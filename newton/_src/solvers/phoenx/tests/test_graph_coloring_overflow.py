@@ -137,7 +137,6 @@ class TestColoringOverflowBucket(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             p.build_csr_greedy_with_jp_fallback()
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
 
         return {
             "num_colors": int(p.num_colors.numpy()[0]),
@@ -172,7 +171,6 @@ class TestColoringOverflowBucket(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             p.build_csr()
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
 
         return {
             "num_colors": int(p.num_colors.numpy()[0]),

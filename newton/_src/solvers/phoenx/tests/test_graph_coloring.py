@@ -765,7 +765,6 @@ class TestIncrementalGraphColoring(unittest.TestCase):
                 p.launch,
             )
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
 
         return {
             "interaction_id_to_partition": p.interaction_id_to_partition.numpy().copy(),
@@ -1052,7 +1051,6 @@ class TestGreedyOverflowDoesNotHang(unittest.TestCase):
         # overflow surfaces, the in-graph JP fallback rebuilds the CSR
         # within the same captured frame, and the call returns.
         p.build_csr_greedy_with_jp_fallback()
-        wp.synchronize_device(device)
 
         # JP needed (Delta + 1) colours for a Delta-clique = num_elements.
         observed_colors = int(p.num_colors.numpy()[0])

@@ -257,13 +257,11 @@ class TestClothMassSplittingDeterminism(unittest.TestCase):
         # Post-warm-up + post-capture state must already match: if it
         # doesn't, the builder is non-deterministic (rare but worth
         # catching here so it doesn't get blamed on the step loop).
-        wp.synchronize_device(device)
         _assert_bit_exact(self, _snapshot(ref), _snapshot(dup), frame=0)
 
         for f in range(1, _N_FRAMES + 1):
             ref.step()
             dup.step()
-            wp.synchronize_device(device)
             _assert_bit_exact(self, _snapshot(ref), _snapshot(dup), frame=f)
 
 

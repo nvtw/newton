@@ -656,25 +656,38 @@ class TestPhoenXPyramidForceBalance(unittest.TestCase):
     SUBSTEPS = 4
     SOLVER_ITERATIONS = 16
 
-    def _build_pyramid(self) -> tuple[_PhoenXScene, list[int]]:
-        """Build an ``LAYERS``-tall 2D pyramid on a ground plane.
+    def _build_pyramid(
+        self,
+        *,
+        layers: int | None = None,
+        mass_splitting: bool = False,
+        max_colored_partitions: int = 12,
+        mass_splitting_batch_size: int = 8,
+        solver_iterations: int | None = None,
+    ) -> tuple[_PhoenXScene, list[int]]:
+        """Build a 2D cube pyramid on a ground plane.
 
-        Level ``L`` has ``LAYERS - L`` cubes in a row along +X,
+        Level ``L`` has ``layers - L`` cubes in a row along +X,
         spaced ``BOX_SPACING`` apart, all at ``y = 0``. The pyramid
         is narrower at the top; the last body added is the apex.
         Returns ``(scene, box_newton_ids)`` with ``box_newton_ids``
         in level-major order (so the apex is the last entry).
         """
+        layer_count = self.LAYERS if layers is None else int(layers)
         scene = _PhoenXScene(
             fps=self.FPS,
             substeps=self.SUBSTEPS,
-            solver_iterations=self.SOLVER_ITERATIONS,
+            solver_iterations=self.SOLVER_ITERATIONS if solver_iterations is None else int(solver_iterations),
+            step_layout="single_world" if mass_splitting else "multi_world",
+            mass_splitting=mass_splitting,
+            max_colored_partitions=max_colored_partitions,
+            mass_splitting_batch_size=mass_splitting_batch_size,
         )
         scene.add_ground_plane()
 
         box_ids: list[int] = []
-        for level in range(self.LAYERS):
-            num_in_row = self.LAYERS - level
+        for level in range(layer_count):
+            num_in_row = layer_count - level
             row_width = (num_in_row - 1) * self.BOX_SPACING
             for i in range(num_in_row):
                 x = -row_width * 0.5 + i * self.BOX_SPACING
@@ -693,21 +706,21 @@ class TestPhoenXPyramidForceBalance(unittest.TestCase):
         scene.finalize()
         return scene, box_ids
 
-    def test_settled_pyramid_force_report(self) -> None:
-        """Per-body ``F_up - F_down == m*g`` balance across a
-        settled 5-layer pyramid, plus apex / Signorini / report-
-        consistency cross-checks.
-        """
-        scene, box_ids = self._build_pyramid()
-
-        for _ in range(self.SETTLE_FRAMES):
-            scene.step()
-
+    def _assert_pyramid_force_report(
+        self,
+        scene: _PhoenXScene,
+        box_ids: list[int],
+        *,
+        velocity_tol: float,
+        balance_tol_n: float,
+        signorini_tol_n: float,
+        report_atol_n: float,
+    ) -> None:
         # Must be at rest -- otherwise the balance below reduces to
         # ``F = m*a`` and the expected ``m*g`` is meaningless.
         velocities = scene.bodies.velocity.numpy()[1:]
         v_max = float(np.linalg.norm(velocities, axis=1).max())
-        self.assertLess(v_max, 1.0e-2, f"pyramid not settled (max |v|={v_max:.4f})")
+        self.assertLess(v_max, velocity_tol, f"pyramid not settled (max |v|={v_max:.4f})")
 
         weight = self.MASS * _G
 
@@ -728,7 +741,7 @@ class TestPhoenXPyramidForceBalance(unittest.TestCase):
             residuals.append(resid)
             self.assertLess(
                 abs(resid),
-                self.BALANCE_TOL_N,
+                balance_tol_n,
                 msg=(
                     f"body {newton_idx}: vertical imbalance {resid:.3f} N "
                     f"(F_up={f_up:.3f}, F_down={f_dn:.3f}, m*g={weight:.3f})"
@@ -745,7 +758,7 @@ class TestPhoenXPyramidForceBalance(unittest.TestCase):
         self.assertAlmostEqual(
             float(pw[sel_apex_dn, 2].sum()),
             0.0,
-            delta=0.5,  # sub-Newton numerical slack
+            delta=signorini_tol_n,
             msg="apex cube must have zero downward contact force",
         )
 
@@ -758,7 +771,7 @@ class TestPhoenXPyramidForceBalance(unittest.TestCase):
         if vert.any():
             self.assertGreaterEqual(
                 float(f_all[vert, 2].min()),
-                -0.5,
+                -signorini_tol_n,
                 msg="vertical contact reported a pulling (negative) normal force",
             )
 
@@ -769,12 +782,71 @@ class TestPhoenXPyramidForceBalance(unittest.TestCase):
             total_pair,
             total_percontact,
             rtol=1.0e-3,
-            atol=1.0e-1,
+            atol=report_atol_n,
             err_msg="per-pair and per-contact reports disagree",
         )
         # Every manifold point in the per-contact view must be
         # represented somewhere in the per-pair view.
         self.assertEqual(int(cnt.sum()), n_active)
+
+    def _assert_overflow_only_partition_used(self, scene: _PhoenXScene) -> None:
+        self.assertTrue(scene.world.mass_splitting_enabled)
+        self.assertEqual(scene.world.max_colored_partitions, 0)
+        num_colors = int(scene.world._partitioner.num_colors.numpy()[0])
+        color_starts = scene.world._partitioner.color_starts.numpy()
+        self.assertEqual(num_colors, 1)
+        self.assertGreater(int(color_starts[1] - color_starts[0]), 0)
+
+    def test_settled_pyramid_force_report(self) -> None:
+        """Per-body ``F_up - F_down == m*g`` balance across a
+        settled 5-layer pyramid, plus apex / Signorini / report-
+        consistency cross-checks.
+        """
+        scene, box_ids = self._build_pyramid()
+
+        for _ in range(self.SETTLE_FRAMES):
+            scene.step()
+
+        self._assert_pyramid_force_report(
+            scene,
+            box_ids,
+            velocity_tol=1.0e-2,
+            balance_tol_n=self.BALANCE_TOL_N,
+            signorini_tol_n=0.5,
+            report_atol_n=1.0e-1,
+        )
+
+    def test_overflow_only_mass_splitting_pyramid_force_report(self) -> None:
+        """All contact rows in the overflow bucket must still conserve
+        momentum in the reported wrench balance.
+
+        ``max_colored_partitions=0`` forces every contact row through
+        the overflow partition, where mass splitting reconciles body
+        copies between PGS iterations. This variant is intentionally
+        smaller and looser than the default 5-layer test: it targets
+        conservation/reporting regressions, not the convergence rate of
+        an overflow-only solve.
+        """
+        scene, box_ids = self._build_pyramid(
+            layers=3,
+            mass_splitting=True,
+            max_colored_partitions=0,
+            mass_splitting_batch_size=2,
+            solver_iterations=24,
+        )
+
+        for _ in range(self.SETTLE_FRAMES):
+            scene.step()
+
+        self._assert_overflow_only_partition_used(scene)
+        self._assert_pyramid_force_report(
+            scene,
+            box_ids,
+            velocity_tol=8.0e-2,
+            balance_tol_n=2.0,
+            signorini_tol_n=1.0,
+            report_atol_n=2.0e-1,
+        )
 
 
 if __name__ == "__main__":

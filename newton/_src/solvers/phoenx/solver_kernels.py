@@ -439,7 +439,7 @@ def _apply_joint_forces_kernel(
             a_p = wp.transform_vector(X_wp, axis)
             t_total += f * a_p
     else:
-        print("joint type not handled in _apply_joint_forces_kernel")
+        return
 
     child_wrench_at_com = wp.spatial_vector(f_total, t_total + wp.cross(r_c, f_total))
     if id_p >= 0:

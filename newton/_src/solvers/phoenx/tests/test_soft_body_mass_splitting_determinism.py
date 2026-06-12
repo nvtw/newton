@@ -73,13 +73,11 @@ class TestSoftBodyMassSplittingDeterminism(unittest.TestCase):
         # Post-warm-up / post-capture state must already match. If the
         # builder is non-deterministic the step-loop comparison would
         # blame the solver, which would be wrong.
-        wp.synchronize_device(device)
         _assert_bit_exact(self, _snapshot(ref), _snapshot(dup), frame=0)
 
         for f in range(1, _N_FRAMES + 1):
             ref.step()
             dup.step()
-            wp.synchronize_device(device)
             _assert_bit_exact(self, _snapshot(ref), _snapshot(dup), frame=f)
 
 

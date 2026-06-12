@@ -120,7 +120,6 @@ def _captured_build(
         p.build_csr_greedy_with_jp_fallback()
     for _ in range(num_replays):
         wp.capture_launch(cap.graph)
-    wp.synchronize_device(device)
     return {
         "num_colors": int(p.num_colors.numpy()[0]),
         "color_starts": p.color_starts.numpy().copy(),

@@ -84,6 +84,9 @@ class _PhoenXScene:
         friction: float = 0.5,
         step_layout: str = "multi_world",
         prepare_refresh_stride: int = 1,
+        mass_splitting: bool = False,
+        max_colored_partitions: int = 12,
+        mass_splitting_batch_size: int = 8,
     ) -> None:
         self.device = wp.get_device("cuda:0")
         self.fps = int(fps)
@@ -94,6 +97,9 @@ class _PhoenXScene:
         self.friction = float(friction)
         self.step_layout = step_layout
         self.prepare_refresh_stride = int(prepare_refresh_stride)
+        self.mass_splitting = bool(mass_splitting)
+        self.max_colored_partitions = int(max_colored_partitions)
+        self.mass_splitting_batch_size = int(mass_splitting_batch_size)
 
         self.mb = newton.ModelBuilder()
         # Pick up the PhoenX contact-ahead-of-impact default so every
@@ -330,6 +336,9 @@ class _PhoenXScene:
             default_friction=self.friction,
             step_layout=self.step_layout,
             prepare_refresh_stride=self.prepare_refresh_stride,
+            mass_splitting=self.mass_splitting,
+            max_colored_partitions=self.max_colored_partitions,
+            mass_splitting_batch_size=self.mass_splitting_batch_size,
             device=self.device,
         )
 
