@@ -102,6 +102,9 @@ class ConfigEvaluateAnymalPPO:
         device: Warp device. Uses the trainer device when ``None``.
         deterministic: Use deterministic policy means.
         seed: Base action seed for stochastic evaluation.
+        max_tilt_degrees: Maximum allowed base tilt from upright [deg].
+        min_valid_base_height: Minimum allowed base height for strict walking [m].
+        max_valid_base_height: Maximum allowed base height for strict walking [m].
     """
 
     env_config: ConfigEnvAnymalPhoenX | None = None
@@ -116,6 +119,9 @@ class ConfigEvaluateAnymalPPO:
     device: wp.context.Devicelike = None
     deterministic: bool = True
     seed: int = 1000
+    max_tilt_degrees: float = 20.0
+    min_valid_base_height: float = 0.40
+    max_valid_base_height: float = 0.85
 
 
 @dataclass
@@ -124,7 +130,10 @@ class StatsEvaluateAnymalTargetPPO:
 
     target_position: tuple[float, float]
     success_fraction: float
+    strict_success_fraction: float
     fall_fraction: float
+    tilt_violation_fraction: float
+    height_violation_fraction: float
     mean_first_success_step: float
     mean_initial_distance: float
     mean_final_distance: float
@@ -133,7 +142,11 @@ class StatsEvaluateAnymalTargetPPO:
     mean_path_length: float
     mean_speed: float
     mean_forward_velocity: float
+    max_tilt_degrees: float
+    mean_max_tilt_degrees: float
     min_base_height: float
+    max_base_height: float
+    mean_base_height: float
 
 
 @dataclass
@@ -353,9 +366,17 @@ def _evaluate_target(
     path_length = np.zeros(env.world_count, dtype=np.float32)
     first_success_step = np.full(env.world_count, -1, dtype=np.int32)
     first_done_step = np.full(env.world_count, -1, dtype=np.int32)
+    tilt_violation = np.zeros(env.world_count, dtype=bool)
+    height_violation = np.zeros(env.world_count, dtype=bool)
+    max_tilt_per_env = np.zeros(env.world_count, dtype=np.float32)
+    min_height_per_env = np.full(env.world_count, np.inf, dtype=np.float32)
+    max_height_per_env = np.full(env.world_count, -np.inf, dtype=np.float32)
+    height_sum = 0.0
+    height_count = 0
     forward_velocity_sum = 0.0
     forward_velocity_count = 0
-    min_base_height = float("inf")
+
+    max_upright_cos = float(np.cos(np.deg2rad(float(cfg.max_tilt_degrees))))
 
     for step in range(int(cfg.steps)):
         alive_before = first_done_step < 0
@@ -375,9 +396,22 @@ def _evaluate_target(
         last_distance[alive_before] = distance[alive_before]
 
         obs_np = obs.numpy()
+        alive_heights = q[alive_before, 2]
+        alive_gravity = obs_np[alive_before, 6:9]
+        upright_cos = np.clip(-alive_gravity[:, 2], -1.0, 1.0)
+        tilt_degrees = np.rad2deg(np.arccos(upright_cos)).astype(np.float32)
+        alive_indices = np.nonzero(alive_before)[0]
+        max_tilt_per_env[alive_indices] = np.maximum(max_tilt_per_env[alive_indices], tilt_degrees)
+        min_height_per_env[alive_indices] = np.minimum(min_height_per_env[alive_indices], alive_heights)
+        max_height_per_env[alive_indices] = np.maximum(max_height_per_env[alive_indices], alive_heights)
+        tilt_violation[alive_indices] |= upright_cos < max_upright_cos
+        height_violation[alive_indices] |= (alive_heights < cfg.min_valid_base_height) | (
+            alive_heights > cfg.max_valid_base_height
+        )
+        height_sum += float(np.sum(alive_heights))
+        height_count += int(np.sum(alive_before))
         forward_velocity_sum += float(np.sum(obs_np[alive_before, 0]))
         forward_velocity_count += int(np.sum(alive_before))
-        min_base_height = min(min_base_height, float(np.min(q[alive_before, 2])))
 
         successes = env.step_successes.numpy() > 0.5
         done = dones.numpy() > 0.5
@@ -385,6 +419,7 @@ def _evaluate_target(
         first_done_step[(first_done_step < 0) & done] = step + 1
 
     success = first_success_step >= 0
+    strict_success = success & ~tilt_violation & ~height_violation
     done = first_done_step >= 0
     fall = done & ~success
     target_vector = target_xy[None, :] - start_xy
@@ -398,7 +433,10 @@ def _evaluate_target(
     return StatsEvaluateAnymalTargetPPO(
         target_position=target,
         success_fraction=float(np.mean(success)),
+        strict_success_fraction=float(np.mean(strict_success)),
         fall_fraction=float(np.mean(fall)),
+        tilt_violation_fraction=float(np.mean(tilt_violation)),
+        height_violation_fraction=float(np.mean(height_violation)),
         mean_first_success_step=mean_first_success_step,
         mean_initial_distance=float(np.mean(initial_distance)),
         mean_final_distance=float(np.mean(last_distance)),
@@ -407,7 +445,11 @@ def _evaluate_target(
         mean_path_length=float(np.mean(path_length)),
         mean_speed=float(np.mean(path_length) / elapsed),
         mean_forward_velocity=float(mean_forward_velocity),
-        min_base_height=float(min_base_height),
+        max_tilt_degrees=float(np.max(max_tilt_per_env)),
+        mean_max_tilt_degrees=float(np.mean(max_tilt_per_env)),
+        min_base_height=float(np.min(min_height_per_env)),
+        max_base_height=float(np.max(max_height_per_env)),
+        mean_base_height=float(height_sum / float(max(height_count, 1))),
     )
 
 

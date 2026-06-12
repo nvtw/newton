@@ -87,6 +87,7 @@ def anymal_observe_reward_kernel(
     max_episode_steps: wp.int32,
     reward_mode: wp.int32,
     min_base_height: wp.float32,
+    min_upright_cos: wp.float32,
     lin_vel_reward_scale: wp.float32,
     yaw_rate_reward_scale: wp.float32,
     z_vel_reward_scale: wp.float32,
@@ -193,7 +194,7 @@ def anymal_observe_reward_kernel(
         if target_dist_sq < target_radius * target_radius:
             success = wp.float32(1.0)
         fall = wp.float32(0.0)
-        if joint_q[q_base + wp.int32(2)] < min_base_height or upright < wp.float32(0.3):
+        if joint_q[q_base + wp.int32(2)] < min_base_height or upright < min_upright_cos:
             fall = wp.float32(1.0)
 
         dense_reward = (
@@ -344,6 +345,7 @@ class ConfigEnvAnymalPhoenX:
         target_radius: Sparse target success radius [m].
         target_base_height: Nominal base height [m].
         min_base_height: Episode ends below this base height [m].
+        min_upright_cos: Episode ends below this base-upright cosine threshold.
         max_episode_steps: Episode timeout in policy steps. Use ``0`` to disable.
         lin_vel_reward_scale: Linear XY velocity tracking reward scale.
         yaw_rate_reward_scale: Yaw-rate tracking reward scale.
@@ -374,6 +376,7 @@ class ConfigEnvAnymalPhoenX:
     target_radius: float = 0.4
     target_base_height: float = 0.62
     min_base_height: float = 0.25
+    min_upright_cos: float = 0.3
     max_episode_steps: int = 96
     lin_vel_reward_scale: float = 1.0
     yaw_rate_reward_scale: float = 0.5
@@ -559,6 +562,7 @@ class EnvAnymalPhoenX:
                 self.config.max_episode_steps,
                 self.reward_mode,
                 self.config.min_base_height,
+                self.config.min_upright_cos,
                 self.config.lin_vel_reward_scale,
                 self.config.yaw_rate_reward_scale,
                 self.config.z_vel_reward_scale,
