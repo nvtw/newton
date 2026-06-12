@@ -3,9 +3,10 @@
 """Host-side conversion from Newton :class:`Model` joints to ADBS init arrays.
 
 Mapping: REVOLUTE/PRISMATIC/BALL/FIXED/CABLE -> ADBS joint modes; FREE -> no
-column; DISTANCE/D6 unsupported. PhoenX slot 0 is the static world anchor, so
-Newton body ``i`` maps to PhoenX slot ``i + 1`` and ``joint_parent == -1`` maps
-to slot 0.
+column; DISTANCE unsupported. D6 joints are reduced to an existing ADBS joint
+mode when their authored axes match the old PhoenX joint vocabulary. PhoenX
+slot 0 is the static world anchor, so Newton body ``i`` maps to PhoenX slot
+``i + 1`` and ``joint_parent == -1`` maps to slot 0.
 """
 
 from __future__ import annotations
@@ -67,6 +68,50 @@ def _transform_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     out[5] = aw * bz + ax * by - ay * bx + az * bw
     out[6] = aw * bw - ax * bx - ay * by - az * bz
     return out
+
+
+def _is_locked_dof(limit_lower: np.ndarray | None, limit_upper: np.ndarray | None, qd: int) -> bool:
+    """Return whether a scalar joint DoF uses Newton's locked sentinel."""
+    if limit_lower is None or limit_upper is None or qd >= len(limit_lower) or qd >= len(limit_upper):
+        return False
+    return float(limit_lower[qd]) > float(limit_upper[qd])
+
+
+def _classify_d6_legacy_mode(
+    n_lin: int,
+    n_ang: int,
+    locked_lin: list[bool],
+    locked_ang: list[bool],
+) -> tuple[newton.JointType | None, int]:
+    """Map D6 axes to the restored box3d_5 ADBS mode set.
+
+    Missing axes are locked by construction in Newton's D6 kinematics.
+    ``dof_offset`` is the scalar DoF within the D6 joint used for the
+    reduced REVOLUTE/PRISMATIC axis. ``-1`` means the reduced mode has no
+    scalar drive row.
+    """
+    lin_free = [i for i, locked in enumerate(locked_lin) if not locked]
+    ang_free = [i for i, locked in enumerate(locked_ang) if not locked]
+
+    if not lin_free and not ang_free:
+        return newton.JointType.FIXED, -1
+
+    if not lin_free and len(ang_free) == 3:
+        return newton.JointType.BALL, -1
+
+    # MJCF imports can represent a universal joint as two angular axes.
+    # The restored ADBS formulation has no universal mode; keep the scene
+    # constructible by reducing to the closest old-mode joint, BALL.
+    if n_lin == 0 and n_ang == 2 and len(ang_free) == 2:
+        return newton.JointType.BALL, -1
+
+    if not lin_free and len(ang_free) == 1:
+        return newton.JointType.REVOLUTE, n_lin + ang_free[0]
+
+    if len(lin_free) == 1 and not ang_free:
+        return newton.JointType.PRISMATIC, lin_free[0]
+
+    return None, -1
 
 
 class AdbsInitArrays:
@@ -192,7 +237,8 @@ def build_adbs_init_arrays(
     """Convert ``model``'s joints to ADBS init arrays on ``device``.
 
     Raises:
-        NotImplementedError: If any joint is DISTANCE or D6.
+        NotImplementedError: If any joint is DISTANCE or a D6 configuration
+            that cannot be reduced to the restored ADBS mode set.
     """
     if device is None:
         device = model.device
@@ -246,6 +292,9 @@ def build_adbs_init_arrays(
     joint_qd_start = model.joint_qd_start.numpy()
     joint_target_q_start = model.joint_target_q_start.numpy()
     joint_axis = model.joint_axis.numpy() if model.joint_axis is not None else np.zeros((0, 3), dtype=np.float32)
+    joint_dof_dim = (
+        model.joint_dof_dim.numpy() if model.joint_dof_dim is not None else np.zeros((n_joints, 2), dtype=np.int32)
+    )
     body_q = model.body_q.numpy()  # (body_count, 7)
     joint_q_arr = model.joint_q.numpy() if model.joint_q is not None else np.zeros(0, dtype=np.float32)
 
@@ -281,13 +330,10 @@ def build_adbs_init_arrays(
             continue
         if jtype is newton.JointType.FREE:
             continue
-        if jtype in (
-            newton.JointType.DISTANCE,
-            newton.JointType.D6,
-        ):
+        if jtype is newton.JointType.DISTANCE:
             raise NotImplementedError(
                 f"PhoenX does not support JointType.{jtype.name} (joint {j}). "
-                "Supported: REVOLUTE, PRISMATIC, BALL, FIXED, CABLE, FREE (no column)."
+                "Supported: REVOLUTE, PRISMATIC, BALL, FIXED, CABLE, reducible D6, FREE (no column)."
             )
 
         parent_idx = int(joint_parent[j])
@@ -306,11 +352,35 @@ def build_adbs_init_arrays(
 
         anchor1_world = _transform_translation(X_w_p)
         qd_start = int(joint_qd_start[j])
+        effective_jtype = jtype
+        effective_dof_offset = 0
+        effective_qd = qd_start
+        if jtype is newton.JointType.D6:
+            n_lin = int(joint_dof_dim[j, 0])
+            n_ang = int(joint_dof_dim[j, 1])
+            locked_lin = [_is_locked_dof(limit_lower, limit_upper, qd_start + i) for i in range(n_lin)]
+            locked_ang = [_is_locked_dof(limit_lower, limit_upper, qd_start + n_lin + i) for i in range(n_ang)]
+            classified_jtype, classified_offset = _classify_d6_legacy_mode(n_lin, n_ang, locked_lin, locked_ang)
+            if classified_jtype is None:
+                raise NotImplementedError(
+                    f"D6 joint {j} cannot be reduced to a restored PhoenX joint "
+                    f"({n_lin} linear axes / {n_ang} angular axes; "
+                    f"locked linear={tuple(locked_lin)}, locked angular={tuple(locked_ang)}). "
+                    "Supported reductions: fixed, ball, revolute, prismatic. "
+                    "Generic D6 requires the post-unification joint path."
+                )
+            effective_jtype = classified_jtype
+            effective_dof_offset = classified_offset if classified_offset >= 0 else 0
+            if classified_offset >= 0:
+                effective_qd = qd_start + classified_offset
+
         # FIXED/BALL have no 1-axis DoF; -1 lets the control kernel skip them.
-        dof_start_for_control = qd_start if jtype in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC) else -1
+        dof_start_for_control = (
+            effective_qd if effective_jtype in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC) else -1
+        )
         target_q_index_for_control = -1
         if dof_start_for_control >= 0:
-            target_q_index_for_control = int(joint_target_q_start[j])
+            target_q_index_for_control = int(joint_target_q_start[j]) + effective_dof_offset
         joint_idx_to_dof_start_np[j] = dof_start_for_control
         joint_idx_to_target_q_index_np[j] = target_q_index_for_control
 
@@ -331,9 +401,9 @@ def build_adbs_init_arrays(
         # Armature only applies to REVOLUTE/PRISMATIC axial rows; 0 elsewhere.
         armature_val = 0.0
 
-        if jtype is newton.JointType.BALL:
+        if effective_jtype is newton.JointType.BALL:
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
-        elif jtype is newton.JointType.CABLE:
+        elif effective_jtype is newton.JointType.CABLE:
             phoenx_mode = int(JOINT_MODE_CABLE)
             # Newton CABLE has 2 DoFs (linear stretch + isotropic angular bend/twist).
             # PhoenX cable is a soft fixed joint (3+2+1 rows) with PD bend/twist; the
@@ -361,16 +431,18 @@ def build_adbs_init_arrays(
             damp_drive = bend_kd
             stiff_limit = bend_ke
             damp_limit = bend_kd
-        elif jtype is newton.JointType.FIXED:
+        elif effective_jtype is newton.JointType.FIXED:
             phoenx_mode = int(JOINT_MODE_FIXED)
             # Pick joint-frame X axis so the anchor-3 basis is well-defined.
             axis_world = _quat_rotate_np(X_w_p[3:], np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
             anchor2_world = anchor1_world + axis_world
-        elif jtype is newton.JointType.REVOLUTE or jtype is newton.JointType.PRISMATIC:
-            phoenx_mode = int(JOINT_MODE_REVOLUTE) if jtype is newton.JointType.REVOLUTE else int(JOINT_MODE_PRISMATIC)
+        elif effective_jtype is newton.JointType.REVOLUTE or effective_jtype is newton.JointType.PRISMATIC:
+            phoenx_mode = (
+                int(JOINT_MODE_REVOLUTE) if effective_jtype is newton.JointType.REVOLUTE else int(JOINT_MODE_PRISMATIC)
+            )
             axis_local = (
-                np.asarray(joint_axis[qd_start], dtype=np.float32)
-                if len(joint_axis)
+                np.asarray(joint_axis[effective_qd], dtype=np.float32)
+                if len(joint_axis) and effective_qd < len(joint_axis)
                 else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
             )
             axis_len = float(np.linalg.norm(axis_local))
@@ -384,39 +456,45 @@ def build_adbs_init_arrays(
             # Drive / limit from per-DOF arrays (first DoF only for the
             # supported 1-DoF joints).
             if target_ke is not None:
-                stiff_drive = float(target_ke[qd_start])
+                stiff_drive = float(target_ke[effective_qd])
             if target_kd is not None:
-                damp_drive = float(target_kd[qd_start])
+                damp_drive = float(target_kd[effective_qd])
             if target_pos is not None and target_q_index_for_control < len(target_pos):
                 target_val = float(target_pos[target_q_index_for_control])
             if target_vel is not None:
-                target_vel_val = float(target_vel[qd_start])
+                target_vel_val = float(target_vel[effective_qd])
             if effort_limit is not None:
                 # PhoenX reads 0 as "unlimited" for POSITION drives, so clamp inf/NaN to 0.
-                raw = float(effort_limit[qd_start])
+                raw = float(effort_limit[effective_qd])
                 max_force = raw if np.isfinite(raw) else 0.0
             if target_mode is not None:
-                drive_mode = _newton_target_mode_to_adbs_drive_mode(int(target_mode[qd_start]), stiff_drive, damp_drive)
+                drive_mode = _newton_target_mode_to_adbs_drive_mode(
+                    int(target_mode[effective_qd]), stiff_drive, damp_drive
+                )
             # Limits are hard stops via DEFAULT_HERTZ_LIMIT (matches SolverXPBD's
             # rigid-limit contract; Newton's limit_ke/limit_kd are XPBD-only soft
             # penalties that don't map to PhoenX's absolute SI PD path). Users who
             # want soft PD limits should drive ADBS init directly.
             if limit_lower is not None and limit_upper is not None:
-                lo = float(limit_lower[qd_start])
-                hi = float(limit_upper[qd_start])
+                lo = float(limit_lower[effective_qd])
+                hi = float(limit_upper[effective_qd])
                 if lo <= hi:
                     min_val = lo
                     max_val = hi
-            if joint_armature is not None and qd_start < len(joint_armature):
-                armature_val = float(joint_armature[qd_start])
+            if joint_armature is not None and effective_qd < len(joint_armature):
+                armature_val = float(joint_armature[effective_qd])
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
         # Init joint coord for this joint's first DOF. BALL/FIXED publish 0 to
         # keep the per-joint array length aligned with the ADBS column array.
         q_start_idx = int(joint_q_start[j])
-        if jtype in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC) and len(joint_q_arr) > q_start_idx:
-            init_q = float(joint_q_arr[q_start_idx])
+        q_coord_idx = q_start_idx + effective_dof_offset
+        if (
+            effective_jtype in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC)
+            and len(joint_q_arr) > q_coord_idx
+        ):
+            init_q = float(joint_q_arr[q_coord_idx])
         else:
             init_q = 0.0
 
