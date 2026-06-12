@@ -15,8 +15,8 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx import solver_phoenx_kernels
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx import solver_phoenx, solver_phoenx_kernels
+from newton._src.solvers.phoenx.solver_phoenx import _choose_fast_tail_solve_schedule
 from newton._src.solvers.phoenx.tests.test_robot_policy_parity import (
     _g1_29dof_yaml,
     _g1_robot_model,
@@ -59,16 +59,24 @@ def _wp_int32_arg_expr(node: ast.AST) -> str | None:
     return ast.unparse(node)
 
 
+class TestMultiWorldColoringContract(unittest.TestCase):
+    def test_per_world_greedy_overflow_flag_is_cleared_before_build(self) -> None:
+        source = inspect.getsource(solver_phoenx.PhoenXWorld._build_per_world_coloring)
+        clear_idx = source.index("self._per_world_greedy_overflow.zero_()")
+        launch_idx = source.index("_per_world_greedy_coloring_kernel")
+        self.assertLess(clear_idx, launch_idx)
+
+
 class TestMultiWorldFastTailSolveContract(unittest.TestCase):
     def test_solve_schedule_keeps_high_substep_total_work_constant(self) -> None:
         solver_iterations = 8
-        joint_sweeps, contact_sweeps, outer_chunk = PhoenXWorld._choose_fast_tail_solve_schedule(substeps=80)
+        joint_sweeps, contact_sweeps, outer_chunk = _choose_fast_tail_solve_schedule(substeps=80)
         outer_iterations = (solver_iterations + outer_chunk - 1) // outer_chunk
 
         self.assertEqual((joint_sweeps, contact_sweeps, outer_chunk), (2, 2, 2))
         self.assertEqual(outer_iterations * joint_sweeps, solver_iterations)
         self.assertEqual(outer_iterations * contact_sweeps, solver_iterations)
-        self.assertEqual(PhoenXWorld._choose_fast_tail_solve_schedule(substeps=20), (3, 3, 1))
+        self.assertEqual(_choose_fast_tail_solve_schedule(substeps=20), (3, 3, 1))
 
     def test_ordered_solve_dispatch_uses_selected_inner_sweeps(self) -> None:
         source = textwrap.dedent(inspect.getsource(solver_phoenx_kernels._make_fast_tail_prepare_plus_iterate_kernel))

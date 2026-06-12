@@ -307,6 +307,94 @@ def _choose_initial_threads_per_world(
     return tpw_auto, initial_tpw
 
 
+def _choose_auto_prepare_refresh_stride(
+    *,
+    substeps: int,
+    contact_capacity_hint: int,
+    cached_prepare_unsupported: bool,
+) -> int:
+    """Choose a graph-capture-stable cached-prepare refresh cadence."""
+    if cached_prepare_unsupported or substeps < 8:
+        return 1
+    if contact_capacity_hint <= 0:
+        return 1
+    return 3
+
+
+def _choose_multi_world_scheduler(
+    *,
+    block_world_supported: bool,
+    num_worlds: int,
+    num_joints: int,
+    max_contact_columns: int,
+) -> tuple[str, int]:
+    """Choose a fixed multi-world scheduler from construction-time topology."""
+    if not block_world_supported:
+        return "fast_tail", 128
+
+    inv_worlds = 1.0 / float(max(1, int(num_worlds)))
+    joints_per_world = float(num_joints) * inv_worlds
+    contacts_per_world = float(max_contact_columns) * inv_worlds
+    rows_per_world = joints_per_world + contacts_per_world
+
+    # Sparse toy worlds are better packed by fast-tail; one physical
+    # block per world only starts to pay once each world has enough rows.
+    if rows_per_world < 16.0:
+        return "fast_tail", 128
+
+    # Dense contact-only fleets are consistently limited by fast-tail's
+    # per-world tail work; one full block per world keeps more lanes useful.
+    if joints_per_world == 0.0 and contacts_per_world >= 512.0:
+        return "block_world", 128
+
+    # Robot fleets are currently too mixed for a static topology-only
+    # block-world rule: solve-only sweeps can improve, but full-frame graph
+    # replay regresses on DR-style scenes.
+    return "fast_tail", 128
+
+
+def _choose_fast_tail_solve_schedule(*, substeps: int) -> tuple[int, int, int]:
+    """Select the fast-tail register reuse schedule.
+
+    Returns ``(joint_inner_sweeps, contact_inner_sweeps, outer_iteration_chunk)``.
+    """
+    # High-substep robot fleets use the old two-by-two schedule: fewer outer
+    # visits, but matching inner sweeps, so default even iteration counts keep
+    # the same total row sweeps. Low-substep humanoid stiffness keeps the
+    # conservative full outer cadence.
+    if substeps >= 64:
+        return 2, 2, 2
+    return 3, 3, 1
+
+
+def _choose_fast_tail_worlds_per_block_for_scene(
+    *,
+    num_worlds: int,
+    num_joints: int,
+    max_contact_columns: int,
+    step_layout: str,
+    tpw_launch_bound: int,
+) -> int:
+    """Choose fast-tail block packing from topology known at finalize time."""
+    wpb = _choose_fast_tail_worlds_per_block(num_worlds)
+    if step_layout == "single_world":
+        return wpb
+
+    inv_worlds = 1.0 / float(max(1, int(num_worlds)))
+    joints_per_world = float(num_joints) * inv_worlds
+    contacts_per_world = float(max_contact_columns) * inv_worlds
+
+    # Dense contact-only worlds have long per-world colour loops. Packing
+    # several worlds into one block made the contact-heavy tower fleet slower.
+    if joints_per_world == 0.0 and contacts_per_world >= 512.0:
+        return 1
+
+    if int(tpw_launch_bound) <= 16 and int(num_worlds) >= 512:
+        if joints_per_world <= 48.0 and contacts_per_world <= 512.0:
+            wpb = min(wpb, 2)
+    return wpb
+
+
 def _mass_splitting_copy_capacity(
     *,
     num_joints: int,
@@ -661,7 +749,7 @@ class PhoenXWorld:
                     f"prepare_refresh_stride must be an integer >= 1 or 'auto' (got {prepare_refresh_stride!r})"
                 )
             self._prepare_refresh_stride_policy = "auto"
-            self.prepare_refresh_stride = self._choose_auto_prepare_refresh_stride(
+            self.prepare_refresh_stride = _choose_auto_prepare_refresh_stride(
                 substeps=self.substeps,
                 contact_capacity_hint=contact_capacity_hint,
                 cached_prepare_unsupported=cached_prepare_unsupported,
@@ -755,7 +843,6 @@ class PhoenXWorld:
 
         # ----- Step time bookkeeping -----
         self.step_dt: float = 0.0
-        self.inv_step_dt: float = 0.0
         self.substep_dt: float = 0.0
 
         # cid layout in the shared :class:`ConstraintContainer`:
@@ -1209,16 +1296,27 @@ class PhoenXWorld:
             # Six head/fused prepare + iterate + relax variants for the
             # current cloth / soft-tet / joint specialisation.
             kernels.extend(self._singleworld_kernels())
+            if self.prepare_refresh_stride > 1:
+                kernels.extend(self._singleworld_cached_prepare_kernels())
         else:
+            include_cached_prepare = self.prepare_refresh_stride > 1
             if self._multi_world_scheduler == "block_world" and self._block_world_supported():
-                kw = self._block_world_kernel_flags(self._multi_world_block_dim)
-                kernels.append(get_block_world_kernel(kind="prepare_plus_iterate", **kw))
-                kernels.append(get_block_world_kernel(kind="relax", **kw))
+                prepare_kw = self._block_world_kernel_flags(self._multi_world_block_dim, cached_prepare=False)
+                kernels.append(get_block_world_kernel(kind="prepare_plus_iterate", **prepare_kw))
+                if include_cached_prepare:
+                    cached_kw = self._block_world_kernel_flags(self._multi_world_block_dim, cached_prepare=True)
+                    kernels.append(get_block_world_kernel(kind="prepare_plus_iterate", **cached_kw))
+                relax_kw = self._block_world_kernel_flags(self._multi_world_block_dim)
+                kernels.append(get_block_world_kernel(kind="relax", **relax_kw))
             else:
                 for fixed_tpw in self._fast_tail_auto_fixed_choices():
-                    kw = self._fast_tail_kernel_flags(fixed_tpw)
-                    kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **kw))
-                    kernels.append(get_fast_tail_kernel(kind="relax", **kw))
+                    prepare_kw = self._fast_tail_kernel_flags(fixed_tpw, cached_prepare=False)
+                    kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **prepare_kw))
+                    if include_cached_prepare:
+                        cached_kw = self._fast_tail_kernel_flags(fixed_tpw, cached_prepare=True)
+                        kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **cached_kw))
+                    relax_kw = self._fast_tail_kernel_flags(fixed_tpw)
+                    kernels.append(get_fast_tail_kernel(kind="relax", **relax_kw))
 
         # De-duplicate by module; ``functools.cache`` already collapses
         # identical (axes-tuple) factory calls but cheap to be defensive.
@@ -2440,20 +2538,6 @@ class PhoenXWorld:
         """Current contacts or the graph-stable placeholder."""
         return self._contact_views if self._contact_views is not None else self._contact_views_placeholder
 
-    @staticmethod
-    def _choose_auto_prepare_refresh_stride(
-        *,
-        substeps: int,
-        contact_capacity_hint: int,
-        cached_prepare_unsupported: bool,
-    ) -> int:
-        """Choose a graph-capture-stable cached-prepare refresh cadence."""
-        if cached_prepare_unsupported or substeps < 8:
-            return 1
-        if contact_capacity_hint <= 0:
-            return 1
-        return 3
-
     def _refresh_prepare_this_substep(self) -> bool:
         """Return whether this substep should refresh cached row data."""
         return self.prepare_refresh_stride <= 1 or self._current_substep_index % self.prepare_refresh_stride == 0
@@ -2511,7 +2595,6 @@ class PhoenXWorld:
                 shape_aabb_upper = self._sleeping_shape_aabb_upper
 
         self.step_dt = dt
-        self.inv_step_dt = 1.0 / dt
         self.substep_dt = dt / self.substeps
 
         if self.enable_column_timers:
@@ -3269,6 +3352,7 @@ class PhoenXWorld:
         # Per-world JP/greedy clears assigned flags for each active world.
         wp.copy(self._world_csr_offsets, self._per_world_element_offsets)
         if self._use_greedy_coloring:
+            self._per_world_greedy_overflow.zero_()
             wp.launch_tiled(
                 _per_world_greedy_coloring_kernel,
                 dim=[nw],
@@ -3446,40 +3530,13 @@ class PhoenXWorld:
         )
 
     def _auto_multi_world_scheduler(self) -> tuple[str, int]:
-        """Choose a fixed scheduler from construction-time topology.
-
-        This intentionally does not time kernels or inspect per-step state;
-        the resolved scheduler is a stable host value before CUDA graph
-        capture. The thresholds come from full-frame captured sweeps across
-        H1/G1/DR-Legs robot fleets plus dense tower contacts.
-        """
-        if not self._block_world_supported():
-            return "fast_tail", 128
-
-        inv_worlds = 1.0 / float(max(1, self.num_worlds))
-        joints_per_world = float(self.num_joints) * inv_worlds
-        contacts_per_world = float(self.max_contact_columns) * inv_worlds
-        rows_per_world = joints_per_world + contacts_per_world
-
-        # Sparse toy worlds are better packed by fast-tail; one physical
-        # block per world only starts to pay once each world has enough
-        # rows to keep the block occupied.
-        if rows_per_world < 16.0:
-            return "fast_tail", 128
-
-        # Dense contact-only fleets are consistently limited by fast-
-        # tail's per-world tail work; one full block per world keeps more
-        # lanes useful on tower-like contact stacks even at larger world
-        # counts.
-        if joints_per_world == 0.0 and contacts_per_world >= 512.0:
-            return "block_world", 128
-
-        # Robot fleets are currently too mixed for a static topology-only
-        # block-world rule: solve-only sweeps can improve, but full-frame
-        # graph replay regresses on DR-style scenes. Keep fast-tail as the
-        # robot default until the scheduler is selected by measured
-        # autotuning or a more predictive topology model.
-        return "fast_tail", 128
+        """Choose a fixed scheduler from construction-time topology."""
+        return _choose_multi_world_scheduler(
+            block_world_supported=self._block_world_supported(),
+            num_worlds=self.num_worlds,
+            num_joints=self.num_joints,
+            max_contact_columns=self.max_contact_columns,
+        )
 
     def _configure_multi_world_scheduler(self, policy: str) -> None:
         """Resolve the multi-world scheduler once before any graph capture."""
@@ -3800,7 +3857,7 @@ class PhoenXWorld:
 
     def _fast_tail_kernel_flags(self, fixed_tpw: int, *, cached_prepare: bool | None = None) -> dict[str, object]:
         """Factory flags for multi-world fast-tail kernels."""
-        joint_sweeps, contact_sweeps, outer_chunk = self._choose_fast_tail_solve_schedule(substeps=self.substeps)
+        joint_sweeps, contact_sweeps, outer_chunk = _choose_fast_tail_solve_schedule(substeps=self.substeps)
         kw: dict[str, object] = {
             **self._dispatch_specialization_flags(),
             "has_contacts": self.max_contact_columns > 0,
@@ -3901,17 +3958,6 @@ class PhoenXWorld:
         """Mixed rigid scenes need joint/contact subranges."""
         return self._singleworld_rigid_direct() and self.num_joints > 0 and self.max_contact_columns > 0
 
-    @staticmethod
-    def _choose_fast_tail_solve_schedule(*, substeps: int) -> tuple[int, int, int]:
-        """Select the fast-tail register reuse schedule."""
-        # High-substep robot fleets use the old two-by-two schedule: fewer outer
-        # visits, but matching inner sweeps, so default even iteration counts keep
-        # the same total row sweeps. Low-substep humanoid stiffness keeps the
-        # conservative full outer cadence.
-        if substeps >= 64:
-            return 2, 2, 2
-        return 3, 3, 1
-
     def _fast_tail_family_split(self) -> bool:
         """Use solver-family subranges in multi-world fast-tail."""
         if self.step_layout == "single_world" or not self._use_greedy_coloring:
@@ -3937,24 +3983,14 @@ class PhoenXWorld:
         return family_count > 1
 
     def _fast_tail_worlds_per_block(self) -> int:
-        """Choose fast-tail block packing from topology known at finalize time."""
-        wpb = _choose_fast_tail_worlds_per_block(self.num_worlds)
-        if self.step_layout != "single_world":
-            inv_worlds = 1.0 / float(max(1, self.num_worlds))
-            joints_per_world = float(self.num_joints) * inv_worlds
-            contacts_per_world = float(self.max_contact_columns) * inv_worlds
-
-            # Dense contact-only worlds have long per-world colour loops.
-            # Packing several worlds into one block made the contact-heavy
-            # tower fleet slower because short lane groups kept block
-            # resources resident behind the longest world.
-            if joints_per_world == 0.0 and contacts_per_world >= 512.0:
-                return 1
-
-            if self._tpw_launch_bound <= 16 and self.num_worlds >= 512:
-                if joints_per_world <= 48.0 and contacts_per_world <= 512.0:
-                    wpb = min(wpb, 2)
-        return wpb
+        """Return the selected fast-tail block packing for this world."""
+        return _choose_fast_tail_worlds_per_block_for_scene(
+            num_worlds=self.num_worlds,
+            num_joints=self.num_joints,
+            max_contact_columns=self.max_contact_columns,
+            step_layout=self.step_layout,
+            tpw_launch_bound=self._tpw_launch_bound,
+        )
 
     def _fast_tail_block_dim(self) -> int:
         """``_STRAGGLER_BLOCK_DIM * worlds_per_block`` (integer warps for __syncwarp)."""

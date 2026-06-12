@@ -34,17 +34,13 @@ from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
 
 
 def _main_solve_kernel_launch_bounds(world) -> dict[str, int]:
-    base_fast_tail_kw = {
-        "revolute_only": bool(world._use_revolute_specialization),
-        "has_sleeping": bool(world._sleeping_enabled),
-        "enable_column_timers": world.enable_column_timers,
-    }
     bounds = {}
     for fixed_tpw in world._fast_tail_auto_fixed_choices():
-        fast_tail_kw = {**base_fast_tail_kw, "fixed_tpw": fixed_tpw, "guard_tpw": world._tpw_auto}
         launch_bound = fixed_tpw if fixed_tpw > 0 else world._tpw_launch_bound
-        bounds[get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).key] = launch_bound
-        bounds[get_fast_tail_kernel(kind="relax", **fast_tail_kw).key] = launch_bound
+        prepare_kw = world._fast_tail_kernel_flags(fixed_tpw, cached_prepare=False)
+        relax_kw = world._fast_tail_kernel_flags(fixed_tpw)
+        bounds[get_fast_tail_kernel(kind="prepare_plus_iterate", **prepare_kw).key] = launch_bound
+        bounds[get_fast_tail_kernel(kind="relax", **relax_kw).key] = launch_bound
     return bounds
 
 

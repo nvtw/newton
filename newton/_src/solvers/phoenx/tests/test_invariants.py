@@ -26,7 +26,12 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.solver_phoenx import (
+    PhoenXWorld,
+    _choose_auto_prepare_refresh_stride,
+    _choose_fast_tail_worlds_per_block_for_scene,
+    _choose_multi_world_scheduler,
+)
 from newton._src.solvers.phoenx.world_builder import DriveMode, JointMode
 
 
@@ -110,6 +115,87 @@ class TestInvariants(unittest.TestCase):
         kw["constraints"] = constraint_container_zeros(num_constraints=4200, num_dwords=1, device=wp.get_device())
         with self.assertRaisesRegex(AssertionError, r"ConstraintContainer\.data has shape \(1, 4200\)"):
             PhoenXWorld(**kw)
+
+
+class TestSelectionHeuristics(unittest.TestCase):
+    """Centralized PhoenX auto-selection helpers stay explicit."""
+
+    def test_prepare_refresh_stride_helper(self) -> None:
+        self.assertEqual(
+            _choose_auto_prepare_refresh_stride(
+                substeps=20,
+                contact_capacity_hint=32,
+                cached_prepare_unsupported=False,
+            ),
+            3,
+        )
+        self.assertEqual(
+            _choose_auto_prepare_refresh_stride(
+                substeps=20,
+                contact_capacity_hint=0,
+                cached_prepare_unsupported=False,
+            ),
+            1,
+        )
+        self.assertEqual(
+            _choose_auto_prepare_refresh_stride(
+                substeps=20,
+                contact_capacity_hint=32,
+                cached_prepare_unsupported=True,
+            ),
+            1,
+        )
+
+    def test_multi_world_scheduler_helper(self) -> None:
+        self.assertEqual(
+            _choose_multi_world_scheduler(
+                block_world_supported=False,
+                num_worlds=2048,
+                num_joints=0,
+                max_contact_columns=2048 * 1024,
+            ),
+            ("fast_tail", 128),
+        )
+        self.assertEqual(
+            _choose_multi_world_scheduler(
+                block_world_supported=True,
+                num_worlds=1024,
+                num_joints=0,
+                max_contact_columns=1024 * 512,
+            ),
+            ("block_world", 128),
+        )
+        self.assertEqual(
+            _choose_multi_world_scheduler(
+                block_world_supported=True,
+                num_worlds=1024,
+                num_joints=1024 * 38,
+                max_contact_columns=1024 * 30,
+            ),
+            ("fast_tail", 128),
+        )
+
+    def test_fast_tail_worlds_per_block_helper(self) -> None:
+        self.assertEqual(
+            _choose_fast_tail_worlds_per_block_for_scene(
+                num_worlds=1024,
+                num_joints=0,
+                max_contact_columns=1024 * 512,
+                step_layout="multi_world",
+                tpw_launch_bound=32,
+            ),
+            1,
+        )
+        self.assertLessEqual(
+            _choose_fast_tail_worlds_per_block_for_scene(
+                num_worlds=1024,
+                num_joints=1024 * 32,
+                max_contact_columns=1024 * 128,
+                step_layout="multi_world",
+                tpw_launch_bound=16,
+            ),
+            2,
+        )
 
 
 class TestPrepareRefreshStride(unittest.TestCase):

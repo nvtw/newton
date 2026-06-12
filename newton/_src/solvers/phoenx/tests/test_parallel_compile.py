@@ -57,7 +57,7 @@ class _RestoreLoadModuleMaxWorkers:
         wp.config.load_module_max_workers = self._saved
 
 
-def _build_minimal_scene(step_layout: str) -> _PhoenXScene:
+def _build_minimal_scene(step_layout: str, *, prepare_refresh_stride: int = 1) -> _PhoenXScene:
     """Tiny single-box-on-plane scene shared across tests.
 
     Construction is what triggers ``_pre_compile_dispatch_kernels``; we
@@ -66,11 +66,46 @@ def _build_minimal_scene(step_layout: str) -> _PhoenXScene:
     0, cloth = 0, soft-tets = 0) so kernel instantiation paths match
     the production dispatch.
     """
-    scene = _PhoenXScene(step_layout=step_layout, substeps=1, solver_iterations=1)
+    scene = _PhoenXScene(
+        step_layout=step_layout,
+        substeps=4,
+        solver_iterations=1,
+        prepare_refresh_stride=prepare_refresh_stride,
+    )
     scene.add_ground_plane()
     scene.add_box((0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     scene.finalize()
     return scene
+
+
+def _expected_multi_world_modules(world, *, include_cached_prepare: bool) -> set[str]:
+    expected_modules: set[str] = set()
+    if world._multi_world_scheduler == "block_world" and world._block_world_supported():
+        prepare_kw = world._block_world_kernel_flags(world._multi_world_block_dim, cached_prepare=False)
+        expected_modules.add(
+            get_block_world_kernel(kind="prepare_plus_iterate", **prepare_kw).module.get_module_identifier()
+        )
+        if include_cached_prepare:
+            cached_kw = world._block_world_kernel_flags(world._multi_world_block_dim, cached_prepare=True)
+            expected_modules.add(
+                get_block_world_kernel(kind="prepare_plus_iterate", **cached_kw).module.get_module_identifier()
+            )
+        relax_kw = world._block_world_kernel_flags(world._multi_world_block_dim)
+        expected_modules.add(get_block_world_kernel(kind="relax", **relax_kw).module.get_module_identifier())
+    else:
+        for fixed_tpw in world._fast_tail_auto_fixed_choices():
+            prepare_kw = world._fast_tail_kernel_flags(fixed_tpw, cached_prepare=False)
+            expected_modules.add(
+                get_fast_tail_kernel(kind="prepare_plus_iterate", **prepare_kw).module.get_module_identifier()
+            )
+            if include_cached_prepare:
+                cached_kw = world._fast_tail_kernel_flags(fixed_tpw, cached_prepare=True)
+                expected_modules.add(
+                    get_fast_tail_kernel(kind="prepare_plus_iterate", **cached_kw).module.get_module_identifier()
+                )
+            relax_kw = world._fast_tail_kernel_flags(fixed_tpw)
+            expected_modules.add(get_fast_tail_kernel(kind="relax", **relax_kw).module.get_module_identifier())
+    return expected_modules
 
 
 class TestPreCompileDispatchKernelsNoop(unittest.TestCase):
@@ -116,42 +151,26 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
             world = _build_minimal_scene(step_layout="multi_world").world
             force_load.assert_called_once()
             loaded_modules = {module.get_module_identifier() for module in force_load.call_args.kwargs["modules"]}
-            dispatch_kw = world._dispatch_specialization_flags()
-            expected_modules = set()
-            if world._multi_world_scheduler == "block_world" and world._block_world_supported():
-                block_world_kw = {
-                    "revolute_only": dispatch_kw["revolute_only"],
-                    "has_joints": dispatch_kw["has_joints"],
-                    "has_contacts": world.max_contact_columns > 0,
-                    "has_sleeping": dispatch_kw["has_sleeping"],
-                    "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
-                    "enable_column_timers": dispatch_kw["enable_column_timers"],
-                    "block_dim": world._multi_world_block_dim,
-                }
-                expected_modules.add(
-                    get_block_world_kernel(kind="prepare_plus_iterate", **block_world_kw).module.get_module_identifier()
-                )
-                expected_modules.add(
-                    get_block_world_kernel(kind="relax", **block_world_kw).module.get_module_identifier()
-                )
-            else:
-                base_fast_tail_kw = {
-                    **dispatch_kw,
-                    "has_contacts": world.max_contact_columns > 0,
-                }
-                for fixed_tpw in world._fast_tail_auto_fixed_choices():
-                    fast_tail_kw = {
-                        **base_fast_tail_kw,
-                        "fixed_tpw": fixed_tpw,
-                        "guard_tpw": world._tpw_auto,
-                        "family_split": world._fast_tail_family_split(),
-                    }
-                    expected_modules.add(
-                        get_fast_tail_kernel(kind="prepare_plus_iterate", **fast_tail_kw).module.get_module_identifier()
-                    )
-                    expected_modules.add(
-                        get_fast_tail_kernel(kind="relax", **fast_tail_kw).module.get_module_identifier()
-                    )
+            expected_modules = _expected_multi_world_modules(world, include_cached_prepare=False)
+            self.assertEqual(loaded_modules, expected_modules)
+
+    def test_single_world_loads_cached_prepare_when_stride_reuses_prepare(self):
+        with _RestoreLoadModuleMaxWorkers(4), mock.patch("warp.force_load") as force_load:
+            world = _build_minimal_scene(step_layout="single_world", prepare_refresh_stride=2).world
+            force_load.assert_called_once()
+            loaded_modules = {module.get_module_identifier() for module in force_load.call_args.kwargs["modules"]}
+            expected_modules = {kernel.module.get_module_identifier() for kernel in world._singleworld_kernels()}
+            expected_modules.update(
+                kernel.module.get_module_identifier() for kernel in world._singleworld_cached_prepare_kernels()
+            )
+            self.assertEqual(loaded_modules, expected_modules)
+
+    def test_multi_world_loads_cached_prepare_when_stride_reuses_prepare(self):
+        with _RestoreLoadModuleMaxWorkers(4), mock.patch("warp.force_load") as force_load:
+            world = _build_minimal_scene(step_layout="multi_world", prepare_refresh_stride=2).world
+            force_load.assert_called_once()
+            loaded_modules = {module.get_module_identifier() for module in force_load.call_args.kwargs["modules"]}
+            expected_modules = _expected_multi_world_modules(world, include_cached_prepare=True)
             self.assertEqual(loaded_modules, expected_modules)
 
 

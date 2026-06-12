@@ -130,7 +130,6 @@ class TestClothContactPartitioner(unittest.TestCase):
         # No iterate -- we want to inspect the colouring produced from
         # the cloth-aware element-interaction-data.
         world.step_dt = 1.0 / 60.0
-        world.inv_step_dt = 60.0
         world.substep_dt = 1.0 / 240.0
         world._ingest_and_warmstart_contacts(contacts, None)
         world._partitioner.set_costs_from_contacts(
