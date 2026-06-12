@@ -490,9 +490,10 @@ def make_llt_blocked_rcm_solve_kernel(block_size: int):
             wp.tile_upper_solve_inplace(wp.tile_transpose(L_diag), rhs_tile)
             wp.tile_store(x_hat_i, rhs_tile, offset=(i, 0))
 
-            row = tid_block
-            if row < block_size:
-                if i + row < n_i:
+            num_row_iterations = (block_size + num_threads_per_block - 1) // num_threads_per_block
+            for ii in range(num_row_iterations):
+                row = tid_block + ii * num_threads_per_block
+                if row < block_size and i + row < n_i:
                     p_r = P_i[i + row]
                     x_i[p_r, 0] = rhs_tile[row, 0]
 
