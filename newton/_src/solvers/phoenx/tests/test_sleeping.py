@@ -387,10 +387,13 @@ class TestSleepingPipeline(unittest.TestCase):
             msg="quiet island should consume the final sleep hysteresis tick",
         )
 
-    def test_square_tower_small_pick_resleeps_without_collapse(self) -> None:
-        """A click-sized pick on a sleeping Kapla square tower must wake
-        contacts for the interaction frame, then settle back to sleep
-        without a delayed contact collapse.
+    def test_square_tower_held_pick_resleeps_without_collapse(self) -> None:
+        """A graph-captured Kapla tower must resleep after a held pick.
+
+        Graph-stable contact history made cross-frame warm-start impulses
+        active during replay. In sleep-enabled contact stacks those impulses
+        kept the picked tower just above the sleep threshold, then the
+        broad-phase sleep filter fragmented contacts and the tower collapsed.
         """
         from newton._src.solvers.phoenx.examples import example_kapla_square_tower as square_tower  # noqa: PLC0415
 
@@ -403,10 +406,9 @@ class TestSleepingPipeline(unittest.TestCase):
             def set_camera(self, **kwargs):
                 pass
 
-        example = square_tower.Example(_Viewer(), types.SimpleNamespace(grid_side=1, show_contacts=False))
+        example = square_tower.Example(_Viewer(), types.SimpleNamespace(grid_side=4, show_contacts=False))
         for _ in range(360):
             example.step()
-        wp.synchronize_device(example.device)
 
         base = example.bodies.position.numpy().copy()
         picked_body = int(example._tower_plank_newton_ids[0][-1]) + 1
@@ -414,15 +416,15 @@ class TestSleepingPipeline(unittest.TestCase):
         example.picking._pick_body.assign(np.array([picked_body], dtype=np.int32))
         example.picking._pick_local.assign(np.array([[0.0, 0.0, 0.0]], dtype=np.float32))
         example.picking._pick_target.assign(
-            np.array([pick_origin + np.array([0.002, 0.0, 0.0], dtype=np.float32)], dtype=np.float32)
+            np.array([pick_origin + np.array([0.02, 0.0, 0.0], dtype=np.float32)], dtype=np.float32)
         )
         example.picking._is_picking = True
 
-        example.step()
-        example.picking.release()
-        for _ in range(120):
+        for _ in range(20):
             example.step()
-        wp.synchronize_device(example.device)
+        example.picking.release()
+        for _ in range(80):
+            example.step()
 
         positions = example.bodies.position.numpy()
         displacement = np.linalg.norm(positions - base, axis=1)
@@ -431,12 +433,12 @@ class TestSleepingPipeline(unittest.TestCase):
         self.assertLess(
             max_displacement,
             0.05,
-            msg=f"small pick caused delayed tower collapse; max displacement={max_displacement:.4f} m",
+            msg=f"held pick caused delayed tower collapse; max displacement={max_displacement:.4f} m",
         )
         self.assertEqual(
             sleep_count,
             int(example.model.body_count),
-            msg="tower should have settled back to sleep after the click-sized pick",
+            msg="tower should have settled back to sleep after the held pick",
         )
 
     def test_external_force_wakes_full_stack_via_pre_collide_pass(self) -> None:

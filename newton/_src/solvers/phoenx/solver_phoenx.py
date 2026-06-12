@@ -2832,6 +2832,9 @@ class PhoenXWorld:
             contacts=self._contact_views,
             cc=self._contact_container,
             device=self.device,
+            # Cross-frame contact impulses can keep a nearly quiet stack above
+            # the sleep threshold; substep-local warm-start still applies.
+            carry_impulses=not self._sleeping_enabled,
         )
 
         # Cloth-aware overlay: when shape_endpoints is populated

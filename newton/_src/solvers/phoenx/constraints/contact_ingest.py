@@ -777,6 +777,7 @@ def _contact_warmstart_gather_kernel(
     prev_cid_of_contact: wp.array[wp.int32],
     num_contact_columns: wp.array[wp.int32],
     reuse_contact_indices: wp.array[wp.int32],
+    carry_impulses: wp.int32,
     bodies: BodyContainer,
     contacts: ContactViews,
     cc: ContactContainer,
@@ -788,9 +789,10 @@ def _contact_warmstart_gather_kernel(
     * Matched (``prev_k = rigid_contact_match_index[k] >= 0``) and prev
       anchor still describes the contact accurately: carry the prev
       ``(lambdas, normal, tangent1, local_p0, local_p1)`` forward.
-      Preserves sticky friction in the body-local frame.
+      Preserves sticky friction in the body-local frame when
+      ``carry_impulses`` is non-zero; otherwise only geometry is reused.
     * Matched but prev anchor has drifted too deep (see
-      :data:`_PREV_ANCHOR_PEN_MAX`): keep impulses, but reseat
+      :data:`_PREV_ANCHOR_PEN_MAX`): optionally keep impulses, but reseat
       ``(normal, tangent1, local_p0, local_p1)`` to the fresh narrow-phase
       values. Tangent1 is rebuilt from current tangential relative
       velocity. This catches the rotation-induced staleness that lets
@@ -889,9 +891,14 @@ def _contact_warmstart_gather_kernel(
                     + cc_get_prev_tangent2_lambda(cc, prev_k) * prev_t2
                 )
 
-                cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
-                cc_set_tangent1_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t1))
-                cc_set_tangent2_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t2))
+                if carry_impulses != wp.int32(0):
+                    cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
+                    cc_set_tangent1_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t1))
+                    cc_set_tangent2_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t2))
+                else:
+                    cc_set_normal_lambda(cc, k, wp.float32(0.0))
+                    cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+                    cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
                 cc_set_normal(cc, k, fresh_n)
                 cc_set_tangent1(cc, k, fresh_t1)
                 cc_set_local_p0(cc, k, fresh_local_p0)
@@ -900,9 +907,14 @@ def _contact_warmstart_gather_kernel(
 
             # Prev frame still describes the contact accurately --
             # carry the full PhoenX state forward (sticky path).
-            cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
-            cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
-            cc_set_tangent2_lambda(cc, k, cc_get_prev_tangent2_lambda(cc, prev_k))
+            if carry_impulses != wp.int32(0):
+                cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
+                cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
+                cc_set_tangent2_lambda(cc, k, cc_get_prev_tangent2_lambda(cc, prev_k))
+            else:
+                cc_set_normal_lambda(cc, k, wp.float32(0.0))
+                cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+                cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
             cc_set_normal(cc, k, prev_n)
             cc_set_tangent1(cc, k, cc_get_prev_tangent1(cc, prev_k))
             cc_set_local_p0(cc, k, prev_lp0)
@@ -1289,13 +1301,16 @@ def gather_contact_warmstart(
     contacts: ContactViews,
     cc: ContactContainer,
     device: wp.DeviceLike = None,
+    *,
+    carry_impulses: bool = True,
 ) -> None:
     """Copy prev-frame state into ``cc`` for matched contacts; initialise
     PhoenX-style for unmatched contacts.
 
-    Called after the pointer-swap (``cc.prev_impulses`` / ``cc.prev_lambdas``
-    now hold last step's persistent state; ``cc.impulses`` / ``cc.lambdas`` are
-    scratch) but before :func:`contact_prepare_for_iteration_at`.
+    Called after contact history is copied into ``cc.prev_*`` but before
+    :func:`contact_prepare_for_iteration_at`. Set ``carry_impulses=False`` to
+    reuse matched contact geometry while cold-starting cross-frame impulse
+    magnitudes.
     """
     wp.launch(
         kernel=_contact_warmstart_gather_kernel,
@@ -1310,6 +1325,7 @@ def gather_contact_warmstart(
             prev_cid_of_contact,
             scratch.num_contact_columns,
             reuse_contact_indices,
+            wp.int32(1 if carry_impulses else 0),
             bodies,
             contacts,
         ],
