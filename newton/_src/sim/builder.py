@@ -85,6 +85,31 @@ else:
     UsdStage = Any
 
 
+@dataclass(frozen=True)
+class _TetrahedronVertexD:
+    """Canonical local coordinates of tetrahedron vertex D."""
+
+    d_x: float
+    d_y: float
+    d_z: float
+
+    def finalize(self) -> np.uint64:
+        max_abs = max(abs(self.d_x), abs(self.d_y), abs(self.d_z))
+        exponent = 0 if max_abs <= 1.0 else int(math.ceil(math.log2(max_abs)))
+        exponent = max(0, min(15, exponent))
+        inv_scale = 1.0 / (2.0**exponent)
+        max_int = float((1 << 20) - 1)
+
+        def quantize(value: float) -> int:
+            normalized = max(-1.0, min(1.0, value * inv_scale))
+            return int(round((normalized * 0.5 + 0.5) * max_int))
+
+        ix = quantize(self.d_x)
+        iy = quantize(self.d_y)
+        iz = quantize(self.d_z)
+        return np.uint64((exponent << 60) | (ix << 40) | (iy << 20) | iz)
+
+
 class ModelBuilder:
     """A helper class for building simulation models at runtime.
 
@@ -6362,6 +6387,168 @@ class ModelBuilder:
             label=label,
             custom_attributes=custom_attributes,
             color=color,
+        )
+
+    def add_shape_triangle(
+        self,
+        body: int,
+        point_a: Vec3,
+        point_b: Vec3,
+        point_c: Vec3,
+        cfg: ShapeConfig | None = None,
+        color: Vec3 | None = None,
+        label: str | None = None,
+        custom_attributes: dict[str, Any] | None = None,
+    ) -> int:
+        """Adds a single triangle collision shape to a body.
+
+        The triangle vertices are specified in the parent body frame.
+        They are stored in a canonical local frame with point_a at
+        the origin, edge A -> B along local +Z, and point_c
+        in the local YZ plane. The shape transform carries the
+        requested position and orientation.
+
+        Args:
+            body: Parent body index, or -1 for world geometry.
+            point_a: First triangle vertex [m].
+            point_b: Second triangle vertex [m].
+            point_c: Third triangle vertex [m].
+            cfg: Shape configuration. If None, uses the default.
+            color: Optional display RGB color with values in [0, 1].
+            label: Optional unique shape label.
+            custom_attributes: Custom shape attributes.
+
+        Returns:
+            Index of the added shape.
+
+        Raises:
+            ValueError: If the triangle is degenerate.
+        """
+
+        def _vec3_to_np(v: Vec3) -> np.ndarray:
+            return np.array((float(v[0]), float(v[1]), float(v[2])), dtype=np.float64)
+
+        a = _vec3_to_np(point_a)
+        b = _vec3_to_np(point_b)
+        c = _vec3_to_np(point_c)
+        ab = b - a
+        ac = c - a
+        edge_ab = float(np.linalg.norm(ab))
+        if edge_ab <= 1.0e-12:
+            raise ValueError("Triangle point_a and point_b must be distinct")
+
+        axis_z = ab / edge_ab
+        c_z = float(np.dot(ac, axis_z))
+        ac_perp = ac - c_z * axis_z
+        c_y = float(np.linalg.norm(ac_perp))
+        if c_y <= 1.0e-12:
+            raise ValueError("Triangle points must not be collinear")
+
+        axis_y = ac_perp / c_y
+        axis_x = np.cross(axis_y, axis_z)
+        rot = wp.quat_from_matrix(
+            wp.matrix_from_cols(
+                wp.vec3(*axis_x.tolist()),
+                wp.vec3(*axis_y.tolist()),
+                wp.vec3(*axis_z.tolist()),
+            )
+        )
+        xform = wp.transform(wp.vec3(*a.tolist()), rot)
+        return self.add_shape(
+            body=body,
+            type=GeoType.TRIANGLE,
+            xform=xform,
+            cfg=cfg,
+            scale=wp.vec3(edge_ab, c_y, c_z),
+            color=color,
+            label=label,
+            custom_attributes=custom_attributes,
+        )
+
+    def add_shape_tetrahedron(
+        self,
+        body: int,
+        point_a: Vec3,
+        point_b: Vec3,
+        point_c: Vec3,
+        point_d: Vec3,
+        cfg: ShapeConfig | None = None,
+        color: Vec3 | None = None,
+        label: str | None = None,
+        custom_attributes: dict[str, Any] | None = None,
+    ) -> int:
+        """Adds a tetrahedron collision shape to a body.
+
+        Vertices are specified in the parent body frame. The first
+        three vertices share the same canonical frame as
+        add_shape_triangle(); vertex D is stored as canonical
+        local coordinates in the shape source.
+
+        Args:
+            body: Parent body index, or -1 for world geometry.
+            point_a: First tetrahedron vertex [m].
+            point_b: Second tetrahedron vertex [m].
+            point_c: Third tetrahedron vertex [m].
+            point_d: Fourth tetrahedron vertex [m].
+            cfg: Shape configuration. If None, uses the default.
+            color: Optional display RGB color with values in [0, 1].
+            label: Optional unique shape label.
+            custom_attributes: Custom shape attributes.
+
+        Returns:
+            Index of the added shape.
+
+        Raises:
+            ValueError: If the tetrahedron is degenerate.
+        """
+
+        def _vec3_to_np(v: Vec3) -> np.ndarray:
+            return np.array((float(v[0]), float(v[1]), float(v[2])), dtype=np.float64)
+
+        a = _vec3_to_np(point_a)
+        b = _vec3_to_np(point_b)
+        c = _vec3_to_np(point_c)
+        d = _vec3_to_np(point_d)
+        ab = b - a
+        ac = c - a
+        edge_ab = float(np.linalg.norm(ab))
+        if edge_ab <= 1.0e-12:
+            raise ValueError("Tetrahedron point_a and point_b must be distinct")
+
+        axis_z = ab / edge_ab
+        c_z = float(np.dot(ac, axis_z))
+        ac_perp = ac - c_z * axis_z
+        c_y = float(np.linalg.norm(ac_perp))
+        if c_y <= 1.0e-12:
+            raise ValueError("Tetrahedron points A, B, and C must not be collinear")
+
+        axis_y = ac_perp / c_y
+        axis_x = np.cross(axis_y, axis_z)
+        ad = d - a
+        d_x = float(np.dot(ad, axis_x))
+        d_y = float(np.dot(ad, axis_y))
+        d_z = float(np.dot(ad, axis_z))
+        if abs(d_x) <= 1.0e-12:
+            raise ValueError("Tetrahedron point_d must not be coplanar with A, B, and C")
+
+        rot = wp.quat_from_matrix(
+            wp.matrix_from_cols(
+                wp.vec3(*axis_x.tolist()),
+                wp.vec3(*axis_y.tolist()),
+                wp.vec3(*axis_z.tolist()),
+            )
+        )
+        xform = wp.transform(wp.vec3(*a.tolist()), rot)
+        return self.add_shape(
+            body=body,
+            type=GeoType.TETRAHEDRON,
+            xform=xform,
+            cfg=cfg,
+            scale=wp.vec3(edge_ab, c_y, c_z),
+            src=_TetrahedronVertexD(d_x, d_y, d_z),
+            color=color,
+            label=label,
+            custom_attributes=custom_attributes,
         )
 
     def add_ground_plane(

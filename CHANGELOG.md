@@ -114,6 +114,7 @@
 
 ### Fixed
 
+- Restore ModelBuilder triangle and tetrahedron shape helpers so primitive examples run.
 - Fix `SolverPhoenX` single-world joint-only scenes so rigid joints remain active when no contact columns are allocated.
 - Fix `SolverPhoenX` sleep-enabled contact stacks so graph-stable contact history does not carry cross-frame warm-start impulses that can prevent quiet towers from resleeping.
 - Fix `SolverPhoenX` D6 ball/universal reductions to preserve angular limits, so MJCF humanoid joints no longer dispatch through unconstrained ball sockets.

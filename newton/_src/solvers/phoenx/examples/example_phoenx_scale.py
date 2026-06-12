@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 import newton
@@ -192,6 +193,19 @@ class Example:
         self.viewer.log_state(self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
+
+    def test_final(self) -> None:
+        for name, array in (
+            ("body_q", self.state_0.body_q),
+            ("body_qd", self.state_0.body_qd),
+            ("joint_q", self.state_0.joint_q),
+            ("joint_qd", self.state_0.joint_qd),
+        ):
+            if array is None:
+                continue
+            values = array.numpy()
+            if not np.isfinite(values).all():
+                raise AssertionError(f"non-finite values in {name}")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import warp as wp
@@ -11,8 +12,7 @@ import warp as wp
 import newton
 import newton.examples
 
-USD_PATH = Path(r"C:\Users\twidmer\Downloads\MaxwellTopSI\MaxwellTopSI2.usda")
-SDF_CACHE_DIR = USD_PATH.parent / ".sdf_cache"
+MAXWELL_TOP_USD_ENV = "NEWTON_MAXWELL_TOP_USD"
 FPS = 300
 SUBSTEPS = 5
 SOLVER_ITERATIONS = 5
@@ -35,10 +35,18 @@ class Example:
         self.sim_time = 0.0
         self._printed_contact_count = False
 
+        usd_path = Path(args.usd_path).expanduser() if args.usd_path else None
+        if usd_path is None or not usd_path.exists():
+            raise FileNotFoundError(
+                "example_maxwell_top_si requires the MaxwellTopSI2.usda asset. "
+                f"Pass --usd-path or set {MAXWELL_TOP_USD_ENV}."
+            )
+        sdf_cache_dir = Path(args.sdf_cache_dir).expanduser() if args.sdf_cache_dir else usd_path.parent / ".sdf_cache"
+
         builder = newton.ModelBuilder()
-        builder.sdf_cache_dir = SDF_CACHE_DIR
+        builder.sdf_cache_dir = sdf_cache_dir
         result = builder.add_usd(
-            str(USD_PATH),
+            str(usd_path),
             schema_resolvers=[
                 newton.usd.SchemaResolverNewton(),
                 newton.usd.SchemaResolverPhysx(),
@@ -53,13 +61,13 @@ class Example:
             f"{len(result['path_joint_map'])} joints, "
             f"{len(result['path_shape_map'])} shapes"
         )
-        print(f"SDF texture cache: {SDF_CACHE_DIR}")
+        print(f"SDF texture cache: {sdf_cache_dir}")
 
         self.model = builder.finalize(skip_validation_joints=True)
         print(
             "Collision setup: "
             f"{self.model.shape_contact_pair_count} contact pairs, "
-            f"SDF indices {self.model.shape_sdf_index.numpy().tolist()}"
+            f"SDF indices {self.model._shape_sdf_index.numpy().tolist()}"
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -166,6 +174,18 @@ class Example:
             default="phoenx",
             choices=["phoenx", "xpbd"],
             help="Rigid-body solver backend.",
+        )
+        parser.add_argument(
+            "--usd-path",
+            type=str,
+            default=os.environ.get(MAXWELL_TOP_USD_ENV),
+            help="Path to MaxwellTopSI2.usda. Defaults to NEWTON_MAXWELL_TOP_USD.",
+        )
+        parser.add_argument(
+            "--sdf-cache-dir",
+            type=str,
+            default=None,
+            help="Optional SDF cache directory. Defaults to a .sdf_cache sibling of --usd-path.",
         )
         return parser
 

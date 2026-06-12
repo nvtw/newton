@@ -19,6 +19,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
+    add_free_body,
     default_box_half_extents,
     default_sphere_half_extents,
     run_ported_example,
@@ -58,7 +59,8 @@ class Example(PortedExample):
         builder.add_articulation([joint])
 
         # Ball thrown at the door.
-        ball = builder.add_body(
+        ball = add_free_body(
+            builder,
             xform=wp.transform(p=wp.vec3(2.0, 0.5, DOOR_HZ + 0.05), q=wp.quat_identity()),
             linear_velocity=(-8.0, 0.0, 0.0),
         )

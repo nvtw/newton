@@ -880,7 +880,7 @@ class Example:
                     f"(r_xy={r_xy:.3f}, tol={tower_tolerance:.3f})"
                 )
 
-        for newton_idx in self._wrecking_ball_newton_ids:
+        for newton_idx in getattr(self, "_wrecking_ball_newton_ids", ()):
             pos = positions[newton_idx + 1]
             assert np.isfinite(pos).all(), f"wrecking ball {newton_idx} non-finite position: {pos}"
 

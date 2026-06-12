@@ -401,6 +401,7 @@ class Example:
             (nx, ny),
         )
         self.pinned_bodies: list[int] = []
+        self.pinned_anchors: list[tuple[int, np.ndarray, np.ndarray]] = []
         for corner in self.corner_grid:
             inc = incident.get(corner, [])
             if not inc:
@@ -418,6 +419,13 @@ class Example:
                 collision_filter_parent=False,
             )
             self.pinned_bodies.append(body)
+            self.pinned_anchors.append(
+                (
+                    body,
+                    np.asarray(anchor_local, dtype=np.float32),
+                    np.asarray(anchor_world, dtype=np.float32),
+                )
+            )
 
         triangle_count = sum(1 for inc in incident.values() for _ in inc) // 3
         print(
@@ -530,18 +538,19 @@ class Example:
         if not np.all(np.isfinite(body_q)):
             raise RuntimeError("non-finite body transform in final state")
 
-        for pinned in self.pinned_bodies:
-            init_p = self._initial_body_q[pinned, :3]
-            now_p = body_q[pinned, :3]
-            # The triangle body's origin sits at vertex A; the corner
-            # we pinned may be vertex A, B, or C of its triangle, so
-            # the body origin can swing around the pin. Bound that
-            # swing by the longest local edge instead of zero drift.
+        def rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+            xyz = np.asarray(q[:3], dtype=np.float32)
+            t = 2.0 * np.cross(xyz, v)
+            return v + float(q[3]) * t + np.cross(xyz, t)
+
+        for pinned, anchor_local, anchor_world in self.pinned_anchors:
+            q = body_q[pinned]
+            anchor_now = q[:3] + rotate(q[3:7], anchor_local)
             allowed = 2.0 * self.cell + 1.0e-3
-            drift = float(np.linalg.norm(now_p - init_p))
+            drift = float(np.linalg.norm(anchor_now - anchor_world))
             if drift > allowed:
                 raise RuntimeError(
-                    f"pinned cloth corner triangle drifted: body={pinned} drift={drift:.4f} m allowed={allowed:.4f} m"
+                    f"pinned cloth corner anchor drifted: body={pinned} drift={drift:.4f} m allowed={allowed:.4f} m"
                 )
 
         cube_z = float(body_q[self.cube_body, 2])

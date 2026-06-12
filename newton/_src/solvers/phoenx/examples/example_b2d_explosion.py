@@ -21,6 +21,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
+    add_free_body,
     default_box_half_extents,
     run_ported_example,
 )
@@ -42,7 +43,8 @@ class Example(PortedExample):
             theta = 2.0 * math.pi * i / N_RING
             x = RADIUS * math.cos(theta)
             y = RADIUS * math.sin(theta)
-            body = builder.add_body(
+            body = add_free_body(
+                builder,
                 xform=wp.transform(p=wp.vec3(x, y, HE + 0.05), q=wp.quat_identity()),
                 # Radial outward velocity in the X-Y plane plus a small
                 # +z lift so the pile lofts before falling back down.

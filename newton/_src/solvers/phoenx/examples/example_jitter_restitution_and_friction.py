@@ -26,6 +26,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
+    add_free_body,
     default_box_half_extents,
     run_ported_example,
 )
@@ -115,7 +116,8 @@ class Example(PortedExample):
         for i in range(N_CUBES):
             mu = i / (N_CUBES - 1) * 0.9  # 0.0, 0.1, ..., 0.9
             cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, mu=float(mu))
-            body = builder.add_body(
+            body = add_free_body(
+                builder,
                 xform=wp.transform(
                     p=wp.vec3(0.0, y0 + i * SPACING, SPAWN_HEIGHT),
                     q=wp.quat_identity(),

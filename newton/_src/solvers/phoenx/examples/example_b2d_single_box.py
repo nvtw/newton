@@ -19,6 +19,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
+    add_free_body,
     default_box_half_extents,
     run_ported_example,
 )
@@ -32,7 +33,8 @@ class Example(PortedExample):
 
     def build_scene(self, builder: newton.ModelBuilder):
         builder.add_ground_plane()
-        body = builder.add_body(
+        body = add_free_body(
+            builder,
             xform=wp.transform(p=wp.vec3(0.0, 0.0, EXTENT + 1.0), q=wp.quat_identity()),
             linear_velocity=(5.0, 0.0, 0.0),
         )

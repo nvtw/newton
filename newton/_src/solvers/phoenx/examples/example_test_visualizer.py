@@ -283,6 +283,15 @@ class Example:
         assert self._live is not None
         self._live.render(self.viewer)
 
+    def test_final(self) -> None:
+        assert self._live is not None
+        positions = self._live.world.bodies.position.numpy()
+        velocities = self._live.world.bodies.velocity.numpy()
+        if not np.isfinite(positions).all():
+            raise AssertionError("non-finite visualizer body positions")
+        if not np.isfinite(velocities).all():
+            raise AssertionError("non-finite visualizer body velocities")
+
 
 if __name__ == "__main__":
     viewer, args = newton.examples.init()

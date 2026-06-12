@@ -41,6 +41,7 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 __all__ = [
     "PortedExample",
+    "add_free_body",
     "default_box_half_extents",
     "default_capsule_half_extents",
     "default_cone_half_extents",
@@ -48,6 +49,39 @@ __all__ = [
     "default_mesh_half_extents",
     "default_sphere_half_extents",
 ]
+
+
+def add_free_body(
+    builder: newton.ModelBuilder,
+    *,
+    xform: wp.transform | None = None,
+    linear_velocity: tuple[float, float, float] | None = None,
+    angular_velocity: tuple[float, float, float] | None = None,
+    **kwargs,
+) -> int:
+    """Add a free body and seed its initial joint velocity.
+
+    ModelBuilder.add_body() creates a free joint internally, but
+    the current public API does not take initial velocity keywords.
+    PhoenX ported demos often need a thrown body, so keep that setup
+    local to this example package instead of repeating qd-slot writes.
+    """
+    body = builder.add_body(xform=xform, **kwargs)
+    if linear_velocity is not None or angular_velocity is not None:
+        if builder.joint_count <= 0:
+            raise RuntimeError("add_body did not create a free joint")
+        qd_start = int(builder.joint_qd_start[builder.joint_count - 1])
+        lin = linear_velocity if linear_velocity is not None else (0.0, 0.0, 0.0)
+        ang = angular_velocity if angular_velocity is not None else (0.0, 0.0, 0.0)
+        builder.joint_qd[qd_start : qd_start + 6] = [
+            float(lin[0]),
+            float(lin[1]),
+            float(lin[2]),
+            float(ang[0]),
+            float(ang[1]),
+            float(ang[2]),
+        ]
+    return body
 
 
 def default_box_half_extents(hx: float, hy: float, hz: float) -> tuple[float, float, float]:
@@ -487,6 +521,23 @@ class PortedExample:
         if self.show_contacts:
             self.viewer.log_contacts(self.contacts, self.state)
         self.viewer.end_frame()
+
+    def test_final(self) -> None:
+        """Generic smoke validation for ported demos."""
+        arrays = [
+            ("state.body_q", self.state.body_q),
+            ("state.body_qd", self.state.body_qd),
+            ("bodies.position", self.bodies.position),
+            ("bodies.orientation", self.bodies.orientation),
+            ("bodies.velocity", self.bodies.velocity),
+            ("bodies.angular_velocity", self.bodies.angular_velocity),
+        ]
+        for name, array in arrays:
+            if array is None:
+                continue
+            values = array.numpy()
+            if not np.isfinite(values).all():
+                raise AssertionError(f"non-finite values in {name}")
 
 
 def run_ported_example(example_factory: Callable[[object, object], PortedExample]) -> None:

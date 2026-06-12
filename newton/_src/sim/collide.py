@@ -875,10 +875,10 @@ class CollisionPipeline:
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
                 has_meshes = bool((shape_types == int(GeoType.MESH)).any())
-                if has_meshes and not has_heightfields and model.shape_sdf_index is not None:
+                if has_meshes and not has_heightfields and model._shape_sdf_index is not None:
                     mesh_shape_indices = np.flatnonzero(shape_types == int(GeoType.MESH))
-                    sdf_indices = model.shape_sdf_index.numpy()[mesh_shape_indices]
-                    coarse_textures = getattr(model, "texture_sdf_coarse_textures", None) or []
+                    sdf_indices = model._shape_sdf_index.numpy()[mesh_shape_indices]
+                    coarse_textures = getattr(model, "_texture_sdf_coarse_textures", None) or []
                     in_range = bool(
                         sdf_indices.size > 0 and np.all(sdf_indices >= 0) and np.all(sdf_indices < len(coarse_textures))
                     )
@@ -1126,7 +1126,7 @@ class CollisionPipeline:
             self.unified_shape_gap = _extend_float(model.shape_gap, 0.0)
             self.unified_shape_collision_radius = _extend_float(model.shape_collision_radius, 0.0)
             self.unified_shape_source_ptr = _extend_uint64(model.shape_source_ptr)
-            self.unified_shape_sdf_index = _extend_int(getattr(model, "shape_sdf_index", None), -1)
+            self.unified_shape_sdf_index = _extend_int(getattr(model, "_shape_sdf_index", None), -1)
             self.unified_shape_heightfield_index = _extend_int(getattr(model, "shape_heightfield_index", None), -1)
             self.unified_shape_collision_aabb_lower = _extend_vec3(model.shape_collision_aabb_lower)
             self.unified_shape_collision_aabb_upper = _extend_vec3(model.shape_collision_aabb_upper)
