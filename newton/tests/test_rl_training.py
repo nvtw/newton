@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import math
+import unittest
+
+import numpy as np
+import warp as wp
+
+import newton.rl as rl
+
+
+class TestRolloutBuffer(unittest.TestCase):
+    def test_compute_returns_matches_numpy_gae(self) -> None:
+        buffer = rl.BufferRollout(num_steps=3, num_envs=2, obs_dim=4, action_dim=2, device="cpu")
+        rewards = np.array([1.0, 0.5, 0.25, -0.25, 2.0, 1.0], dtype=np.float32)
+        dones = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        values = np.array([0.2, -0.1, 0.3, 0.4, -0.2, 0.1, 0.5, -0.3], dtype=np.float32)
+        successes = np.array([0.0, 1.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        buffer.rewards.assign(rewards)
+        buffer.dones.assign(dones)
+        buffer.successes.assign(successes)
+        buffer.values.assign(values)
+
+        gamma = 0.9
+        gae_lambda = 0.8
+        buffer.compute_returns(gamma=gamma, gae_lambda=gae_lambda)
+
+        expected_adv = np.zeros(6, dtype=np.float32)
+        expected_returns = np.zeros(6, dtype=np.float32)
+        for env in range(2):
+            gae = 0.0
+            for t in reversed(range(3)):
+                idx = t * 2 + env
+                next_idx = (t + 1) * 2 + env
+                non_terminal = 1.0 - float(dones[idx])
+                delta = float(rewards[idx]) + gamma * float(values[next_idx]) * non_terminal - float(values[idx])
+                gae = delta + gamma * gae_lambda * non_terminal * gae
+                expected_adv[idx] = gae
+                expected_returns[idx] = gae + float(values[idx])
+
+        np.testing.assert_allclose(buffer.advantages.numpy(), expected_adv, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(buffer.returns.numpy(), expected_returns, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(buffer.successes.numpy(), successes, rtol=0.0, atol=0.0)
+
+
+class TestTrainerPPO(unittest.TestCase):
+    def test_update_changes_actor_and_returns_finite_stats(self) -> None:
+        rng = np.random.default_rng(3)
+        config = rl.ConfigPPO(
+            train_epochs=2,
+            normalize_advantages=False,
+            actor_lr=3.0e-3,
+            critic_lr=3.0e-3,
+            entropy_coeff=0.0,
+        )
+        trainer = rl.TrainerPPO(obs_dim=5, action_dim=2, hidden_layers=(8,), config=config, device="cpu", seed=7)
+        buffer = rl.BufferRollout(num_steps=4, num_envs=4, obs_dim=5, action_dim=2, device="cpu")
+        n = buffer.num_samples
+        obs = rng.normal(size=(n, 5)).astype(np.float32)
+        actions = np.tanh(0.5 * rng.normal(size=(n, 2))).astype(np.float32)
+        advantages = rng.normal(loc=0.5, scale=0.25, size=n).astype(np.float32)
+        returns = rng.normal(size=n).astype(np.float32)
+        buffer.obs.assign(obs)
+        buffer.actions.assign(actions)
+        buffer.advantages.assign(advantages)
+        buffer.returns.assign(returns)
+        _policy_out, old_log_probs = trainer.actor.log_prob(buffer.obs, buffer.actions, requires_grad=False)
+        buffer.old_log_probs.assign(old_log_probs.numpy())
+
+        actor_before = trainer.actor.net.weights[0].numpy().copy()
+        stats = trainer.update(buffer)
+        actor_after = trainer.actor.net.weights[0].numpy()
+
+        self.assertTrue(math.isfinite(stats.policy_loss))
+        self.assertTrue(math.isfinite(stats.value_loss))
+        self.assertTrue(math.isfinite(stats.approx_kl))
+        self.assertTrue(math.isfinite(stats.clip_fraction))
+        self.assertGreater(float(np.max(np.abs(actor_after - actor_before))), 0.0)
+
+
+class TestReplayBufferSAC(unittest.TestCase):
+    def test_sample_returns_inserted_rows(self) -> None:
+        replay = rl.BufferReplaySAC(capacity=8, obs_dim=3, action_dim=2, batch_size=4, device="cpu")
+        obs = np.arange(18, dtype=np.float32).reshape(6, 3)
+        actions = np.arange(12, dtype=np.float32).reshape(6, 2) * 0.1
+        rewards = np.linspace(-1.0, 1.0, 6, dtype=np.float32)
+        dones = np.array([0.0, 1.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        next_obs = obs + 100.0
+        replay.add_batch(
+            wp.array(obs, dtype=wp.float32, device="cpu"),
+            wp.array(actions, dtype=wp.float32, device="cpu"),
+            wp.array(rewards, dtype=wp.float32, device="cpu"),
+            wp.array(dones, dtype=wp.float32, device="cpu"),
+            wp.array(next_obs, dtype=wp.float32, device="cpu"),
+        )
+
+        batch = replay.sample(seed=11)
+        self.assertEqual(batch.obs.shape, (4, 3))
+        self.assertEqual(batch.actions.shape, (4, 2))
+        sampled_obs = batch.obs.numpy()
+        valid_first_columns = {float(v) for v in obs[:, 0]}
+        self.assertTrue(all(float(v) in valid_first_columns for v in sampled_obs[:, 0]))
+        np.testing.assert_allclose(batch.next_obs.numpy(), sampled_obs + 100.0, rtol=0.0, atol=0.0)
+
+
+class TestTrainerSAC(unittest.TestCase):
+    def test_update_changes_networks_and_returns_finite_stats(self) -> None:
+        rng = np.random.default_rng(5)
+        config = rl.ConfigSAC(update_steps=2, tau=0.5, actor_lr=1.0e-3, critic_lr=1.0e-3, alpha_lr=1.0e-3)
+        trainer = rl.TrainerSAC(obs_dim=4, action_dim=2, hidden_layers=(8,), config=config, device="cpu", seed=13)
+        obs = wp.array(rng.normal(size=(16, 4)).astype(np.float32), dtype=wp.float32, device="cpu")
+        actions = wp.array(np.tanh(rng.normal(size=(16, 2))).astype(np.float32), dtype=wp.float32, device="cpu")
+        rewards = wp.array(rng.normal(size=16).astype(np.float32), dtype=wp.float32, device="cpu")
+        dones = wp.array(np.zeros(16, dtype=np.float32), dtype=wp.float32, device="cpu")
+        next_obs = wp.array(rng.normal(size=(16, 4)).astype(np.float32), dtype=wp.float32, device="cpu")
+        batch = rl.BatchSAC(obs=obs, actions=actions, rewards=rewards, dones=dones, next_obs=next_obs)
+
+        actor_before = [param.numpy().copy() for param in trainer.actor.parameters()]
+        critic_before = [param.numpy().copy() for param in trainer.critic1.parameters()]
+        target_before = [param.numpy().copy() for param in trainer.target_critic1.parameters()]
+        stats = trainer.update(batch, seed=17)
+
+        actor_delta = max(
+            float(np.max(np.abs(param.numpy() - before)))
+            for param, before in zip(trainer.actor.parameters(), actor_before, strict=True)
+        )
+        critic_delta = max(
+            float(np.max(np.abs(param.numpy() - before)))
+            for param, before in zip(trainer.critic1.parameters(), critic_before, strict=True)
+        )
+        target_delta = max(
+            float(np.max(np.abs(param.numpy() - before)))
+            for param, before in zip(trainer.target_critic1.parameters(), target_before, strict=True)
+        )
+        self.assertTrue(math.isfinite(stats.actor_loss))
+        self.assertTrue(math.isfinite(stats.critic_loss))
+        self.assertTrue(math.isfinite(stats.alpha_loss))
+        self.assertGreater(stats.alpha, 0.0)
+        self.assertGreater(actor_delta, 0.0)
+        self.assertGreater(critic_delta, 0.0)
+        self.assertGreater(target_delta, 0.0)
+
+
+if __name__ == "__main__":
+    wp.init()
+    unittest.main()
