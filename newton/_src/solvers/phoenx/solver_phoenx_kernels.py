@@ -12,7 +12,6 @@ from newton._src.solvers.phoenx.access_mode import (
     ACCESS_MODE_STATIC,
     ACCESS_MODE_VELOCITY_LEVEL,
 )
-from newton._src.solvers.phoenx.array_helper import read1d_i32
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -116,6 +115,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     _lowest_set_bit,
     element_interaction_data_make,
 )
+from newton._src.solvers.phoenx.helpers.array_access import read1d_i32
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer

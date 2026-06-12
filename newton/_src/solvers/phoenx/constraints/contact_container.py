@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.array_helper import read2d_f32, write2d_f32
+from newton._src.solvers.phoenx.helpers.array_access import read2d_f32, write2d_f32
 
 __all__ = [
     "CC_DERIVED_DWORDS_PER_CONTACT",

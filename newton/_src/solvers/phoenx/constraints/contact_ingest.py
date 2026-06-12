@@ -255,7 +255,7 @@ def _contact_pair_boundary_kernel(
         pair_boundary[tid] = wp.int32(0)
 
 
-# Compound-body grouping (opt-in). See CONTACT_GROUP_COMPOUND_OPT.md.
+# Compound-body grouping (opt-in). See docs/CONTACT_GROUP_COMPOUND_OPT.md.
 
 
 @wp.kernel(enable_backward=False)
@@ -1022,7 +1022,7 @@ def ingest_contacts(
             gather per ingest call. Requires the matching scratch
             arrays to be allocated (``IngestScratch(...,
             enable_body_pair_grouping=True)``) and a non-zero
-            ``num_bodies``. See :file:`CONTACT_GROUP_COMPOUND_OPT.md`.
+            ``num_bodies``. See :file:`../docs/CONTACT_GROUP_COMPOUND_OPT.md`.
         cid_of_contact: Current-frame forward map cleared during the
             boundary pass. Defaults to scratch storage for standalone callers.
         num_active_constraints: Optional output for
@@ -1134,7 +1134,7 @@ def ingest_contacts(
         # Newton's narrow-phase arrays. ``shape0`` / ``shape1`` come
         # from the sorted scratch so material lookups land at the
         # *first* shape pair in each merged column (acceptable for
-        # uniform-material compounds; see CONTACT_GROUP_COMPOUND_OPT.md
+        # uniform-material compounds; see docs/CONTACT_GROUP_COMPOUND_OPT.md
         # Section 5).
         ingest_shape0 = scratch.sorted_shape0
         ingest_shape1 = scratch.sorted_shape1

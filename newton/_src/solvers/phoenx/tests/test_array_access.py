@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for :mod:`newton._src.solvers.phoenx.array_helper`.
+"""Tests for :mod:`newton._src.solvers.phoenx.helpers.array_access`.
 
 The raw-pointer ``read2d_f32`` / ``write2d_f32`` helpers must be
 bit-equivalent to Warp's bounds-checked ``arr[i, j]`` indexing for any
@@ -25,7 +25,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.array_helper import read1d_i32, read2d_f32, write2d_f32
+from newton._src.solvers.phoenx.helpers.array_access import read1d_i32, read2d_f32, write2d_f32
 
 
 @wp.kernel(enable_backward=False)
@@ -96,7 +96,7 @@ def _copy_i32_via_helper_kernel(
 
 @unittest.skipUnless(
     wp.get_preferred_device().is_cuda,
-    "array_helper tests require CUDA (wp.func_native has no CPU fallback).",
+    "array_access tests require CUDA (wp.func_native has no CPU fallback).",
 )
 class TestArrayHelpers(unittest.TestCase):
     """Bit-equivalence + layout checks for ``read2d_f32`` / ``write2d_f32``."""

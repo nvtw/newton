@@ -2,7 +2,7 @@
 
 PhoenX is Newton's deterministic, maximal-coordinate, CUDA-oriented PGS/TGS solver for rigid bodies, joints, contacts, cloth triangles/bending, and soft-body constraints. It is built to handle both very large single worlds and many independent small worlds without changing the constraint model. This note is for people changing the solver; it gives the mental model before you open the large kernel files.
 
-For tuning history, use [`PERF_NOTES.md`](PERF_NOTES.md). For compound contact grouping design notes, use [`CONTACT_GROUP_COMPOUND_OPT.md`](CONTACT_GROUP_COMPOUND_OPT.md).
+For tuning history, use [`PERF_NOTES.md`](docs/PERF_NOTES.md). For compound contact grouping design notes, use [`CONTACT_GROUP_COMPOUND_OPT.md`](docs/CONTACT_GROUP_COMPOUND_OPT.md).
 
 ## 1. Why PhoenX Exists
 PhoenX is designed for scenes where the hard part is not just solving constraints, but solving changing constraint graphs repeatably, at high stiffness, and at high throughput.
@@ -328,7 +328,7 @@ Use these checks before changing core flow:
 - **New contact data**: update ingest, `ContactViews`, `ContactContainer`, warm-start copy, and any body-pair grouping sort path.
 - **New scheduler path**: add a dispatcher if it changes solve choreography. Keep constructor-time selection graph-stable and benchmark with locked clocks.
 - **Mass splitting changes**: validate direct-storage and copy-state paths. Slot cache, access mode, momentum-preserving average/broadcast, and writeback must agree.
-- **Performance changes**: record results in `PERF_NOTES.md` if the lesson is likely to matter later, including reverted experiments.
+- **Performance changes**: record results in `docs/PERF_NOTES.md` if the lesson is likely to matter later, including reverted experiments.
 
 Good local checks:
 ```bash

@@ -27,7 +27,7 @@ class ElementInteractionData:
     # Body slots; -1 = inactive. Slots 0..1 = primary pair; 2..7 optional.
     # Width 8 fits every constraint type (joint=2, cloth-tri=3,
     # cloth-bending=4, soft-tet shear=4, soft-tet-vs-soft-tet contact=6,
-    # cloth-cloth contact=6). Was 6 historically (see PERF_NOTES.md
+    # cloth-cloth contact=6). Was 6 historically (see docs/PERF_NOTES.md
     # 2026-05-12); re-widened to 8.
     bodies: vec8i
 
