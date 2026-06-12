@@ -17,6 +17,10 @@
 - Fix MJCF parsing so attributes from multiple `<compiler>` elements, including `<include>`-expanded children, are merged in document order. (#3030)
 - Fix MJCF worldbody static geoms bypassing the visual/collider class filter, so `parse_visuals=False` drops visual-class geoms attached directly to `<worldbody>` too. (#3030)
 
+### Removed
+
+- Remove the deprecated Style3D `CollisionHandler`; use `Collision` instead
+
 ## [1.3.0] - 2026-06-11
 
 ### Added
