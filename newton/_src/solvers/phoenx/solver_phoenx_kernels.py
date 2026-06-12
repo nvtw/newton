@@ -121,6 +121,9 @@ from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContai
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.timer import elapsed_us, read_global_timer_ns
 
+_FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS = 3
+_FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS = 3
+
 # Body-N dword offsets in the per-constraint header. Each constraint
 # type stores (type, body1, body2) at dwords 0/1/2 then extra bodies
 # at dwords 3/4 (cloth-tri uses body3 only; soft-tet and cloth-bend
@@ -1357,7 +1360,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 idt,
                                 sor_boost,
                                 cid,
-                                sweeps_per_dispatch,
+                                wp.int32(_FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS),
                             )
                             base += tpw
 
@@ -1377,7 +1380,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 idt,
                                 sor_boost,
                                 local_cid,
-                                sweeps_per_dispatch,
+                                wp.int32(_FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS),
                             )
                             base += tpw
                 else:
@@ -1405,21 +1408,44 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 wp.int32(0),
                             )
                         else:
-                            _dispatch_iterate_cid(
-                                constraints,
-                                contact_cols,
-                                bodies,
-                                particles,
-                                cc,
-                                contacts,
-                                copy_state,
-                                num_bodies,
-                                idt,
-                                sor_boost,
-                                cid,
-                                num_joints,
-                                num_iterations,
-                            )
+                            if wp.static(has_joints and not has_contacts):
+                                _dispatch_iterate_joint(
+                                    constraints,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    idt,
+                                    sor_boost,
+                                    cid,
+                                    wp.int32(_FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS),
+                                )
+                            elif cid < num_joints:
+                                _dispatch_iterate_joint(
+                                    constraints,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    idt,
+                                    sor_boost,
+                                    cid,
+                                    wp.int32(_FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS),
+                                )
+                            else:
+                                _dispatch_iterate_contact(
+                                    contact_cols,
+                                    bodies,
+                                    particles,
+                                    cc,
+                                    contacts,
+                                    copy_state,
+                                    num_bodies,
+                                    idt,
+                                    sor_boost,
+                                    cid - num_joints,
+                                    wp.int32(_FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS),
+                                )
                         base += tpw
 
                 _sync_warp_mask(sync_mask)

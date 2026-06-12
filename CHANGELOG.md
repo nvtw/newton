@@ -116,6 +116,7 @@
 
 - Fix `SolverPhoenX` D6 ball/universal reductions to preserve angular limits, so MJCF humanoid joints no longer dispatch through unconstrained ball sockets.
 - Fix `SolverPhoenX` joint stiffness and multi-world contact isolation regressions in robot scenes.
+- Fix `SolverPhoenX` fast-tail multi-world solve dispatch to recover robot-fleet performance without regressing joint stiffness.
 - Fix `example_recording` PhoenX mode to use unified model contacts and avoid nesting internal PhoenX substeps inside the MuJoCo outer loop.
 - Fix `SolverPhoenX` drive target handling to use `Model.joint_target_q` / `Control.joint_target_q`, including coord-layout target indices after free joints.
 - Fix `SolverPhoenX` ignoring `Model.joint_damping` on revolute/prismatic and D6 ball/universal joints, which destabilized damped MJCF humanoids.
