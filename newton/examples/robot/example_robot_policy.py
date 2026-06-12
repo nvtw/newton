@@ -575,10 +575,10 @@ class Example:
         parser.add_argument(
             "--solver",
             choices=["mujoco", "phoenx"],
-            default="mujoco",
+            default="phoenx",
             help=(
-                "Rigid-body solver backend. 'mujoco' (default) is what the policies were trained "
-                "against. 'phoenx' steps the same model with SolverPhoenX -- useful for transfer "
+                "Rigid-body solver backend. 'phoenx' (default) steps the policy model with SolverPhoenX. "
+                "'mujoco' uses the backend the policies were trained against. PhoenX is useful for transfer "
                 "experiments, but the policy may behave differently since PhoenX's contact and "
                 "PD-drive dynamics are not bit-identical to MuJoCo's."
             ),

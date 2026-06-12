@@ -4,8 +4,8 @@
 ###########################################################################
 # Example Robot ANYmal C Walk
 #
-# Shows how to simulate ANYmal C using SolverMuJoCo and control it with a
-# policy trained in PhysX.
+# Shows how to simulate ANYmal C using SolverPhoenX or SolverMuJoCo and control it
+# with a policy trained in PhysX.
 #
 # Command: python -m newton.examples robot_anymal_c_walk
 #
@@ -75,7 +75,7 @@ class Example:
         self.device = wp.get_device()
         self.torch_device = wp.device_to_torch(self.device)
 
-        # Pick the solver backend; default stays MuJoCo for reproducibility.
+        # Pick the solver backend selected by the parser.
         solver_name = getattr(args, "solver", "mujoco")
 
         builder = newton.ModelBuilder()
@@ -351,8 +351,8 @@ class Example:
         parser.add_argument(
             "--solver",
             choices=["mujoco", "phoenx"],
-            default="mujoco",
-            help="Rigid-body solver backend. 'mujoco' (default) uses the MuJoCo/Warp solver; 'phoenx' uses SolverPhoenX.",
+            default="phoenx",
+            help="Rigid-body solver backend. 'phoenx' (default) uses SolverPhoenX; 'mujoco' uses the MuJoCo/Warp solver.",
         )
         return parser
 

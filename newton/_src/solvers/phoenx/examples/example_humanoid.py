@@ -165,10 +165,10 @@ class Example:
         parser.add_argument(
             "--solver-substeps",
             type=int,
-            default=10,
+            default=6,
             help="PhoenX internal PGS substeps per solver step.",
         )
-        parser.add_argument("--solver-iterations", type=int, default=8, help="PhoenX PGS iterations per substep.")
+        parser.add_argument("--solver-iterations", type=int, default=6, help="PhoenX PGS iterations per substep.")
         parser.add_argument(
             "--velocity-iterations",
             type=int,
@@ -181,7 +181,7 @@ class Example:
             default=1,
             help="Substep interval for refreshing contact effective masses and bias.",
         )
-        parser.set_defaults(world_count=100, num_frames=1000, viewer="gl")
+        parser.set_defaults(world_count=20000, num_frames=1000, viewer="gl")
         return parser
 
 

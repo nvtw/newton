@@ -31,7 +31,7 @@ class Example:
 
         self.viewer = viewer
 
-        # Pick the solver backend; default stays MuJoCo for reproducibility.
+        # Pick the solver backend selected by the parser.
         solver_name = getattr(args, "solver", "mujoco")
 
         g1 = newton.ModelBuilder()
@@ -79,8 +79,8 @@ class Example:
             # the extra substepping relative to H1 at 150.
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
-                substeps=self.sim_substeps,
-                solver_iterations=8,
+                substeps=2 * self.sim_substeps,
+                solver_iterations=6,
                 velocity_iterations=1,
             )
         else:
@@ -179,7 +179,7 @@ class Example:
             "--solver",
             choices=["mujoco", "phoenx"],
             default="phoenx",
-            help="Rigid-body solver backend. 'mujoco' (default) uses the MuJoCo/Warp solver; 'phoenx' uses SolverPhoenX.",
+            help="Rigid-body solver backend. 'phoenx' (default) uses SolverPhoenX; 'mujoco' uses the MuJoCo/Warp solver.",
         )
         parser.set_defaults(world_count=4)
         return parser
