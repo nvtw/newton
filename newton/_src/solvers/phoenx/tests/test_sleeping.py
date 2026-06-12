@@ -19,6 +19,7 @@ lowest body id in its island at the moment of sleep transition.
 
 from __future__ import annotations
 
+import types
 import unittest
 
 import numpy as np
@@ -286,13 +287,12 @@ class TestSleepingPipeline(unittest.TestCase):
         )
 
     def test_external_force_wakes_sleeping_island(self) -> None:
-        """An external force applied via ``state.body_f`` -- e.g. picking,
-        a user-side wrench callback -- must wake the body's island on the
-        very next step. The per-island sleep score folds in
-        ``force * inv_mass * step_dt`` (and the torque analogue) so any
-        wrench big enough to actually shift the body lifts the score above
-        threshold without the caller having to clear ``island_root``
-        manually.
+        """A caller-side wrench must wake a sleeping island before
+        collision detection so the broad phase keeps its contact pairs.
+
+        A tiny wrench may still be below the sleep velocity threshold;
+        in that case the body is allowed to re-sleep after the solve.
+        The important contract is the pre-collide wake.
         """
         threshold = 0.05
         model = _make_box_on_plane(box_z=0.3)
@@ -326,27 +326,27 @@ class TestSleepingPipeline(unittest.TestCase):
         body_f[0, 2] = 1.0
         state_0.body_f.assign(body_f)
 
+        solver.wake_on_external_input(state_0)
+        self.assertEqual(
+            _is_sleeping(solver, 1),
+            0,
+            msg="external force via state.body_f must wake before collision detection",
+        )
+
         # Step manually to skip the ``clear_forces`` at the top of
         # ``_run_frames`` -- that zeroes ``state.body_f`` before
         # solver.step gets to import it, which would defeat the test.
         model.collide(state_0, contacts)
         solver.step(state_0, state_1, control, contacts, dt)
-        self.assertEqual(
-            _is_sleeping(solver, 1),
-            0,
-            msg="external force via state.body_f must wake the sleeping island",
-        )
 
-    def test_small_external_force_prevents_resleep(self) -> None:
-        """A latched user force must keep an awake island from going
-        back to sleep even when instantaneous motion is below the sleep
-        threshold.
+    def test_small_external_force_can_resleep_when_quiet(self) -> None:
+        """Tiny user force wakes sleeping bodies, but must not pin an
+        already-awake quiet island above the sleep threshold.
 
-        This covers the square-tower pick path: after one tower wakes,
-        the picking spring can become nearly static. The old sleeping
-        score let the island consume its final hysteresis tick and go
-        back to sleep while the pick was still active, dropping contacts
-        for a frame and causing a later local blow-up.
+        Pinning awake islands on any nonzero force regressed the Kapla
+        square tower: a click-sized pick woke a cold contact stack and
+        prevented it from re-sleeping, so the active solve amplified the
+        cold-started contacts until the tower collapsed.
         """
         model = _make_box_on_plane(box_z=0.1)
         solver = newton.solvers.SolverPhoenX(
@@ -362,10 +362,6 @@ class TestSleepingPipeline(unittest.TestCase):
         control = model.control()
         contacts = model.contacts()
 
-        # Put the body one quiet frame away from sleeping, then apply a
-        # deliberately small user force. Old code treated only the
-        # resulting dv as the sleep score, so this below-threshold force
-        # still allowed the body to sleep.
         roots = solver.world.bodies.island_root.numpy()
         roots[1] = -1
         solver.world.bodies.island_root.assign(roots)
@@ -382,13 +378,65 @@ class TestSleepingPipeline(unittest.TestCase):
 
         self.assertEqual(
             _is_sleeping(solver, 1),
-            0,
-            msg="body under an explicit user force must not re-sleep",
+            1,
+            msg="below-threshold force must not prevent quiet awake bodies from re-sleeping",
         )
         self.assertEqual(
             int(solver.world.bodies.frames_below_threshold.numpy()[1]),
-            0,
-            msg="external force should reset the sleep hysteresis counter",
+            10,
+            msg="quiet island should consume the final sleep hysteresis tick",
+        )
+
+    def test_square_tower_small_pick_resleeps_without_collapse(self) -> None:
+        """A click-sized pick on a sleeping Kapla square tower must wake
+        contacts for the interaction frame, then settle back to sleep
+        without a delayed contact collapse.
+        """
+        from newton._src.solvers.phoenx.examples import example_kapla_square_tower as square_tower  # noqa: PLC0415
+
+        class _Viewer:
+            renderer = None
+
+            def set_model(self, model):
+                pass
+
+            def set_camera(self, **kwargs):
+                pass
+
+        example = square_tower.Example(_Viewer(), types.SimpleNamespace(grid_side=1, show_contacts=False))
+        for _ in range(360):
+            example.step()
+        wp.synchronize_device(example.device)
+
+        base = example.bodies.position.numpy().copy()
+        picked_body = int(example._tower_plank_newton_ids[0][-1]) + 1
+        pick_origin = base[picked_body].copy()
+        example.picking._pick_body.assign(np.array([picked_body], dtype=np.int32))
+        example.picking._pick_local.assign(np.array([[0.0, 0.0, 0.0]], dtype=np.float32))
+        example.picking._pick_target.assign(
+            np.array([pick_origin + np.array([0.002, 0.0, 0.0], dtype=np.float32)], dtype=np.float32)
+        )
+        example.picking._is_picking = True
+
+        example.step()
+        example.picking.release()
+        for _ in range(120):
+            example.step()
+        wp.synchronize_device(example.device)
+
+        positions = example.bodies.position.numpy()
+        displacement = np.linalg.norm(positions - base, axis=1)
+        max_displacement = float(displacement.max())
+        sleep_count = int((example.bodies.island_root.numpy() >= 0).sum())
+        self.assertLess(
+            max_displacement,
+            0.05,
+            msg=f"small pick caused delayed tower collapse; max displacement={max_displacement:.4f} m",
+        )
+        self.assertEqual(
+            sleep_count,
+            int(example.model.body_count),
+            msg="tower should have settled back to sleep after the click-sized pick",
         )
 
     def test_external_force_wakes_full_stack_via_pre_collide_pass(self) -> None:

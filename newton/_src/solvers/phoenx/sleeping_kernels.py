@@ -365,10 +365,6 @@ def _phoenx_island_max_velocity_kernel(
         v_pred = bodies.velocity[b]
         w_pred = bodies.angular_velocity[b]
     score = wp.length(v_pred) + 0.5 * body_aabb_diagonal[b] * wp.length(w_pred)
-    # Treat explicit user wrench as an awake signal even when the
-    # acceleration estimate is below the sleep velocity threshold.
-    if wp.length_sq(force) > wp.float32(0.0) or wp.length_sq(torque) > wp.float32(0.0):
-        score = wp.max(score, sleeping_velocity_threshold)
     if score > island_max_velocity[island]:
         wp.atomic_max(island_max_velocity, island, score)
 
