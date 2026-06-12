@@ -13,6 +13,7 @@
 ### Fixed
 
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)
+- Fix mesh inertia computation to produce deterministic results across repeated CUDA runs.
 - Fix MJCF `euler` producing wrong orientations for multi-component angles by treating angles as intrinsic rotations. (#3030)
 - Fix MJCF parsing so attributes from multiple `<compiler>` elements, including `<include>`-expanded children, are merged in document order. (#3030)
 - Fix MJCF worldbody static geoms bypassing the visual/collider class filter, so `parse_visuals=False` drops visual-class geoms attached directly to `<worldbody>` too. (#3030)
@@ -125,7 +126,6 @@
 - Fix `brick_stacking` example contact gaps to avoid oversized contact envelopes around the robot, table, and ground.
 - Fix `ModelBuilder.collapse_fixed_joints()` producing a NaN center of mass when collapsing joints between zero-mass bodies.
 - Fix mesh and convex-mesh contact sign classification for watertight meshes with nearby opposing surfaces or inconsistent triangle winding.
-- Fix mesh inertia computation to produce deterministic results across repeated CUDA runs.
 - Fix `SolverMuJoCo` returning `State.joint_qd` in world frame for root `FREE` joints with non-identity `parent_xform`, violating the documented parent-frame contract and corrupting derived `body_qd`.
 - Fix `SolverVBD` custom attribute setup so `vbd:joint_is_hard` can be authored without implicitly enabling Dahl cable friction by calling `SolverVBD.register_custom_attributes(..., dahl_defaults_enabled=False)`.
 - Fix `example_softbody_gift` emitting spurious non-manifold edge warnings caused by mismatched 5-tet diagonals across adjacent cubes in the soft body mesh.
