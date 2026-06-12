@@ -125,8 +125,9 @@ class SolverPhoenX(SolverBase):
 
     Supports REVOLUTE / PRISMATIC (PD drive + limit), BALL, FIXED,
     CABLE (soft fixed with PD bend/twist; stretch DoF is rigid), FREE
-    (no column), and D6 configurations reducible to those old ADBS modes.
-    DISTANCE and generic D6 raise at construction.
+    (no column), and D6 configurations reducible to those old ADBS modes
+    including universal joints with angular limits. DISTANCE and generic D6
+    raise at construction.
 
     Newton :class:`Picking` works out of the box: pick force/torque is
     added to ``state.body_f``, which :meth:`step` imports into PhoenX's

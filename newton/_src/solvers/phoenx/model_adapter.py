@@ -24,6 +24,7 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
+    JOINT_MODE_UNIVERSAL,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -82,36 +83,82 @@ def _classify_d6_legacy_mode(
     n_ang: int,
     locked_lin: list[bool],
     locked_ang: list[bool],
-) -> tuple[newton.JointType | None, int]:
-    """Map D6 axes to the restored box3d_5 ADBS mode set.
+) -> tuple[str | None, int]:
+    """Map D6 axes to the restored ADBS mode set.
 
     Missing axes are locked by construction in Newton's D6 kinematics.
     ``dof_offset`` is the scalar DoF within the D6 joint used for the
-    reduced REVOLUTE/PRISMATIC axis. ``-1`` means the reduced mode has no
-    scalar drive row.
+    reduced REVOLUTE/PRISMATIC axis. For UNIVERSAL, ``dof_offset`` is
+    the locked angular axis when it is explicitly authored, or ``-1``
+    for MJCF-style two-axis angular-only D6 joints.
     """
     lin_free = [i for i, locked in enumerate(locked_lin) if not locked]
     ang_free = [i for i, locked in enumerate(locked_ang) if not locked]
 
     if not lin_free and not ang_free:
-        return newton.JointType.FIXED, -1
+        return "FIXED", -1
 
     if not lin_free and len(ang_free) == 3:
-        return newton.JointType.BALL, -1
+        return "BALL", -1
 
-    # MJCF imports can represent a universal joint as two angular axes.
-    # The restored ADBS formulation has no universal mode; keep the scene
-    # constructible by reducing to the closest old-mode joint, BALL.
     if n_lin == 0 and n_ang == 2 and len(ang_free) == 2:
-        return newton.JointType.BALL, -1
+        return "UNIVERSAL", -1
+
+    if n_lin == 3 and n_ang == 3 and not lin_free and len(ang_free) == 2:
+        locked_ang_idx = next(i for i, locked in enumerate(locked_ang) if locked)
+        return "UNIVERSAL", n_lin + locked_ang_idx
 
     if not lin_free and len(ang_free) == 1:
-        return newton.JointType.REVOLUTE, n_lin + ang_free[0]
+        return "REVOLUTE", n_lin + ang_free[0]
 
     if len(lin_free) == 1 and not ang_free:
-        return newton.JointType.PRISMATIC, lin_free[0]
+        return "PRISMATIC", lin_free[0]
 
     return None, -1
+
+
+def _append_d6_angular_limit(
+    qd: int,
+    coord_offset: int,
+    *,
+    limit_lower: np.ndarray | None,
+    limit_upper: np.ndarray | None,
+    joint_axis: np.ndarray,
+    joint_q_arr: np.ndarray,
+    joint_q_start: np.ndarray,
+    joint_index: int,
+    joint_world_xform: np.ndarray,
+    d6_limit_axes: list[np.ndarray],
+    d6_limit_lower: np.ndarray,
+    d6_limit_upper: np.ndarray,
+    d6_limit_count: int,
+) -> int:
+    """Pack one finite D6 angular limit and return the next write slot."""
+    if d6_limit_count >= 3 or limit_lower is None or limit_upper is None:
+        return d6_limit_count
+    if qd < 0 or qd >= len(limit_lower) or qd >= len(limit_upper):
+        return d6_limit_count
+    lo = float(limit_lower[qd])
+    hi = float(limit_upper[qd])
+    if not (np.isfinite(lo) and np.isfinite(hi) and lo <= hi):
+        return d6_limit_count
+    if lo <= -2.0 * np.pi and hi >= 2.0 * np.pi:
+        return d6_limit_count
+    axis_local = (
+        np.asarray(joint_axis[qd], dtype=np.float32)
+        if len(joint_axis) and qd < len(joint_axis)
+        else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    )
+    axis_len = float(np.linalg.norm(axis_local))
+    if axis_len <= 1.0e-12:
+        return d6_limit_count
+    axis_world = _quat_rotate_np(joint_world_xform[3:], axis_local / axis_len)
+    q_idx = int(joint_q_start[joint_index]) + coord_offset
+    init_axis_q = float(joint_q_arr[q_idx]) if len(joint_q_arr) > q_idx else 0.0
+    d6_limit_axes[d6_limit_count] = axis_world
+    d6_limit_lower[d6_limit_count] = lo - init_axis_q
+    d6_limit_upper[d6_limit_count] = hi - init_axis_q
+    return d6_limit_count + 1
 
 
 class AdbsInitArrays:
@@ -141,6 +188,12 @@ class AdbsInitArrays:
         stiffness_limit: wp.array,
         damping_limit: wp.array,
         armature: wp.array,
+        d6_limit_axis0: wp.array,
+        d6_limit_axis1: wp.array,
+        d6_limit_axis2: wp.array,
+        d6_limit_lower: wp.array,
+        d6_limit_upper: wp.array,
+        d6_limit_count: wp.array,
         joint_idx_to_cid: wp.array,
         joint_idx_to_dof_start: wp.array,
         joint_q_at_init: wp.array,
@@ -171,6 +224,12 @@ class AdbsInitArrays:
         self.stiffness_limit = stiffness_limit
         self.damping_limit = damping_limit
         self.armature = armature
+        self.d6_limit_axis0 = d6_limit_axis0
+        self.d6_limit_axis1 = d6_limit_axis1
+        self.d6_limit_axis2 = d6_limit_axis2
+        self.d6_limit_lower = d6_limit_lower
+        self.d6_limit_upper = d6_limit_upper
+        self.d6_limit_count = d6_limit_count
         self.joint_idx_to_cid = joint_idx_to_cid
         self.joint_idx_to_dof_start = joint_idx_to_dof_start
         #: Per-ADBS-column initial Newton joint coordinate. PhoenX measures
@@ -208,6 +267,12 @@ class AdbsInitArrays:
             "stiffness_limit": self.stiffness_limit,
             "damping_limit": self.damping_limit,
             "armature": self.armature,
+            "d6_limit_axis0": self.d6_limit_axis0,
+            "d6_limit_axis1": self.d6_limit_axis1,
+            "d6_limit_axis2": self.d6_limit_axis2,
+            "d6_limit_lower": self.d6_limit_lower,
+            "d6_limit_upper": self.d6_limit_upper,
+            "d6_limit_count": self.d6_limit_count,
         }
 
 
@@ -271,6 +336,12 @@ def build_adbs_init_arrays(
             stiffness_limit=empty_f,
             damping_limit=empty_f,
             armature=empty_f,
+            d6_limit_axis0=empty_v,
+            d6_limit_axis1=empty_v,
+            d6_limit_axis2=empty_v,
+            d6_limit_lower=empty_v,
+            d6_limit_upper=empty_v,
+            d6_limit_count=empty_i,
             joint_idx_to_cid=joint_idx_to_cid,
             joint_idx_to_dof_start=joint_idx_to_dof_start,
             joint_q_at_init=empty_f,
@@ -360,18 +431,27 @@ def build_adbs_init_arrays(
             n_ang = int(joint_dof_dim[j, 1])
             locked_lin = [_is_locked_dof(limit_lower, limit_upper, qd_start + i) for i in range(n_lin)]
             locked_ang = [_is_locked_dof(limit_lower, limit_upper, qd_start + n_lin + i) for i in range(n_ang)]
-            classified_jtype, classified_offset = _classify_d6_legacy_mode(n_lin, n_ang, locked_lin, locked_ang)
-            if classified_jtype is None:
+            classified_tag, classified_offset = _classify_d6_legacy_mode(n_lin, n_ang, locked_lin, locked_ang)
+            if classified_tag is None:
                 raise NotImplementedError(
                     f"D6 joint {j} cannot be reduced to a restored PhoenX joint "
                     f"({n_lin} linear axes / {n_ang} angular axes; "
                     f"locked linear={tuple(locked_lin)}, locked angular={tuple(locked_ang)}). "
-                    "Supported reductions: fixed, ball, revolute, prismatic. "
+                    "Supported reductions: fixed, ball, universal, revolute, prismatic. "
                     "Generic D6 requires the post-unification joint path."
                 )
-            effective_jtype = classified_jtype
+            if classified_tag == "BALL":
+                effective_jtype = newton.JointType.BALL
+            elif classified_tag == "FIXED":
+                effective_jtype = newton.JointType.FIXED
+            elif classified_tag == "REVOLUTE":
+                effective_jtype = newton.JointType.REVOLUTE
+            elif classified_tag == "PRISMATIC":
+                effective_jtype = newton.JointType.PRISMATIC
+            elif classified_tag == "UNIVERSAL":
+                effective_jtype = newton.JointType.D6
             effective_dof_offset = classified_offset if classified_offset >= 0 else 0
-            if classified_offset >= 0:
+            if classified_offset >= 0 and classified_tag in ("REVOLUTE", "PRISMATIC"):
                 effective_qd = qd_start + classified_offset
 
         # FIXED/BALL have no 1-axis DoF; -1 lets the control kernel skip them.
@@ -383,6 +463,12 @@ def build_adbs_init_arrays(
             target_q_index_for_control = int(joint_target_q_start[j]) + effective_dof_offset
         joint_idx_to_dof_start_np[j] = dof_start_for_control
         joint_idx_to_target_q_index_np[j] = target_q_index_for_control
+
+        d6_mode_tag: str | None = None
+        d6_locked_axis_offset = -1
+        if jtype is newton.JointType.D6:
+            d6_mode_tag = classified_tag
+            d6_locked_axis_offset = classified_offset
 
         # Per-mode anchor2 and drive/limit defaults.
         anchor2_world = anchor1_world.copy()
@@ -400,9 +486,35 @@ def build_adbs_init_arrays(
         damping_ratio_limit_val = float(DEFAULT_DAMPING_RATIO)
         # Armature only applies to REVOLUTE/PRISMATIC axial rows; 0 elsewhere.
         armature_val = 0.0
+        d6_limit_axes = [np.zeros(3, dtype=np.float32) for _ in range(3)]
+        d6_limit_lower = np.zeros(3, dtype=np.float32)
+        d6_limit_upper = np.zeros(3, dtype=np.float32)
+        d6_limit_count = 0
+
+        d6_limit_kwargs = {
+            "limit_lower": limit_lower,
+            "limit_upper": limit_upper,
+            "joint_axis": joint_axis,
+            "joint_q_arr": joint_q_arr,
+            "joint_q_start": joint_q_start,
+            "joint_index": j,
+            "joint_world_xform": X_w_p,
+            "d6_limit_axes": d6_limit_axes,
+            "d6_limit_lower": d6_limit_lower,
+            "d6_limit_upper": d6_limit_upper,
+        }
 
         if effective_jtype is newton.JointType.BALL:
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
+            if d6_mode_tag == "BALL":
+                for ai, locked in enumerate(locked_ang):
+                    if not locked:
+                        d6_limit_count = _append_d6_angular_limit(
+                            qd_start + n_lin + ai,
+                            n_lin + ai,
+                            d6_limit_count=d6_limit_count,
+                            **d6_limit_kwargs,
+                        )
         elif effective_jtype is newton.JointType.CABLE:
             phoenx_mode = int(JOINT_MODE_CABLE)
             # Newton CABLE has 2 DoFs (linear stretch + isotropic angular bend/twist).
@@ -431,6 +543,45 @@ def build_adbs_init_arrays(
             damp_drive = bend_kd
             stiff_limit = bend_ke
             damp_limit = bend_kd
+        elif d6_mode_tag == "UNIVERSAL":
+            phoenx_mode = int(JOINT_MODE_UNIVERSAL)
+            if d6_locked_axis_offset >= 0:
+                locked_qd = qd_start + d6_locked_axis_offset
+                axis_local = (
+                    np.asarray(joint_axis[locked_qd], dtype=np.float32)
+                    if len(joint_axis) and locked_qd < len(joint_axis)
+                    else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+                )
+            else:
+                axis_a = np.asarray(joint_axis[qd_start], dtype=np.float32)
+                axis_b = np.asarray(joint_axis[qd_start + 1], dtype=np.float32)
+                axis_local = np.cross(axis_a, axis_b).astype(np.float32)
+            axis_len = float(np.linalg.norm(axis_local))
+            if axis_len <= 1.0e-12:
+                raise NotImplementedError(
+                    f"D6 joint {j} has two angular axes that cannot define a universal locked twist axis."
+                )
+            axis_world = _quat_rotate_np(X_w_p[3:], axis_local / axis_len)
+            anchor2_world = anchor1_world + axis_world
+            min_val = 0.0
+            max_val = 0.0
+            if n_ang == 2 and d6_locked_axis_offset < 0:
+                for ai in range(2):
+                    d6_limit_count = _append_d6_angular_limit(
+                        qd_start + ai,
+                        ai,
+                        d6_limit_count=d6_limit_count,
+                        **d6_limit_kwargs,
+                    )
+            else:
+                for ai, locked in enumerate(locked_ang):
+                    if not locked:
+                        d6_limit_count = _append_d6_angular_limit(
+                            qd_start + n_lin + ai,
+                            n_lin + ai,
+                            d6_limit_count=d6_limit_count,
+                            **d6_limit_kwargs,
+                        )
         elif effective_jtype is newton.JointType.FIXED:
             phoenx_mode = int(JOINT_MODE_FIXED)
             # Pick joint-frame X axis so the anchor-3 basis is well-defined.
@@ -527,6 +678,12 @@ def build_adbs_init_arrays(
                 "stiffness_limit": stiff_limit,
                 "damping_limit": damp_limit,
                 "armature": armature_val,
+                "d6_limit_axis0": d6_limit_axes[0],
+                "d6_limit_axis1": d6_limit_axes[1],
+                "d6_limit_axis2": d6_limit_axes[2],
+                "d6_limit_lower": d6_limit_lower,
+                "d6_limit_upper": d6_limit_upper,
+                "d6_limit_count": d6_limit_count,
                 "joint_q_at_init": init_q,
             }
         )
@@ -582,6 +739,12 @@ def build_adbs_init_arrays(
         stiffness_limit=_stack_f("stiffness_limit"),
         damping_limit=_stack_f("damping_limit"),
         armature=_stack_f("armature"),
+        d6_limit_axis0=_stack_v("d6_limit_axis0"),
+        d6_limit_axis1=_stack_v("d6_limit_axis1"),
+        d6_limit_axis2=_stack_v("d6_limit_axis2"),
+        d6_limit_lower=_stack_v("d6_limit_lower"),
+        d6_limit_upper=_stack_v("d6_limit_upper"),
+        d6_limit_count=_stack_i("d6_limit_count"),
         joint_idx_to_cid=wp.array(joint_idx_to_cid_np, dtype=wp.int32, device=device),
         joint_idx_to_dof_start=wp.array(joint_idx_to_dof_start_np, dtype=wp.int32, device=device),
         joint_q_at_init=_stack_f("joint_q_at_init"),

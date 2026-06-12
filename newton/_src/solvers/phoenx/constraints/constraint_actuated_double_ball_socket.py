@@ -148,9 +148,9 @@ JOINT_MODE_FIXED = wp.constant(wp.int32(3))
 #: (dwords 0..3 = K22_inv, 4 = gamma_bend, 5 = M_twist_soft,
 #: 6 = gamma_twist), ``bias3`` carries the twist bias.
 JOINT_MODE_CABLE = wp.constant(wp.int32(4))
-# Compatibility tags for modules that still import the post-unification D6
-# modes. The restored box3d_5 joint formulation does not route constraints
-# through these modes; the adapter keeps unsupported D6 patterns out.
+#: Universal (Hooke) joint: locks anchor translation and one angular
+#: twist axis. D6-dispatched universal joints may also carry angular
+#: limit rows on their two free axes.
 JOINT_MODE_UNIVERSAL = wp.constant(wp.int32(5))
 JOINT_MODE_CYLINDRICAL = wp.constant(wp.int32(6))
 JOINT_MODE_PLANAR = wp.constant(wp.int32(7))
@@ -384,10 +384,15 @@ _OFF_R3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
 _OFF_R3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
 _OFF_ACC_IMP3 = wp.constant(int(_OFF_MODE_EXTRAS) + 12)
 _OFF_BIAS3 = wp.constant(int(_OFF_MODE_EXTRAS) + 15)
-# Revolute-only fields, dwords 0..5 of mode_extras (10 unused tail):
+# Revolute / universal fields, dwords 0..5 of mode_extras (10 unused tail):
 _OFF_INV_INITIAL_ORIENTATION = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_REVOLUTION_COUNTER = wp.constant(int(_OFF_MODE_EXTRAS) + 4)
 _OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(int(_OFF_MODE_EXTRAS) + 5)
+# BALL / UNIVERSAL D6 angular limit aliases, dwords 6..15 of mode_extras.
+_OFF_D6_LIMIT_LOWER = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
+_OFF_D6_LIMIT_UPPER = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
+_OFF_D6_LIMIT_COUNT = wp.constant(int(_OFF_MODE_EXTRAS) + 12)
+_OFF_D6_LIMIT_EFF_INV = wp.constant(int(_OFF_MODE_EXTRAS) + 13)
 # Cable-only PD soft-cache aliases over the existing ``s_inv`` mat33 slot
 # (9 dwords). Cable never uses the 3+2 Schur, so the revolute / fixed
 # layout for these dwords is free to reinterpret here.
@@ -590,7 +595,7 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
     write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
 
-    # ``mode_extras`` block is mode-aliased: REVOLUTE stores the
+    # ``mode_extras`` block is mode-aliased: REVOLUTE / UNIVERSAL store the
     # twist-tracker scratch (inv_initial_orientation, revolution_counter,
     # previous_quaternion_angle); PRISMATIC / FIXED / CABLE store the
     # anchor-3 snapshot + bias3 + acc_imp3. Writing both layouts
@@ -603,9 +608,9 @@ def actuated_double_ball_socket_initialize_kernel(
         write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, 0.0)
     else:
-        # REVOLUTE / BALL_SOCKET: zero out the anchor-3 slots
-        # via the twist-tracker layout. BALL_SOCKET reads neither side
-        # of the alias, so any consistent zero is fine.
+        # REVOLUTE / BALL_SOCKET / UNIVERSAL: zero out the anchor-3 slots
+        # via the twist-tracker layout. BALL_SOCKET only reads this when
+        # it carries D6 angular limit rows.
         write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
         write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
         write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
@@ -657,6 +662,24 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
     write_float(constraints, _OFF_ACC_DRIVE, cid, 0.0)
     write_float(constraints, _OFF_ACC_LIMIT, cid, 0.0)
+
+    if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
+        count = d6_limit_count[tid]
+        write_vec3(constraints, _OFF_D6_LIMIT_LOWER, cid, d6_limit_lower[tid])
+        write_vec3(constraints, _OFF_D6_LIMIT_UPPER, cid, d6_limit_upper[tid])
+        write_int(constraints, _OFF_D6_LIMIT_COUNT, cid, count)
+        write_vec3(constraints, _OFF_D6_LIMIT_EFF_INV, cid, zero3)
+        if count > wp.int32(0):
+            if mode == JOINT_MODE_BALL_SOCKET:
+                write_vec3(constraints, _OFF_AXIS_LOCAL1, cid, wp.quat_rotate_inv(orient1, d6_limit_axis0[tid]))
+                if count > wp.int32(1):
+                    write_vec3(constraints, _OFF_LA2_B1, cid, wp.quat_rotate_inv(orient1, d6_limit_axis1[tid]))
+                if count > wp.int32(2):
+                    write_vec3(constraints, _OFF_LA2_B2, cid, wp.quat_rotate_inv(orient1, d6_limit_axis2[tid]))
+            else:
+                write_vec3(constraints, _OFF_LA2_B1, cid, wp.quat_rotate_inv(orient1, d6_limit_axis0[tid]))
+                if count > wp.int32(1):
+                    write_vec3(constraints, _OFF_LA2_B2, cid, wp.quat_rotate_inv(orient1, d6_limit_axis1[tid]))
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +946,8 @@ def _anchor1_positional_prepare_at(
     ``mass_coeff``, ``impulse_coeff``, ``bias1`` to the column.
 
     Returns ``(r1_b1, r1_b2, cr1_b1, cr1_b2, velocity1,
-    angular_velocity1, velocity2, angular_velocity2, slot1, slot2)`` so
+    angular_velocity1, velocity2, angular_velocity2, slot1, slot2,
+    inv_inertia1, inv_inertia2)`` so
     callers can continue with additional positional / angular rows
     before committing body velocities via :func:`_ms_store_body_pair`.
     """
@@ -983,7 +1007,20 @@ def _anchor1_positional_prepare_at(
     velocity2 = velocity2 + inv_mass2 * acc1
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1)
 
-    return r1_b1, r1_b2, cr1_b1, cr1_b2, velocity1, angular_velocity1, velocity2, angular_velocity2, slot1, slot2
+    return (
+        r1_b1,
+        r1_b2,
+        cr1_b1,
+        cr1_b2,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+        slot1,
+        slot2,
+        inv_inertia1,
+        inv_inertia2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1131,6 +1168,355 @@ def _tangent_basis_from_anchor3(
     return t1, t2
 
 
+@wp.func
+def _d6_limit_axis_local(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    joint_mode: wp.int32,
+    slot: wp.int32,
+) -> wp.vec3f:
+    if joint_mode == JOINT_MODE_BALL_SOCKET:
+        if slot == wp.int32(0):
+            return read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
+        if slot == wp.int32(1):
+            return read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+        return read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+    if slot == wp.int32(0):
+        return read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
+    if slot == wp.int32(1):
+        return read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
+    return wp.vec3f(0.0, 0.0, 0.0)
+
+
+@wp.func
+def _d6_angular_limits_prepare_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    joint_mode: wp.int32,
+    orientation1: wp.quatf,
+    orientation2: wp.quatf,
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+    angular_velocity1: wp.vec3f,
+    angular_velocity2: wp.vec3f,
+    dt: wp.float32,
+):
+    count = read_int(constraints, base_offset + _OFF_D6_LIMIT_COUNT, cid)
+    if count <= wp.int32(0):
+        return angular_velocity1, angular_velocity2
+
+    lower = read_vec3(constraints, base_offset + _OFF_D6_LIMIT_LOWER, cid)
+    upper = read_vec3(constraints, base_offset + _OFF_D6_LIMIT_UPPER, cid)
+    hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
+    damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
+    bias_rate, _mc, _ic = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
+    inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
+    diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
+
+    axis0 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(0)))
+    axis1 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(1)))
+    axis2 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(2)))
+
+    bias0 = wp.float32(0.0)
+    bias1 = wp.float32(0.0)
+    bias2 = wp.float32(0.0)
+    eff0 = wp.float32(0.0)
+    eff1 = wp.float32(0.0)
+    eff2 = wp.float32(0.0)
+
+    if count > wp.int32(0) and lower[0] <= upper[0]:
+        angle0 = extract_rotation_angle(diff, axis0)
+        if angle0 > upper[0]:
+            bias0 = -(angle0 - upper[0]) * bias_rate
+        elif angle0 < lower[0]:
+            bias0 = -(angle0 - lower[0]) * bias_rate
+        eff0 = wp.dot(axis0, inv_inertia1 @ axis0) + wp.dot(axis0, inv_inertia2 @ axis0)
+    if count > wp.int32(1) and lower[1] <= upper[1]:
+        angle1 = extract_rotation_angle(diff, axis1)
+        if angle1 > upper[1]:
+            bias1 = -(angle1 - upper[1]) * bias_rate
+        elif angle1 < lower[1]:
+            bias1 = -(angle1 - lower[1]) * bias_rate
+        eff1 = wp.dot(axis1, inv_inertia1 @ axis1) + wp.dot(axis1, inv_inertia2 @ axis1)
+    if count > wp.int32(2) and lower[2] <= upper[2]:
+        angle2 = extract_rotation_angle(diff, axis2)
+        if angle2 > upper[2]:
+            bias2 = -(angle2 - upper[2]) * bias_rate
+        elif angle2 < lower[2]:
+            bias2 = -(angle2 - lower[2]) * bias_rate
+        eff2 = wp.dot(axis2, inv_inertia1 @ axis2) + wp.dot(axis2, inv_inertia2 @ axis2)
+
+    write_vec3(constraints, base_offset + _OFF_BIAS2, cid, wp.vec3f(bias0, bias1, bias2))
+    write_vec3(constraints, base_offset + _OFF_D6_LIMIT_EFF_INV, cid, wp.vec3f(eff0, eff1, eff2))
+
+    old_acc = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc = wp.vec3f(0.0, 0.0, 0.0)
+    if bias0 != wp.float32(0.0):
+        acc = acc + wp.dot(axis0, old_acc) * axis0
+    if bias1 != wp.float32(0.0):
+        acc = acc + wp.dot(axis1, old_acc) * axis1
+    if bias2 != wp.float32(0.0):
+        acc = acc + wp.dot(axis2, old_acc) * axis2
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc)
+    angular_velocity1 = angular_velocity1 + inv_inertia1 @ acc
+    angular_velocity2 = angular_velocity2 - inv_inertia2 @ acc
+    return angular_velocity1, angular_velocity2
+
+
+@wp.func
+def _d6_angular_limits_block(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    b1: wp.int32,
+    joint_mode: wp.int32,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    ii1: wp.mat33f,
+    ii2: wp.mat33f,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+):
+    count = read_int(constraints, base_offset + _OFF_D6_LIMIT_COUNT, cid)
+    if count <= wp.int32(0):
+        return w1, w2
+
+    orientation1 = bodies.orientation[b1]
+    axis0 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(0)))
+    axis1 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(1)))
+    axis2 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(2)))
+
+    bias = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+    eff_inv = read_vec3(constraints, base_offset + _OFF_D6_LIMIT_EFF_INV, cid)
+    acc = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    old0 = wp.float32(0.0)
+    old1 = wp.float32(0.0)
+    old2 = wp.float32(0.0)
+    if count > wp.int32(0):
+        old0 = wp.dot(axis0, acc)
+    if count > wp.int32(1):
+        old1 = wp.dot(axis1, acc)
+    if count > wp.int32(2):
+        old2 = wp.dot(axis2, acc)
+
+    dt = wp.float32(1.0) / idt
+    hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
+    damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
+    _br, mc, ic = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
+
+    new0 = old0
+    new1 = old1
+    new2 = old2
+    if bias[0] != wp.float32(0.0) and eff_inv[0] > wp.float32(0.0):
+        lam0 = mc * (-(wp.float32(1.0) / eff_inv[0]) * (wp.dot(axis0, w1 - w2) + bias[0])) - ic * old0
+        new0 = old0 + lam0 * sor_boost
+        if bias[0] < wp.float32(0.0):
+            new0 = wp.max(wp.float32(0.0), new0)
+        else:
+            new0 = wp.min(wp.float32(0.0), new0)
+    if bias[1] != wp.float32(0.0) and eff_inv[1] > wp.float32(0.0):
+        lam1 = mc * (-(wp.float32(1.0) / eff_inv[1]) * (wp.dot(axis1, w1 - w2) + bias[1])) - ic * old1
+        new1 = old1 + lam1 * sor_boost
+        if bias[1] < wp.float32(0.0):
+            new1 = wp.max(wp.float32(0.0), new1)
+        else:
+            new1 = wp.min(wp.float32(0.0), new1)
+    if bias[2] != wp.float32(0.0) and eff_inv[2] > wp.float32(0.0):
+        lam2 = mc * (-(wp.float32(1.0) / eff_inv[2]) * (wp.dot(axis2, w1 - w2) + bias[2])) - ic * old2
+        new2 = old2 + lam2 * sor_boost
+        if bias[2] < wp.float32(0.0):
+            new2 = wp.max(wp.float32(0.0), new2)
+        else:
+            new2 = wp.min(wp.float32(0.0), new2)
+
+    delta = (new0 - old0) * axis0 + (new1 - old1) * axis1 + (new2 - old2) * axis2
+    new_acc = new0 * axis0 + new1 * axis1 + new2 * axis2
+    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, new_acc)
+    w1 = w1 + ii1 @ delta
+    w2 = w2 - ii2 @ delta
+    return w1, w2
+
+
+# ---------------------------------------------------------------------------
+# D6 universal mode math
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _universal_prepare_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+):
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    (
+        _r1_b1,
+        _r1_b2,
+        _cr1_b1,
+        _cr1_b2,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+        slot1,
+        slot2,
+        inv_inertia1,
+        inv_inertia2,
+    ) = _anchor1_positional_prepare_at(
+        constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+    )
+
+    orientation1 = bodies.orientation[b1]
+    orientation2 = bodies.orientation[b2]
+    n_hat = wp.quat_rotate(orientation1, read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid))
+    write_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid, n_hat)
+
+    dt = wp.float32(1.0) / idt
+    inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
+    diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
+    new_q_angle = extract_rotation_angle(diff, n_hat)
+    old_counter = read_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid)
+    old_prev = read_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+    new_counter, new_prev = revolution_tracker_update(new_q_angle, old_counter, old_prev)
+    write_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid, new_counter)
+    write_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid, new_prev)
+    cumulative_angle = revolution_tracker_angle(new_counter, new_prev)
+    eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
+    axial_imp = _axial_drive_limit_prepare_at(
+        constraints,
+        cid,
+        base_offset,
+        cumulative_angle,
+        eff_inv,
+        dt,
+        PHOENX_BOOST_REVOLUTE_DRIVE,
+        PHOENX_BOOST_REVOLUTE_LIMIT,
+    )
+    angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
+    angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
+    angular_velocity1, angular_velocity2 = _d6_angular_limits_prepare_at(
+        constraints,
+        cid,
+        base_offset,
+        JOINT_MODE_UNIVERSAL,
+        orientation1,
+        orientation2,
+        inv_inertia1,
+        inv_inertia2,
+        angular_velocity1,
+        angular_velocity2,
+        dt,
+    )
+
+    _ms_store_body_pair(
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+    )
+
+
+@wp.func
+def _universal_iterate_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    body_pair: ConstraintBodies,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    use_bias: wp.bool,
+):
+    _ball_socket_iterate_at(
+        constraints,
+        cid,
+        base_offset,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        body_pair,
+        idt,
+        sor_boost,
+        use_bias,
+    )
+
+    b1 = body_pair.b1
+    b2 = body_pair.b2
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        _inv_mass1,
+        _inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+
+    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+    clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
+    jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
+    angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
+    angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
+    angular_velocity1, angular_velocity2 = _d6_angular_limits_block(
+        constraints,
+        cid,
+        base_offset,
+        bodies,
+        b1,
+        JOINT_MODE_UNIVERSAL,
+        angular_velocity1,
+        angular_velocity2,
+        inv_inertia1,
+        inv_inertia2,
+        idt,
+        sor_boost,
+    )
+
+    _ms_store_body_pair(
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Ball-socket mode math
 # ---------------------------------------------------------------------------
@@ -1171,9 +1557,28 @@ def _ball_socket_prepare_at(
         angular_velocity2,
         slot1,
         slot2,
+        inv_inertia1,
+        inv_inertia2,
     ) = _anchor1_positional_prepare_at(
         constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
     )
+
+    count = read_int(constraints, base_offset + _OFF_D6_LIMIT_COUNT, cid)
+    if count > wp.int32(0):
+        dt = wp.float32(1.0) / idt
+        angular_velocity1, angular_velocity2 = _d6_angular_limits_prepare_at(
+            constraints,
+            cid,
+            base_offset,
+            JOINT_MODE_BALL_SOCKET,
+            bodies.orientation[b1],
+            bodies.orientation[b2],
+            inv_inertia1,
+            inv_inertia2,
+            angular_velocity1,
+            angular_velocity2,
+            dt,
+        )
 
     _ms_store_body_pair(
         bodies,
@@ -1278,6 +1683,39 @@ def _ball_socket_iterate_at(
     )
 
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
+
+    joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
+    if joint_mode == JOINT_MODE_BALL_SOCKET and read_int(
+        constraints, base_offset + _OFF_D6_LIMIT_COUNT, cid
+    ) > wp.int32(0):
+        angular_velocity1, angular_velocity2 = _d6_angular_limits_block(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            b1,
+            JOINT_MODE_BALL_SOCKET,
+            angular_velocity1,
+            angular_velocity2,
+            inv_inertia1,
+            inv_inertia2,
+            idt,
+            sor_boost,
+        )
+        _ms_store_body_pair(
+            bodies,
+            particles,
+            copy_state,
+            b1,
+            b2,
+            slot1,
+            slot2,
+            num_bodies,
+            velocity1,
+            angular_velocity1,
+            velocity2,
+            angular_velocity2,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2987,6 +3425,10 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
         _prismatic_prepare_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
         )
+    elif joint_mode == JOINT_MODE_UNIVERSAL:
+        _universal_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        )
     elif joint_mode == JOINT_MODE_FIXED:
         _fixed_prepare_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
@@ -3358,6 +3800,21 @@ def actuated_double_ball_socket_iterate_at(
             sor_boost,
             use_bias,
         )
+    elif joint_mode == JOINT_MODE_UNIVERSAL:
+        _universal_iterate_at(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            body_pair,
+            idt,
+            sor_boost,
+            use_bias,
+        )
     elif joint_mode == JOINT_MODE_FIXED:
         _fixed_iterate_at(
             constraints,
@@ -3444,6 +3901,9 @@ def actuated_double_ball_socket_world_wrench_at(
         axial_force = n_hat * ((acc_drive + acc_limit) * idt)
         force = force - axial_force
         torque = torque - wp.cross(r1_b2, axial_force)
+    elif joint_mode == JOINT_MODE_UNIVERSAL:
+        force = acc1 * idt
+        torque = wp.cross(r1_b2, acc1 * idt) - n_hat * ((acc_drive + acc_limit) * idt) - acc2 * idt
     elif joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_CABLE:
         # Same anchor layout (anchor-1 3-row + anchor-2 tangent 2-row +
         # anchor-3 scalar 1-row); no axial block. CABLE's PD softness
@@ -3453,9 +3913,11 @@ def actuated_double_ball_socket_world_wrench_at(
         force = (acc1 + acc2 + acc3) * idt
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
     else:
-        # Ball-socket: only the anchor-1 impulse.
+        # Ball-socket: anchor-1 impulse plus optional D6 angular-limit torque.
         force = acc1 * idt
         torque = wp.cross(r1_b2, acc1 * idt)
+        if read_int(constraints, base_offset + _OFF_D6_LIMIT_COUNT, cid) > wp.int32(0):
+            torque = torque - acc2 * idt
     return force, torque
 
 
@@ -3706,7 +4168,7 @@ def actuated_double_ball_socket_world_error_at(
     # basis is stable across substeps.
     drift_t1 = wp.float32(0.0)
     drift_t2 = wp.float32(0.0)
-    if joint_mode != JOINT_MODE_BALL_SOCKET:
+    if joint_mode != JOINT_MODE_BALL_SOCKET and joint_mode != JOINT_MODE_UNIVERSAL:
         la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
         la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
         p2_b1 = pos1 + wp.quat_rotate(q1, la2_b1)
