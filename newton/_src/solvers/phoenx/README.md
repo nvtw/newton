@@ -114,7 +114,7 @@ flowchart TD
 ```
 
 ## 4. State And Rows
-`ConstraintContainer` and contact columns describe rows; body/particle containers hold the mutable state those rows read and write.
+`constraints/constraint_container.py` and `constraints/contact_container.py` describe rows; `body.py` and `particle.py` hold the mutable state those rows read and write.
 ```mermaid
 flowchart TD
     classDef row fill:#eff6ff,stroke:#2563eb,stroke-width:1.2px,color:#172554
@@ -187,7 +187,7 @@ flowchart TD
     C("<b>constraints/contact_ingest.py</b><br/>Contact compaction and warm start"):::file
     D("<b>constraints/constraint_contact.py</b><br/>Normal and friction rows"):::file
     E("<b>model_adapter.py</b><br/>Joint import and drive mapping"):::file
-    F("<b>constraints/constraint_joint.py</b><br/>ADBS joint rows"):::file
+    F("<b>constraints/constraint_joint.py</b><br/>Unified joint rows"):::file
     G("<b>graph_coloring/*.py</b><br/>Conflict graph and color CSR"):::file
     H("<b>dispatch/*.py</b><br/>Color-batch kernel launch order"):::file
     I("<b>cloth_step.py</b><br/>Cloth step helpers"):::file
@@ -195,6 +195,7 @@ flowchart TD
     K("<b>constraints/constraint_soft_*.py</b><br/>Soft-body row formulations"):::file
     L("<b>mass_splitting/*.py</b><br/>Overflow copies and merge-back"):::file
     M("<b>sleeping_kernels.py</b><br/>Wake scoring and inactive islands"):::file
+    N("<b>body.py + particle.py</b><br/>Mutable state containers"):::file
     A --> B
     B --> C
     C --> D
@@ -207,6 +208,7 @@ flowchart TD
     I --> K
     H --> L
     B --> M
+    B --> N
     linkStyle 0 stroke:#475569,stroke-width:2px
     linkStyle 1 stroke:#475569,stroke-width:2px
     linkStyle 2 stroke:#475569,stroke-width:2px
@@ -219,6 +221,7 @@ flowchart TD
     linkStyle 9 stroke:#475569,stroke-width:2px
     linkStyle 10 stroke:#475569,stroke-width:2px
     linkStyle 11 stroke:#475569,stroke-width:2px
+    linkStyle 12 stroke:#475569,stroke-width:2px
 ```
 
 ## 7. Solver Layouts
@@ -234,8 +237,8 @@ flowchart TD
     msq("<b>mass_splitting</b><br/>Adds overflow copies for hard scenes"):::decision
     unroll("<b>mass_splitting_unrolled</b><br/>Uses fixed color-cap kernels"):::decision
     single("<b>SingleWorldDispatcher</b><br/>Best for one large scene"):::path
-    msd("<b>MassSplittingDispatcher</b><br/>Solves overflow through copy slots"):::ms
-    msu("<b>MassSplittingUnrolledDispatcher</b><br/>Specialized fixed-cap variant"):::ms
+    msd("<b>SingleWorldMassSplittingDispatcher</b><br/>Solves overflow through copy slots"):::ms
+    msu("<b>SingleWorldMassSplittingUnrolledDispatcher</b><br/>Specialized fixed-cap variant"):::ms
     multi("<b>MultiWorldDispatcher</b><br/>Best for many independent worlds"):::multi
     ctor --> layout
     layout -->|multi_world| multi
@@ -261,15 +264,23 @@ flowchart TD
 Important knobs:
 | Knob | Effect |
 | --- | --- |
-| `substeps` | Splits outer `dt`; more substeps improve stiffness/contact stability. |
-| `solver_iterations` | Biased PGS sweeps per substep. |
+| `substeps` | Splits outer `dt`; `12` is a good starting point for stiff contacts and joints. |
+| `solver_iterations` | Biased PGS sweeps per substep; start with `8` and raise only when convergence needs it. |
 | `velocity_iterations` | Bias-off relax sweeps per substep; `0` is valid. |
 | `threads_per_world` | Multi-world lane count: `"auto"`, `8`, `16`, or `32`. |
-| `prepare_refresh_stride` | Reuses cached rigid row prepare data for some substeps. Unsupported for deformables, sleeping, or mass splitting. |
+| `prepare_refresh_stride` | Reuses cached rigid row prepare data for some substeps. `"auto"` disables caching for deformables, sleeping, or mass splitting; fixed values greater than `1` reject those combinations. |
 | `sor_boost` | Multiplies per-row impulse updates. `1.0` is vanilla PGS; values near `2.0` are usually unstable. |
 | `sleeping_velocity_threshold` | Enables island sleeping when positive. |
 
-## 8. Minimal Public Usage
+## 8. Current Boundaries
+Keep these constraints explicit when changing solver dispatch or adding examples:
+- Public `SolverPhoenX` construction covers rigid bodies, contacts, Newton rigid joints, particles, cloth triangles/bending, and soft tetrahedra from `Model`. Soft hexahedra still use the internal `PhoenXWorld` array path.
+- D6 joints are not a generic six-DoF row type in PhoenX. `model_adapter.py` reduces only the legacy-compatible lock patterns to fixed, ball, revolute, prismatic, or universal joint modes; unsupported D6 shapes fail early.
+- Mass splitting is single-world only. It can coexist with joints and cloth-triangle rows, but `mass_splitting=True` still rejects `step_layout="multi_world"`.
+- `prepare_refresh_stride="auto"` is a graph-capture-safe optimization for rigid contact/joint worlds. Contact worlds refresh at least every third substep, and joint-only worlds may use larger fixed strides.
+- Auto-selection heuristics belong near construction-time policy helpers in `solver_phoenx.py` (`_choose_initial_threads_per_world`, `_choose_auto_prepare_refresh_stride`, `_choose_multi_world_scheduler`) plus the small GPU lane picker. Keep scheduler choices graph-stable after construction.
+
+## 9. Minimal Public Usage
 Internal tests may instantiate `PhoenXWorld` directly, but examples and docs should show the public solver.
 ```python
 import warp as wp
@@ -294,8 +305,8 @@ model = builder.finalize()
 
 solver = newton.solvers.SolverPhoenX(
     model,
-    substeps=8,
-    solver_iterations=16,
+    substeps=12,
+    solver_iterations=8,
     velocity_iterations=1,
     step_layout="single_world",
 )
@@ -321,10 +332,10 @@ model.collide(state_0, contacts)
 solver.step(state_0, state_1, control, contacts, dt)
 ```
 
-## 9. Change Checklist
+## 10. Change Checklist
 Use these checks before changing core flow:
 - **New constraint type**: add the dword schema with the shared header, init kernel, prepare/iterate/relax funcs, element emission in `_constraints_to_elements_kernel`, cid offsets/capacity in `PhoenXWorld`, and focused `unittest` coverage.
-- **New joint mapping**: update `model_adapter.py`, ADBS initialization, control writeback in `solver.py`, and D6/joint parity tests.
+- **New joint mapping**: update `model_adapter.py`, `constraints/constraint_joint.py`, control writeback in `solver.py`, and D6/joint parity tests.
 - **New contact data**: update ingest, `ContactViews`, `ContactContainer`, warm-start copy, and any body-pair grouping sort path.
 - **New scheduler path**: add a dispatcher if it changes solve choreography. Keep constructor-time selection graph-stable and benchmark with locked clocks.
 - **Mass splitting changes**: validate direct-storage and copy-state paths. Slot cache, access mode, momentum-preserving average/broadcast, and writeback must agree.
