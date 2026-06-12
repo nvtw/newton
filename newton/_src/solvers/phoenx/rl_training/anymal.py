@@ -8,6 +8,9 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+import newton
+import newton.utils
+
 from .ppo import BufferRollout, TrainerPPO
 from .sac import BufferReplaySAC, TrainerSAC
 
@@ -76,6 +79,7 @@ def anymal_observe_reward_kernel(
     previous_actions: wp.array2d[wp.float32],
     command: wp.array2d[wp.float32],
     target_position: wp.array2d[wp.float32],
+    previous_target_distance: wp.array[wp.float32],
     lab_to_mujoco: wp.array[wp.int32],
     coord_stride: wp.int32,
     dof_stride: wp.int32,
@@ -92,6 +96,8 @@ def anymal_observe_reward_kernel(
     flat_orientation_reward_scale: wp.float32,
     forward_progress_reward_scale: wp.float32,
     sparse_success_reward_scale: wp.float32,
+    target_progress_reward_scale: wp.float32,
+    fall_reward_scale: wp.float32,
     energy_reward_scale: wp.float32,
     target_radius: wp.float32,
     action_scale: wp.float32,
@@ -180,9 +186,15 @@ def anymal_observe_reward_kernel(
 
         forward_progress = lin_b[0] * command[world, 0] + lin_b[1] * command[world, 1]
         target_dist_sq = target_delta_w[0] * target_delta_w[0] + target_delta_w[1] * target_delta_w[1]
+        target_dist = wp.sqrt(target_dist_sq)
+        target_progress = previous_target_distance[world] - target_dist
+        previous_target_distance[world] = target_dist
         success = wp.float32(0.0)
         if target_dist_sq < target_radius * target_radius:
             success = wp.float32(1.0)
+        fall = wp.float32(0.0)
+        if joint_q[q_base + wp.int32(2)] < min_base_height or upright < wp.float32(0.3):
+            fall = wp.float32(1.0)
 
         dense_reward = (
             lin_vel_reward_scale * vel_reward
@@ -194,7 +206,12 @@ def anymal_observe_reward_kernel(
             + joint_speed_reward_scale * joint_speed_penalty
             + flat_orientation_reward_scale * flat_orientation_penalty
         )
-        sparse_reward = sparse_success_reward_scale * success + energy_reward_scale * power_proxy
+        sparse_reward = (
+            sparse_success_reward_scale * success
+            + target_progress_reward_scale * target_progress
+            + fall_reward_scale * fall
+            + energy_reward_scale * power_proxy
+        )
         reward = dense_reward
         if reward_mode == REWARD_MODE_SPARSE_TARGET:
             reward = sparse_reward
@@ -202,7 +219,7 @@ def anymal_observe_reward_kernel(
         successes[world] = success
 
         done = wp.float32(0.0)
-        if joint_q[q_base + wp.int32(2)] < min_base_height or upright < wp.float32(0.3):
+        if fall > wp.float32(0.5):
             done = wp.float32(1.0)
         if reward_mode == REWARD_MODE_SPARSE_TARGET and success > wp.float32(0.5):
             done = wp.float32(1.0)
@@ -337,6 +354,8 @@ class ConfigEnvAnymalPhoenX:
         flat_orientation_reward_scale: Flat-orientation penalty scale.
         forward_progress_reward_scale: Forward velocity projection shaping scale.
         sparse_success_reward_scale: Sparse target success reward scale.
+        target_progress_reward_scale: Target-distance reduction reward scale.
+        fall_reward_scale: Fall penalty scale.
         energy_reward_scale: Mechanical power proxy penalty scale.
         actuator_ke: Position actuator stiffness used by the model and power proxy.
         actuator_kd: Position actuator damping used by the model and power proxy.
@@ -365,6 +384,8 @@ class ConfigEnvAnymalPhoenX:
     flat_orientation_reward_scale: float = -5.0
     forward_progress_reward_scale: float = 0.0
     sparse_success_reward_scale: float = 1.0
+    target_progress_reward_scale: float = 0.8
+    fall_reward_scale: float = -0.25
     energy_reward_scale: float = -1.0e-5
     actuator_ke: float = 150.0
     actuator_kd: float = 5.0
@@ -412,6 +433,7 @@ class EnvAnymalPhoenX:
         target_np = np.tile(np.asarray(self.config.target_position, dtype=np.float32), (self.world_count, 1))
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
         self.target_position = wp.array(target_np, dtype=wp.float32, device=self.device)
+        self.previous_target_distance = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.episode_steps = wp.zeros(self.world_count, dtype=wp.int32, device=self.device)
         self.obs = wp.zeros((self.world_count, self.obs_dim), dtype=wp.float32, device=self.device)
         self.rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
@@ -425,9 +447,6 @@ class EnvAnymalPhoenX:
         self.reset()
 
     def _build_model(self):
-        import newton
-        import newton.utils
-
         articulation_builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(articulation_builder)
         articulation_builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
@@ -477,8 +496,6 @@ class EnvAnymalPhoenX:
         return model
 
     def _make_solver(self):
-        import newton
-
         return newton.solvers.SolverPhoenX(
             self.model,
             substeps=int(self.config.sim_substeps),
@@ -486,13 +503,39 @@ class EnvAnymalPhoenX:
             velocity_iterations=int(self.config.velocity_iterations),
         )
 
+    def set_command(self, command: tuple[float, float, float]) -> None:
+        """Set the same body-frame velocity command for every world [m/s, m/s, rad/s]."""
+
+        cmd = (float(command[0]), float(command[1]), float(command[2]))
+        self.config.command = cmd
+        command_np = np.tile(np.asarray(cmd, dtype=np.float32), (self.world_count, 1))
+        self.command.assign(command_np)
+
+    def set_commands(self, commands: np.ndarray) -> None:
+        """Set per-world body-frame velocity commands [m/s, m/s, rad/s]."""
+
+        cmds = np.asarray(commands, dtype=np.float32)
+        if cmds.shape != (self.world_count, 3):
+            raise ValueError(f"Expected commands with shape {(self.world_count, 3)}, got {cmds.shape}")
+        self.config.command = (float(cmds[0, 0]), float(cmds[0, 1]), float(cmds[0, 2]))
+        self.command.assign(cmds)
+
     def set_target_position(self, target_position: tuple[float, float]) -> None:
-        """Set the sparse target XY position for every world [m]."""
+        """Set the same sparse target XY position for every world [m]."""
 
         target = (float(target_position[0]), float(target_position[1]))
         self.config.target_position = target
         target_np = np.tile(np.asarray(target, dtype=np.float32), (self.world_count, 1))
         self.target_position.assign(target_np)
+
+    def set_target_positions(self, target_positions: np.ndarray) -> None:
+        """Set per-world sparse target XY positions [m]."""
+
+        targets = np.asarray(target_positions, dtype=np.float32)
+        if targets.shape != (self.world_count, 2):
+            raise ValueError(f"Expected target positions with shape {(self.world_count, 2)}, got {targets.shape}")
+        self.config.target_position = (float(targets[0, 0]), float(targets[0, 1]))
+        self.target_position.assign(targets)
 
     def observe(self) -> wp.array:
         """Update and return the current observation array."""
@@ -508,6 +551,7 @@ class EnvAnymalPhoenX:
                 self.previous_actions,
                 self.command,
                 self.target_position,
+                self.previous_target_distance,
                 self.lab_to_mujoco,
                 self.coord_stride,
                 self.dof_stride,
@@ -524,6 +568,8 @@ class EnvAnymalPhoenX:
                 self.config.flat_orientation_reward_scale,
                 self.config.forward_progress_reward_scale,
                 self.config.sparse_success_reward_scale,
+                self.config.target_progress_reward_scale,
+                self.config.fall_reward_scale,
                 self.config.energy_reward_scale,
                 self.config.target_radius,
                 self.config.action_scale,
@@ -538,12 +584,11 @@ class EnvAnymalPhoenX:
     def reset(self) -> wp.array:
         """Reset all worlds and return observations."""
 
-        import newton
-
         wp.copy(self.state_0.joint_q, self.model.joint_q)
         wp.copy(self.state_0.joint_qd, self.model.joint_qd)
         self.current_actions.zero_()
         self.previous_actions.zero_()
+        self.previous_target_distance.zero_()
         self.episode_steps.zero_()
         self.dones.zero_()
         self.successes.zero_()
@@ -553,8 +598,6 @@ class EnvAnymalPhoenX:
 
     def reset_done(self) -> None:
         """Reset worlds whose done flag is set."""
-
-        import newton
 
         max_cols = max(self.coord_stride, self.dof_stride, self.action_dim)
         wp.launch(

@@ -3,13 +3,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import numpy as np
 import warp as wp
 
 from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
-from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO
+from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_checkpoint
 
 
 @dataclass
@@ -32,13 +33,19 @@ class ConfigTrainAnymalPPO:
         target_distance_end: Maximum sparse target distance [m].
         target_distance_step: Curriculum distance increment [m].
         target_success_threshold: Success rate required to advance the curriculum.
+        randomize_target_positions: Sample target directions per world before each rollout.
+        target_angle_min: Minimum sampled target angle relative to initial body-forward [rad].
+        target_angle_max: Maximum sampled target angle relative to initial body-forward [rad].
+        resume_checkpoint: Optional PPO checkpoint to resume from.
+        checkpoint_path: Optional path for writing PPO checkpoints.
+        checkpoint_interval: Save a checkpoint every N iterations when positive.
     """
 
     iterations: int = 100
     rollout_steps: int = 64
     hidden_layers: tuple[int, ...] = (128, 128, 128)
     activation: str = "elu"
-    log_std_init: float = 0.0
+    log_std_init: float = -0.3
     env_config: ConfigEnvAnymalPhoenX | None = None
     ppo_config: ConfigPPO | None = None
     device: wp.context.Devicelike = None
@@ -48,7 +55,13 @@ class ConfigTrainAnymalPPO:
     target_distance_start: float = 0.45
     target_distance_end: float = 1.0
     target_distance_step: float = 0.1
-    target_success_threshold: float = 0.045
+    target_success_threshold: float = 0.025
+    randomize_target_positions: bool = True
+    target_angle_min: float = -float(np.pi)
+    target_angle_max: float = float(np.pi)
+    resume_checkpoint: str | None = None
+    checkpoint_path: str | None = None
+    checkpoint_interval: int = 0
 
 
 @dataclass
@@ -78,13 +91,65 @@ class ResultTrainAnymalPPO:
     history: list[StatsTrainAnymalPPO]
 
 
+@dataclass
+class ConfigEvaluateAnymalPPO:
+    """Configuration for :func:`evaluate_anymal_ppo`.
+
+    Args:
+        env_config: Base PhoenX Anymal environment configuration.
+        target_positions: Target XY positions to evaluate [m].
+        steps: Maximum policy steps per target.
+        device: Warp device. Uses the trainer device when ``None``.
+        deterministic: Use deterministic policy means.
+        seed: Base action seed for stochastic evaluation.
+    """
+
+    env_config: ConfigEnvAnymalPhoenX | None = None
+    target_positions: tuple[tuple[float, float], ...] = (
+        (0.0, 0.75),
+        (0.75, 0.0),
+        (-0.75, 0.0),
+        (0.0, -0.75),
+        (0.53, 0.53),
+    )
+    steps: int = 120
+    device: wp.context.Devicelike = None
+    deterministic: bool = True
+    seed: int = 1000
+
+
+@dataclass
+class StatsEvaluateAnymalTargetPPO:
+    """Target-following diagnostics for one evaluated target."""
+
+    target_position: tuple[float, float]
+    success_fraction: float
+    fall_fraction: float
+    mean_first_success_step: float
+    mean_initial_distance: float
+    mean_final_distance: float
+    mean_min_distance: float
+    mean_target_aligned_displacement: float
+    mean_path_length: float
+    mean_speed: float
+    mean_forward_velocity: float
+    min_base_height: float
+
+
+@dataclass
+class ResultEvaluateAnymalPPO:
+    """Result returned by :func:`evaluate_anymal_ppo`."""
+
+    stats: list[StatsEvaluateAnymalTargetPPO]
+
+
 def _default_ppo_config() -> ConfigPPO:
     return ConfigPPO(
         gamma=0.99,
         gae_lambda=0.95,
         clip_ratio=0.2,
-        entropy_coeff=5.0e-3,
-        actor_lr=1.0e-3,
+        entropy_coeff=2.0e-3,
+        actor_lr=7.0e-4,
         critic_lr=1.0e-3,
         train_epochs=5,
         normalize_advantages=True,
@@ -106,22 +171,31 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
         raise ValueError("iterations must be positive")
     if cfg.rollout_steps <= 0:
         raise ValueError("rollout_steps must be positive")
+    if cfg.target_angle_max <= cfg.target_angle_min:
+        raise ValueError("target_angle_max must be greater than target_angle_min")
+    if cfg.checkpoint_interval < 0:
+        raise ValueError("checkpoint_interval must be non-negative")
 
     device = wp.get_device(cfg.device)
     env_config = cfg.env_config or ConfigEnvAnymalPhoenX()
     ppo_config = cfg.ppo_config or _default_ppo_config()
     env = EnvAnymalPhoenX(env_config, device=device)
-    trainer = TrainerPPO(
-        obs_dim=env.obs_dim,
-        action_dim=env.action_dim,
-        hidden_layers=cfg.hidden_layers,
-        config=ppo_config,
-        device=device,
-        seed=cfg.seed,
-        squash_actions=True,
-        activation=cfg.activation,
-        log_std_init=cfg.log_std_init,
-    )
+    if cfg.resume_checkpoint is not None:
+        trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=ppo_config, device=device)
+        if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
+            raise ValueError("Checkpoint dimensions do not match the Anymal environment")
+    else:
+        trainer = TrainerPPO(
+            obs_dim=env.obs_dim,
+            action_dim=env.action_dim,
+            hidden_layers=cfg.hidden_layers,
+            config=ppo_config,
+            device=device,
+            seed=cfg.seed,
+            squash_actions=True,
+            activation=cfg.activation,
+            log_std_init=cfg.log_std_init,
+        )
     buffer = BufferRollout(
         num_steps=cfg.rollout_steps,
         num_envs=env.world_count,
@@ -134,16 +208,13 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
     command_x = float(env.config.command[0])
     target_xy = np.asarray(env.config.target_position, dtype=np.float32)
     target_distance = float(np.linalg.norm(target_xy))
-    if target_distance > 1.0e-6:
-        target_direction = target_xy / target_distance
-    else:
-        target_direction = np.asarray((0.0, 1.0), dtype=np.float32)
+    target_direction = _target_direction(target_xy)
+    target_rng = np.random.default_rng(int(cfg.seed) + 17_917)
     if cfg.use_target_curriculum and env.config.reward_mode == "sparse_target":
         target_distance = float(cfg.target_distance_start)
-        target_xy = target_direction * target_distance
-        env.set_target_position((float(target_xy[0]), float(target_xy[1])))
 
     for iteration in range(cfg.iterations):
+        _configure_rollout_targets(env, cfg, target_rng, target_direction, target_distance)
         env.collect_ppo_rollout(trainer, buffer, seed=cfg.seed + iteration * cfg.rollout_steps)
         rollout_metrics = _rollout_metrics(buffer, command_x, target_distance)
         update_stats = trainer.update(buffer)
@@ -168,10 +239,180 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
             and target_distance < cfg.target_distance_end
         ):
             target_distance = min(float(cfg.target_distance_end), target_distance + float(cfg.target_distance_step))
-            target_xy = target_direction * target_distance
-            env.set_target_position((float(target_xy[0]), float(target_xy[1])))
+        if cfg.checkpoint_path is not None and cfg.checkpoint_interval > 0:
+            if (iteration + 1) % int(cfg.checkpoint_interval) == 0:
+                trainer.save_checkpoint(
+                    _format_checkpoint_path(cfg.checkpoint_path, iteration + 1), iteration=iteration + 1
+                )
+
+    if cfg.checkpoint_path is not None:
+        trainer.save_checkpoint(_format_checkpoint_path(cfg.checkpoint_path, cfg.iterations), iteration=cfg.iterations)
 
     return ResultTrainAnymalPPO(trainer=trainer, env=env, buffer=buffer, history=history)
+
+
+def evaluate_anymal_ppo(trainer: TrainerPPO, config: ConfigEvaluateAnymalPPO | None = None) -> ResultEvaluateAnymalPPO:
+    """Evaluate whether a trained Anymal PPO policy reaches target points.
+
+    The evaluator disables auto-reset and records first terminal events, so a
+    target hit is not conflated with post-reset motion.
+
+    Args:
+        trainer: Trained PPO trainer.
+        config: Evaluation configuration.
+
+    Returns:
+        Target-wise deterministic or stochastic rollout metrics.
+    """
+
+    cfg = config or ConfigEvaluateAnymalPPO()
+    if cfg.steps <= 0:
+        raise ValueError("steps must be positive")
+    device = wp.get_device(cfg.device if cfg.device is not None else trainer.device)
+    base_env_config = cfg.env_config or ConfigEnvAnymalPhoenX(world_count=64)
+    stats = []
+    for target in cfg.target_positions:
+        eval_config = replace(
+            base_env_config,
+            target_position=(float(target[0]), float(target[1])),
+            auto_reset=False,
+            max_episode_steps=0,
+        )
+        env = EnvAnymalPhoenX(eval_config, device=device)
+        stats.append(_evaluate_target(trainer, env, cfg, (float(target[0]), float(target[1]))))
+    return ResultEvaluateAnymalPPO(stats=stats)
+
+
+def _format_checkpoint_path(path: str, iteration: int) -> Path:
+    if "{" in path:
+        return Path(path.format(iteration=int(iteration)))
+    return Path(path)
+
+
+def _configure_rollout_targets(
+    env: EnvAnymalPhoenX,
+    cfg: ConfigTrainAnymalPPO,
+    rng: np.random.Generator,
+    target_direction: np.ndarray,
+    target_distance: float,
+) -> None:
+    if env.config.reward_mode != "sparse_target":
+        return
+    if cfg.randomize_target_positions:
+        positions = _sample_target_positions(
+            rng=rng,
+            world_count=env.world_count,
+            target_direction=target_direction,
+            target_distance=target_distance,
+            angle_min=cfg.target_angle_min,
+            angle_max=cfg.target_angle_max,
+        )
+        env.set_target_positions(positions)
+    else:
+        target_xy = target_direction * np.float32(target_distance)
+        env.set_target_position((float(target_xy[0]), float(target_xy[1])))
+
+
+def _target_direction(target_xy: np.ndarray) -> np.ndarray:
+    distance = float(np.linalg.norm(target_xy))
+    if distance > 1.0e-6:
+        return (target_xy / np.float32(distance)).astype(np.float32)
+    return np.asarray((0.0, 1.0), dtype=np.float32)
+
+
+def _sample_target_positions(
+    *,
+    rng: np.random.Generator,
+    world_count: int,
+    target_direction: np.ndarray,
+    target_distance: float,
+    angle_min: float,
+    angle_max: float,
+) -> np.ndarray:
+    angles = rng.uniform(float(angle_min), float(angle_max), int(world_count)).astype(np.float32)
+    forward = target_direction.astype(np.float32)
+    right = np.asarray((forward[1], -forward[0]), dtype=np.float32)
+    directions = np.cos(angles)[:, None] * forward[None, :] + np.sin(angles)[:, None] * right[None, :]
+    return (directions * np.float32(target_distance)).astype(np.float32)
+
+
+def _evaluate_target(
+    trainer: TrainerPPO,
+    env: EnvAnymalPhoenX,
+    cfg: ConfigEvaluateAnymalPPO,
+    target: tuple[float, float],
+) -> StatsEvaluateAnymalTargetPPO:
+    obs = env.reset()
+    q0 = _joint_q_matrix(env)
+    start_xy = q0[:, 0:2].copy()
+    target_xy = np.asarray(target, dtype=np.float32)
+    initial_distance = np.linalg.norm(target_xy[None, :] - start_xy, axis=1)
+    min_distance = initial_distance.copy()
+    last_distance = initial_distance.copy()
+    previous_xy = start_xy.copy()
+    path_length = np.zeros(env.world_count, dtype=np.float32)
+    first_success_step = np.full(env.world_count, -1, dtype=np.int32)
+    first_done_step = np.full(env.world_count, -1, dtype=np.int32)
+    forward_velocity_sum = 0.0
+    forward_velocity_count = 0
+    min_base_height = float("inf")
+
+    for step in range(int(cfg.steps)):
+        alive_before = first_done_step < 0
+        if not np.any(alive_before):
+            break
+
+        actions, _log_probs, _values = trainer.act(
+            obs, seed=int(cfg.seed) + step, deterministic=bool(cfg.deterministic)
+        )
+        obs, _rewards, dones = env.step(actions)
+        q = _joint_q_matrix(env)
+        xy = q[:, 0:2].copy()
+        distance = np.linalg.norm(target_xy[None, :] - xy, axis=1)
+        min_distance = np.minimum(min_distance, distance)
+        path_length[alive_before] += np.linalg.norm(xy[alive_before] - previous_xy[alive_before], axis=1)
+        previous_xy = xy
+        last_distance[alive_before] = distance[alive_before]
+
+        obs_np = obs.numpy()
+        forward_velocity_sum += float(np.sum(obs_np[alive_before, 0]))
+        forward_velocity_count += int(np.sum(alive_before))
+        min_base_height = min(min_base_height, float(np.min(q[alive_before, 2])))
+
+        successes = env.step_successes.numpy() > 0.5
+        done = dones.numpy() > 0.5
+        first_success_step[(first_success_step < 0) & successes] = step + 1
+        first_done_step[(first_done_step < 0) & done] = step + 1
+
+    success = first_success_step >= 0
+    done = first_done_step >= 0
+    fall = done & ~success
+    target_vector = target_xy[None, :] - start_xy
+    target_norm = np.maximum(np.linalg.norm(target_vector, axis=1), 1.0e-6)
+    displacement = previous_xy - start_xy
+    aligned_displacement = np.sum(displacement * target_vector, axis=1) / target_norm
+    mean_first_success_step = float(np.mean(first_success_step[success])) if np.any(success) else float("nan")
+    elapsed = max(1, int(cfg.steps)) * float(env.config.frame_dt)
+    mean_forward_velocity = forward_velocity_sum / float(max(forward_velocity_count, 1))
+
+    return StatsEvaluateAnymalTargetPPO(
+        target_position=target,
+        success_fraction=float(np.mean(success)),
+        fall_fraction=float(np.mean(fall)),
+        mean_first_success_step=mean_first_success_step,
+        mean_initial_distance=float(np.mean(initial_distance)),
+        mean_final_distance=float(np.mean(last_distance)),
+        mean_min_distance=float(np.mean(min_distance)),
+        mean_target_aligned_displacement=float(np.mean(aligned_displacement)),
+        mean_path_length=float(np.mean(path_length)),
+        mean_speed=float(np.mean(path_length) / elapsed),
+        mean_forward_velocity=float(mean_forward_velocity),
+        min_base_height=float(min_base_height),
+    )
+
+
+def _joint_q_matrix(env: EnvAnymalPhoenX) -> np.ndarray:
+    return env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
 
 
 def _rollout_metrics(

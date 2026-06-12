@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 import warp as wp
@@ -175,11 +176,15 @@ class TrainerPPO:
         self.config = config or ConfigPPO()
         self.obs_dim = int(obs_dim)
         self.action_dim = int(action_dim)
+        self.hidden_layers = tuple(int(width) for width in hidden_layers)
+        self.activation = activation
+        self.squash_actions = bool(squash_actions)
+        self.log_std_init = float(log_std_init)
         self.device = wp.get_device(device)
         self.actor = GaussianActor(
             obs_dim=self.obs_dim,
             action_dim=self.action_dim,
-            hidden_layers=hidden_layers,
+            hidden_layers=self.hidden_layers,
             activation=activation,
             state_dependent_std=False,
             log_std_init=log_std_init,
@@ -188,7 +193,7 @@ class TrainerPPO:
             seed=seed,
         )
         self.critic = WarpMLP(
-            (self.obs_dim, *hidden_layers, 1),
+            (self.obs_dim, *self.hidden_layers, 1),
             activation=activation,
             output_activation="linear",
             device=self.device,
@@ -201,6 +206,73 @@ class TrainerPPO:
         self._value_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._approx_kl = wp.zeros(1, dtype=wp.float32, device=self.device)
         self._clip_fraction = wp.zeros(1, dtype=wp.float32, device=self.device)
+
+    def save_checkpoint(self, path: str | Path, *, iteration: int | None = None) -> None:
+        """Save network parameters and optimizer state to a NumPy archive.
+
+        Args:
+            path: Output ``.npz`` path.
+            iteration: Optional training iteration stored as metadata.
+        """
+
+        data: dict[str, np.ndarray] = {
+            "obs_dim": np.asarray(self.obs_dim, dtype=np.int64),
+            "action_dim": np.asarray(self.action_dim, dtype=np.int64),
+            "hidden_layers": np.asarray(self.hidden_layers, dtype=np.int64),
+            "activation": np.asarray(self.activation),
+            "squash_actions": np.asarray(int(self.squash_actions), dtype=np.int64),
+            "log_std_init": np.asarray(self.log_std_init, dtype=np.float32),
+            "iteration": np.asarray(-1 if iteration is None else int(iteration), dtype=np.int64),
+        }
+        for key, value in asdict(self.config).items():
+            data[f"config_{key}"] = np.asarray(value)
+        _pack_mlp(data, "actor", self.actor.net)
+        data["actor_log_std"] = self.actor.log_std.numpy()
+        _pack_mlp(data, "critic", self.critic)
+        _pack_adam(data, "actor_optimizer", self.actor_optimizer)
+        _pack_adam(data, "critic_optimizer", self.critic_optimizer)
+        checkpoint_path = Path(path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(checkpoint_path, **data)
+
+    @classmethod
+    def load_checkpoint(
+        cls,
+        path: str | Path,
+        *,
+        config: ConfigPPO | None = None,
+        device: wp.context.Devicelike = None,
+    ) -> TrainerPPO:
+        """Load a PPO trainer from a checkpoint archive.
+
+        Args:
+            path: Input ``.npz`` path.
+            config: Optional PPO config overriding the saved optimizer settings.
+            device: Warp device for restored arrays.
+
+        Returns:
+            Restored trainer.
+        """
+
+        with np.load(Path(path), allow_pickle=False) as data:
+            saved_config = config or _config_from_checkpoint(data)
+            trainer = cls(
+                obs_dim=int(data["obs_dim"]),
+                action_dim=int(data["action_dim"]),
+                hidden_layers=tuple(int(width) for width in data["hidden_layers"]),
+                config=saved_config,
+                device=device,
+                seed=0,
+                squash_actions=bool(int(data["squash_actions"])),
+                activation=str(data["activation"].item()),
+                log_std_init=float(data["log_std_init"]),
+            )
+            _unpack_mlp(data, "actor", trainer.actor.net)
+            trainer.actor.log_std.assign(data["actor_log_std"])
+            _unpack_mlp(data, "critic", trainer.critic)
+            _unpack_adam(data, "actor_optimizer", trainer.actor_optimizer)
+            _unpack_adam(data, "critic_optimizer", trainer.critic_optimizer)
+        return trainer
 
     def act(
         self,
@@ -308,3 +380,81 @@ class TrainerPPO:
         self.critic_optimizer.step()
         tape.zero()
         return loss
+
+
+def save_ppo_checkpoint(trainer: TrainerPPO, path: str | Path, *, iteration: int | None = None) -> None:
+    """Save a PPO trainer checkpoint.
+
+    Args:
+        trainer: Trainer to save.
+        path: Output ``.npz`` path.
+        iteration: Optional training iteration stored as metadata.
+    """
+
+    trainer.save_checkpoint(path, iteration=iteration)
+
+
+def load_ppo_checkpoint(
+    path: str | Path,
+    *,
+    config: ConfigPPO | None = None,
+    device: wp.context.Devicelike = None,
+) -> TrainerPPO:
+    """Load a PPO trainer checkpoint.
+
+    Args:
+        path: Input ``.npz`` path.
+        config: Optional PPO config overriding saved settings.
+        device: Warp device for restored arrays.
+
+    Returns:
+        Restored trainer.
+    """
+
+    return TrainerPPO.load_checkpoint(path, config=config, device=device)
+
+
+def _pack_mlp(data: dict[str, np.ndarray], prefix: str, mlp: WarpMLP) -> None:
+    data[f"{prefix}_layer_count"] = np.asarray(len(mlp.weights), dtype=np.int64)
+    for index, (weight, bias) in enumerate(zip(mlp.weights, mlp.biases, strict=True)):
+        data[f"{prefix}_weight_{index}"] = weight.numpy()
+        data[f"{prefix}_bias_{index}"] = bias.numpy()
+
+
+def _unpack_mlp(data: np.lib.npyio.NpzFile, prefix: str, mlp: WarpMLP) -> None:
+    layer_count = int(data[f"{prefix}_layer_count"])
+    if layer_count != len(mlp.weights):
+        raise ValueError(f"Checkpoint {prefix} layer count does not match trainer")
+    for index, (weight, bias) in enumerate(zip(mlp.weights, mlp.biases, strict=True)):
+        weight.assign(data[f"{prefix}_weight_{index}"])
+        bias.assign(data[f"{prefix}_bias_{index}"])
+
+
+def _pack_adam(data: dict[str, np.ndarray], prefix: str, optimizer: Adam) -> None:
+    data[f"{prefix}_step_count"] = np.asarray(optimizer.step_count, dtype=np.int64)
+    data[f"{prefix}_state_count"] = np.asarray(len(optimizer.m), dtype=np.int64)
+    for index, (m, v) in enumerate(zip(optimizer.m, optimizer.v, strict=True)):
+        data[f"{prefix}_m_{index}"] = m.numpy()
+        data[f"{prefix}_v_{index}"] = v.numpy()
+
+
+def _unpack_adam(data: np.lib.npyio.NpzFile, prefix: str, optimizer: Adam) -> None:
+    state_count = int(data[f"{prefix}_state_count"])
+    if state_count != len(optimizer.m):
+        raise ValueError(f"Checkpoint {prefix} state count does not match optimizer")
+    optimizer.step_count = int(data[f"{prefix}_step_count"])
+    for index, (m, v) in enumerate(zip(optimizer.m, optimizer.v, strict=True)):
+        m.assign(data[f"{prefix}_m_{index}"])
+        v.assign(data[f"{prefix}_v_{index}"])
+
+
+def _config_from_checkpoint(data: np.lib.npyio.NpzFile) -> ConfigPPO:
+    values = {}
+    for field in ConfigPPO.__dataclass_fields__:
+        key = f"config_{field}"
+        if key in data:
+            value = data[key].item()
+            if field == "normalize_advantages":
+                value = bool(value)
+            values[field] = value
+    return ConfigPPO(**values)

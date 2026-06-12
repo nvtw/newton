@@ -299,6 +299,9 @@ ba = "ba"
 ix = "ix"
 iy = "iy"
 iz = "iz"
+# "Generalized Advantage Estimation", used by PPO.
+GAE = "GAE"
+gae = "gae"
 HAA = "HAA"
 lod = "lod"
 # PhoenX is the name of Newton's rigid body solver.

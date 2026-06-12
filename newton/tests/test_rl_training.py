@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import tempfile
 import unittest
 
 import numpy as np
@@ -79,6 +80,28 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertTrue(math.isfinite(stats.approx_kl))
         self.assertTrue(math.isfinite(stats.clip_fraction))
         self.assertGreater(float(np.max(np.abs(actor_after - actor_before))), 0.0)
+
+    def test_checkpoint_round_trip_preserves_parameters(self) -> None:
+        config = rl.ConfigPPO(train_epochs=1, normalize_advantages=False)
+        trainer = rl.TrainerPPO(obs_dim=5, action_dim=2, hidden_layers=(8,), config=config, device="cpu", seed=17)
+        actor_before = [param.numpy().copy() for param in trainer.actor.parameters()]
+        critic_before = [param.numpy().copy() for param in trainer.critic.parameters()]
+        trainer.actor_optimizer.step_count = 3
+        trainer.critic_optimizer.step_count = 5
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/ppo_checkpoint.npz"
+            trainer.save_checkpoint(path, iteration=11)
+            restored = rl.load_ppo_checkpoint(path, device="cpu")
+
+        actor_after = [param.numpy().copy() for param in restored.actor.parameters()]
+        critic_after = [param.numpy().copy() for param in restored.critic.parameters()]
+        for before, after in zip(actor_before, actor_after, strict=True):
+            np.testing.assert_allclose(after, before, rtol=0.0, atol=0.0)
+        for before, after in zip(critic_before, critic_after, strict=True):
+            np.testing.assert_allclose(after, before, rtol=0.0, atol=0.0)
+        self.assertEqual(restored.actor_optimizer.step_count, 3)
+        self.assertEqual(restored.critic_optimizer.step_count, 5)
 
 
 class TestReplayBufferSAC(unittest.TestCase):

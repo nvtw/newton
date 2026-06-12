@@ -20,12 +20,15 @@ Warp-only reinforcement learning utilities for Newton.
    BufferReplaySAC
    BufferRollout
    ConfigEnvAnymalPhoenX
+   ConfigEvaluateAnymalPPO
    ConfigPPO
    ConfigSAC
    ConfigTrainAnymalPPO
    EnvAnymalPhoenX
    GaussianActor
+   ResultEvaluateAnymalPPO
    ResultTrainAnymalPPO
+   StatsEvaluateAnymalTargetPPO
    StatsPPOUpdate
    StatsSACUpdate
    StatsTrainAnymalPPO
@@ -39,6 +42,9 @@ Warp-only reinforcement learning utilities for Newton.
    :toctree: _generated
    :signatures: long
 
+   evaluate_anymal_ppo
+   load_ppo_checkpoint
+   save_ppo_checkpoint
    train_anymal_ppo
 
 .. rubric:: Constants
