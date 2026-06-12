@@ -31,12 +31,6 @@ import warp as wp
 from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver
 from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
-    actuated_double_ball_socket_iterate_multi,
-    actuated_double_ball_socket_prepare_for_iteration,
-    revolute_iterate_multi,
-    revolute_prepare_for_iteration,
-)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -46,6 +40,12 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_prepare_for_iteration_lean_no_soft_pd,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
+from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    actuated_double_ball_socket_iterate_multi,
+    actuated_double_ball_socket_prepare_for_iteration,
+    revolute_iterate_multi,
+    revolute_prepare_for_iteration,
+)
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer

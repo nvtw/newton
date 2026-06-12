@@ -187,7 +187,7 @@ flowchart TD
     C("<b>constraints/contact_ingest.py</b><br/>Contact compaction and warm start"):::file
     D("<b>constraints/constraint_contact.py</b><br/>Normal and friction rows"):::file
     E("<b>model_adapter.py</b><br/>Joint import and drive mapping"):::file
-    F("<b>constraints/constraint_actuated_double_ball_socket.py</b><br/>ADBS joint rows"):::file
+    F("<b>constraints/constraint_joint.py</b><br/>ADBS joint rows"):::file
     G("<b>graph_coloring/*.py</b><br/>Conflict graph and color CSR"):::file
     H("<b>dispatch/*.py</b><br/>Color-batch kernel launch order"):::file
     I("<b>cloth_step.py</b><br/>Cloth step helpers"):::file

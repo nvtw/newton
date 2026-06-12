@@ -15,7 +15,12 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
+from newton._src.solvers.phoenx.constraints.constraint_container import (
+    DEFAULT_DAMPING_RATIO,
+    DEFAULT_HERTZ_LIMIT,
+    DEFAULT_HERTZ_LINEAR,
+)
+from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_OFF,
     DRIVE_MODE_POSITION,
     DRIVE_MODE_VELOCITY,
@@ -25,11 +30,6 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
-)
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    DEFAULT_DAMPING_RATIO,
-    DEFAULT_HERTZ_LIMIT,
-    DEFAULT_HERTZ_LINEAR,
 )
 
 __all__ = [

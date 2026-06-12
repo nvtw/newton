@@ -31,12 +31,6 @@ from newton._src.solvers.phoenx.cloth_step import (
     cloth_predict_kernel,
     cloth_recover_kernel,
 )
-from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
-    ADBS_DWORDS,
-    ADBS_TIME_US_OFFSET,
-    JOINT_MODE_REVOLUTE,
-    actuated_double_ball_socket_initialize_kernel,
-)
 from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
     CLOTH_BENDING_DWORDS,
     CLOTH_BENDING_TIME_US_OFFSET,
@@ -61,6 +55,12 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_MULTIPLIER_DWORDS,
     ConstraintContainer,
     constraint_container_zeros,
+)
+from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    ADBS_DWORDS,
+    ADBS_TIME_US_OFFSET,
+    JOINT_MODE_REVOLUTE,
+    actuated_double_ball_socket_initialize_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron import (
     SOFT_HEX_DWORDS,

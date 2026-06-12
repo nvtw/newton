@@ -25,19 +25,6 @@ from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_RIGID,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )
-from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
-    ADBS_TIME_US_OFFSET,
-    actuated_double_ball_socket_cached_warmstart,
-    actuated_double_ball_socket_iterate,
-    actuated_double_ball_socket_iterate_multi,
-    actuated_double_ball_socket_prepare_for_iteration,
-    actuated_double_ball_socket_world_error,
-    actuated_double_ball_socket_world_wrench,
-    revolute_cached_warmstart,
-    revolute_iterate,
-    revolute_iterate_multi,
-    revolute_prepare_for_iteration,
-)
 from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
     CLOTH_BENDING_TIME_US_OFFSET,
     cloth_bending_iterate_at,
@@ -88,6 +75,19 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_get_body1,
     constraint_get_body2,
     read_int,
+)
+from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    ADBS_TIME_US_OFFSET,
+    actuated_double_ball_socket_cached_warmstart,
+    actuated_double_ball_socket_iterate,
+    actuated_double_ball_socket_iterate_multi,
+    actuated_double_ball_socket_prepare_for_iteration,
+    actuated_double_ball_socket_world_error,
+    actuated_double_ball_socket_world_wrench,
+    revolute_cached_warmstart,
+    revolute_iterate,
+    revolute_iterate_multi,
+    revolute_prepare_for_iteration,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron import (
     SOFT_HEX_TIME_US_OFFSET,

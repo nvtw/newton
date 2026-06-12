@@ -20,7 +20,7 @@ from newton._src.solvers.phoenx.body import (
     BodyContainer,
     body_container_zeros,
 )
-from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
+from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_DAMPING_DRIVE,
     _OFF_DRIVE_MODE,
     _OFF_MAX_FORCE_DRIVE,

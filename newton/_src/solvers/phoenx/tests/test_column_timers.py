@@ -18,7 +18,7 @@ import unittest
 
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
+from newton._src.solvers.phoenx.constraints.constraint_joint import (
     ADBS_TIME_US_OFFSET,
 )
 from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums, _run_frames

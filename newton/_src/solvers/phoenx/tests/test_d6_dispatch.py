@@ -17,7 +17,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_socket import (
+from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_OFF,
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
