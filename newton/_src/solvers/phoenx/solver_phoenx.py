@@ -3800,12 +3800,16 @@ class PhoenXWorld:
 
     def _fast_tail_kernel_flags(self, fixed_tpw: int, *, cached_prepare: bool | None = None) -> dict[str, object]:
         """Factory flags for multi-world fast-tail kernels."""
+        joint_sweeps, contact_sweeps, outer_chunk = self._choose_fast_tail_solve_schedule(substeps=self.substeps)
         kw: dict[str, object] = {
             **self._dispatch_specialization_flags(),
             "has_contacts": self.max_contact_columns > 0,
             "fixed_tpw": int(fixed_tpw),
             "guard_tpw": self._tpw_auto,
             "family_split": self._fast_tail_family_split(),
+            "solve_joint_inner_sweeps": joint_sweeps,
+            "solve_contact_inner_sweeps": contact_sweeps,
+            "solve_outer_iteration_chunk": outer_chunk,
         }
         if cached_prepare is not None:
             kw["cached_prepare"] = bool(cached_prepare)
@@ -3896,6 +3900,17 @@ class PhoenXWorld:
     def _singleworld_needs_family_starts(self) -> bool:
         """Mixed rigid scenes need joint/contact subranges."""
         return self._singleworld_rigid_direct() and self.num_joints > 0 and self.max_contact_columns > 0
+
+    @staticmethod
+    def _choose_fast_tail_solve_schedule(*, substeps: int) -> tuple[int, int, int]:
+        """Select the fast-tail register reuse schedule."""
+        # High-substep robot fleets use the old two-by-two schedule: fewer outer
+        # visits, but matching inner sweeps, so default even iteration counts keep
+        # the same total row sweeps. Low-substep humanoid stiffness keeps the
+        # conservative full outer cadence.
+        if substeps >= 64:
+            return 2, 2, 2
+        return 3, 3, 1
 
     def _fast_tail_family_split(self) -> bool:
         """Use solver-family subranges in multi-world fast-tail."""

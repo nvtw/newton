@@ -123,6 +123,7 @@ from newton._src.solvers.phoenx.timer import elapsed_us, read_global_timer_ns
 
 _FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS = 3
 _FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS = 3
+_FAST_TAIL_SOLVE_OUTER_ITERATION_CHUNK = 1
 
 # Body-N dword offsets in the per-constraint header. Each constraint
 # type stores (type, body1, body2) at dwords 0/1/2 then extra bodies
@@ -1060,6 +1061,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
     family_split: bool = False,
+    solve_joint_inner_sweeps: int = _FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS,
+    solve_contact_inner_sweeps: int = _FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS,
+    solve_outer_iteration_chunk: int = _FAST_TAIL_SOLVE_OUTER_ITERATION_CHUNK,
 ):
     """Build the multi-world fused prepare + iterate fast-tail kernel."""
     (
@@ -1298,8 +1302,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             _sync_warp_mask(sync_mask)
             c += 1
 
+        solve_outer_chunk = wp.int32(solve_outer_iteration_chunk)
+        solve_outer_iterations = (num_iterations + solve_outer_chunk - wp.int32(1)) / solve_outer_chunk
         it_outer = wp.int32(0)
-        while it_outer < num_iterations:
+        while it_outer < solve_outer_iterations:
             c = wp.int32(0)
             while c < n_colors:
                 start = world_base + world_color_starts[world_id, c]
@@ -1360,7 +1366,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 idt,
                                 sor_boost,
                                 cid,
-                                wp.int32(_FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS),
+                                wp.int32(solve_joint_inner_sweeps),
                             )
                             base += tpw
 
@@ -1380,7 +1386,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 idt,
                                 sor_boost,
                                 local_cid,
-                                wp.int32(_FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS),
+                                wp.int32(solve_contact_inner_sweeps),
                             )
                             base += tpw
                 else:
@@ -1418,7 +1424,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     idt,
                                     sor_boost,
                                     cid,
-                                    wp.int32(_FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS),
+                                    wp.int32(solve_joint_inner_sweeps),
                                 )
                             elif cid < num_joints:
                                 _dispatch_iterate_joint(
@@ -1430,7 +1436,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     idt,
                                     sor_boost,
                                     cid,
-                                    wp.int32(_FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS),
+                                    wp.int32(solve_joint_inner_sweeps),
                                 )
                             else:
                                 _dispatch_iterate_contact(
@@ -1444,7 +1450,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     idt,
                                     sor_boost,
                                     cid - num_joints,
-                                    wp.int32(_FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS),
+                                    wp.int32(solve_contact_inner_sweeps),
                                 )
                         base += tpw
 
@@ -2083,6 +2089,9 @@ def get_fast_tail_kernel(
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
     family_split: bool = False,
+    solve_joint_inner_sweeps: int = _FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS,
+    solve_contact_inner_sweeps: int = _FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS,
+    solve_outer_iteration_chunk: int = _FAST_TAIL_SOLVE_OUTER_ITERATION_CHUNK,
 ):
     """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
     or ``"relax"``. Each (kind, revolute_only, has_joints,
@@ -2105,6 +2114,9 @@ def get_fast_tail_kernel(
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,
             family_split=family_split,
+            solve_joint_inner_sweeps=solve_joint_inner_sweeps,
+            solve_contact_inner_sweeps=solve_contact_inner_sweeps,
+            solve_outer_iteration_chunk=solve_outer_iteration_chunk,
         )
     if kind == "relax":
         return _make_fast_tail_relax_kernel(

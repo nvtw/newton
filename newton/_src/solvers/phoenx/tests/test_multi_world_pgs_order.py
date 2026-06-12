@@ -16,6 +16,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx import solver_phoenx_kernels
+from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.phoenx.tests.test_robot_policy_parity import (
     _g1_29dof_yaml,
     _g1_robot_model,
@@ -45,7 +46,7 @@ def _phoenx_factory(step_layout: str, multi_world_scheduler: str = "auto"):
     return make
 
 
-def _wp_int32_arg_value(node: ast.AST) -> int | None:
+def _wp_int32_arg_expr(node: ast.AST) -> str | None:
     if not (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -55,46 +56,46 @@ def _wp_int32_arg_value(node: ast.AST) -> int | None:
         and len(node.args) == 1
     ):
         return None
-    arg = node.args[0]
-    if isinstance(arg, ast.Constant) and isinstance(arg.value, int):
-        return arg.value
-    if isinstance(arg, ast.Name):
-        value = getattr(solver_phoenx_kernels, arg.id, None)
-        if isinstance(value, int):
-            return value
-    return None
+    return ast.unparse(node)
 
 
 class TestMultiWorldFastTailSolveContract(unittest.TestCase):
-    def test_ordered_solve_dispatch_uses_bounded_inner_sweeps(self) -> None:
+    def test_solve_schedule_keeps_high_substep_total_work_constant(self) -> None:
+        solver_iterations = 8
+        joint_sweeps, contact_sweeps, outer_chunk = PhoenXWorld._choose_fast_tail_solve_schedule(substeps=80)
+        outer_iterations = (solver_iterations + outer_chunk - 1) // outer_chunk
+
+        self.assertEqual((joint_sweeps, contact_sweeps, outer_chunk), (2, 2, 2))
+        self.assertEqual(outer_iterations * joint_sweeps, solver_iterations)
+        self.assertEqual(outer_iterations * contact_sweeps, solver_iterations)
+        self.assertEqual(PhoenXWorld._choose_fast_tail_solve_schedule(substeps=20), (3, 3, 1))
+
+    def test_ordered_solve_dispatch_uses_selected_inner_sweeps(self) -> None:
         source = textwrap.dedent(inspect.getsource(solver_phoenx_kernels._make_fast_tail_prepare_plus_iterate_kernel))
         tree = ast.parse(source)
-        dispatches: list[tuple[str, int | None]] = []
+        dispatches: list[tuple[str, str | None]] = []
+        outer_chunk_exprs: list[str | None] = []
         for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "solve_outer_chunk":
+                        outer_chunk_exprs.append(_wp_int32_arg_expr(node.value))
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 if node.func.id in {
                     "_dispatch_iterate_joint",
                     "_dispatch_iterate_contact",
                     "_dispatch_iterate_cid",
                 }:
-                    dispatches.append((node.func.id, _wp_int32_arg_value(node.args[-1])))
+                    dispatches.append((node.func.id, _wp_int32_arg_expr(node.args[-1])))
 
-        joint_chunk = solver_phoenx_kernels._FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS
-        contact_chunk = solver_phoenx_kernels._FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS
+        self.assertIn("wp.int32(solve_outer_iteration_chunk)", outer_chunk_exprs)
         self.assertGreaterEqual(len([name for name, _ in dispatches if name == "_dispatch_iterate_joint"]), 1)
         self.assertGreaterEqual(len([name for name, _ in dispatches if name == "_dispatch_iterate_contact"]), 1)
-        self.assertNotIn(
-            ("_dispatch_iterate_cid", None),
-            dispatches,
-            "generic cid dispatch must not hide a solver_iterations inner sweep in the fast-tail solve",
-        )
         for name, inner_sweeps in dispatches:
             if name == "_dispatch_iterate_joint":
-                self.assertEqual(inner_sweeps, joint_chunk)
-                self.assertLessEqual(inner_sweeps, 3)
+                self.assertEqual(inner_sweeps, "wp.int32(solve_joint_inner_sweeps)")
             elif name == "_dispatch_iterate_contact":
-                self.assertEqual(inner_sweeps, contact_chunk)
-                self.assertLessEqual(inner_sweeps, 3)
+                self.assertEqual(inner_sweeps, "wp.int32(solve_contact_inner_sweeps)")
             else:
                 self.fail("fast-tail solve should split joint/contact dispatches explicitly")
 
