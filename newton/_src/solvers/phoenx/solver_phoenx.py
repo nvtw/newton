@@ -2502,11 +2502,17 @@ class PhoenXWorld:
         self._ingest_and_warmstart_contacts(contacts, shape_body)
         if self._ingest_scratch is not None:
             # Contacts begin after the joint + cloth-tri + cloth-bending
-            # + soft-tet blocks in the cid space.
-            self._partitioner.set_costs_from_contacts(
+            # + soft-tet blocks in the cid space. Contact cids are compacted
+            # every step, so use the stable shape-pair key for contact
+            # priority tie-breaks; otherwise lower-world contact count changes
+            # perturb colouring and PGS order in later worlds.
+            self._partitioner.set_costs_from_contact_pairs(
                 self._contact_offset,
                 self._ingest_scratch.num_contact_columns,
                 self._contact_cols,
+                self._ingest_scratch.pair_source_idx,
+                self._ingest_scratch.pair_shape_a,
+                self._ingest_scratch.pair_shape_b,
             )
 
         self._rebuild_elements()
@@ -2562,10 +2568,7 @@ class PhoenXWorld:
             # VELOCITY_LEVEL. No-op for STATIC particles and rigid-only
             # scenes (num_particles == 0).
             self._recover_particle_velocities()
-            # ``inverse_inertia_world`` is refreshed inline by
-            # :func:`_integrate_velocities_kernel` from the
-            # just-rotated quat, so no separate launch is needed --
-            # one extra mat33 mul vs a full body re-pass.
+            self._refresh_world_inertia()
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
             self._apply_global_damping()

@@ -3,25 +3,10 @@
 
 """D6 auto-dispatch tests for :class:`SolverPhoenX`.
 
-PhoenX's :func:`model_adapter.build_adbs_init_arrays` detects D6 joint
-configurations whose per-DoF lock pattern matches a specialized mode
-(FIXED / BALL / REVOLUTE / PRISMATIC / UNIVERSAL / CYLINDRICAL / PLANAR)
-and routes them to the corresponding constraint kernels. The first
-four route to existing modes (Phase 1); UNIVERSAL (Phase 2b),
-CYLINDRICAL (Phase 2a), and PLANAR (Phase 2c) are new modes built by
-composing existing helpers with different subsets of constraint rows.
-
-Coverage (all CUDA + graph-captured):
-
-* :class:`TestD6Detection` -- adapter-only check.
-* :class:`TestD6Revolute` -- end-to-end equivalence with native revolute.
-* :class:`TestD6Universal` -- twist-lock invariant.
-* :class:`TestD6Cylindrical` -- 2 free DoFs along the shared axis,
-  4 perpendicular DoFs locked.
-* :class:`TestD6Planar` -- 2 in-plane lin + 1 about-normal ang free,
-  3 perpendicular DoFs locked.
-* :class:`TestD6Unsupported` -- non-parallel-axes "cylindrical" and
-  "planar" configurations still raise (= Phase 3 generic D6 territory).
+These tests document the post-unification D6 dispatch work. The current
+solver intentionally restores the older box3d_5 ADBS joint formulation,
+which does not support D6 joints. Keep the tests in-tree but skipped so
+D6 can be reintroduced deliberately on top of the stable joint path.
 """
 
 from __future__ import annotations
@@ -43,6 +28,13 @@ from newton._src.solvers.phoenx.constraints.constraint_actuated_double_ball_sock
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
 )
+
+_D6_DISABLED_REASON = "SolverPhoenX D6 dispatch is disabled while the box3d_5 joint formulation is restored."
+
+
+def setUpModule() -> None:
+    raise unittest.SkipTest(_D6_DISABLED_REASON)
+
 
 _FPS = 240
 _DT = 1.0 / _FPS

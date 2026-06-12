@@ -123,19 +123,9 @@ class _PhoenXCollisionPipelineAdapter:
 class SolverPhoenX(SolverBase):
     """Newton :class:`SolverBase` wrapper around :class:`PhoenXWorld`.
 
-    Supports REVOLUTE / PRISMATIC (PD drive + limit + Coulomb friction),
-    BALL, FIXED, CABLE (soft fixed with PD bend/twist; stretch DoF is
-    rigid), FREE (no column). DISTANCE raises at construction.
-
-    D6 joints are auto-dispatched to a specialized mode based on the
-    per-DoF lock pattern: FIXED (all locked), BALL (3 lin locked + 3 ang
-    free), REVOLUTE (3 lin locked + 2 ang locked + 1 ang free),
-    PRISMATIC (2 lin locked + 1 lin free + 3 ang locked), UNIVERSAL
-    (3 lin locked + 1 ang locked + 2 ang free), CYLINDRICAL (2 lin
-    locked + 1 lin free + 2 ang locked + 1 ang free with the free axes
-    parallel), or PLANAR (1 lin locked + 2 lin free + 2 ang locked +
-    1 ang free with the locked-lin and free-ang axes parallel).
-    Configurations outside these patterns raise a descriptive error.
+    Supports REVOLUTE / PRISMATIC (PD drive + limit), BALL, FIXED,
+    CABLE (soft fixed with PD bend/twist; stretch DoF is rigid), and
+    FREE (no column). DISTANCE and D6 raise at construction.
 
     Newton :class:`Picking` works out of the box: pick force/torque is
     added to ``state.body_f``, which :meth:`step` imports into PhoenX's
@@ -463,14 +453,6 @@ class SolverPhoenX(SolverBase):
         joint_X_p = model.joint_X_p.numpy()
         joint_X_c = model.joint_X_c.numpy()
         armature = model.joint_armature.numpy()
-        # Gear-ratio scaling: motor-side rotor inertia ``I_rotor`` reflects
-        # at the joint as ``gear**2 * I_rotor``. The bake reads
-        # ``joint_armature`` (which is the motor-side value when gear != 1)
-        # and adds the gear-scaled value to the body's inertia along the
-        # joint axis. ``gear == 1`` (default) is the back-compatible no-op.
-        joint_gear_np = (
-            model.joint_gear.numpy() if (hasattr(model, "joint_gear") and model.joint_gear is not None) else None
-        )
 
         body_inv_mass = self.bodies.inverse_mass.numpy().copy()
         body_inv_inertia = self.bodies.inverse_inertia.numpy().copy()
@@ -497,14 +479,7 @@ class SolverPhoenX(SolverBase):
             qd = int(joint_qd_start[j])
             if qd >= len(armature):
                 continue
-            a_motor = float(armature[qd])
-            # Apply gear**2 scaling to convert motor-side to joint-side.
-            gear = 1.0
-            if joint_gear_np is not None and qd < len(joint_gear_np):
-                raw_gear = float(joint_gear_np[qd])
-                if raw_gear > 0.0 and np.isfinite(raw_gear):
-                    gear = raw_gear
-            a = gear * gear * a_motor
+            a = float(armature[qd])
             if a <= 0.0:
                 continue
             any_baked = True
@@ -686,9 +661,6 @@ class SolverPhoenX(SolverBase):
         )
 
     def _joint_gear_array(self) -> wp.array[wp.float32]:
-        joint_gear = getattr(self.model, "joint_gear", None)
-        if joint_gear is not None:
-            return joint_gear
         n = max(1, int(self.model.joint_dof_count))
         if self._default_joint_gear.shape[0] != n:
             self._default_joint_gear = wp.ones(n, dtype=wp.float32, device=self.device)

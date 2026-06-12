@@ -1357,7 +1357,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 idt,
                                 sor_boost,
                                 cid,
-                                wp.int32(1),
+                                sweeps_per_dispatch,
                             )
                             base += tpw
 
@@ -1377,7 +1377,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 idt,
                                 sor_boost,
                                 local_cid,
-                                wp.int32(1),
+                                sweeps_per_dispatch,
                             )
                             base += tpw
                 else:
@@ -1418,7 +1418,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 sor_boost,
                                 cid,
                                 num_joints,
-                                wp.int32(1),
+                                num_iterations,
                             )
                         base += tpw
 
@@ -1534,10 +1534,18 @@ def _make_fast_tail_relax_kernel(
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
 
-        # Preserve global PGS order: each relax iteration visits all colors
-        # once before any color repeats.
+        relax_iterations = num_iterations
+        sweeps_per_dispatch = wp.int32(1)
+        if wp.static(not cloth_support):
+            # Restore the box3d_5 rigid relax contract: each column runs
+            # velocity_iterations sweeps in its register-cached multi path.
+            relax_iterations = wp.int32(1)
+            sweeps_per_dispatch = num_iterations
+
+        # Deformable rows keep the latest global PGS order: each relax
+        # iteration visits all colors once before any color repeats.
         it = wp.int32(0)
-        while it < num_iterations:
+        while it < relax_iterations:
             c = wp.int32(0)
             while c < n_colors:
                 start = world_base + world_color_starts[world_id, c]
@@ -1596,7 +1604,7 @@ def _make_fast_tail_relax_kernel(
                                 idt,
                                 sor_boost,
                                 cid,
-                                wp.int32(1),
+                                sweeps_per_dispatch,
                             )
                             base += tpw
 
@@ -1616,7 +1624,7 @@ def _make_fast_tail_relax_kernel(
                                 idt,
                                 sor_boost,
                                 local_cid,
-                                wp.int32(1),
+                                sweeps_per_dispatch,
                             )
                             base += tpw
                 else:
@@ -1659,7 +1667,7 @@ def _make_fast_tail_relax_kernel(
                                 sor_boost,
                                 cid,
                                 num_joints,
-                                wp.int32(1),
+                                sweeps_per_dispatch,
                             )
                         base += tpw
 
@@ -2542,14 +2550,8 @@ def _integrate_velocities_kernel(
     bodies: BodyContainer,
     dt: wp.float32,
 ):
-    """Advance pose for dynamic bodies only AND refresh
-    ``inverse_inertia_world`` from the just-rotated orientation in the
-    same pass. Fusing the two reduces per-substep launches from 2 to 1,
-    keeps the freshly-rotated quat in a register for the inertia
-    rebuild, and lets the next relax / next substep solve see
-    ``R * I^-1 * R^T`` aligned with the integrated pose. Kinematic
-    bodies advance via lerp/slerp in
-    :func:`_kinematic_interpolate_substep_kernel`."""
+    """Advance pose for dynamic bodies only. Kinematic bodies advance via
+    lerp/slerp in :func:`_kinematic_interpolate_substep_kernel`."""
     i = wp.tid()
     mt = bodies.motion_type[i]
     if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
@@ -2563,12 +2565,7 @@ def _integrate_velocities_kernel(
 
     bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
     q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
-    q_new = wp.normalize(q_rot * bodies.orientation[i])
-    bodies.orientation[i] = q_new
-    # Refresh world-frame inverse inertia using the just-rotated quat
-    # (one extra mat33 mul, no extra global load).
-    r = wp.quat_to_matrix(q_new)
-    bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+    bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
 
 
 @wp.kernel(enable_backward=False)
