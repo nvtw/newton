@@ -1,125 +1,125 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Multi-world contact isolation regressions for ``SolverPhoenX``."""
+"""Regression tests for PhoenX multi-world contact isolation."""
 
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
 
-import newton
-import newton.utils
-from newton import JointTargetMode
+from newton._src.viewer.kernels import PickingState
+from newton._src.viewer.picking import Picking
+from newton.examples.robot.example_robot_h1 import Example
 
 
-class _Scene:
-    def __init__(self, model, solver, state_0, state_1, control, contacts):
-        self.model = model
-        self.solver = solver
-        self.state_0 = state_0
-        self.state_1 = state_1
-        self.control = control
-        self.contacts = contacts
+class _PickViewer:
+    def __init__(self) -> None:
+        self.picking: Picking | None = None
 
+    def set_model(self, model) -> None:
+        self.picking = Picking(
+            model,
+            pick_stiffness=80.0,
+            pick_damping=8.0,
+            pick_max_acceleration=12.0,
+        )
 
-def _make_h1_isolation_scene(world_count: int) -> _Scene:
-    h1 = newton.ModelBuilder()
-    h1.default_joint_cfg = newton.ModelBuilder.JointDofConfig(limit_ke=1.0e3, limit_kd=1.0e1, friction=1.0e-5)
-    h1.default_shape_cfg.ke = 2.0e3
-    h1.default_shape_cfg.kd = 1.0e2
-    h1.default_shape_cfg.kf = 1.0e3
-    h1.default_shape_cfg.mu = 0.75
+    def set_world_offsets(self, _offsets) -> None:
+        pass
 
-    asset_path = newton.utils.download_asset("unitree_h1")
-    h1.add_usd(
-        str(asset_path / "usd_structured" / "h1.usda"),
-        ignore_paths=["/GroundPlane"],
-        enable_self_collisions=False,
-    )
-    h1.approximate_meshes("bounding_box")
-    for i in range(len(h1.joint_target_ke)):
-        h1.joint_target_ke[i] = 150.0
-        h1.joint_target_kd[i] = 5.0
-        h1.joint_target_mode[i] = int(JointTargetMode.POSITION)
+    def set_camera(self, **_kwargs) -> None:
+        pass
 
-    builder = newton.ModelBuilder()
-    builder.replicate(h1, world_count)
-    builder.default_shape_cfg.ke = 1.0e3
-    builder.default_shape_cfg.kd = 1.0e2
-    builder.add_ground_plane()
-    model = builder.finalize()
+    def apply_forces(self, state) -> None:
+        assert self.picking is not None
+        self.picking._apply_picking_force(state)
 
-    solver = newton.solvers.SolverPhoenX(
-        model,
-        substeps=4,
-        solver_iterations=8,
-        velocity_iterations=1,
-        multi_world_scheduler="fast_tail",
-        prepare_refresh_stride=1,
-    )
-    state_0 = model.state()
-    state_1 = model.state()
-    control = model.control()
-    contacts = model.contacts(collision_pipeline=getattr(model, "_collision_pipeline", None))
-    newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
-    return _Scene(model, solver, state_0, state_1, control, contacts)
+    def activate_pick(
+        self,
+        state,
+        *,
+        body: int = 5,
+        delta: tuple[float, float, float] = (2.0, 0.0, 1.0),
+    ) -> None:
+        assert self.picking is not None
+        body_q = state.body_q.numpy()
+        hit = body_q[body, :3].astype(np.float32)
 
+        pick_state = np.empty(1, dtype=PickingState.numpy_dtype())
+        pick_state[0]["picked_point_local"] = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        pick_state[0]["picked_point_world"] = hit
+        pick_state[0]["picking_target_world"] = hit + np.array(delta, dtype=np.float32)
+        pick_state[0]["pick_stiffness"] = 80.0
+        pick_state[0]["pick_damping"] = 8.0
+        pick_state[0]["pick_max_acceleration"] = 12.0
 
-def _step(scene: _Scene, force: tuple[float, float, float] | None = None) -> int:
-    scene.model.collide(scene.state_0, scene.contacts)
-    contact_count = int(scene.contacts.rigid_contact_count.numpy()[0])
+        self.picking.pick_state.assign(pick_state)
+        self.picking.pick_body.assign(np.array([body], dtype=np.int32))
+        self.picking.picking_active = True
 
-    scene.state_0.clear_forces()
-    if force is not None:
-        body_f = np.zeros((scene.model.body_count, 6), dtype=np.float32)
-        body_f[5, :3] = np.asarray(force, dtype=np.float32)
-        scene.state_0.body_f.assign(body_f)
-
-    scene.solver.step(scene.state_0, scene.state_1, scene.control, scene.contacts, 1.0 / 200.0)
-    scene.state_0, scene.state_1 = scene.state_1, scene.state_0
-    return contact_count
+    def release_pick(self) -> None:
+        assert self.picking is not None
+        self.picking.release()
 
 
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX multi-world contact isolation requires CUDA")
 class TestPhoenXMultiWorldContactIsolation(unittest.TestCase):
-    def test_lower_world_contact_count_change_does_not_perturb_higher_worlds(self) -> None:
-        baseline = _make_h1_isolation_scene(world_count=8)
-        disturbed = _make_h1_isolation_scene(world_count=8)
+    def test_reused_contact_generation_warmstart_is_world_local(self) -> None:
+        args = SimpleNamespace(world_count=8, solver="phoenx", use_mujoco_contacts=False)
+        baseline_viewer = _PickViewer()
+        picked_viewer = _PickViewer()
+        baseline = Example(baseline_viewer, args)
+        picked = Example(picked_viewer, args)
 
-        world_id = baseline.model.body_world.numpy()
-        self.assertEqual(int(world_id[5]), 0)
-        higher_world_bodies = world_id > 0
+        picked_viewer.activate_pick(picked.state_0)
 
-        contact_counts_differed = False
+        body_world = baseline.model.body_world.numpy()
+        higher_worlds = body_world > 0
+        first_world = body_world <= 0
+
+        max_first_world_delta = 0.0
         max_higher_world_delta = 0.0
-        max_world0_delta = 0.0
-        for step in range(24):
-            baseline_contacts = _step(baseline)
-            force = (1500.0, 0.0, 2000.0) if step < 12 else None
-            disturbed_contacts = _step(disturbed, force=force)
-            contact_counts_differed = contact_counts_differed or baseline_contacts != disturbed_contacts
+        baseline_contact_count = None
+        min_picked_contact_count = None
 
-            baseline_x = baseline.state_0.body_q.numpy()[:, :3]
-            disturbed_x = disturbed.state_0.body_q.numpy()[:, :3]
+        for frame in range(20):
+            if frame == 6:
+                picked_viewer.activate_pick(picked.state_0, delta=(-2.0, 1.0, 0.5))
+            if frame == 12:
+                picked_viewer.release_pick()
+
+            baseline.step()
+            picked.step()
+
+            baseline_count = int(baseline.contacts.rigid_contact_count.numpy()[0])
+            picked_count = int(picked.contacts.rigid_contact_count.numpy()[0])
+            if baseline_contact_count is None:
+                baseline_contact_count = baseline_count
+                min_picked_contact_count = picked_count
+            else:
+                min_picked_contact_count = min(min_picked_contact_count, picked_count)
+
+            baseline_pos = baseline.state_0.body_q.numpy()[:, :3]
+            picked_pos = picked.state_0.body_q.numpy()[:, :3]
+
+            max_first_world_delta = max(
+                max_first_world_delta,
+                float(np.max(np.abs(baseline_pos[first_world] - picked_pos[first_world]))),
+            )
             max_higher_world_delta = max(
                 max_higher_world_delta,
-                float(np.max(np.abs(baseline_x[higher_world_bodies] - disturbed_x[higher_world_bodies]))),
-            )
-            max_world0_delta = max(
-                max_world0_delta,
-                float(np.max(np.abs(baseline_x[~higher_world_bodies] - disturbed_x[~higher_world_bodies]))),
+                float(np.max(np.abs(baseline_pos[higher_worlds] - picked_pos[higher_worlds]))),
             )
 
-        self.assertTrue(contact_counts_differed, "world-0 disturbance did not change the contact layout")
-        self.assertGreater(max_world0_delta, 0.1, "world-0 disturbance was too small for the isolation check")
-        self.assertLess(
-            max_higher_world_delta,
-            1.0e-6,
-            "lower-world contact compaction perturbed bodies in higher worlds",
-        )
+        assert baseline_contact_count is not None
+        assert min_picked_contact_count is not None
+        self.assertLess(min_picked_contact_count, baseline_contact_count)
+        self.assertGreater(max_first_world_delta, 0.1)
+        self.assertLessEqual(max_higher_world_delta, 1.0e-7)
 
 
 if __name__ == "__main__":

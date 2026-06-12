@@ -776,6 +776,7 @@ def _contact_warmstart_gather_kernel(
     rigid_contact_match_index: wp.array[wp.int32],
     prev_cid_of_contact: wp.array[wp.int32],
     num_contact_columns: wp.array[wp.int32],
+    reuse_contact_indices: wp.array[wp.int32],
     bodies: BodyContainer,
     contacts: ContactViews,
     cc: ContactContainer,
@@ -798,7 +799,10 @@ def _contact_warmstart_gather_kernel(
     * Unmatched (``< 0``): cold-start -- fresh geometry, zero impulses.
 
     ``prev_cid_of_contact`` gates reads of stale prev slots that
-    belonged to an already-overwritten frame.
+    belonged to an already-overwritten frame. When the same
+    ``Contacts`` generation is solved more than once, ``match_index``
+    still points to the previous collide result, so the gather uses the
+    current contact index directly.
     """
     tid = wp.tid()
     if tid >= num_contact_columns[0]:
@@ -824,10 +828,14 @@ def _contact_warmstart_gather_kernel(
     w1 = bodies.angular_velocity[b1]
     w2 = bodies.angular_velocity[b2]
 
+    use_identity_match = reuse_contact_indices[0] != wp.int32(0)
+
     for i in range(count):
         k = start_contact + i
 
         prev_k = rigid_contact_match_index[k]
+        if use_identity_match:
+            prev_k = k
         prev_valid = wp.int32(0)
         if prev_k >= 0:
             if prev_cid_of_contact[prev_k] >= 0:
@@ -1276,6 +1284,7 @@ def gather_contact_warmstart(
     scratch: IngestScratch,
     rigid_contact_match_index: wp.array,
     prev_cid_of_contact: wp.array,
+    reuse_contact_indices: wp.array,
     bodies: BodyContainer,
     contacts: ContactViews,
     cc: ContactContainer,
@@ -1300,6 +1309,7 @@ def gather_contact_warmstart(
             rigid_contact_match_index,
             prev_cid_of_contact,
             scratch.num_contact_columns,
+            reuse_contact_indices,
             bodies,
             contacts,
         ],

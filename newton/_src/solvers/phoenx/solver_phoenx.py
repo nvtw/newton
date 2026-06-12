@@ -206,6 +206,20 @@ __all__ = [
 DEFAULT_SHAPE_GAP: float = 0.05
 
 
+@wp.kernel(enable_backward=False)
+def _update_contact_generation_reuse_kernel(
+    contact_generation: wp.array[wp.int32],
+    reuse_contact_indices: wp.array[wp.int32],
+    last_contact_generation: wp.array[wp.int32],
+):
+    gen = contact_generation[0]
+    if gen == last_contact_generation[0]:
+        reuse_contact_indices[0] = wp.int32(1)
+    else:
+        reuse_contact_indices[0] = wp.int32(0)
+    last_contact_generation[0] = gen
+
+
 def _soft_hex_strain_model_value(strain_model: str | int) -> int:
     """Return the internal soft-hex strain model id."""
     if isinstance(strain_model, str):
@@ -1005,12 +1019,16 @@ class PhoenXWorld:
             )
             self._cid_of_contact_cur = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
             self._cid_of_contact_prev = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
+            self._last_contact_generation = wp.full(1, -1, dtype=wp.int32, device=self.device)
+            self._reuse_contact_indices = wp.zeros(1, dtype=wp.int32, device=self.device)
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
             self._contact_cols = contact_column_container_zeros(1, device=self.device)
             self._ingest_scratch = None
             self._cid_of_contact_cur = None
             self._cid_of_contact_prev = None
+            self._last_contact_generation = wp.full(1, -1, dtype=wp.int32, device=self.device)
+            self._reuse_contact_indices = wp.zeros(1, dtype=wp.int32, device=self.device)
             self._enable_body_pair_grouping = False
 
         self._contact_views: ContactViews | None = None
@@ -2639,6 +2657,14 @@ class PhoenXWorld:
             else self._soft_contact_sentinel
         )
 
+        wp.launch(
+            _update_contact_generation_reuse_kernel,
+            dim=1,
+            inputs=[contacts.contact_generation],
+            outputs=[self._reuse_contact_indices, self._last_contact_generation],
+            device=self.device,
+        )
+
         # Keep history pointers stable so one-step CUDA graphs replay correctly.
         contact_container_copy_current_to_prev(self._contact_container, device=self.device)
         wp.copy(
@@ -2718,6 +2744,7 @@ class PhoenXWorld:
             scratch=self._ingest_scratch,
             rigid_contact_match_index=gather_match_index,
             prev_cid_of_contact=self._cid_of_contact_prev,
+            reuse_contact_indices=self._reuse_contact_indices,
             bodies=self.bodies,
             contacts=self._contact_views,
             cc=self._contact_container,
