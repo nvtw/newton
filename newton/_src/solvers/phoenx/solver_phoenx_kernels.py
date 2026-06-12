@@ -3860,6 +3860,7 @@ def get_singleworld_kernel(
         enable_column_timers=enable_column_timers,
         soft_tet_neohookean=soft_tet_neohookean,
         has_joints=has_joints,
+        has_contacts=has_contacts,
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
