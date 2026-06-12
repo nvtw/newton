@@ -321,6 +321,7 @@ def _phoenx_island_max_velocity_kernel(
     body_aabb_diagonal: wp.array[wp.float32],
     island_of_body: wp.array[wp.int32],
     step_dt: wp.float32,
+    sleeping_velocity_threshold: wp.float32,
     island_max_velocity: wp.array[wp.float32],
 ):
     """Score = ``length(v_pred) + 0.5 * diag * length(w_pred)``, where
@@ -352,14 +353,22 @@ def _phoenx_island_max_velocity_kernel(
         inv_mass = bodies.inverse_mass[b]
         if inv_mass == 0.0:
             return
-        v_pred = bodies.velocity[b] + bodies.force[b] * (inv_mass * step_dt)
-        w_pred = bodies.angular_velocity[b] + (bodies.inverse_inertia_world[b] * bodies.torque[b]) * step_dt
+        force = bodies.force[b]
+        torque = bodies.torque[b]
+        v_pred = bodies.velocity[b] + force * (inv_mass * step_dt)
+        w_pred = bodies.angular_velocity[b] + (bodies.inverse_inertia_world[b] * torque) * step_dt
     else:
         # KINEMATIC: inv_mass / inv_inertia are zero so external wrench
         # can't change velocity; use the inferred pose-derivative directly.
+        force = wp.vec3f(0.0)
+        torque = wp.vec3f(0.0)
         v_pred = bodies.velocity[b]
         w_pred = bodies.angular_velocity[b]
     score = wp.length(v_pred) + 0.5 * body_aabb_diagonal[b] * wp.length(w_pred)
+    # Treat explicit user wrench as an awake signal even when the
+    # acceleration estimate is below the sleep velocity threshold.
+    if wp.length_sq(force) > wp.float32(0.0) or wp.length_sq(torque) > wp.float32(0.0):
+        score = wp.max(score, sleeping_velocity_threshold)
     if score > island_max_velocity[island]:
         wp.atomic_max(island_max_velocity, island, score)
 
@@ -491,9 +500,13 @@ def _phoenx_self_wake_fanin_kernel(
     inv_mass = bodies.inverse_mass[b]
     if inv_mass == 0.0:
         return
-    v_pred = bodies.velocity[b] + bodies.force[b] * (inv_mass * step_dt)
-    w_pred = bodies.angular_velocity[b] + (bodies.inverse_inertia_world[b] * bodies.torque[b]) * step_dt
+    force = bodies.force[b]
+    torque = bodies.torque[b]
+    v_pred = bodies.velocity[b] + force * (inv_mass * step_dt)
+    w_pred = bodies.angular_velocity[b] + (bodies.inverse_inertia_world[b] * torque) * step_dt
     score = wp.length(v_pred) + 0.5 * body_aabb_diagonal[b] * wp.length(w_pred)
+    if wp.length_sq(force) > wp.float32(0.0) or wp.length_sq(torque) > wp.float32(0.0):
+        score = wp.max(score, sleeping_velocity_threshold)
     if score >= sleeping_velocity_threshold:
         wp.atomic_max(wake_flag, root, wp.int32(1))
 

@@ -316,13 +316,14 @@ class TestSleepingPipeline(unittest.TestCase):
             msg="box must be sleeping before the wake test",
         )
 
-        # Apply a +z force big enough that the predicted dv (F * invm * dt)
-        # clears the sleep threshold. For a 0.2 m cube at density 1000 the
-        # mass is 8 kg; force = 50 N gives dv = 50/8/60 ≈ 0.104 m/s > 0.05.
+        # Apply a deliberately small +z force whose predicted dv
+        # (F * invm * dt) stays below the sleep threshold. Explicit user
+        # force is still a wake request; otherwise near-static picking
+        # can leave a body asleep until the spring grows large enough.
         # body_f spatial-vector layout (matching the PhoenX import kernel)
         # is (force_xyz, torque_xyz); index 2 is force_z.
         body_f = np.zeros((1, 6), dtype=np.float32)
-        body_f[0, 2] = 50.0
+        body_f[0, 2] = 1.0
         state_0.body_f.assign(body_f)
 
         # Step manually to skip the ``clear_forces`` at the top of
@@ -334,6 +335,60 @@ class TestSleepingPipeline(unittest.TestCase):
             _is_sleeping(solver, 1),
             0,
             msg="external force via state.body_f must wake the sleeping island",
+        )
+
+    def test_small_external_force_prevents_resleep(self) -> None:
+        """A latched user force must keep an awake island from going
+        back to sleep even when instantaneous motion is below the sleep
+        threshold.
+
+        This covers the square-tower pick path: after one tower wakes,
+        the picking spring can become nearly static. The old sleeping
+        score let the island consume its final hysteresis tick and go
+        back to sleep while the pick was still active, dropping contacts
+        for a frame and causing a later local blow-up.
+        """
+        model = _make_box_on_plane(box_z=0.1)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=1,
+            solver_iterations=1,
+            step_layout="single_world",
+            sleeping_velocity_threshold=0.05,
+            sleeping_frames_required=10,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        contacts = model.contacts()
+
+        # Put the body one quiet frame away from sleeping, then apply a
+        # deliberately small user force. Old code treated only the
+        # resulting dv as the sleep score, so this below-threshold force
+        # still allowed the body to sleep.
+        roots = solver.world.bodies.island_root.numpy()
+        roots[1] = -1
+        solver.world.bodies.island_root.assign(roots)
+        counters = solver.world.bodies.frames_below_threshold.numpy()
+        counters[1] = 9
+        solver.world.bodies.frames_below_threshold.assign(counters)
+
+        body_f = np.zeros((1, 6), dtype=np.float32)
+        body_f[0, 0] = 1.0
+        state_0.body_f.assign(body_f)
+
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, 1.0 / 60.0)
+
+        self.assertEqual(
+            _is_sleeping(solver, 1),
+            0,
+            msg="body under an explicit user force must not re-sleep",
+        )
+        self.assertEqual(
+            int(solver.world.bodies.frames_below_threshold.numpy()[1]),
+            0,
+            msg="external force should reset the sleep hysteresis counter",
         )
 
     def test_external_force_wakes_full_stack_via_pre_collide_pass(self) -> None:

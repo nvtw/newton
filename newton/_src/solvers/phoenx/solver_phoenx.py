@@ -3114,6 +3114,7 @@ class PhoenXWorld:
                 self._body_aabb_diagonal,
                 self._island_builder.set_nr,
                 wp.float32(self.step_dt),
+                wp.float32(self._sleeping_velocity_threshold),
             ],
             outputs=[self._island_max_velocity],
             device=self.device,
