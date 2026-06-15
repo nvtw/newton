@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    DRIVE_MODE_OFF,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
     JOINT_MODE_CYLINDRICAL,
@@ -76,6 +77,39 @@ def joint_constraint_row_count(joint_mode: int) -> int:
     return 0
 
 
+def joint_drive_row_count(
+    joint_mode: int,
+    drive_mode: int,
+    stiffness_drive: float,
+    damping_drive: float,
+) -> int:
+    """Return the DVI axial drive row count for a PhoenX ADBS joint.
+
+    The direct solve stores all rows for one joint in a six-row block. Driven
+    revolute, prismatic, and universal joints have enough room for one scalar
+    axial row in addition to their equality rows. Limit rows remain projected
+    iterative constraints until the DVI path grows inequality support.
+
+    Args:
+        joint_mode: One of the PhoenX ``JOINT_MODE_*`` integer tags.
+        drive_mode: One of the PhoenX ``DRIVE_MODE_*`` integer tags.
+        stiffness_drive: Position-drive stiffness.
+        damping_drive: Velocity-drive damping.
+
+    Returns:
+        ``1`` when the DVI topology should allocate an axial drive row,
+        otherwise ``0``.
+    """
+    mode = int(joint_mode)
+    if mode not in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC), int(JOINT_MODE_UNIVERSAL)):
+        return 0
+    if int(drive_mode) == int(DRIVE_MODE_OFF):
+        return 0
+    if float(stiffness_drive) <= 0.0 and float(damping_drive) <= 0.0:
+        return 0
+    return 1
+
+
 def _normalize_static_bodies(
     bodies: np.ndarray,
     static_body_indices: Iterable[int] | np.ndarray | None,
@@ -106,8 +140,9 @@ class ArticulationTopology:
         body2: Normalized child body per PhoenX joint. Static bodies are
             represented by ``-1``.
         joint_mode: PhoenX joint mode per joint.
-        row_counts: Hard equality row count per joint.
-        active_joint_indices: Raw joint indices with at least one equality row.
+        row_counts: DVI row count per joint, including enabled axial drive rows.
+        drive_row_mask: Whether each joint contributes an axial drive row.
+        active_joint_indices: Raw joint indices with at least one DVI row.
         active_row_counts: Row counts for active joints in active-block order.
         active_block_offsets: Prefix sum of ``active_row_counts``.
         row_to_active_block: Compact row to active block index.
@@ -118,6 +153,7 @@ class ArticulationTopology:
     body2: np.ndarray
     joint_mode: np.ndarray
     row_counts: np.ndarray
+    drive_row_mask: np.ndarray
     active_joint_indices: np.ndarray
     active_row_counts: np.ndarray
     active_block_offsets: np.ndarray
@@ -133,6 +169,9 @@ class ArticulationTopology:
         *,
         static_body_indices: Iterable[int] | np.ndarray | None = None,
         enabled_joint_mask: np.ndarray | None = None,
+        drive_mode: np.ndarray | None = None,
+        stiffness_drive: np.ndarray | None = None,
+        damping_drive: np.ndarray | None = None,
     ) -> ArticulationTopology:
         """Create topology from PhoenX joint init arrays.
 
@@ -144,6 +183,10 @@ class ArticulationTopology:
             enabled_joint_mask: Optional mask selecting the joint columns
                 owned by the articulation DVI solve. Disabled columns keep
                 their raw topology but contribute zero rows.
+            drive_mode: Optional per-joint drive mode. Driven revolute,
+                prismatic, and universal joints get one axial drive row.
+            stiffness_drive: Optional per-joint drive stiffness.
+            damping_drive: Optional per-joint drive damping.
 
         Returns:
             Compact topology with static bodies normalized to ``-1``.
@@ -158,12 +201,46 @@ class ArticulationTopology:
                 f"got {body1_np.shape}, {body2_np.shape}, {mode_np.shape}"
             )
 
-        row_counts = np.asarray([joint_constraint_row_count(mode) for mode in mode_np], dtype=np.int32)
+        equality_row_counts = np.asarray([joint_constraint_row_count(mode) for mode in mode_np], dtype=np.int32)
+        drive_row_mask = np.zeros_like(equality_row_counts, dtype=bool)
+        if drive_mode is not None:
+            drive_np = np.asarray(drive_mode, dtype=np.int32)
+            if drive_np.shape != equality_row_counts.shape:
+                raise ValueError(f"drive_mode must have shape {equality_row_counts.shape}, got {drive_np.shape}")
+            stiffness_np = (
+                np.zeros_like(equality_row_counts, dtype=np.float32)
+                if stiffness_drive is None
+                else np.asarray(stiffness_drive, dtype=np.float32)
+            )
+            damping_np = (
+                np.zeros_like(equality_row_counts, dtype=np.float32)
+                if damping_drive is None
+                else np.asarray(damping_drive, dtype=np.float32)
+            )
+            if stiffness_np.shape != equality_row_counts.shape:
+                raise ValueError(
+                    f"stiffness_drive must have shape {equality_row_counts.shape}, got {stiffness_np.shape}"
+                )
+            if damping_np.shape != equality_row_counts.shape:
+                raise ValueError(f"damping_drive must have shape {equality_row_counts.shape}, got {damping_np.shape}")
+            drive_rows = np.asarray(
+                [
+                    joint_drive_row_count(mode, drive, stiffness, damping)
+                    for mode, drive, stiffness, damping in zip(mode_np, drive_np, stiffness_np, damping_np, strict=True)
+                ],
+                dtype=np.int32,
+            )
+            drive_row_mask = drive_rows.astype(bool)
+            row_counts = equality_row_counts + drive_rows
+        else:
+            row_counts = equality_row_counts.copy()
+
         if enabled_joint_mask is not None:
             mask = np.asarray(enabled_joint_mask, dtype=bool)
             if mask.shape != row_counts.shape:
                 raise ValueError(f"enabled_joint_mask must have shape {row_counts.shape}, got {mask.shape}")
             row_counts = np.where(mask, row_counts, 0).astype(np.int32)
+            drive_row_mask = np.logical_and(drive_row_mask, mask)
         active_joint_indices = np.nonzero(row_counts > 0)[0].astype(np.int32)
         active_row_counts = row_counts[active_joint_indices].astype(np.int32)
         active_block_offsets = np.zeros(active_row_counts.size + 1, dtype=np.int32)
@@ -181,6 +258,7 @@ class ArticulationTopology:
             body2=body2_np,
             joint_mode=mode_np,
             row_counts=row_counts,
+            drive_row_mask=drive_row_mask.astype(bool),
             active_joint_indices=active_joint_indices,
             active_row_counts=active_row_counts,
             active_block_offsets=active_block_offsets,

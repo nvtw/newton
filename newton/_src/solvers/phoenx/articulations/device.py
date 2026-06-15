@@ -10,11 +10,21 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer, read_int, read_vec3
+from newton._src.solvers.phoenx.constraints.constraint_container import (
+    ConstraintContainer,
+    read_float,
+    read_int,
+    read_quat,
+    read_vec3,
+    write_float,
+    write_int,
+)
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_AXIS_LOCAL1,
     _OFF_BODY1,
     _OFF_BODY2,
+    _OFF_DRIVE_MODE,
+    _OFF_INV_INITIAL_ORIENTATION,
     _OFF_JOINT_MODE,
     _OFF_LA1_B1,
     _OFF_LA1_B2,
@@ -22,6 +32,11 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_LA2_B2,
     _OFF_LA3_B1,
     _OFF_LA3_B2,
+    _OFF_PREVIOUS_QUATERNION_ANGLE,
+    _OFF_REVOLUTION_COUNTER,
+    _OFF_TARGET,
+    _OFF_TARGET_VELOCITY,
+    DRIVE_MODE_POSITION,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
     JOINT_MODE_CYLINDRICAL,
@@ -30,6 +45,11 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
+)
+from newton._src.solvers.phoenx.helpers.math_helpers import (
+    extract_rotation_angle,
+    revolution_tracker_angle,
+    revolution_tracker_update,
 )
 
 from .symbolic import BlockSparseSymbolic, compute_block_sparse_symbolic
@@ -51,6 +71,7 @@ class ArticulationDeviceSystem:
     row_to_active_block: wp.array
     jacobian: wp.array
     violation: wp.array
+    velocity_target: wp.array
     matrix: wp.array
     rhs: wp.array
     solution: wp.array
@@ -168,6 +189,7 @@ class ArticulationDeviceSystem:
             row_to_active_block=wp.array(row_to_block_np, dtype=wp.int32, device=device),
             jacobian=wp.zeros((rows_alloc, 12), dtype=wp.float32, device=device),
             violation=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
+            velocity_target=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             matrix=wp.zeros((rows_alloc, rows_alloc), dtype=wp.float32, device=device),
             rhs=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             solution=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
@@ -225,7 +247,7 @@ class ArticulationDeviceSystem:
                 self.active_block_offsets,
                 wp.int32(self.active_joint_count),
             ],
-            outputs=[self.jacobian, self.violation],
+            outputs=[self.jacobian, self.violation, self.velocity_target],
             device=device,
         )
 
@@ -330,6 +352,7 @@ class ArticulationDeviceSystem:
             inputs=[
                 self.jacobian,
                 self.violation,
+                self.velocity_target,
                 self.body1,
                 self.body2,
                 self.row_to_active_block,
@@ -520,6 +543,7 @@ def _populate_adbs_articulation_rows_kernel(
     active_joint_count: wp.int32,
     jacobian: wp.array2d[wp.float32],
     violation: wp.array[wp.float32],
+    velocity_target: wp.array[wp.float32],
 ):
     block = wp.tid()
     if block >= active_joint_count:
@@ -528,7 +552,7 @@ def _populate_adbs_articulation_rows_kernel(
     cid = active_joint_indices[block]
     row0 = active_block_offsets[block]
     row_count = active_block_offsets[block + 1] - row0
-    _clear_joint_rows(row0, row_count, jacobian, violation)
+    _clear_joint_rows(row0, row_count, jacobian, violation, velocity_target)
 
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
@@ -587,6 +611,35 @@ def _populate_adbs_articulation_rows_kernel(
     elif mode == JOINT_MODE_PLANAR:
         _fill_spatial_row(row0, axis_parent, r1_b1, r1_b2, wp.dot(a1_b2 - a1_b1, axis_parent), jacobian, violation)
         _fill_perpendicular_rotation_rows(row0 + 1, tangent0, tangent1, swing_error, jacobian, violation)
+
+    equality_rows = _adbs_equality_row_count(mode)
+    if row_count > equality_rows:
+        drive_row = row0 + equality_rows
+        drive_mode = read_int(constraints, _OFF_DRIVE_MODE, cid)
+        target = read_float(constraints, _OFF_TARGET, cid)
+        target_velocity = read_float(constraints, _OFF_TARGET_VELOCITY, cid)
+        velocity_target[drive_row] = target_velocity
+
+        if mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_UNIVERSAL:
+            axis_drive = _safe_normalize(wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)), axis_parent)
+            inv_init = read_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid)
+            diff = q2 * inv_init * wp.quat_inverse(q1)
+            new_q_angle = extract_rotation_angle(diff, axis_drive)
+            old_counter = read_int(constraints, _OFF_REVOLUTION_COUNTER, cid)
+            old_prev = read_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+            new_counter, new_prev = revolution_tracker_update(new_q_angle, old_counter, old_prev)
+            write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, new_counter)
+            write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, new_prev)
+            drive_error = wp.float32(0.0)
+            if drive_mode == DRIVE_MODE_POSITION:
+                drive_error = revolution_tracker_angle(new_counter, new_prev) - target
+            _fill_angular_row(drive_row, axis_drive, drive_error, jacobian, violation)
+        elif mode == JOINT_MODE_PRISMATIC:
+            axis_drive = _safe_normalize(wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)), axis_parent)
+            drive_error = wp.float32(0.0)
+            if drive_mode == DRIVE_MODE_POSITION:
+                drive_error = wp.dot(axis_drive, a1_b2 - a1_b1) - target
+            _fill_spatial_row(drive_row, axis_drive, r1_b1, r1_b2, drive_error, jacobian, violation)
 
 
 @wp.kernel
@@ -710,6 +763,7 @@ def _assemble_block_sparse_articulation_off_kernel(
 def _compute_articulation_residual_kernel(
     jacobian: wp.array2d[wp.float32],
     violation: wp.array[wp.float32],
+    velocity_target: wp.array[wp.float32],
     body1: wp.array[wp.int32],
     body2: wp.array[wp.int32],
     row_to_active_block: wp.array[wp.int32],
@@ -738,7 +792,7 @@ def _compute_articulation_residual_kernel(
     if recovery_speed > wp.float32(0.0):
         baumgarte = wp.clamp(baumgarte, -recovery_speed, recovery_speed)
 
-    rhs[row] = -(residual + baumgarte)
+    rhs[row] = -(residual - velocity_target[row] + baumgarte)
 
 
 @wp.kernel
@@ -1059,11 +1113,33 @@ def _articulation_matrix_entry(
 
 
 @wp.func
+def _adbs_equality_row_count(mode: wp.int32) -> wp.int32:
+    if mode == JOINT_MODE_REVOLUTE:
+        return wp.int32(5)
+    if mode == JOINT_MODE_PRISMATIC:
+        return wp.int32(5)
+    if mode == JOINT_MODE_BALL_SOCKET:
+        return wp.int32(3)
+    if mode == JOINT_MODE_FIXED:
+        return wp.int32(6)
+    if mode == JOINT_MODE_CABLE:
+        return wp.int32(3)
+    if mode == JOINT_MODE_UNIVERSAL:
+        return wp.int32(4)
+    if mode == JOINT_MODE_CYLINDRICAL:
+        return wp.int32(4)
+    if mode == JOINT_MODE_PLANAR:
+        return wp.int32(3)
+    return wp.int32(0)
+
+
+@wp.func
 def _clear_joint_rows(
     row0: wp.int32,
     row_count: wp.int32,
     jacobian: wp.array2d[wp.float32],
     violation: wp.array[wp.float32],
+    velocity_target: wp.array[wp.float32],
 ):
     local = wp.int32(0)
     while local < row_count:

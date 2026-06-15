@@ -1767,7 +1767,13 @@ class PhoenXWorld:
         if mode_np is not None and mode_np.size > 0:
             self._use_revolute_specialization = bool((mode_np == int(JOINT_MODE_REVOLUTE)).all())
         self._cache_prefactorized_articulation_topology(
-            body1, body2, joint_mode, articulation_joint_mask=articulation_joint_mask
+            body1,
+            body2,
+            joint_mode,
+            drive_mode=drive_mode,
+            stiffness_drive=stiffness_drive,
+            damping_drive=damping_drive,
+            articulation_joint_mask=articulation_joint_mask,
         )
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
@@ -1813,6 +1819,9 @@ class PhoenXWorld:
         body2: wp.array,
         joint_mode: wp.array,
         *,
+        drive_mode: wp.array | None = None,
+        stiffness_drive: wp.array | None = None,
+        damping_drive: wp.array | None = None,
         articulation_joint_mask: wp.array | None = None,
     ) -> None:
         """Cache topology-only DVI articulation data from joint init arrays.
@@ -1831,6 +1840,9 @@ class PhoenXWorld:
             joint_mode_np = joint_mode.numpy()
             inverse_mass_np = self.bodies.inverse_mass.numpy()
             joint_mask_np = articulation_joint_mask.numpy() if articulation_joint_mask is not None else None
+            drive_mode_np = drive_mode.numpy() if drive_mode is not None else None
+            stiffness_drive_np = stiffness_drive.numpy() if stiffness_drive is not None else None
+            damping_drive_np = damping_drive.numpy() if damping_drive is not None else None
         except Exception:
             return
 
@@ -1852,12 +1864,20 @@ class PhoenXWorld:
             self._joint_pgs_enabled.assign(pgs_enabled)
 
         static_body_indices = np.nonzero(inverse_mass_np <= 0.0)[0].astype(np.int32)
+        if not self.articulation_dvi_replaces_joint_pgs:
+            drive_mode_np = None
+            stiffness_drive_np = None
+            damping_drive_np = None
+
         topology = ArticulationTopology.from_host(
             body1_np,
             body2_np,
             joint_mode_np,
             static_body_indices=static_body_indices,
             enabled_joint_mask=joint_mask_np,
+            drive_mode=drive_mode_np,
+            stiffness_drive=stiffness_drive_np,
+            damping_drive=damping_drive_np,
         )
         self.articulation_topology = topology
         self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)

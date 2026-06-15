@@ -22,7 +22,7 @@ from .joint_rows import (
 )
 from .symbolic import BlockSparseSymbolic, ConstraintGraph, compute_block_sparse_symbolic
 from .system import PrefactorizedArticulationSystem
-from .topology import ArticulationTopology, d6_constraint_row_count, joint_constraint_row_count
+from .topology import ArticulationTopology, d6_constraint_row_count, joint_constraint_row_count, joint_drive_row_count
 
 __all__ = [
     "ArticulationDeviceSystem",
@@ -41,6 +41,7 @@ __all__ = [
     "factorize_ldlt",
     "fixed_rows",
     "joint_constraint_row_count",
+    "joint_drive_row_count",
     "orthonormal_pair",
     "prismatic_rows",
     "regularize_diagonal",
