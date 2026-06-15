@@ -568,6 +568,7 @@ class PhoenXWorld:
         enable_column_timers: bool = False,
         articulation_dvi_host: bool = False,
         articulation_dvi_replaces_joint_pgs: bool | None = None,
+        articulation_dvi_host_solver: str = "block_sparse",
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
@@ -589,6 +590,9 @@ class PhoenXWorld:
                 joint CIDs in the coloring/contact layout but skips joint PGS
                 dispatches so the DVI articulation solve owns those rows.
                 Defaults to the value of ``articulation_dvi_host``.
+            articulation_dvi_host_solver: Host validation numeric solve method:
+                ``"block_sparse"`` uses the prefactorized block LDLT path,
+                while ``"dense"`` uses the dense LDLT fallback.
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``"auto"``
@@ -811,6 +815,9 @@ class PhoenXWorld:
         self.articulation_dvi_replaces_joint_pgs: bool = bool(articulation_dvi_replaces_joint_pgs)
         if self.articulation_dvi_replaces_joint_pgs and not self.articulation_dvi_host:
             raise ValueError("articulation_dvi_replaces_joint_pgs requires articulation_dvi_host=True")
+        self.articulation_dvi_host_solver: str = self._normalize_articulation_dvi_host_solver(
+            articulation_dvi_host_solver
+        )
         # Topology-only full-coordinate articulation system. Built at joint
         # initialization and reused by the DVI articulation path as it is
         # brought online.
@@ -1822,12 +1829,22 @@ class PhoenXWorld:
         self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)
         self.articulation_device_system = ArticulationDeviceSystem.from_topology(topology, self.device)
 
+    @staticmethod
+    def _normalize_articulation_dvi_host_solver(value: str) -> str:
+        normalized = str(value).strip().lower().replace("-", "_")
+        if normalized in {"block_sparse", "block_sparse_ldlt", "sparse_ldl", "sparse_ldlt"}:
+            return "block_sparse"
+        if normalized in {"dense", "dense_ldlt"}:
+            return "dense"
+        raise ValueError(f"articulation_dvi_host_solver must be 'block_sparse' or 'dense' (got {value!r})")
+
     def solve_articulations_dvi_host(
         self,
         dt: float | None = None,
         *,
         alpha: float = 0.0,
         recovery_speed: float = -1.0,
+        solver: str | None = None,
     ) -> bool:
         """Apply one host-validation DVI solve for cached articulation rows.
 
@@ -1866,7 +1883,8 @@ class PhoenXWorld:
         matrix = device_system.matrix.numpy()[:total_rows, :total_rows]
         rhs = device_system.rhs.numpy()[:total_rows]
         self.articulation_system.factorize_dense_matrix(matrix)
-        solution = self.articulation_system.solve(rhs).astype(np.float32)
+        solve_method = self.articulation_dvi_host_solver if solver is None else solver
+        solution = self.articulation_system.solve_prefactorized(rhs, method=solve_method).astype(np.float32)
         device_system.solution.assign(solution)
         device_system.apply_solution(
             self.bodies,

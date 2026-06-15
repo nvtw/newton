@@ -208,6 +208,8 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         expected_solution = np.linalg.solve(expected, rhs)
         np.testing.assert_allclose(system.solve(rhs), expected_solution)
         np.testing.assert_allclose(system.solve_block_sparse(rhs), expected_solution)
+        np.testing.assert_allclose(system.solve_prefactorized(rhs), expected_solution)
+        np.testing.assert_allclose(system.solve_prefactorized(rhs, method="dense"), expected_solution)
 
     def test_revolute_row_builder_signs(self):
         rows = revolute_rows(
@@ -309,6 +311,8 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         moved_positions = np.array([[0.0, 0.0, 0.0], [0.2, -0.1, 0.05]], dtype=np.float32)
         world.bodies.position.assign(moved_positions)
 
+        self.assertEqual(world.articulation_dvi_host_solver, "block_sparse")
+
         solved = world.solve_articulations_dvi_host(dt=0.1, alpha=0.0)
 
         self.assertTrue(solved)
@@ -327,6 +331,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         )
         world.bodies.position.assign(np.array([[0.0, 0.0, 0.0], [0.2, -0.1, 0.05]], dtype=np.float32))
 
+        self.assertEqual(world.articulation_dvi_host_solver, "block_sparse")
         self.assertTrue(world.articulation_dvi_replaces_joint_pgs)
         self.assertTrue(world._dispatch_specialization_flags()["skip_joint_pgs"])
 
@@ -373,11 +378,13 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
             world_kwargs={
                 "articulation_dvi_host": True,
                 "articulation_dvi_replaces_joint_pgs": False,
+                "articulation_dvi_host_solver": "dense",
                 "velocity_iterations": 0,
                 "gravity": (0.0, 0.0, 0.0),
             },
         )
 
+        self.assertEqual(world.articulation_dvi_host_solver, "dense")
         self.assertFalse(world.articulation_dvi_replaces_joint_pgs)
         self.assertFalse(world._dispatch_specialization_flags()["skip_joint_pgs"])
 

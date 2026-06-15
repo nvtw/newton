@@ -139,6 +139,24 @@ class PrefactorizedArticulationSystem:
             raise RuntimeError("factorize_from_jacobian() must be called before solve_block_sparse()")
         return self.block_sparse_factorization.solve(rhs)
 
+    def solve_prefactorized(self, rhs: np.ndarray, *, method: str = "block_sparse") -> np.ndarray:
+        """Solve with a selected host validation factorization.
+
+        Args:
+            rhs: Right-hand side in compact original row order.
+            method: ``"block_sparse"`` uses the symbolic block factorization;
+                ``"dense"`` uses the dense LDLT validation factorization.
+
+        Returns:
+            Solution in compact original row order.
+        """
+        normalized = str(method).strip().lower().replace("-", "_")
+        if normalized in {"block_sparse", "block_sparse_ldlt", "sparse_ldl", "sparse_ldlt"}:
+            return self.solve_block_sparse(rhs)
+        if normalized in {"dense", "dense_ldlt"}:
+            return self.solve(rhs)
+        raise ValueError(f"unknown articulation solve method {method!r}")
+
 
 def _body_metric_dot(
     body: int,
