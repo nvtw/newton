@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_STIFFNESS_DRIVE,
     _OFF_TARGET,
     _OFF_TARGET_VELOCITY,
+    JOINT_MODE_CABLE,
 )
 from newton._src.solvers.phoenx.model_adapter import (
     AdbsInitArrays,
@@ -463,16 +464,17 @@ class SolverPhoenX(SolverBase):
 
         mask = np.ones(num_columns, dtype=np.int32)
         joint_articulation = getattr(model, "joint_articulation", None)
-        if joint_articulation is None:
-            return wp.array(mask, dtype=wp.int32, device=self.device)
+        if joint_articulation is not None:
+            joint_articulation_np = joint_articulation.numpy()
+            joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+            mask.fill(0)
+            for joint_index, cid in enumerate(joint_idx_to_cid):
+                cid_int = int(cid)
+                if cid_int >= 0 and int(joint_articulation_np[joint_index]) >= 0:
+                    mask[cid_int] = 1
 
-        joint_articulation_np = joint_articulation.numpy()
-        joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
-        mask.fill(0)
-        for joint_index, cid in enumerate(joint_idx_to_cid):
-            cid_int = int(cid)
-            if cid_int >= 0 and int(joint_articulation_np[joint_index]) >= 0:
-                mask[cid_int] = 1
+        joint_mode_np = self._adbs.joint_mode.numpy()
+        mask[joint_mode_np == int(JOINT_MODE_CABLE)] = 0
         return wp.array(mask, dtype=wp.int32, device=self.device)
 
     def _bake_joint_armature_into_body_inertia(self, model: Model) -> None:

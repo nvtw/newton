@@ -913,6 +913,57 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertTrue(solver.world.articulation_dvi_replaces_joint_pgs)
         self.assertEqual(int(solver.world.articulation_topology.active_joint_count), 1)
 
+    def test_solver_phoenx_keeps_cable_joints_in_pgs(self):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        anchor = builder.add_link(
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()),
+            mass=1.0,
+            inertia=((0.01, 0.0, 0.0), (0.0, 0.01, 0.0), (0.0, 0.0, 0.01)),
+        )
+        fixed = builder.add_joint_fixed(
+            parent=-1,
+            child=anchor,
+            parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()),
+            child_xform=wp.transform_identity(),
+        )
+        bob = builder.add_link(
+            xform=wp.transform_identity(),
+            mass=1.0,
+            inertia=((0.01, 0.0, 0.0), (0.0, 0.01, 0.0), (0.0, 0.0, 0.01)),
+        )
+        cable = builder.add_joint_cable(
+            parent=anchor,
+            child=bob,
+            parent_xform=wp.transform_identity(),
+            child_xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()),
+            stretch_stiffness=1.0e9,
+            stretch_damping=0.0,
+            bend_stiffness=10.0,
+            bend_damping=1.0,
+        )
+        builder.add_articulation([fixed, cable])
+        builder.gravity = 0.0
+        model = builder.finalize()
+
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+            articulation_dvi=True,
+            articulation_dvi_solver="device_block_sparse",
+        )
+
+        modes = solver._adbs.joint_mode.numpy()
+        cable_cid = int(np.nonzero(modes == int(JOINT_MODE_CABLE))[0][0])
+        dvi_mask = solver.world.articulation_dvi_joint_mask
+        self.assertIsNotNone(dvi_mask)
+        self.assertEqual(int(dvi_mask[cable_cid]), 0)
+        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[cable_cid]), 1)
+        self.assertTrue(solver.world._dispatch_specialization_flags()["selective_joint_pgs"])
+        self.assertEqual(solver.world.articulation_topology.active_joint_count, 1)
+
     def test_solver_phoenx_d6_limits_populate_articulation_dvi_topology(self):
         cases = (
             (
