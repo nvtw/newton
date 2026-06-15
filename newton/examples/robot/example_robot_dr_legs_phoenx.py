@@ -511,19 +511,17 @@ class Example:
         parser.add_argument(
             "--sim-substeps",
             type=int,
-            default=80,
+            default=40,
             help=(
                 "PhoenX internal PGS substeps per ``solver.step`` call."
                 " The asset has ~6 g parallel-rod / ankle-bracket bodies"
                 " with min principal inertia ~2e-7 kg.m^2. The actuated"
-                " joints carry a ``--armature`` rotor (0.011 kg.m^2 by"
-                " default) that dominates the drive PD inertia, but the"
+                " joints use a small ``--armature`` rotor, while the"
                 " unactuated parallel-rod / ankle-bracket loop closers"
-                " run on the raw body inertia and set the CFL bound."
-                " At fps=60 the substep dt is ``1/(fps * substeps)``"
-                " so the default 1/(60*80) = 0.21 ms keeps the rod"
-                " chain stable; below ~40 substeps the iterates"
-                " overshoot and the chain blows up within seconds."
+                " still run on the raw body inertia and set the stiffest"
+                " local timestep bound. At fps=60 the default gives a"
+                " 0.42 ms substep and is validated by the walking"
+                " regression."
             ),
         )
         parser.add_argument(
@@ -544,19 +542,22 @@ class Example:
             default="auto",
             help=(
                 "Refresh PhoenX prepared row data every N internal substeps,"
-                " or 'auto' for the benchmark-tuned default. Use 1 to match"
-                " the conservative legacy path."
+                " or 'auto' for the graph-capture-safe default. Auto keeps"
+                " rigid contact worlds at a refresh stride of at most 3 and"
+                " is the validated Dr Legs default."
             ),
         )
         parser.add_argument(
             "--armature",
             type=float,
-            default=0.001,  # 0.011,
+            default=0.001,  # 0.011 is the physical XH540 reflected rotor inertia.
             help=(
                 "Per-joint axial armature [kg*m^2] applied as the"
-                " builder default. 0.011 is the Dynamixel XH540-V150"
-                " reflected rotor inertia used as the DR Legs drive,"
-                " matching the kamino reference example (``a_j``)."
+                " builder default. 0.001 is the validated PhoenX walking"
+                " setting. 0.011 is the Dynamixel XH540-V150 reflected"
+                " rotor inertia used by the Kamino reference example"
+                " (``a_j``), but needs a more robust PhoenX armature path"
+                " before it is a low-substep default."
             ),
         )
         parser.add_argument(

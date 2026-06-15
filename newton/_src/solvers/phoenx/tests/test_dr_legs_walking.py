@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Walking DR Legs regression for ``SolverPhoenX``.
+"""Walking DR Legs regressions for ``SolverPhoenX``.
 
-This pins the old single-world DR Legs settings that are known to walk:
-80 substeps, 8 solver iterations, 0.001 joint armature, and the bundled
-open-loop animation. The checks intentionally look at pelvis trajectory
-and uprightness, not just finite state, so soft/limp drive regressions
-fail even if the simulation remains numerically stable.
+These tests pin configurations that are known to walk with the bundled
+open-loop animation. They check pelvis trajectory and uprightness, not just
+finite state, so soft/limp drive regressions fail even if the simulation
+remains numerically stable.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs
 
 _PELVIS_LABEL = "/DR_Legs/RigidBodies/pelvis"
 _SAMPLE_FRAMES = (0, 120, 240, 360, 480, 600)
-_REFERENCE_PELVIS_XY = np.array(
+_REFERENCE_PELVIS_XY_80_SUBSTEPS = np.array(
     [
         [0.00210191, -0.00000001],
         [0.09024552, -0.07226246],
@@ -30,6 +29,17 @@ _REFERENCE_PELVIS_XY = np.array(
         [0.23876992, -0.01924408],
         [0.34276560, 0.02577228],
         [0.40250567, 0.01641181],
+    ],
+    dtype=np.float32,
+)
+_REFERENCE_PELVIS_XY_40_SUBSTEPS = np.array(
+    [
+        [0.00210191, -0.00000001],
+        [0.08991610, -0.06922619],
+        [0.17868425, 0.05219497],
+        [0.24254240, -0.04291271],
+        [0.32319218, -0.00230198],
+        [0.38382810, 0.07196540],
     ],
     dtype=np.float32,
 )
@@ -57,20 +67,28 @@ def _recover_model_state(handle) -> tuple[newton.Model, newton.State]:
 
 @unittest.skipUnless(wp.is_cuda_available(), "DR Legs PhoenX walking regression requires CUDA")
 class TestDrLegsWalking(unittest.TestCase):
-    """The restored DR Legs settings should walk and stay roughly upright."""
+    """DR Legs should walk and stay roughly upright."""
 
-    def test_single_dr_legs_walks_with_old_settings(self) -> None:
+    def _assert_single_dr_legs_walks(
+        self,
+        *,
+        substeps: int,
+        armature: float,
+        prepare_refresh_stride: int | str,
+        reference_pelvis_xy: np.ndarray,
+        min_up_z_limit: float = 0.85,
+    ) -> None:
         try:
             handle = dr_legs.build(
                 num_worlds=1,
                 solver_name="phoenx",
-                substeps=80,
+                substeps=substeps,
                 solver_iterations=8,
                 velocity_iterations=1,
                 animation=True,
-                armature=0.001,
+                armature=armature,
                 step_layout="multi_world",
-                prepare_refresh_stride="auto",
+                prepare_refresh_stride=prepare_refresh_stride,
             )
         except ImportError as e:
             raise unittest.SkipTest(f"DR Legs USD dependencies unavailable: {e}") from e
@@ -106,16 +124,32 @@ class TestDrLegsWalking(unittest.TestCase):
                 samples_xy.append(pelvis_q[:2].copy())
 
         samples_xy_np = np.asarray(samples_xy, dtype=np.float32)
-        xy_error = np.linalg.norm(samples_xy_np - _REFERENCE_PELVIS_XY, axis=1)
+        xy_error = np.linalg.norm(samples_xy_np - reference_pelvis_xy, axis=1)
         displacement = samples_xy_np[-1] - samples_xy_np[0]
 
         self.assertGreater(float(displacement[0]), 0.32, "DR Legs did not walk forward far enough")
         self.assertLess(abs(float(displacement[1])), 0.20, "DR Legs lateral drifted too far while walking")
         self.assertLess(float(np.max(xy_error)), 0.12, "DR Legs pelvis trajectory drifted from the walking reference")
-        self.assertGreater(min_up_z, 0.85, "DR Legs pelvis tipped too far from upright")
+        self.assertGreater(min_up_z, min_up_z_limit, "DR Legs pelvis tipped too far from upright")
         self.assertGreater(min_body_z, -0.02, "DR Legs body penetrated/fell below the ground tolerance")
         self.assertLess(max_abs_body_speed, 2.0, "DR Legs developed excessive body linear speed")
         self.assertLess(max_abs_joint_speed, 20.0, "DR Legs developed excessive joint speed")
+
+    def test_single_dr_legs_walks_with_old_settings(self) -> None:
+        self._assert_single_dr_legs_walks(
+            substeps=80,
+            armature=0.001,
+            prepare_refresh_stride="auto",
+            reference_pelvis_xy=_REFERENCE_PELVIS_XY_80_SUBSTEPS,
+        )
+
+    def test_single_dr_legs_walks_with_low_substeps(self) -> None:
+        self._assert_single_dr_legs_walks(
+            substeps=40,
+            armature=0.001,
+            prepare_refresh_stride="auto",
+            reference_pelvis_xy=_REFERENCE_PELVIS_XY_40_SUBSTEPS,
+        )
 
 
 if __name__ == "__main__":
