@@ -24,6 +24,10 @@ from newton._src.solvers.phoenx.articulations import (
     revolute_rows,
 )
 from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_STATIC, body_container_zeros
+from newton._src.solvers.phoenx.constraints.constraint_container import (
+    DEFAULT_DAMPING_RATIO,
+    DEFAULT_HERTZ_LIMIT,
+)
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_OFF,
     DRIVE_MODE_POSITION,
@@ -56,6 +60,10 @@ def _make_adbs_world(
     damping_drive_np: np.ndarray | None = None,
     min_np: np.ndarray | None = None,
     max_np: np.ndarray | None = None,
+    hertz_limit_np: np.ndarray | None = None,
+    damping_ratio_limit_np: np.ndarray | None = None,
+    stiffness_limit_np: np.ndarray | None = None,
+    damping_limit_np: np.ndarray | None = None,
     d6_limit_axis0_np: np.ndarray | None = None,
     d6_limit_axis1_np: np.ndarray | None = None,
     d6_limit_axis2_np: np.ndarray | None = None,
@@ -115,6 +123,14 @@ def _make_adbs_world(
         min_np = np.ones(joint_count, dtype=np.float32)
     if max_np is None:
         max_np = -np.ones(joint_count, dtype=np.float32)
+    if hertz_limit_np is None:
+        hertz_limit_np = zeros_np.copy()
+    if damping_ratio_limit_np is None:
+        damping_ratio_limit_np = zeros_np.copy()
+    if stiffness_limit_np is None:
+        stiffness_limit_np = zeros_np.copy()
+    if damping_limit_np is None:
+        damping_limit_np = zeros_np.copy()
     vector_zeros_np = np.zeros((joint_count, 3), dtype=np.float32)
     if d6_limit_axis0_np is None:
         d6_limit_axis0_np = vector_zeros_np.copy()
@@ -145,10 +161,10 @@ def _make_adbs_world(
         wp.array(damping_drive_np.astype(np.float32), dtype=wp.float32, device=device),
         wp.array(min_np, dtype=wp.float32, device=device),
         wp.array(max_np, dtype=wp.float32, device=device),
-        wp.array(zeros_np, dtype=wp.float32, device=device),
-        wp.array(zeros_np, dtype=wp.float32, device=device),
-        wp.array(zeros_np, dtype=wp.float32, device=device),
-        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(hertz_limit_np.astype(np.float32), dtype=wp.float32, device=device),
+        wp.array(damping_ratio_limit_np.astype(np.float32), dtype=wp.float32, device=device),
+        wp.array(stiffness_limit_np.astype(np.float32), dtype=wp.float32, device=device),
+        wp.array(damping_limit_np.astype(np.float32), dtype=wp.float32, device=device),
         d6_limit_axis0=wp.array(d6_limit_axis0_np.astype(np.float32), dtype=wp.vec3f, device=device),
         d6_limit_axis1=wp.array(d6_limit_axis1_np.astype(np.float32), dtype=wp.vec3f, device=device),
         d6_limit_axis2=wp.array(d6_limit_axis2_np.astype(np.float32), dtype=wp.vec3f, device=device),
@@ -747,6 +763,8 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
             world_kwargs={"articulation_dvi_host": True, "gravity": (0.0, 0.0, 0.0)},
             min_np=np.array([-1.0], dtype=np.float32),
             max_np=np.array([0.1], dtype=np.float32),
+            hertz_limit_np=np.array([float(DEFAULT_HERTZ_LIMIT)], dtype=np.float32),
+            damping_ratio_limit_np=np.array([float(DEFAULT_DAMPING_RATIO)], dtype=np.float32),
         )
         world.bodies.orientation.assign(
             np.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.24740396, 0.9689124]], dtype=np.float32)
@@ -755,9 +773,8 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertEqual(world.articulation_topology.total_rows, 6)
         self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
 
-        # The angle is ~0.5 rad and the upper stop is 0.1 rad, so the direct
-        # row targets roughly -4 rad/s to recover to the stop in one 0.1 s step.
-        self.assertLess(world.bodies.angular_velocity.numpy()[1, 2], -3.5)
+        self.assertLess(world.bodies.angular_velocity.numpy()[1, 2], -2.0)
+        np.testing.assert_allclose(world.articulation_device_system.row_regularization.numpy()[5], 0.0, atol=1.0e-6)
 
     def test_device_dvi_inactive_limit_row_does_not_lock_free_axis(self):
         device = wp.get_preferred_device()
@@ -791,13 +808,46 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
             damping_drive_np=np.array([1.0], dtype=np.float32),
             min_np=np.array([-1.0], dtype=np.float32),
             max_np=np.array([0.1], dtype=np.float32),
+            hertz_limit_np=np.array([float(DEFAULT_HERTZ_LIMIT)], dtype=np.float32),
+            damping_ratio_limit_np=np.array([float(DEFAULT_DAMPING_RATIO)], dtype=np.float32),
         )
         world.bodies.orientation.assign(
             np.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.24740396, 0.9689124]], dtype=np.float32)
         )
 
         self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
-        self.assertLess(world.bodies.angular_velocity.numpy()[1, 2], -3.5)
+        self.assertLess(world.bodies.angular_velocity.numpy()[1, 2], -2.0)
+
+    def test_device_dvi_pd_limit_row_adds_regularization(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_REVOLUTE)], dtype=np.int32),
+            world_kwargs={"articulation_dvi_host": True, "gravity": (0.0, 0.0, 0.0)},
+            min_np=np.array([-1.0], dtype=np.float32),
+            max_np=np.array([0.1], dtype=np.float32),
+            stiffness_limit_np=np.array([100.0], dtype=np.float32),
+        )
+        world.bodies.orientation.assign(
+            np.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.24740396, 0.9689124]], dtype=np.float32)
+        )
+
+        self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
+
+        np.testing.assert_allclose(
+            world.bodies.angular_velocity.numpy()[1],
+            np.array([0.0, 0.0, -2.0], dtype=np.float32),
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        )
+        np.testing.assert_allclose(
+            world.articulation_device_system.row_regularization.numpy()[5],
+            1.0,
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        )
 
     def test_device_dvi_active_ball_socket_d6_limit_row_clamps_velocity(self):
         device = wp.get_preferred_device()

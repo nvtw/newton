@@ -17,6 +17,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     read_int,
     read_quat,
     read_vec3,
+    soft_constraint_coefficients,
     write_float,
     write_int,
 )
@@ -32,7 +33,10 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_D6_LIMIT_LOWER,
     _OFF_D6_LIMIT_UPPER,
     _OFF_DAMPING_DRIVE,
+    _OFF_DAMPING_LIMIT,
+    _OFF_DAMPING_RATIO_LIMIT,
     _OFF_DRIVE_MODE,
+    _OFF_HERTZ_LIMIT,
     _OFF_INV_INITIAL_ORIENTATION,
     _OFF_JOINT_MODE,
     _OFF_LA1_B1,
@@ -46,6 +50,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_PREVIOUS_QUATERNION_ANGLE,
     _OFF_REVOLUTION_COUNTER,
     _OFF_STIFFNESS_DRIVE,
+    _OFF_STIFFNESS_LIMIT,
     _OFF_TARGET,
     _OFF_TARGET_VELOCITY,
     DRIVE_MODE_OFF,
@@ -66,7 +71,9 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
 )
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_BOOST_PRISMATIC_DRIVE,
+    PHOENX_BOOST_PRISMATIC_LIMIT,
     PHOENX_BOOST_REVOLUTE_DRIVE,
+    PHOENX_BOOST_REVOLUTE_LIMIT,
 )
 
 from .symbolic import BlockSparseSymbolic, compute_block_sparse_symbolic
@@ -650,6 +657,10 @@ def _populate_adbs_articulation_rows_kernel(
         target_velocity = read_float(constraints, _OFF_TARGET_VELOCITY, cid)
         min_value = read_float(constraints, _OFF_MIN_VALUE, cid)
         max_value = read_float(constraints, _OFF_MAX_VALUE, cid)
+        hertz_limit = read_float(constraints, _OFF_HERTZ_LIMIT, cid)
+        damping_ratio_limit = read_float(constraints, _OFF_DAMPING_RATIO_LIMIT, cid)
+        stiffness_limit = read_float(constraints, _OFF_STIFFNESS_LIMIT, cid)
+        damping_limit = read_float(constraints, _OFF_DAMPING_LIMIT, cid)
         drive_active = drive_mode != DRIVE_MODE_OFF and (stiffness_drive > 0.0 or damping_drive > 0.0)
 
         if mode == JOINT_MODE_REVOLUTE:
@@ -686,6 +697,24 @@ def _populate_adbs_articulation_rows_kernel(
                         velocity_target,
                         row_regularization,
                     )
+                else:
+                    _apply_axial_limit_row_softness(
+                        axial_row,
+                        mode,
+                        axial_error,
+                        hertz_limit,
+                        damping_ratio_limit,
+                        stiffness_limit,
+                        damping_limit,
+                        dt,
+                        b1,
+                        b2,
+                        jacobian,
+                        bodies,
+                        violation,
+                        velocity_target,
+                        row_regularization,
+                    )
         elif mode == JOINT_MODE_PRISMATIC:
             axis_drive = _safe_normalize(wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)), axis_parent)
             value = wp.dot(axis_drive, a1_b2 - a1_b1)
@@ -703,6 +732,24 @@ def _populate_adbs_articulation_rows_kernel(
                         drive_mode,
                         stiffness_drive,
                         damping_drive,
+                        dt,
+                        b1,
+                        b2,
+                        jacobian,
+                        bodies,
+                        violation,
+                        velocity_target,
+                        row_regularization,
+                    )
+                else:
+                    _apply_axial_limit_row_softness(
+                        axial_row,
+                        mode,
+                        axial_error,
+                        hertz_limit,
+                        damping_ratio_limit,
+                        stiffness_limit,
+                        damping_limit,
                         dt,
                         b1,
                         b2,
@@ -1359,6 +1406,42 @@ def _apply_axial_drive_row_softness(
     gamma, bias, _eff_mass_soft = pd_coefficients(stiffness_drive, damping_drive, drive_error, eff_inv, dt, boost)
     row_regularization[row] = gamma
     velocity_target[row] = -(bias - target_velocity)
+    violation[row] = wp.float32(0.0)
+
+
+@wp.func
+def _apply_axial_limit_row_softness(
+    row: wp.int32,
+    mode: wp.int32,
+    limit_error: wp.float32,
+    hertz_limit: wp.float32,
+    damping_ratio_limit: wp.float32,
+    stiffness_limit: wp.float32,
+    damping_limit: wp.float32,
+    dt: wp.float32,
+    b1: wp.int32,
+    b2: wp.int32,
+    jacobian: wp.array2d[wp.float32],
+    bodies: BodyContainer,
+    violation: wp.array[wp.float32],
+    velocity_target: wp.array[wp.float32],
+    row_regularization: wp.array[wp.float32],
+):
+    if dt <= wp.float32(0.0):
+        return
+
+    if stiffness_limit > wp.float32(0.0) or damping_limit > wp.float32(0.0):
+        eff_inv = _joint_row_effective_inverse(row, b1, b2, jacobian, bodies.inverse_mass, bodies.inverse_inertia_world)
+        boost = PHOENX_BOOST_REVOLUTE_LIMIT
+        if mode == JOINT_MODE_PRISMATIC:
+            boost = PHOENX_BOOST_PRISMATIC_LIMIT
+        gamma, bias, _eff_mass_soft = pd_coefficients(stiffness_limit, damping_limit, limit_error, eff_inv, dt, boost)
+        row_regularization[row] = gamma
+        velocity_target[row] = -bias
+    else:
+        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
+        velocity_target[row] = -limit_error * bias_rate
+
     violation[row] = wp.float32(0.0)
 
 
