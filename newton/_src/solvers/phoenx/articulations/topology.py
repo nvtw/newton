@@ -132,6 +132,7 @@ class ArticulationTopology:
         joint_mode: np.ndarray,
         *,
         static_body_indices: Iterable[int] | np.ndarray | None = None,
+        enabled_joint_mask: np.ndarray | None = None,
     ) -> ArticulationTopology:
         """Create topology from PhoenX joint init arrays.
 
@@ -140,6 +141,9 @@ class ArticulationTopology:
             body2: Child body index per joint.
             joint_mode: PhoenX ADBS joint mode per joint.
             static_body_indices: Body indices to treat as fixed world anchors.
+            enabled_joint_mask: Optional mask selecting the joint columns
+                owned by the articulation DVI solve. Disabled columns keep
+                their raw topology but contribute zero rows.
 
         Returns:
             Compact topology with static bodies normalized to ``-1``.
@@ -155,6 +159,11 @@ class ArticulationTopology:
             )
 
         row_counts = np.asarray([joint_constraint_row_count(mode) for mode in mode_np], dtype=np.int32)
+        if enabled_joint_mask is not None:
+            mask = np.asarray(enabled_joint_mask, dtype=bool)
+            if mask.shape != row_counts.shape:
+                raise ValueError(f"enabled_joint_mask must have shape {row_counts.shape}, got {mask.shape}")
+            row_counts = np.where(mask, row_counts, 0).astype(np.int32)
         active_joint_indices = np.nonzero(row_counts > 0)[0].astype(np.int32)
         active_row_counts = row_counts[active_joint_indices].astype(np.int32)
         active_block_offsets = np.zeros(active_row_counts.size + 1, dtype=np.int32)

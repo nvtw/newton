@@ -9,6 +9,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.articulations import (
     ArticulationDeviceSystem,
     ArticulationTopology,
@@ -42,6 +43,7 @@ def _make_adbs_world(
     *,
     positions_np: np.ndarray | None = None,
     world_kwargs: dict | None = None,
+    articulation_joint_mask_np: np.ndarray | None = None,
 ) -> PhoenXWorld:
     body_count = int(max(body1_np.max(initial=0), body2_np.max(initial=0)) + 1)
     joint_count = int(mode_np.size)
@@ -105,8 +107,30 @@ def _make_adbs_world(
         wp.array(zeros_np, dtype=wp.float32, device=device),
         wp.array(zeros_np, dtype=wp.float32, device=device),
         wp.array(zeros_np, dtype=wp.float32, device=device),
+        articulation_joint_mask=None
+        if articulation_joint_mask_np is None
+        else wp.array(articulation_joint_mask_np.astype(np.int32), dtype=wp.int32, device=device),
     )
     return world
+
+
+def _make_solver_pendulum_model() -> newton.Model:
+    builder = newton.ModelBuilder()
+    body = builder.add_link(
+        xform=wp.transform(p=wp.vec3(0.0, -1.0, 0.0), q=wp.quat_identity()),
+        mass=1.0,
+        inertia=((0.1, 0.0, 0.0), (0.0, 0.1, 0.0), (0.0, 0.0, 0.1)),
+    )
+    joint = builder.add_joint_revolute(
+        parent=-1,
+        child=body,
+        axis=(0.0, 0.0, 1.0),
+        parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
+        child_xform=wp.transform(p=wp.vec3(0.0, 1.0, 0.0), q=wp.quat_identity()),
+    )
+    builder.add_articulation([joint])
+    builder.gravity = 0.0
+    return builder.finalize()
 
 
 class TestPhoenXArticulationDVI(unittest.TestCase):
@@ -143,6 +167,18 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_array_equal(topology.active_row_counts, np.array([3, 5, 3], dtype=np.int32))
         np.testing.assert_array_equal(topology.active_block_offsets, np.array([0, 3, 8, 11], dtype=np.int32))
         self.assertEqual(topology.total_rows, 11)
+
+    def test_topology_joint_mask_excludes_loop_closures(self):
+        topology = ArticulationTopology.from_host(
+            np.array([0, 1, 2], dtype=np.int32),
+            np.array([1, 2, 0], dtype=np.int32),
+            np.full(3, int(JOINT_MODE_BALL_SOCKET), dtype=np.int32),
+            enabled_joint_mask=np.array([1, 1, 0], dtype=np.int32),
+        )
+
+        np.testing.assert_array_equal(topology.active_joint_indices, np.array([0, 1], dtype=np.int32))
+        np.testing.assert_array_equal(topology.active_row_counts, np.array([3, 3], dtype=np.int32))
+        self.assertEqual(topology.total_rows, 6)
 
     def test_symbolic_two_link_chain(self):
         symbolic = compute_block_sparse_symbolic(
@@ -486,6 +522,18 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
         np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
 
+    def test_partial_articulation_mask_rejects_joint_owner_mode(self):
+        device = wp.get_preferred_device()
+        with self.assertRaisesRegex(NotImplementedError, "selective joint PGS skipping"):
+            _make_adbs_world(
+                device,
+                np.array([0, 1], dtype=np.int32),
+                np.array([1, 2], dtype=np.int32),
+                np.array([int(JOINT_MODE_BALL_SOCKET), int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+                world_kwargs={"articulation_dvi_host": True},
+                articulation_joint_mask_np=np.array([1, 0], dtype=np.int32),
+            )
+
     def test_step_runs_device_block_sparse_dvi_as_joint_owner(self):
         device = wp.get_preferred_device()
         world = _make_adbs_world(
@@ -555,6 +603,22 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertEqual(world.articulation_dvi_host_solver, "dense")
         self.assertFalse(world.articulation_dvi_replaces_joint_pgs)
         self.assertFalse(world._dispatch_specialization_flags()["skip_joint_pgs"])
+
+    def test_solver_phoenx_exposes_articulation_dvi_options(self):
+        model = _make_solver_pendulum_model()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+            articulation_dvi=True,
+            articulation_dvi_solver="device_block_sparse",
+        )
+
+        self.assertTrue(solver.world.articulation_dvi_host)
+        self.assertEqual(solver.world.articulation_dvi_host_solver, "device_block_sparse")
+        self.assertTrue(solver.world.articulation_dvi_replaces_joint_pgs)
+        self.assertEqual(int(solver.world.articulation_topology.active_joint_count), 1)
 
     def test_phoenx_world_caches_prefactorized_topology(self):
         device = wp.get_preferred_device()

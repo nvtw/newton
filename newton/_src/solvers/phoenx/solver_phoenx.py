@@ -826,6 +826,7 @@ class PhoenXWorld:
         self.articulation_topology: ArticulationTopology | None = None
         self.articulation_system: PrefactorizedArticulationSystem | None = None
         self.articulation_device_system: ArticulationDeviceSystem | None = None
+        self.articulation_dvi_joint_mask: np.ndarray | None = None
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -1683,6 +1684,7 @@ class PhoenXWorld:
         d6_limit_lower: wp.array | None = None,
         d6_limit_upper: wp.array | None = None,
         d6_limit_count: wp.array | None = None,
+        articulation_joint_mask: wp.array | None = None,
     ) -> None:
         """Pack ``num_joints`` actuated-DBS joint columns. Call once after
         :meth:`__init__`, before the first :meth:`step`. All input arrays must
@@ -1728,6 +1730,9 @@ class PhoenXWorld:
             d6_limit_lower, d6_limit_upper: Optional per-axis limit
                 windows [rad].
             d6_limit_count: Optional number of D6 angular limit axes.
+            articulation_joint_mask: Optional per-column mask selecting
+                joints owned by the DVI articulation solve. Use this to
+                exclude loop-closure joints from the direct tree solve.
         """
         if self.num_joints <= 0:
             return
@@ -1758,7 +1763,9 @@ class PhoenXWorld:
             mode_np = None
         if mode_np is not None and mode_np.size > 0:
             self._use_revolute_specialization = bool((mode_np == int(JOINT_MODE_REVOLUTE)).all())
-        self._cache_prefactorized_articulation_topology(body1, body2, joint_mode)
+        self._cache_prefactorized_articulation_topology(
+            body1, body2, joint_mode, articulation_joint_mask=articulation_joint_mask
+        )
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
             dim=self.num_joints,
@@ -1802,6 +1809,8 @@ class PhoenXWorld:
         body1: wp.array,
         body2: wp.array,
         joint_mode: wp.array,
+        *,
+        articulation_joint_mask: wp.array | None = None,
     ) -> None:
         """Cache topology-only DVI articulation data from joint init arrays.
 
@@ -1812,13 +1821,28 @@ class PhoenXWorld:
         self.articulation_topology = None
         self.articulation_system = None
         self.articulation_device_system = None
+        self.articulation_dvi_joint_mask = None
         try:
             body1_np = body1.numpy()
             body2_np = body2.numpy()
             joint_mode_np = joint_mode.numpy()
             inverse_mass_np = self.bodies.inverse_mass.numpy()
+            joint_mask_np = articulation_joint_mask.numpy() if articulation_joint_mask is not None else None
         except Exception:
             return
+
+        if joint_mask_np is not None:
+            joint_mask_np = np.asarray(joint_mask_np, dtype=bool)
+            if joint_mask_np.shape != joint_mode_np.shape:
+                raise ValueError(
+                    f"articulation_joint_mask must have shape {joint_mode_np.shape}, got {joint_mask_np.shape}"
+                )
+            if self.articulation_dvi_replaces_joint_pgs and not bool(joint_mask_np.all()):
+                raise NotImplementedError(
+                    "articulation_dvi_replaces_joint_pgs=True with loop-closure joints requires "
+                    "selective joint PGS skipping, which is not implemented yet"
+                )
+            self.articulation_dvi_joint_mask = joint_mask_np.copy()
 
         static_body_indices = np.nonzero(inverse_mass_np <= 0.0)[0].astype(np.int32)
         topology = ArticulationTopology.from_host(
@@ -1826,6 +1850,7 @@ class PhoenXWorld:
             body2_np,
             joint_mode_np,
             static_body_indices=static_body_indices,
+            enabled_joint_mask=joint_mask_np,
         )
         self.articulation_topology = topology
         self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)

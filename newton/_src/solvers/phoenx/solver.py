@@ -156,6 +156,9 @@ class SolverPhoenX(SolverBase):
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
+        articulation_dvi: bool = False,
+        articulation_dvi_replaces_joint_pgs: bool | None = None,
+        articulation_dvi_solver: str = "device_block_sparse",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -196,6 +199,18 @@ class SolverPhoenX(SolverBase):
                 threshold before being flagged sleeping. Default 30
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
+            articulation_dvi: Enable the experimental full-coordinate DVI
+                articulation solve for joints that belong to Newton
+                articulation trees. Loop-closure joints are excluded from
+                the direct topology.
+            articulation_dvi_replaces_joint_pgs: When ``True``, DVI-owned
+                joints replace PhoenX joint PGS rows. Defaults to ``True``
+                only when every ADBS joint column belongs to the DVI tree;
+                partial loop-closure scenes currently keep PGS enabled.
+            articulation_dvi_solver: DVI numeric solver, forwarded to
+                :class:`PhoenXWorld`. ``"device_block_sparse"`` is the
+                graph-friendly device path; ``"block_sparse"`` and
+                ``"dense"`` are host validation fallbacks.
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -235,6 +250,17 @@ class SolverPhoenX(SolverBase):
 
         self._adbs: AdbsInitArrays = build_adbs_init_arrays(model, device=self.device)
         num_joints = self._adbs.num_joint_columns
+        self._adbs_articulation_joint_mask = self._build_adbs_articulation_joint_mask(model)
+        has_non_dvi_joint_columns = bool(
+            num_joints > 0 and not bool(self._adbs_articulation_joint_mask.numpy().astype(bool).all())
+        )
+        if articulation_dvi_replaces_joint_pgs is None and has_non_dvi_joint_columns:
+            articulation_dvi_replaces_joint_pgs = False
+        if bool(articulation_dvi) and bool(articulation_dvi_replaces_joint_pgs) and has_non_dvi_joint_columns:
+            raise NotImplementedError(
+                "articulation_dvi_replaces_joint_pgs=True with loop-closure joints requires selective "
+                "joint PGS skipping, which is not implemented yet"
+            )
         num_particles = int(getattr(model, "particle_count", 0) or 0)
         num_cloth_triangles = int(getattr(model, "tri_count", 0) or 0)
         num_cloth_bending = int(getattr(model, "edge_count", 0) or 0)
@@ -345,6 +371,9 @@ class SolverPhoenX(SolverBase):
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
             sleeping_frames_required=int(sleeping_frames_required),
             prepare_refresh_stride=prepare_refresh_stride,
+            articulation_dvi_host=bool(articulation_dvi),
+            articulation_dvi_replaces_joint_pgs=articulation_dvi_replaces_joint_pgs,
+            articulation_dvi_host_solver=articulation_dvi_solver,
             device=self.device,
         )
 
@@ -401,7 +430,9 @@ class SolverPhoenX(SolverBase):
             )
 
         if num_joints > 0:
-            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
+            adbs_kwargs = self._adbs.to_initialize_kwargs()
+            adbs_kwargs["articulation_joint_mask"] = self._adbs_articulation_joint_mask
+            self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
 
         if num_cloth_triangles > 0:
             self.world.populate_cloth_triangles_from_model(model)
@@ -432,6 +463,26 @@ class SolverPhoenX(SolverBase):
         # Placeholder for _contact_impulse_to_force_wrapper_kernel when grouping
         # is off (has_perm=0 makes the kernel ignore it).
         self._sort_perm_placeholder = wp.zeros(1, dtype=wp.int32, device=self.device)
+
+    def _build_adbs_articulation_joint_mask(self, model: Model) -> wp.array:
+        """Return per-ADBS-column mask selecting Newton articulation tree joints."""
+        num_columns = int(self._adbs.num_joint_columns)
+        if num_columns <= 0:
+            return wp.zeros(0, dtype=wp.int32, device=self.device)
+
+        mask = np.ones(num_columns, dtype=np.int32)
+        joint_articulation = getattr(model, "joint_articulation", None)
+        if joint_articulation is None:
+            return wp.array(mask, dtype=wp.int32, device=self.device)
+
+        joint_articulation_np = joint_articulation.numpy()
+        joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+        mask.fill(0)
+        for joint_index, cid in enumerate(joint_idx_to_cid):
+            cid_int = int(cid)
+            if cid_int >= 0 and int(joint_articulation_np[joint_index]) >= 0:
+                mask[cid_int] = 1
+        return wp.array(mask, dtype=wp.int32, device=self.device)
 
     def _bake_joint_armature_into_body_inertia(self, model: Model) -> None:
         """Add per-joint axial armature into both attached bodies' inertia so the
