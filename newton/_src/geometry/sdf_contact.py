@@ -15,7 +15,10 @@ from ..geometry.sdf_texture import (
 )
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
-from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
+from .contact_reduction_global import (
+    GlobalContactReducerData,
+    export_and_reduce_contact_centered_two_spatial_depths,
+)
 
 # Launch-side block size for the mesh-SDF narrow-phase kernels. Must match
 # the ``block_dim`` used in ``wp.launch_tiled`` for
@@ -38,20 +41,44 @@ MESH_SDF_BLOCK_DIM = 64
 # outer iteration runs.
 STACK_CAPACITY = 2 * MESH_SDF_BLOCK_DIM
 
+@wp.func
+def mesh_sdf_contact_search_precision(
+    inner_contact_threshold: float,
+    min_sdf_scale: float,
+    voxel_radius: float,
+    use_texture_sdf: bool,
+) -> float:
+    """Return SDF edge-search precision without letting contact gap loosen it."""
+    search_precision = inner_contact_threshold / min_sdf_scale
+    if use_texture_sdf:
+        search_precision = wp.min(search_precision, voxel_radius)
+    return search_precision
 
-@wp.struct
-class EdgeCullResult:
-    """Packed result from the mesh-SDF midphase edge-culling pass.
 
-    Stores the edge index together with the midpoint SDF value computed
-    during culling, so a single cooperative stack can carry both values
-    atomically. Splitting them across two separate stacks would break
-    the pairing because ``wp.tile_stack_pop`` races for slots
-    independently on each stack.
-    """
+@wp.func
+def mesh_sdf_contact_passes_inner_cull_consistency(
+    distance_world: float,
+    inner_contact_threshold: float,
+    midpoint_sdf: float,
+    bsphere_center: wp.vec3,
+    bsphere_radius: float,
+    sdf_aabb_lower: wp.vec3,
+    sdf_aabb_upper: wp.vec3,
+    min_sdf_scale: float,
+    use_texture_bounds: bool,
+) -> bool:
+    """Reject gap-found penetrations that fail the inner edge cull."""
+    if distance_world >= inner_contact_threshold:
+        return True
 
-    edge_idx: int
-    midpoint_sdf: float
+    inner_threshold_unscaled = inner_contact_threshold / min_sdf_scale
+    culling_radius = bsphere_radius + inner_threshold_unscaled
+    if use_texture_bounds:
+        clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
+        if wp.length_sq(bsphere_center - clamped) > culling_radius * culling_radius:
+            return False
+
+    return midpoint_sdf <= culling_radius
 
 
 @wp.func
@@ -71,6 +98,21 @@ def safe_sdf_scale_inverse(sdf_scale: wp.vec3) -> tuple[wp.vec3, float]:
     inv = wp.vec3(1.0 / sx, 1.0 / sy, 1.0 / sz)
     min_abs = wp.min(wp.min(wp.abs(sx), wp.abs(sy)), wp.abs(sz))
     return inv, min_abs
+
+
+@wp.struct
+class EdgeCullResult:
+    """Packed result from the mesh-SDF midphase edge-culling pass.
+
+    Stores the edge index together with the midpoint SDF value computed
+    during culling, so a single cooperative stack can carry both values
+    atomically. Splitting them across two separate stacks would break
+    the pairing because ``wp.tile_stack_pop`` races for slots
+    independently on each stack.
+    """
+
+    edge_idx: int
+    midpoint_sdf: float
 
 
 @wp.func
@@ -885,7 +927,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # compiled code, otherwise FMA-fusion or register-allocation
     # differences between independent JIT compilations can produce subtly
     # different floating-point results, breaking bit-exact reproducibility.
-    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_{force_texture_sdf}"
+    _module = (
+        f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_"
+        f"{force_texture_sdf}"
+    )
 
     @wp.kernel(enable_backward=False, module=_module)
     def mesh_sdf_collision_kernel(
@@ -1010,6 +1055,24 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
+                use_texture_sdf_for_search = False
+                texture_voxel_radius = float(0.0)
+                if wp.static(force_texture_sdf):
+                    use_texture_sdf_for_search = True
+                    texture_voxel_radius = texture_sdf.voxel_radius
+                elif wp.static(enable_heightfields):
+                    if not sdf_is_hfield and not use_bvh_for_sdf:
+                        use_texture_sdf_for_search = True
+                        texture_voxel_radius = texture_sdf.voxel_radius
+                elif not use_bvh_for_sdf:
+                    use_texture_sdf_for_search = True
+                    texture_voxel_radius = texture_sdf.voxel_radius
+                search_precision_unscaled = mesh_sdf_contact_search_precision(
+                    triangle_mesh_margin + sdf_mesh_margin,
+                    min_sdf_scale,
+                    texture_voxel_radius,
+                    use_texture_sdf_for_search,
+                )
 
                 edge_range_tri = shape_edge_range[tri_shape]
                 num_edges = get_edge_count(tri_type, edge_range_tri, hfd_tri)
@@ -1174,12 +1237,29 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 sdf_is_hfield,
                                 hfd_sdf,
                                 heightfield_elevations,
-                                contact_threshold_unscaled,
+                                search_precision_unscaled,
                             )
 
-                            # Quick threshold check before computing the gradient
+                            # Gap may widen the edge cull enough to find
+                            # SDF minima that the inner contact shell would
+                            # not have considered. Those rows are useful as
+                            # separated detections, but an alleged inner
+                            # contact must still pass the inner cull implied
+                            # by a 1-Lipschitz signed distance field.
                             dist_approx = dist_unscaled * min_sdf_scale
-                            if dist_approx < contact_threshold:
+                            bsphere_center_inner, bsphere_radius_inner = get_edge_bounding_sphere(v0, v1)
+                            inner_cull_consistent = mesh_sdf_contact_passes_inner_cull_consistency(
+                                dist_approx,
+                                triangle_mesh_margin + sdf_mesh_margin,
+                                cached_sdf_val,
+                                bsphere_center_inner,
+                                bsphere_radius_inner,
+                                sdf_aabb_lower,
+                                sdf_aabb_upper,
+                                min_sdf_scale,
+                                use_texture_sdf_for_search,
+                            )
+                            if dist_approx < contact_threshold and inner_cull_consistent:
                                 if wp.static(force_texture_sdf):
                                     # Brent already produced the SDF value at
                                     # ``point_unscaled``; skip the redundant value
@@ -1236,6 +1316,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         direction_world = wp.vec3(0.0, 1.0, 0.0)
 
                                 contact_normal = -direction_world if mode == 0 else direction_world
+                                triangle_mesh_margin = shape_data[pair[0]][3]
+                                sdf_mesh_margin = shape_data[pair[1]][3]
 
                                 contact_data = ContactData()
                                 contact_data.contact_point_center = point_world
@@ -1243,8 +1325,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 contact_data.contact_distance = dist
                                 contact_data.radius_eff_a = 0.0
                                 contact_data.radius_eff_b = 0.0
-                                contact_data.margin_a = shape_data[pair[0]][3]
-                                contact_data.margin_b = shape_data[pair[1]][3]
+                                contact_data.margin_a = triangle_mesh_margin
+                                contact_data.margin_b = sdf_mesh_margin
                                 contact_data.shape_a = pair[0]
                                 contact_data.shape_b = pair[1]
                                 contact_data.gap_sum = gap_sum
@@ -1417,6 +1499,24 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
+                use_texture_sdf_for_search = False
+                texture_voxel_radius = float(0.0)
+                if wp.static(force_texture_sdf):
+                    use_texture_sdf_for_search = True
+                    texture_voxel_radius = texture_sdf.voxel_radius
+                elif wp.static(enable_heightfields):
+                    if not sdf_is_hfield and not use_bvh_for_sdf:
+                        use_texture_sdf_for_search = True
+                        texture_voxel_radius = texture_sdf.voxel_radius
+                elif not use_bvh_for_sdf:
+                    use_texture_sdf_for_search = True
+                    texture_voxel_radius = texture_sdf.voxel_radius
+                search_precision_unscaled = mesh_sdf_contact_search_precision(
+                    triangle_mesh_margin + sdf_mesh_margin,
+                    min_sdf_scale,
+                    texture_voxel_radius,
+                    use_texture_sdf_for_search,
+                )
 
                 edge_range_tri = shape_edge_range[tri_shape]
                 num_edges = get_edge_count(tri_type, edge_range_tri, hfd_tri)
@@ -1568,12 +1668,29 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 sdf_is_hfield,
                                 hfd_sdf,
                                 heightfield_elevations,
-                                contact_threshold_unscaled,
+                                search_precision_unscaled,
                             )
 
-                            # Quick threshold check before computing the gradient
+                            # Gap may widen the edge cull enough to find
+                            # SDF minima that the inner contact shell would
+                            # not have considered. Those rows are useful as
+                            # separated detections, but an alleged inner
+                            # contact must still pass the inner cull implied
+                            # by a 1-Lipschitz signed distance field.
                             dist_approx = dist_unscaled * min_sdf_scale
-                            if dist_approx < contact_threshold:
+                            bsphere_center_inner, bsphere_radius_inner = get_edge_bounding_sphere(v0, v1)
+                            inner_cull_consistent = mesh_sdf_contact_passes_inner_cull_consistency(
+                                dist_approx,
+                                triangle_mesh_margin + sdf_mesh_margin,
+                                cached_sdf_val,
+                                bsphere_center_inner,
+                                bsphere_radius_inner,
+                                sdf_aabb_lower,
+                                sdf_aabb_upper,
+                                min_sdf_scale,
+                                use_texture_sdf_for_search,
+                            )
+                            if dist_approx < contact_threshold and inner_cull_consistent:
                                 if wp.static(force_texture_sdf):
                                     # Brent already produced the SDF value at
                                     # ``point_unscaled``; skip the redundant value
@@ -1630,8 +1747,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         direction_world = wp.vec3(0.0, 1.0, 0.0)
 
                                 contact_normal = -direction_world if mode == 0 else direction_world
-
-                                export_and_reduce_contact_centered(
+                                margin_sum = triangle_mesh_margin + sdf_mesh_margin
+                                export_and_reduce_contact_centered_two_spatial_depths(
                                     pair[0],
                                     pair[1],
                                     point_world,
@@ -1639,6 +1756,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     dist,
                                     (my_edge_idx << 2) | (mode << 1),
                                     point_world - midpoint,
+                                    margin_sum,
+                                    margin_sum + gap_sum,
                                     X_ws_tri,
                                     aabb_lower_tri,
                                     aabb_upper_tri,

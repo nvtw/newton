@@ -51,6 +51,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_local_p1,
     cc_set_normal,
     cc_set_normal_lambda,
+    cc_set_start_gap,
     cc_set_tangent1,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
@@ -854,6 +855,12 @@ def _contact_warmstart_gather_kernel(
         # ``|body_com|`` relative to where the narrow phase saw them.
         fresh_r1 = wp.quat_rotate(q1, fresh_local_p0 - body_com1)
         fresh_r2 = wp.quat_rotate(q2, fresh_local_p1 - body_com2)
+        fresh_p1_world = x1 + fresh_r1
+        fresh_p2_world = x2 + fresh_r2
+        fresh_gap = wp.dot(fresh_p2_world - fresh_p1_world, fresh_n) - (
+            contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
+        )
+        cc_set_start_gap(cc, k, fresh_gap)
 
         if prev_valid == wp.int32(1):
             prev_n = cc_get_prev_normal(cc, prev_k)
@@ -864,10 +871,19 @@ def _contact_warmstart_gather_kernel(
             prev_p1_world = x1 + prev_r1
             prev_p2_world = x2 + prev_r2
             prev_penetration = -wp.dot(prev_p2_world - prev_p1_world, prev_n)
+            fresh_penetration = -fresh_gap
 
-            fresh_p1_world = x1 + fresh_r1
-            fresh_p2_world = x2 + fresh_r2
-            fresh_penetration = -wp.dot(fresh_p2_world - fresh_p1_world, fresh_n)
+            if fresh_gap > wp.float32(0.0):
+                dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
+                fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
+                cc_set_normal_lambda(cc, k, wp.float32(0.0))
+                cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+                cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+                cc_set_normal(cc, k, fresh_n)
+                cc_set_tangent1(cc, k, fresh_t1)
+                cc_set_local_p0(cc, k, fresh_local_p0)
+                cc_set_local_p1(cc, k, fresh_local_p1)
+                continue
 
             # Absolute staleness: the prev anchor sits more than
             # :data:`_PREV_ANCHOR_PEN_MAX` below the fresh contact

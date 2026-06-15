@@ -22,6 +22,7 @@ from newton._src.geometry.contact_reduction_global import (
     encode_oct,
     export_and_reduce_contact,
     export_and_reduce_contact_centered,
+    export_and_reduce_contact_centered_two_spatial_depths,
     make_contact_key,
 )
 from newton._src.geometry.narrow_phase import ContactWriterData
@@ -704,6 +705,76 @@ def test_centered_basic_storage_and_reduction(test, device):
     winners = get_winning_contacts(reducer)
     test.assertGreater(len(winners), 0, "At least one contact should win a slot")
     test.assertLess(len(winners), 20, "Reduction should produce fewer winners than inputs")
+
+
+def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
+    """Test that directional lanes prefer inner contacts and keep outer fallbacks."""
+    reducer = GlobalContactReducer(capacity=200, device=device)
+    reducer_data = reducer.get_data_struct()
+
+    @wp.kernel
+    def store_two_depth_contact_kernel(
+        reducer_data: GlobalContactReducerData,
+        x: float,
+        depth: float,
+        fingerprint: int,
+    ):
+        position = wp.vec3(x, 0.0, 0.0)
+        normal = wp.vec3(0.0, 1.0, 0.0)
+        X_ws_shape = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
+
+        export_and_reduce_contact_centered_two_spatial_depths(
+            shape_a=0,
+            shape_b=1,
+            position=position,
+            normal=normal,
+            depth=depth,
+            fingerprint=fingerprint,
+            centered_position=position,
+            inner_spatial_depth=0.0,
+            outer_spatial_depth=0.1,
+            X_ws_voxel_shape=X_ws_shape,
+            aabb_lower_voxel=wp.vec3(-1.0, -1.0, -1.0),
+            aabb_upper_voxel=wp.vec3(1.0, 1.0, 1.0),
+            voxel_res=wp.vec3i(1, 1, 1),
+            reducer_data=reducer_data,
+        )
+
+    wp.launch(
+        store_two_depth_contact_kernel,
+        dim=1,
+        inputs=[reducer_data, 0.0, -0.01, 1],
+        device=device,
+    )
+    test.assertEqual(get_contact_count(reducer), 1)
+
+    wp.launch(
+        store_two_depth_contact_kernel,
+        dim=1,
+        inputs=[reducer_data, 0.1, 0.05, 2],
+        device=device,
+    )
+
+    test.assertEqual(get_contact_count(reducer), 1)
+    winners = get_winning_contacts(reducer)
+    fingerprints = set(int(reducer.contact_fingerprints.numpy()[cid]) for cid in winners)
+    test.assertIn(1, fingerprints, "Inner contact should win over an outer directional contact")
+    test.assertNotIn(2, fingerprints, "Outer directional contact should be a fallback only")
+    test.assertEqual(get_active_slot_count(reducer), 2, "Only normal and voxel entries should be active")
+
+    outer_reducer = GlobalContactReducer(capacity=200, device=device)
+    outer_reducer_data = outer_reducer.get_data_struct()
+    wp.launch(
+        store_two_depth_contact_kernel,
+        dim=1,
+        inputs=[outer_reducer_data, 0.1, 0.05, 2],
+        device=device,
+    )
+
+    test.assertEqual(get_contact_count(outer_reducer), 1)
+    outer_winners = get_winning_contacts(outer_reducer)
+    outer_fingerprints = set(int(outer_reducer.contact_fingerprints.numpy()[cid]) for cid in outer_winners)
+    test.assertIn(2, outer_fingerprints, "Outer contact should win when no inner contact exists")
 
 
 def test_centered_different_pairs_independent(test, device):
@@ -1437,6 +1508,12 @@ add_function_test(
     TestGlobalContactReducer,
     "test_centered_basic_storage_and_reduction",
     test_centered_basic_storage_and_reduction,
+    devices=devices,
+)
+add_function_test(
+    TestGlobalContactReducer,
+    "test_centered_two_spatial_depths_prefers_inner_then_outer",
+    test_centered_two_spatial_depths_prefers_inner_then_outer,
     devices=devices,
 )
 add_function_test(

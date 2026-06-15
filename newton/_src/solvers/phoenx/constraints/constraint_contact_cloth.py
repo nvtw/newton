@@ -66,6 +66,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_r1,
     cc_get_side0_bary,
     cc_get_side1_bary,
+    cc_get_start_gap,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
@@ -550,13 +551,25 @@ def _make_contact_prepare_for_iteration_at(
             lam_n_ref = wp.float32(1.0) / wp.max(eff_n * idt, wp.float32(1.0e-6))
             load_boost = wp.min(wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0))
 
-            # Speculative (>0) vs penetrating (<0) Baumgarte bias; iterate
-            # reads the sign to pick rigid vs soft PGS coefficients.
-            if effective_gap > wp.float32(0.0):
-                bias_val = effective_gap * idt
+            # Speculative (>0) vs penetrating (<0) Baumgarte bias.
+            # Rows generated separated keep their generation-time gap as
+            # an activation barrier for this solver step. Without a
+            # substep narrow-phase refresh, letting a far SDF row become
+            # penetrating later in the frame turns stale anchors into
+            # hard/frictional constraints.
+            start_gap = cc_get_start_gap(cc, k)
+            solver_gap = effective_gap
+            if start_gap > wp.float32(0.0) and solver_gap < start_gap:
+                solver_gap = start_gap
+            if solver_gap > wp.float32(0.0):
+                bias_val = solver_gap * idt
+                # Positive speculative bias is the activation barrier for a
+                # separated row. Capping it below the generated gap can make a
+                # far SDF candidate react even though it has not reached the
+                # contact margin.
             else:
                 bias_val = effective_gap * bias_rate
-            bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
+                bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
 
             drift_t1_raw = wp.dot(p_diff, t1_dir)
             drift_t2_raw = wp.dot(p_diff, t2_dir)
@@ -596,8 +609,10 @@ def _make_contact_prepare_for_iteration_at(
                     drift_t1_raw = wp.dot(p_diff, t1_dir)
                     drift_t2_raw = wp.dot(p_diff, t2_dir)
 
-            if effective_gap > wp.float32(0.002):
-                # Far speculative rows are normal velocity caps, not manifolds.
+            if solver_gap > wp.float32(0.0):
+                # Positive-gap rows warm-start with no stored load. The
+                # bias solve treats them as normal-only speculative
+                # constraints; the relax pass skips them.
                 cc_set_normal_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
@@ -632,7 +647,11 @@ def _make_contact_prepare_for_iteration_at(
                         k_n = contacts.rigid_contact_stiffness[k]
                     if damping_arr_len > k:
                         c_n = contacts.rigid_contact_damping[k]
-                    if (k_n > wp.float32(0.0) or c_n > wp.float32(0.0)) and eff_n > wp.float32(0.0):
+                    if (
+                        (k_n > wp.float32(0.0) or c_n > wp.float32(0.0))
+                        and eff_n > wp.float32(0.0)
+                        and solver_gap <= wp.float32(0.0)
+                    ):
                         eff_inv_n = wp.float32(1.0) / eff_n
                         # ``-effective_gap`` flips sign so spring depth is +ve
                         # for penetration; matches the lam_n >= 0 clamp.
@@ -1039,13 +1058,13 @@ def _make_contact_iterate_at(
                 bias_t1_val = cc_get_bias_t1(cc, k)
                 bias_t2_val = cc_get_bias_t2(cc, k)
             is_speculative = speculative_bias > wp.float32(0.0)
+            if is_speculative and wp.static(not use_bias):
+                continue
             if wp.static(not use_bias):
-                if is_speculative:
-                    continue
                 bias_val = wp.float32(0.0)
 
-            # Normal/friction rows: optional soft-contact PD,
-            # speculative rigid, soft penetrating main, or rigid relax.
+            # Normal/friction rows: optional soft-contact PD, penetrating
+            # main solve, or rigid relax.
             pd_eff_soft_n = wp.float32(0.0)
             pd_gamma_n = wp.float32(0.0)
             pd_bias_n = wp.float32(0.0)
@@ -1055,20 +1074,14 @@ def _make_contact_iterate_at(
                     pd_gamma_n = cc_get_pd_gamma(cc, k)
                     pd_bias_n = cc_get_pd_bias(cc, k)
 
-            if is_speculative:
-                mass_coeff_n = wp.float32(1.0)
-                impulse_coeff_n = wp.float32(0.0)
-                if speculative_bias <= idt * wp.float32(0.002):
-                    mu_s_eff = mu_s
-                    mu_k_eff = mu_k
-                else:
-                    mu_s_eff = wp.float32(0.0)
-                    mu_k_eff = wp.float32(0.0)
-            elif wp.static(use_bias):
+            if wp.static(use_bias):
                 mass_coeff_n = mass_coeff
                 impulse_coeff_n = impulse_coeff
                 mu_s_eff = mu_s
                 mu_k_eff = mu_k
+                if is_speculative:
+                    mu_s_eff = wp.float32(0.0)
+                    mu_k_eff = wp.float32(0.0)
             else:
                 mass_coeff_n = wp.float32(1.0)
                 impulse_coeff_n = wp.float32(0.0)
