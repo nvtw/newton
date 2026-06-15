@@ -146,6 +146,69 @@ class ArticulationDeviceSystem:
             device=device,
         )
 
+    def compute_residual(
+        self,
+        bodies: BodyContainer,
+        *,
+        dt: float,
+        alpha: float = 0.0,
+        recovery_speed: float = -1.0,
+        device=None,
+    ) -> None:
+        """Compute ``-(J v + phi / (dt + alpha))`` into :attr:`rhs`."""
+        if self.total_rows <= 0:
+            return
+        if dt <= 0.0:
+            raise ValueError(f"dt must be positive, got {dt}")
+        if dt + alpha <= 0.0:
+            raise ValueError(f"dt + alpha must be positive, got {dt + alpha}")
+        wp.launch(
+            _compute_articulation_residual_kernel,
+            dim=self.total_rows,
+            inputs=[
+                self.jacobian,
+                self.violation,
+                self.body1,
+                self.body2,
+                self.row_to_active_block,
+                bodies,
+                wp.float32(dt),
+                wp.float32(alpha),
+                wp.float32(recovery_speed),
+                wp.int32(self.total_rows),
+            ],
+            outputs=[self.rhs],
+            device=device,
+        )
+
+    def apply_solution(
+        self,
+        bodies: BodyContainer,
+        inverse_mass: wp.array,
+        inverse_inertia_world: wp.array,
+        *,
+        device=None,
+    ) -> None:
+        """Apply ``M^-1 J^T solution`` to body velocities."""
+        if self.total_rows <= 0:
+            return
+        wp.launch(
+            _apply_articulation_solution_kernel,
+            dim=self.total_rows,
+            inputs=[
+                self.jacobian,
+                self.solution,
+                self.body1,
+                self.body2,
+                self.row_to_active_block,
+                inverse_mass,
+                inverse_inertia_world,
+                wp.int32(self.total_rows),
+            ],
+            outputs=[bodies.velocity, bodies.angular_velocity],
+            device=device,
+        )
+
 
 @wp.kernel
 def _populate_adbs_articulation_rows_kernel(
@@ -258,6 +321,68 @@ def _assemble_dense_articulation_matrix_kernel(
         value += _body_metric_dot(row, col, 6, 6, row_body2, jacobian, inverse_mass, inverse_inertia_world)
 
     matrix[row, col] = value
+
+
+@wp.kernel
+def _compute_articulation_residual_kernel(
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+    body1: wp.array[wp.int32],
+    body2: wp.array[wp.int32],
+    row_to_active_block: wp.array[wp.int32],
+    bodies: BodyContainer,
+    dt: wp.float32,
+    alpha: wp.float32,
+    recovery_speed: wp.float32,
+    total_rows: wp.int32,
+    rhs: wp.array[wp.float32],
+):
+    row = wp.tid()
+    if row >= total_rows:
+        return
+
+    block = row_to_active_block[row]
+    b1 = body1[block]
+    b2 = body2[block]
+
+    residual = wp.float32(0.0)
+    if b1 >= 0:
+        residual += _jacobian_velocity_dot(row, 0, b1, jacobian, bodies)
+    if b2 >= 0:
+        residual += _jacobian_velocity_dot(row, 6, b2, jacobian, bodies)
+
+    baumgarte = violation[row] / (dt + alpha)
+    if recovery_speed > wp.float32(0.0):
+        baumgarte = wp.clamp(baumgarte, -recovery_speed, recovery_speed)
+
+    rhs[row] = -(residual + baumgarte)
+
+
+@wp.kernel
+def _apply_articulation_solution_kernel(
+    jacobian: wp.array2d[wp.float32],
+    solution: wp.array[wp.float32],
+    body1: wp.array[wp.int32],
+    body2: wp.array[wp.int32],
+    row_to_active_block: wp.array[wp.int32],
+    inverse_mass: wp.array[wp.float32],
+    inverse_inertia_world: wp.array[wp.mat33f],
+    total_rows: wp.int32,
+    velocity: wp.array[wp.vec3f],
+    angular_velocity: wp.array[wp.vec3f],
+):
+    row = wp.tid()
+    if row >= total_rows:
+        return
+
+    block = row_to_active_block[row]
+    lam = solution[row]
+    b1 = body1[block]
+    b2 = body2[block]
+    if b1 >= 0:
+        _apply_body_delta(row, 0, b1, lam, jacobian, inverse_mass, inverse_inertia_world, velocity, angular_velocity)
+    if b2 >= 0:
+        _apply_body_delta(row, 6, b2, lam, jacobian, inverse_mass, inverse_inertia_world, velocity, angular_velocity)
 
 
 @wp.func
@@ -402,6 +527,55 @@ def _orthonormal_pair(axis: wp.vec3f):
     tangent0 = _safe_normalize(wp.cross(axis, seed), wp.vec3f(0.0, 1.0, 0.0))
     tangent1 = wp.cross(axis, tangent0)
     return tangent0, tangent1
+
+
+@wp.func
+def _jacobian_velocity_dot(
+    row: wp.int32,
+    offset: wp.int32,
+    body: wp.int32,
+    jacobian: wp.array2d[wp.float32],
+    bodies: BodyContainer,
+) -> wp.float32:
+    lin = wp.vec3(
+        jacobian[row, offset + 0],
+        jacobian[row, offset + 1],
+        jacobian[row, offset + 2],
+    )
+    ang = wp.vec3(
+        jacobian[row, offset + 3],
+        jacobian[row, offset + 4],
+        jacobian[row, offset + 5],
+    )
+    return wp.dot(lin, bodies.velocity[body]) + wp.dot(ang, bodies.angular_velocity[body])
+
+
+@wp.func
+def _apply_body_delta(
+    row: wp.int32,
+    offset: wp.int32,
+    body: wp.int32,
+    lam: wp.float32,
+    jacobian: wp.array2d[wp.float32],
+    inverse_mass: wp.array[wp.float32],
+    inverse_inertia_world: wp.array[wp.mat33f],
+    velocity: wp.array[wp.vec3f],
+    angular_velocity: wp.array[wp.vec3f],
+):
+    lin = wp.vec3(
+        jacobian[row, offset + 0],
+        jacobian[row, offset + 1],
+        jacobian[row, offset + 2],
+    )
+    ang = wp.vec3(
+        jacobian[row, offset + 3],
+        jacobian[row, offset + 4],
+        jacobian[row, offset + 5],
+    )
+    delta_lin = inverse_mass[body] * lam * lin
+    delta_ang = inverse_inertia_world[body] * (lam * ang)
+    wp.atomic_add(velocity, body, delta_lin)
+    wp.atomic_add(angular_velocity, body, delta_ang)
 
 
 @wp.func

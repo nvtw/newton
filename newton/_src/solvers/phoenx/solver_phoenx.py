@@ -1806,6 +1806,60 @@ class PhoenXWorld:
         self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)
         self.articulation_device_system = ArticulationDeviceSystem.from_topology(topology, self.device)
 
+    def solve_articulations_dvi_host(
+        self,
+        dt: float | None = None,
+        *,
+        alpha: float = 0.0,
+        recovery_speed: float = -1.0,
+    ) -> bool:
+        """Apply one host-validation DVI solve for cached articulation rows.
+
+        This is the integration checkpoint for the full-coordinate articulation
+        path: row population, matrix assembly, RHS construction, factorization,
+        solve, and velocity application all run against PhoenX buffers. The
+        numeric factorization still uses the host validation implementation; the
+        topology and device buffers are the same ones used by the GPU path under
+        construction.
+        """
+        if (
+            self.articulation_device_system is None
+            or self.articulation_system is None
+            or self.articulation_device_system.total_rows <= 0
+        ):
+            return False
+
+        solve_dt = float(self.substep_dt if dt is None else dt)
+        if solve_dt <= 0.0:
+            raise ValueError(f"dt must be positive, got {solve_dt}")
+
+        device_system = self.articulation_device_system
+        device_system.populate_from_adbs_constraints(self.constraints, self.bodies, device=self.device)
+        device_system.assemble_dense_matrix(
+            self.bodies.inverse_mass, self.bodies.inverse_inertia_world, device=self.device
+        )
+        device_system.compute_residual(
+            self.bodies,
+            dt=solve_dt,
+            alpha=float(alpha),
+            recovery_speed=float(recovery_speed),
+            device=self.device,
+        )
+
+        total_rows = device_system.total_rows
+        matrix = device_system.matrix.numpy()[:total_rows, :total_rows]
+        rhs = device_system.rhs.numpy()[:total_rows]
+        self.articulation_system.factorize_dense_matrix(matrix)
+        solution = self.articulation_system.solve(rhs).astype(np.float32)
+        device_system.solution.assign(solution)
+        device_system.apply_solution(
+            self.bodies,
+            self.bodies.inverse_mass,
+            self.bodies.inverse_inertia_world,
+            device=self.device,
+        )
+        return True
+
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
         """Replace the body-pair contact filter (canonical (min, max), deduped)."""
         self._set_collision_filter_pairs_impl(pairs)

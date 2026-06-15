@@ -291,6 +291,24 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
             atol=1.0e-6,
         )
 
+    def test_host_dvi_solve_applies_articulation_impulse(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+        )
+        moved_positions = np.array([[0.0, 0.0, 0.0], [0.2, -0.1, 0.05]], dtype=np.float32)
+        world.bodies.position.assign(moved_positions)
+
+        solved = world.solve_articulations_dvi_host(dt=0.1, alpha=0.0)
+
+        self.assertTrue(solved)
+        expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32)
+        np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
+        np.testing.assert_allclose(world.bodies.angular_velocity.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-6)
+
     def test_phoenx_world_caches_prefactorized_topology(self):
         device = wp.get_preferred_device()
         bodies = body_container_zeros(3, device=device)

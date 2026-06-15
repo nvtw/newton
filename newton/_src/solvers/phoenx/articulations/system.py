@@ -112,6 +112,15 @@ class PrefactorizedArticulationSystem:
     ) -> DenseLDLTFactorization:
         """Assemble and factorize the regularized dense validation system."""
         h = self.assemble_dense_matrix(jacobian, inverse_mass, inverse_inertia_world)
+        return self.factorize_dense_matrix(h)
+
+    def factorize_dense_matrix(self, matrix: np.ndarray) -> DenseLDLTFactorization:
+        """Factorize an assembled dense articulation matrix."""
+        h = np.asarray(matrix, dtype=np.float64)
+        expected_shape = (self.topology.total_rows, self.topology.total_rows)
+        if h.shape != expected_shape:
+            raise ValueError(f"matrix must have shape {expected_shape}, got {h.shape}")
+
         h_reg = regularize_diagonal(h, self.diagonal_regularization)
         self.dense_matrix = h_reg
         self.factorization = factorize_ldlt(h_reg)
