@@ -437,7 +437,7 @@ def _make_spatial_contact_value_det(score: float, is_inner: bool, fingerprint: i
     score_bits = wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT + 1)))
     return (
         (priority << wp.uint64(63))
-        | (score_bits << wp.uint64(43))
+        | (score_bits << wp.uint64(42))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | (wp.uint64(contact_id) & CONTACT_ID_MASK)
     )
@@ -452,7 +452,7 @@ def _make_spatial_preprune_probe_det(score: float, is_inner: bool, fingerprint: 
     score_bits = wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT + 1)))
     return (
         (priority << wp.uint64(63))
-        | (score_bits << wp.uint64(43))
+        | (score_bits << wp.uint64(42))
         | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
         | CONTACT_ID_MASK
     )

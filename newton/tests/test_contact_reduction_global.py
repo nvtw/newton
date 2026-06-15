@@ -48,6 +48,7 @@ def get_winning_contacts(reducer: GlobalContactReducer) -> list[int]:
     values = reducer.ht_values.numpy()
     capacity = reducer.hashtable.capacity
     values_per_key = reducer.values_per_key
+    contact_id_mask = (1 << 20) - 1 if reducer.deterministic else 0xFFFFFFFF
 
     contact_ids = set()
 
@@ -61,7 +62,7 @@ def get_winning_contacts(reducer: GlobalContactReducer) -> list[int]:
         for slot in range(values_per_key):
             val = values[slot * capacity + entry_idx]
             if val != 0:
-                contact_id = val & 0xFFFFFFFF
+                contact_id = val & contact_id_mask
                 contact_ids.add(int(contact_id))
 
     return sorted(contact_ids)
@@ -708,9 +709,6 @@ def test_centered_basic_storage_and_reduction(test, device):
 
 def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
     """Test that directional lanes prefer inner contacts and keep outer fallbacks."""
-    reducer = GlobalContactReducer(capacity=200, device=device)
-    reducer_data = reducer.get_data_struct()
-
     @wp.kernel
     def store_two_depth_contact_kernel(
         reducer_data: GlobalContactReducerData,
@@ -739,41 +737,46 @@ def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
             reducer_data=reducer_data,
         )
 
-    wp.launch(
-        store_two_depth_contact_kernel,
-        dim=1,
-        inputs=[reducer_data, 0.0, -0.01, 1],
-        device=device,
-    )
-    test.assertEqual(get_contact_count(reducer), 1)
+    for deterministic in (False, True):
+        mode = "deterministic" if deterministic else "fast"
+        reducer = GlobalContactReducer(capacity=200, device=device, deterministic=deterministic)
+        reducer_data = reducer.get_data_struct()
 
-    wp.launch(
-        store_two_depth_contact_kernel,
-        dim=1,
-        inputs=[reducer_data, 0.1, 0.05, 2],
-        device=device,
-    )
+        wp.launch(
+            store_two_depth_contact_kernel,
+            dim=1,
+            inputs=[reducer_data, 0.0, -0.01, 1],
+            device=device,
+        )
+        test.assertEqual(get_contact_count(reducer), 1, mode)
 
-    test.assertEqual(get_contact_count(reducer), 1)
-    winners = get_winning_contacts(reducer)
-    fingerprints = set(int(reducer.contact_fingerprints.numpy()[cid]) for cid in winners)
-    test.assertIn(1, fingerprints, "Inner contact should win over an outer directional contact")
-    test.assertNotIn(2, fingerprints, "Outer directional contact should be a fallback only")
-    test.assertEqual(get_active_slot_count(reducer), 2, "Only normal and voxel entries should be active")
+        wp.launch(
+            store_two_depth_contact_kernel,
+            dim=1,
+            inputs=[reducer_data, 0.1, 0.05, 2],
+            device=device,
+        )
 
-    outer_reducer = GlobalContactReducer(capacity=200, device=device)
-    outer_reducer_data = outer_reducer.get_data_struct()
-    wp.launch(
-        store_two_depth_contact_kernel,
-        dim=1,
-        inputs=[outer_reducer_data, 0.1, 0.05, 2],
-        device=device,
-    )
+        test.assertEqual(get_contact_count(reducer), 1, mode)
+        winners = get_winning_contacts(reducer)
+        fingerprints = set(int(reducer.contact_fingerprints.numpy()[cid]) for cid in winners)
+        test.assertIn(1, fingerprints, f"Inner contact should win over an outer directional contact ({mode})")
+        test.assertNotIn(2, fingerprints, f"Outer directional contact should be a fallback only ({mode})")
+        test.assertEqual(get_active_slot_count(reducer), 2, f"Only normal and voxel entries should be active ({mode})")
 
-    test.assertEqual(get_contact_count(outer_reducer), 1)
-    outer_winners = get_winning_contacts(outer_reducer)
-    outer_fingerprints = set(int(outer_reducer.contact_fingerprints.numpy()[cid]) for cid in outer_winners)
-    test.assertIn(2, outer_fingerprints, "Outer contact should win when no inner contact exists")
+        outer_reducer = GlobalContactReducer(capacity=200, device=device, deterministic=deterministic)
+        outer_reducer_data = outer_reducer.get_data_struct()
+        wp.launch(
+            store_two_depth_contact_kernel,
+            dim=1,
+            inputs=[outer_reducer_data, 0.1, 0.05, 2],
+            device=device,
+        )
+
+        test.assertEqual(get_contact_count(outer_reducer), 1, mode)
+        outer_winners = get_winning_contacts(outer_reducer)
+        outer_fingerprints = set(int(outer_reducer.contact_fingerprints.numpy()[cid]) for cid in outer_winners)
+        test.assertIn(2, outer_fingerprints, f"Outer contact should win when no inner contact exists ({mode})")
 
 
 def test_centered_different_pairs_independent(test, device):
