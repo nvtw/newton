@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.articulations import ArticulationTopology, PrefactorizedArticulationSystem
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -790,6 +791,11 @@ class PhoenXWorld:
         # observes any non-revolute mode. Must be stable before
         # ``wp.ScopedCapture`` records the step.
         self._use_revolute_specialization: bool = True
+        # Topology-only full-coordinate articulation system. Built at joint
+        # initialization and reused by the DVI articulation path as it is
+        # brought online.
+        self.articulation_topology: ArticulationTopology | None = None
+        self.articulation_system: PrefactorizedArticulationSystem | None = None
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -1722,6 +1728,7 @@ class PhoenXWorld:
             mode_np = None
         if mode_np is not None and mode_np.size > 0:
             self._use_revolute_specialization = bool((mode_np == int(JOINT_MODE_REVOLUTE)).all())
+        self._cache_prefactorized_articulation_topology(body1, body2, joint_mode)
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
             dim=self.num_joints,
@@ -1759,6 +1766,38 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
+
+    def _cache_prefactorized_articulation_topology(
+        self,
+        body1: wp.array,
+        body2: wp.array,
+        joint_mode: wp.array,
+    ) -> None:
+        """Cache topology-only DVI articulation data from joint init arrays.
+
+        The symbolic phase is topology-only and intentionally runs outside graph
+        capture. Runtime DVI kernels will consume this metadata once the numeric
+        path is connected.
+        """
+        self.articulation_topology = None
+        self.articulation_system = None
+        try:
+            body1_np = body1.numpy()
+            body2_np = body2.numpy()
+            joint_mode_np = joint_mode.numpy()
+            inverse_mass_np = self.bodies.inverse_mass.numpy()
+        except Exception:
+            return
+
+        static_body_indices = np.nonzero(inverse_mass_np <= 0.0)[0].astype(np.int32)
+        topology = ArticulationTopology.from_host(
+            body1_np,
+            body2_np,
+            joint_mode_np,
+            static_body_indices=static_body_indices,
+        )
+        self.articulation_topology = topology
+        self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)
 
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
         """Replace the body-pair contact filter (canonical (min, max), deduped)."""
