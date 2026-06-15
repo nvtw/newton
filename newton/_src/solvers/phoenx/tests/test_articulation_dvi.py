@@ -316,7 +316,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
         np.testing.assert_allclose(world.bodies.angular_velocity.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-6)
 
-    def test_step_runs_opt_in_host_dvi_articulation_correction(self):
+    def test_step_runs_opt_in_host_dvi_as_joint_owner(self):
         device = wp.get_preferred_device()
         world = _make_adbs_world(
             device,
@@ -327,9 +327,59 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         )
         world.bodies.position.assign(np.array([[0.0, 0.0, 0.0], [0.2, -0.1, 0.05]], dtype=np.float32))
 
+        self.assertTrue(world.articulation_dvi_replaces_joint_pgs)
+        self.assertTrue(world._dispatch_specialization_flags()["skip_joint_pgs"])
+
         world.step(0.1)
 
+        expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32)
         np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
+        np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
+
+    def test_host_dvi_joint_owner_other_dispatchers(self):
+        device = wp.get_preferred_device()
+        dispatcher_kwargs = (
+            {"step_layout": "single_world"},
+            {"multi_world_scheduler": "block_world"},
+        )
+        for extra_kwargs in dispatcher_kwargs:
+            with self.subTest(extra_kwargs=extra_kwargs):
+                world_kwargs = {
+                    "articulation_dvi_host": True,
+                    "velocity_iterations": 0,
+                    "gravity": (0.0, 0.0, 0.0),
+                }
+                world_kwargs.update(extra_kwargs)
+                world = _make_adbs_world(
+                    device,
+                    np.array([0], dtype=np.int32),
+                    np.array([1], dtype=np.int32),
+                    np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+                    world_kwargs=world_kwargs,
+                )
+                world.bodies.position.assign(np.array([[0.0, 0.0, 0.0], [0.2, -0.1, 0.05]], dtype=np.float32))
+
+                world.step(0.1)
+
+                np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
+
+    def test_host_dvi_can_run_as_post_pgs_correction(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+            world_kwargs={
+                "articulation_dvi_host": True,
+                "articulation_dvi_replaces_joint_pgs": False,
+                "velocity_iterations": 0,
+                "gravity": (0.0, 0.0, 0.0),
+            },
+        )
+
+        self.assertFalse(world.articulation_dvi_replaces_joint_pgs)
+        self.assertFalse(world._dispatch_specialization_flags()["skip_joint_pgs"])
 
     def test_phoenx_world_caches_prefactorized_topology(self):
         device = wp.get_preferred_device()

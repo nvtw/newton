@@ -567,6 +567,7 @@ class PhoenXWorld:
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         articulation_dvi_host: bool = False,
+        articulation_dvi_replaces_joint_pgs: bool | None = None,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
@@ -581,9 +582,13 @@ class PhoenXWorld:
                 schedule. ``velocity_iterations=1`` enables TGS-soft
                 relax (recommended for tall stacks).
             articulation_dvi_host: Run the host-validation full-coordinate
-                DVI articulation correction inside each substep after the main
-                PGS solve. Defaults to ``False`` because this path performs
-                host/device transfers and is not CUDA-graph capturable.
+                DVI articulation solve inside each substep. Defaults to
+                ``False`` because this path performs host/device transfers
+                and is not CUDA-graph capturable.
+            articulation_dvi_replaces_joint_pgs: When ``True``, PhoenX keeps
+                joint CIDs in the coloring/contact layout but skips joint PGS
+                dispatches so the DVI articulation solve owns those rows.
+                Defaults to the value of ``articulation_dvi_host``.
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``"auto"``
@@ -801,6 +806,11 @@ class PhoenXWorld:
         # ``wp.ScopedCapture`` records the step.
         self._use_revolute_specialization: bool = True
         self.articulation_dvi_host: bool = bool(articulation_dvi_host)
+        if articulation_dvi_replaces_joint_pgs is None:
+            articulation_dvi_replaces_joint_pgs = self.articulation_dvi_host
+        self.articulation_dvi_replaces_joint_pgs: bool = bool(articulation_dvi_replaces_joint_pgs)
+        if self.articulation_dvi_replaces_joint_pgs and not self.articulation_dvi_host:
+            raise ValueError("articulation_dvi_replaces_joint_pgs requires articulation_dvi_host=True")
         # Topology-only full-coordinate articulation system. Built at joint
         # initialization and reused by the DVI articulation path as it is
         # brought online.
@@ -1866,6 +1876,14 @@ class PhoenXWorld:
         )
         return True
 
+    def _solve_articulations_dvi_host_for_step(self) -> None:
+        if self.solve_articulations_dvi_host(dt=self.substep_dt):
+            return
+        if self.num_joints > 0:
+            raise RuntimeError(
+                "articulation_dvi_host=True requires initialized PhoenX ADBS joint topology before step()"
+            )
+
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
         """Replace the body-pair contact filter (canonical (min, max), deduped)."""
         self._set_collision_filter_pairs_impl(pairs)
@@ -2768,9 +2786,11 @@ class PhoenXWorld:
             # integrate_positions stays in step() -- identical for every
             # dispatcher.
             idt = wp.float32(1.0 / self.substep_dt)
+            if self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs:
+                self._solve_articulations_dvi_host_for_step()
             self._dispatcher.solve(idt)
-            if self.articulation_dvi_host:
-                self.solve_articulations_dvi_host(dt=self.substep_dt)
+            if self.articulation_dvi_host and not self.articulation_dvi_replaces_joint_pgs:
+                self._solve_articulations_dvi_host_for_step()
             self._integrate_positions()
             self._dispatcher.relax(idt)
             # Flip cloth particles' POSITION_LEVEL writes back to
@@ -3963,6 +3983,7 @@ class PhoenXWorld:
             "soft_tet_neohookean": bool(self._soft_tet_uses_neohookean),
             "enable_column_timers": self.enable_column_timers,
             "has_joints": self.num_joints > 0,
+            "skip_joint_pgs": bool(self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs),
             "has_sleeping": self._sleeping_enabled,
             "has_soft_contact_pd": bool(self._has_soft_contact_pd),
         }
@@ -3991,6 +4012,7 @@ class PhoenXWorld:
             "revolute_only": dispatch_kw["revolute_only"],
             "has_joints": dispatch_kw["has_joints"],
             "has_contacts": self.max_contact_columns > 0,
+            "skip_joint_pgs": dispatch_kw["skip_joint_pgs"],
             "has_sleeping": dispatch_kw["has_sleeping"],
             "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
             "enable_column_timers": dispatch_kw["enable_column_timers"],
@@ -4032,6 +4054,7 @@ class PhoenXWorld:
                 soft_tet_neohookean=False,
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
+                skip_joint_pgs=bool(self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs),
                 has_mass_splitting=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
@@ -4046,6 +4069,7 @@ class PhoenXWorld:
                 soft_tet_neohookean=False,
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
+                skip_joint_pgs=bool(self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs),
                 has_mass_splitting=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
