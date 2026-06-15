@@ -43,6 +43,7 @@ from ..geometry.contact_reduction_global import (
 from ..geometry.contact_sort import ContactSorter
 from ..geometry.flags import ShapeFlags
 from ..geometry.sdf_contact import (
+    DEFAULT_SDF_CONTACT_SURFACE_FILTER_VOXELS,
     MESH_SDF_BLOCK_DIM,
     compute_block_counts_from_weights,
     compute_mesh_mesh_block_offsets_scan,
@@ -1481,6 +1482,8 @@ class NarrowPhase:
         contact_max: int | None = None,
         verify_buffers: bool = True,
         contact_reduction_hashtable_size_factor: float = 0.25,
+        sdf_contact_surface_filter_voxels: float = DEFAULT_SDF_CONTACT_SURFACE_FILTER_VOXELS,
+        contact_reduction_export_inner_only: bool = False,
     ) -> None:
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -1535,6 +1538,13 @@ class NarrowPhase:
                 ``max_triangle_pairs`` when allocating the global contact
                 reduction hashtable. Increase this if hashtable fill/failure
                 warnings appear. Defaults to ``0.25`` for memory compatibility.
+            sdf_contact_surface_filter_voxels: Mesh-SDF positive surface
+                separation tolerance in SDF voxel radii. Positive-gap contacts
+                farther from the true surface than this tolerance are rejected.
+                A non-positive value disables the filter. Defaults to ``0.0``.
+            contact_reduction_export_inner_only: When True, run full contact
+                reduction but export only reduced contacts with distance below
+                the margin/effective-radius envelope.
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
@@ -1545,7 +1555,12 @@ class NarrowPhase:
         self.deterministic = deterministic
         self.verify_buffers = verify_buffers
         device_obj = wp.get_device(device)
-
+        if sdf_contact_surface_filter_voxels < 0.0:
+            raise ValueError(
+                f"sdf_contact_surface_filter_voxels must be non-negative, got {sdf_contact_surface_filter_voxels}"
+            )
+        self.sdf_contact_surface_filter_voxels = float(sdf_contact_surface_filter_voxels)
+        self.contact_reduction_export_inner_only = bool(contact_reduction_export_inner_only)
         # Contact reduction requires either meshes or heightfields (the
         # mesh/heightfield-triangle path feeds the global reducer, so
         # heightfield-only scenes still benefit from reduction).
@@ -1638,12 +1653,14 @@ class NarrowPhase:
                     enable_heightfields=has_heightfields,
                     reduce_contacts=True,
                     force_texture_sdf=mesh_sdf_uses_texture,
+                    sdf_contact_surface_filter_voxels=sdf_contact_surface_filter_voxels,
                 )
             else:
                 self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     writer_func,
                     enable_heightfields=has_heightfields,
                     force_texture_sdf=mesh_sdf_uses_texture,
+                    sdf_contact_surface_filter_voxels=sdf_contact_surface_filter_voxels,
                 )
         else:
             self.mesh_plane_contacts_kernel = None
@@ -1655,7 +1672,10 @@ class NarrowPhase:
         if self.reduce_contacts and (has_meshes or has_heightfields):
             # Global contact reducer uses hardcoded BETA_THRESHOLD (0.1mm) same as shared-memory reduction
             # Slot layout: NUM_SPATIAL_DIRECTIONS spatial + 1 max-depth = VALUES_PER_KEY slots per key
-            self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(writer_func)
+            self.export_reduced_contacts_kernel = create_export_reduced_contacts_kernel(
+                writer_func,
+                export_inner_only=contact_reduction_export_inner_only,
+            )
             # Global contact reducer for all mesh contact types
             self.global_contact_reducer = GlobalContactReducer(
                 max_triangle_pairs,

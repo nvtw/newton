@@ -45,6 +45,7 @@ __all__ = [
     "cc_get_r1",
     "cc_get_side0_bary",
     "cc_get_side1_bary",
+    "cc_get_start_gap",
     "cc_get_tangent1",
     "cc_get_tangent1_lambda",
     "cc_get_tangent2_lambda",
@@ -65,6 +66,7 @@ __all__ = [
     "cc_set_r1",
     "cc_set_side0_bary",
     "cc_set_side1_bary",
+    "cc_set_start_gap",
     "cc_set_tangent1",
     "cc_set_tangent1_lambda",
     "cc_set_tangent2_lambda",
@@ -81,11 +83,13 @@ CC_IMPULSE_DWORDS_PER_CONTACT: int = 3
 #: a side is a cloth triangle; rigid sides leave them at zero.
 CC_DWORDS_PER_CONTACT: int = 18
 
-#: 15 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias +
+#: 16 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias +
 #: pd_eff_soft + r0(3) + r1(3). pd_* are non-zero only for soft contacts (user
 #: K/D); pd_eff_soft > 0 switches the normal row to absolute PD spring-damper.
-#: Rigid-contact prepare caches lever arms for the velocity sweeps.
-CC_DERIVED_DWORDS_PER_CONTACT: int = 15
+#: Rigid-contact prepare caches lever arms for the velocity sweeps. The final
+#: slot stores the generation-time gap for current contacts only; it is written
+#: by ingest and consumed by prepare before the velocity sweeps.
+CC_DERIVED_DWORDS_PER_CONTACT: int = 16
 
 
 # Compile-time dword offsets.
@@ -127,6 +131,7 @@ _CC_OFF_R0_Z = wp.constant(11)
 _CC_OFF_R1_X = wp.constant(12)
 _CC_OFF_R1_Y = wp.constant(13)
 _CC_OFF_R1_Z = wp.constant(14)
+_CC_OFF_START_GAP = wp.constant(15)
 
 
 @wp.struct
@@ -284,6 +289,16 @@ def cc_set_side1_bary(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
     write2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_X, k, v[0])
     write2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Y, k, v[1])
     write2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Z, k, v[2])
+
+
+@wp.func
+def cc_get_start_gap(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return read2d_f32(cc.derived, _CC_OFF_START_GAP, k)
+
+
+@wp.func
+def cc_set_start_gap(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    write2d_f32(cc.derived, _CC_OFF_START_GAP, k, v)
 
 
 # ---- prev-step views ------------------------------------------------

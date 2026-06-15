@@ -18,6 +18,7 @@ from ..geometry.differentiable_contacts import launch_differentiable_contact_aug
 from ..geometry.flags import ShapeFlags
 from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
+from ..geometry.sdf_contact import DEFAULT_SDF_CONTACT_SURFACE_FILTER_VOXELS
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.support_function import (
     GenericShapeData,
@@ -530,6 +531,8 @@ class CollisionPipeline:
         unified_shape_flags: wp.array[int] | None = None,
         broad_phase_filter: tuple[Any, Any] | None = None,
         contact_reduction_hashtable_size_factor: float = 0.25,
+        sdf_contact_surface_filter_voxels: float | None = None,
+        contact_reduction_export_inner_only: bool = False,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -551,6 +554,14 @@ class CollisionPipeline:
                 ``max_triangle_pairs`` when allocating the global contact
                 reduction hashtable. Increase this if hashtable fill/failure
                 warnings appear. Defaults to ``0.25`` for memory compatibility.
+            sdf_contact_surface_filter_voxels: Mesh-SDF positive surface
+                separation tolerance in SDF voxel radii. Positive-gap contacts
+                farther from the true surface than this tolerance are rejected.
+                A non-positive value disables the filter. Defaults to ``0.0``
+                when this pipeline constructs its narrow phase.
+            contact_reduction_export_inner_only: When True, run full contact
+                reduction but export only reduced contacts with distance below
+                the margin/effective-radius envelope.
             soft_contact_max: Maximum number of soft contacts to allocate.
                 If None, computed as shape_count * particle_count.
             soft_contact_margin: Margin for soft contact generation. Defaults to 0.01.
@@ -651,7 +662,17 @@ class CollisionPipeline:
             raise ValueError(
                 f"contact_matching must be one of 'disabled', 'latest', 'sticky', got {contact_matching!r}"
             )
-
+        requested_sdf_contact_surface_filter_voxels = sdf_contact_surface_filter_voxels
+        resolved_sdf_contact_surface_filter_voxels = (
+            DEFAULT_SDF_CONTACT_SURFACE_FILTER_VOXELS
+            if sdf_contact_surface_filter_voxels is None
+            else float(sdf_contact_surface_filter_voxels)
+        )
+        if resolved_sdf_contact_surface_filter_voxels < 0.0:
+            raise ValueError(
+                "sdf_contact_surface_filter_voxels must be non-negative, got "
+                f"{resolved_sdf_contact_surface_filter_voxels}"
+            )
         if contact_matching_pos_threshold < 0.0:
             raise ValueError(
                 f"contact_matching_pos_threshold must be non-negative, got {contact_matching_pos_threshold}"
@@ -741,6 +762,8 @@ class CollisionPipeline:
         self.shape_count = shape_count
         self.device = device
         self.reduce_contacts = reduce_contacts
+        self.sdf_contact_surface_filter_voxels = resolved_sdf_contact_surface_filter_voxels
+        self.contact_reduction_export_inner_only = bool(contact_reduction_export_inner_only)
         self.requires_grad = requires_grad
         self.soft_contact_margin = soft_contact_margin
 
@@ -772,7 +795,16 @@ class CollisionPipeline:
                     "contact_reduction_hashtable_size_factor cannot be used when narrow_phase is provided; "
                     "construct the NarrowPhase with that value instead"
                 )
-
+            if requested_sdf_contact_surface_filter_voxels is not None:
+                raise ValueError(
+                    "sdf_contact_surface_filter_voxels cannot be used when narrow_phase is provided; "
+                    "construct the NarrowPhase with that value instead"
+                )
+            if contact_reduction_export_inner_only:
+                raise ValueError(
+                    "contact_reduction_export_inner_only cannot be used when narrow_phase is provided; "
+                    "construct the NarrowPhase with that value instead"
+                )
             inferred_mode = _infer_broad_phase_mode_from_instance(broad_phase_instance)
             self.broad_phase_mode = inferred_mode
             self.broad_phase = broad_phase_instance
@@ -927,6 +959,8 @@ class CollisionPipeline:
                 contact_max=rigid_contact_max,
                 verify_buffers=verify_buffers,
                 contact_reduction_hashtable_size_factor=contact_reduction_hashtable_size_factor,
+                sdf_contact_surface_filter_voxels=resolved_sdf_contact_surface_filter_voxels,
+                contact_reduction_export_inner_only=contact_reduction_export_inner_only,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
@@ -1475,6 +1509,12 @@ class CollisionPipeline:
                 offset0=contacts.rigid_contact_offset0,
                 offset1=contacts.rigid_contact_offset1,
                 normal=contacts.rigid_contact_normal,
+                shape0=contacts.rigid_contact_shape0,
+                shape1=contacts.rigid_contact_shape1,
+                margin0=contacts.rigid_contact_margin0,
+                margin1=contacts.rigid_contact_margin1,
+                body_q=state.body_q,
+                shape_body=writer_data.shape_body,
                 device=self.device,
             )
 
