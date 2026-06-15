@@ -24,6 +24,7 @@ from .kernels import (
     compute_hydro_contact_surface_lines,
     estimate_world_extents,
     repack_shape_colors,
+    transform_points,
 )
 
 #: Sentinel layer id used when no user-defined layer has been activated.
@@ -115,6 +116,11 @@ class ViewerBase(ABC):
         self.clear_model()
 
     def __getattribute__(self, name: str) -> Any:
+        """Route layer-owned attributes through the active layer.
+
+        Double-underscore attributes bypass this routing so Python internals
+        and explicit object-level state remain normal viewer attributes.
+        """
         if not name.startswith("__"):
             try:
                 layers = object.__getattribute__(self, "__dict__").get("_layers")
@@ -129,11 +135,16 @@ class ViewerBase(ABC):
         return object.__getattribute__(self, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
+        """Store layer-owned attributes on the active layer.
+
+        Attributes not present on :class:`Layer`, plus double-underscore
+        attributes, stay on the viewer instance.
+        """
         layers = self.__dict__.get("_layers")
         active_layer_id = self.__dict__.get("_active_layer_id")
         if layers is not None and active_layer_id in layers:
             layer = layers[active_layer_id]
-            if hasattr(layer, name):
+            if not name.startswith("__") and hasattr(layer, name):
                 setattr(layer, name, value)
                 return
         object.__setattr__(self, name, value)
@@ -179,6 +190,9 @@ class ViewerBase(ABC):
         toggles) lives on the :class:`Layer` object and remains available
         when the layer is activated again.
 
+        A typo creates a new layer. Use :attr:`layers` to inspect registered
+        ids when activating user-provided names.
+
         Args:
             layer_id: Stable identifier for the layer. Re-activates an
                 existing layer when the id is already known.
@@ -210,11 +224,14 @@ class ViewerBase(ABC):
 
         Args:
             layer_id: Identifier of the layer to remove.
+
+        Raises:
+            KeyError: If the layer id is not registered.
         """
         if layer_id == _DEFAULT_LAYER_ID:
             raise ValueError("Cannot remove the default layer")
         if layer_id not in self._layers:
-            return
+            raise KeyError(f"Unknown layer: {layer_id}")
 
         prev_active = self._active_layer_id
         if prev_active == layer_id:
@@ -249,8 +266,8 @@ class ViewerBase(ABC):
         if layer_id not in self._layers:
             raise KeyError(f"Unknown layer: {layer_id}")
         self._layers[layer_id].visible = bool(visible)
-        # Force a re-emit of all owned objects on the next frame so the
-        # hidden flag is propagated through the cached log_* calls.
+        # Re-send appearance data for the active layer on its next log_state;
+        # visibility itself is emitted by the regular per-frame log_* calls.
         if layer_id == self._active_layer_id:
             self.model_changed = True
 
@@ -278,15 +295,20 @@ class ViewerBase(ABC):
 
         Args:
             layer_id: Identifier of the layer to position.
-            xform: Layer transform, or a translation as a tuple, list, or
+            xform: Layer transform, or a translation [m] as a tuple, list, or
                 :class:`wp.vec3` (pure translation, identity rotation).
 
         Raises:
             KeyError: If the layer id is not registered.
+            TypeError: If ``xform`` is not a :class:`wp.transform`,
+                :class:`wp.vec3`, or 3-element translation.
         """
         if layer_id not in self._layers:
             raise KeyError(f"Unknown layer: {layer_id}")
+        type_error = "xform must be a wp.transform, wp.vec3, or 3-element translation tuple/list"
         if isinstance(xform, (list, tuple)):
+            if len(xform) != 3:
+                raise TypeError(type_error)
             xform = wp.transform(
                 wp.vec3(float(xform[0]), float(xform[1]), float(xform[2])),
                 wp.quat_identity(),
@@ -294,8 +316,33 @@ class ViewerBase(ABC):
         elif isinstance(xform, wp.vec3):
             xform = wp.transform(xform, wp.quat_identity())
         elif not isinstance(xform, wp.transform):
-            xform = wp.transform(*xform)
+            raise TypeError(type_error)
         self._layers[layer_id].xform = xform
+
+    @staticmethod
+    def _is_identity_transform(xform: wp.transform) -> bool:
+        return (
+            xform.p[0] == 0.0
+            and xform.p[1] == 0.0
+            and xform.p[2] == 0.0
+            and xform.q[0] == 0.0
+            and xform.q[1] == 0.0
+            and xform.q[2] == 0.0
+            and xform.q[3] == 1.0
+        )
+
+    def _apply_layer_transform_to_points(self, points: wp.array[wp.vec3]) -> wp.array[wp.vec3]:
+        if self._is_identity_transform(self.layer.xform):
+            return points
+        transformed = wp.empty(len(points), dtype=wp.vec3, device=self.device)
+        wp.launch(
+            transform_points,
+            dim=len(points),
+            inputs=[points, self.layer.xform],
+            outputs=[transformed],
+            device=self.device,
+        )
+        return transformed
 
     def _qualify(self, name: str | None) -> str | None:
         """Prefix a backend object name with the active layer's namespace.
@@ -2643,9 +2690,10 @@ class ViewerBase(ABC):
 
     def _log_triangles(self, state: newton.State):
         if self.model.tri_count:
+            points = self._apply_layer_transform_to_points(state.particle_q)
             self.log_mesh(
                 self._qualify("/model/triangles"),
-                state.particle_q,
+                points,
                 self.model.tri_indices.flatten(),
                 hidden=not self.show_triangles or self._layer_force_hidden(),
                 backface_culling=False,
@@ -2680,6 +2728,8 @@ class ViewerBase(ABC):
                         radii_out = wp.empty(active_count, dtype=wp.float32, device=self.device)
                         wp.launch(compact, dim=n, inputs=[radii, mask, offsets, radii_out], device=self.device)
                         radii = radii_out
+
+            points = self._apply_layer_transform_to_points(points)
 
             if self.model_changed:
                 colors = wp.full(shape=len(points), value=wp.vec3(0.7, 0.6, 0.4), device=self.device)

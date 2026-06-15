@@ -361,6 +361,11 @@ class ViewerGL(ViewerBase):
             gl.glDeleteTextures(len(texture_ids), gl_ids)
         self._array_textures.clear()
 
+    def _clear_owned_array_textures(self, owns):
+        for name in list(self._array_textures.keys()):
+            if owns(name):
+                self._delete_array_texture(name)
+
     def register_ui_callback(
         self,
         callback: Callable[[Any], None],
@@ -550,21 +555,28 @@ class ViewerGL(ViewerBase):
         self._packed_vbo_xforms = None
         self._packed_vbo_xforms_host = None
 
-        # Clear scalar plot buffers
-        self._scalar_buffers.clear()
-        self._scalar_arrays.clear()
-        self._scalar_accumulators.clear()
-        self._scalar_smoothing.clear()
-        self._array_buffers.clear()
-        self._array_dirty.clear()
-        self._clear_array_textures()
+        # Scalar, array, and image names are layer-qualified just like
+        # geometry names; clear only the active layer's entries.
+        for name in list(self._scalar_buffers.keys()):
+            if owns(name):
+                self._scalar_buffers.pop(name, None)
+                self._scalar_arrays.pop(name, None)
+                self._scalar_accumulators.pop(name, None)
+                self._scalar_smoothing.pop(name, None)
+        for name in list(self._scalar_arrays.keys()):
+            if owns(name):
+                self._scalar_arrays.pop(name, None)
+        for name in list(self._scalar_dirty):
+            if owns(name):
+                self._scalar_dirty.discard(name)
+        for name in list(self._array_buffers.keys()):
+            if owns(name):
+                self._array_buffers.pop(name, None)
+                self._array_dirty.discard(name)
+        self._clear_owned_array_textures(owns)
 
-        # Drop image-logger entries so example-switch removes any image
-        # windows the previous example opened, and a re-entry into the same
-        # example creates a fresh entry (re-triggering the auto-select that
-        # opens the window after the user manually closed it).
         if getattr(self, "_image_logger", None) is not None:
-            self._image_logger.clear()
+            self._image_logger.clear_matching(owns)
 
         # Drop example-registered side/free UI callbacks (panel/stats/rendering persist).
         if getattr(self, "gui", None) is not None:

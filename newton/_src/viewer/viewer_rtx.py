@@ -118,6 +118,16 @@ class ViewerRTX(ViewerUSD):
     # Available lighting environment presets.
     ENVIRONMENTS = ("default", "studio", "none")
 
+    @override
+    def activate(self, layer_id: str):
+        if (
+            getattr(self, "_phase", self._PHASE_BUILD) == self._PHASE_RENDER
+            and layer_id != _DEFAULT_LAYER_ID
+            and layer_id not in self._layers
+        ):
+            raise RuntimeError("ViewerRTX layers must be activated before the first rendered frame")
+        return super().activate(layer_id)
+
     def __init__(
         self,
         width: int = 1280,

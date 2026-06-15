@@ -207,23 +207,29 @@ class ViewerViser(ViewerBase):
             self._line_segment_counts.pop(name, None)
             self._line_versions.pop(name, None)
 
-        # Remove plot handles from the GUI.
-        for handle in self._plot_handles.values():
+        # Remove only scalar plot state owned by the active layer.
+        for name, handle in list(self._plot_handles.items()):
+            if not owns(name):
+                continue
             try:
                 handle.remove()
             except Exception:
                 pass
-        self._plot_handles.clear()
-        if self._plot_folder is not None:
+            self._plot_handles.pop(name, None)
+        if not self._plot_handles and self._plot_folder is not None:
             try:
                 self._plot_folder.remove()
             except Exception:
                 pass
             self._plot_folder = None
-        self._scalar_buffers.clear()
-        self._scalar_accumulators.clear()
-        self._scalar_smoothing.clear()
-        self._scalar_dirty.clear()
+        for name in list(self._scalar_buffers.keys()):
+            if owns(name):
+                self._scalar_buffers.pop(name, None)
+                self._scalar_accumulators.pop(name, None)
+                self._scalar_smoothing.pop(name, None)
+        for name in list(self._scalar_dirty):
+            if owns(name):
+                self._scalar_dirty.discard(name)
 
         super().clear_model()
 

@@ -823,3 +823,13 @@ def compact(
     i = wp.tid()
     if mask[i] == wp.int32(1):
         dst[offsets[i]] = src[i]
+
+
+@wp.kernel
+def transform_points(
+    points: wp.array[wp.vec3],
+    xform: wp.transform,
+    transformed_points: wp.array[wp.vec3],
+):
+    i = wp.tid()
+    transformed_points[i] = wp.transform_point(xform, points[i])
