@@ -566,9 +566,6 @@ class ViewerGL(ViewerBase):
         for name in list(self._scalar_arrays.keys()):
             if owns(name):
                 self._scalar_arrays.pop(name, None)
-        for name in list(self._scalar_dirty):
-            if owns(name):
-                self._scalar_dirty.discard(name)
         for name in list(self._array_buffers.keys()):
             if owns(name):
                 self._array_buffers.pop(name, None)
