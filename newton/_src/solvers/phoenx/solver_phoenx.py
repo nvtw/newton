@@ -1945,7 +1945,7 @@ class PhoenXWorld:
             self.articulation_dvi_host_solver if solver is None else solver
         )
 
-        device_system.populate_from_adbs_constraints(self.constraints, self.bodies, device=self.device)
+        device_system.populate_from_adbs_constraints(self.constraints, self.bodies, dt=solve_dt, device=self.device)
         device_system.compute_residual(
             self.bodies,
             dt=solve_dt,

@@ -12,6 +12,7 @@ import warp as wp
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
+    pd_coefficients,
     read_float,
     read_int,
     read_quat,
@@ -63,6 +64,10 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
     revolution_tracker_angle,
     revolution_tracker_update,
 )
+from newton._src.solvers.phoenx.solver_config import (
+    PHOENX_BOOST_PRISMATIC_DRIVE,
+    PHOENX_BOOST_REVOLUTE_DRIVE,
+)
 
 from .symbolic import BlockSparseSymbolic, compute_block_sparse_symbolic
 from .topology import ArticulationTopology
@@ -84,6 +89,7 @@ class ArticulationDeviceSystem:
     jacobian: wp.array
     violation: wp.array
     velocity_target: wp.array
+    row_regularization: wp.array
     matrix: wp.array
     rhs: wp.array
     solution: wp.array
@@ -202,6 +208,7 @@ class ArticulationDeviceSystem:
             jacobian=wp.zeros((rows_alloc, 12), dtype=wp.float32, device=device),
             violation=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             velocity_target=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
+            row_regularization=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             matrix=wp.zeros((rows_alloc, rows_alloc), dtype=wp.float32, device=device),
             rhs=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             solution=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
@@ -244,6 +251,7 @@ class ArticulationDeviceSystem:
         constraints: ConstraintContainer,
         bodies: BodyContainer,
         *,
+        dt: float = 0.0,
         device=None,
     ) -> None:
         """Populate compact DVI rows from initialized ADBS joint columns."""
@@ -257,9 +265,10 @@ class ArticulationDeviceSystem:
                 bodies,
                 self.active_joint_indices,
                 self.active_block_offsets,
+                wp.float32(dt),
                 wp.int32(self.active_joint_count),
             ],
-            outputs=[self.jacobian, self.violation, self.velocity_target],
+            outputs=[self.jacobian, self.violation, self.velocity_target, self.row_regularization],
             device=device,
         )
 
@@ -283,6 +292,7 @@ class ArticulationDeviceSystem:
                 self.row_to_active_block,
                 inverse_mass,
                 inverse_inertia_world,
+                self.row_regularization,
                 wp.int32(self.total_rows),
             ],
             outputs=[self.matrix],
@@ -313,6 +323,7 @@ class ArticulationDeviceSystem:
                 self.block_sizes,
                 inverse_mass,
                 inverse_inertia_world,
+                self.row_regularization,
                 wp.float32(diagonal_regularization),
                 wp.int32(self.block_count),
             ],
@@ -552,10 +563,12 @@ def _populate_adbs_articulation_rows_kernel(
     bodies: BodyContainer,
     active_joint_indices: wp.array[wp.int32],
     active_block_offsets: wp.array[wp.int32],
+    dt: wp.float32,
     active_joint_count: wp.int32,
     jacobian: wp.array2d[wp.float32],
     violation: wp.array[wp.float32],
     velocity_target: wp.array[wp.float32],
+    row_regularization: wp.array[wp.float32],
 ):
     block = wp.tid()
     if block >= active_joint_count:
@@ -564,7 +577,7 @@ def _populate_adbs_articulation_rows_kernel(
     cid = active_joint_indices[block]
     row0 = active_block_offsets[block]
     row_count = active_block_offsets[block + 1] - row0
-    _clear_joint_rows(row0, row_count, jacobian, violation, velocity_target)
+    _clear_joint_rows(row0, row_count, jacobian, violation, velocity_target, row_regularization)
 
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
@@ -653,18 +666,52 @@ def _populate_adbs_articulation_rows_kernel(
             axial_error, active, clamp = _axial_row_error(value, target, min_value, max_value, drive_mode, drive_active)
             write_int(constraints, _OFF_CLAMP, cid, clamp)
             if active:
-                if clamp == _CLAMP_NONE:
-                    velocity_target[axial_row] = target_velocity
                 _fill_angular_row(axial_row, axis_drive, axial_error, jacobian, violation)
+                if clamp == _CLAMP_NONE:
+                    _apply_axial_drive_row_softness(
+                        axial_row,
+                        mode,
+                        value,
+                        target,
+                        target_velocity,
+                        drive_mode,
+                        stiffness_drive,
+                        damping_drive,
+                        dt,
+                        b1,
+                        b2,
+                        jacobian,
+                        bodies,
+                        violation,
+                        velocity_target,
+                        row_regularization,
+                    )
         elif mode == JOINT_MODE_PRISMATIC:
             axis_drive = _safe_normalize(wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)), axis_parent)
             value = wp.dot(axis_drive, a1_b2 - a1_b1)
             axial_error, active, clamp = _axial_row_error(value, target, min_value, max_value, drive_mode, drive_active)
             write_int(constraints, _OFF_CLAMP, cid, clamp)
             if active:
-                if clamp == _CLAMP_NONE:
-                    velocity_target[axial_row] = target_velocity
                 _fill_spatial_row(axial_row, axis_drive, r1_b1, r1_b2, axial_error, jacobian, violation)
+                if clamp == _CLAMP_NONE:
+                    _apply_axial_drive_row_softness(
+                        axial_row,
+                        mode,
+                        value,
+                        target,
+                        target_velocity,
+                        drive_mode,
+                        stiffness_drive,
+                        damping_drive,
+                        dt,
+                        b1,
+                        b2,
+                        jacobian,
+                        bodies,
+                        violation,
+                        velocity_target,
+                        row_regularization,
+                    )
 
     d6_row0 = row0 + equality_rows + axial_rows
     d6_row_count = row_count - equality_rows - axial_rows
@@ -680,6 +727,7 @@ def _assemble_dense_articulation_matrix_kernel(
     row_to_active_block: wp.array[wp.int32],
     inverse_mass: wp.array[wp.float32],
     inverse_inertia_world: wp.array[wp.mat33f],
+    row_regularization: wp.array[wp.float32],
     total_rows: wp.int32,
     matrix: wp.array2d[wp.float32],
 ):
@@ -687,7 +735,7 @@ def _assemble_dense_articulation_matrix_kernel(
     if row >= total_rows or col >= total_rows:
         return
 
-    matrix[row, col] = _articulation_matrix_entry(
+    value = _articulation_matrix_entry(
         row,
         col,
         jacobian,
@@ -697,6 +745,9 @@ def _assemble_dense_articulation_matrix_kernel(
         inverse_mass,
         inverse_inertia_world,
     )
+    if row == col:
+        value += row_regularization[row]
+    matrix[row, col] = value
 
 
 @wp.kernel
@@ -710,6 +761,7 @@ def _assemble_block_sparse_articulation_diag_kernel(
     block_sizes: wp.array[wp.int32],
     inverse_mass: wp.array[wp.float32],
     inverse_inertia_world: wp.array[wp.mat33f],
+    row_regularization: wp.array[wp.float32],
     diagonal_regularization: wp.float32,
     block_count: wp.int32,
     block_diag: wp.array3d[wp.float32],
@@ -738,7 +790,7 @@ def _assemble_block_sparse_articulation_diag_kernel(
                     inverse_inertia_world,
                 )
                 if i == j:
-                    value += diagonal_regularization
+                    value += row_regularization[row] + diagonal_regularization
             block_diag[pivot, i, j] = value
 
 
@@ -1269,6 +1321,68 @@ def _axial_row_error(
 
 
 @wp.func
+def _apply_axial_drive_row_softness(
+    row: wp.int32,
+    mode: wp.int32,
+    value: wp.float32,
+    target: wp.float32,
+    target_velocity: wp.float32,
+    drive_mode: wp.int32,
+    stiffness_drive: wp.float32,
+    damping_drive: wp.float32,
+    dt: wp.float32,
+    b1: wp.int32,
+    b2: wp.int32,
+    jacobian: wp.array2d[wp.float32],
+    bodies: BodyContainer,
+    violation: wp.array[wp.float32],
+    velocity_target: wp.array[wp.float32],
+    row_regularization: wp.array[wp.float32],
+):
+    if drive_mode == DRIVE_MODE_OFF:
+        return
+    if stiffness_drive <= wp.float32(0.0) and damping_drive <= wp.float32(0.0):
+        return
+
+    if dt <= wp.float32(0.0):
+        velocity_target[row] = target_velocity
+        return
+
+    drive_error = wp.float32(0.0)
+    if drive_mode == DRIVE_MODE_POSITION:
+        drive_error = value - target
+
+    eff_inv = _joint_row_effective_inverse(row, b1, b2, jacobian, bodies.inverse_mass, bodies.inverse_inertia_world)
+    boost = PHOENX_BOOST_REVOLUTE_DRIVE
+    if mode == JOINT_MODE_PRISMATIC:
+        boost = PHOENX_BOOST_PRISMATIC_DRIVE
+    gamma, bias, _eff_mass_soft = pd_coefficients(stiffness_drive, damping_drive, drive_error, eff_inv, dt, boost)
+    row_regularization[row] = gamma
+    velocity_target[row] = -(bias - target_velocity)
+    violation[row] = wp.float32(0.0)
+
+
+@wp.func
+def _joint_row_effective_inverse(
+    row: wp.int32,
+    b1: wp.int32,
+    b2: wp.int32,
+    jacobian: wp.array2d[wp.float32],
+    inverse_mass: wp.array[wp.float32],
+    inverse_inertia_world: wp.array[wp.mat33f],
+) -> wp.float32:
+    value = wp.float32(0.0)
+    if b1 >= wp.int32(0):
+        value += _body_metric_dot(row, row, wp.int32(0), wp.int32(0), b1, jacobian, inverse_mass, inverse_inertia_world)
+    if b2 >= wp.int32(0):
+        value += _body_metric_dot(row, row, wp.int32(6), wp.int32(6), b2, jacobian, inverse_mass, inverse_inertia_world)
+    if b1 >= wp.int32(0) and b1 == b2:
+        value += _body_metric_dot(row, row, wp.int32(0), wp.int32(6), b1, jacobian, inverse_mass, inverse_inertia_world)
+        value += _body_metric_dot(row, row, wp.int32(6), wp.int32(0), b1, jacobian, inverse_mass, inverse_inertia_world)
+    return value
+
+
+@wp.func
 def _adbs_equality_row_count(mode: wp.int32) -> wp.int32:
     if mode == JOINT_MODE_REVOLUTE:
         return wp.int32(5)
@@ -1296,11 +1410,14 @@ def _clear_joint_rows(
     jacobian: wp.array2d[wp.float32],
     violation: wp.array[wp.float32],
     velocity_target: wp.array[wp.float32],
+    row_regularization: wp.array[wp.float32],
 ):
     local = wp.int32(0)
     while local < row_count:
         row = row0 + local
         violation[row] = wp.float32(0.0)
+        velocity_target[row] = wp.float32(0.0)
+        row_regularization[row] = wp.float32(0.0)
         col = wp.int32(0)
         while col < wp.int32(12):
             jacobian[row, col] = wp.float32(0.0)

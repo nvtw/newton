@@ -695,7 +695,44 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
 
         np.testing.assert_allclose(
             world.bodies.angular_velocity.numpy()[1],
-            np.array([0.0, 0.0, 2.0], dtype=np.float32),
+            np.array([0.0, 0.0, 2.0 / 11.0], dtype=np.float32),
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        )
+        np.testing.assert_allclose(
+            world.articulation_device_system.row_regularization.numpy()[5],
+            10.0,
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        )
+
+    def test_device_dvi_position_drive_row_uses_pd_bias(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_REVOLUTE)], dtype=np.int32),
+            world_kwargs={"articulation_dvi_host": True, "gravity": (0.0, 0.0, 0.0)},
+            drive_mode_np=np.array([int(DRIVE_MODE_POSITION)], dtype=np.int32),
+            target_np=np.array([0.0], dtype=np.float32),
+            stiffness_drive_np=np.array([100.0], dtype=np.float32),
+        )
+        world.bodies.orientation.assign(
+            np.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.24740396, 0.9689124]], dtype=np.float32)
+        )
+
+        self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
+
+        np.testing.assert_allclose(
+            world.bodies.angular_velocity.numpy()[1],
+            np.array([0.0, 0.0, -2.5], dtype=np.float32),
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        )
+        np.testing.assert_allclose(
+            world.articulation_device_system.row_regularization.numpy()[5],
+            1.0,
             rtol=1.0e-5,
             atol=1.0e-5,
         )
