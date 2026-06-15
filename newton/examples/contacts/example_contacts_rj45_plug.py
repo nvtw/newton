@@ -228,6 +228,12 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.viewer = viewer
+        # PhoenX dispatch intentionally not added: the plug ships with
+        # a D6 free joint to allow gizmo-driven 6-DoF translation,
+        # which PhoenX's joint set does not include (only REVOLUTE,
+        # PRISMATIC, BALL, FIXED, FREE). TODO: replace the D6 with a
+        # FREE joint to enable the PhoenX path.
+        self.solver_name = "vbd"
         self.pick_stiffness = 50.0
         self.pick_damping = 10.0
 
@@ -239,6 +245,7 @@ class Example:
         latch_mesh, lc = _load_mesh(stage, "/World/Latch")
 
         builder = newton.ModelBuilder(gravity=-9.81)
+        SolverVBD.register_custom_attributes(builder, dahl_defaults_enabled=False)
         builder.rigid_gap = 0.005
 
         builder.add_ground_plane()
@@ -290,6 +297,7 @@ class Example:
             angular_axes=None,
             parent_xform=wp.transform(plug_pos, wp.quat_identity()),
             child_xform=wp.transform_identity(),
+            custom_attributes={"vbd:joint_is_hard": 0},
         )
 
         # Revolute joint: plug -> latch (hinge along -X axis)
@@ -305,6 +313,7 @@ class Example:
             limit_upper=LATCH_LIMIT_UPPER,
             limit_kd=LATCH_LIMIT_KD,
             collision_filter_parent=True,
+            custom_attributes={"vbd:joint_is_hard": 0},
         )
 
         builder.add_articulation([d6_joint, rev_joint])
@@ -387,8 +396,6 @@ class Example:
             rigid_contact_hard=False,
             rigid_body_contact_buffer_size=256,
         )
-        for j in range(self.model.joint_count):
-            self.solver.set_joint_constraint_mode(j, False)
 
         self._rest_pos = plug_pos
         self.gizmo_tf = wp.transform(plug_pos, wp.quat_identity())
@@ -515,4 +522,5 @@ class Example:
 
 if __name__ == "__main__":
     viewer, args = newton.examples.init()
-    newton.examples.run(Example(viewer, args), args)
+    example = Example(viewer, args)
+    newton.examples.run(example, args)

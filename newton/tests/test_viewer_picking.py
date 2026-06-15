@@ -211,6 +211,43 @@ class TestPickingSetup(unittest.TestCase):
         self.assertIsNotNone(picking_with_offsets.world_offsets)
         self.assertEqual(picking_with_offsets.world_offsets.shape[0], 1)
 
+    def test_apply_picking_force_invalid_body_clears_pick(self):
+        """Stale pick body indices must not write forces."""
+        model = _make_single_sphere_model(device="cpu")
+        state = model.state()
+        picking = Picking(model)
+        picking.pick_body.assign(np.array([model.body_count + 5], dtype=np.int32))
+        picking.picking_active = True
+
+        state.body_f.zero_()
+        picking._apply_picking_force(state)
+
+        self.assertEqual(int(picking.pick_body.numpy()[0]), -1)
+        assert_np_equal(state.body_f.numpy(), np.zeros_like(state.body_f.numpy()), tol=1e-9)
+
+    def test_apply_picking_force_nan_target_clears_pick(self):
+        """Non-finite pick targets must not inject NaN forces."""
+        model = _make_single_sphere_model(device="cpu")
+        state = model.state()
+        picking = Picking(model)
+        pick_state = picking.pick_state.numpy()
+        pick_state[0]["picked_point_local"] = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        pick_state[0]["picking_target_world"] = np.array([np.nan, 0.0, 0.0], dtype=np.float32)
+        pick_state[0]["pick_stiffness"] = 50.0
+        pick_state[0]["pick_damping"] = 5.0
+        pick_state[0]["pick_max_acceleration"] = 5.0
+        picking.pick_state.assign(pick_state)
+        picking.pick_body.assign(np.array([0], dtype=np.int32))
+        picking.picking_active = True
+
+        state.body_f.zero_()
+        picking._apply_picking_force(state)
+
+        self.assertEqual(int(picking.pick_body.numpy()[0]), -1)
+        forces = state.body_f.numpy()
+        self.assertTrue(np.isfinite(forces).all())
+        assert_np_equal(forces, np.zeros_like(forces), tol=1e-9)
+
 
 def test_picking_setup_device(test: TestPickingSetup, device):
     """Picking setup works on the given device (CPU or CUDA)."""

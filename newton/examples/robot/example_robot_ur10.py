@@ -49,6 +49,7 @@ def update_joint_target_trajectory_kernel(
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
 
@@ -62,8 +63,12 @@ class Example:
 
         self.device = wp.get_device()
 
+        # Pick the solver backend; default stays MuJoCo for reproducibility.
+        solver_name = getattr(args, "solver", "mujoco")
+
         ur10 = newton.ModelBuilder()
-        newton.solvers.SolverMuJoCo.register_custom_attributes(ur10)
+        if solver_name == "mujoco":
+            newton.solvers.SolverMuJoCo.register_custom_attributes(ur10)
 
         asset_path = newton.utils.download_asset("universal_robots_ur10")
         asset_file = str(asset_path / "usd" / "ur10_instanceable.usda")
@@ -77,6 +82,15 @@ class Example:
         )
         # create a pedestal
         ur10.add_shape_cylinder(-1, xform=wp.transform(wp.vec3(0, 0, height / 2)), half_height=height / 2, radius=0.08)
+
+        # The UR10 USD's articulated-root prim imports as a 0-DOF D6
+        # joint anchoring base_link to the world. PhoenX rejects D6,
+        # but a D6 with no linear/angular axes is geometrically a
+        # FIXED weld, so retype it in place. MuJoCo handles either
+        # form, so the conversion is harmless when ``solver=mujoco``.
+        for i, jtype in enumerate(ur10.joint_type):
+            if jtype == int(newton.JointType.D6) and ur10.joint_dof_dim[i] == (0, 0):
+                ur10.joint_type[i] = int(newton.JointType.FIXED)
 
         for i in range(len(ur10.joint_target_ke)):
             ur10.joint_target_ke[i] = 500
@@ -98,7 +112,6 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = None
 
         self.articulation_view = ArticulationView(
             self.model, "*ur10*", exclude_joint_types=[newton.JointType.FREE, newton.JointType.DISTANCE]
@@ -140,12 +153,27 @@ class Example:
         self.joint_target_trajectory = wp.array(joint_target_trajectory, dtype=wp.float32, device=self.device)
         self.time_step = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
 
-        self.ctrl = self.articulation_view.get_attribute("joint_target_pos", self.control)
+        self.ctrl = self.articulation_view.get_attribute("joint_target_q", self.control)
 
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            disable_contacts=True,
-        )
+        self.solver_name = solver_name
+        if solver_name == "phoenx":
+            # The arm is welded to the world via a FIXED root joint
+            # (re-typed above), so PhoenX's contact pipeline only sees
+            # arm-arm pairs. Self-collisions are disabled in the USD
+            # import, so contacts stay empty in practice.
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model,
+                substeps=self.sim_substeps,
+                solver_iterations=8,
+                velocity_iterations=1,
+            )
+            self.contacts = self.model.contacts()
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                disable_contacts=True,
+            )
+            self.contacts = None
 
         self.viewer.set_model(self.model)
 
@@ -172,7 +200,7 @@ class Example:
                 outputs=[self.ctrl],
                 device=self.device,
             )
-            self.articulation_view.set_attribute("joint_target_pos", self.control, self.ctrl)
+            self.articulation_view.set_attribute("joint_target_q", self.control, self.ctrl)
 
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
@@ -199,6 +227,12 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
+        parser.add_argument(
+            "--solver",
+            choices=["mujoco", "phoenx"],
+            default="phoenx",
+            help="Rigid-body solver backend. 'mujoco' (default) uses the MuJoCo/Warp solver; 'phoenx' uses SolverPhoenX.",
+        )
         parser.set_defaults(world_count=100)
         return parser
 

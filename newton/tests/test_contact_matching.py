@@ -664,6 +664,106 @@ def test_sticky_disabled_no_sticky_buffers(test, device):
         test.assertIsNotNone(p_sticky._contact_matcher._prev_offset1)
 
 
+def test_tie_break_invariant_under_unsorted_permutation(test, device):
+    """Two new contacts in the same shape pair with identical positions and
+    normals both pick the same prev contact as their closest. The matcher's
+    tie-break must select the same *physical* winner regardless of which
+    unsorted slot the narrow phase happened to assign to each contact, since
+    that assignment is non-deterministic (``wp.atomic_add`` slot allocation).
+
+    Regression test: previously the tie-break used the unsorted ``tid``,
+    which made the winner depend on the (non-deterministic) slot order;
+    in sticky mode this leaked observable non-determinism into the
+    contact buffer because only the winner's row is overwritten by
+    :meth:`ContactMatcher.replay_matched`.
+    """
+    from newton._src.geometry.contact_match import ContactMatcher  # noqa: PLC0415
+    from newton._src.geometry.contact_sort import ContactSorter  # noqa: PLC0415
+
+    def py_key(shape_a, shape_b, sub):
+        return ((shape_a & 0xFFFFF) << 43) | ((shape_b & 0xFFFFF) << 23) | (sub & 0x7FFFFF)
+
+    def signed_int64(v):
+        return v - (1 << 64) if v >= (1 << 63) else v
+
+    capacity = 16
+    with wp.ScopedDevice(device):
+        sorter = ContactSorter(capacity=capacity, device=device)
+        matcher = ContactMatcher(
+            capacity=capacity,
+            sorter=sorter,
+            pos_threshold=0.001,
+            normal_dot_threshold=0.9,
+            sticky=False,
+            device=device,
+        )
+
+        # Seed prev: one contact at origin in pair (0, 1).
+        prev_keys = np.full(capacity, np.iinfo(np.int64).max, dtype=np.int64)
+        prev_keys[0] = signed_int64(py_key(0, 1, 100))
+        prev_pos = np.zeros((capacity, 3), dtype=np.float32)
+        prev_norm = np.zeros((capacity, 3), dtype=np.float32)
+        prev_norm[0] = (0.0, 0.0, 1.0)
+
+        # Two new contacts in pair (0, 1) at the same position; different sub_keys.
+        # Both will pick prev[0]; ties resolve via packed claim.
+        contact_X = {"shape_a": 0, "shape_b": 1, "sub": 200}
+        contact_Y = {"shape_a": 0, "shape_b": 1, "sub": 300}
+
+        def run(order):
+            """Run match with new contacts in the given list order."""
+            matcher._prev_sorted_keys.assign(prev_keys)
+            matcher._prev_count.assign(np.array([1], dtype=np.int32))
+            sorter.scratch_pos_world.assign(prev_pos)
+            sorter.scratch_normal.assign(prev_norm)
+
+            n = len(order)
+            sk = np.full(capacity, np.iinfo(np.int64).max, dtype=np.int64)
+            p0 = np.zeros((capacity, 3), dtype=np.float32)
+            p1 = np.zeros((capacity, 3), dtype=np.float32)
+            sa = np.zeros(capacity, dtype=np.int32)
+            sb = np.zeros(capacity, dtype=np.int32)
+            nm = np.zeros((capacity, 3), dtype=np.float32)
+            for i, c in enumerate(order):
+                sk[i] = signed_int64(py_key(c["shape_a"], c["shape_b"], c["sub"]))
+                sa[i] = c["shape_a"]
+                sb[i] = c["shape_b"]
+                nm[i] = (0.0, 0.0, 1.0)
+
+            sk_a = wp.array(sk, dtype=wp.int64, device=device)
+            cc = wp.array([n], dtype=wp.int32, device=device)
+            mi = wp.full(capacity, -1, dtype=wp.int32, device=device)
+            body_q = wp.array([wp.transform_identity()], dtype=wp.transform, device=device)
+            shape_body = wp.full(2, -1, dtype=wp.int32, device=device)
+
+            matcher.match(
+                sort_keys=sk_a,
+                contact_count=cc,
+                point0=wp.array(p0, dtype=wp.vec3, device=device),
+                point1=wp.array(p1, dtype=wp.vec3, device=device),
+                shape0=wp.array(sa, dtype=wp.int32, device=device),
+                shape1=wp.array(sb, dtype=wp.int32, device=device),
+                normal=wp.array(nm, dtype=wp.vec3, device=device),
+                body_q=body_q,
+                shape_body=shape_body,
+                match_index_out=mi,
+                device=device,
+            )
+            mi_h = mi.numpy()[:n]
+            return [order[i]["sub"] for i in range(n) if mi_h[i] >= 0]
+
+        winners_A = run([contact_X, contact_Y])
+        winners_B = run([contact_Y, contact_X])
+
+        test.assertEqual(
+            winners_A,
+            winners_B,
+            f"Matcher tie-break must be invariant under unsorted slot order; "
+            f"got winners A={winners_A} vs B={winners_B}",
+        )
+        test.assertEqual(len(winners_A), 1, "Exactly one of the racing contacts must win")
+
+
 # ---------------------------------------------------------------------------
 # Register tests
 # ---------------------------------------------------------------------------
@@ -718,6 +818,12 @@ add_function_test(
 add_function_test(TestContactMatching, "test_invalid_mode_raises", test_invalid_mode_raises, devices=devices)
 add_function_test(
     TestContactMatching, "test_contact_report_requires_matching", test_contact_report_requires_matching, devices=devices
+)
+add_function_test(
+    TestContactMatching,
+    "test_tie_break_invariant_under_unsorted_permutation",
+    test_tie_break_invariant_under_unsorted_permutation,
+    devices=devices,
 )
 
 add_function_test(

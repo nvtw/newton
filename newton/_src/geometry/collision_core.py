@@ -41,6 +41,8 @@ def is_discrete_shape(shape_type: int) -> bool:
     return (
         shape_type == GeoType.BOX
         or shape_type == GeoType.CONVEX_MESH
+        or shape_type == GeoType.TRIANGLE
+        or shape_type == GeoType.TETRAHEDRON
         or shape_type == GeoTypeEx.TRIANGLE
         or shape_type == GeoTypeEx.TRIANGLE_PRISM
         or shape_type == GeoType.PLANE

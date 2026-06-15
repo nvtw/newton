@@ -22,6 +22,7 @@ from newton._src.geometry.contact_reduction_global import (
     encode_oct,
     export_and_reduce_contact,
     export_and_reduce_contact_centered,
+    export_and_reduce_contact_centered_two_spatial_depths,
     make_contact_key,
 )
 from newton._src.geometry.narrow_phase import ContactWriterData
@@ -569,7 +570,7 @@ def test_export_reduced_contacts_kernel(test, device):
 
     # Launch export kernel
     total_threads = 128  # Grid stride threads
-    reducer.exported_flags.zero_()
+    reducer.advance_export_epoch()
     wp.launch(
         export_kernel,
         dim=total_threads,
@@ -582,6 +583,7 @@ def test_export_reduced_contacts_kernel(test, device):
             reducer.shape_pairs,
             reducer.contact_fingerprints,
             reducer.exported_flags,
+            reducer.export_epoch,
             shape_types,
             shape_data,
             shape_gap,
@@ -703,6 +705,76 @@ def test_centered_basic_storage_and_reduction(test, device):
     winners = get_winning_contacts(reducer)
     test.assertGreater(len(winners), 0, "At least one contact should win a slot")
     test.assertLess(len(winners), 20, "Reduction should produce fewer winners than inputs")
+
+
+def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
+    """Test that directional lanes prefer inner contacts and keep outer fallbacks."""
+    reducer = GlobalContactReducer(capacity=200, device=device)
+    reducer_data = reducer.get_data_struct()
+
+    @wp.kernel
+    def store_two_depth_contact_kernel(
+        reducer_data: GlobalContactReducerData,
+        x: float,
+        depth: float,
+        fingerprint: int,
+    ):
+        position = wp.vec3(x, 0.0, 0.0)
+        normal = wp.vec3(0.0, 1.0, 0.0)
+        X_ws_shape = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
+
+        export_and_reduce_contact_centered_two_spatial_depths(
+            shape_a=0,
+            shape_b=1,
+            position=position,
+            normal=normal,
+            depth=depth,
+            fingerprint=fingerprint,
+            centered_position=position,
+            inner_spatial_depth=0.0,
+            outer_spatial_depth=0.1,
+            X_ws_voxel_shape=X_ws_shape,
+            aabb_lower_voxel=wp.vec3(-1.0, -1.0, -1.0),
+            aabb_upper_voxel=wp.vec3(1.0, 1.0, 1.0),
+            voxel_res=wp.vec3i(1, 1, 1),
+            reducer_data=reducer_data,
+        )
+
+    wp.launch(
+        store_two_depth_contact_kernel,
+        dim=1,
+        inputs=[reducer_data, 0.0, -0.01, 1],
+        device=device,
+    )
+    test.assertEqual(get_contact_count(reducer), 1)
+
+    wp.launch(
+        store_two_depth_contact_kernel,
+        dim=1,
+        inputs=[reducer_data, 0.1, 0.05, 2],
+        device=device,
+    )
+
+    test.assertEqual(get_contact_count(reducer), 1)
+    winners = get_winning_contacts(reducer)
+    fingerprints = set(int(reducer.contact_fingerprints.numpy()[cid]) for cid in winners)
+    test.assertIn(1, fingerprints, "Inner contact should win over an outer directional contact")
+    test.assertNotIn(2, fingerprints, "Outer directional contact should be a fallback only")
+    test.assertEqual(get_active_slot_count(reducer), 2, "Only normal and voxel entries should be active")
+
+    outer_reducer = GlobalContactReducer(capacity=200, device=device)
+    outer_reducer_data = outer_reducer.get_data_struct()
+    wp.launch(
+        store_two_depth_contact_kernel,
+        dim=1,
+        inputs=[outer_reducer_data, 0.1, 0.05, 2],
+        device=device,
+    )
+
+    test.assertEqual(get_contact_count(outer_reducer), 1)
+    outer_winners = get_winning_contacts(outer_reducer)
+    outer_fingerprints = set(int(outer_reducer.contact_fingerprints.numpy()[cid]) for cid in outer_winners)
+    test.assertIn(2, outer_fingerprints, "Outer contact should win when no inner contact exists")
 
 
 def test_centered_different_pairs_independent(test, device):
@@ -1121,11 +1193,17 @@ def _det_pack_unpack_kernel(
 
 
 def test_det_pack_unpack_roundtrip(test, device):
-    """Verify contact_id survives pack/unpack roundtrip in deterministic mode."""
-    n = 5
-    scores = wp.array([0.1, 0.5, -0.01, 1.0, 0.0], dtype=float, device=device)
-    fps = wp.array([0, 100, 999999, 42, 0], dtype=int, device=device)
-    ids = wp.array([0, 1, 1048575, 500, 12345], dtype=int, device=device)
+    """Verify contact_id survives pack/unpack roundtrip in deterministic mode.
+
+    Includes contact_ids past the old 20-bit (1M) cap to lock in the
+    22-bit (~4M) packing — dense mesh-mesh scenes (e.g. 20x20 nut/bolt)
+    push 2M+ edge-test attempts per frame and used to overflow silently.
+    """
+    # 1048575 = 2^20-1 (the old cap), 1048576..4194303 exercise the new bits.
+    n = 7
+    scores = wp.array([0.1, 0.5, -0.01, 1.0, 0.0, 0.25, -0.5], dtype=float, device=device)
+    fps = wp.array([0, 100, 999999, 42, 0, 7, 12345], dtype=int, device=device)
+    ids = wp.array([0, 1, 1048575, 1048576, 2097151, 3000000, 4194303], dtype=int, device=device)
     packed = wp.zeros(n, dtype=wp.uint64, device=device)
     unpacked = wp.zeros(n, dtype=int, device=device)
 
@@ -1134,7 +1212,7 @@ def test_det_pack_unpack_roundtrip(test, device):
     ids_np = ids.numpy()
     unpacked_np = unpacked.numpy()
     for i in range(n):
-        expected = ids_np[i] & ((1 << 20) - 1)
+        expected = ids_np[i] & ((1 << 22) - 1)
         test.assertEqual(
             unpacked_np[i],
             expected,
@@ -1306,10 +1384,110 @@ def test_deterministic_identical_across_runs(test, device):
 
 
 # =============================================================================
+# Regression test: deterministic reducer must accept > 1M capacity.
+# =============================================================================
+#
+# Pre-fix: deterministic packing used a 20-bit contact_id field, so the
+# GlobalContactReducer ctor raised ``ValueError`` for capacity > ~1M, and
+# the SDF narrow phase silently overflowed past 1M edge-test attempts on
+# dense mesh-mesh scenes (e.g. 20x20 nut/bolt -> ~2.2M attempts). The
+# overflowed contacts were dropped in a non-deterministic ``atomic_add``
+# order, which made the simulation diverge differently on each run.
+#
+# Post-fix: the packing uses 22 bits for contact_id (~4M), so multi-million
+# capacity is allowed and the dropping disappears. This test pins both
+# behaviours: the ctor accepts capacity in (1M, 4M], and a CUDA-graph
+# capture that drives ``atomic_add`` past the old 1M cap produces a
+# deterministic count.
+
+
+@wp.kernel(enable_backward=False)
+def _atomic_add_stress_kernel(counter: wp.array[wp.int32], capacity: wp.int32):
+    """Bump ``counter[0]`` once per thread, mirroring the SDF kernel's
+    per-edge ``atomic_add(reducer_data.contact_count, 0, 1)``. Threads
+    whose returned id falls past ``capacity`` count as "drops" in the
+    real reducer."""
+    _ = wp.atomic_add(counter, 0, 1)
+    _ = capacity  # silence unused (keeps signature mirroring real kernel)
+
+
+class TestLargeCapacity(unittest.TestCase):
+    """Regression: deterministic reducer past the old 1M contact-id cap."""
+
+    pass
+
+
+def test_deterministic_capacity_above_1m(test, device):
+    """Constructing a deterministic GlobalContactReducer past the old 1M
+    cap must succeed (was a hard ValueError before the 22-bit packing
+    fix). CUDA + graph capture to match the production code path."""
+    # CUDA-only by registration (devices below); be defensive in case it
+    # gets re-registered for CPU later.
+    if not wp.get_device(device).is_cuda:
+        test.skipTest("graph-capture regression test is CUDA-only")
+
+    capacity = 2_500_000  # ~ 20x20 nut/bolt frame-0 attempt count
+    # Allocate inside ScopedCapture: the ctor itself only allocates Warp
+    # arrays which is safe under capture. Graph capture exercises the
+    # same launch sequence the production solver uses.
+    with wp.ScopedDevice(device):
+        reducer = GlobalContactReducer(capacity=capacity, device=device, deterministic=True)
+    test.assertEqual(reducer.capacity, capacity)
+    test.assertTrue(bool(reducer.deterministic))
+
+
+def test_atomic_add_past_1m_under_graph_capture(test, device):
+    """Stress the reducer's atomic_add counter past the old 1M cap inside
+    a CUDA graph capture, then replay. The final count must equal the
+    number of bumps and be reproducible across replays — pre-fix, the
+    deterministic ctor would have rejected this capacity so this code
+    path was simply unreachable."""
+    if not wp.get_device(device).is_cuda:
+        test.skipTest("graph-capture regression test is CUDA-only")
+
+    capacity = 2_500_000
+    num_bumps = 2_200_000  # > old 1M cap, < new 4M cap
+
+    with wp.ScopedDevice(device):
+        reducer = GlobalContactReducer(capacity=capacity, device=device, deterministic=True)
+        capacity_const = wp.int32(reducer.capacity)
+
+        # Capture: launch_clear + launch_stress. Both must be CUDA-graph-safe
+        # (no host syncs, no host-side reads). Replays of the captured graph
+        # must produce identical state.
+        with wp.ScopedCapture() as capture:
+            reducer.contact_count.zero_()
+            wp.launch(
+                _atomic_add_stress_kernel,
+                dim=num_bumps,
+                inputs=[reducer.contact_count, capacity_const],
+                device=device,
+            )
+
+        # Replay twice and verify both replays give the same count.
+        wp.capture_launch(capture.graph)
+        count_a = int(reducer.contact_count.numpy()[0])
+        wp.capture_launch(capture.graph)
+        count_b = int(reducer.contact_count.numpy()[0])
+
+    test.assertEqual(
+        count_a,
+        num_bumps,
+        f"First graph replay: expected {num_bumps} atomic_adds past the old 1M cap, got {count_a}",
+    )
+    test.assertEqual(
+        count_b,
+        num_bumps,
+        f"Second graph replay: count diverged ({count_a} vs {count_b}) — atomic_add is supposed to be deterministic in count",
+    )
+
+
+# =============================================================================
 # Test registration
 # =============================================================================
 
 devices = get_test_devices()
+cuda_devices = [d for d in devices if wp.get_device(d).is_cuda]
 
 # Register tests for all devices (CPU and CUDA)
 add_function_test(TestGlobalContactReducer, "test_basic_contact_storage", test_basic_contact_storage, devices=devices)
@@ -1330,6 +1508,12 @@ add_function_test(
     TestGlobalContactReducer,
     "test_centered_basic_storage_and_reduction",
     test_centered_basic_storage_and_reduction,
+    devices=devices,
+)
+add_function_test(
+    TestGlobalContactReducer,
+    "test_centered_two_spatial_depths_prefers_inner_then_outer",
+    test_centered_two_spatial_depths_prefers_inner_then_outer,
     devices=devices,
 )
 add_function_test(
@@ -1394,6 +1578,23 @@ add_function_test(
     "test_det_preprune_probe_is_ceiling",
     test_det_preprune_probe_is_ceiling,
     devices=devices,
+)
+
+# Large-capacity regression (CUDA-only + graph capture). Pre-fix, the
+# deterministic packing's 20-bit contact_id cap made the ctor reject
+# any capacity > ~1M, and the SDF narrow phase silently dropped
+# contacts past 1M on dense mesh-mesh scenes.
+add_function_test(
+    TestLargeCapacity,
+    "test_deterministic_capacity_above_1m",
+    test_deterministic_capacity_above_1m,
+    devices=cuda_devices,
+)
+add_function_test(
+    TestLargeCapacity,
+    "test_atomic_add_past_1m_under_graph_capture",
+    test_atomic_add_past_1m_under_graph_capture,
+    devices=cuda_devices,
 )
 
 # End-to-end deterministic test

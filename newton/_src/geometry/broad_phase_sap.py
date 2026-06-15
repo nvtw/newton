@@ -12,16 +12,18 @@ See Also:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import warp as wp
 
 from ..core.types import Devicelike
 from .broad_phase_common import (
+    EmptyFilterData,
     binary_search,
     check_aabb_overlap,
     is_pair_excluded,
+    keep_all_filter,
     precompute_world_map,
     test_world_and_group_pair,
     write_pair,
@@ -38,6 +40,36 @@ def _normalize_sort_mode(mode: str) -> SAPSortMode:
     if normalized not in ("segmented", "tile"):
         raise ValueError(f"Unsupported SAP sort mode: {mode!r}. Expected 'segmented' or 'tile'.")
     return normalized
+
+
+def _default_direction_candidates() -> np.ndarray:
+    """Return deterministic hemisphere directions for SAP axis search.
+
+    A direction and its negation generate the same SAP interval counts,
+    so the pattern only covers one hemisphere. The first direction is
+    the legacy fixed axis used when search is skipped for small scenes.
+    """
+    dirs = np.array(
+        [
+            (0.5935, 0.7790, 0.1235),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 1.0, 0.0),
+            (1.0, -1.0, 0.0),
+            (1.0, 0.0, 1.0),
+            (1.0, 0.0, -1.0),
+            (0.0, 1.0, 1.0),
+            (0.0, 1.0, -1.0),
+            (1.0, 1.0, 1.0),
+            (1.0, 1.0, -1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, -1.0, -1.0),
+        ],
+        dtype=np.float32,
+    )
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    return dirs
 
 
 @wp.func
@@ -58,7 +90,8 @@ def _sap_project_aabb(
 
     half_size = 0.5 * (upper - lower)
     half_size = wp.vec3(half_size[0] + gap, half_size[1] + gap, half_size[2] + gap)
-    radius = wp.dot(direction, half_size)
+    abs_direction = wp.vec3(wp.abs(direction[0]), wp.abs(direction[1]), wp.abs(direction[2]))
+    radius = wp.dot(abs_direction, half_size)
     center = wp.dot(direction, 0.5 * (lower + upper))
     return wp.vec2(center - radius, center + radius)
 
@@ -143,7 +176,9 @@ def _create_tile_sort_kernel(tile_size: int):
 
 @wp.kernel(enable_backward=False)
 def _sap_project_kernel(
-    direction: wp.vec3,  # Must be normalized
+    direction_candidates: wp.array[wp.vec3],
+    direction_index: int,
+    active_direction_index: wp.array[int],
     shape_bounding_box_lower: wp.array[wp.vec3],
     shape_bounding_box_upper: wp.array[wp.vec3],
     shape_gap: wp.array[float],  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
@@ -178,12 +213,88 @@ def _sap_project_kernel(
     # Map to actual geometry index
     shape_id = world_index_map[world_slice_start + local_shape_id]
 
-    # Project AABB onto direction
+    # Project AABB onto the candidate direction. ``direction_index < 0``
+    # selects the device-side active direction chosen by incremental search.
+    candidate = direction_index
+    if candidate < 0:
+        candidate = active_direction_index[0]
+    direction = direction_candidates[candidate]
     range = _sap_project_aabb(shape_id, direction, shape_bounding_box_lower, shape_bounding_box_upper, shape_gap)
 
     sap_projection_lower_out[idx] = range[0]
     sap_projection_upper_out[idx] = range[1]
     sap_sort_index_out[idx] = local_shape_id
+
+
+@wp.kernel(enable_backward=False)
+def _sap_update_direction_search_kernel(
+    sap_cumulative_sum: wp.array[int],
+    candidate_pair_count: wp.array[int],
+    total_elements: int,
+    direction_candidate_count: int,
+    direction_window_size: int,
+    direction_hold_frames: int,
+    direction_active_index: wp.array[int],
+    direction_candidate_cursor: wp.array[int],
+    direction_window_phase: wp.array[int],
+    direction_probe_count: wp.array[int],
+    direction_hold_count: wp.array[int],
+    direction_best_pause: wp.array[int],
+    direction_best_score: wp.array[float],
+    direction_best_index: wp.array[int],
+):
+    total_candidates = sap_cumulative_sum[total_elements - 1]
+    overlap_count = wp.max(candidate_pair_count[0], 1)
+    score = wp.float32(total_candidates) / wp.float32(overlap_count)
+
+    if score < direction_best_score[0]:
+        direction_best_score[0] = score
+        direction_best_index[0] = direction_active_index[0]
+
+    hold_count = direction_hold_count[0]
+    if hold_count > 0:
+        hold_count = hold_count - 1
+        direction_hold_count[0] = hold_count
+        direction_active_index[0] = direction_best_index[0]
+
+        if hold_count == 0:
+            best_index = direction_best_index[0]
+            direction_best_score[0] = 3.4028234663852886e38
+            direction_probe_count[0] = 0
+            direction_window_phase[0] = 0
+            direction_best_pause[0] = 0
+            direction_candidate_cursor[0] = (best_index + 1) % direction_candidate_count
+        return
+
+    if direction_best_pause[0] != 0:
+        cursor = direction_candidate_cursor[0]
+        direction_active_index[0] = cursor
+        direction_candidate_cursor[0] = (cursor + 1) % direction_candidate_count
+        direction_best_pause[0] = 0
+        return
+
+    probe_count = direction_probe_count[0] + 1
+    direction_probe_count[0] = probe_count
+
+    if probe_count >= direction_candidate_count:
+        best_index = direction_best_index[0]
+        direction_active_index[0] = best_index
+        direction_hold_count[0] = direction_hold_frames
+        direction_window_phase[0] = 0
+        direction_best_pause[0] = 0
+        direction_candidate_cursor[0] = (best_index + 1) % direction_candidate_count
+        return
+
+    phase = direction_window_phase[0] + 1
+    if phase >= direction_window_size:
+        direction_active_index[0] = direction_best_index[0]
+        direction_window_phase[0] = 0
+        direction_best_pause[0] = 1
+    else:
+        cursor = direction_candidate_cursor[0]
+        direction_active_index[0] = cursor
+        direction_candidate_cursor[0] = (cursor + 1) % direction_candidate_count
+        direction_window_phase[0] = phase
 
 
 @wp.kernel(enable_backward=False)
@@ -239,159 +350,130 @@ def _sap_range_kernel(
     sap_range_out[idx] = limit - local_shape_id - 1
 
 
-@wp.func
-def _process_single_sap_pair(
-    pair: wp.vec2i,
-    shape_bounding_box_lower: wp.array[wp.vec3],
-    shape_bounding_box_upper: wp.array[wp.vec3],
-    shape_gap: wp.array[float],  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
-    candidate_pair: wp.array[wp.vec2i],
-    candidate_pair_count: wp.array[int],  # Size one array
-    max_candidate_pair: int,
-    filter_pairs: wp.array[wp.vec2i],  # Sorted excluded pairs (empty if none)
-    num_filter_pairs: int,
-):
-    shape1 = pair[0]
-    shape2 = pair[1]
+def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any):
+    """Build the SAP broad-phase kernel bound to ``filter_func``.
 
-    # Skip explicitly excluded pairs (e.g. shape_collision_filter_pairs)
-    if num_filter_pairs > 0 and is_pair_excluded(pair, filter_pairs, num_filter_pairs):
-        return
+    See :func:`broad_phase_nxn.create_nxn_broadphase_kernel` for the
+    semantics of the filter callback.
+    """
 
-    # Check if margins are provided (empty array means AABBs are pre-expanded)
-    gap1 = 0.0
-    gap2 = 0.0
-    if shape_gap.shape[0] > 0:
-        gap1 = shape_gap[shape1]
-        gap2 = shape_gap[shape2]
+    _module = f"sap_broadphase_{filter_func.__name__}_{filter_data_type.__name__}"
 
-    if check_aabb_overlap(
-        shape_bounding_box_lower[shape1],
-        shape_bounding_box_upper[shape1],
-        gap1,
-        shape_bounding_box_lower[shape2],
-        shape_bounding_box_upper[shape2],
-        gap2,
+    @wp.kernel(enable_backward=False, module=_module)
+    def kernel(
+        shape_bounding_box_lower: wp.array[wp.vec3],
+        shape_bounding_box_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        collision_group: wp.array[int],
+        shape_world: wp.array[int],
+        world_index_map: wp.array[int],
+        world_slice_ends: wp.array[int],
+        sap_sort_index_in: wp.array[int],
+        sap_cumulative_sum_in: wp.array[int],
+        world_count: int,
+        max_shapes_per_world: int,
+        nsweep_in: int,
+        num_regular_worlds: int,
+        filter_pairs: wp.array[wp.vec2i],
+        num_filter_pairs: int,
+        filter_data: Any,
+        candidate_pair: wp.array[wp.vec2i],
+        candidate_pair_count: wp.array[int],
+        max_candidate_pair: int,
     ):
-        write_pair(
-            pair,
-            candidate_pair,
-            candidate_pair_count,
-            max_candidate_pair,
-        )
+        tid = wp.tid()
 
+        total_work_packages = sap_cumulative_sum_in[world_count * max_shapes_per_world - 1]
 
-@wp.kernel(enable_backward=False)
-def _sap_broadphase_kernel(
-    # Input arrays
-    shape_bounding_box_lower: wp.array[wp.vec3],
-    shape_bounding_box_upper: wp.array[wp.vec3],
-    shape_gap: wp.array[float],  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
-    collision_group: wp.array[int],
-    shape_world: wp.array[int],  # World indices
-    world_index_map: wp.array[int],
-    world_slice_ends: wp.array[int],
-    sap_sort_index_in: wp.array[int],  # 1D array with manual indexing
-    sap_cumulative_sum_in: wp.array[int],  # Flattened [world_count * max_shapes]
-    world_count: int,
-    max_shapes_per_world: int,
-    nsweep_in: int,
-    num_regular_worlds: int,  # Number of regular world segments (excluding dedicated -1 segment)
-    filter_pairs: wp.array[wp.vec2i],  # Sorted excluded pairs (empty if none)
-    num_filter_pairs: int,
-    # Output arrays
-    candidate_pair: wp.array[wp.vec2i],
-    candidate_pair_count: wp.array[int],  # Size one array
-    max_candidate_pair: int,
-):
-    tid = wp.tid()
+        workid = tid
+        while workid < total_work_packages:
+            flat_id = binary_search(sap_cumulative_sum_in, workid, 0, world_count * max_shapes_per_world)
 
-    total_work_packages = sap_cumulative_sum_in[world_count * max_shapes_per_world - 1]
+            j = flat_id + workid + 1
+            if flat_id > 0:
+                j -= sap_cumulative_sum_in[flat_id - 1]
 
-    workid = tid
-    while workid < total_work_packages:
-        # Binary search to find which (world, local_shape) this work package belongs to
-        flat_id = binary_search(sap_cumulative_sum_in, workid, 0, world_count * max_shapes_per_world)
+            world_id = flat_id // max_shapes_per_world
+            i = flat_id % max_shapes_per_world
+            j = j % max_shapes_per_world
 
-        # Calculate j from flat_id and workid
-        j = flat_id + workid + 1
-        if flat_id > 0:
-            j -= sap_cumulative_sum_in[flat_id - 1]
+            world_slice_start = 0
+            if world_id > 0:
+                world_slice_start = world_slice_ends[world_id - 1]
+            world_slice_end = world_slice_ends[world_id]
+            num_shapes_in_world = world_slice_end - world_slice_start
 
-        # Convert flat_id to world and local indices
-        world_id = flat_id // max_shapes_per_world
-        i = flat_id % max_shapes_per_world
-        j = j % max_shapes_per_world
+            if i >= num_shapes_in_world or j >= num_shapes_in_world:
+                workid += nsweep_in
+                continue
 
-        # Get slice boundaries for this world
-        world_slice_start = 0
-        if world_id > 0:
-            world_slice_start = world_slice_ends[world_id - 1]
-        world_slice_end = world_slice_ends[world_id]
-        num_shapes_in_world = world_slice_end - world_slice_start
+            if i >= j:
+                workid += nsweep_in
+                continue
 
-        # Check validity: ensure indices are within bounds
-        if i >= num_shapes_in_world or j >= num_shapes_in_world:
+            idx_i = world_id * max_shapes_per_world + i
+            idx_j = world_id * max_shapes_per_world + j
+            local_shape1 = sap_sort_index_in[idx_i]
+            local_shape2 = sap_sort_index_in[idx_j]
+
+            if local_shape1 < 0 or local_shape2 < 0:
+                workid += nsweep_in
+                continue
+
+            shape1_tmp = world_index_map[world_slice_start + local_shape1]
+            shape2_tmp = world_index_map[world_slice_start + local_shape2]
+
+            if shape1_tmp == shape2_tmp:
+                workid += nsweep_in
+                continue
+
+            shape1 = wp.min(shape1_tmp, shape2_tmp)
+            shape2 = wp.max(shape1_tmp, shape2_tmp)
+
+            col_group1 = collision_group[shape1]
+            col_group2 = collision_group[shape2]
+            world1 = shape_world[shape1]
+            world2 = shape_world[shape2]
+
+            is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+            if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
+                workid += nsweep_in
+                continue
+
+            if test_world_and_group_pair(world1, world2, col_group1, col_group2):
+                pair = wp.vec2i(shape1, shape2)
+                if num_filter_pairs > 0 and is_pair_excluded(pair, filter_pairs, num_filter_pairs):
+                    workid += nsweep_in
+                    continue
+
+                gap1 = 0.0
+                gap2 = 0.0
+                if shape_gap.shape[0] > 0:
+                    gap1 = shape_gap[shape1]
+                    gap2 = shape_gap[shape2]
+
+                if check_aabb_overlap(
+                    shape_bounding_box_lower[shape1],
+                    shape_bounding_box_upper[shape1],
+                    gap1,
+                    shape_bounding_box_lower[shape2],
+                    shape_bounding_box_upper[shape2],
+                    gap2,
+                ):
+                    if filter_func(pair, filter_data) != wp.int32(0):
+                        write_pair(
+                            pair,
+                            candidate_pair,
+                            candidate_pair_count,
+                            max_candidate_pair,
+                        )
+
             workid += nsweep_in
-            continue
 
-        # Skip self-pairs (i == j) and invalid pairs (i > j) - pairs must have distinct geometries with i < j
-        if i >= j:
-            workid += nsweep_in
-            continue
+    return kernel
 
-        # Get sorted local indices using manual indexing
-        idx_i = world_id * max_shapes_per_world + i
-        idx_j = world_id * max_shapes_per_world + j
-        local_shape1 = sap_sort_index_in[idx_i]
-        local_shape2 = sap_sort_index_in[idx_j]
 
-        # Check for invalid indices (padding)
-        if local_shape1 < 0 or local_shape2 < 0:
-            workid += nsweep_in
-            continue
-
-        # Map to actual geometry indices
-        shape1_tmp = world_index_map[world_slice_start + local_shape1]
-        shape2_tmp = world_index_map[world_slice_start + local_shape2]
-
-        # Skip if mapped to the same geometry (shouldn't happen, but defensive check)
-        if shape1_tmp == shape2_tmp:
-            workid += nsweep_in
-            continue
-
-        # Ensure canonical ordering
-        shape1 = wp.min(shape1_tmp, shape2_tmp)
-        shape2 = wp.max(shape1_tmp, shape2_tmp)
-
-        # Get collision and world groups
-        col_group1 = collision_group[shape1]
-        col_group2 = collision_group[shape2]
-        world1 = shape_world[shape1]
-        world2 = shape_world[shape2]
-
-        # Skip pairs where both geometries are global (world -1), unless we're in the dedicated -1 segment
-        # The dedicated -1 segment is the last segment (world_id >= num_regular_worlds)
-        is_dedicated_minus_one_segment = world_id >= num_regular_worlds
-        if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
-            workid += nsweep_in
-            continue
-
-        # Check both world and collision groups
-        if test_world_and_group_pair(world1, world2, col_group1, col_group2):
-            _process_single_sap_pair(
-                wp.vec2i(shape1, shape2),
-                shape_bounding_box_lower,
-                shape_bounding_box_upper,
-                shape_gap,
-                candidate_pair,
-                candidate_pair_count,
-                max_candidate_pair,
-                filter_pairs,
-                num_filter_pairs,
-            )
-
-        workid += nsweep_in
+_sap_broadphase_kernel = create_sap_broadphase_kernel(keep_all_filter, EmptyFilterData)
 
 
 class BroadPhaseSAP:
@@ -409,7 +491,13 @@ class BroadPhaseSAP:
         sweep_thread_count_multiplier: int = 5,
         sort_type: Literal["segmented", "tile"] = "segmented",
         tile_block_dim: int | None = None,
+        direction_search: bool = True,
+        direction_search_min_shapes: int = 0,
+        direction_search_window_size: int = 4,
+        direction_search_hold_frames: int = 128,
         device: Devicelike | None = None,
+        filter_func: Any | None = None,
+        filter_data_type: Any | None = None,
     ) -> None:
         """Initialize arrays for sweep and prune broad phase collision detection.
 
@@ -426,12 +514,38 @@ class BroadPhaseSAP:
             tile_block_dim: Block dimension for tile-based sorting (optional, auto-calculated if None).
                 If None, will be set to next power of 2 >= ``max_shapes_per_world``, capped at 512.
                 Minimum value is 32 (required by wp.tile_sort). If provided, will be clamped to [32, 1024].
+            direction_search: Spread a fixed spherical direction-pattern search across launches.
+                Each launch uses one SAP direction and scores the already-computed interval work;
+                after one pattern pass the best direction is reused before probing again. Runs inside CUDA graph capture.
+            direction_search_min_shapes: Optional minimum ``max_shapes_per_world`` for direction search.
+            direction_search_window_size: Number of probe launches in each incremental search window.
+            direction_search_hold_frames: Number of launches to keep the best direction after a full
+                pattern pass before probing the spherical pattern again.
             device: Device to store the precomputed arrays on. If None, uses CPU for numpy
                 arrays or the device of the input warp array.
+            filter_func: Optional ``@wp.func`` invoked as
+                ``filter_func(pair, data) -> wp.int32`` after the AABB overlap test.
+                Returning ``0`` drops the pair.
+            filter_data_type: ``wp.struct`` type for the ``filter_data`` argument
+                forwarded to :meth:`launch`. Required when ``filter_func`` is set.
         """
+        if (filter_func is None) != (filter_data_type is None):
+            raise ValueError("filter_func and filter_data_type must be provided together")
+        if filter_func is None:
+            self._kernel = _sap_broadphase_kernel
+            self._has_custom_filter = False
+        else:
+            self._kernel = create_sap_broadphase_kernel(filter_func, filter_data_type)
+            self._has_custom_filter = True
+        self._empty_filter_data = EmptyFilterData()
+
         self.sweep_thread_count_multiplier = sweep_thread_count_multiplier
         self.sort_type = _normalize_sort_mode(sort_type)
         self.tile_block_dim_override = tile_block_dim  # Store user override if provided
+        self.direction_search = bool(direction_search)
+        self.direction_search_min_shapes = max(0, int(direction_search_min_shapes))
+        self.direction_search_window_size = max(2, int(direction_search_window_size))
+        self.direction_search_hold_frames = max(1, int(direction_search_hold_frames))
 
         # Convert to numpy if it's a warp array
         if isinstance(shape_world, wp.array):
@@ -507,6 +621,86 @@ class BroadPhaseSAP:
         )
         self.segment_indices = wp.array(segment_indices_np, dtype=wp.int32, device=device)
 
+        direction_candidates_np = _default_direction_candidates()
+        self.direction_candidates = wp.array(direction_candidates_np, dtype=wp.vec3, device=device)
+        self.direction_candidate_count = int(direction_candidates_np.shape[0])
+        self.direction_active_index = wp.zeros(1, dtype=wp.int32, device=device)
+        self.direction_candidate_cursor = wp.full(1, 1, dtype=wp.int32, device=device)
+        self.direction_window_phase = wp.zeros(1, dtype=wp.int32, device=device)
+        self.direction_probe_count = wp.zeros(1, dtype=wp.int32, device=device)
+        self.direction_hold_count = wp.zeros(1, dtype=wp.int32, device=device)
+        self.direction_best_pause = wp.zeros(1, dtype=wp.int32, device=device)
+        self.direction_best_score = wp.full(1, np.finfo(np.float32).max, dtype=wp.float32, device=device)
+        self.direction_best_index = wp.zeros(1, dtype=wp.int32, device=device)
+
+    def _sort_projected_intervals(self, device: Devicelike | None) -> None:
+        if self.sort_type == "tile" and self.tile_sort_kernel is not None:
+            wp.launch_tiled(
+                kernel=self.tile_sort_kernel,
+                dim=self.world_count,
+                inputs=[
+                    self.sap_projection_lower,
+                    self.sap_sort_index,
+                    self.max_shapes_per_world,
+                ],
+                block_dim=self.tile_block_dim,
+                device=device,
+                record_tape=False,
+            )
+        else:
+            wp.utils.segmented_sort_pairs(
+                keys=self.sap_projection_lower,
+                values=self.sap_sort_index,
+                count=self.world_count * self.max_shapes_per_world,
+                segment_start_indices=self.segment_indices,
+            )
+
+    def _project_sort_scan(
+        self,
+        *,
+        direction_index: int,
+        shape_lower: wp.array[wp.vec3],
+        shape_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        device: Devicelike | None,
+    ) -> None:
+        wp.launch(
+            kernel=_sap_project_kernel,
+            dim=(self.world_count, self.max_shapes_per_world),
+            inputs=[
+                self.direction_candidates,
+                int(direction_index),
+                self.direction_active_index,
+                shape_lower,
+                shape_upper,
+                shape_gap,
+                self.world_index_map,
+                self.world_slice_ends,
+                self.max_shapes_per_world,
+                self.sap_projection_lower,
+                self.sap_projection_upper,
+                self.sap_sort_index,
+            ],
+            device=device,
+            record_tape=False,
+        )
+        self._sort_projected_intervals(device)
+        wp.launch(
+            kernel=_sap_range_kernel,
+            dim=(self.world_count, self.max_shapes_per_world),
+            inputs=[
+                self.world_slice_ends,
+                self.max_shapes_per_world,
+                self.sap_projection_lower,
+                self.sap_projection_upper,
+                self.sap_sort_index,
+                self.sap_range,
+            ],
+            device=device,
+            record_tape=False,
+        )
+        wp.utils.array_scan(self.sap_range, self.sap_cumulative_sum, True)
+
     def launch(
         self,
         shape_lower: wp.array[wp.vec3],  # Lower bounds of shape bounding boxes
@@ -522,6 +716,7 @@ class BroadPhaseSAP:
         filter_pairs: wp.array[wp.vec2i] | None = None,  # Sorted excluded pairs
         num_filter_pairs: int | None = None,
         skip_count_zero: bool = False,  # Skip candidate_pair_count.zero_() if already zeroed by the caller
+        filter_data: Any | None = None,  # Instance of filter_data_type for the user-supplied filter callback
     ) -> None:
         """Launch the sweep and prune broad phase collision detection with per-world segmented sort.
 
@@ -553,11 +748,6 @@ class BroadPhaseSAP:
         compatible (same world or at least one is global). Pairs in filter_pairs (if provided) are excluded.
         The number of pairs found will be written to candidate_pair_count[0].
         """
-        # TODO: Choose an optimal direction
-        # random fixed direction
-        direction = wp.vec3(0.5935, 0.7790, 0.1235)
-        direction = wp.normalize(direction)
-
         max_candidate_pair = candidate_pair.shape[0]
         if not skip_count_zero:
             candidate_pair_count.zero_()
@@ -577,78 +767,34 @@ class BroadPhaseSAP:
             filter_pairs_arr = filter_pairs
             n_filter = num_filter_pairs if num_filter_pairs is not None else filter_pairs.shape[0]
 
-        # Project AABBs onto the sweep axis for each world
-        wp.launch(
-            kernel=_sap_project_kernel,
-            dim=(self.world_count, self.max_shapes_per_world),
-            inputs=[
-                direction,
-                shape_lower,
-                shape_upper,
-                shape_gap,
-                self.world_index_map,
-                self.world_slice_ends,
-                self.max_shapes_per_world,
-                self.sap_projection_lower,
-                self.sap_projection_upper,
-                self.sap_sort_index,
-            ],
-            device=device,
-            record_tape=False,
+        total_elements = self.world_count * self.max_shapes_per_world
+
+        search_direction = (
+            self.direction_search
+            and self.direction_candidate_count > 1
+            and self.max_shapes_per_world >= self.direction_search_min_shapes
         )
-
-        # Perform segmented sort - each world is sorted independently
-        # Two strategies: tile-based (faster for certain sizes) or segmented (more flexible)
-        if self.sort_type == "tile" and self.tile_sort_kernel is not None:
-            # Use tile-based sort with shared memory
-            wp.launch_tiled(
-                kernel=self.tile_sort_kernel,
-                dim=self.world_count,
-                inputs=[
-                    self.sap_projection_lower,
-                    self.sap_sort_index,
-                    self.max_shapes_per_world,
-                ],
-                block_dim=self.tile_block_dim,
-                device=device,
-                record_tape=False,
-            )
-        else:
-            # Use segmented sort (default)
-            # The count is the number of actual elements to sort (not including scratch space)
-            wp.utils.segmented_sort_pairs(
-                keys=self.sap_projection_lower,
-                values=self.sap_sort_index,
-                count=self.world_count * self.max_shapes_per_world,
-                segment_start_indices=self.segment_indices,
-            )
-
-        # Compute range of overlapping geometries for each geometry in each world
-        wp.launch(
-            kernel=_sap_range_kernel,
-            dim=(self.world_count, self.max_shapes_per_world),
-            inputs=[
-                self.world_slice_ends,
-                self.max_shapes_per_world,
-                self.sap_projection_lower,
-                self.sap_projection_upper,
-                self.sap_sort_index,
-                self.sap_range,
-            ],
+        self._project_sort_scan(
+            direction_index=-1 if search_direction else 0,
+            shape_lower=shape_lower,
+            shape_upper=shape_upper,
+            shape_gap=shape_gap,
             device=device,
-            record_tape=False,
         )
-
-        # Compute cumulative sum of ranges
-        wp.utils.array_scan(self.sap_range, self.sap_cumulative_sum, True)
 
         # Estimate number of sweep threads
-        total_elements = self.world_count * self.max_shapes_per_world
         nsweep_in = int(self.sweep_thread_count_multiplier * total_elements)
+
+        if self._has_custom_filter:
+            if filter_data is None:
+                raise ValueError("BroadPhaseSAP was constructed with filter_func=...; launch() requires filter_data.")
+            kernel_filter_data = filter_data
+        else:
+            kernel_filter_data = self._empty_filter_data
 
         # Perform the sweep and generate candidate pairs
         wp.launch(
-            kernel=_sap_broadphase_kernel,
+            kernel=self._kernel,
             dim=nsweep_in,
             inputs=[
                 shape_lower,
@@ -660,12 +806,13 @@ class BroadPhaseSAP:
                 self.world_slice_ends,
                 self.sap_sort_index,
                 self.sap_cumulative_sum,
-                self.world_count,
-                self.max_shapes_per_world,
+                int(self.world_count),
+                int(self.max_shapes_per_world),
                 nsweep_in,
-                self.num_regular_worlds,
+                int(self.num_regular_worlds),
                 filter_pairs_arr,
                 n_filter,
+                kernel_filter_data,
             ],
             outputs=[
                 candidate_pair,
@@ -675,3 +822,27 @@ class BroadPhaseSAP:
             device=device,
             record_tape=False,
         )
+
+        if search_direction:
+            wp.launch(
+                kernel=_sap_update_direction_search_kernel,
+                dim=1,
+                inputs=[
+                    self.sap_cumulative_sum,
+                    candidate_pair_count,
+                    int(total_elements),
+                    int(self.direction_candidate_count),
+                    int(self.direction_search_window_size),
+                    int(self.direction_search_hold_frames),
+                    self.direction_active_index,
+                    self.direction_candidate_cursor,
+                    self.direction_window_phase,
+                    self.direction_probe_count,
+                    self.direction_hold_count,
+                    self.direction_best_pause,
+                    self.direction_best_score,
+                    self.direction_best_index,
+                ],
+                device=device,
+                record_tape=False,
+            )

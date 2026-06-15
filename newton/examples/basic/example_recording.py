@@ -22,16 +22,15 @@ import newton.examples
 
 
 class Example:
-    def __init__(self, viewer, _args):
+    def __init__(self, viewer, args):
         # Setup simulation parameters
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.sim_substeps = 10
-        self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.viewer = viewer
-        self.world_count = 100
+        self.world_count = args.world_count
 
         # Set numpy random seed for reproducibility
         self.seed = 123
@@ -46,6 +45,7 @@ class Example:
             mjcf_filename,
             ignore_names=["floor", "ground"],
             up_axis="Z",
+            parse_sites=False,
         )
 
         # Joint initial positions
@@ -63,17 +63,33 @@ class Example:
         self.model = builder.finalize()
         self.control = self.model.control()
 
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_cpu=False,
-            solver="newton",
-            integrator="euler",
-            iterations=10,
-            ls_iterations=5,
-            njmax=100,
-        )
+        self.solver_name = getattr(args, "solver", "mujoco")
+        if self.solver_name == "phoenx":
+            self.outer_substeps = 1
+            self.sim_dt = self.frame_dt
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model,
+                substeps=self.sim_substeps,
+                solver_iterations=8,
+                velocity_iterations=1,
+                prepare_refresh_stride="auto",
+            )
+        else:
+            self.outer_substeps = self.sim_substeps
+            self.sim_dt = self.frame_dt / self.outer_substeps
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                use_mujoco_cpu=False,
+                solver="newton",
+                integrator="euler",
+                iterations=10,
+                ls_iterations=5,
+                njmax=100,
+            )
 
         self.state_0, self.state_1 = self.model.state(), self.model.state()
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        self.contacts = self.model.contacts() if self.solver_name == "phoenx" else None
 
         self.use_cuda_graph = wp.get_device().is_cuda
 
@@ -86,9 +102,11 @@ class Example:
         self.viewer.set_model(self.model)
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
+        for _ in range(self.outer_substeps):
             self.state_0.clear_forces()
-            self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
+            if self.contacts is not None:
+                self.model.collide(self.state_0, self.contacts)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
@@ -107,31 +125,43 @@ class Example:
     def test_final(self):
         pass
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        newton.examples.add_world_count_arg(parser)
+        parser.add_argument("recording_file", nargs="?", default="humanoid_recording.bin")
+        parser.add_argument(
+            "--solver",
+            choices=["mujoco", "phoenx"],
+            default="mujoco",
+            help="Rigid-body solver backend.",
+        )
+        parser.set_defaults(world_count=100, num_frames=1000)
+        return parser
+
 
 if __name__ == "__main__":
     # Create ViewerFile for automatic recording
-    import sys
-
-    recording_file = "humanoid_recording.bin"
-
-    # Check if user wants a different filename from command line
-    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-        recording_file = sys.argv[1]
-
-    print(f"Recording simulation to: {recording_file}")
-    print("ViewerFile will automatically save when the simulation ends.")
-
-    parser = newton.examples.create_parser()
+    parser = Example.create_parser()
     args = parser.parse_args()
 
+    if args.device:
+        wp.set_device(args.device)
+    if args.quiet:
+        wp.config.log_level = max(wp.config.log_level, wp.LOG_WARNING)
+
+    print(f"Recording simulation to: {args.recording_file}")
+    print(f"Using solver: {args.solver}")
+    print("ViewerFile will automatically save when the simulation ends.")
+
     # Create ViewerFile with auto_save=False to only save at the end
-    viewer = newton.viewer.ViewerFile(recording_file, auto_save=False)
+    viewer = newton.viewer.ViewerFile(args.recording_file, auto_save=False)
 
     # Create example
     example = Example(viewer, args)
 
     # Run for a reasonable number of frames
-    max_frames = 1000
+    max_frames = args.num_frames
     frame_count = 0
 
     while frame_count < max_frames:
@@ -144,4 +174,4 @@ if __name__ == "__main__":
 
     # Close viewer (automatically saves recording)
     viewer.close()
-    print(f"Recording completed: {recording_file}")
+    print(f"Recording completed: {args.recording_file}")

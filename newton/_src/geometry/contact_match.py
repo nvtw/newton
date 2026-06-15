@@ -260,7 +260,14 @@ def _match_contacts_kernel(data: _MatchData):
         data.match_index[tid] = MATCH_NOT_FOUND
         return
 
+    # Clamp against the prev_keys capacity. ``_save_sorted_state_kernel``
+    # already clamps before writing, but the read-side clamp is cheap
+    # defense in depth in case a future caller pre-populates
+    # ``prev_count`` outside that save path.
     n_old = data.prev_count[0]
+    cap_old = data.prev_keys.shape[0]
+    if n_old > cap_old:
+        n_old = cap_old
     if n_old == 0:
         data.match_index[tid] = MATCH_NOT_FOUND
         return
@@ -345,7 +352,15 @@ def _clear_prev_claim_kernel(
     by either kernel, so leaving them stale is safe.
     """
     i = wp.tid()
-    if i < prev_count[0]:
+    # Clamp to the prev_claim capacity in case ``prev_count`` was
+    # populated from an overflowed frame -- the launch dim already
+    # bounds ``i`` to capacity, but the explicit clamp makes the
+    # bound-safety property local to the kernel.
+    n_old = prev_count[0]
+    cap = prev_claim.shape[0]
+    if n_old > cap:
+        n_old = cap
+    if i < n_old:
         prev_claim[i] = _CLAIM_SENTINEL
 
 
@@ -367,7 +382,14 @@ def _resolve_claims_kernel(
     (no second-closest fallback).
     """
     tid = wp.tid()
-    if tid >= new_count[0]:
+    # Clamp against ``match_index`` capacity so an overflowed
+    # ``new_count`` doesn't let threads in [capacity, new_count) read
+    # past the end of the match_index / sort_keys buffers.
+    n_new = new_count[0]
+    cap = match_index.shape[0]
+    if n_new > cap:
+        n_new = cap
+    if tid >= n_new:
         return
 
     cand = match_index[tid]
@@ -438,10 +460,23 @@ def _save_sorted_state_kernel(data: _SaveStateData):
     The persisted ``dst_pos_world`` is the world-space *midpoint* of the two
     contact points, so the next frame's match kernel compares a shape-symmetric
     quantity.
+
+    ``dst_count`` is clamped against the destination buffer capacity. On
+    narrow-phase overflow ``src_count[0]`` exceeds ``dst_keys.shape[0]``
+    and the per-thread write below only fills ``[0, capacity)``; saving
+    the raw inflated count would leave the ``[capacity, src_count)`` tail
+    appearing valid to next frame's matcher (it'd binary-search into
+    stale/garbage prev_keys and return bogus matches, which feed bogus
+    warm-start impulses into the solver and make resting bodies kick
+    spontaneously).
     """
     i = wp.tid()
     if i == 0:
-        data.dst_count[0] = data.src_count[0]
+        saved = data.src_count[0]
+        cap = data.dst_keys.shape[0]
+        if saved > cap:
+            saved = cap
+        data.dst_count[0] = saved
     if i < data.src_count[0]:
         data.dst_keys[i] = data.src_keys[i]
 
@@ -508,16 +543,47 @@ class _ReplayData:
     offset0: wp.array[wp.vec3]
     offset1: wp.array[wp.vec3]
     normal: wp.array[wp.vec3]
+    shape0: wp.array[wp.int32]
+    shape1: wp.array[wp.int32]
+    margin0: wp.array[wp.float32]
+    margin1: wp.array[wp.float32]
+    body_q: wp.array[wp.transform]
+    shape_body: wp.array[wp.int32]
 
 
 @wp.kernel(enable_backward=False)
 def _replay_matched_kernel(data: _ReplayData):
     tid = wp.tid()
-    if tid >= data.contact_count[0]:
+    # Clamp against the destination buffer capacity. On overflow
+    # ``contact_count[0]`` exceeds the buffer; without the clamp every
+    # thread in [0, capacity) would pass the guard and indexing
+    # ``prev_*[idx]`` with a possibly-bogus matched ``idx`` (set when
+    # the prev frame also overflowed and the matcher searched into
+    # stale prev_keys tail) would write garbage anchors into this
+    # frame's contact arrays.
+    n_active = data.contact_count[0]
+    cap = data.match_index.shape[0]
+    if n_active > cap:
+        n_active = cap
+    if tid >= n_active:
         return
     idx = data.match_index[tid]
     if idx < wp.int32(0):
         return  # MATCH_NOT_FOUND or MATCH_BROKEN -- keep new-frame data.
+
+    body0 = data.shape_body[data.shape0[tid]]
+    body1 = data.shape_body[data.shape1[tid]]
+    p0_world = data.point0[tid]
+    p1_world = data.point1[tid]
+    if body0 >= wp.int32(0):
+        p0_world = wp.transform_point(data.body_q[body0], p0_world)
+    if body1 >= wp.int32(0):
+        p1_world = wp.transform_point(data.body_q[body1], p1_world)
+
+    fresh_gap = wp.dot(p1_world - p0_world, data.normal[tid]) - (data.margin0[tid] + data.margin1[tid])
+    if fresh_gap > wp.float32(0.0):
+        return
+
     data.point0[tid] = data.prev_point0[idx]
     data.point1[tid] = data.prev_point1[idx]
     data.offset0[tid] = data.prev_offset0[idx]
@@ -539,7 +605,13 @@ def _collect_new_contacts_kernel(
 ):
     """Collect indices of new or broken contacts (match_index < 0) after sorting."""
     i = wp.tid()
-    if i >= contact_count[0]:
+    # Clamp against the match_index capacity so an overflowed count
+    # doesn't let threads read past the end of match_index.
+    n_active = contact_count[0]
+    cap = match_index.shape[0]
+    if n_active > cap:
+        n_active = cap
+    if i >= n_active:
         return
     if match_index[i] < wp.int32(0):
         slot = wp.atomic_add(new_count, 0, wp.int32(1))
@@ -555,7 +627,14 @@ def _collect_broken_contacts_kernel(
 ):
     """Collect indices of old contacts that were not matched by any new contact."""
     i = wp.tid()
-    if i >= prev_count[0]:
+    # Clamp against ``prev_was_matched`` capacity so an overflowed
+    # prev_count (set when the prior frame overflowed and the now-fixed
+    # save path didn't clamp) doesn't OOB-read.
+    n_old = prev_count[0]
+    cap = prev_was_matched.shape[0]
+    if n_old > cap:
+        n_old = cap
+    if i >= n_old:
         return
     if prev_was_matched[i] == wp.int32(0):
         slot = wp.atomic_add(broken_count, 0, wp.int32(1))
@@ -898,6 +977,12 @@ class ContactMatcher:
         offset0: wp.array[wp.vec3],
         offset1: wp.array[wp.vec3],
         normal: wp.array[wp.vec3],
+        shape0: wp.array[wp.int32],
+        shape1: wp.array[wp.int32],
+        margin0: wp.array[wp.float32],
+        margin1: wp.array[wp.float32],
+        body_q: wp.array[wp.transform],
+        shape_body: wp.array[wp.int32],
         device: Devicelike = None,
     ) -> None:
         """Overwrite matched rows with the saved previous-frame contact geometry.
@@ -914,7 +999,9 @@ class ContactMatcher:
             contact_count: Single-element int array with the active contact count.
             match_index: Sorted match_index array (from :class:`Contacts`).
             point0, point1, offset0, offset1, normal: Current-frame sorted
-                contact record to be overwritten on matched rows.
+                contact record to be overwritten on matched penetrating rows.
+            shape0, shape1, margin0, margin1, body_q, shape_body: Current-frame
+                arrays used to keep separated speculative rows on fresh geometry.
             device: Device to launch on.
         """
         if not self._sticky:
@@ -936,6 +1023,12 @@ class ContactMatcher:
         data.offset0 = offset0
         data.offset1 = offset1
         data.normal = normal
+        data.shape0 = shape0
+        data.shape1 = shape1
+        data.margin0 = margin0
+        data.margin1 = margin1
+        data.body_q = body_q
+        data.shape_body = shape_body
 
         wp.launch(_replay_matched_kernel, dim=self._capacity, inputs=[data], device=device)
 

@@ -201,6 +201,218 @@ def compute_inertia_ellipsoid(density: float, rx: float, ry: float, rz: float) -
     return (m, wp.vec3(), I)
 
 
+def compute_inertia_triangle_prism(
+    density: float,
+    edge_ab: float,
+    c_y: float,
+    c_z: float,
+    margin: float,
+) -> tuple[float, wp.vec3, wp.mat33]:
+    """Mass and centroidal inertia of a thin triangular prism.
+
+    The canonical triangle has vertex A at the local origin, vertex B at
+    ``(0, 0, edge_ab)`` along the local +Z axis, and vertex C at
+    ``(0, c_y, c_z)`` in the local YZ plane. The prism is the triangle
+    extruded symmetrically along the local X axis by ``±margin``, so it
+    spans ``x ∈ [-margin, +margin]`` with full thickness ``t = 2·margin``.
+
+    Args:
+        density: Material density [kg/m³].
+        edge_ab [m]: Length ``|AB|`` of the first edge (local +Z direction).
+        c_y [m]: Vertex C's local Y coordinate.
+        c_z [m]: Vertex C's local Z coordinate.
+        margin [m]: Half-thickness of the prism along the local X axis;
+            the full thickness is ``2 * margin``. Must be non-negative.
+
+    Returns:
+        A tuple of ``(mass, com, inertia)`` where ``com`` is in the local
+        frame and ``inertia`` is expressed about ``com``. When the
+        thickness or triangle area is zero, returns
+        ``(0.0, centroid, mat33())`` (zero inertia, but a sensible COM
+        offset so external mass / inertia overrides resolve correctly).
+    """
+    L = float(edge_ab)
+    cy = float(c_y)
+    cz = float(c_z)
+    t = 2.0 * float(margin)
+
+    # Centroid of the triangle in the local frame:
+    # mean of (0,0,0), (0,0,L), (0,c_y,c_z).
+    com_y = cy / 3.0
+    com_z = (L + cz) / 3.0
+    com = wp.vec3(0.0, com_y, com_z)
+
+    area = 0.5 * abs(L * cy)  # half magnitude of AB cross AC
+
+    if t <= 0.0 or area == 0.0 or density <= 0.0:
+        return 0.0, com, wp.mat33()
+
+    mass = density * area * t
+
+    # Vertex offsets relative to centroid (q_i = p_i - com), local frame.
+    # Vertex A = (0, 0, 0), B = (0, 0, L), C = (0, c_y, c_z).
+    qa_y, qa_z = -com_y, -com_z
+    qb_y, qb_z = -com_y, L - com_z
+    qc_y, qc_z = cy - com_y, cz - com_z
+
+    # Triangle planar second moments about the centroid, normalised by area:
+    #   I^(2D)_ab / A = (1/12) Σ q_i^a q_i^b.
+    # (Standard result, e.g. Wikipedia "List of second moments of area".)
+    s_yy = qa_y * qa_y + qb_y * qb_y + qc_y * qc_y
+    s_zz = qa_z * qa_z + qb_z * qb_z + qc_z * qc_z
+    s_yz = qa_y * qa_z + qb_y * qb_z + qc_y * qc_z
+
+    inv12 = 1.0 / 12.0
+    iyy_over_area = inv12 * s_yy
+    izz_over_area = inv12 * s_zz
+    iyz_over_area = inv12 * s_yz
+
+    # 3D inertia of the prism about its centroid. The prism is symmetric
+    # in x ∈ [-t/2, t/2] so I_xy = I_xz = 0 and the x-thickness contributes
+    # m·t²/12 to I_yy and I_zz only.
+    t2_over_12 = (t * t) * inv12
+    Ixx = mass * (iyy_over_area + izz_over_area)
+    Iyy = mass * (t2_over_12 + izz_over_area)
+    Izz = mass * (t2_over_12 + iyy_over_area)
+    Iyz = -mass * iyz_over_area  # tensor convention: -∫ y·z dm
+
+    inertia = wp.mat33(
+        [
+            [Ixx, 0.0, 0.0],
+            [0.0, Iyy, Iyz],
+            [0.0, Iyz, Izz],
+        ]
+    )
+    return mass, com, inertia
+
+
+def compute_inertia_tetrahedron(
+    density: float,
+    edge_ab: float,
+    c_y: float,
+    c_z: float,
+    d_x: float,
+    d_y: float,
+    d_z: float,
+) -> tuple[float, wp.vec3, wp.mat33]:
+    """Mass and centroidal inertia of a uniform-density solid tetrahedron.
+
+    The canonical tetrahedron has vertices
+
+    - ``A = (0, 0, 0)``
+    - ``B = (0, 0, edge_ab)``
+    - ``C = (0, c_y, c_z)``
+    - ``D = (d_x, d_y, d_z)``
+
+    in the local frame.
+
+    Mass is exactly ``density * |edge_ab * c_y * d_x| / 6`` (the absolute
+    determinant ``|AB . (AC x AD)|`` equals ``|edge_ab * c_y * d_x|``
+    after expanding the canonical-frame components). The centre of mass
+    is the four-vertex centroid.
+
+    The inertia tensor about the centroid is computed in closed form
+    using `Tonon (2005), Explicit Exact Formulas for the 3-D Tetrahedron
+    Inertia Tensor in Terms of its Vertex Coordinates
+    <https://thescipub.com/abstract/jmssp.2005.8.11>`_, then shifted
+    from the local origin to the centroid via the parallel-axis
+    theorem. The inertia tensor is symmetric and full (off-diagonal
+    products of inertia in general are non-zero unless ``D`` happens
+    to lie on a symmetry axis).
+
+    Args:
+        density [kg/m³]: Material density.
+        edge_ab [m]: Length ``|AB|`` of the canonical first edge along
+            local +Z.
+        c_y [m]: Vertex C's local Y coordinate.
+        c_z [m]: Vertex C's local Z coordinate.
+        d_x [m]: Vertex D's local X coordinate.
+        d_y [m]: Vertex D's local Y coordinate.
+        d_z [m]: Vertex D's local Z coordinate.
+
+    Returns:
+        ``(mass, com, inertia)``. When the volume is zero (degenerate /
+        coplanar tet) or ``density <= 0``, returns
+        ``(0.0, centroid, mat33())``.
+    """
+    e = float(edge_ab)
+    cy = float(c_y)
+    cz = float(c_z)
+    dx = float(d_x)
+    dy = float(d_y)
+    dz = float(d_z)
+
+    # Centroid (COM for uniform density) is the mean of the four vertices.
+    com_x = dx * 0.25
+    com_y = (cy + dy) * 0.25
+    com_z = (e + cz + dz) * 0.25
+    com = wp.vec3(com_x, com_y, com_z)
+
+    # Volume = | AB . (AC x AD) | / 6 = | e * cy * dx | / 6.
+    vol = abs(e * cy * dx) / 6.0
+    if vol == 0.0 or density <= 0.0:
+        return 0.0, com, wp.mat33()
+
+    mass = density * vol
+    det_abs = 6.0 * vol  # |DET(J)| in Tonon's notation
+
+    # Tonon (2005) eq. (9a-f) collapse to:
+    #     a  = ρ |DET(J)| ((Sy^2 + Sy2) + (Sz^2 + Sz2)) / 120
+    #     b  = ρ |DET(J)| ((Sx^2 + Sx2) + (Sz^2 + Sz2)) / 120
+    #     c  = ρ |DET(J)| ((Sx^2 + Sx2) + (Sy^2 + Sy2)) / 120
+    #     a' = ρ |DET(J)| (Syz + Sy*Sz) / 120
+    #     b' = ρ |DET(J)| (Sxz + Sx*Sz) / 120
+    #     c' = ρ |DET(J)| (Sxy + Sx*Sy) / 120
+    # where Sx  = sum_i x_i, Sx2 = sum_i x_i^2, Sxy = sum_i x_i y_i, etc.
+    # (Derived from the Tonon expansion: the sum-of-pairs structure
+    # ``y_i^2 + y_i y_j + y_j^2 + ...`` rearranges into
+    # ``(sum_i y_i)^2 + sum_i y_i^2`` summed and divided by 2.)
+    #
+    # In the canonical local frame:
+    #   Sx  = dx,             Sx2 = dx^2
+    #   Sy  = cy + dy,        Sy2 = cy^2 + dy^2
+    #   Sz  = e + cz + dz,    Sz2 = e^2 + cz^2 + dz^2
+    #   Sxy = dx * dy,        Sxz = dx * dz,    Syz = cy * cz + dy * dz
+    Sx = dx
+    Sy = cy + dy
+    Sz = e + cz + dz
+    Sx2 = dx * dx
+    Sy2 = cy * cy + dy * dy
+    Sz2 = e * e + cz * cz + dz * dz
+    Sxy = dx * dy
+    Sxz = dx * dz
+    Syz = cy * cz + dy * dz
+
+    coeff = density * det_abs / 120.0
+    # Inertia tensor about the origin (Tonon eq. 2 with diagonal =
+    # moments-of-inertia and off-diagonal = -product-of-inertia).
+    a_o = coeff * ((Sy * Sy + Sy2) + (Sz * Sz + Sz2))
+    b_o = coeff * ((Sx * Sx + Sx2) + (Sz * Sz + Sz2))
+    c_o = coeff * ((Sx * Sx + Sx2) + (Sy * Sy + Sy2))
+    apr_o = coeff * (Syz + Sy * Sz)
+    bpr_o = coeff * (Sxz + Sx * Sz)
+    cpr_o = coeff * (Sxy + Sx * Sy)
+
+    # Parallel-axis shift: I_origin = I_centroid + m * (||g||^2 I3 - g g^T)
+    # so I_centroid = I_origin - m * (||g||^2 I3 - g g^T).
+    g2 = com_x * com_x + com_y * com_y + com_z * com_z
+    a_c = a_o - mass * (g2 - com_x * com_x)  # = a_o - m * (com_y^2 + com_z^2)
+    b_c = b_o - mass * (g2 - com_y * com_y)
+    c_c = c_o - mass * (g2 - com_z * com_z)
+    apr_c = apr_o - mass * (com_y * com_z)
+    bpr_c = bpr_o - mass * (com_x * com_z)
+    cpr_c = cpr_o - mass * (com_x * com_y)
+
+    inertia = wp.mat33(
+        [
+            [a_c, -cpr_c, -bpr_c],
+            [-cpr_c, b_c, -apr_c],
+            [-bpr_c, -apr_c, c_c],
+        ]
+    )
+    return mass, com, inertia
+
+
 def compute_inertia_box_from_mass(mass: float, hx: float, hy: float, hz: float) -> wp.mat33:
     """Helper to compute 3x3 inertia matrix of a solid box with given mass and half-extents.
 
@@ -264,14 +476,21 @@ def triangle_inertia(
     return vol, first, second
 
 
+#: Number of scalar components reduced per triangle: 1 (volume) + 3 (first
+#: moment) + 9 (second moment, 3x3 row-major). Lowering the mesh-inertia
+#: reduction into 13 scalar prefix-scans makes it bit-exact reproducible
+#: across runs — ``wp.atomic_add`` does floating-point sums in
+#: scheduling-dependent order, and float addition is not associative.
+_MESH_INERTIA_NUM_SCALARS: int = 13
+
+
 @wp.kernel
 def compute_solid_mesh_inertia(
     indices: wp.array[int],
     vertices: wp.array[wp.vec3],
-    # outputs
-    volume: wp.array[float],
-    first: wp.array[wp.vec3],
-    second: wp.array[wp.mat33],
+    # outputs: per-triangle scratch, shape (13, num_tris). Component layout:
+    # [0]=volume, [1:4]=first, [4:13]=second (row-major 3x3).
+    per_tri: wp.array2d[float],
 ):
     i = wp.tid()
     p = vertices[indices[i * 3 + 0]]
@@ -279,9 +498,19 @@ def compute_solid_mesh_inertia(
     r = vertices[indices[i * 3 + 2]]
 
     v, f, s = triangle_inertia(p, q, r)
-    wp.atomic_add(volume, 0, v)
-    wp.atomic_add(first, 0, f)
-    wp.atomic_add(second, 0, s)
+    per_tri[0, i] = v
+    per_tri[1, i] = f[0]
+    per_tri[2, i] = f[1]
+    per_tri[3, i] = f[2]
+    per_tri[4, i] = s[0, 0]
+    per_tri[5, i] = s[0, 1]
+    per_tri[6, i] = s[0, 2]
+    per_tri[7, i] = s[1, 0]
+    per_tri[8, i] = s[1, 1]
+    per_tri[9, i] = s[1, 2]
+    per_tri[10, i] = s[2, 0]
+    per_tri[11, i] = s[2, 1]
+    per_tri[12, i] = s[2, 2]
 
 
 @wp.kernel
@@ -289,10 +518,9 @@ def compute_hollow_mesh_inertia(
     indices: wp.array[int],
     vertices: wp.array[wp.vec3],
     thickness: wp.array[float],
-    # outputs
-    volume: wp.array[float],
-    first: wp.array[wp.vec3],
-    second: wp.array[wp.mat33],
+    # outputs: per-triangle scratch, shape (13, num_tris). Layout matches
+    # :func:`compute_solid_mesh_inertia`.
+    per_tri: wp.array2d[float],
 ):
     tid = wp.tid()
     i = indices[tid * 3 + 0]
@@ -316,7 +544,7 @@ def compute_hollow_mesh_inertia(
     vk0 = vk - tk
     vk1 = vk + tk
 
-    v_total = 0.0
+    v_total = float(0.0)
     f_total = wp.vec3(0.0)
     s_total = wp.mat33(0.0)
 
@@ -353,9 +581,50 @@ def compute_hollow_mesh_inertia(
     f_total += f
     s_total += s
 
-    wp.atomic_add(volume, 0, v_total)
-    wp.atomic_add(first, 0, f_total)
-    wp.atomic_add(second, 0, s_total)
+    per_tri[0, tid] = v_total
+    per_tri[1, tid] = f_total[0]
+    per_tri[2, tid] = f_total[1]
+    per_tri[3, tid] = f_total[2]
+    per_tri[4, tid] = s_total[0, 0]
+    per_tri[5, tid] = s_total[0, 1]
+    per_tri[6, tid] = s_total[0, 2]
+    per_tri[7, tid] = s_total[1, 0]
+    per_tri[8, tid] = s_total[1, 1]
+    per_tri[9, tid] = s_total[1, 2]
+    per_tri[10, tid] = s_total[2, 0]
+    per_tri[11, tid] = s_total[2, 1]
+    per_tri[12, tid] = s_total[2, 2]
+
+
+def _deterministic_sum_per_triangle(per_tri: wp.array) -> tuple[float, wp.vec3, wp.mat33]:
+    """Reduce a ``(13, num_tris)`` per-triangle scratch buffer to scalar
+    totals via per-component inclusive prefix scan.
+
+    ``wp.utils.array_scan`` runs deterministically (single sequential
+    summation tree) so the result is bit-exact reproducible across runs,
+    in contrast to ``wp.atomic_add`` where ordering depends on GPU
+    scheduling. The last entry of each scanned row holds the sum.
+    """
+    num_tris = per_tri.shape[1]
+    scratch = wp.zeros(num_tris, dtype=float, device=per_tri.device)
+    totals = np.empty(_MESH_INERTIA_NUM_SCALARS, dtype=np.float32)
+    for c in range(_MESH_INERTIA_NUM_SCALARS):
+        wp.utils.array_scan(per_tri[c], scratch, inclusive=True)
+        totals[c] = float(scratch.numpy()[-1])
+    V_tot = float(totals[0])
+    F_tot = wp.vec3(float(totals[1]), float(totals[2]), float(totals[3]))
+    S_tot = wp.mat33(
+        float(totals[4]),
+        float(totals[5]),
+        float(totals[6]),
+        float(totals[7]),
+        float(totals[8]),
+        float(totals[9]),
+        float(totals[10]),
+        float(totals[11]),
+        float(totals[12]),
+    )
+    return V_tot, F_tot, S_tot
 
 
 def compute_inertia_mesh(
@@ -386,13 +655,12 @@ def compute_inertia_mesh(
     indices = np.array(indices).flatten()
     num_tris = len(indices) // 3
 
-    # Allocating for mass and inertia
-    com_warp = wp.zeros(1, dtype=wp.vec3)
-    I_warp = wp.zeros(1, dtype=wp.mat33)
-    vol_warp = wp.zeros(1, dtype=float)
-
     wp_vertices = wp.array(vertices, dtype=wp.vec3)
     wp_indices = wp.array(indices, dtype=int)
+
+    # Per-triangle scratch fed into a deterministic prefix-scan reduction
+    # instead of ``atomic_add``. See :data:`_MESH_INERTIA_NUM_SCALARS`.
+    per_tri = wp.zeros((_MESH_INERTIA_NUM_SCALARS, max(num_tris, 1)), dtype=float)
 
     if is_solid:
         wp.launch(
@@ -402,11 +670,7 @@ def compute_inertia_mesh(
                 wp_indices,
                 wp_vertices,
             ],
-            outputs=[
-                vol_warp,
-                com_warp,
-                I_warp,
-            ],
+            outputs=[per_tri],
         )
     else:
         if isinstance(thickness, float):
@@ -419,16 +683,18 @@ def compute_inertia_mesh(
                 wp_vertices,
                 wp.array(thickness, dtype=float),
             ],
-            outputs=[
-                vol_warp,
-                com_warp,
-                I_warp,
-            ],
+            outputs=[per_tri],
         )
 
-    V_tot = float(vol_warp.numpy()[0])  # signed volume
-    F_tot = com_warp.numpy()[0]  # first moment
-    S_tot = I_warp.numpy()[0]  # second moment
+    V_tot, F_tot_v3, S_tot_m33 = _deterministic_sum_per_triangle(per_tri)
+    F_tot = np.array([F_tot_v3[0], F_tot_v3[1], F_tot_v3[2]])
+    S_tot = np.array(
+        [
+            [S_tot_m33[0, 0], S_tot_m33[0, 1], S_tot_m33[0, 2]],
+            [S_tot_m33[1, 0], S_tot_m33[1, 1], S_tot_m33[1, 2]],
+            [S_tot_m33[2, 0], S_tot_m33[2, 1], S_tot_m33[2, 2]],
+        ]
+    )
 
     # If the winding is inward, flip signs
     if V_tot < 0:
@@ -510,8 +776,49 @@ def compute_inertia_shape(
     Returns:
         The mass, center of mass and 3x3 inertia tensor of the shape
     """
-    if density == 0.0 or type == GeoType.PLANE:  # zero density means fixed
+    if density == 0.0 or type == GeoType.PLANE:
+        # Zero density means fixed; PLANE is a thin shell with zero volume
+        # so it contributes no mass or rotational inertia.
         return 0.0, wp.vec3(), wp.mat33()
+
+    if type == GeoType.TRIANGLE:
+        # Treat the triangle as a thin prism extruded along its local +X
+        # axis (the canonical face normal direction) by ±margin, so the
+        # full prism thickness equals ``2 * margin``. The ``thickness``
+        # argument is reused as that half-thickness -- the builder passes
+        # ``cfg.margin`` here, which is also the per-shape collision
+        # margin used for contact generation, so the inertia matches the
+        # solid the contact surface implicitly defines.
+        margin = float(thickness) if isinstance(thickness, (int, float)) else 0.0
+        return compute_inertia_triangle_prism(
+            density,
+            edge_ab=scale[0],
+            c_y=scale[1],
+            c_z=scale[2],
+            margin=margin,
+        )
+
+    if type == GeoType.TETRAHEDRON:
+        # ``src`` carries the 4th vertex ``D = (d_x, d_y, d_z)`` (a
+        # ``_TetrahedronVertexD`` from :mod:`newton._src.sim.builder`).
+        # Duck-type so this module doesn't import from ``sim``.
+        if src is None or not all(hasattr(src, attr) for attr in ("d_x", "d_y", "d_z")):
+            raise ValueError(
+                "compute_inertia_shape: GeoType.TETRAHEDRON requires "
+                "``src`` to carry the 4th vertex (``d_x``, ``d_y``, "
+                "``d_z`` attributes). The builder normally supplies a "
+                "``_TetrahedronVertexD`` automatically via "
+                "``add_shape_tetrahedron``."
+            )
+        return compute_inertia_tetrahedron(
+            density,
+            edge_ab=scale[0],
+            c_y=scale[1],
+            c_z=scale[2],
+            d_x=float(src.d_x),
+            d_y=float(src.d_y),
+            d_z=float(src.d_z),
+        )
 
     if type == GeoType.SPHERE:
         solid = compute_inertia_sphere(density, scale[0])

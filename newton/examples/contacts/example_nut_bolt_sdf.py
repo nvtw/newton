@@ -143,12 +143,18 @@ class Example:
         # Keep model and pipeline contact capacities aligned.
         self.model.rigid_contact_max = self.rigid_contact_max
 
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model,
-            reduce_contacts=True,
-            rigid_contact_max=self.rigid_contact_max,
-            broad_phase=self.broad_phase,
-        )
+        cp_kwargs = {
+            "reduce_contacts": True,
+            "rigid_contact_max": self.rigid_contact_max,
+            "broad_phase": self.broad_phase,
+        }
+        if self.solver_type == "phoenx":
+            # ``"latest"`` keeps fresh narrow-phase normals each frame so
+            # the helical-thread torque drives nut rotation; ``"sticky"``
+            # would freeze the frame-1 vertical normal and the nut would
+            # just sink straight without threading.
+            cp_kwargs["contact_matching"] = "latest"
+        self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
 
         # Create solver based on user choice
         if self.solver_type == "xpbd":
@@ -171,8 +177,21 @@ class Example:
                 ls_iterations=100,
                 impratio=1.0,
             )
+        elif self.solver_type == "phoenx":
+            # PhoenX manages substeps internally so the contact-warmstart
+            # state survives across substeps. Reusing stale contacts via
+            # the outer ``sim_substeps`` loop (xpbd/mujoco path) lets the
+            # bolt acquire ~0.1 m/s of lateral velocity per frame in this
+            # scene; running ``sim_substeps`` substeps inside one phoenx
+            # ``step()`` keeps the bolt clamped.
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model,
+                substeps=self.sim_substeps,
+                solver_iterations=10,
+                velocity_iterations=1,
+            )
         else:
-            raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd' or 'mujoco'.")
+            raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'xpbd', 'mujoco', or 'phoenx'.")
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -262,14 +281,21 @@ class Example:
 
     def simulate(self):
         self.collision_pipeline.collide(self.state_0, self.contacts)
-        for _ in range(self.sim_substeps):
+        if self.solver_type == "phoenx":
+            # PhoenX integrates ``sim_substeps`` substeps internally.
+            # Read/write the same state buffer so the captured graph
+            # advances from the latest frame on replay; a separate
+            # ``state_1`` + python-level swap would leave the captured
+            # node reading the stale ``state_0`` on every replay.
             self.state_0.clear_forces()
-
             self.viewer.apply_forces(self.state_0)
-            # self.collision_pipeline.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-
-            self.state_0, self.state_1 = self.state_1, self.state_0
+            self.solver.step(self.state_0, self.state_0, self.control, self.contacts, self.frame_dt)
+        else:
+            for _ in range(self.sim_substeps):
+                self.state_0.clear_forces()
+                self.viewer.apply_forces(self.state_0)
+                self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+                self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
         if self.graph:
@@ -383,13 +409,13 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
-        parser.set_defaults(world_count=100)
+        parser.set_defaults(world_count=1)
         parser.add_argument(
             "--solver",
             type=str,
-            choices=["xpbd", "mujoco"],
-            default="mujoco",
-            help="Solver to use: 'xpbd' (Extended Position-Based Dynamics) or 'mujoco' (MuJoCo constraint solver).",
+            choices=["xpbd", "mujoco", "phoenx"],
+            default="phoenx",
+            help="Rigid-body solver backend: 'xpbd', 'mujoco', or 'phoenx'.",
         )
         parser.add_argument("--num-per-world", type=int, default=1, help="Number of assemblies per world.")
         return parser
@@ -400,4 +426,6 @@ if __name__ == "__main__":
 
     viewer, args = newton.examples.init(parser)
 
-    newton.examples.run(Example(viewer, args), args)
+    example = Example(viewer, args)
+    viewer._paused = True
+    newton.examples.run(example, args)

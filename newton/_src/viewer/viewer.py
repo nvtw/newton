@@ -191,7 +191,7 @@ class ViewerBase(ABC):
             model: The Newton model to visualize.
             max_worlds: Maximum number of worlds to render (None = all).
 
-                .. deprecated::
+                .. deprecated:: 1.1
                     Use :meth:`set_visible_worlds` instead.
         """
         if self.model is not None:
@@ -211,7 +211,7 @@ class ViewerBase(ABC):
 
         if model is not None:
             self.device = model.device
-            self._shape_sdf_index_host = model.shape_sdf_index.numpy() if model.shape_sdf_index is not None else None
+            self._shape_sdf_index_host = model._shape_sdf_index.numpy() if model._shape_sdf_index is not None else None
             self._build_visible_worlds_mask()
             self._populate_shapes()
 
@@ -311,15 +311,15 @@ class ViewerBase(ABC):
             return None
 
         sdf_idx = int(self._shape_sdf_index_host[shape_idx]) if self._shape_sdf_index_host is not None else -1
-        if sdf_idx < 0 or self.model.texture_sdf_data is None:
+        if sdf_idx < 0 or self.model._texture_sdf_data is None:
             return None
 
         if sdf_idx in self._isomesh_cache:
             return self._isomesh_cache[sdf_idx]
 
         slots = (
-            self.model.texture_sdf_subgrid_start_slots[sdf_idx]
-            if hasattr(self.model, "texture_sdf_subgrid_start_slots") and self.model.texture_sdf_subgrid_start_slots
+            self.model._texture_sdf_subgrid_start_slots[sdf_idx]
+            if self.model._texture_sdf_subgrid_start_slots
             else None
         )
         if slots is None:
@@ -328,10 +328,10 @@ class ViewerBase(ABC):
 
         from ..geometry.sdf_texture import compute_isomesh_from_texture_sdf  # noqa: PLC0415
 
-        coarse_tex = self.model.texture_sdf_coarse_textures[sdf_idx]
+        coarse_tex = self.model._texture_sdf_coarse_textures[sdf_idx]
         coarse_dims = (coarse_tex.width - 1, coarse_tex.height - 1, coarse_tex.depth - 1)
         isomesh = compute_isomesh_from_texture_sdf(
-            self.model.texture_sdf_data, sdf_idx, slots, coarse_dims, device=self.device
+            self.model._texture_sdf_data, sdf_idx, slots, coarse_dims, device=self.device
         )
         self._isomesh_cache[sdf_idx] = isomesh
         return isomesh
@@ -661,16 +661,20 @@ class ViewerBase(ABC):
             self.log_arrows("/contacts", None, None, None)
             return
 
-        # Get contact count, clamped to buffer size (counter may exceed max on overflow)
+        # Buffer-size cap (counter may exceed max on overflow). The
+        # kernel writes ``vec3(nan, nan, nan)`` for slots beyond the
+        # active count or filtered-out worlds; NaN endpoints don't
+        # rasterize, so we can pass the full ``max_contacts`` slice
+        # without first reading the count back to host. This drops one
+        # device-to-host sync from the per-frame render path — under
+        # graph-captured stepping that sync was a stall point.
         max_contacts = contacts.rigid_contact_max
-        num_contacts = min(int(contacts.rigid_contact_count.numpy()[0]), max_contacts)
 
         # Ensure we have buffers for line endpoints
         if self._contact_points0 is None or len(self._contact_points0) < max_contacts:
             self._contact_points0 = wp.array(np.zeros((max_contacts, 3)), dtype=wp.vec3, device=self.device)
             self._contact_points1 = wp.array(np.zeros((max_contacts, 3)), dtype=wp.vec3, device=self.device)
 
-        # Always run the kernel to ensure buffers are properly cleared/updated
         if max_contacts > 0:
             from .kernels import compute_contact_lines  # noqa: PLC0415
 
@@ -697,20 +701,9 @@ class ViewerBase(ABC):
                 ],
                 device=self.device,
             )
-
-        # Always call log_arrows to update the renderer (handles zero contacts gracefully)
-        if num_contacts > 0:
-            # Slice arrays to only include active contacts
-            starts = self._contact_points0[:num_contacts]
-            ends = self._contact_points1[:num_contacts]
+            self.log_arrows("/contacts", self._contact_points0, self._contact_points1, (0.0, 1.0, 0.0))
         else:
-            # Create empty arrays for zero contacts case
-            starts = wp.array([], dtype=wp.vec3, device=self.device)
-            ends = wp.array([], dtype=wp.vec3, device=self.device)
-
-        colors = (0.0, 1.0, 0.0)
-
-        self.log_arrows("/contacts", starts, ends, colors)
+            self.log_arrows("/contacts", None, None, None)
 
     def log_hydro_contact_surface(
         self,
@@ -1010,6 +1003,116 @@ class ViewerBase(ABC):
             ry = geo_scale[1] if len(geo_scale) > 1 else rx
             rz = geo_scale[2] if len(geo_scale) > 2 else rx
             mesh = newton.Mesh.create_ellipsoid(rx, ry, rz, compute_inertia=False)
+
+        elif geo_type == newton.GeoType.TETRAHEDRON:
+            # Canonical solid tet: A=(0,0,0), B=(0,0,edge_ab),
+            # C=(0,c_y,c_z), D=(d_x,d_y,d_z). The 4th vertex D arrives
+            # via ``geo_src`` as anything with ``.d_x/.d_y/.d_z``
+            # attributes (a ``_TetrahedronVertexD`` from the builder).
+            # Render the four triangular faces with outward-pointing
+            # face normals; each face uses 3 unique flat-shaded vertices
+            # so the GL viewer's per-vertex normal path works without
+            # smoothing across edges.
+            edge_ab = float(geo_scale[0])
+            c_y = float(geo_scale[1]) if len(geo_scale) > 1 else 0.0
+            c_z = float(geo_scale[2]) if len(geo_scale) > 2 else 0.0
+            d_x = 1.0
+            d_y = 0.5
+            d_z = 0.5
+            if geo_src is not None and all(hasattr(geo_src, a) for a in ("d_x", "d_y", "d_z")):
+                d_x = float(geo_src.d_x)
+                d_y = float(geo_src.d_y)
+                d_z = float(geo_src.d_z)
+            a_pt = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            b_pt = np.array([0.0, 0.0, edge_ab], dtype=np.float32)
+            c_pt = np.array([0.0, c_y, c_z], dtype=np.float32)
+            d_pt = np.array([d_x, d_y, d_z], dtype=np.float32)
+            faces = [
+                (a_pt, b_pt, c_pt, d_pt),  # face ABC, opposite vertex D
+                (a_pt, c_pt, d_pt, b_pt),  # face ACD, opposite vertex B
+                (a_pt, d_pt, b_pt, c_pt),  # face ADB, opposite vertex C
+                (b_pt, d_pt, c_pt, a_pt),  # face BDC, opposite vertex A
+            ]
+            verts: list[np.ndarray] = []
+            normals_list: list[np.ndarray] = []
+            uvs_list: list[np.ndarray] = []
+            inds: list[int] = []
+            for p0, face_p1, face_p2, opp in faces:
+                p1 = face_p1
+                p2 = face_p2
+                n = np.cross(p1 - p0, p2 - p0)
+                n_norm = float(np.linalg.norm(n))
+                if n_norm > 0.0:
+                    n = (n / n_norm).astype(np.float32)
+                else:
+                    n = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                # Flip winding (and normal) if normal currently points
+                # *toward* the opposite vertex; we want it outward.
+                if float(np.dot(n, opp - p0)) > 0.0:
+                    p1, p2 = p2, p1
+                    n = -n
+                base = len(verts)
+                verts.extend([p0, p1, p2])
+                normals_list.extend([n, n, n])
+                uvs_list.extend(
+                    [
+                        np.array([0.0, 0.0], dtype=np.float32),
+                        np.array([1.0, 0.0], dtype=np.float32),
+                        np.array([0.0, 1.0], dtype=np.float32),
+                    ]
+                )
+                inds.extend([base, base + 1, base + 2])
+            tet_vertices = np.asarray(verts, dtype=np.float32)
+            tet_normals = np.asarray(normals_list, dtype=np.float32)
+            tet_uvs = np.asarray(uvs_list, dtype=np.float32)
+            tet_indices = np.asarray(inds, dtype=np.int32)
+            mesh = newton.Mesh(
+                tet_vertices,
+                tet_indices,
+                normals=tet_normals,
+                uvs=tet_uvs,
+                compute_inertia=False,
+            )
+
+        elif geo_type == newton.GeoType.TRIANGLE:
+            # Canonical triangle: A=(0,0,0), B=(0,0,edge_ab), C=(0,c_y,c_z).
+            # Render double-sided by emitting two faces with opposite
+            # winding and duplicated vertices so each face carries its
+            # own per-vertex normal (the GL viewer needs explicit
+            # normals; ``Mesh.normals`` is otherwise ``None`` and the
+            # ``fill_vertex_data`` kernel rejects a null array).
+            edge_ab = geo_scale[0]
+            c_y = geo_scale[1] if len(geo_scale) > 1 else 0.0
+            c_z = geo_scale[2] if len(geo_scale) > 2 else 0.0
+            a = (0.0, 0.0, 0.0)
+            b = (0.0, 0.0, float(edge_ab))
+            c = (0.0, float(c_y), float(c_z))
+            tri_vertices = np.array([a, b, c, a, b, c], dtype=np.float32)
+            # Front face (winding A,B,C) faces local +X; back face
+            # (winding A,C,B) faces local -X.
+            tri_normals = np.array(
+                [
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            )
+            tri_uvs = np.array(
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                dtype=np.float32,
+            )
+            tri_indices = np.array([0, 1, 2, 3, 5, 4], dtype=np.int32)
+            mesh = newton.Mesh(
+                tri_vertices,
+                tri_indices,
+                normals=tri_normals,
+                uvs=tri_uvs,
+                compute_inertia=False,
+            )
         else:
             raise ValueError(f"log_geo does not support geo_type={geo_type} (name={name})")
 
@@ -1525,6 +1628,8 @@ class ViewerBase(ABC):
             newton.GeoType.MESH: "mesh",
             newton.GeoType.CONVEX_MESH: "convex_hull",
             newton.GeoType.HFIELD: "heightfield",
+            newton.GeoType.TRIANGLE: "triangle",
+            newton.GeoType.TETRAHEDRON: "tetrahedron",
         }.get(geo_type)
 
         if base_name is None:
@@ -1542,7 +1647,13 @@ class ViewerBase(ABC):
                 float(thickness),
                 bool(is_solid),
                 geo_src=geo_src
-                if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD)
+                if geo_type
+                in (
+                    newton.GeoType.MESH,
+                    newton.GeoType.CONVEX_MESH,
+                    newton.GeoType.HFIELD,
+                    newton.GeoType.TETRAHEDRON,
+                )
                 else None,
                 hidden=True,
             )
@@ -1665,6 +1776,7 @@ class ViewerBase(ABC):
                         newton.GeoType.MESH,
                         newton.GeoType.CONVEX_MESH,
                         newton.GeoType.HFIELD,
+                        newton.GeoType.TETRAHEDRON,
                     )
                     else None,
                     mirror=mirror,
@@ -1688,7 +1800,7 @@ class ViewerBase(ABC):
             is_visible = flags & int(newton.ShapeFlags.VISIBLE)
             # Check for texture SDF existence without computing the isomesh (lazy evaluation)
             sdf_idx = int(shape_sdf_index[s]) if shape_sdf_index is not None else -1
-            has_sdf = sdf_idx >= 0 and self.model.texture_sdf_data is not None
+            has_sdf = sdf_idx >= 0 and self.model._texture_sdf_data is not None
             if is_collision_shape and is_visible and has_sdf:
                 # Remove COLLIDE_SHAPES flag so this is treated as a visual shape
                 flags = flags & ~int(newton.ShapeFlags.COLLIDE_SHAPES)
@@ -1805,7 +1917,7 @@ class ViewerBase(ABC):
         shape_flags = self.model.shape_flags.numpy()
         shape_world = self.model.shape_world.numpy()
         shape_geo_scale = self.model.shape_scale.numpy()
-        tex_sdf_np = self.model.texture_sdf_data.numpy() if self.model.texture_sdf_data is not None else None
+        tex_sdf_np = self.model._texture_sdf_data.numpy() if self.model._texture_sdf_data is not None else None
         shape_sdf_index = self._shape_sdf_index_host
         shape_count = len(shape_body)
 
@@ -1896,6 +2008,10 @@ class ViewerBase(ABC):
     def update_shape_colors(self, shape_colors: dict[int, wp.vec3 | tuple[float, float, float]]):
         """
         Set colors for a set of shapes at runtime.
+
+        .. deprecated:: 1.1
+            Write to :attr:`Model.shape_color` instead.
+
         Args:
             shape_colors: mapping from shape index -> color
         """

@@ -1,0 +1,307 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Sweep PhoenX multi-world fast-tail scheduling choices.
+
+This benchmark complements ``bench_threads_per_world`` by sweeping both
+``threads_per_world`` and fast-tail ``worlds_per_block`` packing. It is
+research tooling: production still chooses these values heuristically, while
+this script measures the sensitivity on representative scenes before we tune
+those heuristics. By default it forces the fast-tail scheduler so the table
+does not silently mix block-world and fast-tail results; pass
+``--scheduler auto`` to measure the production scheduler selection.
+
+Usage::
+
+    python -m newton._src.solvers.phoenx.benchmarks.bench_fast_tail_scheduling
+"""
+
+from __future__ import annotations
+
+import argparse
+import types
+
+import warp as wp
+
+from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _bench, _extract_solver, _force_tpw
+from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
+
+
+def _build_scene(
+    scene: str,
+    num_worlds: int,
+    *,
+    substeps: int,
+    solver_iterations: int,
+    prepare_refresh_stride: int | str,
+):
+    if scene == "h1":
+        return h1_flat.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
+    if scene == "g1":
+        return g1_flat.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
+    if scene == "dr_legs":
+        return dr_legs.build(
+            num_worlds, "phoenx", substeps, solver_iterations, prepare_refresh_stride=prepare_refresh_stride
+        )
+    if scene == "tower":
+        return tower.build(
+            num_worlds,
+            "phoenx",
+            substeps,
+            solver_iterations,
+            step_layout="multi_world",
+            prepare_refresh_stride=prepare_refresh_stride,
+        )
+    raise ValueError(f"unknown scene: {scene}")
+
+
+def _set_worlds_per_block(world, worlds_per_block: int | None) -> None:
+    if worlds_per_block is None:
+        return
+    world._fast_tail_worlds_per_block = types.MethodType(
+        lambda self, _worlds_per_block=worlds_per_block: _worlds_per_block,
+        world,
+    )
+
+
+def _set_family_split(world, family_split: bool | None) -> None:
+    if family_split is None:
+        return
+    world._fast_tail_family_split = types.MethodType(
+        lambda self, _family_split=family_split: _family_split,
+        world,
+    )
+
+
+def _measure_case(
+    *,
+    scene: str,
+    num_worlds: int,
+    tpw: int | str,
+    worlds_per_block: int | None,
+    family_split: bool | None,
+    scheduler: str,
+    substeps: int,
+    solver_iterations: int,
+    prepare_refresh_stride: int | str,
+    warmup: int,
+    n_runs: int,
+    trials: int,
+) -> tuple[float, float, int, int, bool, str, int, int, int, float, int]:
+    handle = _build_scene(
+        scene,
+        num_worlds,
+        substeps=substeps,
+        solver_iterations=solver_iterations,
+        prepare_refresh_stride=prepare_refresh_stride,
+    )
+    solver = _extract_solver(handle)
+    world = solver.world
+    _force_tpw(solver, tpw)
+    world._configure_multi_world_scheduler(scheduler)
+    _set_worlds_per_block(world, worlds_per_block)
+    _set_family_split(world, family_split)
+
+    for _ in range(warmup):
+        handle.simulate_one_frame()
+    wp.synchronize_device()
+
+    chosen_tpw = int(world._tpw_choice.numpy()[0]) if tpw == "auto" else int(tpw)
+    chosen_wpb = int(world._fast_tail_worlds_per_block())
+    chosen_family_split = bool(world._fast_tail_family_split())
+    chosen_scheduler = str(world._multi_world_scheduler)
+    chosen_block_dim = int(world._multi_world_block_dim)
+    num_colors = int(world._world_num_colors.numpy().max(initial=0))
+    total_cids = int(world._world_csr_offsets.numpy()[world.num_worlds])
+    contacts_per_world = float(world.max_contact_columns) / float(max(1, world.num_worlds))
+    min_ms, med_ms = _bench(handle.simulate_one_frame, n_runs=n_runs, warmup=0, trials=trials)
+    return (
+        min_ms,
+        med_ms,
+        chosen_tpw,
+        chosen_wpb,
+        chosen_family_split,
+        chosen_scheduler,
+        chosen_block_dim,
+        num_colors,
+        total_cids,
+        contacts_per_world,
+        int(world.prepare_refresh_stride),
+    )
+
+
+def _parse_stride_value(value: str) -> int | str:
+    item = value.strip().lower()
+    return "auto" if item == "auto" else int(item)
+
+
+def _parse_csv_ints(value: str) -> tuple[int, ...]:
+    return tuple(int(v.strip()) for v in value.split(",") if v.strip())
+
+
+def _parse_family_split_values(value: str) -> tuple[bool | None, ...]:
+    out: list[bool | None] = []
+    for raw in value.split(","):
+        item = raw.strip().lower()
+        if not item:
+            continue
+        if item == "default":
+            out.append(None)
+        elif item in ("on", "true", "1"):
+            out.append(True)
+        elif item in ("off", "false", "0"):
+            out.append(False)
+        else:
+            raise ValueError(f"unknown family split value: {raw!r}")
+    return tuple(out)
+
+
+def _format_family_split(value: bool | None) -> str:
+    if value is None:
+        return "default"
+    return "on" if value else "off"
+
+
+def _parse_tpw_values(value: str) -> tuple[int | str, ...]:
+    out: list[int | str] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        out.append("auto" if item == "auto" else int(item))
+    return tuple(out)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument(
+        "--scenes",
+        nargs="+",
+        choices=("h1", "g1", "dr_legs", "tower"),
+        default=["h1", "dr_legs", "tower"],
+    )
+    parser.add_argument("--worlds", type=_parse_csv_ints, default=(32, 64, 128, 512))
+    parser.add_argument("--tpw", type=_parse_tpw_values, default=("auto", 32, 16, 8))
+    parser.add_argument("--wpb", type=_parse_csv_ints, default=(1, 2, 4, 8))
+    parser.add_argument(
+        "--scheduler",
+        choices=("auto", "fast_tail", "block_world"),
+        default="fast_tail",
+        help="Static multi-world scheduler to measure; use auto for production policy.",
+    )
+    parser.add_argument("--include-default", action="store_true", help="Also measure production heuristic wpb.")
+    parser.add_argument(
+        "--family-split",
+        type=_parse_family_split_values,
+        default=(None,),
+        help="Comma-separated default,on,off values for joint/contact family splitting.",
+    )
+    parser.add_argument("--substeps", type=int, default=1)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_stride_value, default="auto")
+    parser.add_argument("--solver-iterations", type=int, default=8)
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--n-runs", type=int, default=40)
+    parser.add_argument("--trials", type=int, default=2)
+    args = parser.parse_args()
+
+    wp.init()
+    print(f"device={wp.get_device()} sm_count={getattr(wp.get_device(), 'sm_count', 'N/A')}")
+    print(
+        "scene worlds scheduler tpw wpb family chosen_scheduler chosen_tpw chosen_wpb block_dim chosen_family "
+        "prep min_ms med_ms us_per_frame max_colors total_cids contacts_per_world rel_best"
+    )
+
+    for scene in args.scenes:
+        for num_worlds in args.worlds:
+            rows: list[tuple] = []
+            wpb_values: tuple[int | None, ...]
+            if args.include_default:
+                wpb_values = (None, *args.wpb)
+            else:
+                wpb_values = args.wpb
+            for tpw in args.tpw:
+                for worlds_per_block in wpb_values:
+                    for family_split in args.family_split:
+                        (
+                            min_ms,
+                            med_ms,
+                            chosen_tpw,
+                            chosen_wpb,
+                            chosen_family_split,
+                            chosen_scheduler,
+                            chosen_block_dim,
+                            num_colors,
+                            total_cids,
+                            contacts_per_world,
+                            chosen_prepare_refresh_stride,
+                        ) = _measure_case(
+                            scene=scene,
+                            num_worlds=num_worlds,
+                            tpw=tpw,
+                            worlds_per_block=worlds_per_block,
+                            family_split=family_split,
+                            scheduler=args.scheduler,
+                            substeps=args.substeps,
+                            solver_iterations=args.solver_iterations,
+                            prepare_refresh_stride=args.prepare_refresh_stride,
+                            warmup=args.warmup,
+                            n_runs=args.n_runs,
+                            trials=args.trials,
+                        )
+                        rows.append(
+                            (
+                                min_ms,
+                                med_ms,
+                                scene,
+                                num_worlds,
+                                tpw,
+                                "default" if worlds_per_block is None else worlds_per_block,
+                                _format_family_split(family_split),
+                                chosen_tpw,
+                                chosen_wpb,
+                                chosen_family_split,
+                                chosen_scheduler,
+                                chosen_block_dim,
+                                num_colors,
+                                total_cids,
+                                contacts_per_world,
+                                chosen_prepare_refresh_stride,
+                            )
+                        )
+            best = min(row[0] for row in rows)
+            for row in sorted(rows, key=lambda r: (str(r[4]), str(r[5]), str(r[6]))):
+                (
+                    min_ms,
+                    med_ms,
+                    row_scene,
+                    row_num_worlds,
+                    row_tpw,
+                    wpb,
+                    row_family_split,
+                    chosen_tpw,
+                    chosen_wpb,
+                    chosen_family_split,
+                    chosen_scheduler,
+                    chosen_block_dim,
+                    num_colors,
+                    total_cids,
+                    contacts_per_world,
+                    chosen_prepare_refresh_stride,
+                ) = row
+                rel_best = min_ms / best if best > 0.0 else float("nan")
+                print(
+                    f"{row_scene:7s} {row_num_worlds:6d} {args.scheduler:>9s} {row_tpw!s:>4s} {wpb!s:>7s} "
+                    f"{row_family_split:>7s} {chosen_scheduler:>16s} {chosen_tpw:10d} {chosen_wpb:10d} "
+                    f"{chosen_block_dim:9d} {chosen_family_split!s:>13s} {chosen_prepare_refresh_stride:4d} "
+                    f"{min_ms:8.3f} {med_ms:8.3f} "
+                    f"{1000.0 * min_ms / args.n_runs:12.3f} {num_colors:10d} {total_cids:10d} "
+                    f"{contacts_per_world:18.1f} {rel_best:8.3f}"
+                )
+
+
+if __name__ == "__main__":
+    main()

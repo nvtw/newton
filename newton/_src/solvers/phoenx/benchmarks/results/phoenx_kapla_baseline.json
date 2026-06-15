@@ -1,0 +1,82 @@
+[
+  {
+    "key": [
+      "False",
+      "4",
+      "5"
+    ],
+    "result": {
+      "mass_splitting": false,
+      "substeps": 4,
+      "solver_iterations": 5,
+      "warmup_frames": 60,
+      "measured_frames": 120,
+      "fps": 48.45810751944094,
+      "mean_drift_m": 0.008637502789497375,
+      "max_drift_m": 0.7794139981269836,
+      "max_z": 2.7928895950317383,
+      "min_z": 0.0280868262052536,
+      "finite": true
+    }
+  },
+  {
+    "key": [
+      "False",
+      "4",
+      "10"
+    ],
+    "result": {
+      "mass_splitting": false,
+      "substeps": 4,
+      "solver_iterations": 10,
+      "warmup_frames": 60,
+      "measured_frames": 120,
+      "fps": 30.722122577182233,
+      "mean_drift_m": 0.007028155494481325,
+      "max_drift_m": 1.2426294088363647,
+      "max_z": 2.793766498565674,
+      "min_z": -0.024070851504802704,
+      "finite": true
+    }
+  },
+  {
+    "key": [
+      "True",
+      "4",
+      "5"
+    ],
+    "result": {
+      "mass_splitting": true,
+      "substeps": 4,
+      "solver_iterations": 5,
+      "warmup_frames": 60,
+      "measured_frames": 120,
+      "fps": 52.449645917382604,
+      "mean_drift_m": 0.02717386558651924,
+      "max_drift_m": 1.8780810832977295,
+      "max_z": 2.787855386734009,
+      "min_z": -0.022106099873781204,
+      "finite": true
+    }
+  },
+  {
+    "key": [
+      "True",
+      "4",
+      "10"
+    ],
+    "result": {
+      "mass_splitting": true,
+      "substeps": 4,
+      "solver_iterations": 10,
+      "warmup_frames": 60,
+      "measured_frames": 120,
+      "fps": 32.89480376787829,
+      "mean_drift_m": 0.01163582131266594,
+      "max_drift_m": 0.8326384425163269,
+      "max_z": 2.789579153060913,
+      "min_z": -0.025053752586245537,
+      "finite": true
+    }
+  }
+]

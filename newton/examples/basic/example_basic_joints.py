@@ -187,6 +187,10 @@ class Example:
                 self.model,
                 iterations=2,
             )
+        elif solver_type == "phoenx":
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
+            )
         else:
             self.solver = newton.solvers.SolverXPBD(self.model)
 
@@ -305,8 +309,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--solver",
         type=str,
-        choices=["xpbd", "vbd"],
-        default="xpbd",
+        choices=["xpbd", "vbd", "phoenx"],
+        default="phoenx",
         help="Solver backend to use.",
     )
     viewer, args = newton.examples.init(parser)

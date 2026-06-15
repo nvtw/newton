@@ -16,13 +16,20 @@ from ...utils.texture import normalize_texture
 from .shaders import (
     FrameShader,
     ShaderArrow,
+    ShaderEdge,
     ShaderLine,
     ShaderShape,
     ShaderSky,
     ShadowShader,
 )
 
-ENABLE_CUDA_INTEROP = False
+# CUDA-GL interop. When enabled (and the active Warp device is CUDA),
+# per-instance transforms are written directly into mapped GL buffers
+# from device-side Warp arrays -- no D2H copy, no host sync. Defaults
+# on; set ``NEWTON_VIEWER_CUDA_INTEROP=0`` to fall back to the pinned
+# host path (useful when the active GL context isn't tied to the same
+# CUDA context Warp picked up, e.g. some remote-display setups).
+ENABLE_CUDA_INTEROP = os.environ.get("NEWTON_VIEWER_CUDA_INTEROP", "1") != "0"
 ENABLE_GL_CHECKS = False
 
 wp.set_module_options({"enable_backward": False})
@@ -892,6 +899,48 @@ class MeshInstancerGL:
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.instance_material_buffer)
             gl.glBufferData(gl.GL_ARRAY_BUFFER, host_materials.nbytes, host_materials.ctypes.data, gl.GL_STATIC_DRAW)
 
+    def update_from_packed_cuda(self, packed_xforms, offset, count, colors=None, materials=None):
+        """Upload mat44 transforms directly from a device Warp array via CUDA-GL interop.
+
+        Avoids the D2H/H2D round trip ``update_from_pinned`` requires:
+        the registered VBO is mapped into a CUDA pointer, the slice
+        ``packed_xforms[offset : offset + count]`` is copied into it
+        device-to-device, and the buffer is unmapped. The mapping is
+        WRITE_DISCARD, so only the first ``count`` rows are valid after
+        this call -- which matches the renderer's
+        ``glDrawElementsInstanced(..., active_instances)``.
+
+        Args:
+            packed_xforms: ``wp.array[wp.mat44]`` on the same CUDA
+                device as this instancer's registered VBO.
+            offset: Starting index inside ``packed_xforms``.
+            count: Number of active instances to copy and render.
+            colors: Optional ``wp.array`` of per-instance colors.
+            materials: Optional ``wp.array`` of per-instance materials.
+
+        Raises:
+            RuntimeError: If interop isn't available on this instancer
+                (caller must fall back to ``update_from_pinned``).
+        """
+        gl = RendererGL.gl
+        if self._instance_transform_cuda_buffer is None:
+            raise RuntimeError("CUDA-GL interop not available on this instancer; use update_from_pinned instead.")
+        if count > self.num_instances:
+            raise ValueError(f"Active instance count ({count}) exceeds allocated capacity ({self.num_instances}).")
+        self.active_instances = count
+        if count > 0:
+            vbo = self._instance_transform_cuda_buffer.map(dtype=wp.mat44, shape=(self.num_instances,))
+            wp.copy(vbo, packed_xforms, dest_offset=0, src_offset=offset, count=count)
+            self._instance_transform_cuda_buffer.unmap()
+        if colors is not None:
+            host_colors = colors.numpy()
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.instance_color_buffer)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, host_colors.nbytes, host_colors.ctypes.data, gl.GL_STATIC_DRAW)
+        if materials is not None:
+            host_materials = materials.numpy()
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.instance_material_buffer)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, host_materials.nbytes, host_materials.ctypes.data, gl.GL_STATIC_DRAW)
+
     def update_from_pinned(self, host_transforms_np, count, colors=None, materials=None):
         """Upload pre-computed mat44 transforms from pinned host memory to GL.
 
@@ -980,6 +1029,8 @@ class RendererGL:
         self.arrow_length_scale = 1.0  # multiplier on contact-arrow world-space length
         self.joint_scale = 1.0  # multiplier on joint-axis line length
         self.com_scale = 1.0  # multiplier on COM sphere radius
+        self.draw_edges = False
+        self._edge_color = (0.05, 0.05, 0.05, 1.0)
 
         self.background_color = (68.0 / 255.0, 161.0 / 255.0, 255.0 / 255.0)
 
@@ -1109,6 +1160,7 @@ class RendererGL:
         self._shadow_shader = None
         self._shadow_width = 4096
         self._shadow_height = 4096
+        self._light_space_matrix = np.eye(4, dtype=np.float32)
 
         self._frame_texture = None
         self._frame_depth_texture = None
@@ -1144,6 +1196,7 @@ class RendererGL:
 
         self._shadow_shader = ShadowShader(gl)
         self._shape_shader = ShaderShape(gl)
+        self._edge_shader = ShaderEdge(gl)
         self._frame_shader = FrameShader(gl)
         self._sky_shader = ShaderSky(gl)
         self._wireframe_shader = ShaderLine(gl)
@@ -1845,6 +1898,28 @@ class RendererGL:
             self._draw_objects(objects)
 
         gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
+
+        # Edge overlay: redraw the same geometry as lines with polygon offset
+        # to avoid z-fighting (per @mmacklin review on #2300).
+        if self.draw_edges:
+            # Skip objects that opted out of the edge overlay (e.g. ground
+            # planes) via the per-object draw_edge flag. Mirrors the cast_shadow
+            # filter in _render_shadow_map and keeps the decision off the checker
+            # material bit (see #2808 review).
+            edge_objects = {k: v for k, v in objects.items() if getattr(v, "draw_edge", True)}
+            self._edge_shader.update(
+                view_matrix=self._view_matrix,
+                projection_matrix=self._projection_matrix,
+                edge_color=self._edge_color,
+                light_space_matrix=self._light_space_matrix,
+            )
+            gl.glEnable(gl.GL_POLYGON_OFFSET_LINE)
+            gl.glPolygonOffset(-1.0, -1.0)
+            gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE)
+            with self._edge_shader:
+                self._draw_objects(edge_objects)
+            gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
+            gl.glDisable(gl.GL_POLYGON_OFFSET_LINE)
 
         check_gl_error()
 

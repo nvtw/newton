@@ -53,6 +53,7 @@ def broadcast_ik_solution_kernel(
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         self.scene = SceneType(args.scene)
         self.test_mode = args.test
         self.show_isosurface = False  # Disabled by default for performance
@@ -139,7 +140,7 @@ class Example:
             7.8549200e-01,
         ]
         builder.joint_q[:9] = [*init_q, 0.05, 0.05]
-        builder.joint_target_pos[:9] = [*init_q, 1.0, 1.0]
+        builder.joint_target_q[:9] = [*init_q, 1.0, 1.0]
 
         builder.joint_target_ke[:9] = [650.0] * 9
         builder.joint_target_kd[:9] = [100.0] * 9
@@ -275,27 +276,39 @@ class Example:
         sdf_hydroelastic_config = HydroelasticSDF.Config(
             output_contact_surface=hasattr(viewer, "renderer"),  # Compile in if viewer supports it
         )
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model,
-            reduce_contacts=True,
-            broad_phase="explicit",
-            sdf_hydroelastic_config=sdf_hydroelastic_config,
-        )
+        solver_name_for_pipeline = getattr(args, "solver", "mujoco")
+        cp_kwargs = {
+            "reduce_contacts": True,
+            "broad_phase": "explicit",
+            "sdf_hydroelastic_config": sdf_hydroelastic_config,
+        }
+        if solver_name_for_pipeline == "phoenx":
+            cp_kwargs["contact_matching"] = "sticky"
+        self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
         self.contacts = self.collision_pipeline.contacts()
 
-        # Create MuJoCo solver with Newton contacts
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_contacts=False,
-            solver="newton",
-            integrator="implicitfast",
-            cone="elliptic",
-            njmax=500,
-            nconmax=500,
-            iterations=15,
-            ls_iterations=100,
-            impratio=1000.0,
-        )
+        # Solver dispatch. PhoenX has native hydroelastic SDF support
+        # (see ``test_hydroelastic_phoenx.py``); the same Newton
+        # ``CollisionPipeline`` populates ``self.contacts`` for both
+        # backends, so the only branch is the solver instantiation.
+        solver_name = getattr(args, "solver", "mujoco")
+        if solver_name == "phoenx":
+            self.solver = newton.solvers.SolverPhoenX(
+                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
+            )
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                use_mujoco_contacts=False,
+                solver="newton",
+                integrator="implicitfast",
+                cone="elliptic",
+                njmax=500,
+                nconmax=500,
+                iterations=15,
+                ls_iterations=100,
+                impratio=1000.0,
+            )
 
         self.viewer.set_model(self.model)
         self.viewer.picking_enabled = False  # Disable interactive picking for this example
@@ -311,9 +324,9 @@ class Example:
 
         self.setup_ik()
         self.control = self.model.control()
-        self.joint_target_shape = self.control.joint_target_pos.reshape((self.world_count, -1)).shape
+        self.joint_target_shape = self.control.joint_target_q.reshape((self.world_count, -1)).shape
         self.joint_targets_2d = wp.zeros(self.joint_target_shape, dtype=wp.float32)
-        wp.copy(self.control.joint_target_pos[:9], self.model.joint_q[:9])
+        wp.copy(self.control.joint_target_q[:9], self.model.joint_q[:9])
 
         # Track maximum object height for testing (only in test mode)
         self.object_max_z = [self.object_pos[2]] * self.world_count if self.test_mode else None
@@ -349,7 +362,7 @@ class Example:
             dim=self.world_count,
             inputs=[self.joint_q_ik, self.joint_targets_2d, gripper_value],
         )
-        wp.copy(self.control.joint_target_pos, self.joint_targets_2d.flatten())
+        wp.copy(self.control.joint_target_q, self.joint_targets_2d.flatten())
 
         if self.time_in_waypoint >= self.waypoints[self.current_waypoint][1]:
             self.current_waypoint = (self.current_waypoint + 1) % len(self.waypoints)
@@ -531,6 +544,12 @@ class Example:
             choices=[scene.value for scene in SceneType],
             default=SceneType.PEN.value,
             help="Scene type to load (pen, cube)",
+        )
+        parser.add_argument(
+            "--solver",
+            choices=["mujoco", "phoenx"],
+            default="mujoco",
+            help="Rigid-body solver backend.",
         )
         return parser
 
