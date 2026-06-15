@@ -196,12 +196,55 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(h, expected)
 
         device = wp.get_preferred_device()
-        device_system = ArticulationDeviceSystem.from_topology(topology, device)
+        device_system = ArticulationDeviceSystem.from_topology(topology, device, system.symbolic)
         device_system.jacobian.assign(jac.astype(np.float32))
         inv_mass_wp = wp.array(inv_mass.astype(np.float32), dtype=wp.float32, device=device)
         inv_inertia_wp = wp.array(inv_inertia.astype(np.float32), dtype=wp.mat33f, device=device)
         device_system.assemble_dense_matrix(inv_mass_wp, inv_inertia_wp, device=device)
         np.testing.assert_allclose(device_system.matrix.numpy()[:6, :6], expected, rtol=1.0e-6, atol=1.0e-6)
+
+        regularization = 0.125
+        expected_regularized = expected + np.eye(6, dtype=np.float64) * regularization
+        device_system.assemble_block_sparse_matrix(
+            inv_mass_wp, inv_inertia_wp, diagonal_regularization=regularization, device=device
+        )
+        block_diag = device_system.block_diag.numpy()
+        block_off = device_system.block_off.numpy()
+        pivot_order = device_system.block_pivot_order.numpy()[: device_system.block_count]
+        block_sizes = device_system.block_sizes.numpy()[: device_system.block_count]
+        n_off_row_idx = device_system.block_n_off_row_idx.numpy()[: device_system.block_nnz]
+        n_off_col_idx = device_system.block_n_off_col_idx.numpy()[: device_system.block_nnz]
+        offsets = topology.active_block_offsets
+
+        for pivot, active_block in enumerate(pivot_order):
+            block_size = int(block_sizes[pivot])
+            block_slice = slice(int(offsets[active_block]), int(offsets[active_block + 1]))
+            np.testing.assert_allclose(
+                block_diag[pivot, :block_size, :block_size],
+                expected_regularized[block_slice, block_slice],
+                rtol=1.0e-6,
+                atol=1.0e-6,
+            )
+            np.testing.assert_allclose(block_diag[pivot, block_size:, :], 0.0, atol=1.0e-6)
+            np.testing.assert_allclose(block_diag[pivot, :, block_size:], 0.0, atol=1.0e-6)
+
+        for slot in range(device_system.block_nnz):
+            row_pivot = int(n_off_row_idx[slot])
+            col_pivot = int(n_off_col_idx[slot])
+            row_size = int(block_sizes[row_pivot])
+            col_size = int(block_sizes[col_pivot])
+            row_block = int(pivot_order[row_pivot])
+            col_block = int(pivot_order[col_pivot])
+            row_slice = slice(int(offsets[row_block]), int(offsets[row_block + 1]))
+            col_slice = slice(int(offsets[col_block]), int(offsets[col_block + 1]))
+            np.testing.assert_allclose(
+                block_off[slot, :row_size, :col_size],
+                expected_regularized[row_slice, col_slice],
+                rtol=1.0e-6,
+                atol=1.0e-6,
+            )
+            np.testing.assert_allclose(block_off[slot, row_size:, :], 0.0, atol=1.0e-6)
+            np.testing.assert_allclose(block_off[slot, :, col_size:], 0.0, atol=1.0e-6)
 
         rhs = np.arange(1, 7, dtype=np.float64)
         system.factorize_from_jacobian(jac, inv_mass, inv_inertia)

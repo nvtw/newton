@@ -32,7 +32,10 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_UNIVERSAL,
 )
 
+from .symbolic import BlockSparseSymbolic, compute_block_sparse_symbolic
 from .topology import ArticulationTopology
+
+_BLOCK_SIZE = 6
 
 
 @dataclass
@@ -51,9 +54,23 @@ class ArticulationDeviceSystem:
     matrix: wp.array
     rhs: wp.array
     solution: wp.array
+    block_size: int
+    block_count: int
+    block_nnz: int
+    block_pivot_order: wp.array
+    block_sizes: wp.array
+    block_n_off_row_idx: wp.array
+    block_n_off_col_idx: wp.array
+    block_diag: wp.array
+    block_off: wp.array
 
     @classmethod
-    def from_topology(cls, topology: ArticulationTopology, device) -> ArticulationDeviceSystem:
+    def from_topology(
+        cls,
+        topology: ArticulationTopology,
+        device,
+        symbolic: BlockSparseSymbolic | None = None,
+    ) -> ArticulationDeviceSystem:
         """Allocate reusable device buffers for ``topology``."""
         total_rows = int(topology.total_rows)
         rows_alloc = max(total_rows, 1)
@@ -80,6 +97,22 @@ class ArticulationDeviceSystem:
             if topology.active_joint_count > 0
             else np.zeros(1, dtype=np.int32)
         )
+        if symbolic is None:
+            symbolic = compute_block_sparse_symbolic(
+                topology.active_body1,
+                topology.active_body2,
+                topology.active_row_counts,
+            )
+        block_count = int(symbolic.num_blocks)
+        block_nnz = int(symbolic.nnz_n)
+        block_pivot_order_np = symbolic.pivot_order.astype(np.int32) if block_count > 0 else np.zeros(1, dtype=np.int32)
+        block_sizes_np = symbolic.block_sizes.astype(np.int32) if block_count > 0 else np.zeros(1, dtype=np.int32)
+        block_n_off_row_idx_np = (
+            symbolic.n_off_row_idx.astype(np.int32) if block_nnz > 0 else np.zeros(1, dtype=np.int32)
+        )
+        block_n_off_col_idx_np = (
+            symbolic.n_off_col_idx.astype(np.int32) if block_nnz > 0 else np.zeros(1, dtype=np.int32)
+        )
 
         return cls(
             total_rows=total_rows,
@@ -94,6 +127,15 @@ class ArticulationDeviceSystem:
             matrix=wp.zeros((rows_alloc, rows_alloc), dtype=wp.float32, device=device),
             rhs=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             solution=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
+            block_size=_BLOCK_SIZE,
+            block_count=block_count,
+            block_nnz=block_nnz,
+            block_pivot_order=wp.array(block_pivot_order_np, dtype=wp.int32, device=device),
+            block_sizes=wp.array(block_sizes_np, dtype=wp.int32, device=device),
+            block_n_off_row_idx=wp.array(block_n_off_row_idx_np, dtype=wp.int32, device=device),
+            block_n_off_col_idx=wp.array(block_n_off_col_idx_np, dtype=wp.int32, device=device),
+            block_diag=wp.zeros((max(block_count, 1), _BLOCK_SIZE, _BLOCK_SIZE), dtype=wp.float32, device=device),
+            block_off=wp.zeros((max(block_nnz, 1), _BLOCK_SIZE, _BLOCK_SIZE), dtype=wp.float32, device=device),
         )
 
     def populate_from_adbs_constraints(
@@ -143,6 +185,59 @@ class ArticulationDeviceSystem:
                 wp.int32(self.total_rows),
             ],
             outputs=[self.matrix],
+            device=device,
+        )
+
+    def assemble_block_sparse_matrix(
+        self,
+        inverse_mass: wp.array,
+        inverse_inertia_world: wp.array,
+        *,
+        diagonal_regularization: float = 0.0,
+        device=None,
+    ) -> None:
+        """Launch block-sparse ``J W J^T`` assembly in symbolic pivot order."""
+        if self.total_rows <= 0 or self.block_count <= 0:
+            return
+        wp.launch(
+            _assemble_block_sparse_articulation_diag_kernel,
+            dim=self.block_count,
+            inputs=[
+                self.jacobian,
+                self.body1,
+                self.body2,
+                self.row_to_active_block,
+                self.active_block_offsets,
+                self.block_pivot_order,
+                self.block_sizes,
+                inverse_mass,
+                inverse_inertia_world,
+                wp.float32(diagonal_regularization),
+                wp.int32(self.block_count),
+            ],
+            outputs=[self.block_diag],
+            device=device,
+        )
+        if self.block_nnz <= 0:
+            return
+        wp.launch(
+            _assemble_block_sparse_articulation_off_kernel,
+            dim=self.block_nnz,
+            inputs=[
+                self.jacobian,
+                self.body1,
+                self.body2,
+                self.row_to_active_block,
+                self.active_block_offsets,
+                self.block_pivot_order,
+                self.block_sizes,
+                self.block_n_off_row_idx,
+                self.block_n_off_col_idx,
+                inverse_mass,
+                inverse_inertia_world,
+                wp.int32(self.block_nnz),
+            ],
+            outputs=[self.block_off],
             device=device,
         )
 
@@ -303,24 +398,106 @@ def _assemble_dense_articulation_matrix_kernel(
     if row >= total_rows or col >= total_rows:
         return
 
-    block_row = row_to_active_block[row]
-    block_col = row_to_active_block[col]
-    row_body1 = body1[block_row]
-    row_body2 = body2[block_row]
-    col_body1 = body1[block_col]
-    col_body2 = body2[block_col]
+    matrix[row, col] = _articulation_matrix_entry(
+        row,
+        col,
+        jacobian,
+        body1,
+        body2,
+        row_to_active_block,
+        inverse_mass,
+        inverse_inertia_world,
+    )
 
-    value = wp.float32(0.0)
-    if row_body1 >= 0 and row_body1 == col_body1:
-        value += _body_metric_dot(row, col, 0, 0, row_body1, jacobian, inverse_mass, inverse_inertia_world)
-    if row_body1 >= 0 and row_body1 == col_body2:
-        value += _body_metric_dot(row, col, 0, 6, row_body1, jacobian, inverse_mass, inverse_inertia_world)
-    if row_body2 >= 0 and row_body2 == col_body1:
-        value += _body_metric_dot(row, col, 6, 0, row_body2, jacobian, inverse_mass, inverse_inertia_world)
-    if row_body2 >= 0 and row_body2 == col_body2:
-        value += _body_metric_dot(row, col, 6, 6, row_body2, jacobian, inverse_mass, inverse_inertia_world)
 
-    matrix[row, col] = value
+@wp.kernel
+def _assemble_block_sparse_articulation_diag_kernel(
+    jacobian: wp.array2d[wp.float32],
+    body1: wp.array[wp.int32],
+    body2: wp.array[wp.int32],
+    row_to_active_block: wp.array[wp.int32],
+    active_block_offsets: wp.array[wp.int32],
+    pivot_order: wp.array[wp.int32],
+    block_sizes: wp.array[wp.int32],
+    inverse_mass: wp.array[wp.float32],
+    inverse_inertia_world: wp.array[wp.mat33f],
+    diagonal_regularization: wp.float32,
+    block_count: wp.int32,
+    block_diag: wp.array3d[wp.float32],
+):
+    pivot = wp.tid()
+    if pivot >= block_count:
+        return
+
+    active_block = pivot_order[pivot]
+    row0 = active_block_offsets[active_block]
+    block_size = block_sizes[pivot]
+    for i in range(_BLOCK_SIZE):
+        row = row0 + wp.int32(i)
+        for j in range(_BLOCK_SIZE):
+            value = wp.float32(0.0)
+            if wp.int32(i) < block_size and wp.int32(j) < block_size:
+                col = row0 + wp.int32(j)
+                value = _articulation_matrix_entry(
+                    row,
+                    col,
+                    jacobian,
+                    body1,
+                    body2,
+                    row_to_active_block,
+                    inverse_mass,
+                    inverse_inertia_world,
+                )
+                if i == j:
+                    value += diagonal_regularization
+            block_diag[pivot, i, j] = value
+
+
+@wp.kernel
+def _assemble_block_sparse_articulation_off_kernel(
+    jacobian: wp.array2d[wp.float32],
+    body1: wp.array[wp.int32],
+    body2: wp.array[wp.int32],
+    row_to_active_block: wp.array[wp.int32],
+    active_block_offsets: wp.array[wp.int32],
+    pivot_order: wp.array[wp.int32],
+    block_sizes: wp.array[wp.int32],
+    n_off_row_idx: wp.array[wp.int32],
+    n_off_col_idx: wp.array[wp.int32],
+    inverse_mass: wp.array[wp.float32],
+    inverse_inertia_world: wp.array[wp.mat33f],
+    block_nnz: wp.int32,
+    block_off: wp.array3d[wp.float32],
+):
+    slot = wp.tid()
+    if slot >= block_nnz:
+        return
+
+    row_pivot = n_off_row_idx[slot]
+    col_pivot = n_off_col_idx[slot]
+    row_active_block = pivot_order[row_pivot]
+    col_active_block = pivot_order[col_pivot]
+    row0 = active_block_offsets[row_active_block]
+    col0 = active_block_offsets[col_active_block]
+    row_block_size = block_sizes[row_pivot]
+    col_block_size = block_sizes[col_pivot]
+    for i in range(_BLOCK_SIZE):
+        row = row0 + wp.int32(i)
+        for j in range(_BLOCK_SIZE):
+            value = wp.float32(0.0)
+            if wp.int32(i) < row_block_size and wp.int32(j) < col_block_size:
+                col = col0 + wp.int32(j)
+                value = _articulation_matrix_entry(
+                    row,
+                    col,
+                    jacobian,
+                    body1,
+                    body2,
+                    row_to_active_block,
+                    inverse_mass,
+                    inverse_inertia_world,
+                )
+            block_off[slot, i, j] = value
 
 
 @wp.kernel
@@ -383,6 +560,36 @@ def _apply_articulation_solution_kernel(
         _apply_body_delta(row, 0, b1, lam, jacobian, inverse_mass, inverse_inertia_world, velocity, angular_velocity)
     if b2 >= 0:
         _apply_body_delta(row, 6, b2, lam, jacobian, inverse_mass, inverse_inertia_world, velocity, angular_velocity)
+
+
+@wp.func
+def _articulation_matrix_entry(
+    row: wp.int32,
+    col: wp.int32,
+    jacobian: wp.array2d[wp.float32],
+    body1: wp.array[wp.int32],
+    body2: wp.array[wp.int32],
+    row_to_active_block: wp.array[wp.int32],
+    inverse_mass: wp.array[wp.float32],
+    inverse_inertia_world: wp.array[wp.mat33f],
+) -> wp.float32:
+    block_row = row_to_active_block[row]
+    block_col = row_to_active_block[col]
+    row_body1 = body1[block_row]
+    row_body2 = body2[block_row]
+    col_body1 = body1[block_col]
+    col_body2 = body2[block_col]
+
+    value = wp.float32(0.0)
+    if row_body1 >= 0 and row_body1 == col_body1:
+        value += _body_metric_dot(row, col, 0, 0, row_body1, jacobian, inverse_mass, inverse_inertia_world)
+    if row_body1 >= 0 and row_body1 == col_body2:
+        value += _body_metric_dot(row, col, 0, 6, row_body1, jacobian, inverse_mass, inverse_inertia_world)
+    if row_body2 >= 0 and row_body2 == col_body1:
+        value += _body_metric_dot(row, col, 6, 0, row_body2, jacobian, inverse_mass, inverse_inertia_world)
+    if row_body2 >= 0 and row_body2 == col_body2:
+        value += _body_metric_dot(row, col, 6, 6, row_body2, jacobian, inverse_mass, inverse_inertia_world)
+    return value
 
 
 @wp.func

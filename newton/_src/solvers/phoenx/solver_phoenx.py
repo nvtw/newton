@@ -1827,7 +1827,9 @@ class PhoenXWorld:
         )
         self.articulation_topology = topology
         self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)
-        self.articulation_device_system = ArticulationDeviceSystem.from_topology(topology, self.device)
+        self.articulation_device_system = ArticulationDeviceSystem.from_topology(
+            topology, self.device, self.articulation_system.symbolic
+        )
 
     @staticmethod
     def _normalize_articulation_dvi_host_solver(value: str) -> str:
