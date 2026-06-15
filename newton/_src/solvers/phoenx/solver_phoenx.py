@@ -1775,6 +1775,7 @@ class PhoenXWorld:
             damping_drive=damping_drive,
             min_value=min_value,
             max_value=max_value,
+            d6_limit_count=d6_limit_count,
             articulation_joint_mask=articulation_joint_mask,
         )
         wp.launch(
@@ -1826,6 +1827,7 @@ class PhoenXWorld:
         damping_drive: wp.array | None = None,
         min_value: wp.array | None = None,
         max_value: wp.array | None = None,
+        d6_limit_count: wp.array | None = None,
         articulation_joint_mask: wp.array | None = None,
     ) -> None:
         """Cache topology-only DVI articulation data from joint init arrays.
@@ -1849,6 +1851,7 @@ class PhoenXWorld:
             damping_drive_np = damping_drive.numpy() if damping_drive is not None else None
             min_value_np = min_value.numpy() if min_value is not None else None
             max_value_np = max_value.numpy() if max_value is not None else None
+            d6_limit_count_np = d6_limit_count.numpy() if d6_limit_count is not None else None
         except Exception:
             return
 
@@ -1876,6 +1879,7 @@ class PhoenXWorld:
             damping_drive_np = None
             min_value_np = None
             max_value_np = None
+            d6_limit_count_np = None
 
         topology = ArticulationTopology.from_host(
             body1_np,
@@ -1888,6 +1892,7 @@ class PhoenXWorld:
             damping_drive=damping_drive_np,
             min_value=min_value_np,
             max_value=max_value_np,
+            d6_limit_count=d6_limit_count_np,
         )
         self.articulation_topology = topology
         self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)

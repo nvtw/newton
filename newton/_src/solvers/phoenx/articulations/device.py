@@ -27,6 +27,9 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_BODY1,
     _OFF_BODY2,
     _OFF_CLAMP,
+    _OFF_D6_LIMIT_COUNT,
+    _OFF_D6_LIMIT_LOWER,
+    _OFF_D6_LIMIT_UPPER,
     _OFF_DAMPING_DRIVE,
     _OFF_DRIVE_MODE,
     _OFF_INV_INITIAL_ORIENTATION,
@@ -615,14 +618,17 @@ def _populate_adbs_articulation_rows_kernel(
         _fill_perpendicular_position_rows(row0, tangent0, tangent1, a1_b2 - a1_b1, r1_b1, r1_b2, jacobian, violation)
         _fill_perpendicular_rotation_rows(row0 + 2, tangent0, tangent1, swing_error, jacobian, violation)
     elif mode == JOINT_MODE_UNIVERSAL:
+        axis_lock = _safe_normalize(wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)), axis_parent)
         _fill_spherical_rows(row0, a1_b1, a1_b2, r1_b1, r1_b2, jacobian, violation)
-        _fill_angular_row(row0 + 3, axis_parent, wp.float32(0.0), jacobian, violation)
+        _fill_angular_row(row0 + 3, axis_lock, wp.float32(0.0), jacobian, violation)
     elif mode == JOINT_MODE_PLANAR:
         _fill_spatial_row(row0, axis_parent, r1_b1, r1_b2, wp.dot(a1_b2 - a1_b1, axis_parent), jacobian, violation)
         _fill_perpendicular_rotation_rows(row0 + 1, tangent0, tangent1, swing_error, jacobian, violation)
 
     equality_rows = _adbs_equality_row_count(mode)
-    if row_count > equality_rows:
+    axial_rows = wp.int32(0)
+    if (mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC) and row_count > equality_rows:
+        axial_rows = wp.int32(1)
         axial_row = row0 + equality_rows
         drive_mode = read_int(constraints, _OFF_DRIVE_MODE, cid)
         stiffness_drive = read_float(constraints, _OFF_STIFFNESS_DRIVE, cid)
@@ -633,7 +639,7 @@ def _populate_adbs_articulation_rows_kernel(
         max_value = read_float(constraints, _OFF_MAX_VALUE, cid)
         drive_active = drive_mode != DRIVE_MODE_OFF and (stiffness_drive > 0.0 or damping_drive > 0.0)
 
-        if mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_UNIVERSAL:
+        if mode == JOINT_MODE_REVOLUTE:
             axis_drive = _safe_normalize(wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)), axis_parent)
             inv_init = read_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid)
             diff = q2 * inv_init * wp.quat_inverse(q1)
@@ -659,6 +665,11 @@ def _populate_adbs_articulation_rows_kernel(
                 if clamp == _CLAMP_NONE:
                     velocity_target[axial_row] = target_velocity
                 _fill_spatial_row(axial_row, axis_drive, r1_b1, r1_b2, axial_error, jacobian, violation)
+
+    d6_row0 = row0 + equality_rows + axial_rows
+    d6_row_count = row_count - equality_rows - axial_rows
+    if d6_row_count > wp.int32(0) and (mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL):
+        _fill_d6_angular_limit_rows(d6_row0, d6_row_count, mode, q1, q2, constraints, cid, jacobian, violation)
 
 
 @wp.kernel
@@ -1129,6 +1140,108 @@ def _articulation_matrix_entry(
     if row_body2 >= 0 and row_body2 == col_body2:
         value += _body_metric_dot(row, col, 6, 6, row_body2, jacobian, inverse_mass, inverse_inertia_world)
     return value
+
+
+@wp.func
+def _d6_limit_axis_local(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    mode: wp.int32,
+    slot: wp.int32,
+) -> wp.vec3f:
+    if mode == JOINT_MODE_BALL_SOCKET:
+        if slot == wp.int32(0):
+            return read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)
+        if slot == wp.int32(1):
+            return read_vec3(constraints, _OFF_LA2_B1, cid)
+        return read_vec3(constraints, _OFF_LA2_B2, cid)
+    if slot == wp.int32(0):
+        return read_vec3(constraints, _OFF_LA2_B1, cid)
+    if slot == wp.int32(1):
+        return read_vec3(constraints, _OFF_LA2_B2, cid)
+    return wp.vec3f(0.0, 0.0, 0.0)
+
+
+@wp.func
+def _fill_d6_angular_limit_row(
+    row: wp.int32,
+    axis_local: wp.vec3f,
+    lower: wp.float32,
+    upper: wp.float32,
+    diff: wp.quatf,
+    q1: wp.quatf,
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+):
+    if lower > upper:
+        return
+
+    axis = _safe_normalize(wp.quat_rotate(q1, axis_local), wp.vec3f(1.0, 0.0, 0.0))
+    angle = extract_rotation_angle(diff, axis)
+    error = wp.float32(0.0)
+    active = False
+    if angle > upper:
+        error = angle - upper
+        active = True
+    elif angle < lower:
+        error = angle - lower
+        active = True
+
+    if active:
+        _fill_angular_row(row, axis, error, jacobian, violation)
+
+
+@wp.func
+def _fill_d6_angular_limit_rows(
+    row0: wp.int32,
+    row_count: wp.int32,
+    mode: wp.int32,
+    q1: wp.quatf,
+    q2: wp.quatf,
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+):
+    count = read_int(constraints, _OFF_D6_LIMIT_COUNT, cid)
+    lower = read_vec3(constraints, _OFF_D6_LIMIT_LOWER, cid)
+    upper = read_vec3(constraints, _OFF_D6_LIMIT_UPPER, cid)
+    inv_init = read_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid)
+    diff = q2 * inv_init * wp.quat_inverse(q1)
+
+    if row_count > wp.int32(0) and count > wp.int32(0):
+        _fill_d6_angular_limit_row(
+            row0,
+            _d6_limit_axis_local(constraints, cid, mode, wp.int32(0)),
+            lower[0],
+            upper[0],
+            diff,
+            q1,
+            jacobian,
+            violation,
+        )
+    if row_count > wp.int32(1) and count > wp.int32(1):
+        _fill_d6_angular_limit_row(
+            row0 + wp.int32(1),
+            _d6_limit_axis_local(constraints, cid, mode, wp.int32(1)),
+            lower[1],
+            upper[1],
+            diff,
+            q1,
+            jacobian,
+            violation,
+        )
+    if row_count > wp.int32(2) and count > wp.int32(2):
+        _fill_d6_angular_limit_row(
+            row0 + wp.int32(2),
+            _d6_limit_axis_local(constraints, cid, mode, wp.int32(2)),
+            lower[2],
+            upper[2],
+            diff,
+            q1,
+            jacobian,
+            violation,
+        )
 
 
 @wp.func

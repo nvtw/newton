@@ -96,7 +96,7 @@ def joint_drive_row_count(
         otherwise ``0``.
     """
     mode = int(joint_mode)
-    if mode not in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC), int(JOINT_MODE_UNIVERSAL)):
+    if mode not in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
         return 0
     if int(drive_mode) == int(DRIVE_MODE_OFF):
         return 0
@@ -118,7 +118,7 @@ def joint_axial_row_count(
     PhoenX's iterative joint path uses one scalar free-DoF row for both the
     drive and the unilateral limit, with the limit taking precedence when it is
     active. The DVI path allocates the same single row statically when a driven
-    or limited revolute/prismatic/universal joint is owned by the direct solve.
+    or limited revolute/prismatic joint is owned by the direct solve.
 
     Args:
         joint_mode: One of the PhoenX ``JOINT_MODE_*`` integer tags.
@@ -133,11 +133,41 @@ def joint_axial_row_count(
         otherwise ``0``.
     """
     mode = int(joint_mode)
-    if mode not in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC), int(JOINT_MODE_UNIVERSAL)):
+    if mode not in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
         return 0
     if float(min_value) <= float(max_value):
         return 1
     return joint_drive_row_count(mode, drive_mode, stiffness_drive, damping_drive)
+
+
+def joint_d6_limit_row_count(joint_mode: int, d6_limit_count: int) -> int:
+    """Return static DVI row count for D6 angular limit axes.
+
+    D6 angular limit rows are stored only for ball-socket and universal ADBS
+    reductions. The per-joint DVI block is capped at six rows: ball-socket can
+    carry three angular limit rows and universal can carry two.
+
+    Args:
+        joint_mode: One of the PhoenX ``JOINT_MODE_*`` integer tags.
+        d6_limit_count: Number of finite D6 angular limit axes packed in the
+            ADBS column.
+
+    Returns:
+        Number of D6 angular limit rows to allocate for the joint.
+    """
+    count = int(d6_limit_count)
+    if count <= 0:
+        return 0
+    mode = int(joint_mode)
+    if mode == int(JOINT_MODE_BALL_SOCKET):
+        if count > 3:
+            raise ValueError(f"ball-socket D6 limit count must be <= 3, got {count}")
+        return count
+    if mode == int(JOINT_MODE_UNIVERSAL):
+        if count > 2:
+            raise ValueError(f"universal D6 limit count must be <= 2, got {count}")
+        return count
+    return 0
 
 
 def _normalize_static_bodies(
@@ -173,6 +203,7 @@ class ArticulationTopology:
         row_counts: DVI row count per joint, including enabled axial rows.
         drive_row_mask: Whether each joint has an enabled drive row.
         axial_row_mask: Whether each joint allocates the shared drive/limit row.
+        d6_limit_row_counts: Number of allocated D6 angular limit rows.
         active_joint_indices: Raw joint indices with at least one DVI row.
         active_row_counts: Row counts for active joints in active-block order.
         active_block_offsets: Prefix sum of ``active_row_counts``.
@@ -186,6 +217,7 @@ class ArticulationTopology:
     row_counts: np.ndarray
     drive_row_mask: np.ndarray
     axial_row_mask: np.ndarray
+    d6_limit_row_counts: np.ndarray
     active_joint_indices: np.ndarray
     active_row_counts: np.ndarray
     active_block_offsets: np.ndarray
@@ -206,6 +238,7 @@ class ArticulationTopology:
         damping_drive: np.ndarray | None = None,
         min_value: np.ndarray | None = None,
         max_value: np.ndarray | None = None,
+        d6_limit_count: np.ndarray | None = None,
     ) -> ArticulationTopology:
         """Create topology from PhoenX joint init arrays.
 
@@ -217,12 +250,13 @@ class ArticulationTopology:
             enabled_joint_mask: Optional mask selecting the joint columns
                 owned by the articulation DVI solve. Disabled columns keep
                 their raw topology but contribute zero rows.
-            drive_mode: Optional per-joint drive mode. Driven revolute,
-                prismatic, and universal joints get one axial drive row.
+            drive_mode: Optional per-joint drive mode. Driven revolute and
+                prismatic joints get one axial drive row.
             stiffness_drive: Optional per-joint drive stiffness.
             damping_drive: Optional per-joint drive damping.
             min_value: Optional per-joint lower free-DoF limit.
             max_value: Optional per-joint upper free-DoF limit.
+            d6_limit_count: Optional per-joint packed D6 angular limit count.
 
         Returns:
             Compact topology with static bodies normalized to ``-1``.
@@ -240,6 +274,8 @@ class ArticulationTopology:
         equality_row_counts = np.asarray([joint_constraint_row_count(mode) for mode in mode_np], dtype=np.int32)
         drive_row_mask = np.zeros_like(equality_row_counts, dtype=bool)
         axial_row_mask = np.zeros_like(equality_row_counts, dtype=bool)
+        axial_rows = np.zeros_like(equality_row_counts, dtype=np.int32)
+        d6_limit_row_counts = np.zeros_like(equality_row_counts, dtype=np.int32)
         if drive_mode is not None or min_value is not None or max_value is not None:
             drive_np = (
                 np.full_like(equality_row_counts, int(DRIVE_MODE_OFF), dtype=np.int32)
@@ -296,9 +332,19 @@ class ArticulationTopology:
             )
             drive_row_mask = drive_rows.astype(bool)
             axial_row_mask = axial_rows.astype(bool)
-            row_counts = equality_row_counts + axial_rows
-        else:
-            row_counts = equality_row_counts.copy()
+
+        if d6_limit_count is not None:
+            d6_count_np = np.asarray(d6_limit_count, dtype=np.int32)
+            if d6_count_np.shape != equality_row_counts.shape:
+                raise ValueError(f"d6_limit_count must have shape {equality_row_counts.shape}, got {d6_count_np.shape}")
+            d6_limit_row_counts = np.asarray(
+                [joint_d6_limit_row_count(mode, count) for mode, count in zip(mode_np, d6_count_np, strict=True)],
+                dtype=np.int32,
+            )
+
+        row_counts = equality_row_counts + axial_rows + d6_limit_row_counts
+        if np.any(row_counts > 6):
+            raise ValueError(f"DVI articulation blocks support at most 6 rows per joint, got {row_counts.tolist()}")
 
         if enabled_joint_mask is not None:
             mask = np.asarray(enabled_joint_mask, dtype=bool)
@@ -307,6 +353,7 @@ class ArticulationTopology:
             row_counts = np.where(mask, row_counts, 0).astype(np.int32)
             drive_row_mask = np.logical_and(drive_row_mask, mask)
             axial_row_mask = np.logical_and(axial_row_mask, mask)
+            d6_limit_row_counts = np.where(mask, d6_limit_row_counts, 0).astype(np.int32)
         active_joint_indices = np.nonzero(row_counts > 0)[0].astype(np.int32)
         active_row_counts = row_counts[active_joint_indices].astype(np.int32)
         active_block_offsets = np.zeros(active_row_counts.size + 1, dtype=np.int32)
@@ -326,6 +373,7 @@ class ArticulationTopology:
             row_counts=row_counts,
             drive_row_mask=drive_row_mask.astype(bool),
             axial_row_mask=axial_row_mask.astype(bool),
+            d6_limit_row_counts=d6_limit_row_counts.astype(np.int32),
             active_joint_indices=active_joint_indices,
             active_row_counts=active_row_counts,
             active_block_offsets=active_block_offsets,

@@ -27,6 +27,7 @@ from .topology import (
     d6_constraint_row_count,
     joint_axial_row_count,
     joint_constraint_row_count,
+    joint_d6_limit_row_count,
     joint_drive_row_count,
 )
 
@@ -48,6 +49,7 @@ __all__ = [
     "fixed_rows",
     "joint_axial_row_count",
     "joint_constraint_row_count",
+    "joint_d6_limit_row_count",
     "joint_drive_row_count",
     "orthonormal_pair",
     "prismatic_rows",
