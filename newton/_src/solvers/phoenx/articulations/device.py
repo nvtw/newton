@@ -20,9 +20,14 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_int,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    _CLAMP_MAX,
+    _CLAMP_MIN,
+    _CLAMP_NONE,
     _OFF_AXIS_LOCAL1,
     _OFF_BODY1,
     _OFF_BODY2,
+    _OFF_CLAMP,
+    _OFF_DAMPING_DRIVE,
     _OFF_DRIVE_MODE,
     _OFF_INV_INITIAL_ORIENTATION,
     _OFF_JOINT_MODE,
@@ -32,10 +37,14 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_LA2_B2,
     _OFF_LA3_B1,
     _OFF_LA3_B2,
+    _OFF_MAX_VALUE,
+    _OFF_MIN_VALUE,
     _OFF_PREVIOUS_QUATERNION_ANGLE,
     _OFF_REVOLUTION_COUNTER,
+    _OFF_STIFFNESS_DRIVE,
     _OFF_TARGET,
     _OFF_TARGET_VELOCITY,
+    DRIVE_MODE_OFF,
     DRIVE_MODE_POSITION,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
@@ -614,11 +623,15 @@ def _populate_adbs_articulation_rows_kernel(
 
     equality_rows = _adbs_equality_row_count(mode)
     if row_count > equality_rows:
-        drive_row = row0 + equality_rows
+        axial_row = row0 + equality_rows
         drive_mode = read_int(constraints, _OFF_DRIVE_MODE, cid)
+        stiffness_drive = read_float(constraints, _OFF_STIFFNESS_DRIVE, cid)
+        damping_drive = read_float(constraints, _OFF_DAMPING_DRIVE, cid)
         target = read_float(constraints, _OFF_TARGET, cid)
         target_velocity = read_float(constraints, _OFF_TARGET_VELOCITY, cid)
-        velocity_target[drive_row] = target_velocity
+        min_value = read_float(constraints, _OFF_MIN_VALUE, cid)
+        max_value = read_float(constraints, _OFF_MAX_VALUE, cid)
+        drive_active = drive_mode != DRIVE_MODE_OFF and (stiffness_drive > 0.0 or damping_drive > 0.0)
 
         if mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_UNIVERSAL:
             axis_drive = _safe_normalize(wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)), axis_parent)
@@ -630,16 +643,22 @@ def _populate_adbs_articulation_rows_kernel(
             new_counter, new_prev = revolution_tracker_update(new_q_angle, old_counter, old_prev)
             write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, new_counter)
             write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, new_prev)
-            drive_error = wp.float32(0.0)
-            if drive_mode == DRIVE_MODE_POSITION:
-                drive_error = revolution_tracker_angle(new_counter, new_prev) - target
-            _fill_angular_row(drive_row, axis_drive, drive_error, jacobian, violation)
+            value = revolution_tracker_angle(new_counter, new_prev)
+            axial_error, active, clamp = _axial_row_error(value, target, min_value, max_value, drive_mode, drive_active)
+            write_int(constraints, _OFF_CLAMP, cid, clamp)
+            if active:
+                if clamp == _CLAMP_NONE:
+                    velocity_target[axial_row] = target_velocity
+                _fill_angular_row(axial_row, axis_drive, axial_error, jacobian, violation)
         elif mode == JOINT_MODE_PRISMATIC:
             axis_drive = _safe_normalize(wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)), axis_parent)
-            drive_error = wp.float32(0.0)
-            if drive_mode == DRIVE_MODE_POSITION:
-                drive_error = wp.dot(axis_drive, a1_b2 - a1_b1) - target
-            _fill_spatial_row(drive_row, axis_drive, r1_b1, r1_b2, drive_error, jacobian, violation)
+            value = wp.dot(axis_drive, a1_b2 - a1_b1)
+            axial_error, active, clamp = _axial_row_error(value, target, min_value, max_value, drive_mode, drive_active)
+            write_int(constraints, _OFF_CLAMP, cid, clamp)
+            if active:
+                if clamp == _CLAMP_NONE:
+                    velocity_target[axial_row] = target_velocity
+                _fill_spatial_row(axial_row, axis_drive, r1_b1, r1_b2, axial_error, jacobian, violation)
 
 
 @wp.kernel
@@ -1110,6 +1129,30 @@ def _articulation_matrix_entry(
     if row_body2 >= 0 and row_body2 == col_body2:
         value += _body_metric_dot(row, col, 6, 6, row_body2, jacobian, inverse_mass, inverse_inertia_world)
     return value
+
+
+@wp.func
+def _axial_row_error(
+    value: wp.float32,
+    target: wp.float32,
+    min_value: wp.float32,
+    max_value: wp.float32,
+    drive_mode: wp.int32,
+    drive_active: wp.bool,
+):
+    if min_value <= max_value:
+        if value > max_value:
+            return value - max_value, True, _CLAMP_MAX
+        if value < min_value:
+            return value - min_value, True, _CLAMP_MIN
+
+    if drive_active:
+        drive_error = wp.float32(0.0)
+        if drive_mode == DRIVE_MODE_POSITION:
+            drive_error = value - target
+        return drive_error, True, _CLAMP_NONE
+
+    return wp.float32(0.0), False, _CLAMP_NONE
 
 
 @wp.func

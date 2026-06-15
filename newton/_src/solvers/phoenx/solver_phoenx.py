@@ -1773,6 +1773,8 @@ class PhoenXWorld:
             drive_mode=drive_mode,
             stiffness_drive=stiffness_drive,
             damping_drive=damping_drive,
+            min_value=min_value,
+            max_value=max_value,
             articulation_joint_mask=articulation_joint_mask,
         )
         wp.launch(
@@ -1822,6 +1824,8 @@ class PhoenXWorld:
         drive_mode: wp.array | None = None,
         stiffness_drive: wp.array | None = None,
         damping_drive: wp.array | None = None,
+        min_value: wp.array | None = None,
+        max_value: wp.array | None = None,
         articulation_joint_mask: wp.array | None = None,
     ) -> None:
         """Cache topology-only DVI articulation data from joint init arrays.
@@ -1843,6 +1847,8 @@ class PhoenXWorld:
             drive_mode_np = drive_mode.numpy() if drive_mode is not None else None
             stiffness_drive_np = stiffness_drive.numpy() if stiffness_drive is not None else None
             damping_drive_np = damping_drive.numpy() if damping_drive is not None else None
+            min_value_np = min_value.numpy() if min_value is not None else None
+            max_value_np = max_value.numpy() if max_value is not None else None
         except Exception:
             return
 
@@ -1868,6 +1874,8 @@ class PhoenXWorld:
             drive_mode_np = None
             stiffness_drive_np = None
             damping_drive_np = None
+            min_value_np = None
+            max_value_np = None
 
         topology = ArticulationTopology.from_host(
             body1_np,
@@ -1878,6 +1886,8 @@ class PhoenXWorld:
             drive_mode=drive_mode_np,
             stiffness_drive=stiffness_drive_np,
             damping_drive=damping_drive_np,
+            min_value=min_value_np,
+            max_value=max_value_np,
         )
         self.articulation_topology = topology
         self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)

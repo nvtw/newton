@@ -85,11 +85,6 @@ def joint_drive_row_count(
 ) -> int:
     """Return the DVI axial drive row count for a PhoenX ADBS joint.
 
-    The direct solve stores all rows for one joint in a six-row block. Driven
-    revolute, prismatic, and universal joints have enough room for one scalar
-    axial row in addition to their equality rows. Limit rows remain projected
-    iterative constraints until the DVI path grows inequality support.
-
     Args:
         joint_mode: One of the PhoenX ``JOINT_MODE_*`` integer tags.
         drive_mode: One of the PhoenX ``DRIVE_MODE_*`` integer tags.
@@ -108,6 +103,41 @@ def joint_drive_row_count(
     if float(stiffness_drive) <= 0.0 and float(damping_drive) <= 0.0:
         return 0
     return 1
+
+
+def joint_axial_row_count(
+    joint_mode: int,
+    drive_mode: int,
+    stiffness_drive: float,
+    damping_drive: float,
+    min_value: float,
+    max_value: float,
+) -> int:
+    """Return the DVI free-axis row count for drive/limit semantics.
+
+    PhoenX's iterative joint path uses one scalar free-DoF row for both the
+    drive and the unilateral limit, with the limit taking precedence when it is
+    active. The DVI path allocates the same single row statically when a driven
+    or limited revolute/prismatic/universal joint is owned by the direct solve.
+
+    Args:
+        joint_mode: One of the PhoenX ``JOINT_MODE_*`` integer tags.
+        drive_mode: One of the PhoenX ``DRIVE_MODE_*`` integer tags.
+        stiffness_drive: Position-drive stiffness.
+        damping_drive: Velocity-drive damping.
+        min_value: Lower free-DoF limit; ``min_value > max_value`` disables.
+        max_value: Upper free-DoF limit.
+
+    Returns:
+        ``1`` when the DVI topology should allocate the shared axial row,
+        otherwise ``0``.
+    """
+    mode = int(joint_mode)
+    if mode not in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC), int(JOINT_MODE_UNIVERSAL)):
+        return 0
+    if float(min_value) <= float(max_value):
+        return 1
+    return joint_drive_row_count(mode, drive_mode, stiffness_drive, damping_drive)
 
 
 def _normalize_static_bodies(
@@ -140,8 +170,9 @@ class ArticulationTopology:
         body2: Normalized child body per PhoenX joint. Static bodies are
             represented by ``-1``.
         joint_mode: PhoenX joint mode per joint.
-        row_counts: DVI row count per joint, including enabled axial drive rows.
-        drive_row_mask: Whether each joint contributes an axial drive row.
+        row_counts: DVI row count per joint, including enabled axial rows.
+        drive_row_mask: Whether each joint has an enabled drive row.
+        axial_row_mask: Whether each joint allocates the shared drive/limit row.
         active_joint_indices: Raw joint indices with at least one DVI row.
         active_row_counts: Row counts for active joints in active-block order.
         active_block_offsets: Prefix sum of ``active_row_counts``.
@@ -154,6 +185,7 @@ class ArticulationTopology:
     joint_mode: np.ndarray
     row_counts: np.ndarray
     drive_row_mask: np.ndarray
+    axial_row_mask: np.ndarray
     active_joint_indices: np.ndarray
     active_row_counts: np.ndarray
     active_block_offsets: np.ndarray
@@ -172,6 +204,8 @@ class ArticulationTopology:
         drive_mode: np.ndarray | None = None,
         stiffness_drive: np.ndarray | None = None,
         damping_drive: np.ndarray | None = None,
+        min_value: np.ndarray | None = None,
+        max_value: np.ndarray | None = None,
     ) -> ArticulationTopology:
         """Create topology from PhoenX joint init arrays.
 
@@ -187,6 +221,8 @@ class ArticulationTopology:
                 prismatic, and universal joints get one axial drive row.
             stiffness_drive: Optional per-joint drive stiffness.
             damping_drive: Optional per-joint drive damping.
+            min_value: Optional per-joint lower free-DoF limit.
+            max_value: Optional per-joint upper free-DoF limit.
 
         Returns:
             Compact topology with static bodies normalized to ``-1``.
@@ -203,8 +239,13 @@ class ArticulationTopology:
 
         equality_row_counts = np.asarray([joint_constraint_row_count(mode) for mode in mode_np], dtype=np.int32)
         drive_row_mask = np.zeros_like(equality_row_counts, dtype=bool)
-        if drive_mode is not None:
-            drive_np = np.asarray(drive_mode, dtype=np.int32)
+        axial_row_mask = np.zeros_like(equality_row_counts, dtype=bool)
+        if drive_mode is not None or min_value is not None or max_value is not None:
+            drive_np = (
+                np.full_like(equality_row_counts, int(DRIVE_MODE_OFF), dtype=np.int32)
+                if drive_mode is None
+                else np.asarray(drive_mode, dtype=np.int32)
+            )
             if drive_np.shape != equality_row_counts.shape:
                 raise ValueError(f"drive_mode must have shape {equality_row_counts.shape}, got {drive_np.shape}")
             stiffness_np = (
@@ -217,12 +258,26 @@ class ArticulationTopology:
                 if damping_drive is None
                 else np.asarray(damping_drive, dtype=np.float32)
             )
+            min_np = (
+                np.ones_like(equality_row_counts, dtype=np.float32)
+                if min_value is None
+                else np.asarray(min_value, dtype=np.float32)
+            )
+            max_np = (
+                -np.ones_like(equality_row_counts, dtype=np.float32)
+                if max_value is None
+                else np.asarray(max_value, dtype=np.float32)
+            )
             if stiffness_np.shape != equality_row_counts.shape:
                 raise ValueError(
                     f"stiffness_drive must have shape {equality_row_counts.shape}, got {stiffness_np.shape}"
                 )
             if damping_np.shape != equality_row_counts.shape:
                 raise ValueError(f"damping_drive must have shape {equality_row_counts.shape}, got {damping_np.shape}")
+            if min_np.shape != equality_row_counts.shape:
+                raise ValueError(f"min_value must have shape {equality_row_counts.shape}, got {min_np.shape}")
+            if max_np.shape != equality_row_counts.shape:
+                raise ValueError(f"max_value must have shape {equality_row_counts.shape}, got {max_np.shape}")
             drive_rows = np.asarray(
                 [
                     joint_drive_row_count(mode, drive, stiffness, damping)
@@ -230,8 +285,18 @@ class ArticulationTopology:
                 ],
                 dtype=np.int32,
             )
+            axial_rows = np.asarray(
+                [
+                    joint_axial_row_count(mode, drive, stiffness, damping, lower, upper)
+                    for mode, drive, stiffness, damping, lower, upper in zip(
+                        mode_np, drive_np, stiffness_np, damping_np, min_np, max_np, strict=True
+                    )
+                ],
+                dtype=np.int32,
+            )
             drive_row_mask = drive_rows.astype(bool)
-            row_counts = equality_row_counts + drive_rows
+            axial_row_mask = axial_rows.astype(bool)
+            row_counts = equality_row_counts + axial_rows
         else:
             row_counts = equality_row_counts.copy()
 
@@ -241,6 +306,7 @@ class ArticulationTopology:
                 raise ValueError(f"enabled_joint_mask must have shape {row_counts.shape}, got {mask.shape}")
             row_counts = np.where(mask, row_counts, 0).astype(np.int32)
             drive_row_mask = np.logical_and(drive_row_mask, mask)
+            axial_row_mask = np.logical_and(axial_row_mask, mask)
         active_joint_indices = np.nonzero(row_counts > 0)[0].astype(np.int32)
         active_row_counts = row_counts[active_joint_indices].astype(np.int32)
         active_block_offsets = np.zeros(active_row_counts.size + 1, dtype=np.int32)
@@ -259,6 +325,7 @@ class ArticulationTopology:
             joint_mode=mode_np,
             row_counts=row_counts,
             drive_row_mask=drive_row_mask.astype(bool),
+            axial_row_mask=axial_row_mask.astype(bool),
             active_joint_indices=active_joint_indices,
             active_row_counts=active_row_counts,
             active_block_offsets=active_block_offsets,
