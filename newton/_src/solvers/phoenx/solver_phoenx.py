@@ -566,6 +566,7 @@ class PhoenXWorld:
         speculative_coloring: bool = True,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
+        articulation_dvi_host: bool = False,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
@@ -579,6 +580,10 @@ class PhoenXWorld:
             substeps, solver_iterations, velocity_iterations: PGS
                 schedule. ``velocity_iterations=1`` enables TGS-soft
                 relax (recommended for tall stacks).
+            articulation_dvi_host: Run the host-validation full-coordinate
+                DVI articulation correction inside each substep after the main
+                PGS solve. Defaults to ``False`` because this path performs
+                host/device transfers and is not CUDA-graph capturable.
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``"auto"``
@@ -795,6 +800,7 @@ class PhoenXWorld:
         # observes any non-revolute mode. Must be stable before
         # ``wp.ScopedCapture`` records the step.
         self._use_revolute_specialization: bool = True
+        self.articulation_dvi_host: bool = bool(articulation_dvi_host)
         # Topology-only full-coordinate articulation system. Built at joint
         # initialization and reused by the DVI articulation path as it is
         # brought online.
@@ -2763,6 +2769,8 @@ class PhoenXWorld:
             # dispatcher.
             idt = wp.float32(1.0 / self.substep_dt)
             self._dispatcher.solve(idt)
+            if self.articulation_dvi_host:
+                self.solve_articulations_dvi_host(dt=self.substep_dt)
             self._integrate_positions()
             self._dispatcher.relax(idt)
             # Flip cloth particles' POSITION_LEVEL writes back to

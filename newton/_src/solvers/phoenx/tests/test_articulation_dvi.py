@@ -19,7 +19,7 @@ from newton._src.solvers.phoenx.articulations import (
     joint_constraint_row_count,
     revolute_rows,
 )
-from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_STATIC, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_OFF,
     JOINT_MODE_BALL_SOCKET,
@@ -41,6 +41,7 @@ def _make_adbs_world(
     mode_np: np.ndarray,
     *,
     positions_np: np.ndarray | None = None,
+    world_kwargs: dict | None = None,
 ) -> PhoenXWorld:
     body_count = int(max(body1_np.max(initial=0), body2_np.max(initial=0)) + 1)
     joint_count = int(mode_np.size)
@@ -57,18 +58,24 @@ def _make_adbs_world(
     inverse_mass_np = np.ones(body_count, dtype=np.float32)
     inverse_mass_np[0] = 0.0
     bodies.inverse_mass.assign(inverse_mass_np)
+    motion_type_np = np.full(body_count, int(MOTION_DYNAMIC), dtype=np.int32)
+    motion_type_np[0] = int(MOTION_STATIC)
+    bodies.motion_type.assign(motion_type_np)
 
     inverse_inertia_np = np.repeat(np.eye(3, dtype=np.float32)[None, :, :], body_count, axis=0)
     inverse_inertia_np[0] = 0.0
     bodies.inverse_inertia_world.assign(inverse_inertia_np)
 
     constraints = PhoenXWorld.make_constraint_container(num_joints=joint_count, device=device)
+    if world_kwargs is None:
+        world_kwargs = {}
     world = PhoenXWorld(
         bodies=bodies,
         constraints=constraints,
         num_joints=joint_count,
         num_worlds=1,
         device=device,
+        **world_kwargs,
     )
 
     anchor1_np = np.zeros((joint_count, 3), dtype=np.float32)
@@ -308,6 +315,21 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32)
         np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
         np.testing.assert_allclose(world.bodies.angular_velocity.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-6)
+
+    def test_step_runs_opt_in_host_dvi_articulation_correction(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+            world_kwargs={"articulation_dvi_host": True, "velocity_iterations": 0, "gravity": (0.0, 0.0, 0.0)},
+        )
+        world.bodies.position.assign(np.array([[0.0, 0.0, 0.0], [0.2, -0.1, 0.05]], dtype=np.float32))
+
+        world.step(0.1)
+
+        np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
 
     def test_phoenx_world_caches_prefactorized_topology(self):
         device = wp.get_preferred_device()
