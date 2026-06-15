@@ -8,18 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.sdf_contact import (
-    mesh_sdf_contact_passes_surface_filter,
-    mesh_sdf_contact_search_precision,
-)
-
-
-@wp.kernel(enable_backward=False)
-def _mesh_sdf_contact_surface_filter_kernel(out: wp.array[wp.int32]):
-    out[0] = int(mesh_sdf_contact_passes_surface_filter(0.05, 0.1, 0.5, 1.0))
-    out[1] = int(mesh_sdf_contact_passes_surface_filter(0.06, 0.1, 0.5, 1.0))
-    out[2] = int(mesh_sdf_contact_passes_surface_filter(-0.01, 0.1, 0.5, 1.0))
-    out[3] = int(mesh_sdf_contact_passes_surface_filter(10.0, 0.1, 0.5, 0.0))
+from newton._src.geometry.sdf_contact import mesh_sdf_contact_search_precision
 
 
 @wp.kernel(enable_backward=False)
@@ -31,14 +20,6 @@ def _mesh_sdf_contact_search_precision_kernel(out: wp.array[wp.float32]):
 
 
 class TestSDFContact(unittest.TestCase):
-    def test_mesh_sdf_contact_surface_filter_uses_voxel_radius(self) -> None:
-        device = wp.get_preferred_device()
-        passes = wp.empty(4, dtype=wp.int32, device=device)
-
-        wp.launch(_mesh_sdf_contact_surface_filter_kernel, dim=1, inputs=[passes], device=device)
-
-        np.testing.assert_array_equal(passes.numpy(), np.array([1, 0, 1, 1], dtype=np.int32))
-
     def test_mesh_sdf_contact_search_precision_uses_inner_envelope(self) -> None:
         device = wp.get_preferred_device()
         values = wp.empty(4, dtype=wp.float32, device=device)

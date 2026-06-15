@@ -1571,7 +1571,7 @@ def write_contact_to_reducer(
     )
 
 
-def create_export_reduced_contacts_kernel(writer_func: Any, export_inner_only: bool = False):
+def create_export_reduced_contacts_kernel(writer_func: Any):
     """Create a kernel that exports reduced contacts using a custom writer function.
 
     The kernel processes one hashtable ENTRY per thread (not one value slot).
@@ -1593,7 +1593,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any, export_inner_only: b
     # Define vector type for tracking exported contact IDs
     exported_ids_vec = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
 
-    _module = f"export_reduced_contacts_{writer_func.__name__}_{export_inner_only}"
+    _module = f"export_reduced_contacts_{writer_func.__name__}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def export_reduced_contacts_kernel(
@@ -1689,11 +1689,6 @@ def create_export_reduced_contacts_kernel(writer_func: Any, export_inner_only: b
                 # Compute effective radius for spheres, capsules, and cones
                 radius_eff_a = compute_effective_radius(shape_types[shape_a], shape_data[shape_a])
                 radius_eff_b = compute_effective_radius(shape_types[shape_b], shape_data[shape_b])
-
-                if wp.static(export_inner_only):
-                    inner_threshold = radius_eff_a + radius_eff_b + margin_offset_a + margin_offset_b
-                    if depth >= inner_threshold:
-                        continue
 
                 # Use additive per-shape contact gap (matching broad/narrow phase)
                 gap_a = shape_gap[shape_a]

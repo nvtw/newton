@@ -41,22 +41,6 @@ MESH_SDF_BLOCK_DIM = 64
 # outer iteration runs.
 STACK_CAPACITY = 2 * MESH_SDF_BLOCK_DIM
 
-DEFAULT_SDF_CONTACT_SURFACE_FILTER_VOXELS = 0.0
-
-
-@wp.func
-def mesh_sdf_contact_passes_surface_filter(
-    surface_separation: float,
-    voxel_radius: float,
-    min_sdf_scale: float,
-    filter_voxels: float,
-) -> bool:
-    """Check a positive-gap contact against an SDF-resolution-relative tolerance."""
-    if filter_voxels <= 0.0:
-        return True
-    return surface_separation <= filter_voxels * voxel_radius * min_sdf_scale
-
-
 @wp.func
 def mesh_sdf_contact_search_precision(
     inner_contact_threshold: float,
@@ -933,15 +917,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     enable_heightfields: bool = True,
     reduce_contacts: bool = False,
     force_texture_sdf: bool = False,
-    sdf_contact_surface_filter_voxels: float = DEFAULT_SDF_CONTACT_SURFACE_FILTER_VOXELS,
 ):
-    if sdf_contact_surface_filter_voxels < 0.0:
-        raise ValueError(
-            f"sdf_contact_surface_filter_voxels must be non-negative, got {sdf_contact_surface_filter_voxels}"
-        )
-
     do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields, force_texture_sdf)
-    use_sdf_contact_surface_filter = sdf_contact_surface_filter_voxels > 0.0
 
     # Derive a stable module name from the factory arguments so that
     # identical configurations share the compiled CUDA kernel.  This is
@@ -952,7 +929,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # different floating-point results, breaking bit-exact reproducibility.
     _module = (
         f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_"
-        f"{force_texture_sdf}_{sdf_contact_surface_filter_voxels}"
+        f"{force_texture_sdf}"
     )
 
     @wp.kernel(enable_backward=False, module=_module)
@@ -1341,32 +1318,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 contact_normal = -direction_world if mode == 0 else direction_world
                                 triangle_mesh_margin = shape_data[pair[0]][3]
                                 sdf_mesh_margin = shape_data[pair[1]][3]
-                                surface_sep = dist - triangle_mesh_margin - sdf_mesh_margin
-                                keep_contact = True
-                                if wp.static(use_sdf_contact_surface_filter):
-                                    if not sdf_is_hfield and not use_bvh_for_sdf:
-                                        keep_contact = mesh_sdf_contact_passes_surface_filter(
-                                            surface_sep,
-                                            texture_sdf.voxel_radius,
-                                            min_sdf_scale,
-                                            wp.static(sdf_contact_surface_filter_voxels),
-                                        )
 
-                                if keep_contact:
-                                    contact_data = ContactData()
-                                    contact_data.contact_point_center = point_world
-                                    contact_data.contact_normal_a_to_b = contact_normal
-                                    contact_data.contact_distance = dist
-                                    contact_data.radius_eff_a = 0.0
-                                    contact_data.radius_eff_b = 0.0
-                                    contact_data.margin_a = triangle_mesh_margin
-                                    contact_data.margin_b = sdf_mesh_margin
-                                    contact_data.shape_a = pair[0]
-                                    contact_data.shape_b = pair[1]
-                                    contact_data.gap_sum = gap_sum
-                                    contact_data.sort_sub_key = (my_edge_idx << 2) | (mode << 1)
+                                contact_data = ContactData()
+                                contact_data.contact_point_center = point_world
+                                contact_data.contact_normal_a_to_b = contact_normal
+                                contact_data.contact_distance = dist
+                                contact_data.radius_eff_a = 0.0
+                                contact_data.radius_eff_b = 0.0
+                                contact_data.margin_a = triangle_mesh_margin
+                                contact_data.margin_b = sdf_mesh_margin
+                                contact_data.shape_a = pair[0]
+                                contact_data.shape_b = pair[1]
+                                contact_data.gap_sum = gap_sum
+                                contact_data.sort_sub_key = (my_edge_idx << 2) | (mode << 1)
 
-                                    writer_func(contact_data, writer_data, -1)
+                                writer_func(contact_data, writer_data, -1)
 
                     # Defensive cooperative reset before the next outer
                     # iteration. The drain loop above already left the
@@ -1781,36 +1747,23 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         direction_world = wp.vec3(0.0, 1.0, 0.0)
 
                                 contact_normal = -direction_world if mode == 0 else direction_world
-                                surface_sep = dist - triangle_mesh_margin - sdf_mesh_margin
-                                keep_contact = True
-                                if wp.static(use_sdf_contact_surface_filter):
-                                    if not sdf_is_hfield and not use_bvh_for_sdf:
-                                        if not mesh_sdf_contact_passes_surface_filter(
-                                            surface_sep,
-                                            texture_sdf.voxel_radius,
-                                            min_sdf_scale,
-                                            wp.static(sdf_contact_surface_filter_voxels),
-                                        ):
-                                            keep_contact = False
-
-                                if keep_contact:
-                                    margin_sum = triangle_mesh_margin + sdf_mesh_margin
-                                    export_and_reduce_contact_centered_two_spatial_depths(
-                                        pair[0],
-                                        pair[1],
-                                        point_world,
-                                        contact_normal,
-                                        dist,
-                                        (my_edge_idx << 2) | (mode << 1),
-                                        point_world - midpoint,
-                                        margin_sum,
-                                        margin_sum + gap_sum,
-                                        X_ws_tri,
-                                        aabb_lower_tri,
-                                        aabb_upper_tri,
-                                        voxel_res_tri,
-                                        reducer_data,
-                                    )
+                                margin_sum = triangle_mesh_margin + sdf_mesh_margin
+                                export_and_reduce_contact_centered_two_spatial_depths(
+                                    pair[0],
+                                    pair[1],
+                                    point_world,
+                                    contact_normal,
+                                    dist,
+                                    (my_edge_idx << 2) | (mode << 1),
+                                    point_world - midpoint,
+                                    margin_sum,
+                                    margin_sum + gap_sum,
+                                    X_ws_tri,
+                                    aabb_lower_tri,
+                                    aabb_upper_tri,
+                                    voxel_res_tri,
+                                    reducer_data,
+                                )
 
                     # Defensive cooperative reset before the next outer
                     # iteration — see the matching ``tile_stack_clear``

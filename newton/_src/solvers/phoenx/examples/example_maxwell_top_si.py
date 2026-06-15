@@ -20,14 +20,12 @@ DEFAULT_MAXWELL_TOP_USD_PATH = Path(r"C:\Users\twidmer\Downloads\MaxwellTopSI\Ma
 FPS = 300
 SUBSTEPS = 5
 SOLVER_ITERATIONS = 5
-CONTACT_GAP = 0.01
+CONTACT_GAP = 0.001
 CONTACT_MARGIN = 0.0
 SOLVER_TYPE = "phoenx"
 RIGID_CONTACT_MAX = None
 REDUCE_CONTACTS = True
 CONTACT_MATCHING = "sticky"
-SDF_CONTACT_SURFACE_FILTER_VOXELS = 0.0
-CONTACT_REDUCTION_EXPORT_INNER_ONLY = False
 CONTACT_STATS = False
 CONTACT_STATS_INTERVAL = 30
 CONTACT_STATS_CSV = None
@@ -358,8 +356,6 @@ class Example:
         self.contact_matching = CONTACT_MATCHING
         self.rigid_contact_max = RIGID_CONTACT_MAX
         self.reduce_contacts = bool(REDUCE_CONTACTS)
-        self.sdf_contact_surface_filter_voxels = float(SDF_CONTACT_SURFACE_FILTER_VOXELS)
-        self.contact_reduction_export_inner_only = bool(CONTACT_REDUCTION_EXPORT_INNER_ONLY)
         self.sdf_linearity_bad_relerr = float(SDF_LINEARITY_BAD_RELERR)
         self.contact_stats = bool(CONTACT_STATS)
         self.contact_stats_interval = int(CONTACT_STATS_INTERVAL)
@@ -423,15 +419,11 @@ class Example:
             reduce_contacts=self.reduce_contacts,
             rigid_contact_max=self.rigid_contact_max,
             contact_matching=self.contact_matching,
-            sdf_contact_surface_filter_voxels=self.sdf_contact_surface_filter_voxels,
-            contact_reduction_export_inner_only=self.contact_reduction_export_inner_only,
         )
         print(
             "Contact pipeline: "
             f"reduce_contacts={self.reduce_contacts}, "
             f"matching={self.contact_matching}, "
-            f"sdf_contact_surface_filter_voxels={self.collision_pipeline.sdf_contact_surface_filter_voxels}, "
-            f"contact_reduction_export_inner_only={self.collision_pipeline.contact_reduction_export_inner_only}, "
             f"sdf_linearity_bad_relerr={self.sdf_linearity_bad_relerr:g}"
         )
         self.contacts = self.collision_pipeline.contacts()
