@@ -827,6 +827,9 @@ class PhoenXWorld:
         self.articulation_system: PrefactorizedArticulationSystem | None = None
         self.articulation_device_system: ArticulationDeviceSystem | None = None
         self.articulation_dvi_joint_mask: np.ndarray | None = None
+        self._joint_pgs_enabled: wp.array[wp.int32] = wp.ones(
+            max(1, self.num_joints), dtype=wp.int32, device=self.device
+        )
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -1837,12 +1840,16 @@ class PhoenXWorld:
                 raise ValueError(
                     f"articulation_joint_mask must have shape {joint_mode_np.shape}, got {joint_mask_np.shape}"
                 )
-            if self.articulation_dvi_replaces_joint_pgs and not bool(joint_mask_np.all()):
-                raise NotImplementedError(
-                    "articulation_dvi_replaces_joint_pgs=True with loop-closure joints requires "
-                    "selective joint PGS skipping, which is not implemented yet"
-                )
             self.articulation_dvi_joint_mask = joint_mask_np.copy()
+
+        if self.num_joints > 0:
+            if self.articulation_dvi_replaces_joint_pgs and joint_mask_np is not None:
+                pgs_enabled = np.where(joint_mask_np, 0, 1).astype(np.int32)
+            elif self.articulation_dvi_replaces_joint_pgs:
+                pgs_enabled = np.zeros(self.num_joints, dtype=np.int32)
+            else:
+                pgs_enabled = np.ones(self.num_joints, dtype=np.int32)
+            self._joint_pgs_enabled.assign(pgs_enabled)
 
         static_body_indices = np.nonzero(inverse_mass_np <= 0.0)[0].astype(np.int32)
         topology = ArticulationTopology.from_host(
@@ -3673,6 +3680,7 @@ class PhoenXWorld:
                     wp.int32(self.solver_iterations),
                     wp.int32(self.num_worlds),
                     wp.int32(self.num_joints),
+                    self._joint_pgs_enabled,
                     wp.int32(self.num_cloth_triangles),
                     wp.int32(self.num_cloth_bending),
                     wp.int32(self.num_soft_tetrahedra),
@@ -3801,6 +3809,7 @@ class PhoenXWorld:
                 wp.int32(self.solver_iterations),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
                 wp.int32(self.num_bodies),
                 self._copy_state,
             ],
@@ -3840,6 +3849,7 @@ class PhoenXWorld:
                 wp.int32(self.velocity_iterations),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
                 self._copy_state,
             ],
             device=self.device,
@@ -3875,6 +3885,7 @@ class PhoenXWorld:
                 self._contact_container,
                 contact_views,
                 wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_cloth_bending),
                 wp.int32(self.num_soft_tetrahedra),
@@ -3926,6 +3937,7 @@ class PhoenXWorld:
                 self._contact_container,
                 contact_views,
                 wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_cloth_bending),
                 wp.int32(self.num_soft_tetrahedra),
@@ -4032,6 +4044,22 @@ class PhoenXWorld:
             if self.mass_splitting_enabled:
                 self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
 
+    def _selective_joint_pgs_enabled(self) -> bool:
+        """Return whether PGS should skip only DVI-owned joint columns."""
+        if not (self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs):
+            return False
+        if self.articulation_dvi_joint_mask is None:
+            return False
+        return self.num_joints > 0 and not bool(self.articulation_dvi_joint_mask.all())
+
+    def _skip_all_joint_pgs(self) -> bool:
+        """Return whether every joint column is owned by DVI."""
+        return bool(
+            self.articulation_dvi_host
+            and self.articulation_dvi_replaces_joint_pgs
+            and not self._selective_joint_pgs_enabled()
+        )
+
     def _dispatch_specialization_flags(self) -> dict[str, bool]:
         """Static dispatch axes shared by single-world and fast-tail kernels."""
         cloth_on = (
@@ -4046,7 +4074,8 @@ class PhoenXWorld:
             "soft_tet_neohookean": bool(self._soft_tet_uses_neohookean),
             "enable_column_timers": self.enable_column_timers,
             "has_joints": self.num_joints > 0,
-            "skip_joint_pgs": bool(self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs),
+            "skip_joint_pgs": self._skip_all_joint_pgs(),
+            "selective_joint_pgs": self._selective_joint_pgs_enabled(),
             "has_sleeping": self._sleeping_enabled,
             "has_soft_contact_pd": bool(self._has_soft_contact_pd),
         }
@@ -4076,6 +4105,7 @@ class PhoenXWorld:
             "has_joints": dispatch_kw["has_joints"],
             "has_contacts": self.max_contact_columns > 0,
             "skip_joint_pgs": dispatch_kw["skip_joint_pgs"],
+            "selective_joint_pgs": dispatch_kw["selective_joint_pgs"],
             "has_sleeping": dispatch_kw["has_sleeping"],
             "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
             "enable_column_timers": dispatch_kw["enable_column_timers"],
@@ -4117,7 +4147,8 @@ class PhoenXWorld:
                 soft_tet_neohookean=False,
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
-                skip_joint_pgs=bool(self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs),
+                skip_joint_pgs=self._skip_all_joint_pgs(),
+                selective_joint_pgs=self._selective_joint_pgs_enabled(),
                 has_mass_splitting=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
@@ -4132,7 +4163,8 @@ class PhoenXWorld:
                 soft_tet_neohookean=False,
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
-                skip_joint_pgs=bool(self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs),
+                skip_joint_pgs=self._skip_all_joint_pgs(),
+                selective_joint_pgs=self._selective_joint_pgs_enabled(),
                 has_mass_splitting=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
@@ -4261,6 +4293,7 @@ class PhoenXWorld:
                 wp.int32(num_iterations),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_cloth_bending),
                 wp.int32(self.num_soft_tetrahedra),

@@ -204,9 +204,8 @@ class SolverPhoenX(SolverBase):
                 articulation trees. Loop-closure joints are excluded from
                 the direct topology.
             articulation_dvi_replaces_joint_pgs: When ``True``, DVI-owned
-                joints replace PhoenX joint PGS rows. Defaults to ``True``
-                only when every ADBS joint column belongs to the DVI tree;
-                partial loop-closure scenes currently keep PGS enabled.
+                joints replace PhoenX joint PGS rows. Loop-closure joints
+                excluded from the direct topology continue to run through PGS.
             articulation_dvi_solver: DVI numeric solver, forwarded to
                 :class:`PhoenXWorld`. ``"device_block_sparse"`` is the
                 graph-friendly device path; ``"block_sparse"`` and
@@ -251,16 +250,8 @@ class SolverPhoenX(SolverBase):
         self._adbs: AdbsInitArrays = build_adbs_init_arrays(model, device=self.device)
         num_joints = self._adbs.num_joint_columns
         self._adbs_articulation_joint_mask = self._build_adbs_articulation_joint_mask(model)
-        has_non_dvi_joint_columns = bool(
-            num_joints > 0 and not bool(self._adbs_articulation_joint_mask.numpy().astype(bool).all())
-        )
-        if articulation_dvi_replaces_joint_pgs is None and has_non_dvi_joint_columns:
-            articulation_dvi_replaces_joint_pgs = False
-        if bool(articulation_dvi) and bool(articulation_dvi_replaces_joint_pgs) and has_non_dvi_joint_columns:
-            raise NotImplementedError(
-                "articulation_dvi_replaces_joint_pgs=True with loop-closure joints requires selective "
-                "joint PGS skipping, which is not implemented yet"
-            )
+        if articulation_dvi_replaces_joint_pgs is None:
+            articulation_dvi_replaces_joint_pgs = bool(articulation_dvi)
         num_particles = int(getattr(model, "particle_count", 0) or 0)
         num_cloth_triangles = int(getattr(model, "tri_count", 0) or 0)
         num_cloth_bending = int(getattr(model, "edge_count", 0) or 0)

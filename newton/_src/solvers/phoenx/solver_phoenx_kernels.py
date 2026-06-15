@@ -754,6 +754,7 @@ def _make_multiworld_rigid_prepare_dispatch_func(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
+    selective_joint_pgs: bool,
     has_soft_contact_pd: bool,
     cached_prepare: bool,
     enable_column_timers: bool,
@@ -850,6 +851,12 @@ def _make_multiworld_rigid_prepare_dispatch_func(
             contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(t0, read_global_timer_ns()))
 
     @wp.func
+    def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
+        if wp.static(selective_joint_pgs):
+            return joint_pgs_enabled[cid] != wp.int32(0)
+        return True
+
+    @wp.func
     def _dispatch_prepare_cid(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
@@ -862,13 +869,16 @@ def _make_multiworld_rigid_prepare_dispatch_func(
         idt: wp.float32,
         cid: wp.int32,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
     ):
         if wp.static(has_joints and not has_contacts):
             if wp.static(not skip_joint_pgs):
-                _dispatch_prepare_joint(constraints, bodies, particles, copy_state, num_bodies, idt, cid)
+                if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                    _dispatch_prepare_joint(constraints, bodies, particles, copy_state, num_bodies, idt, cid)
         elif cid < num_joints:
             if wp.static(not skip_joint_pgs):
-                _dispatch_prepare_joint(constraints, bodies, particles, copy_state, num_bodies, idt, cid)
+                if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                    _dispatch_prepare_joint(constraints, bodies, particles, copy_state, num_bodies, idt, cid)
         else:
             local_cid = cid - num_joints
             _dispatch_prepare_contact(
@@ -893,6 +903,7 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
+    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
     enable_column_timers: bool,
@@ -1009,6 +1020,12 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
             contact_accumulate_time_us(contact_cols, local_cid, elapsed_us(t0, read_global_timer_ns()))
 
     @wp.func
+    def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
+        if wp.static(selective_joint_pgs):
+            return joint_pgs_enabled[cid] != wp.int32(0)
+        return True
+
+    @wp.func
     def _dispatch_iterate_cid(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
@@ -1022,18 +1039,21 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
         sor_boost: wp.float32,
         cid: wp.int32,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
         num_sweeps: wp.int32,
     ):
         if wp.static(has_joints and not has_contacts):
             if wp.static(not skip_joint_pgs):
-                _dispatch_iterate_joint(
-                    constraints, bodies, particles, copy_state, num_bodies, idt, sor_boost, cid, num_sweeps
-                )
+                if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                    _dispatch_iterate_joint(
+                        constraints, bodies, particles, copy_state, num_bodies, idt, sor_boost, cid, num_sweeps
+                    )
         elif cid < num_joints:
             if wp.static(not skip_joint_pgs):
-                _dispatch_iterate_joint(
-                    constraints, bodies, particles, copy_state, num_bodies, idt, sor_boost, cid, num_sweeps
-                )
+                if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                    _dispatch_iterate_joint(
+                        constraints, bodies, particles, copy_state, num_bodies, idt, sor_boost, cid, num_sweeps
+                    )
         else:
             _dispatch_iterate_contact(
                 contact_cols,
@@ -1059,6 +1079,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
+    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -1082,6 +1103,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=cached_prepare,
         enable_column_timers=enable_column_timers,
@@ -1095,6 +1117,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -1110,6 +1133,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             soft_tet_neohookean=soft_tet_neohookean,
             has_joints=has_joints,
             skip_joint_pgs=skip_joint_pgs,
+            selective_joint_pgs=selective_joint_pgs,
             has_mass_splitting=False,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
@@ -1124,6 +1148,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             soft_tet_neohookean=soft_tet_neohookean,
             has_joints=has_joints,
             skip_joint_pgs=skip_joint_pgs,
+            selective_joint_pgs=selective_joint_pgs,
             has_mass_splitting=False,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
@@ -1150,6 +1175,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         num_iterations: wp.int32,
         num_worlds: wp.int32,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
         num_cloth_triangles: wp.int32,
         num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
@@ -1222,6 +1248,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 contacts,
                                 copy_state,
                                 num_joints,
+                                joint_pgs_enabled,
                                 num_cloth_triangles,
                                 num_cloth_bending,
                                 num_soft_tetrahedra,
@@ -1243,15 +1270,16 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         base = local_tid
                         while base < count_joints:
                             cid = world_element_ids_by_color[joint_start + base]
-                            _dispatch_prepare_joint(
-                                constraints,
-                                bodies,
-                                particles,
-                                copy_state,
-                                num_bodies,
-                                idt,
-                                cid,
-                            )
+                            if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                                _dispatch_prepare_joint(
+                                    constraints,
+                                    bodies,
+                                    particles,
+                                    copy_state,
+                                    num_bodies,
+                                    idt,
+                                    cid,
+                                )
                             base += tpw
 
                     count_contacts = end - contact_start
@@ -1285,6 +1313,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             contacts,
                             copy_state,
                             num_joints,
+                            joint_pgs_enabled,
                             num_cloth_triangles,
                             num_cloth_bending,
                             num_soft_tetrahedra,
@@ -1308,6 +1337,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             idt,
                             cid,
                             num_joints,
+                            joint_pgs_enabled,
                         )
                     base += tpw
 
@@ -1349,6 +1379,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     contacts,
                                     copy_state,
                                     num_joints,
+                                    joint_pgs_enabled,
                                     num_cloth_triangles,
                                     num_cloth_bending,
                                     num_soft_tetrahedra,
@@ -1370,17 +1401,18 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             base = local_tid
                             while base < count_joints:
                                 cid = world_element_ids_by_color[joint_start + base]
-                                _dispatch_iterate_joint(
-                                    constraints,
-                                    bodies,
-                                    particles,
-                                    copy_state,
-                                    num_bodies,
-                                    idt,
-                                    sor_boost,
-                                    cid,
-                                    wp.int32(solve_joint_inner_sweeps),
-                                )
+                                if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                                    _dispatch_iterate_joint(
+                                        constraints,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        idt,
+                                        sor_boost,
+                                        cid,
+                                        wp.int32(solve_joint_inner_sweeps),
+                                    )
                                 base += tpw
 
                         count_contacts = end - contact_start
@@ -1416,6 +1448,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 contacts,
                                 copy_state,
                                 num_joints,
+                                joint_pgs_enabled,
                                 num_cloth_triangles,
                                 num_cloth_bending,
                                 num_soft_tetrahedra,
@@ -1429,30 +1462,32 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         else:
                             if wp.static(has_joints and not has_contacts):
                                 if wp.static(not skip_joint_pgs):
-                                    _dispatch_iterate_joint(
-                                        constraints,
-                                        bodies,
-                                        particles,
-                                        copy_state,
-                                        num_bodies,
-                                        idt,
-                                        sor_boost,
-                                        cid,
-                                        wp.int32(solve_joint_inner_sweeps),
-                                    )
+                                    if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                                        _dispatch_iterate_joint(
+                                            constraints,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            idt,
+                                            sor_boost,
+                                            cid,
+                                            wp.int32(solve_joint_inner_sweeps),
+                                        )
                             elif cid < num_joints:
                                 if wp.static(not skip_joint_pgs):
-                                    _dispatch_iterate_joint(
-                                        constraints,
-                                        bodies,
-                                        particles,
-                                        copy_state,
-                                        num_bodies,
-                                        idt,
-                                        sor_boost,
-                                        cid,
-                                        wp.int32(solve_joint_inner_sweeps),
-                                    )
+                                    if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                                        _dispatch_iterate_joint(
+                                            constraints,
+                                            bodies,
+                                            particles,
+                                            copy_state,
+                                            num_bodies,
+                                            idt,
+                                            sor_boost,
+                                            cid,
+                                            wp.int32(solve_joint_inner_sweeps),
+                                        )
                             else:
                                 _dispatch_iterate_contact(
                                     contact_cols,
@@ -1484,6 +1519,7 @@ def _make_fast_tail_relax_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
+    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -1503,6 +1539,7 @@ def _make_fast_tail_relax_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -1517,6 +1554,7 @@ def _make_fast_tail_relax_kernel(
             soft_tet_neohookean=soft_tet_neohookean,
             has_joints=has_joints,
             skip_joint_pgs=skip_joint_pgs,
+            selective_joint_pgs=selective_joint_pgs,
             has_mass_splitting=False,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
@@ -1544,6 +1582,7 @@ def _make_fast_tail_relax_kernel(
         num_iterations: wp.int32,
         num_worlds: wp.int32,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
         num_cloth_triangles: wp.int32,
         num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
@@ -1625,6 +1664,7 @@ def _make_fast_tail_relax_kernel(
                                     contacts,
                                     copy_state,
                                     num_joints,
+                                    joint_pgs_enabled,
                                     num_cloth_triangles,
                                     num_cloth_bending,
                                     num_soft_tetrahedra,
@@ -1646,17 +1686,18 @@ def _make_fast_tail_relax_kernel(
                             base = local_tid
                             while base < count_joints:
                                 cid = world_element_ids_by_color[joint_start + base]
-                                _dispatch_iterate_joint(
-                                    constraints,
-                                    bodies,
-                                    particles,
-                                    copy_state,
-                                    num_bodies,
-                                    idt,
-                                    sor_boost,
-                                    cid,
-                                    sweeps_per_dispatch,
-                                )
+                                if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                                    _dispatch_iterate_joint(
+                                        constraints,
+                                        bodies,
+                                        particles,
+                                        copy_state,
+                                        num_bodies,
+                                        idt,
+                                        sor_boost,
+                                        cid,
+                                        sweeps_per_dispatch,
+                                    )
                                 base += tpw
 
                         count_contacts = end - contact_start
@@ -1694,6 +1735,7 @@ def _make_fast_tail_relax_kernel(
                                 contacts,
                                 copy_state,
                                 num_joints,
+                                joint_pgs_enabled,
                                 num_cloth_triangles,
                                 num_cloth_bending,
                                 num_soft_tetrahedra,
@@ -1718,6 +1760,7 @@ def _make_fast_tail_relax_kernel(
                                 sor_boost,
                                 cid,
                                 num_joints,
+                                joint_pgs_enabled,
                                 sweeps_per_dispatch,
                             )
                         base += tpw
@@ -1736,6 +1779,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
+    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     cached_prepare: bool = False,
@@ -1752,6 +1796,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=cached_prepare,
         enable_column_timers=enable_column_timers,
@@ -1765,6 +1810,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -1788,6 +1834,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
         num_iterations: wp.int32,
         num_worlds: wp.int32,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
         num_bodies: wp.int32,
         copy_state: CopyStateContainer,
     ):
@@ -1820,6 +1867,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
                     idt,
                     cid,
                     num_joints,
+                    joint_pgs_enabled,
                 )
                 base += wp.int32(block_dim)
 
@@ -1850,6 +1898,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
                         sor_boost,
                         cid,
                         num_joints,
+                        joint_pgs_enabled,
                         wp.int32(1),
                     )
                     base += wp.int32(block_dim)
@@ -1868,6 +1917,7 @@ def _make_block_world_relax_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
+    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     enable_column_timers: bool = False,
@@ -1883,6 +1933,7 @@ def _make_block_world_relax_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -1907,6 +1958,7 @@ def _make_block_world_relax_kernel(
         num_iterations: wp.int32,
         num_worlds: wp.int32,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
         copy_state: CopyStateContainer,
     ):
         tid = wp.tid()
@@ -1943,6 +1995,7 @@ def _make_block_world_relax_kernel(
                         sor_boost,
                         cid,
                         num_joints,
+                        joint_pgs_enabled,
                         wp.int32(1),
                     )
                     base += wp.int32(block_dim)
@@ -2063,6 +2116,7 @@ def get_block_world_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
+    selective_joint_pgs: bool = False,
     has_sleeping: bool = False,
     has_soft_contact_pd: bool = False,
     cached_prepare: bool = False,
@@ -2081,6 +2135,7 @@ def get_block_world_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
+            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             cached_prepare=cached_prepare,
@@ -2093,6 +2148,7 @@ def get_block_world_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
+            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             enable_column_timers=enable_column_timers,
@@ -2108,6 +2164,7 @@ def get_fast_tail_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
+    selective_joint_pgs: bool = False,
     has_sleeping: bool = False,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -2134,6 +2191,7 @@ def get_fast_tail_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
+            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             cloth_support=cloth_support,
@@ -2153,6 +2211,7 @@ def get_fast_tail_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
+            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             cloth_support=cloth_support,
@@ -3128,6 +3187,7 @@ def _make_singleworld_dispatch_func(
     enable_column_timers: bool,
     has_joints: bool,
     skip_joint_pgs: bool,
+    selective_joint_pgs: bool,
     has_mass_splitting: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
@@ -3158,6 +3218,12 @@ def _make_singleworld_dispatch_func(
     )
 
     @wp.func
+    def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
+        if wp.static(selective_joint_pgs):
+            return joint_pgs_enabled[cid] != wp.int32(0)
+        return True
+
+    @wp.func
     def _dispatch_one_cid(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
@@ -3167,6 +3233,7 @@ def _make_singleworld_dispatch_func(
         contacts: ContactViews,
         copy_state: CopyStateContainer,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
         num_cloth_triangles: wp.int32,
         num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
@@ -3257,14 +3324,15 @@ def _make_singleworld_dispatch_func(
             if cid < num_joints:
                 dispatched = True
                 if wp.static(has_joints and not skip_joint_pgs):
-                    if wp.static(cloth_support):
-                        b1 = constraint_get_body1(constraints, cid)
-                        b2 = constraint_get_body2(constraints, cid)
-                        body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
-                        body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
-                    _dispatch_rigid_joint(
-                        constraints, bodies, particles, copy_state, num_bodies, idt, sor_boost, cid, parallel_id
-                    )
+                    if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                        if wp.static(cloth_support):
+                            b1 = constraint_get_body1(constraints, cid)
+                            b2 = constraint_get_body2(constraints, cid)
+                            body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
+                            body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
+                        _dispatch_rigid_joint(
+                            constraints, bodies, particles, copy_state, num_bodies, idt, sor_boost, cid, parallel_id
+                        )
 
         if not dispatched:
             if wp.static(cloth_support):
@@ -3394,6 +3462,7 @@ def _make_singleworld_rigid_direct_color_func(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
+    selective_joint_pgs: bool,
     has_mass_splitting: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
@@ -3417,6 +3486,7 @@ def _make_singleworld_rigid_direct_color_func(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=is_cached_prepare,
         enable_column_timers=enable_column_timers,
@@ -3426,11 +3496,18 @@ def _make_singleworld_rigid_direct_color_func(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
         use_bias=use_bias,
     )
+
+    @wp.func
+    def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
+        if wp.static(selective_joint_pgs):
+            return joint_pgs_enabled[cid] != wp.int32(0)
+        return True
 
     @wp.func
     def _dispatch_rigid_direct_color(
@@ -3447,6 +3524,7 @@ def _make_singleworld_rigid_direct_color_func(
         count: wp.int32,
         c: wp.int32,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
         num_bodies: wp.int32,
         idt: wp.float32,
         sor_boost: wp.float32,
@@ -3468,20 +3546,21 @@ def _make_singleworld_rigid_direct_color_func(
             base = lane
             while base < count_joints:
                 cid = read1d_i32(element_ids_by_color, joint_start + base)
-                if wp.static(is_prepare or is_cached_prepare):
-                    _dispatch_prepare_rigid_joint(constraints, bodies, particles, copy_state, num_bodies, idt, cid)
-                else:
-                    _dispatch_iterate_rigid_joint(
-                        constraints,
-                        bodies,
-                        particles,
-                        copy_state,
-                        num_bodies,
-                        idt,
-                        sor_boost,
-                        cid,
-                        wp.int32(1),
-                    )
+                if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                    if wp.static(is_prepare or is_cached_prepare):
+                        _dispatch_prepare_rigid_joint(constraints, bodies, particles, copy_state, num_bodies, idt, cid)
+                    else:
+                        _dispatch_iterate_rigid_joint(
+                            constraints,
+                            bodies,
+                            particles,
+                            copy_state,
+                            num_bodies,
+                            idt,
+                            sor_boost,
+                            cid,
+                            wp.int32(1),
+                        )
                 base = base + stride
 
         if wp.static(has_contacts):
@@ -3518,6 +3597,7 @@ def _make_singleworld_persistent_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
+    selective_joint_pgs: bool = False,
     has_mass_splitting: bool = True,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
@@ -3544,6 +3624,7 @@ def _make_singleworld_persistent_kernel(
         soft_tet_neohookean=soft_tet_neohookean,
         has_joints=has_joints,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
@@ -3556,6 +3637,7 @@ def _make_singleworld_persistent_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
@@ -3581,6 +3663,7 @@ def _make_singleworld_persistent_kernel(
         cc: ContactContainer,
         contacts: ContactViews,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
         num_cloth_triangles: wp.int32,
         num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
@@ -3647,6 +3730,7 @@ def _make_singleworld_persistent_kernel(
                     count,
                     c,
                     num_joints,
+                    joint_pgs_enabled,
                     num_bodies,
                     idt,
                     sor_boost,
@@ -3679,6 +3763,7 @@ def _make_singleworld_persistent_kernel(
                     contacts,
                     copy_state,
                     num_joints,
+                    joint_pgs_enabled,
                     num_cloth_triangles,
                     num_cloth_bending,
                     num_soft_tetrahedra,
@@ -3707,6 +3792,7 @@ def _make_singleworld_fused_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
+    selective_joint_pgs: bool = False,
     has_mass_splitting: bool = True,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
@@ -3726,6 +3812,7 @@ def _make_singleworld_fused_kernel(
         soft_tet_neohookean=soft_tet_neohookean,
         has_joints=has_joints,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
@@ -3738,6 +3825,7 @@ def _make_singleworld_fused_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
@@ -3763,6 +3851,7 @@ def _make_singleworld_fused_kernel(
         cc: ContactContainer,
         contacts: ContactViews,
         num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
         num_cloth_triangles: wp.int32,
         num_cloth_bending: wp.int32,
         num_soft_tetrahedra: wp.int32,
@@ -3824,6 +3913,7 @@ def _make_singleworld_fused_kernel(
                         count,
                         c,
                         num_joints,
+                        joint_pgs_enabled,
                         num_bodies,
                         idt,
                         sor_boost,
@@ -3852,6 +3942,7 @@ def _make_singleworld_fused_kernel(
                         contacts,
                         copy_state,
                         num_joints,
+                        joint_pgs_enabled,
                         num_cloth_triangles,
                         num_cloth_bending,
                         num_soft_tetrahedra,
@@ -3886,6 +3977,7 @@ def get_singleworld_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
+    selective_joint_pgs: bool = False,
     has_mass_splitting: bool = True,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
@@ -3903,6 +3995,7 @@ def get_singleworld_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,

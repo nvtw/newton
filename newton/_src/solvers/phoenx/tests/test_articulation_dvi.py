@@ -522,17 +522,22 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
         np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
 
-    def test_partial_articulation_mask_rejects_joint_owner_mode(self):
+    def test_partial_articulation_mask_enables_selective_joint_pgs(self):
         device = wp.get_preferred_device()
-        with self.assertRaisesRegex(NotImplementedError, "selective joint PGS skipping"):
-            _make_adbs_world(
-                device,
-                np.array([0, 1], dtype=np.int32),
-                np.array([1, 2], dtype=np.int32),
-                np.array([int(JOINT_MODE_BALL_SOCKET), int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
-                world_kwargs={"articulation_dvi_host": True},
-                articulation_joint_mask_np=np.array([1, 0], dtype=np.int32),
-            )
+        world = _make_adbs_world(
+            device,
+            np.array([0, 1], dtype=np.int32),
+            np.array([1, 2], dtype=np.int32),
+            np.array([int(JOINT_MODE_BALL_SOCKET), int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+            world_kwargs={"articulation_dvi_host": True},
+            articulation_joint_mask_np=np.array([1, 0], dtype=np.int32),
+        )
+
+        flags = world._dispatch_specialization_flags()
+        self.assertFalse(flags["skip_joint_pgs"])
+        self.assertTrue(flags["selective_joint_pgs"])
+        np.testing.assert_array_equal(world._joint_pgs_enabled.numpy()[:2], np.array([0, 1], dtype=np.int32))
+        self.assertEqual(world.articulation_topology.active_joint_count, 1)
 
     def test_step_runs_device_block_sparse_dvi_as_joint_owner(self):
         device = wp.get_preferred_device()
@@ -562,6 +567,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         dispatcher_kwargs = (
             {"step_layout": "single_world"},
             {"multi_world_scheduler": "block_world"},
+            {"step_layout": "single_world", "enable_column_timers": True},
         )
         for extra_kwargs in dispatcher_kwargs:
             with self.subTest(extra_kwargs=extra_kwargs):
