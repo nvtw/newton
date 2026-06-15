@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.articulations import (
+    ArticulationDeviceSystem,
     ArticulationTopology,
     PrefactorizedArticulationSystem,
     compute_block_sparse_symbolic,
@@ -118,6 +119,14 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         )
         np.testing.assert_allclose(h, expected)
 
+        device = wp.get_preferred_device()
+        device_system = ArticulationDeviceSystem.from_topology(topology, device)
+        device_system.jacobian.assign(jac.astype(np.float32))
+        inv_mass_wp = wp.array(inv_mass.astype(np.float32), dtype=wp.float32, device=device)
+        inv_inertia_wp = wp.array(inv_inertia.astype(np.float32), dtype=wp.mat33f, device=device)
+        device_system.assemble_dense_matrix(inv_mass_wp, inv_inertia_wp, device=device)
+        np.testing.assert_allclose(device_system.matrix.numpy()[:6, :6], expected, rtol=1.0e-6, atol=1.0e-6)
+
         rhs = np.arange(1, 7, dtype=np.float64)
         system.factorize_from_jacobian(jac, inv_mass, inv_inertia)
         expected_solution = np.linalg.solve(expected, rhs)
@@ -165,6 +174,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
 
         self.assertIsNotNone(world.articulation_topology)
         self.assertIsNotNone(world.articulation_system)
+        self.assertIsNotNone(world.articulation_device_system)
         np.testing.assert_array_equal(world.articulation_topology.body1, np.array([-1, 1], dtype=np.int32))
         self.assertEqual(world.articulation_topology.total_rows, 8)
         self.assertEqual(world.articulation_system.symbolic.total_rows, 8)

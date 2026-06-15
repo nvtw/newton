@@ -10,6 +10,7 @@ validated incrementally.
 
 from .block_sparse_ldlt import BlockSparseLDLTFactorization, factorize_block_sparse_ldlt
 from .dense_ldlt import DenseLDLTFactorization, factorize_ldlt, regularize_diagonal
+from .device import ArticulationDeviceSystem
 from .joint_rows import (
     JointRowBlock,
     ball_socket_rows,
@@ -24,6 +25,7 @@ from .system import PrefactorizedArticulationSystem
 from .topology import ArticulationTopology, d6_constraint_row_count, joint_constraint_row_count
 
 __all__ = [
+    "ArticulationDeviceSystem",
     "ArticulationTopology",
     "BlockSparseLDLTFactorization",
     "BlockSparseSymbolic",

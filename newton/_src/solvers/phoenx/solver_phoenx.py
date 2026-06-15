@@ -10,7 +10,11 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.articulations import ArticulationTopology, PrefactorizedArticulationSystem
+from newton._src.solvers.phoenx.articulations import (
+    ArticulationDeviceSystem,
+    ArticulationTopology,
+    PrefactorizedArticulationSystem,
+)
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -796,6 +800,7 @@ class PhoenXWorld:
         # brought online.
         self.articulation_topology: ArticulationTopology | None = None
         self.articulation_system: PrefactorizedArticulationSystem | None = None
+        self.articulation_device_system: ArticulationDeviceSystem | None = None
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -1781,6 +1786,7 @@ class PhoenXWorld:
         """
         self.articulation_topology = None
         self.articulation_system = None
+        self.articulation_device_system = None
         try:
             body1_np = body1.numpy()
             body2_np = body2.numpy()
@@ -1798,6 +1804,7 @@ class PhoenXWorld:
         )
         self.articulation_topology = topology
         self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)
+        self.articulation_device_system = ArticulationDeviceSystem.from_topology(topology, self.device)
 
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
         """Replace the body-pair contact filter (canonical (min, max), deduped)."""
