@@ -21,6 +21,7 @@ from newton._src.solvers.phoenx.articulations import (
 )
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    DRIVE_MODE_OFF,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
     JOINT_MODE_CYLINDRICAL,
@@ -31,6 +32,74 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_UNIVERSAL,
 )
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+
+
+def _make_adbs_world(
+    device,
+    body1_np: np.ndarray,
+    body2_np: np.ndarray,
+    mode_np: np.ndarray,
+    *,
+    positions_np: np.ndarray | None = None,
+) -> PhoenXWorld:
+    body_count = int(max(body1_np.max(initial=0), body2_np.max(initial=0)) + 1)
+    joint_count = int(mode_np.size)
+    bodies = body_container_zeros(body_count, device=device)
+
+    if positions_np is None:
+        positions_np = np.zeros((body_count, 3), dtype=np.float32)
+    bodies.position.assign(positions_np.astype(np.float32))
+
+    orientations_np = np.zeros((body_count, 4), dtype=np.float32)
+    orientations_np[:, 3] = 1.0
+    bodies.orientation.assign(orientations_np)
+
+    inverse_mass_np = np.ones(body_count, dtype=np.float32)
+    inverse_mass_np[0] = 0.0
+    bodies.inverse_mass.assign(inverse_mass_np)
+
+    inverse_inertia_np = np.repeat(np.eye(3, dtype=np.float32)[None, :, :], body_count, axis=0)
+    inverse_inertia_np[0] = 0.0
+    bodies.inverse_inertia_world.assign(inverse_inertia_np)
+
+    constraints = PhoenXWorld.make_constraint_container(num_joints=joint_count, device=device)
+    world = PhoenXWorld(
+        bodies=bodies,
+        constraints=constraints,
+        num_joints=joint_count,
+        num_worlds=1,
+        device=device,
+    )
+
+    anchor1_np = np.zeros((joint_count, 3), dtype=np.float32)
+    anchor2_np = np.tile(np.array([0.0, 0.0, 1.0], dtype=np.float32), (joint_count, 1))
+    zeros_np = np.zeros(joint_count, dtype=np.float32)
+    mode_drive_np = np.full(joint_count, int(DRIVE_MODE_OFF), dtype=np.int32)
+    min_np = np.ones(joint_count, dtype=np.float32)
+    max_np = -np.ones(joint_count, dtype=np.float32)
+
+    world.initialize_actuated_double_ball_socket_joints(
+        wp.array(body1_np.astype(np.int32), dtype=wp.int32, device=device),
+        wp.array(body2_np.astype(np.int32), dtype=wp.int32, device=device),
+        wp.array(anchor1_np, dtype=wp.vec3f, device=device),
+        wp.array(anchor2_np, dtype=wp.vec3f, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(mode_np.astype(np.int32), dtype=wp.int32, device=device),
+        wp.array(mode_drive_np, dtype=wp.int32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(min_np, dtype=wp.float32, device=device),
+        wp.array(max_np, dtype=wp.float32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(zeros_np, dtype=wp.float32, device=device),
+    )
+    return world
 
 
 class TestPhoenXArticulationDVI(unittest.TestCase):
@@ -148,6 +217,79 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(rows.jacobian[0, 0:3], np.array([-1.0, 0.0, 0.0]))
         np.testing.assert_allclose(rows.jacobian[0, 6:9], np.array([1.0, 0.0, 0.0]))
         np.testing.assert_allclose(rows.violation[3:], np.zeros(2), atol=1.0e-15)
+
+    def test_device_populates_rows_from_initialized_adbs_constraints(self):
+        device = wp.get_preferred_device()
+        body1 = np.array([0, 1, 2, 3, 4], dtype=np.int32)
+        body2 = np.array([1, 2, 3, 4, 5], dtype=np.int32)
+        mode = np.array(
+            [
+                int(JOINT_MODE_BALL_SOCKET),
+                int(JOINT_MODE_REVOLUTE),
+                int(JOINT_MODE_PRISMATIC),
+                int(JOINT_MODE_FIXED),
+                int(JOINT_MODE_CYLINDRICAL),
+            ],
+            dtype=np.int32,
+        )
+        world = _make_adbs_world(device, body1, body2, mode)
+
+        device_system = world.articulation_device_system
+        self.assertIsNotNone(device_system)
+        device_system.populate_from_adbs_constraints(world.constraints, world.bodies, device=device)
+
+        jac = device_system.jacobian.numpy()[: device_system.total_rows]
+        violation = device_system.violation.numpy()[: device_system.total_rows]
+
+        self.assertEqual(device_system.total_rows, 23)
+        np.testing.assert_allclose(violation, np.zeros(23, dtype=np.float32), atol=1.0e-6)
+        np.testing.assert_allclose(jac[:3, :3], -np.eye(3, dtype=np.float32), atol=1.0e-6)
+        np.testing.assert_allclose(jac[:3, 6:9], np.eye(3, dtype=np.float32), atol=1.0e-6)
+
+        offsets = world.articulation_topology.active_block_offsets
+        revolute_angular = jac[offsets[1] + 3 : offsets[1] + 5]
+        np.testing.assert_allclose(revolute_angular[:, :3], 0.0, atol=1.0e-6)
+        np.testing.assert_allclose(revolute_angular[:, 6:9], 0.0, atol=1.0e-6)
+        np.testing.assert_allclose(revolute_angular[:, 9:12], -revolute_angular[:, 3:6], atol=1.0e-6)
+        np.testing.assert_allclose(np.linalg.norm(revolute_angular[:, 3:6], axis=1), np.ones(2), atol=1.0e-6)
+
+        prismatic_offset = offsets[2]
+        np.testing.assert_allclose(
+            np.linalg.norm(jac[prismatic_offset : prismatic_offset + 2, :3], axis=1),
+            np.ones(2),
+            atol=1.0e-6,
+        )
+        np.testing.assert_allclose(jac[prismatic_offset + 4, :3], 0.0, atol=1.0e-6)
+        np.testing.assert_allclose(jac[prismatic_offset + 4, 6:9], 0.0, atol=1.0e-6)
+        np.testing.assert_allclose(jac[prismatic_offset + 4, 9:12], -jac[prismatic_offset + 4, 3:6], atol=1.0e-6)
+
+        device_system.assemble_dense_matrix(
+            world.bodies.inverse_mass, world.bodies.inverse_inertia_world, device=device
+        )
+        matrix = device_system.matrix.numpy()[: device_system.total_rows, : device_system.total_rows]
+        np.testing.assert_allclose(matrix, matrix.T, atol=1.0e-6)
+        np.testing.assert_allclose(matrix[:3, :3], np.eye(3, dtype=np.float32), atol=1.0e-6)
+
+    def test_device_population_updates_violations_after_body_motion(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+        )
+        moved_positions = np.array([[0.0, 0.0, 0.0], [0.25, -0.5, 0.75]], dtype=np.float32)
+        world.bodies.position.assign(moved_positions)
+
+        device_system = world.articulation_device_system
+        self.assertIsNotNone(device_system)
+        device_system.populate_from_adbs_constraints(world.constraints, world.bodies, device=device)
+
+        np.testing.assert_allclose(
+            device_system.violation.numpy()[:3],
+            np.array([0.25, -0.5, 0.75], dtype=np.float32),
+            atol=1.0e-6,
+        )
 
     def test_phoenx_world_caches_prefactorized_topology(self):
         device = wp.get_preferred_device()

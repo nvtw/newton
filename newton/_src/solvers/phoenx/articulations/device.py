@@ -9,6 +9,29 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer, read_int, read_vec3
+from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    _OFF_AXIS_LOCAL1,
+    _OFF_BODY1,
+    _OFF_BODY2,
+    _OFF_JOINT_MODE,
+    _OFF_LA1_B1,
+    _OFF_LA1_B2,
+    _OFF_LA2_B1,
+    _OFF_LA2_B2,
+    _OFF_LA3_B1,
+    _OFF_LA3_B2,
+    JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_CABLE,
+    JOINT_MODE_CYLINDRICAL,
+    JOINT_MODE_FIXED,
+    JOINT_MODE_PLANAR,
+    JOINT_MODE_PRISMATIC,
+    JOINT_MODE_REVOLUTE,
+    JOINT_MODE_UNIVERSAL,
+)
+
 from .topology import ArticulationTopology
 
 
@@ -20,6 +43,8 @@ class ArticulationDeviceSystem:
     active_joint_count: int
     body1: wp.array
     body2: wp.array
+    active_joint_indices: wp.array
+    active_block_offsets: wp.array
     row_to_active_block: wp.array
     jacobian: wp.array
     violation: wp.array
@@ -45,18 +70,54 @@ class ArticulationDeviceSystem:
         row_to_block_np = (
             topology.row_to_active_block.astype(np.int32) if total_rows > 0 else np.zeros(1, dtype=np.int32)
         )
+        active_joint_indices_np = (
+            topology.active_joint_indices.astype(np.int32)
+            if topology.active_joint_count > 0
+            else np.full(1, -1, dtype=np.int32)
+        )
+        active_block_offsets_np = (
+            topology.active_block_offsets.astype(np.int32)
+            if topology.active_joint_count > 0
+            else np.zeros(1, dtype=np.int32)
+        )
 
         return cls(
             total_rows=total_rows,
             active_joint_count=int(topology.active_joint_count),
             body1=wp.array(body1_np, dtype=wp.int32, device=device),
             body2=wp.array(body2_np, dtype=wp.int32, device=device),
+            active_joint_indices=wp.array(active_joint_indices_np, dtype=wp.int32, device=device),
+            active_block_offsets=wp.array(active_block_offsets_np, dtype=wp.int32, device=device),
             row_to_active_block=wp.array(row_to_block_np, dtype=wp.int32, device=device),
             jacobian=wp.zeros((rows_alloc, 12), dtype=wp.float32, device=device),
             violation=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             matrix=wp.zeros((rows_alloc, rows_alloc), dtype=wp.float32, device=device),
             rhs=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             solution=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
+        )
+
+    def populate_from_adbs_constraints(
+        self,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        *,
+        device=None,
+    ) -> None:
+        """Populate compact DVI rows from initialized ADBS joint columns."""
+        if self.total_rows <= 0 or self.active_joint_count <= 0:
+            return
+        wp.launch(
+            _populate_adbs_articulation_rows_kernel,
+            dim=self.active_joint_count,
+            inputs=[
+                constraints,
+                bodies,
+                self.active_joint_indices,
+                self.active_block_offsets,
+                wp.int32(self.active_joint_count),
+            ],
+            outputs=[self.jacobian, self.violation],
+            device=device,
         )
 
     def assemble_dense_matrix(
@@ -84,6 +145,84 @@ class ArticulationDeviceSystem:
             outputs=[self.matrix],
             device=device,
         )
+
+
+@wp.kernel
+def _populate_adbs_articulation_rows_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    active_joint_indices: wp.array[wp.int32],
+    active_block_offsets: wp.array[wp.int32],
+    active_joint_count: wp.int32,
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+):
+    block = wp.tid()
+    if block >= active_joint_count:
+        return
+
+    cid = active_joint_indices[block]
+    row0 = active_block_offsets[block]
+    row_count = active_block_offsets[block + 1] - row0
+    _clear_joint_rows(row0, row_count, jacobian, violation)
+
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    mode = read_int(constraints, _OFF_JOINT_MODE, cid)
+
+    q1 = bodies.orientation[b1]
+    q2 = bodies.orientation[b2]
+    p1 = bodies.position[b1]
+    p2 = bodies.position[b2]
+
+    r1_b1 = wp.quat_rotate(q1, read_vec3(constraints, _OFF_LA1_B1, cid))
+    r1_b2 = wp.quat_rotate(q2, read_vec3(constraints, _OFF_LA1_B2, cid))
+    r2_b1 = wp.quat_rotate(q1, read_vec3(constraints, _OFF_LA2_B1, cid))
+    r2_b2 = wp.quat_rotate(q2, read_vec3(constraints, _OFF_LA2_B2, cid))
+
+    a1_b1 = p1 + r1_b1
+    a1_b2 = p2 + r1_b2
+    a2_b1 = p1 + r2_b1
+    a2_b2 = p2 + r2_b2
+
+    axis_fallback = wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid))
+    axis_parent = _safe_normalize(a2_b1 - a1_b1, axis_fallback)
+    axis_child = _safe_normalize(a2_b2 - a1_b2, axis_parent)
+    tangent0, tangent1 = _orthonormal_pair(axis_parent)
+    swing_error = wp.cross(axis_parent, axis_child)
+
+    if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_CABLE:
+        _fill_spherical_rows(row0, a1_b1, a1_b2, r1_b1, r1_b2, jacobian, violation)
+    elif mode == JOINT_MODE_REVOLUTE:
+        _fill_spherical_rows(row0, a1_b1, a1_b2, r1_b1, r1_b2, jacobian, violation)
+        _fill_perpendicular_rotation_rows(row0 + 3, tangent0, tangent1, swing_error, jacobian, violation)
+    elif mode == JOINT_MODE_PRISMATIC:
+        r3_b1 = wp.quat_rotate(q1, read_vec3(constraints, _OFF_LA3_B1, cid))
+        r3_b2 = wp.quat_rotate(q2, read_vec3(constraints, _OFF_LA3_B2, cid))
+        parent_twist = _safe_project_tangent(r3_b1 - r1_b1, axis_parent, tangent0)
+        child_twist = _safe_project_tangent(r3_b2 - r1_b2, axis_parent, parent_twist)
+        twist_error = wp.dot(wp.cross(parent_twist, child_twist), axis_parent)
+        _fill_perpendicular_position_rows(row0, tangent0, tangent1, a1_b2 - a1_b1, r1_b1, r1_b2, jacobian, violation)
+        _fill_perpendicular_rotation_rows(row0 + 2, tangent0, tangent1, swing_error, jacobian, violation)
+        _fill_angular_row(row0 + 4, axis_parent, twist_error, jacobian, violation)
+    elif mode == JOINT_MODE_FIXED:
+        r3_b1 = wp.quat_rotate(q1, read_vec3(constraints, _OFF_LA3_B1, cid))
+        r3_b2 = wp.quat_rotate(q2, read_vec3(constraints, _OFF_LA3_B2, cid))
+        parent_twist = _safe_project_tangent(r3_b1 - r1_b1, axis_parent, tangent0)
+        child_twist = _safe_project_tangent(r3_b2 - r1_b2, axis_parent, parent_twist)
+        twist_error = wp.dot(wp.cross(parent_twist, child_twist), axis_parent)
+        _fill_spherical_rows(row0, a1_b1, a1_b2, r1_b1, r1_b2, jacobian, violation)
+        _fill_perpendicular_rotation_rows(row0 + 3, tangent0, tangent1, swing_error, jacobian, violation)
+        _fill_angular_row(row0 + 5, axis_parent, twist_error, jacobian, violation)
+    elif mode == JOINT_MODE_CYLINDRICAL:
+        _fill_perpendicular_position_rows(row0, tangent0, tangent1, a1_b2 - a1_b1, r1_b1, r1_b2, jacobian, violation)
+        _fill_perpendicular_rotation_rows(row0 + 2, tangent0, tangent1, swing_error, jacobian, violation)
+    elif mode == JOINT_MODE_UNIVERSAL:
+        _fill_spherical_rows(row0, a1_b1, a1_b2, r1_b1, r1_b2, jacobian, violation)
+        _fill_angular_row(row0 + 3, axis_parent, wp.float32(0.0), jacobian, violation)
+    elif mode == JOINT_MODE_PLANAR:
+        _fill_spatial_row(row0, axis_parent, r1_b1, r1_b2, wp.dot(a1_b2 - a1_b1, axis_parent), jacobian, violation)
+        _fill_perpendicular_rotation_rows(row0 + 1, tangent0, tangent1, swing_error, jacobian, violation)
 
 
 @wp.kernel
@@ -119,6 +258,150 @@ def _assemble_dense_articulation_matrix_kernel(
         value += _body_metric_dot(row, col, 6, 6, row_body2, jacobian, inverse_mass, inverse_inertia_world)
 
     matrix[row, col] = value
+
+
+@wp.func
+def _clear_joint_rows(
+    row0: wp.int32,
+    row_count: wp.int32,
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+):
+    local = wp.int32(0)
+    while local < row_count:
+        row = row0 + local
+        violation[row] = wp.float32(0.0)
+        col = wp.int32(0)
+        while col < wp.int32(12):
+            jacobian[row, col] = wp.float32(0.0)
+            col += wp.int32(1)
+        local += wp.int32(1)
+
+
+@wp.func
+def _fill_spherical_rows(
+    row0: wp.int32,
+    parent_anchor_world: wp.vec3f,
+    child_anchor_world: wp.vec3f,
+    parent_r: wp.vec3f,
+    child_r: wp.vec3f,
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+):
+    error = child_anchor_world - parent_anchor_world
+    _fill_spatial_row(row0 + 0, wp.vec3f(1.0, 0.0, 0.0), parent_r, child_r, error[0], jacobian, violation)
+    _fill_spatial_row(row0 + 1, wp.vec3f(0.0, 1.0, 0.0), parent_r, child_r, error[1], jacobian, violation)
+    _fill_spatial_row(row0 + 2, wp.vec3f(0.0, 0.0, 1.0), parent_r, child_r, error[2], jacobian, violation)
+
+
+@wp.func
+def _fill_perpendicular_position_rows(
+    row0: wp.int32,
+    tangent0: wp.vec3f,
+    tangent1: wp.vec3f,
+    anchor_error: wp.vec3f,
+    parent_r: wp.vec3f,
+    child_r: wp.vec3f,
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+):
+    _fill_spatial_row(row0 + 0, tangent0, parent_r, child_r, wp.dot(anchor_error, tangent0), jacobian, violation)
+    _fill_spatial_row(row0 + 1, tangent1, parent_r, child_r, wp.dot(anchor_error, tangent1), jacobian, violation)
+
+
+@wp.func
+def _fill_perpendicular_rotation_rows(
+    row0: wp.int32,
+    tangent0: wp.vec3f,
+    tangent1: wp.vec3f,
+    swing_error: wp.vec3f,
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+):
+    _fill_angular_row(row0 + 0, tangent0, wp.dot(swing_error, tangent0), jacobian, violation)
+    _fill_angular_row(row0 + 1, tangent1, wp.dot(swing_error, tangent1), jacobian, violation)
+
+
+@wp.func
+def _fill_spatial_row(
+    row: wp.int32,
+    axis: wp.vec3f,
+    parent_r: wp.vec3f,
+    child_r: wp.vec3f,
+    error: wp.float32,
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+):
+    parent_ang = -wp.cross(parent_r, axis)
+    child_ang = wp.cross(child_r, axis)
+
+    jacobian[row, 0] = -axis[0]
+    jacobian[row, 1] = -axis[1]
+    jacobian[row, 2] = -axis[2]
+    jacobian[row, 3] = parent_ang[0]
+    jacobian[row, 4] = parent_ang[1]
+    jacobian[row, 5] = parent_ang[2]
+    jacobian[row, 6] = axis[0]
+    jacobian[row, 7] = axis[1]
+    jacobian[row, 8] = axis[2]
+    jacobian[row, 9] = child_ang[0]
+    jacobian[row, 10] = child_ang[1]
+    jacobian[row, 11] = child_ang[2]
+    violation[row] = error
+
+
+@wp.func
+def _fill_angular_row(
+    row: wp.int32,
+    axis: wp.vec3f,
+    error: wp.float32,
+    jacobian: wp.array2d[wp.float32],
+    violation: wp.array[wp.float32],
+):
+    jacobian[row, 3] = -axis[0]
+    jacobian[row, 4] = -axis[1]
+    jacobian[row, 5] = -axis[2]
+    jacobian[row, 9] = axis[0]
+    jacobian[row, 10] = axis[1]
+    jacobian[row, 11] = axis[2]
+    violation[row] = error
+
+
+@wp.func
+def _safe_normalize(v: wp.vec3f, fallback: wp.vec3f) -> wp.vec3f:
+    length2 = wp.dot(v, v)
+    if length2 > wp.float32(1.0e-20):
+        return v / wp.sqrt(length2)
+
+    fallback_length2 = wp.dot(fallback, fallback)
+    if fallback_length2 > wp.float32(1.0e-20):
+        return fallback / wp.sqrt(fallback_length2)
+
+    return wp.vec3f(1.0, 0.0, 0.0)
+
+
+@wp.func
+def _safe_project_tangent(v: wp.vec3f, axis: wp.vec3f, fallback: wp.vec3f) -> wp.vec3f:
+    projected = v - wp.dot(v, axis) * axis
+    return _safe_normalize(projected, fallback)
+
+
+@wp.func
+def _orthonormal_pair(axis: wp.vec3f):
+    seed = wp.vec3f(1.0, 0.0, 0.0)
+    if wp.abs(axis[0]) < wp.abs(axis[1]):
+        if wp.abs(axis[0]) < wp.abs(axis[2]):
+            seed = wp.vec3f(1.0, 0.0, 0.0)
+        else:
+            seed = wp.vec3f(0.0, 0.0, 1.0)
+    elif wp.abs(axis[1]) < wp.abs(axis[2]):
+        seed = wp.vec3f(0.0, 1.0, 0.0)
+    else:
+        seed = wp.vec3f(0.0, 0.0, 1.0)
+
+    tangent0 = _safe_normalize(wp.cross(axis, seed), wp.vec3f(0.0, 1.0, 0.0))
+    tangent1 = wp.cross(axis, tangent0)
+    return tangent0, tangent1
 
 
 @wp.func
