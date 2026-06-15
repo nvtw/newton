@@ -709,6 +709,7 @@ def test_centered_basic_storage_and_reduction(test, device):
 
 def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
     """Test that directional lanes prefer inner contacts and keep outer fallbacks."""
+
     @wp.kernel
     def store_two_depth_contact_kernel(
         reducer_data: GlobalContactReducerData,
@@ -759,7 +760,7 @@ def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
 
         test.assertEqual(get_contact_count(reducer), 1, mode)
         winners = get_winning_contacts(reducer)
-        fingerprints = set(int(reducer.contact_fingerprints.numpy()[cid]) for cid in winners)
+        fingerprints = {int(reducer.contact_fingerprints.numpy()[cid]) for cid in winners}
         test.assertIn(1, fingerprints, f"Inner contact should win over an outer directional contact ({mode})")
         test.assertNotIn(2, fingerprints, f"Outer directional contact should be a fallback only ({mode})")
         test.assertEqual(get_active_slot_count(reducer), 2, f"Only normal and voxel entries should be active ({mode})")
@@ -775,7 +776,7 @@ def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
 
         test.assertEqual(get_contact_count(outer_reducer), 1, mode)
         outer_winners = get_winning_contacts(outer_reducer)
-        outer_fingerprints = set(int(outer_reducer.contact_fingerprints.numpy()[cid]) for cid in outer_winners)
+        outer_fingerprints = {int(outer_reducer.contact_fingerprints.numpy()[cid]) for cid in outer_winners}
         test.assertIn(2, outer_fingerprints, f"Outer contact should win when no inner contact exists ({mode})")
 
 

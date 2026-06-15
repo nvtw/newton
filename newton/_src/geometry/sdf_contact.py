@@ -40,6 +40,7 @@ MESH_SDF_BLOCK_DIM = 256
 # outer iteration runs.
 STACK_CAPACITY = 2 * MESH_SDF_BLOCK_DIM
 
+
 @wp.func
 def mesh_sdf_contact_search_precision(
     inner_contact_threshold: float,
@@ -1636,21 +1637,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 contact_normal = -direction_world if mode == 0 else direction_world
                                 margin_sum = triangle_mesh_margin + sdf_mesh_margin
                                 export_and_reduce_contact_centered_two_spatial_depths(
-                                        pair[0],
-                                        pair[1],
-                                        point_world,
-                                        contact_normal,
-                                        dist,
-                                        (my_edge_idx << 2) | (mode << 1),
-                                        point_world - midpoint,
-                                        margin_sum,
-                                        margin_sum + gap_sum,
-                                        X_ws_tri,
-                                        aabb_lower_tri,
-                                        aabb_upper_tri,
-                                        voxel_res_tri,
-                                        reducer_data,
-                                    )
+                                    pair[0],
+                                    pair[1],
+                                    point_world,
+                                    contact_normal,
+                                    dist,
+                                    (my_edge_idx << 2) | (mode << 1),
+                                    point_world - midpoint,
+                                    margin_sum,
+                                    margin_sum + gap_sum,
+                                    X_ws_tri,
+                                    aabb_lower_tri,
+                                    aabb_upper_tri,
+                                    voxel_res_tri,
+                                    reducer_data,
+                                )
 
                     # Defensive cooperative reset before the next outer
                     # iteration — see the matching ``tile_stack_clear``

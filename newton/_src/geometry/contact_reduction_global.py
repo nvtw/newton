@@ -1647,7 +1647,6 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 radius_eff_a = compute_effective_radius(shape_types[shape_a], shape_data[shape_a])
                 radius_eff_b = compute_effective_radius(shape_types[shape_b], shape_data[shape_b])
 
-
                 # Use additive per-shape contact gap (matching broad/narrow phase)
                 gap_a = shape_gap[shape_a]
                 gap_b = shape_gap[shape_b]
