@@ -65,6 +65,25 @@ class ArticulationDeviceSystem:
     block_off: wp.array
     block_rhs: wp.array
     block_solution: wp.array
+    block_l_nnz: int
+    block_num_levels: int
+    block_level_ptr_host: tuple[int, ...]
+    block_factor_diag: wp.array
+    block_factor_off: wp.array
+    block_y: wp.array
+    block_l_col_ptr: wp.array
+    block_l_row_idx: wp.array
+    block_l_row_ptr: wp.array
+    block_l_col_idx: wp.array
+    block_l_csr_to_csc: wp.array
+    block_n_off_to_l: wp.array
+    block_pred_diag_ptr: wp.array
+    block_pred_diag_slot: wp.array
+    block_pred_off_ptr: wp.array
+    block_pred_off_slot_ik: wp.array
+    block_pred_off_slot_jk: wp.array
+    block_level_ptr: wp.array
+    block_level_pivots: wp.array
 
     @classmethod
     def from_topology(
@@ -115,6 +134,29 @@ class ArticulationDeviceSystem:
         block_n_off_col_idx_np = (
             symbolic.n_off_col_idx.astype(np.int32) if block_nnz > 0 else np.zeros(1, dtype=np.int32)
         )
+        block_l_nnz = int(symbolic.nnz_l)
+        block_l_col_ptr_np = symbolic.l_col_ptr.astype(np.int32) if block_count > 0 else np.zeros(1, dtype=np.int32)
+        block_l_row_idx_np = symbolic.l_row_idx.astype(np.int32) if block_l_nnz > 0 else np.zeros(1, dtype=np.int32)
+        block_l_row_ptr_np = symbolic.l_row_ptr.astype(np.int32) if block_count > 0 else np.zeros(1, dtype=np.int32)
+        block_l_col_idx_np = symbolic.l_col_idx.astype(np.int32) if block_l_nnz > 0 else np.zeros(1, dtype=np.int32)
+        block_l_csr_to_csc_np = (
+            symbolic.l_csr_to_csc.astype(np.int32) if block_l_nnz > 0 else np.zeros(1, dtype=np.int32)
+        )
+        block_n_off_to_l_np = symbolic.n_off_to_l.astype(np.int32) if block_nnz > 0 else np.zeros(1, dtype=np.int32)
+        block_pred_diag_ptr_np = (
+            symbolic.pred_diag_ptr.astype(np.int32) if block_count > 0 else np.zeros(1, dtype=np.int32)
+        )
+        block_pred_diag_slot_np = symbolic.pred_diag_slot.astype(np.int32)
+        block_pred_off_ptr_np = (
+            symbolic.pred_off_ptr.astype(np.int32) if block_l_nnz > 0 else np.zeros(1, dtype=np.int32)
+        )
+        block_pred_off_slot_ik_np = symbolic.pred_off_slot_ik.astype(np.int32)
+        block_pred_off_slot_jk_np = symbolic.pred_off_slot_jk.astype(np.int32)
+        block_level_ptr_np = symbolic.level_ptr.astype(np.int32)
+        block_level_pivots_np = (
+            symbolic.level_pivots.astype(np.int32) if block_count > 0 else np.zeros(1, dtype=np.int32)
+        )
+        block_num_levels = int(symbolic.num_levels)
 
         return cls(
             total_rows=total_rows,
@@ -140,6 +182,27 @@ class ArticulationDeviceSystem:
             block_off=wp.zeros((max(block_nnz, 1), _BLOCK_SIZE, _BLOCK_SIZE), dtype=wp.float32, device=device),
             block_rhs=wp.zeros((max(block_count, 1), _BLOCK_SIZE), dtype=wp.float32, device=device),
             block_solution=wp.zeros((max(block_count, 1), _BLOCK_SIZE), dtype=wp.float32, device=device),
+            block_l_nnz=block_l_nnz,
+            block_num_levels=block_num_levels,
+            block_level_ptr_host=tuple(int(v) for v in block_level_ptr_np),
+            block_factor_diag=wp.zeros(
+                (max(block_count, 1), _BLOCK_SIZE, _BLOCK_SIZE), dtype=wp.float32, device=device
+            ),
+            block_factor_off=wp.zeros((max(block_l_nnz, 1), _BLOCK_SIZE, _BLOCK_SIZE), dtype=wp.float32, device=device),
+            block_y=wp.zeros((max(block_count, 1), _BLOCK_SIZE), dtype=wp.float32, device=device),
+            block_l_col_ptr=wp.array(block_l_col_ptr_np, dtype=wp.int32, device=device),
+            block_l_row_idx=wp.array(block_l_row_idx_np, dtype=wp.int32, device=device),
+            block_l_row_ptr=wp.array(block_l_row_ptr_np, dtype=wp.int32, device=device),
+            block_l_col_idx=wp.array(block_l_col_idx_np, dtype=wp.int32, device=device),
+            block_l_csr_to_csc=wp.array(block_l_csr_to_csc_np, dtype=wp.int32, device=device),
+            block_n_off_to_l=wp.array(block_n_off_to_l_np, dtype=wp.int32, device=device),
+            block_pred_diag_ptr=wp.array(block_pred_diag_ptr_np, dtype=wp.int32, device=device),
+            block_pred_diag_slot=wp.array(block_pred_diag_slot_np, dtype=wp.int32, device=device),
+            block_pred_off_ptr=wp.array(block_pred_off_ptr_np, dtype=wp.int32, device=device),
+            block_pred_off_slot_ik=wp.array(block_pred_off_slot_ik_np, dtype=wp.int32, device=device),
+            block_pred_off_slot_jk=wp.array(block_pred_off_slot_jk_np, dtype=wp.int32, device=device),
+            block_level_ptr=wp.array(block_level_ptr_np, dtype=wp.int32, device=device),
+            block_level_pivots=wp.array(block_level_pivots_np, dtype=wp.int32, device=device),
         )
 
     def populate_from_adbs_constraints(
@@ -315,6 +378,109 @@ class ArticulationDeviceSystem:
             outputs=[self.solution],
             device=device,
         )
+
+    def factor_block_sparse_matrix(self, *, device=None) -> None:
+        """Factor the assembled block-sparse matrix in place."""
+        if self.block_count <= 0:
+            return
+        if self.block_l_nnz > 0:
+            wp.launch(
+                _zero_articulation_factor_off_kernel,
+                dim=self.block_l_nnz,
+                inputs=[wp.int32(self.block_l_nnz)],
+                outputs=[self.block_factor_off],
+                device=device,
+            )
+        if self.block_nnz > 0:
+            wp.launch(
+                _copy_articulation_n_off_to_factor_kernel,
+                dim=self.block_nnz,
+                inputs=[self.block_off, self.block_n_off_to_l, wp.int32(self.block_nnz)],
+                outputs=[self.block_factor_off],
+                device=device,
+            )
+        for level in range(self.block_num_levels - 1, -1, -1):
+            level_offset = self.block_level_ptr_host[level]
+            level_count = self.block_level_ptr_host[level + 1] - level_offset
+            if level_count <= 0:
+                continue
+            wp.launch(
+                _factor_articulation_cholesky_level_kernel,
+                dim=level_count,
+                inputs=[
+                    self.block_l_col_ptr,
+                    self.block_l_row_idx,
+                    self.block_pred_diag_ptr,
+                    self.block_pred_diag_slot,
+                    self.block_pred_off_ptr,
+                    self.block_pred_off_slot_ik,
+                    self.block_pred_off_slot_jk,
+                    self.block_level_pivots,
+                    self.block_sizes,
+                    self.block_diag,
+                    wp.int32(level_count),
+                    wp.int32(level_offset),
+                ],
+                outputs=[self.block_factor_diag, self.block_factor_off],
+                device=device,
+            )
+
+    def solve_block_sparse_factors(self, *, device=None) -> None:
+        """Solve using the most recent device block factorization."""
+        if self.block_count <= 0:
+            return
+        for level in range(self.block_num_levels - 1, -1, -1):
+            level_offset = self.block_level_ptr_host[level]
+            level_count = self.block_level_ptr_host[level + 1] - level_offset
+            if level_count <= 0:
+                continue
+            wp.launch(
+                _forward_substitute_articulation_level_kernel,
+                dim=level_count,
+                inputs=[
+                    self.block_l_row_ptr,
+                    self.block_l_col_idx,
+                    self.block_l_csr_to_csc,
+                    self.block_level_pivots,
+                    self.block_sizes,
+                    self.block_factor_off,
+                    self.block_factor_diag,
+                    self.block_rhs,
+                    wp.int32(level_count),
+                    wp.int32(level_offset),
+                ],
+                outputs=[self.block_y],
+                device=device,
+            )
+        for level in range(self.block_num_levels):
+            level_offset = self.block_level_ptr_host[level]
+            level_count = self.block_level_ptr_host[level + 1] - level_offset
+            if level_count <= 0:
+                continue
+            wp.launch(
+                _backward_substitute_articulation_level_kernel,
+                dim=level_count,
+                inputs=[
+                    self.block_l_col_ptr,
+                    self.block_l_row_idx,
+                    self.block_level_pivots,
+                    self.block_sizes,
+                    self.block_factor_off,
+                    self.block_factor_diag,
+                    self.block_y,
+                    wp.int32(level_count),
+                    wp.int32(level_offset),
+                ],
+                outputs=[self.block_solution],
+                device=device,
+            )
+
+    def solve_block_sparse_matrix(self, *, device=None) -> None:
+        """Factor the current block matrix and solve the current RHS."""
+        self.factor_block_sparse_matrix(device=device)
+        self.gather_block_rhs(device=device)
+        self.solve_block_sparse_factors(device=device)
+        self.scatter_block_solution(device=device)
 
     def apply_solution(
         self,
@@ -617,6 +783,222 @@ def _scatter_articulation_solution_blocks_kernel(
     for i in range(_BLOCK_SIZE):
         if wp.int32(i) < block_size:
             solution[row0 + wp.int32(i)] = block_solution[pivot, i]
+
+
+@wp.kernel
+def _zero_articulation_factor_off_kernel(
+    block_l_nnz: wp.int32,
+    factor_off: wp.array3d[wp.float32],
+):
+    slot = wp.tid()
+    if slot >= block_l_nnz:
+        return
+    for i in range(_BLOCK_SIZE):
+        for j in range(_BLOCK_SIZE):
+            factor_off[slot, i, j] = wp.float32(0.0)
+
+
+@wp.kernel
+def _copy_articulation_n_off_to_factor_kernel(
+    block_off: wp.array3d[wp.float32],
+    n_off_to_l: wp.array[wp.int32],
+    block_nnz: wp.int32,
+    factor_off: wp.array3d[wp.float32],
+):
+    slot = wp.tid()
+    if slot >= block_nnz:
+        return
+
+    dst = n_off_to_l[slot]
+    for i in range(_BLOCK_SIZE):
+        for j in range(_BLOCK_SIZE):
+            factor_off[dst, i, j] = block_off[slot, i, j]
+
+
+@wp.kernel
+def _factor_articulation_cholesky_level_kernel(
+    l_col_ptr: wp.array[wp.int32],
+    l_row_idx: wp.array[wp.int32],
+    pred_diag_ptr: wp.array[wp.int32],
+    pred_diag_slot: wp.array[wp.int32],
+    pred_off_ptr: wp.array[wp.int32],
+    pred_off_slot_ik: wp.array[wp.int32],
+    pred_off_slot_jk: wp.array[wp.int32],
+    level_pivots: wp.array[wp.int32],
+    block_sizes: wp.array[wp.int32],
+    block_diag: wp.array3d[wp.float32],
+    level_count: wp.int32,
+    level_offset: wp.int32,
+    factor_diag: wp.array3d[wp.float32],
+    factor_off: wp.array3d[wp.float32],
+):
+    local = wp.tid()
+    if local >= level_count:
+        return
+
+    pivot = level_pivots[level_offset + local]
+    pivot_size = block_sizes[pivot]
+
+    pred_diag_start = pred_diag_ptr[pivot]
+    pred_diag_end = pred_diag_ptr[pivot + wp.int32(1)]
+    for i in range(_BLOCK_SIZE):
+        for j in range(_BLOCK_SIZE):
+            value = wp.float32(0.0)
+            if wp.int32(i) < pivot_size and wp.int32(j) < pivot_size:
+                value = block_diag[pivot, i, j]
+                for pred in range(pred_diag_start, pred_diag_end):
+                    pred_slot = pred_diag_slot[pred]
+                    for k in range(_BLOCK_SIZE):
+                        value -= factor_off[pred_slot, i, k] * factor_off[pred_slot, j, k]
+            elif i == j:
+                value = wp.float32(1.0)
+            factor_diag[pivot, i, j] = value
+
+    for k in range(_BLOCK_SIZE):
+        if wp.int32(k) < pivot_size:
+            diag = factor_diag[pivot, k, k]
+            if diag < wp.float32(1.0e-20):
+                diag = wp.float32(1.0e-20)
+            diag = wp.sqrt(diag)
+            factor_diag[pivot, k, k] = diag
+            inv_diag = wp.float32(1.0) / diag
+
+            for i in range(_BLOCK_SIZE):
+                if wp.int32(i) > wp.int32(k) and wp.int32(i) < pivot_size:
+                    factor_diag[pivot, i, k] = factor_diag[pivot, i, k] * inv_diag
+
+            for j in range(_BLOCK_SIZE):
+                if wp.int32(j) > wp.int32(k) and wp.int32(j) < pivot_size:
+                    l_jk = factor_diag[pivot, j, k]
+                    for i in range(_BLOCK_SIZE):
+                        if wp.int32(i) >= wp.int32(j) and wp.int32(i) < pivot_size:
+                            factor_diag[pivot, i, j] -= factor_diag[pivot, i, k] * l_jk
+
+    for i in range(_BLOCK_SIZE):
+        for j in range(_BLOCK_SIZE):
+            if wp.int32(i) < pivot_size and wp.int32(j) < pivot_size:
+                if wp.int32(i) < wp.int32(j):
+                    factor_diag[pivot, i, j] = wp.float32(0.0)
+            elif i == j:
+                factor_diag[pivot, i, j] = wp.float32(1.0)
+            else:
+                factor_diag[pivot, i, j] = wp.float32(0.0)
+
+    col_start = l_col_ptr[pivot]
+    col_end = l_col_ptr[pivot + wp.int32(1)]
+    for ptr in range(col_start, col_end):
+        row_pivot = l_row_idx[ptr]
+        row_size = block_sizes[row_pivot]
+        pred_off_start = pred_off_ptr[ptr]
+        pred_off_end = pred_off_ptr[ptr + wp.int32(1)]
+
+        for i in range(_BLOCK_SIZE):
+            for j in range(_BLOCK_SIZE):
+                value = wp.float32(0.0)
+                if wp.int32(i) < row_size and wp.int32(j) < pivot_size:
+                    value = factor_off[ptr, i, j]
+                    for pred in range(pred_off_start, pred_off_end):
+                        slot_ik = pred_off_slot_ik[pred]
+                        slot_jk = pred_off_slot_jk[pred]
+                        for k in range(_BLOCK_SIZE):
+                            value -= factor_off[slot_ik, i, k] * factor_off[slot_jk, j, k]
+                factor_off[ptr, i, j] = value
+
+        for i in range(_BLOCK_SIZE):
+            if wp.int32(i) < row_size:
+                for j in range(_BLOCK_SIZE):
+                    if wp.int32(j) < pivot_size:
+                        value = factor_off[ptr, i, j]
+                        for k in range(_BLOCK_SIZE):
+                            if wp.int32(k) < wp.int32(j):
+                                value -= factor_diag[pivot, j, k] * factor_off[ptr, i, k]
+                        factor_off[ptr, i, j] = value / factor_diag[pivot, j, j]
+                    else:
+                        factor_off[ptr, i, j] = wp.float32(0.0)
+            else:
+                for j in range(_BLOCK_SIZE):
+                    factor_off[ptr, i, j] = wp.float32(0.0)
+
+
+@wp.kernel
+def _forward_substitute_articulation_level_kernel(
+    l_row_ptr: wp.array[wp.int32],
+    l_col_idx: wp.array[wp.int32],
+    l_csr_to_csc: wp.array[wp.int32],
+    level_pivots: wp.array[wp.int32],
+    block_sizes: wp.array[wp.int32],
+    factor_off: wp.array3d[wp.float32],
+    factor_diag: wp.array3d[wp.float32],
+    block_rhs: wp.array2d[wp.float32],
+    level_count: wp.int32,
+    level_offset: wp.int32,
+    block_y: wp.array2d[wp.float32],
+):
+    local = wp.tid()
+    if local >= level_count:
+        return
+
+    pivot = level_pivots[level_offset + local]
+    pivot_size = block_sizes[pivot]
+    row_start = l_row_ptr[pivot]
+    row_end = l_row_ptr[pivot + wp.int32(1)]
+
+    for r in range(_BLOCK_SIZE):
+        if wp.int32(r) < pivot_size:
+            value = block_rhs[pivot, r]
+            for row_ptr in range(row_start, row_end):
+                col = l_col_idx[row_ptr]
+                slot = l_csr_to_csc[row_ptr]
+                col_size = block_sizes[col]
+                for c in range(_BLOCK_SIZE):
+                    if wp.int32(c) < col_size:
+                        value -= factor_off[slot, r, c] * block_y[col, c]
+            for c in range(_BLOCK_SIZE):
+                if wp.int32(c) < wp.int32(r):
+                    value -= factor_diag[pivot, r, c] * block_y[pivot, c]
+            block_y[pivot, r] = value / factor_diag[pivot, r, r]
+        else:
+            block_y[pivot, r] = wp.float32(0.0)
+
+
+@wp.kernel
+def _backward_substitute_articulation_level_kernel(
+    l_col_ptr: wp.array[wp.int32],
+    l_row_idx: wp.array[wp.int32],
+    level_pivots: wp.array[wp.int32],
+    block_sizes: wp.array[wp.int32],
+    factor_off: wp.array3d[wp.float32],
+    factor_diag: wp.array3d[wp.float32],
+    block_y: wp.array2d[wp.float32],
+    level_count: wp.int32,
+    level_offset: wp.int32,
+    block_solution: wp.array2d[wp.float32],
+):
+    local = wp.tid()
+    if local >= level_count:
+        return
+
+    pivot = level_pivots[level_offset + local]
+    pivot_size = block_sizes[pivot]
+    col_start = l_col_ptr[pivot]
+    col_end = l_col_ptr[pivot + wp.int32(1)]
+
+    for rev in range(_BLOCK_SIZE):
+        r = _BLOCK_SIZE - 1 - rev
+        if wp.int32(r) < pivot_size:
+            value = block_y[pivot, r]
+            for ptr in range(col_start, col_end):
+                row_pivot = l_row_idx[ptr]
+                row_size = block_sizes[row_pivot]
+                for c in range(_BLOCK_SIZE):
+                    if wp.int32(c) < row_size:
+                        value -= factor_off[ptr, c, r] * block_solution[row_pivot, c]
+            for c in range(_BLOCK_SIZE):
+                if wp.int32(c) > wp.int32(r) and wp.int32(c) < pivot_size:
+                    value -= factor_diag[pivot, c, r] * block_solution[pivot, c]
+            block_solution[pivot, r] = value / factor_diag[pivot, r, r]
+        else:
+            block_solution[pivot, r] = wp.float32(0.0)
 
 
 @wp.kernel

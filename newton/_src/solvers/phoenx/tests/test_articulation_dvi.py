@@ -160,6 +160,83 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertEqual(symbolic.num_levels, 3)
         np.testing.assert_array_equal(symbolic.parent, np.array([1, 2, -1], dtype=np.int32))
 
+    def test_device_block_sparse_solve_uses_fill_blocks(self):
+        topology = ArticulationTopology.from_host(
+            np.array([0, 1, 2, 3], dtype=np.int32),
+            np.array([1, 2, 3, 0], dtype=np.int32),
+            np.full(4, int(JOINT_MODE_BALL_SOCKET), dtype=np.int32),
+        )
+        system = PrefactorizedArticulationSystem.from_topology(topology, use_meca=False, diagonal_regularization=0.0)
+        symbolic = system.symbolic
+        self.assertGreater(symbolic.nnz_l, symbolic.nnz_n)
+
+        rng = np.random.default_rng(11)
+        matrix = np.zeros((topology.total_rows, topology.total_rows), dtype=np.float64)
+        for active_block in range(topology.active_joint_count):
+            block_slice = slice(
+                int(topology.active_block_offsets[active_block]),
+                int(topology.active_block_offsets[active_block + 1]),
+            )
+            a = rng.normal(size=(3, 3))
+            matrix[block_slice, block_slice] = a @ a.T + np.eye(3) * 8.0
+
+        for slot in range(symbolic.nnz_n):
+            row_pivot = int(symbolic.n_off_row_idx[slot])
+            col_pivot = int(symbolic.n_off_col_idx[slot])
+            row_block = int(symbolic.pivot_order[row_pivot])
+            col_block = int(symbolic.pivot_order[col_pivot])
+            row_slice = slice(
+                int(topology.active_block_offsets[row_block]),
+                int(topology.active_block_offsets[row_block + 1]),
+            )
+            col_slice = slice(
+                int(topology.active_block_offsets[col_block]),
+                int(topology.active_block_offsets[col_block + 1]),
+            )
+            block = rng.normal(scale=0.08, size=(3, 3))
+            matrix[row_slice, col_slice] = block
+            matrix[col_slice, row_slice] = block.T
+
+        rhs = rng.normal(size=topology.total_rows)
+        expected = np.linalg.solve(matrix, rhs)
+
+        block_diag = np.zeros((max(symbolic.num_blocks, 1), 6, 6), dtype=np.float32)
+        block_off = np.zeros((max(symbolic.nnz_n, 1), 6, 6), dtype=np.float32)
+        for pivot, active_block in enumerate(symbolic.pivot_order):
+            block_slice = slice(
+                int(topology.active_block_offsets[active_block]),
+                int(topology.active_block_offsets[active_block + 1]),
+            )
+            block_diag[pivot, :3, :3] = matrix[block_slice, block_slice].astype(np.float32)
+        for slot in range(symbolic.nnz_n):
+            row_pivot = int(symbolic.n_off_row_idx[slot])
+            col_pivot = int(symbolic.n_off_col_idx[slot])
+            row_block = int(symbolic.pivot_order[row_pivot])
+            col_block = int(symbolic.pivot_order[col_pivot])
+            row_slice = slice(
+                int(topology.active_block_offsets[row_block]),
+                int(topology.active_block_offsets[row_block + 1]),
+            )
+            col_slice = slice(
+                int(topology.active_block_offsets[col_block]),
+                int(topology.active_block_offsets[col_block + 1]),
+            )
+            block_off[slot, :3, :3] = matrix[row_slice, col_slice].astype(np.float32)
+
+        device = wp.get_preferred_device()
+        device_system = ArticulationDeviceSystem.from_topology(topology, device, symbolic)
+        device_system.block_diag.assign(block_diag)
+        device_system.block_off.assign(block_off)
+        device_system.rhs.assign(rhs.astype(np.float32))
+        device_system.solve_block_sparse_matrix(device=device)
+
+        np.testing.assert_allclose(
+            device_system.solution.numpy()[: topology.total_rows],
+            expected.astype(np.float32),
+            rtol=2.0e-5,
+            atol=2.0e-5,
+        )
+
     def test_dense_ldlt_matches_numpy_solve(self):
         rng = np.random.default_rng(7)
         a = rng.normal(size=(8, 8))
@@ -266,6 +343,18 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(system.solve_block_sparse(rhs), expected_solution)
         np.testing.assert_allclose(system.solve_prefactorized(rhs), expected_solution)
         np.testing.assert_allclose(system.solve_prefactorized(rhs, method="dense"), expected_solution)
+
+        device_system.assemble_block_sparse_matrix(
+            inv_mass_wp, inv_inertia_wp, diagonal_regularization=0.0, device=device
+        )
+        device_system.rhs.assign(rhs.astype(np.float32))
+        device_system.solve_block_sparse_matrix(device=device)
+        np.testing.assert_allclose(
+            device_system.solution.numpy()[:6],
+            expected_solution.astype(np.float32),
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        )
 
     def test_revolute_row_builder_signs(self):
         rows = revolute_rows(
