@@ -247,6 +247,19 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
             np.testing.assert_allclose(block_off[slot, :, col_size:], 0.0, atol=1.0e-6)
 
         rhs = np.arange(1, 7, dtype=np.float64)
+        device_system.rhs.assign(rhs.astype(np.float32))
+        device_system.gather_block_rhs(device=device)
+        packed_rhs = np.zeros((device_system.block_count, device_system.block_size), dtype=np.float32)
+        for pivot, active_block in enumerate(pivot_order):
+            block_size = int(block_sizes[pivot])
+            block_slice = slice(int(offsets[active_block]), int(offsets[active_block + 1]))
+            packed_rhs[pivot, :block_size] = rhs[block_slice]
+        np.testing.assert_allclose(device_system.block_rhs.numpy()[: device_system.block_count], packed_rhs)
+
+        device_system.block_solution.assign(packed_rhs)
+        device_system.scatter_block_solution(device=device)
+        np.testing.assert_allclose(device_system.solution.numpy()[:6], rhs.astype(np.float32))
+
         system.factorize_from_jacobian(jac, inv_mass, inv_inertia)
         expected_solution = np.linalg.solve(expected, rhs)
         np.testing.assert_allclose(system.solve(rhs), expected_solution)

@@ -63,6 +63,8 @@ class ArticulationDeviceSystem:
     block_n_off_col_idx: wp.array
     block_diag: wp.array
     block_off: wp.array
+    block_rhs: wp.array
+    block_solution: wp.array
 
     @classmethod
     def from_topology(
@@ -136,6 +138,8 @@ class ArticulationDeviceSystem:
             block_n_off_col_idx=wp.array(block_n_off_col_idx_np, dtype=wp.int32, device=device),
             block_diag=wp.zeros((max(block_count, 1), _BLOCK_SIZE, _BLOCK_SIZE), dtype=wp.float32, device=device),
             block_off=wp.zeros((max(block_nnz, 1), _BLOCK_SIZE, _BLOCK_SIZE), dtype=wp.float32, device=device),
+            block_rhs=wp.zeros((max(block_count, 1), _BLOCK_SIZE), dtype=wp.float32, device=device),
+            block_solution=wp.zeros((max(block_count, 1), _BLOCK_SIZE), dtype=wp.float32, device=device),
         )
 
     def populate_from_adbs_constraints(
@@ -273,6 +277,42 @@ class ArticulationDeviceSystem:
                 wp.int32(self.total_rows),
             ],
             outputs=[self.rhs],
+            device=device,
+        )
+
+    def gather_block_rhs(self, *, device=None) -> None:
+        """Pack flat RHS rows into padded pivot-order block storage."""
+        if self.total_rows <= 0 or self.block_count <= 0:
+            return
+        wp.launch(
+            _gather_articulation_rhs_blocks_kernel,
+            dim=self.block_count,
+            inputs=[
+                self.rhs,
+                self.active_block_offsets,
+                self.block_pivot_order,
+                self.block_sizes,
+                wp.int32(self.block_count),
+            ],
+            outputs=[self.block_rhs],
+            device=device,
+        )
+
+    def scatter_block_solution(self, *, device=None) -> None:
+        """Unpack padded pivot-order block solution into flat rows."""
+        if self.total_rows <= 0 or self.block_count <= 0:
+            return
+        wp.launch(
+            _scatter_articulation_solution_blocks_kernel,
+            dim=self.block_count,
+            inputs=[
+                self.block_solution,
+                self.active_block_offsets,
+                self.block_pivot_order,
+                self.block_sizes,
+                wp.int32(self.block_count),
+            ],
+            outputs=[self.solution],
             device=device,
         )
 
@@ -533,6 +573,50 @@ def _compute_articulation_residual_kernel(
         baumgarte = wp.clamp(baumgarte, -recovery_speed, recovery_speed)
 
     rhs[row] = -(residual + baumgarte)
+
+
+@wp.kernel
+def _gather_articulation_rhs_blocks_kernel(
+    rhs: wp.array[wp.float32],
+    active_block_offsets: wp.array[wp.int32],
+    pivot_order: wp.array[wp.int32],
+    block_sizes: wp.array[wp.int32],
+    block_count: wp.int32,
+    block_rhs: wp.array2d[wp.float32],
+):
+    pivot = wp.tid()
+    if pivot >= block_count:
+        return
+
+    active_block = pivot_order[pivot]
+    row0 = active_block_offsets[active_block]
+    block_size = block_sizes[pivot]
+    for i in range(_BLOCK_SIZE):
+        value = wp.float32(0.0)
+        if wp.int32(i) < block_size:
+            value = rhs[row0 + wp.int32(i)]
+        block_rhs[pivot, i] = value
+
+
+@wp.kernel
+def _scatter_articulation_solution_blocks_kernel(
+    block_solution: wp.array2d[wp.float32],
+    active_block_offsets: wp.array[wp.int32],
+    pivot_order: wp.array[wp.int32],
+    block_sizes: wp.array[wp.int32],
+    block_count: wp.int32,
+    solution: wp.array[wp.float32],
+):
+    pivot = wp.tid()
+    if pivot >= block_count:
+        return
+
+    active_block = pivot_order[pivot]
+    row0 = active_block_offsets[active_block]
+    block_size = block_sizes[pivot]
+    for i in range(_BLOCK_SIZE):
+        if wp.int32(i) < block_size:
+            solution[row0 + wp.int32(i)] = block_solution[pivot, i]
 
 
 @wp.kernel
