@@ -590,9 +590,11 @@ class PhoenXWorld:
                 joint CIDs in the coloring/contact layout but skips joint PGS
                 dispatches so the DVI articulation solve owns those rows.
                 Defaults to the value of ``articulation_dvi_host``.
-            articulation_dvi_host_solver: Host validation numeric solve method:
-                ``"block_sparse"`` uses the prefactorized block LDLT path,
-                while ``"dense"`` uses the dense LDLT fallback.
+            articulation_dvi_host_solver: DVI numeric solve method.
+                ``"device_block_sparse"`` uses the Warp block-sparse solve.
+                ``"block_sparse"`` uses the host prefactorized block LDLT
+                validation path, while ``"dense"`` uses the dense host LDLT
+                fallback.
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``"auto"``
@@ -1834,11 +1836,15 @@ class PhoenXWorld:
     @staticmethod
     def _normalize_articulation_dvi_host_solver(value: str) -> str:
         normalized = str(value).strip().lower().replace("-", "_")
+        if normalized in {"device_block_sparse", "device_sparse_ldl", "device_sparse_ldlt", "gpu_block_sparse"}:
+            return "device_block_sparse"
         if normalized in {"block_sparse", "block_sparse_ldlt", "sparse_ldl", "sparse_ldlt"}:
             return "block_sparse"
         if normalized in {"dense", "dense_ldlt"}:
             return "dense"
-        raise ValueError(f"articulation_dvi_host_solver must be 'block_sparse' or 'dense' (got {value!r})")
+        raise ValueError(
+            f"articulation_dvi_host_solver must be 'device_block_sparse', 'block_sparse', or 'dense' (got {value!r})"
+        )
 
     def solve_articulations_dvi_host(
         self,
@@ -1848,14 +1854,13 @@ class PhoenXWorld:
         recovery_speed: float = -1.0,
         solver: str | None = None,
     ) -> bool:
-        """Apply one host-validation DVI solve for cached articulation rows.
+        """Apply one DVI solve for cached articulation rows.
 
         This is the integration checkpoint for the full-coordinate articulation
         path: row population, matrix assembly, RHS construction, factorization,
-        solve, and velocity application all run against PhoenX buffers. The
-        numeric factorization still uses the host validation implementation; the
-        topology and device buffers are the same ones used by the GPU path under
-        construction.
+        solve, and velocity application all run against PhoenX buffers.
+        ``solver="device_block_sparse"`` stays on the device after row
+        assembly; the host modes remain as validation fallbacks.
         """
         if (
             self.articulation_device_system is None
@@ -1869,10 +1874,11 @@ class PhoenXWorld:
             raise ValueError(f"dt must be positive, got {solve_dt}")
 
         device_system = self.articulation_device_system
-        device_system.populate_from_adbs_constraints(self.constraints, self.bodies, device=self.device)
-        device_system.assemble_dense_matrix(
-            self.bodies.inverse_mass, self.bodies.inverse_inertia_world, device=self.device
+        solve_method = self._normalize_articulation_dvi_host_solver(
+            self.articulation_dvi_host_solver if solver is None else solver
         )
+
+        device_system.populate_from_adbs_constraints(self.constraints, self.bodies, device=self.device)
         device_system.compute_residual(
             self.bodies,
             dt=solve_dt,
@@ -1881,13 +1887,25 @@ class PhoenXWorld:
             device=self.device,
         )
 
-        total_rows = device_system.total_rows
-        matrix = device_system.matrix.numpy()[:total_rows, :total_rows]
-        rhs = device_system.rhs.numpy()[:total_rows]
-        self.articulation_system.factorize_dense_matrix(matrix)
-        solve_method = self.articulation_dvi_host_solver if solver is None else solver
-        solution = self.articulation_system.solve_prefactorized(rhs, method=solve_method).astype(np.float32)
-        device_system.solution.assign(solution)
+        if solve_method == "device_block_sparse":
+            device_system.assemble_block_sparse_matrix(
+                self.bodies.inverse_mass,
+                self.bodies.inverse_inertia_world,
+                diagonal_regularization=self.articulation_system.diagonal_regularization,
+                device=self.device,
+            )
+            device_system.solve_block_sparse_matrix(device=self.device)
+        else:
+            device_system.assemble_dense_matrix(
+                self.bodies.inverse_mass, self.bodies.inverse_inertia_world, device=self.device
+            )
+            total_rows = device_system.total_rows
+            matrix = device_system.matrix.numpy()[:total_rows, :total_rows]
+            rhs = device_system.rhs.numpy()[:total_rows]
+            self.articulation_system.factorize_dense_matrix(matrix)
+            solution = self.articulation_system.solve_prefactorized(rhs, method=solve_method).astype(np.float32)
+            device_system.solution.assign(solution)
+
         device_system.apply_solution(
             self.bodies,
             self.bodies.inverse_mass,

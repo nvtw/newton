@@ -486,6 +486,29 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
         np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
 
+    def test_step_runs_device_block_sparse_dvi_as_joint_owner(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+            world_kwargs={
+                "articulation_dvi_host": True,
+                "articulation_dvi_host_solver": "device_block_sparse",
+                "velocity_iterations": 0,
+                "gravity": (0.0, 0.0, 0.0),
+            },
+        )
+        world.bodies.position.assign(np.array([[0.0, 0.0, 0.0], [0.2, -0.1, 0.05]], dtype=np.float32))
+
+        self.assertEqual(world.articulation_dvi_host_solver, "device_block_sparse")
+        world.step(0.1)
+
+        expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32)
+        np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
+        np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
+
     def test_host_dvi_joint_owner_other_dispatchers(self):
         device = wp.get_preferred_device()
         dispatcher_kwargs = (
