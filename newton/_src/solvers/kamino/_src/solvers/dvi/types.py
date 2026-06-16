@@ -32,6 +32,9 @@ class DVIConfigStruct:
     max_iterations: int32
     """Maximum number of projected Gauss-Seidel iterations."""
 
+    block_iterations: int32
+    """Outer direct-bilateral/projected-inequality block iterations."""
+
 
 @wp.struct
 class DVIStatus:
@@ -122,4 +125,5 @@ def convert_config_to_struct(config: DVISolverConfig) -> DVIConfigStruct:
     config_struct.regularization = config.regularization
     config_struct.omega = config.omega
     config_struct.max_iterations = config.max_iterations
+    config_struct.block_iterations = config.block_iterations
     return config_struct

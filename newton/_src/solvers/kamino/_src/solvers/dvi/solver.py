@@ -39,6 +39,7 @@ from .kernels import (
     _scatter_unilateral_solution,
     _solve_dvi_pgs,
     _solve_dvi_reduced_unilateral_pgs,
+    _solve_dvi_unilateral_pgs,
     _unprecondition_dvi_solution,
     _write_reduced_unilateral_column,
 )
@@ -66,6 +67,8 @@ class DVISolver(ForwardDynamicsSolver):
         self._data: DVIData | None = None
         self._bilateral_solver: LLTBlockedSolver | None = None
         self._max_unilateral_dim: int = 0
+        self._max_block_iterations: int = 1
+        self._has_unilateral_constraints: bool = False
         self._device: wp.DeviceLike = None
 
         if model is not None:
@@ -109,9 +112,10 @@ class DVISolver(ForwardDynamicsSolver):
         self._config = self._check_config(model, config)
         self._warmstart = warmstart
         self._collect_info = collect_info
+        self._max_block_iterations = max(c.block_iterations for c in self._config)
+        self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
         self._data = DVIData(size=self._size, device=self._device)
         self._allocate_bilateral_solver(model)
-        self._allocate_unilateral_operator(model)
 
         configs = [convert_config_to_struct(c) for c in self._config]
         with wp.ScopedDevice(self._device):
@@ -524,10 +528,33 @@ class DVISolver(ForwardDynamicsSolver):
 
     def _solve_with_bilateral_direct_block(self, problem: DualProblem):
         self._factor_bilateral_block(problem)
-        if self._data.unilateral_operator is not None:
-            self._build_reduced_unilateral_problem(problem)
-            self._solve_reduced_unilateral_block(problem)
         self._solve_bilateral_block(problem)
+        if not self._has_unilateral_constraints:
+            return
+
+        for _ in range(self._max_block_iterations):
+            wp.launch(
+                kernel=_solve_dvi_unilateral_pgs,
+                dim=self._size.num_worlds,
+                inputs=[
+                    problem.data.dim,
+                    problem.data.mio,
+                    problem.data.vio,
+                    problem.data.nl,
+                    problem.data.nc,
+                    problem.data.lcgo,
+                    problem.data.ccgo,
+                    problem.data.cio,
+                    problem.data.mu,
+                    problem.data.D,
+                    problem.data.v_f,
+                    self._data.config,
+                    self._data.status,
+                    self._data.solution.lambdas,
+                ],
+                device=self.device,
+            )
+            self._solve_bilateral_block(problem)
 
     def _warmstart_from_solution(self, problem: DualProblem):
         wp.launch(

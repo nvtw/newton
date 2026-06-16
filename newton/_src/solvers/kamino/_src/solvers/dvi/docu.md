@@ -91,19 +91,16 @@ v_plus = D lambda + v_f
 
 where `D` is the Delassus matrix and `v_f` is the biased free constraint velocity. The DVI backend should therefore solve this existing system instead of replacing Kamino kinematics or dynamics.
 
-The integrated solver keeps that coupled `DualProblem` system. For worlds with only unilateral rows it uses projected Gauss-Seidel on the dense Delassus matrix. For worlds with bilateral joint rows it factors the bilateral block, builds the unilateral Schur complement, solves projected Gauss-Seidel on that reduced unilateral system, and then back-substitutes the bilateral impulses. This keeps bilateral residuals near tolerance but makes contact-heavy models pay for Schur construction.
+The integrated solver keeps that coupled `DualProblem` system. For worlds with a usable bilateral block it now factors only the bilateral joint block, solves bilateral impulses directly, runs projected Gauss-Seidel over all active inequality rows on the full Delassus matrix, then re-solves the bilateral block. The outer `block_iterations` setting controls this direct-bilateral/projected-inequality block Gauss-Seidel loop and defaults to 8.
+
+This avoids the previous dense unilateral Schur complement build. The full fallback PGS path is still used when a direct bilateral block cannot be allocated, such as heterogeneous world sets with empty joint blocks.
 
 ## mraksha Comparison
 
-The mraksha DVI checkout is faster in part because it uses a different solve split:
+The mraksha DVI checkout uses the same high-level split: inequalities are projected updates and bilateral joints are handled by a direct/sparse block solve. The main difference is representation. mraksha updates body velocities stage-by-stage, while Kamino keeps the assembled `v_plus = D lambda + v_f` dual system and applies the split solve to that matrix.
 
-1. Joint limits are solved and applied first as unilateral velocity constraints.
-2. Bilateral joints are solved and applied second, usually with block-sparse LDL.
-3. Contacts are solved and applied last with a separate sparse Jacobi or LDL contact solve.
+The important performance lesson from mraksha was to avoid explicitly materializing a dense reduced contact/limit Schur complement. Kamino now follows that lesson while preserving the Kamino equation system.
 
-That pipeline is close to a traditional DVI engine: every stage updates body velocities, and later stages see the impulses from earlier stages. It avoids building a dense reduced contact/limit Schur complement. The tradeoff is that it is not solving Kamino's fully coupled dual system in one pass.
-
-The Kamino DVI implementation deliberately preserves Kamino's equation system. The current speed bottleneck is therefore not PGS iteration count. It is the Schur complement build for unilateral rows, especially when contact capacity raises `max_total_cts`. A faster next implementation should batch the bilateral solves used for Schur columns or assemble the reduced operator with a custom tiled kernel. A larger algorithm change could mimic mraksha's sequential limit, bilateral, contact split, but that would need a separate correctness decision because it changes the effective system being solved.
 
 ## Benchmarking
 
@@ -111,27 +108,26 @@ The focused benchmark entrypoint is:
 
 ```bash
 uv run --extra dev -m newton._src.solvers.kamino._src.utils.benchmark.dvi_padmm_matrix \
-    --world-counts 1 16 \
+    --world-counts 1 \
     --contact-states no-contact contact \
     --cuda-graph-modes off on \
-    --num-steps 50 \
-    --mode convergence \
-    --solver-configs padmm-fast dvi
+    --num-steps 200 \
+    --mode total \
+    --solver-configs padmm-accurate padmm-fast dvi
 ```
 
-Local measurements on June 16, 2026 with an RTX PRO 6000 Blackwell show:
+Local measurements on June 16, 2026 with an RTX PRO 6000 Blackwell, 200 steps, and the split DVI path show:
 
-| Scenario | CUDA graph | PADMM fast | DVI | Notes |
-| --- | --- | ---: | ---: | --- |
-| Dr Legs, 1 world, no ground | off | 80 FPS | 130 FPS | DVI converges in 1 iteration. |
-| Dr Legs, 1 world, ground | off | 73 FPS | 75 FPS | DVI converges reliably; Schur construction dominates. |
-| Dr Legs, 1 world, no ground | on | 165 FPS | 158 FPS | Graph launch overhead reduction helps PADMM. |
-| Dr Legs, 1 world, ground | on | 97 FPS | 84 FPS | Contact capacity makes current DVI slower. |
-| Dr Legs, 16 worlds, no ground | on | 147 FPS | 150 FPS | Rough parity. |
-| Dr Legs, 16 worlds, ground | on | 83 FPS | 79 FPS | Current DVI remains slower with contacts. |
+| Scenario | CUDA graph | PADMM accurate | PADMM fast | DVI | DVI vs PADMM fast |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Dr Legs, 1 world, ground | off | 39.5 FPS | 74.6 FPS | 291.8 FPS | 3.9x |
+| Dr Legs, 1 world, ground | on | 52.7 FPS | 100.4 FPS | 416.0 FPS | 4.1x |
+| Dr Legs, 1 world, no ground | off | 41.6 FPS | 78.2 FPS | 515.3 FPS | 6.6x |
+| Dr Legs, 1 world, no ground | on | 84.1 FPS | 165.6 FPS | 1250.2 FPS | 7.5x |
 
-The mraksha hanging Dr Legs benchmark, run with cached kernels and a runtime import shim for its stale public exports, reported 74 frames/s for 250 frames with 4 DVI substeps per frame. This is not the same scene as the Kamino standing/contact benchmark, but it confirms that mraksha's current DVI path is in the same single-world frame-rate range while using a different equation split.
+The mraksha hanging Dr Legs benchmark, run with cached kernels and a runtime import shim for its stale public exports, reported 74 frames/s for 250 frames with 4 DVI substeps per frame. This is not the same scene as the Kamino standing/contact benchmark, but it motivated the same important solver split: do not materialize a dense reduced contact/limit Schur complement.
 
 ## Recommendation
 
-DVI should remain opt-in for now. It is clearly useful for correctness diagnostics and it often reaches tighter residuals in fewer iterations than PADMM, but the current Schur complement construction is not consistently faster than PADMM in contact-heavy Dr Legs scenes. Do not make DVI the default until the Schur build is batched or replaced and the benchmark matrix shows a stable throughput advantage without losing the coupled-system residual guarantees.
+DVI should remain opt-in until broader benchmark coverage is stable, but the main performance concern changed. The old Schur construction was the bottleneck; the current split path is faster than PADMM fast in the single-world Dr Legs matrix while preserving the assembled Kamino dual system. Next work should focus on multi-world scaling, per-world block-iteration control, and possible sparse or velocity-space DVI kernels.
+

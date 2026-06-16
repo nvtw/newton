@@ -805,6 +805,12 @@ class DVISolverConfig:
     Must be in the range `(0, 2]`. Defaults to `1.0`.
     """
 
+    block_iterations: int = 8
+    """
+    Number of outer DVI block iterations alternating direct bilateral solves
+    with projected inequality solves. Must be greater than zero. Defaults to `8`.
+    """
+
     warmstart_mode: Literal["none", "internal", "containers"] = "containers"
     """
     Warmstart mode to be used for the DVI solver.
@@ -854,6 +860,8 @@ class DVISolverConfig:
             raise ValueError(f"Invalid regularization: {self.regularization}. Must be greater than zero.")
         if self.omega <= 0.0 or self.omega > 2.0:
             raise ValueError(f"Invalid omega: {self.omega}. Must be in the range (0, 2].")
+        if self.block_iterations <= 0:
+            raise ValueError(f"Invalid block iterations: {self.block_iterations}. Must be a positive integer.")
         PADMMWarmStartMode.from_string(self.warmstart_mode)
         WarmstarterContacts.Method.from_string(self.contact_warmstart_method)
 

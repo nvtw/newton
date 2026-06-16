@@ -340,7 +340,7 @@ def render_solver_configs_table(
             - "sparse": Sparse representation settings (sparse, sparse_jacobian)
             - "linear": Linear solver settings (type, kwargs)
             - "padmm": PADMM settings (max_iterations, primal_tol, dual_tol, etc)
-            - "dvi": DVI settings (max_iterations, tolerance, regularization, omega)
+            - "dvi": DVI settings (max_iterations, tolerance, regularization, omega, block_iterations)
             - "warmstart": Warmstarting settings (mode, contact_method)
         to_console (bool, optional):
             If True, also prints the table to the console.
@@ -409,7 +409,7 @@ def render_solver_configs_table(
         _add_table_column_group(
             table,
             "DVI",
-            ["max_iterations", "tol", "reg", "omega"],
+            ["max_iterations", "tol", "reg", "omega", "block_iter"],
             color="cyan",
         )
     if "warmstart" in groups:
@@ -462,6 +462,7 @@ def render_solver_configs_table(
                     f"{cfg.dvi.tolerance:.0e}",
                     f"{cfg.dvi.regularization:.0e}",
                     f"{cfg.dvi.omega}",
+                    str(cfg.dvi.block_iterations),
                 ]
             )
         if "warmstart" in groups:

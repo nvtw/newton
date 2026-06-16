@@ -114,10 +114,13 @@ class TestDVISolver(unittest.TestCase):
         )
         self.assertEqual(config.dynamics_solver, "dvi")
         self.assertEqual(config.dvi.max_iterations, 32)
+        self.assertEqual(config.dvi.block_iterations, 8)
         self.assertEqual(config.dvi.contact_warmstart_method, "geom_pair_net_force")
 
         with self.assertRaises(ValueError):
             SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
+        with self.assertRaises(ValueError):
+            kamino_config.DVISolverConfig(block_iterations=0)
 
     def test_01_dvi_solve_dense_dual_problem(self):
         builder = basics.build_boxes_fourbar()
@@ -271,6 +274,7 @@ class TestDVISolver(unittest.TestCase):
         problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
         solver = _solve_dvi(model, problem)
 
+        self.assertIsNone(solver.data.unilateral_operator)
         _assert_solver_status_converged(self, solver)
         _check_solution_matches_dual_problem(self, problem, solver)
 
@@ -427,6 +431,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(config.sparse_jacobian)
         self.assertFalse(config.sparse_dynamics)
         self.assertEqual(config.dvi.warmstart_mode, "containers")
+        self.assertEqual(config.dvi.block_iterations, 8)
 
         focused_configs = make_dvi_padmm_benchmark_configs()
         self.assertEqual(set(focused_configs), {"PADMM accurate", "PADMM fast", "DVI"})

@@ -322,6 +322,7 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     config.dvi.tolerance = 1e-4
     config.dvi.regularization = 1e-5
     config.dvi.omega = 1.0
+    config.dvi.block_iterations = 8
     # ------------------------------------------------------------------------------
     # Warm-starting
     config.dvi.warmstart_mode = "containers"
@@ -419,6 +420,7 @@ def save_solver_configs_to_hdf5(configs: dict[str, SolverKaminoImpl.Config], dat
         datafile[f"{scope}/dvi/tolerance"] = config.dvi.tolerance
         datafile[f"{scope}/dvi/regularization"] = config.dvi.regularization
         datafile[f"{scope}/dvi/omega"] = config.dvi.omega
+        datafile[f"{scope}/dvi/block_iterations"] = config.dvi.block_iterations
         datafile[f"{scope}/dvi/warmstart_mode"] = config.dvi.warmstart_mode
         datafile[f"{scope}/dvi/contact_warmstart_method"] = config.dvi.contact_warmstart_method
         # ------------------------------------------------------------------------------
@@ -484,6 +486,8 @@ def load_solver_configs_to_hdf5(datafile) -> dict[str, SolverKaminoImpl.Config]:
             config.dvi.tolerance = float(datafile[f"{scope}/dvi/tolerance"][()])
             config.dvi.regularization = float(datafile[f"{scope}/dvi/regularization"][()])
             config.dvi.omega = float(datafile[f"{scope}/dvi/omega"][()])
+            if f"{scope}/dvi/block_iterations" in datafile:
+                config.dvi.block_iterations = int(datafile[f"{scope}/dvi/block_iterations"][()])
             config.dvi.warmstart_mode = _read_hdf5_string(datafile, f"{scope}/dvi/warmstart_mode")
             config.dvi.contact_warmstart_method = _read_hdf5_string(datafile, f"{scope}/dvi/contact_warmstart_method")
         # ------------------------------------------------------------------------------

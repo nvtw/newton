@@ -604,9 +604,11 @@ def _solve_dvi_pgs(
             for l in range(nl):
                 i = lcgo + l
                 v_i = _compute_row_velocity(ncts, mio, vio, i, problem_D, problem_v_f, solution_lambdas)
-                D_ii = wp.abs(problem_D[mio + ncts * i + i]) + cfg.regularization + FLOAT32_EPS
+                D_ii_raw = wp.abs(problem_D[mio + ncts * i + i])
                 lambda_limit_old = solution_lambdas[vio + i]
-                lambda_limit_new = wp.max(0.0, lambda_limit_old - cfg.omega * v_i / D_ii)
+                lambda_limit_new = lambda_limit_old
+                if D_ii_raw > FLOAT32_EPS:
+                    lambda_limit_new = wp.max(0.0, lambda_limit_old - cfg.omega * v_i / (D_ii_raw + cfg.regularization))
                 solution_lambdas[vio + i] = lambda_limit_new
                 max_step = wp.max(max_step, wp.abs(lambda_limit_new - lambda_limit_old))
                 max_velocity = wp.max(max_velocity, wp.abs(wp.min(v_i, 0.0)))
@@ -629,14 +631,16 @@ def _solve_dvi_pgs(
                 D_00 = wp.abs(problem_D[mio + ncts * (ccio + 0) + (ccio + 0)])
                 D_11 = wp.abs(problem_D[mio + ncts * (ccio + 1) + (ccio + 1)])
                 D_22 = wp.abs(problem_D[mio + ncts * (ccio + 2) + (ccio + 2)])
-                D_kk = wp.max(vec3f(D_00, D_11, D_22)) + cfg.regularization + FLOAT32_EPS
+                D_kk_raw = wp.max(vec3f(D_00, D_11, D_22))
                 lambda_contact_old = vec3f(
                     solution_lambdas[vio + ccio + 0],
                     solution_lambdas[vio + ccio + 1],
                     solution_lambdas[vio + ccio + 2],
                 )
-                lambda_contact_arg = lambda_contact_old - (cfg.omega / D_kk) * v_c
-                lambda_contact_new = project_to_coulomb_cone(lambda_contact_arg, problem_mu[cio + cid])
+                lambda_contact_new = lambda_contact_old
+                if D_kk_raw > FLOAT32_EPS:
+                    lambda_contact_arg = lambda_contact_old - (cfg.omega / (D_kk_raw + cfg.regularization)) * v_c
+                    lambda_contact_new = project_to_coulomb_cone(lambda_contact_arg, problem_mu[cio + cid])
                 solution_lambdas[vio + ccio + 0] = lambda_contact_new.x
                 solution_lambdas[vio + ccio + 1] = lambda_contact_new.y
                 solution_lambdas[vio + ccio + 2] = lambda_contact_new.z
@@ -714,9 +718,11 @@ def _solve_dvi_unilateral_pgs(
             for l in range(nl):
                 i = lcgo + l
                 v_i = _compute_row_velocity(ncts, mio, vio, i, problem_D, problem_v_f, solution_lambdas)
-                D_ii = wp.abs(problem_D[mio + ncts * i + i]) + cfg.regularization + FLOAT32_EPS
+                D_ii_raw = wp.abs(problem_D[mio + ncts * i + i])
                 lambda_limit_old = solution_lambdas[vio + i]
-                lambda_limit_new = wp.max(0.0, lambda_limit_old - cfg.omega * v_i / D_ii)
+                lambda_limit_new = lambda_limit_old
+                if D_ii_raw > FLOAT32_EPS:
+                    lambda_limit_new = wp.max(0.0, lambda_limit_old - cfg.omega * v_i / (D_ii_raw + cfg.regularization))
                 solution_lambdas[vio + i] = lambda_limit_new
                 max_step = wp.max(max_step, wp.abs(lambda_limit_new - lambda_limit_old))
                 max_velocity = wp.max(max_velocity, wp.abs(wp.min(v_i, 0.0)))
@@ -739,14 +745,16 @@ def _solve_dvi_unilateral_pgs(
                 D_00 = wp.abs(problem_D[mio + ncts * (ccio + 0) + (ccio + 0)])
                 D_11 = wp.abs(problem_D[mio + ncts * (ccio + 1) + (ccio + 1)])
                 D_22 = wp.abs(problem_D[mio + ncts * (ccio + 2) + (ccio + 2)])
-                D_kk = wp.max(vec3f(D_00, D_11, D_22)) + cfg.regularization + FLOAT32_EPS
+                D_kk_raw = wp.max(vec3f(D_00, D_11, D_22))
                 lambda_contact_old = vec3f(
                     solution_lambdas[vio + ccio + 0],
                     solution_lambdas[vio + ccio + 1],
                     solution_lambdas[vio + ccio + 2],
                 )
-                lambda_contact_arg = lambda_contact_old - (cfg.omega / D_kk) * v_c
-                lambda_contact_new = project_to_coulomb_cone(lambda_contact_arg, problem_mu[cio + cid])
+                lambda_contact_new = lambda_contact_old
+                if D_kk_raw > FLOAT32_EPS:
+                    lambda_contact_arg = lambda_contact_old - (cfg.omega / (D_kk_raw + cfg.regularization)) * v_c
+                    lambda_contact_new = project_to_coulomb_cone(lambda_contact_arg, problem_mu[cio + cid])
                 solution_lambdas[vio + ccio + 0] = lambda_contact_new.x
                 solution_lambdas[vio + ccio + 1] = lambda_contact_new.y
                 solution_lambdas[vio + ccio + 2] = lambda_contact_new.z
