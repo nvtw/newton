@@ -66,7 +66,7 @@ def build(
     step_layout: str = "multi_world",
     prepare_refresh_stride: int | str = "auto",
     articulation_dvi: bool = False,
-    articulation_dvi_solver: str = "device_block_sparse",
+    articulation_dvi_solver: str = "block_sparse",
 ) -> SceneHandle:
     """Build a DR-Legs-on-ground PhoenX scene."""
     if solver_name != "phoenx":

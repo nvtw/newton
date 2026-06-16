@@ -26,7 +26,7 @@ class PrefactorizedArticulationSystem:
 
     topology: ArticulationTopology
     symbolic: BlockSparseSymbolic
-    diagonal_regularization: float = 1.0e-8
+    diagonal_regularization: float = 1.0e-4
     dense_matrix: np.ndarray | None = None
     factorization: DenseLDLTFactorization | None = None
     block_sparse_factorization: BlockSparseLDLTFactorization | None = None
@@ -37,7 +37,7 @@ class PrefactorizedArticulationSystem:
         topology: ArticulationTopology,
         *,
         use_meca: bool = True,
-        diagonal_regularization: float = 1.0e-8,
+        diagonal_regularization: float = 1.0e-4,
     ) -> PrefactorizedArticulationSystem:
         """Create a system with topology-only symbolic data."""
         symbolic = compute_block_sparse_symbolic(

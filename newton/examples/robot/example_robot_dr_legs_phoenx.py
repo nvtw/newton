@@ -45,9 +45,8 @@
 # ``--fps`` controls how often the broad/narrow-phase collision
 # detection runs.
 #
-# Pass ``--articulation-dvi`` to replace the tree-edge joint PGS rows
-# with PhoenX's full-coordinate DVI articulation solve. The six
-# excluded loop-closure joints remain in the iterative path.
+# Pass ``--articulation-dvi`` to replace supported joint PGS rows with
+# PhoenX's full-coordinate DVI articulation solve.
 #
 # Command: python -m newton.examples robot_dr_legs_phoenx --world-count 4
 #
@@ -414,7 +413,9 @@ class Example:
 
     def capture(self):
         self.graph = None
-        if wp.get_device().is_cuda:
+        dvi_solver = getattr(self.solver.world, "articulation_dvi_host_solver", "")
+        uses_host_dvi = self._articulation_dvi and dvi_solver != "device_block_sparse"
+        if wp.get_device().is_cuda and not uses_host_dvi:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
@@ -581,11 +582,7 @@ class Example:
             "--articulation-dvi",
             action=argparse.BooleanOptionalAction,
             default=False,
-            help=(
-                "Use PhoenX's full-coordinate DVI articulation solve for"
-                " tree-edge joints. Excluded loop-closure joints continue"
-                " through joint PGS."
-            ),
+            help=("Use PhoenX's full-coordinate DVI articulation solve for supported joint columns."),
         )
         parser.add_argument(
             "--articulation-dvi-replaces-joint-pgs",
@@ -596,7 +593,7 @@ class Example:
         parser.add_argument(
             "--articulation-dvi-solver",
             type=str,
-            default="device_block_sparse",
+            default="block_sparse",
             choices=("device_block_sparse", "block_sparse", "dense"),
             help="DVI articulation numeric solver.",
         )

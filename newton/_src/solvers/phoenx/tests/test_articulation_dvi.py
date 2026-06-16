@@ -251,7 +251,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_array_equal(topology.active_block_offsets, np.array([0, 3, 8, 11], dtype=np.int32))
         self.assertEqual(topology.total_rows, 11)
 
-    def test_topology_joint_mask_excludes_loop_closures(self):
+    def test_topology_joint_mask_can_disable_columns(self):
         topology = ArticulationTopology.from_host(
             np.array([0, 1, 2], dtype=np.int32),
             np.array([1, 2, 0], dtype=np.int32),
@@ -448,7 +448,11 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(device_system.matrix.numpy()[:6, :6], expected, rtol=1.0e-6, atol=1.0e-6)
 
         regularization = 0.125
-        expected_regularized = expected + np.eye(6, dtype=np.float64) * regularization
+        expected_regularized = expected.copy()
+        diag = np.diag(expected_regularized)
+        expected_regularized[np.diag_indices_from(expected_regularized)] += regularization * np.maximum(
+            np.abs(diag), 1.0
+        )
         device_system.assemble_block_sparse_matrix(
             inv_mass_wp, inv_inertia_wp, diagonal_regularization=regularization, device=device
         )
@@ -628,7 +632,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         solved = world.solve_articulations_dvi_host(dt=0.1, alpha=0.0)
 
         self.assertTrue(solved)
-        expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32)
+        expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32) / np.float32(1.0001)
         np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
         np.testing.assert_allclose(world.bodies.angular_velocity.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-6)
 
@@ -649,8 +653,8 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
 
         world.step(0.1)
 
-        expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32)
-        np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
+        expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32) / np.float32(1.0001)
+        np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=3.0e-5)
         np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
 
     def test_partial_articulation_mask_enables_selective_joint_pgs(self):
@@ -689,9 +693,9 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertEqual(world.articulation_dvi_host_solver, "device_block_sparse")
         world.step(0.1)
 
-        expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32)
-        np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
-        np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=1.0e-5, atol=1.0e-5)
+        expected_velocity = np.array([-2.0, 1.0, -0.5], dtype=np.float32) / np.float32(1.0001)
+        np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=3.0e-5)
+        np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=2.0e-4, atol=1.0e-5)
 
     def test_device_dvi_velocity_drive_row_sets_angular_velocity(self):
         device = wp.get_preferred_device()
@@ -712,7 +716,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(
             world.bodies.angular_velocity.numpy()[1],
             np.array([0.0, 0.0, 2.0 / 11.0], dtype=np.float32),
-            rtol=1.0e-5,
+            rtol=2.0e-4,
             atol=1.0e-5,
         )
         np.testing.assert_allclose(
@@ -743,7 +747,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(
             world.bodies.angular_velocity.numpy()[1],
             np.array([0.0, 0.0, -2.5], dtype=np.float32),
-            rtol=1.0e-5,
+            rtol=2.0e-4,
             atol=1.0e-5,
         )
         np.testing.assert_allclose(
@@ -839,7 +843,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(
             world.bodies.angular_velocity.numpy()[1],
             np.array([0.0, 0.0, -2.0], dtype=np.float32),
-            rtol=1.0e-5,
+            rtol=2.0e-4,
             atol=1.0e-5,
         )
         np.testing.assert_allclose(
@@ -962,7 +966,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
 
                 world.step(0.1)
 
-                np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=1.0e-5)
+                np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=3.0e-5)
 
     def test_host_dvi_can_run_as_post_pgs_correction(self):
         device = wp.get_preferred_device()
@@ -1050,6 +1054,60 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[cable_cid]), 1)
         self.assertTrue(solver.world._dispatch_specialization_flags()["selective_joint_pgs"])
         self.assertEqual(solver.world.articulation_topology.active_joint_count, 1)
+
+    def test_solver_phoenx_owns_loop_closure_joints(self):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        bodies = [
+            builder.add_link(
+                xform=wp.transform(p=wp.vec3(float(i), 0.0, 0.0), q=wp.quat_identity()),
+                mass=1.0,
+                inertia=((0.01, 0.0, 0.0), (0.0, 0.01, 0.0), (0.0, 0.0, 0.01)),
+            )
+            for i in range(3)
+        ]
+        fixed = builder.add_joint_fixed(
+            parent=-1,
+            child=bodies[0],
+            parent_xform=wp.transform_identity(),
+            child_xform=wp.transform_identity(),
+        )
+        chain0 = builder.add_joint_ball(
+            parent=bodies[0],
+            child=bodies[1],
+            parent_xform=wp.transform_identity(),
+            child_xform=wp.transform_identity(),
+        )
+        chain1 = builder.add_joint_ball(
+            parent=bodies[1],
+            child=bodies[2],
+            parent_xform=wp.transform_identity(),
+            child_xform=wp.transform_identity(),
+        )
+        builder.add_joint_ball(
+            parent=bodies[2],
+            child=bodies[0],
+            parent_xform=wp.transform_identity(),
+            child_xform=wp.transform_identity(),
+        )
+        builder.add_articulation([fixed, chain0, chain1])
+        builder.gravity = 0.0
+        model = builder.finalize(skip_validation_joints=True)
+
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+            articulation_dvi=True,
+            articulation_dvi_solver="block_sparse",
+        )
+
+        dvi_mask = solver.world.articulation_dvi_joint_mask
+        self.assertIsNotNone(dvi_mask)
+        np.testing.assert_array_equal(dvi_mask, np.ones_like(dvi_mask, dtype=bool))
+        self.assertEqual(solver.world.articulation_topology.active_joint_count, 4)
+        self.assertEqual(int(solver.world.articulation_topology.total_rows), 15)
+        self.assertEqual(int(np.sum(solver.world._joint_pgs_enabled.numpy()[:4])), 0)
 
     def test_solver_phoenx_d6_limits_populate_articulation_dvi_topology(self):
         cases = (

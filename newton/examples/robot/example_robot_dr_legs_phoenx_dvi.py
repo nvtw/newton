@@ -19,7 +19,7 @@
 # Single-scene entry point for running the Disney Research DR Legs asset with
 # SolverPhoenX's full-coordinate DVI articulation solve enabled. This reuses
 # the validated PhoenX Dr Legs setup and only changes the defaults: one visible
-# world, and DVI owning the articulation tree joints by default.
+# world, and DVI owning supported joint columns by default.
 #
 # Command: python -m newton.examples robot_dr_legs_phoenx_dvi
 #
@@ -37,7 +37,7 @@ class Example(_BaseExample):
         parser = _BaseExample.create_parser()
         parser.set_defaults(
             articulation_dvi=True,
-            articulation_dvi_solver="device_block_sparse",
+            articulation_dvi_solver="block_sparse",
             world_count=1,
             visible_world_count=1,
         )

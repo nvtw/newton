@@ -593,8 +593,9 @@ class PhoenXWorld:
             articulation_dvi_host_solver: DVI numeric solve method.
                 ``"device_block_sparse"`` uses the Warp block-sparse solve.
                 ``"block_sparse"`` uses the host prefactorized block LDLT
-                validation path, while ``"dense"`` uses the dense host LDLT
-                fallback.
+                validation path and is the most robust option for cyclic
+                full-coordinate mechanisms, while ``"dense"`` uses the dense
+                host LDLT fallback.
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``"auto"``

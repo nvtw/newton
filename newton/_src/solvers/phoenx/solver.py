@@ -159,7 +159,7 @@ class SolverPhoenX(SolverBase):
         prepare_refresh_stride: int | str = "auto",
         articulation_dvi: bool = False,
         articulation_dvi_replaces_joint_pgs: bool | None = None,
-        articulation_dvi_solver: str = "device_block_sparse",
+        articulation_dvi_solver: str = "block_sparse",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -201,16 +201,14 @@ class SolverPhoenX(SolverBase):
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
             articulation_dvi: Enable the experimental full-coordinate DVI
-                articulation solve for joints that belong to Newton
-                articulation trees. Loop-closure joints are excluded from
-                the direct topology.
+                articulation solve for every supported PhoenX joint column.
             articulation_dvi_replaces_joint_pgs: When ``True``, DVI-owned
-                joints replace PhoenX joint PGS rows. Loop-closure joints
-                excluded from the direct topology continue to run through PGS.
+                joints replace PhoenX joint PGS rows. Unsupported columns,
+                such as cable joints, continue to run through PGS.
             articulation_dvi_solver: DVI numeric solver, forwarded to
-                :class:`PhoenXWorld`. ``"device_block_sparse"`` is the
-                graph-friendly device path; ``"block_sparse"`` and
-                ``"dense"`` are host validation fallbacks.
+                :class:`PhoenXWorld`. ``"block_sparse"`` is the robust
+                validation path for cyclic full-coordinate mechanisms;
+                ``"device_block_sparse"`` is the graph-friendly device path.
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -457,22 +455,12 @@ class SolverPhoenX(SolverBase):
         self._sort_perm_placeholder = wp.zeros(1, dtype=wp.int32, device=self.device)
 
     def _build_adbs_articulation_joint_mask(self, model: Model) -> wp.array:
-        """Return per-ADBS-column mask selecting Newton articulation tree joints."""
+        """Return per-ADBS-column mask selecting supported DVI-owned joints."""
         num_columns = int(self._adbs.num_joint_columns)
         if num_columns <= 0:
             return wp.zeros(0, dtype=wp.int32, device=self.device)
 
         mask = np.ones(num_columns, dtype=np.int32)
-        joint_articulation = getattr(model, "joint_articulation", None)
-        if joint_articulation is not None:
-            joint_articulation_np = joint_articulation.numpy()
-            joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
-            mask.fill(0)
-            for joint_index, cid in enumerate(joint_idx_to_cid):
-                cid_int = int(cid)
-                if cid_int >= 0 and int(joint_articulation_np[joint_index]) >= 0:
-                    mask[cid_int] = 1
-
         joint_mode_np = self._adbs.joint_mode.numpy()
         mask[joint_mode_np == int(JOINT_MODE_CABLE)] = 0
         return wp.array(mask, dtype=wp.int32, device=self.device)

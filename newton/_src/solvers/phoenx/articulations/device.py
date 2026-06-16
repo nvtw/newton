@@ -837,7 +837,8 @@ def _assemble_block_sparse_articulation_diag_kernel(
                     inverse_inertia_world,
                 )
                 if i == j:
-                    value += row_regularization[row] + diagonal_regularization
+                    value += row_regularization[row]
+                    value += diagonal_regularization * wp.max(wp.abs(value), wp.float32(1.0))
             block_diag[pivot, i, j] = value
 
 

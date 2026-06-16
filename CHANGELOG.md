@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add opt-in `SolverPhoenX` full-coordinate DVI articulation controls, including the device block-sparse solve mode and safe exclusion of loop-closure joints from the direct topology.
+- Add opt-in `SolverPhoenX` full-coordinate DVI articulation controls, including block-sparse solve modes and full closed-loop joint ownership for supported joint columns.
 - Add experimental pure-Warp `newton.rl` PPO and SAC training utilities, including a PhoenX Anymal sparse-target locomotion environment, deterministic evaluation metrics, and PPO checkpoint resume helpers.
 - Add strict walking validation metrics and configurable upright termination for the experimental PhoenX Anymal RL environment.
 - Add a `robot_dr_legs_phoenx_dvi` example and matching `robot_dr_legs_phoenx --articulation-dvi` option for running DR Legs with PhoenX's DVI articulation solve.
