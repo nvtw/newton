@@ -10,6 +10,7 @@ import warp as wp
 from ....config import DVISolverConfig
 from ...core.size import SizeKamino
 from ...core.types import float32, int32, vec2f
+from ...linalg import DenseLinearOperatorData
 from ..padmm.types import PADMMSolution
 
 wp.set_module_options({"enable_backward": False})
@@ -55,6 +56,8 @@ class DVIState:
         self.v_aug: wp.array | None = None
         self.s: wp.array | None = None
         self.scratch: wp.array | None = None
+        self.bilateral_rhs: wp.array | None = None
+        self.bilateral_solution: wp.array | None = None
         if size is not None:
             self.finalize(size)
 
@@ -64,6 +67,8 @@ class DVIState:
         self.v_aug = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
         self.s = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
         self.scratch = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
+        self.bilateral_rhs = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
+        self.bilateral_solution = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
 
     def reset(self):
         """Reset scratch arrays to zero."""
@@ -71,6 +76,8 @@ class DVIState:
         self.v_aug.zero_()
         self.s.zero_()
         self.scratch.zero_()
+        self.bilateral_rhs.zero_()
+        self.bilateral_solution.zero_()
 
 
 class DVIData:
@@ -85,6 +92,7 @@ class DVIData:
         self.status: wp.array | None = None
         self.state: DVIState | None = None
         self.solution: PADMMSolution | None = None
+        self.bilateral_operator: DenseLinearOperatorData | None = None
         if size is not None:
             self.finalize(size=size, device=device)
 
@@ -95,6 +103,7 @@ class DVIData:
             self.status = wp.zeros(shape=(size.num_worlds,), dtype=DVIStatus)
             self.state = DVIState(size)
             self.solution = PADMMSolution(size)
+            self.bilateral_operator = None
 
 
 def convert_config_to_struct(config: DVISolverConfig) -> DVIConfigStruct:

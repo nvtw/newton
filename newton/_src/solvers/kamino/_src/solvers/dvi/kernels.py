@@ -72,6 +72,86 @@ def _reset_dvi_solver_data(
 
 
 @wp.kernel
+def _copy_bilateral_block(
+    # Inputs:
+    problem_dim: wp.array[int32],
+    problem_mio: wp.array[int32],
+    problem_njc: wp.array[int32],
+    problem_D: wp.array[float32],
+    solver_config: wp.array[DVIConfigStruct],
+    bilateral_mio: wp.array[int32],
+    # Outputs:
+    bilateral_D: wp.array[float32],
+):
+    wid, tid = wp.tid()
+
+    njc = problem_njc[wid]
+    if njc == 0 or tid >= njc * njc:
+        return
+
+    ncts = problem_dim[wid]
+    pmio = problem_mio[wid]
+    bmio = bilateral_mio[wid]
+    row = tid // njc
+    col = tid - row * njc
+
+    val = problem_D[pmio + ncts * row + col]
+    if row == col:
+        val += solver_config[wid].regularization
+    bilateral_D[bmio + njc * row + col] = val
+
+
+@wp.kernel
+def _build_bilateral_rhs(
+    # Inputs:
+    problem_dim: wp.array[int32],
+    problem_mio: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_njc: wp.array[int32],
+    problem_D: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    bilateral_vio: wp.array[int32],
+    solution_lambdas: wp.array[float32],
+    # Outputs:
+    bilateral_rhs: wp.array[float32],
+):
+    wid, row = wp.tid()
+
+    njc = problem_njc[wid]
+    if row >= njc:
+        return
+
+    ncts = problem_dim[wid]
+    pmio = problem_mio[wid]
+    pvio = problem_vio[wid]
+    bvio = bilateral_vio[wid]
+
+    rhs = -problem_v_f[pvio + row]
+    for col in range(njc, ncts):
+        rhs -= problem_D[pmio + ncts * row + col] * solution_lambdas[pvio + col]
+    bilateral_rhs[bvio + row] = rhs
+
+
+@wp.kernel
+def _scatter_bilateral_solution(
+    # Inputs:
+    problem_vio: wp.array[int32],
+    problem_njc: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    bilateral_solution: wp.array[float32],
+    # Outputs:
+    solution_lambdas: wp.array[float32],
+):
+    wid, row = wp.tid()
+
+    njc = problem_njc[wid]
+    if row >= njc:
+        return
+
+    solution_lambdas[problem_vio[wid] + row] = bilateral_solution[bilateral_vio[wid] + row]
+
+
+@wp.kernel
 def _solve_dvi_pgs(
     # Inputs:
     problem_dim: wp.array[int32],
@@ -132,6 +212,115 @@ def _solve_dvi_pgs(
                 solution_lambdas[vio + i] += delta
                 max_step = wp.max(max_step, wp.abs(delta))
                 max_velocity = wp.max(max_velocity, wp.abs(v_i))
+
+            for l in range(nl):
+                i = lcgo + l
+                v_i = _compute_row_velocity(ncts, mio, vio, i, problem_D, problem_v_f, solution_lambdas)
+                D_ii = wp.abs(problem_D[mio + ncts * i + i]) + cfg.regularization + FLOAT32_EPS
+                lambda_limit_old = solution_lambdas[vio + i]
+                lambda_limit_new = wp.max(0.0, lambda_limit_old - cfg.omega * v_i / D_ii)
+                solution_lambdas[vio + i] = lambda_limit_new
+                max_step = wp.max(max_step, wp.abs(lambda_limit_new - lambda_limit_old))
+                max_velocity = wp.max(max_velocity, wp.abs(wp.min(v_i, 0.0)))
+                max_complementarity = wp.max(max_complementarity, wp.abs(lambda_limit_new * v_i))
+
+            for cid in range(nc):
+                ccio = ccgo + 3 * cid
+                v_c = _contact_velocity_aug(
+                    ncts,
+                    mio,
+                    vio,
+                    ccgo,
+                    cio,
+                    cid,
+                    problem_D,
+                    problem_v_f,
+                    solution_lambdas,
+                    problem_mu,
+                )
+                D_00 = wp.abs(problem_D[mio + ncts * (ccio + 0) + (ccio + 0)])
+                D_11 = wp.abs(problem_D[mio + ncts * (ccio + 1) + (ccio + 1)])
+                D_22 = wp.abs(problem_D[mio + ncts * (ccio + 2) + (ccio + 2)])
+                D_kk = wp.max(vec3f(D_00, D_11, D_22)) + cfg.regularization + FLOAT32_EPS
+                lambda_contact_old = vec3f(
+                    solution_lambdas[vio + ccio + 0],
+                    solution_lambdas[vio + ccio + 1],
+                    solution_lambdas[vio + ccio + 2],
+                )
+                lambda_contact_arg = lambda_contact_old - (cfg.omega / D_kk) * v_c
+                lambda_contact_new = project_to_coulomb_cone(lambda_contact_arg, problem_mu[cio + cid])
+                solution_lambdas[vio + ccio + 0] = lambda_contact_new.x
+                solution_lambdas[vio + ccio + 1] = lambda_contact_new.y
+                solution_lambdas[vio + ccio + 2] = lambda_contact_new.z
+                lambda_delta = lambda_contact_new - lambda_contact_old
+                max_step = wp.max(max_step, wp.max(wp.abs(lambda_delta)))
+                max_velocity = wp.max(max_velocity, wp.max(wp.abs(v_c)))
+                max_complementarity = wp.max(max_complementarity, wp.abs(wp.dot(lambda_contact_new, v_c)))
+
+            status.iterations = iteration + int32(1)
+            status.r_p = max_step
+            status.r_d = max_velocity
+            status.r_c = max_complementarity
+            if max_step <= cfg.tolerance:
+                status.converged = int32(1)
+                done = int32(1)
+
+    if done == 0:
+        status.converged = int32(0)
+
+    solver_status[wid] = status
+
+
+@wp.kernel
+def _solve_dvi_unilateral_pgs(
+    # Inputs:
+    problem_dim: wp.array[int32],
+    problem_mio: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_lcgo: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_D: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solver_status: wp.array[DVIStatus],
+    solution_lambdas: wp.array[float32],
+):
+    wid = wp.tid()
+
+    ncts = problem_dim[wid]
+    vio = problem_vio[wid]
+    mio = problem_mio[wid]
+    nl = problem_nl[wid]
+    nc = problem_nc[wid]
+    lcgo = problem_lcgo[wid]
+    ccgo = problem_ccgo[wid]
+    cio = problem_cio[wid]
+    cfg = solver_config[wid]
+
+    status = DVIStatus()
+    status.converged = int32(0)
+    status.iterations = int32(0)
+    status.r_p = float32(0.0)
+    status.r_d = float32(0.0)
+    status.r_c = float32(0.0)
+
+    if ncts == 0 or (nl == 0 and nc == 0):
+        status.converged = int32(1)
+        status.iterations = int32(1)
+        solver_status[wid] = status
+        return
+
+    done = int32(0)
+    for iteration in range(cfg.max_iterations):
+        if done == 0:
+            max_step = float32(0.0)
+            max_velocity = float32(0.0)
+            max_complementarity = float32(0.0)
 
             for l in range(nl):
                 i = lcgo + l

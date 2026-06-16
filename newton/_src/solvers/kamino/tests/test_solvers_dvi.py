@@ -15,9 +15,9 @@ import newton._src.solvers.kamino.config as kamino_config
 from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
 from newton._src.solvers.kamino._src.linalg import LLTBlockedSolver
 from newton._src.solvers.kamino._src.models.builders import basics
-from newton._src.solvers.kamino._src.utils.benchmark.configs import make_benchmark_configs
 from newton._src.solvers.kamino._src.solvers.dvi import DVISolver
 from newton._src.solvers.kamino._src.solvers.padmm.types import PADMMWarmStartMode
+from newton._src.solvers.kamino._src.utils.benchmark.configs import make_benchmark_configs
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton._src.solvers.kamino.tests import setup_tests, test_context
 from newton._src.solvers.kamino.tests.utils.extract import extract_delassus, extract_problem_vector
@@ -29,12 +29,8 @@ def _check_solution_matches_dual_problem(testcase: unittest.TestCase, problem: D
     D_np = extract_delassus(problem.delassus, only_active_dims=True)
     v_f_np = extract_problem_vector(problem.delassus, problem.data.v_f.numpy(), only_active_dims=True)
     P_np = extract_problem_vector(problem.delassus, problem.data.P.numpy(), only_active_dims=True)
-    lambdas_np = extract_problem_vector(
-        problem.delassus, solver.data.solution.lambdas.numpy(), only_active_dims=True
-    )
-    v_plus_np = extract_problem_vector(
-        problem.delassus, solver.data.solution.v_plus.numpy(), only_active_dims=True
-    )
+    lambdas_np = extract_problem_vector(problem.delassus, solver.data.solution.lambdas.numpy(), only_active_dims=True)
+    v_plus_np = extract_problem_vector(problem.delassus, solver.data.solution.v_plus.numpy(), only_active_dims=True)
 
     status = solver.data.status.numpy()
     for wid in range(problem.data.num_worlds):
@@ -150,7 +146,52 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(body_qd)))
         self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
 
-    def test_03_benchmark_configs_include_dvi_dr_legs(self):
+    def test_03_dvi_solve_single_contact(self):
+        builder = basics.build_box_on_plane()
+        model, data, state, limits, detector, jacobians = make_containers(
+            builder=builder,
+            device=self.device,
+            max_world_contacts=1,
+            sparse=False,
+        )
+        update_containers(
+            model=model,
+            data=data,
+            state=state,
+            limits=limits,
+            detector=detector,
+            jacobians=jacobians,
+        )
+        self.assertGreater(int(detector.contacts.model_active_contacts.numpy()[0]), 0)
+
+        problem = DualProblem(
+            model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
+            solver=LLTBlockedSolver,
+            sparse=False,
+        )
+        problem.build(model=model, data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians)
+
+        solver = DVISolver(
+            model=model,
+            config=kamino_config.DVISolverConfig(max_iterations=200, tolerance=1e-4),
+            warmstart=PADMMWarmStartMode.NONE,
+        )
+        solver.reset()
+        solver.coldstart()
+        solver.solve(problem)
+        wp.synchronize()
+
+        status = solver.data.status.numpy()[0]
+        self.assertEqual(int(status["converged"]), 1)
+        self.assertLessEqual(int(status["iterations"]), solver.config[0].max_iterations)
+        self.assertTrue(np.all(np.isfinite(solver.data.solution.lambdas.numpy())))
+        self.assertTrue(np.all(np.isfinite(solver.data.solution.v_plus.numpy())))
+
+    def test_04_benchmark_configs_include_dvi_dr_legs(self):
         configs = make_benchmark_configs(include_default=False)
         self.assertIn("Dense DVI Dr Legs", configs)
         config = configs["Dense DVI Dr Legs"]

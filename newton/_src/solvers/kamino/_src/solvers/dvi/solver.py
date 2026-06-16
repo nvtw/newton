@@ -11,22 +11,28 @@ from ....config import DVISolverConfig
 from ...core.data import DataKamino
 from ...core.model import ModelKamino
 from ...core.size import SizeKamino
+from ...core.types import float32, to_warp_int32_array
 from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
+from ...linalg import DenseLinearOperatorData, DenseSquareMultiLinearInfo, LLTBlockedSolver
 from ..base import ForwardDynamicsSolver
-from ..padmm.types import PADMMWarmStartMode
 from ..padmm.kernels import (
     _apply_dual_preconditioner_to_solution,
     _warmstart_contact_constraints,
     _warmstart_joint_constraints,
     _warmstart_limit_constraints,
 )
+from ..padmm.types import PADMMWarmStartMode
 from .kernels import (
+    _build_bilateral_rhs,
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
+    _copy_bilateral_block,
     _reset_dvi_solver_data,
+    _scatter_bilateral_solution,
     _solve_dvi_pgs,
+    _solve_dvi_unilateral_pgs,
     _unprecondition_dvi_solution,
 )
 from .types import DVIConfigStruct, DVIData, convert_config_to_struct
@@ -51,6 +57,7 @@ class DVISolver(ForwardDynamicsSolver):
         self._collect_info: bool = False
         self._size: SizeKamino | None = None
         self._data: DVIData | None = None
+        self._bilateral_solver: LLTBlockedSolver | None = None
         self._device: wp.DeviceLike = None
 
         if model is not None:
@@ -95,10 +102,41 @@ class DVISolver(ForwardDynamicsSolver):
         self._warmstart = warmstart
         self._collect_info = collect_info
         self._data = DVIData(size=self._size, device=self._device)
+        self._allocate_bilateral_solver(model)
 
         configs = [convert_config_to_struct(c) for c in self._config]
         with wp.ScopedDevice(self._device):
             self._data.config = wp.array(configs, dtype=DVIConfigStruct)
+
+    def _allocate_bilateral_solver(self, model: ModelKamino):
+        """Allocate the reduced dense operator used for bilateral DVI solves."""
+        self._bilateral_solver = None
+        self._data.bilateral_operator = None
+        if model.size.sum_of_num_joint_cts == 0:
+            return
+
+        joint_cts_per_world = model.info.num_joint_cts.numpy().astype(int).tolist()
+        if any(njc <= 0 for njc in joint_cts_per_world):
+            return
+
+        mat_sizes = [njc * njc for njc in joint_cts_per_world]
+        mat_offsets = [0]
+        for size in mat_sizes[:-1]:
+            mat_offsets.append(mat_offsets[-1] + size)
+
+        operator = DenseLinearOperatorData()
+        operator.info = DenseSquareMultiLinearInfo()
+        operator.info.assign(
+            maxdim=model.info.num_joint_cts,
+            dim=model.info.num_joint_cts,
+            mio=to_warp_int32_array(mat_offsets, device=self._device),
+            vio=model.info.joint_cts_offset,
+            dtype=float32,
+            device=self._device,
+        )
+        operator.mat = wp.zeros(shape=(operator.info.total_mat_size,), dtype=float32, device=self._device)
+        self._data.bilateral_operator = operator
+        self._bilateral_solver = LLTBlockedSolver(operator=operator, device=self._device)
 
     @staticmethod
     def _check_config(
@@ -165,32 +203,35 @@ class DVISolver(ForwardDynamicsSolver):
                 raise ValueError(f"Invalid warmstart mode: {self._warmstart}")
 
     def solve(self, problem: DualProblem):
-        """Solve ``problem`` using projected Gauss-Seidel over its dense Delassus matrix."""
+        """Solve ``problem`` using a DVI-style projected method on Kamino's dual system."""
         if problem.sparse:
             raise ValueError("The DVI solver currently requires `sparse_dynamics=False`.")
 
-        wp.launch(
-            kernel=_solve_dvi_pgs,
-            dim=self._size.num_worlds,
-            inputs=[
-                problem.data.dim,
-                problem.data.mio,
-                problem.data.vio,
-                problem.data.njc,
-                problem.data.nl,
-                problem.data.nc,
-                problem.data.lcgo,
-                problem.data.ccgo,
-                problem.data.cio,
-                problem.data.mu,
-                problem.data.D,
-                problem.data.v_f,
-                self._data.config,
-                self._data.status,
-                self._data.solution.lambdas,
-            ],
-            device=self.device,
-        )
+        if self._bilateral_solver is not None and self._data.bilateral_operator is not None:
+            self._solve_with_bilateral_direct_block(problem)
+        else:
+            wp.launch(
+                kernel=_solve_dvi_pgs,
+                dim=self._size.num_worlds,
+                inputs=[
+                    problem.data.dim,
+                    problem.data.mio,
+                    problem.data.vio,
+                    problem.data.njc,
+                    problem.data.nl,
+                    problem.data.nc,
+                    problem.data.lcgo,
+                    problem.data.ccgo,
+                    problem.data.cio,
+                    problem.data.mu,
+                    problem.data.D,
+                    problem.data.v_f,
+                    self._data.config,
+                    self._data.status,
+                    self._data.solution.lambdas,
+                ],
+                device=self.device,
+            )
 
         wp.launch(
             kernel=_compute_dvi_solution_vectors,
@@ -240,6 +281,81 @@ class DVISolver(ForwardDynamicsSolver):
             ],
             device=self.device,
         )
+
+    def _solve_bilateral_block(self, problem: DualProblem):
+        operator = self._data.bilateral_operator
+        state = self._data.state
+        wp.launch(
+            kernel=_build_bilateral_rhs,
+            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
+            inputs=[
+                problem.data.dim,
+                problem.data.mio,
+                problem.data.vio,
+                problem.data.njc,
+                problem.data.D,
+                problem.data.v_f,
+                operator.info.vio,
+                self._data.solution.lambdas,
+                state.bilateral_rhs,
+            ],
+            device=self.device,
+        )
+        self._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
+        wp.launch(
+            kernel=_scatter_bilateral_solution,
+            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
+            inputs=[
+                problem.data.vio,
+                problem.data.njc,
+                operator.info.vio,
+                state.bilateral_solution,
+                self._data.solution.lambdas,
+            ],
+            device=self.device,
+        )
+
+    def _solve_with_bilateral_direct_block(self, problem: DualProblem):
+        operator = self._data.bilateral_operator
+        wp.launch(
+            kernel=_copy_bilateral_block,
+            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts * self._size.max_of_num_joint_cts),
+            inputs=[
+                problem.data.dim,
+                problem.data.mio,
+                problem.data.njc,
+                problem.data.D,
+                self._data.config,
+                operator.info.mio,
+                operator.mat,
+            ],
+            device=self.device,
+        )
+        self._bilateral_solver.compute(A=operator.mat)
+        self._solve_bilateral_block(problem)
+
+        wp.launch(
+            kernel=_solve_dvi_unilateral_pgs,
+            dim=self._size.num_worlds,
+            inputs=[
+                problem.data.dim,
+                problem.data.mio,
+                problem.data.vio,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.lcgo,
+                problem.data.ccgo,
+                problem.data.cio,
+                problem.data.mu,
+                problem.data.D,
+                problem.data.v_f,
+                self._data.config,
+                self._data.status,
+                self._data.solution.lambdas,
+            ],
+            device=self.device,
+        )
+        self._solve_bilateral_block(problem)
 
     def _warmstart_from_solution(self, problem: DualProblem):
         wp.launch(

@@ -319,7 +319,7 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     # DVI
     config.dvi.max_iterations = 200
     config.dvi.tolerance = 1e-4
-    config.dvi.regularization = 1e-8
+    config.dvi.regularization = 1e-5
     config.dvi.omega = 1.0
     # ------------------------------------------------------------------------------
     # Warm-starting

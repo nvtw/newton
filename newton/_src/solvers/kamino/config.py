@@ -793,10 +793,10 @@ class DVISolverConfig:
     Must be non-negative. Defaults to `1e-5`.
     """
 
-    regularization: float = 1e-8
+    regularization: float = 1e-6
     """
     Diagonal regularization added to each projected update denominator.
-    Must be positive. Defaults to `1e-8`.
+    Must be positive. Defaults to `1e-6`.
     """
 
     omega: float = 1.0
