@@ -148,9 +148,7 @@ class ViewerBase(ABC):
             existing = base.__dict__.get(name)
             if existing is None:
                 continue
-            if isinstance(existing, property) and getattr(
-                existing.fget, "_newton_layer_property_name", None
-            ) == name:
+            if isinstance(existing, property) and getattr(existing.fget, "_newton_layer_property_name", None) == name:
                 return
             return
 
