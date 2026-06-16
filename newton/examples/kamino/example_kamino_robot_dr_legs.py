@@ -26,6 +26,7 @@ class Example:
         self.sim_time = 0.0
         self.world_count = args.world_count if args else 1
         self.use_kamino_contacts = args.use_kamino_contacts if args else False
+        self.dynamics_solver = args.dynamics_solver if args else "padmm"
         self.viewer = viewer
         self.device = wp.get_device()
 
@@ -66,6 +67,7 @@ class Example:
 
         # Create the Kamino solver for the given model
         self.config = newton.solvers.SolverKamino.Config.from_model(self.model)
+        self.config.dynamics_solver = self.dynamics_solver
         self.config.use_fk_solver = True
         self.config.use_collision_detector = self.use_kamino_contacts
         self.config.constraints.delta = 1e-3
@@ -73,6 +75,13 @@ class Example:
         self.config.padmm.primal_tolerance = 1e-4
         self.config.padmm.dual_tolerance = 1e-4
         self.config.padmm.compl_tolerance = 1e-4
+        if self.dynamics_solver == "dvi":
+            self.config.sparse_dynamics = False
+            self.config.sparse_jacobian = False
+            self.config.dvi.max_iterations = 200
+            self.config.dvi.tolerance = 1e-4
+            self.config.dvi.regularization = 1e-5
+            self.config.dvi.block_iterations = 8
         self.solver = newton.solvers.SolverKamino(self.model, config=self.config)
 
         # Set joint armature and viscous damping for better
@@ -167,6 +176,12 @@ class Example:
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
         newton.examples.add_kamino_contacts_arg(parser)
+        parser.add_argument(
+            "--dynamics-solver",
+            choices=("padmm", "dvi"),
+            default="padmm",
+            help="Kamino dynamics solver to use.",
+        )
         parser.set_defaults(world_count=1)
         parser.set_defaults(use_kamino_contacts=True)
         return parser
