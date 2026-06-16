@@ -26,26 +26,20 @@ from ..padmm.kernels import (
 from ..padmm.types import PADMMWarmStartMode
 from .kernels import (
     _apply_dvi_contact_jacobi_delta,
-    _build_bilateral_column_rhs,
     _build_bilateral_free_velocity_rhs,
     _build_bilateral_rhs,
-    _build_reduced_unilateral_rhs,
     _compute_dvi_contact_jacobi_delta,
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
     _compute_dvi_status_residuals,
     _copy_bilateral_block,
-    _gather_unilateral_solution,
     _initialize_dvi_status,
     _reset_dvi_solver_data,
     _scatter_bilateral_solution,
-    _scatter_unilateral_solution,
     _solve_dvi_contacts_colored_gs,
     _solve_dvi_limits_pgs,
     _solve_dvi_pgs,
-    _solve_dvi_reduced_unilateral_pgs,
     _unprecondition_dvi_solution,
-    _write_reduced_unilateral_column,
 )
 from .types import DVIConfigStruct, DVIData, convert_config_to_struct
 
@@ -70,7 +64,6 @@ class DVISolver(ForwardDynamicsSolver):
         self._size: SizeKamino | None = None
         self._data: DVIData | None = None
         self._bilateral_solver: LLTBlockedSolver | None = None
-        self._max_unilateral_dim: int = 0
         self._max_block_iterations: int = 1
         self._max_contact_iterations: int = 1
         self._has_unilateral_constraints: bool = False
@@ -157,40 +150,6 @@ class DVISolver(ForwardDynamicsSolver):
         operator.mat = wp.zeros(shape=(operator.info.total_mat_size,), dtype=float32, device=self._device)
         self._data.bilateral_operator = operator
         self._bilateral_solver = LLTBlockedSolver(operator=operator, device=self._device)
-
-    def _allocate_unilateral_operator(self, model: ModelKamino):
-        """Allocate the dense Schur complement operator for unilateral rows."""
-        self._max_unilateral_dim = 0
-        self._data.unilateral_operator = None
-
-        max_total_cts = model.info.max_total_cts.numpy().astype(int).tolist()
-        num_joint_cts = model.info.num_joint_cts.numpy().astype(int).tolist()
-        max_unilateral_cts = [max(0, ncts - njc) for ncts, njc in zip(max_total_cts, num_joint_cts, strict=True)]
-        self._max_unilateral_dim = max(max_unilateral_cts, default=0)
-        if self._max_unilateral_dim == 0:
-            return
-
-        allocation_dims = [max(1, dim) for dim in max_unilateral_cts]
-        mat_sizes = [dim * dim for dim in allocation_dims]
-        mat_offsets = [0]
-        for size in mat_sizes[:-1]:
-            mat_offsets.append(mat_offsets[-1] + size)
-        vec_offsets = [0]
-        for dim in allocation_dims[:-1]:
-            vec_offsets.append(vec_offsets[-1] + dim)
-
-        operator = DenseLinearOperatorData()
-        operator.info = DenseSquareMultiLinearInfo()
-        operator.info.assign(
-            maxdim=to_warp_int32_array(allocation_dims, device=self._device),
-            dim=to_warp_int32_array(allocation_dims, device=self._device),
-            mio=to_warp_int32_array(mat_offsets, device=self._device),
-            vio=to_warp_int32_array(vec_offsets, device=self._device),
-            dtype=float32,
-            device=self._device,
-        )
-        operator.mat = wp.zeros(shape=(operator.info.total_mat_size,), dtype=float32, device=self._device)
-        self._data.unilateral_operator = operator
 
     @staticmethod
     def _check_config(
@@ -432,114 +391,6 @@ class DVISolver(ForwardDynamicsSolver):
             device=self.device,
         )
         self._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
-
-    def _build_reduced_unilateral_problem(self, problem: DualProblem):
-        bilateral_operator = self._data.bilateral_operator
-        unilateral_operator = self._data.unilateral_operator
-        state = self._data.state
-        unilateral_operator.zero()
-
-        self._solve_bilateral_free_velocity(problem)
-        wp.launch(
-            kernel=_build_reduced_unilateral_rhs,
-            dim=(self._size.num_worlds, self._max_unilateral_dim),
-            inputs=[
-                problem.data.dim,
-                problem.data.mio,
-                problem.data.vio,
-                problem.data.njc,
-                problem.data.D,
-                problem.data.v_f,
-                bilateral_operator.info.vio,
-                state.bilateral_solution,
-                unilateral_operator.info.vio,
-                state.unilateral_rhs,
-            ],
-            device=self.device,
-        )
-
-        for col in range(self._max_unilateral_dim):
-            wp.launch(
-                kernel=_build_bilateral_column_rhs,
-                dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
-                inputs=[
-                    problem.data.dim,
-                    problem.data.mio,
-                    problem.data.njc,
-                    problem.data.D,
-                    col,
-                    bilateral_operator.info.vio,
-                    state.bilateral_rhs,
-                ],
-                device=self.device,
-            )
-            self._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
-            wp.launch(
-                kernel=_write_reduced_unilateral_column,
-                dim=(self._size.num_worlds, self._max_unilateral_dim),
-                inputs=[
-                    problem.data.dim,
-                    problem.data.mio,
-                    problem.data.njc,
-                    problem.data.D,
-                    col,
-                    bilateral_operator.info.vio,
-                    state.bilateral_solution,
-                    unilateral_operator.info.maxdim,
-                    unilateral_operator.info.mio,
-                    unilateral_operator.mat,
-                ],
-                device=self.device,
-            )
-
-    def _solve_reduced_unilateral_block(self, problem: DualProblem):
-        operator = self._data.unilateral_operator
-        state = self._data.state
-        wp.launch(
-            kernel=_gather_unilateral_solution,
-            dim=(self._size.num_worlds, self._max_unilateral_dim),
-            inputs=[
-                problem.data.dim,
-                problem.data.vio,
-                problem.data.njc,
-                operator.info.vio,
-                self._data.solution.lambdas,
-                state.unilateral_solution,
-            ],
-            device=self.device,
-        )
-        wp.launch(
-            kernel=_solve_dvi_reduced_unilateral_pgs,
-            dim=self._size.num_worlds,
-            inputs=[
-                problem.data.nl,
-                problem.data.nc,
-                problem.data.cio,
-                problem.data.mu,
-                operator.info.maxdim,
-                operator.info.mio,
-                operator.info.vio,
-                operator.mat,
-                state.unilateral_rhs,
-                self._data.config,
-                self._data.status,
-                state.unilateral_solution,
-            ],
-            device=self.device,
-        )
-        wp.launch(
-            kernel=_scatter_unilateral_solution,
-            dim=(self._size.num_worlds, self._max_unilateral_dim),
-            inputs=[
-                problem.data.dim,
-                problem.data.vio,
-                problem.data.njc,
-                operator.info.vio,
-                state.unilateral_solution,
-                self._data.solution.lambdas,
-            ],
-            device=self.device,
-        )
 
     def _solve_with_bilateral_direct_block(self, problem: DualProblem):
         self._factor_bilateral_block(problem)

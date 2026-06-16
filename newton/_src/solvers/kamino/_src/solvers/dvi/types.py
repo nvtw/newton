@@ -65,8 +65,6 @@ class DVIState:
         self.scratch: wp.array | None = None
         self.bilateral_rhs: wp.array | None = None
         self.bilateral_solution: wp.array | None = None
-        self.unilateral_rhs: wp.array | None = None
-        self.unilateral_solution: wp.array | None = None
         self.contact_colors: wp.array | None = None
         self.contact_num_colors: wp.array | None = None
         if size is not None:
@@ -80,8 +78,6 @@ class DVIState:
         self.scratch = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
         self.bilateral_rhs = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
         self.bilateral_solution = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
-        self.unilateral_rhs = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
-        self.unilateral_solution = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
         self.contact_colors = wp.full(max(1, size.sum_of_max_contacts), -1, dtype=int32)
         self.contact_num_colors = wp.zeros(max(1, size.num_worlds), dtype=int32)
 
@@ -93,8 +89,6 @@ class DVIState:
         self.scratch.zero_()
         self.bilateral_rhs.zero_()
         self.bilateral_solution.zero_()
-        self.unilateral_rhs.zero_()
-        self.unilateral_solution.zero_()
         self.contact_colors.fill_(-1)
         self.contact_num_colors.zero_()
 
@@ -112,7 +106,6 @@ class DVIData:
         self.state: DVIState | None = None
         self.solution: PADMMSolution | None = None
         self.bilateral_operator: DenseLinearOperatorData | None = None
-        self.unilateral_operator: DenseLinearOperatorData | None = None
         if size is not None:
             self.finalize(size=size, device=device)
 
@@ -124,7 +117,6 @@ class DVIData:
             self.state = DVIState(size)
             self.solution = PADMMSolution(size)
             self.bilateral_operator = None
-            self.unilateral_operator = None
 
 
 def convert_config_to_struct(config: DVISolverConfig) -> DVIConfigStruct:

@@ -277,7 +277,6 @@ class TestDVISolver(unittest.TestCase):
         problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
         solver = _solve_dvi(model, problem)
 
-        self.assertIsNone(solver.data.unilateral_operator)
         _assert_solver_status_converged(self, solver)
         _check_solution_matches_dual_problem(self, problem, solver)
 
