@@ -114,8 +114,8 @@ class TestDVISolver(unittest.TestCase):
         )
         self.assertEqual(config.dynamics_solver, "dvi")
         self.assertEqual(config.dvi.max_iterations, 32)
-        self.assertEqual(config.dvi.block_iterations, 32)
-        self.assertEqual(config.dvi.contact_iterations, 2)
+        self.assertEqual(config.dvi.block_iterations, 24)
+        self.assertEqual(config.dvi.contact_iterations, 3)
         self.assertEqual(config.dvi.contact_warmstart_method, "geom_pair_net_force")
 
         with self.assertRaises(ValueError):
@@ -438,13 +438,29 @@ class TestDVISolver(unittest.TestCase):
         example = Example(ViewerNull(num_frames=1), args)
 
         contact_seen = False
+        color_checked = False
         for _ in range(12):
             example.step()
             body_q = example.state_0.body_q.numpy()
             body_qd = example.state_0.body_qd.numpy()
             lambdas = example.solver._solver_kamino.solver_fd.data.solution.lambdas.numpy()
-            contact_count = int(example.contacts.rigid_contact_count.numpy()[0])
+            kamino_contacts = example.solver._contacts_kamino
+            contact_count = int(kamino_contacts.world_active_contacts.numpy()[0])
             contact_seen = contact_seen or contact_count > 0
+            if contact_count > 0:
+                solver_fd = example.solver._solver_kamino.solver_fd
+                color_count = int(solver_fd.data.state.contact_num_colors.numpy()[0])
+                colors = solver_fd.data.state.contact_colors.numpy()
+                bid_ab = kamino_contacts.bid_AB.numpy()
+                self.assertGreater(color_count, 0)
+                self.assertTrue(np.all(colors[:contact_count] >= 0))
+                for ci in range(contact_count):
+                    bodies_i = {int(bid_ab[ci][0]), int(bid_ab[ci][1])} - {-1}
+                    for cj in range(ci):
+                        if colors[ci] == colors[cj]:
+                            bodies_j = {int(bid_ab[cj][0]), int(bid_ab[cj][1])} - {-1}
+                            self.assertFalse(bodies_i & bodies_j)
+                color_checked = True
 
             self.assertTrue(np.all(np.isfinite(body_q)))
             self.assertTrue(np.all(np.isfinite(body_qd)))
@@ -453,6 +469,7 @@ class TestDVISolver(unittest.TestCase):
             self.assertLess(float(np.max(np.abs(lambdas))), 100.0)
 
         self.assertTrue(contact_seen)
+        self.assertTrue(color_checked)
 
     def test_10_dr_legs_dvi_tipped_contact_does_not_creep(self):
         if not self.device.is_cuda:
@@ -486,7 +503,89 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(body_qd)))
         self.assertLess(float(np.linalg.norm(base_delta_xy)), 0.006)
 
-    def test_11_benchmark_configs_include_dvi_dr_legs(self):
+    def test_11_dvi_opening_contact_releases_warmstarted_force(self):
+        if not self.device.is_cuda:
+            self.skipTest("DVI colored contact release regression uses the CUDA graph-colored path")
+
+        radius = 0.1
+        separation = 0.005
+        gap = 0.03
+        z = radius + separation
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(gap=gap, margin=0.0)
+        body = builder.add_link(
+            xform=wp.transform(p=wp.vec3(0.0, 0.0, z), q=wp.quat_identity()),
+            mass=1.0,
+        )
+        builder.add_shape_sphere(body=body, radius=radius, cfg=shape_cfg)
+        joint = builder.add_joint_prismatic(
+            parent=-1,
+            child=body,
+            axis=newton.Axis.Z,
+            parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, z), q=wp.quat_identity()),
+            child_xform=wp.transform_identity(),
+            limit_lower=-10.0,
+            limit_upper=10.0,
+        )
+        builder.add_articulation([joint])
+        builder.add_ground_plane(cfg=shape_cfg)
+        model = builder.finalize(device=self.device)
+
+        joint_qd = model.joint_qd.numpy()
+        joint_qd[:] = 1.0
+        model.joint_qd.assign(joint_qd)
+
+        state_0 = model.state()
+        state_1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+
+        config = SolverKamino.Config(
+            use_collision_detector=True,
+            collision_detector=kamino_config.CollisionDetectorConfig(
+                max_contacts_per_world=8,
+                max_contacts_per_pair=8,
+                default_gap=gap,
+            ),
+            dynamics_solver="dvi",
+            dvi=kamino_config.DVISolverConfig(
+                max_iterations=300,
+                tolerance=1e-5,
+                regularization=1e-5,
+                block_iterations=24,
+                contact_iterations=3,
+            ),
+        )
+        solver = SolverKamino(model, config=config)
+
+        solver.step(state_0, state_1, control=None, contacts=None, dt=1e-3)
+        self.assertEqual(int(solver._contacts_kamino.model_active_contacts.numpy()[0]), 1)
+
+        cache = solver._solver_kamino._ws_contacts.cache
+        self.assertIsNotNone(cache)
+        reaction = cache.reaction.numpy()
+        reaction[:, :] = 0.0
+        reaction[0, 2] = 10000.0
+        cache.reaction.assign(reaction)
+        velocity = cache.velocity.numpy()
+        velocity[:, :] = 0.0
+        cache.velocity.assign(velocity)
+
+        solver.step(state_1, state_0, control=None, contacts=None, dt=1e-3)
+
+        contact_count = int(solver._contacts_kamino.model_active_contacts.numpy()[0])
+        gaps = solver._contacts_kamino.gapfunc.numpy()[:contact_count, 3]
+        contact_velocity = solver._contacts_kamino.velocity.numpy()[:contact_count, 2]
+        contact_reaction = solver._contacts_kamino.reaction.numpy()[:contact_count, 2]
+        opening = (gaps > 0.0) & (contact_velocity > 0.0)
+
+        self.assertTrue(np.any(opening))
+        self.assertLess(float(np.max(np.abs(contact_reaction[opening]))), 1e-3)
+        self.assertLess(float(abs(state_0.body_qd.numpy()[0, 2])), 2.0)
+        self.assertEqual(int(solver._solver_kamino.solver_fd.data.status.numpy()[0]["converged"]), 1)
+
+    def test_12_benchmark_configs_include_dvi_dr_legs(self):
         configs = make_benchmark_configs(include_default=False)
         self.assertIn("Dense DVI Dr Legs", configs)
         config = configs["Dense DVI Dr Legs"]
@@ -495,15 +594,15 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(config.sparse_jacobian)
         self.assertFalse(config.sparse_dynamics)
         self.assertEqual(config.dvi.warmstart_mode, "containers")
-        self.assertEqual(config.dvi.block_iterations, 32)
-        self.assertEqual(config.dvi.contact_iterations, 2)
+        self.assertEqual(config.dvi.block_iterations, 24)
+        self.assertEqual(config.dvi.contact_iterations, 3)
 
         focused_configs = make_dvi_padmm_benchmark_configs()
         self.assertEqual(set(focused_configs), {"PADMM accurate", "PADMM fast", "DVI"})
         self.assertEqual(focused_configs["DVI"].dynamics_solver, "dvi")
         self.assertEqual(focused_configs["PADMM fast"].dynamics_solver, "padmm")
 
-    def test_12_dvi_padmm_matrix_planning(self):
+    def test_13_dvi_padmm_matrix_planning(self):
         scenarios = make_matrix_scenarios(
             problem="dr_legs",
             world_counts=[1, 4],

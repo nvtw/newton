@@ -40,6 +40,7 @@ from .kernels import (
     _reset_dvi_solver_data,
     _scatter_bilateral_solution,
     _scatter_unilateral_solution,
+    _solve_dvi_contacts_colored_gs,
     _solve_dvi_limits_pgs,
     _solve_dvi_pgs,
     _solve_dvi_reduced_unilateral_pgs,
@@ -73,6 +74,7 @@ class DVISolver(ForwardDynamicsSolver):
         self._max_block_iterations: int = 1
         self._max_contact_iterations: int = 1
         self._has_unilateral_constraints: bool = False
+        self._contact_bid_AB: wp.array | None = None
         self._device: wp.DeviceLike = None
 
         if model is not None:
@@ -207,6 +209,13 @@ class DVISolver(ForwardDynamicsSolver):
             raise TypeError(f"Expected a single object or list of `DVISolver.Config`, got {type(config)}")
         return config
 
+    def set_contacts(self, contacts: ContactsKamino | None):
+        """Cache contact topology for graph-colored contact solves."""
+        if contacts is not None and contacts.model_max_contacts_host > 0:
+            self._contact_bid_AB = contacts.bid_AB
+        else:
+            self._contact_bid_AB = None
+
     def reset(self, problem: DualProblem | None = None, world_mask: wp.array | None = None):
         """Reset scratch state and cached solution data."""
         self._data.state.reset()
@@ -243,6 +252,7 @@ class DVISolver(ForwardDynamicsSolver):
     ):
         """Prepare a warm-start solve."""
         self._data.state.reset()
+        self.set_contacts(contacts)
 
         match self._warmstart:
             case PADMMWarmStartMode.NONE:
@@ -585,10 +595,10 @@ class DVISolver(ForwardDynamicsSolver):
                     device=self.device,
                 )
 
-                for _ in range(self._max_contact_iterations):
+                if self.device.is_cuda and self._contact_bid_AB is not None:
                     wp.launch(
-                        kernel=_compute_dvi_contact_jacobi_delta,
-                        dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+                        kernel=_solve_dvi_contacts_colored_gs,
+                        dim=self._size.num_worlds * 64,
                         inputs=[
                             problem.data.dim,
                             problem.data.mio,
@@ -598,28 +608,52 @@ class DVISolver(ForwardDynamicsSolver):
                             problem.data.cio,
                             problem.data.mu,
                             problem.data.D,
+                            self._contact_bid_AB,
                             self._data.config,
+                            self._data.state.contact_colors,
+                            self._data.state.contact_num_colors,
                             self._data.state.v_aug,
                             self._data.solution.lambdas,
-                            self._data.state.scratch,
                         ],
                         device=self.device,
+                        block_dim=64,
                     )
-                    wp.launch(
-                        kernel=_apply_dvi_contact_jacobi_delta,
-                        dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
-                        inputs=[
-                            problem.data.dim,
-                            problem.data.mio,
-                            problem.data.vio,
-                            problem.data.nc,
-                            problem.data.ccgo,
-                            problem.data.D,
-                            self._data.state.scratch,
-                            self._data.state.v_aug,
-                        ],
-                        device=self.device,
-                    )
+                else:
+                    for _ in range(self._max_contact_iterations):
+                        wp.launch(
+                            kernel=_compute_dvi_contact_jacobi_delta,
+                            dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+                            inputs=[
+                                problem.data.dim,
+                                problem.data.mio,
+                                problem.data.vio,
+                                problem.data.nc,
+                                problem.data.ccgo,
+                                problem.data.cio,
+                                problem.data.mu,
+                                problem.data.D,
+                                self._data.config,
+                                self._data.state.v_aug,
+                                self._data.solution.lambdas,
+                                self._data.state.scratch,
+                            ],
+                            device=self.device,
+                        )
+                        wp.launch(
+                            kernel=_apply_dvi_contact_jacobi_delta,
+                            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+                            inputs=[
+                                problem.data.dim,
+                                problem.data.mio,
+                                problem.data.vio,
+                                problem.data.nc,
+                                problem.data.ccgo,
+                                problem.data.D,
+                                self._data.state.scratch,
+                                self._data.state.v_aug,
+                            ],
+                            device=self.device,
+                        )
 
             self._solve_bilateral_block(problem)
 

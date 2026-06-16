@@ -1035,6 +1035,9 @@ class SolverKaminoImpl(SolverBase):
         else:
             self._solver_fd.coldstart()
 
+        if isinstance(self._solver_fd, DVISolver):
+            self._solver_fd.set_contacts(contacts)
+
         # Solve the dual problem to compute the constraint reactions
         self._solver_fd.solve(problem=self._problem_fd)
 
