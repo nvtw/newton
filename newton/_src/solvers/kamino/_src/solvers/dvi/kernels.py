@@ -778,6 +778,202 @@ def _solve_dvi_unilateral_pgs(
 
 
 @wp.kernel
+def _initialize_dvi_status(
+    # Inputs:
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solver_status: wp.array[DVIStatus],
+):
+    wid = wp.tid()
+    cfg = solver_config[wid]
+    status = DVIStatus()
+    status.converged = int32(0)
+    status.iterations = cfg.contact_iterations
+    status.r_p = float32(0.0)
+    status.r_d = float32(0.0)
+    status.r_c = float32(0.0)
+    status.r_b = float32(0.0)
+    solver_status[wid] = status
+
+
+@wp.kernel
+def _solve_dvi_limits_pgs(
+    # Inputs:
+    problem_dim: wp.array[int32],
+    problem_mio: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_lcgo: wp.array[int32],
+    problem_D: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solver_status: wp.array[DVIStatus],
+    solution_lambdas: wp.array[float32],
+):
+    wid = wp.tid()
+
+    ncts = problem_dim[wid]
+    vio = problem_vio[wid]
+    mio = problem_mio[wid]
+    nl = problem_nl[wid]
+    lcgo = problem_lcgo[wid]
+    cfg = solver_config[wid]
+
+    status = DVIStatus()
+    status.converged = int32(0)
+    status.iterations = cfg.contact_iterations
+    status.r_p = float32(0.0)
+    status.r_d = float32(0.0)
+    status.r_c = float32(0.0)
+    status.r_b = float32(0.0)
+
+    if ncts == 0 or nl == 0:
+        status.converged = int32(1)
+        solver_status[wid] = status
+        return
+
+    done = int32(0)
+    for iteration in range(cfg.max_iterations):
+        if done == 0:
+            max_step = float32(0.0)
+            max_velocity = float32(0.0)
+            max_complementarity = float32(0.0)
+
+            for l in range(nl):
+                i = lcgo + l
+                v_i = _compute_row_velocity(ncts, mio, vio, i, problem_D, problem_v_f, solution_lambdas)
+                D_ii_raw = wp.abs(problem_D[mio + ncts * i + i])
+                lambda_limit_old = solution_lambdas[vio + i]
+                lambda_limit_new = lambda_limit_old
+                if D_ii_raw > FLOAT32_EPS:
+                    lambda_limit_new = wp.max(0.0, lambda_limit_old - cfg.omega * v_i / (D_ii_raw + cfg.regularization))
+                solution_lambdas[vio + i] = lambda_limit_new
+                max_step = wp.max(max_step, wp.abs(lambda_limit_new - lambda_limit_old))
+                max_velocity = wp.max(max_velocity, wp.abs(wp.min(v_i, 0.0)))
+                max_complementarity = wp.max(max_complementarity, wp.abs(lambda_limit_new * v_i))
+
+            status.iterations = iteration + int32(1)
+            status.r_p = max_step
+            status.r_d = max_velocity
+            status.r_c = max_complementarity
+            if max_step <= cfg.tolerance:
+                status.converged = int32(1)
+                done = int32(1)
+
+    if done == 0:
+        status.converged = int32(0)
+
+    solver_status[wid] = status
+
+
+@wp.kernel
+def _compute_dvi_contact_jacobi_delta(
+    # Inputs:
+    problem_dim: wp.array[int32],
+    problem_mio: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_D: wp.array[float32],
+    solver_config: wp.array[DVIConfigStruct],
+    state_v_aug: wp.array[float32],
+    # Outputs:
+    solution_lambdas: wp.array[float32],
+    state_scratch: wp.array[float32],
+):
+    wid, cid = wp.tid()
+
+    nc = problem_nc[wid]
+    if cid >= nc:
+        return
+
+    ncts = problem_dim[wid]
+    vio = problem_vio[wid]
+    mio = problem_mio[wid]
+    ccgo = problem_ccgo[wid]
+    ccio = ccgo + int32(3) * cid
+    ccio_v = vio + ccio
+    mu_c = problem_mu[problem_cio[wid] + cid]
+    cfg = solver_config[wid]
+
+    v_t0 = state_v_aug[ccio_v + 0]
+    v_t1 = state_v_aug[ccio_v + 1]
+    v_n = state_v_aug[ccio_v + 2] + mu_c * wp.sqrt(v_t0 * v_t0 + v_t1 * v_t1)
+    v_c = vec3f(v_t0, v_t1, v_n)
+
+    D_block = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    trace = float32(0.0)
+    for row in range(3):
+        row_i = ccio + row
+        for col in range(3):
+            col_i = ccio + col
+            val = problem_D[mio + ncts * row_i + col_i]
+            if row == col:
+                trace += wp.abs(val)
+                val += cfg.regularization
+            D_block[row, col] = val
+
+    lambda_old = vec3f(
+        solution_lambdas[ccio_v + 0],
+        solution_lambdas[ccio_v + 1],
+        solution_lambdas[ccio_v + 2],
+    )
+    lambda_new = lambda_old
+    if trace > FLOAT32_EPS:
+        lambda_arg = lambda_old - cfg.omega * (wp.inverse(D_block) * v_c)
+        lambda_new = project_to_coulomb_cone(lambda_arg, mu_c)
+
+    delta = lambda_new - lambda_old
+    solution_lambdas[ccio_v + 0] = lambda_new.x
+    solution_lambdas[ccio_v + 1] = lambda_new.y
+    solution_lambdas[ccio_v + 2] = lambda_new.z
+    state_scratch[ccio_v + 0] = delta.x
+    state_scratch[ccio_v + 1] = delta.y
+    state_scratch[ccio_v + 2] = delta.z
+
+
+@wp.kernel
+def _apply_dvi_contact_jacobi_delta(
+    # Inputs:
+    problem_dim: wp.array[int32],
+    problem_mio: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_D: wp.array[float32],
+    state_scratch: wp.array[float32],
+    # Outputs:
+    state_v_aug: wp.array[float32],
+):
+    wid, row = wp.tid()
+
+    ncts = problem_dim[wid]
+    if row >= ncts:
+        return
+
+    nc = problem_nc[wid]
+    if nc == 0:
+        return
+
+    vio = problem_vio[wid]
+    mio = problem_mio[wid]
+    ccgo = problem_ccgo[wid]
+    row_mio = mio + ncts * row
+
+    dv = float32(0.0)
+    for cid in range(nc):
+        ccio = ccgo + int32(3) * cid
+        dv += problem_D[row_mio + ccio + 0] * state_scratch[vio + ccio + 0]
+        dv += problem_D[row_mio + ccio + 1] * state_scratch[vio + ccio + 1]
+        dv += problem_D[row_mio + ccio + 2] * state_scratch[vio + ccio + 2]
+
+    state_v_aug[vio + row] += dv
+
+
+@wp.kernel
 def _compute_dvi_solution_vectors(
     # Inputs:
     problem_dim: wp.array[int32],

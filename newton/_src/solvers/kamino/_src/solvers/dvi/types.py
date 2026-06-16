@@ -35,6 +35,9 @@ class DVIConfigStruct:
     block_iterations: int32
     """Outer direct-bilateral/projected-inequality block iterations."""
 
+    contact_iterations: int32
+    """Projected Jacobi iterations for contact inequalities in each block."""
+
 
 @wp.struct
 class DVIStatus:
@@ -126,4 +129,5 @@ def convert_config_to_struct(config: DVISolverConfig) -> DVIConfigStruct:
     config_struct.omega = config.omega
     config_struct.max_iterations = config.max_iterations
     config_struct.block_iterations = config.block_iterations
+    config_struct.contact_iterations = config.contact_iterations
     return config_struct

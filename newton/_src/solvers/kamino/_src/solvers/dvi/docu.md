@@ -91,7 +91,7 @@ v_plus = D lambda + v_f
 
 where `D` is the Delassus matrix and `v_f` is the biased free constraint velocity. The DVI backend should therefore solve this existing system instead of replacing Kamino kinematics or dynamics.
 
-The integrated solver keeps that coupled `DualProblem` system. For worlds with a usable bilateral block it now factors only the bilateral joint block, solves bilateral impulses directly, runs projected Gauss-Seidel over all active inequality rows on the full Delassus matrix, then re-solves the bilateral block. The outer `block_iterations` setting controls this direct-bilateral/projected-inequality block Gauss-Seidel loop and defaults to 8.
+The integrated solver keeps that coupled `DualProblem` system. For worlds with a usable bilateral block it now factors only the bilateral joint block, solves bilateral impulses directly, solves limits with scalar PGS, solves contact inequalities with a mraksha-style projected block-Jacobi iteration over Kamino's existing contact rows, then re-solves the bilateral block. The outer `block_iterations` setting controls the direct-bilateral/projected-inequality loop and defaults to 8; `contact_iterations` controls contact Jacobi sweeps per block and defaults to 8.
 
 This avoids the previous dense unilateral Schur complement build. The full fallback PGS path is still used when a direct bilateral block cannot be allocated, such as heterogeneous world sets with empty joint blocks.
 

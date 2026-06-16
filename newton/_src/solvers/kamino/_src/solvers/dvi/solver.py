@@ -25,21 +25,24 @@ from ..padmm.kernels import (
 )
 from ..padmm.types import PADMMWarmStartMode
 from .kernels import (
+    _apply_dvi_contact_jacobi_delta,
     _build_bilateral_column_rhs,
     _build_bilateral_free_velocity_rhs,
     _build_bilateral_rhs,
     _build_reduced_unilateral_rhs,
+    _compute_dvi_contact_jacobi_delta,
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
     _compute_dvi_status_residuals,
     _copy_bilateral_block,
     _gather_unilateral_solution,
+    _initialize_dvi_status,
     _reset_dvi_solver_data,
     _scatter_bilateral_solution,
     _scatter_unilateral_solution,
+    _solve_dvi_limits_pgs,
     _solve_dvi_pgs,
     _solve_dvi_reduced_unilateral_pgs,
-    _solve_dvi_unilateral_pgs,
     _unprecondition_dvi_solution,
     _write_reduced_unilateral_column,
 )
@@ -68,6 +71,7 @@ class DVISolver(ForwardDynamicsSolver):
         self._bilateral_solver: LLTBlockedSolver | None = None
         self._max_unilateral_dim: int = 0
         self._max_block_iterations: int = 1
+        self._max_contact_iterations: int = 1
         self._has_unilateral_constraints: bool = False
         self._device: wp.DeviceLike = None
 
@@ -113,6 +117,7 @@ class DVISolver(ForwardDynamicsSolver):
         self._warmstart = warmstart
         self._collect_info = collect_info
         self._max_block_iterations = max(c.block_iterations for c in self._config)
+        self._max_contact_iterations = max(c.contact_iterations for c in self._config)
         self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
         self._data = DVIData(size=self._size, device=self._device)
         self._allocate_bilateral_solver(model)
@@ -532,28 +537,90 @@ class DVISolver(ForwardDynamicsSolver):
         if not self._has_unilateral_constraints:
             return
 
+        wp.launch(
+            kernel=_initialize_dvi_status,
+            dim=self._size.num_worlds,
+            inputs=[
+                self._data.config,
+                self._data.status,
+            ],
+            device=self.device,
+        )
+
         for _ in range(self._max_block_iterations):
-            wp.launch(
-                kernel=_solve_dvi_unilateral_pgs,
-                dim=self._size.num_worlds,
-                inputs=[
-                    problem.data.dim,
-                    problem.data.mio,
-                    problem.data.vio,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.cio,
-                    problem.data.mu,
-                    problem.data.D,
-                    problem.data.v_f,
-                    self._data.config,
-                    self._data.status,
-                    self._data.solution.lambdas,
-                ],
-                device=self.device,
-            )
+            if self._size.max_of_max_limits > 0:
+                wp.launch(
+                    kernel=_solve_dvi_limits_pgs,
+                    dim=self._size.num_worlds,
+                    inputs=[
+                        problem.data.dim,
+                        problem.data.mio,
+                        problem.data.vio,
+                        problem.data.nl,
+                        problem.data.lcgo,
+                        problem.data.D,
+                        problem.data.v_f,
+                        self._data.config,
+                        self._data.status,
+                        self._data.solution.lambdas,
+                    ],
+                    device=self.device,
+                )
+
+            if self._size.max_of_max_contacts > 0:
+                wp.launch(
+                    kernel=_compute_dvi_solution_vectors,
+                    dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+                    inputs=[
+                        problem.data.dim,
+                        problem.data.mio,
+                        problem.data.vio,
+                        problem.data.D,
+                        problem.data.v_f,
+                        self._data.state.s,
+                        self._data.state.v_aug,
+                        self._data.solution.lambdas,
+                        self._data.solution.v_plus,
+                    ],
+                    device=self.device,
+                )
+
+                for _ in range(self._max_contact_iterations):
+                    wp.launch(
+                        kernel=_compute_dvi_contact_jacobi_delta,
+                        dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+                        inputs=[
+                            problem.data.dim,
+                            problem.data.mio,
+                            problem.data.vio,
+                            problem.data.nc,
+                            problem.data.ccgo,
+                            problem.data.cio,
+                            problem.data.mu,
+                            problem.data.D,
+                            self._data.config,
+                            self._data.state.v_aug,
+                            self._data.solution.lambdas,
+                            self._data.state.scratch,
+                        ],
+                        device=self.device,
+                    )
+                    wp.launch(
+                        kernel=_apply_dvi_contact_jacobi_delta,
+                        dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+                        inputs=[
+                            problem.data.dim,
+                            problem.data.mio,
+                            problem.data.vio,
+                            problem.data.nc,
+                            problem.data.ccgo,
+                            problem.data.D,
+                            self._data.state.scratch,
+                            self._data.state.v_aug,
+                        ],
+                        device=self.device,
+                    )
+
             self._solve_bilateral_block(problem)
 
     def _warmstart_from_solution(self, problem: DualProblem):

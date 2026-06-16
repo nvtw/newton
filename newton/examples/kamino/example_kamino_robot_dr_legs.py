@@ -82,6 +82,7 @@ class Example:
             self.config.dvi.tolerance = 1e-4
             self.config.dvi.regularization = 1e-5
             self.config.dvi.block_iterations = 8
+            self.config.dvi.contact_iterations = 8
         self.solver = newton.solvers.SolverKamino(self.model, config=self.config)
 
         # Set joint armature and viscous damping for better

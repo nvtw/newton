@@ -811,6 +811,12 @@ class DVISolverConfig:
     with projected inequality solves. Must be greater than zero. Defaults to `8`.
     """
 
+    contact_iterations: int = 8
+    """
+    Number of projected Jacobi iterations used for contact inequalities during
+    each DVI block iteration. Must be greater than zero. Defaults to `8`.
+    """
+
     warmstart_mode: Literal["none", "internal", "containers"] = "containers"
     """
     Warmstart mode to be used for the DVI solver.
@@ -862,6 +868,8 @@ class DVISolverConfig:
             raise ValueError(f"Invalid omega: {self.omega}. Must be in the range (0, 2].")
         if self.block_iterations <= 0:
             raise ValueError(f"Invalid block iterations: {self.block_iterations}. Must be a positive integer.")
+        if self.contact_iterations <= 0:
+            raise ValueError(f"Invalid contact iterations: {self.contact_iterations}. Must be a positive integer.")
         PADMMWarmStartMode.from_string(self.warmstart_mode)
         WarmstarterContacts.Method.from_string(self.contact_warmstart_method)
 
