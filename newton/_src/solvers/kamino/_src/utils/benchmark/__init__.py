@@ -3,7 +3,7 @@
 
 """Utilities for solver configuration benchmarking."""
 
-from .configs import make_benchmark_configs, make_solver_config_default
+from .configs import make_benchmark_configs, make_dvi_padmm_benchmark_configs, make_solver_config_default
 from .metrics import (
     BenchmarkMetrics,
     SolverMetrics,
@@ -50,6 +50,7 @@ __all__ = [
     "StatsInteger",
     "make_benchmark_configs",
     "make_benchmark_problems",
+    "make_dvi_padmm_benchmark_configs",
     "make_solver_config_default",
     "render_solver_configs_table",
     "render_subcolumn_metrics_table",

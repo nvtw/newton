@@ -11,6 +11,7 @@ from ...solver_kamino_impl import SolverKaminoImpl
 
 __all__ = [
     "make_benchmark_configs",
+    "make_dvi_padmm_benchmark_configs",
     "make_solver_config_default",
     "make_solver_config_dense_dvi_dr_legs",
     "make_solver_config_dense_jacobian_llt_accurate",
@@ -355,6 +356,22 @@ def make_benchmark_configs(include_default: bool = True) -> dict[str, SolverKami
         name, config = gen()
         solver_configs[name] = config
     return solver_configs
+
+
+def make_dvi_padmm_benchmark_configs() -> dict[str, SolverKaminoImpl.Config]:
+    """Return the focused dense PADMM/DVI solver set used by DVI benchmarks."""
+    configs: dict[str, SolverKaminoImpl.Config] = {}
+
+    _, config = make_solver_config_dense_jacobian_llt_accurate()
+    configs["PADMM accurate"] = config
+
+    _, config = make_solver_config_dense_jacobian_llt_fast()
+    configs["PADMM fast"] = config
+
+    _, config = make_solver_config_dense_dvi_dr_legs()
+    configs["DVI"] = config
+
+    return configs
 
 
 ###
