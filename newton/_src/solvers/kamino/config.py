@@ -25,6 +25,7 @@ __all__ = [
     "ConfigBase",
     "ConstrainedDynamicsConfig",
     "ConstraintStabilizationConfig",
+    "DVISolverConfig",
     "ForwardKinematicsSolverConfig",
     "PADMMSolverConfig",
 ]
@@ -611,7 +612,7 @@ class PADMMSolverConfig:
             builder: The model builder instance with which to register the custom attributes.
         """
         # Import here to avoid module-level imports and circular dependencies
-        from ._src.solvers.padmm import PADMMWarmStartMode  # noqa: PLC0415
+        from ._src.solvers.padmm.types import PADMMWarmStartMode  # noqa: PLC0415
 
         # Separately register `newton:maxSolverIterations` from
         # `KaminoSceneAPI` so we have access to it through the model.
@@ -765,6 +766,94 @@ class PADMMSolverConfig:
         # Conversion to enum-type configs will raise an error
         # if the corresponding input string is invalid.
         PADMMPenaltyUpdate.from_string(self.penalty_update_method)
+        PADMMWarmStartMode.from_string(self.warmstart_mode)
+        WarmstarterContacts.Method.from_string(self.contact_warmstart_method)
+
+    @override
+    def __post_init__(self):
+        """Post-initialization to validate configurations."""
+        self.validate()
+
+
+@dataclass
+class DVISolverConfig:
+    """
+    A container to hold configurations for the DVI forward dynamics solver.
+    """
+
+    max_iterations: int = 100
+    """
+    The maximum number of projected Gauss-Seidel iterations.
+    Must be greater than zero. Defaults to `100`.
+    """
+
+    tolerance: float = 1e-5
+    """
+    The convergence tolerance on the projected update size.
+    Must be non-negative. Defaults to `1e-5`.
+    """
+
+    regularization: float = 1e-8
+    """
+    Diagonal regularization added to each projected update denominator.
+    Must be positive. Defaults to `1e-8`.
+    """
+
+    omega: float = 1.0
+    """
+    Relaxation factor applied to projected Gauss-Seidel updates.
+    Must be in the range `(0, 2]`. Defaults to `1.0`.
+    """
+
+    warmstart_mode: Literal["none", "internal", "containers"] = "containers"
+    """
+    Warmstart mode to be used for the DVI solver.
+    Uses the same choices as :class:`PADMMWarmStartMode`. Defaults to `containers`.
+    """
+
+    contact_warmstart_method: Literal[
+        "reaction",
+        "net_force",
+        "geom_pair_net_force",
+        "geom_pair_reaction",
+        "geom_pair_reaction_weighted",
+    ] = "geom_pair_net_force"
+    """
+    The contact warmstart method used when `warmstart_mode` is `containers`.
+    See :class:`WarmstarterContacts.Method` for available options.
+    Defaults to `geom_pair_net_force`.
+    """
+
+    @override
+    @staticmethod
+    def register_custom_attributes(builder: ModelBuilder) -> None:
+        """Registers custom attributes for the DVI solver configurations."""
+        pass  # TODO: Add Kamino USD schema support for DVI-specific options.
+
+    @override
+    @staticmethod
+    def from_model(model: Model, **kwargs: dict[str, Any]) -> DVISolverConfig:
+        """Creates a :class:`DVISolverConfig` from model attributes if available.
+
+        Args:
+            model: The Newton model from which to parse configurations.
+        """
+        return DVISolverConfig(**kwargs)
+
+    @override
+    def validate(self) -> None:
+        """Validates the current values held by this config instance."""
+        from ._src.solvers.padmm.types import PADMMWarmStartMode  # noqa: PLC0415
+        from ._src.solvers.warmstart import WarmstarterContacts  # noqa: PLC0415
+
+        if self.max_iterations <= 0:
+            raise ValueError(f"Invalid maximum iterations: {self.max_iterations}. Must be a positive integer.")
+        if self.tolerance < 0.0:
+            raise ValueError(f"Invalid tolerance: {self.tolerance}. Must be non-negative.")
+        if self.regularization <= 0.0:
+            raise ValueError(f"Invalid regularization: {self.regularization}. Must be greater than zero.")
+        if self.omega <= 0.0 or self.omega > 2.0:
+            raise ValueError(f"Invalid omega: {self.omega}. Must be in the range (0, 2].")
         PADMMWarmStartMode.from_string(self.warmstart_mode)
         WarmstarterContacts.Method.from_string(self.contact_warmstart_method)
 

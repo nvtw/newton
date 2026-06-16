@@ -21,6 +21,7 @@ from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
 from ...utils.tile import get_block_dim, get_tile_size
+from ..base import ForwardDynamicsSolver
 from .kernels import (
     _apply_dual_preconditioner_to_solution,
     _apply_dual_preconditioner_to_state,
@@ -76,7 +77,7 @@ wp.set_module_options({"enable_backward": False})
 ###
 
 
-class PADMMSolver:
+class PADMMSolver(ForwardDynamicsSolver):
     """
     The Proximal-ADMM (PADMM) forward dynamics solver for constrained rigid multi-body systems.
 

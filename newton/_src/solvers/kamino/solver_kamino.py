@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         ConfigBase,
         ConstrainedDynamicsConfig,
         ConstraintStabilizationConfig,
+        DVISolverConfig,
         ForwardKinematicsSolverConfig,
         PADMMSolverConfig,
     )
@@ -153,8 +154,15 @@ class SolverKamino(SolverBase):
 
         padmm: PADMMSolverConfig | None = None
         """
-        Configurations for the dynamics solver.\n
+        Configurations for the PADMM dynamics solver.\n
         See :class:`PADMMSolverConfig` for more details.\n
+        If `None`, default values will be used.
+        """
+
+        dvi: DVISolverConfig | None = None
+        """
+        Configurations for the DVI dynamics solver.\n
+        See :class:`DVISolverConfig` for more details.\n
         If `None`, default values will be used.
         """
 
@@ -177,6 +185,11 @@ class SolverKamino(SolverBase):
         The time-integrator to use for state integration.\n
         See available options in the `integrators` module.\n
         Defaults to `"euler"`.
+        """
+
+        dynamics_solver: Literal["padmm", "dvi"] = "padmm"
+        """
+        The forward dynamics solver to use. Defaults to `"padmm"`.
         """
 
         angular_velocity_damping: float = 0.0
@@ -222,6 +235,7 @@ class SolverKamino(SolverBase):
             config.ConstrainedDynamicsConfig.register_custom_attributes(builder)
             config.CollisionDetectorConfig.register_custom_attributes(builder)
             config.PADMMSolverConfig.register_custom_attributes(builder)
+            config.DVISolverConfig.register_custom_attributes(builder)
 
             # Register KaminoSceneAPI custom attributes for each individual solver-level configurations
             builder.add_custom_attribute(
@@ -274,6 +288,7 @@ class SolverKamino(SolverBase):
                 "constraints": config.ConstraintStabilizationConfig,
                 "dynamics": config.ConstrainedDynamicsConfig,
                 "padmm": config.PADMMSolverConfig,
+                "dvi": config.DVISolverConfig,
                 "fk": config.ForwardKinematicsSolverConfig,
             }
             for attr_name, config_cls in subconfigs.items():
@@ -308,6 +323,8 @@ class SolverKamino(SolverBase):
                 raise ValueError("Constrained dynamics config cannot be None.")
             elif self.padmm is None:
                 raise ValueError("PADMM solver config cannot be None.")
+            elif self.dvi is None:
+                raise ValueError("DVI solver config cannot be None.")
 
             # Validate specialized sub-configurations
             # using their own built-in validations
@@ -318,6 +335,15 @@ class SolverKamino(SolverBase):
             self.constraints.validate()
             self.dynamics.validate()
             self.padmm.validate()
+            self.dvi.validate()
+
+            supported_dynamics_solvers = {"padmm", "dvi"}
+            if self.dynamics_solver not in supported_dynamics_solvers:
+                raise ValueError(
+                    f"Invalid dynamics solver: {self.dynamics_solver}. Must be one of {supported_dynamics_solvers}."
+                )
+            if self.dynamics_solver == "dvi" and self.sparse_dynamics:
+                raise ValueError("The DVI solver currently requires `sparse_dynamics=False`.")
 
             # Conversion to JointCorrectionMode will raise an error if the input string is invalid.
             JointCorrectionMode.from_string(self.rotation_correction)
@@ -353,6 +379,8 @@ class SolverKamino(SolverBase):
                 self.dynamics = config.ConstrainedDynamicsConfig()
             if self.padmm is None:
                 self.padmm = config.PADMMSolverConfig()
+            if self.dvi is None:
+                self.dvi = config.DVISolverConfig()
 
             # Validate the config values after all default-initialization is done
             # to ensure that any inter-dependent parameters are properly checked.

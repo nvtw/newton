@@ -336,9 +336,11 @@ def render_solver_configs_table(
             A list of groups to include in the table. If None, "sparse", "linear" and "padmm" are used.\n
             Supported groups include:
             - "cts": Constraint parameters (alpha, beta, gamma, delta, preconditioning)
+            - "solver": Active solver and integration settings (dynamics_solver, integrator)
             - "sparse": Sparse representation settings (sparse, sparse_jacobian)
             - "linear": Linear solver settings (type, kwargs)
             - "padmm": PADMM settings (max_iterations, primal_tol, dual_tol, etc)
+            - "dvi": DVI settings (max_iterations, tolerance, regularization, omega)
             - "warmstart": Warmstarting settings (mode, contact_method)
         to_console (bool, optional):
             If True, also prints the table to the console.
@@ -368,14 +370,16 @@ def render_solver_configs_table(
         pad_edge=True,
     )
 
-    # If no groups are specified, default to showing sparsity, linear solver and PADMM settings
+    # If no groups are specified, default to showing solver type, sparsity, linear solver, and PADMM settings.
     if groups is None:
-        groups = ["sparse", "linear", "padmm"]
+        groups = ["solver", "sparse", "linear", "padmm", "dvi"]
 
     # Add the first column for configuration names
     _add_table_column_group(table, "Solver Configuration", ["Name"], color="white", justify="left")
 
     # Add groups of columns based on the specified groups to include in the table
+    if "solver" in groups:
+        _add_table_column_group(table, "Solver", ["type", "integrator"], color="white")
     if "cts" in groups:
         _add_table_column_group(table, "Constraints", ["alpha", "beta", "gamma", "delta", "precond"], color="green")
     if "sparse" in groups:
@@ -401,12 +405,21 @@ def render_solver_configs_table(
             ],
             color="cyan",
         )
+    if "dvi" in groups:
+        _add_table_column_group(
+            table,
+            "DVI",
+            ["max_iterations", "tol", "reg", "omega"],
+            color="cyan",
+        )
     if "warmstart" in groups:
         _add_table_column_group(table, "Warmstarting", ["mode", "contact_method"], color="blue")
 
     # Add rows for each configuration
     for name, cfg in configs.items():
         cfg_row = []
+        if "solver" in groups:
+            cfg_row.extend([cfg.dynamics_solver, cfg.integrator])
         if "cts" in groups:
             cfg_row.extend(
                 [
@@ -442,8 +455,20 @@ def render_solver_configs_table(
                     str(cfg.padmm.use_acceleration),
                 ]
             )
+        if "dvi" in groups:
+            cfg_row.extend(
+                [
+                    str(cfg.dvi.max_iterations),
+                    f"{cfg.dvi.tolerance:.0e}",
+                    f"{cfg.dvi.regularization:.0e}",
+                    f"{cfg.dvi.omega}",
+                ]
+            )
         if "warmstart" in groups:
-            cfg_row.extend([cfg.padmm.warmstart_mode, cfg.padmm.contact_warmstart_method])
+            if cfg.dynamics_solver == "dvi":
+                cfg_row.extend([cfg.dvi.warmstart_mode, cfg.dvi.contact_warmstart_method])
+            else:
+                cfg_row.extend([cfg.padmm.warmstart_mode, cfg.padmm.contact_warmstart_method])
         table.add_row(name, *cfg_row)
 
     # Render the table to the console and/or save to file
