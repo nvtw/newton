@@ -86,6 +86,33 @@ class Layer:
         return f"/layers/{sanitized}"
 
 
+def _make_layer_property(name: str) -> property:
+    def get_layer_attr(self):
+        obj_dict = object.__getattribute__(self, "__dict__")
+        layers = obj_dict.get("_layers")
+        active_layer_id = obj_dict.get("_active_layer_id")
+        if layers is not None and active_layer_id in layers:
+            try:
+                return getattr(layers[active_layer_id], name)
+            except AttributeError:
+                pass
+        if name in obj_dict:
+            return obj_dict[name]
+        raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
+
+    def set_layer_attr(self, value):
+        obj_dict = object.__getattribute__(self, "__dict__")
+        layers = obj_dict.get("_layers")
+        active_layer_id = obj_dict.get("_active_layer_id")
+        if layers is not None and active_layer_id in layers:
+            setattr(layers[active_layer_id], name, value)
+        else:
+            obj_dict[name] = value
+
+    get_layer_attr._newton_layer_property_name = name
+    return property(get_layer_attr, set_layer_attr)
+
+
 class ViewerBase(ABC):
     class SDFMarginMode(enum.IntEnum):
         """Controls which offset surface is visualized for SDF debug wireframes."""
@@ -115,24 +142,30 @@ class ViewerBase(ABC):
         # All model-dependent state is initialized by clear_model()
         self.clear_model()
 
-    def __getattribute__(self, name: str) -> Any:
-        """Route layer-owned attributes through the active layer.
+    @classmethod
+    def _ensure_layer_property(cls, name: str) -> None:
+        for base in cls.__mro__:
+            existing = base.__dict__.get(name)
+            if existing is None:
+                continue
+            if isinstance(existing, property) and getattr(
+                existing.fget, "_newton_layer_property_name", None
+            ) == name:
+                return
+            return
 
-        Double-underscore attributes bypass this routing so Python internals
-        and explicit object-level state remain normal viewer attributes.
-        """
+        setattr(cls, name, _make_layer_property(name))
+
+    def __getattr__(self, name: str) -> Any:
+        """Route dynamically-added layer fields through the active layer."""
         if not name.startswith("__"):
-            try:
-                layers = object.__getattribute__(self, "__dict__").get("_layers")
-                active_layer_id = object.__getattribute__(self, "__dict__").get("_active_layer_id")
-            except AttributeError:
-                layers = None
-                active_layer_id = None
+            layers = self.__dict__.get("_layers")
+            active_layer_id = self.__dict__.get("_active_layer_id")
             if layers is not None and active_layer_id in layers:
                 layer = layers[active_layer_id]
                 if hasattr(layer, name):
                     return getattr(layer, name)
-        return object.__getattribute__(self, name)
+        raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Store layer-owned attributes on the active layer.
@@ -549,6 +582,8 @@ class ViewerBase(ABC):
         ] = {}
 
         self._init_extra_layer_state(layer)
+        for name in layer.__dict__:
+            type(self)._ensure_layer_property(name)
 
     def _init_extra_layer_state(self, layer: Layer) -> None:
         """Hook for backends to initialize additional per-layer attributes."""
