@@ -18,7 +18,7 @@
 ### Fixed
 
 - Fix Kamino DVI opening contacts to release stale warm-started normal reactions instead of preserving large separating forces.
-- Fix Kamino DVI contact scheduling to re-solve bilateral constraints more frequently, reducing DR Legs tipped-contact creep while preserving the same total contact Jacobi sweep count.
+- Fix Kamino DVI contact scheduling to use additional direct-bilateral/contact sweeps, reducing DR Legs tipped-contact sink and creep.
 - Fix `SolverVBD` rigid contact injecting kinetic energy for yawed finite-radius contacts (e.g. small-radius cables blowing up). The normal response now acts at the geometric skeleton point rather than the rotating surface anchor, which was non-conservative under reorientation; friction still uses the surface anchor to preserve finite-radius slip. (#3125)
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)
 - Fix mesh inertia computation to produce deterministic results across repeated CUDA runs. (#3136)

@@ -91,7 +91,7 @@ v_plus = D lambda + v_f
 
 where `D` is the Delassus matrix and `v_f` is the biased free constraint velocity. The DVI backend should therefore solve this existing system instead of replacing Kamino kinematics or dynamics.
 
-The integrated solver keeps that coupled `DualProblem` system. For worlds with a usable bilateral block it now factors only the bilateral joint block, solves bilateral impulses directly, solves limits with scalar PGS, solves contact inequalities with a graph-colored projected Gauss-Seidel sweep over the existing Kamino contact rows, then re-solves the bilateral block. The outer `block_iterations` setting controls the direct-bilateral/projected-inequality loop and defaults to 24; `contact_iterations` controls colored contact sweeps per block and defaults to 3. Contacts sharing a dynamic body are assigned different colors, and each world is swept inside one block so color barriers do not require one kernel launch per color.
+The integrated solver keeps that coupled `DualProblem` system. For worlds with a usable bilateral block it now factors only the bilateral joint block, solves bilateral impulses directly, solves limits with scalar PGS, solves contact inequalities with a graph-colored projected Gauss-Seidel sweep over the existing Kamino contact rows, then re-solves the bilateral block. The outer `block_iterations` setting controls the direct-bilateral/projected-inequality loop and defaults to 32; `contact_iterations` controls colored contact sweeps per block and defaults to 4. Contacts sharing a dynamic body are assigned different colors, and each world is swept inside one block so color barriers do not require one kernel launch per color.
 
 Contact rows use per-component diagonal scaling before projection onto the Coulomb cone. Using one scalar denominator from the maximum tangent/normal diagonal can preserve stale normal warm-start impulses when the normal diagonal is much smaller than the tangent diagonals; opening gap contacts then keep large separating forces instead of releasing.
 
@@ -118,7 +118,7 @@ uv run --extra dev -m newton._src.solvers.kamino._src.utils.benchmark.dvi_padmm_
     --solver-configs padmm-fast dvi
 ```
 
-Local measurements on June 16, 2026 with an RTX PRO 6000 Blackwell, 200 steps, and the colored-GS split DVI path (`block_iterations=24`, `contact_iterations=3`) show:
+Local measurements on June 16, 2026 with an RTX PRO 6000 Blackwell, 200 steps, and the colored-GS split DVI path (`block_iterations=32`, `contact_iterations=4`) show:
 
 | Scenario | CUDA graph | PADMM fast | DVI | DVI vs PADMM fast |
 | --- | --- | ---: | ---: | ---: |
@@ -126,6 +126,19 @@ Local measurements on June 16, 2026 with an RTX PRO 6000 Blackwell, 200 steps, a
 | Dr Legs, 1 world, ground | on | 100.5 FPS | 318.4 FPS | 3.2x |
 | Dr Legs, 1 world, no ground | off | 80.6 FPS | 287.1 FPS | 3.6x |
 | Dr Legs, 1 world, no ground | on | 167.8 FPS | 497.0 FPS | 3.0x |
+
+The end-to-end `example_kamino_robot_dr_legs` loop advances two substeps per frame and therefore reports lower frame FPS than the focused benchmark. In the one-world standing contact scene, with a null viewer, CUDA graph replay, 120 warmup frames, and 300 timed frames, DVI measured 54.2 FPS while PADMM measured 25.4 FPS. Contact aggregation after 180 DVI frames measured vertical contact force at 1.019 times the robot weight; PADMM measured 1.000 in the same probe.
+
+A CUDA-kernel profile of DVI without graph replay over 20 example frames (40 substeps) showed:
+
+| Kernel group | GPU time share | Calls | Average |
+| --- | ---: | ---: | ---: |
+| Colored contact GS | 74.4% | 1,280 | 210 us |
+| Bilateral LLT solve | 17.0% | 1,320 | 46.6 us |
+| Solution-vector update | 4.1% | 1,320 | 11.1 us |
+| Bilateral LLT factorization | 1.3% | 40 | 114 us |
+
+The contact GS sweep is the optimization target. A shorter `24/3` schedule reached 80.8 example FPS in a short graph replay run, but its vertical force balance dropped to 0.977 times weight and body residual velocity increased, so the default stays at `32/4`.
 
 The mraksha hanging Dr Legs benchmark, run with cached kernels and a runtime import shim for its stale public exports, reported 74 frames/s for 250 frames with 4 DVI substeps per frame. This is not the same scene as the Kamino standing/contact benchmark, but it motivated the same important solver split: do not materialize a dense reduced contact/limit Schur complement.
 

@@ -805,16 +805,16 @@ class DVISolverConfig:
     Must be in the range `(0, 2]`. Defaults to `1.0`.
     """
 
-    block_iterations: int = 24
+    block_iterations: int = 32
     """
     Number of outer DVI block iterations alternating direct bilateral solves
-    with projected inequality solves. Must be greater than zero. Defaults to `24`.
+    with projected inequality solves. Must be greater than zero. Defaults to `32`.
     """
 
-    contact_iterations: int = 3
+    contact_iterations: int = 4
     """
     Number of graph-colored projected Gauss-Seidel sweeps used for contact
-    inequalities during each DVI block iteration. Must be greater than zero. Defaults to `3`.
+    inequalities during each DVI block iteration. Must be greater than zero. Defaults to `4`.
     """
 
     warmstart_mode: Literal["none", "internal", "containers"] = "containers"

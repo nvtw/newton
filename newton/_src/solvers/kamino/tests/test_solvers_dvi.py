@@ -114,8 +114,8 @@ class TestDVISolver(unittest.TestCase):
         )
         self.assertEqual(config.dynamics_solver, "dvi")
         self.assertEqual(config.dvi.max_iterations, 32)
-        self.assertEqual(config.dvi.block_iterations, 24)
-        self.assertEqual(config.dvi.contact_iterations, 3)
+        self.assertEqual(config.dvi.block_iterations, 32)
+        self.assertEqual(config.dvi.contact_iterations, 4)
         self.assertEqual(config.dvi.contact_warmstart_method, "geom_pair_net_force")
 
         with self.assertRaises(ValueError):
@@ -503,7 +503,37 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(body_qd)))
         self.assertLess(float(np.linalg.norm(base_delta_xy)), 0.006)
 
-    def test_11_dvi_opening_contact_releases_warmstarted_force(self):
+    def test_11_dr_legs_dvi_contact_force_balances_weight(self):
+        if not self.device.is_cuda:
+            self.skipTest("Dr Legs DVI contact-force regression uses the CUDA graph path")
+
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from newton._src.solvers.kamino._src.geometry.aggregation import ContactAggregation  # noqa: PLC0415
+        from newton.examples.kamino.example_kamino_robot_dr_legs import Example  # noqa: PLC0415
+        from newton.viewer import ViewerNull  # noqa: PLC0415
+
+        args = SimpleNamespace(world_count=1, use_kamino_contacts=True, dynamics_solver="dvi")
+        example = Example(ViewerNull(num_frames=1), args)
+
+        for _ in range(180):
+            example.step()
+
+        contacts_kamino = example.solver._contacts_kamino
+        aggregation = ContactAggregation(model=example.solver._model_kamino, contacts=contacts_kamino)
+        aggregation.compute()
+
+        contact_count = int(contacts_kamino.world_active_contacts.numpy()[0])
+        total_contact_force = aggregation.body_net_force.numpy()[0].sum(axis=0)
+        weight = float(example.model.body_mass.numpy().sum() * 9.81)
+        force_ratio = float(total_contact_force[2] / weight)
+
+        self.assertGreater(contact_count, 0)
+        self.assertTrue(np.all(np.isfinite(total_contact_force)))
+        self.assertGreater(force_ratio, 0.95)
+        self.assertLess(force_ratio, 1.05)
+
+    def test_12_dvi_opening_contact_releases_warmstarted_force(self):
         if not self.device.is_cuda:
             self.skipTest("DVI colored contact release regression uses the CUDA graph-colored path")
 
@@ -553,8 +583,8 @@ class TestDVISolver(unittest.TestCase):
                 max_iterations=300,
                 tolerance=1e-5,
                 regularization=1e-5,
-                block_iterations=24,
-                contact_iterations=3,
+                block_iterations=32,
+                contact_iterations=4,
             ),
         )
         solver = SolverKamino(model, config=config)
@@ -585,7 +615,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertLess(float(abs(state_0.body_qd.numpy()[0, 2])), 2.0)
         self.assertEqual(int(solver._solver_kamino.solver_fd.data.status.numpy()[0]["converged"]), 1)
 
-    def test_12_benchmark_configs_include_dvi_dr_legs(self):
+    def test_13_benchmark_configs_include_dvi_dr_legs(self):
         configs = make_benchmark_configs(include_default=False)
         self.assertIn("Dense DVI Dr Legs", configs)
         config = configs["Dense DVI Dr Legs"]
@@ -594,15 +624,15 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(config.sparse_jacobian)
         self.assertFalse(config.sparse_dynamics)
         self.assertEqual(config.dvi.warmstart_mode, "containers")
-        self.assertEqual(config.dvi.block_iterations, 24)
-        self.assertEqual(config.dvi.contact_iterations, 3)
+        self.assertEqual(config.dvi.block_iterations, 32)
+        self.assertEqual(config.dvi.contact_iterations, 4)
 
         focused_configs = make_dvi_padmm_benchmark_configs()
         self.assertEqual(set(focused_configs), {"PADMM accurate", "PADMM fast", "DVI"})
         self.assertEqual(focused_configs["DVI"].dynamics_solver, "dvi")
         self.assertEqual(focused_configs["PADMM fast"].dynamics_solver, "padmm")
 
-    def test_13_dvi_padmm_matrix_planning(self):
+    def test_14_dvi_padmm_matrix_planning(self):
         scenarios = make_matrix_scenarios(
             problem="dr_legs",
             world_counts=[1, 4],
