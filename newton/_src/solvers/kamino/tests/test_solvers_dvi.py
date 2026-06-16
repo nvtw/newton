@@ -425,6 +425,35 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(state_in.body_qd.numpy())))
         self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
 
+    def test_09_dr_legs_dvi_first_contact_remains_finite(self):
+        if not self.device.is_cuda:
+            self.skipTest("Dr Legs DVI first-contact regression uses the CUDA graph path")
+
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from newton.examples.kamino.example_kamino_robot_dr_legs import Example  # noqa: PLC0415
+        from newton.viewer import ViewerNull  # noqa: PLC0415
+
+        args = SimpleNamespace(world_count=1, use_kamino_contacts=True, dynamics_solver="dvi")
+        example = Example(ViewerNull(num_frames=1), args)
+
+        contact_seen = False
+        for _ in range(12):
+            example.step()
+            body_q = example.state_0.body_q.numpy()
+            body_qd = example.state_0.body_qd.numpy()
+            lambdas = example.solver._solver_kamino.solver_fd.data.solution.lambdas.numpy()
+            contact_count = int(example.contacts.rigid_contact_count.numpy()[0])
+            contact_seen = contact_seen or contact_count > 0
+
+            self.assertTrue(np.all(np.isfinite(body_q)))
+            self.assertTrue(np.all(np.isfinite(body_qd)))
+            self.assertTrue(np.all(np.isfinite(lambdas)))
+            self.assertLess(float(np.max(np.abs(body_qd))), 100.0)
+            self.assertLess(float(np.max(np.abs(lambdas))), 100.0)
+
+        self.assertTrue(contact_seen)
+
     def test_09_benchmark_configs_include_dvi_dr_legs(self):
         configs = make_benchmark_configs(include_default=False)
         self.assertIn("Dense DVI Dr Legs", configs)

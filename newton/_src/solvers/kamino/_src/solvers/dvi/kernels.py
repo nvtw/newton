@@ -904,17 +904,10 @@ def _compute_dvi_contact_jacobi_delta(
     v_n = state_v_aug[ccio_v + 2] + mu_c * wp.sqrt(v_t0 * v_t0 + v_t1 * v_t1)
     v_c = vec3f(v_t0, v_t1, v_n)
 
-    D_block = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    trace = float32(0.0)
-    for row in range(3):
-        row_i = ccio + row
-        for col in range(3):
-            col_i = ccio + col
-            val = problem_D[mio + ncts * row_i + col_i]
-            if row == col:
-                trace += wp.abs(val)
-                val += cfg.regularization
-            D_block[row, col] = val
+    D_00 = wp.abs(problem_D[mio + ncts * (ccio + 0) + (ccio + 0)])
+    D_11 = wp.abs(problem_D[mio + ncts * (ccio + 1) + (ccio + 1)])
+    D_22 = wp.abs(problem_D[mio + ncts * (ccio + 2) + (ccio + 2)])
+    D_kk_raw = wp.max(vec3f(D_00, D_11, D_22))
 
     lambda_old = vec3f(
         solution_lambdas[ccio_v + 0],
@@ -922,9 +915,14 @@ def _compute_dvi_contact_jacobi_delta(
         solution_lambdas[ccio_v + 2],
     )
     lambda_new = lambda_old
-    if trace > FLOAT32_EPS:
-        lambda_arg = lambda_old - cfg.omega * (wp.inverse(D_block) * v_c)
-        lambda_new = project_to_coulomb_cone(lambda_arg, mu_c)
+    if D_kk_raw > FLOAT32_EPS:
+        # Mraksha's contact Jacobi path uses a conservative relaxation. Keep
+        # Kamino's contact rows but avoid the unstable full 3x3 inverse on the
+        # preconditioned dense Delassus block.
+        contact_omega = wp.min(cfg.omega, float32(0.3))
+        lambda_arg = lambda_old - (contact_omega / (D_kk_raw + cfg.regularization)) * v_c
+        lambda_projected = project_to_coulomb_cone(lambda_arg, mu_c)
+        lambda_new = lambda_old + float32(0.9) * (lambda_projected - lambda_old)
 
     delta = lambda_new - lambda_old
     solution_lambdas[ccio_v + 0] = lambda_new.x
