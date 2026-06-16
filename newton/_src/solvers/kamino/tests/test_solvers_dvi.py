@@ -114,8 +114,8 @@ class TestDVISolver(unittest.TestCase):
         )
         self.assertEqual(config.dynamics_solver, "dvi")
         self.assertEqual(config.dvi.max_iterations, 32)
-        self.assertEqual(config.dvi.block_iterations, 8)
-        self.assertEqual(config.dvi.contact_iterations, 8)
+        self.assertEqual(config.dvi.block_iterations, 32)
+        self.assertEqual(config.dvi.contact_iterations, 2)
         self.assertEqual(config.dvi.contact_warmstart_method, "geom_pair_net_force")
 
         with self.assertRaises(ValueError):
@@ -454,7 +454,39 @@ class TestDVISolver(unittest.TestCase):
 
         self.assertTrue(contact_seen)
 
-    def test_09_benchmark_configs_include_dvi_dr_legs(self):
+    def test_10_dr_legs_dvi_tipped_contact_does_not_creep(self):
+        if not self.device.is_cuda:
+            self.skipTest("Dr Legs DVI tipped-contact regression uses the CUDA graph path")
+
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from newton.examples.kamino.example_kamino_robot_dr_legs import Example  # noqa: PLC0415
+        from newton.viewer import ViewerNull  # noqa: PLC0415
+
+        args = SimpleNamespace(world_count=1, use_kamino_contacts=True, dynamics_solver="dvi")
+        example = Example(ViewerNull(num_frames=1), args)
+
+        q_tip = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), float(np.pi * 0.5))
+        example.base_q.assign([wp.transformf((0.0, 0.0, 0.25), q_tip)])
+        example.solver.reset(state=example.state_0, base_q=example.base_q)
+        example.capture()
+
+        base_start = example.state_0.body_q.numpy()[0, :3].copy()
+        contact_seen = False
+        for _ in range(160):
+            example.step()
+            contact_seen = contact_seen or int(example.contacts.rigid_contact_count.numpy()[0]) > 0
+
+        body_q = example.state_0.body_q.numpy()
+        body_qd = example.state_0.body_qd.numpy()
+        base_delta_xy = body_q[0, :2] - base_start[:2]
+
+        self.assertTrue(contact_seen)
+        self.assertTrue(np.all(np.isfinite(body_q)))
+        self.assertTrue(np.all(np.isfinite(body_qd)))
+        self.assertLess(float(np.linalg.norm(base_delta_xy)), 0.006)
+
+    def test_11_benchmark_configs_include_dvi_dr_legs(self):
         configs = make_benchmark_configs(include_default=False)
         self.assertIn("Dense DVI Dr Legs", configs)
         config = configs["Dense DVI Dr Legs"]
@@ -463,15 +495,15 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(config.sparse_jacobian)
         self.assertFalse(config.sparse_dynamics)
         self.assertEqual(config.dvi.warmstart_mode, "containers")
-        self.assertEqual(config.dvi.block_iterations, 8)
-        self.assertEqual(config.dvi.contact_iterations, 8)
+        self.assertEqual(config.dvi.block_iterations, 32)
+        self.assertEqual(config.dvi.contact_iterations, 2)
 
         focused_configs = make_dvi_padmm_benchmark_configs()
         self.assertEqual(set(focused_configs), {"PADMM accurate", "PADMM fast", "DVI"})
         self.assertEqual(focused_configs["DVI"].dynamics_solver, "dvi")
         self.assertEqual(focused_configs["PADMM fast"].dynamics_solver, "padmm")
 
-    def test_10_dvi_padmm_matrix_planning(self):
+    def test_12_dvi_padmm_matrix_planning(self):
         scenarios = make_matrix_scenarios(
             problem="dr_legs",
             world_counts=[1, 4],

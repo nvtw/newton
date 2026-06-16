@@ -805,16 +805,16 @@ class DVISolverConfig:
     Must be in the range `(0, 2]`. Defaults to `1.0`.
     """
 
-    block_iterations: int = 8
+    block_iterations: int = 32
     """
     Number of outer DVI block iterations alternating direct bilateral solves
-    with projected inequality solves. Must be greater than zero. Defaults to `8`.
+    with projected inequality solves. Must be greater than zero. Defaults to `32`.
     """
 
-    contact_iterations: int = 8
+    contact_iterations: int = 2
     """
     Number of projected Jacobi iterations used for contact inequalities during
-    each DVI block iteration. Must be greater than zero. Defaults to `8`.
+    each DVI block iteration. Must be greater than zero. Defaults to `2`.
     """
 
     warmstart_mode: Literal["none", "internal", "containers"] = "containers"

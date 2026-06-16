@@ -322,8 +322,8 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     config.dvi.tolerance = 1e-4
     config.dvi.regularization = 1e-5
     config.dvi.omega = 1.0
-    config.dvi.block_iterations = 8
-    config.dvi.contact_iterations = 8
+    config.dvi.block_iterations = 32
+    config.dvi.contact_iterations = 2
     # ------------------------------------------------------------------------------
     # Warm-starting
     config.dvi.warmstart_mode = "containers"
