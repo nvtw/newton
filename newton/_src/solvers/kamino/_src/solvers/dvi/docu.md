@@ -95,6 +95,8 @@ The integrated solver keeps that coupled `DualProblem` system. For worlds with a
 
 Contact rows use per-component diagonal scaling before projection onto the Coulomb cone. Using one scalar denominator from the maximum tangent/normal diagonal can preserve stale normal warm-start impulses when the normal diagonal is much smaller than the tangent diagonals; opening gap contacts then keep large separating forces instead of releasing.
 
+Kamino now supports mraksha bounded recovery bias as an opt-in cap on penetration correction. Positive-gap contact rows still keep the full opening bias so stale warm-started normal impulses can release instead of pulling bodies together during separation. In the Dr Legs example the stable existing Dr Legs bias is kept (`delta=1e-3`, model/config `gamma`) with a 1 m/s safety cap; the focused DVI benchmark uses `gamma=0.05` with the same cap.
+
 This avoids the previous dense unilateral Schur complement build. The full fallback PGS path is still used when a direct bilateral block cannot be allocated, such as heterogeneous world sets with empty joint blocks.
 
 ## mraksha Comparison
@@ -127,7 +129,7 @@ Local measurements on June 16, 2026 with an RTX PRO 6000 Blackwell, 200 steps, a
 | Dr Legs, 1 world, no ground | off | 80.6 FPS | 287.1 FPS | 3.6x |
 | Dr Legs, 1 world, no ground | on | 167.8 FPS | 497.0 FPS | 3.0x |
 
-The end-to-end `example_kamino_robot_dr_legs` loop advances two substeps per frame and therefore reports lower frame FPS than the focused benchmark. In the one-world standing contact scene, with a null viewer, CUDA graph replay, 120 warmup frames, and 300 timed frames, DVI measured 54.2 FPS while PADMM measured 25.4 FPS. Contact aggregation after 180 DVI frames measured vertical contact force at 1.019 times the robot weight; PADMM measured 1.000 in the same probe.
+The end-to-end `example_kamino_robot_dr_legs` loop advances two substeps per frame and therefore reports lower frame FPS than the focused benchmark. In the one-world standing contact scene, with a null viewer, CUDA graph replay, 120 warmup frames, and 300 timed frames, DVI measured 54.2 FPS while PADMM measured 25.4 FPS. Contact aggregation in the source-default DVI probe measured vertical contact force at 0.981 times the robot weight; PADMM measured 1.000 in the same probe.
 
 A CUDA-kernel profile of DVI without graph replay over 20 example frames (40 substeps) showed:
 

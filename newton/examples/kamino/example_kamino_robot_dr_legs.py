@@ -76,6 +76,7 @@ class Example:
         self.config.padmm.dual_tolerance = 1e-4
         self.config.padmm.compl_tolerance = 1e-4
         if self.dynamics_solver == "dvi":
+            self.config.constraints.contact_recovery_speed = 1.0
             self.config.sparse_dynamics = False
             self.config.sparse_jacobian = False
             self.config.dvi.max_iterations = 200

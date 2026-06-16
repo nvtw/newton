@@ -308,6 +308,7 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     config.constraints.alpha = 0.1
     config.constraints.beta = 0.011
     config.constraints.gamma = 0.05
+    config.constraints.contact_recovery_speed = 1.0
     # ------------------------------------------------------------------------------
     # Jacobian representation
     config.sparse_dynamics = False
@@ -394,6 +395,7 @@ def save_solver_configs_to_hdf5(configs: dict[str, SolverKaminoImpl.Config], dat
         datafile[f"{scope}/constraints/beta"] = config.constraints.beta
         datafile[f"{scope}/constraints/gamma"] = config.constraints.gamma
         datafile[f"{scope}/constraints/delta"] = config.constraints.delta
+        datafile[f"{scope}/constraints/contact_recovery_speed"] = config.constraints.contact_recovery_speed
         # ------------------------------------------------------------------------------
         datafile[f"{scope}/dynamics/preconditioning"] = config.dynamics.preconditioning
         datafile[f"{scope}/dynamics/linear_solver/type"] = str(config.dynamics.linear_solver_type)
@@ -454,6 +456,9 @@ def load_solver_configs_to_hdf5(datafile) -> dict[str, SolverKaminoImpl.Config]:
         config.constraints.beta = float(datafile[f"{scope}/constraints/beta"][()])
         config.constraints.gamma = float(datafile[f"{scope}/constraints/gamma"][()])
         config.constraints.delta = float(datafile[f"{scope}/constraints/delta"][()])
+        contact_recovery_speed_path = f"{scope}/constraints/contact_recovery_speed"
+        if contact_recovery_speed_path in datafile:
+            config.constraints.contact_recovery_speed = float(datafile[contact_recovery_speed_path][()])
         # ------------------------------------------------------------------------------
         config.dynamics.preconditioning = bool(datafile[f"{scope}/dynamics/preconditioning"][()])
         config.dynamics.linear_solver_type = _read_hdf5_string(datafile, f"{scope}/dynamics/linear_solver/type")

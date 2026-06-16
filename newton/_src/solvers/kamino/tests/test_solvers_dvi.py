@@ -12,7 +12,12 @@ import warp as wp
 
 import newton
 import newton._src.solvers.kamino.config as kamino_config
-from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
+from newton._src.solvers.kamino._src.core.types import vec2f, vec4f
+from newton._src.solvers.kamino._src.dynamics.dual import (
+    DualProblem,
+    DualProblemConfigStruct,
+    _build_free_velocity_bias_contacts,
+)
 from newton._src.solvers.kamino._src.kinematics.constraints import unpack_constraint_solutions, update_constraints_info
 from newton._src.solvers.kamino._src.kinematics.jacobians import DenseSystemJacobians
 from newton._src.solvers.kamino._src.linalg import LLTBlockedSolver
@@ -117,6 +122,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.block_iterations, 32)
         self.assertEqual(config.dvi.contact_iterations, 4)
         self.assertEqual(config.dvi.contact_warmstart_method, "geom_pair_net_force")
+        self.assertEqual(config.constraints.contact_recovery_speed, -1.0)
 
         with self.assertRaises(ValueError):
             SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
@@ -614,6 +620,53 @@ class TestDVISolver(unittest.TestCase):
         self.assertLess(float(abs(state_0.body_qd.numpy()[0, 2])), 2.0)
         self.assertEqual(int(solver._solver_kamino.solver_fd.data.status.numpy()[0]["converged"]), 1)
 
+    def test_12b_dvi_contact_recovery_speed_caps_bias(self):
+        config = DualProblem.Config(
+            constraints=kamino_config.ConstraintStabilizationConfig(
+                gamma=1.0,
+                delta=0.0,
+                contact_recovery_speed=0.2,
+            )
+        )
+        problem_config = wp.array([config.to_struct()], dtype=DualProblemConfigStruct, device=self.device)
+        model_time_inv_dt = wp.array([100.0], dtype=wp.float32, device=self.device)
+        model_info_contacts_offset = wp.array([0], dtype=wp.int32, device=self.device)
+        data_info_contact_cts_group_offset = wp.array([0], dtype=wp.int32, device=self.device)
+        contacts_model_num = wp.array([1], dtype=wp.int32, device=self.device)
+        contacts_wid = wp.array([0], dtype=wp.int32, device=self.device)
+        contacts_cid = wp.array([0], dtype=wp.int32, device=self.device)
+        contacts_material = wp.array([vec2f(0.5, 0.0)], dtype=vec2f, device=self.device)
+        problem_vio = wp.array([0], dtype=wp.int32, device=self.device)
+
+        def contact_bias(distance: float) -> np.ndarray:
+            contacts_gapfunc = wp.array([vec4f(0.0, 0.0, 0.0, distance)], dtype=vec4f, device=self.device)
+            problem_v_b = wp.zeros(3, dtype=wp.float32, device=self.device)
+            problem_v_i = wp.zeros(3, dtype=wp.float32, device=self.device)
+            problem_mu = wp.zeros(1, dtype=wp.float32, device=self.device)
+            wp.launch(
+                _build_free_velocity_bias_contacts,
+                dim=1,
+                inputs=[
+                    model_time_inv_dt,
+                    model_info_contacts_offset,
+                    data_info_contact_cts_group_offset,
+                    1,
+                    contacts_model_num,
+                    contacts_wid,
+                    contacts_cid,
+                    contacts_gapfunc,
+                    contacts_material,
+                    problem_config,
+                    problem_vio,
+                ],
+                outputs=[problem_v_b, problem_v_i, problem_mu],
+                device=self.device,
+            )
+            return problem_v_b.numpy()
+
+        np.testing.assert_allclose(contact_bias(-0.05), [0.0, 0.0, -0.2], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(contact_bias(0.05), [0.0, 0.0, 5.0], rtol=1e-6, atol=1e-6)
+
     def test_13_benchmark_configs_include_dvi_dr_legs(self):
         configs = make_benchmark_configs(include_default=False)
         self.assertIn("Dense DVI Dr Legs", configs)
@@ -625,6 +678,9 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.warmstart_mode, "containers")
         self.assertEqual(config.dvi.block_iterations, 32)
         self.assertEqual(config.dvi.contact_iterations, 4)
+        self.assertEqual(config.constraints.gamma, 0.05)
+        self.assertEqual(config.constraints.delta, 1.0e-6)
+        self.assertEqual(config.constraints.contact_recovery_speed, 1.0)
 
         focused_configs = make_dvi_padmm_benchmark_configs()
         self.assertEqual(set(focused_configs), {"PADMM accurate", "PADMM fast", "DVI"})

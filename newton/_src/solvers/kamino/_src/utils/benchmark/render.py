@@ -335,7 +335,7 @@ def render_solver_configs_table(
         groups (list[str], optional):
             A list of groups to include in the table. If None, "sparse", "linear" and "padmm" are used.\n
             Supported groups include:
-            - "cts": Constraint parameters (alpha, beta, gamma, delta, preconditioning)
+            - "cts": Constraint parameters (alpha, beta, gamma, delta, recovery speed, preconditioning)
             - "solver": Active solver and integration settings (dynamics_solver, integrator)
             - "sparse": Sparse representation settings (sparse, sparse_jacobian)
             - "linear": Linear solver settings (type, kwargs)
@@ -381,7 +381,9 @@ def render_solver_configs_table(
     if "solver" in groups:
         _add_table_column_group(table, "Solver", ["type", "integrator"], color="white")
     if "cts" in groups:
-        _add_table_column_group(table, "Constraints", ["alpha", "beta", "gamma", "delta", "precond"], color="green")
+        _add_table_column_group(
+            table, "Constraints", ["alpha", "beta", "gamma", "delta", "recovery", "precond"], color="green"
+        )
     if "sparse" in groups:
         _add_table_column_group(table, "Representation", ["sparse_jacobian", "sparse_dynamics"], color="yellow")
     if "linear" in groups:
@@ -427,6 +429,7 @@ def render_solver_configs_table(
                     f"{cfg.constraints.beta}",
                     f"{cfg.constraints.gamma}",
                     f"{cfg.constraints.delta}",
+                    f"{cfg.constraints.contact_recovery_speed}",
                     str(cfg.dynamics.preconditioning),
                 ]
             )

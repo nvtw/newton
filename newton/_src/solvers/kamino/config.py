@@ -253,6 +253,12 @@ class ConstraintStabilizationConfig(ConfigBase):
     Defaults to `0.01`.
     """
 
+    contact_recovery_speed: float = -1.0
+    """
+    Maximum contact penetration recovery speed [m/s]. Negative values disable
+    clamping. Defaults to `-1.0`.
+    """
+
     delta: float = 1.0e-6
     """
     Contact penetration margin used for unilateral contact constraints.\n
@@ -310,6 +316,17 @@ class ConstraintStabilizationConfig(ConfigBase):
                 usd_attribute_name="newton:kamino:constraints:gamma",
             )
         )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="constraints_contact_recovery_speed",
+                frequency=Model.AttributeFrequency.ONCE,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.float32,
+                default=default_cfg.contact_recovery_speed,
+                namespace="kamino",
+                usd_attribute_name="newton:kamino:constraints:contactRecoverySpeed",
+            )
+        )
 
     @override
     @staticmethod
@@ -332,6 +349,8 @@ class ConstraintStabilizationConfig(ConfigBase):
                 cfg.beta = float(kamino_attrs.constraints_beta.numpy()[0])
             if hasattr(kamino_attrs, "constraints_gamma"):
                 cfg.gamma = float(kamino_attrs.constraints_gamma.numpy()[0])
+            if hasattr(kamino_attrs, "constraints_contact_recovery_speed"):
+                cfg.contact_recovery_speed = float(kamino_attrs.constraints_contact_recovery_speed.numpy()[0])
 
         # Return the fully constructed config with configurations
         # parsed from the model's custom attributes if available,
