@@ -45,6 +45,10 @@
 # ``--fps`` controls how often the broad/narrow-phase collision
 # detection runs.
 #
+# Pass ``--articulation-dvi`` to replace the tree-edge joint PGS rows
+# with PhoenX's full-coordinate DVI articulation solve. The six
+# excluded loop-closure joints remain in the iterative path.
+#
 # Command: python -m newton.examples robot_dr_legs_phoenx --world-count 4
 #
 ###########################################################################
@@ -160,10 +164,10 @@ def _scatter_animation_targets(
     n_frames: wp.int32,
     animation_data: wp.array2d[wp.float32],
     animation_indices: wp.array2d[wp.int32],
-    joint_target_pos: wp.array[wp.float32],
+    joint_target_q: wp.array[wp.float32],
 ):
     """Scatter the current animation frame's per-channel target into
-    ``joint_target_pos``. ``dim=(world_count, n_channels)``."""
+    ``joint_target_q``. ``dim=(world_count, n_channels)``."""
     world_idx, channel = wp.tid()
     frame = wp.int32(sim_time[0] * animation_speed * animation_fps)
     if frame >= n_frames:
@@ -171,7 +175,7 @@ def _scatter_animation_targets(
     if frame < 0:
         frame = 0
     dof_idx = animation_indices[world_idx, channel]
-    joint_target_pos[dof_idx] = animation_data[frame, channel]
+    joint_target_q[dof_idx] = animation_data[frame, channel]
 
 
 @wp.kernel(enable_backward=False)
@@ -194,6 +198,7 @@ class Example:
         self.world_count = args.world_count
 
         self.viewer = viewer
+        self._articulation_dvi = bool(args.articulation_dvi)
 
         dr_legs = newton.ModelBuilder(up_axis=newton.Axis.Z)
         # Mirror the kamino DR Legs reference example: ``armature``
@@ -277,6 +282,9 @@ class Example:
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
             prepare_refresh_stride=args.prepare_refresh_stride,
+            articulation_dvi=args.articulation_dvi,
+            articulation_dvi_replaces_joint_pgs=args.articulation_dvi_replaces_joint_pgs,
+            articulation_dvi_solver=args.articulation_dvi_solver,
         )
 
         self.state_0 = self.model.state()
@@ -380,7 +388,7 @@ class Example:
         # Per-frame target updates are then a single Warp kernel
         # launch that reads the current frame from
         # ``self._sim_time_wp`` and scatters it into
-        # ``control.joint_target_pos`` -- no host->device copy and no
+        # ``control.joint_target_q`` -- no host->device copy and no
         # Python work in the hot loop.
         anim_file = str(asset_path / "dr_legs/animation" / "dr_legs_animation_100fps.npy")
         anim = np.load(anim_file).astype(np.float32)
@@ -420,7 +428,7 @@ class Example:
         # is graph-safe and avoids copy-back kernels.
         #
         # Animation targets are scattered into
-        # ``control.joint_target_pos`` by a Warp kernel that reads
+        # ``control.joint_target_q`` by a Warp kernel that reads
         # the GPU-resident frame counter ``self._sim_time_wp``; the
         # trajectory itself lives in ``self._animation_data_wp``.
         # The advance kernel at the end bumps the counter so
@@ -437,7 +445,7 @@ class Example:
                     self._animation_n_frames,
                     self._animation_data_wp,
                     self._animation_indices_wp,
-                    self.control.joint_target_pos,
+                    self.control.joint_target_q,
                 ],
             )
         self.model.collide(self.state_0, self.contacts)
@@ -460,6 +468,28 @@ class Example:
         self.viewer.log_state(self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
+
+    def test_final(self) -> None:
+        body_q = self.state_0.body_q.numpy()
+        body_qd = self.state_0.body_qd.numpy()
+        joint_qd = self.state_0.joint_qd.numpy()
+
+        if not np.isfinite(body_q).all():
+            raise AssertionError("body_q contains non-finite values")
+        if not np.isfinite(body_qd).all():
+            raise AssertionError("body_qd contains non-finite values")
+        if not np.isfinite(joint_qd).all():
+            raise AssertionError("joint_qd contains non-finite values")
+        if float(np.min(body_q[:, 2])) < -0.10:
+            raise AssertionError("DR Legs fell below the ground tolerance")
+
+        if self._articulation_dvi:
+            topology = getattr(self.solver.world, "articulation_topology", None)
+            if topology is None or int(topology.total_rows) <= 0:
+                raise AssertionError("PhoenX DVI articulation topology was not initialized")
+            dvi_mask = getattr(self.solver.world, "articulation_dvi_joint_mask", None)
+            if dvi_mask is None or not bool(np.any(dvi_mask)):
+                raise AssertionError("PhoenX DVI articulation owns no joints")
 
     @staticmethod
     def create_parser():
@@ -546,6 +576,29 @@ class Example:
                 " rigid contact worlds at a refresh stride of at most 3 and"
                 " is the validated Dr Legs default."
             ),
+        )
+        parser.add_argument(
+            "--articulation-dvi",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help=(
+                "Use PhoenX's full-coordinate DVI articulation solve for"
+                " tree-edge joints. Excluded loop-closure joints continue"
+                " through joint PGS."
+            ),
+        )
+        parser.add_argument(
+            "--articulation-dvi-replaces-joint-pgs",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=("Whether DVI-owned joints skip PhoenX joint PGS. Defaults to following --articulation-dvi."),
+        )
+        parser.add_argument(
+            "--articulation-dvi-solver",
+            type=str,
+            default="device_block_sparse",
+            choices=("device_block_sparse", "block_sparse", "dense"),
+            help="DVI articulation numeric solver.",
         )
         parser.add_argument(
             "--armature",

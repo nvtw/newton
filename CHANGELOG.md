@@ -7,6 +7,7 @@
 - Add opt-in `SolverPhoenX` full-coordinate DVI articulation controls, including the device block-sparse solve mode and safe exclusion of loop-closure joints from the direct topology.
 - Add experimental pure-Warp `newton.rl` PPO and SAC training utilities, including a PhoenX Anymal sparse-target locomotion environment, deterministic evaluation metrics, and PPO checkpoint resume helpers.
 - Add strict walking validation metrics and configurable upright termination for the experimental PhoenX Anymal RL environment.
+- Add a `robot_dr_legs_phoenx_dvi` example and matching `robot_dr_legs_phoenx --articulation-dvi` option for running DR Legs with PhoenX's DVI articulation solve.
 - Add public `SolverPhoenX` construction for model particles, cloth triangles and bending edges, and soft tetrahedra; deformable contacts use the same `model.contacts()` / `model.collide()` flow as rigid PhoenX scenes.
 - Add `body_qdd` extended state attribute support to `SolverPhoenX`, populated as a finite difference of pre-step and post-step COM-frame velocity over the outer `dt`. Enables `newton.sensors.SensorIMU` on top of PhoenX (accelerometer reports specific force; gyroscope reports body angular velocity)
 - Add `prepare_refresh_stride="auto"` to `SolverPhoenX` for graph-capture-safe reuse of cached rigid contact/joint prepare data in high-substep rigid scenes. Fixed integer strides remain available; the default `1` still rebuilds prepare data every substep, while `"auto"` falls back to `1` for unsupported deformable, mass-splitting, or sleeping scenes.
