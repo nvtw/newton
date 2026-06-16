@@ -86,33 +86,6 @@ class Layer:
         return f"/layers/{sanitized}"
 
 
-def _make_layer_property(name: str) -> property:
-    def get_layer_attr(self):
-        obj_dict = object.__getattribute__(self, "__dict__")
-        layers = obj_dict.get("_layers")
-        active_layer_id = obj_dict.get("_active_layer_id")
-        if layers is not None and active_layer_id in layers:
-            try:
-                return getattr(layers[active_layer_id], name)
-            except AttributeError:
-                pass
-        if name in obj_dict:
-            return obj_dict[name]
-        raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
-
-    def set_layer_attr(self, value):
-        obj_dict = object.__getattribute__(self, "__dict__")
-        layers = obj_dict.get("_layers")
-        active_layer_id = obj_dict.get("_active_layer_id")
-        if layers is not None and active_layer_id in layers:
-            setattr(layers[active_layer_id], name, value)
-        else:
-            obj_dict[name] = value
-
-    get_layer_attr._newton_layer_property_name = name
-    return property(get_layer_attr, set_layer_attr)
-
-
 class ViewerBase(ABC):
     class SDFMarginMode(enum.IntEnum):
         """Controls which offset surface is visualized for SDF debug wireframes."""
@@ -142,20 +115,8 @@ class ViewerBase(ABC):
         # All model-dependent state is initialized by clear_model()
         self.clear_model()
 
-    @classmethod
-    def _ensure_layer_property(cls, name: str) -> None:
-        for base in cls.__mro__:
-            existing = base.__dict__.get(name)
-            if existing is None:
-                continue
-            if isinstance(existing, property) and getattr(existing.fget, "_newton_layer_property_name", None) == name:
-                return
-            return
-
-        setattr(cls, name, _make_layer_property(name))
-
     def __getattr__(self, name: str) -> Any:
-        """Route dynamically-added layer fields through the active layer."""
+        """Fallback for active layer fields not yet loaded on the viewer."""
         if not name.startswith("__"):
             layers = self.__dict__.get("_layers")
             active_layer_id = self.__dict__.get("_active_layer_id")
@@ -166,19 +127,34 @@ class ViewerBase(ABC):
         raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Store layer-owned attributes on the active layer.
-
-        Attributes not present on :class:`Layer`, plus double-underscore
-        attributes, stay on the viewer instance.
-        """
+        """Keep active layer-owned fields synchronized on writes."""
+        object.__setattr__(self, name, value)
         layers = self.__dict__.get("_layers")
         active_layer_id = self.__dict__.get("_active_layer_id")
         if layers is not None and active_layer_id in layers:
             layer = layers[active_layer_id]
-            if not name.startswith("__") and hasattr(layer, name):
+            if not name.startswith("__") and name in layer.__dict__:
                 setattr(layer, name, value)
-                return
-        object.__setattr__(self, name, value)
+
+    @staticmethod
+    def _is_layer_runtime_field(name: str) -> bool:
+        return name not in ("layer_id", "visible", "xform")
+
+    def _save_active_layer_state(self) -> None:
+        layers = self.__dict__.get("_layers")
+        active_layer_id = self.__dict__.get("_active_layer_id")
+        if layers is None or active_layer_id not in layers:
+            return
+        layer = layers[active_layer_id]
+        obj_dict = self.__dict__
+        for name in layer.__dict__:
+            if self._is_layer_runtime_field(name) and name in obj_dict:
+                setattr(layer, name, obj_dict[name])
+
+    def _load_layer_state(self, layer: Layer) -> None:
+        for name, value in layer.__dict__.items():
+            if self._is_layer_runtime_field(name):
+                object.__setattr__(self, name, value)
 
     # ------------------------------------------------------------------
     # Layer management
@@ -236,12 +212,14 @@ class ViewerBase(ABC):
         if layer_id == self._active_layer_id and layer_id in self._layers:
             return self._layers[layer_id]
 
+        self._save_active_layer_state()
         if layer_id not in self._layers:
             layer = Layer(layer_id)
             self._init_layer_state(layer)
             self._layers[layer_id] = layer
 
         self._active_layer_id = layer_id
+        self._load_layer_state(self._layers[layer_id])
         return self._layers[layer_id]
 
     def remove_layer(self, layer_id: str) -> None:
@@ -456,6 +434,7 @@ class ViewerBase(ABC):
         currently active layer are released — other layers remain intact.
         """
         self._init_layer_state(self.layer)
+        self._load_layer_state(self.layer)
 
     def _is_layer_owned_path(self, name: str) -> bool:
         """Return True when ``name`` was generated by the active layer.
@@ -580,8 +559,6 @@ class ViewerBase(ABC):
         ] = {}
 
         self._init_extra_layer_state(layer)
-        for name in layer.__dict__:
-            type(self)._ensure_layer_property(name)
 
     def _init_extra_layer_state(self, layer: Layer) -> None:
         """Hook for backends to initialize additional per-layer attributes."""
