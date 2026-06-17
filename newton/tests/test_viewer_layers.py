@@ -124,8 +124,8 @@ class TestViewerLayers(unittest.TestCase):
         self.assertIs(viewer.model, model_a)
         self.assertIs(viewer._shape_instances, batches_a)
 
-    def test_layer_owns_custom_state_without_registry(self):
-        """Layer fields route through the viewer without a snapshot registry."""
+    def test_layer_owns_custom_state_from_snapshot(self):
+        """Backend layer fields included in the snapshot route through the viewer."""
 
         class _CustomLayerStateViewer(_RecordingViewer):
             def _init_extra_layer_state(self, layer):
@@ -145,6 +145,29 @@ class TestViewerLayers(unittest.TestCase):
         viewer.activate("A")
         self.assertIs(viewer.custom_cache, cache_a)
         self.assertEqual(viewer.custom_cache["value"], "A")
+
+    def test_layer_runtime_fields_are_snapshotted(self):
+        """Layer-owned runtime fields are an explicit allowlist."""
+        viewer = _RecordingViewer()
+
+        self.assertIn("model", viewer._layer_runtime_fields)
+        self.assertIn("_shape_instances", viewer._layer_runtime_fields)
+        self.assertNotIn("layer_id", viewer._layer_runtime_fields)
+        self.assertNotIn("visible", viewer._layer_runtime_fields)
+        self.assertNotIn("xform", viewer._layer_runtime_fields)
+
+    def test_unseeded_self_attribute_is_viewer_global(self):
+        """A self-only attribute should not become accidental layer state."""
+        viewer = _RecordingViewer()
+
+        viewer.activate("A")
+        viewer.future_cache = "A"
+
+        viewer.activate("B")
+        viewer.future_cache = "B"
+
+        viewer.activate("A")
+        self.assertEqual(viewer.future_cache, "B")
 
     def test_set_layer_visible_hides_instances(self):
         """Hiding the active layer causes log_state to emit hidden=True for shapes."""

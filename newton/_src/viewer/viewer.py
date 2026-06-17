@@ -32,6 +32,9 @@ from .kernels import (
 #: examples, tests, and viewer backends keep working unchanged.
 _DEFAULT_LAYER_ID = "__default__"
 
+#: Fields that configure a layer itself rather than model/runtime state.
+_LAYER_CONFIG_FIELDS = frozenset(("layer_id", "visible", "xform"))
+
 
 class Layer:
     """Container holding per-model viewer state for one layer.
@@ -114,6 +117,7 @@ class ViewerBase(ABC):
 
         # All model-dependent state is initialized by clear_model()
         self.clear_model()
+        self._layer_runtime_fields = self._snapshot_layer_runtime_fields(self.layer)
 
     def __getattr__(self, name: str) -> Any:
         """Fallback for active layer fields not yet loaded on the viewer."""
@@ -129,16 +133,36 @@ class ViewerBase(ABC):
     def __setattr__(self, name: str, value: Any) -> None:
         """Keep active layer-owned fields synchronized on writes."""
         object.__setattr__(self, name, value)
+        layer_runtime_fields = self.__dict__.get("_layer_runtime_fields")
+        if layer_runtime_fields is None or name not in layer_runtime_fields:
+            return
         layers = self.__dict__.get("_layers")
         active_layer_id = self.__dict__.get("_active_layer_id")
         if layers is not None and active_layer_id in layers:
-            layer = layers[active_layer_id]
-            if not name.startswith("__") and name in layer.__dict__:
-                setattr(layer, name, value)
+            setattr(layers[active_layer_id], name, value)
 
     @staticmethod
-    def _is_layer_runtime_field(name: str) -> bool:
-        return name not in ("layer_id", "visible", "xform")
+    def _snapshot_layer_runtime_fields(layer: Layer) -> frozenset[str]:
+        """Return the allowlist of per-layer runtime fields from ``layer``."""
+        return frozenset(name for name in layer.__dict__ if name not in _LAYER_CONFIG_FIELDS)
+
+    def _validate_layer_runtime_fields(self, layer: Layer) -> None:
+        layer_runtime_fields = self.__dict__.get("_layer_runtime_fields")
+        if layer_runtime_fields is None:
+            return
+        actual = self._snapshot_layer_runtime_fields(layer)
+        if actual != layer_runtime_fields:
+            missing = sorted(layer_runtime_fields - actual)
+            unexpected = sorted(actual - layer_runtime_fields)
+            details = []
+            if missing:
+                details.append(f"missing: {missing}")
+            if unexpected:
+                details.append(f"unexpected: {unexpected}")
+            raise RuntimeError(
+                "Layer runtime fields must be initialized consistently by _init_layer_state()"
+                + (f" ({'; '.join(details)})" if details else "")
+            )
 
     def _save_active_layer_state(self) -> None:
         layers = self.__dict__.get("_layers")
@@ -147,14 +171,19 @@ class ViewerBase(ABC):
             return
         layer = layers[active_layer_id]
         obj_dict = self.__dict__
-        for name in layer.__dict__:
-            if self._is_layer_runtime_field(name) and name in obj_dict:
+        layer_runtime_fields = self.__dict__.get("_layer_runtime_fields")
+        if layer_runtime_fields is None:
+            layer_runtime_fields = self._snapshot_layer_runtime_fields(layer)
+        for name in layer_runtime_fields:
+            if name in obj_dict:
                 setattr(layer, name, obj_dict[name])
 
     def _load_layer_state(self, layer: Layer) -> None:
-        for name, value in layer.__dict__.items():
-            if self._is_layer_runtime_field(name):
-                object.__setattr__(self, name, value)
+        layer_runtime_fields = self.__dict__.get("_layer_runtime_fields")
+        if layer_runtime_fields is None:
+            layer_runtime_fields = self._snapshot_layer_runtime_fields(layer)
+        for name in layer_runtime_fields:
+            object.__setattr__(self, name, getattr(layer, name))
 
     # ------------------------------------------------------------------
     # Layer management
@@ -218,6 +247,7 @@ class ViewerBase(ABC):
         if layer_id not in self._layers:
             layer = Layer(layer_id)
             self._init_layer_state(layer)
+            self._validate_layer_runtime_fields(layer)
             self._layers[layer_id] = layer
 
         self._active_layer_id = layer_id
@@ -440,6 +470,7 @@ class ViewerBase(ABC):
         currently active layer are released — other layers remain intact.
         """
         self._init_layer_state(self.layer)
+        self._validate_layer_runtime_fields(self.layer)
         self._load_layer_state(self.layer)
 
     def _is_layer_owned_path(self, name: str) -> bool:
