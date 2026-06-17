@@ -30,6 +30,19 @@ from ..sim.model import Model
 from ..sim.state import State
 
 
+def _shape_collide_mask(model: Model, shape_count: int | None = None) -> np.ndarray:
+    """Return a host mask for shapes participating in shape-shape collision."""
+    shape_flags = getattr(model, "shape_flags", None)
+    if shape_flags is None:
+        count = model.shape_count if shape_count is None else shape_count
+        return np.ones(count, dtype=bool)
+
+    flags = shape_flags.numpy()
+    if shape_count is not None and len(flags) != shape_count:
+        raise ValueError("model.shape_flags and model.shape_type must have the same length")
+    return (flags & int(ShapeFlags.COLLIDE_SHAPES)) != 0
+
+
 @wp.struct
 class ContactWriterData:
     """Contact writer data for collide write_contact function."""
@@ -299,6 +312,7 @@ def _estimate_rigid_contact_max(model: Model) -> int:
         return 1000  # Fallback
 
     shape_types = model.shape_type.numpy()
+    colliding_mask = _shape_collide_mask(model, len(shape_types))
 
     # Primitive pairs (GJK/MPR) produce up to 5 manifold contacts.
     # Mesh-involved pairs (SDF + contact reduction) typically retain ~40.
@@ -306,9 +320,9 @@ def _estimate_rigid_contact_max(model: Model) -> int:
     MESH_CPP = 40
     MAX_NEIGHBORS_PER_SHAPE = 20
 
-    mesh_mask = (shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.HFIELD))
-    plane_mask = shape_types == int(GeoType.PLANE)
-    non_plane_mask = ~plane_mask
+    mesh_mask = colliding_mask & ((shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.HFIELD)))
+    plane_mask = colliding_mask & (shape_types == int(GeoType.PLANE))
+    non_plane_mask = colliding_mask & ~plane_mask
     num_meshes = int(np.count_nonzero(mesh_mask))
     num_non_planes = int(np.count_nonzero(non_plane_mask))
     num_primitives = num_non_planes - num_meshes
@@ -762,7 +776,21 @@ class CollisionPipeline:
             use_lean_gjk_mpr = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
-                has_meshes = bool((shape_types == int(GeoType.MESH)).any())
+                colliding_mask = _shape_collide_mask(model, len(shape_types))
+                colliding_shape_types = shape_types[colliding_mask]
+                has_meshes = bool((colliding_shape_types == int(GeoType.MESH)).any())
+                if (
+                    hasattr(model, "_shape_sdf_index")
+                    and model._shape_sdf_index is not None
+                    and hasattr(model, "shape_edge_range")
+                    and model.shape_edge_range is not None
+                ):
+                    shape_sdf_index = model._shape_sdf_index.numpy()
+                    shape_edge_range = model.shape_edge_range.numpy()
+                    has_planar_sdf_shapes = bool(
+                        np.any(colliding_mask & (shape_sdf_index >= 0) & (shape_edge_range[:, 1] > 0))
+                    )
+                    has_meshes = has_meshes or has_planar_sdf_shapes
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
                 # cylinders, or cones (which need full support function and axial
                 # rolling post-processing)
@@ -772,7 +800,7 @@ class CollisionPipeline:
                     int(GeoType.CYLINDER),
                     int(GeoType.CONE),
                 }
-                use_lean_gjk_mpr = not bool(lean_unsupported & set(shape_types.tolist()))
+                use_lean_gjk_mpr = not bool(lean_unsupported & set(colliding_shape_types.tolist()))
 
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs

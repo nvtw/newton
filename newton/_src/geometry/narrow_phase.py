@@ -161,6 +161,8 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
         shape_source: wp.array[wp.uint64],
         shape_gap: wp.array[float],
         shape_flags: wp.array[wp.int32],
+        shape_sdf_index: wp.array[wp.int32],
+        shape_edge_range: wp.array[wp.vec2i],
         writer_data: Any,
         total_num_threads: int,
         # Output: pairs that need GJK/MPR processing
@@ -293,11 +295,21 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # =====================================================================
             is_mesh_a = type_a == GeoType.MESH
             is_mesh_b = type_b == GeoType.MESH
+            is_box_a = type_a == GeoType.BOX
+            is_box_b = type_b == GeoType.BOX
             is_plane_a = type_a == GeoType.PLANE
             is_infinite_plane_a = is_plane_a and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
+            has_sdf_edges_a = shape_sdf_index[shape_a] >= 0 and shape_edge_range[shape_a][1] > 0
+            has_sdf_edges_b = shape_sdf_index[shape_b] >= 0 and shape_edge_range[shape_b][1] > 0
 
-            # Mesh-mesh collision
-            if is_mesh_a and is_mesh_b:
+            # Existing mesh-mesh pairs keep their legacy SDF/BVH fallback
+            # behavior. New planar SDF cases require both shapes to have
+            # texture SDF data and edges; otherwise the old routing is cheaper.
+            # Box-box stays on the primitive multi-contact path even when SDFs
+            # are present.
+            if (is_mesh_a and is_mesh_b) or (
+                shape_pairs_mesh_mesh and has_sdf_edges_a and has_sdf_edges_b and not (is_box_a and is_box_b)
+            ):
                 idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
                 if idx < shape_pairs_mesh_mesh.shape[0]:
                     shape_pairs_mesh_mesh[idx] = wp.vec2i(shape_a, shape_b)
@@ -1833,6 +1845,8 @@ class NarrowPhase:
                 shape_source,
                 shape_gap,
                 shape_flags,
+                shape_sdf_index,
+                shape_edge_range,
                 writer_data,
                 self.total_num_threads,
             ],

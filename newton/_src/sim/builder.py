@@ -6148,20 +6148,10 @@ class ModelBuilder:
                     "Mesh-backed shapes do not use cfg.sdf_* for SDF generation. "
                     "Build and attach an SDF on the mesh via mesh.build_sdf()."
                 )
-            if type == GeoType.CONVEX_MESH and cfg.is_hydroelastic:
-                # finalize() only consumes mesh-attached SDFs for GeoType.MESH;
-                # a hydroelastic CONVEX_MESH would fall into the primitive
-                # branch where _create_primitive_mesh returns None, leaving an
-                # invalid shape_sdf_index entry. Reject up front.
-                raise ValueError(
-                    "Hydroelastic is not supported on GeoType.CONVEX_MESH. "
-                    "Use add_shape_mesh() with a watertight Mesh whose mesh.sdf "
-                    "was built via Mesh.build_sdf()."
-                )
             if cfg.is_hydroelastic and (src is None or getattr(src, "sdf", None) is None):
                 raise ValueError(
                     "Hydroelastic mesh-backed shapes require mesh.sdf. "
-                    "Call mesh.build_sdf() before add_shape_mesh(..., cfg=...)."
+                    "Call mesh.build_sdf() before adding a mesh-backed hydroelastic shape."
                 )
         if scale is None:
             scale = (1.0, 1.0, 1.0)
@@ -10656,12 +10646,67 @@ class ModelBuilder:
             m.shape_flags = wp.array(self.shape_flags, dtype=wp.int32)
             m.body_shapes = self.body_shapes
 
+            def _shape_requests_planar_sdf(shape_idx: int) -> bool:
+                """Whether a shape needs texture SDF data for planar-faced contact."""
+                if not (self.shape_flags[shape_idx] & ShapeFlags.COLLIDE_SHAPES):
+                    return False
+                stype = self.shape_type[shape_idx]
+                if stype in (GeoType.MESH, GeoType.CONVEX_MESH):
+                    src = self.shape_source[shape_idx]
+                    return src is not None and (
+                        getattr(src, "sdf", None) is not None
+                        or self.shape_sdf_max_resolution[shape_idx] is not None
+                        or self.shape_sdf_target_voxel_size[shape_idx] is not None
+                    )
+                return stype == GeoType.BOX and (
+                    self.shape_sdf_max_resolution[shape_idx] is not None
+                    or self.shape_sdf_target_voxel_size[shape_idx] is not None
+                    or bool(self.shape_flags[shape_idx] & ShapeFlags.HYDROELASTIC)
+                )
+
+            generated_shape_sources = list(self.shape_source)
+            generated_sdf_edge_meshes = []
+            unit_box_edge_mesh = None
+            for shape_idx, shape_type in enumerate(self.shape_type):
+                if shape_type == GeoType.BOX and _shape_requests_planar_sdf(shape_idx):
+                    if unit_box_edge_mesh is None:
+                        # The edge mesh is intentionally unscaled; per-shape box
+                        # half-extents are still applied through shape_scale.
+                        unit_box_edge_mesh = Mesh.create_box(
+                            1.0,
+                            1.0,
+                            1.0,
+                            duplicate_vertices=False,
+                            compute_normals=False,
+                            compute_uvs=False,
+                            compute_inertia=False,
+                        )
+                        unit_box_edge_mesh._collision_edges = np.array(
+                            [
+                                (0, 1),
+                                (1, 2),
+                                (2, 3),
+                                (3, 0),
+                                (4, 5),
+                                (5, 6),
+                                (6, 7),
+                                (7, 4),
+                                (0, 4),
+                                (1, 5),
+                                (2, 6),
+                                (3, 7),
+                            ],
+                            dtype=np.int32,
+                        )
+                        generated_sdf_edge_meshes.append(unit_box_edge_mesh)
+                    generated_shape_sources[shape_idx] = unit_box_edge_mesh
+
             # build list of ids for geometry sources (meshes, sdfs, heightfields)
             geo_sources = []
             finalized_geos = {}  # do not duplicate geometry
             gaussians = []
             heightfield_meshes = []
-            for geo in self.shape_source:
+            for geo in generated_shape_sources:
                 geo_hash = hash(geo)  # avoid repeated hash computations
                 if isinstance(geo, Heightfield):
                     if geo_hash not in finalized_geos:
@@ -10695,6 +10740,7 @@ class ModelBuilder:
             m.shape_type = wp.array(self.shape_type, dtype=wp.int32)
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)
             m.heightfield_meshes = heightfield_meshes
+            m._generated_sdf_edge_meshes = generated_sdf_edge_meshes
             m.gaussians_count = len(gaussians)
             m.gaussians_data = wp.array(gaussians, dtype=Gaussian.Data)
             m.shape_scale = wp.array(self.shape_scale, dtype=wp.vec3, requires_grad=requires_grad)
@@ -10902,7 +10948,7 @@ class ModelBuilder:
             is_gpu = current_device.is_cuda
 
             has_mesh_sdf = any(
-                stype == GeoType.MESH
+                stype in (GeoType.MESH, GeoType.CONVEX_MESH)
                 and ssrc is not None
                 and sflags & ShapeFlags.COLLIDE_SHAPES
                 and getattr(ssrc, "sdf", None) is not None
@@ -10911,14 +10957,14 @@ class ModelBuilder:
             # Catch meshes whose SDF is still deferred (built during finalize) so
             # the CPU-runs-into-build_sdf path also raises here, not deeper down.
             has_deferred_mesh_sdf = any(
-                stype == GeoType.MESH
+                stype in (GeoType.MESH, GeoType.CONVEX_MESH, GeoType.BOX)
                 and ssrc is not None
                 and sflags & ShapeFlags.COLLIDE_SHAPES
-                and getattr(ssrc, "sdf", None) is None
+                and (stype == GeoType.BOX or getattr(ssrc, "sdf", None) is None)
                 and (smax is not None or svox is not None)
                 for stype, ssrc, sflags, smax, svox in zip(
                     self.shape_type,
-                    self.shape_source,
+                    generated_shape_sources,
                     self.shape_flags,
                     self.shape_sdf_max_resolution,
                     self.shape_sdf_target_voxel_size,
@@ -10983,7 +11029,7 @@ class ModelBuilder:
                 cache_key = None
                 mesh_sdf = None
 
-                if shape_type == GeoType.MESH and has_shape_collision and shape_src is not None:
+                if shape_type in (GeoType.MESH, GeoType.CONVEX_MESH) and has_shape_collision and shape_src is not None:
                     mesh_sdf = getattr(shape_src, "sdf", None)
                     # Build on a Mesh clone so shapes sharing one Mesh at different
                     # scale/margin/resolution end up with distinct SDFs.
@@ -11017,7 +11063,13 @@ class ModelBuilder:
                             deferred_collision_edges[i] = deferred_collision_edges_cache[deferred_key]
                     if mesh_sdf is not None:
                         cache_key = ("mesh_sdf", id(mesh_sdf))
-                elif is_hydroelastic and has_shape_collision:
+                elif has_shape_collision and (
+                    is_hydroelastic
+                    or (
+                        shape_type == GeoType.BOX
+                        and (sdf_max_resolution is not None or sdf_target_voxel_size is not None)
+                    )
+                ):
                     effective_max_resolution = sdf_max_resolution
                     if sdf_target_voxel_size is None and effective_max_resolution is None:
                         effective_max_resolution = 64
@@ -11168,11 +11220,11 @@ class ModelBuilder:
 
             for i in range(len(self.shape_type)):
                 if (
-                    self.shape_type[i] == GeoType.MESH
-                    and self.shape_source[i] is not None
+                    self.shape_type[i] in (GeoType.MESH, GeoType.CONVEX_MESH, GeoType.BOX)
+                    and generated_shape_sources[i] is not None
                     and (self.shape_flags[i] & ShapeFlags.COLLIDE_SHAPES)
                 ):
-                    mesh = self.shape_source[i]
+                    mesh = generated_shape_sources[i]
                     deferred_edges = deferred_collision_edges.get(i)
                     if deferred_edges is not None:
                         mesh_key = ("deferred", id(deferred_edges))
