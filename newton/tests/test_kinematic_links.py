@@ -161,6 +161,39 @@ class TestKinematicLinks(unittest.TestCase):
             "Dynamic body should move on the first step after a kinematic toggle.",
         )
 
+    def test_immovable_contact_pairs_are_opt_in(self):
+        """Kinematic/static contacts require opt-in; static/static remains filtered."""
+        opt_in_cases = {
+            ("kinematic", "kinematic"),
+            ("static", "kinematic"),
+            ("kinematic", "static"),
+        }
+
+        for shape_a, shape_b in [
+            ("kinematic", "kinematic"),
+            ("static", "kinematic"),
+            ("kinematic", "static"),
+            ("static", "static"),
+        ]:
+            with self.subTest(shape_a=shape_a, shape_b=shape_b, include_static_kinematic_pairs=False):
+                model = _build_immovable_contact_pair(shape_a, shape_b)
+                self.assertEqual(model.shape_contact_pair_count, 0)
+                self.assertEqual(_rigid_contact_count(model), 0)
+
+            with self.subTest(shape_a=shape_a, shape_b=shape_b, include_static_kinematic_pairs=True):
+                model = _build_immovable_contact_pair(shape_a, shape_b)
+                expected_has_contacts = (shape_a, shape_b) in opt_in_cases
+                for broad_phase in ("explicit", "nxn", "sap"):
+                    count = _rigid_contact_count(
+                        model,
+                        broad_phase=broad_phase,
+                        include_static_kinematic_pairs=True,
+                    )
+                    if expected_has_contacts:
+                        self.assertGreater(count, 0)
+                    else:
+                        self.assertEqual(count, 0)
+
 
 class TestKinematicLinksCanonical(unittest.TestCase):
     pass
@@ -200,6 +233,41 @@ def _configure_contact_defaults(builder: ModelBuilder) -> None:
     builder.default_shape_cfg.ke = 1.0e4
     builder.default_shape_cfg.kd = 500.0
     builder.default_shape_cfg.kf = 0.5
+
+
+def _build_immovable_contact_pair(shape_a: str, shape_b: str) -> newton.Model:
+    builder = ModelBuilder(gravity=0.0)
+    _configure_contact_defaults(builder)
+
+    def add_sphere(kind: str, x: float) -> None:
+        xform = wp.transform(wp.vec3(x, 0.0, 0.0), wp.quat_identity())
+        if kind == "static":
+            builder.add_shape_sphere(-1, xform=xform, radius=0.5)
+        elif kind == "kinematic":
+            body = builder.add_body(xform=xform, mass=1.0, is_kinematic=True)
+            builder.add_shape_sphere(body, radius=0.5)
+        else:
+            raise ValueError(f"Unsupported immovable shape kind: {kind}")
+
+    add_sphere(shape_a, -0.25)
+    add_sphere(shape_b, 0.25)
+    return builder.finalize(requires_grad=False)
+
+
+def _rigid_contact_count(
+    model: newton.Model,
+    *,
+    broad_phase: str = "explicit",
+    include_static_kinematic_pairs: bool = False,
+) -> int:
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase=broad_phase,
+        include_static_kinematic_pairs=include_static_kinematic_pairs,
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+    return int(contacts.rigid_contact_count.numpy()[0])
 
 
 def _build_free_root_scene(device):

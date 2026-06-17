@@ -11785,6 +11785,27 @@ class ModelBuilder:
         # If same world or at least one is global (-1), check collision groups
         return self._test_group_pair(collision_group_a, collision_group_b)
 
+    def _shape_pair_has_movable_body(
+        self,
+        shape_a: int,
+        shape_b: int,
+        *,
+        include_static_kinematic_pairs: bool = False,
+    ) -> bool:
+        body_a = int(self.shape_body[shape_a])
+        body_b = int(self.shape_body[shape_b])
+        static_a = body_a < 0
+        static_b = body_b < 0
+
+        if static_a and static_b:
+            return False
+
+        kinematic_a = (not static_a) and (int(self.body_flags[body_a]) & int(BodyFlags.KINEMATIC)) != 0
+        kinematic_b = (not static_b) and (int(self.body_flags[body_b]) & int(BodyFlags.KINEMATIC)) != 0
+        immovable_a = static_a or kinematic_a
+        immovable_b = static_b or kinematic_b
+        return include_static_kinematic_pairs or not (immovable_a and immovable_b)
+
     def find_shape_contact_pairs(self, model: Model):
         """
         Identifies and stores all potential shape contact pairs for collision detection.
@@ -11838,9 +11859,12 @@ class ModelBuilder:
                 else:
                     shape_a, shape_b = s1, s2
 
+                if not self._shape_pair_has_movable_body(shape_a, shape_b):
+                    continue
+
                 # Skip if explicitly filtered
                 if (shape_a, shape_b) not in filters:
                     contact_pairs.append((shape_a, shape_b))
 
-        model.shape_contact_pairs = wp.array(np.array(contact_pairs), dtype=wp.vec2i, device=model.device)
+        model.shape_contact_pairs = wp.array(np.array(contact_pairs, dtype=np.int32).reshape((-1, 2)), dtype=wp.vec2i, device=model.device)
         model.shape_contact_pair_count = len(contact_pairs)
