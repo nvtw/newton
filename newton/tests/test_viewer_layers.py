@@ -222,6 +222,12 @@ class TestViewerLayers(unittest.TestCase):
 
         self.assertIn("X", clear_calls, "remove_layer must run clear_model under the removed layer")
 
+    def test_activate_rejects_default_layer_id(self):
+        """The internal default-layer id is reserved for legacy unprefixed output."""
+        viewer = _RecordingViewer()
+        with self.assertRaises(ValueError):
+            viewer.activate("__default__")
+
     def test_cannot_remove_default_layer(self):
         viewer = _RecordingViewer()
         with self.assertRaises(ValueError):
@@ -231,6 +237,21 @@ class TestViewerLayers(unittest.TestCase):
         viewer = _RecordingViewer()
         with self.assertRaises(ValueError):
             viewer.activate("")
+
+    def test_new_layer_activation_preserves_global_picking_enabled(self):
+        """Creating a new layer must not reset the viewer-wide picking toggle."""
+        viewer = _RecordingViewer()
+        viewer.picking_enabled = False
+
+        viewer.activate("solverA")
+
+        self.assertFalse(viewer.picking_enabled)
+
+    def test_default_layer_owns_orphan_layer_namespace_paths(self):
+        """Default clear ownership includes /layers paths not claimed by a live layer."""
+        viewer = _RecordingViewer()
+
+        self.assertTrue(viewer._is_layer_owned_path("/layers/orphan/probe"))
 
     def test_log_shapes_user_name_is_layer_qualified(self):
         """Two layers calling log_shapes with the same user-supplied name

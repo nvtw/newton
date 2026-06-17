@@ -209,6 +209,8 @@ class ViewerBase(ABC):
         """
         if not isinstance(layer_id, str) or not layer_id:
             raise ValueError("layer_id must be a non-empty string")
+        if layer_id == _DEFAULT_LAYER_ID:
+            raise ValueError(f"{_DEFAULT_LAYER_ID!r} is reserved for the viewer's internal default layer")
         if layer_id == self._active_layer_id and layer_id in self._layers:
             return self._layers[layer_id]
 
@@ -257,7 +259,11 @@ class ViewerBase(ABC):
         self.clear_model()
 
         # Move off the removed layer before deleting its registry entry.
-        self.activate(prev_active)
+        if prev_active == _DEFAULT_LAYER_ID:
+            self._active_layer_id = _DEFAULT_LAYER_ID
+            self._load_layer_state(self._layers[_DEFAULT_LAYER_ID])
+        else:
+            self.activate(prev_active)
         del self._layers[layer_id]
 
     def set_layer_visible(self, layer_id: str, visible: bool) -> None:
@@ -454,8 +460,12 @@ class ViewerBase(ABC):
         prefix = self.layer.name_prefix
         if prefix:
             return name.startswith(prefix + "/") or name == prefix
-        # Default layer: own everything that is NOT inside a "/layers/" namespace.
-        return not name.startswith("/layers/")
+        # Default layer: own unprefixed names and any orphaned "/layers/..."
+        # path that no registered named layer claims.
+        return not any(
+            layer_id != _DEFAULT_LAYER_ID and (name == layer.name_prefix or name.startswith(layer.name_prefix + "/"))
+            for layer_id, layer in self._layers.items()
+        )
 
     def _init_layer_state(self, layer: Layer) -> None:
         """Initialize all per-model attributes to defaults on ``layer``.
@@ -502,9 +512,6 @@ class ViewerBase(ABC):
         # Set in :meth:`set_model` from :meth:`_estimate_scene_scale`; falls
         # back to 1.0 when no dynamic shapes are present.
         layer.scene_scale: float = 1.0
-
-        # Picking
-        self.picking_enabled = True
 
         # Display options
         layer.show_joints = False

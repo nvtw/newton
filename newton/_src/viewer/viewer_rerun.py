@@ -154,6 +154,7 @@ class ViewerRerun(ViewerBase):
         if rr is None:
             raise ImportError("rerun package is required for ViewerRerun. Install with: pip install rerun-sdk")
 
+        self._rerun_initialized = False
         super().__init__()
 
         self.app_id = app_id or "newton-viewer"
@@ -197,6 +198,7 @@ class ViewerRerun(ViewerBase):
 
         # Make sure the timeline is set up
         rr.set_time("time", timestamp=0.0)
+        self._rerun_initialized = True
 
     def _get_blueprint(self):
         scalar_panel = None
@@ -210,6 +212,34 @@ class ViewerRerun(ViewerBase):
             rrb.TimePanel(timeline="time", state="collapsed"),
             collapse_panels=True,
         )
+
+    @override
+    def clear_model(self):
+        """Clear the active layer's local caches and Rerun entity subtree."""
+        owns = self._is_layer_owned_path
+
+        if getattr(self, "_rerun_initialized", False):
+            prefix = self.layer.name_prefix
+            if prefix:
+                rr.log(prefix, rr.Clear(recursive=True))
+            else:
+                names = (
+                    set(getattr(self, "_meshes", {}))
+                    | set(getattr(self, "_instances", {}))
+                    | set(getattr(self, "_scalars", {}))
+                )
+                for name in names:
+                    if owns(name):
+                        rr.log(name, rr.Clear(recursive=True))
+
+        if hasattr(self, "_meshes"):
+            self._meshes = {name: value for name, value in self._meshes.items() if not owns(name)}
+        if hasattr(self, "_instances"):
+            self._instances = {name: value for name, value in self._instances.items() if not owns(name)}
+        if hasattr(self, "_scalars"):
+            self._scalars = {name: value for name, value in self._scalars.items() if not owns(name)}
+
+        super().clear_model()
 
     @override
     def log_mesh(
