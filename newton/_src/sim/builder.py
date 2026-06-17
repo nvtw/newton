@@ -11866,5 +11866,7 @@ class ModelBuilder:
                 if (shape_a, shape_b) not in filters:
                     contact_pairs.append((shape_a, shape_b))
 
-        model.shape_contact_pairs = wp.array(np.array(contact_pairs, dtype=np.int32).reshape((-1, 2)), dtype=wp.vec2i, device=model.device)
+        model.shape_contact_pairs = wp.array(
+            np.array(contact_pairs, dtype=np.int32).reshape((-1, 2)), dtype=wp.vec2i, device=model.device
+        )
         model.shape_contact_pair_count = len(contact_pairs)

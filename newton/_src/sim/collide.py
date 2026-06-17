@@ -82,7 +82,9 @@ def _build_shape_contact_pairs(
     body_flags = model.body_flags.numpy() if model.body_flags is not None else np.empty(0, dtype=np.int32)
     filters: set[tuple[int, int]] = getattr(model, "shape_collision_filter_pairs", set())
 
-    colliding_mask = _shape_collide_mask(model, shape_count) if shape_flags is not None else np.ones(shape_count, dtype=bool)
+    colliding_mask = (
+        _shape_collide_mask(model, shape_count) if shape_flags is not None else np.ones(shape_count, dtype=bool)
+    )
     colliding_indices = [int(i) for i in np.where(colliding_mask)[0]]
     sorted_indices = sorted(colliding_indices, key=lambda i: int(shape_world[i]))
 
@@ -740,9 +742,8 @@ class CollisionPipeline:
         particle_count = model.particle_count
         device = model.device
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
-        explicit_mode_requested = (
-            isinstance(broad_phase_instance, BroadPhaseExplicit)
-            or (not using_expert_components and (mode_from_broad_phase is None or mode_from_broad_phase == "explicit"))
+        explicit_mode_requested = isinstance(broad_phase_instance, BroadPhaseExplicit) or (
+            not using_expert_components and (mode_from_broad_phase is None or mode_from_broad_phase == "explicit")
         )
 
         if shape_pairs_filtered is None and include_static_kinematic_pairs and explicit_mode_requested:
