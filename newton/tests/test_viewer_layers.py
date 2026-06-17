@@ -7,6 +7,8 @@ from unittest.mock import Mock, patch
 import warp as wp
 
 import newton
+from newton._src.viewer.viewer import ViewerBase
+from newton._src.viewer.viewer_rtx import ViewerRTX
 from newton._src.viewer.viewer_viser import ViewerViser
 from newton.viewer import ViewerNull
 
@@ -63,6 +65,21 @@ def _build_box_model() -> newton.Model:
         cfg=cfg,
     )
     return builder.finalize()
+
+
+class _MinimalRTXViewer(ViewerRTX):
+    """Minimal RTX instance for layer-management tests without OVRTX startup."""
+
+    def __init__(self):
+        self.gui = None
+        self._render_result = None
+        self._render_products = None
+        self._transform_binding = None
+        self._rtx = None
+        self._render_width = 640
+        self._render_height = 480
+        self._up_axis = "Z"
+        ViewerBase.__init__(self)
 
 
 class TestViewerLayers(unittest.TestCase):
@@ -244,6 +261,18 @@ class TestViewerLayers(unittest.TestCase):
         viewer.remove_layer("X")
 
         self.assertIn("X", clear_calls, "remove_layer must run clear_model under the removed layer")
+
+    def test_rtx_remove_layer_with_sibling_fails_loudly(self):
+        """RTX should not silently wipe sibling layers during clear_model()."""
+        viewer = _MinimalRTXViewer()
+        viewer.activate("A")
+        viewer.activate("B")
+
+        with self.assertRaisesRegex(RuntimeError, "other user layers"):
+            viewer.remove_layer("A")
+
+        self.assertIn("A", viewer.layers)
+        self.assertIn("B", viewer.layers)
 
     def test_activate_rejects_default_layer_id(self):
         """The internal default-layer id is reserved for legacy unprefixed output."""

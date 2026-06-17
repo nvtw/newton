@@ -1994,6 +1994,12 @@ void main() {
         UI callbacks, releases the picking and wind helpers, and drains the
         async rendering pipeline before releasing the renderer.
         """
+        if self._has_other_user_layers():
+            raise RuntimeError(
+                "ViewerRTX cannot clear one layer while other user layers are still live; "
+                "create a new ViewerRTX for a different layered scene."
+            )
+
         # Drop example-registered side/free UI callbacks (panel/stats/rendering persist).
         if getattr(self, "gui", None) is not None:
             self.gui.clear_example_callbacks()
@@ -2056,6 +2062,11 @@ void main() {
         self._camera_dirty = True
 
         super().clear_model()
+
+    def _has_other_user_layers(self) -> bool:
+        active_layer_id = getattr(self, "_active_layer_id", _DEFAULT_LAYER_ID)
+        layers = getattr(self, "_layers", {})
+        return any(layer_id != _DEFAULT_LAYER_ID and layer_id != active_layer_id for layer_id in layers)
 
     def _ui_populate_rendering_panel(self, imgui):
         """Render RTX-specific items inside the Rendering Options panel section."""
