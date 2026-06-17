@@ -353,7 +353,13 @@ class BroadPhaseAllPairs:
             shape_count: Number of active bounding boxes to check
             candidate_pair: Output array to store overlapping shape pairs
             candidate_pair_count: Output array to store number of overlapping pairs found
+            shape_body: Optional array mapping each shape to its body index. Negative body indices are static shapes.
+            body_flags: Optional body flag array used to identify kinematic bodies.
+            include_static_kinematic_pairs: Whether to include pairs where both shapes are immovable and at
+                least one shape is attached to a kinematic body. Static-static pairs are always skipped.
             device: Device to launch on. If None, uses the device of the input arrays.
+            filter_pairs: Optional sorted shape pairs to exclude.
+            num_filter_pairs: Number of valid entries in ``filter_pairs``. If None, uses ``filter_pairs.shape[0]``.
             skip_count_zero: If True, skip the internal ``candidate_pair_count.zero_()``.
                 The caller guarantees ``candidate_pair_count[0] == 0`` on entry (e.g. when
                 the counter was zeroed by a preceding fused kernel).  Defaults to False so
@@ -459,6 +465,10 @@ class BroadPhaseExplicit:
             shape_pair_count: Number of shape pairs to check
             candidate_pair: Output array to store overlapping shape pairs
             candidate_pair_count: Output array to store number of overlapping pairs found
+            shape_body: Optional array mapping each shape to its body index. Negative body indices are static shapes.
+            body_flags: Optional body flag array used to identify kinematic bodies.
+            include_static_kinematic_pairs: Whether to include pairs where both shapes are immovable and at
+                least one shape is attached to a kinematic body. Static-static pairs are always skipped.
             device: Device to launch on. If None, uses the device of the input arrays.
             skip_count_zero: If True, skip the internal ``candidate_pair_count.zero_()``.
                 The caller guarantees ``candidate_pair_count[0] == 0`` on entry (e.g. when
