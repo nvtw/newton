@@ -364,6 +364,7 @@ class SolverPhoenX(SolverBase):
             articulation_dvi_host=bool(articulation_dvi),
             articulation_dvi_replaces_joint_pgs=articulation_dvi_replaces_joint_pgs,
             articulation_dvi_host_solver=articulation_dvi_solver,
+            cache_articulation_topology=bool(articulation_dvi),
             device=self.device,
         )
 

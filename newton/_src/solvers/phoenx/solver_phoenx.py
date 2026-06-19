@@ -569,6 +569,7 @@ class PhoenXWorld:
         articulation_dvi_host: bool = False,
         articulation_dvi_replaces_joint_pgs: bool | None = None,
         articulation_dvi_host_solver: str = "block_sparse",
+        cache_articulation_topology: bool = True,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
@@ -596,6 +597,9 @@ class PhoenXWorld:
                 validation path and is the most robust option for cyclic
                 full-coordinate mechanisms, while ``"dense"`` uses the dense
                 host LDLT fallback.
+            cache_articulation_topology: Build and store DVI articulation
+                topology during joint initialization. Disable this for normal
+                PGS-only SolverPhoenX worlds to avoid DVI setup work.
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``"auto"``
@@ -821,6 +825,7 @@ class PhoenXWorld:
         self.articulation_dvi_host_solver: str = self._normalize_articulation_dvi_host_solver(
             articulation_dvi_host_solver
         )
+        self.cache_articulation_topology: bool = bool(cache_articulation_topology)
         # Topology-only full-coordinate articulation system. Built at joint
         # initialization and reused by the DVI articulation path as it is
         # brought online.
@@ -1767,18 +1772,19 @@ class PhoenXWorld:
             mode_np = None
         if mode_np is not None and mode_np.size > 0:
             self._use_revolute_specialization = bool((mode_np == int(JOINT_MODE_REVOLUTE)).all())
-        self._cache_prefactorized_articulation_topology(
-            body1,
-            body2,
-            joint_mode,
-            drive_mode=drive_mode,
-            stiffness_drive=stiffness_drive,
-            damping_drive=damping_drive,
-            min_value=min_value,
-            max_value=max_value,
-            d6_limit_count=d6_limit_count,
-            articulation_joint_mask=articulation_joint_mask,
-        )
+        if self.cache_articulation_topology:
+            self._cache_prefactorized_articulation_topology(
+                body1,
+                body2,
+                joint_mode,
+                drive_mode=drive_mode,
+                stiffness_drive=stiffness_drive,
+                damping_drive=damping_drive,
+                min_value=min_value,
+                max_value=max_value,
+                d6_limit_count=d6_limit_count,
+                articulation_joint_mask=articulation_joint_mask,
+            )
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
             dim=self.num_joints,

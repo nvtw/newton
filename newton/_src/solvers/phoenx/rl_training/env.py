@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+from typing import Protocol
+
+import warp as wp
+
+from .ppo import BufferRollout, TrainerPPO
+
+
+class EnvPPO(Protocol):
+    """Minimal vectorized environment interface needed by PPO rollout collection."""
+
+    world_count: int
+    obs_dim: int
+    action_dim: int
+    device: wp.context.Device
+    obs: wp.array
+    step_successes: wp.array
+
+    def observe(self) -> wp.array:
+        """Return the current batched observation array."""
+
+    def step(self, actions: wp.array) -> tuple[wp.array, wp.array, wp.array]:
+        """Advance the environment with batched actions."""
+
+
+@wp.kernel
+def rollout_store_step_kernel(
+    step: wp.int32,
+    num_envs: wp.int32,
+    obs_dim: wp.int32,
+    action_dim: wp.int32,
+    obs_src: wp.array2d[wp.float32],
+    actions_src: wp.array2d[wp.float32],
+    log_probs_src: wp.array[wp.float32],
+    rewards_src: wp.array[wp.float32],
+    dones_src: wp.array[wp.float32],
+    successes_src: wp.array[wp.float32],
+    values_src: wp.array2d[wp.float32],
+    obs_dst: wp.array2d[wp.float32],
+    actions_dst: wp.array2d[wp.float32],
+    log_probs_dst: wp.array[wp.float32],
+    rewards_dst: wp.array[wp.float32],
+    dones_dst: wp.array[wp.float32],
+    successes_dst: wp.array[wp.float32],
+    values_dst: wp.array[wp.float32],
+):
+    env, col = wp.tid()
+    row = step * num_envs + env
+    if col < obs_dim:
+        obs_dst[row, col] = obs_src[env, col]
+    if col < action_dim:
+        actions_dst[row, col] = actions_src[env, col]
+    if col == 0:
+        log_probs_dst[row] = log_probs_src[env]
+        rewards_dst[row] = rewards_src[env]
+        dones_dst[row] = dones_src[env]
+        successes_dst[row] = successes_src[env]
+        values_dst[row] = values_src[env, 0]
+
+
+@wp.kernel
+def rollout_store_bootstrap_values_kernel(
+    values_src: wp.array2d[wp.float32],
+    num_steps: wp.int32,
+    num_envs: wp.int32,
+    values_dst: wp.array[wp.float32],
+):
+    env = wp.tid()
+    values_dst[num_steps * num_envs + env] = values_src[env, 0]
+
+
+def capture_env_steps(
+    env: EnvPPO,
+    actions: wp.array,
+    *,
+    steps_per_graph: int = 1,
+    warmup_steps: int = 1,
+):
+    """Capture repeated environment steps into one CUDA graph.
+
+    Args:
+        env: Vectorized environment implementing :class:`EnvPPO`.
+        actions: Persistent action array read by each captured step.
+        steps_per_graph: Number of policy steps recorded in the graph.
+        warmup_steps: Eager policy steps run before capture to compile kernels
+            and allocate lazy scratch buffers.
+
+    Returns:
+        Captured CUDA graph ready for :func:`wp.capture_launch`.
+    """
+
+    steps = int(steps_per_graph)
+    warmup = int(warmup_steps)
+    if steps <= 0:
+        raise ValueError("steps_per_graph must be positive")
+    if warmup < 0:
+        raise ValueError("warmup_steps must be non-negative")
+    if not env.device.is_cuda or not wp.is_mempool_enabled(env.device):
+        raise RuntimeError("environment graph capture requires a CUDA device with Warp mempool enabled")
+
+    for _ in range(warmup):
+        env.step(actions)
+    with wp.ScopedCapture(device=env.device) as capture:
+        for _ in range(steps):
+            env.step(actions)
+    return capture.graph
+
+
+def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout, *, seed: int) -> None:
+    """Collect one PPO rollout from any vectorized Warp environment.
+
+    Args:
+        env: Vectorized environment implementing :class:`EnvPPO`.
+        trainer: PPO trainer used for action sampling and value estimates.
+        buffer: Rollout buffer to fill.
+        seed: Base stochastic action seed.
+    """
+
+    if buffer.num_envs != env.world_count or buffer.obs_dim != env.obs_dim or buffer.action_dim != env.action_dim:
+        raise ValueError("PPO buffer dimensions do not match environment")
+
+    obs = env.observe()
+    max_cols = max(env.obs_dim, env.action_dim, 1)
+    for step in range(buffer.num_steps):
+        obs_before = wp.empty(env.obs.shape, dtype=wp.float32, device=env.device)
+        wp.copy(obs_before, obs)
+        actions, log_probs, values = trainer.act(obs, seed=int(seed) + step)
+        next_obs, rewards, dones = env.step(actions)
+        wp.launch(
+            rollout_store_step_kernel,
+            dim=(env.world_count, max_cols),
+            inputs=[
+                step,
+                env.world_count,
+                env.obs_dim,
+                env.action_dim,
+                obs_before,
+                actions,
+                log_probs,
+                rewards,
+                dones,
+                env.step_successes,
+                values,
+            ],
+            outputs=[
+                buffer.obs,
+                buffer.actions,
+                buffer.old_log_probs,
+                buffer.rewards,
+                buffer.dones,
+                buffer.successes,
+                buffer.values,
+            ],
+            device=env.device,
+        )
+        obs = next_obs
+
+    final_values = trainer.critic.forward(obs, requires_grad=False)
+    wp.launch(
+        rollout_store_bootstrap_values_kernel,
+        dim=env.world_count,
+        inputs=[final_values, buffer.num_steps, env.world_count],
+        outputs=[buffer.values],
+        device=env.device,
+    )
+    buffer.compute_returns(gamma=trainer.config.gamma, gae_lambda=trainer.config.gae_lambda)

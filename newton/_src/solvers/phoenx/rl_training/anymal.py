@@ -11,6 +11,7 @@ import warp as wp
 import newton
 import newton.utils
 
+from .env import collect_ppo_rollout
 from .ppo import BufferRollout, TrainerPPO
 from .sac import BufferReplaySAC, TrainerSAC
 
@@ -271,61 +272,6 @@ def anymal_uniform_actions_kernel(seed: wp.int32, actions: wp.array2d[wp.float32
     world, action = wp.tid()
     rng = wp.rand_init(seed, world * actions.shape[1] + action)
     actions[world, action] = wp.float32(2.0) * wp.randf(rng) - wp.float32(1.0)
-
-
-@wp.kernel
-def rollout_store_step_kernel(
-    step: wp.int32,
-    num_envs: wp.int32,
-    obs_dim: wp.int32,
-    action_dim: wp.int32,
-    obs_src: wp.array2d[wp.float32],
-    actions_src: wp.array2d[wp.float32],
-    log_probs_src: wp.array[wp.float32],
-    rewards_src: wp.array[wp.float32],
-    dones_src: wp.array[wp.float32],
-    successes_src: wp.array[wp.float32],
-    values_src: wp.array2d[wp.float32],
-    obs_dst: wp.array2d[wp.float32],
-    actions_dst: wp.array2d[wp.float32],
-    log_probs_dst: wp.array[wp.float32],
-    rewards_dst: wp.array[wp.float32],
-    dones_dst: wp.array[wp.float32],
-    successes_dst: wp.array[wp.float32],
-    values_dst: wp.array[wp.float32],
-):
-    env, col = wp.tid()
-    row = step * num_envs + env
-    if col < obs_dim:
-        obs_dst[row, col] = obs_src[env, col]
-    if col < action_dim:
-        actions_dst[row, col] = actions_src[env, col]
-    if col == 0:
-        log_probs_dst[row] = log_probs_src[env]
-        rewards_dst[row] = rewards_src[env]
-        dones_dst[row] = dones_src[env]
-        successes_dst[row] = successes_src[env]
-        values_dst[row] = values_src[env, 0]
-
-
-@wp.kernel
-def rollout_store_bootstrap_values_kernel(
-    values_src: wp.array2d[wp.float32],
-    num_steps: wp.int32,
-    num_envs: wp.int32,
-    values_dst: wp.array[wp.float32],
-):
-    env = wp.tid()
-    values_dst[num_steps * num_envs + env] = values_src[env, 0]
-
-
-def _reward_mode_code(name: str) -> int:
-    key = name.lower()
-    if key == "dense_command":
-        return REWARD_MODE_DENSE_COMMAND
-    if key == "sparse_target":
-        return REWARD_MODE_SPARSE_TARGET
-    raise ValueError(f"Unsupported Anymal reward mode {name!r}")
 
 
 @dataclass
@@ -673,58 +619,7 @@ class EnvAnymalPhoenX:
     def collect_ppo_rollout(self, trainer: TrainerPPO, buffer: BufferRollout, *, seed: int) -> None:
         """Collect one rollout and compute GAE returns for PPO."""
 
-        if (
-            buffer.num_envs != self.world_count
-            or buffer.obs_dim != self.obs_dim
-            or buffer.action_dim != self.action_dim
-        ):
-            raise ValueError("PPO buffer dimensions do not match environment")
-
-        obs = self.observe()
-        max_cols = max(self.obs_dim, self.action_dim, 1)
-        for step in range(buffer.num_steps):
-            obs_before = wp.empty(self.obs.shape, dtype=wp.float32, device=self.device)
-            wp.copy(obs_before, obs)
-            actions, log_probs, values = trainer.act(obs, seed=int(seed) + step)
-            next_obs, rewards, dones = self.step(actions)
-            wp.launch(
-                rollout_store_step_kernel,
-                dim=(self.world_count, max_cols),
-                inputs=[
-                    step,
-                    self.world_count,
-                    self.obs_dim,
-                    self.action_dim,
-                    obs_before,
-                    actions,
-                    log_probs,
-                    rewards,
-                    dones,
-                    self.step_successes,
-                    values,
-                ],
-                outputs=[
-                    buffer.obs,
-                    buffer.actions,
-                    buffer.old_log_probs,
-                    buffer.rewards,
-                    buffer.dones,
-                    buffer.successes,
-                    buffer.values,
-                ],
-                device=self.device,
-            )
-            obs = next_obs
-
-        final_values = trainer.critic.forward(obs, requires_grad=False)
-        wp.launch(
-            rollout_store_bootstrap_values_kernel,
-            dim=self.world_count,
-            inputs=[final_values, buffer.num_steps, self.world_count],
-            outputs=[buffer.values],
-            device=self.device,
-        )
-        buffer.compute_returns(gamma=trainer.config.gamma, gae_lambda=trainer.config.gae_lambda)
+        collect_ppo_rollout(self, trainer, buffer, seed=seed)
 
     def collect_sac_transitions(
         self,

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import numpy as np
 import warp as wp
 
 from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
+from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX
 from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_checkpoint
 
 
@@ -83,12 +85,65 @@ class StatsTrainAnymalPPO:
 
 @dataclass
 class ResultTrainAnymalPPO:
-    """Result returned by :func:`train_anymal_ppo`."""
+    """Result returned by train_anymal_ppo."""
 
     trainer: TrainerPPO
     env: EnvAnymalPhoenX
     buffer: BufferRollout
     history: list[StatsTrainAnymalPPO]
+
+
+@dataclass
+class ConfigTrainG1PPO:
+    """Configuration for train_g1_ppo."""
+
+    iterations: int = 100
+    rollout_steps: int = 64
+    hidden_layers: tuple[int, ...] = (128, 128, 128)
+    activation: str = "relu"
+    log_std_init: float = -0.5
+    env_config: ConfigEnvG1PhoenX | None = None
+    ppo_config: ConfigPPO | None = None
+    device: wp.context.Devicelike = None
+    seed: int = 42
+    log_interval: int = 1
+    randomize_commands: bool = True
+    command_x_range: tuple[float, float] = (-0.5, 0.8)
+    command_y_range: tuple[float, float] = (-0.4, 0.4)
+    command_yaw_range: tuple[float, float] = (-1.0, 1.0)
+    resume_checkpoint: str | None = None
+    checkpoint_path: str | None = None
+    checkpoint_interval: int = 0
+
+
+@dataclass
+class StatsTrainG1PPO:
+    """Per-iteration G1 PPO training diagnostics."""
+
+    iteration: int
+    mean_reward: float
+    mean_done: float
+    mean_tracking_perf: float
+    mean_command_x: float
+    mean_command_y: float
+    mean_command_yaw: float
+    policy_loss: float
+    value_loss: float
+    approx_kl: float
+    clip_fraction: float
+    rollout_seconds: float
+    update_seconds: float
+    samples_per_second: float
+
+
+@dataclass
+class ResultTrainG1PPO:
+    """Result returned by train_g1_ppo."""
+
+    trainer: TrainerPPO
+    env: EnvG1PhoenX
+    buffer: BufferRollout
+    history: list[StatsTrainG1PPO]
 
 
 @dataclass
@@ -167,6 +222,110 @@ def _default_ppo_config() -> ConfigPPO:
         train_epochs=5,
         normalize_advantages=True,
     )
+
+
+def _default_g1_ppo_config() -> ConfigPPO:
+    return ConfigPPO(
+        gamma=0.97,
+        gae_lambda=0.9,
+        clip_ratio=0.2,
+        entropy_coeff=1.0e-5,
+        actor_lr=2.0e-3,
+        critic_lr=2.0e-3,
+        train_epochs=4,
+        normalize_advantages=True,
+    )
+
+
+def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
+    """Train a Unitree G1 walking policy with PhoenX and Warp-only PPO."""
+
+    cfg = config or ConfigTrainG1PPO()
+    if cfg.iterations <= 0:
+        raise ValueError("iterations must be positive")
+    if cfg.rollout_steps <= 0:
+        raise ValueError("rollout_steps must be positive")
+    if cfg.command_x_range[1] < cfg.command_x_range[0]:
+        raise ValueError("command_x_range must be ordered")
+    if cfg.command_y_range[1] < cfg.command_y_range[0]:
+        raise ValueError("command_y_range must be ordered")
+    if cfg.command_yaw_range[1] < cfg.command_yaw_range[0]:
+        raise ValueError("command_yaw_range must be ordered")
+    if cfg.checkpoint_interval < 0:
+        raise ValueError("checkpoint_interval must be non-negative")
+
+    device = wp.get_device(cfg.device)
+    env_config = cfg.env_config or ConfigEnvG1PhoenX()
+    ppo_config = cfg.ppo_config or _default_g1_ppo_config()
+    env = EnvG1PhoenX(env_config, device=device)
+    if cfg.resume_checkpoint is not None:
+        trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=ppo_config, device=device)
+        if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
+            raise ValueError("Checkpoint dimensions do not match the G1 environment")
+    else:
+        trainer = TrainerPPO(
+            obs_dim=env.obs_dim,
+            action_dim=env.action_dim,
+            hidden_layers=cfg.hidden_layers,
+            config=ppo_config,
+            device=device,
+            seed=cfg.seed,
+            squash_actions=True,
+            activation=cfg.activation,
+            log_std_init=cfg.log_std_init,
+        )
+    buffer = BufferRollout(
+        num_steps=cfg.rollout_steps,
+        num_envs=env.world_count,
+        obs_dim=env.obs_dim,
+        action_dim=env.action_dim,
+        device=device,
+    )
+
+    history: list[StatsTrainG1PPO] = []
+    command_rng = np.random.default_rng(int(cfg.seed) + 53_321)
+    command_np = np.tile(np.asarray(env.config.command, dtype=np.float32), (env.world_count, 1))
+
+    for iteration in range(cfg.iterations):
+        if cfg.randomize_commands:
+            command_np = _sample_g1_commands(
+                rng=command_rng,
+                world_count=env.world_count,
+                command_x_range=cfg.command_x_range,
+                command_y_range=cfg.command_y_range,
+                command_yaw_range=cfg.command_yaw_range,
+            )
+            env.set_commands(command_np)
+
+        t0 = time.perf_counter()
+        env.collect_ppo_rollout(trainer, buffer, seed=cfg.seed + iteration * cfg.rollout_steps)
+        t1 = time.perf_counter()
+        rollout_metrics = _g1_rollout_metrics(buffer, command_np)
+        update_stats = trainer.update(buffer)
+        t2 = time.perf_counter()
+        stats = _merge_g1_stats(iteration, rollout_metrics, update_stats, t1 - t0, t2 - t1, buffer.num_samples)
+        history.append(stats)
+
+        if cfg.log_interval > 0 and (iteration % cfg.log_interval == 0 or iteration == cfg.iterations - 1):
+            print(
+                f"iter={iteration:04d} "
+                f"reward={stats.mean_reward:.4f} "
+                f"perf={stats.mean_tracking_perf:.3f} "
+                f"done={stats.mean_done:.4f} "
+                f"sps={stats.samples_per_second:.1f} "
+                f"pi_loss={stats.policy_loss:.4f} "
+                f"v_loss={stats.value_loss:.4f}"
+            )
+        if cfg.checkpoint_path is not None and cfg.checkpoint_interval > 0:
+            if (iteration + 1) % int(cfg.checkpoint_interval) == 0:
+                trainer.save_checkpoint(
+                    _format_checkpoint_path(cfg.checkpoint_path, iteration + 1), iteration=iteration + 1
+                )
+
+    if cfg.checkpoint_path is not None:
+        trainer.save_checkpoint(_format_checkpoint_path(cfg.checkpoint_path, cfg.iterations), iteration=cfg.iterations)
+
+    return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffer, history=history)
 
 
 def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainAnymalPPO:
@@ -455,6 +614,63 @@ def _evaluate_target(
 
 def _joint_q_matrix(env: EnvAnymalPhoenX) -> np.ndarray:
     return env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+
+
+def _sample_g1_commands(
+    *,
+    rng: np.random.Generator,
+    world_count: int,
+    command_x_range: tuple[float, float],
+    command_y_range: tuple[float, float],
+    command_yaw_range: tuple[float, float],
+) -> np.ndarray:
+    commands = np.empty((int(world_count), 3), dtype=np.float32)
+    commands[:, 0] = rng.uniform(float(command_x_range[0]), float(command_x_range[1]), int(world_count))
+    commands[:, 1] = rng.uniform(float(command_y_range[0]), float(command_y_range[1]), int(world_count))
+    commands[:, 2] = rng.uniform(float(command_yaw_range[0]), float(command_yaw_range[1]), int(world_count))
+    return commands
+
+
+def _g1_rollout_metrics(buffer: BufferRollout, commands: np.ndarray) -> tuple[float, float, float, float, float, float]:
+    rewards = buffer.rewards.numpy()
+    dones = buffer.dones.numpy()
+    tracking_perf = buffer.successes.numpy()
+    return (
+        float(np.mean(rewards)),
+        float(np.mean(dones)),
+        float(np.mean(tracking_perf)),
+        float(np.mean(commands[:, 0])),
+        float(np.mean(commands[:, 1])),
+        float(np.mean(commands[:, 2])),
+    )
+
+
+def _merge_g1_stats(
+    iteration: int,
+    rollout_metrics: tuple[float, float, float, float, float, float],
+    update_stats: StatsPPOUpdate,
+    rollout_seconds: float,
+    update_seconds: float,
+    num_samples: int,
+) -> StatsTrainG1PPO:
+    mean_reward, mean_done, mean_tracking_perf, mean_command_x, mean_command_y, mean_command_yaw = rollout_metrics
+    elapsed = max(float(rollout_seconds) + float(update_seconds), 1.0e-12)
+    return StatsTrainG1PPO(
+        iteration=iteration,
+        mean_reward=mean_reward,
+        mean_done=mean_done,
+        mean_tracking_perf=mean_tracking_perf,
+        mean_command_x=mean_command_x,
+        mean_command_y=mean_command_y,
+        mean_command_yaw=mean_command_yaw,
+        policy_loss=update_stats.policy_loss,
+        value_loss=update_stats.value_loss,
+        approx_kl=update_stats.approx_kl,
+        clip_fraction=update_stats.clip_fraction,
+        rollout_seconds=float(rollout_seconds),
+        update_seconds=float(update_seconds),
+        samples_per_second=float(num_samples) / elapsed,
+    )
 
 
 def _rollout_metrics(

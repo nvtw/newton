@@ -13,9 +13,17 @@ import warp as wp
 import newton.rl as rl
 
 
+def _rl_cuda_device():
+    device = wp.get_preferred_device()
+    if not device.is_cuda or not wp.is_mempool_enabled(device):
+        raise unittest.SkipTest("RL tests require CUDA graph capture with Warp mempool enabled")
+    return device
+
+
 class TestRolloutBuffer(unittest.TestCase):
     def test_compute_returns_matches_numpy_gae(self) -> None:
-        buffer = rl.BufferRollout(num_steps=3, num_envs=2, obs_dim=4, action_dim=2, device="cpu")
+        device = _rl_cuda_device()
+        buffer = rl.BufferRollout(num_steps=3, num_envs=2, obs_dim=4, action_dim=2, device=device)
         rewards = np.array([1.0, 0.5, 0.25, -0.25, 2.0, 1.0], dtype=np.float32)
         dones = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 1.0], dtype=np.float32)
         values = np.array([0.2, -0.1, 0.3, 0.4, -0.2, 0.1, 0.5, -0.3], dtype=np.float32)
@@ -28,6 +36,11 @@ class TestRolloutBuffer(unittest.TestCase):
         gamma = 0.9
         gae_lambda = 0.8
         buffer.compute_returns(gamma=gamma, gae_lambda=gae_lambda)
+        buffer.advantages.zero_()
+        buffer.returns.zero_()
+        with wp.ScopedCapture(device=device) as capture:
+            buffer.compute_returns(gamma=gamma, gae_lambda=gae_lambda)
+        wp.capture_launch(capture.graph)
 
         expected_adv = np.zeros(6, dtype=np.float32)
         expected_returns = np.zeros(6, dtype=np.float32)
@@ -49,6 +62,7 @@ class TestRolloutBuffer(unittest.TestCase):
 
 class TestTrainerPPO(unittest.TestCase):
     def test_update_changes_actor_and_returns_finite_stats(self) -> None:
+        device = _rl_cuda_device()
         rng = np.random.default_rng(3)
         config = rl.ConfigPPO(
             train_epochs=2,
@@ -57,8 +71,8 @@ class TestTrainerPPO(unittest.TestCase):
             critic_lr=3.0e-3,
             entropy_coeff=0.0,
         )
-        trainer = rl.TrainerPPO(obs_dim=5, action_dim=2, hidden_layers=(8,), config=config, device="cpu", seed=7)
-        buffer = rl.BufferRollout(num_steps=4, num_envs=4, obs_dim=5, action_dim=2, device="cpu")
+        trainer = rl.TrainerPPO(obs_dim=5, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=7)
+        buffer = rl.BufferRollout(num_steps=4, num_envs=4, obs_dim=5, action_dim=2, device=device)
         n = buffer.num_samples
         obs = rng.normal(size=(n, 5)).astype(np.float32)
         actions = np.tanh(0.5 * rng.normal(size=(n, 2))).astype(np.float32)
@@ -82,8 +96,9 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertGreater(float(np.max(np.abs(actor_after - actor_before))), 0.0)
 
     def test_checkpoint_round_trip_preserves_parameters(self) -> None:
+        device = _rl_cuda_device()
         config = rl.ConfigPPO(train_epochs=1, normalize_advantages=False)
-        trainer = rl.TrainerPPO(obs_dim=5, action_dim=2, hidden_layers=(8,), config=config, device="cpu", seed=17)
+        trainer = rl.TrainerPPO(obs_dim=5, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=17)
         actor_before = [param.numpy().copy() for param in trainer.actor.parameters()]
         critic_before = [param.numpy().copy() for param in trainer.critic.parameters()]
         trainer.actor_optimizer.step_count = 3
@@ -92,7 +107,7 @@ class TestTrainerPPO(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ppo_checkpoint.npz"
             trainer.save_checkpoint(path, iteration=11)
-            restored = rl.load_ppo_checkpoint(path, device="cpu")
+            restored = rl.load_ppo_checkpoint(path, device=device)
 
         actor_after = [param.numpy().copy() for param in restored.actor.parameters()]
         critic_after = [param.numpy().copy() for param in restored.critic.parameters()]
@@ -106,18 +121,19 @@ class TestTrainerPPO(unittest.TestCase):
 
 class TestReplayBufferSAC(unittest.TestCase):
     def test_sample_returns_inserted_rows(self) -> None:
-        replay = rl.BufferReplaySAC(capacity=8, obs_dim=3, action_dim=2, batch_size=4, device="cpu")
+        device = _rl_cuda_device()
+        replay = rl.BufferReplaySAC(capacity=8, obs_dim=3, action_dim=2, batch_size=4, device=device)
         obs = np.arange(18, dtype=np.float32).reshape(6, 3)
         actions = np.arange(12, dtype=np.float32).reshape(6, 2) * 0.1
         rewards = np.linspace(-1.0, 1.0, 6, dtype=np.float32)
         dones = np.array([0.0, 1.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
         next_obs = obs + 100.0
         replay.add_batch(
-            wp.array(obs, dtype=wp.float32, device="cpu"),
-            wp.array(actions, dtype=wp.float32, device="cpu"),
-            wp.array(rewards, dtype=wp.float32, device="cpu"),
-            wp.array(dones, dtype=wp.float32, device="cpu"),
-            wp.array(next_obs, dtype=wp.float32, device="cpu"),
+            wp.array(obs, dtype=wp.float32, device=device),
+            wp.array(actions, dtype=wp.float32, device=device),
+            wp.array(rewards, dtype=wp.float32, device=device),
+            wp.array(dones, dtype=wp.float32, device=device),
+            wp.array(next_obs, dtype=wp.float32, device=device),
         )
 
         batch = replay.sample(seed=11)
@@ -131,14 +147,15 @@ class TestReplayBufferSAC(unittest.TestCase):
 
 class TestTrainerSAC(unittest.TestCase):
     def test_update_changes_networks_and_returns_finite_stats(self) -> None:
+        device = _rl_cuda_device()
         rng = np.random.default_rng(5)
         config = rl.ConfigSAC(update_steps=2, tau=0.5, actor_lr=1.0e-3, critic_lr=1.0e-3, alpha_lr=1.0e-3)
-        trainer = rl.TrainerSAC(obs_dim=4, action_dim=2, hidden_layers=(8,), config=config, device="cpu", seed=13)
-        obs = wp.array(rng.normal(size=(16, 4)).astype(np.float32), dtype=wp.float32, device="cpu")
-        actions = wp.array(np.tanh(rng.normal(size=(16, 2))).astype(np.float32), dtype=wp.float32, device="cpu")
-        rewards = wp.array(rng.normal(size=16).astype(np.float32), dtype=wp.float32, device="cpu")
-        dones = wp.array(np.zeros(16, dtype=np.float32), dtype=wp.float32, device="cpu")
-        next_obs = wp.array(rng.normal(size=(16, 4)).astype(np.float32), dtype=wp.float32, device="cpu")
+        trainer = rl.TrainerSAC(obs_dim=4, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=13)
+        obs = wp.array(rng.normal(size=(16, 4)).astype(np.float32), dtype=wp.float32, device=device)
+        actions = wp.array(np.tanh(rng.normal(size=(16, 2))).astype(np.float32), dtype=wp.float32, device=device)
+        rewards = wp.array(rng.normal(size=16).astype(np.float32), dtype=wp.float32, device=device)
+        dones = wp.array(np.zeros(16, dtype=np.float32), dtype=wp.float32, device=device)
+        next_obs = wp.array(rng.normal(size=(16, 4)).astype(np.float32), dtype=wp.float32, device=device)
         batch = rl.BatchSAC(obs=obs, actions=actions, rewards=rewards, dones=dones, next_obs=next_obs)
 
         actor_before = [param.numpy().copy() for param in trainer.actor.parameters()]
