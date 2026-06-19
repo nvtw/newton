@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 from .kernels import (
+    PPO_LOG_STD_PARTIAL_BATCH,
     compute_gae_kernel,
     compute_vtrace_returns_kernel,
     gather_trajectory_minibatch_kernel,
@@ -20,6 +21,7 @@ from .kernels import (
     normalize_from_stats_kernel,
     ppo_actor_loss_backward_kernel,
     ppo_actor_loss_kernel,
+    reduce_ppo_log_std_grad_kernel,
     sample_trajectory_env_ids_kernel,
     scatter_trajectory_ratios_kernel,
     scatter_trajectory_values_kernel,
@@ -366,6 +368,8 @@ class TrainerPPO:
         self._actor_policy_out_grad: wp.array2d[wp.float32] | None = None
         self._critic_value_grad: wp.array2d[wp.float32] | None = None
         self._actor_log_std_grad = wp.zeros_like(self.actor.log_std, requires_grad=False)
+        self._actor_log_std_grad_partials: wp.array2d[wp.float32] | None = None
+        self._actor_log_std_grad_partial_count = 0
         if mirror_map is not None:
             self.set_mirror_map(mirror_map)
 
@@ -749,6 +753,20 @@ class TrainerPPO:
             )
         return self._actor_policy_out_grad
 
+    def _ensure_actor_log_std_grad_partials(self, rows: int) -> tuple[wp.array2d[wp.float32], int]:
+        partial_count = (int(rows) + PPO_LOG_STD_PARTIAL_BATCH - 1) // PPO_LOG_STD_PARTIAL_BATCH
+        partial_count = max(partial_count, 1)
+        if (
+            self._actor_log_std_grad_partials is None
+            or int(self._actor_log_std_grad_partials.shape[0]) < partial_count
+            or int(self._actor_log_std_grad_partials.shape[1]) != self.action_dim
+        ):
+            self._actor_log_std_grad_partials = wp.zeros(
+                (partial_count, self.action_dim), dtype=wp.float32, device=self.device, requires_grad=False
+            )
+        self._actor_log_std_grad_partial_count = partial_count
+        return self._actor_log_std_grad_partials, partial_count
+
     def _update_actor_manual(
         self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True
     ) -> tuple[float, float, float]:
@@ -757,10 +775,12 @@ class TrainerPPO:
         if mirror_obs is not None:
             mirror_policy_out = self.actor.net.forward_reuse(mirror_obs)
 
+        log_std_grad_partials, log_std_partial_count = self._ensure_actor_log_std_grad_partials(buffer.num_samples)
         wp.launch(
             zero_ppo_actor_stats_kernel,
-            dim=max(int(self.actor.log_std.shape[0]), 1),
-            outputs=[self._policy_loss, self._approx_kl, self._clip_fraction, self._actor_log_std_grad],
+            dim=max(log_std_partial_count * self.action_dim, 1),
+            inputs=[log_std_partial_count, self.action_dim],
+            outputs=[self._policy_loss, self._approx_kl, self._clip_fraction, log_std_grad_partials],
             device=self.device,
         )
         policy_out = self.actor.net.forward_manual(buffer.obs)
@@ -789,7 +809,7 @@ class TrainerPPO:
                 self._clip_fraction,
                 buffer.ratios,
                 policy_out_grad,
-                self._actor_log_std_grad,
+                log_std_grad_partials,
             ],
             device=self.device,
         )
@@ -811,6 +831,13 @@ class TrainerPPO:
             )
         self.actor.net.backward_manual(policy_out_grad)
         if not self.actor.state_dependent_std:
+            wp.launch(
+                reduce_ppo_log_std_grad_kernel,
+                dim=self.action_dim,
+                inputs=[log_std_grad_partials, log_std_partial_count],
+                outputs=[self._actor_log_std_grad],
+                device=self.device,
+            )
             self.actor.log_std.grad.assign(self._actor_log_std_grad)
         if read_stats:
             loss = float(self._policy_loss.numpy()[0])

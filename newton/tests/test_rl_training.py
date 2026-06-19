@@ -12,8 +12,10 @@ import warp as wp
 
 import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training.kernels import (
+    PPO_LOG_STD_PARTIAL_BATCH,
     mirrored_action_mse_grad_kernel,
     ppo_actor_loss_backward_kernel,
+    reduce_ppo_log_std_grad_kernel,
     value_loss_grad_kernel,
     value_symmetry_loss_grad_kernel,
     zero_scalar_kernel,
@@ -211,6 +213,8 @@ class TestTrainerPPO(unittest.TestCase):
         ratios = wp.zeros(rows, dtype=wp.float32, device=device)
         policy_out_grad = wp.zeros((rows, action_dim), dtype=wp.float32, device=device)
         log_std_grad = wp.zeros(action_dim, dtype=wp.float32, device=device)
+        partial_count = max((rows + PPO_LOG_STD_PARTIAL_BATCH - 1) // PPO_LOG_STD_PARTIAL_BATCH, 1)
+        log_std_grad_partials = wp.zeros((partial_count, action_dim), dtype=wp.float32, device=device)
         mirror_src = wp.array(np.array([1, 0], dtype=np.int32), dtype=wp.int32, device=device)
         mirror_sign = wp.array(np.array([1.0, 1.0], dtype=np.float32), dtype=wp.float32, device=device)
 
@@ -218,7 +222,7 @@ class TestTrainerPPO(unittest.TestCase):
             wp.launch(zero_scalar_kernel, dim=1, outputs=[loss], device=device)
             wp.launch(zero_scalar_kernel, dim=1, outputs=[approx_kl], device=device)
             wp.launch(zero_scalar_kernel, dim=1, outputs=[clip_fraction], device=device)
-            log_std_grad.zero_()
+            log_std_grad_partials.zero_()
             wp.launch(
                 ppo_actor_loss_backward_kernel,
                 dim=rows,
@@ -237,7 +241,14 @@ class TestTrainerPPO(unittest.TestCase):
                     2.0,
                     rows,
                 ],
-                outputs=[loss, approx_kl, clip_fraction, ratios, policy_out_grad, log_std_grad],
+                outputs=[loss, approx_kl, clip_fraction, ratios, policy_out_grad, log_std_grad_partials],
+                device=device,
+            )
+            wp.launch(
+                reduce_ppo_log_std_grad_kernel,
+                dim=action_dim,
+                inputs=[log_std_grad_partials, partial_count],
+                outputs=[log_std_grad],
                 device=device,
             )
             wp.launch(

@@ -19,6 +19,7 @@ DENSE_TILE_IN = 16
 DENSE_TILE_OUT = 16
 DENSE_TILE_BLOCK_DIM = 256
 DENSE_BIAS_TILE_BATCH = 256
+PPO_LOG_STD_PARTIAL_BATCH = 256
 
 
 @wp.func
@@ -90,18 +91,22 @@ def zero_scalar_kernel(x: wp.array[wp.float32]):
 
 @wp.kernel
 def zero_ppo_actor_stats_kernel(
+    partial_count: wp.int32,
+    action_dim: wp.int32,
     loss: wp.array[wp.float32],
     approx_kl: wp.array[wp.float32],
     clip_fraction: wp.array[wp.float32],
-    log_std_grad: wp.array[wp.float32],
+    log_std_grad_partials: wp.array2d[wp.float32],
 ):
     i = wp.tid()
     if i == wp.int32(0):
         loss[0] = wp.float32(0.0)
         approx_kl[0] = wp.float32(0.0)
         clip_fraction[0] = wp.float32(0.0)
-    if i < log_std_grad.shape[0]:
-        log_std_grad[i] = wp.float32(0.0)
+    if i < partial_count * action_dim:
+        partial = i / action_dim
+        action = i - partial * action_dim
+        log_std_grad_partials[partial, action] = wp.float32(0.0)
 
 
 @wp.kernel
@@ -377,6 +382,19 @@ def ppo_actor_loss_kernel(
 
 
 @wp.kernel
+def reduce_ppo_log_std_grad_kernel(
+    log_std_grad_partials: wp.array2d[wp.float32],
+    partial_count: wp.int32,
+    log_std_grad: wp.array[wp.float32],
+):
+    action = wp.tid()
+    total = wp.float32(0.0)
+    for partial in range(partial_count):
+        total = total + log_std_grad_partials[partial, action]
+    log_std_grad[action] = total
+
+
+@wp.kernel
 def ppo_actor_loss_backward_kernel(
     policy_out: wp.array2d[wp.float32],
     log_std_param: wp.array[wp.float32],
@@ -396,7 +414,7 @@ def ppo_actor_loss_backward_kernel(
     clip_fraction: wp.array[wp.float32],
     ratios: wp.array[wp.float32],
     policy_out_grad: wp.array2d[wp.float32],
-    log_std_grad: wp.array[wp.float32],
+    log_std_grad_partials: wp.array2d[wp.float32],
 ):
     row = wp.tid()
     total_log_prob = wp.float32(0.0)
@@ -455,7 +473,8 @@ def ppo_actor_loss_backward_kernel(
         if state_dependent_std != 0:
             policy_out_grad[row, action_dim + j] = d_log_std
         else:
-            wp.atomic_add(log_std_grad, j, d_log_std)
+            partial = row / PPO_LOG_STD_PARTIAL_BATCH
+            wp.atomic_add(log_std_grad_partials, partial, j, d_log_std)
 
 
 @wp.kernel
