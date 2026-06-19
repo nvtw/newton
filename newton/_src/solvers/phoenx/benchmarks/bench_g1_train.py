@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -28,6 +29,9 @@ from newton._src.solvers.phoenx.rl_training import g1_recipe
 
 _NANOG1_TRAIN_ENV_SPS = 1_280_000.0
 _NANOG1_TRAIN_PHYSICS_SPS = 6_400_000.0
+_NANOG1_REFERENCE_SOURCE = "nanoG1 RESULTS.md rounded steady training SPS"
+_RESULT_END_MARKER = "=== END RESULT ==="
+_NANOG1_TRAIN_MARKERS = ("=== nanoG1 RESULT ===",)
 
 
 def _parse_hidden_layers(text: str) -> tuple[int, ...]:
@@ -69,6 +73,77 @@ def _g1_ppo_config(
         reward_clip=float(reward_clip),
         max_grad_norm=float(max_grad_norm),
     )
+
+
+def _json_from_result_text(text: str, *, markers: tuple[str, ...], path: Path) -> dict[str, Any]:
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError(f"{path} is empty")
+    try:
+        blob = json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    else:
+        if not isinstance(blob, dict):
+            raise ValueError(f"{path} must contain a JSON object")
+        return blob
+
+    for marker in markers:
+        start = stripped.find(marker)
+        if start < 0:
+            continue
+        start += len(marker)
+        end = stripped.find(_RESULT_END_MARKER, start)
+        blob_text = stripped[start : end if end >= 0 else None].strip()
+        try:
+            blob = json.loads(blob_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path} has an invalid JSON blob after {marker!r}") from exc
+        if not isinstance(blob, dict):
+            raise ValueError(f"{path} must contain a JSON object after {marker!r}")
+        return blob
+    raise ValueError(f"{path} does not contain JSON or a nanoG1 result marker")
+
+
+def _load_nanog1_train_result(path: Path) -> dict[str, Any]:
+    return _json_from_result_text(path.read_text(encoding="utf-8"), markers=_NANOG1_TRAIN_MARKERS, path=path)
+
+
+def _nanog1_training_reference(args: argparse.Namespace) -> tuple[float, float, str]:
+    env_sps = _NANOG1_TRAIN_ENV_SPS
+    physics_sps = _NANOG1_TRAIN_PHYSICS_SPS
+    source = _NANOG1_REFERENCE_SOURCE
+
+    if args.nanog1_train_result is not None:
+        result_path = Path(args.nanog1_train_result)
+        blob = _load_nanog1_train_result(result_path)
+        steady_sps = blob.get("steady_sps")
+        if steady_sps is None:
+            raise ValueError(f"{result_path} is missing nanoG1 train.py 'steady_sps'")
+        env_sps = float(steady_sps)
+        physics_value = blob.get("physics_steps_per_s")
+        physics_sps = float(physics_value) if physics_value is not None else env_sps * float(args.sim_substeps)
+        source = str(result_path)
+        gpu = blob.get("gpu")
+        if gpu:
+            source = f"{source} ({gpu})"
+
+    if args.nanog1_reference_env_sps is not None:
+        env_sps = float(args.nanog1_reference_env_sps)
+        if env_sps <= 0.0:
+            raise ValueError("--nanog1-reference-env-sps must be positive")
+        source = args.nanog1_reference_source
+    if args.nanog1_reference_physics_sps is not None:
+        physics_sps = float(args.nanog1_reference_physics_sps)
+        if physics_sps <= 0.0:
+            raise ValueError("--nanog1-reference-physics-sps must be positive")
+        source = args.nanog1_reference_source
+    elif args.nanog1_reference_env_sps is not None:
+        physics_sps = env_sps * float(args.sim_substeps)
+
+    if env_sps <= 0.0 or physics_sps <= 0.0:
+        raise ValueError("nanoG1 reference throughput must be positive")
+    return env_sps, physics_sps, source
 
 
 def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
@@ -127,6 +202,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
     warm_update = np.asarray([item.update_seconds for item in warm], dtype=np.float64)
     env_sps = float(np.mean(warm_sps))
     physics_sps = env_sps * float(args.sim_substeps)
+    nanog1_env_sps, nanog1_physics_sps, nanog1_source = _nanog1_training_reference(args)
     return {
         "engine": "phoenx_g1_warp_ppo",
         "metric": "full collect-update training throughput",
@@ -158,9 +234,11 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "physics_steps_per_s": physics_sps,
         "mean_rollout_seconds": float(np.mean(warm_rollout)),
         "mean_update_seconds": float(np.mean(warm_update)),
-        "nanog1_reference_env_samples_per_s": _NANOG1_TRAIN_ENV_SPS,
-        "nanog1_reference_physics_steps_per_s": _NANOG1_TRAIN_PHYSICS_SPS,
-        "phoenx_over_nanog1_train_ratio": env_sps / _NANOG1_TRAIN_ENV_SPS,
+        "nanog1_reference_source": nanog1_source,
+        "nanog1_reference_env_samples_per_s": nanog1_env_sps,
+        "nanog1_reference_physics_steps_per_s": nanog1_physics_sps,
+        "phoenx_over_nanog1_train_ratio": env_sps / nanog1_env_sps,
+        "phoenx_train_slowdown_vs_nanog1": nanog1_env_sps / env_sps,
         "history": [asdict(item) for item in history],
     }
 
@@ -221,6 +299,29 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)
     parser.add_argument("--json-indent", type=int, default=2)
+    parser.add_argument(
+        "--nanog1-train-result",
+        type=Path,
+        default=None,
+        help="Path to a nanoG1 train.py JSON result or log containing the '=== nanoG1 RESULT ===' blob.",
+    )
+    parser.add_argument(
+        "--nanog1-reference-env-sps",
+        type=float,
+        default=None,
+        help="Override the nanoG1 training reference env samples/s.",
+    )
+    parser.add_argument(
+        "--nanog1-reference-physics-sps",
+        type=float,
+        default=None,
+        help="Override the nanoG1 training reference physics steps/s.",
+    )
+    parser.add_argument(
+        "--nanog1-reference-source",
+        default="manual nanoG1 training reference",
+        help="Source label used when --nanog1-reference-*-sps overrides are supplied.",
+    )
     return parser.parse_args()
 
 
