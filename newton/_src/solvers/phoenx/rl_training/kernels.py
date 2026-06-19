@@ -14,7 +14,7 @@ ACTIVATION_TANH = 1
 ACTIVATION_RELU = 2
 ACTIVATION_ELU = 3
 
-DENSE_TILE_BATCH = 64
+DENSE_TILE_BATCH = 128
 DENSE_TILE_IN = 16
 DENSE_TILE_OUT = 16
 DENSE_TILE_BLOCK_DIM = 256
@@ -87,6 +87,12 @@ def _activation_grad_from_output(y: wp.float32, activation: wp.int32) -> wp.floa
 @wp.kernel
 def zero_scalar_kernel(x: wp.array[wp.float32]):
     x[0] = wp.float32(0.0)
+
+
+@wp.kernel
+def zero_2d_tail_rows_kernel(start_row: wp.int32, x: wp.array2d[wp.float32]):
+    row, col = wp.tid()
+    x[start_row + row, col] = wp.float32(0.0)
 
 
 @wp.kernel

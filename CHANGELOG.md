@@ -63,8 +63,8 @@
 - Change the experimental PhoenX G1 PPO primitive-collision environment to cap rigid-contact buffers at 32 contacts per world by default; pass `rigid_contact_max_per_world=0` or `newton.rl train-g1-ppo --rigid-contact-max-per-world 0` to restore SolverPhoenX automatic sizing.
 
 - Change the experimental PhoenX G1 PPO defaults to use BF16 inputs with
-  FP32 accumulation for manual CUDA MLP backward tile matmuls and
-  large-minibatch hidden-layer forward tile matmul; pass
+  FP32 accumulation and 128-row dense tiles for manual CUDA MLP backward tile
+  matmuls and large-minibatch hidden-layer forward tile matmul; pass
   `--manual-mlp-weight-grad-dtype float32` or
   `--manual-mlp-forward-dtype float32` to restore exact FP32 manual kernels.
 

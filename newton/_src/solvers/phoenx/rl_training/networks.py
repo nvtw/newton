@@ -35,6 +35,7 @@ from .kernels import (
     sample_gaussian_actions_kernel,
     soft_update_1d_kernel,
     soft_update_2d_kernel,
+    zero_2d_tail_rows_kernel,
 )
 from .kernels_bf16 import (
     cast_2d_float_to_bfloat16_kernel,
@@ -44,7 +45,7 @@ from .kernels_bf16 import (
     dense_weight_grad_bf16_tiled_kernel,
 )
 
-_BF16_FORWARD_MIN_BATCH = DENSE_TILE_BATCH * 256
+_BF16_FORWARD_MIN_BATCH = 16_384
 
 
 def activation_code(name: str) -> int:
@@ -340,6 +341,19 @@ class WarpMLP:
                 outputs=[grad_pre],
                 device=self.device,
             )
+            tiled_rows = rows
+            if self.device.is_cuda:
+                # Tiled weight-grad kernels read a rounded-up tile; clear reserved inactive rows.
+                tile_end = min(int(grad_pre.shape[0]), _ceil_div(rows, DENSE_TILE_BATCH) * DENSE_TILE_BATCH)
+                if tile_end > rows:
+                    wp.launch(
+                        zero_2d_tail_rows_kernel,
+                        dim=(tile_end - rows, width),
+                        inputs=[rows],
+                        outputs=[grad_pre],
+                        device=self.device,
+                    )
+                    tiled_rows = tile_end
             x = self._manual_input if layer == 0 else self._manual_outputs[layer - 1]
             if self.device.is_cuda:
                 if self.manual_weight_grad_dtype == "bfloat16":
@@ -354,7 +368,7 @@ class WarpMLP:
                     )
                     wp.launch(
                         cast_2d_float_to_bfloat16_kernel,
-                        dim=(rows, width),
+                        dim=(tiled_rows, width),
                         inputs=[grad_pre],
                         outputs=[grad_pre_bf16],
                         device=self.device,
