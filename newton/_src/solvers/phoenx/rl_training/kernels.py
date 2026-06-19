@@ -191,6 +191,108 @@ def ppo_actor_loss_kernel(
 
 
 @wp.kernel
+def ppo_actor_loss_backward_kernel(
+    policy_out: wp.array2d[wp.float32],
+    log_std_param: wp.array[wp.float32],
+    actions: wp.array2d[wp.float32],
+    old_log_probs: wp.array[wp.float32],
+    advantages: wp.array[wp.float32],
+    clip_ratio: wp.float32,
+    entropy_coeff: wp.float32,
+    action_dim: wp.int32,
+    state_dependent_std: wp.int32,
+    squash: wp.int32,
+    log_std_min: wp.float32,
+    log_std_max: wp.float32,
+    batch_size: wp.int32,
+    loss: wp.array[wp.float32],
+    approx_kl: wp.array[wp.float32],
+    clip_fraction: wp.array[wp.float32],
+    ratios: wp.array[wp.float32],
+    policy_out_grad: wp.array2d[wp.float32],
+    log_std_grad: wp.array[wp.float32],
+):
+    row = wp.tid()
+    total_log_prob = wp.float32(0.0)
+    total_entropy = wp.float32(0.0)
+    for j in range(action_dim):
+        mean = policy_out[row, j]
+        raw_log_std = log_std_param[j]
+        if state_dependent_std != 0:
+            raw_log_std = policy_out[row, action_dim + j]
+        log_std = _clip(raw_log_std, log_std_min, log_std_max)
+        a = actions[row, j]
+        if squash != 0:
+            a = _atanh_clamped(a)
+        total_log_prob = total_log_prob + _normal_log_prob(a, mean, log_std)
+        if squash != 0:
+            action = actions[row, j]
+            total_log_prob = total_log_prob - wp.log(wp.float32(1.0) - action * action + wp.float32(TANH_EPS))
+        total_entropy = total_entropy + wp.float32(0.5 * LOG_2PI_E) + log_std
+
+    log_ratio = total_log_prob - old_log_probs[row]
+    ratio = wp.exp(log_ratio)
+    ratios[row] = ratio
+    clipped = _clip(ratio, wp.float32(1.0) - clip_ratio, wp.float32(1.0) + clip_ratio)
+    adv = advantages[row]
+    pg_loss_unclipped = -adv * ratio
+    pg_loss_clipped = -adv * clipped
+    pg_loss = wp.max(pg_loss_unclipped, pg_loss_clipped)
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    wp.atomic_add(loss, 0, (pg_loss - entropy_coeff * total_entropy) * inv_batch)
+    wp.atomic_add(approx_kl, 0, ((ratio - wp.float32(1.0)) - log_ratio) * inv_batch)
+    clipped_branch = pg_loss_clipped > pg_loss_unclipped
+    outside_clip = ratio <= wp.float32(1.0) - clip_ratio or ratio >= wp.float32(1.0) + clip_ratio
+    d_log_prob = -adv * ratio * inv_batch
+    if clipped_branch and outside_clip:
+        d_log_prob = wp.float32(0.0)
+    if wp.abs(ratio - wp.float32(1.0)) > clip_ratio:
+        wp.atomic_add(clip_fraction, 0, inv_batch)
+
+    for j in range(action_dim):
+        mean = policy_out[row, j]
+        raw_log_std = log_std_param[j]
+        if state_dependent_std != 0:
+            raw_log_std = policy_out[row, action_dim + j]
+        log_std = _clip(raw_log_std, log_std_min, log_std_max)
+        std = wp.exp(log_std)
+        var = std * std
+        a = actions[row, j]
+        if squash != 0:
+            a = _atanh_clamped(a)
+        diff = a - mean
+        policy_out_grad[row, j] = d_log_prob * diff / var
+        raw_log_std_active = raw_log_std >= log_std_min and raw_log_std <= log_std_max
+        d_log_std = wp.float32(0.0)
+        if raw_log_std_active:
+            d_log_std = d_log_prob * (diff * diff / var - wp.float32(1.0)) - entropy_coeff * inv_batch
+        if state_dependent_std != 0:
+            policy_out_grad[row, action_dim + j] = d_log_std
+        else:
+            wp.atomic_add(log_std_grad, j, d_log_std)
+
+
+@wp.kernel
+def mirrored_action_mse_grad_kernel(
+    policy_out: wp.array2d[wp.float32],
+    mirrored_policy_out: wp.array2d[wp.float32],
+    action_mirror_src: wp.array[wp.int32],
+    action_mirror_sign: wp.array[wp.float32],
+    action_dim: wp.int32,
+    coeff: wp.float32,
+    batch_size: wp.int32,
+    policy_out_grad: wp.array2d[wp.float32],
+    loss: wp.array[wp.float32],
+):
+    row, action = wp.tid()
+    target = action_mirror_sign[action] * mirrored_policy_out[row, action_mirror_src[action]]
+    delta = policy_out[row, action] - target
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    policy_out_grad[row, action] = policy_out_grad[row, action] + coeff * delta * inv_batch
+    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta * inv_batch)
+
+
+@wp.kernel
 def value_loss_kernel(
     values: wp.array2d[wp.float32],
     returns: wp.array[wp.float32],

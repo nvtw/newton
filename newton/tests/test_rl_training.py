@@ -11,6 +11,11 @@ import numpy as np
 import warp as wp
 
 import newton.rl as rl
+from newton._src.solvers.phoenx.rl_training.kernels import (
+    mirrored_action_mse_grad_kernel,
+    ppo_actor_loss_backward_kernel,
+    zero_scalar_kernel,
+)
 
 
 def _rl_cuda_device():
@@ -108,6 +113,137 @@ class TestRolloutBuffer(unittest.TestCase):
 
 
 class TestTrainerPPO(unittest.TestCase):
+    def test_manual_actor_backward_matches_tape_update(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(31)
+        mirror_map = rl.MirrorMapPPO(
+            obs_src=(0, 1, 2, 3),
+            obs_sign=(1.0, 1.0, 1.0, 1.0),
+            action_src=(1, 0),
+            action_sign=(1.0, 1.0),
+        )
+        common = {
+            "train_epochs": 1,
+            "normalize_advantages": False,
+            "actor_lr": 1.0e-3,
+            "critic_lr": 1.0e-3,
+            "entropy_coeff": 1.0e-4,
+            "max_grad_norm": 0.0,
+            "mirror_loss_coeff": 0.1,
+        }
+        trainer_tape = rl.TrainerPPO(
+            obs_dim=4,
+            action_dim=2,
+            hidden_layers=(8,),
+            config=rl.ConfigPPO(**common, manual_actor_backward=False),
+            device=device,
+            seed=13,
+            mirror_map=mirror_map,
+        )
+        trainer_manual = rl.TrainerPPO(
+            obs_dim=4,
+            action_dim=2,
+            hidden_layers=(8,),
+            config=rl.ConfigPPO(**common, manual_actor_backward=True),
+            device=device,
+            seed=13,
+            mirror_map=mirror_map,
+        )
+        buffers = [rl.BufferRollout(num_steps=4, num_envs=3, obs_dim=4, action_dim=2, device=device) for _ in range(2)]
+        obs = rng.normal(size=(12, 4)).astype(np.float32)
+        actions = np.tanh(0.35 * rng.normal(size=(12, 2))).astype(np.float32)
+        advantages = rng.normal(loc=0.2, scale=0.4, size=12).astype(np.float32)
+        for buffer in buffers:
+            buffer.obs.assign(obs)
+            buffer.actions.assign(actions)
+            buffer.advantages.assign(advantages)
+        _policy_out, old_log_probs = trainer_tape.actor.log_prob(
+            buffers[0].obs, buffers[0].actions, requires_grad=False
+        )
+        old_log_probs_np = old_log_probs.numpy()
+        buffers[0].old_log_probs.assign(old_log_probs_np)
+        buffers[1].old_log_probs.assign(old_log_probs_np)
+
+        stats_tape = trainer_tape._update_actor(buffers[0])
+        stats_manual = trainer_manual._update_actor(buffers[1])
+
+        self.assertAlmostEqual(stats_manual[0], stats_tape[0], places=5)
+        self.assertAlmostEqual(stats_manual[1], stats_tape[1], places=5)
+        self.assertAlmostEqual(stats_manual[2], stats_tape[2], places=6)
+        for manual_param, tape_param in zip(
+            trainer_manual.actor.parameters(), trainer_tape.actor.parameters(), strict=True
+        ):
+            np.testing.assert_allclose(manual_param.numpy(), tape_param.numpy(), rtol=2.0e-4, atol=2.0e-5)
+
+    def test_manual_actor_loss_backward_is_graph_capturable(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(47)
+        rows = 8
+        action_dim = 2
+        policy_out = wp.array(rng.normal(size=(rows, action_dim)).astype(np.float32), dtype=wp.float32, device=device)
+        mirrored_policy_out = wp.array(
+            rng.normal(size=(rows, action_dim)).astype(np.float32), dtype=wp.float32, device=device
+        )
+        log_std = wp.array(np.array([-0.2, 0.1], dtype=np.float32), dtype=wp.float32, device=device)
+        actions = wp.array(
+            np.tanh(0.3 * rng.normal(size=(rows, action_dim))).astype(np.float32), dtype=wp.float32, device=device
+        )
+        old_log_probs = wp.array(rng.normal(size=rows).astype(np.float32), dtype=wp.float32, device=device)
+        advantages = wp.array(rng.normal(size=rows).astype(np.float32), dtype=wp.float32, device=device)
+        loss = wp.zeros(1, dtype=wp.float32, device=device)
+        approx_kl = wp.zeros(1, dtype=wp.float32, device=device)
+        clip_fraction = wp.zeros(1, dtype=wp.float32, device=device)
+        ratios = wp.zeros(rows, dtype=wp.float32, device=device)
+        policy_out_grad = wp.zeros((rows, action_dim), dtype=wp.float32, device=device)
+        log_std_grad = wp.zeros(action_dim, dtype=wp.float32, device=device)
+        mirror_src = wp.array(np.array([1, 0], dtype=np.int32), dtype=wp.int32, device=device)
+        mirror_sign = wp.array(np.array([1.0, 1.0], dtype=np.float32), dtype=wp.float32, device=device)
+
+        def launch_manual_backward() -> None:
+            wp.launch(zero_scalar_kernel, dim=1, outputs=[loss], device=device)
+            wp.launch(zero_scalar_kernel, dim=1, outputs=[approx_kl], device=device)
+            wp.launch(zero_scalar_kernel, dim=1, outputs=[clip_fraction], device=device)
+            log_std_grad.zero_()
+            wp.launch(
+                ppo_actor_loss_backward_kernel,
+                dim=rows,
+                inputs=[
+                    policy_out,
+                    log_std,
+                    actions,
+                    old_log_probs,
+                    advantages,
+                    0.2,
+                    1.0e-4,
+                    action_dim,
+                    0,
+                    1,
+                    -5.0,
+                    2.0,
+                    rows,
+                ],
+                outputs=[loss, approx_kl, clip_fraction, ratios, policy_out_grad, log_std_grad],
+                device=device,
+            )
+            wp.launch(
+                mirrored_action_mse_grad_kernel,
+                dim=(rows, action_dim),
+                inputs=[policy_out, mirrored_policy_out, mirror_src, mirror_sign, action_dim, 0.1, rows],
+                outputs=[policy_out_grad, loss],
+                device=device,
+            )
+
+        launch_manual_backward()
+        policy_out_grad.zero_()
+        with wp.ScopedCapture(device=device) as capture:
+            launch_manual_backward()
+        wp.capture_launch(capture.graph)
+
+        self.assertTrue(math.isfinite(float(loss.numpy()[0])))
+        self.assertTrue(math.isfinite(float(approx_kl.numpy()[0])))
+        self.assertGreater(float(np.linalg.norm(policy_out_grad.numpy())), 0.0)
+        self.assertGreater(float(np.linalg.norm(log_std_grad.numpy())), 0.0)
+
     def test_update_changes_actor_and_returns_finite_stats(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(3)
@@ -125,6 +261,7 @@ class TestTrainerPPO(unittest.TestCase):
             vtrace_c_clip=3.0,
             max_grad_norm=0.3,
             mirror_loss_coeff=0.1,
+            manual_actor_backward=True,
         )
         mirror_map = rl.MirrorMapPPO(
             obs_src=(0, 1, 2, 3, 4),
@@ -186,6 +323,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.config.replay_ratio, 0.0)
         self.assertEqual(restored.config.priority_alpha, 0.0)
         self.assertEqual(restored.config.priority_beta, 0.0)
+        self.assertFalse(restored.config.manual_actor_backward)
         self.assertEqual(restored.config.vtrace_rho_clip, 0.0)
         self.assertEqual(restored.config.vtrace_c_clip, 0.0)
         self.assertEqual(restored.config.reward_clip, 0.0)

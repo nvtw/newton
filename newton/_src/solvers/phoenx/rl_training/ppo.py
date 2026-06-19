@@ -15,8 +15,10 @@ from .kernels import (
     gather_trajectory_minibatch_kernel,
     gaussian_entropy_kernel,
     mirror_2d_kernel,
+    mirrored_action_mse_grad_kernel,
     mirrored_action_mse_loss_kernel,
     normalize_kernel,
+    ppo_actor_loss_backward_kernel,
     ppo_actor_loss_kernel,
     scatter_trajectory_ratios_kernel,
     scatter_trajectory_values_kernel,
@@ -69,6 +71,9 @@ class ConfigPPO:
             equal to zero uses uniform trajectory sampling.
         priority_beta: Importance-correction exponent for priority replay. A
             value less than or equal to zero disables the correction.
+        manual_actor_backward: Use a hand-written Gaussian PPO loss backward
+            kernel and seed the actor MLP gradients directly. This avoids Warp
+            Tape through the log-probability, entropy, and PPO loss kernels.
         vtrace_rho_clip: V-trace policy-ratio clip for replayed trajectories.
             A value less than or equal to zero disables V-trace recomputation.
         vtrace_c_clip: V-trace trace-ratio clip for replayed trajectories.
@@ -95,6 +100,7 @@ class ConfigPPO:
     replay_ratio: float = 0.0
     priority_alpha: float = 0.0
     priority_beta: float = 0.0
+    manual_actor_backward: bool = False
     vtrace_rho_clip: float = 0.0
     vtrace_c_clip: float = 0.0
     normalize_advantages: bool = True
@@ -332,6 +338,8 @@ class TrainerPPO:
         self._minibatch: BatchPPO | None = None
         self._minibatch_env_ids: wp.array[wp.int32] | None = None
         self._trajectory_priorities: wp.array[wp.float32] | None = None
+        self._actor_policy_out_grad: wp.array2d[wp.float32] | None = None
+        self._actor_log_std_grad = wp.zeros_like(self.actor.log_std, requires_grad=False)
         if mirror_map is not None:
             self.set_mirror_map(mirror_map)
 
@@ -645,6 +653,96 @@ class TrainerPPO:
         return self._minibatch
 
     def _update_actor(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> tuple[float, float, float]:
+        if self.config.manual_actor_backward:
+            return self._update_actor_manual(buffer, read_stats=read_stats)
+        return self._update_actor_tape(buffer, read_stats=read_stats)
+
+    def _ensure_actor_backward_buffers(self, rows: int, cols: int) -> wp.array2d[wp.float32]:
+        if (
+            self._actor_policy_out_grad is None
+            or int(self._actor_policy_out_grad.shape[0]) != int(rows)
+            or int(self._actor_policy_out_grad.shape[1]) != int(cols)
+        ):
+            self._actor_policy_out_grad = wp.zeros(
+                (int(rows), int(cols)), dtype=wp.float32, device=self.device, requires_grad=False
+            )
+        return self._actor_policy_out_grad
+
+    def _update_actor_manual(
+        self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True
+    ) -> tuple[float, float, float]:
+        mirror_obs = self._mirrored_obs(buffer)
+        mirror_policy_out = None
+        if mirror_obs is not None:
+            mirror_policy_out = self.actor.forward(mirror_obs, requires_grad=False)
+
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._policy_loss], device=self.device)
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._approx_kl], device=self.device)
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._clip_fraction], device=self.device)
+        self._actor_log_std_grad.zero_()
+        with wp.Tape() as tape:
+            policy_out = self.actor.forward(buffer.obs, requires_grad=True)
+        policy_out_grad = self._ensure_actor_backward_buffers(buffer.num_samples, int(policy_out.shape[1]))
+        wp.launch(
+            ppo_actor_loss_backward_kernel,
+            dim=buffer.num_samples,
+            inputs=[
+                policy_out,
+                self.actor.log_std,
+                buffer.actions,
+                buffer.old_log_probs,
+                buffer.advantages,
+                self.config.clip_ratio,
+                self.config.entropy_coeff,
+                self.action_dim,
+                int(self.actor.state_dependent_std),
+                int(self.actor.squash),
+                self.actor.log_std_min,
+                self.actor.log_std_max,
+                buffer.num_samples,
+            ],
+            outputs=[
+                self._policy_loss,
+                self._approx_kl,
+                self._clip_fraction,
+                buffer.ratios,
+                policy_out_grad,
+                self._actor_log_std_grad,
+            ],
+            device=self.device,
+        )
+        if mirror_policy_out is not None:
+            wp.launch(
+                mirrored_action_mse_grad_kernel,
+                dim=(buffer.num_samples, self.action_dim),
+                inputs=[
+                    policy_out,
+                    mirror_policy_out,
+                    self._mirror_action_src,
+                    self._mirror_action_sign,
+                    self.action_dim,
+                    self.config.mirror_loss_coeff,
+                    buffer.num_samples,
+                ],
+                outputs=[policy_out_grad, self._policy_loss],
+                device=self.device,
+            )
+        tape.backward(grads={policy_out: policy_out_grad, self.actor.log_std: self._actor_log_std_grad})
+        if read_stats:
+            loss = float(self._policy_loss.numpy()[0])
+            kl = float(self._approx_kl.numpy()[0])
+            clip_fraction = float(self._clip_fraction.numpy()[0])
+        else:
+            loss = 0.0
+            kl = 0.0
+            clip_fraction = 0.0
+        self.actor_optimizer.step()
+        tape.zero()
+        return loss, kl, clip_fraction
+
+    def _update_actor_tape(
+        self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True
+    ) -> tuple[float, float, float]:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_policy_out = None
         if mirror_obs is not None:
