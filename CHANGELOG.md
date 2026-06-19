@@ -6,6 +6,7 @@
 
 - Add opt-in `SolverPhoenX` full-coordinate DVI articulation controls, including block-sparse solve modes and full closed-loop joint ownership for supported joint columns.
 - Add experimental pure-Warp `newton.rl` PPO and SAC training utilities, including a PhoenX Anymal sparse-target locomotion environment, deterministic evaluation metrics, and PPO checkpoint resume helpers.
+- Add manual critic-backward PPO controls for the experimental PhoenX G1 RL training path, including `ConfigPPO.manual_critic_backward` and `newton.rl train-g1-ppo --no-manual-critic-backward`.
 - Add strict walking validation metrics and configurable upright termination for the experimental PhoenX Anymal RL environment.
 - Add a `robot_dr_legs_phoenx_dvi` example and matching `robot_dr_legs_phoenx --articulation-dvi` option for running DR Legs with PhoenX's DVI articulation solve.
 - Add public `SolverPhoenX` construction for model particles, cloth triangles and bending edges, and soft tetrahedra; deformable contacts use the same `model.contacts()` / `model.collide()` flow as rigid PhoenX scenes.

@@ -96,6 +96,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             max_grad_norm=0.3,
             mirror_loss_coeff=0.25,
             manual_actor_backward=True,
+            manual_critic_backward=True,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -125,6 +126,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(restored.config.priority_alpha, 0.0)
             self.assertEqual(restored.config.priority_beta, 0.0)
             self.assertTrue(restored.config.manual_actor_backward)
+            self.assertTrue(restored.config.manual_critic_backward)
             self.assertEqual(restored.config.vtrace_rho_clip, 0.0)
             self.assertEqual(restored.config.vtrace_c_clip, 0.0)
             self.assertEqual(restored.config.reward_clip, 1.0)

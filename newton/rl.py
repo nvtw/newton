@@ -163,6 +163,7 @@ def _main() -> int:
     g1_parser.add_argument("--priority-alpha", type=float, default=0.4)
     g1_parser.add_argument("--priority-beta", type=float, default=1.0)
     g1_parser.add_argument("--no-manual-actor-backward", action="store_true")
+    g1_parser.add_argument("--no-manual-critic-backward", action="store_true")
     g1_parser.add_argument("--vtrace-rho-clip", type=float, default=0.0)
     g1_parser.add_argument("--vtrace-c-clip", type=float, default=0.0)
     g1_parser.add_argument("--reward-clip", type=float, default=1.0)
@@ -259,6 +260,7 @@ def _main() -> int:
             priority_alpha=args.priority_alpha,
             priority_beta=args.priority_beta,
             manual_actor_backward=not args.no_manual_actor_backward,
+            manual_critic_backward=not args.no_manual_critic_backward,
             vtrace_rho_clip=args.vtrace_rho_clip,
             vtrace_c_clip=args.vtrace_c_clip,
             normalize_advantages=True,

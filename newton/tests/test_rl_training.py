@@ -14,6 +14,8 @@ import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training.kernels import (
     mirrored_action_mse_grad_kernel,
     ppo_actor_loss_backward_kernel,
+    value_loss_grad_kernel,
+    value_symmetry_loss_grad_kernel,
     zero_scalar_kernel,
 )
 
@@ -244,6 +246,51 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertGreater(float(np.linalg.norm(policy_out_grad.numpy())), 0.0)
         self.assertGreater(float(np.linalg.norm(log_std_grad.numpy())), 0.0)
 
+    def test_manual_critic_loss_backward_is_graph_capturable(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(53)
+        rows = 8
+        coeff = 0.25
+        values_np = rng.normal(size=(rows, 1)).astype(np.float32)
+        returns_np = rng.normal(size=rows).astype(np.float32)
+        mirrored_np = rng.normal(size=(rows, 1)).astype(np.float32)
+        values = wp.array(values_np, dtype=wp.float32, device=device)
+        returns = wp.array(returns_np, dtype=wp.float32, device=device)
+        mirrored = wp.array(mirrored_np, dtype=wp.float32, device=device)
+        loss = wp.zeros(1, dtype=wp.float32, device=device)
+        value_grad = wp.zeros((rows, 1), dtype=wp.float32, device=device)
+
+        def launch_manual_backward() -> None:
+            wp.launch(zero_scalar_kernel, dim=1, outputs=[loss], device=device)
+            wp.launch(
+                value_loss_grad_kernel,
+                dim=rows,
+                inputs=[values, returns, rows],
+                outputs=[loss, value_grad],
+                device=device,
+            )
+            wp.launch(
+                value_symmetry_loss_grad_kernel,
+                dim=rows,
+                inputs=[values, mirrored, coeff, rows],
+                outputs=[loss, value_grad],
+                device=device,
+            )
+
+        launch_manual_backward()
+        value_grad.zero_()
+        with wp.ScopedCapture(device=device) as capture:
+            launch_manual_backward()
+        wp.capture_launch(capture.graph)
+
+        expected_delta = values_np[:, 0] - returns_np
+        expected_mirror_delta = values_np[:, 0] - mirrored_np[:, 0]
+        expected_loss = 0.5 * np.mean(expected_delta * expected_delta)
+        expected_loss += 0.5 * coeff * np.mean(expected_mirror_delta * expected_mirror_delta)
+        expected_grad = ((expected_delta + coeff * expected_mirror_delta) / float(rows)).reshape(rows, 1)
+        self.assertAlmostEqual(float(loss.numpy()[0]), float(expected_loss), places=6)
+        np.testing.assert_allclose(value_grad.numpy(), expected_grad, rtol=1.0e-6, atol=1.0e-6)
+
     def test_manual_mlp_backward_matches_numpy_and_graph_captures(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(71)
@@ -298,6 +345,7 @@ class TestTrainerPPO(unittest.TestCase):
             max_grad_norm=0.3,
             mirror_loss_coeff=0.1,
             manual_actor_backward=True,
+            manual_critic_backward=True,
         )
         mirror_map = rl.MirrorMapPPO(
             obs_src=(0, 1, 2, 3, 4),
@@ -360,6 +408,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.config.priority_alpha, 0.0)
         self.assertEqual(restored.config.priority_beta, 0.0)
         self.assertFalse(restored.config.manual_actor_backward)
+        self.assertFalse(restored.config.manual_critic_backward)
         self.assertEqual(restored.config.vtrace_rho_clip, 0.0)
         self.assertEqual(restored.config.vtrace_c_clip, 0.0)
         self.assertEqual(restored.config.reward_clip, 0.0)

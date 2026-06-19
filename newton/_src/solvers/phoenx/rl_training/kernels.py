@@ -366,6 +366,21 @@ def value_loss_kernel(
 
 
 @wp.kernel
+def value_loss_grad_kernel(
+    values: wp.array2d[wp.float32],
+    returns: wp.array[wp.float32],
+    batch_size: wp.int32,
+    loss: wp.array[wp.float32],
+    value_grad: wp.array2d[wp.float32],
+):
+    i = wp.tid()
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    delta = values[i, 0] - returns[i]
+    value_grad[i, 0] = delta * inv_batch
+    wp.atomic_add(loss, 0, wp.float32(0.5) * delta * delta * inv_batch)
+
+
+@wp.kernel
 def mirror_2d_kernel(
     src: wp.array2d[wp.float32],
     mirror_src: wp.array[wp.int32],
@@ -404,6 +419,22 @@ def value_symmetry_loss_kernel(
     row = wp.tid()
     delta = values[row, 0] - mirrored_values[row, 0]
     wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta / wp.float32(batch_size))
+
+
+@wp.kernel
+def value_symmetry_loss_grad_kernel(
+    values: wp.array2d[wp.float32],
+    mirrored_values: wp.array2d[wp.float32],
+    coeff: wp.float32,
+    batch_size: wp.int32,
+    loss: wp.array[wp.float32],
+    value_grad: wp.array2d[wp.float32],
+):
+    row = wp.tid()
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    delta = values[row, 0] - mirrored_values[row, 0]
+    value_grad[row, 0] = value_grad[row, 0] + coeff * delta * inv_batch
+    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta * inv_batch)
 
 
 @wp.kernel

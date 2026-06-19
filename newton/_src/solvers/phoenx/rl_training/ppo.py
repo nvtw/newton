@@ -24,7 +24,9 @@ from .kernels import (
     scatter_trajectory_values_kernel,
     sum_and_sumsq_kernel,
     trajectory_priority_kernel,
+    value_loss_grad_kernel,
     value_loss_kernel,
+    value_symmetry_loss_grad_kernel,
     value_symmetry_loss_kernel,
     weight_trajectory_advantages_kernel,
     zero_scalar_kernel,
@@ -74,6 +76,9 @@ class ConfigPPO:
         manual_actor_backward: Use hand-written kernels for the actor MLP and
             Gaussian PPO loss backward pass. This avoids Warp Tape for the
             actor update path.
+        manual_critic_backward: Use hand-written kernels for the critic MLP and
+            value loss backward pass. This avoids Warp Tape for the critic
+            update path.
         vtrace_rho_clip: V-trace policy-ratio clip for replayed trajectories.
             A value less than or equal to zero disables V-trace recomputation.
         vtrace_c_clip: V-trace trace-ratio clip for replayed trajectories.
@@ -101,6 +106,7 @@ class ConfigPPO:
     priority_alpha: float = 0.0
     priority_beta: float = 0.0
     manual_actor_backward: bool = False
+    manual_critic_backward: bool = False
     vtrace_rho_clip: float = 0.0
     vtrace_c_clip: float = 0.0
     normalize_advantages: bool = True
@@ -339,6 +345,7 @@ class TrainerPPO:
         self._minibatch_env_ids: wp.array[wp.int32] | None = None
         self._trajectory_priorities: wp.array[wp.float32] | None = None
         self._actor_policy_out_grad: wp.array2d[wp.float32] | None = None
+        self._critic_value_grad: wp.array2d[wp.float32] | None = None
         self._actor_log_std_grad = wp.zeros_like(self.actor.log_std, requires_grad=False)
         if mirror_map is not None:
             self.set_mirror_map(mirror_map)
@@ -812,7 +819,48 @@ class TrainerPPO:
         tape.zero()
         return loss, kl, clip_fraction
 
+    def _ensure_critic_backward_buffers(self, rows: int) -> wp.array2d[wp.float32]:
+        if self._critic_value_grad is None or int(self._critic_value_grad.shape[0]) != int(rows):
+            self._critic_value_grad = wp.zeros(
+                (int(rows), 1), dtype=wp.float32, device=self.device, requires_grad=False
+            )
+        return self._critic_value_grad
+
     def _update_critic(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> float:
+        if self.config.manual_critic_backward:
+            return self._update_critic_manual(buffer, read_stats=read_stats)
+        return self._update_critic_tape(buffer, read_stats=read_stats)
+
+    def _update_critic_manual(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> float:
+        mirror_obs = self._mirrored_obs(buffer)
+        mirror_values = None
+        if mirror_obs is not None:
+            mirror_values = self.critic.forward(mirror_obs, requires_grad=False)
+
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._value_loss], device=self.device)
+        values = self.critic.forward_manual(buffer.obs)
+        value_grad = self._ensure_critic_backward_buffers(buffer.num_samples)
+        wp.launch(
+            value_loss_grad_kernel,
+            dim=buffer.num_samples,
+            inputs=[values, buffer.returns, buffer.num_samples],
+            outputs=[self._value_loss, value_grad],
+            device=self.device,
+        )
+        if mirror_values is not None:
+            wp.launch(
+                value_symmetry_loss_grad_kernel,
+                dim=buffer.num_samples,
+                inputs=[values, mirror_values, self.config.mirror_loss_coeff, buffer.num_samples],
+                outputs=[self._value_loss, value_grad],
+                device=self.device,
+            )
+        self.critic.backward_manual(value_grad)
+        loss = float(self._value_loss.numpy()[0]) if read_stats else 0.0
+        self.critic_optimizer.step()
+        return loss
+
+    def _update_critic_tape(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> float:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_values = None
         if mirror_obs is not None:
@@ -986,7 +1034,7 @@ def _config_from_checkpoint(data: np.lib.npyio.NpzFile) -> ConfigPPO:
         key = f"config_{field}"
         if key in data:
             value = data[key].item()
-            if field == "normalize_advantages":
+            if field in ("manual_actor_backward", "manual_critic_backward", "normalize_advantages"):
                 value = bool(value)
             values[field] = value
     return ConfigPPO(**values)
