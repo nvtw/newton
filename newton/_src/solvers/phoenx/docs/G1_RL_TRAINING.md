@@ -121,50 +121,49 @@ uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_rl \
     --world-count 4096 --measure-replays 16 --warmup-steps 4
 ```
 
-Result from this checkpoint:
+Result from this checkpoint after the G1 recipe switched to
+`velocity_iterations=0`:
 
-- 763,732 env steps/s at 4096 worlds.
-- 3,818,658 physics steps/s at 4096 worlds.
-- 9.8 s setup time at 4096 worlds.
+- 960,866 env steps/s at 4096 worlds.
+- 4,804,329 physics steps/s at 4096 worlds.
+- 4.9 s setup time at 4096 worlds.
 
 A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
 128x128x128 PPO networks, `minibatch_size=32768`, `replay_ratio=3.0`,
 `priority_alpha=0.4`, V-trace replay correction, mirror regularization, and
 BF16 manual MLP weight-gradient tile matmul plus large-minibatch BF16 hidden
-forward tile matmul reached 506,519 environment samples/s after warmup on
-2026-06-19. The corresponding physics rate was 2,532,597 steps/s.
+forward tile matmul reached 554,990 environment samples/s with compact
+diagnostics and 554,222 environment samples/s with `--no-readback-diagnostics`
+after warmup on 2026-06-19. The corresponding no-readback physics rate was
+2,771,110 steps/s. Short-run variation is larger than the compact diagnostic
+copy cost, so the diagnostic readback remains throughput-neutral at this scale.
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train \
-    --iterations 3 --warmup-iterations 1
+    --iterations 4 --warmup-iterations 1 --no-readback-diagnostics
 ```
 
-The same benchmark with `--no-readback-diagnostics` reached 510,166 environment
-samples/s and 2,550,832 physics steps/s. Avoiding diagnostic host copies makes
-the update phase more graph-capture friendly, but end-to-end throughput is
-currently neutral because rollout/solver work dominates.
-
 nanoG1 reports about 1.28M environment samples/s while actually training, so
-the current mirror-enabled pure-Warp PhoenX G1 training loop is about 2.53x
+the current mirror-enabled pure-Warp PhoenX G1 training loop is about 2.31x
 slower on this training-throughput metric. An Nsight Systems profile of the
 same short benchmark shows the time is still dominated by PhoenX rollout and
 solver work rather than the Warp PPO optimizer. Top CUDA kernels by total GPU
 time in that profile were:
 
-1. `_make_fast_tail_prepare_plus_iterate`: 35.2%
-2. `dense_weight_grad_bf16_tiled`: 9.3%
-3. `_make_fast_tail_relax`: 7.8%
-4. `_per_world_greedy_coloring`: 7.2%
-5. CUB int64 radix sort: 3.3%
-6. `dense_forward_bf16_tiled`: 3.1%
-7. `_phoenx_refresh_world_inertia`: 2.9%
-8. `eval_articulation_fk`: 2.9%
-9. CUB int32 radix sort: 2.4%
-10. `dense_layer`: 1.8%
+1. `_make_fast_tail_prepare_plus_iterate`: 34.6%
+2. `dense_weight_grad_bf16_tiled`: 10.8%
+3. `_per_world_greedy_coloring`: 8.4%
+4. CUB radix sort onesweep: 6.7%
+5. `dense_forward_bf16_tiled`: 3.6%
+6. `_phoenx_refresh_world_inertia`: 3.5%
+7. `eval_articulation_fk`: 3.3%
+8. `dense_layer`: 2.0%
+9. `_phoenx_apply_forces_and_gravity`: 2.0%
+10. `_contact_container_copy_current_to_prev`: 1.3%
 
 nanoG1 reports about 8.5M production physics steps/s and 7.25M matched physics
 steps/s in its README/benchmark notes, so this PhoenX path is currently about
-2.2x slower than nanoG1 production and about 1.9x slower than nanoG1 matched on
+1.8x slower than nanoG1 production and about 1.5x slower than nanoG1 matched on
 raw no-learner stepping. The benchmark can invoke the local nanoG1 checkout when
 cloud execution is intended:
 

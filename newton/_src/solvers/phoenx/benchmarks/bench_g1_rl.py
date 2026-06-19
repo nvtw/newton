@@ -26,6 +26,7 @@ from typing import Any
 import warp as wp
 
 import newton.rl as rl
+from newton._src.solvers.phoenx.rl_training import g1_recipe
 
 _NANOG1_RESULT_START = "=== ULTRA-BENCH RESULT ==="
 _NANOG1_RESULT_END = "=== END RESULT ==="
@@ -153,7 +154,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--world-count", type=int, default=4096)
     parser.add_argument("--sim-substeps", type=int, default=5)
     parser.add_argument("--solver-iterations", type=int, default=2)
-    parser.add_argument("--velocity-iterations", type=int, default=1)
+    parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument("--parse-meshes", action="store_true")
     parser.add_argument("--measure-replays", type=int, default=64)
     parser.add_argument("--warmup-steps", type=int, default=4)

@@ -21,7 +21,7 @@ def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
         world_count=int(world_count),
         sim_substeps=5,
         solver_iterations=2,
-        velocity_iterations=1,
+        velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
         max_episode_steps=0,
         auto_reset=False,
     )
@@ -38,6 +38,7 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         self.assertEqual(env_config.sim_substeps, g1_recipe.SIM_SUBSTEPS)
         self.assertEqual(env_config.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
+        self.assertEqual(g1_recipe.VELOCITY_ITERATIONS, 0)
         self.assertEqual(env_config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
         self.assertEqual(env_config.w_track_lin, g1_recipe.W_TRACK_LIN)
         self.assertEqual(env_config.w_action_rate, g1_recipe.W_ACTION_RATE)
@@ -118,7 +119,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             world_count=1,
             sim_substeps=1,
             solver_iterations=1,
-            velocity_iterations=1,
+            velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
             max_episode_steps=0,
             auto_reset=False,
         )
