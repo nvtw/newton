@@ -171,6 +171,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         velocity_iterations=int(args.velocity_iterations),
         controlled_action_count=int(args.controlled_action_count),
         parse_meshes=bool(args.parse_meshes),
+        rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
         threads_per_world=args.threads_per_world,
         multi_world_scheduler=str(args.multi_world_scheduler),
         prepare_refresh_stride=args.prepare_refresh_stride,
@@ -238,6 +239,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
         "parse_meshes": bool(args.parse_meshes),
+        "rigid_contact_max_per_world": int(args.rigid_contact_max_per_world),
         "threads_per_world": args.threads_per_world,
         "multi_world_scheduler": str(args.multi_world_scheduler),
         "prepare_refresh_stride": args.prepare_refresh_stride,
@@ -306,6 +308,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     parser.add_argument("--parse-meshes", action="store_true")
+    parser.add_argument(
+        "--rigid-contact-max-per-world",
+        type=int,
+        default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
+        help="Per-world G1 rigid-contact capacity; 0 keeps SolverPhoenX auto-sizing.",
+    )
     parser.add_argument("--threads-per-world", type=_parse_int_or_auto, default=g1_recipe.THREADS_PER_WORLD)
     parser.add_argument("--multi-world-scheduler", default=g1_recipe.MULTI_WORLD_SCHEDULER)
     parser.add_argument("--prepare-refresh-stride", type=_parse_int_or_auto, default=g1_recipe.PREPARE_REFRESH_STRIDE)

@@ -157,6 +157,12 @@ def _main() -> int:
     g1_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_parser.add_argument("--parse-meshes", action="store_true")
+    g1_parser.add_argument(
+        "--rigid-contact-max-per-world",
+        type=int,
+        default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
+        help="Per-world G1 rigid-contact capacity; 0 keeps SolverPhoenX auto-sizing.",
+    )
     g1_parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     g1_parser.add_argument("--mirror-loss-coeff", type=float, default=g1_recipe.MIRROR_LOSS_COEFF)
     g1_parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
@@ -197,6 +203,12 @@ def _main() -> int:
     g1_eval_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_eval_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_eval_parser.add_argument("--parse-meshes", action="store_true")
+    g1_eval_parser.add_argument(
+        "--rigid-contact-max-per-world",
+        type=int,
+        default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
+        help="Per-world G1 rigid-contact capacity; 0 keeps SolverPhoenX auto-sizing.",
+    )
     g1_eval_parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     g1_eval_parser.add_argument("--stochastic", action="store_true")
 
@@ -214,6 +226,12 @@ def _main() -> int:
     g1_gate_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_gate_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_gate_parser.add_argument("--parse-meshes", action="store_true")
+    g1_gate_parser.add_argument(
+        "--rigid-contact-max-per-world",
+        type=int,
+        default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
+        help="Per-world G1 rigid-contact capacity; 0 keeps SolverPhoenX auto-sizing.",
+    )
     g1_gate_parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     g1_gate_parser.add_argument("--stochastic", action="store_true")
     g1_gate_parser.add_argument("--no-fail-on-gate", action="store_true")
@@ -257,6 +275,7 @@ def _main() -> int:
             velocity_iterations=args.velocity_iterations,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
+            rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         ppo_config = g1_recipe.default_g1_ppo_config(
             minibatch_size=args.minibatch_size,
@@ -301,6 +320,7 @@ def _main() -> int:
             velocity_iterations=args.velocity_iterations,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
+            rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)
         result = evaluate_g1_ppo(
@@ -322,6 +342,7 @@ def _main() -> int:
             velocity_iterations=args.velocity_iterations,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
+            rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)
         result = evaluate_g1_gate_ppo(

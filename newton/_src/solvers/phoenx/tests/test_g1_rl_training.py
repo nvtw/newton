@@ -41,6 +41,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
         self.assertEqual(env_config.w_track_lin, g1_recipe.W_TRACK_LIN)
         self.assertEqual(env_config.w_action_rate, g1_recipe.W_ACTION_RATE)
+        self.assertEqual(env_config.rigid_contact_max_per_world, g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env_config.threads_per_world, g1_recipe.THREADS_PER_WORLD)
         self.assertEqual(env_config.multi_world_scheduler, g1_recipe.MULTI_WORLD_SCHEDULER)
         self.assertEqual(env_config.prepare_refresh_stride, g1_recipe.PREPARE_REFRESH_STRIDE)
@@ -54,6 +55,13 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(ppo_config.minibatch_size, g1_recipe.MINIBATCH_SIZE)
         self.assertEqual(ppo_config.manual_mlp_forward_dtype, g1_recipe.MANUAL_MLP_FORWARD_DTYPE)
 
+    def test_rejects_negative_contact_capacity(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 RL capacity tests")
+        config = rl.ConfigEnvG1PhoenX(world_count=1, rigid_contact_max_per_world=-1)
+
+        with self.assertRaisesRegex(ValueError, "rigid_contact_max_per_world"):
+            rl.EnvG1PhoenX(config, device=device)
+
     def test_step_graph_capture_shapes_and_masks_actions(self) -> None:
         env = _g1_test_env(world_count=2)
         actions_np = np.full((env.world_count, env.action_dim), 1.5, dtype=np.float32)
@@ -66,6 +74,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertFalse(env.solver.world.articulation_dvi_host)
         self.assertFalse(env.solver.world.articulation_dvi_replaces_joint_pgs)
         self.assertIsNone(env.solver.world.articulation_topology)
+        self.assertEqual(env.solver.world.rigid_contact_max, env.world_count * g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
+        self.assertEqual(env.contacts.rigid_contact_max, env.world_count * g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env.obs.shape, (2, rl.OBS_DIM_G1))
         self.assertEqual(env.rewards.shape, (2,))
         self.assertEqual(env.dones.shape, (2,))

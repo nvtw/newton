@@ -731,6 +731,10 @@ class ConfigEnvG1PhoenX:
         parse_meshes: Import MJCF mesh collision geoms. Disable for fast
             RL runs that use the primitive foot and arm geoms only.
         auto_reset: Reset worlds whose done flag is set after each step.
+        rigid_contact_max_per_world: Rigid-contact capacity per vectorized world.
+            ``0`` keeps the solver's automatic sizing. The default is
+            intended for primitive-collision G1 RL runs and is ignored when
+            ``parse_meshes`` is enabled.
         threads_per_world: PhoenX multi-world lane count, or ``"auto"``.
         multi_world_scheduler: PhoenX multi-world scheduler selection.
         prepare_refresh_stride: PhoenX cached-prepare refresh stride, or
@@ -761,6 +765,7 @@ class ConfigEnvG1PhoenX:
     w_termination: float = g1_recipe.W_TERMINATION
     parse_meshes: bool = g1_recipe.PARSE_MESHES
     auto_reset: bool = g1_recipe.AUTO_RESET
+    rigid_contact_max_per_world: int = g1_recipe.RIGID_CONTACT_MAX_PER_WORLD
     threads_per_world: int | str = g1_recipe.THREADS_PER_WORLD
     multi_world_scheduler: str = g1_recipe.MULTI_WORLD_SCHEDULER
     prepare_refresh_stride: int | str = g1_recipe.PREPARE_REFRESH_STRIDE
@@ -791,6 +796,8 @@ class EnvG1PhoenX:
             raise ValueError("controlled_action_count must be in [1, ACTION_DIM_G1]")
         if int(self.config.phase_period) <= 0:
             raise ValueError("phase_period must be positive")
+        if int(self.config.rigid_contact_max_per_world) < 0:
+            raise ValueError("rigid_contact_max_per_world must be non-negative")
 
         self.model = self._build_model()
         self.coord_stride = int(self.model.joint_coord_count) // self.world_count
@@ -870,6 +877,15 @@ class EnvG1PhoenX:
         builder.add_ground_plane()
         model = builder.finalize(device=self.device)
         model.set_gravity((0.0, 0.0, -9.81))
+        contact_cap_per_world = int(self.config.rigid_contact_max_per_world)
+        if contact_cap_per_world > 0 and not bool(self.config.parse_meshes):
+            from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING  # noqa: PLC0415
+
+            model._collision_pipeline = newton.CollisionPipeline(
+                model,
+                contact_matching=PHOENX_CONTACT_MATCHING,
+                rigid_contact_max=max(1, self.world_count * contact_cap_per_world),
+            )
         return model
 
     def _make_solver(self):
