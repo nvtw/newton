@@ -59,6 +59,10 @@
 
 ### Changed
 
+- Change the experimental PhoenX G1 PPO defaults to use nanoG1-style
+  V-trace replay clips; pass `--vtrace-rho-clip 0.0 --vtrace-c-clip 0.0`
+  to keep replay uncorrected.
+
 - `ModelBuilder.finalize()` no longer writes the deferred mesh SDF back to `Mesh.sdf` on shared `Mesh` instances. The SDF data is retained on the finalized `Model` (`model.shape_sdf_index`, `model.texture_sdf_data`). Call `Mesh.build_sdf()` directly when you want the SDF stored on a `Mesh`.
 - `ModelBuilder.add_shape_convex_hull()` (and any path producing `GeoType.CONVEX_MESH`) now raises `ValueError` if `ShapeConfig.sdf_*` or `ShapeConfig.is_hydroelastic` are set, matching `add_shape_mesh()`. Build and attach the SDF on the underlying `Mesh` via `Mesh.build_sdf()` instead.
 - `GeoType.HFIELD` shapes now use a `wp.Mesh` BVH for raycasting (built during `ModelBuilder.finalize()`), replacing the per-thread DDA grid traversal; the raycast kernel signature no longer accepts `shape_heightfield_index`, `heightfield_data`, or `heightfield_elevations` — those arrays are still present on `Model` for collision kernels

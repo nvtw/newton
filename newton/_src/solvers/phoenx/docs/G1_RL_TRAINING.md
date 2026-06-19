@@ -79,8 +79,9 @@ and the absolute training iteration. Resuming from `/tmp/phoenx_g1_2.npz` writes
 
 Use `--mirror-loss-coeff 0.0` on `train-g1-ppo` or `bench_g1_train` to disable
 the default nanoG1-style mirror regularizer for throughput-only comparisons. Use
-`--reward-clip 0.0` to disable PufferLib-style reward clipping, or
-`--max-grad-norm 0.0` to disable gradient clipping.
+`--reward-clip 0.0` to disable PufferLib-style reward clipping,
+`--vtrace-rho-clip 0.0 --vtrace-c-clip 0.0` to disable V-trace replay
+correction, or `--max-grad-norm 0.0` to disable gradient clipping.
 
 The gate command mirrors nanoG1's frozen bar: a six-command deterministic
 battery with noisy resets for falls/tracking performance, plus a separate
