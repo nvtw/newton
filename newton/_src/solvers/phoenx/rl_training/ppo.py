@@ -28,6 +28,8 @@ from .kernels import (
     sum_and_sumsq_kernel,
     trajectory_priority_kernel,
     trajectory_priority_weight_kernel,
+    value_column_loss_grad_kernel,
+    value_column_symmetry_loss_grad_kernel,
     value_loss_grad_kernel,
     value_loss_kernel,
     value_symmetry_loss_grad_kernel,
@@ -103,6 +105,9 @@ class ConfigPPO:
             critic optimizers. A value less than or equal to zero disables clipping.
         mirror_loss_coeff: Coefficient for optional mirror-symmetry MSE on
             policy means and value predictions. Requires a mirror map.
+        shared_value_network: Use one actor/value MLP with the final output
+            column as the value estimate. This matches PufferLib's fused
+            decoder layout and uses actor_lr for the shared network.
     """
 
     gamma: float = 0.99
@@ -126,6 +131,7 @@ class ConfigPPO:
     reward_clip: float = 0.0
     max_grad_norm: float = 0.0
     mirror_loss_coeff: float = 0.0
+    shared_value_network: bool = False
 
 
 @dataclass
@@ -325,6 +331,9 @@ class TrainerPPO:
         self.squash_actions = bool(squash_actions)
         self.log_std_init = float(log_std_init)
         self.device = wp.get_device(device)
+        self.shared_value_network = bool(self.config.shared_value_network)
+        if self.shared_value_network and not (self.config.manual_actor_backward and self.config.manual_critic_backward):
+            raise ValueError("shared_value_network currently requires manual actor and critic backward")
         self.actor = GaussianActor(
             obs_dim=self.obs_dim,
             action_dim=self.action_dim,
@@ -338,20 +347,33 @@ class TrainerPPO:
             manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
             manual_forward_dtype=self.config.manual_mlp_forward_dtype,
         )
-        self.critic = WarpMLP(
-            (self.obs_dim, *self.hidden_layers, 1),
-            activation=activation,
-            output_activation="linear",
-            device=self.device,
-            seed=seed + 1,
-            manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
-            manual_forward_dtype=self.config.manual_mlp_forward_dtype,
-        )
+        if self.shared_value_network:
+            self.actor.net = WarpMLP(
+                (self.obs_dim, *self.hidden_layers, self.action_dim + 1),
+                activation=activation,
+                output_activation="linear",
+                device=self.device,
+                seed=seed,
+                manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
+                manual_forward_dtype=self.config.manual_mlp_forward_dtype,
+            )
+            self.critic: WarpMLP | None = None
+            self.critic_optimizer: Adam | None = None
+        else:
+            self.critic = WarpMLP(
+                (self.obs_dim, *self.hidden_layers, 1),
+                activation=activation,
+                output_activation="linear",
+                device=self.device,
+                seed=seed + 1,
+                manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
+                manual_forward_dtype=self.config.manual_mlp_forward_dtype,
+            )
+            self.critic_optimizer = Adam(
+                self.critic.parameters(), lr=self.config.critic_lr, max_grad_norm=self.config.max_grad_norm
+            )
         self.actor_optimizer = Adam(
             self.actor.parameters(), lr=self.config.actor_lr, max_grad_norm=self.config.max_grad_norm
-        )
-        self.critic_optimizer = Adam(
-            self.critic.parameters(), lr=self.config.critic_lr, max_grad_norm=self.config.max_grad_norm
         )
         self.iteration = 0
         self.mirror_map: MirrorMapPPO | None = None
@@ -427,9 +449,12 @@ class TrainerPPO:
             data[f"config_{key}"] = np.asarray(value)
         _pack_mlp(data, "actor", self.actor.net)
         data["actor_log_std"] = self.actor.log_std.numpy()
-        _pack_mlp(data, "critic", self.critic)
         _pack_adam(data, "actor_optimizer", self.actor_optimizer)
-        _pack_adam(data, "critic_optimizer", self.critic_optimizer)
+        if not self.shared_value_network:
+            if self.critic is None or self.critic_optimizer is None:
+                raise RuntimeError("separate critic state was not initialized")
+            _pack_mlp(data, "critic", self.critic)
+            _pack_adam(data, "critic_optimizer", self.critic_optimizer)
         checkpoint_path = Path(path)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(checkpoint_path, **data)
@@ -468,12 +493,30 @@ class TrainerPPO:
             )
             _unpack_mlp(data, "actor", trainer.actor.net)
             trainer.actor.log_std.assign(data["actor_log_std"])
-            _unpack_mlp(data, "critic", trainer.critic)
             _unpack_adam(data, "actor_optimizer", trainer.actor_optimizer)
-            _unpack_adam(data, "critic_optimizer", trainer.critic_optimizer)
+            if not trainer.shared_value_network:
+                if trainer.critic is None or trainer.critic_optimizer is None:
+                    raise RuntimeError("separate critic state was not initialized")
+                _unpack_mlp(data, "critic", trainer.critic)
+                _unpack_adam(data, "critic_optimizer", trainer.critic_optimizer)
             if "iteration" in data:
                 trainer.iteration = max(int(data["iteration"]), 0)
         return trainer
+
+    @property
+    def value_column(self) -> int:
+        """Column in the returned value tensor containing value predictions."""
+
+        return self.action_dim if self.shared_value_network else 0
+
+    def value_reuse(self, obs: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+        """Evaluate values into persistent no-grad buffers."""
+
+        if self.shared_value_network:
+            return self.actor.net.forward_reuse(obs)
+        if self.critic is None:
+            raise RuntimeError("separate critic state was not initialized")
+        return self.critic.forward_reuse(obs)
 
     def act(
         self,
@@ -493,9 +536,13 @@ class TrainerPPO:
             Tuple ``(actions, log_probs, values)``.
         """
 
-        actions, log_probs, _policy_out = self.actor.sample(
+        actions, log_probs, policy_out = self.actor.sample(
             obs, seed=seed, deterministic=deterministic, requires_grad=False
         )
+        if self.shared_value_network:
+            return actions, log_probs, policy_out
+        if self.critic is None:
+            raise RuntimeError("separate critic state was not initialized")
         values = self.critic.forward(obs, requires_grad=False)
         return actions, log_probs, values
 
@@ -508,7 +555,11 @@ class TrainerPPO:
     ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
         """Sample actions and values into persistent no-grad buffers."""
 
-        actions, log_probs, _policy_out = self.actor.sample_reuse(obs, seed=seed, deterministic=deterministic)
+        actions, log_probs, policy_out = self.actor.sample_reuse(obs, seed=seed, deterministic=deterministic)
+        if self.shared_value_network:
+            return actions, log_probs, policy_out
+        if self.critic is None:
+            raise RuntimeError("separate critic state was not initialized")
         values = self.critic.forward_reuse(obs)
         return actions, log_probs, values
 
@@ -519,9 +570,10 @@ class TrainerPPO:
         if rows <= 0:
             raise ValueError("batch_size must be positive")
         self.actor.reserve_reuse_buffers(rows)
-        self.critic.reserve_buffers(rows)
         self._ensure_actor_backward_buffers(rows, self.actor.net.output_dim)
-        self._ensure_critic_backward_buffers(rows)
+        if self.critic is not None:
+            self.critic.reserve_buffers(rows)
+            self._ensure_critic_backward_buffers(rows)
 
     def update(self, buffer: BufferRollout) -> StatsPPOUpdate:
         """Update actor and critic from a finished rollout buffer."""
@@ -541,8 +593,15 @@ class TrainerPPO:
         train_epochs = int(self.config.train_epochs)
         for epoch in range(train_epochs):
             read_stats = epoch == train_epochs - 1
-            policy_loss, approx_kl, clip_fraction = self._update_actor(buffer, read_stats=read_stats)
-            value_loss = self._update_critic(buffer, read_stats=read_stats)
+            if self.shared_value_network:
+                stats = self._update_shared_manual(buffer, read_stats=read_stats)
+                policy_loss = stats.policy_loss
+                value_loss = stats.value_loss
+                approx_kl = stats.approx_kl
+                clip_fraction = stats.clip_fraction
+            else:
+                policy_loss, approx_kl, clip_fraction = self._update_actor(buffer, read_stats=read_stats)
+                value_loss = self._update_critic(buffer, read_stats=read_stats)
         return StatsPPOUpdate(
             policy_loss=policy_loss,
             value_loss=value_loss,
@@ -605,10 +664,18 @@ class TrainerPPO:
             if self.config.normalize_advantages:
                 batch.normalize_advantages()
             self._weight_minibatch_advantages(batch, use_priority)
-            policy_loss, approx_kl, clip_fraction = self._update_actor(batch, read_stats=read_stats)
+            if self.shared_value_network:
+                stats = self._update_shared_manual(batch, read_stats=read_stats)
+                policy_loss = stats.policy_loss
+                value_loss = stats.value_loss
+                approx_kl = stats.approx_kl
+                clip_fraction = stats.clip_fraction
+            else:
+                policy_loss, approx_kl, clip_fraction = self._update_actor(batch, read_stats=read_stats)
             if use_vtrace:
                 self._scatter_minibatch_ratios(buffer, batch, segment_count)
-            value_loss = self._update_critic(batch, read_stats=read_stats)
+            if not self.shared_value_network:
+                value_loss = self._update_critic(batch, read_stats=read_stats)
             if use_vtrace:
                 self._scatter_minibatch_values(buffer, batch, segment_count)
 
@@ -710,11 +777,11 @@ class TrainerPPO:
         )
 
     def _scatter_minibatch_values(self, buffer: BufferRollout, batch: BatchPPO, segment_count: int) -> None:
-        values = self.critic.forward_reuse(batch.obs)
+        values = self.value_reuse(batch.obs)
         wp.launch(
             scatter_trajectory_values_kernel,
             dim=batch.num_samples,
-            inputs=[self._minibatch_env_ids, buffer.num_envs, segment_count, values],
+            inputs=[self._minibatch_env_ids, buffer.num_envs, segment_count, values, self.value_column],
             outputs=[buffer.values],
             device=self.device,
         )
@@ -734,6 +801,121 @@ class TrainerPPO:
             )
             self._minibatch_env_ids = wp.zeros(int(segment_count), dtype=wp.int32, device=self.device)
         return self._minibatch
+
+    def _update_shared_manual(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> StatsPPOUpdate:
+        if not (self.config.manual_actor_backward and self.config.manual_critic_backward):
+            raise RuntimeError("shared_value_network requires manual actor and critic backward")
+
+        mirror_obs = self._mirrored_obs(buffer)
+        mirror_policy_out = None
+        if mirror_obs is not None:
+            mirror_policy_out = self.actor.net.forward_reuse(mirror_obs)
+
+        log_std_grad_partials, log_std_partial_count = self._ensure_actor_log_std_grad_partials(buffer.num_samples)
+        wp.launch(
+            zero_ppo_actor_stats_kernel,
+            dim=max(log_std_partial_count * self.action_dim, 1),
+            inputs=[log_std_partial_count, self.action_dim],
+            outputs=[self._policy_loss, self._approx_kl, self._clip_fraction, log_std_grad_partials],
+            device=self.device,
+        )
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._value_loss], device=self.device)
+
+        policy_out = self.actor.net.forward_manual(buffer.obs)
+        policy_out_grad = self._ensure_actor_backward_buffers(buffer.num_samples, int(policy_out.shape[1]))
+        wp.launch(
+            ppo_actor_loss_backward_kernel,
+            dim=buffer.num_samples,
+            inputs=[
+                policy_out,
+                self.actor.log_std,
+                buffer.actions,
+                buffer.old_log_probs,
+                buffer.advantages,
+                self.config.clip_ratio,
+                self.config.entropy_coeff,
+                self.action_dim,
+                int(self.actor.state_dependent_std),
+                int(self.actor.squash),
+                self.actor.log_std_min,
+                self.actor.log_std_max,
+                buffer.num_samples,
+            ],
+            outputs=[
+                self._policy_loss,
+                self._approx_kl,
+                self._clip_fraction,
+                buffer.ratios,
+                policy_out_grad,
+                log_std_grad_partials,
+            ],
+            device=self.device,
+        )
+        if mirror_policy_out is not None:
+            wp.launch(
+                mirrored_action_mse_grad_kernel,
+                dim=buffer.num_samples,
+                inputs=[
+                    policy_out,
+                    mirror_policy_out,
+                    self._mirror_action_src,
+                    self._mirror_action_sign,
+                    self.action_dim,
+                    self.config.mirror_loss_coeff,
+                    buffer.num_samples,
+                ],
+                outputs=[policy_out_grad, self._policy_loss],
+                device=self.device,
+            )
+        wp.launch(
+            value_column_loss_grad_kernel,
+            dim=buffer.num_samples,
+            inputs=[policy_out, self.value_column, buffer.returns, buffer.num_samples],
+            outputs=[self._value_loss, policy_out_grad],
+            device=self.device,
+        )
+        if mirror_policy_out is not None:
+            wp.launch(
+                value_column_symmetry_loss_grad_kernel,
+                dim=buffer.num_samples,
+                inputs=[
+                    policy_out,
+                    self.value_column,
+                    mirror_policy_out,
+                    self.config.mirror_loss_coeff,
+                    buffer.num_samples,
+                ],
+                outputs=[self._value_loss, policy_out_grad],
+                device=self.device,
+            )
+
+        self.actor.net.backward_manual(policy_out_grad)
+        if not self.actor.state_dependent_std:
+            wp.launch(
+                reduce_ppo_log_std_grad_kernel,
+                dim=self.action_dim,
+                inputs=[log_std_grad_partials, log_std_partial_count],
+                outputs=[self._actor_log_std_grad],
+                device=self.device,
+            )
+            self.actor.log_std.grad.assign(self._actor_log_std_grad)
+        if read_stats:
+            policy_loss = float(self._policy_loss.numpy()[0])
+            value_loss = float(self._value_loss.numpy()[0])
+            approx_kl = float(self._approx_kl.numpy()[0])
+            clip_fraction = float(self._clip_fraction.numpy()[0])
+        else:
+            policy_loss = 0.0
+            value_loss = 0.0
+            approx_kl = 0.0
+            clip_fraction = 0.0
+        self.actor_optimizer.step()
+        return StatsPPOUpdate(
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            approx_kl=approx_kl,
+            clip_fraction=clip_fraction,
+        )
 
     def _update_actor(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> tuple[float, float, float]:
         if self.config.manual_actor_backward:
@@ -934,6 +1116,8 @@ class TrainerPPO:
         return self._critic_value_grad
 
     def _update_critic(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> float:
+        if self.critic is None or self.critic_optimizer is None:
+            raise RuntimeError("shared_value_network has no separate critic update")
         if self.config.manual_critic_backward:
             return self._update_critic_manual(buffer, read_stats=read_stats)
         return self._update_critic_tape(buffer, read_stats=read_stats)
@@ -1148,7 +1332,12 @@ def _config_from_checkpoint(data: np.lib.npyio.NpzFile) -> ConfigPPO:
         key = f"config_{field}"
         if key in data:
             value = data[key].item()
-            if field in ("manual_actor_backward", "manual_critic_backward", "normalize_advantages"):
+            if field in (
+                "manual_actor_backward",
+                "manual_critic_backward",
+                "normalize_advantages",
+                "shared_value_network",
+            ):
                 value = bool(value)
             values[field] = value
     return ConfigPPO(**values)

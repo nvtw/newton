@@ -37,6 +37,7 @@ def rollout_store_pre_step_kernel(
     actions_src: wp.array2d[wp.float32],
     log_probs_src: wp.array[wp.float32],
     values_src: wp.array2d[wp.float32],
+    value_col: wp.int32,
     obs_dst: wp.array2d[wp.float32],
     actions_dst: wp.array2d[wp.float32],
     log_probs_dst: wp.array[wp.float32],
@@ -50,7 +51,7 @@ def rollout_store_pre_step_kernel(
         actions_dst[row, col] = actions_src[env, col]
     if col == 0:
         log_probs_dst[row] = log_probs_src[env]
-        values_dst[row] = values_src[env, 0]
+        values_dst[row] = values_src[env, value_col]
 
 
 @wp.kernel
@@ -74,12 +75,13 @@ def rollout_store_post_step_kernel(
 @wp.kernel
 def rollout_store_bootstrap_values_kernel(
     values_src: wp.array2d[wp.float32],
+    value_col: wp.int32,
     num_steps: wp.int32,
     num_envs: wp.int32,
     values_dst: wp.array[wp.float32],
 ):
     env = wp.tid()
-    values_dst[num_steps * num_envs + env] = values_src[env, 0]
+    values_dst[num_steps * num_envs + env] = values_src[env, value_col]
 
 
 def capture_env_steps(
@@ -134,6 +136,7 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
 
     obs = env.observe()
     max_cols = max(env.obs_dim, env.action_dim, 1)
+    value_col = trainer.value_column
     for step in range(buffer.num_steps):
         actions, log_probs, values = trainer.act_reuse(obs, seed=int(seed) + step)
         wp.launch(
@@ -148,6 +151,7 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
                 actions,
                 log_probs,
                 values,
+                value_col,
             ],
             outputs=[buffer.obs, buffer.actions, buffer.old_log_probs, buffer.values],
             device=env.device,
@@ -162,11 +166,11 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
         )
         obs = next_obs
 
-    final_values = trainer.critic.forward_reuse(obs)
+    final_values = trainer.value_reuse(obs)
     wp.launch(
         rollout_store_bootstrap_values_kernel,
         dim=env.world_count,
-        inputs=[final_values, buffer.num_steps, env.world_count],
+        inputs=[final_values, value_col, buffer.num_steps, env.world_count],
         outputs=[buffer.values],
         device=env.device,
     )

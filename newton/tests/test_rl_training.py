@@ -16,6 +16,8 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     mirrored_action_mse_grad_kernel,
     ppo_actor_loss_backward_kernel,
     reduce_ppo_log_std_grad_kernel,
+    value_column_loss_grad_kernel,
+    value_column_symmetry_loss_grad_kernel,
     value_loss_grad_kernel,
     value_symmetry_loss_grad_kernel,
     zero_scalar_kernel,
@@ -315,6 +317,54 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertAlmostEqual(float(loss.numpy()[0]), float(expected_loss), places=6)
         np.testing.assert_allclose(value_grad.numpy(), expected_grad, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_shared_value_column_loss_backward_is_graph_capturable(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(59)
+        rows = 8
+        action_dim = 2
+        value_col = action_dim
+        coeff = 0.25
+        values_np = rng.normal(size=(rows, action_dim + 1)).astype(np.float32)
+        mirrored_np = rng.normal(size=(rows, action_dim + 1)).astype(np.float32)
+        returns_np = rng.normal(size=rows).astype(np.float32)
+        values = wp.array(values_np, dtype=wp.float32, device=device)
+        mirrored = wp.array(mirrored_np, dtype=wp.float32, device=device)
+        returns = wp.array(returns_np, dtype=wp.float32, device=device)
+        loss = wp.zeros(1, dtype=wp.float32, device=device)
+        output_grad = wp.zeros((rows, action_dim + 1), dtype=wp.float32, device=device)
+
+        def launch_manual_backward() -> None:
+            wp.launch(zero_scalar_kernel, dim=1, outputs=[loss], device=device)
+            output_grad.zero_()
+            wp.launch(
+                value_column_loss_grad_kernel,
+                dim=rows,
+                inputs=[values, value_col, returns, rows],
+                outputs=[loss, output_grad],
+                device=device,
+            )
+            wp.launch(
+                value_column_symmetry_loss_grad_kernel,
+                dim=rows,
+                inputs=[values, value_col, mirrored, coeff, rows],
+                outputs=[loss, output_grad],
+                device=device,
+            )
+
+        launch_manual_backward()
+        with wp.ScopedCapture(device=device) as capture:
+            launch_manual_backward()
+        wp.capture_launch(capture.graph)
+
+        expected_delta = values_np[:, value_col] - returns_np
+        expected_mirror_delta = values_np[:, value_col] - mirrored_np[:, value_col]
+        expected_loss = 0.5 * np.mean(expected_delta * expected_delta)
+        expected_loss += 0.5 * coeff * np.mean(expected_mirror_delta * expected_mirror_delta)
+        expected_grad = np.zeros((rows, action_dim + 1), dtype=np.float32)
+        expected_grad[:, value_col] = (expected_delta + coeff * expected_mirror_delta) / float(rows)
+        self.assertAlmostEqual(float(loss.numpy()[0]), float(expected_loss), places=6)
+        np.testing.assert_allclose(output_grad.numpy(), expected_grad, rtol=1.0e-6, atol=1.0e-6)
+
     def test_manual_mlp_backward_matches_numpy_and_graph_captures(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(71)
@@ -576,6 +626,75 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertTrue(math.isfinite(stats.clip_fraction))
         self.assertGreater(float(np.max(np.abs(actor_after - actor_before))), 0.0)
 
+    def test_shared_value_network_update_graph_capture_and_checkpoint(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(11)
+        config = rl.ConfigPPO(
+            train_epochs=1,
+            normalize_advantages=False,
+            actor_lr=1.0e-3,
+            critic_lr=1.0e-3,
+            entropy_coeff=0.0,
+            max_grad_norm=0.3,
+            mirror_loss_coeff=0.1,
+            manual_actor_backward=True,
+            manual_critic_backward=True,
+            manual_mlp_weight_grad_dtype="bfloat16",
+            manual_mlp_forward_dtype="bfloat16",
+            shared_value_network=True,
+        )
+        mirror_map = rl.MirrorMapPPO(
+            obs_src=(0, 1, 2, 3, 4),
+            obs_sign=(1.0, 1.0, 1.0, 1.0, 1.0),
+            action_src=(1, 0),
+            action_sign=(1.0, 1.0),
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=5, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=13, mirror_map=mirror_map
+        )
+        buffer = rl.BufferRollout(num_steps=4, num_envs=4, obs_dim=5, action_dim=2, device=device)
+        n = buffer.num_samples
+        buffer.obs.assign(rng.normal(size=(n, 5)).astype(np.float32))
+        buffer.actions.assign(np.tanh(0.5 * rng.normal(size=(n, 2))).astype(np.float32))
+        buffer.advantages.assign(rng.normal(loc=0.5, scale=0.25, size=n).astype(np.float32))
+        buffer.returns.assign(rng.normal(size=n).astype(np.float32))
+        _policy_out, old_log_probs = trainer.actor.log_prob(buffer.obs, buffer.actions, requires_grad=False)
+        buffer.old_log_probs.assign(old_log_probs.numpy())
+
+        self.assertIsNone(trainer.critic)
+        self.assertEqual(trainer.value_column, 2)
+        self.assertEqual(trainer.actor.net.output_dim, 3)
+
+        trainer.reserve_buffers(buffer.num_samples)
+        actor_before = trainer.actor.net.weights[0].numpy().copy()
+        stats = trainer._update_shared_manual(buffer)
+        actor_after = trainer.actor.net.weights[0].numpy()
+        self.assertTrue(math.isfinite(stats.policy_loss))
+        self.assertTrue(math.isfinite(stats.value_loss))
+        self.assertTrue(math.isfinite(stats.approx_kl))
+        self.assertTrue(math.isfinite(stats.clip_fraction))
+        self.assertGreater(float(np.max(np.abs(actor_after - actor_before))), 0.0)
+
+        graph_before = trainer.actor.net.weights[0].numpy().copy()
+        with wp.ScopedCapture(device=device) as capture:
+            trainer._update_shared_manual(buffer, read_stats=False)
+        wp.capture_launch(capture.graph)
+        graph_after = trainer.actor.net.weights[0].numpy()
+        self.assertGreater(float(np.max(np.abs(graph_after - graph_before))), 0.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/shared_ppo_checkpoint.npz"
+            trainer.save_checkpoint(path, iteration=7)
+            restored = rl.load_ppo_checkpoint(path, device=device)
+
+        self.assertTrue(restored.config.shared_value_network)
+        self.assertIsNone(restored.critic)
+        self.assertEqual(restored.actor.net.output_dim, 3)
+        self.assertEqual(restored.actor_optimizer.step_count, trainer.actor_optimizer.step_count)
+        self.assertEqual(restored.iteration, 7)
+        for before, after in zip(trainer.actor.parameters(), restored.actor.parameters(), strict=True):
+            np.testing.assert_allclose(after.numpy(), before.numpy(), rtol=0.0, atol=0.0)
+
     def test_checkpoint_round_trip_preserves_parameters(self) -> None:
         device = _rl_cuda_device()
         config = rl.ConfigPPO(train_epochs=1, normalize_advantages=False)
@@ -613,6 +732,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.config.reward_clip, 0.0)
         self.assertEqual(restored.config.max_grad_norm, 0.0)
         self.assertEqual(restored.config.mirror_loss_coeff, 0.0)
+        self.assertFalse(restored.config.shared_value_network)
 
 
 class TestReplayBufferSAC(unittest.TestCase):

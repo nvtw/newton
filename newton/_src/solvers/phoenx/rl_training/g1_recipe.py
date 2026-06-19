@@ -63,6 +63,7 @@ PRIORITY_ALPHA = 0.4
 PRIORITY_BETA = 1.0
 MANUAL_ACTOR_BACKWARD = True
 MANUAL_CRITIC_BACKWARD = True
+SHARED_VALUE_NETWORK = True
 MANUAL_MLP_WEIGHT_GRAD_DTYPE = "bfloat16"
 MANUAL_MLP_FORWARD_DTYPE = "bfloat16"
 VTRACE_RHO_CLIP = 3.0
@@ -127,6 +128,7 @@ def default_g1_ppo_config(**overrides: Any):
         "priority_beta": PRIORITY_BETA,
         "manual_actor_backward": MANUAL_ACTOR_BACKWARD,
         "manual_critic_backward": MANUAL_CRITIC_BACKWARD,
+        "shared_value_network": SHARED_VALUE_NETWORK,
         "manual_mlp_weight_grad_dtype": MANUAL_MLP_WEIGHT_GRAD_DTYPE,
         "manual_mlp_forward_dtype": MANUAL_MLP_FORWARD_DTYPE,
         "vtrace_rho_clip": VTRACE_RHO_CLIP,

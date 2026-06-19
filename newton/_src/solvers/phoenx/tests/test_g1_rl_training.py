@@ -46,6 +46,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(train_config.rollout_steps, g1_recipe.ROLLOUT_STEPS)
         self.assertGreater(ppo_config.mirror_loss_coeff, 0.0)
         self.assertEqual(ppo_config.mirror_loss_coeff, g1_recipe.MIRROR_LOSS_COEFF)
+        self.assertTrue(ppo_config.shared_value_network)
+        self.assertEqual(ppo_config.shared_value_network, g1_recipe.SHARED_VALUE_NETWORK)
         self.assertEqual(ppo_config.minibatch_size, g1_recipe.MINIBATCH_SIZE)
         self.assertEqual(ppo_config.manual_mlp_forward_dtype, g1_recipe.MANUAL_MLP_FORWARD_DTYPE)
 
@@ -116,6 +118,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             reward_clip=1.0,
             max_grad_norm=0.3,
             mirror_loss_coeff=0.25,
+            shared_value_network=True,
             manual_actor_backward=True,
             manual_critic_backward=True,
             manual_mlp_weight_grad_dtype="bfloat16",
@@ -157,6 +160,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(restored.config.reward_clip, 1.0)
             self.assertEqual(restored.config.max_grad_norm, 0.3)
             self.assertEqual(restored.config.mirror_loss_coeff, 0.25)
+            self.assertTrue(restored.config.shared_value_network)
+            self.assertIsNone(restored.critic)
             for before, after in zip(first.trainer.actor.parameters(), restored.actor.parameters(), strict=True):
                 np.testing.assert_allclose(after.numpy(), before.numpy(), rtol=0.0, atol=0.0)
 
@@ -215,6 +220,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(resumed.history[0].iteration, 1)
             self.assertEqual(resumed.trainer.iteration, 2)
             self.assertEqual(second_restored.iteration, 2)
+            self.assertTrue(second_restored.config.shared_value_network)
+            self.assertIsNone(second_restored.critic)
 
 
 if __name__ == "__main__":
