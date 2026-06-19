@@ -179,6 +179,72 @@ class ResultEvaluateG1PPO:
 
 
 @dataclass
+class ConfigEvaluateG1GatePPO:
+    """Configuration for :func:`evaluate_g1_gate_ppo`."""
+
+    env_config: ConfigEnvG1PhoenX | None = None
+    battery_commands: tuple[tuple[float, float, float], ...] = (
+        (0.8, 0.0, 0.0),
+        (-0.5, 0.0, 0.0),
+        (0.3, 0.0, 1.0),
+        (0.3, 0.0, -1.0),
+        (0.0, 0.4, 0.0),
+        (0.0, 0.0, 0.0),
+    )
+    seeds_per_command: int = 4
+    battery_steps: int = 1000
+    diagnostic_command: tuple[float, float, float] = (0.5, 0.0, 0.0)
+    diagnostic_world_count: int = 1
+    diagnostic_steps: int = 2000
+    device: wp.context.Devicelike = None
+    deterministic: bool = True
+    seed: int = 1000
+    max_battery_falls: int = 1
+    min_battery_perf: float = 0.90
+    max_action_jerk_rms: float = 0.21
+    max_ang_vel_xy_rms: float = 0.21
+    max_yaw_rate_rms: float = 0.20
+    max_leg_qvel_rms: float = 1.22
+
+
+@dataclass
+class StatsEvaluateG1GateCommandPPO:
+    """Per-command statistics for the G1 quality gate."""
+
+    command: tuple[float, float, float]
+    falls: int
+    mean_tracking_perf: float
+    mean_linear_velocity_error: float
+    mean_yaw_rate_error: float
+    samples: int
+
+
+@dataclass
+class StatsEvaluateG1GatePPO:
+    """nanoG1-style quality-gate diagnostics for a G1 PPO policy."""
+
+    battery_falls: int
+    battery_perf: float
+    action_jerk_rms: float
+    ang_vel_xy_rms: float
+    yaw_rate_rms: float
+    leg_qvel_rms: float
+    diagnostic_falls: int
+    battery_samples: int
+    diagnostic_samples: int
+    samples_per_second: float
+    pass_gate: bool
+    per_command: tuple[StatsEvaluateG1GateCommandPPO, ...]
+
+
+@dataclass
+class ResultEvaluateG1GatePPO:
+    """Result returned by :func:`evaluate_g1_gate_ppo`."""
+
+    stats: StatsEvaluateG1GatePPO
+
+
+@dataclass
 class ConfigEvaluateAnymalPPO:
     """Configuration for :func:`evaluate_anymal_ppo`.
 
@@ -406,6 +472,69 @@ def evaluate_g1_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1PPO | None = No
         samples_per_second=float(env.world_count * steps) / elapsed,
     )
     return ResultEvaluateG1PPO(stats=stats)
+
+
+def evaluate_g1_gate_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1GatePPO | None = None) -> ResultEvaluateG1GatePPO:
+    """Evaluate a G1 PPO policy against nanoG1-style quality-gate metrics."""
+
+    cfg = config or ConfigEvaluateG1GatePPO()
+    _validate_g1_gate_config(cfg)
+    device = wp.get_device(cfg.device if cfg.device is not None else trainer.device)
+    base_env_config = cfg.env_config or ConfigEnvG1PhoenX()
+    commands = _g1_gate_commands_array(cfg.battery_commands)
+
+    battery_config = replace(
+        base_env_config,
+        world_count=int(commands.shape[0]) * int(cfg.seeds_per_command),
+        auto_reset=False,
+        max_episode_steps=0,
+    )
+    battery_env = EnvG1PhoenX(battery_config, device=device)
+    _check_g1_trainer_dimensions(trainer, battery_env)
+
+    diagnostic_config = replace(
+        base_env_config,
+        world_count=int(cfg.diagnostic_world_count),
+        command=tuple(float(x) for x in cfg.diagnostic_command),
+        auto_reset=False,
+        max_episode_steps=0,
+    )
+    diagnostic_env = EnvG1PhoenX(diagnostic_config, device=device)
+    _check_g1_trainer_dimensions(trainer, diagnostic_env)
+
+    t0 = time.perf_counter()
+    per_command, battery_falls, battery_perf, battery_samples = _evaluate_g1_gate_battery(
+        trainer, battery_env, cfg, commands
+    )
+    diagnostic = _evaluate_g1_gate_diagnostics(trainer, diagnostic_env, cfg)
+    elapsed = max(time.perf_counter() - t0, 1.0e-12)
+
+    diagnostic_falls, diagnostic_samples, action_jerk, ang_vel_xy, yaw_rate, leg_qvel = diagnostic
+    pass_gate = _g1_gate_passes(
+        cfg,
+        battery_falls=battery_falls,
+        battery_perf=battery_perf,
+        action_jerk_rms=action_jerk,
+        ang_vel_xy_rms=ang_vel_xy,
+        yaw_rate_rms=yaw_rate,
+        leg_qvel_rms=leg_qvel,
+    )
+    total_samples = int(battery_samples) + int(diagnostic_samples)
+    stats = StatsEvaluateG1GatePPO(
+        battery_falls=int(battery_falls),
+        battery_perf=float(battery_perf),
+        action_jerk_rms=float(action_jerk),
+        ang_vel_xy_rms=float(ang_vel_xy),
+        yaw_rate_rms=float(yaw_rate),
+        leg_qvel_rms=float(leg_qvel),
+        diagnostic_falls=int(diagnostic_falls),
+        battery_samples=int(battery_samples),
+        diagnostic_samples=int(diagnostic_samples),
+        samples_per_second=float(total_samples) / elapsed,
+        pass_gate=bool(pass_gate),
+        per_command=per_command,
+    )
+    return ResultEvaluateG1GatePPO(stats=stats)
 
 
 def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainAnymalPPO:
@@ -701,6 +830,191 @@ def _evaluate_target(
 
 def _joint_q_matrix(env: EnvAnymalPhoenX) -> np.ndarray:
     return env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+
+
+def _validate_g1_gate_config(cfg: ConfigEvaluateG1GatePPO) -> None:
+    if cfg.seeds_per_command <= 0:
+        raise ValueError("seeds_per_command must be positive")
+    if cfg.battery_steps <= 0:
+        raise ValueError("battery_steps must be positive")
+    if cfg.diagnostic_steps <= 0:
+        raise ValueError("diagnostic_steps must be positive")
+    if cfg.diagnostic_world_count <= 0:
+        raise ValueError("diagnostic_world_count must be positive")
+    if cfg.max_battery_falls < 0:
+        raise ValueError("max_battery_falls must be non-negative")
+
+
+def _g1_gate_commands_array(commands: tuple[tuple[float, float, float], ...]) -> np.ndarray:
+    command_np = np.asarray(commands, dtype=np.float32)
+    if command_np.ndim != 2 or command_np.shape[0] == 0 or command_np.shape[1] != 3:
+        raise ValueError("battery_commands must have shape [command_count, 3]")
+    if not np.isfinite(command_np).all():
+        raise ValueError("battery_commands must be finite")
+    return command_np
+
+
+def _check_g1_trainer_dimensions(trainer: TrainerPPO, env: EnvG1PhoenX) -> None:
+    if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
+        raise ValueError("Trainer dimensions do not match the G1 environment")
+
+
+def _evaluate_g1_gate_battery(
+    trainer: TrainerPPO,
+    env: EnvG1PhoenX,
+    cfg: ConfigEvaluateG1GatePPO,
+    commands: np.ndarray,
+) -> tuple[tuple[StatsEvaluateG1GateCommandPPO, ...], int, float, int]:
+    command_ids = np.repeat(np.arange(commands.shape[0], dtype=np.int32), int(cfg.seeds_per_command))
+    command_np = commands[command_ids].astype(np.float32, copy=False)
+    samples_per_step = np.bincount(command_ids, minlength=commands.shape[0]).astype(np.int64)
+    falls = np.zeros(commands.shape[0], dtype=np.int64)
+    perf_sum = np.zeros(commands.shape[0], dtype=np.float64)
+    lin_err_sum = np.zeros(commands.shape[0], dtype=np.float64)
+    yaw_err_sum = np.zeros(commands.shape[0], dtype=np.float64)
+    sample_count = np.zeros(commands.shape[0], dtype=np.int64)
+
+    env.set_commands(command_np)
+    obs = env.reset_noisy(seed=int(cfg.seed))
+    for step in range(int(cfg.battery_steps)):
+        actions, _log_probs, _values = trainer.act(
+            obs, seed=int(cfg.seed) + step, deterministic=bool(cfg.deterministic)
+        )
+        obs, _rewards, dones = env.step(actions)
+        done_np = dones.numpy() > 0.5
+        perf_np = env.step_successes.numpy().astype(np.float64)
+        q = _joint_q_matrix_g1(env)
+        qd = _joint_qd_matrix_g1(env)
+        lin_b = _quat_rotate_inverse_wxyz_np(q[:, 3:7], qd[:, 0:3])
+        lin_err = np.linalg.norm(command_np[:, 0:2] - lin_b[:, 0:2], axis=1)
+        yaw_err = np.abs(command_np[:, 2] - qd[:, 5])
+
+        falls += np.bincount(command_ids, weights=done_np.astype(np.float64), minlength=commands.shape[0]).astype(
+            np.int64
+        )
+        perf_sum += np.bincount(command_ids, weights=perf_np, minlength=commands.shape[0])
+        lin_err_sum += np.bincount(command_ids, weights=lin_err, minlength=commands.shape[0])
+        yaw_err_sum += np.bincount(command_ids, weights=yaw_err, minlength=commands.shape[0])
+        sample_count += samples_per_step
+        if np.any(done_np):
+            obs = _reset_g1_done_worlds(env)
+
+    stats = []
+    for command_index, command in enumerate(commands):
+        denom = float(max(int(sample_count[command_index]), 1))
+        stats.append(
+            StatsEvaluateG1GateCommandPPO(
+                command=(float(command[0]), float(command[1]), float(command[2])),
+                falls=int(falls[command_index]),
+                mean_tracking_perf=float(perf_sum[command_index] / denom),
+                mean_linear_velocity_error=float(lin_err_sum[command_index] / denom),
+                mean_yaw_rate_error=float(yaw_err_sum[command_index] / denom),
+                samples=int(sample_count[command_index]),
+            )
+        )
+    total_samples = int(np.sum(sample_count))
+    battery_perf = float(np.sum(perf_sum) / float(max(total_samples, 1)))
+    return tuple(stats), int(np.sum(falls)), battery_perf, total_samples
+
+
+def _evaluate_g1_gate_diagnostics(
+    trainer: TrainerPPO, env: EnvG1PhoenX, cfg: ConfigEvaluateG1GatePPO
+) -> tuple[int, int, float, float, float, float]:
+    obs = env.reset()
+    falls = 0
+    valid_samples = 0
+    jerk_sum = 0.0
+    jerk_count = 0
+    ang_vel_xy_sum = 0.0
+    yaw_rate_sum = 0.0
+    leg_qvel_sum = 0.0
+    leg_qvel_count = 0
+    previous_actions = np.zeros((env.world_count, 12), dtype=np.float32)
+    has_previous = np.zeros(env.world_count, dtype=bool)
+
+    for step in range(int(cfg.diagnostic_steps)):
+        actions, _log_probs, _values = trainer.act(
+            obs, seed=int(cfg.seed) + 1_000_003 + step, deterministic=bool(cfg.deterministic)
+        )
+        obs, _rewards, dones = env.step(actions)
+        done_np = dones.numpy() > 0.5
+        valid = ~done_np
+        falls += int(np.sum(done_np))
+
+        actions_np = env.current_actions.numpy()[:, :12]
+        jerk_worlds = valid & has_previous
+        if np.any(jerk_worlds):
+            action_delta = actions_np[jerk_worlds] - previous_actions[jerk_worlds]
+            jerk_sum += float(np.sum(action_delta * action_delta))
+            jerk_count += int(action_delta.size)
+        if np.any(valid):
+            previous_actions[valid] = actions_np[valid]
+            has_previous[valid] = True
+        has_previous[done_np] = False
+
+        qd = _joint_qd_matrix_g1(env)
+        if np.any(valid):
+            qd_valid = qd[valid]
+            ang_vel_xy_sum += float(np.sum(qd_valid[:, 3] * qd_valid[:, 3] + qd_valid[:, 4] * qd_valid[:, 4]))
+            yaw_rate_sum += float(np.sum(qd_valid[:, 5] * qd_valid[:, 5]))
+            leg_qvel = qd_valid[:, 6:18]
+            leg_qvel_sum += float(np.sum(leg_qvel * leg_qvel))
+            leg_qvel_count += int(leg_qvel.size)
+            valid_samples += int(qd_valid.shape[0])
+        if np.any(done_np):
+            obs = _reset_g1_done_worlds(env)
+
+    action_jerk = float(np.sqrt(jerk_sum / float(max(jerk_count, 1))))
+    ang_vel_xy = float(np.sqrt(ang_vel_xy_sum / float(max(valid_samples, 1))))
+    yaw_rate = float(np.sqrt(yaw_rate_sum / float(max(valid_samples, 1))))
+    leg_qvel = float(np.sqrt(leg_qvel_sum / float(max(leg_qvel_count, 1))))
+    diagnostic_samples = int(env.world_count) * int(cfg.diagnostic_steps)
+    return falls, diagnostic_samples, action_jerk, ang_vel_xy, yaw_rate, leg_qvel
+
+
+def _reset_g1_done_worlds(env: EnvG1PhoenX) -> wp.array:
+    env.reset_done()
+    env.dones.zero_()
+    return env.observe()
+
+
+def _g1_gate_passes(
+    cfg: ConfigEvaluateG1GatePPO,
+    *,
+    battery_falls: int,
+    battery_perf: float,
+    action_jerk_rms: float,
+    ang_vel_xy_rms: float,
+    yaw_rate_rms: float,
+    leg_qvel_rms: float,
+) -> bool:
+    return (
+        int(battery_falls) <= int(cfg.max_battery_falls)
+        and np.isfinite(battery_perf)
+        and float(battery_perf) >= float(cfg.min_battery_perf)
+        and np.isfinite(action_jerk_rms)
+        and float(action_jerk_rms) <= float(cfg.max_action_jerk_rms)
+        and np.isfinite(ang_vel_xy_rms)
+        and float(ang_vel_xy_rms) <= float(cfg.max_ang_vel_xy_rms)
+        and np.isfinite(yaw_rate_rms)
+        and float(yaw_rate_rms) <= float(cfg.max_yaw_rate_rms)
+        and np.isfinite(leg_qvel_rms)
+        and float(leg_qvel_rms) <= float(cfg.max_leg_qvel_rms)
+    )
+
+
+def _joint_q_matrix_g1(env: EnvG1PhoenX) -> np.ndarray:
+    return env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+
+
+def _joint_qd_matrix_g1(env: EnvG1PhoenX) -> np.ndarray:
+    return env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+
+
+def _quat_rotate_inverse_wxyz_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    qw = q[:, 0:1]
+    qv = q[:, 1:4]
+    return v * (2.0 * qw * qw - 1.0) - np.cross(qv, v) * (2.0 * qw) + qv * (2.0 * np.sum(qv * v, axis=1, keepdims=True))
 
 
 def _sample_g1_commands(

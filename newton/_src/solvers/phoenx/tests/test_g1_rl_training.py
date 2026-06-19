@@ -127,6 +127,31 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(math.isfinite(eval_result.stats.mean_done))
             self.assertGreater(eval_result.stats.samples_per_second, 0.0)
 
+            gate_result = rl.evaluate_g1_gate_ppo(
+                restored,
+                rl.ConfigEvaluateG1GatePPO(
+                    env_config=env_config,
+                    battery_commands=((0.0, 0.0, 0.0),),
+                    seeds_per_command=1,
+                    battery_steps=1,
+                    diagnostic_steps=1,
+                    diagnostic_world_count=1,
+                    device=device,
+                    deterministic=True,
+                    min_battery_perf=2.0,
+                ),
+            )
+            gate_stats = gate_result.stats
+            self.assertEqual(gate_stats.battery_samples, 1)
+            self.assertEqual(len(gate_stats.per_command), 1)
+            self.assertFalse(gate_stats.pass_gate)
+            self.assertTrue(math.isfinite(gate_stats.battery_perf))
+            self.assertTrue(math.isfinite(gate_stats.action_jerk_rms))
+            self.assertTrue(math.isfinite(gate_stats.ang_vel_xy_rms))
+            self.assertTrue(math.isfinite(gate_stats.yaw_rate_rms))
+            self.assertTrue(math.isfinite(gate_stats.leg_qvel_rms))
+            self.assertGreater(gate_stats.samples_per_second, 0.0)
+
             resumed = rl.train_g1_ppo(
                 rl.ConfigTrainG1PPO(
                     iterations=1,

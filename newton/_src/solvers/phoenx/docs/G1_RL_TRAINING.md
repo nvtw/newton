@@ -15,6 +15,8 @@ adding a PyTorch dependency to Newton's Warp-only RL stack.
   training, checkpointing, and resume.
 - `python -m newton.rl eval-g1-ppo`: Load and roll out a saved G1 PPO
   checkpoint.
+- `python -m newton.rl gate-g1-ppo`: Run the nanoG1-style quality gate on a
+  saved G1 PPO checkpoint.
 - `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_rl`: PhoenX G1
   env-step throughput benchmark with optional nanoG1 result ingestion.
 
@@ -51,6 +53,9 @@ uv run --extra dev -m newton.rl train-g1-ppo \
 uv run --extra dev -m newton.rl eval-g1-ppo \
     --checkpoint /tmp/phoenx_g1_2.npz --steps 4 --world-count 4096
 
+uv run --extra dev -m newton.rl gate-g1-ppo \
+    --checkpoint /tmp/phoenx_g1_2.npz --no-fail-on-gate
+
 uv run --extra dev -m newton.rl train-g1-ppo \
     --iterations 1 --rollout-steps 8 --world-count 4096 \
     --resume-checkpoint /tmp/phoenx_g1_2.npz \
@@ -61,6 +66,12 @@ uv run --extra dev -m newton.rl train-g1-ppo \
 The checkpoint stores actor, critic, optimizer state, PPO config, network shape,
 and the absolute training iteration. Resuming from `/tmp/phoenx_g1_2.npz` writes
 `/tmp/phoenx_g1_3.npz` and logs `iter=0002`.
+
+The gate command mirrors nanoG1's frozen bar: a six-command deterministic
+battery with noisy resets for falls/tracking performance, plus a separate
+forward-walk diagnostic for action jerk, torso angular velocity, yaw rate, and
+leg joint velocity. It exits nonzero when a checkpoint fails unless
+`--no-fail-on-gate` is passed.
 
 ## Current Benchmark Baseline
 

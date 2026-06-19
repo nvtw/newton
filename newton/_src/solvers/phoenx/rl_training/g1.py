@@ -668,6 +668,17 @@ class EnvG1PhoenX:
         self.sim_time = 0.0
         return self.observe()
 
+    def reset_noisy(self, seed: int | None = None) -> wp.array:
+        """Reset all worlds with configured joint-position reset noise."""
+
+        self.reset()
+        if seed is not None:
+            self._reset_seed = int(seed)
+        self.dones.assign(np.ones(self.world_count, dtype=np.float32))
+        self.reset_done()
+        self.dones.zero_()
+        return self.observe()
+
     def reset_done(self) -> None:
         """Reset worlds whose done flag is set."""
 

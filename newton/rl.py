@@ -19,6 +19,7 @@ from ._src.solvers.phoenx.rl_training import (
     ConfigEnvAnymalPhoenX,
     ConfigEnvG1PhoenX,
     ConfigEvaluateAnymalPPO,
+    ConfigEvaluateG1GatePPO,
     ConfigEvaluateG1PPO,
     ConfigPPO,
     ConfigSAC,
@@ -29,10 +30,13 @@ from ._src.solvers.phoenx.rl_training import (
     EnvPPO,
     GaussianActor,
     ResultEvaluateAnymalPPO,
+    ResultEvaluateG1GatePPO,
     ResultEvaluateG1PPO,
     ResultTrainAnymalPPO,
     ResultTrainG1PPO,
     StatsEvaluateAnymalTargetPPO,
+    StatsEvaluateG1GateCommandPPO,
+    StatsEvaluateG1GatePPO,
     StatsEvaluateG1PPO,
     StatsPPOUpdate,
     StatsSACUpdate,
@@ -44,6 +48,7 @@ from ._src.solvers.phoenx.rl_training import (
     capture_env_steps,
     collect_ppo_rollout,
     evaluate_anymal_ppo,
+    evaluate_g1_gate_ppo,
     evaluate_g1_ppo,
     load_ppo_checkpoint,
     save_ppo_checkpoint,
@@ -63,6 +68,7 @@ __all__ = [
     "ConfigEnvAnymalPhoenX",
     "ConfigEnvG1PhoenX",
     "ConfigEvaluateAnymalPPO",
+    "ConfigEvaluateG1GatePPO",
     "ConfigEvaluateG1PPO",
     "ConfigPPO",
     "ConfigSAC",
@@ -73,10 +79,13 @@ __all__ = [
     "EnvPPO",
     "GaussianActor",
     "ResultEvaluateAnymalPPO",
+    "ResultEvaluateG1GatePPO",
     "ResultEvaluateG1PPO",
     "ResultTrainAnymalPPO",
     "ResultTrainG1PPO",
     "StatsEvaluateAnymalTargetPPO",
+    "StatsEvaluateG1GateCommandPPO",
+    "StatsEvaluateG1GatePPO",
     "StatsEvaluateG1PPO",
     "StatsPPOUpdate",
     "StatsSACUpdate",
@@ -88,6 +97,7 @@ __all__ = [
     "capture_env_steps",
     "collect_ppo_rollout",
     "evaluate_anymal_ppo",
+    "evaluate_g1_gate_ppo",
     "evaluate_g1_ppo",
     "load_ppo_checkpoint",
     "save_ppo_checkpoint",
@@ -163,6 +173,24 @@ def _main() -> int:
     g1_eval_parser.add_argument("--parse-meshes", action="store_true")
     g1_eval_parser.add_argument("--controlled-action-count", type=int, default=12)
     g1_eval_parser.add_argument("--stochastic", action="store_true")
+
+    g1_gate_parser = subparsers.add_parser(
+        "gate-g1-ppo", help="Run the nanoG1-style quality gate on a saved Unitree G1 PPO checkpoint"
+    )
+    g1_gate_parser.add_argument("--checkpoint", required=True)
+    g1_gate_parser.add_argument("--battery-steps", type=int, default=1000)
+    g1_gate_parser.add_argument("--seeds-per-command", type=int, default=4)
+    g1_gate_parser.add_argument("--diagnostic-steps", type=int, default=2000)
+    g1_gate_parser.add_argument("--diagnostic-world-count", type=int, default=1)
+    g1_gate_parser.add_argument("--device", default=None)
+    g1_gate_parser.add_argument("--seed", type=int, default=1000)
+    g1_gate_parser.add_argument("--sim-substeps", type=int, default=5)
+    g1_gate_parser.add_argument("--solver-iterations", type=int, default=2)
+    g1_gate_parser.add_argument("--velocity-iterations", type=int, default=1)
+    g1_gate_parser.add_argument("--parse-meshes", action="store_true")
+    g1_gate_parser.add_argument("--controlled-action-count", type=int, default=12)
+    g1_gate_parser.add_argument("--stochastic", action="store_true")
+    g1_gate_parser.add_argument("--no-fail-on-gate", action="store_true")
 
     args = parser.parse_args()
     if args.command == "train-anymal-ppo":
@@ -245,6 +273,30 @@ def _main() -> int:
         )
         print(json.dumps(asdict(result.stats), sort_keys=True))
         return 0
+    if args.command == "gate-g1-ppo":
+        env_config = ConfigEnvG1PhoenX(
+            sim_substeps=args.sim_substeps,
+            solver_iterations=args.solver_iterations,
+            velocity_iterations=args.velocity_iterations,
+            controlled_action_count=args.controlled_action_count,
+            parse_meshes=args.parse_meshes,
+        )
+        trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)
+        result = evaluate_g1_gate_ppo(
+            trainer,
+            ConfigEvaluateG1GatePPO(
+                env_config=env_config,
+                battery_steps=args.battery_steps,
+                seeds_per_command=args.seeds_per_command,
+                diagnostic_steps=args.diagnostic_steps,
+                diagnostic_world_count=args.diagnostic_world_count,
+                device=args.device,
+                deterministic=not args.stochastic,
+                seed=args.seed,
+            ),
+        )
+        print(json.dumps(asdict(result.stats), sort_keys=True))
+        return 0 if result.stats.pass_gate or args.no_fail_on_gate else 1
     parser.error(f"unsupported command {args.command!r}")
     return 2
 
