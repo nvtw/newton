@@ -105,6 +105,7 @@ class WarpMLP:
         self.manual_weight_grad_dtype = _manual_bfloat16_dtype(manual_weight_grad_dtype, "manual_weight_grad_dtype")
         self.manual_forward_dtype = _manual_bfloat16_dtype(manual_forward_dtype, "manual_forward_dtype")
         self._manual_batch_size = 0
+        self._manual_capacity = 0
         self._manual_input: wp.array2d[wp.float32] | None = None
         self._manual_outputs: list[wp.array2d[wp.float32]] = []
         self._manual_output_grads: list[wp.array2d[wp.float32]] = []
@@ -167,7 +168,26 @@ class WarpMLP:
                     device=self.device,
                 )
             else:
-                self._launch_forward_layer(layer, y, weight, bias, activation, out)
+                self._launch_forward_layer(layer, y, weight, bias, activation, out, batch_size)
+            y = out
+        return y
+
+    def forward_reuse(self, x: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+        """Evaluate the MLP into persistent no-grad buffers."""
+
+        if x.ndim != 2:
+            raise ValueError(f"Expected a 2-D input array, got ndim={x.ndim}")
+        if int(x.shape[1]) != self.input_dim:
+            raise ValueError(f"Expected input dim {self.input_dim}, got {int(x.shape[1])}")
+
+        batch_size = int(x.shape[0])
+        self._ensure_manual_buffers(batch_size)
+        self._manual_input = None
+        y = x
+        for layer, (weight, bias) in enumerate(zip(self.weights, self.biases, strict=True)):
+            activation = self.output_activation if layer == len(self.weights) - 1 else self.activation
+            out = self._manual_outputs[layer]
+            self._launch_forward_layer(layer, y, weight, bias, activation, out, batch_size)
             y = out
         return y
 
@@ -186,7 +206,7 @@ class WarpMLP:
         for layer, (weight, bias) in enumerate(zip(self.weights, self.biases, strict=True)):
             activation = self.output_activation if layer == len(self.weights) - 1 else self.activation
             out = self._manual_outputs[layer]
-            self._launch_forward_layer(layer, y, weight, bias, activation, out)
+            self._launch_forward_layer(layer, y, weight, bias, activation, out, batch_size)
             y = out
         return y
 
@@ -198,13 +218,16 @@ class WarpMLP:
         bias: wp.array[wp.float32],
         activation: int,
         out: wp.array2d[wp.float32],
+        batch_size: int,
     ) -> None:
-        if self._uses_bf16_forward(x, weight):
+        rows = int(batch_size)
+        cols = int(out.shape[1])
+        if self._uses_bf16_forward(x, weight, rows):
             x_bf16 = self._manual_bf16_inputs[layer]
             weight_bf16 = self._manual_bf16_weights[layer]
             wp.launch(
                 cast_2d_float_to_bfloat16_kernel,
-                dim=x.shape,
+                dim=(rows, int(x.shape[1])),
                 inputs=[x],
                 outputs=[x_bf16],
                 device=self.device,
@@ -219,8 +242,8 @@ class WarpMLP:
             wp.launch_tiled(
                 dense_forward_bf16_tiled_kernel,
                 dim=(
-                    _ceil_div(int(out.shape[0]), DENSE_TILE_BATCH),
-                    _ceil_div(int(out.shape[1]), DENSE_TILE_OUT),
+                    _ceil_div(rows, DENSE_TILE_BATCH),
+                    _ceil_div(cols, DENSE_TILE_OUT),
                 ),
                 inputs=[x_bf16, weight_bf16, int(weight.shape[0])],
                 outputs=[out],
@@ -229,24 +252,24 @@ class WarpMLP:
             )
             wp.launch(
                 dense_bias_activation_kernel,
-                dim=out.shape,
+                dim=(rows, cols),
                 inputs=[out, bias, activation],
                 device=self.device,
             )
         else:
             wp.launch(
                 dense_layer_kernel,
-                dim=out.shape,
+                dim=(rows, cols),
                 inputs=[x, weight, bias, int(weight.shape[0]), activation],
                 outputs=[out],
                 device=self.device,
             )
 
-    def _uses_bf16_forward(self, x: wp.array2d[wp.float32], weight: wp.array2d[wp.float32]) -> bool:
+    def _uses_bf16_forward(self, x: wp.array2d[wp.float32], weight: wp.array2d[wp.float32], batch_size: int) -> bool:
         return (
             self.device.is_cuda
             and self.manual_forward_dtype == "bfloat16"
-            and int(x.shape[0]) >= _BF16_FORWARD_MIN_BATCH
+            and int(batch_size) >= _BF16_FORWARD_MIN_BATCH
             and int(weight.shape[0]) >= DENSE_TILE_IN
             and int(weight.shape[1]) >= 64
         )
@@ -256,18 +279,20 @@ class WarpMLP:
 
         if self._manual_input is None or not self._manual_outputs:
             raise RuntimeError("forward_manual() must be called before backward_manual()")
-        if int(output_grad.shape[0]) != self._manual_batch_size or int(output_grad.shape[1]) != self.output_dim:
+        if int(output_grad.shape[0]) < self._manual_batch_size or int(output_grad.shape[1]) != self.output_dim:
             raise ValueError("Manual MLP output gradient shape does not match the last forward pass")
 
+        rows = self._manual_batch_size
         grad_y = output_grad
         for layer in reversed(range(len(self.weights))):
             weight = self.weights[layer]
             bias = self.biases[layer]
             activation = self.output_activation if layer == len(self.weights) - 1 else self.activation
             grad_pre = self._manual_pre_grads[layer]
+            width = int(grad_pre.shape[1])
             wp.launch(
                 dense_activation_grad_kernel,
-                dim=grad_pre.shape,
+                dim=(rows, width),
                 inputs=[self._manual_outputs[layer], grad_y, activation],
                 outputs=[grad_pre],
                 device=self.device,
@@ -279,14 +304,14 @@ class WarpMLP:
                     grad_pre_bf16 = self._manual_bf16_pre_grads[layer]
                     wp.launch(
                         cast_2d_float_to_bfloat16_kernel,
-                        dim=x.shape,
+                        dim=(rows, int(x.shape[1])),
                         inputs=[x],
                         outputs=[x_bf16],
                         device=self.device,
                     )
                     wp.launch(
                         cast_2d_float_to_bfloat16_kernel,
-                        dim=grad_pre.shape,
+                        dim=(rows, width),
                         inputs=[grad_pre],
                         outputs=[grad_pre_bf16],
                         device=self.device,
@@ -297,7 +322,7 @@ class WarpMLP:
                             _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
                             _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
                         ),
-                        inputs=[x_bf16, grad_pre_bf16, self._manual_batch_size],
+                        inputs=[x_bf16, grad_pre_bf16, rows],
                         outputs=[weight.grad],
                         block_dim=DENSE_TILE_BLOCK_DIM,
                         device=self.device,
@@ -309,23 +334,24 @@ class WarpMLP:
                             _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
                             _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
                         ),
-                        inputs=[x, grad_pre, self._manual_batch_size],
+                        inputs=[x, grad_pre, rows],
                         outputs=[weight.grad],
                         block_dim=DENSE_TILE_BLOCK_DIM,
                         device=self.device,
                     )
                 bias_partial = self._manual_bias_partials[layer]
+                bias_tile_count = _ceil_div(rows, DENSE_BIAS_TILE_BATCH)
                 wp.launch(
                     dense_bias_partial_grad_kernel,
-                    dim=bias_partial.shape,
-                    inputs=[grad_pre, self._manual_batch_size],
+                    dim=(bias_tile_count, int(weight.shape[1])),
+                    inputs=[grad_pre, rows],
                     outputs=[bias_partial],
                     device=self.device,
                 )
                 wp.launch(
                     dense_bias_reduce_grad_kernel,
                     dim=int(weight.shape[1]),
-                    inputs=[bias_partial, int(bias_partial.shape[0])],
+                    inputs=[bias_partial, bias_tile_count],
                     outputs=[bias.grad],
                     device=self.device,
                 )
@@ -333,7 +359,7 @@ class WarpMLP:
                 wp.launch(
                     dense_weight_bias_grad_kernel,
                     dim=weight.shape,
-                    inputs=[x, grad_pre, self._manual_batch_size],
+                    inputs=[x, grad_pre, rows],
                     outputs=[weight.grad, bias.grad],
                     device=self.device,
                 )
@@ -343,7 +369,7 @@ class WarpMLP:
                     wp.launch_tiled(
                         dense_input_grad_tiled_kernel,
                         dim=(
-                            _ceil_div(int(grad_y.shape[0]), DENSE_TILE_BATCH),
+                            _ceil_div(rows, DENSE_TILE_BATCH),
                             _ceil_div(int(grad_y.shape[1]), DENSE_TILE_IN),
                         ),
                         inputs=[grad_pre, weight, int(weight.shape[1])],
@@ -354,16 +380,20 @@ class WarpMLP:
                 else:
                     wp.launch(
                         dense_input_grad_kernel,
-                        dim=grad_y.shape,
+                        dim=(rows, int(grad_y.shape[1])),
                         inputs=[grad_pre, weight, int(weight.shape[1])],
                         outputs=[grad_y],
                         device=self.device,
                     )
 
     def _ensure_manual_buffers(self, batch_size: int) -> None:
-        if self._manual_batch_size == int(batch_size) and len(self._manual_outputs) == len(self.weights):
+        requested = int(batch_size)
+        if requested <= 0:
+            raise ValueError("batch_size must be positive")
+        self._manual_batch_size = requested
+        if self._manual_capacity >= requested and len(self._manual_outputs) == len(self.weights):
             return
-        self._manual_batch_size = int(batch_size)
+        self._manual_capacity = requested
         self._manual_outputs = []
         self._manual_output_grads = []
         self._manual_pre_grads = []
@@ -371,9 +401,9 @@ class WarpMLP:
         self._manual_bf16_inputs = []
         self._manual_bf16_pre_grads = []
         self._manual_bf16_weights = []
-        bias_tile_count = _ceil_div(self._manual_batch_size, DENSE_BIAS_TILE_BATCH)
+        bias_tile_count = _ceil_div(self._manual_capacity, DENSE_BIAS_TILE_BATCH)
         for in_dim, width in pairwise(self.layer_sizes):
-            shape = (self._manual_batch_size, int(width))
+            shape = (self._manual_capacity, int(width))
             self._manual_outputs.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
             self._manual_output_grads.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
             self._manual_pre_grads.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
@@ -384,7 +414,7 @@ class WarpMLP:
                 if self.manual_weight_grad_dtype == "bfloat16" or self.manual_forward_dtype == "bfloat16":
                     self._manual_bf16_inputs.append(
                         wp.empty(
-                            (self._manual_batch_size, int(in_dim)),
+                            (self._manual_capacity, int(in_dim)),
                             dtype=wp.bfloat16,
                             device=self.device,
                             requires_grad=False,
@@ -400,6 +430,12 @@ class WarpMLP:
                                 (int(in_dim), int(width)), dtype=wp.bfloat16, device=self.device, requires_grad=False
                             )
                         )
+
+    def reserve_buffers(self, batch_size: int) -> None:
+        """Reserve no-grad and manual-backward buffers for at least ``batch_size`` rows."""
+
+        self._ensure_manual_buffers(batch_size)
+        self._manual_input = None
 
     def copy_from(self, other: WarpMLP) -> None:
         """Copy parameters from another network with the same architecture."""
@@ -483,6 +519,10 @@ class GaussianActor:
             device=self.device,
             requires_grad=not self.state_dependent_std,
         )
+        self._sample_reuse_capacity = 0
+        self._sample_reuse_actions: wp.array2d[wp.float32] | None = None
+        self._sample_reuse_log_probs: wp.array[wp.float32] | None = None
+        self._sample_reuse_eps: wp.array2d[wp.float32] | None = None
 
     def parameters(self) -> list[wp.array]:
         """Return trainable parameter arrays."""
@@ -576,10 +616,14 @@ class GaussianActor:
         )
         log_probs = wp.empty(batch_size, dtype=wp.float32, device=self.device, requires_grad=requires_grad)
         eps = wp.empty((batch_size, self.action_dim), dtype=wp.float32, device=self.device, requires_grad=False)
-        if deterministic:
-            eps.zero_()
-        else:
-            wp.launch(fill_eps_kernel, dim=eps.shape, inputs=[int(seed)], outputs=[eps], device=self.device)
+        if not deterministic:
+            wp.launch(
+                fill_eps_kernel,
+                dim=(batch_size, self.action_dim),
+                inputs=[int(seed)],
+                outputs=[eps],
+                device=self.device,
+            )
         wp.launch(
             sample_gaussian_actions_kernel,
             dim=batch_size,
@@ -598,6 +642,83 @@ class GaussianActor:
             device=self.device,
         )
         return actions, log_probs, policy_out
+
+    def sample_reuse(
+        self,
+        obs: wp.array2d[wp.float32],
+        *,
+        seed: int,
+        deterministic: bool = False,
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
+        """Sample actions into persistent no-grad buffers."""
+
+        batch_size = int(obs.shape[0])
+        self._ensure_sample_reuse_buffers(batch_size)
+        actions = self._sample_reuse_actions
+        log_probs = self._sample_reuse_log_probs
+        eps = self._sample_reuse_eps
+        if actions is None or log_probs is None or eps is None:
+            raise RuntimeError("sample reuse buffers were not initialized")
+
+        policy_out = self.net.forward_reuse(obs)
+        if not deterministic:
+            wp.launch(
+                fill_eps_kernel,
+                dim=(batch_size, self.action_dim),
+                inputs=[int(seed)],
+                outputs=[eps],
+                device=self.device,
+            )
+        wp.launch(
+            sample_gaussian_actions_kernel,
+            dim=batch_size,
+            inputs=[
+                policy_out,
+                self.log_std,
+                eps,
+                self.action_dim,
+                int(self.state_dependent_std),
+                int(self.squash),
+                int(deterministic),
+                self.log_std_min,
+                self.log_std_max,
+            ],
+            outputs=[actions, log_probs],
+            device=self.device,
+        )
+        return actions, log_probs, policy_out
+
+    def _ensure_sample_reuse_buffers(self, batch_size: int) -> None:
+        requested = int(batch_size)
+        if requested <= 0:
+            raise ValueError("batch_size must be positive")
+        if self._sample_reuse_capacity >= requested and self._sample_reuse_actions is not None:
+            return
+        self._sample_reuse_capacity = requested
+        self._sample_reuse_actions = wp.empty(
+            (self._sample_reuse_capacity, self.action_dim),
+            dtype=wp.float32,
+            device=self.device,
+            requires_grad=False,
+        )
+        self._sample_reuse_log_probs = wp.empty(
+            self._sample_reuse_capacity,
+            dtype=wp.float32,
+            device=self.device,
+            requires_grad=False,
+        )
+        self._sample_reuse_eps = wp.empty(
+            (self._sample_reuse_capacity, self.action_dim),
+            dtype=wp.float32,
+            device=self.device,
+            requires_grad=False,
+        )
+
+    def reserve_reuse_buffers(self, batch_size: int) -> None:
+        """Reserve no-grad policy sampling buffers for at least ``batch_size`` rows."""
+
+        self.net.reserve_buffers(batch_size)
+        self._ensure_sample_reuse_buffers(batch_size)
 
     def copy_from(self, other: GaussianActor) -> None:
         """Copy parameters from another actor."""

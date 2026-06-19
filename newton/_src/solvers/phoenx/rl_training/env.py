@@ -135,7 +135,7 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
     obs = env.observe()
     max_cols = max(env.obs_dim, env.action_dim, 1)
     for step in range(buffer.num_steps):
-        actions, log_probs, values = trainer.act(obs, seed=int(seed) + step)
+        actions, log_probs, values = trainer.act_reuse(obs, seed=int(seed) + step)
         wp.launch(
             rollout_store_pre_step_kernel,
             dim=(env.world_count, max_cols),
@@ -162,7 +162,7 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
         )
         obs = next_obs
 
-    final_values = trainer.critic.forward(obs, requires_grad=False)
+    final_values = trainer.critic.forward_reuse(obs)
     wp.launch(
         rollout_store_bootstrap_values_kernel,
         dim=env.world_count,

@@ -489,6 +489,30 @@ class TrainerPPO:
         values = self.critic.forward(obs, requires_grad=False)
         return actions, log_probs, values
 
+    def act_reuse(
+        self,
+        obs: wp.array2d[wp.float32],
+        *,
+        seed: int,
+        deterministic: bool = False,
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
+        """Sample actions and values into persistent no-grad buffers."""
+
+        actions, log_probs, _policy_out = self.actor.sample_reuse(obs, seed=seed, deterministic=deterministic)
+        values = self.critic.forward_reuse(obs)
+        return actions, log_probs, values
+
+    def reserve_buffers(self, batch_size: int) -> None:
+        """Reserve reusable trainer buffers for at least ``batch_size`` rows."""
+
+        rows = int(batch_size)
+        if rows <= 0:
+            raise ValueError("batch_size must be positive")
+        self.actor.reserve_reuse_buffers(rows)
+        self.critic.reserve_buffers(rows)
+        self._ensure_actor_backward_buffers(rows, self.actor.net.output_dim)
+        self._ensure_critic_backward_buffers(rows)
+
     def update(self, buffer: BufferRollout) -> StatsPPOUpdate:
         """Update actor and critic from a finished rollout buffer."""
 
@@ -678,13 +702,15 @@ class TrainerPPO:
         return self._update_actor_tape(buffer, read_stats=read_stats)
 
     def _ensure_actor_backward_buffers(self, rows: int, cols: int) -> wp.array2d[wp.float32]:
+        requested_rows = int(rows)
+        requested_cols = int(cols)
         if (
             self._actor_policy_out_grad is None
-            or int(self._actor_policy_out_grad.shape[0]) != int(rows)
-            or int(self._actor_policy_out_grad.shape[1]) != int(cols)
+            or int(self._actor_policy_out_grad.shape[0]) < requested_rows
+            or int(self._actor_policy_out_grad.shape[1]) != requested_cols
         ):
             self._actor_policy_out_grad = wp.zeros(
-                (int(rows), int(cols)), dtype=wp.float32, device=self.device, requires_grad=False
+                (requested_rows, requested_cols), dtype=wp.float32, device=self.device, requires_grad=False
             )
         return self._actor_policy_out_grad
 
@@ -833,9 +859,10 @@ class TrainerPPO:
         return loss, kl, clip_fraction
 
     def _ensure_critic_backward_buffers(self, rows: int) -> wp.array2d[wp.float32]:
-        if self._critic_value_grad is None or int(self._critic_value_grad.shape[0]) != int(rows):
+        requested_rows = int(rows)
+        if self._critic_value_grad is None or int(self._critic_value_grad.shape[0]) < requested_rows:
             self._critic_value_grad = wp.zeros(
-                (int(rows), 1), dtype=wp.float32, device=self.device, requires_grad=False
+                (requested_rows, 1), dtype=wp.float32, device=self.device, requires_grad=False
             )
         return self._critic_value_grad
 

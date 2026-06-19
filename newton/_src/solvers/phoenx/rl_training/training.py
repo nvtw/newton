@@ -322,6 +322,14 @@ class ResultEvaluateAnymalPPO:
     stats: list[StatsEvaluateAnymalTargetPPO]
 
 
+def _ppo_trainer_reserve_rows(buffer: BufferRollout, config: ConfigPPO) -> int:
+    update_rows = buffer.num_samples
+    minibatch_size = int(config.minibatch_size)
+    if minibatch_size > 0 and float(config.replay_ratio) > 0.0 and minibatch_size < buffer.num_samples:
+        update_rows = minibatch_size
+    return max(buffer.num_envs, update_rows)
+
+
 def _default_ppo_config() -> ConfigPPO:
     return ConfigPPO(
         gamma=0.99,
@@ -387,6 +395,7 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         action_dim=env.action_dim,
         device=device,
     )
+    trainer.reserve_buffers(_ppo_trainer_reserve_rows(buffer, ppo_config))
 
     history: list[StatsTrainG1PPO] = []
     start_iteration = int(getattr(trainer, "iteration", 0))
@@ -592,6 +601,7 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
         action_dim=env.action_dim,
         device=device,
     )
+    trainer.reserve_buffers(_ppo_trainer_reserve_rows(buffer, ppo_config))
 
     history: list[StatsTrainAnymalPPO] = []
     start_iteration = int(getattr(trainer, "iteration", 0))

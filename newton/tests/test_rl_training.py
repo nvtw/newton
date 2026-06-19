@@ -340,6 +340,43 @@ class TestTrainerPPO(unittest.TestCase):
         for manual_grad, expected_grad in zip(manual_grads, expected_grads, strict=True):
             np.testing.assert_allclose(manual_grad, expected_grad, rtol=1.0e-5, atol=1.0e-5)
 
+    def test_manual_mlp_reserved_capacity_graph_captures(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(75)
+        x_np = rng.normal(size=(64, 3)).astype(np.float32)
+        output_grad_np = rng.normal(size=(64, 2)).astype(np.float32)
+        x = wp.array(x_np, dtype=wp.float32, device=device)
+        output_grad = wp.array(output_grad_np, dtype=wp.float32, device=device)
+        manual_mlp = rl.WarpMLP((3, 5, 4, 2), activation="tanh", output_activation="tanh", device=device, seed=21)
+        manual_mlp.reserve_buffers(128)
+
+        manual_mlp.forward_manual(x)
+        manual_mlp.backward_manual(output_grad)
+        with wp.ScopedCapture(device=device) as capture:
+            manual_mlp.forward_manual(x)
+            manual_mlp.backward_manual(output_grad)
+        wp.capture_launch(capture.graph)
+        manual_out = manual_mlp._manual_outputs[-1].numpy()[: x_np.shape[0]]
+        manual_grads = [param.grad.numpy().copy() for param in manual_mlp.parameters()]
+
+        weights = [weight.numpy() for weight in manual_mlp.weights]
+        biases = [bias.numpy() for bias in manual_mlp.biases]
+        activations = [x_np]
+        for weight, bias in zip(weights, biases, strict=True):
+            activations.append(np.tanh(activations[-1] @ weight + bias))
+
+        grad = output_grad_np * (1.0 - activations[-1] * activations[-1])
+        expected_pairs = []
+        for layer in reversed(range(len(weights))):
+            expected_pairs.append((activations[layer].T @ grad, grad.sum(axis=0)))
+            if layer > 0:
+                grad = (grad @ weights[layer].T) * (1.0 - activations[layer] * activations[layer])
+        expected_grads = [grad for pair in reversed(expected_pairs) for grad in pair]
+
+        np.testing.assert_allclose(manual_out, activations[-1], rtol=1.0e-6, atol=1.0e-6)
+        for manual_grad, expected_grad in zip(manual_grads, expected_grads, strict=True):
+            np.testing.assert_allclose(manual_grad, expected_grad, rtol=1.0e-5, atol=1.0e-5)
+
     def test_bfloat16_manual_mlp_weight_grad_graph_captures(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(83)
