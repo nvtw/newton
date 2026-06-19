@@ -28,7 +28,7 @@ class EnvPPO(Protocol):
 
 
 @wp.kernel
-def rollout_store_step_kernel(
+def rollout_store_pre_step_kernel(
     step: wp.int32,
     num_envs: wp.int32,
     obs_dim: wp.int32,
@@ -36,16 +36,10 @@ def rollout_store_step_kernel(
     obs_src: wp.array2d[wp.float32],
     actions_src: wp.array2d[wp.float32],
     log_probs_src: wp.array[wp.float32],
-    rewards_src: wp.array[wp.float32],
-    dones_src: wp.array[wp.float32],
-    successes_src: wp.array[wp.float32],
     values_src: wp.array2d[wp.float32],
     obs_dst: wp.array2d[wp.float32],
     actions_dst: wp.array2d[wp.float32],
     log_probs_dst: wp.array[wp.float32],
-    rewards_dst: wp.array[wp.float32],
-    dones_dst: wp.array[wp.float32],
-    successes_dst: wp.array[wp.float32],
     values_dst: wp.array[wp.float32],
 ):
     env, col = wp.tid()
@@ -56,10 +50,25 @@ def rollout_store_step_kernel(
         actions_dst[row, col] = actions_src[env, col]
     if col == 0:
         log_probs_dst[row] = log_probs_src[env]
-        rewards_dst[row] = rewards_src[env]
-        dones_dst[row] = dones_src[env]
-        successes_dst[row] = successes_src[env]
         values_dst[row] = values_src[env, 0]
+
+
+@wp.kernel
+def rollout_store_post_step_kernel(
+    step: wp.int32,
+    num_envs: wp.int32,
+    rewards_src: wp.array[wp.float32],
+    dones_src: wp.array[wp.float32],
+    successes_src: wp.array[wp.float32],
+    rewards_dst: wp.array[wp.float32],
+    dones_dst: wp.array[wp.float32],
+    successes_dst: wp.array[wp.float32],
+):
+    env = wp.tid()
+    row = step * num_envs + env
+    rewards_dst[row] = rewards_src[env]
+    dones_dst[row] = dones_src[env]
+    successes_dst[row] = successes_src[env]
 
 
 @wp.kernel
@@ -126,35 +135,29 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
     obs = env.observe()
     max_cols = max(env.obs_dim, env.action_dim, 1)
     for step in range(buffer.num_steps):
-        obs_before = wp.empty(env.obs.shape, dtype=wp.float32, device=env.device)
-        wp.copy(obs_before, obs)
         actions, log_probs, values = trainer.act(obs, seed=int(seed) + step)
-        next_obs, rewards, dones = env.step(actions)
         wp.launch(
-            rollout_store_step_kernel,
+            rollout_store_pre_step_kernel,
             dim=(env.world_count, max_cols),
             inputs=[
                 step,
                 env.world_count,
                 env.obs_dim,
                 env.action_dim,
-                obs_before,
+                obs,
                 actions,
                 log_probs,
-                rewards,
-                dones,
-                env.step_successes,
                 values,
             ],
-            outputs=[
-                buffer.obs,
-                buffer.actions,
-                buffer.old_log_probs,
-                buffer.rewards,
-                buffer.dones,
-                buffer.successes,
-                buffer.values,
-            ],
+            outputs=[buffer.obs, buffer.actions, buffer.old_log_probs, buffer.values],
+            device=env.device,
+        )
+        next_obs, rewards, dones = env.step(actions)
+        wp.launch(
+            rollout_store_post_step_kernel,
+            dim=env.world_count,
+            inputs=[step, env.world_count, rewards, dones, env.step_successes],
+            outputs=[buffer.rewards, buffer.dones, buffer.successes],
             device=env.device,
         )
         obs = next_obs

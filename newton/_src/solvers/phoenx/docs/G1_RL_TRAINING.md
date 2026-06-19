@@ -97,17 +97,17 @@ Result from this checkpoint:
 
 A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
 128x128x128 PPO networks, three train epochs, and the default mirror regularizer
-reached 184,977 environment samples/s after the first warmup-heavy iteration.
-Disabling the mirror regularizer reached 192,762 environment samples/s:
+reached 189,650 environment samples/s after the first warmup-heavy iteration.
+Disabling the mirror regularizer reached 197,252 environment samples/s:
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train
 ```
 
 nanoG1 reports about 1.28M environment samples/s while actually training, so
-the current mirror-enabled pure-Warp PhoenX G1 training loop is about 6.9x
+the current mirror-enabled pure-Warp PhoenX G1 training loop is about 6.7x
 slower on this training-throughput metric. The throughput-only no-mirror path is
-about 6.6x slower.
+about 6.5x slower.
 
 nanoG1 reports about 8.5M production physics steps/s and 7.25M matched physics
 steps/s in its README/benchmark notes, so this PhoenX path is currently about
