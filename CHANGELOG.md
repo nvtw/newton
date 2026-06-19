@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add `ConfigEnvG1PhoenX` scheduler knobs for `threads_per_world`, `multi_world_scheduler`, and `prepare_refresh_stride` so experimental G1 RL runs can benchmark PhoenX solver schedules without monkeypatching.
 - Add opt-in `SolverPhoenX` full-coordinate DVI articulation controls, including block-sparse solve modes and full closed-loop joint ownership for supported joint columns.
 - Add experimental pure-Warp `newton.rl` PPO and SAC training utilities, including a PhoenX Anymal sparse-target locomotion environment, deterministic evaluation metrics, and PPO checkpoint resume helpers.
 - Add manual critic-backward PPO controls for the experimental PhoenX G1 RL training path, including `ConfigPPO.manual_critic_backward` and `newton.rl train-g1-ppo --no-manual-critic-backward`.

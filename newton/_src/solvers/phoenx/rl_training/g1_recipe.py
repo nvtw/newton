@@ -38,6 +38,9 @@ W_TERMINATION = -1.0
 
 PARSE_MESHES = False
 AUTO_RESET = True
+THREADS_PER_WORLD: int | str = "auto"
+MULTI_WORLD_SCHEDULER = "auto"
+PREPARE_REFRESH_STRIDE: int | str = "auto"
 
 TRAIN_ITERATIONS = 100
 ROLLOUT_STEPS = 64
@@ -104,6 +107,9 @@ def default_g1_env_config(**overrides: Any):
         "w_termination": W_TERMINATION,
         "parse_meshes": PARSE_MESHES,
         "auto_reset": AUTO_RESET,
+        "threads_per_world": THREADS_PER_WORLD,
+        "multi_world_scheduler": MULTI_WORLD_SCHEDULER,
+        "prepare_refresh_stride": PREPARE_REFRESH_STRIDE,
     }
     values.update(overrides)
     return ConfigEnvG1PhoenX(**values)

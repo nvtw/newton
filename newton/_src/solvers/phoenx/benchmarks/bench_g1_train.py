@@ -41,6 +41,11 @@ def _parse_hidden_layers(text: str) -> tuple[int, ...]:
     return widths
 
 
+def _parse_int_or_auto(text: str) -> int | str:
+    value = text.strip().lower()
+    return "auto" if value == "auto" else int(value)
+
+
 def _g1_ppo_config(
     train_epochs: int,
     mirror_loss_coeff: float,
@@ -166,6 +171,9 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         velocity_iterations=int(args.velocity_iterations),
         controlled_action_count=int(args.controlled_action_count),
         parse_meshes=bool(args.parse_meshes),
+        threads_per_world=args.threads_per_world,
+        multi_world_scheduler=str(args.multi_world_scheduler),
+        prepare_refresh_stride=args.prepare_refresh_stride,
     )
     config = rl.ConfigTrainG1PPO(
         iterations=int(args.iterations),
@@ -230,6 +238,9 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
         "parse_meshes": bool(args.parse_meshes),
+        "threads_per_world": args.threads_per_world,
+        "multi_world_scheduler": str(args.multi_world_scheduler),
+        "prepare_refresh_stride": args.prepare_refresh_stride,
         "env_samples_per_s": env_sps,
         "physics_steps_per_s": physics_sps,
         "mean_rollout_seconds": float(np.mean(warm_rollout)),
@@ -295,6 +306,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     parser.add_argument("--parse-meshes", action="store_true")
+    parser.add_argument("--threads-per-world", type=_parse_int_or_auto, default=g1_recipe.THREADS_PER_WORLD)
+    parser.add_argument("--multi-world-scheduler", default=g1_recipe.MULTI_WORLD_SCHEDULER)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_int_or_auto, default=g1_recipe.PREPARE_REFRESH_STRIDE)
     parser.add_argument("--no-command-randomization", action="store_true")
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)

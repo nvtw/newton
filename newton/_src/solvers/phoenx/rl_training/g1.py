@@ -731,6 +731,10 @@ class ConfigEnvG1PhoenX:
         parse_meshes: Import MJCF mesh collision geoms. Disable for fast
             RL runs that use the primitive foot and arm geoms only.
         auto_reset: Reset worlds whose done flag is set after each step.
+        threads_per_world: PhoenX multi-world lane count, or ``"auto"``.
+        multi_world_scheduler: PhoenX multi-world scheduler selection.
+        prepare_refresh_stride: PhoenX cached-prepare refresh stride, or
+            ``"auto"``.
     """
 
     world_count: int = g1_recipe.WORLD_COUNT
@@ -757,6 +761,9 @@ class ConfigEnvG1PhoenX:
     w_termination: float = g1_recipe.W_TERMINATION
     parse_meshes: bool = g1_recipe.PARSE_MESHES
     auto_reset: bool = g1_recipe.AUTO_RESET
+    threads_per_world: int | str = g1_recipe.THREADS_PER_WORLD
+    multi_world_scheduler: str = g1_recipe.MULTI_WORLD_SCHEDULER
+    prepare_refresh_stride: int | str = g1_recipe.PREPARE_REFRESH_STRIDE
 
 
 class EnvG1PhoenX:
@@ -871,6 +878,9 @@ class EnvG1PhoenX:
             substeps=int(self.config.sim_substeps),
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
+            threads_per_world=self.config.threads_per_world,
+            multi_world_scheduler=self.config.multi_world_scheduler,
+            prepare_refresh_stride=self.config.prepare_refresh_stride,
             articulation_dvi=False,
             articulation_dvi_replaces_joint_pgs=False,
         )
