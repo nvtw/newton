@@ -240,6 +240,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "max_grad_norm": float(args.max_grad_norm),
         "readback_diagnostics": not bool(args.no_readback_diagnostics),
         "sim_substeps": int(args.sim_substeps),
+        "solver_internal_substeps": int(world.substeps),
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
         "parse_meshes": bool(args.parse_meshes),

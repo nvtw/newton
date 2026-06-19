@@ -90,6 +90,7 @@ def benchmark_phoenx(
         "obs_dim": rl.OBS_DIM_G1,
         "action_dim": rl.ACTION_DIM_G1,
         "sim_substeps": int(sim_substeps),
+        "solver_internal_substeps": int(env.solver.world.substeps),
         "solver_iterations": int(solver_iterations),
         "velocity_iterations": int(velocity_iterations),
         "parse_meshes": bool(parse_meshes),

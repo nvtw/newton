@@ -145,6 +145,11 @@
 
 ### Fixed
 
+- Fix the experimental PhoenX G1 PPO environment so `sim_substeps` is
+  the total number of PhoenX physics steps per policy step. Previously the
+  environment loop and internal SolverPhoenX substep loop were nested, so the
+  default recipe ran 25 internal substeps when it requested 5.
+
 - Restore ModelBuilder triangle and tetrahedron shape helpers so primitive examples run.
 - Fix `SolverPhoenX` single-world joint-only scenes so rigid joints remain active when no contact columns are allocated.
 - Fix `SolverPhoenX` sleep-enabled contact stacks so graph-stable contact history does not carry cross-frame warm-start impulses that can prevent quiet towers from resleeping.

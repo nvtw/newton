@@ -30,13 +30,14 @@ def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
 
 class TestG1PhoenXRL(unittest.TestCase):
     def test_default_recipe_enables_mirror_and_matches_config_defaults(self) -> None:
-        require_cuda_graph_capture("PhoenX G1 RL recipe tests")
+        device = require_cuda_graph_capture("PhoenX G1 RL recipe tests")
 
         env_config = g1_recipe.default_g1_env_config(world_count=1)
         train_config = rl.ConfigTrainG1PPO()
         ppo_config = g1_recipe.default_g1_ppo_config()
 
         self.assertEqual(env_config.sim_substeps, g1_recipe.SIM_SUBSTEPS)
+        self.assertEqual(rl.EnvG1PhoenX(env_config, device=device).solver.world.substeps, 1)
         self.assertEqual(env_config.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
         self.assertEqual(g1_recipe.VELOCITY_ITERATIONS, 0)
         self.assertEqual(env_config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)

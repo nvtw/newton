@@ -708,7 +708,9 @@ class ConfigEnvG1PhoenX:
     Args:
         world_count: Number of vectorized G1 worlds.
         frame_dt: Policy step duration [s].
-        sim_substeps: PhoenX physics steps per policy step.
+        sim_substeps: PhoenX physics steps per policy step. The G1
+            environment owns this decimation loop and keeps the internal
+            SolverPhoenX substep count at one.
         solver_iterations: PhoenX position iterations per substep.
         velocity_iterations: PhoenX velocity iterations per substep.
         action_scale: Position target scale [rad].
@@ -889,9 +891,11 @@ class EnvG1PhoenX:
         return model
 
     def _make_solver(self):
+        # The environment loop already runs sim_substeps solver calls per policy
+        # step; nesting SolverPhoenX substeps would square the recipe value.
         return newton.solvers.SolverPhoenX(
             self.model,
-            substeps=int(self.config.sim_substeps),
+            substeps=1,
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
             threads_per_world=self.config.threads_per_world,
