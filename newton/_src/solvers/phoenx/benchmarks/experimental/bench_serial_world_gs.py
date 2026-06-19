@@ -357,6 +357,16 @@ def _parse_stride(value: str) -> int | str:
     return "auto" if value.strip().lower() == "auto" else int(value)
 
 
+def _parse_threads_per_world(value: str) -> int | str:
+    normalized = value.strip().lower()
+    if normalized == "auto":
+        return "auto"
+    tpw = int(normalized)
+    if tpw not in (8, 16, 32):
+        raise argparse.ArgumentTypeError("threads-per-world must be 'auto' or one of 8, 16, 32")
+    return tpw
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--world-count", type=int, default=4096)
@@ -364,7 +374,7 @@ def main() -> None:
     parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument("--velocity-iterations", type=int, default=1)
     parser.add_argument("--prepare-refresh-stride", type=_parse_stride, default=1)
-    parser.add_argument("--threads-per-world", type=int, default=16)
+    parser.add_argument("--threads-per-world", type=_parse_threads_per_world, default="auto")
     parser.add_argument("--prime-frames", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--replays", type=int, default=8)
@@ -390,7 +400,8 @@ def main() -> None:
         handle.simulate_one_frame()
     wp.synchronize_device()
 
-    fast_tail_kw = world._fast_tail_kernel_flags(args.threads_per_world, cached_prepare=False)
+    fixed_tpw = world._fast_tail_fixed_tpw()
+    fast_tail_kw = world._fast_tail_kernel_flags(fixed_tpw, cached_prepare=False)
     prepare_kernel = _make_serial_world_prepare_plus_iterate_kernel(**fast_tail_kw)
     relax_kw = dict(fast_tail_kw)
     relax_kw.pop("cached_prepare", None)
@@ -422,6 +433,7 @@ def main() -> None:
         "velocity_iterations": args.velocity_iterations,
         "prepare_refresh_stride": args.prepare_refresh_stride,
         "threads_per_world": args.threads_per_world,
+        "effective_threads_per_world": fixed_tpw,
         "replays": args.replays,
         "trials": args.trials,
         "coloring_min_ms": coloring_min,
