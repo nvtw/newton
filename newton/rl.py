@@ -4,6 +4,8 @@
 """Warp-only reinforcement learning utilities for Newton."""
 
 import argparse
+import json
+from dataclasses import asdict
 
 from ._src.solvers.phoenx.rl_training import (
     ACTION_DIM_ANYMAL,
@@ -17,6 +19,7 @@ from ._src.solvers.phoenx.rl_training import (
     ConfigEnvAnymalPhoenX,
     ConfigEnvG1PhoenX,
     ConfigEvaluateAnymalPPO,
+    ConfigEvaluateG1PPO,
     ConfigPPO,
     ConfigSAC,
     ConfigTrainAnymalPPO,
@@ -26,9 +29,11 @@ from ._src.solvers.phoenx.rl_training import (
     EnvPPO,
     GaussianActor,
     ResultEvaluateAnymalPPO,
+    ResultEvaluateG1PPO,
     ResultTrainAnymalPPO,
     ResultTrainG1PPO,
     StatsEvaluateAnymalTargetPPO,
+    StatsEvaluateG1PPO,
     StatsPPOUpdate,
     StatsSACUpdate,
     StatsTrainAnymalPPO,
@@ -39,6 +44,7 @@ from ._src.solvers.phoenx.rl_training import (
     capture_env_steps,
     collect_ppo_rollout,
     evaluate_anymal_ppo,
+    evaluate_g1_ppo,
     load_ppo_checkpoint,
     save_ppo_checkpoint,
     train_anymal_ppo,
@@ -57,6 +63,7 @@ __all__ = [
     "ConfigEnvAnymalPhoenX",
     "ConfigEnvG1PhoenX",
     "ConfigEvaluateAnymalPPO",
+    "ConfigEvaluateG1PPO",
     "ConfigPPO",
     "ConfigSAC",
     "ConfigTrainAnymalPPO",
@@ -66,9 +73,11 @@ __all__ = [
     "EnvPPO",
     "GaussianActor",
     "ResultEvaluateAnymalPPO",
+    "ResultEvaluateG1PPO",
     "ResultTrainAnymalPPO",
     "ResultTrainG1PPO",
     "StatsEvaluateAnymalTargetPPO",
+    "StatsEvaluateG1PPO",
     "StatsPPOUpdate",
     "StatsSACUpdate",
     "StatsTrainAnymalPPO",
@@ -79,6 +88,7 @@ __all__ = [
     "capture_env_steps",
     "collect_ppo_rollout",
     "evaluate_anymal_ppo",
+    "evaluate_g1_ppo",
     "load_ppo_checkpoint",
     "save_ppo_checkpoint",
     "train_anymal_ppo",
@@ -138,6 +148,22 @@ def _main() -> int:
     g1_parser.add_argument("--checkpoint-interval", type=int, default=0)
     g1_parser.add_argument("--log-interval", type=int, default=1)
 
+    g1_eval_parser = subparsers.add_parser("eval-g1-ppo", help="Evaluate a saved Unitree G1 PPO checkpoint")
+    g1_eval_parser.add_argument("--checkpoint", required=True)
+    g1_eval_parser.add_argument("--steps", type=int, default=200)
+    g1_eval_parser.add_argument("--world-count", type=int, default=64)
+    g1_eval_parser.add_argument("--device", default=None)
+    g1_eval_parser.add_argument("--seed", type=int, default=1000)
+    g1_eval_parser.add_argument("--command-x", type=float, default=0.8)
+    g1_eval_parser.add_argument("--command-y", type=float, default=0.0)
+    g1_eval_parser.add_argument("--command-yaw", type=float, default=0.0)
+    g1_eval_parser.add_argument("--sim-substeps", type=int, default=5)
+    g1_eval_parser.add_argument("--solver-iterations", type=int, default=2)
+    g1_eval_parser.add_argument("--velocity-iterations", type=int, default=1)
+    g1_eval_parser.add_argument("--parse-meshes", action="store_true")
+    g1_eval_parser.add_argument("--controlled-action-count", type=int, default=12)
+    g1_eval_parser.add_argument("--stochastic", action="store_true")
+
     args = parser.parse_args()
     if args.command == "train-anymal-ppo":
         env_config = ConfigEnvAnymalPhoenX(
@@ -195,6 +221,29 @@ def _main() -> int:
                 checkpoint_interval=args.checkpoint_interval,
             )
         )
+        return 0
+    if args.command == "eval-g1-ppo":
+        env_config = ConfigEnvG1PhoenX(
+            world_count=args.world_count,
+            command=(args.command_x, args.command_y, args.command_yaw),
+            sim_substeps=args.sim_substeps,
+            solver_iterations=args.solver_iterations,
+            velocity_iterations=args.velocity_iterations,
+            controlled_action_count=args.controlled_action_count,
+            parse_meshes=args.parse_meshes,
+        )
+        trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)
+        result = evaluate_g1_ppo(
+            trainer,
+            ConfigEvaluateG1PPO(
+                env_config=env_config,
+                steps=args.steps,
+                device=args.device,
+                deterministic=not args.stochastic,
+                seed=args.seed,
+            ),
+        )
+        print(json.dumps(asdict(result.stats), sort_keys=True))
         return 0
     parser.error(f"unsupported command {args.command!r}")
     return 2

@@ -103,6 +103,7 @@ class TestTrainerPPO(unittest.TestCase):
         critic_before = [param.numpy().copy() for param in trainer.critic.parameters()]
         trainer.actor_optimizer.step_count = 3
         trainer.critic_optimizer.step_count = 5
+        trainer.iteration = 9
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ppo_checkpoint.npz"
@@ -117,6 +118,7 @@ class TestTrainerPPO(unittest.TestCase):
             np.testing.assert_allclose(after, before, rtol=0.0, atol=0.0)
         self.assertEqual(restored.actor_optimizer.step_count, 3)
         self.assertEqual(restored.critic_optimizer.step_count, 5)
+        self.assertEqual(restored.iteration, 11)
 
 
 class TestReplayBufferSAC(unittest.TestCase):

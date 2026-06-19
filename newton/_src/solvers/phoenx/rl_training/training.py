@@ -147,6 +147,38 @@ class ResultTrainG1PPO:
 
 
 @dataclass
+class ConfigEvaluateG1PPO:
+    """Configuration for :func:`evaluate_g1_ppo`."""
+
+    env_config: ConfigEnvG1PhoenX | None = None
+    steps: int = 200
+    device: wp.context.Devicelike = None
+    deterministic: bool = True
+    seed: int = 1000
+
+
+@dataclass
+class StatsEvaluateG1PPO:
+    """Deterministic G1 rollout diagnostics for a trained PPO policy."""
+
+    steps: int
+    mean_reward: float
+    mean_done: float
+    mean_tracking_perf: float
+    mean_command_x: float
+    mean_command_y: float
+    mean_command_yaw: float
+    samples_per_second: float
+
+
+@dataclass
+class ResultEvaluateG1PPO:
+    """Result returned by :func:`evaluate_g1_ppo`."""
+
+    stats: StatsEvaluateG1PPO
+
+
+@dataclass
 class ConfigEvaluateAnymalPPO:
     """Configuration for :func:`evaluate_anymal_ppo`.
 
@@ -259,7 +291,8 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
     ppo_config = cfg.ppo_config or _default_g1_ppo_config()
     env = EnvG1PhoenX(env_config, device=device)
     if cfg.resume_checkpoint is not None:
-        trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=ppo_config, device=device)
+        trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=cfg.ppo_config, device=device)
+        ppo_config = trainer.config
         if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
             raise ValueError("Checkpoint dimensions do not match the G1 environment")
     else:
@@ -283,13 +316,14 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
     )
 
     history: list[StatsTrainG1PPO] = []
-    command_rng = np.random.default_rng(int(cfg.seed) + 53_321)
+    start_iteration = int(getattr(trainer, "iteration", 0))
     command_np = np.tile(np.asarray(env.config.command, dtype=np.float32), (env.world_count, 1))
 
-    for iteration in range(cfg.iterations):
+    for local_iteration in range(cfg.iterations):
+        iteration = start_iteration + local_iteration
         if cfg.randomize_commands:
             command_np = _sample_g1_commands(
-                rng=command_rng,
+                rng=np.random.default_rng(int(cfg.seed) + 53_321 + iteration),
                 world_count=env.world_count,
                 command_x_range=cfg.command_x_range,
                 command_y_range=cfg.command_y_range,
@@ -306,7 +340,7 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         stats = _merge_g1_stats(iteration, rollout_metrics, update_stats, t1 - t0, t2 - t1, buffer.num_samples)
         history.append(stats)
 
-        if cfg.log_interval > 0 and (iteration % cfg.log_interval == 0 or iteration == cfg.iterations - 1):
+        if cfg.log_interval > 0 and (iteration % cfg.log_interval == 0 or local_iteration == cfg.iterations - 1):
             print(
                 f"iter={iteration:04d} "
                 f"reward={stats.mean_reward:.4f} "
@@ -316,16 +350,62 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
                 f"pi_loss={stats.policy_loss:.4f} "
                 f"v_loss={stats.value_loss:.4f}"
             )
+        trainer.iteration = iteration + 1
         if cfg.checkpoint_path is not None and cfg.checkpoint_interval > 0:
-            if (iteration + 1) % int(cfg.checkpoint_interval) == 0:
-                trainer.save_checkpoint(
-                    _format_checkpoint_path(cfg.checkpoint_path, iteration + 1), iteration=iteration + 1
-                )
+            if trainer.iteration % int(cfg.checkpoint_interval) == 0:
+                checkpoint_path = _format_checkpoint_path(cfg.checkpoint_path, trainer.iteration)
+                trainer.save_checkpoint(checkpoint_path, iteration=trainer.iteration)
 
     if cfg.checkpoint_path is not None:
-        trainer.save_checkpoint(_format_checkpoint_path(cfg.checkpoint_path, cfg.iterations), iteration=cfg.iterations)
+        final_iteration = start_iteration + int(cfg.iterations)
+        trainer.iteration = final_iteration
+        trainer.save_checkpoint(
+            _format_checkpoint_path(cfg.checkpoint_path, final_iteration), iteration=final_iteration
+        )
 
     return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffer, history=history)
+
+
+def evaluate_g1_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1PPO | None = None) -> ResultEvaluateG1PPO:
+    """Evaluate a saved or in-memory G1 PPO policy with deterministic rollouts."""
+
+    cfg = config or ConfigEvaluateG1PPO()
+    if cfg.steps <= 0:
+        raise ValueError("steps must be positive")
+    device = wp.get_device(cfg.device if cfg.device is not None else trainer.device)
+    base_env_config = cfg.env_config or ConfigEnvG1PhoenX(world_count=64)
+    eval_config = replace(base_env_config, auto_reset=False, max_episode_steps=0)
+    env = EnvG1PhoenX(eval_config, device=device)
+    if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
+        raise ValueError("Trainer dimensions do not match the G1 environment")
+
+    obs = env.reset()
+    reward_sum = 0.0
+    done_sum = 0.0
+    tracking_perf_sum = 0.0
+    t0 = time.perf_counter()
+    for step in range(int(cfg.steps)):
+        actions, _log_probs, _values = trainer.act(
+            obs, seed=int(cfg.seed) + step, deterministic=bool(cfg.deterministic)
+        )
+        obs, rewards, dones = env.step(actions)
+        reward_sum += float(np.mean(rewards.numpy()))
+        done_sum += float(np.mean(dones.numpy()))
+        tracking_perf_sum += float(np.mean(env.step_successes.numpy()))
+    elapsed = max(time.perf_counter() - t0, 1.0e-12)
+    command_np = env.command.numpy()
+    steps = int(cfg.steps)
+    stats = StatsEvaluateG1PPO(
+        steps=steps,
+        mean_reward=reward_sum / float(steps),
+        mean_done=done_sum / float(steps),
+        mean_tracking_perf=tracking_perf_sum / float(steps),
+        mean_command_x=float(np.mean(command_np[:, 0])),
+        mean_command_y=float(np.mean(command_np[:, 1])),
+        mean_command_yaw=float(np.mean(command_np[:, 2])),
+        samples_per_second=float(env.world_count * steps) / elapsed,
+    )
+    return ResultEvaluateG1PPO(stats=stats)
 
 
 def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainAnymalPPO:
@@ -353,7 +433,8 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
     ppo_config = cfg.ppo_config or _default_ppo_config()
     env = EnvAnymalPhoenX(env_config, device=device)
     if cfg.resume_checkpoint is not None:
-        trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=ppo_config, device=device)
+        trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=cfg.ppo_config, device=device)
+        ppo_config = trainer.config
         if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
             raise ValueError("Checkpoint dimensions do not match the Anymal environment")
     else:
@@ -377,22 +458,24 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
     )
 
     history: list[StatsTrainAnymalPPO] = []
+    start_iteration = int(getattr(trainer, "iteration", 0))
     command_x = float(env.config.command[0])
     target_xy = np.asarray(env.config.target_position, dtype=np.float32)
     target_distance = float(np.linalg.norm(target_xy))
     target_direction = _target_direction(target_xy)
-    target_rng = np.random.default_rng(int(cfg.seed) + 17_917)
     if cfg.use_target_curriculum and env.config.reward_mode == "sparse_target":
         target_distance = float(cfg.target_distance_start)
 
-    for iteration in range(cfg.iterations):
+    for local_iteration in range(cfg.iterations):
+        iteration = start_iteration + local_iteration
+        target_rng = np.random.default_rng(int(cfg.seed) + 17_917 + iteration)
         _configure_rollout_targets(env, cfg, target_rng, target_direction, target_distance)
         env.collect_ppo_rollout(trainer, buffer, seed=cfg.seed + iteration * cfg.rollout_steps)
         rollout_metrics = _rollout_metrics(buffer, command_x, target_distance)
         update_stats = trainer.update(buffer)
         stats = _merge_stats(iteration, rollout_metrics, update_stats)
         history.append(stats)
-        if cfg.log_interval > 0 and (iteration % cfg.log_interval == 0 or iteration == cfg.iterations - 1):
+        if cfg.log_interval > 0 and (iteration % cfg.log_interval == 0 or local_iteration == cfg.iterations - 1):
             print(
                 f"iter={iteration:04d} "
                 f"reward={stats.mean_reward:.4f} "
@@ -411,14 +494,18 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
             and target_distance < cfg.target_distance_end
         ):
             target_distance = min(float(cfg.target_distance_end), target_distance + float(cfg.target_distance_step))
+        trainer.iteration = iteration + 1
         if cfg.checkpoint_path is not None and cfg.checkpoint_interval > 0:
-            if (iteration + 1) % int(cfg.checkpoint_interval) == 0:
-                trainer.save_checkpoint(
-                    _format_checkpoint_path(cfg.checkpoint_path, iteration + 1), iteration=iteration + 1
-                )
+            if trainer.iteration % int(cfg.checkpoint_interval) == 0:
+                checkpoint_path = _format_checkpoint_path(cfg.checkpoint_path, trainer.iteration)
+                trainer.save_checkpoint(checkpoint_path, iteration=trainer.iteration)
 
     if cfg.checkpoint_path is not None:
-        trainer.save_checkpoint(_format_checkpoint_path(cfg.checkpoint_path, cfg.iterations), iteration=cfg.iterations)
+        final_iteration = start_iteration + int(cfg.iterations)
+        trainer.iteration = final_iteration
+        trainer.save_checkpoint(
+            _format_checkpoint_path(cfg.checkpoint_path, final_iteration), iteration=final_iteration
+        )
 
     return ResultTrainAnymalPPO(trainer=trainer, env=env, buffer=buffer, history=history)
 

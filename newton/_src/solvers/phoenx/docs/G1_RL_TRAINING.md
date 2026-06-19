@@ -11,7 +11,10 @@ adding a PyTorch dependency to Newton's Warp-only RL stack.
   `collect_ppo_rollout` helper.
 - `newton.rl.capture_env_steps`: reusable CUDA graph-capture helper for vectorized
   environments.
-- `python -m newton.rl train-g1-ppo`: CLI wrapper for quick runs.
+- `python -m newton.rl train-g1-ppo`: CLI wrapper for pure-Warp PPO
+  training, checkpointing, and resume.
+- `python -m newton.rl eval-g1-ppo`: Load and roll out a saved G1 PPO
+  checkpoint.
 - `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_rl`: PhoenX G1
   env-step throughput benchmark with optional nanoG1 result ingestion.
 
@@ -33,6 +36,30 @@ The environment follows nanoG1's G1 v3 control surface where practical:
 - Reward weights mirror the nanoG1 recipe for velocity tracking, base penalties,
   torque proxy, action-rate penalty, alive reward, and termination penalty.
 
+## End-to-End Checkpoint Workflow
+
+A minimal user-facing pure-Warp lifecycle is:
+
+```bash
+uv run --extra dev -m newton.rl train-g1-ppo \
+    --iterations 2 --rollout-steps 8 --world-count 4096 \
+    --checkpoint-path /tmp/phoenx_g1_{iteration}.npz \
+    --checkpoint-interval 1 --no-command-randomization
+
+uv run --extra dev -m newton.rl eval-g1-ppo \
+    --checkpoint /tmp/phoenx_g1_2.npz --steps 4 --world-count 4096
+
+uv run --extra dev -m newton.rl train-g1-ppo \
+    --iterations 1 --rollout-steps 8 --world-count 4096 \
+    --resume-checkpoint /tmp/phoenx_g1_2.npz \
+    --checkpoint-path /tmp/phoenx_g1_{iteration}.npz \
+    --checkpoint-interval 1 --no-command-randomization
+```
+
+The checkpoint stores actor, critic, optimizer state, PPO config, network shape,
+and the absolute training iteration. Resuming from `/tmp/phoenx_g1_2.npz` writes
+`/tmp/phoenx_g1_3.npz` and logs `iter=0002`.
+
 ## Current Benchmark Baseline
 
 Measured on an NVIDIA RTX PRO 6000 Blackwell Workstation Edition with CUDA graph
@@ -48,6 +75,12 @@ Result from this checkpoint:
 - 763,732 env steps/s at 4096 worlds.
 - 3,818,658 physics steps/s at 4096 worlds.
 - 9.8 s setup time at 4096 worlds.
+
+A small full train-loop run with 4096 worlds, 8 rollout steps, and the
+default 128x128x128 PPO networks reached 156,611 environment samples/s on
+iteration 1 after the first warmup-heavy iteration. That includes rollout and
+PPO update time, so it should not be compared directly to nanoG1 no-learner
+stepping benchmarks.
 
 nanoG1 reports about 8.5M production physics steps/s and 7.25M matched physics
 steps/s in its README/benchmark notes, so this PhoenX path is currently about

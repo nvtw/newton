@@ -201,6 +201,7 @@ class TrainerPPO:
         )
         self.actor_optimizer = Adam(self.actor.parameters(), lr=self.config.actor_lr)
         self.critic_optimizer = Adam(self.critic.parameters(), lr=self.config.critic_lr)
+        self.iteration = 0
 
         self._policy_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._value_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
@@ -222,7 +223,7 @@ class TrainerPPO:
             "activation": np.asarray(self.activation),
             "squash_actions": np.asarray(int(self.squash_actions), dtype=np.int64),
             "log_std_init": np.asarray(self.log_std_init, dtype=np.float32),
-            "iteration": np.asarray(-1 if iteration is None else int(iteration), dtype=np.int64),
+            "iteration": np.asarray(self.iteration if iteration is None else int(iteration), dtype=np.int64),
         }
         for key, value in asdict(self.config).items():
             data[f"config_{key}"] = np.asarray(value)
@@ -272,6 +273,8 @@ class TrainerPPO:
             _unpack_mlp(data, "critic", trainer.critic)
             _unpack_adam(data, "actor_optimizer", trainer.actor_optimizer)
             _unpack_adam(data, "critic_optimizer", trainer.critic_optimizer)
+            if "iteration" in data:
+                trainer.iteration = max(int(data["iteration"]), 0)
         return trainer
 
     def act(

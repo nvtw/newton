@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+import tempfile
 import unittest
 
 import numpy as np
@@ -62,6 +64,80 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         self.assertEqual(after - before, 6)
         self.assertTrue(np.isfinite(env.obs.numpy()).all())
+
+    def test_train_save_load_evaluate_and_resume(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 RL training tests")
+        env_config = rl.ConfigEnvG1PhoenX(
+            world_count=1,
+            sim_substeps=1,
+            solver_iterations=1,
+            velocity_iterations=1,
+            max_episode_steps=0,
+            auto_reset=False,
+        )
+        ppo_config = rl.ConfigPPO(
+            train_epochs=1,
+            normalize_advantages=False,
+            actor_lr=1.0e-3,
+            critic_lr=1.0e-3,
+            entropy_coeff=0.0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_template = f"{tmpdir}/g1_{{iteration}}.npz"
+            train_config = rl.ConfigTrainG1PPO(
+                iterations=1,
+                rollout_steps=1,
+                hidden_layers=(8,),
+                env_config=env_config,
+                ppo_config=ppo_config,
+                device=device,
+                seed=23,
+                log_interval=0,
+                randomize_commands=False,
+                checkpoint_path=checkpoint_template,
+                checkpoint_interval=1,
+            )
+            first = rl.train_g1_ppo(train_config)
+            first_path = f"{tmpdir}/g1_1.npz"
+            restored = rl.load_ppo_checkpoint(first_path, device=device)
+
+            self.assertEqual(first.history[0].iteration, 0)
+            self.assertEqual(first.trainer.iteration, 1)
+            self.assertEqual(restored.iteration, 1)
+            for before, after in zip(first.trainer.actor.parameters(), restored.actor.parameters(), strict=True):
+                np.testing.assert_allclose(after.numpy(), before.numpy(), rtol=0.0, atol=0.0)
+
+            eval_result = rl.evaluate_g1_ppo(
+                restored,
+                rl.ConfigEvaluateG1PPO(env_config=env_config, steps=1, device=device, deterministic=True),
+            )
+            self.assertTrue(math.isfinite(eval_result.stats.mean_reward))
+            self.assertTrue(math.isfinite(eval_result.stats.mean_done))
+            self.assertGreater(eval_result.stats.samples_per_second, 0.0)
+
+            resumed = rl.train_g1_ppo(
+                rl.ConfigTrainG1PPO(
+                    iterations=1,
+                    rollout_steps=1,
+                    hidden_layers=(8,),
+                    env_config=env_config,
+                    ppo_config=ppo_config,
+                    device=device,
+                    seed=23,
+                    log_interval=0,
+                    randomize_commands=False,
+                    resume_checkpoint=first_path,
+                    checkpoint_path=checkpoint_template,
+                    checkpoint_interval=1,
+                )
+            )
+            second_path = f"{tmpdir}/g1_2.npz"
+            second_restored = rl.load_ppo_checkpoint(second_path, device=device)
+
+            self.assertEqual(resumed.history[0].iteration, 1)
+            self.assertEqual(resumed.trainer.iteration, 2)
+            self.assertEqual(second_restored.iteration, 2)
 
 
 if __name__ == "__main__":
