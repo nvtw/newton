@@ -570,6 +570,56 @@ def trajectory_priority_kernel(
 
 
 @wp.kernel
+def trajectory_priority_weight_kernel(
+    priorities: wp.array[wp.float32],
+    priority_alpha: wp.float32,
+    weights: wp.array[wp.float32],
+    total_weight: wp.array[wp.float32],
+):
+    env = wp.tid()
+    weight = wp.pow(wp.max(priorities[env], wp.float32(0.0)) + wp.float32(1.0e-6), priority_alpha)
+    weights[env] = weight
+    wp.atomic_add(total_weight, 0, weight)
+
+
+@wp.kernel
+def sample_trajectory_env_ids_kernel(
+    priority_weights: wp.array[wp.float32],
+    total_weight: wp.array[wp.float32],
+    num_envs: wp.int32,
+    seed: wp.int32,
+    priority_beta: wp.float32,
+    use_priority: wp.int32,
+    env_ids: wp.array[wp.int32],
+    importance_weights: wp.array[wp.float32],
+):
+    segment = wp.tid()
+    rng = wp.rand_init(seed, segment)
+    u = wp.randf(rng)
+    env = wp.min(wp.int32(wp.floor(u * wp.float32(num_envs))), num_envs - wp.int32(1))
+    importance = wp.float32(1.0)
+
+    total = total_weight[0]
+    if use_priority != wp.int32(0) and total > wp.float32(0.0):
+        target = u * total
+        cumulative = wp.float32(0.0)
+        found = wp.int32(0)
+        env = num_envs - wp.int32(1)
+        for candidate in range(num_envs):
+            cumulative = cumulative + priority_weights[candidate]
+            if found == wp.int32(0) and target <= cumulative:
+                env = candidate
+                found = wp.int32(1)
+        if priority_beta > wp.float32(0.0):
+            prob = priority_weights[env] / total
+            correction = wp.max(wp.float32(num_envs) * prob, wp.float32(1.0e-6))
+            importance = wp.pow(correction, -priority_beta)
+
+    env_ids[segment] = env
+    importance_weights[segment] = importance
+
+
+@wp.kernel
 def weight_trajectory_advantages_kernel(
     trajectory_weights: wp.array[wp.float32],
     segment_count: wp.int32,

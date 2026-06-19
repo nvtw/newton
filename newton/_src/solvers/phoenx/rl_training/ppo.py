@@ -20,10 +20,12 @@ from .kernels import (
     normalize_from_stats_kernel,
     ppo_actor_loss_backward_kernel,
     ppo_actor_loss_kernel,
+    sample_trajectory_env_ids_kernel,
     scatter_trajectory_ratios_kernel,
     scatter_trajectory_values_kernel,
     sum_and_sumsq_kernel,
     trajectory_priority_kernel,
+    trajectory_priority_weight_kernel,
     value_loss_grad_kernel,
     value_loss_kernel,
     value_symmetry_loss_grad_kernel,
@@ -357,6 +359,8 @@ class TrainerPPO:
         self._minibatch: BatchPPO | None = None
         self._minibatch_env_ids: wp.array[wp.int32] | None = None
         self._trajectory_priorities: wp.array[wp.float32] | None = None
+        self._trajectory_priority_weights: wp.array[wp.float32] | None = None
+        self._trajectory_priority_total: wp.array[wp.float32] | None = None
         self._actor_policy_out_grad: wp.array2d[wp.float32] | None = None
         self._critic_value_grad: wp.array2d[wp.float32] | None = None
         self._actor_log_std_grad = wp.zeros_like(self.actor.log_std, requires_grad=False)
@@ -556,9 +560,8 @@ class TrainerPPO:
             1, int(float(self.config.replay_ratio) * float(buffer.num_samples) / float(minibatch_size))
         )
 
-        rng = np.random.default_rng(self.seed + 1000003 * self.iteration)
         use_vtrace = self._uses_vtrace_replay()
-        probabilities = None if use_vtrace else self._trajectory_sampling_probabilities(buffer)
+        use_priority = False if use_vtrace else self._prepare_trajectory_priority_weights(buffer)
         max_cols = max(self.obs_dim, self.action_dim, 1)
         policy_loss = 0.0
         value_loss = 0.0
@@ -568,14 +571,13 @@ class TrainerPPO:
             read_stats = minibatch_id == num_minibatches - 1
             if use_vtrace:
                 self._compute_vtrace_returns(buffer)
-                probabilities = self._trajectory_sampling_probabilities(buffer)
-            if probabilities is None:
-                env_ids = rng.integers(0, buffer.num_envs, size=segment_count, dtype=np.int32)
-            else:
-                env_ids = rng.choice(buffer.num_envs, size=segment_count, replace=True, p=probabilities).astype(
-                    np.int32, copy=False
-                )
-            self._minibatch_env_ids.assign(env_ids)
+                use_priority = self._prepare_trajectory_priority_weights(buffer)
+            self._sample_minibatch_env_ids(
+                buffer,
+                batch,
+                seed=self.seed + 1000003 * self.iteration + minibatch_id,
+                use_priority=use_priority,
+            )
             wp.launch(
                 gather_trajectory_minibatch_kernel,
                 dim=(batch.num_samples, max_cols),
@@ -596,7 +598,7 @@ class TrainerPPO:
             )
             if self.config.normalize_advantages:
                 batch.normalize_advantages()
-            self._weight_minibatch_advantages(batch, env_ids, probabilities, buffer.num_envs)
+            self._weight_minibatch_advantages(batch, use_priority)
             policy_loss, approx_kl, clip_fraction = self._update_actor(batch, read_stats=read_stats)
             if use_vtrace:
                 self._scatter_minibatch_ratios(buffer, batch, segment_count)
@@ -623,16 +625,9 @@ class TrainerPPO:
             reward_clip=self.config.reward_clip,
         )
 
-    def _weight_minibatch_advantages(
-        self, batch: BatchPPO, env_ids: np.ndarray, probabilities: np.ndarray | None, total_envs: int
-    ) -> None:
-        priority_beta = float(self.config.priority_beta)
-        if priority_beta <= 0.0 or probabilities is None:
+    def _weight_minibatch_advantages(self, batch: BatchPPO, use_priority: bool) -> None:
+        if float(self.config.priority_beta) <= 0.0 or not use_priority:
             return
-        weights = np.power(np.maximum(float(total_envs) * probabilities[env_ids], 1.0e-6), -priority_beta).astype(
-            np.float32, copy=False
-        )
-        batch.priority_weights.assign(weights)
         wp.launch(
             weight_trajectory_advantages_kernel,
             dim=batch.num_samples,
@@ -641,12 +636,25 @@ class TrainerPPO:
             device=self.device,
         )
 
-    def _trajectory_sampling_probabilities(self, buffer: BufferRollout) -> np.ndarray | None:
+    def _ensure_trajectory_sampling_buffers(self, num_envs: int) -> None:
+        env_count = int(num_envs)
+        if env_count <= 0:
+            raise ValueError("num_envs must be positive")
+        if self._trajectory_priorities is None or int(self._trajectory_priorities.shape[0]) != env_count:
+            self._trajectory_priorities = wp.zeros(env_count, dtype=wp.float32, device=self.device)
+            self._trajectory_priority_weights = wp.zeros(env_count, dtype=wp.float32, device=self.device)
+            self._trajectory_priority_total = wp.zeros(1, dtype=wp.float32, device=self.device)
+
+    def _prepare_trajectory_priority_weights(self, buffer: BufferRollout) -> bool:
         priority_alpha = float(self.config.priority_alpha)
+        self._ensure_trajectory_sampling_buffers(buffer.num_envs)
         if priority_alpha <= 0.0:
-            return None
-        if self._trajectory_priorities is None or int(self._trajectory_priorities.shape[0]) != buffer.num_envs:
-            self._trajectory_priorities = wp.zeros(buffer.num_envs, dtype=wp.float32, device=self.device)
+            return False
+        if self._trajectory_priorities is None or self._trajectory_priority_weights is None:
+            raise RuntimeError("trajectory priority buffers were not initialized")
+        if self._trajectory_priority_total is None:
+            raise RuntimeError("trajectory priority total buffer was not initialized")
+        self._trajectory_priority_total.zero_()
         wp.launch(
             trajectory_priority_kernel,
             dim=buffer.num_envs,
@@ -654,12 +662,37 @@ class TrainerPPO:
             outputs=[self._trajectory_priorities],
             device=self.device,
         )
-        priorities = self._trajectory_priorities.numpy().astype(np.float64, copy=False)
-        weights = np.power(np.maximum(priorities, 0.0) + 1.0e-6, priority_alpha)
-        total = float(np.sum(weights))
-        if not np.isfinite(total) or total <= 0.0:
-            return None
-        return weights / total
+        wp.launch(
+            trajectory_priority_weight_kernel,
+            dim=buffer.num_envs,
+            inputs=[self._trajectory_priorities, priority_alpha],
+            outputs=[self._trajectory_priority_weights, self._trajectory_priority_total],
+            device=self.device,
+        )
+        return True
+
+    def _sample_minibatch_env_ids(
+        self, buffer: BufferRollout, batch: BatchPPO, *, seed: int, use_priority: bool
+    ) -> None:
+        self._ensure_trajectory_sampling_buffers(buffer.num_envs)
+        if self._minibatch_env_ids is None:
+            raise RuntimeError("minibatch env id buffer was not initialized")
+        if self._trajectory_priority_weights is None or self._trajectory_priority_total is None:
+            raise RuntimeError("trajectory sampling buffers were not initialized")
+        wp.launch(
+            sample_trajectory_env_ids_kernel,
+            dim=batch.num_envs,
+            inputs=[
+                self._trajectory_priority_weights,
+                self._trajectory_priority_total,
+                buffer.num_envs,
+                int(seed) & 0x7FFFFFFF,
+                float(self.config.priority_beta),
+                int(use_priority),
+            ],
+            outputs=[self._minibatch_env_ids, batch.priority_weights],
+            device=self.device,
+        )
 
     def _scatter_minibatch_ratios(self, buffer: BufferRollout, batch: BatchPPO, segment_count: int) -> None:
         wp.launch(

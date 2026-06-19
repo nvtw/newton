@@ -478,6 +478,41 @@ class TestTrainerPPO(unittest.TestCase):
         with self.assertRaises(ValueError):
             rl.WarpMLP((2, 64, 3), device=device, manual_forward_dtype="float16")
 
+    def test_priority_replay_sampling_is_graph_capturable(self) -> None:
+        device = _rl_cuda_device()
+        config = rl.ConfigPPO(
+            minibatch_size=128,
+            replay_ratio=1.0,
+            priority_alpha=0.5,
+            priority_beta=0.75,
+            normalize_advantages=False,
+        )
+        trainer = rl.TrainerPPO(obs_dim=3, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=101)
+        buffer = rl.BufferRollout(num_steps=4, num_envs=5, obs_dim=3, action_dim=2, device=device)
+        per_env_priority = np.array([0.25, 0.5, 1.0, 2.0, 4.0], dtype=np.float32)
+        buffer.advantages.assign(np.tile(per_env_priority / float(buffer.num_steps), buffer.num_steps))
+        batch = trainer._ensure_minibatch(buffer, segment_count=32)
+
+        trainer._prepare_trajectory_priority_weights(buffer)
+        trainer._sample_minibatch_env_ids(buffer, batch, seed=17, use_priority=True)
+        with wp.ScopedCapture(device=device) as capture:
+            use_priority = trainer._prepare_trajectory_priority_weights(buffer)
+            trainer._sample_minibatch_env_ids(buffer, batch, seed=19, use_priority=use_priority)
+        wp.capture_launch(capture.graph)
+
+        env_ids = trainer._minibatch_env_ids.numpy()
+        importance = batch.priority_weights.numpy()
+        weights = np.power(np.maximum(per_env_priority, 0.0) + 1.0e-6, config.priority_alpha)
+        total = float(np.sum(weights))
+        expected = np.power(
+            np.maximum(float(buffer.num_envs) * weights[env_ids] / total, 1.0e-6), -config.priority_beta
+        )
+
+        self.assertTrue(np.all(env_ids >= 0))
+        self.assertTrue(np.all(env_ids < buffer.num_envs))
+        np.testing.assert_allclose(importance, expected, rtol=2.0e-6, atol=2.0e-6)
+        self.assertGreater(float(np.max(importance) - np.min(importance)), 0.0)
+
     def test_update_changes_actor_and_returns_finite_stats(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(3)
