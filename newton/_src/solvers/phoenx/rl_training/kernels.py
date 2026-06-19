@@ -271,6 +271,18 @@ def trajectory_priority_kernel(
 
 
 @wp.kernel
+def weight_trajectory_advantages_kernel(
+    trajectory_weights: wp.array[wp.float32],
+    segment_count: wp.int32,
+    advantages: wp.array[wp.float32],
+):
+    row = wp.tid()
+    step = row / segment_count
+    segment = row - step * segment_count
+    advantages[row] = advantages[row] * trajectory_weights[segment]
+
+
+@wp.kernel
 def gather_trajectory_minibatch_kernel(
     env_ids: wp.array[wp.int32],
     src_num_envs: wp.int32,

@@ -42,6 +42,7 @@ def _g1_ppo_config(
     minibatch_size: int,
     replay_ratio: float,
     priority_alpha: float,
+    priority_beta: float,
     vtrace_rho_clip: float,
     vtrace_c_clip: float,
     reward_clip: float,
@@ -58,6 +59,7 @@ def _g1_ppo_config(
         minibatch_size=int(minibatch_size),
         replay_ratio=float(replay_ratio),
         priority_alpha=float(priority_alpha),
+        priority_beta=float(priority_beta),
         vtrace_rho_clip=float(vtrace_rho_clip),
         vtrace_c_clip=float(vtrace_c_clip),
         normalize_advantages=True,
@@ -99,6 +101,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
             args.minibatch_size,
             args.replay_ratio,
             args.priority_alpha,
+            args.priority_beta,
             args.vtrace_rho_clip,
             args.vtrace_c_clip,
             args.reward_clip,
@@ -132,6 +135,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "minibatch_size": int(args.minibatch_size),
         "replay_ratio": float(args.replay_ratio),
         "priority_alpha": float(args.priority_alpha),
+        "priority_beta": float(args.priority_beta),
         "vtrace_rho_clip": float(args.vtrace_rho_clip),
         "vtrace_c_clip": float(args.vtrace_c_clip),
         "reward_clip": float(args.reward_clip),
@@ -181,6 +185,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--minibatch-size", type=int, default=32768)
     parser.add_argument("--replay-ratio", type=float, default=3.0)
     parser.add_argument("--priority-alpha", type=float, default=0.4)
+    parser.add_argument("--priority-beta", type=float, default=1.0)
     parser.add_argument("--vtrace-rho-clip", type=float, default=0.0)
     parser.add_argument("--vtrace-c-clip", type=float, default=0.0)
     parser.add_argument("--reward-clip", type=float, default=1.0)

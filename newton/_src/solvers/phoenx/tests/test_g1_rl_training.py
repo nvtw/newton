@@ -122,6 +122,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(restored.config.minibatch_size, 0)
             self.assertEqual(restored.config.replay_ratio, 0.0)
             self.assertEqual(restored.config.priority_alpha, 0.0)
+            self.assertEqual(restored.config.priority_beta, 0.0)
             self.assertEqual(restored.config.vtrace_rho_clip, 0.0)
             self.assertEqual(restored.config.vtrace_c_clip, 0.0)
             self.assertEqual(restored.config.reward_clip, 1.0)

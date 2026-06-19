@@ -161,6 +161,7 @@ def _main() -> int:
     g1_parser.add_argument("--minibatch-size", type=int, default=32768)
     g1_parser.add_argument("--replay-ratio", type=float, default=3.0)
     g1_parser.add_argument("--priority-alpha", type=float, default=0.4)
+    g1_parser.add_argument("--priority-beta", type=float, default=1.0)
     g1_parser.add_argument("--vtrace-rho-clip", type=float, default=0.0)
     g1_parser.add_argument("--vtrace-c-clip", type=float, default=0.0)
     g1_parser.add_argument("--reward-clip", type=float, default=1.0)
@@ -255,6 +256,7 @@ def _main() -> int:
             minibatch_size=args.minibatch_size,
             replay_ratio=args.replay_ratio,
             priority_alpha=args.priority_alpha,
+            priority_beta=args.priority_beta,
             vtrace_rho_clip=args.vtrace_rho_clip,
             vtrace_c_clip=args.vtrace_c_clip,
             normalize_advantages=True,

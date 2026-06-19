@@ -120,6 +120,7 @@ class TestTrainerPPO(unittest.TestCase):
             minibatch_size=8,
             replay_ratio=1.0,
             priority_alpha=0.4,
+            priority_beta=1.0,
             vtrace_rho_clip=3.0,
             vtrace_c_clip=3.0,
             max_grad_norm=0.3,
@@ -184,6 +185,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.config.minibatch_size, 0)
         self.assertEqual(restored.config.replay_ratio, 0.0)
         self.assertEqual(restored.config.priority_alpha, 0.0)
+        self.assertEqual(restored.config.priority_beta, 0.0)
         self.assertEqual(restored.config.vtrace_rho_clip, 0.0)
         self.assertEqual(restored.config.vtrace_c_clip, 0.0)
         self.assertEqual(restored.config.reward_clip, 0.0)

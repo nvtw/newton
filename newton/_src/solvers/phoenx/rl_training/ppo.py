@@ -24,6 +24,7 @@ from .kernels import (
     trajectory_priority_kernel,
     value_loss_kernel,
     value_symmetry_loss_kernel,
+    weight_trajectory_advantages_kernel,
     zero_scalar_kernel,
 )
 from .networks import GaussianActor, WarpMLP
@@ -66,6 +67,8 @@ class ConfigPPO:
             transition when trajectory minibatches are enabled.
         priority_alpha: Trajectory priority exponent. A value less than or
             equal to zero uses uniform trajectory sampling.
+        priority_beta: Importance-correction exponent for priority replay. A
+            value less than or equal to zero disables the correction.
         vtrace_rho_clip: V-trace policy-ratio clip for replayed trajectories.
             A value less than or equal to zero disables V-trace recomputation.
         vtrace_c_clip: V-trace trace-ratio clip for replayed trajectories.
@@ -91,6 +94,7 @@ class ConfigPPO:
     minibatch_size: int = 0
     replay_ratio: float = 0.0
     priority_alpha: float = 0.0
+    priority_beta: float = 0.0
     vtrace_rho_clip: float = 0.0
     vtrace_c_clip: float = 0.0
     normalize_advantages: bool = True
@@ -136,6 +140,7 @@ class BatchPPO:
         self.advantages = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
+        self.priority_weights = wp.ones(self.num_envs, dtype=wp.float32, device=self.device)
 
     @property
     def num_samples(self) -> int:
@@ -539,6 +544,7 @@ class TrainerPPO:
             )
             if self.config.normalize_advantages:
                 batch.normalize_advantages()
+            self._weight_minibatch_advantages(batch, env_ids, probabilities, buffer.num_envs)
             policy_loss, approx_kl, clip_fraction = self._update_actor(batch, read_stats=read_stats)
             if use_vtrace:
                 self._scatter_minibatch_ratios(buffer, batch, segment_count)
@@ -563,6 +569,24 @@ class TrainerPPO:
             rho_clip=self.config.vtrace_rho_clip,
             c_clip=self.config.vtrace_c_clip,
             reward_clip=self.config.reward_clip,
+        )
+
+    def _weight_minibatch_advantages(
+        self, batch: BatchPPO, env_ids: np.ndarray, probabilities: np.ndarray | None, total_envs: int
+    ) -> None:
+        priority_beta = float(self.config.priority_beta)
+        if priority_beta <= 0.0 or probabilities is None:
+            return
+        weights = np.power(np.maximum(float(total_envs) * probabilities[env_ids], 1.0e-6), -priority_beta).astype(
+            np.float32, copy=False
+        )
+        batch.priority_weights.assign(weights)
+        wp.launch(
+            weight_trajectory_advantages_kernel,
+            dim=batch.num_samples,
+            inputs=[batch.priority_weights, batch.num_envs],
+            outputs=[batch.advantages],
+            device=self.device,
         )
 
     def _trajectory_sampling_probabilities(self, buffer: BufferRollout) -> np.ndarray | None:
