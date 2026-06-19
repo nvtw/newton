@@ -36,7 +36,9 @@ def _parse_hidden_layers(text: str) -> tuple[int, ...]:
     return widths
 
 
-def _g1_ppo_config(train_epochs: int, mirror_loss_coeff: float, reward_clip: float) -> rl.ConfigPPO:
+def _g1_ppo_config(
+    train_epochs: int, mirror_loss_coeff: float, reward_clip: float, max_grad_norm: float
+) -> rl.ConfigPPO:
     return rl.ConfigPPO(
         gamma=0.97,
         gae_lambda=0.9,
@@ -47,6 +49,7 @@ def _g1_ppo_config(train_epochs: int, mirror_loss_coeff: float, reward_clip: flo
         train_epochs=int(train_epochs),
         normalize_advantages=True,
         reward_clip=float(reward_clip),
+        max_grad_norm=float(max_grad_norm),
         mirror_loss_coeff=float(mirror_loss_coeff),
     )
 
@@ -77,7 +80,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         rollout_steps=int(args.rollout_steps),
         hidden_layers=tuple(args.hidden_layers),
         env_config=env_config,
-        ppo_config=_g1_ppo_config(args.train_epochs, args.mirror_loss_coeff, args.reward_clip),
+        ppo_config=_g1_ppo_config(args.train_epochs, args.mirror_loss_coeff, args.reward_clip, args.max_grad_norm),
         device=device,
         seed=int(args.seed),
         log_interval=0,
@@ -104,6 +107,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "train_epochs": int(args.train_epochs),
         "mirror_loss_coeff": float(args.mirror_loss_coeff),
         "reward_clip": float(args.reward_clip),
+        "max_grad_norm": float(args.max_grad_norm),
         "sim_substeps": int(args.sim_substeps),
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
@@ -147,6 +151,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--train-epochs", type=int, default=3)
     parser.add_argument("--mirror-loss-coeff", type=float, default=0.25)
     parser.add_argument("--reward-clip", type=float, default=1.0)
+    parser.add_argument("--max-grad-norm", type=float, default=0.3)
     parser.add_argument("--sim-substeps", type=int, default=5)
     parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument("--velocity-iterations", type=int, default=1)

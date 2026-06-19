@@ -461,11 +461,36 @@ def soft_update_2d_kernel(src: wp.array2d[wp.float32], tau: wp.float32, dst: wp.
 
 
 @wp.kernel
+def grad_sumsq_1d_kernel(grad: wp.array[wp.float32], grad_sumsq: wp.array[wp.float32]):
+    i = wp.tid()
+    g = grad[i]
+    wp.atomic_add(grad_sumsq, 0, g * g)
+
+
+@wp.kernel
+def grad_sumsq_2d_kernel(grad: wp.array2d[wp.float32], grad_sumsq: wp.array[wp.float32]):
+    i, j = wp.tid()
+    g = grad[i, j]
+    wp.atomic_add(grad_sumsq, 0, g * g)
+
+
+@wp.func
+def _grad_clip_scale(grad_sumsq: wp.array[wp.float32], max_grad_norm: wp.float32) -> wp.float32:
+    scale = wp.float32(1.0)
+    if max_grad_norm > wp.float32(0.0):
+        norm = wp.sqrt(grad_sumsq[0])
+        if norm > max_grad_norm:
+            scale = max_grad_norm / (norm + wp.float32(1.0e-6))
+    return scale
+
+
+@wp.kernel
 def adam_step_1d_kernel(
     param: wp.array[wp.float32],
     grad: wp.array[wp.float32],
     m: wp.array[wp.float32],
     v: wp.array[wp.float32],
+    grad_sumsq: wp.array[wp.float32],
     lr: wp.float32,
     beta1: wp.float32,
     beta2: wp.float32,
@@ -473,9 +498,10 @@ def adam_step_1d_kernel(
     beta2_correction: wp.float32,
     eps: wp.float32,
     weight_decay: wp.float32,
+    max_grad_norm: wp.float32,
 ):
     i = wp.tid()
-    g = grad[i] + weight_decay * param[i]
+    g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i] + weight_decay * param[i]
     mi = beta1 * m[i] + (wp.float32(1.0) - beta1) * g
     vi = beta2 * v[i] + (wp.float32(1.0) - beta2) * g * g
     m[i] = mi
@@ -490,6 +516,7 @@ def adam_step_2d_kernel(
     grad: wp.array2d[wp.float32],
     m: wp.array2d[wp.float32],
     v: wp.array2d[wp.float32],
+    grad_sumsq: wp.array[wp.float32],
     lr: wp.float32,
     beta1: wp.float32,
     beta2: wp.float32,
@@ -497,9 +524,10 @@ def adam_step_2d_kernel(
     beta2_correction: wp.float32,
     eps: wp.float32,
     weight_decay: wp.float32,
+    max_grad_norm: wp.float32,
 ):
     i, j = wp.tid()
-    g = grad[i, j] + weight_decay * param[i, j]
+    g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i, j] + weight_decay * param[i, j]
     mi = beta1 * m[i, j] + (wp.float32(1.0) - beta1) * g
     vi = beta2 * v[i, j] + (wp.float32(1.0) - beta2) * g * g
     m[i, j] = mi

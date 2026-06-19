@@ -42,6 +42,8 @@ The environment follows nanoG1's G1 v3 control surface where practical:
 - Default G1 PPO clips rewards to `[-1, 1]` before advantage/return
   computation, matching PufferLib's learner input scaling and keeping the value
   target bounded for early unstable G1 rollouts.
+- Default G1 PPO clips actor and critic gradient norms at `0.3`, matching the
+  nanoG1 recipe's max-gradient-norm setting through the reusable Warp Adam path.
 - Default G1 PPO uses nanoG1's N1 left/right mirror regularization with
   `mirror_loss_coeff=0.25`, implemented through the reusable Warp PPO mirror-map
   hook and the validated G1 observation/action mirror map from the pinned fork.
@@ -75,7 +77,8 @@ and the absolute training iteration. Resuming from `/tmp/phoenx_g1_2.npz` writes
 
 Use `--mirror-loss-coeff 0.0` on `train-g1-ppo` or `bench_g1_train` to disable
 the default nanoG1-style mirror regularizer for throughput-only comparisons. Use
-`--reward-clip 0.0` to disable PufferLib-style reward clipping.
+`--reward-clip 0.0` to disable PufferLib-style reward clipping, or
+`--max-grad-norm 0.0` to disable gradient clipping.
 
 The gate command mirrors nanoG1's frozen bar: a six-command deterministic
 battery with noisy resets for falls/tracking performance, plus a separate
@@ -101,8 +104,8 @@ Result from this checkpoint:
 
 A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
 128x128x128 PPO networks, three train epochs, and the default mirror regularizer
-reached 189,526 environment samples/s after the first warmup-heavy iteration.
-Disabling the mirror regularizer reached 195,513 environment samples/s:
+reached 189,632 environment samples/s after the first warmup-heavy iteration.
+Disabling the mirror regularizer reached 195,060 environment samples/s:
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train

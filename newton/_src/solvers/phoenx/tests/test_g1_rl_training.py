@@ -93,6 +93,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             critic_lr=1.0e-3,
             entropy_coeff=0.0,
             reward_clip=1.0,
+            max_grad_norm=0.3,
             mirror_loss_coeff=0.25,
         )
 
@@ -119,6 +120,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(first.trainer.iteration, 1)
             self.assertEqual(restored.iteration, 1)
             self.assertEqual(restored.config.reward_clip, 1.0)
+            self.assertEqual(restored.config.max_grad_norm, 0.3)
             self.assertEqual(restored.config.mirror_loss_coeff, 0.25)
             for before, after in zip(first.trainer.actor.parameters(), restored.actor.parameters(), strict=True):
                 np.testing.assert_allclose(after.numpy(), before.numpy(), rtol=0.0, atol=0.0)

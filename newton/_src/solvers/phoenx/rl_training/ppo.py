@@ -58,6 +58,8 @@ class ConfigPPO:
             updating.
         reward_clip: Absolute reward clamp used before advantage/return
             computation. A value less than or equal to zero disables clipping.
+        max_grad_norm: Global gradient-norm clipping threshold for actor and
+            critic optimizers. A value less than or equal to zero disables clipping.
         mirror_loss_coeff: Coefficient for optional mirror-symmetry MSE on
             policy means and value predictions. Requires a mirror map.
     """
@@ -71,6 +73,7 @@ class ConfigPPO:
     train_epochs: int = 4
     normalize_advantages: bool = True
     reward_clip: float = 0.0
+    max_grad_norm: float = 0.0
     mirror_loss_coeff: float = 0.0
 
 
@@ -229,8 +232,12 @@ class TrainerPPO:
             device=self.device,
             seed=seed + 1,
         )
-        self.actor_optimizer = Adam(self.actor.parameters(), lr=self.config.actor_lr)
-        self.critic_optimizer = Adam(self.critic.parameters(), lr=self.config.critic_lr)
+        self.actor_optimizer = Adam(
+            self.actor.parameters(), lr=self.config.actor_lr, max_grad_norm=self.config.max_grad_norm
+        )
+        self.critic_optimizer = Adam(
+            self.critic.parameters(), lr=self.config.critic_lr, max_grad_norm=self.config.max_grad_norm
+        )
         self.iteration = 0
         self.mirror_map: MirrorMapPPO | None = None
         self._mirror_obs_src: wp.array | None = None

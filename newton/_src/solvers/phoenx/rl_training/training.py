@@ -333,6 +333,7 @@ def _default_g1_ppo_config() -> ConfigPPO:
         train_epochs=3,
         normalize_advantages=True,
         reward_clip=1.0,
+        max_grad_norm=0.3,
         mirror_loss_coeff=0.25,
     )
 
