@@ -24,6 +24,14 @@ adding a PyTorch dependency to Newton's Warp-only RL stack.
 
 The environment follows nanoG1's G1 v3 control surface where practical:
 
+## Recipe Surface
+
+The default PhoenX G1 run is centralized in
+`newton/_src/solvers/phoenx/rl_training/g1_recipe.py`. Tune dt/decimation,
+solver iterations, reward weights, PPO replay/V-trace settings, BF16 manual MLP
+kernels, and the left/right mirror regularizer there first; the train CLI and
+benchmark defaults read from the same constants.
+
 - MJCF asset: `unitree_g1/mjcf/g1_29dof.xml` with 36 coordinates, 35 DOFs,
   and 29 actions.
 - Observation size: 98.

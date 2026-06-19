@@ -12,6 +12,19 @@ import warp as wp
 
 from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
 from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
+from .g1_recipe import (
+    ACTIVATION,
+    COMMAND_X_RANGE,
+    COMMAND_Y_RANGE,
+    COMMAND_YAW_RANGE,
+    HIDDEN_LAYERS,
+    LOG_STD_INIT,
+    RANDOMIZE_COMMANDS,
+    ROLLOUT_STEPS,
+    SEED,
+    TRAIN_ITERATIONS,
+    default_g1_ppo_config,
+)
 from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_checkpoint
 
 
@@ -97,20 +110,20 @@ class ResultTrainAnymalPPO:
 class ConfigTrainG1PPO:
     """Configuration for train_g1_ppo."""
 
-    iterations: int = 100
-    rollout_steps: int = 64
-    hidden_layers: tuple[int, ...] = (128, 128, 128)
-    activation: str = "relu"
-    log_std_init: float = -0.5
+    iterations: int = TRAIN_ITERATIONS
+    rollout_steps: int = ROLLOUT_STEPS
+    hidden_layers: tuple[int, ...] = HIDDEN_LAYERS
+    activation: str = ACTIVATION
+    log_std_init: float = LOG_STD_INIT
     env_config: ConfigEnvG1PhoenX | None = None
     ppo_config: ConfigPPO | None = None
     device: wp.context.Devicelike = None
-    seed: int = 42
+    seed: int = SEED
     log_interval: int = 1
-    randomize_commands: bool = True
-    command_x_range: tuple[float, float] = (-0.5, 0.8)
-    command_y_range: tuple[float, float] = (-0.4, 0.4)
-    command_yaw_range: tuple[float, float] = (-1.0, 1.0)
+    randomize_commands: bool = RANDOMIZE_COMMANDS
+    command_x_range: tuple[float, float] = COMMAND_X_RANGE
+    command_y_range: tuple[float, float] = COMMAND_Y_RANGE
+    command_yaw_range: tuple[float, float] = COMMAND_YAW_RANGE
     resume_checkpoint: str | None = None
     checkpoint_path: str | None = None
     checkpoint_interval: int = 0
@@ -323,29 +336,7 @@ def _default_ppo_config() -> ConfigPPO:
 
 
 def _default_g1_ppo_config() -> ConfigPPO:
-    return ConfigPPO(
-        gamma=0.97,
-        gae_lambda=0.9,
-        clip_ratio=0.2,
-        entropy_coeff=1.0e-5,
-        actor_lr=2.0e-3,
-        critic_lr=2.0e-3,
-        train_epochs=3,
-        minibatch_size=32768,
-        replay_ratio=3.0,
-        priority_alpha=0.4,
-        priority_beta=1.0,
-        manual_actor_backward=True,
-        manual_critic_backward=True,
-        manual_mlp_weight_grad_dtype="bfloat16",
-        manual_mlp_forward_dtype="bfloat16",
-        vtrace_rho_clip=3.0,
-        vtrace_c_clip=3.0,
-        normalize_advantages=True,
-        reward_clip=1.0,
-        max_grad_norm=0.3,
-        mirror_loss_coeff=0.25,
-    )
+    return default_g1_ppo_config()
 
 
 def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:

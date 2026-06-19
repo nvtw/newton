@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton.rl as rl
+from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
@@ -28,6 +29,26 @@ def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
 
 
 class TestG1PhoenXRL(unittest.TestCase):
+    def test_default_recipe_enables_mirror_and_matches_config_defaults(self) -> None:
+        require_cuda_graph_capture("PhoenX G1 RL recipe tests")
+
+        env_config = g1_recipe.default_g1_env_config(world_count=1)
+        train_config = rl.ConfigTrainG1PPO()
+        ppo_config = g1_recipe.default_g1_ppo_config()
+
+        self.assertEqual(env_config.sim_substeps, g1_recipe.SIM_SUBSTEPS)
+        self.assertEqual(env_config.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
+        self.assertEqual(env_config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
+        self.assertEqual(env_config.w_track_lin, g1_recipe.W_TRACK_LIN)
+        self.assertEqual(env_config.w_action_rate, g1_recipe.W_ACTION_RATE)
+        self.assertEqual(train_config.hidden_layers, g1_recipe.HIDDEN_LAYERS)
+        self.assertEqual(train_config.activation, g1_recipe.ACTIVATION)
+        self.assertEqual(train_config.rollout_steps, g1_recipe.ROLLOUT_STEPS)
+        self.assertGreater(ppo_config.mirror_loss_coeff, 0.0)
+        self.assertEqual(ppo_config.mirror_loss_coeff, g1_recipe.MIRROR_LOSS_COEFF)
+        self.assertEqual(ppo_config.minibatch_size, g1_recipe.MINIBATCH_SIZE)
+        self.assertEqual(ppo_config.manual_mlp_forward_dtype, g1_recipe.MANUAL_MLP_FORWARD_DTYPE)
+
     def test_step_graph_capture_shapes_and_masks_actions(self) -> None:
         env = _g1_test_env(world_count=2)
         actions_np = np.full((env.world_count, env.action_dim), 1.5, dtype=np.float32)

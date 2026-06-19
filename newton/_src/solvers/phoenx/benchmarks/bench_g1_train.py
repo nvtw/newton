@@ -24,6 +24,7 @@ import numpy as np
 import warp as wp
 
 import newton.rl as rl
+from newton._src.solvers.phoenx.rl_training import g1_recipe
 
 _NANOG1_TRAIN_ENV_SPS = 1_280_000.0
 _NANOG1_TRAIN_PHYSICS_SPS = 6_400_000.0
@@ -52,14 +53,9 @@ def _g1_ppo_config(
     reward_clip: float,
     max_grad_norm: float,
 ) -> rl.ConfigPPO:
-    return rl.ConfigPPO(
-        gamma=0.97,
-        gae_lambda=0.9,
-        clip_ratio=0.2,
-        entropy_coeff=1.0e-5,
-        actor_lr=2.0e-3,
-        critic_lr=2.0e-3,
+    return g1_recipe.default_g1_ppo_config(
         train_epochs=int(train_epochs),
+        mirror_loss_coeff=float(mirror_loss_coeff),
         minibatch_size=int(minibatch_size),
         replay_ratio=float(replay_ratio),
         priority_alpha=float(priority_alpha),
@@ -70,10 +66,8 @@ def _g1_ppo_config(
         manual_mlp_forward_dtype=str(manual_mlp_forward_dtype),
         vtrace_rho_clip=float(vtrace_rho_clip),
         vtrace_c_clip=float(vtrace_c_clip),
-        normalize_advantages=True,
         reward_clip=float(reward_clip),
         max_grad_norm=float(max_grad_norm),
-        mirror_loss_coeff=float(mirror_loss_coeff),
     )
 
 
@@ -191,33 +185,41 @@ def _validate_finite_history(history: list[rl.StatsTrainG1PPO]) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--world-count", type=int, default=4096)
-    parser.add_argument("--rollout-steps", type=int, default=64)
+    parser.add_argument("--world-count", type=int, default=g1_recipe.WORLD_COUNT)
+    parser.add_argument("--rollout-steps", type=int, default=g1_recipe.ROLLOUT_STEPS)
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--warmup-iterations", type=int, default=1)
-    parser.add_argument("--hidden-layers", type=_parse_hidden_layers, default=(128, 128, 128))
-    parser.add_argument("--train-epochs", type=int, default=3)
-    parser.add_argument("--mirror-loss-coeff", type=float, default=0.25)
-    parser.add_argument("--minibatch-size", type=int, default=32768)
-    parser.add_argument("--replay-ratio", type=float, default=3.0)
-    parser.add_argument("--priority-alpha", type=float, default=0.4)
-    parser.add_argument("--priority-beta", type=float, default=1.0)
+    parser.add_argument("--hidden-layers", type=_parse_hidden_layers, default=g1_recipe.HIDDEN_LAYERS)
+    parser.add_argument("--train-epochs", type=int, default=g1_recipe.TRAIN_EPOCHS)
+    parser.add_argument("--mirror-loss-coeff", type=float, default=g1_recipe.MIRROR_LOSS_COEFF)
+    parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
+    parser.add_argument("--replay-ratio", type=float, default=g1_recipe.REPLAY_RATIO)
+    parser.add_argument("--priority-alpha", type=float, default=g1_recipe.PRIORITY_ALPHA)
+    parser.add_argument("--priority-beta", type=float, default=g1_recipe.PRIORITY_BETA)
     parser.add_argument("--no-manual-actor-backward", action="store_true")
     parser.add_argument("--no-manual-critic-backward", action="store_true")
-    parser.add_argument("--manual-mlp-weight-grad-dtype", choices=("float32", "bfloat16"), default="bfloat16")
-    parser.add_argument("--manual-mlp-forward-dtype", choices=("float32", "bfloat16"), default="bfloat16")
-    parser.add_argument("--vtrace-rho-clip", type=float, default=3.0)
-    parser.add_argument("--vtrace-c-clip", type=float, default=3.0)
-    parser.add_argument("--reward-clip", type=float, default=1.0)
-    parser.add_argument("--max-grad-norm", type=float, default=0.3)
-    parser.add_argument("--sim-substeps", type=int, default=5)
-    parser.add_argument("--solver-iterations", type=int, default=2)
-    parser.add_argument("--velocity-iterations", type=int, default=1)
-    parser.add_argument("--controlled-action-count", type=int, default=12)
+    parser.add_argument(
+        "--manual-mlp-weight-grad-dtype",
+        choices=("float32", "bfloat16"),
+        default=g1_recipe.MANUAL_MLP_WEIGHT_GRAD_DTYPE,
+    )
+    parser.add_argument(
+        "--manual-mlp-forward-dtype",
+        choices=("float32", "bfloat16"),
+        default=g1_recipe.MANUAL_MLP_FORWARD_DTYPE,
+    )
+    parser.add_argument("--vtrace-rho-clip", type=float, default=g1_recipe.VTRACE_RHO_CLIP)
+    parser.add_argument("--vtrace-c-clip", type=float, default=g1_recipe.VTRACE_C_CLIP)
+    parser.add_argument("--reward-clip", type=float, default=g1_recipe.REWARD_CLIP)
+    parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
+    parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
+    parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
+    parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     parser.add_argument("--parse-meshes", action="store_true")
     parser.add_argument("--no-command-randomization", action="store_true")
     parser.add_argument("--device", default=None)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=g1_recipe.SEED)
     parser.add_argument("--json-indent", type=int, default=2)
     return parser.parse_args()
 

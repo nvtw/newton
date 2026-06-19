@@ -52,6 +52,7 @@ from ._src.solvers.phoenx.rl_training import (
     evaluate_g1_gate_ppo,
     evaluate_g1_ppo,
     g1_mirror_map_ppo,
+    g1_recipe,
     load_ppo_checkpoint,
     save_ppo_checkpoint,
     train_anymal_ppo,
@@ -137,39 +138,47 @@ def _main() -> int:
     train_parser.add_argument("--log-interval", type=int, default=1)
 
     g1_parser = subparsers.add_parser("train-g1-ppo", help="Train Unitree G1 with PhoenX and Warp-only PPO")
-    g1_parser.add_argument("--iterations", type=int, default=100)
-    g1_parser.add_argument("--rollout-steps", type=int, default=64)
-    g1_parser.add_argument("--world-count", type=int, default=4096)
+    g1_parser.add_argument("--iterations", type=int, default=g1_recipe.TRAIN_ITERATIONS)
+    g1_parser.add_argument("--rollout-steps", type=int, default=g1_recipe.ROLLOUT_STEPS)
+    g1_parser.add_argument("--world-count", type=int, default=g1_recipe.WORLD_COUNT)
     g1_parser.add_argument("--device", default=None)
-    g1_parser.add_argument("--seed", type=int, default=42)
-    g1_parser.add_argument("--command-x", type=float, default=0.8)
-    g1_parser.add_argument("--command-y", type=float, default=0.0)
-    g1_parser.add_argument("--command-yaw", type=float, default=0.0)
-    g1_parser.add_argument("--command-x-min", type=float, default=-0.5)
-    g1_parser.add_argument("--command-x-max", type=float, default=0.8)
-    g1_parser.add_argument("--command-y-min", type=float, default=-0.4)
-    g1_parser.add_argument("--command-y-max", type=float, default=0.4)
-    g1_parser.add_argument("--command-yaw-min", type=float, default=-1.0)
-    g1_parser.add_argument("--command-yaw-max", type=float, default=1.0)
+    g1_parser.add_argument("--seed", type=int, default=g1_recipe.SEED)
+    g1_parser.add_argument("--command-x", type=float, default=g1_recipe.COMMAND[0])
+    g1_parser.add_argument("--command-y", type=float, default=g1_recipe.COMMAND[1])
+    g1_parser.add_argument("--command-yaw", type=float, default=g1_recipe.COMMAND[2])
+    g1_parser.add_argument("--command-x-min", type=float, default=g1_recipe.COMMAND_X_RANGE[0])
+    g1_parser.add_argument("--command-x-max", type=float, default=g1_recipe.COMMAND_X_RANGE[1])
+    g1_parser.add_argument("--command-y-min", type=float, default=g1_recipe.COMMAND_Y_RANGE[0])
+    g1_parser.add_argument("--command-y-max", type=float, default=g1_recipe.COMMAND_Y_RANGE[1])
+    g1_parser.add_argument("--command-yaw-min", type=float, default=g1_recipe.COMMAND_YAW_RANGE[0])
+    g1_parser.add_argument("--command-yaw-max", type=float, default=g1_recipe.COMMAND_YAW_RANGE[1])
     g1_parser.add_argument("--no-command-randomization", action="store_true")
-    g1_parser.add_argument("--sim-substeps", type=int, default=5)
-    g1_parser.add_argument("--solver-iterations", type=int, default=2)
-    g1_parser.add_argument("--velocity-iterations", type=int, default=1)
+    g1_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
+    g1_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
+    g1_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_parser.add_argument("--parse-meshes", action="store_true")
-    g1_parser.add_argument("--controlled-action-count", type=int, default=12)
-    g1_parser.add_argument("--mirror-loss-coeff", type=float, default=0.25)
-    g1_parser.add_argument("--minibatch-size", type=int, default=32768)
-    g1_parser.add_argument("--replay-ratio", type=float, default=3.0)
-    g1_parser.add_argument("--priority-alpha", type=float, default=0.4)
-    g1_parser.add_argument("--priority-beta", type=float, default=1.0)
+    g1_parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
+    g1_parser.add_argument("--mirror-loss-coeff", type=float, default=g1_recipe.MIRROR_LOSS_COEFF)
+    g1_parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
+    g1_parser.add_argument("--replay-ratio", type=float, default=g1_recipe.REPLAY_RATIO)
+    g1_parser.add_argument("--priority-alpha", type=float, default=g1_recipe.PRIORITY_ALPHA)
+    g1_parser.add_argument("--priority-beta", type=float, default=g1_recipe.PRIORITY_BETA)
     g1_parser.add_argument("--no-manual-actor-backward", action="store_true")
     g1_parser.add_argument("--no-manual-critic-backward", action="store_true")
-    g1_parser.add_argument("--manual-mlp-weight-grad-dtype", choices=("float32", "bfloat16"), default="bfloat16")
-    g1_parser.add_argument("--manual-mlp-forward-dtype", choices=("float32", "bfloat16"), default="bfloat16")
-    g1_parser.add_argument("--vtrace-rho-clip", type=float, default=3.0)
-    g1_parser.add_argument("--vtrace-c-clip", type=float, default=3.0)
-    g1_parser.add_argument("--reward-clip", type=float, default=1.0)
-    g1_parser.add_argument("--max-grad-norm", type=float, default=0.3)
+    g1_parser.add_argument(
+        "--manual-mlp-weight-grad-dtype",
+        choices=("float32", "bfloat16"),
+        default=g1_recipe.MANUAL_MLP_WEIGHT_GRAD_DTYPE,
+    )
+    g1_parser.add_argument(
+        "--manual-mlp-forward-dtype",
+        choices=("float32", "bfloat16"),
+        default=g1_recipe.MANUAL_MLP_FORWARD_DTYPE,
+    )
+    g1_parser.add_argument("--vtrace-rho-clip", type=float, default=g1_recipe.VTRACE_RHO_CLIP)
+    g1_parser.add_argument("--vtrace-c-clip", type=float, default=g1_recipe.VTRACE_C_CLIP)
+    g1_parser.add_argument("--reward-clip", type=float, default=g1_recipe.REWARD_CLIP)
+    g1_parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
     g1_parser.add_argument("--resume-checkpoint", default=None)
     g1_parser.add_argument("--checkpoint-path", default=None)
     g1_parser.add_argument("--checkpoint-interval", type=int, default=0)
@@ -181,14 +190,14 @@ def _main() -> int:
     g1_eval_parser.add_argument("--world-count", type=int, default=64)
     g1_eval_parser.add_argument("--device", default=None)
     g1_eval_parser.add_argument("--seed", type=int, default=1000)
-    g1_eval_parser.add_argument("--command-x", type=float, default=0.8)
-    g1_eval_parser.add_argument("--command-y", type=float, default=0.0)
-    g1_eval_parser.add_argument("--command-yaw", type=float, default=0.0)
-    g1_eval_parser.add_argument("--sim-substeps", type=int, default=5)
-    g1_eval_parser.add_argument("--solver-iterations", type=int, default=2)
-    g1_eval_parser.add_argument("--velocity-iterations", type=int, default=1)
+    g1_eval_parser.add_argument("--command-x", type=float, default=g1_recipe.COMMAND[0])
+    g1_eval_parser.add_argument("--command-y", type=float, default=g1_recipe.COMMAND[1])
+    g1_eval_parser.add_argument("--command-yaw", type=float, default=g1_recipe.COMMAND[2])
+    g1_eval_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
+    g1_eval_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
+    g1_eval_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_eval_parser.add_argument("--parse-meshes", action="store_true")
-    g1_eval_parser.add_argument("--controlled-action-count", type=int, default=12)
+    g1_eval_parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     g1_eval_parser.add_argument("--stochastic", action="store_true")
 
     g1_gate_parser = subparsers.add_parser(
@@ -201,11 +210,11 @@ def _main() -> int:
     g1_gate_parser.add_argument("--diagnostic-world-count", type=int, default=1)
     g1_gate_parser.add_argument("--device", default=None)
     g1_gate_parser.add_argument("--seed", type=int, default=1000)
-    g1_gate_parser.add_argument("--sim-substeps", type=int, default=5)
-    g1_gate_parser.add_argument("--solver-iterations", type=int, default=2)
-    g1_gate_parser.add_argument("--velocity-iterations", type=int, default=1)
+    g1_gate_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
+    g1_gate_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
+    g1_gate_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_gate_parser.add_argument("--parse-meshes", action="store_true")
-    g1_gate_parser.add_argument("--controlled-action-count", type=int, default=12)
+    g1_gate_parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     g1_gate_parser.add_argument("--stochastic", action="store_true")
     g1_gate_parser.add_argument("--no-fail-on-gate", action="store_true")
 
@@ -249,14 +258,7 @@ def _main() -> int:
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
         )
-        ppo_config = ConfigPPO(
-            gamma=0.97,
-            gae_lambda=0.9,
-            clip_ratio=0.2,
-            entropy_coeff=1.0e-5,
-            actor_lr=2.0e-3,
-            critic_lr=2.0e-3,
-            train_epochs=3,
+        ppo_config = g1_recipe.default_g1_ppo_config(
             minibatch_size=args.minibatch_size,
             replay_ratio=args.replay_ratio,
             priority_alpha=args.priority_alpha,
@@ -267,7 +269,6 @@ def _main() -> int:
             manual_mlp_forward_dtype=args.manual_mlp_forward_dtype,
             vtrace_rho_clip=args.vtrace_rho_clip,
             vtrace_c_clip=args.vtrace_c_clip,
-            normalize_advantages=True,
             reward_clip=args.reward_clip,
             max_grad_norm=args.max_grad_norm,
             mirror_loss_coeff=args.mirror_loss_coeff,

@@ -11,12 +11,13 @@ import warp as wp
 import newton
 import newton.utils
 
+from . import g1_recipe
 from .env import collect_ppo_rollout
 from .ppo import BufferRollout, MirrorMapPPO, TrainerPPO
 
 ACTION_DIM_G1 = 29
 OBS_DIM_G1 = 98
-NANOG1_PHASE_PERIOD = 40
+NANOG1_PHASE_PERIOD = g1_recipe.PHASE_PERIOD
 
 _G1_OBS_MIRROR_SRC = (
     0,
@@ -732,30 +733,30 @@ class ConfigEnvG1PhoenX:
         auto_reset: Reset worlds whose done flag is set after each step.
     """
 
-    world_count: int = 4096
-    frame_dt: float = 1.0 / 50.0
-    sim_substeps: int = 5
-    solver_iterations: int = 2
-    velocity_iterations: int = 1
-    action_scale: float = 0.25
-    controlled_action_count: int = 12
-    command: tuple[float, float, float] = (0.8, 0.0, 0.0)
-    max_episode_steps: int = 1000
-    reset_noise: float = 0.05
-    min_base_height: float = 0.35
-    min_upright_cos: float = 0.6
-    phase_period: int = NANOG1_PHASE_PERIOD
-    w_track_lin: float = 2.5
-    w_track_ang: float = 1.25
-    w_lin_vel_z: float = -2.0
-    w_ang_vel_xy: float = -1.3
-    w_orientation: float = -10.0
-    w_torque: float = -2.0e-5
-    w_action_rate: float = -0.01
-    w_alive: float = 3.0
-    w_termination: float = -1.0
-    parse_meshes: bool = False
-    auto_reset: bool = True
+    world_count: int = g1_recipe.WORLD_COUNT
+    frame_dt: float = g1_recipe.FRAME_DT
+    sim_substeps: int = g1_recipe.SIM_SUBSTEPS
+    solver_iterations: int = g1_recipe.SOLVER_ITERATIONS
+    velocity_iterations: int = g1_recipe.VELOCITY_ITERATIONS
+    action_scale: float = g1_recipe.ACTION_SCALE
+    controlled_action_count: int = g1_recipe.CONTROLLED_ACTION_COUNT
+    command: tuple[float, float, float] = g1_recipe.COMMAND
+    max_episode_steps: int = g1_recipe.MAX_EPISODE_STEPS
+    reset_noise: float = g1_recipe.RESET_NOISE
+    min_base_height: float = g1_recipe.MIN_BASE_HEIGHT
+    min_upright_cos: float = g1_recipe.MIN_UPRIGHT_COS
+    phase_period: int = g1_recipe.PHASE_PERIOD
+    w_track_lin: float = g1_recipe.W_TRACK_LIN
+    w_track_ang: float = g1_recipe.W_TRACK_ANG
+    w_lin_vel_z: float = g1_recipe.W_LIN_VEL_Z
+    w_ang_vel_xy: float = g1_recipe.W_ANG_VEL_XY
+    w_orientation: float = g1_recipe.W_ORIENTATION
+    w_torque: float = g1_recipe.W_TORQUE
+    w_action_rate: float = g1_recipe.W_ACTION_RATE
+    w_alive: float = g1_recipe.W_ALIVE
+    w_termination: float = g1_recipe.W_TERMINATION
+    parse_meshes: bool = g1_recipe.PARSE_MESHES
+    auto_reset: bool = g1_recipe.AUTO_RESET
 
 
 class EnvG1PhoenX:
