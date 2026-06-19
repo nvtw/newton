@@ -150,6 +150,12 @@ class TestRolloutBuffer(unittest.TestCase):
             buffer.compute_reward_done_success_sums().numpy(), expected_sums, rtol=0.0, atol=1.0e-6
         )
 
+        with wp.ScopedCapture(device=device) as copy_capture:
+            buffer.copy_reward_done_success_sums_to_host()
+        wp.capture_launch(copy_capture.graph)
+        wp.synchronize_device(device)
+        np.testing.assert_allclose(buffer._metric_sums_host.numpy(), expected_sums, rtol=0.0, atol=1.0e-6)
+
         mean_reward, mean_done, mean_success = buffer.reward_done_success_means()
         self.assertAlmostEqual(mean_reward, float(np.mean(rewards)), places=6)
         self.assertAlmostEqual(mean_done, float(np.mean(dones)), places=6)
@@ -740,6 +746,17 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertTrue(math.isfinite(stats.approx_kl))
         self.assertTrue(math.isfinite(stats.clip_fraction))
         self.assertGreater(float(np.max(np.abs(actor_after - actor_before))), 0.0)
+
+        with wp.ScopedCapture(device=device) as stats_capture:
+            trainer.copy_update_stats_to_host()
+        wp.capture_launch(stats_capture.graph)
+        wp.synchronize_device(device)
+        np.testing.assert_allclose(
+            trainer._update_stats_host.numpy(),
+            np.array([stats.policy_loss, stats.value_loss, stats.approx_kl, stats.clip_fraction], dtype=np.float32),
+            rtol=0.0,
+            atol=1.0e-6,
+        )
 
         graph_before = trainer.actor.net.weights[0].numpy().copy()
         with wp.ScopedCapture(device=device) as capture:

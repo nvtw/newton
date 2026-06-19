@@ -229,6 +229,7 @@ class BufferRollout:
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
         self._advantage_stats = wp.zeros(2, dtype=wp.float32, device=self.device)
         self._metric_sums = wp.zeros(3, dtype=wp.float32, device=self.device)
+        self._metric_sums_host = wp.empty(3, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
 
     @property
     def num_samples(self) -> int:
@@ -275,10 +276,21 @@ class BufferRollout:
         )
         return self._metric_sums
 
+    def copy_reward_done_success_sums_to_host(self) -> wp.array[wp.float32]:
+        """Copy compact rollout metric sums into pinned host storage."""
+
+        sums = self.compute_reward_done_success_sums()
+        wp.copy(self._metric_sums_host, sums, count=3)
+        return self._metric_sums_host
+
     def reward_done_success_means(self) -> tuple[float, float, float]:
         """Return rollout reward, done, and success means."""
 
-        sums = self.compute_reward_done_success_sums().numpy()
+        sums_host = self.copy_reward_done_success_sums_to_host()
+        if self.device.is_cuda:
+            # Pinned host arrays expose memory directly; wait for the async graph copy.
+            wp.synchronize_device(self.device)
+        sums = sums_host.numpy()
         inv_count = 1.0 / float(self.num_samples)
         return float(sums[0]) * inv_count, float(sums[1]) * inv_count, float(sums[2]) * inv_count
 
@@ -423,6 +435,7 @@ class TrainerPPO:
         self._approx_kl = wp.zeros(1, dtype=wp.float32, device=self.device)
         self._clip_fraction = wp.zeros(1, dtype=wp.float32, device=self.device)
         self._update_stats = wp.zeros(4, dtype=wp.float32, device=self.device)
+        self._update_stats_host = wp.empty(4, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
 
     def set_mirror_map(self, mirror_map: MirrorMapPPO | None) -> None:
         """Set or clear the optional PPO symmetry map."""
@@ -620,7 +633,9 @@ class TrainerPPO:
             update_rows = batch.num_samples
         self.reserve_buffers(max(buffer.num_envs, update_rows))
 
-    def _read_update_stat_values(self) -> tuple[float, float, float, float]:
+    def copy_update_stats_to_host(self) -> wp.array[wp.float32]:
+        """Copy compact PPO update stats into pinned host storage."""
+
         wp.launch(
             pack_ppo_update_stats_kernel,
             dim=1,
@@ -628,7 +643,15 @@ class TrainerPPO:
             outputs=[self._update_stats],
             device=self.device,
         )
-        stats = self._update_stats.numpy()
+        wp.copy(self._update_stats_host, self._update_stats, count=4)
+        return self._update_stats_host
+
+    def _read_update_stat_values(self) -> tuple[float, float, float, float]:
+        stats_host = self.copy_update_stats_to_host()
+        if self.device.is_cuda:
+            # Pinned host arrays expose memory directly; wait for the async graph copy.
+            wp.synchronize_device(self.device)
+        stats = stats_host.numpy()
         return float(stats[0]), float(stats[1]), float(stats[2]), float(stats[3])
 
     def _read_update_stats(self) -> StatsPPOUpdate:
