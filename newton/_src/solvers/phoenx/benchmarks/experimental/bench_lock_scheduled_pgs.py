@@ -12,6 +12,8 @@ compares two ways to run the same scalar projected Gauss-Seidel update:
   pass;
 * ``locked-spin``: launch one persistent-ish kernel per solver iteration, let
   workers scan rows until every row completes.
+* ``warp``: launch one warp per world. Lanes propose rows and greedily accept a
+  body-disjoint micro-wave using warp shuffles, avoiding global lock traffic.
 
 The locked path is the closest candidate for a local, GS-like solver that does
 not require graph coloring. It keeps immediate body-state updates and local
@@ -22,9 +24,11 @@ Current takeaway on RTX PRO 6000 Blackwell: ordinary multi-kernel lock
 schedulers are not competitive with colored PGS. On a 2048-world mixed graph
 with 131k rows and four iterations, colored PGS measured about 0.32 ms,
 fixed-pass locking about 0.71 ms when complete, queued retries about 7.7 ms,
-and spin locking about 16 ms. This keeps the evidence local and reproducible
-while pointing future work toward cooperative megakernel/shared-memory queues
-rather than global-memory lock waves.
+and spin locking about 16 ms. A one-warp-per-world scheduler that uses
+warp-local body masks instead of global locks measured about 0.14 ms on the
+same graph. This keeps the evidence local and reproducible while pointing
+future work toward cooperative warp-local scheduling rather than global-memory
+lock waves.
 
 Usage::
 
@@ -42,6 +46,56 @@ import numpy as np
 import warp as wp
 
 LAMBDA_INF = 1.0e20
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncwarp();
+#endif
+""")
+def _sync_warp(): ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __shfl_sync(mask, value, src_lane);
+#else
+return value;
+#endif
+""")
+def _warp_shfl_i32(mask: wp.uint32, value: wp.int32, src_lane: wp.int32) -> wp.int32: ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __shfl_sync(mask, value, src_lane);
+#else
+return value;
+#endif
+""")
+def _warp_shfl_u32(mask: wp.uint32, value: wp.uint32, src_lane: wp.int32) -> wp.uint32: ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __ballot_sync(mask, pred);
+#else
+return pred ? 1u : 0u;
+#endif
+""")
+def _warp_ballot(mask: wp.uint32, pred: bool) -> wp.uint32: ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __popc(value);
+#else
+int c = 0;
+while (value != 0u) { c += (int)(value & 1u); value >>= 1u; }
+return c;
+#endif
+""")
+def _warp_popc(value: wp.uint32) -> wp.int32: ...
 
 
 @dataclasses.dataclass(frozen=True)
@@ -372,6 +426,104 @@ def _queued_lock_pgs_kernel(
         wp.atomic_add(total_done, 0, wp.int32(1))
     wp.atomic_exch(body_locks, second, wp.int32(0))
     wp.atomic_exch(body_locks, first, wp.int32(0))
+
+
+@wp.kernel(enable_backward=False)
+def _warp_local_pgs_kernel(
+    body0: wp.array[wp.int32],
+    body1: wp.array[wp.int32],
+    w0: wp.array[wp.float32],
+    w1: wp.array[wp.float32],
+    inv_mass: wp.array[wp.float32],
+    rhs: wp.array[wp.float32],
+    lambda_min: wp.array[wp.float32],
+    lambda_max: wp.array[wp.float32],
+    body_v: wp.array[wp.float32],
+    lambdas: wp.array[wp.float32],
+    row_done: wp.array[wp.int32],
+    total_done: wp.array[wp.int32],
+    failed: wp.array[wp.int32],
+    num_worlds: wp.int32,
+    bodies_per_world: wp.int32,
+    rows_per_world: wp.int32,
+    iterations: wp.int32,
+    max_waves: wp.int32,
+    sor: wp.float32,
+):
+    tid = wp.tid()
+    lane = tid & wp.int32(31)
+    world = tid / wp.int32(32)
+    if world >= num_worlds:
+        return
+
+    if bodies_per_world > wp.int32(32):
+        if lane == wp.int32(0):
+            failed[0] = wp.int32(1)
+        return
+
+    row_start = world * rows_per_world
+    body_start = world * bodies_per_world
+    warp_mask = wp.uint32(0xFFFFFFFF)
+    last_done = wp.int32(0)
+
+    it = wp.int32(0)
+    while it < iterations:
+        slot = lane
+        while slot < rows_per_world:
+            row_done[row_start + slot] = wp.int32(0)
+            slot = slot + wp.int32(32)
+        _sync_warp()
+
+        done = wp.int32(0)
+        wave = wp.int32(0)
+        while done < rows_per_world and wave < max_waves:
+            proposed = wp.int32(-1)
+            slot = lane
+            while slot < rows_per_world and proposed < wp.int32(0):
+                if row_done[row_start + slot] == wp.int32(0):
+                    proposed = slot
+                slot = slot + wp.int32(32)
+
+            active_i = wp.int32(0)
+            body_mask = wp.uint32(0)
+            if proposed >= wp.int32(0):
+                active_i = wp.int32(1)
+                row = row_start + proposed
+                local0 = body0[row] - body_start
+                local1 = body1[row] - body_start
+                body_mask = (wp.uint32(1) << wp.uint32(local0)) | (wp.uint32(1) << wp.uint32(local1))
+
+            occupied = wp.uint32(0)
+            accepted = bool(False)
+            src_lane = wp.int32(0)
+            while src_lane < wp.int32(32):
+                src_active = _warp_shfl_i32(warp_mask, active_i, src_lane)
+                src_mask = _warp_shfl_u32(warp_mask, body_mask, src_lane)
+                if src_active != wp.int32(0) and (occupied & src_mask) == wp.uint32(0):
+                    occupied = occupied | src_mask
+                    if lane == src_lane:
+                        accepted = bool(True)
+                src_lane = src_lane + wp.int32(1)
+
+            if accepted:
+                row = row_start + proposed
+                row_done[row] = wp.int32(1)
+                _solve_row(row, body0, body1, w0, w1, inv_mass, rhs, lambda_min, lambda_max, body_v, lambdas, sor)
+
+            accepted_bits = _warp_ballot(warp_mask, accepted)
+            progress = _warp_popc(accepted_bits)
+            done = done + progress
+            _sync_warp()
+            wave = wave + wp.int32(1)
+
+        last_done = done
+        if done < rows_per_world and lane == wp.int32(0):
+            failed[0] = wp.int32(1)
+        _sync_warp()
+        it = it + wp.int32(1)
+
+    if lane == wp.int32(0):
+        wp.atomic_add(total_done, 0, last_done)
 
 
 @wp.kernel(enable_backward=False)
@@ -735,6 +887,45 @@ def _launch_locked_queue(
         )
 
 
+def _launch_warp_local(
+    problem: SyntheticProblem,
+    *,
+    worlds: int,
+    bodies_per_world: int,
+    rows_per_world: int,
+    iterations: int,
+    max_waves: int,
+    sor: float,
+) -> None:
+    _launch_reset(problem)
+    wp.launch(
+        _warp_local_pgs_kernel,
+        dim=worlds * 32,
+        block_dim=256,
+        inputs=[
+            problem.body0,
+            problem.body1,
+            problem.w0,
+            problem.w1,
+            problem.inv_mass,
+            problem.rhs,
+            problem.lambda_min,
+            problem.lambda_max,
+            problem.body_v,
+            problem.lambdas,
+            problem.row_done,
+            problem.total_done,
+            problem.failed,
+            wp.int32(worlds),
+            wp.int32(bodies_per_world),
+            wp.int32(rows_per_world),
+            wp.int32(iterations),
+            wp.int32(max_waves),
+            wp.float32(sor),
+        ],
+    )
+
+
 def _time_captured(
     launch_fn,
     *,
@@ -789,8 +980,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rows-per-world", type=int, default=64)
     parser.add_argument("--pattern", choices=("random", "mixed", "chain", "hub"), default="mixed")
     parser.add_argument("--iterations", type=int, default=8)
-    parser.add_argument("--lock-mode", choices=("queue", "pass", "spin"), default="queue")
+    parser.add_argument("--lock-mode", choices=("queue", "pass", "spin", "warp"), default="queue")
     parser.add_argument("--passes", type=int, default=32)
+    parser.add_argument("--warp-max-waves", type=int, default=128)
     parser.add_argument("--scheduler-threads", type=int, default=65536)
     parser.add_argument("--max-attempts", type=int, default=2048)
     parser.add_argument("--sor", type=float, default=1.0)
@@ -847,7 +1039,7 @@ def main() -> None:
                 sor=args.sor,
             )
 
-    else:
+    elif args.lock_mode == "spin":
 
         def locked_launch() -> None:
             _launch_locked(
@@ -855,6 +1047,19 @@ def main() -> None:
                 iterations=args.iterations,
                 scheduler_threads=args.scheduler_threads,
                 max_attempts=args.max_attempts,
+                sor=args.sor,
+            )
+
+    else:
+
+        def locked_launch() -> None:
+            _launch_warp_local(
+                locked,
+                worlds=args.worlds,
+                bodies_per_world=args.bodies_per_world,
+                rows_per_world=args.rows_per_world,
+                iterations=args.iterations,
+                max_waves=args.warp_max_waves,
                 sor=args.sor,
             )
 
@@ -884,7 +1089,7 @@ def main() -> None:
         f"bodies/world={args.bodies_per_world} rows/world={args.rows_per_world} "
         f"rows={args.worlds * args.rows_per_world} colors={host.num_colors} "
         f"iterations={args.iterations} lock_mode={args.lock_mode} passes={args.passes} "
-        f"scheduler_threads={args.scheduler_threads}"
+        f"scheduler_threads={args.scheduler_threads} warp_max_waves={args.warp_max_waves}"
     )
     print(
         f"colored_min_ms={colored_min:.4f} colored_median_ms={colored_median:.4f} "

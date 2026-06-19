@@ -121,6 +121,26 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Experimental-only code
 
+### Warp-local no-coloring PGS scheduler
+- `benchmarks/experimental/bench_lock_scheduled_pgs.py --lock-mode warp` tests
+  one warp per world. Each lane proposes an unfinished row, the warp accepts a
+  body-disjoint micro-wave using shuffle/ballot intrinsics and a 32-bit local
+  body mask, then solves accepted rows immediately. There are no global body
+  locks and no graph coloring.
+- Synthetic scalar PGS results on RTX PRO 6000 Blackwell, four iterations,
+  graph-captured timing:
+  - `2048` worlds, `32` bodies/world, `64` rows/world, mixed graph:
+    colored `0.335 ms`, warp-local `0.145 ms` (`2.3x`).
+  - `4096` worlds, `30` bodies/world, `43` rows/world, G1-sized mixed graph:
+    colored `0.268 ms`, warp-local `0.141 ms` (`1.9x`).
+- Global runtime-claiming variants are still bad: queued global locks were
+  about `7.8 ms` on the same 2048-world mixed graph. If a no-coloring solver is
+  pursued, keep it warp-local or block-local.
+- Caveats: this is a scalar synthetic row solve, changes GS row order, and
+  currently assumes a dynamic body footprint that fits a 32-bit per-world mask.
+  Promote only behind an explicit experimental scheduler flag and validate G1
+  convergence before using it for training measurements.
+
 ### Actual-solve color-grid scheduler prototypes
 - `benchmarks/experimental/bench_color_grid_actual_solve.py` keeps the flat/global-colour, block-per-world, grouped-subfamily, autotune/adaptive, and software-barrier mega-kernel scheduler prototypes in one place. They are useful research scaffolding, not production evidence.
 - Current state: some prototype timing paths have been observed to hang (`flat_grouped` and `block_world` on small H1 smoke runs), while the production `world._solve_main` path with the same scene setup completes. The benchmark now defaults to `--mode baseline`, which only times the production solve path; all prototype modes require `--allow-unsafe-prototypes`.
