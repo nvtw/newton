@@ -36,6 +36,7 @@ from .kernels import (
     soft_update_1d_kernel,
     soft_update_2d_kernel,
 )
+from .kernels_bf16 import cast_2d_float_to_bfloat16_kernel, dense_weight_grad_bf16_tiled_kernel
 
 
 def activation_code(name: str) -> int:
@@ -63,6 +64,9 @@ class WarpMLP:
         device: Warp device.
         seed: Initializer seed.
         gain: Weight initializer gain.
+        manual_weight_grad_dtype: Accumulator input dtype for manual CUDA
+            weight-gradient tile matmul. Supports ``"float32"`` and
+            ``"bfloat16"``.
     """
 
     def __init__(
@@ -74,6 +78,7 @@ class WarpMLP:
         device: wp.context.Devicelike = None,
         seed: int = 0,
         gain: float = 1.0,
+        manual_weight_grad_dtype: str = "float32",
     ):
         sizes = [int(s) for s in layer_sizes]
         if len(sizes) < 2:
@@ -87,12 +92,15 @@ class WarpMLP:
         self.device = wp.get_device(device)
         self.activation = activation_code(activation)
         self.output_activation = activation_code(output_activation)
+        self.manual_weight_grad_dtype = _manual_weight_grad_dtype(manual_weight_grad_dtype)
         self._manual_batch_size = 0
         self._manual_input: wp.array2d[wp.float32] | None = None
         self._manual_outputs: list[wp.array2d[wp.float32]] = []
         self._manual_output_grads: list[wp.array2d[wp.float32]] = []
         self._manual_pre_grads: list[wp.array2d[wp.float32]] = []
         self._manual_bias_partials: list[wp.array2d[wp.float32]] = []
+        self._manual_bf16_inputs: list[wp.array2d[wp.bfloat16]] = []
+        self._manual_bf16_pre_grads: list[wp.array2d[wp.bfloat16]] = []
 
         rng = np.random.default_rng(seed)
         self.weights: list[wp.array] = []
@@ -194,17 +202,46 @@ class WarpMLP:
             )
             x = self._manual_input if layer == 0 else self._manual_outputs[layer - 1]
             if self.device.is_cuda:
-                wp.launch_tiled(
-                    dense_weight_grad_tiled_kernel,
-                    dim=(
-                        _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
-                        _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
-                    ),
-                    inputs=[x, grad_pre, self._manual_batch_size],
-                    outputs=[weight.grad],
-                    block_dim=DENSE_TILE_BLOCK_DIM,
-                    device=self.device,
-                )
+                if self.manual_weight_grad_dtype == "bfloat16":
+                    x_bf16 = self._manual_bf16_inputs[layer]
+                    grad_pre_bf16 = self._manual_bf16_pre_grads[layer]
+                    wp.launch(
+                        cast_2d_float_to_bfloat16_kernel,
+                        dim=x.shape,
+                        inputs=[x],
+                        outputs=[x_bf16],
+                        device=self.device,
+                    )
+                    wp.launch(
+                        cast_2d_float_to_bfloat16_kernel,
+                        dim=grad_pre.shape,
+                        inputs=[grad_pre],
+                        outputs=[grad_pre_bf16],
+                        device=self.device,
+                    )
+                    wp.launch_tiled(
+                        dense_weight_grad_bf16_tiled_kernel,
+                        dim=(
+                            _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
+                            _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
+                        ),
+                        inputs=[x_bf16, grad_pre_bf16, self._manual_batch_size],
+                        outputs=[weight.grad],
+                        block_dim=DENSE_TILE_BLOCK_DIM,
+                        device=self.device,
+                    )
+                else:
+                    wp.launch_tiled(
+                        dense_weight_grad_tiled_kernel,
+                        dim=(
+                            _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
+                            _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
+                        ),
+                        inputs=[x, grad_pre, self._manual_batch_size],
+                        outputs=[weight.grad],
+                        block_dim=DENSE_TILE_BLOCK_DIM,
+                        device=self.device,
+                    )
                 bias_partial = self._manual_bias_partials[layer]
                 wp.launch(
                     dense_bias_partial_grad_kernel,
@@ -259,8 +296,10 @@ class WarpMLP:
         self._manual_output_grads = []
         self._manual_pre_grads = []
         self._manual_bias_partials = []
+        self._manual_bf16_inputs = []
+        self._manual_bf16_pre_grads = []
         bias_tile_count = _ceil_div(self._manual_batch_size, DENSE_BIAS_TILE_BATCH)
-        for width in self.layer_sizes[1:]:
+        for in_dim, width in pairwise(self.layer_sizes):
             shape = (self._manual_batch_size, int(width))
             self._manual_outputs.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
             self._manual_output_grads.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
@@ -269,6 +308,18 @@ class WarpMLP:
                 self._manual_bias_partials.append(
                     wp.empty((bias_tile_count, int(width)), dtype=wp.float32, device=self.device, requires_grad=False)
                 )
+                if self.manual_weight_grad_dtype == "bfloat16":
+                    self._manual_bf16_inputs.append(
+                        wp.empty(
+                            (self._manual_batch_size, int(in_dim)),
+                            dtype=wp.bfloat16,
+                            device=self.device,
+                            requires_grad=False,
+                        )
+                    )
+                    self._manual_bf16_pre_grads.append(
+                        wp.empty(shape, dtype=wp.bfloat16, device=self.device, requires_grad=False)
+                    )
 
     def copy_from(self, other: WarpMLP) -> None:
         """Copy parameters from another network with the same architecture."""
@@ -305,6 +356,8 @@ class GaussianActor:
         squash: Whether to tanh-squash actions into ``[-1, 1]``.
         device: Warp device.
         seed: Initializer seed.
+        manual_weight_grad_dtype: Accumulator input dtype for manual CUDA
+            weight-gradient tile matmul.
     """
 
     def __init__(
@@ -320,6 +373,7 @@ class GaussianActor:
         squash: bool = True,
         device: wp.context.Devicelike = None,
         seed: int = 0,
+        manual_weight_grad_dtype: str = "float32",
     ):
         self.obs_dim = int(obs_dim)
         self.action_dim = int(action_dim)
@@ -336,6 +390,7 @@ class GaussianActor:
             output_activation="linear",
             device=self.device,
             seed=seed,
+            manual_weight_grad_dtype=manual_weight_grad_dtype,
         )
         log_std_np = np.full(self.action_dim, float(log_std_init), dtype=np.float32)
         self.log_std = wp.array(
@@ -471,6 +526,15 @@ class GaussianActor:
 
 def _ceil_div(value: int, divisor: int) -> int:
     return (int(value) + int(divisor) - 1) // int(divisor)
+
+
+def _manual_weight_grad_dtype(dtype: str) -> str:
+    key = str(dtype).lower()
+    if key in ("float32", "fp32"):
+        return "float32"
+    if key in ("bfloat16", "bf16"):
+        return "bfloat16"
+    raise ValueError(f"Unsupported manual weight-gradient dtype {dtype!r}")
 
 
 def _check_same_shapes(params: list[wp.array], other_params: list[wp.array]) -> None:

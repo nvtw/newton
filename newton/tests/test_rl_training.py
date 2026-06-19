@@ -340,6 +340,45 @@ class TestTrainerPPO(unittest.TestCase):
         for manual_grad, expected_grad in zip(manual_grads, expected_grads, strict=True):
             np.testing.assert_allclose(manual_grad, expected_grad, rtol=1.0e-5, atol=1.0e-5)
 
+    def test_bfloat16_manual_mlp_weight_grad_graph_captures(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(83)
+        x_np = rng.normal(size=(67, 17)).astype(np.float32)
+        output_grad_np = rng.normal(size=(67, 5)).astype(np.float32)
+        x = wp.array(x_np, dtype=wp.float32, device=device)
+        output_grad = wp.array(output_grad_np, dtype=wp.float32, device=device)
+        fp32_mlp = rl.WarpMLP(
+            (17, 19, 5),
+            activation="relu",
+            output_activation="linear",
+            device=device,
+            seed=29,
+            manual_weight_grad_dtype="float32",
+        )
+        bf16_mlp = rl.WarpMLP(
+            (17, 19, 5),
+            activation="relu",
+            output_activation="linear",
+            device=device,
+            seed=29,
+            manual_weight_grad_dtype="bfloat16",
+        )
+
+        fp32_mlp.forward_manual(x)
+        fp32_mlp.backward_manual(output_grad)
+        with wp.ScopedCapture(device=device) as capture:
+            bf16_mlp.forward_manual(x)
+            bf16_mlp.backward_manual(output_grad)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(
+            bf16_mlp._manual_outputs[-1].numpy(), fp32_mlp._manual_outputs[-1].numpy(), rtol=0.0, atol=0.0
+        )
+        for bf16_param, fp32_param in zip(bf16_mlp.parameters(), fp32_mlp.parameters(), strict=True):
+            np.testing.assert_allclose(bf16_param.grad.numpy(), fp32_param.grad.numpy(), rtol=8.0e-3, atol=2.0e-2)
+        with self.assertRaises(ValueError):
+            rl.WarpMLP((2, 3), device=device, manual_weight_grad_dtype="float16")
+
     def test_update_changes_actor_and_returns_finite_stats(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(3)
@@ -422,6 +461,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.config.priority_beta, 0.0)
         self.assertFalse(restored.config.manual_actor_backward)
         self.assertFalse(restored.config.manual_critic_backward)
+        self.assertEqual(restored.config.manual_mlp_weight_grad_dtype, "float32")
         self.assertEqual(restored.config.vtrace_rho_clip, 0.0)
         self.assertEqual(restored.config.vtrace_c_clip, 0.0)
         self.assertEqual(restored.config.reward_clip, 0.0)

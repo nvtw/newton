@@ -337,6 +337,7 @@ def _default_g1_ppo_config() -> ConfigPPO:
         priority_beta=1.0,
         manual_actor_backward=True,
         manual_critic_backward=True,
+        manual_mlp_weight_grad_dtype="bfloat16",
         vtrace_rho_clip=3.0,
         vtrace_c_clip=3.0,
         normalize_advantages=True,

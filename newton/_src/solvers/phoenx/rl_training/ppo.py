@@ -79,6 +79,9 @@ class ConfigPPO:
         manual_critic_backward: Use hand-written kernels for the critic MLP and
             value loss backward pass. This avoids Warp Tape for the critic
             update path.
+        manual_mlp_weight_grad_dtype: Accumulator input dtype for manual CUDA
+            MLP weight-gradient tile matmul. Supports ``"float32"`` and
+            ``"bfloat16"``.
         vtrace_rho_clip: V-trace policy-ratio clip for replayed trajectories.
             A value less than or equal to zero disables V-trace recomputation.
         vtrace_c_clip: V-trace trace-ratio clip for replayed trajectories.
@@ -107,6 +110,7 @@ class ConfigPPO:
     priority_beta: float = 0.0
     manual_actor_backward: bool = False
     manual_critic_backward: bool = False
+    manual_mlp_weight_grad_dtype: str = "float32"
     vtrace_rho_clip: float = 0.0
     vtrace_c_clip: float = 0.0
     normalize_advantages: bool = True
@@ -322,6 +326,7 @@ class TrainerPPO:
             squash=squash_actions,
             device=self.device,
             seed=seed,
+            manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
         )
         self.critic = WarpMLP(
             (self.obs_dim, *self.hidden_layers, 1),
@@ -329,6 +334,7 @@ class TrainerPPO:
             output_activation="linear",
             device=self.device,
             seed=seed + 1,
+            manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
         )
         self.actor_optimizer = Adam(
             self.actor.parameters(), lr=self.config.actor_lr, max_grad_norm=self.config.max_grad_norm
