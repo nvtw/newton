@@ -37,8 +37,9 @@ The environment follows nanoG1's G1 v3 control surface where practical:
   are masked to zero.
 - Reward weights mirror the nanoG1 recipe for velocity tracking, base penalties,
   torque proxy, action-rate penalty, alive reward, and termination penalty.
-- Default G1 PPO uses three train epochs, matching nanoG1's
-  `train.replay_ratio=3.0` more closely than the older four-epoch default.
+- Default G1 PPO uses trajectory-shaped minibatches with `minibatch_size=32768`
+  and `replay_ratio=3.0`, matching nanoG1's learner schedule more closely than
+  the older four-epoch full-buffer default.
 - Default G1 PPO clips rewards to `[-1, 1]` before advantage/return
   computation, matching PufferLib's learner input scaling and keeping the value
   target bounded for early unstable G1 rollouts.
@@ -103,18 +104,20 @@ Result from this checkpoint:
 - 9.8 s setup time at 4096 worlds.
 
 A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
-128x128x128 PPO networks, three train epochs, and the default mirror regularizer
-reached 189,632 environment samples/s after the first warmup-heavy iteration.
-Disabling the mirror regularizer reached 195,060 environment samples/s:
+128x128x128 PPO networks, `minibatch_size=32768`, `replay_ratio=3.0`,
+and the default mirror regularizer reached 186,666 environment samples/s after
+the first warmup-heavy iteration. Disabling the mirror regularizer reached
+192,810 environment samples/s. The previous full-buffer update path can be
+measured with `--replay-ratio 0.0` and reached 189,141 environment samples/s:
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train
 ```
 
 nanoG1 reports about 1.28M environment samples/s while actually training, so
-the current mirror-enabled pure-Warp PhoenX G1 training loop is about 6.7x
+the current mirror-enabled pure-Warp PhoenX G1 training loop is about 6.9x
 slower on this training-throughput metric. The throughput-only no-mirror path is
-about 6.5x slower.
+about 6.6x slower.
 
 nanoG1 reports about 8.5M production physics steps/s and 7.25M matched physics
 steps/s in its README/benchmark notes, so this PhoenX path is currently about
@@ -143,22 +146,22 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
 - nanoG1's Modal image installs `torch`, so using the same full PufferLib training
   stack is not currently a torch-free route even though the environment core is
   specialized CUDA.
-- The Warp-only PPO loop is reusable but intentionally simple: it does not yet
-  include nanoG1's V-trace/prioritized-replay setup, Muon optimizer path, or
-  PufferNet model stack.
+- The Warp-only PPO loop is reusable and now supports uniform trajectory
+  minibatch replay, but it does not yet include nanoG1's V-trace, priority
+  sampling, Muon optimizer path, or PufferNet model stack.
 - Environment stepping can be CUDA-graph replayed, but the full collect-policy-
   update loop is not captured end to end because actions and Warp Tape updates
   allocate intermediate arrays per rollout/update.
-- Domain randomization and symmetry regularization still need to be added before
-  sample efficiency can be compared meaningfully.
+- Reset/domain randomization and command scheduling are still lighter than
+  nanoG1, so sample efficiency is not yet directly comparable.
 
 ## Next Optimization Targets
 
 1. Avoid generic replicated MJCF setup for high world counts; build or cache a
    compact fixed-topology G1 multi-world model path.
 2. Remove avoidable broadphase/contact work for independent flat-ground G1 worlds.
-3. Add nanoG1-style V-trace, prioritized replay, and command scheduling to Warp
-   PPO.
+3. Upgrade uniform trajectory replay to nanoG1-style V-trace, priority
+   sampling, and command scheduling.
 4. Add a PufferLib interop path behind an optional dependency boundary if we want
    exact nanoG1 trainer compatibility. Its Python package currently depends on
    PyTorch, while its compiled `_C` backend is closer to torch-free.

@@ -255,6 +255,39 @@ def mse_loss_2d_kernel(
 
 
 @wp.kernel
+def gather_trajectory_minibatch_kernel(
+    env_ids: wp.array[wp.int32],
+    src_num_envs: wp.int32,
+    segment_count: wp.int32,
+    obs_dim: wp.int32,
+    action_dim: wp.int32,
+    obs_src: wp.array2d[wp.float32],
+    actions_src: wp.array2d[wp.float32],
+    log_probs_src: wp.array[wp.float32],
+    advantages_src: wp.array[wp.float32],
+    returns_src: wp.array[wp.float32],
+    obs_dst: wp.array2d[wp.float32],
+    actions_dst: wp.array2d[wp.float32],
+    log_probs_dst: wp.array[wp.float32],
+    advantages_dst: wp.array[wp.float32],
+    returns_dst: wp.array[wp.float32],
+):
+    row, col = wp.tid()
+    step = row / segment_count
+    segment = row - step * segment_count
+    env = env_ids[segment]
+    src_row = step * src_num_envs + env
+    if col < obs_dim:
+        obs_dst[row, col] = obs_src[src_row, col]
+    if col < action_dim:
+        actions_dst[row, col] = actions_src[src_row, col]
+    if col == 0:
+        log_probs_dst[row] = log_probs_src[src_row]
+        advantages_dst[row] = advantages_src[src_row]
+        returns_dst[row] = returns_src[src_row]
+
+
+@wp.kernel
 def compute_gae_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],

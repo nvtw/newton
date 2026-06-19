@@ -331,6 +331,8 @@ def _default_g1_ppo_config() -> ConfigPPO:
         actor_lr=2.0e-3,
         critic_lr=2.0e-3,
         train_epochs=3,
+        minibatch_size=32768,
+        replay_ratio=3.0,
         normalize_advantages=True,
         reward_clip=1.0,
         max_grad_norm=0.3,

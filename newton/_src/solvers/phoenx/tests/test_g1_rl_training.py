@@ -119,6 +119,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(first.history[0].iteration, 0)
             self.assertEqual(first.trainer.iteration, 1)
             self.assertEqual(restored.iteration, 1)
+            self.assertEqual(restored.config.minibatch_size, 0)
+            self.assertEqual(restored.config.replay_ratio, 0.0)
             self.assertEqual(restored.config.reward_clip, 1.0)
             self.assertEqual(restored.config.max_grad_norm, 0.3)
             self.assertEqual(restored.config.mirror_loss_coeff, 0.25)

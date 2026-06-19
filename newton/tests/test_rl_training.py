@@ -94,6 +94,8 @@ class TestTrainerPPO(unittest.TestCase):
             actor_lr=3.0e-3,
             critic_lr=3.0e-3,
             entropy_coeff=0.0,
+            minibatch_size=8,
+            replay_ratio=1.0,
             max_grad_norm=0.3,
             mirror_loss_coeff=0.1,
         )
@@ -153,6 +155,8 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.actor_optimizer.step_count, 3)
         self.assertEqual(restored.critic_optimizer.step_count, 5)
         self.assertEqual(restored.iteration, 11)
+        self.assertEqual(restored.config.minibatch_size, 0)
+        self.assertEqual(restored.config.replay_ratio, 0.0)
         self.assertEqual(restored.config.reward_clip, 0.0)
         self.assertEqual(restored.config.max_grad_norm, 0.0)
         self.assertEqual(restored.config.mirror_loss_coeff, 0.0)

@@ -158,6 +158,8 @@ def _main() -> int:
     g1_parser.add_argument("--parse-meshes", action="store_true")
     g1_parser.add_argument("--controlled-action-count", type=int, default=12)
     g1_parser.add_argument("--mirror-loss-coeff", type=float, default=0.25)
+    g1_parser.add_argument("--minibatch-size", type=int, default=32768)
+    g1_parser.add_argument("--replay-ratio", type=float, default=3.0)
     g1_parser.add_argument("--reward-clip", type=float, default=1.0)
     g1_parser.add_argument("--max-grad-norm", type=float, default=0.3)
     g1_parser.add_argument("--resume-checkpoint", default=None)
@@ -247,6 +249,8 @@ def _main() -> int:
             actor_lr=2.0e-3,
             critic_lr=2.0e-3,
             train_epochs=3,
+            minibatch_size=args.minibatch_size,
+            replay_ratio=args.replay_ratio,
             normalize_advantages=True,
             reward_clip=args.reward_clip,
             max_grad_norm=args.max_grad_norm,

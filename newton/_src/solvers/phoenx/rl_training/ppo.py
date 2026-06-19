@@ -11,6 +11,7 @@ import warp as wp
 
 from .kernels import (
     compute_gae_kernel,
+    gather_trajectory_minibatch_kernel,
     gaussian_entropy_kernel,
     mirror_2d_kernel,
     mirrored_action_mse_loss_kernel,
@@ -53,9 +54,15 @@ class ConfigPPO:
         entropy_coeff: Entropy bonus coefficient.
         actor_lr: Actor Adam learning rate.
         critic_lr: Critic Adam learning rate.
-        train_epochs: Full-buffer optimization epochs per rollout.
+        train_epochs: Full-buffer optimization epochs per rollout when replay
+            minibatches are disabled.
+        minibatch_size: Optional trajectory-minibatch size. A value less than or
+            equal to zero disables minibatch replay.
+        replay_ratio: Number of sampled transition updates per collected
+            transition when trajectory minibatches are enabled.
         normalize_advantages: Whether to normalize advantages in-place before
-            updating.
+            updating. With minibatch replay this normalizes each sampled
+            minibatch.
         reward_clip: Absolute reward clamp used before advantage/return
             computation. A value less than or equal to zero disables clipping.
         max_grad_norm: Global gradient-norm clipping threshold for actor and
@@ -71,6 +78,8 @@ class ConfigPPO:
     actor_lr: float = 3.0e-4
     critic_lr: float = 1.0e-3
     train_epochs: int = 4
+    minibatch_size: int = 0
+    replay_ratio: float = 0.0
     normalize_advantages: bool = True
     reward_clip: float = 0.0
     max_grad_norm: float = 0.0
@@ -85,6 +94,45 @@ class StatsPPOUpdate:
     value_loss: float
     approx_kl: float
     clip_fraction: float
+
+
+class BatchPPO:
+    """Sampled transition batch used by :class:`TrainerPPO`."""
+
+    def __init__(
+        self,
+        *,
+        num_steps: int,
+        num_envs: int,
+        obs_dim: int,
+        action_dim: int,
+        device: wp.context.Devicelike = None,
+    ):
+        self.num_steps = int(num_steps)
+        self.num_envs = int(num_envs)
+        self.obs_dim = int(obs_dim)
+        self.action_dim = int(action_dim)
+        self.device = wp.get_device(device)
+        if self.num_steps <= 0 or self.num_envs <= 0:
+            raise ValueError("num_steps and num_envs must be positive")
+
+        count = self.num_steps * self.num_envs
+        self.obs = wp.zeros((count, self.obs_dim), dtype=wp.float32, device=self.device)
+        self.actions = wp.zeros((count, self.action_dim), dtype=wp.float32, device=self.device)
+        self.old_log_probs = wp.zeros(count, dtype=wp.float32, device=self.device)
+        self.advantages = wp.zeros(count, dtype=wp.float32, device=self.device)
+        self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
+
+    @property
+    def num_samples(self) -> int:
+        """Number of transition rows in the batch."""
+
+        return self.num_steps * self.num_envs
+
+    def normalize_advantages(self, eps: float = 1.0e-8) -> None:
+        """Normalize advantages in place."""
+
+        _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps)
 
 
 class BufferRollout:
@@ -155,24 +203,7 @@ class BufferRollout:
     def normalize_advantages(self, eps: float = 1.0e-8) -> None:
         """Normalize advantages in place."""
 
-        stats = wp.zeros(2, dtype=wp.float32, device=self.device)
-        wp.launch(
-            sum_and_sumsq_kernel,
-            dim=self.num_samples,
-            inputs=[self.advantages, self.num_samples],
-            outputs=[stats],
-            device=self.device,
-        )
-        stats_np = stats.numpy()
-        mean = float(stats_np[0]) / float(self.num_samples)
-        var = max(float(stats_np[1]) / float(self.num_samples) - mean * mean, 0.0)
-        inv_std = 1.0 / np.sqrt(var + float(eps))
-        wp.launch(
-            normalize_kernel,
-            dim=self.num_samples,
-            inputs=[self.advantages, mean, float(inv_std), self.num_samples],
-            device=self.device,
-        )
+        _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps)
 
 
 class TrainerPPO:
@@ -207,6 +238,7 @@ class TrainerPPO:
         mirror_map: MirrorMapPPO | None = None,
     ):
         self.config = config or ConfigPPO()
+        self.seed = int(seed)
         self.obs_dim = int(obs_dim)
         self.action_dim = int(action_dim)
         self.hidden_layers = tuple(int(width) for width in hidden_layers)
@@ -240,11 +272,13 @@ class TrainerPPO:
         )
         self.iteration = 0
         self.mirror_map: MirrorMapPPO | None = None
-        self._mirror_obs_src: wp.array | None = None
-        self._mirror_obs_sign: wp.array | None = None
-        self._mirror_action_src: wp.array | None = None
-        self._mirror_action_sign: wp.array | None = None
-        self._mirror_obs: wp.array | None = None
+        self._mirror_obs_src: wp.array[wp.int32] | None = None
+        self._mirror_obs_sign: wp.array[wp.float32] | None = None
+        self._mirror_action_src: wp.array[wp.int32] | None = None
+        self._mirror_action_sign: wp.array[wp.float32] | None = None
+        self._mirror_obs: wp.array2d[wp.float32] | None = None
+        self._minibatch: BatchPPO | None = None
+        self._minibatch_env_ids: wp.array[wp.int32] | None = None
         if mirror_map is not None:
             self.set_mirror_map(mirror_map)
 
@@ -295,6 +329,7 @@ class TrainerPPO:
             "activation": np.asarray(self.activation),
             "squash_actions": np.asarray(int(self.squash_actions), dtype=np.int64),
             "log_std_init": np.asarray(self.log_std_init, dtype=np.float32),
+            "seed": np.asarray(self.seed, dtype=np.int64),
             "iteration": np.asarray(self.iteration if iteration is None else int(iteration), dtype=np.int64),
         }
         for key, value in asdict(self.config).items():
@@ -335,7 +370,7 @@ class TrainerPPO:
                 hidden_layers=tuple(int(width) for width in data["hidden_layers"]),
                 config=saved_config,
                 device=device,
-                seed=0,
+                seed=int(data["seed"]) if "seed" in data else 0,
                 squash_actions=bool(int(data["squash_actions"])),
                 activation=str(data["activation"].item()),
                 log_std_init=float(data["log_std_init"]),
@@ -351,11 +386,11 @@ class TrainerPPO:
 
     def act(
         self,
-        obs: wp.array,
+        obs: wp.array2d[wp.float32],
         *,
         seed: int,
         deterministic: bool = False,
-    ) -> tuple[wp.array, wp.array, wp.array]:
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
         """Sample actions and evaluate values for rollout collection.
 
         Args:
@@ -378,6 +413,9 @@ class TrainerPPO:
 
         if buffer.obs_dim != self.obs_dim or buffer.action_dim != self.action_dim:
             raise ValueError("BufferRollout dimensions do not match trainer dimensions")
+        if self._uses_minibatch_replay(buffer):
+            return self._update_minibatches(buffer)
+
         if self.config.normalize_advantages:
             buffer.normalize_advantages()
 
@@ -395,7 +433,78 @@ class TrainerPPO:
             clip_fraction=clip_fraction,
         )
 
-    def _update_actor(self, buffer: BufferRollout) -> tuple[float, float, float]:
+    def _uses_minibatch_replay(self, buffer: BufferRollout) -> bool:
+        minibatch_size = int(self.config.minibatch_size)
+        return minibatch_size > 0 and float(self.config.replay_ratio) > 0.0 and minibatch_size < buffer.num_samples
+
+    def _update_minibatches(self, buffer: BufferRollout) -> StatsPPOUpdate:
+        minibatch_size = int(self.config.minibatch_size)
+        if minibatch_size % buffer.num_steps != 0:
+            raise ValueError("PPO trajectory minibatch_size must be a multiple of rollout steps")
+        segment_count = minibatch_size // buffer.num_steps
+        if segment_count <= 0:
+            raise ValueError("PPO trajectory minibatch_size is smaller than one rollout trajectory")
+        batch = self._ensure_minibatch(buffer, segment_count)
+        num_minibatches = max(
+            1, int(float(self.config.replay_ratio) * float(buffer.num_samples) / float(minibatch_size))
+        )
+
+        rng = np.random.default_rng(self.seed + 1000003 * self.iteration)
+        max_cols = max(self.obs_dim, self.action_dim, 1)
+        policy_loss = 0.0
+        value_loss = 0.0
+        approx_kl = 0.0
+        clip_fraction = 0.0
+        for _ in range(num_minibatches):
+            env_ids = rng.integers(0, buffer.num_envs, size=segment_count, dtype=np.int32)
+            self._minibatch_env_ids.assign(env_ids)
+            wp.launch(
+                gather_trajectory_minibatch_kernel,
+                dim=(batch.num_samples, max_cols),
+                inputs=[
+                    self._minibatch_env_ids,
+                    buffer.num_envs,
+                    segment_count,
+                    self.obs_dim,
+                    self.action_dim,
+                    buffer.obs,
+                    buffer.actions,
+                    buffer.old_log_probs,
+                    buffer.advantages,
+                    buffer.returns,
+                ],
+                outputs=[batch.obs, batch.actions, batch.old_log_probs, batch.advantages, batch.returns],
+                device=self.device,
+            )
+            if self.config.normalize_advantages:
+                batch.normalize_advantages()
+            policy_loss, approx_kl, clip_fraction = self._update_actor(batch)
+            value_loss = self._update_critic(batch)
+
+        return StatsPPOUpdate(
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            approx_kl=approx_kl,
+            clip_fraction=clip_fraction,
+        )
+
+    def _ensure_minibatch(self, buffer: BufferRollout, segment_count: int) -> BatchPPO:
+        if (
+            self._minibatch is None
+            or self._minibatch.num_steps != buffer.num_steps
+            or self._minibatch.num_envs != int(segment_count)
+        ):
+            self._minibatch = BatchPPO(
+                num_steps=buffer.num_steps,
+                num_envs=int(segment_count),
+                obs_dim=self.obs_dim,
+                action_dim=self.action_dim,
+                device=self.device,
+            )
+            self._minibatch_env_ids = wp.zeros(int(segment_count), dtype=wp.int32, device=self.device)
+        return self._minibatch
+
+    def _update_actor(self, buffer: BufferRollout | BatchPPO) -> tuple[float, float, float]:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_policy_out = None
         if mirror_obs is not None:
@@ -460,7 +569,7 @@ class TrainerPPO:
         tape.zero()
         return loss, kl, clip_fraction
 
-    def _update_critic(self, buffer: BufferRollout) -> float:
+    def _update_critic(self, buffer: BufferRollout | BatchPPO) -> float:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_values = None
         if mirror_obs is not None:
@@ -490,7 +599,7 @@ class TrainerPPO:
         tape.zero()
         return loss
 
-    def _mirrored_obs(self, buffer: BufferRollout) -> wp.array | None:
+    def _mirrored_obs(self, buffer: BufferRollout | BatchPPO) -> wp.array2d[wp.float32] | None:
         if self.config.mirror_loss_coeff <= 0.0:
             return None
         if self.mirror_map is None:
@@ -507,6 +616,29 @@ class TrainerPPO:
             device=self.device,
         )
         return self._mirror_obs
+
+
+def _normalize_advantages(
+    advantages: wp.array[wp.float32], count: int, device: wp.context.Device, *, eps: float
+) -> None:
+    stats = wp.zeros(2, dtype=wp.float32, device=device)
+    wp.launch(
+        sum_and_sumsq_kernel,
+        dim=count,
+        inputs=[advantages, count],
+        outputs=[stats],
+        device=device,
+    )
+    stats_np = stats.numpy()
+    mean = float(stats_np[0]) / float(count)
+    var = max(float(stats_np[1]) / float(count) - mean * mean, 0.0)
+    inv_std = 1.0 / np.sqrt(var + float(eps))
+    wp.launch(
+        normalize_kernel,
+        dim=count,
+        inputs=[advantages, mean, float(inv_std), count],
+        device=device,
+    )
 
 
 def save_ppo_checkpoint(trainer: TrainerPPO, path: str | Path, *, iteration: int | None = None) -> None:
