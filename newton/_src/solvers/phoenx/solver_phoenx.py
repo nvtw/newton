@@ -400,6 +400,43 @@ def _choose_fast_tail_worlds_per_block_for_scene(
     return wpb
 
 
+def _choose_fast_tail_family_split_for_scene(
+    *,
+    step_layout: str,
+    use_greedy_coloring: bool,
+    num_worlds: int,
+    num_joints: int,
+    max_contact_columns: int,
+    num_cloth_triangles: int,
+    num_cloth_bending: int,
+    num_soft_tetrahedra: int,
+    num_soft_hexahedra: int,
+) -> bool:
+    """Choose whether fast-tail kernels consume per-family color ranges."""
+    if step_layout == "single_world" or not use_greedy_coloring:
+        return False
+
+    deformable_family_count = 0
+    if num_cloth_triangles > 0:
+        deformable_family_count += 1
+    if num_cloth_bending > 0:
+        deformable_family_count += 1
+    if num_soft_tetrahedra > 0:
+        deformable_family_count += 1
+    if num_soft_hexahedra > 0:
+        deformable_family_count += 1
+
+    if deformable_family_count == 0:
+        return num_worlds >= 512 and num_joints > 0 and max_contact_columns > 0
+
+    family_count = deformable_family_count
+    if num_joints > 0:
+        family_count += 1
+    if max_contact_columns > 0:
+        family_count += 1
+    return family_count > 1
+
+
 def _mass_splitting_copy_capacity(
     *,
     num_joints: int,
@@ -4233,27 +4270,17 @@ class PhoenXWorld:
 
     def _fast_tail_family_split(self) -> bool:
         """Use solver-family subranges in multi-world fast-tail."""
-        if self.step_layout == "single_world" or not self._use_greedy_coloring:
-            return False
-
-        deformable_family_count = 0
-        if self.num_cloth_triangles > 0:
-            deformable_family_count += 1
-        if self.num_cloth_bending > 0:
-            deformable_family_count += 1
-        if self.num_soft_tetrahedra > 0:
-            deformable_family_count += 1
-        if self.num_soft_hexahedra > 0:
-            deformable_family_count += 1
-        if deformable_family_count == 0:
-            return False
-
-        family_count = deformable_family_count
-        if self.num_joints > 0:
-            family_count += 1
-        if self.max_contact_columns > 0:
-            family_count += 1
-        return family_count > 1
+        return _choose_fast_tail_family_split_for_scene(
+            step_layout=self.step_layout,
+            use_greedy_coloring=self._use_greedy_coloring,
+            num_worlds=self.num_worlds,
+            num_joints=self.num_joints,
+            max_contact_columns=self.max_contact_columns,
+            num_cloth_triangles=self.num_cloth_triangles,
+            num_cloth_bending=self.num_cloth_bending,
+            num_soft_tetrahedra=self.num_soft_tetrahedra,
+            num_soft_hexahedra=self.num_soft_hexahedra,
+        )
 
     def _fast_tail_worlds_per_block(self) -> int:
         """Return the selected fast-tail block packing for this world."""

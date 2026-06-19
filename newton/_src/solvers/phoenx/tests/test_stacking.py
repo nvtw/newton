@@ -727,7 +727,7 @@ class TestPhoenXSolverStacking(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(vel)))
 
     def test_multi_world_rigid_family_split_off_by_default(self) -> None:
-        """Robot-style rigid fleets use the faster sorted generic path."""
+        """Small rigid mixed scenes stay on the sorted generic path."""
         scene = _PhoenXScene(substeps=2, solver_iterations=2, step_layout="multi_world")
         scene.add_ground_plane()
         body = scene.mb.add_link(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.22), q=wp.quat_identity()))

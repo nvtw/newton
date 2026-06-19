@@ -29,6 +29,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_
 from newton._src.solvers.phoenx.solver_phoenx import (
     PhoenXWorld,
     _choose_auto_prepare_refresh_stride,
+    _choose_fast_tail_family_split_for_scene,
     _choose_fast_tail_worlds_per_block_for_scene,
     _choose_multi_world_scheduler,
 )
@@ -196,6 +197,30 @@ class TestSelectionHeuristics(unittest.TestCase):
             ),
             2,
         )
+
+    def test_fast_tail_family_split_helper(self) -> None:
+        def choose(**overrides) -> bool:
+            values = {
+                "step_layout": "multi_world",
+                "use_greedy_coloring": True,
+                "num_worlds": 512,
+                "num_joints": 512 * 32,
+                "max_contact_columns": 512 * 32,
+                "num_cloth_triangles": 0,
+                "num_cloth_bending": 0,
+                "num_soft_tetrahedra": 0,
+                "num_soft_hexahedra": 0,
+            }
+            values.update(overrides)
+            return _choose_fast_tail_family_split_for_scene(**values)
+
+        self.assertFalse(choose(step_layout="single_world"))
+        self.assertFalse(choose(use_greedy_coloring=False))
+        self.assertFalse(choose(num_worlds=511))
+        self.assertFalse(choose(num_joints=0))
+        self.assertFalse(choose(max_contact_columns=0))
+        self.assertTrue(choose())
+        self.assertTrue(choose(num_worlds=1, num_joints=0, num_cloth_triangles=1))
 
 
 class TestPrepareRefreshStride(unittest.TestCase):

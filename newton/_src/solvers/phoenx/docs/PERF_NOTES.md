@@ -58,6 +58,11 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Host-side `threads_per_world="auto"` pins obvious graph-capture-stable topologies before capture. On RTX PRO 6000, 4096-world H1-like fleets (`~23` joint rows/world, `~320` contact capacity/world) are faster at `tpw=8`, while 2048-world H1 and 4096-world G1/DR-Legs remain faster at `tpw=16`; `_choose_initial_threads_per_world` encodes that split.
 - Pinned to 32 below `8 * sm_count` worlds (picker overhead would never pay off). Captured-graph safe (no host sync).
 - User opt-out: `threads_per_world={8,16,32}` in the solver constructor.
+- Greedy coloring always builds per-family offsets. Large rigid mixed fleets
+  (512+ worlds with joints and contacts) consume those joint/contact subranges
+  directly in fast-tail kernels, avoiding a per-cid joint/contact branch in the
+  hottest solve loops. Narrow G1/H1/DR-Legs scheduling sweeps on RTX PRO 6000
+  showed 5-18% lower frame time for the affected fast-tail path.
 
 ### Inertia + force-clear fusion
 - Damping + rotated-inertia refresh + force/torque zeroing were three back-to-back per-body kernels with the same dim/gate. Fused into `_phoenx_update_inertia_and_clear_forces_kernel`. Saves ~3 launches per step.

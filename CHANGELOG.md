@@ -62,6 +62,10 @@
 
 - Change the experimental PhoenX G1 PPO primitive-collision environment to cap rigid-contact buffers at 32 contacts per world by default; pass `rigid_contact_max_per_world=0` or `newton.rl train-g1-ppo --rigid-contact-max-per-world 0` to restore SolverPhoenX automatic sizing.
 
+- Change `SolverPhoenX` fast-tail multi-world robot fleets to use per-color
+  joint/contact family ranges at 512+ worlds, reducing branchy mixed constraint
+  dispatch in high-throughput PhoenX RL scenes.
+
 - Change the experimental PhoenX G1 PPO defaults to use BF16 inputs with
   FP32 accumulation and 128-row dense tiles for manual CUDA MLP backward tile
   matmuls and large-minibatch hidden-layer forward tile matmul; pass
