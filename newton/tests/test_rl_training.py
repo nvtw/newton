@@ -59,6 +59,30 @@ class TestRolloutBuffer(unittest.TestCase):
         np.testing.assert_allclose(buffer.returns.numpy(), expected_returns, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(buffer.successes.numpy(), successes, rtol=0.0, atol=0.0)
 
+        buffer.advantages.zero_()
+        buffer.returns.zero_()
+        clipped_rewards = np.clip(rewards, -0.5, 0.5)
+        with wp.ScopedCapture(device=device) as clipped_capture:
+            buffer.compute_returns(gamma=gamma, gae_lambda=gae_lambda, reward_clip=0.5)
+        wp.capture_launch(clipped_capture.graph)
+        expected_clipped_adv = np.zeros(6, dtype=np.float32)
+        expected_clipped_returns = np.zeros(6, dtype=np.float32)
+        for env in range(2):
+            gae = 0.0
+            for t in reversed(range(3)):
+                idx = t * 2 + env
+                next_idx = (t + 1) * 2 + env
+                non_terminal = 1.0 - float(dones[idx])
+                delta = (
+                    float(clipped_rewards[idx]) + gamma * float(values[next_idx]) * non_terminal - float(values[idx])
+                )
+                gae = delta + gamma * gae_lambda * non_terminal * gae
+                expected_clipped_adv[idx] = gae
+                expected_clipped_returns[idx] = gae + float(values[idx])
+
+        np.testing.assert_allclose(buffer.advantages.numpy(), expected_clipped_adv, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(buffer.returns.numpy(), expected_clipped_returns, rtol=1.0e-6, atol=1.0e-6)
+
 
 class TestTrainerPPO(unittest.TestCase):
     def test_update_changes_actor_and_returns_finite_stats(self) -> None:
@@ -128,6 +152,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.actor_optimizer.step_count, 3)
         self.assertEqual(restored.critic_optimizer.step_count, 5)
         self.assertEqual(restored.iteration, 11)
+        self.assertEqual(restored.config.reward_clip, 0.0)
         self.assertEqual(restored.config.mirror_loss_coeff, 0.0)
 
 

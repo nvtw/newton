@@ -170,4 +170,8 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
         outputs=[buffer.values],
         device=env.device,
     )
-    buffer.compute_returns(gamma=trainer.config.gamma, gae_lambda=trainer.config.gae_lambda)
+    buffer.compute_returns(
+        gamma=trainer.config.gamma,
+        gae_lambda=trainer.config.gae_lambda,
+        reward_clip=trainer.config.reward_clip,
+    )

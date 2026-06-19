@@ -56,6 +56,8 @@ class ConfigPPO:
         train_epochs: Full-buffer optimization epochs per rollout.
         normalize_advantages: Whether to normalize advantages in-place before
             updating.
+        reward_clip: Absolute reward clamp used before advantage/return
+            computation. A value less than or equal to zero disables clipping.
         mirror_loss_coeff: Coefficient for optional mirror-symmetry MSE on
             policy means and value predictions. Requires a mirror map.
     """
@@ -68,6 +70,7 @@ class ConfigPPO:
     critic_lr: float = 1.0e-3
     train_epochs: int = 4
     normalize_advantages: bool = True
+    reward_clip: float = 0.0
     mirror_loss_coeff: float = 0.0
 
 
@@ -126,7 +129,7 @@ class BufferRollout:
 
         return self.num_steps * self.num_envs
 
-    def compute_returns(self, *, gamma: float, gae_lambda: float) -> None:
+    def compute_returns(self, *, gamma: float, gae_lambda: float, reward_clip: float = 0.0) -> None:
         """Compute GAE advantages and returns in place."""
 
         wp.launch(
@@ -140,6 +143,7 @@ class BufferRollout:
                 self.num_envs,
                 float(gamma),
                 float(gae_lambda),
+                float(reward_clip),
             ],
             outputs=[self.advantages, self.returns],
             device=self.device,

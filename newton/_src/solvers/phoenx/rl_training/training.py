@@ -332,6 +332,7 @@ def _default_g1_ppo_config() -> ConfigPPO:
         critic_lr=2.0e-3,
         train_epochs=3,
         normalize_advantages=True,
+        reward_clip=1.0,
         mirror_loss_coeff=0.25,
     )
 

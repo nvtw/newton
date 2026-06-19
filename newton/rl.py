@@ -158,6 +158,7 @@ def _main() -> int:
     g1_parser.add_argument("--parse-meshes", action="store_true")
     g1_parser.add_argument("--controlled-action-count", type=int, default=12)
     g1_parser.add_argument("--mirror-loss-coeff", type=float, default=0.25)
+    g1_parser.add_argument("--reward-clip", type=float, default=1.0)
     g1_parser.add_argument("--resume-checkpoint", default=None)
     g1_parser.add_argument("--checkpoint-path", default=None)
     g1_parser.add_argument("--checkpoint-interval", type=int, default=0)
@@ -246,6 +247,7 @@ def _main() -> int:
             critic_lr=2.0e-3,
             train_epochs=3,
             normalize_advantages=True,
+            reward_clip=args.reward_clip,
             mirror_loss_coeff=args.mirror_loss_coeff,
         )
         train_g1_ppo(

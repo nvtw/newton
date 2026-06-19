@@ -263,6 +263,7 @@ def compute_gae_kernel(
     num_envs: wp.int32,
     gamma: wp.float32,
     gae_lambda: wp.float32,
+    reward_clip: wp.float32,
     advantages: wp.array[wp.float32],
     returns: wp.array[wp.float32],
 ):
@@ -272,8 +273,11 @@ def compute_gae_kernel(
         t = num_steps - wp.int32(1) - t_rev
         idx = t * num_envs + env
         next_idx = (t + wp.int32(1)) * num_envs + env
+        reward = rewards[idx]
+        if reward_clip > wp.float32(0.0):
+            reward = _clip(reward, -reward_clip, reward_clip)
         non_terminal = wp.float32(1.0) - dones[idx]
-        delta = rewards[idx] + gamma * values[next_idx] * non_terminal - values[idx]
+        delta = reward + gamma * values[next_idx] * non_terminal - values[idx]
         gae = delta + gamma * gae_lambda * non_terminal * gae
         advantages[idx] = gae
         returns[idx] = gae + values[idx]
