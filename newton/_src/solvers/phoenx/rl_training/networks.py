@@ -78,6 +78,13 @@ class WarpMLP:
             tile matmul. Supports ``"float32"`` and ``"bfloat16"``.
     """
 
+    class _ForwardScratch:
+        def __init__(self):
+            self.capacity = 0
+            self.outputs: list[wp.array2d[wp.float32]] = []
+            self.bf16_inputs: list[wp.array2d[wp.bfloat16]] = []
+            self.bf16_weights: list[wp.array2d[wp.bfloat16]] = []
+
     def __init__(
         self,
         layer_sizes: Iterable[int],
@@ -114,6 +121,7 @@ class WarpMLP:
         self._manual_bf16_inputs: list[wp.array2d[wp.bfloat16]] = []
         self._manual_bf16_pre_grads: list[wp.array2d[wp.bfloat16]] = []
         self._manual_bf16_weights: list[wp.array2d[wp.bfloat16]] = []
+        self._forward_scratch: dict[str, WarpMLP._ForwardScratch] = {}
 
         rng = np.random.default_rng(seed)
         self.weights: list[wp.array] = []
@@ -168,7 +176,17 @@ class WarpMLP:
                     device=self.device,
                 )
             else:
-                self._launch_forward_layer(layer, y, weight, bias, activation, out, batch_size)
+                self._launch_forward_layer(
+                    layer,
+                    y,
+                    weight,
+                    bias,
+                    activation,
+                    out,
+                    batch_size,
+                    bf16_inputs=self._manual_bf16_inputs,
+                    bf16_weights=self._manual_bf16_weights,
+                )
             y = out
         return y
 
@@ -181,13 +199,22 @@ class WarpMLP:
             raise ValueError(f"Expected input dim {self.input_dim}, got {int(x.shape[1])}")
 
         batch_size = int(x.shape[0])
-        self._ensure_manual_buffers(batch_size)
-        self._manual_input = None
+        scratch = self._ensure_forward_scratch(batch_size, "default")
         y = x
         for layer, (weight, bias) in enumerate(zip(self.weights, self.biases, strict=True)):
             activation = self.output_activation if layer == len(self.weights) - 1 else self.activation
-            out = self._manual_outputs[layer]
-            self._launch_forward_layer(layer, y, weight, bias, activation, out, batch_size)
+            out = scratch.outputs[layer]
+            self._launch_forward_layer(
+                layer,
+                y,
+                weight,
+                bias,
+                activation,
+                out,
+                batch_size,
+                bf16_inputs=scratch.bf16_inputs,
+                bf16_weights=scratch.bf16_weights,
+            )
             y = out
         return y
 
@@ -206,7 +233,17 @@ class WarpMLP:
         for layer, (weight, bias) in enumerate(zip(self.weights, self.biases, strict=True)):
             activation = self.output_activation if layer == len(self.weights) - 1 else self.activation
             out = self._manual_outputs[layer]
-            self._launch_forward_layer(layer, y, weight, bias, activation, out, batch_size)
+            self._launch_forward_layer(
+                layer,
+                y,
+                weight,
+                bias,
+                activation,
+                out,
+                batch_size,
+                bf16_inputs=self._manual_bf16_inputs,
+                bf16_weights=self._manual_bf16_weights,
+            )
             y = out
         return y
 
@@ -219,12 +256,17 @@ class WarpMLP:
         activation: int,
         out: wp.array2d[wp.float32],
         batch_size: int,
+        *,
+        bf16_inputs: list[wp.array2d[wp.bfloat16]] | None = None,
+        bf16_weights: list[wp.array2d[wp.bfloat16]] | None = None,
     ) -> None:
         rows = int(batch_size)
         cols = int(out.shape[1])
         if self._uses_bf16_forward(x, weight, rows):
-            x_bf16 = self._manual_bf16_inputs[layer]
-            weight_bf16 = self._manual_bf16_weights[layer]
+            if bf16_inputs is None or bf16_weights is None:
+                raise RuntimeError("BF16 forward buffers were not initialized")
+            x_bf16 = bf16_inputs[layer]
+            weight_bf16 = bf16_weights[layer]
             wp.launch(
                 cast_2d_float_to_bfloat16_kernel,
                 dim=(rows, int(x.shape[1])),
@@ -431,10 +473,51 @@ class WarpMLP:
                             )
                         )
 
+    def _ensure_forward_scratch(self, batch_size: int, name: str) -> _ForwardScratch:
+        requested = int(batch_size)
+        if requested <= 0:
+            raise ValueError("batch_size must be positive")
+        if not name:
+            raise ValueError("forward scratch name must be non-empty")
+        scratch = self._forward_scratch.get(name)
+        if scratch is None:
+            scratch = self._ForwardScratch()
+            self._forward_scratch[name] = scratch
+        if scratch.capacity >= requested and len(scratch.outputs) == len(self.weights):
+            return scratch
+
+        scratch.capacity = requested
+        scratch.outputs = []
+        scratch.bf16_inputs = []
+        scratch.bf16_weights = []
+        for in_dim, width in pairwise(self.layer_sizes):
+            scratch.outputs.append(
+                wp.empty((scratch.capacity, int(width)), dtype=wp.float32, device=self.device, requires_grad=False)
+            )
+            if self.device.is_cuda and self.manual_forward_dtype == "bfloat16":
+                scratch.bf16_inputs.append(
+                    wp.empty(
+                        (scratch.capacity, int(in_dim)),
+                        dtype=wp.bfloat16,
+                        device=self.device,
+                        requires_grad=False,
+                    )
+                )
+                scratch.bf16_weights.append(
+                    wp.empty((int(in_dim), int(width)), dtype=wp.bfloat16, device=self.device, requires_grad=False)
+                )
+        return scratch
+
+    def reserve_forward_buffers(self, batch_size: int) -> None:
+        """Reserve reusable no-grad forward buffers for at least ``batch_size`` rows."""
+
+        self._ensure_forward_scratch(batch_size, "default")
+
     def reserve_buffers(self, batch_size: int) -> None:
         """Reserve no-grad and manual-backward buffers for at least ``batch_size`` rows."""
 
         self._ensure_manual_buffers(batch_size)
+        self.reserve_forward_buffers(batch_size)
         self._manual_input = None
 
     def copy_from(self, other: WarpMLP) -> None:

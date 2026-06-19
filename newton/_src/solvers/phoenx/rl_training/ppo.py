@@ -671,7 +671,7 @@ class TrainerPPO:
         )
 
     def _scatter_minibatch_values(self, buffer: BufferRollout, batch: BatchPPO, segment_count: int) -> None:
-        values = self.critic.forward(batch.obs, requires_grad=False)
+        values = self.critic.forward_reuse(batch.obs)
         wp.launch(
             scatter_trajectory_values_kernel,
             dim=batch.num_samples,
@@ -720,7 +720,7 @@ class TrainerPPO:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_policy_out = None
         if mirror_obs is not None:
-            mirror_policy_out = self.actor.forward(mirror_obs, requires_grad=False)
+            mirror_policy_out = self.actor.net.forward_reuse(mirror_obs)
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._policy_loss], device=self.device)
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._approx_kl], device=self.device)
@@ -792,7 +792,7 @@ class TrainerPPO:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_policy_out = None
         if mirror_obs is not None:
-            mirror_policy_out = self.actor.forward(mirror_obs, requires_grad=False)
+            mirror_policy_out = self.actor.net.forward_reuse(mirror_obs)
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._policy_loss], device=self.device)
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._approx_kl], device=self.device)
@@ -875,7 +875,7 @@ class TrainerPPO:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_values = None
         if mirror_obs is not None:
-            mirror_values = self.critic.forward(mirror_obs, requires_grad=False)
+            mirror_values = self.critic.forward_reuse(mirror_obs)
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._value_loss], device=self.device)
         values = self.critic.forward_manual(buffer.obs)
@@ -904,7 +904,7 @@ class TrainerPPO:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_values = None
         if mirror_obs is not None:
-            mirror_values = self.critic.forward(mirror_obs, requires_grad=False)
+            mirror_values = self.critic.forward_reuse(mirror_obs)
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._value_loss], device=self.device)
         with wp.Tape() as tape:

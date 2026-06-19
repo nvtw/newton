@@ -377,6 +377,37 @@ class TestTrainerPPO(unittest.TestCase):
         for manual_grad, expected_grad in zip(manual_grads, expected_grads, strict=True):
             np.testing.assert_allclose(manual_grad, expected_grad, rtol=1.0e-5, atol=1.0e-5)
 
+    def test_mlp_reuse_forward_survives_manual_backward_graph_capture(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(79)
+        x_reuse_np = rng.normal(size=(16, 4)).astype(np.float32)
+        x_manual_np = rng.normal(size=(16, 4)).astype(np.float32)
+        output_grad_np = rng.normal(size=(16, 3)).astype(np.float32)
+        x_reuse = wp.array(x_reuse_np, dtype=wp.float32, device=device)
+        x_manual = wp.array(x_manual_np, dtype=wp.float32, device=device)
+        output_grad = wp.array(output_grad_np, dtype=wp.float32, device=device)
+        manual_mlp = rl.WarpMLP((4, 6, 3), activation="tanh", output_activation="tanh", device=device, seed=23)
+        manual_mlp.reserve_buffers(64)
+
+        def run_reuse_then_manual() -> wp.array2d[wp.float32]:
+            reuse_out = manual_mlp.forward_reuse(x_reuse)
+            manual_mlp.forward_manual(x_manual)
+            manual_mlp.backward_manual(output_grad)
+            return reuse_out
+
+        reuse_out = run_reuse_then_manual()
+        with wp.ScopedCapture(device=device) as capture:
+            reuse_out = run_reuse_then_manual()
+        wp.capture_launch(capture.graph)
+
+        weights = [weight.numpy() for weight in manual_mlp.weights]
+        biases = [bias.numpy() for bias in manual_mlp.biases]
+        expected = x_reuse_np
+        for weight, bias in zip(weights, biases, strict=True):
+            expected = np.tanh(expected @ weight + bias)
+
+        np.testing.assert_allclose(reuse_out.numpy()[: x_reuse_np.shape[0]], expected, rtol=1.0e-6, atol=1.0e-6)
+
     def test_bfloat16_manual_mlp_weight_grad_graph_captures(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(83)
