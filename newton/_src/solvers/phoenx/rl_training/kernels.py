@@ -201,6 +201,47 @@ def value_loss_kernel(
 
 
 @wp.kernel
+def mirror_2d_kernel(
+    src: wp.array2d[wp.float32],
+    mirror_src: wp.array[wp.int32],
+    mirror_sign: wp.array[wp.float32],
+    dst: wp.array2d[wp.float32],
+):
+    row, col = wp.tid()
+    dst[row, col] = mirror_sign[col] * src[row, mirror_src[col]]
+
+
+@wp.kernel
+def mirrored_action_mse_loss_kernel(
+    policy_out: wp.array2d[wp.float32],
+    mirrored_policy_out: wp.array2d[wp.float32],
+    action_mirror_src: wp.array[wp.int32],
+    action_mirror_sign: wp.array[wp.float32],
+    action_dim: wp.int32,
+    coeff: wp.float32,
+    batch_size: wp.int32,
+    loss: wp.array[wp.float32],
+):
+    row, action = wp.tid()
+    target = action_mirror_sign[action] * mirrored_policy_out[row, action_mirror_src[action]]
+    delta = policy_out[row, action] - target
+    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta / wp.float32(batch_size))
+
+
+@wp.kernel
+def value_symmetry_loss_kernel(
+    values: wp.array2d[wp.float32],
+    mirrored_values: wp.array2d[wp.float32],
+    coeff: wp.float32,
+    batch_size: wp.int32,
+    loss: wp.array[wp.float32],
+):
+    row = wp.tid()
+    delta = values[row, 0] - mirrored_values[row, 0]
+    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta / wp.float32(batch_size))
+
+
+@wp.kernel
 def mse_loss_2d_kernel(
     predictions: wp.array2d[wp.float32],
     targets: wp.array2d[wp.float32],

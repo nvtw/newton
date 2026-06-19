@@ -29,6 +29,7 @@ from ._src.solvers.phoenx.rl_training import (
     EnvG1PhoenX,
     EnvPPO,
     GaussianActor,
+    MirrorMapPPO,
     ResultEvaluateAnymalPPO,
     ResultEvaluateG1GatePPO,
     ResultEvaluateG1PPO,
@@ -50,6 +51,7 @@ from ._src.solvers.phoenx.rl_training import (
     evaluate_anymal_ppo,
     evaluate_g1_gate_ppo,
     evaluate_g1_ppo,
+    g1_mirror_map_ppo,
     load_ppo_checkpoint,
     save_ppo_checkpoint,
     train_anymal_ppo,
@@ -78,6 +80,7 @@ __all__ = [
     "EnvG1PhoenX",
     "EnvPPO",
     "GaussianActor",
+    "MirrorMapPPO",
     "ResultEvaluateAnymalPPO",
     "ResultEvaluateG1GatePPO",
     "ResultEvaluateG1PPO",
@@ -99,6 +102,7 @@ __all__ = [
     "evaluate_anymal_ppo",
     "evaluate_g1_gate_ppo",
     "evaluate_g1_ppo",
+    "g1_mirror_map_ppo",
     "load_ppo_checkpoint",
     "save_ppo_checkpoint",
     "train_anymal_ppo",
@@ -153,6 +157,7 @@ def _main() -> int:
     g1_parser.add_argument("--velocity-iterations", type=int, default=1)
     g1_parser.add_argument("--parse-meshes", action="store_true")
     g1_parser.add_argument("--controlled-action-count", type=int, default=12)
+    g1_parser.add_argument("--mirror-loss-coeff", type=float, default=0.25)
     g1_parser.add_argument("--resume-checkpoint", default=None)
     g1_parser.add_argument("--checkpoint-path", default=None)
     g1_parser.add_argument("--checkpoint-interval", type=int, default=0)
@@ -232,11 +237,23 @@ def _main() -> int:
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
         )
+        ppo_config = ConfigPPO(
+            gamma=0.97,
+            gae_lambda=0.9,
+            clip_ratio=0.2,
+            entropy_coeff=1.0e-5,
+            actor_lr=2.0e-3,
+            critic_lr=2.0e-3,
+            train_epochs=3,
+            normalize_advantages=True,
+            mirror_loss_coeff=args.mirror_loss_coeff,
+        )
         train_g1_ppo(
             ConfigTrainG1PPO(
                 iterations=args.iterations,
                 rollout_steps=args.rollout_steps,
                 env_config=env_config,
+                ppo_config=ppo_config,
                 device=args.device,
                 seed=args.seed,
                 log_interval=args.log_interval,

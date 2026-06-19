@@ -12,14 +12,34 @@ import warp as wp
 from .kernels import (
     compute_gae_kernel,
     gaussian_entropy_kernel,
+    mirror_2d_kernel,
+    mirrored_action_mse_loss_kernel,
     normalize_kernel,
     ppo_actor_loss_kernel,
     sum_and_sumsq_kernel,
     value_loss_kernel,
+    value_symmetry_loss_kernel,
     zero_scalar_kernel,
 )
 from .networks import GaussianActor, WarpMLP
 from .optim import Adam
+
+
+@dataclass(frozen=True)
+class MirrorMapPPO:
+    """Observation/action reflection map for PPO symmetry regularization.
+
+    Args:
+        obs_src: Source observation index for each mirrored observation column.
+        obs_sign: Sign multiplier for each mirrored observation column.
+        action_src: Source action index for each mirrored action column.
+        action_sign: Sign multiplier for each mirrored action column.
+    """
+
+    obs_src: tuple[int, ...]
+    obs_sign: tuple[float, ...]
+    action_src: tuple[int, ...]
+    action_sign: tuple[float, ...]
 
 
 @dataclass
@@ -36,6 +56,8 @@ class ConfigPPO:
         train_epochs: Full-buffer optimization epochs per rollout.
         normalize_advantages: Whether to normalize advantages in-place before
             updating.
+        mirror_loss_coeff: Coefficient for optional mirror-symmetry MSE on
+            policy means and value predictions. Requires a mirror map.
     """
 
     gamma: float = 0.99
@@ -46,6 +68,7 @@ class ConfigPPO:
     critic_lr: float = 1.0e-3
     train_epochs: int = 4
     normalize_advantages: bool = True
+    mirror_loss_coeff: float = 0.0
 
 
 @dataclass
@@ -158,6 +181,8 @@ class TrainerPPO:
         squash_actions: Whether the actor uses tanh-squashed actions.
         activation: Hidden-layer activation.
         log_std_init: Initial actor log-standard-deviation.
+        mirror_map: Optional observation/action reflection map used when
+            ``config.mirror_loss_coeff`` is positive.
     """
 
     def __init__(
@@ -172,6 +197,7 @@ class TrainerPPO:
         squash_actions: bool = True,
         activation: str = "tanh",
         log_std_init: float = 0.0,
+        mirror_map: MirrorMapPPO | None = None,
     ):
         self.config = config or ConfigPPO()
         self.obs_dim = int(obs_dim)
@@ -202,11 +228,46 @@ class TrainerPPO:
         self.actor_optimizer = Adam(self.actor.parameters(), lr=self.config.actor_lr)
         self.critic_optimizer = Adam(self.critic.parameters(), lr=self.config.critic_lr)
         self.iteration = 0
+        self.mirror_map: MirrorMapPPO | None = None
+        self._mirror_obs_src: wp.array | None = None
+        self._mirror_obs_sign: wp.array | None = None
+        self._mirror_action_src: wp.array | None = None
+        self._mirror_action_sign: wp.array | None = None
+        self._mirror_obs: wp.array | None = None
+        if mirror_map is not None:
+            self.set_mirror_map(mirror_map)
 
         self._policy_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._value_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._approx_kl = wp.zeros(1, dtype=wp.float32, device=self.device)
         self._clip_fraction = wp.zeros(1, dtype=wp.float32, device=self.device)
+
+    def set_mirror_map(self, mirror_map: MirrorMapPPO | None) -> None:
+        """Set or clear the optional PPO symmetry map."""
+
+        if mirror_map is None:
+            self.mirror_map = None
+            self._mirror_obs_src = None
+            self._mirror_obs_sign = None
+            self._mirror_action_src = None
+            self._mirror_action_sign = None
+            self._mirror_obs = None
+            return
+        _validate_mirror_map(mirror_map, self.obs_dim, self.action_dim)
+        self.mirror_map = mirror_map
+        self._mirror_obs_src = wp.array(
+            np.asarray(mirror_map.obs_src, dtype=np.int32), dtype=wp.int32, device=self.device
+        )
+        self._mirror_obs_sign = wp.array(
+            np.asarray(mirror_map.obs_sign, dtype=np.float32), dtype=wp.float32, device=self.device
+        )
+        self._mirror_action_src = wp.array(
+            np.asarray(mirror_map.action_src, dtype=np.int32), dtype=wp.int32, device=self.device
+        )
+        self._mirror_action_sign = wp.array(
+            np.asarray(mirror_map.action_sign, dtype=np.float32), dtype=wp.float32, device=self.device
+        )
+        self._mirror_obs = None
 
     def save_checkpoint(self, path: str | Path, *, iteration: int | None = None) -> None:
         """Save network parameters and optimizer state to a NumPy archive.
@@ -324,6 +385,11 @@ class TrainerPPO:
         )
 
     def _update_actor(self, buffer: BufferRollout) -> tuple[float, float, float]:
+        mirror_obs = self._mirrored_obs(buffer)
+        mirror_policy_out = None
+        if mirror_obs is not None:
+            mirror_policy_out = self.actor.forward(mirror_obs, requires_grad=False)
+
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._policy_loss], device=self.device)
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._approx_kl], device=self.device)
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._clip_fraction], device=self.device)
@@ -359,6 +425,22 @@ class TrainerPPO:
                 outputs=[self._policy_loss, self._approx_kl, self._clip_fraction],
                 device=self.device,
             )
+            if mirror_policy_out is not None:
+                wp.launch(
+                    mirrored_action_mse_loss_kernel,
+                    dim=(buffer.num_samples, self.action_dim),
+                    inputs=[
+                        policy_out,
+                        mirror_policy_out,
+                        self._mirror_action_src,
+                        self._mirror_action_sign,
+                        self.action_dim,
+                        self.config.mirror_loss_coeff,
+                        buffer.num_samples,
+                    ],
+                    outputs=[self._policy_loss],
+                    device=self.device,
+                )
         tape.backward(self._policy_loss)
         loss = float(self._policy_loss.numpy()[0])
         kl = float(self._approx_kl.numpy()[0])
@@ -368,6 +450,11 @@ class TrainerPPO:
         return loss, kl, clip_fraction
 
     def _update_critic(self, buffer: BufferRollout) -> float:
+        mirror_obs = self._mirrored_obs(buffer)
+        mirror_values = None
+        if mirror_obs is not None:
+            mirror_values = self.critic.forward(mirror_obs, requires_grad=False)
+
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._value_loss], device=self.device)
         with wp.Tape() as tape:
             values = self.critic.forward(buffer.obs, requires_grad=True)
@@ -378,11 +465,37 @@ class TrainerPPO:
                 outputs=[self._value_loss],
                 device=self.device,
             )
+            if mirror_values is not None:
+                wp.launch(
+                    value_symmetry_loss_kernel,
+                    dim=buffer.num_samples,
+                    inputs=[values, mirror_values, self.config.mirror_loss_coeff, buffer.num_samples],
+                    outputs=[self._value_loss],
+                    device=self.device,
+                )
         tape.backward(self._value_loss)
         loss = float(self._value_loss.numpy()[0])
         self.critic_optimizer.step()
         tape.zero()
         return loss
+
+    def _mirrored_obs(self, buffer: BufferRollout) -> wp.array | None:
+        if self.config.mirror_loss_coeff <= 0.0:
+            return None
+        if self.mirror_map is None:
+            raise ValueError("PPO mirror_loss_coeff requires a mirror map")
+        if self._mirror_obs is None or int(self._mirror_obs.shape[0]) != buffer.num_samples:
+            self._mirror_obs = wp.empty(
+                (buffer.num_samples, self.obs_dim), dtype=wp.float32, device=self.device, requires_grad=False
+            )
+        wp.launch(
+            mirror_2d_kernel,
+            dim=(buffer.num_samples, self.obs_dim),
+            inputs=[buffer.obs, self._mirror_obs_src, self._mirror_obs_sign],
+            outputs=[self._mirror_obs],
+            device=self.device,
+        )
+        return self._mirror_obs
 
 
 def save_ppo_checkpoint(trainer: TrainerPPO, path: str | Path, *, iteration: int | None = None) -> None:
@@ -415,6 +528,36 @@ def load_ppo_checkpoint(
     """
 
     return TrainerPPO.load_checkpoint(path, config=config, device=device)
+
+
+def _validate_mirror_map(mirror_map: MirrorMapPPO, obs_dim: int, action_dim: int) -> None:
+    obs_src = np.asarray(mirror_map.obs_src, dtype=np.int64)
+    obs_sign = np.asarray(mirror_map.obs_sign, dtype=np.float32)
+    action_src = np.asarray(mirror_map.action_src, dtype=np.int64)
+    action_sign = np.asarray(mirror_map.action_sign, dtype=np.float32)
+    if obs_src.shape != (int(obs_dim),) or obs_sign.shape != (int(obs_dim),):
+        raise ValueError(f"Observation mirror map must have length {obs_dim}")
+    if action_src.shape != (int(action_dim),) or action_sign.shape != (int(action_dim),):
+        raise ValueError(f"Action mirror map must have length {action_dim}")
+    if np.any(obs_src < 0) or np.any(obs_src >= int(obs_dim)):
+        raise ValueError("Observation mirror source indices are out of range")
+    if np.any(action_src < 0) or np.any(action_src >= int(action_dim)):
+        raise ValueError("Action mirror source indices are out of range")
+    if not np.isfinite(obs_sign).all() or not np.isfinite(action_sign).all():
+        raise ValueError("Mirror signs must be finite")
+    if not _is_signed_involution(obs_src, obs_sign):
+        raise ValueError("Observation mirror map must be a signed involution")
+    if not _is_signed_involution(action_src, action_sign):
+        raise ValueError("Action mirror map must be a signed involution")
+
+
+def _is_signed_involution(src: np.ndarray, sign: np.ndarray) -> bool:
+    for i, j in enumerate(src):
+        if int(src[int(j)]) != int(i):
+            return False
+        if not np.isclose(float(sign[i]) * float(sign[int(j)]), 1.0, rtol=0.0, atol=1.0e-6):
+            return False
+    return True
 
 
 def _pack_mlp(data: dict[str, np.ndarray], prefix: str, mlp: WarpMLP) -> None:

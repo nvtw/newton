@@ -70,8 +70,17 @@ class TestTrainerPPO(unittest.TestCase):
             actor_lr=3.0e-3,
             critic_lr=3.0e-3,
             entropy_coeff=0.0,
+            mirror_loss_coeff=0.1,
         )
-        trainer = rl.TrainerPPO(obs_dim=5, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=7)
+        mirror_map = rl.MirrorMapPPO(
+            obs_src=(0, 1, 2, 3, 4),
+            obs_sign=(1.0, 1.0, 1.0, 1.0, 1.0),
+            action_src=(1, 0),
+            action_sign=(1.0, 1.0),
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=5, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=7, mirror_map=mirror_map
+        )
         buffer = rl.BufferRollout(num_steps=4, num_envs=4, obs_dim=5, action_dim=2, device=device)
         n = buffer.num_samples
         obs = rng.normal(size=(n, 5)).astype(np.float32)
@@ -119,6 +128,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.actor_optimizer.step_count, 3)
         self.assertEqual(restored.critic_optimizer.step_count, 5)
         self.assertEqual(restored.iteration, 11)
+        self.assertEqual(restored.config.mirror_loss_coeff, 0.0)
 
 
 class TestReplayBufferSAC(unittest.TestCase):

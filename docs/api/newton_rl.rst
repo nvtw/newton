@@ -32,6 +32,7 @@ Warp-only reinforcement learning utilities for Newton.
    EnvG1PhoenX
    EnvPPO
    GaussianActor
+   MirrorMapPPO
    ResultEvaluateAnymalPPO
    ResultEvaluateG1GatePPO
    ResultEvaluateG1PPO
@@ -60,6 +61,7 @@ Warp-only reinforcement learning utilities for Newton.
    evaluate_anymal_ppo
    evaluate_g1_gate_ppo
    evaluate_g1_ppo
+   g1_mirror_map_ppo
    load_ppo_checkpoint
    save_ppo_checkpoint
    train_anymal_ppo

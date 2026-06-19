@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
-from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX
+from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
 from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_checkpoint
 
 
@@ -332,6 +332,7 @@ def _default_g1_ppo_config() -> ConfigPPO:
         critic_lr=2.0e-3,
         train_epochs=3,
         normalize_advantages=True,
+        mirror_loss_coeff=0.25,
     )
 
 
@@ -361,6 +362,8 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         ppo_config = trainer.config
         if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
             raise ValueError("Checkpoint dimensions do not match the G1 environment")
+        if trainer.config.mirror_loss_coeff > 0.0:
+            trainer.set_mirror_map(g1_mirror_map_ppo())
     else:
         trainer = TrainerPPO(
             obs_dim=env.obs_dim,
@@ -372,6 +375,7 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
             squash_actions=True,
             activation=cfg.activation,
             log_std_init=cfg.log_std_init,
+            mirror_map=g1_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,
         )
     buffer = BufferRollout(
         num_steps=cfg.rollout_steps,

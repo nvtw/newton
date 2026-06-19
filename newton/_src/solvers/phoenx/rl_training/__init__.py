@@ -3,10 +3,18 @@
 
 from .anymal import ACTION_DIM_ANYMAL, OBS_DIM_ANYMAL, ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
 from .env import EnvPPO, capture_env_steps, collect_ppo_rollout
-from .g1 import ACTION_DIM_G1, OBS_DIM_G1, ConfigEnvG1PhoenX, EnvG1PhoenX
+from .g1 import ACTION_DIM_G1, OBS_DIM_G1, ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
 from .networks import GaussianActor, WarpMLP
 from .optim import Adam
-from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_checkpoint, save_ppo_checkpoint
+from .ppo import (
+    BufferRollout,
+    ConfigPPO,
+    MirrorMapPPO,
+    StatsPPOUpdate,
+    TrainerPPO,
+    load_ppo_checkpoint,
+    save_ppo_checkpoint,
+)
 from .sac import BatchSAC, BufferReplaySAC, ConfigSAC, StatsSACUpdate, TrainerSAC
 from .training import (
     ConfigEvaluateAnymalPPO,
@@ -54,6 +62,7 @@ __all__ = [
     "EnvG1PhoenX",
     "EnvPPO",
     "GaussianActor",
+    "MirrorMapPPO",
     "ResultEvaluateAnymalPPO",
     "ResultEvaluateG1GatePPO",
     "ResultEvaluateG1PPO",
@@ -75,6 +84,7 @@ __all__ = [
     "evaluate_anymal_ppo",
     "evaluate_g1_gate_ppo",
     "evaluate_g1_ppo",
+    "g1_mirror_map_ppo",
     "load_ppo_checkpoint",
     "save_ppo_checkpoint",
     "train_anymal_ppo",
