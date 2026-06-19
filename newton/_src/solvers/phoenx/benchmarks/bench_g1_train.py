@@ -203,6 +203,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         randomize_commands=not bool(args.no_command_randomization),
     )
     result = rl.train_g1_ppo(config)
+    world = result.env.solver.world
+    effective_tpw = int(world._tpw_choice.numpy()[0])
     history = result.history
     _validate_finite_history(history)
     warm = history[int(args.warmup_iterations) :]
@@ -241,6 +243,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "parse_meshes": bool(args.parse_meshes),
         "rigid_contact_max_per_world": int(args.rigid_contact_max_per_world),
         "threads_per_world": args.threads_per_world,
+        "effective_threads_per_world": effective_tpw,
+        "threads_per_world_auto_active": bool(world._tpw_auto),
         "multi_world_scheduler": str(args.multi_world_scheduler),
         "prepare_refresh_stride": args.prepare_refresh_stride,
         "env_samples_per_s": env_sps,
