@@ -126,19 +126,32 @@ Result from this checkpoint:
 A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
 128x128x128 PPO networks, `minibatch_size=32768`, `replay_ratio=3.0`,
 `priority_alpha=0.4`, V-trace replay correction, mirror regularization, and
-BF16 manual MLP weight-gradient tile matmul and large-minibatch BF16 hidden
-forward tile matmul reached 374,749 environment samples/s after warmup. The
-same path with `--manual-mlp-forward-dtype float32` reached 363,210 environment
-samples/s, and the earlier exact-FP32 weight-gradient path reached 332,842
-environment samples/s.
+BF16 manual MLP weight-gradient tile matmul plus large-minibatch BF16 hidden
+forward tile matmul reached 505,183 environment samples/s after warmup on
+2026-06-19. The corresponding physics rate was 2,525,913 steps/s.
 
 ```bash
-uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train \
+    --iterations 3 --warmup-iterations 1
 ```
 
 nanoG1 reports about 1.28M environment samples/s while actually training, so
-the current mirror-enabled pure-Warp PhoenX G1 training loop is about 3.4x
-slower on this training-throughput metric.
+the current mirror-enabled pure-Warp PhoenX G1 training loop is about 2.53x
+slower on this training-throughput metric. An Nsight Systems profile of the
+same short benchmark shows the time is still dominated by PhoenX rollout and
+solver work rather than the Warp PPO optimizer. Top CUDA kernels by total GPU
+time in that profile were:
+
+1. `_make_fast_tail_prepare_plus_iterate`: 35.2%
+2. `dense_weight_grad_bf16_tiled`: 9.3%
+3. `_make_fast_tail_relax`: 7.8%
+4. `_per_world_greedy_coloring`: 7.2%
+5. CUB int64 radix sort: 3.3%
+6. `dense_forward_bf16_tiled`: 3.1%
+7. `_phoenx_refresh_world_inertia`: 2.9%
+8. `eval_articulation_fk`: 2.9%
+9. CUB int32 radix sort: 2.4%
+10. `dense_layer`: 1.8%
 
 nanoG1 reports about 8.5M production physics steps/s and 7.25M matched physics
 steps/s in its README/benchmark notes, so this PhoenX path is currently about
