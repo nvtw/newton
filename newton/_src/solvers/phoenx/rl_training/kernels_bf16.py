@@ -87,6 +87,31 @@ def dense_forward_bf16_tiled_kernel(
 
 
 @wp.kernel
+def dense_input_grad_bf16_tiled_kernel(
+    grad_pre: wp.array2d[wp.bfloat16],
+    weight: wp.array2d[wp.bfloat16],
+    out_dim: wp.int32,
+    grad_x: wp.array2d[wp.float32],
+):
+    batch_tile, in_tile = wp.tid()
+    total = wp.tile_zeros(shape=(DENSE_TILE_BATCH, DENSE_TILE_IN), dtype=wp.float32)
+    out_tiles = (out_dim + DENSE_TILE_OUT - wp.int32(1)) // DENSE_TILE_OUT
+    for tile in range(out_tiles):
+        grad_tile = wp.tile_load(
+            grad_pre,
+            shape=(DENSE_TILE_BATCH, DENSE_TILE_OUT),
+            offset=(batch_tile * DENSE_TILE_BATCH, tile * DENSE_TILE_OUT),
+        )
+        weight_tile = wp.tile_load(
+            weight,
+            shape=(DENSE_TILE_IN, DENSE_TILE_OUT),
+            offset=(in_tile * DENSE_TILE_IN, tile * DENSE_TILE_OUT),
+        )
+        wp.tile_matmul(grad_tile, wp.tile_transpose(weight_tile), total)
+    wp.tile_store(grad_x, total, offset=(batch_tile * DENSE_TILE_BATCH, in_tile * DENSE_TILE_IN))
+
+
+@wp.kernel
 def dense_bias_activation_kernel(y: wp.array2d[wp.float32], bias: wp.array[wp.float32], activation: wp.int32):
     row, col = wp.tid()
     y[row, col] = _activation(y[row, col] + bias[col], activation)

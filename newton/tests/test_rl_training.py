@@ -504,7 +504,7 @@ class TestTrainerPPO(unittest.TestCase):
             bf16_mlp._manual_outputs[-1].numpy(), fp32_mlp._manual_outputs[-1].numpy(), rtol=0.0, atol=0.0
         )
         for bf16_param, fp32_param in zip(bf16_mlp.parameters(), fp32_mlp.parameters(), strict=True):
-            np.testing.assert_allclose(bf16_param.grad.numpy(), fp32_param.grad.numpy(), rtol=8.0e-3, atol=2.0e-2)
+            np.testing.assert_allclose(bf16_param.grad.numpy(), fp32_param.grad.numpy(), rtol=8.0e-3, atol=3.0e-2)
         with self.assertRaises(ValueError):
             rl.WarpMLP((2, 3), device=device, manual_weight_grad_dtype="float16")
 

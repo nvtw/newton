@@ -40,6 +40,7 @@ from .kernels_bf16 import (
     cast_2d_float_to_bfloat16_kernel,
     dense_bias_activation_kernel,
     dense_forward_bf16_tiled_kernel,
+    dense_input_grad_bf16_tiled_kernel,
     dense_weight_grad_bf16_tiled_kernel,
 )
 
@@ -72,7 +73,7 @@ class WarpMLP:
         seed: Initializer seed.
         gain: Weight initializer gain.
         manual_weight_grad_dtype: Accumulator input dtype for manual CUDA
-            weight-gradient tile matmul. Supports ``"float32"`` and
+            backward tile matmuls. Supports ``"float32"`` and
             ``"bfloat16"``.
         manual_forward_dtype: Input dtype for manual CUDA hidden-layer forward
             tile matmul. Supports ``"float32"`` and ``"bfloat16"``.
@@ -408,17 +409,39 @@ class WarpMLP:
             if layer > 0:
                 grad_y = self._manual_output_grads[layer - 1]
                 if self.device.is_cuda:
-                    wp.launch_tiled(
-                        dense_input_grad_tiled_kernel,
-                        dim=(
-                            _ceil_div(rows, DENSE_TILE_BATCH),
-                            _ceil_div(int(grad_y.shape[1]), DENSE_TILE_IN),
-                        ),
-                        inputs=[grad_pre, weight, int(weight.shape[1])],
-                        outputs=[grad_y],
-                        block_dim=DENSE_TILE_BLOCK_DIM,
-                        device=self.device,
-                    )
+                    if self.manual_weight_grad_dtype == "bfloat16":
+                        grad_pre_bf16 = self._manual_bf16_pre_grads[layer]
+                        weight_bf16 = self._manual_bf16_weights[layer]
+                        wp.launch(
+                            cast_2d_float_to_bfloat16_kernel,
+                            dim=weight.shape,
+                            inputs=[weight],
+                            outputs=[weight_bf16],
+                            device=self.device,
+                        )
+                        wp.launch_tiled(
+                            dense_input_grad_bf16_tiled_kernel,
+                            dim=(
+                                _ceil_div(rows, DENSE_TILE_BATCH),
+                                _ceil_div(int(grad_y.shape[1]), DENSE_TILE_IN),
+                            ),
+                            inputs=[grad_pre_bf16, weight_bf16, int(weight.shape[1])],
+                            outputs=[grad_y],
+                            block_dim=DENSE_TILE_BLOCK_DIM,
+                            device=self.device,
+                        )
+                    else:
+                        wp.launch_tiled(
+                            dense_input_grad_tiled_kernel,
+                            dim=(
+                                _ceil_div(rows, DENSE_TILE_BATCH),
+                                _ceil_div(int(grad_y.shape[1]), DENSE_TILE_IN),
+                            ),
+                            inputs=[grad_pre, weight, int(weight.shape[1])],
+                            outputs=[grad_y],
+                            block_dim=DENSE_TILE_BLOCK_DIM,
+                            device=self.device,
+                        )
                 else:
                     wp.launch(
                         dense_input_grad_kernel,
@@ -466,7 +489,7 @@ class WarpMLP:
                         self._manual_bf16_pre_grads.append(
                             wp.empty(shape, dtype=wp.bfloat16, device=self.device, requires_grad=False)
                         )
-                    if self.manual_forward_dtype == "bfloat16":
+                    if self.manual_weight_grad_dtype == "bfloat16" or self.manual_forward_dtype == "bfloat16":
                         self._manual_bf16_weights.append(
                             wp.empty(
                                 (int(in_dim), int(width)), dtype=wp.bfloat16, device=self.device, requires_grad=False

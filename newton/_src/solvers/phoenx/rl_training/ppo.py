@@ -88,7 +88,7 @@ class ConfigPPO:
             value loss backward pass. This avoids Warp Tape for the critic
             update path.
         manual_mlp_weight_grad_dtype: Accumulator input dtype for manual CUDA
-            MLP weight-gradient tile matmul. Supports ``"float32"`` and
+            MLP backward tile matmuls. Supports ``"float32"`` and
             ``"bfloat16"``.
         manual_mlp_forward_dtype: Input dtype for manual CUDA hidden-layer
             forward tile matmul. Supports ``"float32"`` and ``"bfloat16"``.
