@@ -62,9 +62,70 @@ def dense_layer_kernel(
     y[row, col] = _activation(total, activation)
 
 
+@wp.func
+def _activation_grad_from_output(y: wp.float32, activation: wp.int32) -> wp.float32:
+    if activation == ACTIVATION_TANH:
+        return wp.float32(1.0) - y * y
+    if activation == ACTIVATION_RELU:
+        if y > wp.float32(0.0):
+            return wp.float32(1.0)
+        return wp.float32(0.0)
+    if activation == ACTIVATION_ELU:
+        if y > wp.float32(0.0):
+            return wp.float32(1.0)
+        return y + wp.float32(1.0)
+    return wp.float32(1.0)
+
+
 @wp.kernel
 def zero_scalar_kernel(x: wp.array[wp.float32]):
     x[0] = wp.float32(0.0)
+
+
+@wp.kernel
+def dense_activation_grad_kernel(
+    y: wp.array2d[wp.float32],
+    grad_y: wp.array2d[wp.float32],
+    activation: wp.int32,
+    grad_pre: wp.array2d[wp.float32],
+):
+    row, col = wp.tid()
+    grad_pre[row, col] = grad_y[row, col] * _activation_grad_from_output(y[row, col], activation)
+
+
+@wp.kernel
+def dense_weight_bias_grad_kernel(
+    x: wp.array2d[wp.float32],
+    grad_pre: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    weight_grad: wp.array2d[wp.float32],
+    bias_grad: wp.array[wp.float32],
+):
+    in_col, out_col = wp.tid()
+    total = wp.float32(0.0)
+    bias_total = wp.float32(0.0)
+    for row in range(batch_size):
+        g = grad_pre[row, out_col]
+        total = total + x[row, in_col] * g
+        if in_col == wp.int32(0):
+            bias_total = bias_total + g
+    weight_grad[in_col, out_col] = total
+    if in_col == wp.int32(0):
+        bias_grad[out_col] = bias_total
+
+
+@wp.kernel
+def dense_input_grad_kernel(
+    grad_pre: wp.array2d[wp.float32],
+    weight: wp.array2d[wp.float32],
+    out_dim: wp.int32,
+    grad_x: wp.array2d[wp.float32],
+):
+    row, in_col = wp.tid()
+    total = wp.float32(0.0)
+    for out_col in range(out_dim):
+        total = total + grad_pre[row, out_col] * weight[in_col, out_col]
+    grad_x[row, in_col] = total
 
 
 @wp.kernel

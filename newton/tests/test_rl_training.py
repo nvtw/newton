@@ -125,8 +125,8 @@ class TestTrainerPPO(unittest.TestCase):
         common = {
             "train_epochs": 1,
             "normalize_advantages": False,
-            "actor_lr": 1.0e-3,
-            "critic_lr": 1.0e-3,
+            "actor_lr": 1.0e-5,
+            "critic_lr": 1.0e-5,
             "entropy_coeff": 1.0e-4,
             "max_grad_norm": 0.0,
             "mirror_loss_coeff": 0.1,
@@ -243,6 +243,42 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertTrue(math.isfinite(float(approx_kl.numpy()[0])))
         self.assertGreater(float(np.linalg.norm(policy_out_grad.numpy())), 0.0)
         self.assertGreater(float(np.linalg.norm(log_std_grad.numpy())), 0.0)
+
+    def test_manual_mlp_backward_matches_numpy_and_graph_captures(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(71)
+        x_np = rng.normal(size=(9, 3)).astype(np.float32)
+        output_grad_np = rng.normal(size=(9, 2)).astype(np.float32)
+        x = wp.array(x_np, dtype=wp.float32, device=device)
+        output_grad = wp.array(output_grad_np, dtype=wp.float32, device=device)
+        manual_mlp = rl.WarpMLP((3, 5, 4, 2), activation="tanh", output_activation="tanh", device=device, seed=19)
+
+        manual_mlp.forward_manual(x)
+        manual_mlp.backward_manual(output_grad)
+        with wp.ScopedCapture(device=device) as capture:
+            manual_mlp.forward_manual(x)
+            manual_mlp.backward_manual(output_grad)
+        wp.capture_launch(capture.graph)
+        manual_out = manual_mlp._manual_outputs[-1].numpy()
+        manual_grads = [param.grad.numpy().copy() for param in manual_mlp.parameters()]
+
+        weights = [weight.numpy() for weight in manual_mlp.weights]
+        biases = [bias.numpy() for bias in manual_mlp.biases]
+        activations = [x_np]
+        for weight, bias in zip(weights, biases, strict=True):
+            activations.append(np.tanh(activations[-1] @ weight + bias))
+
+        grad = output_grad_np * (1.0 - activations[-1] * activations[-1])
+        expected_pairs = []
+        for layer in reversed(range(len(weights))):
+            expected_pairs.append((activations[layer].T @ grad, grad.sum(axis=0)))
+            if layer > 0:
+                grad = (grad @ weights[layer].T) * (1.0 - activations[layer] * activations[layer])
+        expected_grads = [grad for pair in reversed(expected_pairs) for grad in pair]
+
+        np.testing.assert_allclose(manual_out, activations[-1], rtol=1.0e-6, atol=1.0e-6)
+        for manual_grad, expected_grad in zip(manual_grads, expected_grads, strict=True):
+            np.testing.assert_allclose(manual_grad, expected_grad, rtol=1.0e-5, atol=1.0e-5)
 
     def test_update_changes_actor_and_returns_finite_stats(self) -> None:
         device = _rl_cuda_device()

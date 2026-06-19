@@ -71,9 +71,9 @@ class ConfigPPO:
             equal to zero uses uniform trajectory sampling.
         priority_beta: Importance-correction exponent for priority replay. A
             value less than or equal to zero disables the correction.
-        manual_actor_backward: Use a hand-written Gaussian PPO loss backward
-            kernel and seed the actor MLP gradients directly. This avoids Warp
-            Tape through the log-probability, entropy, and PPO loss kernels.
+        manual_actor_backward: Use hand-written kernels for the actor MLP and
+            Gaussian PPO loss backward pass. This avoids Warp Tape for the
+            actor update path.
         vtrace_rho_clip: V-trace policy-ratio clip for replayed trajectories.
             A value less than or equal to zero disables V-trace recomputation.
         vtrace_c_clip: V-trace trace-ratio clip for replayed trajectories.
@@ -680,8 +680,7 @@ class TrainerPPO:
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._approx_kl], device=self.device)
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._clip_fraction], device=self.device)
         self._actor_log_std_grad.zero_()
-        with wp.Tape() as tape:
-            policy_out = self.actor.forward(buffer.obs, requires_grad=True)
+        policy_out = self.actor.net.forward_manual(buffer.obs)
         policy_out_grad = self._ensure_actor_backward_buffers(buffer.num_samples, int(policy_out.shape[1]))
         wp.launch(
             ppo_actor_loss_backward_kernel,
@@ -727,7 +726,9 @@ class TrainerPPO:
                 outputs=[policy_out_grad, self._policy_loss],
                 device=self.device,
             )
-        tape.backward(grads={policy_out: policy_out_grad, self.actor.log_std: self._actor_log_std_grad})
+        self.actor.net.backward_manual(policy_out_grad)
+        if not self.actor.state_dependent_std:
+            self.actor.log_std.grad.assign(self._actor_log_std_grad)
         if read_stats:
             loss = float(self._policy_loss.numpy()[0])
             kl = float(self._approx_kl.numpy()[0])
@@ -737,7 +738,6 @@ class TrainerPPO:
             kl = 0.0
             clip_fraction = 0.0
         self.actor_optimizer.step()
-        tape.zero()
         return loss, kl, clip_fraction
 
     def _update_actor_tape(

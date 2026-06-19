@@ -16,7 +16,10 @@ from .kernels import (
     ACTIVATION_TANH,
     copy_1d_kernel,
     copy_2d_kernel,
+    dense_activation_grad_kernel,
+    dense_input_grad_kernel,
     dense_layer_kernel,
+    dense_weight_bias_grad_kernel,
     fill_eps_kernel,
     gaussian_entropy_kernel,
     gaussian_log_prob_kernel,
@@ -75,6 +78,11 @@ class WarpMLP:
         self.device = wp.get_device(device)
         self.activation = activation_code(activation)
         self.output_activation = activation_code(output_activation)
+        self._manual_batch_size = 0
+        self._manual_input: wp.array2d[wp.float32] | None = None
+        self._manual_outputs: list[wp.array2d[wp.float32]] = []
+        self._manual_output_grads: list[wp.array2d[wp.float32]] = []
+        self._manual_pre_grads: list[wp.array2d[wp.float32]] = []
 
         rng = np.random.default_rng(seed)
         self.weights: list[wp.array] = []
@@ -127,6 +135,83 @@ class WarpMLP:
             )
             y = out
         return y
+
+    def forward_manual(self, x: wp.array) -> wp.array:
+        """Evaluate the MLP and retain activations for manual backpropagation."""
+
+        if x.ndim != 2:
+            raise ValueError(f"Expected a 2-D input array, got ndim={x.ndim}")
+        if int(x.shape[1]) != self.input_dim:
+            raise ValueError(f"Expected input dim {self.input_dim}, got {int(x.shape[1])}")
+
+        batch_size = int(x.shape[0])
+        self._ensure_manual_buffers(batch_size)
+        self._manual_input = x
+        y = x
+        for layer, (weight, bias) in enumerate(zip(self.weights, self.biases, strict=True)):
+            activation = self.output_activation if layer == len(self.weights) - 1 else self.activation
+            out = self._manual_outputs[layer]
+            wp.launch(
+                dense_layer_kernel,
+                dim=out.shape,
+                inputs=[y, weight, bias, int(weight.shape[0]), activation],
+                outputs=[out],
+                device=self.device,
+            )
+            y = out
+        return y
+
+    def backward_manual(self, output_grad: wp.array2d[wp.float32]) -> None:
+        """Backpropagate from an output gradient into parameter gradients."""
+
+        if self._manual_input is None or not self._manual_outputs:
+            raise RuntimeError("forward_manual() must be called before backward_manual()")
+        if int(output_grad.shape[0]) != self._manual_batch_size or int(output_grad.shape[1]) != self.output_dim:
+            raise ValueError("Manual MLP output gradient shape does not match the last forward pass")
+
+        grad_y = output_grad
+        for layer in reversed(range(len(self.weights))):
+            weight = self.weights[layer]
+            bias = self.biases[layer]
+            activation = self.output_activation if layer == len(self.weights) - 1 else self.activation
+            grad_pre = self._manual_pre_grads[layer]
+            wp.launch(
+                dense_activation_grad_kernel,
+                dim=grad_pre.shape,
+                inputs=[self._manual_outputs[layer], grad_y, activation],
+                outputs=[grad_pre],
+                device=self.device,
+            )
+            x = self._manual_input if layer == 0 else self._manual_outputs[layer - 1]
+            wp.launch(
+                dense_weight_bias_grad_kernel,
+                dim=weight.shape,
+                inputs=[x, grad_pre, self._manual_batch_size],
+                outputs=[weight.grad, bias.grad],
+                device=self.device,
+            )
+            if layer > 0:
+                grad_y = self._manual_output_grads[layer - 1]
+                wp.launch(
+                    dense_input_grad_kernel,
+                    dim=grad_y.shape,
+                    inputs=[grad_pre, weight, int(weight.shape[1])],
+                    outputs=[grad_y],
+                    device=self.device,
+                )
+
+    def _ensure_manual_buffers(self, batch_size: int) -> None:
+        if self._manual_batch_size == int(batch_size) and len(self._manual_outputs) == len(self.weights):
+            return
+        self._manual_batch_size = int(batch_size)
+        self._manual_outputs = []
+        self._manual_output_grads = []
+        self._manual_pre_grads = []
+        for width in self.layer_sizes[1:]:
+            shape = (self._manual_batch_size, int(width))
+            self._manual_outputs.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
+            self._manual_output_grads.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
+            self._manual_pre_grads.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
 
     def copy_from(self, other: WarpMLP) -> None:
         """Copy parameters from another network with the same architecture."""
