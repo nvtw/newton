@@ -443,12 +443,15 @@ def mirrored_action_mse_grad_kernel(
     policy_out_grad: wp.array2d[wp.float32],
     loss: wp.array[wp.float32],
 ):
-    row, action = wp.tid()
-    target = action_mirror_sign[action] * mirrored_policy_out[row, action_mirror_src[action]]
-    delta = policy_out[row, action] - target
+    row = wp.tid()
     inv_batch = wp.float32(1.0) / wp.float32(batch_size)
-    policy_out_grad[row, action] = policy_out_grad[row, action] + coeff * delta * inv_batch
-    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta * inv_batch)
+    row_loss = wp.float32(0.0)
+    for action in range(action_dim):
+        target = action_mirror_sign[action] * mirrored_policy_out[row, action_mirror_src[action]]
+        delta = policy_out[row, action] - target
+        policy_out_grad[row, action] = policy_out_grad[row, action] + coeff * delta * inv_batch
+        row_loss = row_loss + wp.float32(0.5) * coeff * delta * delta * inv_batch
+    wp.atomic_add(loss, 0, row_loss)
 
 
 @wp.kernel
@@ -500,10 +503,14 @@ def mirrored_action_mse_loss_kernel(
     batch_size: wp.int32,
     loss: wp.array[wp.float32],
 ):
-    row, action = wp.tid()
-    target = action_mirror_sign[action] * mirrored_policy_out[row, action_mirror_src[action]]
-    delta = policy_out[row, action] - target
-    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta / wp.float32(batch_size))
+    row = wp.tid()
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    row_loss = wp.float32(0.0)
+    for action in range(action_dim):
+        target = action_mirror_sign[action] * mirrored_policy_out[row, action_mirror_src[action]]
+        delta = policy_out[row, action] - target
+        row_loss = row_loss + wp.float32(0.5) * coeff * delta * delta * inv_batch
+    wp.atomic_add(loss, 0, row_loss)
 
 
 @wp.kernel

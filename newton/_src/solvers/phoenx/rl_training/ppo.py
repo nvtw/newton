@@ -759,7 +759,7 @@ class TrainerPPO:
         if mirror_policy_out is not None:
             wp.launch(
                 mirrored_action_mse_grad_kernel,
-                dim=(buffer.num_samples, self.action_dim),
+                dim=buffer.num_samples,
                 inputs=[
                     policy_out,
                     mirror_policy_out,
@@ -832,7 +832,7 @@ class TrainerPPO:
             if mirror_policy_out is not None:
                 wp.launch(
                     mirrored_action_mse_loss_kernel,
-                    dim=(buffer.num_samples, self.action_dim),
+                    dim=buffer.num_samples,
                     inputs=[
                         policy_out,
                         mirror_policy_out,

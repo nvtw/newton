@@ -242,7 +242,7 @@ class TestTrainerPPO(unittest.TestCase):
             )
             wp.launch(
                 mirrored_action_mse_grad_kernel,
-                dim=(rows, action_dim),
+                dim=rows,
                 inputs=[policy_out, mirrored_policy_out, mirror_src, mirror_sign, action_dim, 0.1, rows],
                 outputs=[policy_out_grad, loss],
                 device=device,
