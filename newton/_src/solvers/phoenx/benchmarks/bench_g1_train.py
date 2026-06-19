@@ -41,6 +41,7 @@ def _g1_ppo_config(
     mirror_loss_coeff: float,
     minibatch_size: int,
     replay_ratio: float,
+    priority_alpha: float,
     reward_clip: float,
     max_grad_norm: float,
 ) -> rl.ConfigPPO:
@@ -54,6 +55,7 @@ def _g1_ppo_config(
         train_epochs=int(train_epochs),
         minibatch_size=int(minibatch_size),
         replay_ratio=float(replay_ratio),
+        priority_alpha=float(priority_alpha),
         normalize_advantages=True,
         reward_clip=float(reward_clip),
         max_grad_norm=float(max_grad_norm),
@@ -92,6 +94,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
             args.mirror_loss_coeff,
             args.minibatch_size,
             args.replay_ratio,
+            args.priority_alpha,
             args.reward_clip,
             args.max_grad_norm,
         ),
@@ -122,6 +125,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "mirror_loss_coeff": float(args.mirror_loss_coeff),
         "minibatch_size": int(args.minibatch_size),
         "replay_ratio": float(args.replay_ratio),
+        "priority_alpha": float(args.priority_alpha),
         "reward_clip": float(args.reward_clip),
         "max_grad_norm": float(args.max_grad_norm),
         "sim_substeps": int(args.sim_substeps),
@@ -168,6 +172,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mirror-loss-coeff", type=float, default=0.25)
     parser.add_argument("--minibatch-size", type=int, default=32768)
     parser.add_argument("--replay-ratio", type=float, default=3.0)
+    parser.add_argument("--priority-alpha", type=float, default=0.4)
     parser.add_argument("--reward-clip", type=float, default=1.0)
     parser.add_argument("--max-grad-norm", type=float, default=0.3)
     parser.add_argument("--sim-substeps", type=int, default=5)

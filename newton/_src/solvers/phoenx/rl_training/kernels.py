@@ -255,6 +255,20 @@ def mse_loss_2d_kernel(
 
 
 @wp.kernel
+def trajectory_priority_kernel(
+    advantages: wp.array[wp.float32],
+    num_steps: wp.int32,
+    num_envs: wp.int32,
+    priorities: wp.array[wp.float32],
+):
+    env = wp.tid()
+    total = wp.float32(0.0)
+    for step in range(num_steps):
+        total = total + wp.abs(advantages[step * num_envs + env])
+    priorities[env] = total
+
+
+@wp.kernel
 def gather_trajectory_minibatch_kernel(
     env_ids: wp.array[wp.int32],
     src_num_envs: wp.int32,

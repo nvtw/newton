@@ -333,6 +333,7 @@ def _default_g1_ppo_config() -> ConfigPPO:
         train_epochs=3,
         minibatch_size=32768,
         replay_ratio=3.0,
+        priority_alpha=0.4,
         normalize_advantages=True,
         reward_clip=1.0,
         max_grad_norm=0.3,

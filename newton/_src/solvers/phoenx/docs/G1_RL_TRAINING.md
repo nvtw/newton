@@ -37,9 +37,10 @@ The environment follows nanoG1's G1 v3 control surface where practical:
   are masked to zero.
 - Reward weights mirror the nanoG1 recipe for velocity tracking, base penalties,
   torque proxy, action-rate penalty, alive reward, and termination penalty.
-- Default G1 PPO uses trajectory-shaped minibatches with `minibatch_size=32768`
-  and `replay_ratio=3.0`, matching nanoG1's learner schedule more closely than
-  the older four-epoch full-buffer default.
+- Default G1 PPO uses trajectory-shaped prioritized minibatches with
+  `minibatch_size=32768`, `replay_ratio=3.0`, and `priority_alpha=0.4`,
+  matching nanoG1's learner schedule more closely than the older four-epoch
+  full-buffer default.
 - Default G1 PPO clips rewards to `[-1, 1]` before advantage/return
   computation, matching PufferLib's learner input scaling and keeping the value
   target bounded for early unstable G1 rollouts.
@@ -105,10 +106,12 @@ Result from this checkpoint:
 
 A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
 128x128x128 PPO networks, `minibatch_size=32768`, `replay_ratio=3.0`,
-and the default mirror regularizer reached 186,666 environment samples/s after
-the first warmup-heavy iteration. Disabling the mirror regularizer reached
-192,810 environment samples/s. The previous full-buffer update path can be
-measured with `--replay-ratio 0.0` and reached 189,141 environment samples/s:
+`priority_alpha=0.4`, and the default mirror regularizer reached 186,336
+environment samples/s after the first warmup-heavy iteration. Disabling the
+mirror regularizer reached 193,524 environment samples/s. The uniform replay
+path can be measured with `--priority-alpha 0.0` and reached 187,199
+environment samples/s; the previous full-buffer update path can be measured
+with `--replay-ratio 0.0`.
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train
@@ -146,9 +149,10 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
 - nanoG1's Modal image installs `torch`, so using the same full PufferLib training
   stack is not currently a torch-free route even though the environment core is
   specialized CUDA.
-- The Warp-only PPO loop is reusable and now supports uniform trajectory
-  minibatch replay, but it does not yet include nanoG1's V-trace, priority
-  sampling, Muon optimizer path, or PufferNet model stack.
+- The Warp-only PPO loop is reusable and now supports trajectory minibatch
+  replay with rollout-advantage priority sampling, but it does not yet include
+  nanoG1's V-trace ratio updates, Muon optimizer path, or PufferNet model
+  stack.
 - Environment stepping can be CUDA-graph replayed, but the full collect-policy-
   update loop is not captured end to end because actions and Warp Tape updates
   allocate intermediate arrays per rollout/update.
@@ -160,8 +164,8 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
 1. Avoid generic replicated MJCF setup for high world counts; build or cache a
    compact fixed-topology G1 multi-world model path.
 2. Remove avoidable broadphase/contact work for independent flat-ground G1 worlds.
-3. Upgrade uniform trajectory replay to nanoG1-style V-trace, priority
-   sampling, and command scheduling.
+3. Upgrade rollout-advantage priority replay to nanoG1-style V-trace ratio
+   updates and command scheduling.
 4. Add a PufferLib interop path behind an optional dependency boundary if we want
    exact nanoG1 trainer compatibility. Its Python package currently depends on
    PyTorch, while its compiled `_C` backend is closer to torch-free.

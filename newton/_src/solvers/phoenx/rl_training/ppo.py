@@ -18,6 +18,7 @@ from .kernels import (
     normalize_kernel,
     ppo_actor_loss_kernel,
     sum_and_sumsq_kernel,
+    trajectory_priority_kernel,
     value_loss_kernel,
     value_symmetry_loss_kernel,
     zero_scalar_kernel,
@@ -60,6 +61,8 @@ class ConfigPPO:
             equal to zero disables minibatch replay.
         replay_ratio: Number of sampled transition updates per collected
             transition when trajectory minibatches are enabled.
+        priority_alpha: Trajectory priority exponent. A value less than or
+            equal to zero uses uniform trajectory sampling.
         normalize_advantages: Whether to normalize advantages in-place before
             updating. With minibatch replay this normalizes each sampled
             minibatch.
@@ -80,6 +83,7 @@ class ConfigPPO:
     train_epochs: int = 4
     minibatch_size: int = 0
     replay_ratio: float = 0.0
+    priority_alpha: float = 0.0
     normalize_advantages: bool = True
     reward_clip: float = 0.0
     max_grad_norm: float = 0.0
@@ -279,6 +283,7 @@ class TrainerPPO:
         self._mirror_obs: wp.array2d[wp.float32] | None = None
         self._minibatch: BatchPPO | None = None
         self._minibatch_env_ids: wp.array[wp.int32] | None = None
+        self._trajectory_priorities: wp.array[wp.float32] | None = None
         if mirror_map is not None:
             self.set_mirror_map(mirror_map)
 
@@ -450,13 +455,19 @@ class TrainerPPO:
         )
 
         rng = np.random.default_rng(self.seed + 1000003 * self.iteration)
+        probabilities = self._trajectory_sampling_probabilities(buffer)
         max_cols = max(self.obs_dim, self.action_dim, 1)
         policy_loss = 0.0
         value_loss = 0.0
         approx_kl = 0.0
         clip_fraction = 0.0
         for _ in range(num_minibatches):
-            env_ids = rng.integers(0, buffer.num_envs, size=segment_count, dtype=np.int32)
+            if probabilities is None:
+                env_ids = rng.integers(0, buffer.num_envs, size=segment_count, dtype=np.int32)
+            else:
+                env_ids = rng.choice(buffer.num_envs, size=segment_count, replace=True, p=probabilities).astype(
+                    np.int32, copy=False
+                )
             self._minibatch_env_ids.assign(env_ids)
             wp.launch(
                 gather_trajectory_minibatch_kernel,
@@ -487,6 +498,26 @@ class TrainerPPO:
             approx_kl=approx_kl,
             clip_fraction=clip_fraction,
         )
+
+    def _trajectory_sampling_probabilities(self, buffer: BufferRollout) -> np.ndarray | None:
+        priority_alpha = float(self.config.priority_alpha)
+        if priority_alpha <= 0.0:
+            return None
+        if self._trajectory_priorities is None or int(self._trajectory_priorities.shape[0]) != buffer.num_envs:
+            self._trajectory_priorities = wp.zeros(buffer.num_envs, dtype=wp.float32, device=self.device)
+        wp.launch(
+            trajectory_priority_kernel,
+            dim=buffer.num_envs,
+            inputs=[buffer.advantages, buffer.num_steps, buffer.num_envs],
+            outputs=[self._trajectory_priorities],
+            device=self.device,
+        )
+        priorities = self._trajectory_priorities.numpy().astype(np.float64, copy=False)
+        weights = np.power(np.maximum(priorities, 0.0) + 1.0e-6, priority_alpha)
+        total = float(np.sum(weights))
+        if not np.isfinite(total) or total <= 0.0:
+            return None
+        return weights / total
 
     def _ensure_minibatch(self, buffer: BufferRollout, segment_count: int) -> BatchPPO:
         if (

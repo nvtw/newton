@@ -96,6 +96,7 @@ class TestTrainerPPO(unittest.TestCase):
             entropy_coeff=0.0,
             minibatch_size=8,
             replay_ratio=1.0,
+            priority_alpha=0.4,
             max_grad_norm=0.3,
             mirror_loss_coeff=0.1,
         )
@@ -157,6 +158,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.iteration, 11)
         self.assertEqual(restored.config.minibatch_size, 0)
         self.assertEqual(restored.config.replay_ratio, 0.0)
+        self.assertEqual(restored.config.priority_alpha, 0.0)
         self.assertEqual(restored.config.reward_clip, 0.0)
         self.assertEqual(restored.config.max_grad_norm, 0.0)
         self.assertEqual(restored.config.mirror_loss_coeff, 0.0)
