@@ -174,10 +174,12 @@ def ppo_actor_loss_kernel(
     loss: wp.array[wp.float32],
     approx_kl: wp.array[wp.float32],
     clip_fraction: wp.array[wp.float32],
+    ratios: wp.array[wp.float32],
 ):
     i = wp.tid()
     log_ratio = new_log_probs[i] - old_log_probs[i]
     ratio = wp.exp(log_ratio)
+    ratios[i] = ratio
     clipped = _clip(ratio, wp.float32(1.0) - clip_ratio, wp.float32(1.0) + clip_ratio)
     unclipped_obj = ratio * advantages[i]
     clipped_obj = clipped * advantages[i]
@@ -302,6 +304,38 @@ def gather_trajectory_minibatch_kernel(
 
 
 @wp.kernel
+def scatter_trajectory_ratios_kernel(
+    env_ids: wp.array[wp.int32],
+    src_num_envs: wp.int32,
+    segment_count: wp.int32,
+    ratios_src: wp.array[wp.float32],
+    ratios_dst: wp.array[wp.float32],
+):
+    row = wp.tid()
+    step = row / segment_count
+    segment = row - step * segment_count
+    env = env_ids[segment]
+    dst_row = step * src_num_envs + env
+    ratios_dst[dst_row] = ratios_src[row]
+
+
+@wp.kernel
+def scatter_trajectory_values_kernel(
+    env_ids: wp.array[wp.int32],
+    src_num_envs: wp.int32,
+    segment_count: wp.int32,
+    values_src: wp.array2d[wp.float32],
+    values_dst: wp.array[wp.float32],
+):
+    row = wp.tid()
+    step = row / segment_count
+    segment = row - step * segment_count
+    env = env_ids[segment]
+    dst_row = step * src_num_envs + env
+    values_dst[dst_row] = values_src[row, 0]
+
+
+@wp.kernel
 def compute_gae_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
@@ -328,6 +362,44 @@ def compute_gae_kernel(
         gae = delta + gamma * gae_lambda * non_terminal * gae
         advantages[idx] = gae
         returns[idx] = gae + values[idx]
+
+
+@wp.kernel
+def compute_vtrace_returns_kernel(
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    values: wp.array[wp.float32],
+    ratios: wp.array[wp.float32],
+    num_steps: wp.int32,
+    num_envs: wp.int32,
+    gamma: wp.float32,
+    gae_lambda: wp.float32,
+    rho_clip: wp.float32,
+    c_clip: wp.float32,
+    reward_clip: wp.float32,
+    advantages: wp.array[wp.float32],
+    returns: wp.array[wp.float32],
+):
+    env = wp.tid()
+    trace = wp.float32(0.0)
+    for t_rev in range(num_steps):
+        t = num_steps - wp.int32(1) - t_rev
+        idx = t * num_envs + env
+        next_idx = (t + wp.int32(1)) * num_envs + env
+        reward = rewards[idx]
+        if reward_clip > wp.float32(0.0):
+            reward = _clip(reward, -reward_clip, reward_clip)
+        non_terminal = wp.float32(1.0) - dones[idx]
+        rho = ratios[idx]
+        c = ratios[idx]
+        if rho_clip > wp.float32(0.0):
+            rho = wp.min(rho, rho_clip)
+        if c_clip > wp.float32(0.0):
+            c = wp.min(c, c_clip)
+        delta = rho * (reward + gamma * values[next_idx] * non_terminal - values[idx])
+        trace = delta + gamma * gae_lambda * c * trace * non_terminal
+        advantages[idx] = trace
+        returns[idx] = trace + values[idx]
 
 
 @wp.kernel

@@ -83,6 +83,29 @@ class TestRolloutBuffer(unittest.TestCase):
         np.testing.assert_allclose(buffer.advantages.numpy(), expected_clipped_adv, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(buffer.returns.numpy(), expected_clipped_returns, rtol=1.0e-6, atol=1.0e-6)
 
+        ratios = np.array([0.5, 1.5, 4.0, 0.25, 2.0, 0.75], dtype=np.float32)
+        buffer.ratios.assign(ratios)
+        buffer.compute_vtrace_returns(gamma=gamma, gae_lambda=gae_lambda, rho_clip=1.5, c_clip=1.0, reward_clip=0.5)
+        expected_vtrace_adv = np.zeros(6, dtype=np.float32)
+        expected_vtrace_returns = np.zeros(6, dtype=np.float32)
+        for env in range(2):
+            trace = 0.0
+            for t in reversed(range(3)):
+                idx = t * 2 + env
+                next_idx = (t + 1) * 2 + env
+                non_terminal = 1.0 - float(dones[idx])
+                rho = min(float(ratios[idx]), 1.5)
+                c = min(float(ratios[idx]), 1.0)
+                delta = rho * (
+                    float(clipped_rewards[idx]) + gamma * float(values[next_idx]) * non_terminal - float(values[idx])
+                )
+                trace = delta + gamma * gae_lambda * c * trace * non_terminal
+                expected_vtrace_adv[idx] = trace
+                expected_vtrace_returns[idx] = trace + float(values[idx])
+
+        np.testing.assert_allclose(buffer.advantages.numpy(), expected_vtrace_adv, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(buffer.returns.numpy(), expected_vtrace_returns, rtol=1.0e-6, atol=1.0e-6)
+
 
 class TestTrainerPPO(unittest.TestCase):
     def test_update_changes_actor_and_returns_finite_stats(self) -> None:
@@ -97,6 +120,8 @@ class TestTrainerPPO(unittest.TestCase):
             minibatch_size=8,
             replay_ratio=1.0,
             priority_alpha=0.4,
+            vtrace_rho_clip=3.0,
+            vtrace_c_clip=3.0,
             max_grad_norm=0.3,
             mirror_loss_coeff=0.1,
         )
@@ -159,6 +184,8 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(restored.config.minibatch_size, 0)
         self.assertEqual(restored.config.replay_ratio, 0.0)
         self.assertEqual(restored.config.priority_alpha, 0.0)
+        self.assertEqual(restored.config.vtrace_rho_clip, 0.0)
+        self.assertEqual(restored.config.vtrace_c_clip, 0.0)
         self.assertEqual(restored.config.reward_clip, 0.0)
         self.assertEqual(restored.config.max_grad_norm, 0.0)
         self.assertEqual(restored.config.mirror_loss_coeff, 0.0)

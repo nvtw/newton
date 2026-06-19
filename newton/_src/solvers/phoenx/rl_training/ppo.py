@@ -11,12 +11,15 @@ import warp as wp
 
 from .kernels import (
     compute_gae_kernel,
+    compute_vtrace_returns_kernel,
     gather_trajectory_minibatch_kernel,
     gaussian_entropy_kernel,
     mirror_2d_kernel,
     mirrored_action_mse_loss_kernel,
     normalize_kernel,
     ppo_actor_loss_kernel,
+    scatter_trajectory_ratios_kernel,
+    scatter_trajectory_values_kernel,
     sum_and_sumsq_kernel,
     trajectory_priority_kernel,
     value_loss_kernel,
@@ -63,6 +66,10 @@ class ConfigPPO:
             transition when trajectory minibatches are enabled.
         priority_alpha: Trajectory priority exponent. A value less than or
             equal to zero uses uniform trajectory sampling.
+        vtrace_rho_clip: V-trace policy-ratio clip for replayed trajectories.
+            A value less than or equal to zero disables V-trace recomputation.
+        vtrace_c_clip: V-trace trace-ratio clip for replayed trajectories.
+            A value less than or equal to zero disables V-trace recomputation.
         normalize_advantages: Whether to normalize advantages in-place before
             updating. With minibatch replay this normalizes each sampled
             minibatch.
@@ -84,6 +91,8 @@ class ConfigPPO:
     minibatch_size: int = 0
     replay_ratio: float = 0.0
     priority_alpha: float = 0.0
+    vtrace_rho_clip: float = 0.0
+    vtrace_c_clip: float = 0.0
     normalize_advantages: bool = True
     reward_clip: float = 0.0
     max_grad_norm: float = 0.0
@@ -126,6 +135,7 @@ class BatchPPO:
         self.old_log_probs = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.advantages = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
+        self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
 
     @property
     def num_samples(self) -> int:
@@ -177,6 +187,7 @@ class BufferRollout:
         self.values = wp.zeros((self.num_steps + 1) * self.num_envs, dtype=wp.float32, device=self.device)
         self.advantages = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
+        self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
 
     @property
     def num_samples(self) -> int:
@@ -187,6 +198,7 @@ class BufferRollout:
     def compute_returns(self, *, gamma: float, gae_lambda: float, reward_clip: float = 0.0) -> None:
         """Compute GAE advantages and returns in place."""
 
+        self.ratios.fill_(1.0)
         wp.launch(
             compute_gae_kernel,
             dim=self.num_envs,
@@ -208,6 +220,37 @@ class BufferRollout:
         """Normalize advantages in place."""
 
         _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps)
+
+    def compute_vtrace_returns(
+        self,
+        *,
+        gamma: float,
+        gae_lambda: float,
+        rho_clip: float,
+        c_clip: float,
+        reward_clip: float = 0.0,
+    ) -> None:
+        """Compute V-trace advantages and returns in place."""
+
+        wp.launch(
+            compute_vtrace_returns_kernel,
+            dim=self.num_envs,
+            inputs=[
+                self.rewards,
+                self.dones,
+                self.values,
+                self.ratios,
+                self.num_steps,
+                self.num_envs,
+                float(gamma),
+                float(gae_lambda),
+                float(rho_clip),
+                float(c_clip),
+                float(reward_clip),
+            ],
+            outputs=[self.advantages, self.returns],
+            device=self.device,
+        )
 
 
 class TrainerPPO:
@@ -428,9 +471,11 @@ class TrainerPPO:
         value_loss = 0.0
         approx_kl = 0.0
         clip_fraction = 0.0
-        for _ in range(int(self.config.train_epochs)):
-            policy_loss, approx_kl, clip_fraction = self._update_actor(buffer)
-            value_loss = self._update_critic(buffer)
+        train_epochs = int(self.config.train_epochs)
+        for epoch in range(train_epochs):
+            read_stats = epoch == train_epochs - 1
+            policy_loss, approx_kl, clip_fraction = self._update_actor(buffer, read_stats=read_stats)
+            value_loss = self._update_critic(buffer, read_stats=read_stats)
         return StatsPPOUpdate(
             policy_loss=policy_loss,
             value_loss=value_loss,
@@ -455,13 +500,18 @@ class TrainerPPO:
         )
 
         rng = np.random.default_rng(self.seed + 1000003 * self.iteration)
-        probabilities = self._trajectory_sampling_probabilities(buffer)
+        use_vtrace = self._uses_vtrace_replay()
+        probabilities = None if use_vtrace else self._trajectory_sampling_probabilities(buffer)
         max_cols = max(self.obs_dim, self.action_dim, 1)
         policy_loss = 0.0
         value_loss = 0.0
         approx_kl = 0.0
         clip_fraction = 0.0
-        for _ in range(num_minibatches):
+        for minibatch_id in range(num_minibatches):
+            read_stats = minibatch_id == num_minibatches - 1
+            if use_vtrace:
+                self._compute_vtrace_returns(buffer)
+                probabilities = self._trajectory_sampling_probabilities(buffer)
             if probabilities is None:
                 env_ids = rng.integers(0, buffer.num_envs, size=segment_count, dtype=np.int32)
             else:
@@ -489,14 +539,30 @@ class TrainerPPO:
             )
             if self.config.normalize_advantages:
                 batch.normalize_advantages()
-            policy_loss, approx_kl, clip_fraction = self._update_actor(batch)
-            value_loss = self._update_critic(batch)
+            policy_loss, approx_kl, clip_fraction = self._update_actor(batch, read_stats=read_stats)
+            if use_vtrace:
+                self._scatter_minibatch_ratios(buffer, batch, segment_count)
+            value_loss = self._update_critic(batch, read_stats=read_stats)
+            if use_vtrace:
+                self._scatter_minibatch_values(buffer, batch, segment_count)
 
         return StatsPPOUpdate(
             policy_loss=policy_loss,
             value_loss=value_loss,
             approx_kl=approx_kl,
             clip_fraction=clip_fraction,
+        )
+
+    def _uses_vtrace_replay(self) -> bool:
+        return float(self.config.vtrace_rho_clip) > 0.0 and float(self.config.vtrace_c_clip) > 0.0
+
+    def _compute_vtrace_returns(self, buffer: BufferRollout) -> None:
+        buffer.compute_vtrace_returns(
+            gamma=self.config.gamma,
+            gae_lambda=self.config.gae_lambda,
+            rho_clip=self.config.vtrace_rho_clip,
+            c_clip=self.config.vtrace_c_clip,
+            reward_clip=self.config.reward_clip,
         )
 
     def _trajectory_sampling_probabilities(self, buffer: BufferRollout) -> np.ndarray | None:
@@ -519,6 +585,25 @@ class TrainerPPO:
             return None
         return weights / total
 
+    def _scatter_minibatch_ratios(self, buffer: BufferRollout, batch: BatchPPO, segment_count: int) -> None:
+        wp.launch(
+            scatter_trajectory_ratios_kernel,
+            dim=batch.num_samples,
+            inputs=[self._minibatch_env_ids, buffer.num_envs, segment_count, batch.ratios],
+            outputs=[buffer.ratios],
+            device=self.device,
+        )
+
+    def _scatter_minibatch_values(self, buffer: BufferRollout, batch: BatchPPO, segment_count: int) -> None:
+        values = self.critic.forward(batch.obs, requires_grad=False)
+        wp.launch(
+            scatter_trajectory_values_kernel,
+            dim=batch.num_samples,
+            inputs=[self._minibatch_env_ids, buffer.num_envs, segment_count, values],
+            outputs=[buffer.values],
+            device=self.device,
+        )
+
     def _ensure_minibatch(self, buffer: BufferRollout, segment_count: int) -> BatchPPO:
         if (
             self._minibatch is None
@@ -535,7 +620,7 @@ class TrainerPPO:
             self._minibatch_env_ids = wp.zeros(int(segment_count), dtype=wp.int32, device=self.device)
         return self._minibatch
 
-    def _update_actor(self, buffer: BufferRollout | BatchPPO) -> tuple[float, float, float]:
+    def _update_actor(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> tuple[float, float, float]:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_policy_out = None
         if mirror_obs is not None:
@@ -573,7 +658,7 @@ class TrainerPPO:
                     self.config.entropy_coeff,
                     buffer.num_samples,
                 ],
-                outputs=[self._policy_loss, self._approx_kl, self._clip_fraction],
+                outputs=[self._policy_loss, self._approx_kl, self._clip_fraction, buffer.ratios],
                 device=self.device,
             )
             if mirror_policy_out is not None:
@@ -593,14 +678,19 @@ class TrainerPPO:
                     device=self.device,
                 )
         tape.backward(self._policy_loss)
-        loss = float(self._policy_loss.numpy()[0])
-        kl = float(self._approx_kl.numpy()[0])
-        clip_fraction = float(self._clip_fraction.numpy()[0])
+        if read_stats:
+            loss = float(self._policy_loss.numpy()[0])
+            kl = float(self._approx_kl.numpy()[0])
+            clip_fraction = float(self._clip_fraction.numpy()[0])
+        else:
+            loss = 0.0
+            kl = 0.0
+            clip_fraction = 0.0
         self.actor_optimizer.step()
         tape.zero()
         return loss, kl, clip_fraction
 
-    def _update_critic(self, buffer: BufferRollout | BatchPPO) -> float:
+    def _update_critic(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> float:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_values = None
         if mirror_obs is not None:
@@ -625,7 +715,7 @@ class TrainerPPO:
                     device=self.device,
                 )
         tape.backward(self._value_loss)
-        loss = float(self._value_loss.numpy()[0])
+        loss = float(self._value_loss.numpy()[0]) if read_stats else 0.0
         self.critic_optimizer.step()
         tape.zero()
         return loss

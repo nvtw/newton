@@ -334,6 +334,8 @@ def _default_g1_ppo_config() -> ConfigPPO:
         minibatch_size=32768,
         replay_ratio=3.0,
         priority_alpha=0.4,
+        vtrace_rho_clip=0.0,
+        vtrace_c_clip=0.0,
         normalize_advantages=True,
         reward_clip=1.0,
         max_grad_norm=0.3,
