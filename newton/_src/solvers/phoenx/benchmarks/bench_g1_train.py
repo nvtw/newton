@@ -46,6 +46,7 @@ def _g1_ppo_config(
     manual_actor_backward: bool,
     manual_critic_backward: bool,
     manual_mlp_weight_grad_dtype: str,
+    manual_mlp_forward_dtype: str,
     vtrace_rho_clip: float,
     vtrace_c_clip: float,
     reward_clip: float,
@@ -66,6 +67,7 @@ def _g1_ppo_config(
         manual_actor_backward=bool(manual_actor_backward),
         manual_critic_backward=bool(manual_critic_backward),
         manual_mlp_weight_grad_dtype=str(manual_mlp_weight_grad_dtype),
+        manual_mlp_forward_dtype=str(manual_mlp_forward_dtype),
         vtrace_rho_clip=float(vtrace_rho_clip),
         vtrace_c_clip=float(vtrace_c_clip),
         normalize_advantages=True,
@@ -111,6 +113,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
             not args.no_manual_actor_backward,
             not args.no_manual_critic_backward,
             args.manual_mlp_weight_grad_dtype,
+            args.manual_mlp_forward_dtype,
             args.vtrace_rho_clip,
             args.vtrace_c_clip,
             args.reward_clip,
@@ -148,6 +151,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "manual_actor_backward": not bool(args.no_manual_actor_backward),
         "manual_critic_backward": not bool(args.no_manual_critic_backward),
         "manual_mlp_weight_grad_dtype": str(args.manual_mlp_weight_grad_dtype),
+        "manual_mlp_forward_dtype": str(args.manual_mlp_forward_dtype),
         "vtrace_rho_clip": float(args.vtrace_rho_clip),
         "vtrace_c_clip": float(args.vtrace_c_clip),
         "reward_clip": float(args.reward_clip),
@@ -201,6 +205,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-manual-actor-backward", action="store_true")
     parser.add_argument("--no-manual-critic-backward", action="store_true")
     parser.add_argument("--manual-mlp-weight-grad-dtype", choices=("float32", "bfloat16"), default="bfloat16")
+    parser.add_argument("--manual-mlp-forward-dtype", choices=("float32", "bfloat16"), default="bfloat16")
     parser.add_argument("--vtrace-rho-clip", type=float, default=3.0)
     parser.add_argument("--vtrace-c-clip", type=float, default=3.0)
     parser.add_argument("--reward-clip", type=float, default=1.0)

@@ -82,6 +82,8 @@ class ConfigPPO:
         manual_mlp_weight_grad_dtype: Accumulator input dtype for manual CUDA
             MLP weight-gradient tile matmul. Supports ``"float32"`` and
             ``"bfloat16"``.
+        manual_mlp_forward_dtype: Input dtype for manual CUDA hidden-layer
+            forward tile matmul. Supports ``"float32"`` and ``"bfloat16"``.
         vtrace_rho_clip: V-trace policy-ratio clip for replayed trajectories.
             A value less than or equal to zero disables V-trace recomputation.
         vtrace_c_clip: V-trace trace-ratio clip for replayed trajectories.
@@ -111,6 +113,7 @@ class ConfigPPO:
     manual_actor_backward: bool = False
     manual_critic_backward: bool = False
     manual_mlp_weight_grad_dtype: str = "float32"
+    manual_mlp_forward_dtype: str = "float32"
     vtrace_rho_clip: float = 0.0
     vtrace_c_clip: float = 0.0
     normalize_advantages: bool = True
@@ -327,6 +330,7 @@ class TrainerPPO:
             device=self.device,
             seed=seed,
             manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
+            manual_forward_dtype=self.config.manual_mlp_forward_dtype,
         )
         self.critic = WarpMLP(
             (self.obs_dim, *self.hidden_layers, 1),
@@ -335,6 +339,7 @@ class TrainerPPO:
             device=self.device,
             seed=seed + 1,
             manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
+            manual_forward_dtype=self.config.manual_mlp_forward_dtype,
         )
         self.actor_optimizer = Adam(
             self.actor.parameters(), lr=self.config.actor_lr, max_grad_norm=self.config.max_grad_norm

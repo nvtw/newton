@@ -50,9 +50,12 @@ The environment follows nanoG1's G1 v3 control surface where practical:
   `mirror_loss_coeff=0.25`, implemented through the reusable Warp PPO mirror-map
   hook and the validated G1 observation/action mirror map from the pinned fork.
 - Default G1 PPO uses BF16 inputs with FP32 accumulation for manual CUDA MLP
-  weight-gradient tile matmul, matching PufferLib's default precision direction
+  weight-gradient tile matmul, plus BF16 hidden-layer forward tile matmul for
+  large PPO minibatches. This follows PufferLib's default precision direction
   while keeping FP32 master parameters and optimizer state. Pass
-  `--manual-mlp-weight-grad-dtype float32` to use exact FP32 manual gradients.
+  `--manual-mlp-weight-grad-dtype float32` or
+  `--manual-mlp-forward-dtype float32` to use exact FP32 manual kernels for
+  those paths.
 
 ## End-to-End Checkpoint Workflow
 
@@ -86,8 +89,9 @@ the default nanoG1-style mirror regularizer for throughput-only comparisons. Use
 `--reward-clip 0.0` to disable PufferLib-style reward clipping,
 `--vtrace-rho-clip 0.0 --vtrace-c-clip 0.0` to disable V-trace replay
 correction, `--manual-mlp-weight-grad-dtype float32` to disable BF16 MLP
-weight-gradient tile matmul, or `--max-grad-norm 0.0` to disable gradient
-clipping.
+weight-gradient tile matmul, `--manual-mlp-forward-dtype float32` to disable
+large-minibatch BF16 MLP forward tile matmul, or `--max-grad-norm 0.0` to
+disable gradient clipping.
 
 The gate command mirrors nanoG1's frozen bar: a six-command deterministic
 battery with noisy resets for falls/tracking performance, plus a separate
@@ -114,18 +118,18 @@ Result from this checkpoint:
 A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
 128x128x128 PPO networks, `minibatch_size=32768`, `replay_ratio=3.0`,
 `priority_alpha=0.4`, V-trace replay correction, mirror regularization, and
-BF16 manual MLP weight-gradient tile matmul reached 361,371 environment
-samples/s after warmup. The same path with
-`--manual-mlp-weight-grad-dtype float32` reached 332,842 environment samples/s,
-so BF16 closes about 8.6% of the full collect-update wall time on this
-benchmark.
+BF16 manual MLP weight-gradient tile matmul and large-minibatch BF16 hidden
+forward tile matmul reached 374,749 environment samples/s after warmup. The
+same path with `--manual-mlp-forward-dtype float32` reached 363,210 environment
+samples/s, and the earlier exact-FP32 weight-gradient path reached 332,842
+environment samples/s.
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train
 ```
 
 nanoG1 reports about 1.28M environment samples/s while actually training, so
-the current mirror-enabled pure-Warp PhoenX G1 training loop is about 3.5x
+the current mirror-enabled pure-Warp PhoenX G1 training loop is about 3.4x
 slower on this training-throughput metric.
 
 nanoG1 reports about 8.5M production physics steps/s and 7.25M matched physics
@@ -156,9 +160,10 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
   stack is not currently a torch-free route even though the environment core is
   specialized CUDA.
 - The Warp-only PPO loop is reusable and now supports trajectory minibatch
-  replay, rollout-advantage priority sampling, V-trace replay correction, and
-  BF16 MLP weight-gradient tile matmul, but it does not yet include nanoG1's
-  Muon optimizer path or PufferNet model stack.
+  replay, rollout-advantage priority sampling, V-trace replay correction,
+  BF16 MLP weight-gradient tile matmul, and large-minibatch BF16 hidden forward
+  tile matmul, but it does not yet include nanoG1's Muon optimizer path or
+  PufferNet model stack.
 - Environment stepping can be CUDA-graph replayed, but the full collect-policy-
   update loop is not captured end to end because actions and Warp Tape updates
   allocate intermediate arrays per rollout/update.

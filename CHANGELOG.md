@@ -60,9 +60,10 @@
 ### Changed
 
 - Change the experimental PhoenX G1 PPO defaults to use BF16 inputs with
-  FP32 accumulation for manual CUDA MLP weight-gradient tile matmul; pass
-  `--manual-mlp-weight-grad-dtype float32` to restore exact FP32 manual
-  gradients.
+  FP32 accumulation for manual CUDA MLP weight-gradient tile matmul and
+  large-minibatch hidden-layer forward tile matmul; pass
+  `--manual-mlp-weight-grad-dtype float32` or
+  `--manual-mlp-forward-dtype float32` to restore exact FP32 manual kernels.
 
 - Change the experimental PhoenX G1 PPO defaults to use nanoG1-style
   V-trace replay clips; pass `--vtrace-rho-clip 0.0 --vtrace-c-clip 0.0`

@@ -379,6 +379,37 @@ class TestTrainerPPO(unittest.TestCase):
         with self.assertRaises(ValueError):
             rl.WarpMLP((2, 3), device=device, manual_weight_grad_dtype="float16")
 
+    def test_bfloat16_manual_mlp_forward_graph_captures(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(89)
+        x_np = rng.normal(size=(16_384, 17)).astype(np.float32)
+        x = wp.array(x_np, dtype=wp.float32, device=device)
+        fp32_mlp = rl.WarpMLP(
+            (17, 64, 5),
+            activation="relu",
+            output_activation="linear",
+            device=device,
+            seed=31,
+            manual_forward_dtype="float32",
+        )
+        bf16_mlp = rl.WarpMLP(
+            (17, 64, 5),
+            activation="relu",
+            output_activation="linear",
+            device=device,
+            seed=31,
+            manual_forward_dtype="bfloat16",
+        )
+
+        fp32_out = fp32_mlp.forward_manual(x)
+        with wp.ScopedCapture(device=device) as capture:
+            bf16_out = bf16_mlp.forward_manual(x)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(bf16_out.numpy(), fp32_out.numpy(), rtol=8.0e-3, atol=2.0e-2)
+        with self.assertRaises(ValueError):
+            rl.WarpMLP((2, 64, 3), device=device, manual_forward_dtype="float16")
+
     def test_update_changes_actor_and_returns_finite_stats(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(3)
@@ -462,6 +493,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertFalse(restored.config.manual_actor_backward)
         self.assertFalse(restored.config.manual_critic_backward)
         self.assertEqual(restored.config.manual_mlp_weight_grad_dtype, "float32")
+        self.assertEqual(restored.config.manual_mlp_forward_dtype, "float32")
         self.assertEqual(restored.config.vtrace_rho_clip, 0.0)
         self.assertEqual(restored.config.vtrace_c_clip, 0.0)
         self.assertEqual(restored.config.reward_clip, 0.0)
