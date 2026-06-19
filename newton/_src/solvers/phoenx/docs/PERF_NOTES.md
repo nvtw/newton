@@ -136,10 +136,17 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Global runtime-claiming variants are still bad: queued global locks were
   about `7.8 ms` on the same 2048-world mixed graph. If a no-coloring solver is
   pursued, keep it warp-local or block-local.
-- Caveats: this is a scalar synthetic row solve, changes GS row order, and
-  currently assumes a dynamic body footprint that fits a 32-bit per-world mask.
-  Promote only behind an explicit experimental scheduler flag and validate G1
-  convergence before using it for training measurements.
+- Follow-up actual-solve benchmark (`bench_color_grid_actual_solve.py`) did
+  **not** transfer the synthetic win to the real current G1/H1/DR-Legs kernels.
+  G1 4096 solve-only: colored fast-tail `0.764 ms`, basic warp-local
+  `0.950 ms` (`0.80x`). A refill/tile-stack variant that keeps lanes scanning
+  for a compatible row was worse: `2.392 ms` (`0.35x` vs a `0.824 ms` baseline
+  in that run). H1 512 was `0.44x`; DR-Legs 512 was `0.83x`.
+- Caveats: the synthetic benchmark is a scalar row solve and changes GS row
+  order. The actual-solve prototype keeps a 64-body fast-path mask with a clean
+  refusal for wider worlds; production would need a wider/chunked representation
+  plus convergence tests. Do not promote the no-color warp-local scheduler on
+  current evidence.
 
 ### Actual-solve color-grid scheduler prototypes
 - `benchmarks/experimental/bench_color_grid_actual_solve.py` keeps the flat/global-colour, block-per-world, grouped-subfamily, autotune/adaptive, and software-barrier mega-kernel scheduler prototypes in one place. They are useful research scaffolding, not production evidence.

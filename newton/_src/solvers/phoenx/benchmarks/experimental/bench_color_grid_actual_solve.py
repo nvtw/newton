@@ -11,11 +11,12 @@ worlds. ``flat`` and ``direct`` use one launch per color, ``block_world`` gives
 one physical block to a world, ``block_world_grouped`` serializes joint-mode /
 contact subfamilies inside each color to test lower branch divergence, and
 ``mega`` keeps the color loop inside one persistent kernel with a software grid
-barrier. ``autotune`` evaluates the whole
-scheduler portfolio, while ``adaptive`` uses a time-budgeted tournament that
-keeps only the measured winners. The benchmark is aimed at finding scheduling
-rules that can eventually be moved into production instead of hard-coding one
-distribution.
+barrier. ``warp_local`` and ``warp_local_stack`` are no-color, one-warp-per-world
+experiments that use body masks instead of precomputed colors. ``autotune``
+evaluates the scheduler portfolio, while ``adaptive`` uses a time-budgeted
+tournament that keeps only the measured winners. The benchmark is aimed at
+finding scheduling rules that can eventually be moved into production instead
+of hard-coding one distribution.
 
 This file contains scheduler prototypes that can hang on some scenes and Warp
 versions. The default ``baseline`` mode only times the production solve kernel.
@@ -26,6 +27,7 @@ runs do not treat this file as production evidence.
 from __future__ import annotations
 
 import argparse
+import functools
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -61,15 +63,71 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     revolute_prepare_for_iteration,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES, ElementInteractionData
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
-from newton._src.solvers.phoenx.solver_phoenx_kernels import _sync_threads
+from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+    _make_multiworld_rigid_iterate_dispatch_funcs,
+    _make_multiworld_rigid_prepare_dispatch_func,
+    _sync_threads,
+)
 
 _EXPERIMENTAL_INNER_SWEEPS = 1
 _DEFAULT_BLOCK_WORLD_DIM = 128
 _BLOCK_WORLD_SUBFAMILIES = 10
 _BLOCK_WORLD_SUBFAMILY_STRIDE = _BLOCK_WORLD_SUBFAMILIES + 1
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncwarp();
+#endif
+""")
+def _sync_warp_local(): ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __shfl_sync(mask, value, src_lane);
+#else
+return value;
+#endif
+""")
+def _warp_shfl_i32(mask: wp.uint32, value: wp.int32, src_lane: wp.int32) -> wp.int32: ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __shfl_sync(mask, value, src_lane);
+#else
+return value;
+#endif
+""")
+def _warp_shfl_u32(mask: wp.uint32, value: wp.uint32, src_lane: wp.int32) -> wp.uint32: ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __ballot_sync(mask, pred);
+#else
+return pred ? 1u : 0u;
+#endif
+""")
+def _warp_ballot(mask: wp.uint32, pred: bool) -> wp.uint32: ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __popc(value);
+#else
+int c = 0;
+while (value != 0u) { c += (int)(value & 1u); value >>= 1u; }
+return c;
+#endif
+""")
+def _warp_popc(value: wp.uint32) -> wp.int32: ...
+
 
 _JOINT_MODE_REVOLUTE_HOST = int(JOINT_MODE_REVOLUTE)
 _JOINT_MODE_PRISMATIC_HOST = int(JOINT_MODE_PRISMATIC)
@@ -119,6 +177,15 @@ class BlockWorldSubfamilyDevice:
     world_subfamily_starts: wp.array
     world_csr_offsets: wp.array
     world_num_colors: wp.array
+
+
+@dataclass
+class WarpLocalNoColorDevice:
+    body_local_slot: wp.array
+    row_done: wp.array
+    failed: wp.array
+    row_count: int
+    max_world_bodies: int
 
 
 @dataclass(frozen=True)
@@ -916,6 +983,34 @@ def _block_world_subfamily_prepare_iterate_kernel(
         outer = outer + wp.int32(1)
 
 
+@wp.func
+def _warp_local_element_mask(
+    eid: wp.int32,
+    elements: wp.array[ElementInteractionData],
+    body_local_slot: wp.array[wp.int32],
+):
+    mask_lo = wp.uint32(0)
+    mask_hi = wp.uint32(0)
+    valid = wp.int32(1)
+    for i in range(MAX_BODIES):
+        body = elements[eid].bodies[i]
+        if body < wp.int32(0):
+            break
+        slot = body_local_slot[body]
+        if slot < wp.int32(0) or slot >= wp.int32(64):
+            valid = wp.int32(0)
+        elif slot < wp.int32(32):
+            mask_lo = mask_lo | (wp.uint32(1) << wp.uint32(slot))
+        else:
+            mask_hi = mask_hi | (wp.uint32(1) << wp.uint32(slot - wp.int32(32)))
+    return mask_lo, mask_hi, valid
+
+
+@wp.kernel(enable_backward=False)
+def _warp_local_reset_failed_kernel(failed: wp.array[wp.int32]):
+    failed[0] = wp.int32(0)
+
+
 def _joint_mode_rank(mode: int) -> int:
     if mode == _JOINT_MODE_REVOLUTE_HOST:
         return 0
@@ -1448,6 +1543,385 @@ def _color_grid_direct_runner(world: PhoenXWorld, graph: ColorGridDevice, *, blo
     return run
 
 
+@functools.cache
+def _make_warp_local_static_no_color_kernel(
+    *,
+    revolute_only: bool,
+    has_joints: bool,
+    has_contacts: bool,
+    skip_joint_pgs: bool,
+    selective_joint_pgs: bool,
+    has_sleeping: bool,
+    has_soft_contact_pd: bool,
+    refill: bool,
+):
+    _dispatch_prepare_cid = _make_multiworld_rigid_prepare_dispatch_func(
+        revolute_only=revolute_only,
+        has_joints=has_joints,
+        has_contacts=has_contacts,
+        skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
+        has_soft_contact_pd=has_soft_contact_pd,
+        cached_prepare=False,
+        enable_column_timers=False,
+    )[0]
+    _dispatch_iterate_cid = _make_multiworld_rigid_iterate_dispatch_funcs(
+        revolute_only=revolute_only,
+        has_joints=has_joints,
+        has_contacts=has_contacts,
+        skip_joint_pgs=skip_joint_pgs,
+        selective_joint_pgs=selective_joint_pgs,
+        has_sleeping=has_sleeping,
+        has_soft_contact_pd=has_soft_contact_pd,
+        enable_column_timers=False,
+        use_bias=True,
+    )[0]
+
+    @wp.func
+    def _run_phase(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        world_elements: wp.array[wp.int32],
+        world_element_offsets: wp.array[wp.int32],
+        world_element_count: wp.array[wp.int32],
+        elements: wp.array[ElementInteractionData],
+        body_local_slot: wp.array[wp.int32],
+        row_done: wp.array[wp.int32],
+        failed: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
+        num_bodies: wp.int32,
+        copy_state: CopyStateContainer,
+        world_id: wp.int32,
+        lane: wp.int32,
+        max_waves: wp.int32,
+        phase: wp.int32,
+        inner_sweeps: wp.int32,
+    ):
+        base = world_element_offsets[world_id]
+        count = world_element_count[world_id]
+        slot = lane
+        while slot < count:
+            row_done[base + slot] = wp.int32(0)
+            slot = slot + wp.int32(32)
+        _sync_warp_local()
+
+        done = wp.int32(0)
+        wave = wp.int32(0)
+        warp_mask = wp.uint32(0xFFFFFFFF)
+        while done < count and wave < max_waves:
+            accepted = bool(False)
+            accepted_slot = wp.int32(-1)
+            occupied_lo = wp.uint32(0)
+            occupied_hi = wp.uint32(0)
+
+            if wp.static(refill):
+                src_lane = wp.int32(0)
+                while src_lane < wp.int32(32):
+                    candidate = wp.int32(-1)
+                    candidate_mask_lo = wp.uint32(0)
+                    candidate_mask_hi = wp.uint32(0)
+                    invalid = wp.int32(0)
+                    if lane == src_lane:
+                        slot = lane
+                        while slot < count and candidate < wp.int32(0) and invalid == wp.int32(0):
+                            if row_done[base + slot] == wp.int32(0):
+                                cid = world_elements[base + slot]
+                                candidate_mask_lo, candidate_mask_hi, valid = _warp_local_element_mask(
+                                    cid, elements, body_local_slot
+                                )
+                                conflict = (occupied_lo & candidate_mask_lo) | (occupied_hi & candidate_mask_hi)
+                                if valid == wp.int32(0):
+                                    invalid = wp.int32(1)
+                                elif conflict == wp.uint32(0):
+                                    candidate = slot
+                            slot = slot + wp.int32(32)
+
+                    invalid_bits = _warp_ballot(warp_mask, invalid != wp.int32(0))
+                    if invalid_bits != wp.uint32(0):
+                        if lane == wp.int32(0):
+                            failed[0] = wp.int32(1)
+                        return
+
+                    src_candidate = _warp_shfl_i32(warp_mask, candidate, src_lane)
+                    src_mask_lo = _warp_shfl_u32(warp_mask, candidate_mask_lo, src_lane)
+                    src_mask_hi = _warp_shfl_u32(warp_mask, candidate_mask_hi, src_lane)
+                    if src_candidate >= wp.int32(0):
+                        occupied_lo = occupied_lo | src_mask_lo
+                        occupied_hi = occupied_hi | src_mask_hi
+                        if lane == src_lane:
+                            accepted = bool(True)
+                            accepted_slot = src_candidate
+                    src_lane = src_lane + wp.int32(1)
+            else:
+                proposed = wp.int32(-1)
+                proposed_mask_lo = wp.uint32(0)
+                proposed_mask_hi = wp.uint32(0)
+                invalid = wp.int32(0)
+                slot = lane
+                while slot < count and proposed < wp.int32(0) and invalid == wp.int32(0):
+                    if row_done[base + slot] == wp.int32(0):
+                        cid = world_elements[base + slot]
+                        proposed_mask_lo, proposed_mask_hi, valid = _warp_local_element_mask(
+                            cid, elements, body_local_slot
+                        )
+                        if valid != wp.int32(0):
+                            proposed = slot
+                        else:
+                            invalid = wp.int32(1)
+                    slot = slot + wp.int32(32)
+
+                invalid_bits = _warp_ballot(warp_mask, invalid != wp.int32(0))
+                if invalid_bits != wp.uint32(0):
+                    if lane == wp.int32(0):
+                        failed[0] = wp.int32(1)
+                    return
+
+                active_i = wp.int32(0)
+                if proposed >= wp.int32(0):
+                    active_i = wp.int32(1)
+
+                src_lane = wp.int32(0)
+                while src_lane < wp.int32(32):
+                    src_active = _warp_shfl_i32(warp_mask, active_i, src_lane)
+                    src_mask_lo = _warp_shfl_u32(warp_mask, proposed_mask_lo, src_lane)
+                    src_mask_hi = _warp_shfl_u32(warp_mask, proposed_mask_hi, src_lane)
+                    conflict = (occupied_lo & src_mask_lo) | (occupied_hi & src_mask_hi)
+                    if src_active != wp.int32(0) and conflict == wp.uint32(0):
+                        occupied_lo = occupied_lo | src_mask_lo
+                        occupied_hi = occupied_hi | src_mask_hi
+                        if lane == src_lane:
+                            accepted = bool(True)
+                            accepted_slot = proposed
+                    src_lane = src_lane + wp.int32(1)
+
+            if accepted:
+                cid = world_elements[base + accepted_slot]
+                row_done[base + accepted_slot] = wp.int32(1)
+                if phase == wp.int32(0):
+                    _dispatch_prepare_cid(
+                        constraints,
+                        contact_cols,
+                        bodies,
+                        particles,
+                        cc,
+                        contacts,
+                        copy_state,
+                        num_bodies,
+                        idt,
+                        cid,
+                        num_joints,
+                        joint_pgs_enabled,
+                    )
+                else:
+                    _dispatch_iterate_cid(
+                        constraints,
+                        contact_cols,
+                        bodies,
+                        particles,
+                        cc,
+                        contacts,
+                        copy_state,
+                        num_bodies,
+                        idt,
+                        sor_boost,
+                        cid,
+                        num_joints,
+                        joint_pgs_enabled,
+                        inner_sweeps,
+                    )
+
+            accepted_bits = _warp_ballot(warp_mask, accepted)
+            done = done + _warp_popc(accepted_bits)
+            _sync_warp_local()
+            wave = wave + wp.int32(1)
+
+        if done < count and lane == wp.int32(0):
+            failed[0] = wp.int32(1)
+        _sync_warp_local()
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        world_elements: wp.array[wp.int32],
+        world_element_offsets: wp.array[wp.int32],
+        world_element_count: wp.array[wp.int32],
+        elements: wp.array[ElementInteractionData],
+        body_local_slot: wp.array[wp.int32],
+        row_done: wp.array[wp.int32],
+        failed: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
+        num_bodies: wp.int32,
+        outer_iters: wp.int32,
+        inner_sweeps: wp.int32,
+        max_waves: wp.int32,
+        num_worlds: wp.int32,
+        copy_state: CopyStateContainer,
+    ):
+        tid = wp.tid()
+        lane = tid & wp.int32(31)
+        world_id = tid / wp.int32(32)
+        if world_id >= num_worlds:
+            return
+
+        _run_phase(
+            constraints,
+            contact_cols,
+            bodies,
+            particles,
+            idt,
+            sor_boost,
+            world_elements,
+            world_element_offsets,
+            world_element_count,
+            elements,
+            body_local_slot,
+            row_done,
+            failed,
+            cc,
+            contacts,
+            num_joints,
+            joint_pgs_enabled,
+            num_bodies,
+            copy_state,
+            world_id,
+            lane,
+            max_waves,
+            wp.int32(0),
+            inner_sweeps,
+        )
+
+        outer = wp.int32(0)
+        while outer < outer_iters:
+            _run_phase(
+                constraints,
+                contact_cols,
+                bodies,
+                particles,
+                idt,
+                sor_boost,
+                world_elements,
+                world_element_offsets,
+                world_element_count,
+                elements,
+                body_local_slot,
+                row_done,
+                failed,
+                cc,
+                contacts,
+                num_joints,
+                joint_pgs_enabled,
+                num_bodies,
+                copy_state,
+                world_id,
+                lane,
+                max_waves,
+                wp.int32(1),
+                inner_sweeps,
+            )
+            outer = outer + wp.int32(1)
+
+    return kernel
+
+
+def _build_warp_local_no_color_device(world: PhoenXWorld) -> WarpLocalNoColorDevice:
+    body_world = world.bodies.world_id.numpy().astype(np.int32, copy=False)
+    if body_world.shape[0] != int(world.num_bodies):
+        raise RuntimeError("body world-id array length does not match world.num_bodies")
+    counts = np.zeros(int(world.num_worlds), dtype=np.int32)
+    body_local_slot = np.full(int(world.num_bodies), -1, dtype=np.int32)
+    for body, world_id in enumerate(body_world):
+        if 0 <= int(world_id) < int(world.num_worlds):
+            slot = int(counts[int(world_id)])
+            body_local_slot[body] = slot
+            counts[int(world_id)] += 1
+    max_world_bodies = int(counts.max(initial=0))
+    if max_world_bodies > 64:
+        raise RuntimeError(
+            f"warp_local no-color prototype requires <=64 rigid bodies per world (observed {max_world_bodies})"
+        )
+    row_count = int(world._per_world_element_count.numpy().sum())
+    return WarpLocalNoColorDevice(
+        body_local_slot=wp.array(body_local_slot, dtype=wp.int32, device=world.device),
+        row_done=wp.zeros(max(1, int(world._constraint_capacity)), dtype=wp.int32, device=world.device),
+        failed=wp.zeros(1, dtype=wp.int32, device=world.device),
+        row_count=row_count,
+        max_world_bodies=max_world_bodies,
+    )
+
+
+def _warp_local_no_color_runner(
+    world: PhoenXWorld, graph: WarpLocalNoColorDevice, *, max_waves: int, refill: bool = False
+):
+    device = world.device
+    contact_views = world._contact_views if world._contact_views is not None else world._contact_views_placeholder
+    idt = wp.float32(1.0 / world.substep_dt)
+    inner_sweeps = int(_EXPERIMENTAL_INNER_SWEEPS)
+    outer_iters = int(world.solver_iterations) // inner_sweeps
+    flags = world._dispatch_specialization_flags()
+    kernel = _make_warp_local_static_no_color_kernel(
+        revolute_only=bool(flags["revolute_only"]),
+        has_joints=bool(flags["has_joints"]),
+        has_contacts=world.max_contact_columns > 0,
+        skip_joint_pgs=bool(flags["skip_joint_pgs"]),
+        selective_joint_pgs=bool(flags["selective_joint_pgs"]),
+        has_sleeping=bool(flags["has_sleeping"]),
+        has_soft_contact_pd=bool(flags["has_soft_contact_pd"]),
+        refill=bool(refill),
+    )
+    dim = max(1, int(world.num_worlds) * 32)
+
+    def run() -> None:
+        wp.launch(_warp_local_reset_failed_kernel, dim=1, inputs=[graph.failed], device=device)
+        wp.launch(
+            kernel,
+            dim=dim,
+            block_dim=256,
+            inputs=[
+                world.constraints,
+                world._contact_cols,
+                world.bodies,
+                world._particles_or_sentinel(),
+                idt,
+                wp.float32(world.sor_boost),
+                world._per_world_elements,
+                world._per_world_element_offsets,
+                world._per_world_element_count,
+                world._elements,
+                graph.body_local_slot,
+                graph.row_done,
+                graph.failed,
+                world._contact_container,
+                contact_views,
+                wp.int32(world.num_joints),
+                world._joint_pgs_enabled,
+                wp.int32(world.num_bodies),
+                wp.int32(outer_iters),
+                wp.int32(inner_sweeps),
+                wp.int32(max_waves),
+                wp.int32(world.num_worlds),
+                world._copy_state,
+            ],
+            device=device,
+        )
+
+    return run
+
+
 def _parse_csv_ints(value: str) -> tuple[int, ...]:
     return tuple(int(raw.strip()) for raw in value.split(",") if raw.strip())
 
@@ -1522,6 +1996,24 @@ def _scheduler_candidates(
             SchedulerCandidate(
                 f"block_world_grouped_{block_dim}",
                 _block_world_subfamily_runner(world, subfamily_graph, block_dim=block_dim),
+            )
+        )
+    try:
+        warp_graph = _build_warp_local_no_color_device(world)
+    except RuntimeError:
+        pass
+    else:
+        candidates.append(
+            SchedulerCandidate(
+                "warp_local",
+                _warp_local_no_color_runner(world, warp_graph, max_waves=args.warp_local_max_waves),
+            )
+        )
+        stack_graph = _build_warp_local_no_color_device(world)
+        candidates.append(
+            SchedulerCandidate(
+                "warp_local_stack",
+                _warp_local_no_color_runner(world, stack_graph, max_waves=args.warp_local_max_waves, refill=True),
             )
         )
     return candidates
@@ -1758,20 +2250,21 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
         )
         return
 
-    runs: list[tuple[str, object]] = []
+    runs: list[tuple[str, object, WarpLocalNoColorDevice | None]] = []
     if args.mode in ("flat", "both", "all"):
-        runs.append(("flat", _color_grid_runner(world, grid_graph, block_dim=args.block_dim)))
+        runs.append(("flat", _color_grid_runner(world, grid_graph, block_dim=args.block_dim), None))
     if args.mode in ("flat_grouped", "grouped", "both", "all"):
-        runs.append(("flat_grouped", _color_grid_runner(world, grouped_grid_graph, block_dim=args.block_dim)))
+        runs.append(("flat_grouped", _color_grid_runner(world, grouped_grid_graph, block_dim=args.block_dim), None))
     if args.mode in ("direct", "both", "all"):
-        runs.append(("direct", _color_grid_direct_runner(world, grid_graph, block_dim=args.block_dim)))
+        runs.append(("direct", _color_grid_direct_runner(world, grid_graph, block_dim=args.block_dim), None))
     if args.mode in ("block_world", "all"):
-        runs.append(("block_world", _block_world_runner(world, block_dim=args.block_world_dim)))
+        runs.append(("block_world", _block_world_runner(world, block_dim=args.block_world_dim), None))
     if args.mode in ("block_world_grouped", "subfamily", "all"):
         runs.append(
             (
                 "block_world_grouped",
                 _block_world_subfamily_runner(world, subfamily_graph, block_dim=args.block_world_dim),
+                None,
             )
         )
     if args.mode in ("mega", "all"):
@@ -1779,6 +2272,25 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
             (
                 "mega",
                 _color_grid_mega_runner(world, grid_graph, block_dim=args.block_dim, worker_blocks=args.mega_blocks),
+                None,
+            )
+        )
+    if args.mode in ("warp_local", "all"):
+        warp_graph = _build_warp_local_no_color_device(world)
+        runs.append(
+            (
+                "warp_local",
+                _warp_local_no_color_runner(world, warp_graph, max_waves=args.warp_local_max_waves),
+                warp_graph,
+            )
+        )
+    if args.mode in ("warp_local_stack", "all"):
+        warp_graph = _build_warp_local_no_color_device(world)
+        runs.append(
+            (
+                "warp_local_stack",
+                _warp_local_no_color_runner(world, warp_graph, max_waves=args.warp_local_max_waves, refill=True),
+                warp_graph,
             )
         )
     if args.mode in ("mega_direct", "all"):
@@ -1792,19 +2304,22 @@ def run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
                     worker_blocks=args.mega_blocks,
                     row_bound=args.row_bound,
                 ),
+                None,
             )
         )
 
-    for _label, run in runs:
+    for _label, run, warp_graph in runs:
         run()
         wp.synchronize_device()
         _validate(grid_graph, expected)
+        if warp_graph is not None and int(warp_graph.failed.numpy()[0]) != 0:
+            raise RuntimeError("warp_local scheduler failed to finish all rows")
 
     base_min, base_med = _bench(
         world._solve_main, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=world.device
     )
     pieces = []
-    for label, run in runs:
+    for label, run, _warp_graph in runs:
         min_ms, med_ms = _bench(run, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials, device=world.device)
         speed = base_min / min_ms if min_ms > 0.0 else float("nan")
         pieces.append(f"{label}={min_ms:8.3f}ms({speed:5.3f}x)")
@@ -1839,6 +2354,8 @@ def parse_args() -> argparse.Namespace:
             "block_world",
             "block_world_grouped",
             "subfamily",
+            "warp_local",
+            "warp_local_stack",
             "autotune",
             "adaptive",
             "mega",
@@ -1855,6 +2372,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--mega-blocks", type=int, default=128)
     parser.add_argument("--row-bound", type=int, default=64)
+    parser.add_argument("--warp-local-max-waves", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--n-runs", type=int, default=10)
     parser.add_argument("--tune-block-world-dims", default="32,64,128")
@@ -1884,7 +2402,8 @@ def main() -> None:
     print(
         f"device={wp.get_device()} block_dim={args.block_dim} block_world_dim={args.block_world_dim} "
         f"prepare_refresh_stride={args.prepare_refresh_stride} mega_blocks={args.mega_blocks} "
-        f"row_bound={args.row_bound} n_runs={args.n_runs} mode={args.mode} "
+        f"row_bound={args.row_bound} warp_local_max_waves={args.warp_local_max_waves} "
+        f"n_runs={args.n_runs} mode={args.mode} "
         f"unsafe_prototypes={args.allow_unsafe_prototypes}"
     )
     for scene in args.scenes:

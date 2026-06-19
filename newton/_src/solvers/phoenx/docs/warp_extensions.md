@@ -19,8 +19,11 @@ Keep new native snippets tiny, GPU-scoped, and documented here.
   `_warp_shfl_u32`, `_warp_ballot`, and `_warp_popc`: experimental wrappers
   used by the one-warp-per-world no-coloring PGS feasibility benchmark. They
   let lanes propose constraint rows and greedily accept a body-disjoint
-  micro-wave without global atomics. These are not production solver entry
-  points yet.
+  micro-wave without global atomics.
+- `benchmarks/experimental/bench_color_grid_actual_solve` defines the same
+  shuffle/ballot wrappers for an actual-solve no-color scheduler experiment,
+  including a refill/tile-stack variant. These are benchmarking entry points
+  only; current real-kernel measurements do not justify production use.
 
 ## Bit Operations
 
