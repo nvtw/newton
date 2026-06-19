@@ -723,6 +723,17 @@ def normalize_kernel(x: wp.array[wp.float32], mean: wp.float32, inv_std: wp.floa
 
 
 @wp.kernel
+def normalize_from_stats_kernel(x: wp.array[wp.float32], stats: wp.array[wp.float32], count: wp.int32, eps: wp.float32):
+    i = wp.tid()
+    if i < count:
+        inv_count = wp.float32(1.0) / wp.float32(count)
+        mean = stats[0] * inv_count
+        var = wp.max(stats[1] * inv_count - mean * mean, wp.float32(0.0))
+        inv_std = wp.float32(1.0) / wp.sqrt(var + eps)
+        x[i] = (x[i] - mean) * inv_std
+
+
+@wp.kernel
 def concat_obs_action_kernel(
     obs: wp.array2d[wp.float32],
     actions: wp.array2d[wp.float32],

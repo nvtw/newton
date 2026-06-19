@@ -113,6 +113,19 @@ class TestRolloutBuffer(unittest.TestCase):
         np.testing.assert_allclose(buffer.advantages.numpy(), expected_vtrace_adv, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(buffer.returns.numpy(), expected_vtrace_returns, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_normalize_advantages_is_graph_capturable(self) -> None:
+        device = _rl_cuda_device()
+        buffer = rl.BufferRollout(num_steps=3, num_envs=4, obs_dim=2, action_dim=1, device=device)
+        advantages_np = np.array([1.0, -2.0, 0.5, 3.0, -1.0, 4.0, 2.0, -3.0, 0.25, 1.5, -0.5, 2.5], dtype=np.float32)
+        buffer.advantages.assign(advantages_np)
+
+        with wp.ScopedCapture(device=device) as capture:
+            buffer.normalize_advantages()
+        wp.capture_launch(capture.graph)
+
+        expected = (advantages_np - float(np.mean(advantages_np))) / float(np.sqrt(np.var(advantages_np) + 1.0e-8))
+        np.testing.assert_allclose(buffer.advantages.numpy(), expected, rtol=2.0e-6, atol=2.0e-6)
+
 
 class TestTrainerPPO(unittest.TestCase):
     def test_manual_actor_backward_matches_tape_update(self) -> None:

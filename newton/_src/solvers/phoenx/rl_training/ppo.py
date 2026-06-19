@@ -17,7 +17,7 @@ from .kernels import (
     mirror_2d_kernel,
     mirrored_action_mse_grad_kernel,
     mirrored_action_mse_loss_kernel,
-    normalize_kernel,
+    normalize_from_stats_kernel,
     ppo_actor_loss_backward_kernel,
     ppo_actor_loss_kernel,
     scatter_trajectory_ratios_kernel,
@@ -153,6 +153,7 @@ class BatchPPO:
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
         self.priority_weights = wp.ones(self.num_envs, dtype=wp.float32, device=self.device)
+        self._advantage_stats = wp.zeros(2, dtype=wp.float32, device=self.device)
 
     @property
     def num_samples(self) -> int:
@@ -163,7 +164,7 @@ class BatchPPO:
     def normalize_advantages(self, eps: float = 1.0e-8) -> None:
         """Normalize advantages in place."""
 
-        _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps)
+        _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps, stats=self._advantage_stats)
 
 
 class BufferRollout:
@@ -205,6 +206,7 @@ class BufferRollout:
         self.advantages = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
+        self._advantage_stats = wp.zeros(2, dtype=wp.float32, device=self.device)
 
     @property
     def num_samples(self) -> int:
@@ -236,7 +238,7 @@ class BufferRollout:
     def normalize_advantages(self, eps: float = 1.0e-8) -> None:
         """Normalize advantages in place."""
 
-        _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps)
+        _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps, stats=self._advantage_stats)
 
     def compute_vtrace_returns(
         self,
@@ -910,9 +912,20 @@ class TrainerPPO:
 
 
 def _normalize_advantages(
-    advantages: wp.array[wp.float32], count: int, device: wp.context.Device, *, eps: float
+    advantages: wp.array[wp.float32],
+    count: int,
+    device: wp.context.Device,
+    *,
+    eps: float,
+    stats: wp.array[wp.float32] | None = None,
 ) -> None:
-    stats = wp.zeros(2, dtype=wp.float32, device=device)
+    if count <= 0:
+        return
+    if stats is None:
+        stats = wp.zeros(2, dtype=wp.float32, device=device)
+    elif int(stats.shape[0]) != 2:
+        raise ValueError("advantage normalization stats buffer must have length 2")
+    stats.zero_()
     wp.launch(
         sum_and_sumsq_kernel,
         dim=count,
@@ -920,14 +933,10 @@ def _normalize_advantages(
         outputs=[stats],
         device=device,
     )
-    stats_np = stats.numpy()
-    mean = float(stats_np[0]) / float(count)
-    var = max(float(stats_np[1]) / float(count) - mean * mean, 0.0)
-    inv_std = 1.0 / np.sqrt(var + float(eps))
     wp.launch(
-        normalize_kernel,
+        normalize_from_stats_kernel,
         dim=count,
-        inputs=[advantages, mean, float(inv_std), count],
+        inputs=[advantages, stats, count, float(eps)],
         device=device,
     )
 
