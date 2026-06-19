@@ -130,6 +130,31 @@ class TestRolloutBuffer(unittest.TestCase):
         expected = (advantages_np - float(np.mean(advantages_np))) / float(np.sqrt(np.var(advantages_np) + 1.0e-8))
         np.testing.assert_allclose(buffer.advantages.numpy(), expected, rtol=2.0e-6, atol=2.0e-6)
 
+    def test_reward_done_success_sums_are_graph_capturable(self) -> None:
+        device = _rl_cuda_device()
+        buffer = rl.BufferRollout(num_steps=3, num_envs=2, obs_dim=2, action_dim=1, device=device)
+        rewards = np.array([1.0, -2.0, 0.5, 3.0, -1.0, 4.0], dtype=np.float32)
+        dones = np.array([0.0, 1.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        successes = np.array([0.2, 0.4, 0.6, 0.8, 1.0, 0.0], dtype=np.float32)
+        buffer.rewards.assign(rewards)
+        buffer.dones.assign(dones)
+        buffer.successes.assign(successes)
+
+        buffer.compute_reward_done_success_sums()
+        with wp.ScopedCapture(device=device) as capture:
+            buffer.compute_reward_done_success_sums()
+        wp.capture_launch(capture.graph)
+
+        expected_sums = np.array([np.sum(rewards), np.sum(dones), np.sum(successes)], dtype=np.float32)
+        np.testing.assert_allclose(
+            buffer.compute_reward_done_success_sums().numpy(), expected_sums, rtol=0.0, atol=1.0e-6
+        )
+
+        mean_reward, mean_done, mean_success = buffer.reward_done_success_means()
+        self.assertAlmostEqual(mean_reward, float(np.mean(rewards)), places=6)
+        self.assertAlmostEqual(mean_done, float(np.mean(dones)), places=6)
+        self.assertAlmostEqual(mean_success, float(np.mean(successes)), places=6)
+
 
 class TestTrainerPPO(unittest.TestCase):
     def test_manual_actor_backward_matches_tape_update(self) -> None:
@@ -626,6 +651,47 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertTrue(math.isfinite(stats.clip_fraction))
         self.assertGreater(float(np.max(np.abs(actor_after - actor_before))), 0.0)
 
+    def test_minibatch_update_reserve_graph_captures_without_readback(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(29)
+        config = rl.ConfigPPO(
+            train_epochs=1,
+            minibatch_size=4,
+            replay_ratio=1.0,
+            priority_alpha=0.4,
+            priority_beta=0.5,
+            normalize_advantages=True,
+            actor_lr=1.0e-3,
+            critic_lr=1.0e-3,
+            entropy_coeff=0.0,
+            max_grad_norm=0.3,
+            manual_actor_backward=True,
+            manual_critic_backward=True,
+            shared_value_network=True,
+        )
+        trainer = rl.TrainerPPO(obs_dim=4, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=17)
+        buffer = rl.BufferRollout(num_steps=2, num_envs=4, obs_dim=4, action_dim=2, device=device)
+        n = buffer.num_samples
+        buffer.obs.assign(rng.normal(size=(n, 4)).astype(np.float32))
+        buffer.actions.assign(np.tanh(0.4 * rng.normal(size=(n, 2))).astype(np.float32))
+        buffer.advantages.assign(rng.normal(loc=0.2, scale=0.5, size=n).astype(np.float32))
+        buffer.returns.assign(rng.normal(size=n).astype(np.float32))
+        _policy_out, old_log_probs = trainer.actor.log_prob(buffer.obs, buffer.actions, requires_grad=False)
+        buffer.old_log_probs.assign(old_log_probs.numpy())
+
+        trainer.reserve_update_buffers(buffer)
+        before = trainer.actor.net.weights[0].numpy().copy()
+        with wp.ScopedCapture(device=device) as capture:
+            stats = trainer.update(buffer, read_stats=False)
+        wp.capture_launch(capture.graph)
+        after = trainer.actor.net.weights[0].numpy()
+
+        self.assertEqual(stats.policy_loss, 0.0)
+        self.assertEqual(stats.value_loss, 0.0)
+        self.assertEqual(stats.approx_kl, 0.0)
+        self.assertEqual(stats.clip_fraction, 0.0)
+        self.assertGreater(float(np.max(np.abs(after - before))), 0.0)
+
     def test_shared_value_network_update_graph_capture_and_checkpoint(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(11)
@@ -665,7 +731,7 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertEqual(trainer.value_column, 2)
         self.assertEqual(trainer.actor.net.output_dim, 3)
 
-        trainer.reserve_buffers(buffer.num_samples)
+        trainer.reserve_update_buffers(buffer)
         actor_before = trainer.actor.net.weights[0].numpy().copy()
         stats = trainer._update_shared_manual(buffer)
         actor_after = trainer.actor.net.weights[0].numpy()
@@ -677,7 +743,7 @@ class TestTrainerPPO(unittest.TestCase):
 
         graph_before = trainer.actor.net.weights[0].numpy().copy()
         with wp.ScopedCapture(device=device) as capture:
-            trainer._update_shared_manual(buffer, read_stats=False)
+            trainer.update(buffer, read_stats=False)
         wp.capture_launch(capture.graph)
         graph_after = trainer.actor.net.weights[0].numpy()
         self.assertGreater(float(np.max(np.abs(graph_after - graph_before))), 0.0)

@@ -493,6 +493,8 @@ def eval_fk(
         num_articulations = len(indices)
     else:
         num_articulations = model.articulation_count
+    if num_articulations == 0:
+        return
 
     wp.launch(
         kernel=eval_articulation_fk,

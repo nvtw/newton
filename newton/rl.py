@@ -189,6 +189,11 @@ def _main() -> int:
     g1_parser.add_argument("--checkpoint-path", default=None)
     g1_parser.add_argument("--checkpoint-interval", type=int, default=0)
     g1_parser.add_argument("--log-interval", type=int, default=1)
+    g1_parser.add_argument(
+        "--no-readback-diagnostics",
+        action="store_true",
+        help="Do not copy training diagnostics to the host during the train loop.",
+    )
 
     g1_eval_parser = subparsers.add_parser("eval-g1-ppo", help="Evaluate a saved Unitree G1 PPO checkpoint")
     g1_eval_parser.add_argument("--checkpoint", required=True)
@@ -308,6 +313,7 @@ def _main() -> int:
                 resume_checkpoint=args.resume_checkpoint,
                 checkpoint_path=args.checkpoint_path,
                 checkpoint_interval=args.checkpoint_interval,
+                readback_diagnostics=not args.no_readback_diagnostics,
             )
         )
         return 0

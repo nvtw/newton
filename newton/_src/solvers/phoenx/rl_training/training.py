@@ -127,6 +127,7 @@ class ConfigTrainG1PPO:
     resume_checkpoint: str | None = None
     checkpoint_path: str | None = None
     checkpoint_interval: int = 0
+    readback_diagnostics: bool = True
 
 
 @dataclass
@@ -395,7 +396,7 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         action_dim=env.action_dim,
         device=device,
     )
-    trainer.reserve_buffers(_ppo_trainer_reserve_rows(buffer, ppo_config))
+    trainer.reserve_update_buffers(buffer)
 
     history: list[StatsTrainG1PPO] = []
     start_iteration = int(getattr(trainer, "iteration", 0))
@@ -416,8 +417,8 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         t0 = time.perf_counter()
         env.collect_ppo_rollout(trainer, buffer, seed=cfg.seed + iteration * cfg.rollout_steps)
         t1 = time.perf_counter()
-        rollout_metrics = _g1_rollout_metrics(buffer, command_np)
-        update_stats = trainer.update(buffer)
+        rollout_metrics = _g1_rollout_metrics(buffer, command_np, readback=cfg.readback_diagnostics)
+        update_stats = trainer.update(buffer, read_stats=cfg.readback_diagnostics)
         t2 = time.perf_counter()
         stats = _merge_g1_stats(iteration, rollout_metrics, update_stats, t1 - t0, t2 - t1, buffer.num_samples)
         history.append(stats)
@@ -1049,14 +1050,19 @@ def _sample_g1_commands(
     return commands
 
 
-def _g1_rollout_metrics(buffer: BufferRollout, commands: np.ndarray) -> tuple[float, float, float, float, float, float]:
-    rewards = buffer.rewards.numpy()
-    dones = buffer.dones.numpy()
-    tracking_perf = buffer.successes.numpy()
+def _g1_rollout_metrics(
+    buffer: BufferRollout, commands: np.ndarray, *, readback: bool = True
+) -> tuple[float, float, float, float, float, float]:
+    if readback:
+        mean_reward, mean_done, mean_tracking_perf = buffer.reward_done_success_means()
+    else:
+        mean_reward = 0.0
+        mean_done = 0.0
+        mean_tracking_perf = 0.0
     return (
-        float(np.mean(rewards)),
-        float(np.mean(dones)),
-        float(np.mean(tracking_perf)),
+        mean_reward,
+        mean_done,
+        mean_tracking_perf,
         float(np.mean(commands[:, 0])),
         float(np.mean(commands[:, 1])),
         float(np.mean(commands[:, 2])),

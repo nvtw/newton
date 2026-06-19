@@ -90,6 +90,20 @@ def zero_scalar_kernel(x: wp.array[wp.float32]):
 
 
 @wp.kernel
+def pack_ppo_update_stats_kernel(
+    policy_loss: wp.array[wp.float32],
+    value_loss: wp.array[wp.float32],
+    approx_kl: wp.array[wp.float32],
+    clip_fraction: wp.array[wp.float32],
+    stats: wp.array[wp.float32],
+):
+    stats[0] = policy_loss[0]
+    stats[1] = value_loss[0]
+    stats[2] = approx_kl[0]
+    stats[3] = clip_fraction[0]
+
+
+@wp.kernel
 def zero_2d_tail_rows_kernel(start_row: wp.int32, x: wp.array2d[wp.float32]):
     row, col = wp.tid()
     x[start_row + row, col] = wp.float32(0.0)
@@ -856,6 +870,21 @@ def sum_and_sumsq_kernel(x: wp.array[wp.float32], count: wp.int32, stats: wp.arr
         v = x[i]
         wp.atomic_add(stats, 0, v)
         wp.atomic_add(stats, 1, v * v)
+
+
+@wp.kernel
+def rollout_reward_done_success_sums_kernel(
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    successes: wp.array[wp.float32],
+    count: wp.int32,
+    sums: wp.array[wp.float32],
+):
+    i = wp.tid()
+    if i < count:
+        wp.atomic_add(sums, 0, rewards[i])
+        wp.atomic_add(sums, 1, dones[i])
+        wp.atomic_add(sums, 2, successes[i])
 
 
 @wp.kernel

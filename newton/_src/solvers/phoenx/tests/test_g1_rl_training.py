@@ -152,12 +152,15 @@ class TestG1PhoenXRL(unittest.TestCase):
                 randomize_commands=False,
                 checkpoint_path=checkpoint_template,
                 checkpoint_interval=1,
+                readback_diagnostics=False,
             )
             first = rl.train_g1_ppo(train_config)
             first_path = f"{tmpdir}/g1_1.npz"
             restored = rl.load_ppo_checkpoint(first_path, device=device)
 
             self.assertEqual(first.history[0].iteration, 0)
+            self.assertEqual(first.history[0].policy_loss, 0.0)
+            self.assertEqual(first.history[0].value_loss, 0.0)
             self.assertEqual(first.trainer.iteration, 1)
             self.assertEqual(restored.iteration, 1)
             self.assertEqual(restored.config.minibatch_size, 0)
@@ -225,6 +228,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                     resume_checkpoint=first_path,
                     checkpoint_path=checkpoint_template,
                     checkpoint_interval=1,
+                    readback_diagnostics=False,
                 )
             )
             second_path = f"{tmpdir}/g1_2.npz"

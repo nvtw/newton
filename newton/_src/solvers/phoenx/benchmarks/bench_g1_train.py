@@ -201,6 +201,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         seed=int(args.seed),
         log_interval=0,
         randomize_commands=not bool(args.no_command_randomization),
+        readback_diagnostics=not bool(args.no_readback_diagnostics),
     )
     result = rl.train_g1_ppo(config)
     world = result.env.solver.world
@@ -237,6 +238,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "vtrace_c_clip": float(args.vtrace_c_clip),
         "reward_clip": float(args.reward_clip),
         "max_grad_norm": float(args.max_grad_norm),
+        "readback_diagnostics": not bool(args.no_readback_diagnostics),
         "sim_substeps": int(args.sim_substeps),
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
@@ -322,6 +324,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--multi-world-scheduler", default=g1_recipe.MULTI_WORLD_SCHEDULER)
     parser.add_argument("--prepare-refresh-stride", type=_parse_int_or_auto, default=g1_recipe.PREPARE_REFRESH_STRIDE)
     parser.add_argument("--no-command-randomization", action="store_true")
+    parser.add_argument(
+        "--no-readback-diagnostics",
+        action="store_true",
+        help="Skip host diagnostic readbacks during the measured train loop.",
+    )
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)
     parser.add_argument("--json-indent", type=int, default=2)

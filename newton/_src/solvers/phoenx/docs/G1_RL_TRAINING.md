@@ -99,7 +99,11 @@ the default nanoG1-style mirror regularizer for throughput-only comparisons. Use
 correction, `--manual-mlp-weight-grad-dtype float32` to disable BF16 MLP
 weight-gradient tile matmul, `--manual-mlp-forward-dtype float32` to disable
 large-minibatch BF16 MLP forward tile matmul, or `--max-grad-norm 0.0` to
-disable gradient clipping.
+disable gradient clipping. The default training loop keeps progress monitoring
+compact: one 3-float rollout metric buffer and one 4-float PPO update-stat
+buffer are copied to the host per iteration. Use `--no-readback-diagnostics` to
+skip those diagnostic copies in strict capture/benchmark runs; history entries
+use zero placeholders for those diagnostics in that mode.
 
 The gate command mirrors nanoG1's frozen bar: a six-command deterministic
 battery with noisy resets for falls/tracking performance, plus a separate
@@ -127,13 +131,18 @@ A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
 128x128x128 PPO networks, `minibatch_size=32768`, `replay_ratio=3.0`,
 `priority_alpha=0.4`, V-trace replay correction, mirror regularization, and
 BF16 manual MLP weight-gradient tile matmul plus large-minibatch BF16 hidden
-forward tile matmul reached 505,183 environment samples/s after warmup on
-2026-06-19. The corresponding physics rate was 2,525,913 steps/s.
+forward tile matmul reached 506,519 environment samples/s after warmup on
+2026-06-19. The corresponding physics rate was 2,532,597 steps/s.
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train \
     --iterations 3 --warmup-iterations 1
 ```
+
+The same benchmark with `--no-readback-diagnostics` reached 510,166 environment
+samples/s and 2,550,832 physics steps/s. Avoiding diagnostic host copies makes
+the update phase more graph-capture friendly, but end-to-end throughput is
+currently neutral because rollout/solver work dominates.
 
 nanoG1 reports about 1.28M environment samples/s while actually training, so
 the current mirror-enabled pure-Warp PhoenX G1 training loop is about 2.53x

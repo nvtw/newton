@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.sim import articulation as articulation_module
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -616,6 +617,17 @@ def test_empty_model(test, device):
 
     J = newton.eval_jacobian(model, state)
     H = newton.eval_mass_matrix(model, state)
+
+    launch = articulation_module.wp.launch
+
+    def fail_launch(*args, **kwargs):
+        raise AssertionError("eval_fk should not launch when no articulations are present")
+
+    articulation_module.wp.launch = fail_launch
+    try:
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    finally:
+        articulation_module.wp.launch = launch
 
     test.assertIsNone(J)
     test.assertIsNone(H)

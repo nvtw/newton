@@ -19,9 +19,11 @@ from .kernels import (
     mirrored_action_mse_grad_kernel,
     mirrored_action_mse_loss_kernel,
     normalize_from_stats_kernel,
+    pack_ppo_update_stats_kernel,
     ppo_actor_loss_backward_kernel,
     ppo_actor_loss_kernel,
     reduce_ppo_log_std_grad_kernel,
+    rollout_reward_done_success_sums_kernel,
     sample_trajectory_env_ids_kernel,
     scatter_trajectory_ratios_kernel,
     scatter_trajectory_values_kernel,
@@ -226,6 +228,7 @@ class BufferRollout:
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
         self._advantage_stats = wp.zeros(2, dtype=wp.float32, device=self.device)
+        self._metric_sums = wp.zeros(3, dtype=wp.float32, device=self.device)
 
     @property
     def num_samples(self) -> int:
@@ -258,6 +261,26 @@ class BufferRollout:
         """Normalize advantages in place."""
 
         _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps, stats=self._advantage_stats)
+
+    def compute_reward_done_success_sums(self) -> wp.array[wp.float32]:
+        """Compute rollout reward, done, and success sums in preallocated storage."""
+
+        self._metric_sums.zero_()
+        wp.launch(
+            rollout_reward_done_success_sums_kernel,
+            dim=self.num_samples,
+            inputs=[self.rewards, self.dones, self.successes, self.num_samples],
+            outputs=[self._metric_sums],
+            device=self.device,
+        )
+        return self._metric_sums
+
+    def reward_done_success_means(self) -> tuple[float, float, float]:
+        """Return rollout reward, done, and success means."""
+
+        sums = self.compute_reward_done_success_sums().numpy()
+        inv_count = 1.0 / float(self.num_samples)
+        return float(sums[0]) * inv_count, float(sums[1]) * inv_count, float(sums[2]) * inv_count
 
     def compute_vtrace_returns(
         self,
@@ -399,6 +422,7 @@ class TrainerPPO:
         self._value_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._approx_kl = wp.zeros(1, dtype=wp.float32, device=self.device)
         self._clip_fraction = wp.zeros(1, dtype=wp.float32, device=self.device)
+        self._update_stats = wp.zeros(4, dtype=wp.float32, device=self.device)
 
     def set_mirror_map(self, mirror_map: MirrorMapPPO | None) -> None:
         """Set or clear the optional PPO symmetry map."""
@@ -571,17 +595,58 @@ class TrainerPPO:
             raise ValueError("batch_size must be positive")
         self.actor.reserve_reuse_buffers(rows)
         self._ensure_actor_backward_buffers(rows, self.actor.net.output_dim)
+        self._ensure_actor_log_std_grad_partials(rows)
+        if self.config.mirror_loss_coeff > 0.0:
+            self._ensure_mirror_obs(rows)
         if self.critic is not None:
             self.critic.reserve_buffers(rows)
             self._ensure_critic_backward_buffers(rows)
 
-    def update(self, buffer: BufferRollout) -> StatsPPOUpdate:
+    def reserve_update_buffers(self, buffer: BufferRollout) -> None:
+        """Reserve all reusable buffers needed by :meth:`update` for ``buffer``."""
+
+        if buffer.obs_dim != self.obs_dim or buffer.action_dim != self.action_dim:
+            raise ValueError("BufferRollout dimensions do not match trainer dimensions")
+        update_rows = buffer.num_samples
+        if self._uses_minibatch_replay(buffer):
+            minibatch_size = int(self.config.minibatch_size)
+            if minibatch_size % buffer.num_steps != 0:
+                raise ValueError("PPO trajectory minibatch_size must be a multiple of rollout steps")
+            segment_count = minibatch_size // buffer.num_steps
+            if segment_count <= 0:
+                raise ValueError("PPO trajectory minibatch_size is smaller than one rollout trajectory")
+            batch = self._ensure_minibatch(buffer, segment_count)
+            self._ensure_trajectory_sampling_buffers(buffer.num_envs)
+            update_rows = batch.num_samples
+        self.reserve_buffers(max(buffer.num_envs, update_rows))
+
+    def _read_update_stat_values(self) -> tuple[float, float, float, float]:
+        wp.launch(
+            pack_ppo_update_stats_kernel,
+            dim=1,
+            inputs=[self._policy_loss, self._value_loss, self._approx_kl, self._clip_fraction],
+            outputs=[self._update_stats],
+            device=self.device,
+        )
+        stats = self._update_stats.numpy()
+        return float(stats[0]), float(stats[1]), float(stats[2]), float(stats[3])
+
+    def _read_update_stats(self) -> StatsPPOUpdate:
+        policy_loss, value_loss, approx_kl, clip_fraction = self._read_update_stat_values()
+        return StatsPPOUpdate(
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            approx_kl=approx_kl,
+            clip_fraction=clip_fraction,
+        )
+
+    def update(self, buffer: BufferRollout, *, read_stats: bool = True) -> StatsPPOUpdate:
         """Update actor and critic from a finished rollout buffer."""
 
         if buffer.obs_dim != self.obs_dim or buffer.action_dim != self.action_dim:
             raise ValueError("BufferRollout dimensions do not match trainer dimensions")
         if self._uses_minibatch_replay(buffer):
-            return self._update_minibatches(buffer)
+            return self._update_minibatches(buffer, read_stats=read_stats)
 
         if self.config.normalize_advantages:
             buffer.normalize_advantages()
@@ -592,16 +657,16 @@ class TrainerPPO:
         clip_fraction = 0.0
         train_epochs = int(self.config.train_epochs)
         for epoch in range(train_epochs):
-            read_stats = epoch == train_epochs - 1
+            epoch_read_stats = read_stats and epoch == train_epochs - 1
             if self.shared_value_network:
-                stats = self._update_shared_manual(buffer, read_stats=read_stats)
+                stats = self._update_shared_manual(buffer, read_stats=epoch_read_stats)
                 policy_loss = stats.policy_loss
                 value_loss = stats.value_loss
                 approx_kl = stats.approx_kl
                 clip_fraction = stats.clip_fraction
             else:
-                policy_loss, approx_kl, clip_fraction = self._update_actor(buffer, read_stats=read_stats)
-                value_loss = self._update_critic(buffer, read_stats=read_stats)
+                policy_loss, approx_kl, clip_fraction = self._update_actor(buffer, read_stats=epoch_read_stats)
+                value_loss = self._update_critic(buffer, read_stats=epoch_read_stats)
         return StatsPPOUpdate(
             policy_loss=policy_loss,
             value_loss=value_loss,
@@ -613,7 +678,7 @@ class TrainerPPO:
         minibatch_size = int(self.config.minibatch_size)
         return minibatch_size > 0 and float(self.config.replay_ratio) > 0.0 and minibatch_size < buffer.num_samples
 
-    def _update_minibatches(self, buffer: BufferRollout) -> StatsPPOUpdate:
+    def _update_minibatches(self, buffer: BufferRollout, *, read_stats: bool = True) -> StatsPPOUpdate:
         minibatch_size = int(self.config.minibatch_size)
         if minibatch_size % buffer.num_steps != 0:
             raise ValueError("PPO trajectory minibatch_size must be a multiple of rollout steps")
@@ -633,7 +698,7 @@ class TrainerPPO:
         approx_kl = 0.0
         clip_fraction = 0.0
         for minibatch_id in range(num_minibatches):
-            read_stats = minibatch_id == num_minibatches - 1
+            minibatch_read_stats = read_stats and minibatch_id == num_minibatches - 1
             if use_vtrace:
                 self._compute_vtrace_returns(buffer)
                 use_priority = self._prepare_trajectory_priority_weights(buffer)
@@ -665,17 +730,17 @@ class TrainerPPO:
                 batch.normalize_advantages()
             self._weight_minibatch_advantages(batch, use_priority)
             if self.shared_value_network:
-                stats = self._update_shared_manual(batch, read_stats=read_stats)
+                stats = self._update_shared_manual(batch, read_stats=minibatch_read_stats)
                 policy_loss = stats.policy_loss
                 value_loss = stats.value_loss
                 approx_kl = stats.approx_kl
                 clip_fraction = stats.clip_fraction
             else:
-                policy_loss, approx_kl, clip_fraction = self._update_actor(batch, read_stats=read_stats)
+                policy_loss, approx_kl, clip_fraction = self._update_actor(batch, read_stats=minibatch_read_stats)
             if use_vtrace:
                 self._scatter_minibatch_ratios(buffer, batch, segment_count)
             if not self.shared_value_network:
-                value_loss = self._update_critic(batch, read_stats=read_stats)
+                value_loss = self._update_critic(batch, read_stats=minibatch_read_stats)
             if use_vtrace:
                 self._scatter_minibatch_values(buffer, batch, segment_count)
 
@@ -900,22 +965,11 @@ class TrainerPPO:
             )
             self.actor.log_std.grad.assign(self._actor_log_std_grad)
         if read_stats:
-            policy_loss = float(self._policy_loss.numpy()[0])
-            value_loss = float(self._value_loss.numpy()[0])
-            approx_kl = float(self._approx_kl.numpy()[0])
-            clip_fraction = float(self._clip_fraction.numpy()[0])
+            stats = self._read_update_stats()
         else:
-            policy_loss = 0.0
-            value_loss = 0.0
-            approx_kl = 0.0
-            clip_fraction = 0.0
+            stats = StatsPPOUpdate(policy_loss=0.0, value_loss=0.0, approx_kl=0.0, clip_fraction=0.0)
         self.actor_optimizer.step()
-        return StatsPPOUpdate(
-            policy_loss=policy_loss,
-            value_loss=value_loss,
-            approx_kl=approx_kl,
-            clip_fraction=clip_fraction,
-        )
+        return stats
 
     def _update_actor(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> tuple[float, float, float]:
         if self.config.manual_actor_backward:
@@ -1022,9 +1076,7 @@ class TrainerPPO:
             )
             self.actor.log_std.grad.assign(self._actor_log_std_grad)
         if read_stats:
-            loss = float(self._policy_loss.numpy()[0])
-            kl = float(self._approx_kl.numpy()[0])
-            clip_fraction = float(self._clip_fraction.numpy()[0])
+            loss, _value_loss, kl, clip_fraction = self._read_update_stat_values()
         else:
             loss = 0.0
             kl = 0.0
@@ -1096,9 +1148,7 @@ class TrainerPPO:
                 )
         tape.backward(self._policy_loss)
         if read_stats:
-            loss = float(self._policy_loss.numpy()[0])
-            kl = float(self._approx_kl.numpy()[0])
-            clip_fraction = float(self._clip_fraction.numpy()[0])
+            loss, _value_loss, kl, clip_fraction = self._read_update_stat_values()
         else:
             loss = 0.0
             kl = 0.0
@@ -1147,7 +1197,7 @@ class TrainerPPO:
                 device=self.device,
             )
         self.critic.backward_manual(value_grad)
-        loss = float(self._value_loss.numpy()[0]) if read_stats else 0.0
+        loss = self._read_update_stat_values()[1] if read_stats else 0.0
         self.critic_optimizer.step()
         return loss
 
@@ -1176,20 +1226,27 @@ class TrainerPPO:
                     device=self.device,
                 )
         tape.backward(self._value_loss)
-        loss = float(self._value_loss.numpy()[0]) if read_stats else 0.0
+        loss = self._read_update_stat_values()[1] if read_stats else 0.0
         self.critic_optimizer.step()
         tape.zero()
         return loss
+
+    def _ensure_mirror_obs(self, rows: int) -> wp.array2d[wp.float32]:
+        requested_rows = int(rows)
+        if requested_rows <= 0:
+            raise ValueError("mirror observation row count must be positive")
+        if self._mirror_obs is None or int(self._mirror_obs.shape[0]) != requested_rows:
+            self._mirror_obs = wp.empty(
+                (requested_rows, self.obs_dim), dtype=wp.float32, device=self.device, requires_grad=False
+            )
+        return self._mirror_obs
 
     def _mirrored_obs(self, buffer: BufferRollout | BatchPPO) -> wp.array2d[wp.float32] | None:
         if self.config.mirror_loss_coeff <= 0.0:
             return None
         if self.mirror_map is None:
             raise ValueError("PPO mirror_loss_coeff requires a mirror map")
-        if self._mirror_obs is None or int(self._mirror_obs.shape[0]) != buffer.num_samples:
-            self._mirror_obs = wp.empty(
-                (buffer.num_samples, self.obs_dim), dtype=wp.float32, device=self.device, requires_grad=False
-            )
+        self._ensure_mirror_obs(buffer.num_samples)
         wp.launch(
             mirror_2d_kernel,
             dim=(buffer.num_samples, self.obs_dim),
