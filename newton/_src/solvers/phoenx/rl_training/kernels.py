@@ -14,6 +14,12 @@ ACTIVATION_TANH = 1
 ACTIVATION_RELU = 2
 ACTIVATION_ELU = 3
 
+DENSE_TILE_BATCH = 64
+DENSE_TILE_IN = 16
+DENSE_TILE_OUT = 16
+DENSE_TILE_BLOCK_DIM = 256
+DENSE_BIAS_TILE_BATCH = 256
+
 
 @wp.func
 def _activation(x: wp.float32, activation: wp.int32) -> wp.float32:
@@ -126,6 +132,98 @@ def dense_input_grad_kernel(
     for out_col in range(out_dim):
         total = total + grad_pre[row, out_col] * weight[in_col, out_col]
     grad_x[row, in_col] = total
+
+
+@wp.kernel
+def dense_weight_grad_tiled_kernel(
+    x: wp.array2d[wp.float32],
+    grad_pre: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    weight_grad: wp.array2d[wp.float32],
+):
+    in_tile, out_tile = wp.tid()
+    total = wp.tile_zeros(shape=(DENSE_TILE_IN, DENSE_TILE_OUT), dtype=wp.float32)
+    batch_tiles = (batch_size + DENSE_TILE_BATCH - wp.int32(1)) // DENSE_TILE_BATCH
+    for tile in range(batch_tiles):
+        x_tile = wp.tile_load(
+            x,
+            shape=(DENSE_TILE_BATCH, DENSE_TILE_IN),
+            offset=(tile * DENSE_TILE_BATCH, in_tile * DENSE_TILE_IN),
+        )
+        grad_tile = wp.tile_load(
+            grad_pre,
+            shape=(DENSE_TILE_BATCH, DENSE_TILE_OUT),
+            offset=(tile * DENSE_TILE_BATCH, out_tile * DENSE_TILE_OUT),
+        )
+        wp.tile_matmul(wp.tile_transpose(x_tile), grad_tile, total)
+    wp.tile_store(weight_grad, total, offset=(in_tile * DENSE_TILE_IN, out_tile * DENSE_TILE_OUT))
+
+
+@wp.kernel
+def dense_bias_grad_kernel(
+    grad_pre: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    bias_grad: wp.array[wp.float32],
+):
+    out_col = wp.tid()
+    total = wp.float32(0.0)
+    for row in range(batch_size):
+        total = total + grad_pre[row, out_col]
+    bias_grad[out_col] = total
+
+
+@wp.kernel
+def dense_bias_partial_grad_kernel(
+    grad_pre: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    partial_grad: wp.array2d[wp.float32],
+):
+    batch_tile, out_col = wp.tid()
+    start = batch_tile * DENSE_BIAS_TILE_BATCH
+    total = wp.float32(0.0)
+    for i in range(DENSE_BIAS_TILE_BATCH):
+        row = start + i
+        if row < batch_size:
+            total = total + grad_pre[row, out_col]
+    partial_grad[batch_tile, out_col] = total
+
+
+@wp.kernel
+def dense_bias_reduce_grad_kernel(
+    partial_grad: wp.array2d[wp.float32],
+    partial_count: wp.int32,
+    bias_grad: wp.array[wp.float32],
+):
+    out_col = wp.tid()
+    total = wp.float32(0.0)
+    for i in range(partial_count):
+        total = total + partial_grad[i, out_col]
+    bias_grad[out_col] = total
+
+
+@wp.kernel
+def dense_input_grad_tiled_kernel(
+    grad_pre: wp.array2d[wp.float32],
+    weight: wp.array2d[wp.float32],
+    out_dim: wp.int32,
+    grad_x: wp.array2d[wp.float32],
+):
+    batch_tile, in_tile = wp.tid()
+    total = wp.tile_zeros(shape=(DENSE_TILE_BATCH, DENSE_TILE_IN), dtype=wp.float32)
+    out_tiles = (out_dim + DENSE_TILE_OUT - wp.int32(1)) // DENSE_TILE_OUT
+    for tile in range(out_tiles):
+        grad_tile = wp.tile_load(
+            grad_pre,
+            shape=(DENSE_TILE_BATCH, DENSE_TILE_OUT),
+            offset=(batch_tile * DENSE_TILE_BATCH, tile * DENSE_TILE_OUT),
+        )
+        weight_tile = wp.tile_load(
+            weight,
+            shape=(DENSE_TILE_IN, DENSE_TILE_OUT),
+            offset=(in_tile * DENSE_TILE_IN, tile * DENSE_TILE_OUT),
+        )
+        wp.tile_matmul(grad_tile, wp.tile_transpose(weight_tile), total)
+    wp.tile_store(grad_x, total, offset=(batch_tile * DENSE_TILE_BATCH, in_tile * DENSE_TILE_IN))
 
 
 @wp.kernel

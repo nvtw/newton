@@ -14,12 +14,21 @@ from .kernels import (
     ACTIVATION_LINEAR,
     ACTIVATION_RELU,
     ACTIVATION_TANH,
+    DENSE_BIAS_TILE_BATCH,
+    DENSE_TILE_BATCH,
+    DENSE_TILE_BLOCK_DIM,
+    DENSE_TILE_IN,
+    DENSE_TILE_OUT,
     copy_1d_kernel,
     copy_2d_kernel,
     dense_activation_grad_kernel,
+    dense_bias_partial_grad_kernel,
+    dense_bias_reduce_grad_kernel,
     dense_input_grad_kernel,
+    dense_input_grad_tiled_kernel,
     dense_layer_kernel,
     dense_weight_bias_grad_kernel,
+    dense_weight_grad_tiled_kernel,
     fill_eps_kernel,
     gaussian_entropy_kernel,
     gaussian_log_prob_kernel,
@@ -83,6 +92,7 @@ class WarpMLP:
         self._manual_outputs: list[wp.array2d[wp.float32]] = []
         self._manual_output_grads: list[wp.array2d[wp.float32]] = []
         self._manual_pre_grads: list[wp.array2d[wp.float32]] = []
+        self._manual_bias_partials: list[wp.array2d[wp.float32]] = []
 
         rng = np.random.default_rng(seed)
         self.weights: list[wp.array] = []
@@ -183,22 +193,63 @@ class WarpMLP:
                 device=self.device,
             )
             x = self._manual_input if layer == 0 else self._manual_outputs[layer - 1]
-            wp.launch(
-                dense_weight_bias_grad_kernel,
-                dim=weight.shape,
-                inputs=[x, grad_pre, self._manual_batch_size],
-                outputs=[weight.grad, bias.grad],
-                device=self.device,
-            )
-            if layer > 0:
-                grad_y = self._manual_output_grads[layer - 1]
-                wp.launch(
-                    dense_input_grad_kernel,
-                    dim=grad_y.shape,
-                    inputs=[grad_pre, weight, int(weight.shape[1])],
-                    outputs=[grad_y],
+            if self.device.is_cuda:
+                wp.launch_tiled(
+                    dense_weight_grad_tiled_kernel,
+                    dim=(
+                        _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
+                        _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
+                    ),
+                    inputs=[x, grad_pre, self._manual_batch_size],
+                    outputs=[weight.grad],
+                    block_dim=DENSE_TILE_BLOCK_DIM,
                     device=self.device,
                 )
+                bias_partial = self._manual_bias_partials[layer]
+                wp.launch(
+                    dense_bias_partial_grad_kernel,
+                    dim=bias_partial.shape,
+                    inputs=[grad_pre, self._manual_batch_size],
+                    outputs=[bias_partial],
+                    device=self.device,
+                )
+                wp.launch(
+                    dense_bias_reduce_grad_kernel,
+                    dim=int(weight.shape[1]),
+                    inputs=[bias_partial, int(bias_partial.shape[0])],
+                    outputs=[bias.grad],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    dense_weight_bias_grad_kernel,
+                    dim=weight.shape,
+                    inputs=[x, grad_pre, self._manual_batch_size],
+                    outputs=[weight.grad, bias.grad],
+                    device=self.device,
+                )
+            if layer > 0:
+                grad_y = self._manual_output_grads[layer - 1]
+                if self.device.is_cuda:
+                    wp.launch_tiled(
+                        dense_input_grad_tiled_kernel,
+                        dim=(
+                            _ceil_div(int(grad_y.shape[0]), DENSE_TILE_BATCH),
+                            _ceil_div(int(grad_y.shape[1]), DENSE_TILE_IN),
+                        ),
+                        inputs=[grad_pre, weight, int(weight.shape[1])],
+                        outputs=[grad_y],
+                        block_dim=DENSE_TILE_BLOCK_DIM,
+                        device=self.device,
+                    )
+                else:
+                    wp.launch(
+                        dense_input_grad_kernel,
+                        dim=grad_y.shape,
+                        inputs=[grad_pre, weight, int(weight.shape[1])],
+                        outputs=[grad_y],
+                        device=self.device,
+                    )
 
     def _ensure_manual_buffers(self, batch_size: int) -> None:
         if self._manual_batch_size == int(batch_size) and len(self._manual_outputs) == len(self.weights):
@@ -207,11 +258,17 @@ class WarpMLP:
         self._manual_outputs = []
         self._manual_output_grads = []
         self._manual_pre_grads = []
+        self._manual_bias_partials = []
+        bias_tile_count = _ceil_div(self._manual_batch_size, DENSE_BIAS_TILE_BATCH)
         for width in self.layer_sizes[1:]:
             shape = (self._manual_batch_size, int(width))
             self._manual_outputs.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
             self._manual_output_grads.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
             self._manual_pre_grads.append(wp.empty(shape, dtype=wp.float32, device=self.device, requires_grad=False))
+            if self.device.is_cuda:
+                self._manual_bias_partials.append(
+                    wp.empty((bias_tile_count, int(width)), dtype=wp.float32, device=self.device, requires_grad=False)
+                )
 
     def copy_from(self, other: WarpMLP) -> None:
         """Copy parameters from another network with the same architecture."""
@@ -410,6 +467,10 @@ class GaussianActor:
         wp.launch(
             copy_1d_kernel, dim=self.action_dim, inputs=[other.log_std], outputs=[self.log_std], device=self.device
         )
+
+
+def _ceil_div(value: int, divisor: int) -> int:
+    return (int(value) + int(divisor) - 1) // int(divisor)
 
 
 def _check_same_shapes(params: list[wp.array], other_params: list[wp.array]) -> None:
