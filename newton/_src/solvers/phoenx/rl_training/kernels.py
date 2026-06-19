@@ -89,6 +89,33 @@ def zero_scalar_kernel(x: wp.array[wp.float32]):
 
 
 @wp.kernel
+def zero_ppo_actor_stats_kernel(
+    loss: wp.array[wp.float32],
+    approx_kl: wp.array[wp.float32],
+    clip_fraction: wp.array[wp.float32],
+    log_std_grad: wp.array[wp.float32],
+):
+    i = wp.tid()
+    if i == wp.int32(0):
+        loss[0] = wp.float32(0.0)
+        approx_kl[0] = wp.float32(0.0)
+        clip_fraction[0] = wp.float32(0.0)
+    if i < log_std_grad.shape[0]:
+        log_std_grad[i] = wp.float32(0.0)
+
+
+@wp.kernel
+def zero_ppo_loss_stats_kernel(
+    loss: wp.array[wp.float32],
+    approx_kl: wp.array[wp.float32],
+    clip_fraction: wp.array[wp.float32],
+):
+    loss[0] = wp.float32(0.0)
+    approx_kl[0] = wp.float32(0.0)
+    clip_fraction[0] = wp.float32(0.0)
+
+
+@wp.kernel
 def dense_activation_grad_kernel(
     y: wp.array2d[wp.float32],
     grad_y: wp.array2d[wp.float32],

@@ -31,6 +31,8 @@ from .kernels import (
     value_symmetry_loss_grad_kernel,
     value_symmetry_loss_kernel,
     weight_trajectory_advantages_kernel,
+    zero_ppo_actor_stats_kernel,
+    zero_ppo_loss_stats_kernel,
     zero_scalar_kernel,
 )
 from .networks import GaussianActor, WarpMLP
@@ -755,10 +757,12 @@ class TrainerPPO:
         if mirror_obs is not None:
             mirror_policy_out = self.actor.net.forward_reuse(mirror_obs)
 
-        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._policy_loss], device=self.device)
-        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._approx_kl], device=self.device)
-        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._clip_fraction], device=self.device)
-        self._actor_log_std_grad.zero_()
+        wp.launch(
+            zero_ppo_actor_stats_kernel,
+            dim=max(int(self.actor.log_std.shape[0]), 1),
+            outputs=[self._policy_loss, self._approx_kl, self._clip_fraction, self._actor_log_std_grad],
+            device=self.device,
+        )
         policy_out = self.actor.net.forward_manual(buffer.obs)
         policy_out_grad = self._ensure_actor_backward_buffers(buffer.num_samples, int(policy_out.shape[1]))
         wp.launch(
@@ -827,9 +831,12 @@ class TrainerPPO:
         if mirror_obs is not None:
             mirror_policy_out = self.actor.net.forward_reuse(mirror_obs)
 
-        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._policy_loss], device=self.device)
-        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._approx_kl], device=self.device)
-        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._clip_fraction], device=self.device)
+        wp.launch(
+            zero_ppo_loss_stats_kernel,
+            dim=1,
+            outputs=[self._policy_loss, self._approx_kl, self._clip_fraction],
+            device=self.device,
+        )
         with wp.Tape() as tape:
             policy_out, new_log_probs = self.actor.log_prob(buffer.obs, buffer.actions, requires_grad=True)
             entropy = wp.empty(buffer.num_samples, dtype=wp.float32, device=self.device, requires_grad=True)
