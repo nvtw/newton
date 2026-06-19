@@ -264,7 +264,7 @@ def _default_g1_ppo_config() -> ConfigPPO:
         entropy_coeff=1.0e-5,
         actor_lr=2.0e-3,
         critic_lr=2.0e-3,
-        train_epochs=4,
+        train_epochs=3,
         normalize_advantages=True,
     )
 

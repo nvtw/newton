@@ -65,6 +65,17 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(after - before, 6)
         self.assertTrue(np.isfinite(env.obs.numpy()).all())
 
+    def test_observe_clamps_extreme_state_to_finite_metrics(self) -> None:
+        env = _g1_test_env(world_count=1)
+        huge_qd = np.full(env.state_0.joint_qd.shape, 1.0e20, dtype=np.float32)
+        env.state_0.joint_qd.assign(huge_qd)
+
+        obs = env.observe()
+
+        self.assertTrue(np.isfinite(obs.numpy()).all())
+        self.assertTrue(np.isfinite(env.rewards.numpy()).all())
+        self.assertTrue(np.isfinite(env.dones.numpy()).all())
+
     def test_train_save_load_evaluate_and_resume(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL training tests")
         env_config = rl.ConfigEnvG1PhoenX(

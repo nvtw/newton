@@ -35,6 +35,8 @@ The environment follows nanoG1's G1 v3 control surface where practical:
   are masked to zero.
 - Reward weights mirror the nanoG1 recipe for velocity tracking, base penalties,
   torque proxy, action-rate penalty, alive reward, and termination penalty.
+- Default G1 PPO uses three train epochs, matching nanoG1's
+  `train.replay_ratio=3.0` more closely than the older four-epoch default.
 
 ## End-to-End Checkpoint Workflow
 
@@ -76,11 +78,17 @@ Result from this checkpoint:
 - 3,818,658 physics steps/s at 4096 worlds.
 - 9.8 s setup time at 4096 worlds.
 
-A small full train-loop run with 4096 worlds, 8 rollout steps, and the
-default 128x128x128 PPO networks reached 156,611 environment samples/s on
-iteration 1 after the first warmup-heavy iteration. That includes rollout and
-PPO update time, so it should not be compared directly to nanoG1 no-learner
-stepping benchmarks.
+A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
+128x128x128 PPO networks, and three train epochs reached 195,420 environment
+samples/s after the first warmup-heavy iteration:
+
+```bash
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train
+```
+
+nanoG1 reports about 1.28M environment samples/s while actually training, so
+the current pure-Warp PhoenX G1 training loop is about 6.5x slower on this
+training-throughput metric.
 
 nanoG1 reports about 8.5M production physics steps/s and 7.25M matched physics
 steps/s in its README/benchmark notes, so this PhoenX path is currently about

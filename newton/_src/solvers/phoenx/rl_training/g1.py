@@ -185,6 +185,18 @@ def _clip_float(x: wp.float32, lo: wp.float32, hi: wp.float32) -> wp.float32:
 
 
 @wp.func
+def _finite_or_zero(x: wp.float32) -> wp.float32:
+    if wp.isfinite(x):
+        return x
+    return wp.float32(0.0)
+
+
+@wp.func
+def _clip_finite(x: wp.float32, lo: wp.float32, hi: wp.float32) -> wp.float32:
+    return _clip_float(_finite_or_zero(x), lo, hi)
+
+
+@wp.func
 def _quat_rotate_inverse_wxyz(qw: wp.float32, qx: wp.float32, qy: wp.float32, qz: wp.float32, v: wp.vec3) -> wp.vec3:
     q = wp.vec3(qx, qy, qz)
     a = v * (wp.float32(2.0) * qw * qw - wp.float32(1.0))
@@ -270,19 +282,29 @@ def g1_observe_reward_kernel(
     lin_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, lin_w)
     gravity_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, wp.vec3(0.0, 0.0, -1.0))
 
+    state_bad = wp.int32(0)
+    if not wp.isfinite(qw) or not wp.isfinite(qx) or not wp.isfinite(qy) or not wp.isfinite(qz):
+        state_bad = wp.int32(1)
+    if not wp.isfinite(joint_q[q_base + wp.int32(2)]):
+        state_bad = wp.int32(1)
+
     value = wp.float32(0.0)
     if col < wp.int32(3):
-        value = wp.float32(0.25) * ang[col]
+        value = wp.float32(0.25) * _clip_finite(ang[col], wp.float32(-40.0), wp.float32(40.0))
     elif col < wp.int32(6):
-        value = gravity_b[col - wp.int32(3)]
+        value = _clip_finite(gravity_b[col - wp.int32(3)], wp.float32(-1.0), wp.float32(1.0))
     elif col < wp.int32(9):
         value = command[world, col - wp.int32(6)]
     elif col < wp.int32(38):
         j = col - wp.int32(9)
-        value = joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j]
+        value = _clip_finite(
+            joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j], wp.float32(-10.0), wp.float32(10.0)
+        )
     elif col < wp.int32(67):
         j = col - wp.int32(38)
-        value = wp.float32(0.05) * joint_qd[qd_base + wp.int32(6) + j]
+        value = wp.float32(0.05) * _clip_finite(
+            joint_qd[qd_base + wp.int32(6) + j], wp.float32(-200.0), wp.float32(200.0)
+        )
     elif col < wp.int32(96):
         value = current_actions[world, col - wp.int32(67)]
     elif col == wp.int32(96):
@@ -293,18 +315,27 @@ def g1_observe_reward_kernel(
         phase_step = episode_steps[world] % phase_period
         phase = wp.float32(6.283185307179586) * wp.float32(phase_step) / wp.float32(phase_period)
         value = wp.cos(phase)
-    obs[world, col] = value
+    obs[world, col] = _clip_finite(value, wp.float32(-100.0), wp.float32(100.0))
 
     if col == 0:
-        vx_err = command[world, 0] - lin_b[0]
-        vy_err = command[world, 1] - lin_b[1]
-        yaw_err = command[world, 2] - ang[2]
+        lin_b_x = _clip_finite(lin_b[0], wp.float32(-50.0), wp.float32(50.0))
+        lin_b_y = _clip_finite(lin_b[1], wp.float32(-50.0), wp.float32(50.0))
+        lin_b_z = _clip_finite(lin_b[2], wp.float32(-50.0), wp.float32(50.0))
+        ang_x = _clip_finite(ang[0], wp.float32(-50.0), wp.float32(50.0))
+        ang_y = _clip_finite(ang[1], wp.float32(-50.0), wp.float32(50.0))
+        ang_z = _clip_finite(ang[2], wp.float32(-50.0), wp.float32(50.0))
+        gravity_x = _clip_finite(gravity_b[0], wp.float32(-1.0), wp.float32(1.0))
+        gravity_y = _clip_finite(gravity_b[1], wp.float32(-1.0), wp.float32(1.0))
+        gravity_z = _clip_finite(gravity_b[2], wp.float32(-1.0), wp.float32(1.0))
+        vx_err = _clip_finite(command[world, 0] - lin_b_x, wp.float32(-20.0), wp.float32(20.0))
+        vy_err = _clip_finite(command[world, 1] - lin_b_y, wp.float32(-20.0), wp.float32(20.0))
+        yaw_err = _clip_finite(command[world, 2] - ang_z, wp.float32(-20.0), wp.float32(20.0))
         track_lin = wp.exp(-(vx_err * vx_err + vy_err * vy_err) / wp.float32(0.25))
         track_ang = wp.exp(-(yaw_err * yaw_err) / wp.float32(0.25))
-        lin_vel_z_penalty = lin_b[2] * lin_b[2]
-        ang_vel_xy_penalty = ang[0] * ang[0] + ang[1] * ang[1]
-        orientation_penalty = gravity_b[0] * gravity_b[0] + gravity_b[1] * gravity_b[1]
-        upright = _clip_float(-gravity_b[2], wp.float32(0.0), wp.float32(1.0))
+        lin_vel_z_penalty = lin_b_z * lin_b_z
+        ang_vel_xy_penalty = ang_x * ang_x + ang_y * ang_y
+        orientation_penalty = gravity_x * gravity_x + gravity_y * gravity_y
+        upright = _clip_float(-gravity_z, wp.float32(0.0), wp.float32(1.0))
 
         action_rate_penalty = wp.float32(0.0)
         power_proxy = wp.float32(0.0)
@@ -313,13 +344,17 @@ def g1_observe_reward_kernel(
             action_rate_penalty = action_rate_penalty + da * da
             q_idx = q_base + wp.int32(7) + j
             qd_idx = qd_base + wp.int32(6) + j
-            qd = joint_qd[qd_idx]
+            qd = _clip_finite(joint_qd[qd_idx], wp.float32(-100.0), wp.float32(100.0))
+            q = _clip_finite(joint_q[q_idx], wp.float32(-20.0), wp.float32(20.0))
             target = default_joint_pos[j] + current_actions[world, j] * action_scale
-            tau_proxy = actuator_ke[j] * (target - joint_q[q_idx]) - actuator_kd[j] * qd
+            tau_proxy = actuator_ke[j] * (target - q) - actuator_kd[j] * qd
+            tau_proxy = _clip_finite(tau_proxy, wp.float32(-10000.0), wp.float32(10000.0))
             power_proxy = power_proxy + wp.abs(tau_proxy * qd)
 
         fall = wp.float32(0.0)
         if joint_q[q_base + wp.int32(2)] < min_base_height or upright < min_upright_cos:
+            fall = wp.float32(1.0)
+        if state_bad != wp.int32(0):
             fall = wp.float32(1.0)
 
         reward = (
@@ -333,6 +368,9 @@ def g1_observe_reward_kernel(
             + w_alive
             + w_termination * fall
         )
+        if state_bad != wp.int32(0) or not wp.isfinite(reward):
+            reward = w_termination
+            track_lin = wp.float32(0.0)
         rewards[world] = reward
         successes[world] = track_lin
 
