@@ -3,14 +3,17 @@
 
 from __future__ import annotations
 
+import argparse
 import math
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import warp as wp
 
 import newton.rl as rl
+from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import benchmark_train_to_gate
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import make_seed_counter
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
@@ -388,6 +391,84 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(resumed.trainer.iteration, 3)
             self.assertEqual(second_restored.iteration, 3)
             self.assertEqual(second_restored.actor_optimizer.step_count, resumed.trainer.actor_optimizer.step_count)
+
+    def test_train_to_gate_benchmark_smoke_graph_leapfrog(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 train-to-gate benchmark tests")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_template = f"{tmpdir}/gate_{{iteration}}.npz"
+            args = argparse.Namespace(
+                world_count=2,
+                rollout_steps=1,
+                target_samples=4,
+                max_iterations=1,
+                chunk_iterations=1,
+                hidden_layers=(8,),
+                train_epochs=1,
+                mirror_loss_coeff=0.25,
+                minibatch_size=1,
+                replay_ratio=1.0,
+                priority_alpha=0.4,
+                priority_beta=1.0,
+                no_manual_actor_backward=False,
+                no_manual_critic_backward=False,
+                manual_mlp_weight_grad_dtype="bfloat16",
+                manual_mlp_forward_dtype="bfloat16",
+                vtrace_rho_clip=3.0,
+                vtrace_c_clip=3.0,
+                reward_clip=1.0,
+                max_grad_norm=0.3,
+                command_x=0.8,
+                command_y=0.0,
+                command_yaw=0.0,
+                command_x_range=(-0.5, 0.8),
+                command_y_range=(-0.4, 0.4),
+                command_yaw_range=(-1.0, 1.0),
+                no_command_randomization=True,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                controlled_action_count=g1_recipe.CONTROLLED_ACTION_COUNT,
+                parse_meshes=False,
+                rigid_contact_max_per_world=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
+                threads_per_world="auto",
+                multi_world_scheduler="auto",
+                prepare_refresh_stride="auto",
+                execution_mode="graph_leapfrog",
+                readback_diagnostics=False,
+                checkpoint_path=checkpoint_template,
+                device=device,
+                seed=31,
+                battery_steps=1,
+                seeds_per_command=1,
+                diagnostic_steps=1,
+                diagnostic_world_count=1,
+                stochastic_gate=False,
+                gate_seed=41,
+                max_battery_falls=1,
+                min_battery_perf=2.0,
+                max_action_jerk_rms=0.21,
+                max_ang_vel_xy_rms=0.21,
+                max_yaw_rate_rms=0.20,
+                max_leg_qvel_rms=1.22,
+                keep_going_after_pass=False,
+                fail_on_miss=False,
+                include_train_history=True,
+            )
+            result = benchmark_train_to_gate(args)
+            checkpoint_path = Path(checkpoint_template.format(iteration=1))
+            restored = rl.load_ppo_checkpoint(checkpoint_path, device=device)
+
+            self.assertEqual(result["execution_mode"], "graph_leapfrog")
+            self.assertEqual(result["completed_iterations"], 1)
+            self.assertEqual(result["trained_samples"], 2)
+            self.assertEqual(restored.iteration, 1)
+            self.assertTrue(checkpoint_path.exists())
+            self.assertEqual(len(result["gate_history"]), 1)
+            self.assertEqual(len(result["train_history"]), 1)
+            self.assertFalse(result["pass_gate"])
+            self.assertGreater(result["train_env_samples_per_s"], 0.0)
+            self.assertTrue(math.isfinite(result["gate_history"][0]["stats"]["battery_perf"]))
 
 
 if __name__ == "__main__":

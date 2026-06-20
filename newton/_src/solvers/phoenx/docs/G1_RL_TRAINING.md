@@ -20,6 +20,11 @@ adding a PyTorch dependency to Newton's Warp-only RL stack.
   saved G1 PPO checkpoint.
 - `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_rl`: PhoenX G1
   env-step throughput benchmark with optional nanoG1 result ingestion.
+- `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_train`: Full
+  collect-update PPO throughput benchmark.
+- `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate`:
+  End-to-end train, save, reload, and quality-gate benchmark for estimating
+  samples/time-to-walk.
 - `python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog`:
   experimental rollout/update overlap benchmark using separate CUDA graphs.
 
@@ -119,6 +124,21 @@ battery with noisy resets for falls/tracking performance, plus a separate
 forward-walk diagnostic for action jerk, torso angular velocity, yaw rate, and
 leg joint velocity. It exits nonzero when a checkpoint fails unless
 `--no-fail-on-gate` is passed.
+
+For the nanoG1-style time-to-walk metric, use `bench_g1_train_to_gate`. It trains
+in chunks, saves a checkpoint, reloads that checkpoint, runs the quality gate,
+and reports the first passing checkpoint if one is found:
+
+```bash
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate \
+    --execution-mode graph_leapfrog --chunk-iterations 25
+
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate \
+    --max-iterations 1 --chunk-iterations 1 --world-count 2 --rollout-steps 1 \
+    --hidden-layers 8 --minibatch-size 1 --replay-ratio 1.0 --train-epochs 1 \
+    --battery-steps 1 --seeds-per-command 1 --diagnostic-steps 1 \
+    --diagnostic-world-count 1 --no-command-randomization
+```
 
 ## Current Benchmark Baseline
 
@@ -240,10 +260,11 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
 1. Avoid generic replicated MJCF setup for high world counts; build or cache a
    compact fixed-topology G1 multi-world model path.
 2. Remove avoidable broadphase/contact work for independent flat-ground G1 worlds.
-3. Measure the opt-in graph-leapfrog trainer over longer runs and tighten the
-   remaining host synchronization around metrics/checkpoint cadence.
-4. Upgrade command scheduling and remaining domain randomization toward the
+3. Run `bench_g1_train_to_gate` to measure PhoenX samples-to-gate and identify
+   whether the remaining gap is throughput, sample efficiency, or both.
+4. Tighten the remaining host synchronization around metrics/checkpoint cadence.
+5. Upgrade command scheduling and remaining domain randomization toward the
    nanoG1 recipe.
-5. Add a PufferLib interop path behind an optional dependency boundary if we want
+6. Add a PufferLib interop path behind an optional dependency boundary if we want
    exact nanoG1 trainer compatibility. Its Python package currently depends on
    PyTorch, while its compiled `_C` backend is closer to torch-free.
