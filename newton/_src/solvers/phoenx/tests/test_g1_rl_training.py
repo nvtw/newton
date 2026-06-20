@@ -12,6 +12,7 @@ import warp as wp
 
 import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training import g1_recipe
+from newton._src.solvers.phoenx.rl_training.env import make_seed_counter
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
@@ -126,6 +127,36 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(commands[:, 1] <= command_y_range[1]))
         self.assertTrue(np.all(commands[:, 2] >= command_yaw_range[0]))
         self.assertTrue(np.all(commands[:, 2] <= command_yaw_range[1]))
+
+    def test_randomize_commands_seed_counter_advances_inside_graph(self) -> None:
+        env = _g1_test_env(world_count=4)
+        command_x_range = (-0.4, 0.8)
+        command_y_range = (-0.2, 0.3)
+        command_yaw_range = (-0.7, 0.6)
+        seed_counter = make_seed_counter(17, device=env.device)
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.randomize_commands_seed_counter(
+                seed_counter=seed_counter,
+                command_x_range=command_x_range,
+                command_y_range=command_y_range,
+                command_yaw_range=command_yaw_range,
+            )
+
+        wp.capture_launch(capture.graph)
+        first = env.command.numpy().copy()
+        wp.capture_launch(capture.graph)
+        second = env.command.numpy().copy()
+
+        self.assertFalse(np.allclose(first, second))
+        np.testing.assert_array_equal(seed_counter.numpy(), np.array([19], dtype=np.int32))
+        for commands in (first, second):
+            self.assertTrue(np.all(commands[:, 0] >= command_x_range[0]))
+            self.assertTrue(np.all(commands[:, 0] <= command_x_range[1]))
+            self.assertTrue(np.all(commands[:, 1] >= command_y_range[0]))
+            self.assertTrue(np.all(commands[:, 1] <= command_y_range[1]))
+            self.assertTrue(np.all(commands[:, 2] >= command_yaw_range[0]))
+            self.assertTrue(np.all(commands[:, 2] <= command_yaw_range[1]))
 
     def test_observe_clamps_extreme_state_to_finite_metrics(self) -> None:
         env = _g1_test_env(world_count=1)

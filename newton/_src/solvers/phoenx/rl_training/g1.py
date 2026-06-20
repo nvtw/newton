@@ -12,7 +12,7 @@ import newton
 import newton.utils
 
 from . import g1_recipe
-from .env import collect_ppo_rollout
+from .env import advance_seed_counter, collect_ppo_rollout, collect_ppo_rollout_seed_counter
 from .ppo import BufferRollout, MirrorMapPPO, TrainerPPO
 
 ACTION_DIM_G1 = 29
@@ -723,6 +723,30 @@ def g1_sample_commands_kernel(
         command[world, col] = yaw_min + (yaw_max - yaw_min) * u
 
 
+@wp.kernel
+def g1_sample_commands_seed_counter_kernel(
+    seed_counter: wp.array[wp.int32],
+    seed_offset: wp.int32,
+    x_min: wp.float32,
+    x_max: wp.float32,
+    y_min: wp.float32,
+    y_max: wp.float32,
+    yaw_min: wp.float32,
+    yaw_max: wp.float32,
+    command: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
+    rng = wp.rand_init(seed, world * wp.int32(3) + col)
+    u = wp.randf(rng)
+    if col == 0:
+        command[world, col] = x_min + (x_max - x_min) * u
+    elif col == 1:
+        command[world, col] = y_min + (y_max - y_min) * u
+    else:
+        command[world, col] = yaw_min + (yaw_max - yaw_min) * u
+
+
 @dataclass
 class ConfigEnvG1PhoenX:
     """Configuration for :class:`EnvG1PhoenX`.
@@ -954,12 +978,9 @@ class EnvG1PhoenX:
     ) -> None:
         """Sample per-world body-frame commands on the device [m/s, m/s, rad/s]."""
 
-        x_min, x_max = float(command_x_range[0]), float(command_x_range[1])
-        y_min, y_max = float(command_y_range[0]), float(command_y_range[1])
-        yaw_min, yaw_max = float(command_yaw_range[0]), float(command_yaw_range[1])
-        if x_max < x_min or y_max < y_min or yaw_max < yaw_min:
-            raise ValueError("command ranges must be ordered")
-        self.config.command = ((x_min + x_max) * 0.5, (y_min + y_max) * 0.5, (yaw_min + yaw_max) * 0.5)
+        x_min, x_max, y_min, y_max, yaw_min, yaw_max = self._validate_command_ranges(
+            command_x_range, command_y_range, command_yaw_range
+        )
         wp.launch(
             g1_sample_commands_kernel,
             dim=(self.world_count, 3),
@@ -967,6 +988,45 @@ class EnvG1PhoenX:
             outputs=[self.command],
             device=self.device,
         )
+
+    def randomize_commands_seed_counter(
+        self,
+        *,
+        seed_counter: wp.array[wp.int32],
+        command_x_range: tuple[float, float],
+        command_y_range: tuple[float, float],
+        command_yaw_range: tuple[float, float],
+        seed_offset: int = 0,
+        advance: int = 1,
+    ) -> None:
+        """Sample per-world commands using a graph-replay-safe device seed counter."""
+
+        x_min, x_max, y_min, y_max, yaw_min, yaw_max = self._validate_command_ranges(
+            command_x_range, command_y_range, command_yaw_range
+        )
+        wp.launch(
+            g1_sample_commands_seed_counter_kernel,
+            dim=(self.world_count, 3),
+            inputs=[seed_counter, int(seed_offset), x_min, x_max, y_min, y_max, yaw_min, yaw_max],
+            outputs=[self.command],
+            device=self.device,
+        )
+        if int(advance) != 0:
+            advance_seed_counter(seed_counter, int(advance), device=self.device)
+
+    def _validate_command_ranges(
+        self,
+        command_x_range: tuple[float, float],
+        command_y_range: tuple[float, float],
+        command_yaw_range: tuple[float, float],
+    ) -> tuple[float, float, float, float, float, float]:
+        x_min, x_max = float(command_x_range[0]), float(command_x_range[1])
+        y_min, y_max = float(command_y_range[0]), float(command_y_range[1])
+        yaw_min, yaw_max = float(command_yaw_range[0]), float(command_yaw_range[1])
+        if x_max < x_min or y_max < y_min or yaw_max < yaw_min:
+            raise ValueError("command ranges must be ordered")
+        self.config.command = ((x_min + x_max) * 0.5, (y_min + y_max) * 0.5, (yaw_min + yaw_max) * 0.5)
+        return x_min, x_max, y_min, y_max, yaw_min, yaw_max
 
     def observe(self) -> wp.array:
         """Update and return the current observation array."""
@@ -1109,3 +1169,10 @@ class EnvG1PhoenX:
         """Collect one rollout and compute GAE returns for PPO."""
 
         collect_ppo_rollout(self, trainer, buffer, seed=seed)
+
+    def collect_ppo_rollout_seed_counter(
+        self, trainer: TrainerPPO, buffer: BufferRollout, *, seed_counter: wp.array[wp.int32]
+    ) -> None:
+        """Collect one rollout using a graph-replay-safe device seed counter."""
+
+        collect_ppo_rollout_seed_counter(self, trainer, buffer, seed_counter=seed_counter)

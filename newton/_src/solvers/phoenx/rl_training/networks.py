@@ -30,6 +30,7 @@ from .kernels import (
     dense_weight_bias_grad_kernel,
     dense_weight_grad_tiled_kernel,
     fill_eps_kernel,
+    fill_eps_seed_counter_kernel,
     gaussian_entropy_kernel,
     gaussian_log_prob_kernel,
     sample_gaussian_actions_kernel,
@@ -772,6 +773,33 @@ class GaussianActor:
     ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
         """Sample actions into persistent no-grad buffers."""
 
+        return self._sample_reuse_impl(
+            obs, seed=int(seed), seed_counter=None, seed_offset=0, deterministic=deterministic
+        )
+
+    def sample_reuse_seed_counter(
+        self,
+        obs: wp.array2d[wp.float32],
+        *,
+        seed_counter: wp.array[wp.int32],
+        seed_offset: int = 0,
+        deterministic: bool = False,
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
+        """Sample actions using a graph-replay-safe device seed counter."""
+
+        return self._sample_reuse_impl(
+            obs, seed=0, seed_counter=seed_counter, seed_offset=int(seed_offset), deterministic=deterministic
+        )
+
+    def _sample_reuse_impl(
+        self,
+        obs: wp.array2d[wp.float32],
+        *,
+        seed: int,
+        seed_counter: wp.array[wp.int32] | None,
+        seed_offset: int,
+        deterministic: bool,
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
         batch_size = int(obs.shape[0])
         self._ensure_sample_reuse_buffers(batch_size)
         actions = self._sample_reuse_actions
@@ -782,13 +810,22 @@ class GaussianActor:
 
         policy_out = self.net.forward_reuse(obs)
         if not deterministic:
-            wp.launch(
-                fill_eps_kernel,
-                dim=(batch_size, self.action_dim),
-                inputs=[int(seed)],
-                outputs=[eps],
-                device=self.device,
-            )
+            if seed_counter is None:
+                wp.launch(
+                    fill_eps_kernel,
+                    dim=(batch_size, self.action_dim),
+                    inputs=[int(seed)],
+                    outputs=[eps],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    fill_eps_seed_counter_kernel,
+                    dim=(batch_size, self.action_dim),
+                    inputs=[seed_counter, int(seed_offset)],
+                    outputs=[eps],
+                    device=self.device,
+                )
         wp.launch(
             sample_gaussian_actions_kernel,
             dim=batch_size,

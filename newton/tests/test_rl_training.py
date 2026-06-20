@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton.rl as rl
+from newton._src.solvers.phoenx.rl_training.env import advance_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.kernels import (
     PPO_LOG_STD_PARTIAL_BATCH,
     mirrored_action_mse_grad_kernel,
@@ -569,6 +570,57 @@ class TestTrainerPPO(unittest.TestCase):
         np.testing.assert_allclose(bf16_out.numpy(), fp32_out.numpy(), rtol=8.0e-3, atol=2.0e-2)
         with self.assertRaises(ValueError):
             rl.WarpMLP((2, 64, 3), device=device, manual_forward_dtype="float16")
+
+    def test_actor_seed_counter_advances_inside_graph(self) -> None:
+        device = _rl_cuda_device()
+        actor = rl.GaussianActor(obs_dim=3, action_dim=2, hidden_layers=(8,), device=device, seed=11)
+        obs = wp.array(np.ones((4, 3), dtype=np.float32), dtype=wp.float32, device=device)
+        seed_counter = make_seed_counter(17, device=device)
+        actor.reserve_reuse_buffers(4)
+
+        with wp.ScopedCapture(device=device) as capture:
+            actor.sample_reuse_seed_counter(obs, seed_counter=seed_counter)
+            advance_seed_counter(seed_counter, 1, device=device)
+
+        wp.capture_launch(capture.graph)
+        first = actor._sample_reuse_actions.numpy().copy()
+        wp.capture_launch(capture.graph)
+        second = actor._sample_reuse_actions.numpy().copy()
+
+        self.assertFalse(np.allclose(first, second))
+        np.testing.assert_array_equal(seed_counter.numpy(), np.array([19], dtype=np.int32))
+
+    def test_priority_replay_sampling_seed_counter_advances_inside_graph(self) -> None:
+        device = _rl_cuda_device()
+        config = rl.ConfigPPO(
+            minibatch_size=128,
+            replay_ratio=1.0,
+            priority_alpha=0.5,
+            priority_beta=0.75,
+            normalize_advantages=False,
+        )
+        trainer = rl.TrainerPPO(obs_dim=3, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=101)
+        buffer = rl.BufferRollout(num_steps=4, num_envs=5, obs_dim=3, action_dim=2, device=device)
+        per_env_priority = np.array([0.25, 0.5, 1.0, 2.0, 4.0], dtype=np.float32)
+        buffer.advantages.assign(np.tile(per_env_priority / float(buffer.num_steps), buffer.num_steps))
+        batch = trainer._ensure_minibatch(buffer, segment_count=32)
+        seed_counter = make_seed_counter(17, device=device)
+
+        trainer._prepare_trajectory_priority_weights(buffer)
+        with wp.ScopedCapture(device=device) as capture:
+            use_priority = trainer._prepare_trajectory_priority_weights(buffer)
+            trainer._sample_minibatch_env_ids_seed_counter(
+                buffer, batch, seed_counter=seed_counter, seed_offset=0, use_priority=use_priority
+            )
+            advance_seed_counter(seed_counter, 1, device=device)
+
+        wp.capture_launch(capture.graph)
+        first = trainer._minibatch_env_ids.numpy().copy()
+        wp.capture_launch(capture.graph)
+        second = trainer._minibatch_env_ids.numpy().copy()
+
+        self.assertFalse(np.array_equal(first, second))
+        np.testing.assert_array_equal(seed_counter.numpy(), np.array([19], dtype=np.int32))
 
     def test_priority_replay_sampling_is_graph_capturable(self) -> None:
         device = _rl_cuda_device()

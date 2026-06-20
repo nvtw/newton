@@ -7,6 +7,7 @@ from typing import Protocol
 
 import warp as wp
 
+from .kernels import seed_counter_increment_kernel
 from .ppo import BufferRollout, TrainerPPO
 
 
@@ -121,6 +122,21 @@ def capture_env_steps(
     return capture.graph
 
 
+def make_seed_counter(seed: int, *, device: wp.context.Devicelike = None) -> wp.array[wp.int32]:
+    """Allocate a one-element device seed counter for graph replay."""
+
+    return wp.array([int(seed) & 0x7FFFFFFF], dtype=wp.int32, device=device)
+
+
+def advance_seed_counter(
+    seed_counter: wp.array[wp.int32], delta: int = 1, *, device: wp.context.Devicelike = None
+) -> None:
+    """Advance a device seed counter in a graph-capturable kernel."""
+
+    counter_device = wp.get_device(device) if device is not None else seed_counter.device
+    wp.launch(seed_counter_increment_kernel, dim=1, inputs=[seed_counter, int(delta)], device=counter_device)
+
+
 def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout, *, seed: int) -> None:
     """Collect one PPO rollout from any vectorized Warp environment.
 
@@ -131,6 +147,26 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
         seed: Base stochastic action seed.
     """
 
+    _collect_ppo_rollout_impl(env, trainer, buffer, seed=int(seed), seed_counter=None)
+
+
+def collect_ppo_rollout_seed_counter(
+    env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout, *, seed_counter: wp.array[wp.int32]
+) -> None:
+    """Collect one PPO rollout using a graph-replay-safe device seed counter."""
+
+    _collect_ppo_rollout_impl(env, trainer, buffer, seed=0, seed_counter=seed_counter)
+    advance_seed_counter(seed_counter, buffer.num_steps, device=env.device)
+
+
+def _collect_ppo_rollout_impl(
+    env: EnvPPO,
+    trainer: TrainerPPO,
+    buffer: BufferRollout,
+    *,
+    seed: int,
+    seed_counter: wp.array[wp.int32] | None,
+) -> None:
     if buffer.num_envs != env.world_count or buffer.obs_dim != env.obs_dim or buffer.action_dim != env.action_dim:
         raise ValueError("PPO buffer dimensions do not match environment")
 
@@ -138,7 +174,12 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
     max_cols = max(env.obs_dim, env.action_dim, 1)
     value_col = trainer.value_column
     for step in range(buffer.num_steps):
-        actions, log_probs, values = trainer.act_reuse(obs, seed=int(seed) + step)
+        if seed_counter is None:
+            actions, log_probs, values = trainer.act_reuse(obs, seed=int(seed) + step)
+        else:
+            actions, log_probs, values = trainer.act_reuse_seed_counter(
+                obs, seed_counter=seed_counter, seed_offset=step
+            )
         wp.launch(
             rollout_store_pre_step_kernel,
             dim=(env.world_count, max_cols),

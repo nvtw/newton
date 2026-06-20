@@ -27,9 +27,9 @@ from newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_rollout_update_
     _g1_ppo_config,
     _make_trainer,
     _parse_hidden_layers,
-    _randomize_commands,
 )
 from newton._src.solvers.phoenx.rl_training import g1_recipe
+from newton._src.solvers.phoenx.rl_training.env import make_seed_counter
 
 
 def _copy_trainer_policy(dst: rl.TrainerPPO, src: rl.TrainerPPO) -> None:
@@ -63,6 +63,9 @@ class _LeapfrogFixture:
             _make_buffer(self.env, int(args.rollout_steps)),
             _make_buffer(self.env, int(args.rollout_steps)),
         )
+        self.command_seed_counter = make_seed_counter(int(args.seed) + 53_321, device=device)
+        self.rollout_seed_counter = make_seed_counter(int(args.seed) + 1_000_000, device=device)
+        self.update_seed_counter = make_seed_counter(int(args.seed) + 2_000_000, device=device)
         for trainer in (self.master, self.rollout):
             for buffer in self.buffers:
                 trainer.reserve_update_buffers(buffer)
@@ -70,13 +73,18 @@ class _LeapfrogFixture:
         self.iteration = 0
 
     def collect(self, buffer: rl.BufferRollout) -> None:
-        seed = int(self.args.seed) + 100_003 * self.iteration
-        _randomize_commands(self.env, self.args, seed)
-        self.env.collect_ppo_rollout(self.rollout, buffer, seed=seed + 10_000_000)
+        if not self.args.no_command_randomization:
+            self.env.randomize_commands_seed_counter(
+                seed_counter=self.command_seed_counter,
+                command_x_range=tuple(self.args.command_x_range),
+                command_y_range=tuple(self.args.command_y_range),
+                command_yaw_range=tuple(self.args.command_yaw_range),
+            )
+        self.env.collect_ppo_rollout_seed_counter(self.rollout, buffer, seed_counter=self.rollout_seed_counter)
         self.iteration += 1
 
     def update(self, buffer: rl.BufferRollout) -> None:
-        self.master.update(buffer, read_stats=False)
+        self.master.update_seed_counter(buffer, seed_counter=self.update_seed_counter, read_stats=False)
         self.master.iteration += 1
 
     @property
@@ -350,7 +358,7 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
         "graph_sync_env_samples_per_s": graph_sync_sps,
         "graph_leapfrog_env_samples_per_s": graph_leapfrog_sps,
         "graph_leapfrog_speedup": graph_sync_seconds / graph_leapfrog_seconds if graph_leapfrog_seconds > 0.0 else 0.0,
-        "graph_fixed_seed_note": "separate stream graphs replay fixed Python scalar seeds; use only as a throughput upper bound",
+        "graph_seed_note": "separate stream graphs advance command, action, and minibatch RNG with device seed counters",
         "graph_error": graph_error,
         "command_randomization": not bool(args.no_command_randomization),
     }

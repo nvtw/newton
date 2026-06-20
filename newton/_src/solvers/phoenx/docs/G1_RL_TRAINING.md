@@ -19,6 +19,8 @@ adding a PyTorch dependency to Newton's Warp-only RL stack.
   saved G1 PPO checkpoint.
 - `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_rl`: PhoenX G1
   env-step throughput benchmark with optional nanoG1 result ingestion.
+- `python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog`:
+  experimental rollout/update overlap benchmark using separate CUDA graphs.
 
 ## nanoG1 Parity Choices
 
@@ -148,10 +150,24 @@ uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train \
 
 nanoG1 reports about 1.28M environment samples/s while actually training, so
 the current mirror-enabled pure-Warp PhoenX G1 training loop is about 2.01x
-slower on this training-throughput metric. An Nsight Systems profile of the
-same short benchmark shows the largest kernels are split between the Warp PPO
-learner and generic PhoenX rollout. Top CUDA kernels by total GPU time in that
-profile were:
+slower on this training-throughput metric. An experimental frozen-policy
+leapfrog benchmark that launches a rollout graph, an update graph, and a small
+policy-copy graph on separate streams reached 1,098,981 environment samples/s
+with device-side command, action-noise, and minibatch seed counters. That
+separate-graph benchmark is not yet the production trainer, but it reduces the
+throughput gap to about 1.16x versus nanoG1's reported 1.28M samples/s.
+
+```bash
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog \
+    --iterations 4 --warmup-iterations 1 --graphs
+```
+
+The same short benchmark measured 971,627 samples/s for sequential graph replay
+and 641,902 samples/s for the eager synchronous schedule, so the stream overlap
+only pays off once the rollout, update, and copy phases are graph-replayed. An
+Nsight Systems profile of the normal train-loop benchmark shows the largest
+kernels are split between the Warp PPO learner and generic PhoenX rollout. Top
+CUDA kernels by total GPU time in that profile were:
 
 1. `dense_weight_grad_bf16_tiled`: 15.4%
 2. `_make_fast_tail_prepare_plus_iterate`: 13.7%
@@ -196,10 +212,12 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
   BF16 MLP weight-gradient tile matmul, and large-minibatch BF16 hidden forward
   tile matmul, but it does not yet include nanoG1's Muon optimizer path or
   PufferNet model stack.
-- Environment stepping and the manual PPO update pieces are CUDA-graph
-  capturable, but the full collect-policy-update loop is not captured end to end
-  yet because iteration scheduling, changing RNG seeds, logging, and
-  checkpointing remain host-driven.
+- Environment stepping, command randomization, stochastic action sampling,
+  priority minibatch sampling, and the manual PPO update pieces are CUDA-graph
+  capturable with device-side seed counters. The production train loop still
+  uses the eager collect-update schedule; the separate rollout/update/copy graph
+  schedule is currently benchmarked but not yet exposed as the default trainer.
+  Logging and checkpointing remain host-driven.
 - Reset/domain randomization and command scheduling are still lighter than
   nanoG1, so sample efficiency is not yet directly comparable.
 
@@ -208,8 +226,11 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
 1. Avoid generic replicated MJCF setup for high world counts; build or cache a
    compact fixed-topology G1 multi-world model path.
 2. Remove avoidable broadphase/contact work for independent flat-ground G1 worlds.
-3. Upgrade rollout-advantage priority replay to nanoG1-style V-trace ratio
-   updates and command scheduling.
-4. Add a PufferLib interop path behind an optional dependency boundary if we want
+3. Promote the measured separate-graph rollout/update/copy schedule into a
+   production training mode once diagnostics, checkpoint cadence, and policy
+   freshness semantics are nailed down.
+4. Upgrade command scheduling and remaining domain randomization toward the
+   nanoG1 recipe.
+5. Add a PufferLib interop path behind an optional dependency boundary if we want
    exact nanoG1 trainer compatibility. Its Python package currently depends on
    PyTorch, while its compiled `_C` backend is closer to torch-free.

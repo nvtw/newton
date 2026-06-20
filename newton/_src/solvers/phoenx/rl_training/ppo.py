@@ -25,8 +25,10 @@ from .kernels import (
     reduce_ppo_log_std_grad_kernel,
     rollout_reward_done_success_sums_kernel,
     sample_trajectory_env_ids_kernel,
+    sample_trajectory_env_ids_seed_counter_kernel,
     scatter_trajectory_ratios_kernel,
     scatter_trajectory_values_kernel,
+    seed_counter_increment_kernel,
     sum_and_sumsq_kernel,
     trajectory_priority_kernel,
     trajectory_priority_weight_kernel,
@@ -600,6 +602,26 @@ class TrainerPPO:
         values = self.critic.forward_reuse(obs)
         return actions, log_probs, values
 
+    def act_reuse_seed_counter(
+        self,
+        obs: wp.array2d[wp.float32],
+        *,
+        seed_counter: wp.array[wp.int32],
+        seed_offset: int = 0,
+        deterministic: bool = False,
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
+        """Sample actions and values using a graph-replay-safe device seed counter."""
+
+        actions, log_probs, policy_out = self.actor.sample_reuse_seed_counter(
+            obs, seed_counter=seed_counter, seed_offset=int(seed_offset), deterministic=deterministic
+        )
+        if self.shared_value_network:
+            return actions, log_probs, policy_out
+        if self.critic is None:
+            raise RuntimeError("separate critic state was not initialized")
+        values = self.critic.forward_reuse(obs)
+        return actions, log_probs, values
+
     def reserve_buffers(self, batch_size: int) -> None:
         """Reserve reusable trainer buffers for at least ``batch_size`` rows."""
 
@@ -666,10 +688,22 @@ class TrainerPPO:
     def update(self, buffer: BufferRollout, *, read_stats: bool = True) -> StatsPPOUpdate:
         """Update actor and critic from a finished rollout buffer."""
 
+        return self._update_impl(buffer, read_stats=read_stats, seed_counter=None)
+
+    def update_seed_counter(
+        self, buffer: BufferRollout, *, seed_counter: wp.array[wp.int32], read_stats: bool = True
+    ) -> StatsPPOUpdate:
+        """Update from a rollout buffer using device-side replay seeds."""
+
+        return self._update_impl(buffer, read_stats=read_stats, seed_counter=seed_counter)
+
+    def _update_impl(
+        self, buffer: BufferRollout, *, read_stats: bool = True, seed_counter: wp.array[wp.int32] | None
+    ) -> StatsPPOUpdate:
         if buffer.obs_dim != self.obs_dim or buffer.action_dim != self.action_dim:
             raise ValueError("BufferRollout dimensions do not match trainer dimensions")
         if self._uses_minibatch_replay(buffer):
-            return self._update_minibatches(buffer, read_stats=read_stats)
+            return self._update_minibatches(buffer, read_stats=read_stats, seed_counter=seed_counter)
 
         if self.config.normalize_advantages:
             buffer.normalize_advantages()
@@ -701,7 +735,9 @@ class TrainerPPO:
         minibatch_size = int(self.config.minibatch_size)
         return minibatch_size > 0 and float(self.config.replay_ratio) > 0.0 and minibatch_size < buffer.num_samples
 
-    def _update_minibatches(self, buffer: BufferRollout, *, read_stats: bool = True) -> StatsPPOUpdate:
+    def _update_minibatches(
+        self, buffer: BufferRollout, *, read_stats: bool = True, seed_counter: wp.array[wp.int32] | None = None
+    ) -> StatsPPOUpdate:
         minibatch_size = int(self.config.minibatch_size)
         if minibatch_size % buffer.num_steps != 0:
             raise ValueError("PPO trajectory minibatch_size must be a multiple of rollout steps")
@@ -725,12 +761,21 @@ class TrainerPPO:
             if use_vtrace:
                 self._compute_vtrace_returns(buffer)
                 use_priority = self._prepare_trajectory_priority_weights(buffer)
-            self._sample_minibatch_env_ids(
-                buffer,
-                batch,
-                seed=self.seed + 1000003 * self.iteration + minibatch_id,
-                use_priority=use_priority,
-            )
+            if seed_counter is None:
+                self._sample_minibatch_env_ids(
+                    buffer,
+                    batch,
+                    seed=self.seed + 1000003 * self.iteration + minibatch_id,
+                    use_priority=use_priority,
+                )
+            else:
+                self._sample_minibatch_env_ids_seed_counter(
+                    buffer,
+                    batch,
+                    seed_counter=seed_counter,
+                    seed_offset=minibatch_id,
+                    use_priority=use_priority,
+                )
             wp.launch(
                 gather_trajectory_minibatch_kernel,
                 dim=(batch.num_samples, max_cols),
@@ -766,6 +811,14 @@ class TrainerPPO:
                 value_loss = self._update_critic(batch, read_stats=minibatch_read_stats)
             if use_vtrace:
                 self._scatter_minibatch_values(buffer, batch, segment_count)
+
+        if seed_counter is not None:
+            wp.launch(
+                seed_counter_increment_kernel,
+                dim=1,
+                inputs=[seed_counter, 1000003],
+                device=self.device,
+            )
 
         return StatsPPOUpdate(
             policy_loss=policy_loss,
@@ -848,6 +901,36 @@ class TrainerPPO:
                 self._trajectory_priority_total,
                 buffer.num_envs,
                 int(seed) & 0x7FFFFFFF,
+                float(self.config.priority_beta),
+                int(use_priority),
+            ],
+            outputs=[self._minibatch_env_ids, batch.priority_weights],
+            device=self.device,
+        )
+
+    def _sample_minibatch_env_ids_seed_counter(
+        self,
+        buffer: BufferRollout,
+        batch: BatchPPO,
+        *,
+        seed_counter: wp.array[wp.int32],
+        seed_offset: int,
+        use_priority: bool,
+    ) -> None:
+        self._ensure_trajectory_sampling_buffers(buffer.num_envs)
+        if self._minibatch_env_ids is None:
+            raise RuntimeError("minibatch env id buffer was not initialized")
+        if self._trajectory_priority_weights is None or self._trajectory_priority_total is None:
+            raise RuntimeError("trajectory sampling buffers were not initialized")
+        wp.launch(
+            sample_trajectory_env_ids_seed_counter_kernel,
+            dim=batch.num_envs,
+            inputs=[
+                self._trajectory_priority_weights,
+                self._trajectory_priority_total,
+                buffer.num_envs,
+                seed_counter,
+                int(seed_offset),
                 float(self.config.priority_beta),
                 int(use_priority),
             ],

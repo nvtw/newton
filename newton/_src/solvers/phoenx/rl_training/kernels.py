@@ -90,6 +90,13 @@ def zero_scalar_kernel(x: wp.array[wp.float32]):
 
 
 @wp.kernel
+def seed_counter_increment_kernel(counter: wp.array[wp.int32], delta: wp.int32):
+    modulus = wp.int64(2147483647)
+    value = (wp.int64(counter[0]) + wp.int64(delta)) % modulus
+    counter[0] = wp.int32(value)
+
+
+@wp.kernel
 def pack_ppo_update_stats_kernel(
     policy_loss: wp.array[wp.float32],
     value_loss: wp.array[wp.float32],
@@ -282,6 +289,15 @@ def dense_input_grad_tiled_kernel(
 def fill_eps_kernel(seed: wp.int32, eps: wp.array2d[wp.float32]):
     row, col = wp.tid()
     flat = row * eps.shape[1] + col
+    rng = wp.rand_init(seed, flat)
+    eps[row, col] = wp.randn(rng)
+
+
+@wp.kernel
+def fill_eps_seed_counter_kernel(seed_counter: wp.array[wp.int32], seed_offset: wp.int32, eps: wp.array2d[wp.float32]):
+    row, col = wp.tid()
+    flat = row * eps.shape[1] + col
+    seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
     rng = wp.rand_init(seed, flat)
     eps[row, col] = wp.randn(rng)
 
@@ -693,6 +709,45 @@ def sample_trajectory_env_ids_kernel(
     importance_weights: wp.array[wp.float32],
 ):
     segment = wp.tid()
+    rng = wp.rand_init(seed, segment)
+    u = wp.randf(rng)
+    env = wp.min(wp.int32(wp.floor(u * wp.float32(num_envs))), num_envs - wp.int32(1))
+    importance = wp.float32(1.0)
+
+    total = total_weight[0]
+    if use_priority != wp.int32(0) and total > wp.float32(0.0):
+        target = u * total
+        cumulative = wp.float32(0.0)
+        found = wp.int32(0)
+        env = num_envs - wp.int32(1)
+        for candidate in range(num_envs):
+            cumulative = cumulative + priority_weights[candidate]
+            if found == wp.int32(0) and target <= cumulative:
+                env = candidate
+                found = wp.int32(1)
+        if priority_beta > wp.float32(0.0):
+            prob = priority_weights[env] / total
+            correction = wp.max(wp.float32(num_envs) * prob, wp.float32(1.0e-6))
+            importance = wp.pow(correction, -priority_beta)
+
+    env_ids[segment] = env
+    importance_weights[segment] = importance
+
+
+@wp.kernel
+def sample_trajectory_env_ids_seed_counter_kernel(
+    priority_weights: wp.array[wp.float32],
+    total_weight: wp.array[wp.float32],
+    num_envs: wp.int32,
+    seed_counter: wp.array[wp.int32],
+    seed_offset: wp.int32,
+    priority_beta: wp.float32,
+    use_priority: wp.int32,
+    env_ids: wp.array[wp.int32],
+    importance_weights: wp.array[wp.float32],
+):
+    segment = wp.tid()
+    seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
     rng = wp.rand_init(seed, segment)
     u = wp.randf(rng)
     env = wp.min(wp.int32(wp.floor(u * wp.float32(num_envs))), num_envs - wp.int32(1))
