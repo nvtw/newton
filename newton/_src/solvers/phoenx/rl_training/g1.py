@@ -390,6 +390,43 @@ _UNITREE_KD_G1 = (
     0.2,
 )
 
+_NANOG1_DOF_DAMPING_G1 = (
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    1.0,
+    0.2,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    1.0,
+    0.2,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    0.2,
+    0.2,
+    0.2,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    0.2,
+    0.2,
+    0.2,
+)
+
+_DRIVE_KD_G1 = tuple(
+    _UNITREE_KD_G1[i] + _NANOG1_DOF_DAMPING_G1[i] if i < g1_recipe.CONTROLLED_ACTION_COUNT else _UNITREE_KD_G1[i]
+    for i in range(ACTION_DIM_G1)
+)
+
 _CTRL_LO_G1 = (
     -2.5307,
     -0.5236,
@@ -868,7 +905,7 @@ class EnvG1PhoenX:
         self.ctrl_lower = wp.array(np.asarray(_CTRL_LO_G1, dtype=np.float32), dtype=wp.float32, device=self.device)
         self.ctrl_upper = wp.array(np.asarray(_CTRL_HI_G1, dtype=np.float32), dtype=wp.float32, device=self.device)
         self.actuator_ke = wp.array(np.asarray(_UNITREE_KP_G1, dtype=np.float32), dtype=wp.float32, device=self.device)
-        self.actuator_kd = wp.array(np.asarray(_UNITREE_KD_G1, dtype=np.float32), dtype=wp.float32, device=self.device)
+        self.actuator_kd = wp.array(np.asarray(_DRIVE_KD_G1, dtype=np.float32), dtype=wp.float32, device=self.device)
         self.current_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.previous_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
@@ -911,7 +948,7 @@ class EnvG1PhoenX:
         for i in range(ACTION_DIM_G1):
             dof = i + 6
             articulation_builder.joint_target_ke[dof] = _UNITREE_KP_G1[i]
-            articulation_builder.joint_target_kd[dof] = _UNITREE_KD_G1[i]
+            articulation_builder.joint_target_kd[dof] = _DRIVE_KD_G1[i]
             articulation_builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)

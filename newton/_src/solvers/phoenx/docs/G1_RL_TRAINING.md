@@ -45,7 +45,9 @@ benchmark defaults read from the same constants.
 - Observation size: 98.
 - Action size: 29.
 - Control frame dt: 0.02 s.
-- Physics dt: 0.004 s via `sim_substeps=5`.
+- Physics dt: 0.002 s via `sim_substeps=10`. nanoG1 uses 0.004 s x 5,
+  but the current PhoenX convergence sweep requires 10 substeps and 4
+  position iterations for credible early G1 contact/drive behavior.
 - Primitive-only collision by default (`parse_meshes=False`), preserving the
   same G1 coordinates/DOFs/actions while avoiding generic mesh/SDF contact
   overflow in high-world-count RL runs.
@@ -150,7 +152,7 @@ uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_rl \
     --world-count 4096 --measure-replays 16 --warmup-steps 4
 ```
 
-Result from this checkpoint with the normal G1 recipe
+Older fast-setting result with `sim_substeps=5`, `solver_iterations=2`,
 `velocity_iterations=1` relax pass enabled and with the environment no longer
 nesting SolverPhoenX substeps inside its own policy-step decimation loop:
 
@@ -190,7 +192,24 @@ path measured 1,093,535 environment samples/s after excluding the final
 update-only graph drain interval from the steady-state mean, reducing the
 throughput gap to about 1.17x versus nanoG1's reported 1.28M samples/s.
 
-The current graph-leapfrog production path was remeasured with the default
+After the G1 solver-convergence sweep, the default recipe moved to
+`sim_substeps=10` and `solver_iterations=4` because the faster 5-substep settings
+fell below the 0.35 m gate height in short standing/drive tests. With the
+safer 10x4 setting, this command measured 609,052 environment samples/s, about
+2.10x slower than nanoG1's reported 1.28M samples/s:
+
+```bash
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train \
+    --execution-mode graph_leapfrog --no-readback-diagnostics \
+    --sim-substeps 10 --solver-iterations 4
+```
+
+A 75.2M-sample train-save-reload-gate run with this setting completed
+in 174.6 s including the final gate but still failed the gate
+(`battery_perf=0.517`, `battery_falls=1584`). See `G1_SOLVER_CONVERGENCE.md` for
+the fidelity study.
+
+The old fast graph-leapfrog production path was remeasured with the default
 auto fast-tail scheduler at 1,086,344 samples/s on 2026-06-20. Setting
 `--prepare-refresh-stride 3` was neutral at 1,087,558 samples/s, while forcing
 block-world schedulers was slower: 1,071,348 samples/s for `block_world_32`,

@@ -37,11 +37,12 @@ class TestG1PhoenXRL(unittest.TestCase):
         device = require_cuda_graph_capture("PhoenX G1 RL recipe tests")
 
         env_config = g1_recipe.default_g1_env_config(world_count=1)
+        env = rl.EnvG1PhoenX(env_config, device=device)
         train_config = rl.ConfigTrainG1PPO()
         ppo_config = g1_recipe.default_g1_ppo_config()
 
         self.assertEqual(env_config.sim_substeps, g1_recipe.SIM_SUBSTEPS)
-        self.assertEqual(rl.EnvG1PhoenX(env_config, device=device).solver.world.substeps, 1)
+        self.assertEqual(env.solver.world.substeps, 1)
         self.assertEqual(env_config.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
         self.assertEqual(g1_recipe.VELOCITY_ITERATIONS, 1)
         self.assertEqual(env_config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
@@ -51,6 +52,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.threads_per_world, g1_recipe.THREADS_PER_WORLD)
         self.assertEqual(env_config.multi_world_scheduler, g1_recipe.MULTI_WORLD_SCHEDULER)
         self.assertEqual(env_config.prepare_refresh_stride, g1_recipe.PREPARE_REFRESH_STRIDE)
+        expected_leg_kd = np.array([4.0, 4.0, 4.0, 6.0, 3.0, 2.2] * 2, dtype=np.float32)
+        np.testing.assert_allclose(env.model.joint_target_kd.numpy()[6:18], expected_leg_kd, rtol=0.0, atol=1.0e-6)
         self.assertEqual(train_config.hidden_layers, g1_recipe.HIDDEN_LAYERS)
         self.assertEqual(train_config.activation, g1_recipe.ACTIVATION)
         self.assertEqual(train_config.rollout_steps, g1_recipe.ROLLOUT_STEPS)
