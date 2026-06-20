@@ -171,6 +171,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         velocity_iterations=int(args.velocity_iterations),
         controlled_action_count=int(args.controlled_action_count),
         parse_meshes=bool(args.parse_meshes),
+        contact_geometry=str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
         rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
         threads_per_world=args.threads_per_world,
         multi_world_scheduler=str(args.multi_world_scheduler),
@@ -252,6 +253,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
         "parse_meshes": bool(args.parse_meshes),
+        "contact_geometry": str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
         "rigid_contact_max_per_world": int(args.rigid_contact_max_per_world),
         "threads_per_world": args.threads_per_world,
         "effective_threads_per_world": effective_tpw,
@@ -325,6 +327,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     parser.add_argument("--parse-meshes", action="store_true")
+    parser.add_argument("--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY)
     parser.add_argument(
         "--rigid-contact-max-per-world",
         type=int,

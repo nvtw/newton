@@ -37,6 +37,7 @@ W_ALIVE = 3.0
 W_TERMINATION = -1.0
 
 PARSE_MESHES = False
+CONTACT_GEOMETRY = "nanog1_foot_boxes"
 AUTO_RESET = True
 RIGID_CONTACT_MAX_PER_WORLD = 32
 THREADS_PER_WORLD: int | str = "auto"
@@ -107,6 +108,7 @@ def default_g1_env_config(**overrides: Any):
         "w_alive": W_ALIVE,
         "w_termination": W_TERMINATION,
         "parse_meshes": PARSE_MESHES,
+        "contact_geometry": CONTACT_GEOMETRY,
         "auto_reset": AUTO_RESET,
         "rigid_contact_max_per_world": RIGID_CONTACT_MAX_PER_WORLD,
         "threads_per_world": THREADS_PER_WORLD,

@@ -54,6 +54,7 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         velocity_iterations=int(args.velocity_iterations),
         controlled_action_count=int(args.controlled_action_count),
         parse_meshes=bool(args.parse_meshes),
+        contact_geometry=str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
         rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
         threads_per_world=args.threads_per_world,
         multi_world_scheduler=str(args.multi_world_scheduler),
@@ -266,6 +267,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     parser.add_argument("--parse-meshes", action="store_true")
+    parser.add_argument("--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY)
     parser.add_argument("--rigid-contact-max-per-world", type=int, default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
     parser.add_argument("--threads-per-world", type=_parse_int_or_auto, default=g1_recipe.THREADS_PER_WORLD)
     parser.add_argument("--multi-world-scheduler", default=g1_recipe.MULTI_WORLD_SCHEDULER)

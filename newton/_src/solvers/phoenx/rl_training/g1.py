@@ -10,6 +10,7 @@ import warp as wp
 
 import newton
 import newton.utils
+from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 
 from . import g1_recipe
 from .env import advance_seed_counter, collect_ppo_rollout, collect_ppo_rollout_seed_counter
@@ -491,6 +492,13 @@ _CTRL_HI_G1 = (
     1.61443,
 )
 
+_NANOG1_CONTACT_GEOMETRY_MJCF = "mjcf"
+_NANOG1_CONTACT_GEOMETRY_FOOT_BOXES = "nanog1_foot_boxes"
+_NANOG1_CONTACT_GEOMETRIES = (_NANOG1_CONTACT_GEOMETRY_MJCF, _NANOG1_CONTACT_GEOMETRY_FOOT_BOXES)
+_NANOG1_FOOT_BOX_LOCAL_POS = (0.04, 0.0, -0.029)
+_NANOG1_FOOT_BOX_HALF_EXTENTS = (0.09, 0.03, 0.008)
+_NANOG1_FOOT_BOX_MU = 0.6
+
 
 @wp.func
 def _clip_float(x: wp.float32, lo: wp.float32, hi: wp.float32) -> wp.float32:
@@ -582,10 +590,10 @@ def g1_observe_reward_kernel(
     q_base = world * coord_stride
     qd_base = world * dof_stride
 
-    qw = joint_q[q_base + wp.int32(3)]
-    qx = joint_q[q_base + wp.int32(4)]
-    qy = joint_q[q_base + wp.int32(5)]
-    qz = joint_q[q_base + wp.int32(6)]
+    qx = joint_q[q_base + wp.int32(3)]
+    qy = joint_q[q_base + wp.int32(4)]
+    qz = joint_q[q_base + wp.int32(5)]
+    qw = joint_q[q_base + wp.int32(6)]
     lin_w = wp.vec3(joint_qd[qd_base], joint_qd[qd_base + wp.int32(1)], joint_qd[qd_base + wp.int32(2)])
     ang = wp.vec3(
         joint_qd[qd_base + wp.int32(3)],
@@ -815,6 +823,9 @@ class ConfigEnvG1PhoenX:
         w_termination: Termination reward applied on fall.
         parse_meshes: Import MJCF mesh collision geoms. Disable for fast
             RL runs that use the primitive foot and arm geoms only.
+        contact_geometry: G1 contact geometry preset. "mjcf" keeps the
+            imported MJCF primitives; "nanog1_foot_boxes" replaces the
+            four foot point contacts per foot with nanoG1's MuJoCo contact boxes.
         auto_reset: Reset worlds whose done flag is set after each step.
         rigid_contact_max_per_world: Rigid-contact capacity per vectorized world.
             ``0`` keeps the solver's automatic sizing. The default is
@@ -849,6 +860,7 @@ class ConfigEnvG1PhoenX:
     w_alive: float = g1_recipe.W_ALIVE
     w_termination: float = g1_recipe.W_TERMINATION
     parse_meshes: bool = g1_recipe.PARSE_MESHES
+    contact_geometry: str = g1_recipe.CONTACT_GEOMETRY
     auto_reset: bool = g1_recipe.AUTO_RESET
     rigid_contact_max_per_world: int = g1_recipe.RIGID_CONTACT_MAX_PER_WORLD
     threads_per_world: int | str = g1_recipe.THREADS_PER_WORLD
@@ -883,6 +895,8 @@ class EnvG1PhoenX:
             raise ValueError("phase_period must be positive")
         if int(self.config.rigid_contact_max_per_world) < 0:
             raise ValueError("rigid_contact_max_per_world must be non-negative")
+        if str(self.config.contact_geometry) not in _NANOG1_CONTACT_GEOMETRIES:
+            raise ValueError(f"contact_geometry must be one of {_NANOG1_CONTACT_GEOMETRIES}")
 
         self.model = self._build_model()
         self.coord_stride = int(self.model.joint_coord_count) // self.world_count
@@ -942,8 +956,9 @@ class EnvG1PhoenX:
             parse_meshes=bool(self.config.parse_meshes),
             ignore_inertial_definitions=False,
         )
+        self._apply_contact_geometry(articulation_builder)
         articulation_builder.joint_q[:3] = [0.0, 0.0, 0.785]
-        articulation_builder.joint_q[3:7] = [1.0, 0.0, 0.0, 0.0]
+        articulation_builder.joint_q[3:7] = [0.0, 0.0, 0.0, 1.0]
         articulation_builder.joint_q[7 : 7 + ACTION_DIM_G1] = list(_DEFAULT_JOINT_POS_G1)
         for i in range(ACTION_DIM_G1):
             dof = i + 6
@@ -964,14 +979,64 @@ class EnvG1PhoenX:
         model.set_gravity((0.0, 0.0, -9.81))
         contact_cap_per_world = int(self.config.rigid_contact_max_per_world)
         if contact_cap_per_world > 0 and not bool(self.config.parse_meshes):
-            from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING  # noqa: PLC0415
-
             model._collision_pipeline = newton.CollisionPipeline(
                 model,
                 contact_matching=PHOENX_CONTACT_MATCHING,
                 rigid_contact_max=max(1, self.world_count * contact_cap_per_world),
             )
         return model
+
+    def _apply_contact_geometry(self, builder: newton.ModelBuilder) -> None:
+        contact_geometry = str(self.config.contact_geometry)
+        if contact_geometry == _NANOG1_CONTACT_GEOMETRY_MJCF:
+            return
+        if contact_geometry == _NANOG1_CONTACT_GEOMETRY_FOOT_BOXES:
+            self._apply_nanog1_foot_boxes(builder)
+            return
+        raise ValueError(f"contact_geometry must be one of {_NANOG1_CONTACT_GEOMETRIES}")
+
+    def _apply_nanog1_foot_boxes(self, builder: newton.ModelBuilder) -> None:
+        left_body = self._disable_ankle_point_contacts(builder, "left")
+        right_body = self._disable_ankle_point_contacts(builder, "right")
+        cfg = builder.default_shape_cfg.copy()
+        cfg.mu = _NANOG1_FOOT_BOX_MU
+        cfg.gap = 0.0
+        hx, hy, hz = _NANOG1_FOOT_BOX_HALF_EXTENTS
+        xform = wp.transform(p=wp.vec3(*_NANOG1_FOOT_BOX_LOCAL_POS), q=wp.quat_identity())
+        builder.add_shape_box(
+            body=left_body,
+            xform=xform,
+            hx=hx,
+            hy=hy,
+            hz=hz,
+            cfg=cfg,
+            label="left_nanog1_foot_box",
+        )
+        builder.add_shape_box(
+            body=right_body,
+            xform=xform,
+            hx=hx,
+            hy=hy,
+            hz=hz,
+            cfg=cfg,
+            label="right_nanog1_foot_box",
+        )
+
+    @staticmethod
+    def _disable_ankle_point_contacts(builder: newton.ModelBuilder, side: str) -> int:
+        body_ids: list[int] = []
+        collide_bit = int(newton.ShapeFlags.COLLIDE_SHAPES)
+        particle_bit = int(newton.ShapeFlags.COLLIDE_PARTICLES)
+        geom_token = f"{side}_ankle_roll_link_geom_"
+        for shape_index, label in enumerate(builder.shape_label):
+            if geom_token not in label:
+                continue
+            body_ids.append(int(builder.shape_body[shape_index]))
+            builder.shape_flags[shape_index] = int(builder.shape_flags[shape_index]) & ~collide_bit & ~particle_bit
+        unique_body_ids = sorted(set(body_ids))
+        if len(unique_body_ids) != 1:
+            raise RuntimeError(f"Expected one {side} ankle contact body, found {unique_body_ids}")
+        return unique_body_ids[0]
 
     def _make_solver(self):
         # The environment loop already runs sim_substeps solver calls per policy

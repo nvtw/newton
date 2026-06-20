@@ -158,6 +158,9 @@ def _main() -> int:
     g1_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_parser.add_argument("--parse-meshes", action="store_true")
     g1_parser.add_argument(
+        "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
+    )
+    g1_parser.add_argument(
         "--rigid-contact-max-per-world",
         type=int,
         default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
@@ -215,6 +218,9 @@ def _main() -> int:
     g1_eval_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_eval_parser.add_argument("--parse-meshes", action="store_true")
     g1_eval_parser.add_argument(
+        "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
+    )
+    g1_eval_parser.add_argument(
         "--rigid-contact-max-per-world",
         type=int,
         default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
@@ -237,6 +243,9 @@ def _main() -> int:
     g1_gate_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_gate_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_gate_parser.add_argument("--parse-meshes", action="store_true")
+    g1_gate_parser.add_argument(
+        "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
+    )
     g1_gate_parser.add_argument(
         "--rigid-contact-max-per-world",
         type=int,
@@ -286,6 +295,7 @@ def _main() -> int:
             velocity_iterations=args.velocity_iterations,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
+            contact_geometry=args.contact_geometry,
             rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         ppo_config = g1_recipe.default_g1_ppo_config(
@@ -333,6 +343,7 @@ def _main() -> int:
             velocity_iterations=args.velocity_iterations,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
+            contact_geometry=args.contact_geometry,
             rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)
@@ -355,6 +366,7 @@ def _main() -> int:
             velocity_iterations=args.velocity_iterations,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
+            contact_geometry=args.contact_geometry,
             rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)

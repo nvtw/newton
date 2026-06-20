@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
+import newton
 import newton.rl as rl
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import benchmark_train_to_gate
 from newton._src.solvers.phoenx.rl_training import g1_recipe
@@ -49,11 +50,26 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.w_track_lin, g1_recipe.W_TRACK_LIN)
         self.assertEqual(env_config.w_action_rate, g1_recipe.W_ACTION_RATE)
         self.assertEqual(env_config.rigid_contact_max_per_world, g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
+        self.assertEqual(env_config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
+        self.assertEqual(env_config.contact_geometry, "nanog1_foot_boxes")
         self.assertEqual(env_config.threads_per_world, g1_recipe.THREADS_PER_WORLD)
         self.assertEqual(env_config.multi_world_scheduler, g1_recipe.MULTI_WORLD_SCHEDULER)
         self.assertEqual(env_config.prepare_refresh_stride, g1_recipe.PREPARE_REFRESH_STRIDE)
         expected_leg_kd = np.array([4.0, 4.0, 4.0, 6.0, 3.0, 2.2] * 2, dtype=np.float32)
         np.testing.assert_allclose(env.model.joint_target_kd.numpy()[6:18], expected_leg_kd, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.model.joint_q.numpy()[3:7], np.array([0.0, 0.0, 0.0, 1.0]), rtol=0.0, atol=0.0)
+        labels = list(env.model.shape_label)
+        self.assertIn("left_nanog1_foot_box", labels)
+        self.assertIn("right_nanog1_foot_box", labels)
+        flags = env.model.shape_flags.numpy()
+        collide_bit = int(newton.ShapeFlags.COLLIDE_SHAPES)
+        for shape_index, label in enumerate(labels):
+            if "ankle_roll_link_geom_" in label:
+                self.assertEqual(int(flags[shape_index]) & collide_bit, 0)
+        with wp.ScopedCapture(device=device) as capture:
+            env.model.collide(env.state_0, env.contacts)
+        wp.capture_launch(capture.graph)
+        self.assertGreater(int(env.contacts.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(train_config.hidden_layers, g1_recipe.HIDDEN_LAYERS)
         self.assertEqual(train_config.activation, g1_recipe.ACTIVATION)
         self.assertEqual(train_config.rollout_steps, g1_recipe.ROLLOUT_STEPS)
@@ -63,6 +79,13 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(ppo_config.shared_value_network, g1_recipe.SHARED_VALUE_NETWORK)
         self.assertEqual(ppo_config.minibatch_size, g1_recipe.MINIBATCH_SIZE)
         self.assertEqual(ppo_config.manual_mlp_forward_dtype, g1_recipe.MANUAL_MLP_FORWARD_DTYPE)
+
+    def test_rejects_unknown_contact_geometry(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 RL contact geometry tests")
+        config = rl.ConfigEnvG1PhoenX(world_count=1, contact_geometry="unknown")
+
+        with self.assertRaisesRegex(ValueError, "contact_geometry"):
+            rl.EnvG1PhoenX(config, device=device)
 
     def test_rejects_negative_contact_capacity(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL capacity tests")
