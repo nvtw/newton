@@ -152,18 +152,18 @@ nanoG1 reports about 1.28M environment samples/s while actually training, so
 the current mirror-enabled pure-Warp PhoenX G1 training loop is about 2.01x
 slower on this training-throughput metric. An experimental frozen-policy
 leapfrog benchmark that launches a rollout graph, an update graph, and a small
-policy-copy graph on separate streams reached 1,098,981 environment samples/s
+policy-copy graph on separate streams reached 1,093,441 environment samples/s
 with device-side command, action-noise, and minibatch seed counters. That
 separate-graph benchmark is not yet the production trainer, but it reduces the
-throughput gap to about 1.16x versus nanoG1's reported 1.28M samples/s.
+throughput gap to about 1.17x versus nanoG1's reported 1.28M samples/s.
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog \
     --iterations 4 --warmup-iterations 1 --graphs
 ```
 
-The same short benchmark measured 971,627 samples/s for sequential graph replay
-and 641,902 samples/s for the eager synchronous schedule, so the stream overlap
+The same short benchmark measured 966,730 samples/s for sequential graph replay
+and 641,921 samples/s for the eager synchronous schedule, so the stream overlap
 only pays off once the rollout, update, and copy phases are graph-replayed. An
 Nsight Systems profile of the normal train-loop benchmark shows the largest
 kernels are split between the Warp PPO learner and generic PhoenX rollout. Top
@@ -213,8 +213,9 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
   tile matmul, but it does not yet include nanoG1's Muon optimizer path or
   PufferNet model stack.
 - Environment stepping, command randomization, stochastic action sampling,
-  priority minibatch sampling, and the manual PPO update pieces are CUDA-graph
-  capturable with device-side seed counters. The production train loop still
+  priority minibatch sampling, Adam optimizer step state, and the manual PPO
+  update pieces are CUDA-graph capturable with device-side counters. The
+  production train loop still
   uses the eager collect-update schedule; the separate rollout/update/copy graph
   schedule is currently benchmarked but not yet exposed as the default trainer.
   Logging and checkpointing remain host-driven.

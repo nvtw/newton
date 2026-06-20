@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 from .kernels import (
     adam_step_1d_kernel,
     adam_step_2d_kernel,
+    adam_step_prepare_kernel,
     grad_sumsq_1d_kernel,
     grad_sumsq_2d_kernel,
     zero_scalar_kernel,
@@ -49,10 +51,25 @@ class Adam:
         self.eps = float(eps)
         self.weight_decay = float(weight_decay)
         self.max_grad_norm = float(max_grad_norm)
-        self.step_count = 0
+        self._step_count_host = 0
+        self._step_count = wp.array([0], dtype=wp.int32, device=params[0].device)
+        self._step_corrections = wp.zeros(2, dtype=wp.float32, device=params[0].device, requires_grad=False)
         self._grad_sumsq = wp.zeros(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
         self.m = [wp.zeros_like(param, requires_grad=False) for param in params]
         self.v = [wp.zeros_like(param, requires_grad=False) for param in params]
+
+    @property
+    def step_count(self) -> int:
+        """Number of optimizer steps already applied."""
+
+        self._step_count_host = int(self._step_count.numpy()[0])
+        return self._step_count_host
+
+    @step_count.setter
+    def step_count(self, value: int) -> None:
+        self._step_count_host = max(int(value), 0)
+        if hasattr(self, "_step_count"):
+            self._step_count.assign(np.asarray([self._step_count_host], dtype=np.int32))
 
     def zero_grad(self) -> None:
         """Clear gradients on all parameters."""
@@ -64,9 +81,13 @@ class Adam:
     def step(self) -> None:
         """Apply one Adam update and clear gradients."""
 
-        self.step_count += 1
-        beta1_correction = 1.0 - self.beta1**self.step_count
-        beta2_correction = 1.0 - self.beta2**self.step_count
+        wp.launch(
+            adam_step_prepare_kernel,
+            dim=1,
+            inputs=[self._step_count, self.beta1, self.beta2],
+            outputs=[self._step_corrections],
+            device=self._step_count.device,
+        )
         max_grad_norm = float(self.max_grad_norm)
         if max_grad_norm > 0.0:
             wp.launch(zero_scalar_kernel, dim=1, outputs=[self._grad_sumsq], device=self._grad_sumsq.device)
@@ -108,11 +129,10 @@ class Adam:
                         m,
                         v,
                         self._grad_sumsq,
+                        self._step_corrections,
                         self.lr,
                         self.beta1,
                         self.beta2,
-                        beta1_correction,
-                        beta2_correction,
                         self.eps,
                         self.weight_decay,
                         max_grad_norm,
@@ -129,11 +149,10 @@ class Adam:
                         m,
                         v,
                         self._grad_sumsq,
+                        self._step_corrections,
                         self.lr,
                         self.beta1,
                         self.beta2,
-                        beta1_correction,
-                        beta2_correction,
                         self.eps,
                         self.weight_decay,
                         max_grad_norm,

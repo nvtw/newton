@@ -90,6 +90,16 @@ def zero_scalar_kernel(x: wp.array[wp.float32]):
 
 
 @wp.kernel
+def adam_step_prepare_kernel(
+    step_count: wp.array[wp.int32], beta1: wp.float32, beta2: wp.float32, corrections: wp.array[wp.float32]
+):
+    step_count[0] = step_count[0] + wp.int32(1)
+    step = wp.float32(step_count[0])
+    corrections[0] = wp.float32(1.0) - wp.pow(beta1, step)
+    corrections[1] = wp.float32(1.0) - wp.pow(beta2, step)
+
+
+@wp.kernel
 def seed_counter_increment_kernel(counter: wp.array[wp.int32], delta: wp.int32):
     modulus = wp.int64(2147483647)
     value = (wp.int64(counter[0]) + wp.int64(delta)) % modulus
@@ -1152,16 +1162,17 @@ def adam_step_1d_kernel(
     m: wp.array[wp.float32],
     v: wp.array[wp.float32],
     grad_sumsq: wp.array[wp.float32],
+    step_corrections: wp.array[wp.float32],
     lr: wp.float32,
     beta1: wp.float32,
     beta2: wp.float32,
-    beta1_correction: wp.float32,
-    beta2_correction: wp.float32,
     eps: wp.float32,
     weight_decay: wp.float32,
     max_grad_norm: wp.float32,
 ):
     i = wp.tid()
+    beta1_correction = step_corrections[0]
+    beta2_correction = step_corrections[1]
     g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i] + weight_decay * param[i]
     mi = beta1 * m[i] + (wp.float32(1.0) - beta1) * g
     vi = beta2 * v[i] + (wp.float32(1.0) - beta2) * g * g
@@ -1178,16 +1189,17 @@ def adam_step_2d_kernel(
     m: wp.array2d[wp.float32],
     v: wp.array2d[wp.float32],
     grad_sumsq: wp.array[wp.float32],
+    step_corrections: wp.array[wp.float32],
     lr: wp.float32,
     beta1: wp.float32,
     beta2: wp.float32,
-    beta1_correction: wp.float32,
-    beta2_correction: wp.float32,
     eps: wp.float32,
     weight_decay: wp.float32,
     max_grad_norm: wp.float32,
 ):
     i, j = wp.tid()
+    beta1_correction = step_corrections[0]
+    beta2_correction = step_corrections[1]
     g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i, j] + weight_decay * param[i, j]
     mi = beta1 * m[i, j] + (wp.float32(1.0) - beta1) * g
     vi = beta2 * v[i, j] + (wp.float32(1.0) - beta2) * g * g

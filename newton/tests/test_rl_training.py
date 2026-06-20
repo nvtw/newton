@@ -25,6 +25,12 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
 )
 
 
+@wp.kernel
+def _fill_1d_float_kernel(value: wp.float32, out: wp.array[wp.float32]):
+    i = wp.tid()
+    out[i] = value
+
+
 def _rl_cuda_device():
     device = wp.get_preferred_device()
     if not device.is_cuda or not wp.is_mempool_enabled(device):
@@ -570,6 +576,34 @@ class TestTrainerPPO(unittest.TestCase):
         np.testing.assert_allclose(bf16_out.numpy(), fp32_out.numpy(), rtol=8.0e-3, atol=2.0e-2)
         with self.assertRaises(ValueError):
             rl.WarpMLP((2, 64, 3), device=device, manual_forward_dtype="float16")
+
+    def test_adam_step_count_advances_inside_graph(self) -> None:
+        device = _rl_cuda_device()
+        initial = np.array([1.0, -2.0, 0.5], dtype=np.float32)
+        param_graph = wp.array(initial, dtype=wp.float32, device=device, requires_grad=True)
+        param_eager = wp.array(initial, dtype=wp.float32, device=device, requires_grad=True)
+        opt_graph = rl.Adam([param_graph], lr=0.01, beta1=0.8, beta2=0.9)
+        opt_eager = rl.Adam([param_eager], lr=0.01, beta1=0.8, beta2=0.9)
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(_fill_1d_float_kernel, dim=param_graph.shape[0], inputs=[0.25], outputs=[param_graph.grad])
+            opt_graph.step()
+
+        for _ in range(2):
+            wp.capture_launch(capture.graph)
+        for _ in range(2):
+            wp.launch(
+                _fill_1d_float_kernel,
+                dim=param_eager.shape[0],
+                inputs=[0.25],
+                outputs=[param_eager.grad],
+                device=device,
+            )
+            opt_eager.step()
+
+        np.testing.assert_allclose(param_graph.numpy(), param_eager.numpy(), rtol=1.0e-6, atol=1.0e-6)
+        self.assertEqual(opt_graph.step_count, 2)
+        self.assertEqual(opt_eager.step_count, 2)
 
     def test_actor_seed_counter_advances_inside_graph(self) -> None:
         device = _rl_cuda_device()
