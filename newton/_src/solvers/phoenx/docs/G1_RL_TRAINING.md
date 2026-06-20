@@ -12,7 +12,8 @@ adding a PyTorch dependency to Newton's Warp-only RL stack.
 - `newton.rl.capture_env_steps`: reusable CUDA graph-capture helper for vectorized
   environments.
 - `python -m newton.rl train-g1-ppo`: CLI wrapper for pure-Warp PPO
-  training, checkpointing, and resume.
+  training, checkpointing, resume, and the experimental
+  `--execution-mode graph_leapfrog` rollout/update/copy graph schedule.
 - `python -m newton.rl eval-g1-ppo`: Load and roll out a saved G1 PPO
   checkpoint.
 - `python -m newton.rl gate-g1-ppo`: Run the nanoG1-style quality gate on a
@@ -94,7 +95,12 @@ The checkpoint stores actor, critic, optimizer state, PPO config, network shape,
 and the absolute training iteration. Resuming from `/tmp/phoenx_g1_2.npz` writes
 `/tmp/phoenx_g1_3.npz` and logs `iter=0002`.
 
-Use `--mirror-loss-coeff 0.0` on `train-g1-ppo` or `bench_g1_train` to disable
+Use `--execution-mode graph_leapfrog` on `train-g1-ppo` or `bench_g1_train`
+to run the experimental separate-stream schedule: a frozen-policy rollout graph,
+PPO update graph, and small policy-copy graph are replayed on separate CUDA
+streams. Eager execution remains the default while this mode is validated for
+longer training runs. Use `--mirror-loss-coeff 0.0` on `train-g1-ppo` or
+`bench_g1_train` to disable
 the default nanoG1-style mirror regularizer for throughput-only comparisons. Use
 `--reward-clip 0.0` to disable PufferLib-style reward clipping,
 `--vtrace-rho-clip 0.0 --vtrace-c-clip 0.0` to disable V-trace replay
@@ -146,6 +152,9 @@ scale.
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train \
     --iterations 6 --warmup-iterations 2
+
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train \
+    --iterations 6 --warmup-iterations 2 --execution-mode graph_leapfrog
 ```
 
 nanoG1 reports about 1.28M environment samples/s while actually training, so
@@ -153,8 +162,12 @@ the current mirror-enabled pure-Warp PhoenX G1 training loop is about 2.01x
 slower on this training-throughput metric. An experimental frozen-policy
 leapfrog benchmark that launches a rollout graph, an update graph, and a small
 policy-copy graph on separate streams reached 1,093,441 environment samples/s
-with device-side command, action-noise, and minibatch seed counters. That
-separate-graph benchmark is not yet the production trainer, but it reduces the
+with device-side command, action-noise, and minibatch seed counters. The same
+separate-graph schedule is now exposed as the experimental
+`train-g1-ppo --execution-mode graph_leapfrog` mode. The production
+`bench_g1_train --execution-mode graph_leapfrog --no-readback-diagnostics`
+path measured 1,093,535 environment samples/s after excluding the final
+update-only graph drain interval from the steady-state mean, reducing the
 throughput gap to about 1.17x versus nanoG1's reported 1.28M samples/s.
 
 ```bash
@@ -215,10 +228,10 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
 - Environment stepping, command randomization, stochastic action sampling,
   priority minibatch sampling, Adam optimizer step state, and the manual PPO
   update pieces are CUDA-graph capturable with device-side counters. The
-  production train loop still
-  uses the eager collect-update schedule; the separate rollout/update/copy graph
-  schedule is currently benchmarked but not yet exposed as the default trainer.
-  Logging and checkpointing remain host-driven.
+  default train loop still uses the eager collect-update schedule, while the
+  separate rollout/update/copy graph schedule is available through
+  `execution_mode="graph_leapfrog"`. Logging and checkpointing remain
+  host-driven.
 - Reset/domain randomization and command scheduling are still lighter than
   nanoG1, so sample efficiency is not yet directly comparable.
 
@@ -227,9 +240,8 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
 1. Avoid generic replicated MJCF setup for high world counts; build or cache a
    compact fixed-topology G1 multi-world model path.
 2. Remove avoidable broadphase/contact work for independent flat-ground G1 worlds.
-3. Promote the measured separate-graph rollout/update/copy schedule into a
-   production training mode once diagnostics, checkpoint cadence, and policy
-   freshness semantics are nailed down.
+3. Measure the opt-in graph-leapfrog trainer over longer runs and tighten the
+   remaining host synchronization around metrics/checkpoint cadence.
 4. Upgrade command scheduling and remaining domain randomization toward the
    nanoG1 recipe.
 5. Add a PufferLib interop path behind an optional dependency boundary if we want

@@ -202,6 +202,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         log_interval=0,
         randomize_commands=not bool(args.no_command_randomization),
         readback_diagnostics=not bool(args.no_readback_diagnostics),
+        execution_mode=str(args.execution_mode),
     )
     result = rl.train_g1_ppo(config)
     world = result.env.solver.world
@@ -209,6 +210,12 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
     history = result.history
     _validate_finite_history(history)
     warm = history[int(args.warmup_iterations) :]
+    excluded_final_graph_drain = False
+    if args.execution_mode == "graph_leapfrog" and len(warm) > 1:
+        # The last graph-leapfrog interval only drains the pending PPO update; the
+        # matching rollout was already timed in the previous overlapped interval.
+        warm = warm[:-1]
+        excluded_final_graph_drain = True
     warm_sps = np.asarray([item.samples_per_second for item in warm], dtype=np.float64)
     warm_rollout = np.asarray([item.rollout_seconds for item in warm], dtype=np.float64)
     warm_update = np.asarray([item.update_seconds for item in warm], dtype=np.float64)
@@ -239,6 +246,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "reward_clip": float(args.reward_clip),
         "max_grad_norm": float(args.max_grad_norm),
         "readback_diagnostics": not bool(args.no_readback_diagnostics),
+        "execution_mode": str(args.execution_mode),
         "sim_substeps": int(args.sim_substeps),
         "solver_internal_substeps": int(world.substeps),
         "solver_iterations": int(args.solver_iterations),
@@ -254,6 +262,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "physics_steps_per_s": physics_sps,
         "mean_rollout_seconds": float(np.mean(warm_rollout)),
         "mean_update_seconds": float(np.mean(warm_update)),
+        "mean_samples_iterations": [int(item.iteration) for item in warm],
+        "excluded_final_graph_drain_from_mean": excluded_final_graph_drain,
         "nanog1_reference_source": nanog1_source,
         "nanog1_reference_env_samples_per_s": nanog1_env_sps,
         "nanog1_reference_physics_steps_per_s": nanog1_physics_sps,
@@ -329,6 +339,12 @@ def _parse_args() -> argparse.Namespace:
         "--no-readback-diagnostics",
         action="store_true",
         help="Skip host diagnostic readbacks during the measured train loop.",
+    )
+    parser.add_argument(
+        "--execution-mode",
+        choices=("eager", "graph_leapfrog"),
+        default="eager",
+        help="Use eager PPO or the experimental separate-graph rollout/update schedule.",
     )
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)

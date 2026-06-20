@@ -302,6 +302,93 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(second_restored.config.shared_value_network)
             self.assertIsNone(second_restored.critic)
 
+    def test_train_graph_leapfrog_save_and_resume(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 graph-leapfrog training tests")
+        env_config = rl.ConfigEnvG1PhoenX(
+            world_count=2,
+            sim_substeps=1,
+            solver_iterations=1,
+            velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+            max_episode_steps=0,
+            auto_reset=False,
+        )
+        ppo_config = rl.ConfigPPO(
+            train_epochs=1,
+            minibatch_size=1,
+            replay_ratio=1.0,
+            priority_alpha=0.4,
+            priority_beta=1.0,
+            normalize_advantages=False,
+            actor_lr=1.0e-3,
+            critic_lr=1.0e-3,
+            entropy_coeff=0.0,
+            reward_clip=1.0,
+            max_grad_norm=0.3,
+            mirror_loss_coeff=0.25,
+            shared_value_network=True,
+            manual_actor_backward=True,
+            manual_critic_backward=True,
+            manual_mlp_weight_grad_dtype="bfloat16",
+            manual_mlp_forward_dtype="bfloat16",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_template = f"{tmpdir}/g1_graph_{{iteration}}.npz"
+            result = rl.train_g1_ppo(
+                rl.ConfigTrainG1PPO(
+                    iterations=2,
+                    rollout_steps=1,
+                    hidden_layers=(8,),
+                    env_config=env_config,
+                    ppo_config=ppo_config,
+                    device=device,
+                    seed=29,
+                    log_interval=0,
+                    randomize_commands=True,
+                    checkpoint_path=checkpoint_template,
+                    checkpoint_interval=1,
+                    readback_diagnostics=True,
+                    execution_mode="graph_leapfrog",
+                )
+            )
+            restored = rl.load_ppo_checkpoint(f"{tmpdir}/g1_graph_2.npz", device=device)
+
+            self.assertEqual([stat.iteration for stat in result.history], [0, 1])
+            self.assertEqual(result.trainer.iteration, 2)
+            self.assertEqual(restored.iteration, 2)
+            self.assertGreater(result.trainer.actor_optimizer.step_count, 0)
+            self.assertTrue(math.isfinite(result.history[-1].mean_reward))
+            self.assertTrue(math.isfinite(result.history[-1].policy_loss))
+            self.assertTrue(math.isfinite(result.history[-1].value_loss))
+            self.assertGreater(result.history[-1].samples_per_second, 0.0)
+            for before, after in zip(result.trainer.actor.parameters(), restored.actor.parameters(), strict=True):
+                np.testing.assert_allclose(after.numpy(), before.numpy(), rtol=0.0, atol=0.0)
+
+            resumed = rl.train_g1_ppo(
+                rl.ConfigTrainG1PPO(
+                    iterations=1,
+                    rollout_steps=1,
+                    hidden_layers=(8,),
+                    env_config=env_config,
+                    ppo_config=ppo_config,
+                    device=device,
+                    seed=29,
+                    log_interval=0,
+                    randomize_commands=False,
+                    resume_checkpoint=f"{tmpdir}/g1_graph_2.npz",
+                    checkpoint_path=checkpoint_template,
+                    checkpoint_interval=1,
+                    readback_diagnostics=False,
+                    execution_mode="graph_leapfrog",
+                )
+            )
+            second_restored = rl.load_ppo_checkpoint(f"{tmpdir}/g1_graph_3.npz", device=device)
+
+            self.assertEqual(resumed.history[0].iteration, 2)
+            self.assertEqual(resumed.trainer.iteration, 3)
+            self.assertEqual(second_restored.iteration, 3)
+            self.assertEqual(second_restored.actor_optimizer.step_count, resumed.trainer.actor_optimizer.step_count)
+
 
 if __name__ == "__main__":
     wp.init()

@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
+from .env import make_seed_counter
 from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
 from .g1_recipe import (
     ACTIVATION,
@@ -219,6 +220,7 @@ class ConfigTrainG1PPO:
     checkpoint_path: str | None = None
     checkpoint_interval: int = 0
     readback_diagnostics: bool = True
+    execution_mode: str = "eager"
 
 
 @dataclass
@@ -439,6 +441,201 @@ def _default_g1_ppo_config() -> ConfigPPO:
     return default_g1_ppo_config()
 
 
+def _copy_g1_trainer_policy(dst: TrainerPPO, src: TrainerPPO) -> None:
+    dst.actor.copy_from(src.actor)
+    if dst.critic is not None or src.critic is not None:
+        if dst.critic is None or src.critic is None:
+            raise RuntimeError("trainer critic layouts do not match")
+        dst.critic.copy_from(src.critic)
+
+
+def _make_g1_rollout_trainer(env: EnvG1PhoenX, trainer: TrainerPPO) -> TrainerPPO:
+    rollout = TrainerPPO(
+        obs_dim=env.obs_dim,
+        action_dim=env.action_dim,
+        hidden_layers=trainer.hidden_layers,
+        config=trainer.config,
+        device=env.device,
+        seed=trainer.seed + 17,
+        squash_actions=trainer.squash_actions,
+        activation=trainer.activation,
+        log_std_init=trainer.log_std_init,
+        mirror_map=g1_mirror_map_ppo() if trainer.config.mirror_loss_coeff > 0.0 else None,
+    )
+    _copy_g1_trainer_policy(rollout, trainer)
+    return rollout
+
+
+def _make_g1_buffer(env: EnvG1PhoenX, steps: int) -> BufferRollout:
+    return BufferRollout(
+        num_steps=int(steps),
+        num_envs=env.world_count,
+        obs_dim=env.obs_dim,
+        action_dim=env.action_dim,
+        device=env.device,
+    )
+
+
+def _capture_stream_graph(stream: wp.Stream, device: wp.context.Device, workload) -> object:
+    main_stream = wp.get_stream(device)
+    with wp.ScopedStream(stream, sync_enter=False, sync_exit=False):
+        wp.wait_stream(main_stream)
+        with wp.ScopedCapture(device=device, stream=stream) as capture:
+            workload()
+    wp.wait_stream(stream)
+    wp.synchronize_device(device)
+    return capture.graph
+
+
+class _G1GraphTrainPhase:
+    def __init__(self, rollout_graph, update_graph):
+        self.rollout_graph = rollout_graph
+        self.update_graph = update_graph
+
+
+def _g1_command_metric_override(cfg: ConfigTrainG1PPO, env: EnvG1PhoenX) -> tuple[float, float, float]:
+    if not cfg.randomize_commands:
+        return tuple(float(v) for v in env.config.command)
+    return (
+        0.5 * (float(cfg.command_x_range[0]) + float(cfg.command_x_range[1])),
+        0.5 * (float(cfg.command_y_range[0]) + float(cfg.command_y_range[1])),
+        0.5 * (float(cfg.command_yaw_range[0]) + float(cfg.command_yaw_range[1])),
+    )
+
+
+def _g1_graph_rollout_metrics(
+    diagnostics: _G1TrainDiagnosticsReadback | None,
+    buffer: BufferRollout,
+    env: EnvG1PhoenX,
+    trainer: TrainerPPO,
+    cfg: ConfigTrainG1PPO,
+) -> tuple[tuple[float, float, float, float, float, float], StatsPPOUpdate]:
+    if diagnostics is None:
+        return _g1_disabled_rollout_metrics(env), StatsPPOUpdate(0.0, 0.0, 0.0, 0.0)
+    rollout_metrics, update_stats = diagnostics.read(buffer, env, trainer)
+    command = _g1_command_metric_override(cfg, env)
+    rollout_metrics = (rollout_metrics[0], rollout_metrics[1], rollout_metrics[2], *command)
+    return rollout_metrics, update_stats
+
+
+def _maybe_log_g1_train_stats(cfg: ConfigTrainG1PPO, stats: StatsTrainG1PPO, local_iteration: int) -> None:
+    if cfg.log_interval > 0 and (stats.iteration % cfg.log_interval == 0 or local_iteration == cfg.iterations - 1):
+        print(
+            f"iter={stats.iteration:04d} "
+            f"reward={stats.mean_reward:.4f} "
+            f"perf={stats.mean_tracking_perf:.3f} "
+            f"done={stats.mean_done:.4f} "
+            f"sps={stats.samples_per_second:.1f} "
+            f"pi_loss={stats.policy_loss:.4f} "
+            f"v_loss={stats.value_loss:.4f}"
+        )
+
+
+def _maybe_checkpoint_g1(cfg: ConfigTrainG1PPO, trainer: TrainerPPO) -> None:
+    if cfg.checkpoint_path is not None and cfg.checkpoint_interval > 0:
+        if trainer.iteration % int(cfg.checkpoint_interval) == 0:
+            checkpoint_path = _format_checkpoint_path(cfg.checkpoint_path, trainer.iteration)
+            trainer.save_checkpoint(checkpoint_path, iteration=trainer.iteration)
+
+
+def _train_g1_ppo_graph_leapfrog(
+    cfg: ConfigTrainG1PPO,
+    env: EnvG1PhoenX,
+    trainer: TrainerPPO,
+    first_buffer: BufferRollout,
+    *,
+    start_iteration: int,
+    diagnostics: _G1TrainDiagnosticsReadback | None,
+) -> ResultTrainG1PPO:
+    device = env.device
+    if not device.is_cuda or not wp.is_mempool_enabled(device):
+        raise RuntimeError("G1 graph_leapfrog training requires CUDA with Warp mempool enabled")
+
+    rollout_trainer = _make_g1_rollout_trainer(env, trainer)
+    buffers = (first_buffer, _make_g1_buffer(env, int(cfg.rollout_steps)))
+    for graph_trainer in (trainer, rollout_trainer):
+        for buffer in buffers:
+            graph_trainer.reserve_update_buffers(buffer)
+
+    command_seed_counter = make_seed_counter(int(cfg.seed) + 53_321 + int(start_iteration), device=device)
+    rollout_seed_counter = make_seed_counter(
+        int(cfg.seed) + int(start_iteration) * int(cfg.rollout_steps), device=device
+    )
+    update_seed_counter = make_seed_counter(int(trainer.seed) + 1_000_003 * int(start_iteration), device=device)
+
+    def collect(buffer: BufferRollout) -> None:
+        if cfg.randomize_commands:
+            env.randomize_commands_seed_counter(
+                seed_counter=command_seed_counter,
+                command_x_range=cfg.command_x_range,
+                command_y_range=cfg.command_y_range,
+                command_yaw_range=cfg.command_yaw_range,
+            )
+        env.collect_ppo_rollout_seed_counter(rollout_trainer, buffer, seed_counter=rollout_seed_counter)
+
+    def update(buffer: BufferRollout) -> None:
+        trainer.update_seed_counter(buffer, seed_counter=update_seed_counter, read_stats=False)
+
+    collect(buffers[0])
+    wp.synchronize_device(device)
+
+    rollout_stream = wp.Stream(device)
+    update_stream = wp.Stream(device)
+    copy_stream = wp.Stream(device)
+    phases = (
+        _G1GraphTrainPhase(
+            _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[1])),
+            _capture_stream_graph(update_stream, device, lambda: update(buffers[0])),
+        ),
+        _G1GraphTrainPhase(
+            _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[0])),
+            _capture_stream_graph(update_stream, device, lambda: update(buffers[1])),
+        ),
+    )
+    copy_graph = _capture_stream_graph(copy_stream, device, lambda: _copy_g1_trainer_policy(rollout_trainer, trainer))
+
+    history: list[StatsTrainG1PPO] = []
+    prev = 0
+    for local_iteration in range(int(cfg.iterations)):
+        iteration = int(start_iteration) + local_iteration
+        t0 = time.perf_counter()
+        if local_iteration < int(cfg.iterations) - 1:
+            phase = phases[prev]
+            wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
+            wp.capture_launch(phase.update_graph, stream=update_stream)
+            with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
+                wp.wait_stream(rollout_stream)
+                wp.wait_stream(update_stream)
+            wp.capture_launch(copy_graph, stream=copy_stream)
+            wp.synchronize_device(device)
+        else:
+            wp.capture_launch(phases[prev].update_graph, stream=update_stream)
+            with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
+                wp.wait_stream(update_stream)
+            wp.capture_launch(copy_graph, stream=copy_stream)
+            wp.synchronize_device(device)
+        t1 = time.perf_counter()
+
+        trainer.iteration = iteration + 1
+        rollout_metrics, update_stats = _g1_graph_rollout_metrics(diagnostics, buffers[prev], env, trainer, cfg)
+        stats = _merge_g1_stats(iteration, rollout_metrics, update_stats, t1 - t0, 0.0, buffers[prev].num_samples)
+        history.append(stats)
+        _maybe_log_g1_train_stats(cfg, stats, local_iteration)
+        _maybe_checkpoint_g1(cfg, trainer)
+
+        if local_iteration < int(cfg.iterations) - 1:
+            prev = 1 - prev
+
+    if cfg.checkpoint_path is not None:
+        final_iteration = int(start_iteration) + int(cfg.iterations)
+        trainer.iteration = final_iteration
+        trainer.save_checkpoint(
+            _format_checkpoint_path(cfg.checkpoint_path, final_iteration), iteration=final_iteration
+        )
+
+    return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffers[prev], history=history)
+
+
 def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
     """Train a Unitree G1 walking policy with PhoenX and Warp-only PPO."""
 
@@ -455,6 +652,8 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         raise ValueError("command_yaw_range must be ordered")
     if cfg.checkpoint_interval < 0:
         raise ValueError("checkpoint_interval must be non-negative")
+    if cfg.execution_mode not in ("eager", "graph_leapfrog"):
+        raise ValueError("execution_mode must be 'eager' or 'graph_leapfrog'")
 
     device = wp.get_device(cfg.device)
     env_config = cfg.env_config or ConfigEnvG1PhoenX()
@@ -480,18 +679,17 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
             log_std_init=cfg.log_std_init,
             mirror_map=g1_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,
         )
-    buffer = BufferRollout(
-        num_steps=cfg.rollout_steps,
-        num_envs=env.world_count,
-        obs_dim=env.obs_dim,
-        action_dim=env.action_dim,
-        device=device,
-    )
+    buffer = _make_g1_buffer(env, int(cfg.rollout_steps))
     trainer.reserve_update_buffers(buffer)
 
     history: list[StatsTrainG1PPO] = []
     start_iteration = int(getattr(trainer, "iteration", 0))
     diagnostics = _G1TrainDiagnosticsReadback(device) if cfg.readback_diagnostics else None
+
+    if cfg.execution_mode == "graph_leapfrog":
+        return _train_g1_ppo_graph_leapfrog(
+            cfg, env, trainer, buffer, start_iteration=start_iteration, diagnostics=diagnostics
+        )
 
     for local_iteration in range(cfg.iterations):
         iteration = start_iteration + local_iteration
@@ -515,21 +713,9 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         stats = _merge_g1_stats(iteration, rollout_metrics, update_stats, t1 - t0, t2 - t1, buffer.num_samples)
         history.append(stats)
 
-        if cfg.log_interval > 0 and (iteration % cfg.log_interval == 0 or local_iteration == cfg.iterations - 1):
-            print(
-                f"iter={iteration:04d} "
-                f"reward={stats.mean_reward:.4f} "
-                f"perf={stats.mean_tracking_perf:.3f} "
-                f"done={stats.mean_done:.4f} "
-                f"sps={stats.samples_per_second:.1f} "
-                f"pi_loss={stats.policy_loss:.4f} "
-                f"v_loss={stats.value_loss:.4f}"
-            )
+        _maybe_log_g1_train_stats(cfg, stats, local_iteration)
         trainer.iteration = iteration + 1
-        if cfg.checkpoint_path is not None and cfg.checkpoint_interval > 0:
-            if trainer.iteration % int(cfg.checkpoint_interval) == 0:
-                checkpoint_path = _format_checkpoint_path(cfg.checkpoint_path, trainer.iteration)
-                trainer.save_checkpoint(checkpoint_path, iteration=trainer.iteration)
+        _maybe_checkpoint_g1(cfg, trainer)
 
     if cfg.checkpoint_path is not None:
         final_iteration = start_iteration + int(cfg.iterations)

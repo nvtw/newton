@@ -190,6 +190,12 @@ def _main() -> int:
     g1_parser.add_argument("--checkpoint-interval", type=int, default=0)
     g1_parser.add_argument("--log-interval", type=int, default=1)
     g1_parser.add_argument(
+        "--execution-mode",
+        choices=("eager", "graph_leapfrog"),
+        default="eager",
+        help="Use eager PPO or the experimental separate-graph rollout/update schedule.",
+    )
+    g1_parser.add_argument(
         "--no-readback-diagnostics",
         action="store_true",
         help="Do not copy training diagnostics to the host during the train loop.",
@@ -314,6 +320,7 @@ def _main() -> int:
                 checkpoint_path=args.checkpoint_path,
                 checkpoint_interval=args.checkpoint_interval,
                 readback_diagnostics=not args.no_readback_diagnostics,
+                execution_mode=args.execution_mode,
             )
         )
         return 0
