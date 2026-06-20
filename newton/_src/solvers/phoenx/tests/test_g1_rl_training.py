@@ -39,7 +39,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.sim_substeps, g1_recipe.SIM_SUBSTEPS)
         self.assertEqual(rl.EnvG1PhoenX(env_config, device=device).solver.world.substeps, 1)
         self.assertEqual(env_config.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
-        self.assertEqual(g1_recipe.VELOCITY_ITERATIONS, 0)
+        self.assertEqual(g1_recipe.VELOCITY_ITERATIONS, 1)
         self.assertEqual(env_config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
         self.assertEqual(env_config.w_track_lin, g1_recipe.W_TRACK_LIN)
         self.assertEqual(env_config.w_action_rate, g1_recipe.W_ACTION_RATE)
@@ -103,6 +103,30 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(after - before, 6)
         self.assertTrue(np.isfinite(env.obs.numpy()).all())
 
+    def test_randomize_commands_graph_capture(self) -> None:
+        env = _g1_test_env(world_count=4)
+        command_x_range = (-0.4, 0.8)
+        command_y_range = (-0.2, 0.3)
+        command_yaw_range = (-0.7, 0.6)
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.randomize_commands(
+                seed=17,
+                command_x_range=command_x_range,
+                command_y_range=command_y_range,
+                command_yaw_range=command_yaw_range,
+            )
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(env.device)
+
+        commands = env.command.numpy()
+        self.assertTrue(np.all(commands[:, 0] >= command_x_range[0]))
+        self.assertTrue(np.all(commands[:, 0] <= command_x_range[1]))
+        self.assertTrue(np.all(commands[:, 1] >= command_y_range[0]))
+        self.assertTrue(np.all(commands[:, 1] <= command_y_range[1]))
+        self.assertTrue(np.all(commands[:, 2] >= command_yaw_range[0]))
+        self.assertTrue(np.all(commands[:, 2] <= command_yaw_range[1]))
+
     def test_observe_clamps_extreme_state_to_finite_metrics(self) -> None:
         env = _g1_test_env(world_count=1)
         huge_qd = np.full(env.state_0.joint_qd.shape, 1.0e20, dtype=np.float32)
@@ -151,18 +175,23 @@ class TestG1PhoenXRL(unittest.TestCase):
                 device=device,
                 seed=23,
                 log_interval=0,
-                randomize_commands=False,
+                randomize_commands=True,
                 checkpoint_path=checkpoint_template,
                 checkpoint_interval=1,
-                readback_diagnostics=False,
+                readback_diagnostics=True,
             )
             first = rl.train_g1_ppo(train_config)
             first_path = f"{tmpdir}/g1_1.npz"
             restored = rl.load_ppo_checkpoint(first_path, device=device)
 
             self.assertEqual(first.history[0].iteration, 0)
-            self.assertEqual(first.history[0].policy_loss, 0.0)
-            self.assertEqual(first.history[0].value_loss, 0.0)
+            self.assertTrue(math.isfinite(first.history[0].policy_loss))
+            self.assertTrue(math.isfinite(first.history[0].value_loss))
+            self.assertTrue(math.isfinite(first.history[0].mean_reward))
+            self.assertTrue(math.isfinite(first.history[0].mean_tracking_perf))
+            self.assertTrue(math.isfinite(first.history[0].mean_command_x))
+            self.assertTrue(math.isfinite(first.history[0].mean_command_y))
+            self.assertTrue(math.isfinite(first.history[0].mean_command_yaw))
             self.assertEqual(first.trainer.iteration, 1)
             self.assertEqual(restored.iteration, 1)
             self.assertEqual(restored.config.minibatch_size, 0)

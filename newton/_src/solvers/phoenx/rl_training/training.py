@@ -27,6 +27,97 @@ from .g1_recipe import (
 )
 from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_checkpoint
 
+_G1_TRAIN_STAT_COUNT = 10
+
+
+@wp.kernel
+def _g1_train_stat_sums_kernel(
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    successes: wp.array[wp.float32],
+    command: wp.array2d[wp.float32],
+    num_samples: wp.int32,
+    num_envs: wp.int32,
+    policy_loss: wp.array[wp.float32],
+    value_loss: wp.array[wp.float32],
+    approx_kl: wp.array[wp.float32],
+    clip_fraction: wp.array[wp.float32],
+    stats: wp.array[wp.float32],
+):
+    i = wp.tid()
+    if i < num_samples:
+        wp.atomic_add(stats, 0, rewards[i])
+        wp.atomic_add(stats, 1, dones[i])
+        wp.atomic_add(stats, 2, successes[i])
+    if i < num_envs:
+        wp.atomic_add(stats, 3, command[i, 0])
+        wp.atomic_add(stats, 4, command[i, 1])
+        wp.atomic_add(stats, 5, command[i, 2])
+    if i == 0:
+        stats[6] = policy_loss[0]
+        stats[7] = value_loss[0]
+        stats[8] = approx_kl[0]
+        stats[9] = clip_fraction[0]
+
+
+class _G1TrainDiagnosticsReadback:
+    """Preallocated compact host readback for monitored G1 PPO training."""
+
+    def __init__(self, device: wp.context.Devicelike):
+        self.device = wp.get_device(device)
+        self._stats = wp.zeros(_G1_TRAIN_STAT_COUNT, dtype=wp.float32, device=self.device)
+        self._stats_host = wp.empty(_G1_TRAIN_STAT_COUNT, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
+
+    def read(
+        self, buffer: BufferRollout, env: EnvG1PhoenX, trainer: TrainerPPO
+    ) -> tuple[tuple[float, float, float, float, float, float], StatsPPOUpdate]:
+        self._stats.zero_()
+        wp.launch(
+            _g1_train_stat_sums_kernel,
+            dim=max(buffer.num_samples, env.world_count),
+            inputs=[
+                buffer.rewards,
+                buffer.dones,
+                buffer.successes,
+                env.command,
+                buffer.num_samples,
+                env.world_count,
+                trainer._policy_loss,
+                trainer._value_loss,
+                trainer._approx_kl,
+                trainer._clip_fraction,
+            ],
+            outputs=[self._stats],
+            device=self.device,
+        )
+        wp.copy(self._stats_host, self._stats, count=_G1_TRAIN_STAT_COUNT)
+        if self.device.is_cuda:
+            # Pinned host arrays expose memory directly; wait for the async graph copy.
+            wp.synchronize_device(self.device)
+        stats = self._stats_host.numpy()
+        inv_samples = 1.0 / float(buffer.num_samples)
+        inv_envs = 1.0 / float(env.world_count)
+        rollout_metrics = (
+            float(stats[0]) * inv_samples,
+            float(stats[1]) * inv_samples,
+            float(stats[2]) * inv_samples,
+            float(stats[3]) * inv_envs,
+            float(stats[4]) * inv_envs,
+            float(stats[5]) * inv_envs,
+        )
+        update_stats = StatsPPOUpdate(
+            policy_loss=float(stats[6]),
+            value_loss=float(stats[7]),
+            approx_kl=float(stats[8]),
+            clip_fraction=float(stats[9]),
+        )
+        return rollout_metrics, update_stats
+
+
+def _g1_disabled_rollout_metrics(env: EnvG1PhoenX) -> tuple[float, float, float, float, float, float]:
+    command = env.config.command
+    return (0.0, 0.0, 0.0, float(command[0]), float(command[1]), float(command[2]))
+
 
 @dataclass
 class ConfigTrainAnymalPPO:
@@ -400,25 +491,26 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
 
     history: list[StatsTrainG1PPO] = []
     start_iteration = int(getattr(trainer, "iteration", 0))
-    command_np = np.tile(np.asarray(env.config.command, dtype=np.float32), (env.world_count, 1))
+    diagnostics = _G1TrainDiagnosticsReadback(device) if cfg.readback_diagnostics else None
 
     for local_iteration in range(cfg.iterations):
         iteration = start_iteration + local_iteration
         if cfg.randomize_commands:
-            command_np = _sample_g1_commands(
-                rng=np.random.default_rng(int(cfg.seed) + 53_321 + iteration),
-                world_count=env.world_count,
+            env.randomize_commands(
+                seed=int(cfg.seed) + 53_321 + iteration,
                 command_x_range=cfg.command_x_range,
                 command_y_range=cfg.command_y_range,
                 command_yaw_range=cfg.command_yaw_range,
             )
-            env.set_commands(command_np)
 
         t0 = time.perf_counter()
         env.collect_ppo_rollout(trainer, buffer, seed=cfg.seed + iteration * cfg.rollout_steps)
         t1 = time.perf_counter()
-        rollout_metrics = _g1_rollout_metrics(buffer, command_np, readback=cfg.readback_diagnostics)
-        update_stats = trainer.update(buffer, read_stats=cfg.readback_diagnostics)
+        update_stats = trainer.update(buffer, read_stats=False)
+        if diagnostics is not None:
+            rollout_metrics, update_stats = diagnostics.read(buffer, env, trainer)
+        else:
+            rollout_metrics = _g1_disabled_rollout_metrics(env)
         t2 = time.perf_counter()
         stats = _merge_g1_stats(iteration, rollout_metrics, update_stats, t1 - t0, t2 - t1, buffer.num_samples)
         history.append(stats)
@@ -1033,40 +1125,6 @@ def _quat_rotate_inverse_wxyz_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     qw = q[:, 0:1]
     qv = q[:, 1:4]
     return v * (2.0 * qw * qw - 1.0) - np.cross(qv, v) * (2.0 * qw) + qv * (2.0 * np.sum(qv * v, axis=1, keepdims=True))
-
-
-def _sample_g1_commands(
-    *,
-    rng: np.random.Generator,
-    world_count: int,
-    command_x_range: tuple[float, float],
-    command_y_range: tuple[float, float],
-    command_yaw_range: tuple[float, float],
-) -> np.ndarray:
-    commands = np.empty((int(world_count), 3), dtype=np.float32)
-    commands[:, 0] = rng.uniform(float(command_x_range[0]), float(command_x_range[1]), int(world_count))
-    commands[:, 1] = rng.uniform(float(command_y_range[0]), float(command_y_range[1]), int(world_count))
-    commands[:, 2] = rng.uniform(float(command_yaw_range[0]), float(command_yaw_range[1]), int(world_count))
-    return commands
-
-
-def _g1_rollout_metrics(
-    buffer: BufferRollout, commands: np.ndarray, *, readback: bool = True
-) -> tuple[float, float, float, float, float, float]:
-    if readback:
-        mean_reward, mean_done, mean_tracking_perf = buffer.reward_done_success_means()
-    else:
-        mean_reward = 0.0
-        mean_done = 0.0
-        mean_tracking_perf = 0.0
-    return (
-        mean_reward,
-        mean_done,
-        mean_tracking_perf,
-        float(np.mean(commands[:, 0])),
-        float(np.mean(commands[:, 1])),
-        float(np.mean(commands[:, 2])),
-    )
 
 
 def _merge_g1_stats(

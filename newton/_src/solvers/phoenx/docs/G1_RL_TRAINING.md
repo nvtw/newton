@@ -99,11 +99,12 @@ the default nanoG1-style mirror regularizer for throughput-only comparisons. Use
 correction, `--manual-mlp-weight-grad-dtype float32` to disable BF16 MLP
 weight-gradient tile matmul, `--manual-mlp-forward-dtype float32` to disable
 large-minibatch BF16 MLP forward tile matmul, or `--max-grad-norm 0.0` to
-disable gradient clipping. The default training loop keeps progress monitoring
-compact: one 3-float rollout metric buffer and one 4-float PPO update-stat
-buffer are copied to the host per iteration. Use `--no-readback-diagnostics` to
-skip those diagnostic copies in strict capture/benchmark runs; history entries
-use zero placeholders for those diagnostics in that mode.
+disable gradient clipping. The default training loop samples randomized G1
+commands on the device and keeps progress monitoring compact: one 10-float
+metric buffer is copied to pinned host memory per iteration. Use
+`--no-readback-diagnostics` to skip that diagnostic copy in strict
+capture/benchmark runs; history entries use zero placeholders for those
+diagnostics in that mode.
 
 The gate command mirrors nanoG1's frozen bar: a six-command deterministic
 battery with noisy resets for falls/tracking performance, plus a separate
@@ -121,45 +122,46 @@ uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_rl \
     --world-count 4096 --measure-replays 16 --warmup-steps 4
 ```
 
-Result from this checkpoint after the G1 recipe switched to
-`velocity_iterations=0` and the environment stopped nesting SolverPhoenX
-substeps inside its own policy-step decimation loop:
+Result from this checkpoint with the normal G1 recipe
+`velocity_iterations=1` relax pass enabled and with the environment no longer
+nesting SolverPhoenX substeps inside its own policy-step decimation loop:
 
-- 1,518,794 env steps/s at 4096 worlds.
-- 7,593,971 physics steps/s at 4096 worlds.
-- 4.9 s setup time at 4096 worlds.
+- 1,499,589 env steps/s at 4096 worlds.
+- 7,497,944 physics steps/s at 4096 worlds.
+- 5.0 s setup time at 4096 worlds.
 
 A full train-loop benchmark with 4096 worlds, 64 rollout steps, the default
 128x128x128 PPO networks, `minibatch_size=32768`, `replay_ratio=3.0`,
 `priority_alpha=0.4`, V-trace replay correction, mirror regularization, and
 BF16 manual MLP weight-gradient tile matmul plus large-minibatch BF16 hidden
-forward tile matmul reached 649,179 environment samples/s with compact
-diagnostics and 648,033 environment samples/s with `--no-readback-diagnostics`
-after warmup on 2026-06-19. The corresponding no-readback physics rate was
-3,240,163 steps/s. Short-run variation is larger than the compact diagnostic
-copy cost, so the diagnostic readback remains throughput-neutral at this scale.
+forward tile matmul reached 635,494 environment samples/s with compact
+diagnostics and 631,135 environment samples/s with `--no-readback-diagnostics`
+after warmup on 2026-06-20. The corresponding no-readback physics rate was
+3,155,676 steps/s. Short-run variation is larger than the compact diagnostic
+copy cost, so the single diagnostic readback remains throughput-neutral at this
+scale.
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train \
-    --iterations 4 --warmup-iterations 1 --no-readback-diagnostics
+    --iterations 6 --warmup-iterations 2
 ```
 
 nanoG1 reports about 1.28M environment samples/s while actually training, so
-the current mirror-enabled pure-Warp PhoenX G1 training loop is about 1.97x
+the current mirror-enabled pure-Warp PhoenX G1 training loop is about 2.01x
 slower on this training-throughput metric. An Nsight Systems profile of the
-same short benchmark shows the largest kernels are now split between the Warp
-PPO learner and generic PhoenX rollout. Top CUDA kernels by total GPU time in
-that profile were:
+same short benchmark shows the largest kernels are split between the Warp PPO
+learner and generic PhoenX rollout. Top CUDA kernels by total GPU time in that
+profile were:
 
-1. `dense_weight_grad_bf16_tiled`: 15.6%
-2. `_make_fast_tail_prepare_plus_iterate`: 14.0%
-3. `_per_world_greedy_coloring`: 12.1%
-4. CUB radix sort onesweep: 9.6%
-5. `dense_forward_bf16_tiled`: 5.3%
-6. `eval_articulation_fk`: 4.8%
-7. `dense_layer`: 3.0%
-8. `_contact_container_copy_current_to_prev`: 1.9%
-9. `_apply_joint_forces`: 1.8%
+1. `dense_weight_grad_bf16_tiled`: 15.4%
+2. `_make_fast_tail_prepare_plus_iterate`: 13.7%
+3. `_per_world_greedy_coloring`: 11.6%
+4. CUB radix sort onesweep (`long, int`): 5.3%
+5. `dense_forward_bf16_tiled`: 4.9%
+6. `eval_articulation_fk`: 4.6%
+7. CUB radix sort onesweep (`int, int`): 3.9%
+8. `dense_layer`: 2.8%
+9. `_make_fast_tail_relax`: 2.4%
 10. BF16 cast kernels: 1.7%
 
 nanoG1 reports about 8.5M production physics steps/s and 7.25M matched physics
@@ -194,9 +196,10 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
   BF16 MLP weight-gradient tile matmul, and large-minibatch BF16 hidden forward
   tile matmul, but it does not yet include nanoG1's Muon optimizer path or
   PufferNet model stack.
-- Environment stepping can be CUDA-graph replayed, but the full collect-policy-
-  update loop is not captured end to end because actions and Warp Tape updates
-  allocate intermediate arrays per rollout/update.
+- Environment stepping and the manual PPO update pieces are CUDA-graph
+  capturable, but the full collect-policy-update loop is not captured end to end
+  yet because iteration scheduling, changing RNG seeds, logging, and
+  checkpointing remain host-driven.
 - Reset/domain randomization and command scheduling are still lighter than
   nanoG1, so sample efficiency is not yet directly comparable.
 

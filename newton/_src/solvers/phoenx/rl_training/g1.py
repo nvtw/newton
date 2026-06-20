@@ -701,6 +701,28 @@ def g1_reset_done_worlds_kernel(
         episode_steps[world] = wp.int32(0)
 
 
+@wp.kernel
+def g1_sample_commands_kernel(
+    seed: wp.int32,
+    x_min: wp.float32,
+    x_max: wp.float32,
+    y_min: wp.float32,
+    y_max: wp.float32,
+    yaw_min: wp.float32,
+    yaw_max: wp.float32,
+    command: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    rng = wp.rand_init(seed, world * wp.int32(3) + col)
+    u = wp.randf(rng)
+    if col == 0:
+        command[world, col] = x_min + (x_max - x_min) * u
+    elif col == 1:
+        command[world, col] = y_min + (y_max - y_min) * u
+    else:
+        command[world, col] = yaw_min + (yaw_max - yaw_min) * u
+
+
 @dataclass
 class ConfigEnvG1PhoenX:
     """Configuration for :class:`EnvG1PhoenX`.
@@ -921,6 +943,30 @@ class EnvG1PhoenX:
             raise ValueError(f"Expected commands with shape {(self.world_count, 3)}, got {cmds.shape}")
         self.config.command = (float(cmds[0, 0]), float(cmds[0, 1]), float(cmds[0, 2]))
         self.command.assign(cmds)
+
+    def randomize_commands(
+        self,
+        *,
+        seed: int,
+        command_x_range: tuple[float, float],
+        command_y_range: tuple[float, float],
+        command_yaw_range: tuple[float, float],
+    ) -> None:
+        """Sample per-world body-frame commands on the device [m/s, m/s, rad/s]."""
+
+        x_min, x_max = float(command_x_range[0]), float(command_x_range[1])
+        y_min, y_max = float(command_y_range[0]), float(command_y_range[1])
+        yaw_min, yaw_max = float(command_yaw_range[0]), float(command_yaw_range[1])
+        if x_max < x_min or y_max < y_min or yaw_max < yaw_min:
+            raise ValueError("command ranges must be ordered")
+        self.config.command = ((x_min + x_max) * 0.5, (y_min + y_max) * 0.5, (yaw_min + yaw_max) * 0.5)
+        wp.launch(
+            g1_sample_commands_kernel,
+            dim=(self.world_count, 3),
+            inputs=[int(seed), x_min, x_max, y_min, y_max, yaw_min, yaw_max],
+            outputs=[self.command],
+            device=self.device,
+        )
 
     def observe(self) -> wp.array:
         """Update and return the current observation array."""
