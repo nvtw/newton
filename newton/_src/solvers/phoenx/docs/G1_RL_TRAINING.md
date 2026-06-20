@@ -190,6 +190,14 @@ path measured 1,093,535 environment samples/s after excluding the final
 update-only graph drain interval from the steady-state mean, reducing the
 throughput gap to about 1.17x versus nanoG1's reported 1.28M samples/s.
 
+The current graph-leapfrog production path was remeasured with the default
+auto fast-tail scheduler at 1,086,344 samples/s on 2026-06-20. Setting
+`--prepare-refresh-stride 3` was neutral at 1,087,558 samples/s, while forcing
+block-world schedulers was slower: 1,071,348 samples/s for `block_world_32`,
+1,011,811 samples/s for `block_world_64`, and 931,857 samples/s for
+`block_world_128`. The default scheduler therefore remains the best measured
+choice for this G1 training workload.
+
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog \
     --iterations 4 --warmup-iterations 1 --graphs
@@ -212,6 +220,21 @@ CUDA kernels by total GPU time in that profile were:
 8. `dense_layer`: 2.8%
 9. `_make_fast_tail_relax`: 2.4%
 10. BF16 cast kernels: 1.7%
+
+An Nsight Systems profile of the graph-leapfrog production path shifts the
+dominant cost to PhoenX rollout kernels. Top CUDA kernels by total GPU time in
+that profile were:
+
+1. `_make_fast_tail_prepare_plus_iterate`: 19.9%
+2. `_per_world_greedy_coloring`: 17.4%
+3. CUB radix sort onesweep (`long, int`): 7.9%
+4. `eval_articulation_fk`: 7.0%
+5. CUB radix sort onesweep (`int, int`): 5.9%
+6. `_make_fast_tail_relax`: 3.5%
+7. `_contact_container_copy_current_to_prev`: 2.8%
+8. `dense_layer`: 2.7%
+9. `_apply_joint_forces`: 2.6%
+10. `eval_articulation_ik`: 2.2%
 
 nanoG1 reports about 8.5M production physics steps/s and 7.25M matched physics
 steps/s in its README/benchmark notes, so this PhoenX path is currently about
