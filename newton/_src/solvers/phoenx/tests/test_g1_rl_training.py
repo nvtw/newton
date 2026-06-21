@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import math
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +20,9 @@ from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import benchma
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import make_seed_counter
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
+
+_NANOG1_ROOT = Path("/home/twidmer/Documents/git/nanoG1")
+_PUFFERLIB_ROOT = Path("/home/twidmer/Documents/git/PufferLib")
 
 
 def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
@@ -33,7 +38,246 @@ def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
     return rl.EnvG1PhoenX(config, device=device)
 
 
+def _load_reference_module(path: Path, name: str):
+    if not path.is_file():
+        raise unittest.SkipTest(f"missing nanoG1 reference file: {path}")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise unittest.SkipTest(f"could not import nanoG1 reference file: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_nanog1_recipe():
+    return _load_reference_module(_NANOG1_ROOT / "recipe.py", "nanog1_recipe_reference")
+
+
+def _load_nanog1_deploy():
+    return _load_reference_module(_NANOG1_ROOT / "deploy" / "deploy_g1.py", "nanog1_deploy_reference")
+
+
+def _read_c_array(path: Path, name: str, *, dtype: type = float) -> np.ndarray:
+    if not path.is_file():
+        raise unittest.SkipTest(f"missing nanoG1 reference file: {path}")
+    text = path.read_text()
+    pattern = rf"static const (?:double|int) {re.escape(name)}\[[^\]]+\] = \{{([^}}]+)\}};"
+    match = re.search(pattern, text)
+    if match is None:
+        raise AssertionError(f"missing C array {name!r} in {path}")
+    values = [item.strip() for item in match.group(1).replace("\n", " ").split(",") if item.strip()]
+    np_dtype = np.int64 if dtype is int else np.float64
+    return np.asarray([dtype(value) for value in values], dtype=np_dtype)
+
+
+def _reference_obs_from_nanog1_deploy(
+    deploy,
+    q: np.ndarray,
+    qd: np.ndarray,
+    command: np.ndarray,
+    prev_action: np.ndarray,
+    episode_step: int,
+) -> np.ndarray:
+    obs = np.zeros(rl.OBS_DIM_G1, dtype=np.float32)
+    # Newton and nanoG1 host qpos store the base-to-world root quaternion.
+    # The deploy helper consumes the Unitree IMU convention, so use the
+    # conjugate to compare the same projected-gravity observation.
+    unitree_quat_wxyz = np.asarray((q[6], -q[3], -q[4], -q[5]), dtype=np.float64)
+    phase = 2.0 * math.pi * float(episode_step % deploy.PHASE_PERIOD) / float(deploy.PHASE_PERIOD)
+    obs[0:3] = np.float32(deploy.ANG_VEL_SCALE) * qd[3:6]
+    obs[3:6] = deploy.projected_gravity(unitree_quat_wxyz).astype(np.float32)
+    obs[6:9] = command
+    obs[9:38] = q[7 : 7 + rl.ACTION_DIM_G1] - deploy.HOME.astype(np.float32)
+    obs[38:67] = np.float32(deploy.DOF_VEL_SCALE) * qd[6 : 6 + rl.ACTION_DIM_G1]
+    obs[67:96] = prev_action
+    obs[96] = math.sin(phase)
+    obs[97] = math.cos(phase)
+    return obs
+
+
 class TestG1PhoenXRL(unittest.TestCase):
+    def test_nanog1_recipe_constants_match_reference(self) -> None:
+        reference = _load_nanog1_recipe()
+        recipe = reference.RECIPE
+        dt_match = re.search(r"-DG1_DT=([0-9.]+)f", reference.TASK_FLAGS)
+        decimation_match = re.search(r"-DENV_DECIMATION=([0-9]+)", reference.TASK_FLAGS)
+        solver_match = re.search(r"-DSOL_ITER=([0-9]+)", reference.TASK_FLAGS)
+        mirror_match = re.search(r"-DG1_MIRROR_LOSS=([0-9.]+)", reference.TRAIN_FLAGS)
+        self.assertIsNotNone(dt_match)
+        self.assertIsNotNone(decimation_match)
+        self.assertIsNotNone(solver_match)
+        self.assertIsNotNone(mirror_match)
+
+        reference_frame_dt = float(dt_match.group(1)) * int(decimation_match.group(1))
+        self.assertAlmostEqual(g1_recipe.FRAME_DT, reference_frame_dt)
+        self.assertGreaterEqual(g1_recipe.SIM_SUBSTEPS, int(decimation_match.group(1)))
+        self.assertGreaterEqual(g1_recipe.SOLVER_ITERATIONS, int(solver_match.group(1)))
+        self.assertEqual(g1_recipe.CONTROLLED_ACTION_COUNT, 12)
+        self.assertIn("-DG1_TASK_V3", reference.TASK_FLAGS)
+        self.assertIn("-DG1_PD_UNITREE", reference.TASK_FLAGS)
+
+        self.assertAlmostEqual(g1_recipe.ACTION_SCALE, float(recipe["env.action_scale"]))
+        self.assertEqual(g1_recipe.MAX_EPISODE_STEPS, int(recipe["env.max_episode_len"]))
+        self.assertAlmostEqual(g1_recipe.W_TRACK_LIN, float(recipe["env.w_track_lin"]))
+        self.assertAlmostEqual(g1_recipe.W_TRACK_ANG, float(recipe["env.w_track_ang"]))
+        self.assertAlmostEqual(g1_recipe.W_LIN_VEL_Z, float(recipe["env.w_lin_vel_z"]))
+        self.assertAlmostEqual(g1_recipe.W_ANG_VEL_XY, float(recipe["env.w_ang_vel_xy"]))
+        self.assertAlmostEqual(g1_recipe.W_ORIENTATION, float(recipe["env.w_orientation"]))
+        self.assertAlmostEqual(g1_recipe.W_TORQUE, float(recipe["env.w_torque"]))
+        self.assertAlmostEqual(g1_recipe.W_ACTION_RATE, float(recipe["env.w_action_rate"]))
+        self.assertAlmostEqual(g1_recipe.W_ALIVE, float(recipe["env.w_alive"]))
+        self.assertAlmostEqual(g1_recipe.W_TERMINATION, float(recipe["env.w_termination"]))
+
+        self.assertEqual(g1_recipe.SEED, int(recipe["train.seed"]))
+        self.assertAlmostEqual(g1_recipe.GAMMA, float(recipe["train.gamma"]))
+        self.assertAlmostEqual(g1_recipe.GAE_LAMBDA, float(recipe["train.gae_lambda"]))
+        self.assertAlmostEqual(g1_recipe.CLIP_RATIO, float(recipe["train.clip_coef"]))
+        self.assertAlmostEqual(g1_recipe.ENTROPY_COEFF, float(recipe["train.ent_coef"]))
+        self.assertAlmostEqual(g1_recipe.REPLAY_RATIO, float(recipe["train.replay_ratio"]))
+        self.assertAlmostEqual(g1_recipe.VTRACE_RHO_CLIP, float(recipe["train.vtrace_rho_clip"]))
+        self.assertAlmostEqual(g1_recipe.VTRACE_C_CLIP, float(recipe["train.vtrace_c_clip"]))
+        self.assertAlmostEqual(g1_recipe.PRIORITY_ALPHA, float(recipe["train.prio_alpha"]))
+        self.assertAlmostEqual(g1_recipe.PRIORITY_BETA, float(recipe["train.prio_beta0"]))
+        self.assertEqual(g1_recipe.MINIBATCH_SIZE, int(recipe["train.minibatch_size"]))
+        self.assertEqual(g1_recipe.ROLLOUT_STEPS, int(recipe["train.horizon"]))
+        self.assertAlmostEqual(g1_recipe.MAX_GRAD_NORM, float(recipe["train.max_grad_norm"]))
+        self.assertAlmostEqual(g1_recipe.MIRROR_LOSS_COEFF, float(mirror_match.group(1)))
+
+    def test_nanog1_model_and_deploy_constants_match_env(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 nanoG1 constant parity tests")
+        deploy = _load_nanog1_deploy()
+        header = _NANOG1_ROOT / "web" / "g1_model_const.h"
+        key_qpos = _read_c_array(header, "hc_key_qpos")
+        ctrl_range = _read_c_array(header, "hc_act_ctrlrange").reshape(rl.ACTION_DIM_G1, 2)
+        dof_damping = _read_c_array(header, "hc_dof_damping")
+
+        env = rl.EnvG1PhoenX(g1_recipe.default_g1_env_config(world_count=1), device=device)
+        np.testing.assert_allclose(env.default_joint_pos.numpy(), deploy.HOME, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.default_joint_pos.numpy(), key_qpos[7:], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.ctrl_lower.numpy(), deploy.CTRL_RANGE[:, 0], rtol=0.0, atol=1.0e-5)
+        np.testing.assert_allclose(env.ctrl_upper.numpy(), deploy.CTRL_RANGE[:, 1], rtol=0.0, atol=1.0e-5)
+        np.testing.assert_allclose(env.ctrl_lower.numpy(), ctrl_range[:, 0], rtol=0.0, atol=1.0e-5)
+        np.testing.assert_allclose(env.ctrl_upper.numpy(), ctrl_range[:, 1], rtol=0.0, atol=1.0e-5)
+
+        expected_kp = deploy.KP.astype(np.float32)
+        expected_kd = deploy.KD.astype(np.float32)
+        expected_kd[: g1_recipe.CONTROLLED_ACTION_COUNT] += dof_damping[6 : 6 + g1_recipe.CONTROLLED_ACTION_COUNT]
+        np.testing.assert_allclose(env.actuator_ke.numpy(), expected_kp, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.actuator_kd.numpy(), expected_kd, rtol=0.0, atol=1.0e-6)
+        self.assertEqual(deploy.NU, rl.ACTION_DIM_G1)
+        self.assertEqual(deploy.LEG_DOF, g1_recipe.CONTROLLED_ACTION_COUNT)
+        self.assertAlmostEqual(deploy.CONTROL_DT, g1_recipe.FRAME_DT)
+        self.assertEqual(deploy.PHASE_PERIOD, g1_recipe.PHASE_PERIOD)
+
+    def test_nanog1_observation_contract_matches_graph_observe(self) -> None:
+        env = _g1_test_env(world_count=1)
+        deploy = _load_nanog1_deploy()
+        q = env.state_0.joint_q.numpy()
+        qd = env.state_0.joint_qd.numpy()
+        quat_wxyz = np.asarray((0.94, 0.12, -0.25, 0.20), dtype=np.float32)
+        quat_wxyz /= np.linalg.norm(quat_wxyz)
+        q[:] = 0.0
+        q[0:3] = np.asarray((0.11, -0.07, 0.82), dtype=np.float32)
+        q[3:7] = np.asarray((quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]), dtype=np.float32)
+        q[7:] = deploy.HOME.astype(np.float32) + np.linspace(-0.03, 0.03, rl.ACTION_DIM_G1, dtype=np.float32)
+        qd[:] = np.linspace(-0.4, 0.6, qd.size, dtype=np.float32)
+        command = np.asarray((0.42, -0.13, 0.70), dtype=np.float32)
+        prev_action = np.linspace(-1.0, 1.0, rl.ACTION_DIM_G1, dtype=np.float32)
+        episode_step = 13
+
+        env.state_0.joint_q.assign(q)
+        env.state_0.joint_qd.assign(qd)
+        env.command.assign(command.reshape(1, 3))
+        env.current_actions.assign(prev_action.reshape(1, rl.ACTION_DIM_G1))
+        env.previous_actions.zero_()
+        env.episode_steps.assign(np.asarray([episode_step], dtype=np.int32))
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(env.device)
+
+        expected = _reference_obs_from_nanog1_deploy(deploy, q, qd, command, prev_action, episode_step)
+        np.testing.assert_allclose(env.obs.numpy()[0], expected, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_nanog1_action_target_contract_matches_graph_step(self) -> None:
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+            ),
+            device=require_cuda_graph_capture("PhoenX G1 nanoG1 action parity tests"),
+        )
+        deploy = _load_nanog1_deploy()
+        raw_actions = np.linspace(-1.6, 1.6, rl.ACTION_DIM_G1, dtype=np.float32).reshape(1, rl.ACTION_DIM_G1)
+        actions = wp.array(raw_actions, dtype=wp.float32, device=env.device)
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.step(actions)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(env.device)
+
+        expected_actions = np.clip(raw_actions[0], -1.0, 1.0)
+        expected_actions[g1_recipe.CONTROLLED_ACTION_COUNT :] = 0.0
+        expected_target = deploy.HOME.astype(np.float32) + np.float32(deploy.ACTION_SCALE) * expected_actions
+        expected_target = np.clip(expected_target, deploy.CTRL_RANGE[:, 0], deploy.CTRL_RANGE[:, 1])
+        np.testing.assert_allclose(env.current_actions.numpy()[0], expected_actions, rtol=0.0, atol=0.0)
+
+        target_q = env.control.joint_target_q.numpy()
+        if env.model.use_coord_layout_targets:
+            actual_target = target_q[7 : 7 + rl.ACTION_DIM_G1]
+        else:
+            actual_target = target_q[6 : 6 + rl.ACTION_DIM_G1]
+        np.testing.assert_allclose(actual_target, expected_target, rtol=0.0, atol=1.0e-6)
+
+    def test_shared_value_mlp_forward_matches_numpy_for_nanog1_shape(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 RL network parity tests")
+        puffernet = _PUFFERLIB_ROOT / "src" / "puffernet.h"
+        if not puffernet.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference file: {puffernet}")
+        text = puffernet.read_text()
+        self.assertIn("decoder output", text)
+        self.assertIn("_gaussian_mean", text)
+        self.assertIn("MinGRU* mingru", text)
+
+        trainer = rl.TrainerPPO(
+            obs_dim=rl.OBS_DIM_G1,
+            action_dim=rl.ACTION_DIM_G1,
+            hidden_layers=(128, 128, 128),
+            config=rl.ConfigPPO(
+                shared_value_network=True,
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+                manual_mlp_forward_dtype="float32",
+                manual_mlp_weight_grad_dtype="float32",
+            ),
+            device=device,
+            seed=101,
+            squash_actions=True,
+            activation="relu",
+            log_std_init=g1_recipe.LOG_STD_INIT,
+        )
+        self.assertEqual(trainer.value_column, rl.ACTION_DIM_G1)
+        self.assertEqual(trainer.actor.net.output_dim, rl.ACTION_DIM_G1 + 1)
+
+        obs_np = np.linspace(-0.8, 0.9, 4 * rl.OBS_DIM_G1, dtype=np.float32).reshape(4, rl.OBS_DIM_G1)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        out = trainer.actor.net.forward_reuse(obs)
+        with wp.ScopedCapture(device=device) as capture:
+            trainer.actor.net.forward_reuse(obs)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(device)
+
+        expected = obs_np
+        for layer, (weight, bias) in enumerate(zip(trainer.actor.net.weights, trainer.actor.net.biases, strict=True)):
+            expected = expected @ weight.numpy() + bias.numpy()
+            if layer < len(trainer.actor.net.weights) - 1:
+                expected = np.maximum(expected, 0.0)
+        np.testing.assert_allclose(out.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
+
     def test_default_recipe_enables_mirror_and_matches_config_defaults(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL recipe tests")
 
