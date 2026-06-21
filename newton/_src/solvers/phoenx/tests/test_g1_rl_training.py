@@ -201,8 +201,8 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         reference_frame_dt = float(dt_match.group(1)) * int(decimation_match.group(1))
         self.assertAlmostEqual(g1_recipe.FRAME_DT, reference_frame_dt)
-        self.assertGreaterEqual(g1_recipe.SIM_SUBSTEPS, int(decimation_match.group(1)))
-        self.assertGreaterEqual(g1_recipe.SOLVER_ITERATIONS, int(solver_match.group(1)))
+        self.assertEqual(g1_recipe.SIM_SUBSTEPS, int(decimation_match.group(1)))
+        self.assertEqual(g1_recipe.SOLVER_ITERATIONS, int(solver_match.group(1)))
         self.assertEqual(g1_recipe.CONTROLLED_ACTION_COUNT, 12)
         self.assertIn("-DG1_TASK_V3", reference.TASK_FLAGS)
         self.assertIn("-DG1_PD_UNITREE", reference.TASK_FLAGS)
@@ -2242,6 +2242,54 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(math.isfinite(stat.mean_tracking_perf))
             self.assertTrue(math.isfinite(stat.approx_kl))
             self.assertLess(stat.mean_done, 0.95)
+
+    def test_default_stochastic_rollout_graph_stays_nonterminal_without_update(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 default stochastic rollout regression tests")
+        env_config = g1_recipe.default_g1_env_config(
+            world_count=32,
+            max_episode_steps=0,
+            randomize_commands_on_reset=False,
+            command_resample_steps=0,
+        )
+        env = rl.EnvG1PhoenX(env_config, device=device)
+        rollout_seed_counter = make_seed_counter(37, device=device)
+        reset_seed_counter = make_seed_counter(113, device=device)
+        env.use_reset_seed_counter(reset_seed_counter)
+        trainer = rl.TrainerPPO(
+            obs_dim=env.obs_dim,
+            action_dim=env.action_dim,
+            hidden_layers=(32, 32, 32),
+            config=g1_recipe.default_g1_ppo_config(minibatch_size=0, replay_ratio=0.0),
+            device=device,
+            seed=37,
+            squash_actions=g1_recipe.SQUASH_ACTIONS,
+            activation=g1_recipe.ACTIVATION,
+            log_std_init=g1_recipe.LOG_STD_INIT,
+            mirror_map=rl.g1_mirror_map_ppo(),
+        )
+        buffer = rl.BufferRollout(
+            num_steps=8,
+            num_envs=env.world_count,
+            obs_dim=env.obs_dim,
+            action_dim=env.action_dim,
+            device=device,
+        )
+
+        env.collect_ppo_rollout_seed_counter(trainer, buffer, seed_counter=rollout_seed_counter)
+        env.reset()
+        rollout_seed_counter.assign(np.asarray([37], dtype=np.int32))
+        reset_seed_counter.assign(np.asarray([113], dtype=np.int32))
+        with wp.ScopedCapture(device=device) as capture:
+            for _ in range(3):
+                env.collect_ppo_rollout_seed_counter(trainer, buffer, seed_counter=rollout_seed_counter)
+        wp.capture_launch(capture.graph)
+
+        reward_mean, done_mean, success_mean = buffer.reward_done_success_means()
+        self.assertTrue(math.isfinite(reward_mean))
+        self.assertTrue(math.isfinite(done_mean))
+        self.assertTrue(math.isfinite(success_mean))
+        self.assertLess(done_mean, 0.35)
+        self.assertGreater(reward_mean, -5.0)
 
     def test_train_to_gate_benchmark_smoke_graph_leapfrog(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 train-to-gate benchmark tests")

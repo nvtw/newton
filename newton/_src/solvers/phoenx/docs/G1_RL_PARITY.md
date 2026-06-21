@@ -49,17 +49,20 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
 - The local generic PufferLib checkout is branch `4.0` at `e90b58ed`, not the
   nanoG1 G1 fork. Parity work should use the nanoG1 recipe/deploy files plus
   the pinned fork source above.
-- Short train-to-gate probes still show unstable velocity diagnostics. That
-  points to remaining simulator/reward/solver quality gaps, not just PPO math.
+- Short train-to-gate probes still fail the walking gate. The current evidence
+  points to remaining simulator/reward/solver quality gaps and sample-efficiency
+  issues, not just PPO math.
 
 ## Current Measurement
 
-After the RL parity fixes, 20-iteration train-save-load-evaluate probes on the
-RTX PRO 6000 Blackwell measured about 188k-226k train env samples/s and
-174k-206k total env samples/s. Against the nanoG1 README/reference value of
-about 1.276M env samples/s, PhoenX is about 5.6x-6.8x slower in these short
-probes. The 20-iteration policy does not pass the walking gate yet, and the
-latest diagnostic still shows unstable velocity outliers.
+After the RL parity fixes, short train-save-load-evaluate probes on the RTX PRO
+6000 Blackwell measured about 228k train env samples/s and 215k total env
+samples/s with the nanoG1-timed `5x2` training recipe. Against the nanoG1
+README/reference value of about 1.276M env samples/s, PhoenX is about 5.6x
+slower in these short probes. The 60-iteration policy does not pass the walking
+gate yet (`battery_perf=0.289`, `battery_falls=94`), but the `5x2` training
+distribution avoids the all-terminal stochastic rollout collapse seen with the
+heavier `10x4` diagnostic setting.
 
 ## Next Checks
 

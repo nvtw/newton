@@ -45,9 +45,10 @@ benchmark defaults read from the same constants.
 - Observation size: 98.
 - Action size: 29.
 - Control frame dt: 0.02 s.
-- Physics dt: 0.002 s via `sim_substeps=10`. nanoG1 uses 0.004 s x 5,
-  but the current PhoenX convergence sweep requires 10 substeps and 4
-  position iterations for credible early G1 contact/drive behavior.
+- Physics dt: 0.004 s via `sim_substeps=5`, matching nanoG1's 0.004 s x 5
+  control decimation. The higher-resolution `10x4` setting remains useful as a
+  solver-fidelity diagnostic, but it made stochastic early PPO rollouts fall too
+  often for the default training recipe.
 - Primitive-only collision by default (`parse_meshes=False`), preserving the
   same G1 coordinates/DOFs/actions while avoiding generic mesh/SDF contact
   overflow in high-world-count RL runs.
@@ -192,22 +193,16 @@ path measured 1,093,535 environment samples/s after excluding the final
 update-only graph drain interval from the steady-state mean, reducing the
 throughput gap to about 1.17x versus nanoG1's reported 1.28M samples/s.
 
-After the G1 solver-convergence sweep, the default recipe moved to
-`sim_substeps=10` and `solver_iterations=4` because the faster 5-substep settings
-fell below the 0.35 m gate height in short standing/drive tests. With the
-safer 10x4 setting, this command measured 609,052 environment samples/s, about
-2.10x slower than nanoG1's reported 1.28M samples/s:
-
-```bash
-uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train \
-    --execution-mode graph_leapfrog --no-readback-diagnostics \
-    --sim-substeps 10 --solver-iterations 4
-```
-
-A 75.2M-sample train-save-reload-gate run with this setting completed
-in 174.6 s including the final gate but still failed the gate
-(`battery_perf=0.517`, `battery_falls=1584`). See `G1_SOLVER_CONVERGENCE.md` for
-the fidelity study.
+A later quality-facing sweep found that the `10x4` setting is a useful
+high-resolution diagnostic but a poor default for early PPO: stochastic
+std-1 policy rollouts became fall-dominated even without an optimizer update.
+The training recipe therefore now matches nanoG1's production timing,
+`sim_substeps=5` and `solver_iterations=2`. On RTX PRO 6000, a 60-iteration
+train-save-reload-gate probe with this setting measured about 228k train env
+samples/s and 215k total env samples/s. It still failed the gate at 15.7M
+samples (`battery_perf=0.289`, `battery_falls=94`), so the remaining gap is
+policy quality/sample efficiency rather than only raw throughput. See
+`G1_SOLVER_CONVERGENCE.md` for the fidelity and stochastic-rollout study.
 
 The old fast graph-leapfrog production path was remeasured with the default
 auto fast-tail scheduler at 1,086,344 samples/s on 2026-06-20. Setting

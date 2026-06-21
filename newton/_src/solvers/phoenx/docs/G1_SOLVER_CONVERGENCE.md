@@ -98,28 +98,34 @@ iterations.
 | `phoenx_10x8` | 0.002 | 8 + 2 | 0.0 | 0.759 m | 0.0289 rad | 0.0497 rad |
 | `phoenx_20x8` | 0.001 | 8 + 2 | 0.0 | 0.766 m | 0.0000 rad | 0.0709 rad |
 
-The `10x4` default is still the conservative setting: it materially improves
-trajectory agreement versus `5x2` without making the recipe as expensive as the
-`20x8` reference.
+The `10x4` setting remains the conservative open-loop fidelity diagnostic: it
+materially improves trajectory agreement versus `5x2` without making the run as
+expensive as the `20x8` reference. It is no longer the default RL training
+setting because the stochastic early-policy distribution exposed a different
+failure mode (fall-dominated rollouts), described below.
 
 ## Training Impact
 
-With the grounded G1 setup (`contact_geometry="nanog1_foot_boxes"`,
-`sim_substeps=10`, `solver_iterations=4`) and MuJoCo-soft nanoG1 joint friction
-enabled, a 20-iteration graph-leapfrog train-save-load probe measured about
-188k train env samples/s and about 174k total env samples/s on the RTX PRO 6000
-Blackwell. Against the nanoG1 rounded 1.28M env samples/s reference, that short
-probe is about 6.8x slower and did not pass the walking gate at 20 iterations.
+With the grounded G1 setup (`contact_geometry="nanog1_foot_boxes"`) and
+MuJoCo-soft nanoG1 joint friction enabled, short graph-leapfrog probes show two
+different behaviors:
 
-The friction-enabled setup is more physically faithful, but it adds a scalar
-axial row to every G1 joint and remains a throughput regression. Further work
-should keep the friction path correct while reducing its per-joint cost and
-should prioritize simulator-quality gaps, since the current short probe still
-shows unstable velocity diagnostics rather than a merely slow PPO update.
+| setting | stochastic no-update rollouts | train-to-gate probe |
+| --- | --- | --- |
+| `5x2` (nanoG1 timing) | 64 worlds x 16-step rollouts stayed mostly non-terminal: first four rollout done means `0.000`, `0.054`, `0.034`, `0.037`. | 60 iterations measured 228k train env samples/s and 215k total env samples/s; gate still failed at 15.7M samples (`battery_perf=0.289`, `battery_falls=94`). |
+| `10x4` (fidelity diagnostic) | same random policy became fall-dominated: first four rollout done means `0.115`, `0.536`, `0.724`, `0.757`. | prior 60-iteration probes degraded badly by iteration 60, with unstable velocity diagnostics. |
+
+The heavier `10x4` setting is closer to the high-resolution PhoenX reference in
+open-loop drive tests, but it moves the early stochastic training distribution
+away from nanoG1 and makes PPO spend most samples on resets/falls. The default
+RL recipe therefore uses `sim_substeps=5`, `solver_iterations=2`, and
+`contact_geometry="nanog1_foot_boxes"`, matching nanoG1's production timing.
+Further solver work should improve the constraint formulation so higher
+substep/iteration counts do not change the training distribution this much.
 
 ## Current Decision
 
-The default PhoenX G1 RL recipe keeps `sim_substeps=10`, `solver_iterations=4`,
+The default PhoenX G1 RL recipe uses `sim_substeps=5`, `solver_iterations=2`,
 and `contact_geometry="nanog1_foot_boxes"`. Speed remains important, but
 further optimization should preserve the grounded reset, active foot contacts,
 and open-loop parity checks above.
