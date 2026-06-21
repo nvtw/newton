@@ -61,6 +61,8 @@ def _g1_ppo_config(
     vtrace_c_clip: float,
     reward_clip: float,
     max_grad_norm: float,
+    value_loss_coeff: float,
+    value_clip_range: float,
 ) -> rl.ConfigPPO:
     return g1_recipe.default_g1_ppo_config(
         train_epochs=int(train_epochs),
@@ -77,6 +79,8 @@ def _g1_ppo_config(
         vtrace_c_clip=float(vtrace_c_clip),
         reward_clip=float(reward_clip),
         max_grad_norm=float(max_grad_norm),
+        value_loss_coeff=float(value_loss_coeff),
+        value_clip_range=float(value_clip_range),
     )
 
 
@@ -197,6 +201,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
             args.vtrace_c_clip,
             args.reward_clip,
             args.max_grad_norm,
+            args.value_loss_coeff,
+            args.value_clip_range,
         ),
         device=device,
         seed=int(args.seed),
@@ -247,6 +253,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "vtrace_c_clip": float(args.vtrace_c_clip),
         "reward_clip": float(args.reward_clip),
         "max_grad_norm": float(args.max_grad_norm),
+        "value_loss_coeff": float(args.value_loss_coeff),
+        "value_clip_range": float(args.value_clip_range),
         "squash_actions": bool(args.squash_actions),
         "readback_diagnostics": not bool(args.no_readback_diagnostics),
         "execution_mode": str(args.execution_mode),
@@ -324,6 +332,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vtrace-c-clip", type=float, default=g1_recipe.VTRACE_C_CLIP)
     parser.add_argument("--reward-clip", type=float, default=g1_recipe.REWARD_CLIP)
     parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
+    parser.add_argument("--value-loss-coeff", type=float, default=g1_recipe.VALUE_LOSS_COEFF)
+    parser.add_argument("--value-clip-range", type=float, default=g1_recipe.VALUE_CLIP_RANGE)
     parser.add_argument(
         "--squash-actions",
         action=argparse.BooleanOptionalAction,

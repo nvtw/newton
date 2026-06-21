@@ -188,6 +188,8 @@ def _main() -> int:
     g1_parser.add_argument("--vtrace-c-clip", type=float, default=g1_recipe.VTRACE_C_CLIP)
     g1_parser.add_argument("--reward-clip", type=float, default=g1_recipe.REWARD_CLIP)
     g1_parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
+    g1_parser.add_argument("--value-loss-coeff", type=float, default=g1_recipe.VALUE_LOSS_COEFF)
+    g1_parser.add_argument("--value-clip-range", type=float, default=g1_recipe.VALUE_CLIP_RANGE)
     g1_parser.add_argument(
         "--squash-actions",
         action=argparse.BooleanOptionalAction,
@@ -317,6 +319,8 @@ def _main() -> int:
             vtrace_c_clip=args.vtrace_c_clip,
             reward_clip=args.reward_clip,
             max_grad_norm=args.max_grad_norm,
+            value_loss_coeff=args.value_loss_coeff,
+            value_clip_range=args.value_clip_range,
             mirror_loss_coeff=args.mirror_loss_coeff,
         )
         train_g1_ppo(

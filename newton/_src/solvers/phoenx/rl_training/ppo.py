@@ -73,6 +73,10 @@ class ConfigPPO:
         gae_lambda: Generalized advantage estimation trace decay.
         clip_ratio: PPO policy-ratio clipping threshold.
         entropy_coeff: Entropy bonus coefficient.
+        value_loss_coeff: Value loss coefficient.
+        value_clip_range: PPO value-function clip range against rollout
+            value predictions. A value less than or equal to zero disables
+            clipping.
         actor_lr: Actor Adam learning rate.
         critic_lr: Critic Adam learning rate.
         train_epochs: Full-buffer optimization epochs per rollout when replay
@@ -118,6 +122,8 @@ class ConfigPPO:
     gae_lambda: float = 0.95
     clip_ratio: float = 0.2
     entropy_coeff: float = 1.0e-3
+    value_loss_coeff: float = 1.0
+    value_clip_range: float = 0.0
     actor_lr: float = 3.0e-4
     critic_lr: float = 1.0e-3
     train_epochs: int = 4
@@ -174,6 +180,7 @@ class BatchPPO:
         self.old_log_probs = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.advantages = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
+        self.old_values = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
         self.priority_weights = wp.ones(self.num_envs, dtype=wp.float32, device=self.device)
         self._advantage_stats = wp.zeros(2, dtype=wp.float32, device=self.device)
@@ -226,6 +233,7 @@ class BufferRollout:
         self.dones = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.successes = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.values = wp.zeros((self.num_steps + 1) * self.num_envs, dtype=wp.float32, device=self.device)
+        self.old_values = self.values
         self.advantages = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
@@ -790,8 +798,16 @@ class TrainerPPO:
                     buffer.old_log_probs,
                     buffer.advantages,
                     buffer.returns,
+                    buffer.old_values,
                 ],
-                outputs=[batch.obs, batch.actions, batch.old_log_probs, batch.advantages, batch.returns],
+                outputs=[
+                    batch.obs,
+                    batch.actions,
+                    batch.old_log_probs,
+                    batch.advantages,
+                    batch.returns,
+                    batch.old_values,
+                ],
                 device=self.device,
             )
             if self.config.normalize_advantages:
@@ -1041,7 +1057,15 @@ class TrainerPPO:
         wp.launch(
             value_column_loss_grad_kernel,
             dim=buffer.num_samples,
-            inputs=[policy_out, self.value_column, buffer.returns, buffer.num_samples],
+            inputs=[
+                policy_out,
+                self.value_column,
+                buffer.old_values,
+                buffer.returns,
+                self.config.value_loss_coeff,
+                self.config.value_clip_range,
+                buffer.num_samples,
+            ],
             outputs=[self._value_loss, policy_out_grad],
             device=self.device,
         )
@@ -1290,7 +1314,14 @@ class TrainerPPO:
         wp.launch(
             value_loss_grad_kernel,
             dim=buffer.num_samples,
-            inputs=[values, buffer.returns, buffer.num_samples],
+            inputs=[
+                values,
+                buffer.old_values,
+                buffer.returns,
+                self.config.value_loss_coeff,
+                self.config.value_clip_range,
+                buffer.num_samples,
+            ],
             outputs=[self._value_loss, value_grad],
             device=self.device,
         )
@@ -1319,7 +1350,14 @@ class TrainerPPO:
             wp.launch(
                 value_loss_kernel,
                 dim=buffer.num_samples,
-                inputs=[values, buffer.returns, buffer.num_samples],
+                inputs=[
+                    values,
+                    buffer.old_values,
+                    buffer.returns,
+                    self.config.value_loss_coeff,
+                    self.config.value_clip_range,
+                    buffer.num_samples,
+                ],
                 outputs=[self._value_loss],
                 device=self.device,
             )

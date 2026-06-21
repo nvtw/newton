@@ -78,6 +78,8 @@ def _make_ppo_config(args: argparse.Namespace) -> rl.ConfigPPO:
         args.vtrace_c_clip,
         args.reward_clip,
         args.max_grad_norm,
+        args.value_loss_coeff,
+        args.value_clip_range,
     )
 
 
@@ -193,6 +195,8 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "world_count": int(args.world_count),
         "rollout_steps": int(args.rollout_steps),
         "squash_actions": bool(args.squash_actions),
+        "value_loss_coeff": float(args.value_loss_coeff),
+        "value_clip_range": float(args.value_clip_range),
         "max_iterations": int(args.max_iterations),
         "chunk_iterations": int(args.chunk_iterations),
         "completed_iterations": int(completed_iterations),
@@ -257,6 +261,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vtrace-c-clip", type=float, default=g1_recipe.VTRACE_C_CLIP)
     parser.add_argument("--reward-clip", type=float, default=g1_recipe.REWARD_CLIP)
     parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
+    parser.add_argument("--value-loss-coeff", type=float, default=g1_recipe.VALUE_LOSS_COEFF)
+    parser.add_argument("--value-clip-range", type=float, default=g1_recipe.VALUE_CLIP_RANGE)
     parser.add_argument(
         "--squash-actions",
         action=argparse.BooleanOptionalAction,

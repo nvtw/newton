@@ -60,6 +60,8 @@ GAMMA = 0.97
 GAE_LAMBDA = 0.9
 CLIP_RATIO = 0.2
 ENTROPY_COEFF = 1.0e-5
+VALUE_LOSS_COEFF = 0.5
+VALUE_CLIP_RANGE = 20.0
 ACTOR_LR = 2.0e-3
 CRITIC_LR = 2.0e-3
 TRAIN_EPOCHS = 3
@@ -130,6 +132,8 @@ def default_g1_ppo_config(**overrides: Any):
         "gae_lambda": GAE_LAMBDA,
         "clip_ratio": CLIP_RATIO,
         "entropy_coeff": ENTROPY_COEFF,
+        "value_loss_coeff": VALUE_LOSS_COEFF,
+        "value_clip_range": VALUE_CLIP_RANGE,
         "actor_lr": ACTOR_LR,
         "critic_lr": CRITIC_LR,
         "train_epochs": TRAIN_EPOCHS,

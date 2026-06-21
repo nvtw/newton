@@ -546,47 +546,101 @@ def mirrored_action_mse_grad_kernel(
     wp.atomic_add(loss, 0, row_loss)
 
 
+@wp.func
+def _ppo_value_loss_term(
+    value: wp.float32,
+    old_value: wp.float32,
+    target: wp.float32,
+    value_loss_coeff: wp.float32,
+    value_clip_range: wp.float32,
+) -> wp.float32:
+    delta = value - target
+    loss_sq = delta * delta
+    if value_clip_range > wp.float32(0.0):
+        value_error = value - old_value
+        clipped_value = old_value + _clip(value_error, -value_clip_range, value_clip_range)
+        clipped_delta = clipped_value - target
+        clipped_loss_sq = clipped_delta * clipped_delta
+        loss_sq = wp.max(loss_sq, clipped_loss_sq)
+    return wp.float32(0.5) * value_loss_coeff * loss_sq
+
+
+@wp.func
+def _ppo_value_grad_term(
+    value: wp.float32,
+    old_value: wp.float32,
+    target: wp.float32,
+    value_loss_coeff: wp.float32,
+    value_clip_range: wp.float32,
+) -> wp.float32:
+    delta = value - target
+    if value_clip_range > wp.float32(0.0):
+        value_error = value - old_value
+        clipped_error = _clip(value_error, -value_clip_range, value_clip_range)
+        clipped_delta = old_value + clipped_error - target
+        if clipped_delta * clipped_delta > delta * delta:
+            if value_error >= -value_clip_range and value_error <= value_clip_range:
+                return value_loss_coeff * clipped_delta
+            return wp.float32(0.0)
+    return value_loss_coeff * delta
+
+
 @wp.kernel
 def value_loss_kernel(
     values: wp.array2d[wp.float32],
+    old_values: wp.array[wp.float32],
     returns: wp.array[wp.float32],
+    value_loss_coeff: wp.float32,
+    value_clip_range: wp.float32,
     batch_size: wp.int32,
     loss: wp.array[wp.float32],
 ):
     i = wp.tid()
-    delta = values[i, 0] - returns[i]
-    wp.atomic_add(loss, 0, wp.float32(0.5) * delta * delta / wp.float32(batch_size))
+    loss_term = _ppo_value_loss_term(values[i, 0], old_values[i], returns[i], value_loss_coeff, value_clip_range)
+    wp.atomic_add(loss, 0, loss_term / wp.float32(batch_size))
 
 
 @wp.kernel
 def value_loss_grad_kernel(
     values: wp.array2d[wp.float32],
+    old_values: wp.array[wp.float32],
     returns: wp.array[wp.float32],
+    value_loss_coeff: wp.float32,
+    value_clip_range: wp.float32,
     batch_size: wp.int32,
     loss: wp.array[wp.float32],
     value_grad: wp.array2d[wp.float32],
 ):
     i = wp.tid()
     inv_batch = wp.float32(1.0) / wp.float32(batch_size)
-    delta = values[i, 0] - returns[i]
-    value_grad[i, 0] = delta * inv_batch
-    wp.atomic_add(loss, 0, wp.float32(0.5) * delta * delta * inv_batch)
+    value = values[i, 0]
+    loss_term = _ppo_value_loss_term(value, old_values[i], returns[i], value_loss_coeff, value_clip_range)
+    value_grad[i, 0] = (
+        _ppo_value_grad_term(value, old_values[i], returns[i], value_loss_coeff, value_clip_range) * inv_batch
+    )
+    wp.atomic_add(loss, 0, loss_term * inv_batch)
 
 
 @wp.kernel
 def value_column_loss_grad_kernel(
     values: wp.array2d[wp.float32],
     value_col: wp.int32,
+    old_values: wp.array[wp.float32],
     returns: wp.array[wp.float32],
+    value_loss_coeff: wp.float32,
+    value_clip_range: wp.float32,
     batch_size: wp.int32,
     loss: wp.array[wp.float32],
     output_grad: wp.array2d[wp.float32],
 ):
     i = wp.tid()
     inv_batch = wp.float32(1.0) / wp.float32(batch_size)
-    delta = values[i, value_col] - returns[i]
-    output_grad[i, value_col] = delta * inv_batch
-    wp.atomic_add(loss, 0, wp.float32(0.5) * delta * delta * inv_batch)
+    value = values[i, value_col]
+    loss_term = _ppo_value_loss_term(value, old_values[i], returns[i], value_loss_coeff, value_clip_range)
+    output_grad[i, value_col] = (
+        _ppo_value_grad_term(value, old_values[i], returns[i], value_loss_coeff, value_clip_range) * inv_batch
+    )
+    wp.atomic_add(loss, 0, loss_term * inv_batch)
 
 
 @wp.kernel
@@ -807,11 +861,13 @@ def gather_trajectory_minibatch_kernel(
     log_probs_src: wp.array[wp.float32],
     advantages_src: wp.array[wp.float32],
     returns_src: wp.array[wp.float32],
+    values_src: wp.array[wp.float32],
     obs_dst: wp.array2d[wp.float32],
     actions_dst: wp.array2d[wp.float32],
     log_probs_dst: wp.array[wp.float32],
     advantages_dst: wp.array[wp.float32],
     returns_dst: wp.array[wp.float32],
+    old_values_dst: wp.array[wp.float32],
 ):
     row, col = wp.tid()
     step = row / segment_count
@@ -826,6 +882,7 @@ def gather_trajectory_minibatch_kernel(
         log_probs_dst[row] = log_probs_src[src_row]
         advantages_dst[row] = advantages_src[src_row]
         returns_dst[row] = returns_src[src_row]
+        old_values_dst[row] = values_src[src_row]
 
 
 @wp.kernel

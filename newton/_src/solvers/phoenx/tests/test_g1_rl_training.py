@@ -19,6 +19,7 @@ import newton.rl as rl
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import benchmark_train_to_gate
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import make_seed_counter
+from newton._src.solvers.phoenx.rl_training.kernels import value_column_loss_grad_kernel, zero_scalar_kernel
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 _NANOG1_ROOT = Path("/home/twidmer/Documents/git/nanoG1")
@@ -133,6 +134,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertAlmostEqual(g1_recipe.GAE_LAMBDA, float(recipe["train.gae_lambda"]))
         self.assertAlmostEqual(g1_recipe.CLIP_RATIO, float(recipe["train.clip_coef"]))
         self.assertAlmostEqual(g1_recipe.ENTROPY_COEFF, float(recipe["train.ent_coef"]))
+        self.assertAlmostEqual(g1_recipe.VALUE_LOSS_COEFF, float(recipe["train.vf_coef"]))
+        self.assertAlmostEqual(g1_recipe.VALUE_CLIP_RANGE, float(recipe["train.vf_clip_coef"]))
         self.assertAlmostEqual(g1_recipe.REPLAY_RATIO, float(recipe["train.replay_ratio"]))
         self.assertAlmostEqual(g1_recipe.VTRACE_RHO_CLIP, float(recipe["train.vtrace_rho_clip"]))
         self.assertAlmostEqual(g1_recipe.VTRACE_C_CLIP, float(recipe["train.vtrace_c_clip"]))
@@ -296,6 +299,74 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected_clipped[:, g1_recipe.CONTROLLED_ACTION_COUNT :] = 0.0
         np.testing.assert_allclose(env.current_actions.numpy(), expected_clipped, rtol=0.0, atol=0.0)
 
+    def test_pufferlib_value_clip_formula_matches_warp_kernel(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 PufferLib value loss parity tests")
+        pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
+        if not pufferlib_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference file: {pufferlib_cu}")
+        cuda_text = pufferlib_cu.read_text()
+        self.assertIn("v_clipped = val + fmaxf(-a.vf_clip_coef", cuda_text)
+        self.assertIn("v_loss = 0.5f * fmaxf(v_loss_unclipped, v_loss_clipped)", cuda_text)
+        self.assertIn("a.grad_values_pred[nt] = dL * a.vf_coef * d_val_pred", cuda_text)
+
+        values_np = np.asarray(
+            [
+                [0.0, 15.0, 0.0],
+                [0.0, 35.0, 0.0],
+                [0.0, -45.0, 0.0],
+                [0.0, -5.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+        old_values_np = np.asarray([0.0, 10.0, 0.0, -10.0], dtype=np.float32)
+        returns_np = np.asarray([5.0, 0.0, -10.0, -8.0], dtype=np.float32)
+        value_col = 1
+        coeff = np.float32(g1_recipe.VALUE_LOSS_COEFF)
+        clip_range = np.float32(g1_recipe.VALUE_CLIP_RANGE)
+
+        values = wp.array(values_np, dtype=wp.float32, device=device)
+        old_values = wp.array(old_values_np, dtype=wp.float32, device=device)
+        returns = wp.array(returns_np, dtype=wp.float32, device=device)
+        loss = wp.zeros(1, dtype=wp.float32, device=device)
+        grad = wp.zeros_like(values)
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(zero_scalar_kernel, dim=1, outputs=[loss], device=device)
+            wp.launch(
+                value_column_loss_grad_kernel,
+                dim=values_np.shape[0],
+                inputs=[
+                    values,
+                    value_col,
+                    old_values,
+                    returns,
+                    float(coeff),
+                    float(clip_range),
+                    values_np.shape[0],
+                ],
+                outputs=[loss, grad],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        pred = values_np[:, value_col]
+        value_error = pred - old_values_np
+        clipped = old_values_np + np.clip(value_error, -clip_range, clip_range)
+        loss_unclipped = (pred - returns_np) ** 2
+        loss_clipped = (clipped - returns_np) ** 2
+        expected_loss = float(np.mean(0.5 * coeff * np.maximum(loss_unclipped, loss_clipped)))
+        expected_grad_col = coeff * (pred - returns_np) / values_np.shape[0]
+        use_clipped = loss_clipped > loss_unclipped
+        outside_clip = np.logical_or(value_error < -clip_range, value_error > clip_range)
+        expected_grad_col = np.where(use_clipped & outside_clip, 0.0, expected_grad_col)
+        expected_grad_col = np.where(
+            use_clipped & ~outside_clip, coeff * (clipped - returns_np) / values_np.shape[0], expected_grad_col
+        )
+        expected_grad = np.zeros_like(values_np)
+        expected_grad[:, value_col] = expected_grad_col
+
+        np.testing.assert_allclose(loss.numpy()[0], expected_loss, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(grad.numpy(), expected_grad, rtol=1.0e-6, atol=1.0e-6)
+
     def test_shared_value_mlp_forward_matches_numpy_for_nanog1_shape(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL network parity tests")
         puffernet = _PUFFERLIB_ROOT / "src" / "puffernet.h"
@@ -387,6 +458,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(ppo_config.shared_value_network)
         self.assertEqual(ppo_config.shared_value_network, g1_recipe.SHARED_VALUE_NETWORK)
         self.assertEqual(ppo_config.minibatch_size, g1_recipe.MINIBATCH_SIZE)
+        self.assertEqual(ppo_config.value_loss_coeff, g1_recipe.VALUE_LOSS_COEFF)
+        self.assertEqual(ppo_config.value_clip_range, g1_recipe.VALUE_CLIP_RANGE)
         self.assertEqual(ppo_config.manual_mlp_forward_dtype, g1_recipe.MANUAL_MLP_FORWARD_DTYPE)
 
     def test_rejects_unknown_contact_geometry(self) -> None:
@@ -525,6 +598,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             entropy_coeff=0.0,
             reward_clip=1.0,
             max_grad_norm=0.3,
+            value_loss_coeff=0.5,
+            value_clip_range=20.0,
             mirror_loss_coeff=0.25,
             shared_value_network=True,
             manual_actor_backward=True,
@@ -577,6 +652,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(restored.config.vtrace_c_clip, 0.0)
             self.assertEqual(restored.config.reward_clip, 1.0)
             self.assertEqual(restored.config.max_grad_norm, 0.3)
+            self.assertEqual(restored.config.value_loss_coeff, 0.5)
+            self.assertEqual(restored.config.value_clip_range, 20.0)
             self.assertEqual(restored.config.mirror_loss_coeff, 0.25)
             self.assertTrue(restored.config.shared_value_network)
             self.assertIsNone(restored.critic)
@@ -757,6 +834,8 @@ class TestG1PhoenXRL(unittest.TestCase):
                 vtrace_c_clip=3.0,
                 reward_clip=1.0,
                 max_grad_norm=0.3,
+                value_loss_coeff=g1_recipe.VALUE_LOSS_COEFF,
+                value_clip_range=g1_recipe.VALUE_CLIP_RANGE,
                 squash_actions=g1_recipe.SQUASH_ACTIONS,
                 command_x=0.8,
                 command_y=0.0,
@@ -801,6 +880,8 @@ class TestG1PhoenXRL(unittest.TestCase):
 
             self.assertEqual(result["execution_mode"], "graph_leapfrog")
             self.assertEqual(result["squash_actions"], g1_recipe.SQUASH_ACTIONS)
+            self.assertEqual(result["value_loss_coeff"], g1_recipe.VALUE_LOSS_COEFF)
+            self.assertEqual(result["value_clip_range"], g1_recipe.VALUE_CLIP_RANGE)
             self.assertEqual(result["completed_iterations"], 1)
             self.assertEqual(result["trained_samples"], 2)
             self.assertEqual(restored.iteration, 1)
