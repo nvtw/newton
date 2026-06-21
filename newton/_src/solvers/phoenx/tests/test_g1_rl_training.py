@@ -583,6 +583,26 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(loss.numpy()[0], expected_loss, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(grad.numpy(), expected_grad, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_pufferlib_advantage_normalization_matches_warp_buffer(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 advantage normalization tests")
+        pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
+        if not pufferlib_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference file: {pufferlib_cu}")
+        text = pufferlib_cu.read_text()
+        self.assertIn("*var_out = sdata[0] / (float)(n - 1)", text)
+        self.assertIn("float adv_std = sqrtf(float(a.adv_var[0]))", text)
+        self.assertIn("adv_normalized = (adv - float(a.adv_mean[0])) / (adv_std + 1e-8f)", text)
+
+        raw = np.asarray([1.0, 2.0, 4.0, -1.0, 0.5, 3.0], dtype=np.float32)
+        buffer = rl.BufferRollout(num_steps=2, num_envs=3, obs_dim=1, action_dim=1, device=device)
+        buffer.advantages.assign(raw)
+        with wp.ScopedCapture(device=device) as capture:
+            buffer.normalize_advantages()
+        wp.capture_launch(capture.graph)
+
+        expected = (raw - np.mean(raw)) / (np.std(raw, ddof=1) + np.float32(1.0e-8))
+        np.testing.assert_allclose(buffer.advantages.numpy(), expected, rtol=1.0e-6, atol=1.0e-6)
+
     def test_pufferlib_vtrace_advantage_matches_shifted_warp_layout(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 V-trace parity tests")
         pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
