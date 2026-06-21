@@ -933,6 +933,18 @@ class TestG1PhoenXRL(unittest.TestCase):
 
     def test_puffer_mingru_forward_and_reset_match_numpy_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 MinGRU network tests")
+        models_py = _PUFFERLIB_ROOT / "pufferlib" / "models.py"
+        models_cu = _PUFFERLIB_ROOT / "src" / "models.cu"
+        if not models_py.is_file() or not models_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib MinGRU reference files under {_PUFFERLIB_ROOT}")
+        models_text = models_py.read_text()
+        self.assertIn("return torch.where(x >= 0, x + 0.5, x.sigmoid())", models_text)
+        self.assertIn("return g * out + (1.0 - g) * x", models_text)
+        self.assertIn("log_coeffs = -F.softplus(gate)", models_text)
+        cuda_text = models_cu.read_text()
+        self.assertIn("float hidden_tilde = (hidden >= 0.0f) ? hidden + 0.5f : fast_sigmoid(hidden)", cuda_text)
+        self.assertIn("float mingru_out = lerp(state, hidden_tilde, gate_sigmoid)", cuda_text)
+
         net = rl.PufferMinGRUNet(input_dim=3, hidden_size=2, output_dim=2, num_layers=1, device=device, seed=3)
         net.encoder_weight.assign(np.asarray([[0.2, -0.1], [0.4, 0.3], [-0.5, 0.7]], dtype=np.float32))
         net.recurrent_weights[0].assign(
