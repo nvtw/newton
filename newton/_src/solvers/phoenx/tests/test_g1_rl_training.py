@@ -20,7 +20,11 @@ from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import benchma
 from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
-from newton._src.solvers.phoenx.rl_training.kernels import value_column_loss_grad_kernel, zero_scalar_kernel
+from newton._src.solvers.phoenx.rl_training.kernels import (
+    compute_vtrace_returns_kernel,
+    value_column_loss_grad_kernel,
+    zero_scalar_kernel,
+)
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 _NANOG1_ROOT = Path("/home/twidmer/Documents/git/nanoG1")
@@ -578,6 +582,84 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         np.testing.assert_allclose(loss.numpy()[0], expected_loss, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(grad.numpy(), expected_grad, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_pufferlib_vtrace_advantage_matches_shifted_warp_layout(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 V-trace parity tests")
+        pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
+        if not pufferlib_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference file: {pufferlib_cu}")
+        text = pufferlib_cu.read_text()
+        self.assertIn("float r_nxt = to_float(rewards[t_next])", text)
+        self.assertIn("float rho_t = fminf(imp, rho_clip)", text)
+        self.assertIn("lastpufferlam = delta + gamma*lambda*c_t*lastpufferlam*nextnonterminal", text)
+
+        num_steps = 4
+        num_envs = 2
+        gamma = np.float32(0.97)
+        gae_lambda = np.float32(0.9)
+        rho_clip = np.float32(1.4)
+        c_clip = np.float32(1.1)
+        reward_clip = np.float32(1.0)
+        rewards_np = np.asarray([[1.2, -0.4], [0.3, 2.5], [-1.7, 0.2], [0.5, -0.8]], dtype=np.float32)
+        dones_np = np.asarray([[0.0, 0.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+        values_np = np.asarray([[0.1, -0.2], [0.4, 0.3], [-0.1, 0.7], [0.5, -0.6], [0.2, 0.9]], dtype=np.float32)
+        ratios_np = np.asarray([[0.8, 1.6], [1.2, 0.7], [2.0, 1.0], [0.5, 1.3]], dtype=np.float32)
+
+        rewards = wp.array(rewards_np.reshape(-1), dtype=wp.float32, device=device)
+        dones = wp.array(dones_np.reshape(-1), dtype=wp.float32, device=device)
+        values = wp.array(values_np.reshape(-1), dtype=wp.float32, device=device)
+        ratios = wp.array(ratios_np.reshape(-1), dtype=wp.float32, device=device)
+        advantages = wp.zeros(num_steps * num_envs, dtype=wp.float32, device=device)
+        returns = wp.zeros(num_steps * num_envs, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                compute_vtrace_returns_kernel,
+                dim=num_envs,
+                inputs=[
+                    rewards,
+                    dones,
+                    values,
+                    ratios,
+                    num_steps,
+                    num_envs,
+                    float(gamma),
+                    float(gae_lambda),
+                    float(rho_clip),
+                    float(c_clip),
+                    float(reward_clip),
+                ],
+                outputs=[advantages, returns],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        puffer_rewards = np.zeros((num_steps + 1, num_envs), dtype=np.float32)
+        puffer_dones = np.zeros((num_steps + 1, num_envs), dtype=np.float32)
+        puffer_rewards[1:] = np.clip(rewards_np, -reward_clip, reward_clip)
+        puffer_dones[1:] = dones_np
+        expected_adv = np.zeros((num_steps, num_envs), dtype=np.float32)
+        for env_id in range(num_envs):
+            trace = np.float32(0.0)
+            for t in range(num_steps - 1, -1, -1):
+                next_nonterminal = np.float32(1.0) - puffer_dones[t + 1, env_id]
+                rho = min(ratios_np[t, env_id], rho_clip)
+                c = min(ratios_np[t, env_id], c_clip)
+                delta = rho * (
+                    puffer_rewards[t + 1, env_id]
+                    + gamma * values_np[t + 1, env_id] * next_nonterminal
+                    - values_np[t, env_id]
+                )
+                trace = delta + gamma * gae_lambda * c * trace * next_nonterminal
+                expected_adv[t, env_id] = trace
+        expected_returns = expected_adv + values_np[:-1]
+
+        np.testing.assert_allclose(
+            advantages.numpy().reshape(num_steps, num_envs), expected_adv, rtol=1.0e-6, atol=1.0e-6
+        )
+        np.testing.assert_allclose(
+            returns.numpy().reshape(num_steps, num_envs), expected_returns, rtol=1.0e-6, atol=1.0e-6
+        )
 
     def test_collect_rollout_resets_recurrent_state_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX recurrent rollout reset tests")
