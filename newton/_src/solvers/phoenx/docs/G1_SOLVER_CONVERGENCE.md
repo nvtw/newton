@@ -112,16 +112,19 @@ different behaviors:
 
 | setting | stochastic no-update rollouts | train-to-gate probe |
 | --- | --- | --- |
-| `5x2` (nanoG1 timing) | 64 worlds x 16-step rollouts stayed mostly non-terminal: first four rollout done means `0.000`, `0.054`, `0.034`, `0.037`. | 60 iterations measured 228k train env samples/s and 215k total env samples/s; gate still failed at 15.7M samples (`battery_perf=0.289`, `battery_falls=94`). |
+| `5x2` (nanoG1 timing, no armature) | 64 worlds x 16-step rollouts stayed mostly non-terminal: first four rollout done means `0.000`, `0.054`, `0.034`, `0.037`. | 60 iterations measured 228k train env samples/s and 215k total env samples/s; gate failed at 15.7M samples (`battery_perf=0.289`, `battery_falls=94`). A full 75.2M-sample run also failed the gate before the armature fix. |
+| `5x2` (nanoG1 timing + armature) | Same timing plus nanoG1 exported per-DOF armature in the PhoenX model. | compact 60-iteration probe measured 252k train env samples/s and 237k total env samples/s; gate still failed but improved to `battery_perf=0.388`, `battery_falls=27`, and finite leg-velocity diagnostics. |
 | `10x4` (fidelity diagnostic) | same random policy became fall-dominated: first four rollout done means `0.115`, `0.536`, `0.724`, `0.757`. | prior 60-iteration probes degraded badly by iteration 60, with unstable velocity diagnostics. |
 
 The heavier `10x4` setting is closer to the high-resolution PhoenX reference in
 open-loop drive tests, but it moves the early stochastic training distribution
 away from nanoG1 and makes PPO spend most samples on resets/falls. The default
 RL recipe therefore uses `sim_substeps=5`, `solver_iterations=2`, and
-`contact_geometry="nanog1_foot_boxes"`, matching nanoG1's production timing.
-Further solver work should improve the constraint formulation so higher
-substep/iteration counts do not change the training distribution this much.
+`contact_geometry="nanog1_foot_boxes"`, matching nanoG1 production timing.
+The model also carries nanoG1 damping, frictionloss, and armature; unit tests
+compare those values directly against `web/g1_model_const.h`. Further solver
+work should improve the constraint formulation so higher substep/iteration
+counts do not change the training distribution this much.
 
 ## Current Decision
 

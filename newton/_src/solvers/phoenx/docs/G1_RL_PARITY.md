@@ -56,13 +56,14 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
 ## Current Measurement
 
 After the RL parity fixes, short train-save-load-evaluate probes on the RTX PRO
-6000 Blackwell measured about 228k train env samples/s and 215k total env
-samples/s with the nanoG1-timed `5x2` training recipe. Against the nanoG1
-README/reference value of about 1.276M env samples/s, PhoenX is about 5.6x
-slower in these short probes. The 60-iteration policy does not pass the walking
-gate yet (`battery_perf=0.289`, `battery_falls=94`), but the `5x2` training
-distribution avoids the all-terminal stochastic rollout collapse seen with the
-heavier `10x4` diagnostic setting.
+6000 Blackwell measured about 252k train env samples/s and 237k total env
+samples/s with the nanoG1-timed `5x2` training recipe plus nanoG1 per-DOF
+armature. Against the nanoG1 README/reference value of about 1.276M env
+samples/s, PhoenX is about 5.0x slower in these compact probes. The 60-iteration
+policy does not pass the walking gate yet, but the armature parity fix improved
+the compact gate to `battery_perf=0.388` and `battery_falls=27`, compared with
+`battery_perf=0.289` and `battery_falls=94` before armature. A full 75.2M-sample
+run before the armature fix failed the gate, so a fresh full run is still needed.
 
 ## Next Checks
 

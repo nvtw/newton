@@ -267,6 +267,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         act_bias2 = _read_c_array(header, "hc_act_bias2")
         jnt_actfrcrange = _read_c_array(header, "hc_jnt_actfrcrange").reshape(rl.ACTION_DIM_G1 + 1, 2)[1:]
         dof_damping = _read_c_array(header, "hc_dof_damping")
+        dof_armature = _read_c_array(header, "hc_dof_armature")
         dof_frictionloss = _read_c_array(header, "hc_dof_frictionloss")
 
         env = rl.EnvG1PhoenX(g1_recipe.default_g1_env_config(world_count=1), device=device)
@@ -289,6 +290,12 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(act_bias2, np.zeros_like(act_bias2), rtol=0.0, atol=0.0)
         np.testing.assert_allclose(env.actuator_force_lower.numpy(), jnt_actfrcrange[:, 0], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_force_upper.numpy(), jnt_actfrcrange[:, 1], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(
+            env.model.joint_armature.numpy()[6 : 6 + rl.ACTION_DIM_G1],
+            dof_armature[6 : 6 + rl.ACTION_DIM_G1],
+            rtol=0.0,
+            atol=1.0e-8,
+        )
         np.testing.assert_allclose(
             env.model.joint_friction.numpy()[6 : 6 + rl.ACTION_DIM_G1],
             dof_frictionloss[6 : 6 + rl.ACTION_DIM_G1],
@@ -1364,7 +1371,11 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.multi_world_scheduler, g1_recipe.MULTI_WORLD_SCHEDULER)
         self.assertEqual(env_config.prepare_refresh_stride, g1_recipe.PREPARE_REFRESH_STRIDE)
         expected_leg_kd = np.array([4.0, 4.0, 4.0, 6.0, 3.0, 2.2] * 2, dtype=np.float32)
+        expected_leg_armature = np.array(
+            [0.01017752004, 0.025101925, 0.01017752004, 0.025101925, 0.00721945, 0.00721945] * 2, dtype=np.float32
+        )
         np.testing.assert_allclose(env.model.joint_target_kd.numpy()[6:18], expected_leg_kd, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.model.joint_armature.numpy()[6:18], expected_leg_armature, rtol=0.0, atol=1.0e-8)
         np.testing.assert_allclose(env.model.joint_friction.numpy()[6:35], 0.1, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.model.joint_q.numpy()[3:7], np.array([0.0, 0.0, 0.0, 1.0]), rtol=0.0, atol=0.0)
         labels = list(env.model.shape_label)

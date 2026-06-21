@@ -424,6 +424,38 @@ _NANOG1_DOF_DAMPING_G1 = (
     0.2,
 )
 
+_NANOG1_DOF_ARMATURE_G1 = (
+    0.01017752004,
+    0.025101925,
+    0.01017752004,
+    0.025101925,
+    0.00721945,
+    0.00721945,
+    0.01017752004,
+    0.025101925,
+    0.01017752004,
+    0.025101925,
+    0.00721945,
+    0.00721945,
+    0.01017752004,
+    0.00721945,
+    0.00721945,
+    0.003609725,
+    0.003609725,
+    0.003609725,
+    0.003609725,
+    0.003609725,
+    0.00425,
+    0.00425,
+    0.003609725,
+    0.003609725,
+    0.003609725,
+    0.003609725,
+    0.003609725,
+    0.00425,
+    0.00425,
+)
+
 _NANOG1_DOF_FRICTIONLOSS_G1 = tuple(0.1 for _ in range(ACTION_DIM_G1))
 
 _DRIVE_KD_G1 = tuple(_UNITREE_KD_G1[i] + _NANOG1_DOF_DAMPING_G1[i] for i in range(ACTION_DIM_G1))
@@ -1429,6 +1461,7 @@ class EnvG1PhoenX:
             articulation_builder.joint_friction[dof] = (
                 float(self.config.joint_friction_scale) * _NANOG1_DOF_FRICTIONLOSS_G1[i]
             )
+            articulation_builder.joint_armature[dof] = _NANOG1_DOF_ARMATURE_G1[i]
             articulation_builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)

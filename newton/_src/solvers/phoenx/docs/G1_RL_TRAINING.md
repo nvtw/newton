@@ -196,13 +196,16 @@ throughput gap to about 1.17x versus nanoG1's reported 1.28M samples/s.
 A later quality-facing sweep found that the `10x4` setting is a useful
 high-resolution diagnostic but a poor default for early PPO: stochastic
 std-1 policy rollouts became fall-dominated even without an optimizer update.
-The training recipe therefore now matches nanoG1's production timing,
-`sim_substeps=5` and `solver_iterations=2`. On RTX PRO 6000, a 60-iteration
-train-save-reload-gate probe with this setting measured about 228k train env
-samples/s and 215k total env samples/s. It still failed the gate at 15.7M
-samples (`battery_perf=0.289`, `battery_falls=94`), so the remaining gap is
-policy quality/sample efficiency rather than only raw throughput. See
-`G1_SOLVER_CONVERGENCE.md` for the fidelity and stochastic-rollout study.
+The training recipe therefore now matches nanoG1 production timing,
+`sim_substeps=5` and `solver_iterations=2`. A subsequent model-parity check
+found that the PhoenX MJCF fixture was missing nanoG1 per-DOF armature. After
+adding that armature, a compact 60-iteration train-save-reload-gate probe on RTX
+PRO 6000 measured about 252k train env samples/s and 237k total env samples/s.
+It still failed the gate at 15.7M samples, but improved to `battery_perf=0.388`
+and `battery_falls=27` versus the previous no-armature `battery_perf=0.289` and
+`battery_falls=94`. The remaining gap is policy quality/sample efficiency rather
+than only raw throughput. See `G1_SOLVER_CONVERGENCE.md` for the fidelity and
+stochastic-rollout study.
 
 The old fast graph-leapfrog production path was remeasured with the default
 auto fast-tail scheduler at 1,086,344 samples/s on 2026-06-20. Setting
