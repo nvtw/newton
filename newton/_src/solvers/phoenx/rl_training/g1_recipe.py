@@ -35,6 +35,13 @@ W_TORQUE = -2.0e-5
 W_ACTION_RATE = -0.01
 W_ALIVE = 3.0
 W_TERMINATION = -1.0
+GAIT_STANCE_FRACTION = 0.55
+W_GAIT_CONTACT = 0.5
+W_GAIT_SWING = -20.0
+W_GAIT_HIP = -4.0
+GAIT_FOOT_HEIGHT = 0.08
+W_BASE_HEIGHT = -10.0
+BASE_HEIGHT_TARGET = 0.78
 
 PARSE_MESHES = False
 CONTACT_GEOMETRY = "nanog1_foot_boxes"
@@ -52,9 +59,12 @@ LOG_STD_INIT = -0.5
 SQUASH_ACTIONS = False
 SEED = 42
 RANDOMIZE_COMMANDS = True
-COMMAND_X_RANGE = (-0.5, 0.8)
-COMMAND_Y_RANGE = (-0.4, 0.4)
+COMMAND_SAMPLING = "episode"
+COMMAND_X_RANGE = (-1.0, 1.0)
+COMMAND_Y_RANGE = (-0.6, 0.6)
 COMMAND_YAW_RANGE = (-1.0, 1.0)
+COMMAND_ZERO_PROBABILITY = 0.1
+COMMAND_RESAMPLE_STEPS = 500
 
 GAMMA = 0.97
 GAE_LAMBDA = 0.9
@@ -103,6 +113,12 @@ def default_g1_env_config(**overrides: Any):
         "action_scale": ACTION_SCALE,
         "controlled_action_count": CONTROLLED_ACTION_COUNT,
         "command": COMMAND,
+        "command_x_range": COMMAND_X_RANGE,
+        "command_y_range": COMMAND_Y_RANGE,
+        "command_yaw_range": COMMAND_YAW_RANGE,
+        "randomize_commands_on_reset": False,
+        "command_zero_probability": COMMAND_ZERO_PROBABILITY,
+        "command_resample_steps": COMMAND_RESAMPLE_STEPS,
         "max_episode_steps": MAX_EPISODE_STEPS,
         "reset_noise": RESET_NOISE,
         "min_base_height": MIN_BASE_HEIGHT,
@@ -117,6 +133,13 @@ def default_g1_env_config(**overrides: Any):
         "w_action_rate": W_ACTION_RATE,
         "w_alive": W_ALIVE,
         "w_termination": W_TERMINATION,
+        "gait_stance_fraction": GAIT_STANCE_FRACTION,
+        "w_gait_contact": W_GAIT_CONTACT,
+        "w_gait_swing": W_GAIT_SWING,
+        "w_gait_hip": W_GAIT_HIP,
+        "gait_foot_height": GAIT_FOOT_HEIGHT,
+        "w_base_height": W_BASE_HEIGHT,
+        "base_height_target": BASE_HEIGHT_TARGET,
         "parse_meshes": PARSE_MESHES,
         "contact_geometry": CONTACT_GEOMETRY,
         "auto_reset": AUTO_RESET,

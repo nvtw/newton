@@ -15,9 +15,12 @@ from .env import make_seed_counter
 from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
 from .g1_recipe import (
     ACTIVATION,
+    COMMAND_RESAMPLE_STEPS,
+    COMMAND_SAMPLING,
     COMMAND_X_RANGE,
     COMMAND_Y_RANGE,
     COMMAND_YAW_RANGE,
+    COMMAND_ZERO_PROBABILITY,
     HIDDEN_LAYERS,
     LOG_STD_INIT,
     RANDOMIZE_COMMANDS,
@@ -215,9 +218,12 @@ class ConfigTrainG1PPO:
     seed: int = SEED
     log_interval: int = 1
     randomize_commands: bool = RANDOMIZE_COMMANDS
+    command_sampling: str = COMMAND_SAMPLING
     command_x_range: tuple[float, float] = COMMAND_X_RANGE
     command_y_range: tuple[float, float] = COMMAND_Y_RANGE
     command_yaw_range: tuple[float, float] = COMMAND_YAW_RANGE
+    command_zero_probability: float = COMMAND_ZERO_PROBABILITY
+    command_resample_steps: int = COMMAND_RESAMPLE_STEPS
     resume_checkpoint: str | None = None
     checkpoint_path: str | None = None
     checkpoint_interval: int = 0
@@ -569,13 +575,16 @@ def _train_g1_ppo_graph_leapfrog(
     )
     env.use_reset_seed_counter(reset_seed_counter)
 
+    env.use_command_seed_counter(command_seed_counter)
+
     def collect(buffer: BufferRollout) -> None:
-        if cfg.randomize_commands:
+        if cfg.randomize_commands and cfg.command_sampling == "rollout":
             env.randomize_commands_seed_counter(
                 seed_counter=command_seed_counter,
                 command_x_range=cfg.command_x_range,
                 command_y_range=cfg.command_y_range,
                 command_yaw_range=cfg.command_yaw_range,
+                zero_probability=cfg.command_zero_probability,
             )
         env.collect_ppo_rollout_seed_counter(rollout_trainer, buffer, seed_counter=rollout_seed_counter)
 
@@ -656,6 +665,12 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         raise ValueError("command_y_range must be ordered")
     if cfg.command_yaw_range[1] < cfg.command_yaw_range[0]:
         raise ValueError("command_yaw_range must be ordered")
+    if not 0.0 <= float(cfg.command_zero_probability) <= 1.0:
+        raise ValueError("command_zero_probability must be in [0, 1]")
+    if cfg.command_resample_steps < 0:
+        raise ValueError("command_resample_steps must be non-negative")
+    if cfg.command_sampling not in ("episode", "rollout"):
+        raise ValueError("command_sampling must be 'episode' or 'rollout'")
     if cfg.checkpoint_interval < 0:
         raise ValueError("checkpoint_interval must be non-negative")
     if cfg.execution_mode not in ("eager", "graph_leapfrog"):
@@ -663,6 +678,18 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
 
     device = wp.get_device(cfg.device)
     env_config = cfg.env_config or ConfigEnvG1PhoenX()
+    if cfg.randomize_commands and cfg.command_sampling == "episode":
+        env_config = replace(
+            env_config,
+            command_x_range=cfg.command_x_range,
+            command_y_range=cfg.command_y_range,
+            command_yaw_range=cfg.command_yaw_range,
+            randomize_commands_on_reset=True,
+            command_zero_probability=cfg.command_zero_probability,
+            command_resample_steps=cfg.command_resample_steps,
+        )
+    elif not cfg.randomize_commands or cfg.command_sampling == "rollout":
+        env_config = replace(env_config, randomize_commands_on_reset=False, command_resample_steps=0)
     ppo_config = cfg.ppo_config or _default_g1_ppo_config()
     env = EnvG1PhoenX(env_config, device=device)
     if cfg.resume_checkpoint is not None:
@@ -699,12 +726,13 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
 
     for local_iteration in range(cfg.iterations):
         iteration = start_iteration + local_iteration
-        if cfg.randomize_commands:
+        if cfg.randomize_commands and cfg.command_sampling == "rollout":
             env.randomize_commands(
                 seed=int(cfg.seed) + 53_321 + iteration,
                 command_x_range=cfg.command_x_range,
                 command_y_range=cfg.command_y_range,
                 command_yaw_range=cfg.command_yaw_range,
+                zero_probability=cfg.command_zero_probability,
             )
 
         t0 = time.perf_counter()

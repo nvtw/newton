@@ -563,14 +563,20 @@ def g1_observe_reward_kernel(
     current_actions: wp.array2d[wp.float32],
     previous_actions: wp.array2d[wp.float32],
     command: wp.array2d[wp.float32],
+    body_q: wp.array[wp.transform],
+    foot_contacts: wp.array2d[wp.float32],
     coord_stride: wp.int32,
     dof_stride: wp.int32,
+    body_stride: wp.int32,
+    left_foot_body: wp.int32,
+    right_foot_body: wp.int32,
     episode_steps: wp.array[wp.int32],
     max_episode_steps: wp.int32,
     phase_period: wp.int32,
     min_base_height: wp.float32,
     min_upright_cos: wp.float32,
     action_scale: wp.float32,
+    reward_dt: wp.float32,
     w_track_lin: wp.float32,
     w_track_ang: wp.float32,
     w_lin_vel_z: wp.float32,
@@ -580,6 +586,13 @@ def g1_observe_reward_kernel(
     w_action_rate: wp.float32,
     w_alive: wp.float32,
     w_termination: wp.float32,
+    gait_stance_fraction: wp.float32,
+    w_gait_contact: wp.float32,
+    w_gait_swing: wp.float32,
+    w_gait_hip: wp.float32,
+    gait_foot_height: wp.float32,
+    w_base_height: wp.float32,
+    base_height_target: wp.float32,
     actuator_ke: wp.array[wp.float32],
     actuator_kd: wp.array[wp.float32],
     obs: wp.array2d[wp.float32],
@@ -657,10 +670,11 @@ def g1_observe_reward_kernel(
         lin_vel_z_penalty = lin_b_z * lin_b_z
         ang_vel_xy_penalty = ang_x * ang_x + ang_y * ang_y
         orientation_penalty = gravity_x * gravity_x + gravity_y * gravity_y
-        upright = _clip_float(-gravity_z, wp.float32(0.0), wp.float32(1.0))
+        upright_cos = _clip_float(-gravity_z, wp.float32(0.0), wp.float32(1.0))
+        upright_gate = _clip_float((upright_cos - wp.float32(0.75)) * wp.float32(4.0), wp.float32(0.0), wp.float32(1.0))
 
         action_rate_penalty = wp.float32(0.0)
-        power_proxy = wp.float32(0.0)
+        torque_sq_penalty = wp.float32(0.0)
         for j in range(ACTION_DIM_G1):
             da = current_actions[world, j] - previous_actions[world, j]
             action_rate_penalty = action_rate_penalty + da * da
@@ -671,25 +685,80 @@ def g1_observe_reward_kernel(
             target = default_joint_pos[j] + current_actions[world, j] * action_scale
             tau_proxy = actuator_ke[j] * (target - q) - actuator_kd[j] * qd
             tau_proxy = _clip_finite(tau_proxy, wp.float32(-10000.0), wp.float32(10000.0))
-            power_proxy = power_proxy + wp.abs(tau_proxy * qd)
+            torque_sq_penalty = torque_sq_penalty + tau_proxy * tau_proxy
+
+        gait_reward = wp.float32(0.0)
+        if left_foot_body >= wp.int32(0) and right_foot_body >= wp.int32(0):
+            phase_step = episode_steps[world] % phase_period
+            left_phase = wp.float32(phase_step) / wp.float32(phase_period)
+            right_phase = left_phase + wp.float32(0.5)
+            if right_phase >= wp.float32(1.0):
+                right_phase = right_phase - wp.float32(1.0)
+
+            left_stance = wp.int32(0)
+            if left_phase < gait_stance_fraction:
+                left_stance = wp.int32(1)
+            right_stance = wp.int32(0)
+            if right_phase < gait_stance_fraction:
+                right_stance = wp.int32(1)
+
+            left_contact = wp.int32(0)
+            if foot_contacts[world, 0] > wp.float32(0.5):
+                left_contact = wp.int32(1)
+            right_contact = wp.int32(0)
+            if foot_contacts[world, 1] > wp.float32(0.5):
+                right_contact = wp.int32(1)
+
+            if left_stance == left_contact:
+                gait_reward = gait_reward + w_gait_contact
+            if right_stance == right_contact:
+                gait_reward = gait_reward + w_gait_contact
+
+            if left_contact == wp.int32(0):
+                left_foot_z = wp.transform_get_translation(body_q[world * body_stride + left_foot_body])[2]
+                left_dz = _clip_finite(left_foot_z - gait_foot_height, wp.float32(-10.0), wp.float32(10.0))
+                gait_reward = gait_reward + w_gait_swing * left_dz * left_dz
+            if right_contact == wp.int32(0):
+                right_foot_z = wp.transform_get_translation(body_q[world * body_stride + right_foot_body])[2]
+                right_dz = _clip_finite(right_foot_z - gait_foot_height, wp.float32(-10.0), wp.float32(10.0))
+                gait_reward = gait_reward + w_gait_swing * right_dz * right_dz
+
+            hip_penalty = wp.float32(0.0)
+            hip_dq = joint_q[q_base + wp.int32(7) + wp.int32(1)] - default_joint_pos[wp.int32(1)]
+            hip_penalty = hip_penalty + hip_dq * hip_dq
+            hip_dq = joint_q[q_base + wp.int32(7) + wp.int32(2)] - default_joint_pos[wp.int32(2)]
+            hip_penalty = hip_penalty + hip_dq * hip_dq
+            hip_dq = joint_q[q_base + wp.int32(7) + wp.int32(7)] - default_joint_pos[wp.int32(7)]
+            hip_penalty = hip_penalty + hip_dq * hip_dq
+            hip_dq = joint_q[q_base + wp.int32(7) + wp.int32(8)] - default_joint_pos[wp.int32(8)]
+            hip_penalty = hip_penalty + hip_dq * hip_dq
+            gait_reward = gait_reward + w_gait_hip * hip_penalty
+
+            base_dz = _clip_finite(
+                joint_q[q_base + wp.int32(2)] - base_height_target, wp.float32(-10.0), wp.float32(10.0)
+            )
+            gait_reward = gait_reward + w_base_height * base_dz * base_dz
 
         fall = wp.float32(0.0)
-        if joint_q[q_base + wp.int32(2)] < min_base_height or upright < min_upright_cos:
+        if joint_q[q_base + wp.int32(2)] < min_base_height or upright_cos < min_upright_cos:
             fall = wp.float32(1.0)
         if state_bad != wp.int32(0):
             fall = wp.float32(1.0)
 
-        reward = (
+        shaped_reward = (
             w_track_lin * track_lin
             + w_track_ang * track_ang
             + w_lin_vel_z * lin_vel_z_penalty
-            + w_ang_vel_xy * ang_vel_xy_penalty
-            + w_orientation * orientation_penalty
-            + w_torque * power_proxy
+            + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
+            + w_orientation * orientation_penalty * upright_gate
+            + w_torque * torque_sq_penalty
             + w_action_rate * action_rate_penalty
+            + gait_reward
             + w_alive
-            + w_termination * fall
         )
+        reward = shaped_reward * reward_dt
+        if fall > wp.float32(0.5):
+            reward = reward + w_termination
         if state_bad != wp.int32(0) or not wp.isfinite(reward):
             reward = w_termination
             track_lin = wp.float32(0.0)
@@ -785,6 +854,33 @@ def g1_reset_done_worlds_seed_counter_kernel(
         episode_steps[world] = wp.int32(0)
 
 
+@wp.func
+def _g1_sample_command_value(
+    seed: wp.int32,
+    world: wp.int32,
+    col: wp.int32,
+    x_min: wp.float32,
+    x_max: wp.float32,
+    y_min: wp.float32,
+    y_max: wp.float32,
+    yaw_min: wp.float32,
+    yaw_max: wp.float32,
+    zero_probability: wp.float32,
+):
+    zero_rng = wp.rand_init(seed, world * wp.int32(4))
+    if zero_probability > wp.float32(0.0) and wp.randf(zero_rng) < zero_probability:
+        return wp.float32(0.0)
+
+    rng = wp.rand_init(seed, world * wp.int32(4) + col + wp.int32(1))
+    u = wp.randf(rng)
+    value = yaw_min + (yaw_max - yaw_min) * u
+    if col == wp.int32(0):
+        value = x_min + (x_max - x_min) * u
+    elif col == wp.int32(1):
+        value = y_min + (y_max - y_min) * u
+    return value
+
+
 @wp.kernel
 def g1_sample_commands_kernel(
     seed: wp.int32,
@@ -794,17 +890,13 @@ def g1_sample_commands_kernel(
     y_max: wp.float32,
     yaw_min: wp.float32,
     yaw_max: wp.float32,
+    zero_probability: wp.float32,
     command: wp.array2d[wp.float32],
 ):
     world, col = wp.tid()
-    rng = wp.rand_init(seed, world * wp.int32(3) + col)
-    u = wp.randf(rng)
-    if col == 0:
-        command[world, col] = x_min + (x_max - x_min) * u
-    elif col == 1:
-        command[world, col] = y_min + (y_max - y_min) * u
-    else:
-        command[world, col] = yaw_min + (yaw_max - yaw_min) * u
+    command[world, col] = _g1_sample_command_value(
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+    )
 
 
 @wp.kernel
@@ -817,18 +909,167 @@ def g1_sample_commands_seed_counter_kernel(
     y_max: wp.float32,
     yaw_min: wp.float32,
     yaw_max: wp.float32,
+    zero_probability: wp.float32,
     command: wp.array2d[wp.float32],
 ):
     world, col = wp.tid()
     seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
-    rng = wp.rand_init(seed, world * wp.int32(3) + col)
-    u = wp.randf(rng)
-    if col == 0:
-        command[world, col] = x_min + (x_max - x_min) * u
-    elif col == 1:
-        command[world, col] = y_min + (y_max - y_min) * u
-    else:
-        command[world, col] = yaw_min + (yaw_max - yaw_min) * u
+    command[world, col] = _g1_sample_command_value(
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+    )
+
+
+@wp.kernel
+def g1_sample_done_commands_kernel(
+    seed: wp.int32,
+    x_min: wp.float32,
+    x_max: wp.float32,
+    y_min: wp.float32,
+    y_max: wp.float32,
+    yaw_min: wp.float32,
+    yaw_max: wp.float32,
+    zero_probability: wp.float32,
+    dones: wp.array[wp.float32],
+    command: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    if dones[world] <= wp.float32(0.5):
+        return
+    command[world, col] = _g1_sample_command_value(
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+    )
+
+
+@wp.kernel
+def g1_sample_done_commands_seed_counter_kernel(
+    seed_counter: wp.array[wp.int32],
+    seed_offset: wp.int32,
+    x_min: wp.float32,
+    x_max: wp.float32,
+    y_min: wp.float32,
+    y_max: wp.float32,
+    yaw_min: wp.float32,
+    yaw_max: wp.float32,
+    zero_probability: wp.float32,
+    dones: wp.array[wp.float32],
+    command: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    if dones[world] <= wp.float32(0.5):
+        return
+    seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
+    command[world, col] = _g1_sample_command_value(
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+    )
+
+
+@wp.kernel
+def g1_sample_due_commands_kernel(
+    seed: wp.int32,
+    resample_steps: wp.int32,
+    x_min: wp.float32,
+    x_max: wp.float32,
+    y_min: wp.float32,
+    y_max: wp.float32,
+    yaw_min: wp.float32,
+    yaw_max: wp.float32,
+    zero_probability: wp.float32,
+    dones: wp.array[wp.float32],
+    episode_steps: wp.array[wp.int32],
+    command: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    if resample_steps <= wp.int32(0) or dones[world] > wp.float32(0.5):
+        return
+    if episode_steps[world] <= wp.int32(0) or episode_steps[world] % resample_steps != wp.int32(0):
+        return
+    command[world, col] = _g1_sample_command_value(
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+    )
+
+
+@wp.kernel
+def g1_sample_due_commands_seed_counter_kernel(
+    seed_counter: wp.array[wp.int32],
+    seed_offset: wp.int32,
+    resample_steps: wp.int32,
+    x_min: wp.float32,
+    x_max: wp.float32,
+    y_min: wp.float32,
+    y_max: wp.float32,
+    yaw_min: wp.float32,
+    yaw_max: wp.float32,
+    zero_probability: wp.float32,
+    dones: wp.array[wp.float32],
+    episode_steps: wp.array[wp.int32],
+    command: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    if resample_steps <= wp.int32(0) or dones[world] > wp.float32(0.5):
+        return
+    if episode_steps[world] <= wp.int32(0) or episode_steps[world] % resample_steps != wp.int32(0):
+        return
+    seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
+    command[world, col] = _g1_sample_command_value(
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+    )
+
+
+@wp.func
+def _g1_mark_foot_contact(
+    shape_id: wp.int32,
+    shape_body: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    body_stride: wp.int32,
+    left_foot_body: wp.int32,
+    right_foot_body: wp.int32,
+    foot_contacts: wp.array2d[wp.float32],
+):
+    if shape_id < wp.int32(0):
+        return
+    body = shape_body[shape_id]
+    if body < wp.int32(0):
+        return
+    world = shape_world[shape_id]
+    if world < wp.int32(0):
+        if body_stride <= wp.int32(0):
+            return
+        world = body / body_stride
+    if world < wp.int32(0) or world >= foot_contacts.shape[0]:
+        return
+    local_body = body
+    if body_stride > wp.int32(0):
+        local_body = body - world * body_stride
+    if local_body == left_foot_body:
+        wp.atomic_add(foot_contacts, world, wp.int32(0), wp.float32(1.0))
+    elif local_body == right_foot_body:
+        wp.atomic_add(foot_contacts, world, wp.int32(1), wp.float32(1.0))
+
+
+@wp.kernel
+def g1_scan_foot_contacts_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    rigid_contact_shape0: wp.array[wp.int32],
+    rigid_contact_shape1: wp.array[wp.int32],
+    shape_body: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    body_stride: wp.int32,
+    left_foot_body: wp.int32,
+    right_foot_body: wp.int32,
+    foot_contacts: wp.array2d[wp.float32],
+):
+    tid = wp.tid()
+    count = rigid_contact_count[0]
+    if count > rigid_contact_shape0.shape[0]:
+        count = rigid_contact_shape0.shape[0]
+    if tid >= count:
+        return
+    _g1_mark_foot_contact(
+        rigid_contact_shape0[tid], shape_body, shape_world, body_stride, left_foot_body, right_foot_body, foot_contacts
+    )
+    _g1_mark_foot_contact(
+        rigid_contact_shape1[tid], shape_body, shape_world, body_stride, left_foot_body, right_foot_body, foot_contacts
+    )
 
 
 @dataclass
@@ -846,6 +1087,13 @@ class ConfigEnvG1PhoenX:
         action_scale: Position target scale [rad].
         controlled_action_count: Number of leading policy actions applied to joints.
         command: Target body-frame command ``(vx, vy, yaw_rate)`` [m/s, m/s, rad/s].
+        command_x_range: Sampled command-x range [m/s].
+        command_y_range: Sampled command-y range [m/s].
+        command_yaw_range: Sampled yaw-rate command range [rad/s].
+        randomize_commands_on_reset: Sample commands when worlds reset.
+        command_zero_probability: Probability of sampling a zero command.
+        command_resample_steps: Periodic command resampling interval in policy
+            steps. Use ``0`` to disable periodic resampling.
         max_episode_steps: Episode timeout in policy steps. Use ``0`` to disable.
         reset_noise: Uniform joint-position reset noise half-width [rad].
         min_base_height: Episode ends below this base height [m].
@@ -856,10 +1104,17 @@ class ConfigEnvG1PhoenX:
         w_lin_vel_z: Vertical body-velocity penalty scale.
         w_ang_vel_xy: Base roll/pitch angular-velocity penalty scale.
         w_orientation: Projected-gravity tilt penalty scale.
-        w_torque: Mechanical power proxy penalty scale.
+        w_torque: Torque-squared penalty scale.
         w_action_rate: Action-rate penalty scale.
         w_alive: Alive reward per policy step.
         w_termination: Termination reward applied on fall.
+        gait_stance_fraction: Fraction of each gait half-period spent in stance.
+        w_gait_contact: Stance/contact phase-matching reward scale.
+        w_gait_swing: Swing-foot height penalty scale.
+        w_gait_hip: Hip-roll/yaw deviation penalty scale.
+        gait_foot_height: Swing-foot target height [m].
+        w_base_height: Base-height penalty scale.
+        base_height_target: Target base height [m].
         parse_meshes: Import MJCF mesh collision geoms. Disable for fast
             RL runs that use the primitive foot and arm geoms only.
         contact_geometry: G1 contact geometry preset. "mjcf" keeps the
@@ -884,6 +1139,12 @@ class ConfigEnvG1PhoenX:
     action_scale: float = g1_recipe.ACTION_SCALE
     controlled_action_count: int = g1_recipe.CONTROLLED_ACTION_COUNT
     command: tuple[float, float, float] = g1_recipe.COMMAND
+    command_x_range: tuple[float, float] = g1_recipe.COMMAND_X_RANGE
+    command_y_range: tuple[float, float] = g1_recipe.COMMAND_Y_RANGE
+    command_yaw_range: tuple[float, float] = g1_recipe.COMMAND_YAW_RANGE
+    randomize_commands_on_reset: bool = False
+    command_zero_probability: float = 0.0
+    command_resample_steps: int = 0
     max_episode_steps: int = g1_recipe.MAX_EPISODE_STEPS
     reset_noise: float = g1_recipe.RESET_NOISE
     min_base_height: float = g1_recipe.MIN_BASE_HEIGHT
@@ -898,6 +1159,13 @@ class ConfigEnvG1PhoenX:
     w_action_rate: float = g1_recipe.W_ACTION_RATE
     w_alive: float = g1_recipe.W_ALIVE
     w_termination: float = g1_recipe.W_TERMINATION
+    gait_stance_fraction: float = g1_recipe.GAIT_STANCE_FRACTION
+    w_gait_contact: float = g1_recipe.W_GAIT_CONTACT
+    w_gait_swing: float = g1_recipe.W_GAIT_SWING
+    w_gait_hip: float = g1_recipe.W_GAIT_HIP
+    gait_foot_height: float = g1_recipe.GAIT_FOOT_HEIGHT
+    w_base_height: float = g1_recipe.W_BASE_HEIGHT
+    base_height_target: float = g1_recipe.BASE_HEIGHT_TARGET
     parse_meshes: bool = g1_recipe.PARSE_MESHES
     contact_geometry: str = g1_recipe.CONTACT_GEOMETRY
     auto_reset: bool = g1_recipe.AUTO_RESET
@@ -934,6 +1202,15 @@ class EnvG1PhoenX:
             raise ValueError("phase_period must be positive")
         if int(self.config.rigid_contact_max_per_world) < 0:
             raise ValueError("rigid_contact_max_per_world must be non-negative")
+        self._check_command_ranges(
+            self.config.command_x_range, self.config.command_y_range, self.config.command_yaw_range
+        )
+        if not 0.0 <= float(self.config.command_zero_probability) <= 1.0:
+            raise ValueError("command_zero_probability must be in [0, 1]")
+        if int(self.config.command_resample_steps) < 0:
+            raise ValueError("command_resample_steps must be non-negative")
+        if not 0.0 <= float(self.config.gait_stance_fraction) <= 1.0:
+            raise ValueError("gait_stance_fraction must be in [0, 1]")
         if str(self.config.contact_geometry) not in _NANOG1_CONTACT_GEOMETRIES:
             raise ValueError(f"contact_geometry must be one of {_NANOG1_CONTACT_GEOMETRIES}")
 
@@ -945,12 +1222,19 @@ class EnvG1PhoenX:
                 f"Expected nanoG1 dimensions coord={7 + ACTION_DIM_G1}, dof={6 + ACTION_DIM_G1}; "
                 f"got coord={self.coord_stride}, dof={self.dof_stride}"
             )
+        if int(self.model.body_count) % self.world_count != 0:
+            raise RuntimeError("Expected equal G1 body count per world")
+        self.body_stride = int(self.model.body_count) // self.world_count
+        self._left_foot_body_local = self._resolve_foot_body_local("left")
+        self._right_foot_body_local = self._resolve_foot_body_local("right")
 
         self.solver = self._make_solver()
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
         self.contacts = self.model.contacts()
+        self.foot_contacts = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
+        self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
 
         self.default_joint_pos = wp.array(
             np.asarray(_DEFAULT_JOINT_POS_G1, dtype=np.float32), dtype=wp.float32, device=self.device
@@ -973,6 +1257,8 @@ class EnvG1PhoenX:
         self.step_successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self._reset_seed = 0
         self._reset_seed_counter: wp.array[wp.int32] | None = None
+        self._command_seed = 0
+        self._command_seed_counter: wp.array[wp.int32] | None = None
         self.sim_time = 0.0
 
         self.reset()
@@ -1093,6 +1379,22 @@ class EnvG1PhoenX:
             articulation_dvi_replaces_joint_pgs=False,
         )
 
+    def _resolve_foot_body_local(self, side: str) -> int:
+        shape_body = self.model.shape_body.numpy() if self.model.shape_body is not None else None
+        shape_label = f"{side}_nanog1_foot_box"
+        if shape_body is not None:
+            for shape_index, label in enumerate(getattr(self.model, "shape_label", ())):
+                if label == shape_label:
+                    body = int(shape_body[shape_index])
+                    if body >= 0:
+                        return body % self.body_stride
+
+        body_suffix = f"{side}_ankle_roll_link"
+        for body_index, label in enumerate(getattr(self.model, "body_label", ())):
+            if str(label).endswith(body_suffix):
+                return int(body_index) % self.body_stride
+        return -1
+
     def set_command(self, command: tuple[float, float, float]) -> None:
         """Set the same body-frame command for every world [m/s, m/s, rad/s]."""
 
@@ -1117,6 +1419,7 @@ class EnvG1PhoenX:
         command_x_range: tuple[float, float],
         command_y_range: tuple[float, float],
         command_yaw_range: tuple[float, float],
+        zero_probability: float = 0.0,
     ) -> None:
         """Sample per-world body-frame commands on the device [m/s, m/s, rad/s]."""
 
@@ -1126,7 +1429,7 @@ class EnvG1PhoenX:
         wp.launch(
             g1_sample_commands_kernel,
             dim=(self.world_count, 3),
-            inputs=[int(seed), x_min, x_max, y_min, y_max, yaw_min, yaw_max],
+            inputs=[int(seed), x_min, x_max, y_min, y_max, yaw_min, yaw_max, float(zero_probability)],
             outputs=[self.command],
             device=self.device,
         )
@@ -1138,6 +1441,7 @@ class EnvG1PhoenX:
         command_x_range: tuple[float, float],
         command_y_range: tuple[float, float],
         command_yaw_range: tuple[float, float],
+        zero_probability: float = 0.0,
         seed_offset: int = 0,
         advance: int = 1,
     ) -> None:
@@ -1149,15 +1453,25 @@ class EnvG1PhoenX:
         wp.launch(
             g1_sample_commands_seed_counter_kernel,
             dim=(self.world_count, 3),
-            inputs=[seed_counter, int(seed_offset), x_min, x_max, y_min, y_max, yaw_min, yaw_max],
+            inputs=[
+                seed_counter,
+                int(seed_offset),
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                yaw_min,
+                yaw_max,
+                float(zero_probability),
+            ],
             outputs=[self.command],
             device=self.device,
         )
         if int(advance) != 0:
             advance_seed_counter(seed_counter, int(advance), device=self.device)
 
-    def _validate_command_ranges(
-        self,
+    @staticmethod
+    def _check_command_ranges(
         command_x_range: tuple[float, float],
         command_y_range: tuple[float, float],
         command_yaw_range: tuple[float, float],
@@ -1167,11 +1481,46 @@ class EnvG1PhoenX:
         yaw_min, yaw_max = float(command_yaw_range[0]), float(command_yaw_range[1])
         if x_max < x_min or y_max < y_min or yaw_max < yaw_min:
             raise ValueError("command ranges must be ordered")
+        return x_min, x_max, y_min, y_max, yaw_min, yaw_max
+
+    def _validate_command_ranges(
+        self,
+        command_x_range: tuple[float, float],
+        command_y_range: tuple[float, float],
+        command_yaw_range: tuple[float, float],
+    ) -> tuple[float, float, float, float, float, float]:
+        x_min, x_max, y_min, y_max, yaw_min, yaw_max = self._check_command_ranges(
+            command_x_range, command_y_range, command_yaw_range
+        )
         self.config.command = ((x_min + x_max) * 0.5, (y_min + y_max) * 0.5, (yaw_min + yaw_max) * 0.5)
         return x_min, x_max, y_min, y_max, yaw_min, yaw_max
 
+    def _config_command_ranges(self) -> tuple[float, float, float, float, float, float]:
+        return self._check_command_ranges(
+            self.config.command_x_range, self.config.command_y_range, self.config.command_yaw_range
+        )
+
     def observe(self) -> wp.array:
         """Update and return the current observation array."""
+
+        self.foot_contacts.zero_()
+        if self._can_scan_foot_contacts and int(self.contacts.rigid_contact_max) > 0:
+            wp.launch(
+                g1_scan_foot_contacts_kernel,
+                dim=int(self.contacts.rigid_contact_max),
+                inputs=[
+                    self.contacts.rigid_contact_count,
+                    self.contacts.rigid_contact_shape0,
+                    self.contacts.rigid_contact_shape1,
+                    self.model.shape_body,
+                    self.model.shape_world,
+                    self.body_stride,
+                    self._left_foot_body_local,
+                    self._right_foot_body_local,
+                ],
+                outputs=[self.foot_contacts],
+                device=self.device,
+            )
 
         wp.launch(
             g1_observe_reward_kernel,
@@ -1183,14 +1532,20 @@ class EnvG1PhoenX:
                 self.current_actions,
                 self.previous_actions,
                 self.command,
+                self.state_0.body_q,
+                self.foot_contacts,
                 self.coord_stride,
                 self.dof_stride,
+                self.body_stride,
+                self._left_foot_body_local,
+                self._right_foot_body_local,
                 self.episode_steps,
                 self.config.max_episode_steps,
                 self.config.phase_period,
                 self.config.min_base_height,
                 self.config.min_upright_cos,
                 self.config.action_scale,
+                self.config.frame_dt,
                 self.config.w_track_lin,
                 self.config.w_track_ang,
                 self.config.w_lin_vel_z,
@@ -1200,6 +1555,13 @@ class EnvG1PhoenX:
                 self.config.w_action_rate,
                 self.config.w_alive,
                 self.config.w_termination,
+                self.config.gait_stance_fraction,
+                self.config.w_gait_contact,
+                self.config.w_gait_swing,
+                self.config.w_gait_hip,
+                self.config.gait_foot_height,
+                self.config.w_base_height,
+                self.config.base_height_target,
                 self.actuator_ke,
                 self.actuator_kd,
             ],
@@ -1225,6 +1587,110 @@ class EnvG1PhoenX:
             device=self.device,
         )
 
+    def use_command_seed_counter(self, seed_counter: wp.array[wp.int32] | None) -> None:
+        """Use a device seed counter for graph-captured command sampling."""
+
+        self._command_seed_counter = seed_counter
+
+    def _sample_done_commands(self) -> bool:
+        if not bool(self.config.randomize_commands_on_reset):
+            return False
+        x_min, x_max, y_min, y_max, yaw_min, yaw_max = self._config_command_ranges()
+        zero_probability = float(self.config.command_zero_probability)
+        if self._command_seed_counter is None:
+            wp.launch(
+                g1_sample_done_commands_kernel,
+                dim=(self.world_count, 3),
+                inputs=[
+                    int(self._command_seed),
+                    x_min,
+                    x_max,
+                    y_min,
+                    y_max,
+                    yaw_min,
+                    yaw_max,
+                    zero_probability,
+                    self.dones,
+                ],
+                outputs=[self.command],
+                device=self.device,
+            )
+            self._command_seed += 1
+        else:
+            wp.launch(
+                g1_sample_done_commands_seed_counter_kernel,
+                dim=(self.world_count, 3),
+                inputs=[
+                    self._command_seed_counter,
+                    0,
+                    x_min,
+                    x_max,
+                    y_min,
+                    y_max,
+                    yaw_min,
+                    yaw_max,
+                    zero_probability,
+                    self.dones,
+                ],
+                outputs=[self.command],
+                device=self.device,
+            )
+            advance_seed_counter(self._command_seed_counter, 1, device=self.device)
+        return True
+
+    def _resample_due_commands(self) -> bool:
+        if not bool(self.config.randomize_commands_on_reset):
+            return False
+        resample_steps = int(self.config.command_resample_steps)
+        if resample_steps <= 0:
+            return False
+        x_min, x_max, y_min, y_max, yaw_min, yaw_max = self._config_command_ranges()
+        zero_probability = float(self.config.command_zero_probability)
+        if self._command_seed_counter is None:
+            wp.launch(
+                g1_sample_due_commands_kernel,
+                dim=(self.world_count, 3),
+                inputs=[
+                    int(self._command_seed),
+                    resample_steps,
+                    x_min,
+                    x_max,
+                    y_min,
+                    y_max,
+                    yaw_min,
+                    yaw_max,
+                    zero_probability,
+                    self.dones,
+                    self.episode_steps,
+                ],
+                outputs=[self.command],
+                device=self.device,
+            )
+            self._command_seed += 1
+        else:
+            wp.launch(
+                g1_sample_due_commands_seed_counter_kernel,
+                dim=(self.world_count, 3),
+                inputs=[
+                    self._command_seed_counter,
+                    0,
+                    resample_steps,
+                    x_min,
+                    x_max,
+                    y_min,
+                    y_max,
+                    yaw_min,
+                    yaw_max,
+                    zero_probability,
+                    self.dones,
+                    self.episode_steps,
+                ],
+                outputs=[self.command],
+                device=self.device,
+            )
+            advance_seed_counter(self._command_seed_counter, 1, device=self.device)
+        return True
+
     def reset(self) -> wp.array:
         """Reset all worlds and return observations."""
 
@@ -1235,6 +1701,7 @@ class EnvG1PhoenX:
         self.episode_steps.zero_()
         self.dones.fill_(1.0)
         self._clear_reset_solver_state()
+        self._sample_done_commands()
         self.dones.zero_()
         self.successes.zero_()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
@@ -1280,6 +1747,7 @@ class EnvG1PhoenX:
         )
         self._reset_seed += 1
         self._clear_reset_solver_state()
+        self._sample_done_commands()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
     def use_reset_seed_counter(self, seed_counter: wp.array[wp.int32] | None) -> None:
@@ -1319,6 +1787,7 @@ class EnvG1PhoenX:
         if int(advance) != 0:
             advance_seed_counter(seed_counter, int(advance), device=self.device)
         self._clear_reset_solver_state()
+        self._sample_done_commands()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
     def step(self, actions: wp.array) -> tuple[wp.array, wp.array, wp.array]:
@@ -1360,11 +1829,16 @@ class EnvG1PhoenX:
         wp.copy(self.step_dones, self.dones)
         wp.copy(self.step_successes, self.successes)
         wp.copy(self.previous_actions, self.current_actions)
+        update_obs = False
         if self.config.auto_reset:
             if self._reset_seed_counter is None:
                 self.reset_done()
             else:
                 self.reset_done_seed_counter(self._reset_seed_counter)
+            update_obs = True
+        if self._resample_due_commands():
+            update_obs = True
+        if update_obs:
             self.observe()
         self.sim_time += float(self.config.frame_dt)
         return self.obs, self.step_rewards, self.step_dones

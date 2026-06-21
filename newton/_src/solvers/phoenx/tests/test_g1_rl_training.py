@@ -169,6 +169,24 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertIn("-DG1_TASK_V3", reference.TASK_FLAGS)
         self.assertIn("-DG1_PD_UNITREE", reference.TASK_FLAGS)
 
+        g1_gpu_path = _NANOG1_ROOT / "ocean" / "g1gpu" / "g1_gpu.cu"
+        if not g1_gpu_path.is_file():
+            raise unittest.SkipTest(f"missing nanoG1 reference file: {g1_gpu_path}")
+        g1_gpu = g1_gpu_path.read_text()
+
+        def read_define_number(name: str) -> float:
+            match = re.search(rf"#define {re.escape(name)}\s+\(?(-?[0-9.]+)f?\)?", g1_gpu)
+            self.assertIsNotNone(match, f"missing define {name}")
+            return float(match.group(1))
+
+        self.assertAlmostEqual(g1_recipe.GAIT_STANCE_FRACTION, read_define_number("G1_V3_STANCE"))
+        self.assertAlmostEqual(g1_recipe.W_GAIT_CONTACT, read_define_number("G1_V3_W_CONTACT"))
+        self.assertAlmostEqual(g1_recipe.W_GAIT_SWING, read_define_number("G1_V3_W_SWING"))
+        self.assertAlmostEqual(g1_recipe.W_GAIT_HIP, read_define_number("G1_V3_W_HIP"))
+        self.assertAlmostEqual(g1_recipe.GAIT_FOOT_HEIGHT, read_define_number("G1_V3_FOOT_Z0"))
+        self.assertAlmostEqual(g1_recipe.W_BASE_HEIGHT, read_define_number("G1_V3_W_BASE_HEIGHT"))
+        self.assertAlmostEqual(g1_recipe.BASE_HEIGHT_TARGET, read_define_number("G1_V3_BASE_Z0"))
+
         self.assertAlmostEqual(g1_recipe.ACTION_SCALE, float(recipe["env.action_scale"]))
         self.assertEqual(g1_recipe.MAX_EPISODE_STEPS, int(recipe["env.max_episode_len"]))
         self.assertAlmostEqual(g1_recipe.W_TRACK_LIN, float(recipe["env.w_track_lin"]))
@@ -614,6 +632,13 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
         self.assertEqual(env_config.w_track_lin, g1_recipe.W_TRACK_LIN)
         self.assertEqual(env_config.w_action_rate, g1_recipe.W_ACTION_RATE)
+        self.assertEqual(env_config.gait_stance_fraction, g1_recipe.GAIT_STANCE_FRACTION)
+        self.assertEqual(env_config.w_gait_contact, g1_recipe.W_GAIT_CONTACT)
+        self.assertEqual(env_config.w_gait_swing, g1_recipe.W_GAIT_SWING)
+        self.assertEqual(env_config.w_gait_hip, g1_recipe.W_GAIT_HIP)
+        self.assertEqual(env_config.gait_foot_height, g1_recipe.GAIT_FOOT_HEIGHT)
+        self.assertEqual(env_config.w_base_height, g1_recipe.W_BASE_HEIGHT)
+        self.assertEqual(env_config.base_height_target, g1_recipe.BASE_HEIGHT_TARGET)
         self.assertEqual(env_config.rigid_contact_max_per_world, g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env_config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
         self.assertEqual(env_config.contact_geometry, "nanog1_foot_boxes")
@@ -760,6 +785,69 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(np.all(commands[:, 2] >= command_yaw_range[0]))
             self.assertTrue(np.all(commands[:, 2] <= command_yaw_range[1]))
 
+    def test_reset_done_samples_commands_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 command reset tests")
+        config = rl.ConfigEnvG1PhoenX(
+            world_count=2,
+            sim_substeps=1,
+            solver_iterations=1,
+            velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+            max_episode_steps=0,
+            auto_reset=False,
+            randomize_commands_on_reset=True,
+            command_x_range=(0.25, 0.25),
+            command_y_range=(-0.15, -0.15),
+            command_yaw_range=(0.4, 0.4),
+            command_zero_probability=0.0,
+        )
+        env = rl.EnvG1PhoenX(config, device=device)
+        env.set_commands(np.zeros((env.world_count, 3), dtype=np.float32))
+        env.dones.assign(np.array([1.0, 0.0], dtype=np.float32))
+        reset_seed_counter = make_seed_counter(11, device=device)
+        command_seed_counter = make_seed_counter(21, device=device)
+        env.use_command_seed_counter(command_seed_counter)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.reset_done_seed_counter(reset_seed_counter)
+
+        wp.capture_launch(capture.graph)
+        commands = env.command.numpy()
+        np.testing.assert_allclose(commands[0], np.array([0.25, -0.15, 0.4], dtype=np.float32))
+        np.testing.assert_allclose(commands[1], np.zeros(3, dtype=np.float32))
+        np.testing.assert_array_equal(reset_seed_counter.numpy(), np.array([12], dtype=np.int32))
+        np.testing.assert_array_equal(command_seed_counter.numpy(), np.array([22], dtype=np.int32))
+
+    def test_periodic_command_resample_updates_next_obs_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 periodic command tests")
+        config = rl.ConfigEnvG1PhoenX(
+            world_count=1,
+            sim_substeps=1,
+            solver_iterations=1,
+            velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+            max_episode_steps=0,
+            auto_reset=True,
+            randomize_commands_on_reset=True,
+            command_x_range=(0.3, 0.3),
+            command_y_range=(0.0, 0.0),
+            command_yaw_range=(-0.2, -0.2),
+            command_zero_probability=0.0,
+            command_resample_steps=2,
+        )
+        env = rl.EnvG1PhoenX(config, device=device)
+        env.set_command((0.0, 0.0, 0.0))
+        env.episode_steps.assign(np.array([1], dtype=np.int32))
+        env.use_reset_seed_counter(make_seed_counter(31, device=device))
+        env.use_command_seed_counter(make_seed_counter(41, device=device))
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.step(actions)
+
+        wp.capture_launch(capture.graph)
+        expected = np.array([0.3, 0.0, -0.2], dtype=np.float32)
+        np.testing.assert_allclose(env.command.numpy()[0], expected)
+        np.testing.assert_allclose(env.obs.numpy()[0, 6:9], expected)
+
     def test_reset_done_seed_counter_advances_inside_graph(self) -> None:
         env = _g1_test_env(world_count=2)
         seed_counter = make_seed_counter(21, device=env.device)
@@ -891,6 +979,77 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_array_equal(derived[:, 1], np.ones(derived.shape[0], dtype=np.float32))
         self.assertEqual(cid_cur[1], 17)
         self.assertEqual(cid_prev[1], 19)
+
+    def test_reward_matches_nanog1_dt_scaling_inside_graph(self) -> None:
+        env = _g1_test_env(world_count=1)
+        env.set_command((0.0, 0.0, 0.0))
+        env.config.w_gait_contact = 0.0
+        env.config.w_gait_swing = 0.0
+        env.config.w_gait_hip = 0.0
+        env.config.w_base_height = 0.0
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.observe()
+
+        wp.capture_launch(capture.graph)
+        expected = (env.config.w_alive + env.config.w_track_lin + env.config.w_track_ang) * env.config.frame_dt
+        self.assertAlmostEqual(float(env.rewards.numpy()[0]), expected, places=5)
+        self.assertEqual(float(env.dones.numpy()[0]), 0.0)
+
+        joint_q = env.state_0.joint_q.numpy()
+        joint_q[2] = env.config.min_base_height - 0.01
+        env.state_0.joint_q.assign(joint_q)
+
+        with wp.ScopedCapture(device=env.device) as fall_capture:
+            env.observe()
+
+        wp.capture_launch(fall_capture.graph)
+        self.assertAlmostEqual(float(env.rewards.numpy()[0]), expected + env.config.w_termination, places=5)
+        self.assertEqual(float(env.dones.numpy()[0]), 1.0)
+
+    def test_gait_reward_uses_foot_contacts_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 gait reward tests")
+        config = rl.ConfigEnvG1PhoenX(
+            world_count=1,
+            sim_substeps=1,
+            solver_iterations=1,
+            velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+            max_episode_steps=0,
+            auto_reset=False,
+            command=(0.0, 0.0, 0.0),
+            w_track_lin=0.0,
+            w_track_ang=0.0,
+            w_lin_vel_z=0.0,
+            w_ang_vel_xy=0.0,
+            w_orientation=0.0,
+            w_torque=0.0,
+            w_action_rate=0.0,
+            w_alive=0.0,
+        )
+        env = rl.EnvG1PhoenX(config, device=device)
+        labels = list(env.model.shape_label)
+        left_shape = labels.index("left_nanog1_foot_box")
+        right_shape = labels.index("right_nanog1_foot_box")
+        ground_shape = int(np.flatnonzero(env.model.shape_body.numpy() < 0)[0])
+
+        shape0 = np.full(int(env.contacts.rigid_contact_max), ground_shape, dtype=np.int32)
+        shape1 = np.full(int(env.contacts.rigid_contact_max), ground_shape, dtype=np.int32)
+        shape0[:2] = np.array([left_shape, right_shape], dtype=np.int32)
+        env.contacts.rigid_contact_count.assign(np.array([2], dtype=np.int32))
+        env.contacts.rigid_contact_shape0.assign(shape0)
+        env.contacts.rigid_contact_shape1.assign(shape1)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+
+        wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(env.foot_contacts.numpy()[0], np.array([1.0, 1.0], dtype=np.float32))
+
+        base_z = float(env.state_0.joint_q.numpy()[2])
+        expected_shaped = 2.0 * env.config.w_gait_contact
+        expected_shaped += env.config.w_base_height * (base_z - env.config.base_height_target) ** 2
+        self.assertAlmostEqual(float(env.rewards.numpy()[0]), expected_shaped * env.config.frame_dt, places=5)
+        self.assertEqual(float(env.dones.numpy()[0]), 0.0)
 
     def test_observe_clamps_extreme_state_to_finite_metrics(self) -> None:
         env = _g1_test_env(world_count=1)
