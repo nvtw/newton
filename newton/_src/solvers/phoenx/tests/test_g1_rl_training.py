@@ -821,6 +821,48 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertIn(0, env_ids_np.tolist())
         np.testing.assert_allclose(importance_weights.numpy(), expected_importance, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_compact_rollout_and_update_metric_readbacks_reuse_pinned_buffers(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 compact metric readback tests")
+        buffer = rl.BufferRollout(num_steps=2, num_envs=3, obs_dim=4, action_dim=2, device=device)
+        buffer.rewards.assign(np.linspace(-0.3, 0.4, buffer.num_samples, dtype=np.float32))
+        buffer.dones.assign(np.array([0.0, 1.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32))
+        buffer.successes.assign(np.linspace(0.1, 0.6, buffer.num_samples, dtype=np.float32))
+
+        metric_host_a = buffer.copy_reward_done_success_sums_to_host()
+        metric_host_b = buffer.copy_reward_done_success_sums_to_host()
+        self.assertIs(metric_host_a, metric_host_b)
+        self.assertEqual(metric_host_a.device, wp.get_device("cpu"))
+        self.assertTrue(metric_host_a.pinned)
+        np.testing.assert_allclose(
+            metric_host_a.numpy(),
+            np.asarray(
+                [
+                    np.sum(buffer.rewards.numpy(), dtype=np.float32),
+                    np.sum(buffer.dones.numpy(), dtype=np.float32),
+                    np.sum(buffer.successes.numpy(), dtype=np.float32),
+                ],
+                dtype=np.float32,
+            ),
+            rtol=1.0e-6,
+            atol=1.0e-6,
+        )
+
+        trainer = rl.TrainerPPO(
+            obs_dim=buffer.obs_dim,
+            action_dim=buffer.action_dim,
+            hidden_layers=(8,),
+            config=rl.ConfigPPO(manual_actor_backward=True, manual_critic_backward=True),
+            device=device,
+            seed=7,
+            squash_actions=False,
+        )
+        stats_host_a = trainer.copy_update_stats_to_host()
+        stats_host_b = trainer.copy_update_stats_to_host()
+        self.assertIs(stats_host_a, stats_host_b)
+        self.assertEqual(stats_host_a.device, wp.get_device("cpu"))
+        self.assertTrue(stats_host_a.pinned)
+        self.assertEqual(stats_host_a.shape, (4,))
+
     def test_pufferlib_vtrace_advantage_matches_shifted_warp_layout(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 V-trace parity tests")
         pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
@@ -1002,6 +1044,53 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected1, _state1 = step_numpy(state0, obs_np)
         np.testing.assert_allclose(out0_snapshot.numpy(), expected0, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(out1.numpy(), expected1, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_puffer_mingru_initialization_matches_native_shape_order(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 MinGRU initializer tests")
+        models_cu = _PUFFERLIB_ROOT / "src" / "models.cu"
+        if not models_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib MinGRU reference file: {models_cu}")
+        text = models_cu.read_text()
+        self.assertIn("p->encoder.init_weights(w.encoder, seed, stream)", text)
+        self.assertIn("p->decoder.init_weights(w.decoder, seed, stream)", text)
+        self.assertIn("p->network.init_weights(w.network, seed, stream)", text)
+        self.assertIn(".shape = {ew->out_dim, ew->in_dim}", text)
+        self.assertIn(".shape = {dw->output_dim + 1, dw->hidden_dim}", text)
+        self.assertIn(".shape = {3 * m->hidden, m->hidden}", text)
+
+        seed = 42
+        hidden_size = 32
+        num_layers = 3
+        net = rl.PufferMinGRUNet(
+            input_dim=rl.OBS_DIM_G1,
+            hidden_size=hidden_size,
+            output_dim=rl.ACTION_DIM_G1 + 1,
+            num_layers=num_layers,
+            device=device,
+            seed=seed,
+        )
+        self.assertEqual(net.encoder_weight.shape, (rl.OBS_DIM_G1, hidden_size))
+        self.assertEqual(net.decoder_weight.shape, (hidden_size, rl.ACTION_DIM_G1 + 1))
+        self.assertEqual([weight.shape for weight in net.recurrent_weights], [(hidden_size, 3 * hidden_size)] * 3)
+
+        rng = np.random.default_rng(seed)
+        encoder_bound = np.sqrt(np.float32(2.0)) / np.sqrt(np.float32(rl.OBS_DIM_G1))
+        decoder_bound = np.float32(1.0) / np.sqrt(np.float32(hidden_size))
+        expected_encoder = rng.uniform(-encoder_bound, encoder_bound, size=(rl.OBS_DIM_G1, hidden_size)).astype(
+            np.float32
+        )
+        expected_decoder = rng.uniform(-decoder_bound, decoder_bound, size=(hidden_size, rl.ACTION_DIM_G1 + 1)).astype(
+            np.float32
+        )
+        expected_recurrent = [
+            rng.uniform(-decoder_bound, decoder_bound, size=(hidden_size, 3 * hidden_size)).astype(np.float32)
+            for _ in range(num_layers)
+        ]
+
+        np.testing.assert_allclose(net.encoder_weight.numpy(), expected_encoder, rtol=0.0, atol=2.0e-8)
+        np.testing.assert_allclose(net.decoder_weight.numpy(), expected_decoder, rtol=0.0, atol=2.0e-8)
+        for actual, expected in zip(net.recurrent_weights, expected_recurrent, strict=True):
+            np.testing.assert_allclose(actual.numpy(), expected, rtol=0.0, atol=2.0e-8)
 
     def test_puffer_mingru_backward_matches_finite_difference_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX MinGRU backward tests")
@@ -1422,6 +1511,24 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         self.assertEqual(after - before, 6)
         self.assertTrue(np.isfinite(env.obs.numpy()).all())
+
+    def test_zero_action_full_g1_solver_survives_short_graph_rollout(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 zero-action full solver tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(world_count=2, auto_reset=False, max_episode_steps=0),
+            device=device,
+        )
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            for _ in range(8):
+                env.step(actions)
+        wp.capture_launch(capture.graph)
+
+        self.assertFalse(np.any(env.dones.numpy() > 0.0))
+        self.assertTrue(np.isfinite(env.obs.numpy()).all())
+        self.assertTrue(np.isfinite(env.rewards.numpy()).all())
+        self.assertTrue(np.all(env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)[:, 2] > 0.5))
 
     def test_randomize_commands_graph_capture(self) -> None:
         env = _g1_test_env(world_count=4)
@@ -2104,6 +2211,37 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(resumed.trainer.iteration, 3)
             self.assertEqual(second_restored.iteration, 3)
             self.assertEqual(second_restored.actor_optimizer.step_count, resumed.trainer.actor_optimizer.step_count)
+
+    def test_full_solver_replay_training_graph_does_not_collapse_to_all_done(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 full-solver PPO collapse regression tests")
+        env_config = g1_recipe.default_g1_env_config(world_count=32)
+        ppo_config = g1_recipe.default_g1_ppo_config(minibatch_size=64)
+
+        result = rl.train_g1_ppo(
+            rl.ConfigTrainG1PPO(
+                iterations=2,
+                rollout_steps=8,
+                hidden_layers=(32, 32, 32),
+                env_config=env_config,
+                ppo_config=ppo_config,
+                device=device,
+                seed=37,
+                log_interval=0,
+                randomize_commands=False,
+                readback_diagnostics=True,
+                execution_mode="graph_leapfrog",
+            )
+        )
+
+        self.assertEqual([stat.iteration for stat in result.history], [0, 1])
+        self.assertEqual(result.trainer.actor.net.network_type, "puffer_mingru")
+        self.assertTrue(result.trainer.actor_optimizer.matrix_transpose)
+        for stat in result.history:
+            self.assertTrue(math.isfinite(stat.mean_reward))
+            self.assertTrue(math.isfinite(stat.mean_done))
+            self.assertTrue(math.isfinite(stat.mean_tracking_perf))
+            self.assertTrue(math.isfinite(stat.approx_kl))
+            self.assertLess(stat.mean_done, 0.95)
 
     def test_train_to_gate_benchmark_smoke_graph_leapfrog(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 train-to-gate benchmark tests")
