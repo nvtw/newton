@@ -21,8 +21,15 @@ from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.kernels import (
+    PPO_LOG_STD_PARTIAL_BATCH,
     compute_vtrace_returns_kernel,
+    ppo_actor_loss_backward_kernel,
+    reduce_ppo_log_std_grad_kernel,
+    sample_trajectory_env_ids_kernel,
+    trajectory_priority_kernel,
+    trajectory_priority_weight_kernel,
     value_column_loss_grad_kernel,
+    zero_ppo_actor_stats_kernel,
     zero_scalar_kernel,
 )
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
@@ -420,6 +427,127 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected_clipped[:, g1_recipe.CONTROLLED_ACTION_COUNT :] = 0.0
         np.testing.assert_allclose(env.current_actions.numpy(), expected_clipped, rtol=0.0, atol=0.0)
 
+    def test_pufferlib_ppo_actor_loss_backward_matches_warp_kernel(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 PPO actor loss parity tests")
+        pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
+        if not pufferlib_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference file: {pufferlib_cu}")
+        cuda_text = pufferlib_cu.read_text()
+        self.assertIn("float wa = -w * adv_normalized", cuda_text)
+        self.assertIn("pg_loss = fmaxf(pg_loss1, pg_loss2)", cuda_text)
+        self.assertIn("a.grad_logits[grad_logits_base + h] = d_new_logp * diff / var", cuda_text)
+        self.assertIn(
+            "a.grad_logstd[nt * a.num_atns + h] = d_new_logp * (diff * diff / var - 1.0f) + d_entropy_term",
+            cuda_text,
+        )
+
+        rows = 4
+        action_dim = 2
+        clip_ratio = np.float32(0.2)
+        entropy_coeff = np.float32(0.03)
+        policy_out_np = np.asarray([[0.2, -0.4], [0.1, 0.3], [-0.25, 0.35], [0.45, -0.15]], dtype=np.float32)
+        log_std_np = np.asarray([-0.3, 0.25], dtype=np.float32)
+        actions_np = np.asarray([[0.35, -0.2], [-0.15, 0.65], [0.4, -0.05], [0.2, -0.55]], dtype=np.float32)
+        advantages_np = np.asarray([0.5, -0.25, 0.8, -0.4], dtype=np.float32)
+        desired_ratios = np.asarray([1.0, 1.35, 1.35, 0.72], dtype=np.float32)
+        std = np.exp(log_std_np).astype(np.float32)
+        var = std * std
+        new_log_probs_np = np.sum(
+            -0.5 * ((actions_np - policy_out_np) / std) ** 2 - 0.5 * np.log(2.0 * np.pi) - log_std_np,
+            axis=1,
+            dtype=np.float32,
+        ).astype(np.float32)
+        old_log_probs_np = (new_log_probs_np - np.log(desired_ratios).astype(np.float32)).astype(np.float32)
+
+        policy_out = wp.array(policy_out_np, dtype=wp.float32, device=device)
+        log_std = wp.array(log_std_np, dtype=wp.float32, device=device)
+        actions = wp.array(actions_np, dtype=wp.float32, device=device)
+        old_log_probs = wp.array(old_log_probs_np, dtype=wp.float32, device=device)
+        advantages = wp.array(advantages_np, dtype=wp.float32, device=device)
+        loss = wp.zeros(1, dtype=wp.float32, device=device)
+        approx_kl = wp.zeros(1, dtype=wp.float32, device=device)
+        clip_fraction = wp.zeros(1, dtype=wp.float32, device=device)
+        ratios = wp.zeros(rows, dtype=wp.float32, device=device)
+        policy_out_grad = wp.zeros_like(policy_out)
+        partial_count = (rows + PPO_LOG_STD_PARTIAL_BATCH - 1) // PPO_LOG_STD_PARTIAL_BATCH
+        log_std_grad_partials = wp.zeros((partial_count, action_dim), dtype=wp.float32, device=device)
+        log_std_grad = wp.zeros(action_dim, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                zero_ppo_actor_stats_kernel,
+                dim=max(partial_count * action_dim, 1),
+                inputs=[partial_count, action_dim],
+                outputs=[loss, approx_kl, clip_fraction, log_std_grad_partials],
+                device=device,
+            )
+            wp.launch(
+                ppo_actor_loss_backward_kernel,
+                dim=rows,
+                inputs=[
+                    policy_out,
+                    log_std,
+                    actions,
+                    old_log_probs,
+                    advantages,
+                    float(clip_ratio),
+                    float(entropy_coeff),
+                    action_dim,
+                    0,
+                    0,
+                    -20.0,
+                    2.0,
+                    rows,
+                ],
+                outputs=[loss, approx_kl, clip_fraction, ratios, policy_out_grad, log_std_grad_partials],
+                device=device,
+            )
+            wp.launch(
+                reduce_ppo_log_std_grad_kernel,
+                dim=action_dim,
+                inputs=[log_std_grad_partials, partial_count],
+                outputs=[log_std_grad],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        expected_loss = np.float32(0.0)
+        expected_approx_kl = np.float32(0.0)
+        expected_clip_fraction = np.float32(0.0)
+        expected_policy_grad = np.zeros_like(policy_out_np)
+        expected_log_std_grad = np.zeros(action_dim, dtype=np.float32)
+        entropy = np.sum(np.float32(0.5 * math.log(2.0 * math.pi * math.e)) + log_std_np, dtype=np.float32)
+        inv_batch = np.float32(1.0 / rows)
+        expected_ratios = np.zeros(rows, dtype=np.float32)
+        for row in range(rows):
+            log_ratio = np.float32(new_log_probs_np[row] - old_log_probs_np[row])
+            ratio = np.float32(math.exp(float(log_ratio)))
+            expected_ratios[row] = ratio
+            clipped = np.clip(ratio, np.float32(1.0) - clip_ratio, np.float32(1.0) + clip_ratio)
+            adv = advantages_np[row]
+            pg_loss_unclipped = np.float32(-adv * ratio)
+            pg_loss_clipped = np.float32(-adv * clipped)
+            pg_loss = max(pg_loss_unclipped, pg_loss_clipped)
+            expected_loss += np.float32((pg_loss - entropy_coeff * entropy) * inv_batch)
+            expected_approx_kl += np.float32(((ratio - np.float32(1.0)) - log_ratio) * inv_batch)
+            if abs(ratio - np.float32(1.0)) > clip_ratio:
+                expected_clip_fraction += inv_batch
+            d_log_prob = np.float32(-adv * ratio * inv_batch)
+            clipped_branch = pg_loss_clipped > pg_loss_unclipped
+            outside_clip = ratio <= np.float32(1.0) - clip_ratio or ratio >= np.float32(1.0) + clip_ratio
+            if clipped_branch and outside_clip:
+                d_log_prob = np.float32(0.0)
+            diff = actions_np[row] - policy_out_np[row]
+            expected_policy_grad[row] = d_log_prob * diff / var
+            expected_log_std_grad += d_log_prob * (diff * diff / var - np.float32(1.0)) - entropy_coeff * inv_batch
+
+        np.testing.assert_allclose(loss.numpy()[0], expected_loss, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(approx_kl.numpy()[0], expected_approx_kl, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(clip_fraction.numpy()[0], expected_clip_fraction, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(ratios.numpy(), expected_ratios, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(policy_out_grad.numpy(), expected_policy_grad, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(log_std_grad.numpy(), expected_log_std_grad, rtol=1.0e-6, atol=1.0e-6)
+
     def test_pufferlib_muon_optimizer_matches_numpy_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 Muon optimizer parity tests")
         muon_py = _PUFFERLIB_ROOT / "pufferlib" / "muon.py"
@@ -602,6 +730,83 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         expected = (raw - np.mean(raw)) / (np.std(raw, ddof=1) + np.float32(1.0e-8))
         np.testing.assert_allclose(buffer.advantages.numpy(), expected, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_pufferlib_priority_weights_match_warp_kernels(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 priority replay parity tests")
+        pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
+        if not pufferlib_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference file: {pufferlib_cu}")
+        text = pufferlib_cu.read_text()
+        self.assertIn("float pw = __powf(local_sum, prio_alpha)", text)
+        self.assertIn("prio_weights[t] = (prio_weights[t] + eps) / block_sum", text)
+        self.assertIn("mb_prio[tx] = __powf(value, -anneal_beta)", text)
+
+        num_steps = 3
+        num_envs = 4
+        alpha = np.float32(0.4)
+        advantages_np = np.asarray(
+            [[1.0, -2.0, 0.0, 0.25], [-0.5, 3.0, 0.0, -0.75], [0.25, -1.0, 0.0, 1.5]],
+            dtype=np.float32,
+        )
+        advantages = wp.array(advantages_np.reshape(-1), dtype=wp.float32, device=device)
+        priorities = wp.zeros(num_envs, dtype=wp.float32, device=device)
+        weights = wp.zeros(num_envs, dtype=wp.float32, device=device)
+        total_weight = wp.zeros(1, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                trajectory_priority_kernel,
+                dim=num_envs,
+                inputs=[advantages, num_steps, num_envs],
+                outputs=[priorities],
+                device=device,
+            )
+            wp.launch(
+                trajectory_priority_weight_kernel,
+                dim=num_envs,
+                inputs=[priorities, float(alpha)],
+                outputs=[weights, total_weight],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        expected_priorities = np.sum(np.abs(advantages_np), axis=0, dtype=np.float32)
+        expected_weights = np.power(np.maximum(expected_priorities, np.float32(0.0)), alpha).astype(np.float32)
+        expected_probs = (expected_weights + np.float32(1.0e-6)) / (
+            np.sum(expected_weights, dtype=np.float32) + np.float32(1.0e-6)
+        )
+
+        np.testing.assert_allclose(priorities.numpy(), expected_priorities, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(weights.numpy(), expected_weights, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(
+            total_weight.numpy()[0], np.sum(expected_weights, dtype=np.float32), rtol=1.0e-6, atol=1.0e-6
+        )
+        self.assertEqual(float(expected_weights[2]), 0.0)
+        self.assertLess(float(expected_probs[2]), 1.0e-6)
+
+        sample_count = 16
+        beta = np.float32(1.0)
+        manual_weights_np = np.asarray([0.0, 1.0e-8, 2.0e-8, 0.0], dtype=np.float32)
+        manual_total_np = np.asarray([np.sum(manual_weights_np, dtype=np.float32)], dtype=np.float32)
+        manual_weights = wp.array(manual_weights_np, dtype=wp.float32, device=device)
+        manual_total = wp.array(manual_total_np, dtype=wp.float32, device=device)
+        env_ids = wp.zeros(sample_count, dtype=wp.int32, device=device)
+        importance_weights = wp.zeros(sample_count, dtype=wp.float32, device=device)
+        with wp.ScopedCapture(device=device) as sample_capture:
+            wp.launch(
+                sample_trajectory_env_ids_kernel,
+                dim=sample_count,
+                inputs=[manual_weights, manual_total, num_envs, 17, float(beta), 1],
+                outputs=[env_ids, importance_weights],
+                device=device,
+            )
+        wp.capture_launch(sample_capture.graph)
+
+        env_ids_np = env_ids.numpy()
+        manual_probs = (manual_weights_np + np.float32(1.0e-6)) / (manual_total_np[0] + np.float32(1.0e-6))
+        expected_importance = np.power(np.float32(num_envs) * manual_probs[env_ids_np], -beta).astype(np.float32)
+        self.assertIn(0, env_ids_np.tolist())
+        np.testing.assert_allclose(importance_weights.numpy(), expected_importance, rtol=1.0e-6, atol=1.0e-6)
 
     def test_pufferlib_vtrace_advantage_matches_shifted_warp_layout(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 V-trace parity tests")

@@ -893,7 +893,7 @@ def trajectory_priority_weight_kernel(
     total_weight: wp.array[wp.float32],
 ):
     env = wp.tid()
-    weight = wp.pow(wp.max(priorities[env], wp.float32(0.0)) + wp.float32(1.0e-6), priority_alpha)
+    weight = wp.pow(wp.max(priorities[env], wp.float32(0.0)), priority_alpha)
     weights[env] = weight
     wp.atomic_add(total_weight, 0, weight)
 
@@ -917,17 +917,18 @@ def sample_trajectory_env_ids_kernel(
 
     total = total_weight[0]
     if use_priority != wp.int32(0) and total > wp.float32(0.0):
-        target = u * total
+        normalizer = total + wp.float32(1.0e-6)
+        target = u * normalizer
         cumulative = wp.float32(0.0)
         found = wp.int32(0)
         env = num_envs - wp.int32(1)
         for candidate in range(num_envs):
-            cumulative = cumulative + priority_weights[candidate]
+            cumulative = cumulative + priority_weights[candidate] + wp.float32(1.0e-6)
             if found == wp.int32(0) and target <= cumulative:
                 env = candidate
                 found = wp.int32(1)
         if priority_beta > wp.float32(0.0):
-            prob = priority_weights[env] / total
+            prob = (priority_weights[env] + wp.float32(1.0e-6)) / normalizer
             correction = wp.max(wp.float32(num_envs) * prob, wp.float32(1.0e-6))
             importance = wp.pow(correction, -priority_beta)
 
@@ -956,17 +957,18 @@ def sample_trajectory_env_ids_seed_counter_kernel(
 
     total = total_weight[0]
     if use_priority != wp.int32(0) and total > wp.float32(0.0):
-        target = u * total
+        normalizer = total + wp.float32(1.0e-6)
+        target = u * normalizer
         cumulative = wp.float32(0.0)
         found = wp.int32(0)
         env = num_envs - wp.int32(1)
         for candidate in range(num_envs):
-            cumulative = cumulative + priority_weights[candidate]
+            cumulative = cumulative + priority_weights[candidate] + wp.float32(1.0e-6)
             if found == wp.int32(0) and target <= cumulative:
                 env = candidate
                 found = wp.int32(1)
         if priority_beta > wp.float32(0.0):
-            prob = priority_weights[env] / total
+            prob = (priority_weights[env] + wp.float32(1.0e-6)) / normalizer
             correction = wp.max(wp.float32(num_envs) * prob, wp.float32(1.0e-6))
             importance = wp.pow(correction, -priority_beta)
 
