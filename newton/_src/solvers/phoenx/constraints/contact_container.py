@@ -70,6 +70,7 @@ __all__ = [
     "cc_set_tangent1",
     "cc_set_tangent1_lambda",
     "cc_set_tangent2_lambda",
+    "contact_container_clear_reset_worlds",
     "contact_container_copy_current_to_prev",
     "contact_container_zeros",
 ]
@@ -154,6 +155,54 @@ def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer):
         cc.prev_impulses[row, k] = cc.impulses[row, k]
     for row in range(CC_DWORDS_PER_CONTACT):
         cc.prev_lambdas[row, k] = cc.lambdas[row, k]
+
+
+@wp.kernel(enable_backward=False)
+def _contact_container_clear_reset_worlds_kernel(
+    dones: wp.array[wp.float32],
+    shape_world: wp.array[wp.int32],
+    rigid_contact_count: wp.array[wp.int32],
+    rigid_contact_shape0: wp.array[wp.int32],
+    rigid_contact_shape1: wp.array[wp.int32],
+    cc: ContactContainer,
+    cid_of_contact_cur: wp.array[wp.int32],
+    cid_of_contact_prev: wp.array[wp.int32],
+):
+    k = wp.tid()
+    contact_count = rigid_contact_count[0]
+    contact_cap = rigid_contact_shape0.shape[0]
+    if contact_count > contact_cap:
+        contact_count = contact_cap
+    if k >= contact_count:
+        return
+
+    world = wp.int32(-1)
+    shape0 = rigid_contact_shape0[k]
+    if shape0 >= wp.int32(0) and shape0 < shape_world.shape[0]:
+        world0 = shape_world[shape0]
+        if world0 >= wp.int32(0):
+            world = world0
+
+    shape1 = rigid_contact_shape1[k]
+    if world < wp.int32(0) and shape1 >= wp.int32(0) and shape1 < shape_world.shape[0]:
+        world1 = shape_world[shape1]
+        if world1 >= wp.int32(0):
+            world = world1
+
+    if world < wp.int32(0) or world >= dones.shape[0] or dones[world] <= wp.float32(0.5):
+        return
+
+    for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
+        cc.impulses[row, k] = wp.float32(0.0)
+        cc.prev_impulses[row, k] = wp.float32(0.0)
+    for row in range(CC_DWORDS_PER_CONTACT):
+        cc.lambdas[row, k] = wp.float32(0.0)
+        cc.prev_lambdas[row, k] = wp.float32(0.0)
+    for row in range(CC_DERIVED_DWORDS_PER_CONTACT):
+        cc.derived[row, k] = wp.float32(0.0)
+
+    cid_of_contact_cur[k] = wp.int32(-1)
+    cid_of_contact_prev[k] = wp.int32(-1)
 
 
 # Mutable impulse accessors keyed by contact index k.
@@ -509,5 +558,30 @@ def contact_container_copy_current_to_prev(cc: ContactContainer, device: wp.Devi
         _contact_container_copy_current_to_prev_kernel,
         dim=int(cc.impulses.shape[1]),
         outputs=[cc],
+        device=device,
+    )
+
+
+def contact_container_clear_reset_worlds(
+    cc: ContactContainer,
+    cid_of_contact_cur: wp.array[wp.int32],
+    cid_of_contact_prev: wp.array[wp.int32],
+    contacts,
+    shape_world: wp.array[wp.int32],
+    dones: wp.array[wp.float32],
+    device: wp.DeviceLike = None,
+) -> None:
+    """Clear contact warm-start state for worlds whose reset flag is set."""
+    wp.launch(
+        _contact_container_clear_reset_worlds_kernel,
+        dim=int(cc.impulses.shape[1]),
+        inputs=[
+            dones,
+            shape_world,
+            contacts.rigid_contact_count,
+            contacts.rigid_contact_shape0,
+            contacts.rigid_contact_shape1,
+        ],
+        outputs=[cc, cid_of_contact_cur, cid_of_contact_prev],
         device=device,
     )

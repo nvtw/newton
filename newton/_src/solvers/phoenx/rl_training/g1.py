@@ -10,6 +10,7 @@ import warp as wp
 
 import newton
 import newton.utils
+from newton._src.solvers.phoenx.constraints.contact_container import contact_container_clear_reset_worlds
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 
 from . import g1_recipe
@@ -747,6 +748,44 @@ def g1_reset_done_worlds_kernel(
 
 
 @wp.kernel
+def g1_reset_done_worlds_seed_counter_kernel(
+    seed_counter: wp.array[wp.int32],
+    seed_offset: wp.int32,
+    reset_noise: wp.float32,
+    dones: wp.array[wp.float32],
+    default_joint_q: wp.array[wp.float32],
+    default_joint_qd: wp.array[wp.float32],
+    coord_stride: wp.int32,
+    dof_stride: wp.int32,
+    action_dim: wp.int32,
+    joint_q: wp.array[wp.float32],
+    joint_qd: wp.array[wp.float32],
+    episode_steps: wp.array[wp.int32],
+    previous_actions: wp.array2d[wp.float32],
+    current_actions: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    if dones[world] <= wp.float32(0.5):
+        return
+    seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
+    if col < coord_stride:
+        idx = world * coord_stride + col
+        value = default_joint_q[idx]
+        if col >= wp.int32(7) and col < wp.int32(7) + action_dim and reset_noise > wp.float32(0.0):
+            rng = wp.rand_init(seed, world * coord_stride + col)
+            value = value + reset_noise * (wp.float32(2.0) * wp.randf(rng) - wp.float32(1.0))
+        joint_q[idx] = value
+    if col < dof_stride:
+        idx = world * dof_stride + col
+        joint_qd[idx] = default_joint_qd[idx]
+    if col < action_dim:
+        previous_actions[world, col] = wp.float32(0.0)
+        current_actions[world, col] = wp.float32(0.0)
+    if col == 0:
+        episode_steps[world] = wp.int32(0)
+
+
+@wp.kernel
 def g1_sample_commands_kernel(
     seed: wp.int32,
     x_min: wp.float32,
@@ -933,6 +972,7 @@ class EnvG1PhoenX:
         self.step_dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self._reset_seed = 0
+        self._reset_seed_counter: wp.array[wp.int32] | None = None
         self.sim_time = 0.0
 
         self.reset()
@@ -1168,6 +1208,23 @@ class EnvG1PhoenX:
         )
         return self.obs
 
+    def _clear_reset_solver_state(self) -> None:
+        world = self.solver.world
+        shape_world = getattr(self.model, "shape_world", None)
+        cid_of_contact_cur = getattr(world, "_cid_of_contact_cur", None)
+        cid_of_contact_prev = getattr(world, "_cid_of_contact_prev", None)
+        if shape_world is None or cid_of_contact_cur is None or cid_of_contact_prev is None:
+            return
+        contact_container_clear_reset_worlds(
+            world._contact_container,
+            cid_of_contact_cur,
+            cid_of_contact_prev,
+            self.contacts,
+            shape_world,
+            self.dones,
+            device=self.device,
+        )
+
     def reset(self) -> wp.array:
         """Reset all worlds and return observations."""
 
@@ -1176,6 +1233,8 @@ class EnvG1PhoenX:
         self.current_actions.zero_()
         self.previous_actions.zero_()
         self.episode_steps.zero_()
+        self.dones.fill_(1.0)
+        self._clear_reset_solver_state()
         self.dones.zero_()
         self.successes.zero_()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
@@ -1220,6 +1279,46 @@ class EnvG1PhoenX:
             device=self.device,
         )
         self._reset_seed += 1
+        self._clear_reset_solver_state()
+        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+
+    def use_reset_seed_counter(self, seed_counter: wp.array[wp.int32] | None) -> None:
+        """Use a device seed counter for graph-captured reset noise."""
+
+        self._reset_seed_counter = seed_counter
+
+    def reset_done_seed_counter(
+        self, seed_counter: wp.array[wp.int32], *, seed_offset: int = 0, advance: int = 1
+    ) -> None:
+        """Reset done worlds using a graph-replay-safe device seed counter."""
+
+        max_cols = max(self.coord_stride, self.dof_stride, self.action_dim)
+        wp.launch(
+            g1_reset_done_worlds_seed_counter_kernel,
+            dim=(self.world_count, max_cols),
+            inputs=[
+                seed_counter,
+                int(seed_offset),
+                self.config.reset_noise,
+                self.dones,
+                self.model.joint_q,
+                self.model.joint_qd,
+                self.coord_stride,
+                self.dof_stride,
+                self.action_dim,
+            ],
+            outputs=[
+                self.state_0.joint_q,
+                self.state_0.joint_qd,
+                self.episode_steps,
+                self.previous_actions,
+                self.current_actions,
+            ],
+            device=self.device,
+        )
+        if int(advance) != 0:
+            advance_seed_counter(seed_counter, int(advance), device=self.device)
+        self._clear_reset_solver_state()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
     def step(self, actions: wp.array) -> tuple[wp.array, wp.array, wp.array]:
@@ -1262,7 +1361,10 @@ class EnvG1PhoenX:
         wp.copy(self.step_successes, self.successes)
         wp.copy(self.previous_actions, self.current_actions)
         if self.config.auto_reset:
-            self.reset_done()
+            if self._reset_seed_counter is None:
+                self.reset_done()
+            else:
+                self.reset_done_seed_counter(self._reset_seed_counter)
             self.observe()
         self.sim_time += float(self.config.frame_dt)
         return self.obs, self.step_rewards, self.step_dones

@@ -760,6 +760,85 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(np.all(commands[:, 2] >= command_yaw_range[0]))
             self.assertTrue(np.all(commands[:, 2] <= command_yaw_range[1]))
 
+    def test_reset_done_seed_counter_advances_inside_graph(self) -> None:
+        env = _g1_test_env(world_count=2)
+        seed_counter = make_seed_counter(21, device=env.device)
+        env.dones.assign(np.ones(env.world_count, dtype=np.float32))
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.reset_done_seed_counter(seed_counter=seed_counter)
+
+        wp.capture_launch(capture.graph)
+        first = env.state_0.joint_q.numpy().copy()
+        wp.capture_launch(capture.graph)
+        second = env.state_0.joint_q.numpy().copy()
+
+        first_joints = first.reshape(env.world_count, env.coord_stride)[:, 7 : 7 + env.action_dim]
+        second_joints = second.reshape(env.world_count, env.coord_stride)[:, 7 : 7 + env.action_dim]
+        self.assertFalse(np.allclose(first_joints, second_joints))
+        np.testing.assert_array_equal(seed_counter.numpy(), np.array([23], dtype=np.int32))
+
+    def test_reset_done_clears_contact_warmstart_inside_graph(self) -> None:
+        env = _g1_test_env(world_count=2)
+        shape_world = env.model.shape_world.numpy()
+        world0_shape = int(np.flatnonzero(shape_world == 0)[0])
+        world1_shape = int(np.flatnonzero(shape_world == 1)[0])
+        ground_shape = int(np.flatnonzero(shape_world < 0)[0])
+
+        shape0 = np.full(env.contacts.rigid_contact_max, ground_shape, dtype=np.int32)
+        shape1 = np.full(env.contacts.rigid_contact_max, ground_shape, dtype=np.int32)
+        shape0[:2] = np.array([world0_shape, world1_shape], dtype=np.int32)
+        env.contacts.rigid_contact_count.assign(np.array([2], dtype=np.int32))
+        env.contacts.rigid_contact_shape0.assign(shape0)
+        env.contacts.rigid_contact_shape1.assign(shape1)
+
+        world = env.solver.world
+        self.assertIsNotNone(world._cid_of_contact_cur)
+        self.assertIsNotNone(world._cid_of_contact_prev)
+        world._contact_container.impulses.assign(np.ones(world._contact_container.impulses.shape, dtype=np.float32))
+        world._contact_container.prev_impulses.assign(
+            np.ones(world._contact_container.prev_impulses.shape, dtype=np.float32)
+        )
+        world._contact_container.lambdas.assign(np.ones(world._contact_container.lambdas.shape, dtype=np.float32))
+        world._contact_container.prev_lambdas.assign(
+            np.ones(world._contact_container.prev_lambdas.shape, dtype=np.float32)
+        )
+        world._contact_container.derived.assign(np.ones(world._contact_container.derived.shape, dtype=np.float32))
+        world._cid_of_contact_cur.assign(np.full(world._cid_of_contact_cur.shape, 17, dtype=np.int32))
+        world._cid_of_contact_prev.assign(np.full(world._cid_of_contact_prev.shape, 19, dtype=np.int32))
+
+        seed_counter = make_seed_counter(7, device=env.device)
+        env.dones.assign(np.array([1.0, 0.0], dtype=np.float32))
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.reset_done_seed_counter(seed_counter=seed_counter)
+
+        wp.capture_launch(capture.graph)
+
+        impulses = world._contact_container.impulses.numpy()
+        prev_impulses = world._contact_container.prev_impulses.numpy()
+        lambdas = world._contact_container.lambdas.numpy()
+        prev_lambdas = world._contact_container.prev_lambdas.numpy()
+        derived = world._contact_container.derived.numpy()
+        cid_cur = world._cid_of_contact_cur.numpy()
+        cid_prev = world._cid_of_contact_prev.numpy()
+
+        np.testing.assert_array_equal(impulses[:, 0], np.zeros(impulses.shape[0], dtype=np.float32))
+        np.testing.assert_array_equal(prev_impulses[:, 0], np.zeros(prev_impulses.shape[0], dtype=np.float32))
+        np.testing.assert_array_equal(lambdas[:, 0], np.zeros(lambdas.shape[0], dtype=np.float32))
+        np.testing.assert_array_equal(prev_lambdas[:, 0], np.zeros(prev_lambdas.shape[0], dtype=np.float32))
+        np.testing.assert_array_equal(derived[:, 0], np.zeros(derived.shape[0], dtype=np.float32))
+        self.assertEqual(cid_cur[0], -1)
+        self.assertEqual(cid_prev[0], -1)
+
+        np.testing.assert_array_equal(impulses[:, 1], np.ones(impulses.shape[0], dtype=np.float32))
+        np.testing.assert_array_equal(prev_impulses[:, 1], np.ones(prev_impulses.shape[0], dtype=np.float32))
+        np.testing.assert_array_equal(lambdas[:, 1], np.ones(lambdas.shape[0], dtype=np.float32))
+        np.testing.assert_array_equal(prev_lambdas[:, 1], np.ones(prev_lambdas.shape[0], dtype=np.float32))
+        np.testing.assert_array_equal(derived[:, 1], np.ones(derived.shape[0], dtype=np.float32))
+        self.assertEqual(cid_cur[1], 17)
+        self.assertEqual(cid_prev[1], 19)
+
     def test_observe_clamps_extreme_state_to_finite_metrics(self) -> None:
         env = _g1_test_env(world_count=1)
         huge_qd = np.full(env.state_0.joint_qd.shape, 1.0e20, dtype=np.float32)

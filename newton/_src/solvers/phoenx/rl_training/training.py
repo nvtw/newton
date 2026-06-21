@@ -564,6 +564,10 @@ def _train_g1_ppo_graph_leapfrog(
         int(cfg.seed) + int(start_iteration) * int(cfg.rollout_steps), device=device
     )
     update_seed_counter = make_seed_counter(int(trainer.seed) + 1_000_003 * int(start_iteration), device=device)
+    reset_seed_counter = make_seed_counter(
+        int(cfg.seed) + 91_337 + int(start_iteration) * int(cfg.rollout_steps), device=device
+    )
+    env.use_reset_seed_counter(reset_seed_counter)
 
     def collect(buffer: BufferRollout) -> None:
         if cfg.randomize_commands:
