@@ -10,6 +10,8 @@ import warp as wp
 
 import newton
 import newton.utils
+from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
+from newton._src.solvers.phoenx.constraints.constraint_joint import actuated_double_ball_socket_drive_impulse_at
 from newton._src.solvers.phoenx.constraints.contact_container import contact_container_clear_reset_worlds
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 
@@ -564,6 +566,7 @@ def g1_observe_reward_kernel(
     command: wp.array2d[wp.float32],
     body_q: wp.array[wp.transform],
     foot_contacts: wp.array2d[wp.float32],
+    actuator_force: wp.array2d[wp.float32],
     coord_stride: wp.int32,
     dof_stride: wp.int32,
     body_stride: wp.int32,
@@ -592,8 +595,6 @@ def g1_observe_reward_kernel(
     gait_foot_height: wp.float32,
     w_base_height: wp.float32,
     base_height_target: wp.float32,
-    actuator_ke: wp.array[wp.float32],
-    actuator_kd: wp.array[wp.float32],
     obs: wp.array2d[wp.float32],
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
@@ -677,14 +678,8 @@ def g1_observe_reward_kernel(
         for j in range(ACTION_DIM_G1):
             da = current_actions[world, j] - previous_actions[world, j]
             action_rate_penalty = action_rate_penalty + da * da
-            q_idx = q_base + wp.int32(7) + j
-            qd_idx = qd_base + wp.int32(6) + j
-            qd = _clip_finite(joint_qd[qd_idx], wp.float32(-100.0), wp.float32(100.0))
-            q = _clip_finite(joint_q[q_idx], wp.float32(-20.0), wp.float32(20.0))
-            target = default_joint_pos[j] + current_actions[world, j] * action_scale
-            tau_proxy = actuator_ke[j] * (target - q) - actuator_kd[j] * qd
-            tau_proxy = _clip_finite(tau_proxy, wp.float32(-10000.0), wp.float32(10000.0))
-            torque_sq_penalty = torque_sq_penalty + tau_proxy * tau_proxy
+            force = _clip_finite(actuator_force[world, j], wp.float32(-10000.0), wp.float32(10000.0))
+            torque_sq_penalty = torque_sq_penalty + force * force
 
         gait_reward = wp.float32(0.0)
         if left_foot_body >= wp.int32(0) and right_foot_body >= wp.int32(0):
@@ -794,6 +789,7 @@ def g1_reset_done_worlds_kernel(
     episode_steps: wp.array[wp.int32],
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
+    actuator_force: wp.array2d[wp.float32],
 ):
     world, col = wp.tid()
     if dones[world] <= wp.float32(0.5):
@@ -811,6 +807,7 @@ def g1_reset_done_worlds_kernel(
     if col < action_dim:
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
+        actuator_force[world, col] = wp.float32(0.0)
     if col == 0:
         episode_steps[world] = wp.int32(0)
 
@@ -831,6 +828,7 @@ def g1_reset_done_worlds_seed_counter_kernel(
     episode_steps: wp.array[wp.int32],
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
+    actuator_force: wp.array2d[wp.float32],
 ):
     world, col = wp.tid()
     if dones[world] <= wp.float32(0.5):
@@ -849,6 +847,7 @@ def g1_reset_done_worlds_seed_counter_kernel(
     if col < action_dim:
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
+        actuator_force[world, col] = wp.float32(0.0)
     if col == 0:
         episode_steps[world] = wp.int32(0)
 
@@ -1071,6 +1070,21 @@ def g1_scan_foot_contacts_kernel(
     )
 
 
+@wp.kernel(enable_backward=False)
+def g1_gather_actuator_force_kernel(
+    constraints: ConstraintContainer,
+    drive_cid_by_action: wp.array2d[wp.int32],
+    inv_dt: wp.float32,
+    actuator_force: wp.array2d[wp.float32],
+):
+    world, action = wp.tid()
+    cid = drive_cid_by_action[world, action]
+    value = wp.float32(0.0)
+    if cid >= wp.int32(0):
+        value = actuated_double_ball_socket_drive_impulse_at(constraints, cid, wp.int32(0)) * inv_dt
+    actuator_force[world, action] = value
+
+
 @dataclass
 class ConfigEnvG1PhoenX:
     """Configuration for :class:`EnvG1PhoenX`.
@@ -1252,6 +1266,8 @@ class EnvG1PhoenX:
         self.actuator_kd = wp.array(np.asarray(_DRIVE_KD_G1, dtype=np.float32), dtype=wp.float32, device=self.device)
         self.current_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.previous_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
+        self.actuator_force = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
+        self._drive_cid_by_action = self._make_drive_cid_by_action()
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
         self.episode_steps = wp.zeros(self.world_count, dtype=wp.int32, device=self.device)
@@ -1389,6 +1405,24 @@ class EnvG1PhoenX:
             articulation_dvi=False,
             articulation_dvi_replaces_joint_pgs=False,
         )
+
+    def _make_drive_cid_by_action(self) -> wp.array:
+        drive_cid = np.asarray(self.solver._adbs.drive_cid.numpy(), dtype=np.int32)
+        drive_dof_start = np.asarray(self.solver._adbs.drive_dof_start.numpy(), dtype=np.int32)
+        cid_by_action = np.full((self.world_count, self.action_dim), -1, dtype=np.int32)
+        for cid, dof in zip(drive_cid, drive_dof_start, strict=True):
+            world = int(dof) // self.dof_stride
+            local_dof = int(dof) - world * self.dof_stride
+            action = local_dof - 6
+            if 0 <= world < self.world_count and 0 <= action < self.action_dim:
+                cid_by_action[world, action] = int(cid)
+        missing = np.argwhere(cid_by_action < 0)
+        if missing.size:
+            first_world, first_action = (int(missing[0, 0]), int(missing[0, 1]))
+            raise RuntimeError(
+                f"Expected an ADBS drive row for every G1 action; missing world {first_world}, action {first_action}"
+            )
+        return wp.array(cid_by_action, dtype=wp.int32, device=self.device)
 
     def _resolve_foot_body_local(self, side: str) -> int:
         shape_body = self.model.shape_body.numpy() if self.model.shape_body is not None else None
@@ -1545,6 +1579,7 @@ class EnvG1PhoenX:
                 self.command,
                 self.state_0.body_q,
                 self.foot_contacts,
+                self.actuator_force,
                 self.coord_stride,
                 self.dof_stride,
                 self.body_stride,
@@ -1573,8 +1608,6 @@ class EnvG1PhoenX:
                 self.config.gait_foot_height,
                 self.config.w_base_height,
                 self.config.base_height_target,
-                self.actuator_ke,
-                self.actuator_kd,
             ],
             outputs=[self.obs, self.rewards, self.dones, self.successes],
             device=self.device,
@@ -1709,6 +1742,7 @@ class EnvG1PhoenX:
         wp.copy(self.state_0.joint_qd, self.model.joint_qd)
         self.current_actions.zero_()
         self.previous_actions.zero_()
+        self.actuator_force.zero_()
         self.episode_steps.zero_()
         self.dones.fill_(1.0)
         self._clear_reset_solver_state()
@@ -1753,6 +1787,7 @@ class EnvG1PhoenX:
                 self.episode_steps,
                 self.previous_actions,
                 self.current_actions,
+                self.actuator_force,
             ],
             device=self.device,
         )
@@ -1792,6 +1827,7 @@ class EnvG1PhoenX:
                 self.episode_steps,
                 self.previous_actions,
                 self.current_actions,
+                self.actuator_force,
             ],
             device=self.device,
         )
@@ -1800,6 +1836,15 @@ class EnvG1PhoenX:
         self._clear_reset_solver_state()
         self._sample_done_commands()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+
+    def _gather_actuator_force(self, sub_dt: float) -> None:
+        wp.launch(
+            g1_gather_actuator_force_kernel,
+            dim=(self.world_count, self.action_dim),
+            inputs=[self.solver._constraints, self._drive_cid_by_action, float(1.0 / sub_dt)],
+            outputs=[self.actuator_force],
+            device=self.device,
+        )
 
     def step(self, actions: wp.array) -> tuple[wp.array, wp.array, wp.array]:
         """Apply actions, advance PhoenX, and return ``(obs, rewards, dones)``."""
@@ -1828,6 +1873,8 @@ class EnvG1PhoenX:
             self.model.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
+
+        self._gather_actuator_force(sub_dt)
 
         wp.launch(
             g1_increment_episode_steps_kernel,

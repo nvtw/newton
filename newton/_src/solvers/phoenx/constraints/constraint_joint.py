@@ -92,6 +92,7 @@ __all__ = [
     "JOINT_MODE_UNIVERSAL",
     "ActuatedDoubleBallSocketData",
     "actuated_double_ball_socket_cached_warmstart",
+    "actuated_double_ball_socket_drive_impulse_at",
     "actuated_double_ball_socket_initialize_kernel",
     "actuated_double_ball_socket_iterate",
     "actuated_double_ball_socket_iterate_at",
@@ -3950,6 +3951,17 @@ def actuated_double_ball_socket_iterate_at(
             sor_boost,
             use_bias,
         )
+
+
+@wp.func
+def actuated_double_ball_socket_drive_impulse_at(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+) -> wp.float32:
+    """Accumulated scalar drive impulse for the latest axial solve row."""
+
+    return read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
 
 
 @wp.func

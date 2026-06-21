@@ -1294,13 +1294,55 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env.obs.shape, (2, rl.OBS_DIM_G1))
         self.assertEqual(env.rewards.shape, (2,))
         self.assertEqual(env.dones.shape, (2,))
+        self.assertEqual(env.actuator_force.shape, (2, rl.ACTION_DIM_G1))
         self.assertTrue(np.isfinite(env.obs.numpy()).all())
         self.assertTrue(np.isfinite(env.rewards.numpy()).all())
         self.assertTrue(np.isfinite(env.dones.numpy()).all())
+        self.assertTrue(np.isfinite(env.actuator_force.numpy()).all())
 
         current_actions = env.current_actions.numpy()
         np.testing.assert_allclose(current_actions[:, :12], 1.0, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(current_actions[:, 12:], 0.0, rtol=0.0, atol=0.0)
+
+    def test_actuator_force_gather_uses_solver_drive_impulses_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 actuator-force gather tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=4,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        actions_np = np.zeros((1, rl.ACTION_DIM_G1), dtype=np.float32)
+        actions_np[0, : g1_recipe.CONTROLLED_ACTION_COUNT] = np.linspace(0.3, -0.3, 12, dtype=np.float32)
+        actions = wp.array(actions_np, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.step(actions)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(device)
+
+        actuator_force = env.actuator_force.numpy()
+        self.assertTrue(np.isfinite(actuator_force).all())
+        self.assertGreater(float(np.max(np.abs(actuator_force))), 1.0e-4)
+
+        sub_dt = env.config.frame_dt / env.config.sim_substeps
+        with wp.ScopedCapture(device=device) as gather_capture:
+            env._gather_actuator_force(sub_dt * 2.0)
+        wp.capture_launch(gather_capture.graph)
+        half_scaled_force = env.actuator_force.numpy()
+        np.testing.assert_allclose(half_scaled_force, actuator_force * 0.5, rtol=2.0e-5, atol=2.0e-6)
+
+        env.dones.assign(np.ones(env.world_count, dtype=np.float32))
+        seed_counter = make_seed_counter(11, device=device)
+        with wp.ScopedCapture(device=device) as reset_capture:
+            env.reset_done_seed_counter(seed_counter)
+        wp.capture_launch(reset_capture.graph)
+        np.testing.assert_allclose(env.actuator_force.numpy(), np.zeros_like(actuator_force), rtol=0.0, atol=0.0)
 
     def test_graph_replay_advances_policy_steps(self) -> None:
         env = _g1_test_env(world_count=1)
@@ -1602,6 +1644,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
                 max_episode_steps=100,
                 auto_reset=False,
+                w_torque=-0.01,
             ),
             device=device,
         )
@@ -1625,6 +1668,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             0.1, -0.1, g1_recipe.CONTROLLED_ACTION_COUNT, dtype=np.float32
         )
         command_np = np.asarray([[0.1, -0.05, 0.0]], dtype=np.float32)
+        actuator_force_np = np.linspace(-14.0, 17.0, rl.ACTION_DIM_G1, dtype=np.float32).reshape(1, rl.ACTION_DIM_G1)
         episode_step = 5
         labels = list(env.model.shape_label)
         left_shape = labels.index("left_nanog1_foot_box")
@@ -1641,6 +1685,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         env.state_0.joint_qd.assign(qd)
         env.current_actions.assign(current_actions_np)
         env.previous_actions.assign(previous_actions_np)
+        env.actuator_force.assign(actuator_force_np)
         env.command.assign(command_np)
         env.episode_steps.assign(np.asarray([episode_step], dtype=np.int32))
         with wp.ScopedCapture(device=device) as capture:
@@ -1666,7 +1711,9 @@ class TestG1PhoenXRL(unittest.TestCase):
         actuator_kd = env.actuator_kd.numpy()
         targets = default_joint_pos + current_actions_np[0] * np.float32(env.config.action_scale)
         tau_proxy = actuator_ke * (targets - q[7 : 7 + rl.ACTION_DIM_G1]) - actuator_kd * qd[6 : 6 + rl.ACTION_DIM_G1]
-        torque_sq_penalty = float(np.sum(tau_proxy * tau_proxy, dtype=np.float32))
+        proxy_sq_penalty = float(np.sum(tau_proxy * tau_proxy, dtype=np.float32))
+        torque_sq_penalty = float(np.sum(actuator_force_np[0] * actuator_force_np[0], dtype=np.float32))
+        self.assertGreater(abs(proxy_sq_penalty - torque_sq_penalty), 100.0)
 
         left_phase = float(episode_step % env.config.phase_period) / float(env.config.phase_period)
         right_phase = left_phase + 0.5

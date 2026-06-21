@@ -29,19 +29,20 @@ PufferLib G1 fork `kingjulio8238/PufferLib`, branch `g1`, pinned at commit
 - Muon optimizer update semantics, transposed MLP weight layout, PufferNet linear
   layer layout, MinGRU equations, recurrent reset behavior, save/load/resume,
   and graph-leapfrog smoke training.
-- G1 v3 reward decomposition for a deterministic state, including gait phase,
-  contact/swing/hip/base-height shaping, action-rate penalty, dt scaling, done,
-  and success metrics.
+- G1 v3 reward decomposition for a deterministic state, including actual
+  actuator-force torque penalty, gait phase, contact/swing/hip/base-height
+  shaping, action-rate penalty, dt scaling, done, and success metrics.
+- Graph-captured G1 actuator-force gather from PhoenX ADBS drive impulses,
+  including reset clearing so stale force cannot leak across episodes.
 
 All of these tests run CUDA-only and use Warp CUDA graph capture.
 
 ## Current Difference List
 
-- nanoG1 reward uses actual actuator force `g_af` for the torque penalty. PhoenX
-  currently uses a PD torque proxy derived from target, q, qd, kp, and kd. This
-  is close when targets are unclamped but is still not identical. A clean fix is
-  to expose or accumulate the actual PhoenX actuator generalized force without
-  adding host copies or breaking graph capture.
+- PhoenX now feeds the G1 torque penalty from the solver's actual ADBS drive
+  impulse converted to force on the final physics substep. nanoG1 uses MuJoCo
+  `g_af`; the remaining semantic question is whether final-substep force or a
+  decimation aggregate best matches MuJoCo's post-step actuator-force buffer.
 - The local generic PufferLib checkout is branch `4.0` at `e90b58ed`, not the
   nanoG1 G1 fork. Parity work should use the nanoG1 recipe/deploy files plus
   the pinned fork source above.
@@ -59,8 +60,9 @@ latest diagnostic still shows unstable velocity outliers.
 
 ## Next Checks
 
-1. Add an actual-actuator-force path for the G1 torque penalty, or explicitly
-   prove the proxy is sufficient over relevant unclamped/clamped action ranges.
+1. Compare final-substep PhoenX actuator force against nanoG1/MuJoCo `g_af` on
+   component-level drive scenarios and decide whether a decimation aggregate is
+   needed.
 2. Run longer train-to-gate checkpoints after each quality fix and compare
    learning curves, not just final throughput.
 3. Keep profiling after correctness changes; optimize kernels only when the
