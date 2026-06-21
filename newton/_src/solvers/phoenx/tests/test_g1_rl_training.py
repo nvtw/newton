@@ -1592,6 +1592,124 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertAlmostEqual(float(env.rewards.numpy()[0]), expected + env.config.w_termination, places=5)
         self.assertEqual(float(env.dones.numpy()[0]), 1.0)
 
+    def test_reward_decomposition_matches_nanog1_v3_equations_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 reward decomposition tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=100,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        q = env.state_0.joint_q.numpy()
+        qd = env.state_0.joint_qd.numpy()
+        default_joint_pos = env.default_joint_pos.numpy()
+        q[:] = 0.0
+        q[2] = 0.79
+        q[6] = 1.0
+        joint_delta = np.linspace(-0.015, 0.015, rl.ACTION_DIM_G1, dtype=np.float32)
+        q[7 : 7 + rl.ACTION_DIM_G1] = default_joint_pos + joint_delta
+        qd[:] = 0.0
+        qd[0:6] = np.asarray([0.35, -0.2, 0.15, 0.4, -0.3, 0.2], dtype=np.float32)
+        qd[6 : 6 + rl.ACTION_DIM_G1] = np.linspace(-0.25, 0.35, rl.ACTION_DIM_G1, dtype=np.float32)
+        current_actions_np = np.zeros((1, rl.ACTION_DIM_G1), dtype=np.float32)
+        previous_actions_np = np.zeros((1, rl.ACTION_DIM_G1), dtype=np.float32)
+        current_actions_np[0, : g1_recipe.CONTROLLED_ACTION_COUNT] = np.linspace(
+            -0.2, 0.2, g1_recipe.CONTROLLED_ACTION_COUNT, dtype=np.float32
+        )
+        previous_actions_np[0, : g1_recipe.CONTROLLED_ACTION_COUNT] = np.linspace(
+            0.1, -0.1, g1_recipe.CONTROLLED_ACTION_COUNT, dtype=np.float32
+        )
+        command_np = np.asarray([[0.1, -0.05, 0.0]], dtype=np.float32)
+        episode_step = 5
+        labels = list(env.model.shape_label)
+        left_shape = labels.index("left_nanog1_foot_box")
+        ground_shape = int(np.flatnonzero(env.model.shape_body.numpy() < 0)[0])
+        shape0 = np.full(int(env.contacts.rigid_contact_max), ground_shape, dtype=np.int32)
+        shape1 = np.full(int(env.contacts.rigid_contact_max), ground_shape, dtype=np.int32)
+        shape0[0] = left_shape
+        shape1[0] = ground_shape
+        env.contacts.rigid_contact_count.assign(np.asarray([1], dtype=np.int32))
+        env.contacts.rigid_contact_shape0.assign(shape0)
+        env.contacts.rigid_contact_shape1.assign(shape1)
+
+        env.state_0.joint_q.assign(q)
+        env.state_0.joint_qd.assign(qd)
+        env.current_actions.assign(current_actions_np)
+        env.previous_actions.assign(previous_actions_np)
+        env.command.assign(command_np)
+        env.episode_steps.assign(np.asarray([episode_step], dtype=np.int32))
+        with wp.ScopedCapture(device=device) as capture:
+            newton.eval_fk(env.model, env.state_0.joint_q, env.state_0.joint_qd, env.state_0)
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        body_q = env.state_0.body_q.numpy()
+        right_foot_z = float(body_q[env._right_foot_body_local, 2])
+        lin_b = qd[0:3]
+        ang = qd[3:6]
+        vx_err = command_np[0, 0] - lin_b[0]
+        vy_err = command_np[0, 1] - lin_b[1]
+        yaw_err = command_np[0, 2] - ang[2]
+        track_lin = math.exp(-float(vx_err * vx_err + vy_err * vy_err) / 0.25)
+        track_ang = math.exp(-float(yaw_err * yaw_err) / 0.25)
+        lin_vel_z_penalty = float(lin_b[2] * lin_b[2])
+        ang_vel_xy_penalty = float(ang[0] * ang[0] + ang[1] * ang[1])
+        orientation_penalty = 0.0
+        upright_gate = 1.0
+        action_rate_penalty = float(np.sum((current_actions_np[0] - previous_actions_np[0]) ** 2, dtype=np.float32))
+        actuator_ke = env.actuator_ke.numpy()
+        actuator_kd = env.actuator_kd.numpy()
+        targets = default_joint_pos + current_actions_np[0] * np.float32(env.config.action_scale)
+        tau_proxy = actuator_ke * (targets - q[7 : 7 + rl.ACTION_DIM_G1]) - actuator_kd * qd[6 : 6 + rl.ACTION_DIM_G1]
+        torque_sq_penalty = float(np.sum(tau_proxy * tau_proxy, dtype=np.float32))
+
+        left_phase = float(episode_step % env.config.phase_period) / float(env.config.phase_period)
+        right_phase = left_phase + 0.5
+        if right_phase >= 1.0:
+            right_phase -= 1.0
+        gait_reward = 0.0
+        gait_reward += env.config.w_gait_contact if left_phase < env.config.gait_stance_fraction else 0.0
+        gait_reward += env.config.w_gait_contact if right_phase >= env.config.gait_stance_fraction else 0.0
+        right_dz = right_foot_z - env.config.gait_foot_height
+        gait_reward += env.config.w_gait_swing * right_dz * right_dz
+        hip_indices = np.asarray([1, 2, 7, 8], dtype=np.int32)
+        hip_penalty = float(np.sum(joint_delta[hip_indices] * joint_delta[hip_indices], dtype=np.float32))
+        gait_reward += env.config.w_gait_hip * hip_penalty
+        base_dz = float(q[2] - env.config.base_height_target)
+        gait_reward += env.config.w_base_height * base_dz * base_dz
+
+        shaped_reward = (
+            env.config.w_track_lin * track_lin
+            + env.config.w_track_ang * track_ang
+            + env.config.w_lin_vel_z * lin_vel_z_penalty
+            + env.config.w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
+            + env.config.w_orientation * orientation_penalty * upright_gate
+            + env.config.w_torque * torque_sq_penalty
+            + env.config.w_action_rate * action_rate_penalty
+            + gait_reward
+            + env.config.w_alive
+        )
+        expected_reward = np.float32(shaped_reward * env.config.frame_dt)
+        expected_phase = 2.0 * math.pi * float(episode_step % env.config.phase_period) / float(env.config.phase_period)
+
+        np.testing.assert_allclose(
+            env.rewards.numpy(), np.asarray([expected_reward], dtype=np.float32), rtol=2.0e-5, atol=2.0e-6
+        )
+        np.testing.assert_allclose(
+            env.successes.numpy(), np.asarray([track_lin], dtype=np.float32), rtol=1.0e-6, atol=1.0e-6
+        )
+        np.testing.assert_allclose(env.dones.numpy(), np.zeros(1, dtype=np.float32), rtol=0.0, atol=0.0)
+        obs = env.obs.numpy()[0]
+        np.testing.assert_allclose(obs[6:9], command_np[0], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(obs[67:96], current_actions_np[0], rtol=0.0, atol=0.0)
+        self.assertAlmostEqual(float(obs[96]), math.sin(expected_phase), places=6)
+        self.assertAlmostEqual(float(obs[97]), math.cos(expected_phase), places=6)
+
     def test_gait_reward_uses_foot_contacts_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 gait reward tests")
         config = rl.ConfigEnvG1PhoenX(
