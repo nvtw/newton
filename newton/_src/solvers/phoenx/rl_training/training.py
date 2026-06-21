@@ -23,6 +23,7 @@ from .g1_recipe import (
     RANDOMIZE_COMMANDS,
     ROLLOUT_STEPS,
     SEED,
+    SQUASH_ACTIONS,
     TRAIN_ITERATIONS,
     default_g1_ppo_config,
 )
@@ -207,6 +208,7 @@ class ConfigTrainG1PPO:
     hidden_layers: tuple[int, ...] = HIDDEN_LAYERS
     activation: str = ACTIVATION
     log_std_init: float = LOG_STD_INIT
+    squash_actions: bool = SQUASH_ACTIONS
     env_config: ConfigEnvG1PhoenX | None = None
     ppo_config: ConfigPPO | None = None
     device: wp.context.Devicelike = None
@@ -674,7 +676,7 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
             config=ppo_config,
             device=device,
             seed=cfg.seed,
-            squash_actions=True,
+            squash_actions=cfg.squash_actions,
             activation=cfg.activation,
             log_std_init=cfg.log_std_init,
             mirror_map=g1_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,

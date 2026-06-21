@@ -188,6 +188,12 @@ def _main() -> int:
     g1_parser.add_argument("--vtrace-c-clip", type=float, default=g1_recipe.VTRACE_C_CLIP)
     g1_parser.add_argument("--reward-clip", type=float, default=g1_recipe.REWARD_CLIP)
     g1_parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
+    g1_parser.add_argument(
+        "--squash-actions",
+        action=argparse.BooleanOptionalAction,
+        default=g1_recipe.SQUASH_ACTIONS,
+        help="Use tanh-squashed PPO actions instead of the nanoG1-compatible raw Gaussian policy.",
+    )
     g1_parser.add_argument("--resume-checkpoint", default=None)
     g1_parser.add_argument("--checkpoint-path", default=None)
     g1_parser.add_argument("--checkpoint-interval", type=int, default=0)
@@ -326,6 +332,7 @@ def _main() -> int:
                 command_x_range=(args.command_x_min, args.command_x_max),
                 command_y_range=(args.command_y_min, args.command_y_max),
                 command_yaw_range=(args.command_yaw_min, args.command_yaw_max),
+                squash_actions=bool(args.squash_actions),
                 resume_checkpoint=args.resume_checkpoint,
                 checkpoint_path=args.checkpoint_path,
                 checkpoint_interval=args.checkpoint_interval,

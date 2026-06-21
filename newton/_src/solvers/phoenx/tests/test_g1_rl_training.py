@@ -233,6 +233,69 @@ class TestG1PhoenXRL(unittest.TestCase):
             actual_target = target_q[6 : 6 + rl.ACTION_DIM_G1]
         np.testing.assert_allclose(actual_target, expected_target, rtol=0.0, atol=1.0e-6)
 
+    def test_pufferlib_continuous_actor_matches_unsquashed_warp_gaussian(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 PufferLib actor parity tests")
+        models_py = _PUFFERLIB_ROOT / "pufferlib" / "models.py"
+        pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
+        if not models_py.is_file() or not pufferlib_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference files under {_PUFFERLIB_ROOT}")
+        self.assertIn("torch.distributions.Normal(mean, torch.exp(logstd))", models_py.read_text())
+        cuda_text = pufferlib_cu.read_text()
+        self.assertIn("action = mean + std * noise", cuda_text)
+        self.assertIn("normalized = (action - mean) / std", cuda_text)
+        self.assertIn("*out_logp = -0.5f * normalized", cuda_text)
+
+        actor = rl.GaussianActor(
+            obs_dim=rl.OBS_DIM_G1,
+            action_dim=rl.ACTION_DIM_G1,
+            hidden_layers=(),
+            activation="relu",
+            squash=False,
+            device=device,
+            seed=5,
+            log_std_init=g1_recipe.LOG_STD_INIT,
+        )
+        mean = np.linspace(-1.35, 1.35, rl.ACTION_DIM_G1, dtype=np.float32)
+        log_std = np.linspace(-0.7, -0.2, rl.ACTION_DIM_G1, dtype=np.float32)
+        actor.net.weights[0].assign(np.zeros((rl.OBS_DIM_G1, rl.ACTION_DIM_G1), dtype=np.float32))
+        actor.net.biases[0].assign(mean)
+        actor.log_std.assign(log_std)
+
+        obs = wp.zeros((2, rl.OBS_DIM_G1), dtype=wp.float32, device=device)
+        actor.reserve_reuse_buffers(2)
+        with wp.ScopedCapture(device=device) as capture:
+            actions, log_probs, _ = actor.sample_reuse(obs, seed=19, deterministic=True)
+        wp.capture_launch(capture.graph)
+
+        expected_actions = np.broadcast_to(mean, (2, rl.ACTION_DIM_G1))
+        np.testing.assert_allclose(actions.numpy(), expected_actions, rtol=0.0, atol=0.0)
+        self.assertGreater(float(np.max(expected_actions)), 1.0)
+        expected_log_prob = np.full(
+            2,
+            np.sum(-0.5 * np.log(2.0 * np.pi) - log_std),
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(log_probs.numpy(), expected_log_prob, rtol=1.0e-6, atol=1.0e-6)
+
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=2,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        with wp.ScopedCapture(device=device) as step_capture:
+            env.step(actions)
+        wp.capture_launch(step_capture.graph)
+
+        expected_clipped = np.clip(expected_actions, -1.0, 1.0)
+        expected_clipped[:, g1_recipe.CONTROLLED_ACTION_COUNT :] = 0.0
+        np.testing.assert_allclose(env.current_actions.numpy(), expected_clipped, rtol=0.0, atol=0.0)
+
     def test_shared_value_mlp_forward_matches_numpy_for_nanog1_shape(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL network parity tests")
         puffernet = _PUFFERLIB_ROOT / "src" / "puffernet.h"
@@ -317,6 +380,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(train_config.hidden_layers, g1_recipe.HIDDEN_LAYERS)
         self.assertEqual(train_config.activation, g1_recipe.ACTIVATION)
         self.assertEqual(train_config.rollout_steps, g1_recipe.ROLLOUT_STEPS)
+        self.assertEqual(train_config.squash_actions, g1_recipe.SQUASH_ACTIONS)
+        self.assertFalse(train_config.squash_actions)
         self.assertGreater(ppo_config.mirror_loss_coeff, 0.0)
         self.assertEqual(ppo_config.mirror_loss_coeff, g1_recipe.MIRROR_LOSS_COEFF)
         self.assertTrue(ppo_config.shared_value_network)
@@ -498,6 +563,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(math.isfinite(first.history[0].mean_command_yaw))
             self.assertEqual(first.trainer.iteration, 1)
             self.assertEqual(restored.iteration, 1)
+            self.assertFalse(first.trainer.squash_actions)
+            self.assertFalse(restored.squash_actions)
             self.assertEqual(restored.config.minibatch_size, 0)
             self.assertEqual(restored.config.replay_ratio, 0.0)
             self.assertEqual(restored.config.priority_alpha, 0.0)
@@ -629,6 +696,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual([stat.iteration for stat in result.history], [0, 1])
             self.assertEqual(result.trainer.iteration, 2)
             self.assertEqual(restored.iteration, 2)
+            self.assertFalse(result.trainer.squash_actions)
+            self.assertFalse(restored.squash_actions)
             self.assertGreater(result.trainer.actor_optimizer.step_count, 0)
             self.assertTrue(math.isfinite(result.history[-1].mean_reward))
             self.assertTrue(math.isfinite(result.history[-1].policy_loss))
@@ -688,6 +757,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 vtrace_c_clip=3.0,
                 reward_clip=1.0,
                 max_grad_norm=0.3,
+                squash_actions=g1_recipe.SQUASH_ACTIONS,
                 command_x=0.8,
                 command_y=0.0,
                 command_yaw=0.0,
@@ -730,6 +800,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             restored = rl.load_ppo_checkpoint(checkpoint_path, device=device)
 
             self.assertEqual(result["execution_mode"], "graph_leapfrog")
+            self.assertEqual(result["squash_actions"], g1_recipe.SQUASH_ACTIONS)
             self.assertEqual(result["completed_iterations"], 1)
             self.assertEqual(result["trained_samples"], 2)
             self.assertEqual(restored.iteration, 1)

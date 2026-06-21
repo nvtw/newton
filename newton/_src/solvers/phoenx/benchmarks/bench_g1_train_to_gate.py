@@ -128,6 +128,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 command_x_range=tuple(float(v) for v in args.command_x_range),
                 command_y_range=tuple(float(v) for v in args.command_y_range),
                 command_yaw_range=tuple(float(v) for v in args.command_yaw_range),
+                squash_actions=bool(args.squash_actions),
                 resume_checkpoint=resume_checkpoint,
                 checkpoint_path=checkpoint_template,
                 checkpoint_interval=0,
@@ -191,6 +192,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "execution_mode": str(args.execution_mode),
         "world_count": int(args.world_count),
         "rollout_steps": int(args.rollout_steps),
+        "squash_actions": bool(args.squash_actions),
         "max_iterations": int(args.max_iterations),
         "chunk_iterations": int(args.chunk_iterations),
         "completed_iterations": int(completed_iterations),
@@ -255,6 +257,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vtrace-c-clip", type=float, default=g1_recipe.VTRACE_C_CLIP)
     parser.add_argument("--reward-clip", type=float, default=g1_recipe.REWARD_CLIP)
     parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
+    parser.add_argument(
+        "--squash-actions",
+        action=argparse.BooleanOptionalAction,
+        default=g1_recipe.SQUASH_ACTIONS,
+        help="Use tanh-squashed PPO actions instead of the nanoG1-compatible raw Gaussian policy.",
+    )
     parser.add_argument("--command-x", type=float, default=g1_recipe.COMMAND[0])
     parser.add_argument("--command-y", type=float, default=g1_recipe.COMMAND[1])
     parser.add_argument("--command-yaw", type=float, default=g1_recipe.COMMAND[2])

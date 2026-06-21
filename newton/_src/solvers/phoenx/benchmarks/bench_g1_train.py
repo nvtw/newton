@@ -202,6 +202,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         seed=int(args.seed),
         log_interval=0,
         randomize_commands=not bool(args.no_command_randomization),
+        squash_actions=bool(args.squash_actions),
         readback_diagnostics=not bool(args.no_readback_diagnostics),
         execution_mode=str(args.execution_mode),
     )
@@ -246,6 +247,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "vtrace_c_clip": float(args.vtrace_c_clip),
         "reward_clip": float(args.reward_clip),
         "max_grad_norm": float(args.max_grad_norm),
+        "squash_actions": bool(args.squash_actions),
         "readback_diagnostics": not bool(args.no_readback_diagnostics),
         "execution_mode": str(args.execution_mode),
         "sim_substeps": int(args.sim_substeps),
@@ -322,6 +324,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vtrace-c-clip", type=float, default=g1_recipe.VTRACE_C_CLIP)
     parser.add_argument("--reward-clip", type=float, default=g1_recipe.REWARD_CLIP)
     parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
+    parser.add_argument(
+        "--squash-actions",
+        action=argparse.BooleanOptionalAction,
+        default=g1_recipe.SQUASH_ACTIONS,
+        help="Use tanh-squashed PPO actions instead of the nanoG1-compatible raw Gaussian policy.",
+    )
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
