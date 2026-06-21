@@ -536,6 +536,182 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(loss.numpy()[0], expected_loss, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(grad.numpy(), expected_grad, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_puffer_mingru_forward_and_reset_match_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 MinGRU network tests")
+        net = rl.PufferMinGRUNet(input_dim=3, hidden_size=2, output_dim=2, num_layers=1, device=device, seed=3)
+        net.encoder_weight.assign(np.asarray([[0.2, -0.1], [0.4, 0.3], [-0.5, 0.7]], dtype=np.float32))
+        net.recurrent_weights[0].assign(
+            np.asarray(
+                [
+                    [0.1, -0.2, 0.3, -0.4, 0.5, -0.6],
+                    [-0.3, 0.2, -0.1, 0.6, -0.5, 0.4],
+                ],
+                dtype=np.float32,
+            )
+        )
+        net.decoder_weight.assign(np.asarray([[0.3, -0.2], [-0.4, 0.5]], dtype=np.float32))
+        obs_np = np.asarray([[0.2, -0.4, 0.6], [0.1, 0.3, -0.2]], dtype=np.float32)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        dones = wp.array(np.asarray([1.0, 0.0], dtype=np.float32), dtype=wp.float32, device=device)
+        net.reserve_buffers(2)
+        out0_snapshot = wp.empty((2, 2), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            out0 = net.forward_reuse(obs)
+            wp.copy(out0_snapshot, out0)
+            net.reset_state(dones)
+            out1 = net.forward_reuse(obs)
+        wp.capture_launch(capture.graph)
+
+        def step_numpy(state: np.ndarray, observations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            h = observations @ net.encoder_weight.numpy()
+            combined = h @ net.recurrent_weights[0].numpy()
+            hidden = combined[:, 0:2]
+            gate = combined[:, 2:4]
+            proj = combined[:, 4:6]
+            candidate = np.where(hidden >= 0.0, hidden + 0.5, 1.0 / (1.0 + np.exp(-hidden)))
+            gate_sig = 1.0 / (1.0 + np.exp(-gate))
+            recurrent = state + gate_sig * (candidate - state)
+            proj_sig = 1.0 / (1.0 + np.exp(-proj))
+            y = proj_sig * recurrent + (1.0 - proj_sig) * h
+            return y @ net.decoder_weight.numpy(), recurrent.astype(np.float32)
+
+        zero_state = np.zeros((2, 2), dtype=np.float32)
+        expected0, state0 = step_numpy(zero_state, obs_np)
+        state0[0] = 0.0
+        expected1, _state1 = step_numpy(state0, obs_np)
+        np.testing.assert_allclose(out0_snapshot.numpy(), expected0, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(out1.numpy(), expected1, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_puffer_mingru_backward_matches_finite_difference_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX MinGRU backward tests")
+        net = rl.PufferMinGRUNet(input_dim=2, hidden_size=2, output_dim=1, num_layers=1, device=device, seed=5)
+        encoder = np.asarray([[0.2, -0.3], [0.4, 0.1]], dtype=np.float32)
+        recurrent = np.asarray(
+            [[0.1, -0.2, 0.3, 0.15, -0.25, 0.35], [-0.4, 0.2, -0.1, 0.45, 0.05, -0.15]],
+            dtype=np.float32,
+        )
+        decoder = np.asarray([[0.25], [-0.35]], dtype=np.float32)
+        obs_np = np.asarray([[0.2, -0.1], [0.4, 0.3]], dtype=np.float32)
+        upstream_np = np.asarray([[0.7], [-0.2]], dtype=np.float32)
+        net.encoder_weight.assign(encoder)
+        net.recurrent_weights[0].assign(recurrent)
+        net.decoder_weight.assign(decoder)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        upstream = wp.array(upstream_np, dtype=wp.float32, device=device)
+        net.set_sequence_shape(num_steps=2, num_envs=1)
+        net.reserve_buffers(2)
+
+        with wp.ScopedCapture(device=device) as capture:
+            net.forward_manual(obs)
+            net.backward_manual(upstream)
+        wp.capture_launch(capture.graph)
+
+        def sigmoid(x: np.ndarray) -> np.ndarray:
+            return 1.0 / (1.0 + np.exp(-x))
+
+        def loss(enc: np.ndarray, rec: np.ndarray, dec: np.ndarray) -> float:
+            h = obs_np @ enc
+            state = np.zeros((1, 2), dtype=np.float32)
+            outputs = []
+            for row in range(2):
+                combined = h[row : row + 1] @ rec
+                hidden = combined[:, 0:2]
+                gate = sigmoid(combined[:, 2:4])
+                proj = sigmoid(combined[:, 4:6])
+                candidate = np.where(hidden >= 0.0, hidden + 0.5, sigmoid(hidden))
+                state = state + gate * (candidate - state)
+                outputs.append(proj * state + (1.0 - proj) * h[row : row + 1])
+            out = np.concatenate(outputs, axis=0) @ dec
+            return float(np.sum(out * upstream_np))
+
+        def finite_difference(param: np.ndarray, fn) -> np.ndarray:
+            grad = np.zeros_like(param)
+            eps = 1.0e-3
+            it = np.nditer(param, flags=["multi_index"], op_flags=["readwrite"])
+            for value in it:
+                index = it.multi_index
+                old = float(value)
+                param[index] = old + eps
+                plus = fn()
+                param[index] = old - eps
+                minus = fn()
+                param[index] = old
+                grad[index] = (plus - minus) / (2.0 * eps)
+            return grad
+
+        encoder_fd = encoder.copy()
+        recurrent_fd = recurrent.copy()
+        decoder_fd = decoder.copy()
+        enc_grad = finite_difference(encoder_fd, lambda: loss(encoder_fd, recurrent, decoder))
+        rec_grad = finite_difference(recurrent_fd, lambda: loss(encoder, recurrent_fd, decoder))
+        dec_grad = finite_difference(decoder_fd, lambda: loss(encoder, recurrent, decoder_fd))
+
+        np.testing.assert_allclose(net.encoder_weight.grad.numpy(), enc_grad, rtol=2.0e-2, atol=2.0e-2)
+        np.testing.assert_allclose(net.recurrent_weights[0].grad.numpy(), rec_grad, rtol=2.0e-2, atol=2.0e-2)
+        np.testing.assert_allclose(net.decoder_weight.grad.numpy(), dec_grad, rtol=2.0e-2, atol=2.0e-2)
+
+    def test_puffer_mingru_ppo_train_save_load_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX recurrent PPO tests")
+        buffer = rl.BufferRollout(num_steps=2, num_envs=2, obs_dim=4, action_dim=2, device=device)
+        obs = np.linspace(-0.5, 0.6, buffer.num_samples * buffer.obs_dim, dtype=np.float32).reshape(
+            buffer.num_samples, buffer.obs_dim
+        )
+        buffer.obs.assign(obs)
+        buffer.actions.assign(
+            np.linspace(-0.2, 0.2, buffer.num_samples * buffer.action_dim, dtype=np.float32).reshape(
+                buffer.num_samples, buffer.action_dim
+            )
+        )
+        buffer.old_log_probs.assign(np.zeros(buffer.num_samples, dtype=np.float32))
+        buffer.advantages.assign(np.asarray([0.4, -0.1, 0.2, -0.3], dtype=np.float32))
+        buffer.returns.assign(np.asarray([0.3, -0.2, 0.1, -0.4], dtype=np.float32))
+        buffer.old_values.assign(np.zeros((buffer.num_steps + 1) * buffer.num_envs, dtype=np.float32))
+
+        config = rl.ConfigPPO(
+            train_epochs=1,
+            normalize_advantages=False,
+            actor_lr=1.0e-3,
+            entropy_coeff=0.0,
+            value_loss_coeff=0.5,
+            value_clip_range=1.0,
+            max_grad_norm=0.3,
+            shared_value_network=True,
+            policy_network="puffer_mingru",
+            manual_actor_backward=True,
+            manual_critic_backward=True,
+            mirror_loss_coeff=0.0,
+            optimizer="adam",
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=buffer.obs_dim,
+            action_dim=buffer.action_dim,
+            hidden_layers=(8, 8),
+            config=config,
+            device=device,
+            seed=7,
+            squash_actions=False,
+        )
+        trainer.reserve_update_buffers(buffer)
+        seed_counter = make_seed_counter(17, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            trainer.update_seed_counter(buffer, seed_counter=seed_counter, read_stats=False)
+        before = [param.numpy().copy() for param in trainer.actor.parameters()]
+        wp.capture_launch(capture.graph)
+        after = [param.numpy().copy() for param in trainer.actor.parameters()]
+        self.assertTrue(any(not np.allclose(a, b) for a, b in zip(after, before, strict=True)))
+        self.assertEqual(trainer.actor.net.network_type, "puffer_mingru")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/recurrent.npz"
+            trainer.save_checkpoint(path, iteration=1)
+            restored = rl.load_ppo_checkpoint(path, device=device)
+            self.assertEqual(restored.config.policy_network, "puffer_mingru")
+            self.assertEqual(restored.actor.net.network_type, "puffer_mingru")
+            for expected, actual in zip(trainer.actor.parameters(), restored.actor.parameters(), strict=True):
+                np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=0.0, atol=0.0)
+
     def test_shared_value_mlp_forward_matches_numpy_for_nanog1_shape(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL network parity tests")
         puffernet = _PUFFERLIB_ROOT / "src" / "puffernet.h"
@@ -669,6 +845,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(ppo_config.mirror_loss_coeff, g1_recipe.MIRROR_LOSS_COEFF)
         self.assertTrue(ppo_config.shared_value_network)
         self.assertEqual(ppo_config.shared_value_network, g1_recipe.SHARED_VALUE_NETWORK)
+        self.assertEqual(ppo_config.policy_network, g1_recipe.POLICY_NETWORK)
+        self.assertEqual(ppo_config.policy_network, "puffer_mingru")
         self.assertEqual(ppo_config.minibatch_size, g1_recipe.MINIBATCH_SIZE)
         self.assertEqual(ppo_config.value_loss_coeff, g1_recipe.VALUE_LOSS_COEFF)
         self.assertEqual(ppo_config.value_clip_range, g1_recipe.VALUE_CLIP_RANGE)
@@ -1304,6 +1482,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 hidden_layers=(8,),
                 train_epochs=1,
                 mirror_loss_coeff=0.25,
+                policy_network=g1_recipe.POLICY_NETWORK,
                 minibatch_size=1,
                 replay_ratio=1.0,
                 priority_alpha=0.4,

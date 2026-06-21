@@ -31,6 +31,7 @@ from ._src.solvers.phoenx.rl_training import (
     GaussianActor,
     MirrorMapPPO,
     Muon,
+    PufferMinGRUNet,
     ResultEvaluateAnymalPPO,
     ResultEvaluateG1GatePPO,
     ResultEvaluateG1PPO,
@@ -84,6 +85,7 @@ __all__ = [
     "GaussianActor",
     "MirrorMapPPO",
     "Muon",
+    "PufferMinGRUNet",
     "ResultEvaluateAnymalPPO",
     "ResultEvaluateG1GatePPO",
     "ResultEvaluateG1PPO",
@@ -170,6 +172,12 @@ def _main() -> int:
     )
     g1_parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     g1_parser.add_argument("--mirror-loss-coeff", type=float, default=g1_recipe.MIRROR_LOSS_COEFF)
+    g1_parser.add_argument(
+        "--policy-network",
+        choices=("mlp", "puffer_mingru"),
+        default=g1_recipe.POLICY_NETWORK,
+        help="PPO policy backbone. puffer_mingru matches nanoG1/PufferLib's recurrent default.",
+    )
     g1_parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
     g1_parser.add_argument("--replay-ratio", type=float, default=g1_recipe.REPLAY_RATIO)
     g1_parser.add_argument("--priority-alpha", type=float, default=g1_recipe.PRIORITY_ALPHA)
@@ -332,6 +340,7 @@ def _main() -> int:
             optimizer_weight_decay=args.optimizer_weight_decay,
             muon_momentum=args.muon_momentum,
             mirror_loss_coeff=args.mirror_loss_coeff,
+            policy_network=args.policy_network,
         )
         train_g1_ppo(
             ConfigTrainG1PPO(

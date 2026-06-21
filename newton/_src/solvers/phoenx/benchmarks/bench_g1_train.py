@@ -55,6 +55,7 @@ def _g1_ppo_config(
     priority_beta: float,
     manual_actor_backward: bool,
     manual_critic_backward: bool,
+    policy_network: str,
     manual_mlp_weight_grad_dtype: str,
     manual_mlp_forward_dtype: str,
     vtrace_rho_clip: float,
@@ -77,6 +78,7 @@ def _g1_ppo_config(
         priority_beta=float(priority_beta),
         manual_actor_backward=bool(manual_actor_backward),
         manual_critic_backward=bool(manual_critic_backward),
+        policy_network=str(policy_network),
         manual_mlp_weight_grad_dtype=str(manual_mlp_weight_grad_dtype),
         manual_mlp_forward_dtype=str(manual_mlp_forward_dtype),
         vtrace_rho_clip=float(vtrace_rho_clip),
@@ -203,6 +205,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
             args.priority_beta,
             not args.no_manual_actor_backward,
             not args.no_manual_critic_backward,
+            args.policy_network,
             args.manual_mlp_weight_grad_dtype,
             args.manual_mlp_forward_dtype,
             args.vtrace_rho_clip,
@@ -251,6 +254,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "iterations": int(args.iterations),
         "warmup_iterations": int(args.warmup_iterations),
         "hidden_layers": list(args.hidden_layers),
+        "policy_network": str(args.policy_network),
         "train_epochs": int(args.train_epochs),
         "mirror_loss_coeff": float(args.mirror_loss_coeff),
         "minibatch_size": int(args.minibatch_size),
@@ -326,6 +330,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--warmup-iterations", type=int, default=1)
     parser.add_argument("--hidden-layers", type=_parse_hidden_layers, default=g1_recipe.HIDDEN_LAYERS)
+    parser.add_argument("--policy-network", choices=("mlp", "puffer_mingru"), default=g1_recipe.POLICY_NETWORK)
     parser.add_argument("--train-epochs", type=int, default=g1_recipe.TRAIN_EPOCHS)
     parser.add_argument("--mirror-loss-coeff", type=float, default=g1_recipe.MIRROR_LOSS_COEFF)
     parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)

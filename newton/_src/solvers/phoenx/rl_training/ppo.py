@@ -44,7 +44,7 @@ from .kernels import (
     zero_ppo_loss_stats_kernel,
     zero_scalar_kernel,
 )
-from .networks import GaussianActor, WarpMLP
+from .networks import GaussianActor, PufferMinGRUNet, WarpMLP
 from .optim import Adam, Muon
 
 
@@ -123,9 +123,12 @@ class ConfigPPO:
             critic optimizers. A value less than or equal to zero disables clipping.
         mirror_loss_coeff: Coefficient for optional mirror-symmetry MSE on
             policy means and value predictions. Requires a mirror map.
-        shared_value_network: Use one actor/value MLP with the final output
-            column as the value estimate. This matches PufferLib's fused
-            decoder layout and uses actor_lr for the shared network.
+        shared_value_network: Use one actor/value policy network with the
+            final output column as the value estimate. This matches PufferLib's
+            fused decoder layout and uses actor_lr for the shared network.
+        policy_network: Policy backbone, either ``"mlp"`` or
+            ``"puffer_mingru"``. The recurrent option follows PufferLib's
+            bias-free encoder, MinGRU stack, and fused decoder.
     """
 
     gamma: float = 0.99
@@ -159,6 +162,7 @@ class ConfigPPO:
     max_grad_norm: float = 0.0
     mirror_loss_coeff: float = 0.0
     shared_value_network: bool = False
+    policy_network: str = "mlp"
 
 
 @dataclass
@@ -394,8 +398,11 @@ class TrainerPPO:
         self.log_std_init = float(log_std_init)
         self.device = wp.get_device(device)
         self.shared_value_network = bool(self.config.shared_value_network)
+        self.policy_network = _normalize_policy_network(self.config.policy_network)
         if self.shared_value_network and not (self.config.manual_actor_backward and self.config.manual_critic_backward):
             raise ValueError("shared_value_network currently requires manual actor and critic backward")
+        if self.policy_network != "mlp" and not self.shared_value_network:
+            raise ValueError("recurrent PPO policy backbones currently require shared_value_network")
         self.actor = GaussianActor(
             obs_dim=self.obs_dim,
             action_dim=self.action_dim,
@@ -410,15 +417,26 @@ class TrainerPPO:
             manual_forward_dtype=self.config.manual_mlp_forward_dtype,
         )
         if self.shared_value_network:
-            self.actor.net = WarpMLP(
-                (self.obs_dim, *self.hidden_layers, self.action_dim + 1),
-                activation=activation,
-                output_activation="linear",
-                device=self.device,
-                seed=seed,
-                manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
-                manual_forward_dtype=self.config.manual_mlp_forward_dtype,
-            )
+            if self.policy_network == "puffer_mingru":
+                hidden_size, num_layers = _mingru_shape_from_hidden_layers(self.hidden_layers)
+                self.actor.net = PufferMinGRUNet(
+                    input_dim=self.obs_dim,
+                    hidden_size=hidden_size,
+                    output_dim=self.action_dim + 1,
+                    num_layers=num_layers,
+                    device=self.device,
+                    seed=seed,
+                )
+            else:
+                self.actor.net = WarpMLP(
+                    (self.obs_dim, *self.hidden_layers, self.action_dim + 1),
+                    activation=activation,
+                    output_activation="linear",
+                    device=self.device,
+                    seed=seed,
+                    manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
+                    manual_forward_dtype=self.config.manual_mlp_forward_dtype,
+                )
             self.critic: WarpMLP | None = None
             self.critic_optimizer: Adam | Muon | None = None
         else:
@@ -513,6 +531,7 @@ class TrainerPPO:
             "action_dim": np.asarray(self.action_dim, dtype=np.int64),
             "hidden_layers": np.asarray(self.hidden_layers, dtype=np.int64),
             "activation": np.asarray(self.activation),
+            "policy_network": np.asarray(self.policy_network),
             "squash_actions": np.asarray(int(self.squash_actions), dtype=np.int64),
             "log_std_init": np.asarray(self.log_std_init, dtype=np.float32),
             "seed": np.asarray(self.seed, dtype=np.int64),
@@ -520,13 +539,13 @@ class TrainerPPO:
         }
         for key, value in asdict(self.config).items():
             data[f"config_{key}"] = np.asarray(value)
-        _pack_mlp(data, "actor", self.actor.net)
+        _pack_policy_network(data, "actor", self.actor.net)
         data["actor_log_std"] = self.actor.log_std.numpy()
         _pack_optimizer(data, "actor_optimizer", self.actor_optimizer)
         if not self.shared_value_network:
             if self.critic is None or self.critic_optimizer is None:
                 raise RuntimeError("separate critic state was not initialized")
-            _pack_mlp(data, "critic", self.critic)
+            _pack_policy_network(data, "critic", self.critic)
             _pack_optimizer(data, "critic_optimizer", self.critic_optimizer)
         checkpoint_path = Path(path)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -564,13 +583,13 @@ class TrainerPPO:
                 activation=str(data["activation"].item()),
                 log_std_init=float(data["log_std_init"]),
             )
-            _unpack_mlp(data, "actor", trainer.actor.net)
+            _unpack_policy_network(data, "actor", trainer.actor.net)
             trainer.actor.log_std.assign(data["actor_log_std"])
             _unpack_optimizer(data, "actor_optimizer", trainer.actor_optimizer)
             if not trainer.shared_value_network:
                 if trainer.critic is None or trainer.critic_optimizer is None:
                     raise RuntimeError("separate critic state was not initialized")
-                _unpack_mlp(data, "critic", trainer.critic)
+                _unpack_policy_network(data, "critic", trainer.critic)
                 _unpack_optimizer(data, "critic_optimizer", trainer.critic_optimizer)
             if "iteration" in data:
                 trainer.iteration = max(int(data["iteration"]), 0)
@@ -590,6 +609,31 @@ class TrainerPPO:
         if self.critic is None:
             raise RuntimeError("separate critic state was not initialized")
         return self.critic.forward_reuse(obs)
+
+    def reset_rollout_state(self, dones: wp.array[wp.float32] | None = None) -> None:
+        """Reset recurrent rollout state when the selected policy has one."""
+
+        reset_state = getattr(self.actor.net, "reset_state", None)
+        if reset_state is not None:
+            reset_state(dones)
+
+    def _set_update_sequence_shape(self, buffer: BufferRollout | BatchPPO) -> None:
+        set_sequence_shape = getattr(self.actor.net, "set_sequence_shape", None)
+        if set_sequence_shape is not None:
+            set_sequence_shape(buffer.num_steps, buffer.num_envs)
+
+    def _policy_update_reuse(
+        self, obs: wp.array2d[wp.float32], buffer: BufferRollout | BatchPPO
+    ) -> wp.array2d[wp.float32]:
+        forward_sequence_reuse = getattr(self.actor.net, "forward_sequence_reuse", None)
+        if forward_sequence_reuse is not None:
+            return forward_sequence_reuse(obs, num_steps=buffer.num_steps, num_envs=buffer.num_envs)
+        return self.actor.net.forward_reuse(obs)
+
+    def _value_reuse_for_update(self, buffer: BufferRollout | BatchPPO) -> wp.array2d[wp.float32]:
+        if self.shared_value_network:
+            return self._policy_update_reuse(buffer.obs, buffer)
+        return self.value_reuse(buffer.obs)
 
     def act(
         self,
@@ -1021,7 +1065,7 @@ class TrainerPPO:
         )
 
     def _scatter_minibatch_values(self, buffer: BufferRollout, batch: BatchPPO, segment_count: int) -> None:
-        values = self.value_reuse(batch.obs)
+        values = self._value_reuse_for_update(batch)
         wp.launch(
             scatter_trajectory_values_kernel,
             dim=batch.num_samples,
@@ -1050,10 +1094,11 @@ class TrainerPPO:
         if not (self.config.manual_actor_backward and self.config.manual_critic_backward):
             raise RuntimeError("shared_value_network requires manual actor and critic backward")
 
+        self._set_update_sequence_shape(buffer)
         mirror_obs = self._mirrored_obs(buffer)
         mirror_policy_out = None
         if mirror_obs is not None:
-            mirror_policy_out = self.actor.net.forward_reuse(mirror_obs)
+            mirror_policy_out = self._policy_update_reuse(mirror_obs, buffer)
 
         log_std_grad_partials, log_std_partial_count = self._ensure_actor_log_std_grad_partials(buffer.num_samples)
         wp.launch(
@@ -1550,6 +1595,24 @@ def _is_signed_involution(src: np.ndarray, sign: np.ndarray) -> bool:
     return True
 
 
+def _normalize_policy_network(policy_network: str) -> str:
+    key = str(policy_network).lower().replace("-", "_")
+    if key in ("mlp", "feedforward", "feed_forward"):
+        return "mlp"
+    if key in ("puffer_mingru", "mingru", "min_gru", "puffernet"):
+        return "puffer_mingru"
+    raise ValueError(f"Unsupported PPO policy_network {policy_network!r}")
+
+
+def _mingru_shape_from_hidden_layers(hidden_layers: tuple[int, ...]) -> tuple[int, int]:
+    if not hidden_layers:
+        raise ValueError("puffer_mingru policy_network requires at least one hidden layer width")
+    hidden_size = int(hidden_layers[0])
+    if any(int(width) != hidden_size for width in hidden_layers):
+        raise ValueError("puffer_mingru policy_network requires equal hidden layer widths")
+    return hidden_size, len(hidden_layers)
+
+
 def _make_optimizer(params: list[wp.array], config: ConfigPPO, *, lr: float) -> Adam | Muon:
     optimizer = str(config.optimizer).lower()
     if optimizer == "adam":
@@ -1581,18 +1644,42 @@ def _optimizer_type(optimizer: Adam | Muon) -> str:
     raise TypeError(f"Unsupported optimizer type {type(optimizer)!r}")
 
 
-def _pack_mlp(data: dict[str, np.ndarray], prefix: str, mlp: WarpMLP) -> None:
-    data[f"{prefix}_layer_count"] = np.asarray(len(mlp.weights), dtype=np.int64)
-    for index, (weight, bias) in enumerate(zip(mlp.weights, mlp.biases, strict=True)):
+def _pack_policy_network(data: dict[str, np.ndarray], prefix: str, network: WarpMLP | PufferMinGRUNet) -> None:
+    if isinstance(network, PufferMinGRUNet):
+        data[f"{prefix}_network_type"] = np.asarray("puffer_mingru")
+        data[f"{prefix}_hidden_size"] = np.asarray(network.hidden_size, dtype=np.int64)
+        data[f"{prefix}_recurrent_layer_count"] = np.asarray(network.num_layers, dtype=np.int64)
+        data[f"{prefix}_encoder_weight"] = network.encoder_weight.numpy()
+        data[f"{prefix}_decoder_weight"] = network.decoder_weight.numpy()
+        for index, weight in enumerate(network.recurrent_weights):
+            data[f"{prefix}_recurrent_weight_{index}"] = weight.numpy()
+        return
+    data[f"{prefix}_network_type"] = np.asarray("mlp")
+    data[f"{prefix}_layer_count"] = np.asarray(len(network.weights), dtype=np.int64)
+    for index, (weight, bias) in enumerate(zip(network.weights, network.biases, strict=True)):
         data[f"{prefix}_weight_{index}"] = weight.numpy()
         data[f"{prefix}_bias_{index}"] = bias.numpy()
 
 
-def _unpack_mlp(data: np.lib.npyio.NpzFile, prefix: str, mlp: WarpMLP) -> None:
+def _unpack_policy_network(data: np.lib.npyio.NpzFile, prefix: str, network: WarpMLP | PufferMinGRUNet) -> None:
+    saved_type = str(data[f"{prefix}_network_type"].item()) if f"{prefix}_network_type" in data else "mlp"
+    if isinstance(network, PufferMinGRUNet):
+        if saved_type != "puffer_mingru":
+            raise ValueError(f"Checkpoint {prefix} network type {saved_type!r} does not match puffer_mingru")
+        layer_count = int(data[f"{prefix}_recurrent_layer_count"])
+        if layer_count != network.num_layers:
+            raise ValueError(f"Checkpoint {prefix} recurrent layer count does not match trainer")
+        network.encoder_weight.assign(data[f"{prefix}_encoder_weight"])
+        network.decoder_weight.assign(data[f"{prefix}_decoder_weight"])
+        for index, weight in enumerate(network.recurrent_weights):
+            weight.assign(data[f"{prefix}_recurrent_weight_{index}"])
+        return
+    if saved_type != "mlp":
+        raise ValueError(f"Checkpoint {prefix} network type {saved_type!r} does not match mlp")
     layer_count = int(data[f"{prefix}_layer_count"])
-    if layer_count != len(mlp.weights):
+    if layer_count != len(network.weights):
         raise ValueError(f"Checkpoint {prefix} layer count does not match trainer")
-    for index, (weight, bias) in enumerate(zip(mlp.weights, mlp.biases, strict=True)):
+    for index, (weight, bias) in enumerate(zip(network.weights, network.biases, strict=True)):
         weight.assign(data[f"{prefix}_weight_{index}"])
         bias.assign(data[f"{prefix}_bias_{index}"])
 

@@ -775,6 +775,7 @@ def evaluate_g1_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1PPO | None = No
         raise ValueError("Trainer dimensions do not match the G1 environment")
 
     obs = env.reset()
+    trainer.reset_rollout_state()
     reward_sum = 0.0
     done_sum = 0.0
     tracking_perf_sum = 0.0
@@ -1206,6 +1207,7 @@ def _evaluate_g1_gate_battery(
 
     env.set_commands(command_np)
     obs = env.reset_noisy(seed=int(cfg.seed))
+    trainer.reset_rollout_state()
     for step in range(int(cfg.battery_steps)):
         actions, _log_probs, _values = trainer.act(
             obs, seed=int(cfg.seed) + step, deterministic=bool(cfg.deterministic)
@@ -1227,6 +1229,7 @@ def _evaluate_g1_gate_battery(
         yaw_err_sum += np.bincount(command_ids, weights=yaw_err, minlength=commands.shape[0])
         sample_count += samples_per_step
         if np.any(done_np):
+            trainer.reset_rollout_state(dones)
             obs = _reset_g1_done_worlds(env)
 
     stats = []
@@ -1251,6 +1254,7 @@ def _evaluate_g1_gate_diagnostics(
     trainer: TrainerPPO, env: EnvG1PhoenX, cfg: ConfigEvaluateG1GatePPO
 ) -> tuple[int, int, float, float, float, float]:
     obs = env.reset()
+    trainer.reset_rollout_state()
     falls = 0
     valid_samples = 0
     jerk_sum = 0.0
@@ -1292,6 +1296,7 @@ def _evaluate_g1_gate_diagnostics(
             leg_qvel_count += int(leg_qvel.size)
             valid_samples += int(qd_valid.shape[0])
         if np.any(done_np):
+            trainer.reset_rollout_state(dones)
             obs = _reset_g1_done_worlds(env)
 
     action_jerk = float(np.sqrt(jerk_sum / float(max(jerk_count, 1))))

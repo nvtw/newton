@@ -205,6 +205,7 @@ def _collect_ppo_rollout_impl(
             outputs=[buffer.rewards, buffer.dones, buffer.successes],
             device=env.device,
         )
+        trainer.reset_rollout_state(dones)
         obs = next_obs
 
     final_values = trainer.value_reuse(obs)

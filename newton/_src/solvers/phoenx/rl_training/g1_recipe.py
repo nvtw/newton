@@ -55,6 +55,7 @@ TRAIN_ITERATIONS = 100
 ROLLOUT_STEPS = 64
 HIDDEN_LAYERS = (128, 128, 128)
 ACTIVATION = "relu"
+POLICY_NETWORK = "puffer_mingru"
 LOG_STD_INIT = -0.5
 SQUASH_ACTIONS = False
 SEED = 42
@@ -181,6 +182,7 @@ def default_g1_ppo_config(**overrides: Any):
         "manual_actor_backward": MANUAL_ACTOR_BACKWARD,
         "manual_critic_backward": MANUAL_CRITIC_BACKWARD,
         "shared_value_network": SHARED_VALUE_NETWORK,
+        "policy_network": POLICY_NETWORK,
         "manual_mlp_weight_grad_dtype": MANUAL_MLP_WEIGHT_GRAD_DTYPE,
         "manual_mlp_forward_dtype": MANUAL_MLP_FORWARD_DTYPE,
         "vtrace_rho_clip": VTRACE_RHO_CLIP,
