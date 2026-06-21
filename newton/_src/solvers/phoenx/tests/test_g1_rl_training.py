@@ -260,6 +260,9 @@ class TestG1PhoenXRL(unittest.TestCase):
         header = _NANOG1_ROOT / "web" / "g1_model_const.h"
         key_qpos = _read_c_array(header, "hc_key_qpos")
         ctrl_range = _read_c_array(header, "hc_act_ctrlrange").reshape(rl.ACTION_DIM_G1, 2)
+        act_gain0 = _read_c_array(header, "hc_act_gain0")
+        act_bias2 = _read_c_array(header, "hc_act_bias2")
+        jnt_actfrcrange = _read_c_array(header, "hc_jnt_actfrcrange").reshape(rl.ACTION_DIM_G1 + 1, 2)[1:]
         dof_damping = _read_c_array(header, "hc_dof_damping")
         dof_frictionloss = _read_c_array(header, "hc_dof_frictionloss")
 
@@ -273,8 +276,16 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         expected_kp = deploy.KP.astype(np.float32)
         expected_kd = deploy.KD.astype(np.float32) + dof_damping[6 : 6 + rl.ACTION_DIM_G1].astype(np.float32)
+        expected_force_kd = np.zeros(rl.ACTION_DIM_G1, dtype=np.float32)
+        expected_force_kd[: g1_recipe.CONTROLLED_ACTION_COUNT] = deploy.KD[: g1_recipe.CONTROLLED_ACTION_COUNT]
         np.testing.assert_allclose(env.actuator_ke.numpy(), expected_kp, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_kd.numpy(), expected_kd, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.actuator_force_kp.numpy(), expected_kp, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.actuator_force_kp.numpy()[12:], act_gain0[12:], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.actuator_force_kd.numpy(), expected_force_kd, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(act_bias2, np.zeros_like(act_bias2), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(env.actuator_force_lower.numpy(), jnt_actfrcrange[:, 0], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.actuator_force_upper.numpy(), jnt_actfrcrange[:, 1], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(
             env.model.joint_friction.numpy()[6 : 6 + rl.ACTION_DIM_G1],
             dof_frictionloss[6 : 6 + rl.ACTION_DIM_G1],
@@ -1304,21 +1315,33 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(current_actions[:, :12], 1.0, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(current_actions[:, 12:], 0.0, rtol=0.0, atol=0.0)
 
-    def test_actuator_force_gather_uses_solver_drive_impulses_inside_graph(self) -> None:
+    def test_actuator_force_matches_nanog1_model_formula_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 actuator-force gather tests")
         env = rl.EnvG1PhoenX(
             rl.ConfigEnvG1PhoenX(
                 world_count=1,
                 sim_substeps=1,
-                solver_iterations=4,
+                solver_iterations=1,
                 velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
                 max_episode_steps=0,
                 auto_reset=False,
             ),
             device=device,
         )
+        q = env.state_0.joint_q.numpy()
+        qd = env.state_0.joint_qd.numpy()
+        q_before = q.copy()
+        qd_before = qd.copy()
+        q_before[7 : 7 + rl.ACTION_DIM_G1] = env.default_joint_pos.numpy()
+        q_before[8] = env.default_joint_pos.numpy()[1] - np.float32(3.0)
+        q_before[20] = env.default_joint_pos.numpy()[13] + np.float32(1.5)
+        qd_before[:] = 0.0
+        qd_before[6 : 6 + rl.ACTION_DIM_G1] = np.linspace(-3.0, 2.0, rl.ACTION_DIM_G1, dtype=np.float32)
+        env.state_0.joint_q.assign(q_before)
+        env.state_0.joint_qd.assign(qd_before)
+
         actions_np = np.zeros((1, rl.ACTION_DIM_G1), dtype=np.float32)
-        actions_np[0, : g1_recipe.CONTROLLED_ACTION_COUNT] = np.linspace(0.3, -0.3, 12, dtype=np.float32)
+        actions_np[0, : g1_recipe.CONTROLLED_ACTION_COUNT] = np.linspace(0.8, -0.8, 12, dtype=np.float32)
         actions = wp.array(actions_np, dtype=wp.float32, device=device)
 
         with wp.ScopedCapture(device=device) as capture:
@@ -1326,23 +1349,29 @@ class TestG1PhoenXRL(unittest.TestCase):
         wp.capture_launch(capture.graph)
         wp.synchronize_device(device)
 
-        actuator_force = env.actuator_force.numpy()
-        self.assertTrue(np.isfinite(actuator_force).all())
-        self.assertGreater(float(np.max(np.abs(actuator_force))), 1.0e-4)
+        expected_actions = np.clip(actions_np[0], -1.0, 1.0)
+        expected_actions[g1_recipe.CONTROLLED_ACTION_COUNT :] = 0.0
+        target = env.default_joint_pos.numpy() + np.float32(env.config.action_scale) * expected_actions
+        target = np.clip(target, env.ctrl_lower.numpy(), env.ctrl_upper.numpy())
+        expected_force = env.actuator_force_kp.numpy() * (target - q_before[7 : 7 + rl.ACTION_DIM_G1])
+        expected_force -= env.actuator_force_kd.numpy() * qd_before[6 : 6 + rl.ACTION_DIM_G1]
+        expected_force = np.clip(expected_force, env.actuator_force_lower.numpy(), env.actuator_force_upper.numpy())
+        np.testing.assert_allclose(env.actuator_force.numpy()[0], expected_force, rtol=1.0e-6, atol=1.0e-6)
+        self.assertEqual(float(env.actuator_force.numpy()[0, 1]), float(env.actuator_force_upper.numpy()[1]))
+        self.assertEqual(float(env.actuator_force.numpy()[0, 13]), float(env.actuator_force_lower.numpy()[13]))
 
-        sub_dt = env.config.frame_dt / env.config.sim_substeps
-        with wp.ScopedCapture(device=device) as gather_capture:
-            env._gather_actuator_force(sub_dt * 2.0)
-        wp.capture_launch(gather_capture.graph)
-        half_scaled_force = env.actuator_force.numpy()
-        np.testing.assert_allclose(half_scaled_force, actuator_force * 0.5, rtol=2.0e-5, atol=2.0e-6)
+        old_drive_proxy = env.actuator_ke.numpy() * (target - q_before[7 : 7 + rl.ACTION_DIM_G1])
+        old_drive_proxy -= env.actuator_kd.numpy() * qd_before[6 : 6 + rl.ACTION_DIM_G1]
+        self.assertGreater(abs(float(old_drive_proxy[13] - expected_force[13])), 1.0)
 
         env.dones.assign(np.ones(env.world_count, dtype=np.float32))
         seed_counter = make_seed_counter(11, device=device)
         with wp.ScopedCapture(device=device) as reset_capture:
             env.reset_done_seed_counter(seed_counter)
         wp.capture_launch(reset_capture.graph)
-        np.testing.assert_allclose(env.actuator_force.numpy(), np.zeros_like(actuator_force), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            env.actuator_force.numpy(), np.zeros_like(env.actuator_force.numpy()), rtol=0.0, atol=0.0
+        )
 
     def test_graph_replay_advances_policy_steps(self) -> None:
         env = _g1_test_env(world_count=1)

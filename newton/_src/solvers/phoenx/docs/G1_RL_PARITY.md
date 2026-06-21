@@ -32,17 +32,20 @@ PufferLib G1 fork `kingjulio8238/PufferLib`, branch `g1`, pinned at commit
 - G1 v3 reward decomposition for a deterministic state, including actual
   actuator-force torque penalty, gait phase, contact/swing/hip/base-height
   shaping, action-rate penalty, dt scaling, done, and success metrics.
-- Graph-captured G1 actuator-force gather from PhoenX ADBS drive impulses,
-  including reset clearing so stale force cannot leak across episodes.
+- Graph-captured G1 actuator-force gather using nanoG1's actuator-model formula,
+  including force clamps and reset clearing so stale force cannot leak across
+  episodes.
 
 All of these tests run CUDA-only and use Warp CUDA graph capture.
 
 ## Current Difference List
 
-- PhoenX now feeds the G1 torque penalty from the solver's actual ADBS drive
-  impulse converted to force on the final physics substep. nanoG1 uses MuJoCo
-  `g_af`; the remaining semantic question is whether final-substep force or a
-  decimation aggregate best matches MuJoCo's post-step actuator-force buffer.
+- PhoenX now feeds the G1 torque penalty from the same actuator-model force
+  signal nanoG1 writes to `g_af`: clamped `kp * (target - q) - kd * qd` for
+  the 12 Unitree leg actuators and clamped model position-actuator force for
+  the remaining waist/arm actuators. The signal is gathered before the final
+  decimation substep solve, matching nanoG1's `k3_rne_act_solve -> ... ->
+  k_epi` ordering.
 - The local generic PufferLib checkout is branch `4.0` at `e90b58ed`, not the
   nanoG1 G1 fork. Parity work should use the nanoG1 recipe/deploy files plus
   the pinned fork source above.
@@ -60,9 +63,8 @@ latest diagnostic still shows unstable velocity outliers.
 
 ## Next Checks
 
-1. Compare final-substep PhoenX actuator force against nanoG1/MuJoCo `g_af` on
-   component-level drive scenarios and decide whether a decimation aggregate is
-   needed.
+1. Compare PhoenX drive dynamics against nanoG1/MuJoCo component scenarios now
+   that the reward force uses nanoG1's actuator-model signal.
 2. Run longer train-to-gate checkpoints after each quality fix and compare
    learning curves, not just final throughput.
 3. Keep profiling after correctness changes; optimize kernels only when the
