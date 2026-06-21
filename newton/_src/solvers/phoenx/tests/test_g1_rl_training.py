@@ -21,6 +21,8 @@ from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.kernels import (
+    DENSE_TILE_IN,
+    DENSE_TILE_OUT,
     PPO_LOG_STD_PARTIAL_BATCH,
     compute_vtrace_returns_kernel,
     ppo_actor_loss_backward_kernel,
@@ -32,6 +34,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     zero_ppo_actor_stats_kernel,
     zero_scalar_kernel,
 )
+from newton._src.solvers.phoenx.rl_training.networks import _BF16_FORWARD_MIN_BATCH
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 _NANOG1_ROOT = Path("/home/twidmer/Documents/git/nanoG1")
@@ -1178,6 +1181,39 @@ class TestG1PhoenXRL(unittest.TestCase):
             expected = expected @ weight.numpy() + bias.numpy()
             if layer < len(trainer.actor.net.weights) - 1:
                 expected = np.maximum(expected, 0.0)
+        np.testing.assert_allclose(out.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
+
+    def test_bf16_tiled_mlp_forward_matches_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 BF16 MLP forward tests")
+        batch_size = _BF16_FORWARD_MIN_BATCH
+        input_dim = DENSE_TILE_IN
+        output_dim = max(64, DENSE_TILE_OUT)
+        obs_np = ((np.arange(batch_size * input_dim, dtype=np.float32) % 17.0) - 8.0).reshape(
+            batch_size, input_dim
+        ) / np.float32(16.0)
+        weight_np = ((np.arange(input_dim * output_dim, dtype=np.float32) % 13.0) - 6.0).reshape(
+            input_dim, output_dim
+        ) / np.float32(32.0)
+        bias_np = ((np.arange(output_dim, dtype=np.float32) % 7.0) - 3.0) / np.float32(64.0)
+
+        net = rl.WarpMLP(
+            (input_dim, output_dim),
+            activation="linear",
+            device=device,
+            seed=7,
+            manual_forward_dtype="bfloat16",
+        )
+        net.weights[0].assign(weight_np)
+        net.biases[0].assign(bias_np)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        out = net.forward_reuse(obs)
+        self.assertTrue(net._uses_bf16_forward(obs, net.weights[0], batch_size))
+
+        with wp.ScopedCapture(device=device) as capture:
+            net.forward_reuse(obs)
+        wp.capture_launch(capture.graph)
+
+        expected = obs_np @ weight_np + bias_np
         np.testing.assert_allclose(out.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
 
     def test_puffernet_linear_layer_matches_warp_mlp_in_graph(self) -> None:
