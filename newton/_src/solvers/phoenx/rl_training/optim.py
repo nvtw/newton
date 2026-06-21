@@ -56,6 +56,7 @@ class Adam:
             raise ValueError("Adam requires at least one parameter")
         self.params = params
         self.lr = float(lr)
+        self.lr_scale = wp.ones(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
         self.beta1 = float(beta1)
         self.beta2 = float(beta2)
         self.eps = float(eps)
@@ -141,6 +142,7 @@ class Adam:
                         self._grad_sumsq,
                         self._step_corrections,
                         self.lr,
+                        self.lr_scale,
                         self.beta1,
                         self.beta2,
                         self.eps,
@@ -161,6 +163,7 @@ class Adam:
                         self._grad_sumsq,
                         self._step_corrections,
                         self.lr,
+                        self.lr_scale,
                         self.beta1,
                         self.beta2,
                         self.eps,
@@ -221,6 +224,7 @@ class Muon:
                 raise ValueError(f"Muon only supports 1-D and 2-D arrays, got ndim={param.ndim}")
         self.params = params
         self.lr = float(lr)
+        self.lr_scale = wp.ones(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
         self.momentum_coeff = float(momentum)
         self.eps = float(eps)
         self.weight_decay = float(weight_decay)
@@ -313,6 +317,7 @@ class Muon:
                         momentum_buffer,
                         self._grad_sumsq,
                         self.lr,
+                        self.lr_scale,
                         self.momentum_coeff,
                         self.weight_decay,
                         max_grad_norm,
@@ -394,7 +399,7 @@ class Muon:
             wp.launch(
                 muon_step_2d_kernel,
                 dim=param.shape,
-                inputs=[param, grad, src, self.lr, self.weight_decay, float(scale)],
+                inputs=[param, grad, src, self.lr, self.lr_scale, self.weight_decay, float(scale)],
                 device=param.device,
             )
 

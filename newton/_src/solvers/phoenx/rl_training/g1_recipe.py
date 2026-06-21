@@ -64,6 +64,9 @@ VALUE_LOSS_COEFF = 0.5
 VALUE_CLIP_RANGE = 20.0
 ACTOR_LR = 2.0e-2
 CRITIC_LR = 2.0e-2
+ANNEAL_LR = True
+LR_ANNEAL_TIMESTEPS = 150_000_000
+MIN_LR_RATIO = 0.0
 OPTIMIZER = "muon"
 OPTIMIZER_EPS = 1.0e-12
 OPTIMIZER_WEIGHT_DECAY = 0.0
@@ -140,6 +143,9 @@ def default_g1_ppo_config(**overrides: Any):
         "value_clip_range": VALUE_CLIP_RANGE,
         "actor_lr": ACTOR_LR,
         "critic_lr": CRITIC_LR,
+        "anneal_lr": ANNEAL_LR,
+        "lr_anneal_timesteps": LR_ANNEAL_TIMESTEPS,
+        "min_lr_ratio": MIN_LR_RATIO,
         "optimizer": OPTIMIZER,
         "optimizer_eps": OPTIMIZER_EPS,
         "optimizer_weight_decay": OPTIMIZER_WEIGHT_DECAY,

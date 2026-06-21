@@ -22,6 +22,7 @@ from .kernels import (
     pack_ppo_update_stats_kernel,
     ppo_actor_loss_backward_kernel,
     ppo_actor_loss_kernel,
+    ppo_lr_scale_kernel,
     reduce_ppo_log_std_grad_kernel,
     rollout_reward_done_success_sums_kernel,
     sample_trajectory_env_ids_kernel,
@@ -79,6 +80,11 @@ class ConfigPPO:
             clipping.
         actor_lr: Actor optimizer learning rate.
         critic_lr: Critic optimizer learning rate.
+        anneal_lr: Whether to cosine-anneal optimizer learning rates.
+        lr_anneal_timesteps: Environment samples over which the learning rate
+            anneals toward ``min_lr_ratio``. A value less than or equal to zero
+            disables annealing.
+        min_lr_ratio: Final learning-rate ratio for cosine annealing.
         optimizer: Optimizer implementation, either ``"adam"`` or ``"muon"``.
         optimizer_eps: Numerical stabilizer for the selected optimizer.
         optimizer_weight_decay: Decoupled weight decay for the selected optimizer.
@@ -130,6 +136,9 @@ class ConfigPPO:
     value_clip_range: float = 0.0
     actor_lr: float = 3.0e-4
     critic_lr: float = 1.0e-3
+    anneal_lr: bool = False
+    lr_anneal_timesteps: int = 0
+    min_lr_ratio: float = 0.0
     optimizer: str = "adam"
     optimizer_eps: float = 1.0e-8
     optimizer_weight_decay: float = 0.0
@@ -424,7 +433,8 @@ class TrainerPPO:
             )
             self.critic_optimizer = _make_optimizer(self.critic.parameters(), self.config, lr=self.config.critic_lr)
         self.actor_optimizer = _make_optimizer(self.actor.parameters(), self.config, lr=self.config.actor_lr)
-        self.iteration = 0
+        self._iteration = 0
+        self._iteration_counter = wp.array([0], dtype=wp.int32, device=self.device)
         self.mirror_map: MirrorMapPPO | None = None
         self._mirror_obs_src: wp.array[wp.int32] | None = None
         self._mirror_obs_sign: wp.array[wp.float32] | None = None
@@ -450,6 +460,18 @@ class TrainerPPO:
         self._clip_fraction = wp.zeros(1, dtype=wp.float32, device=self.device)
         self._update_stats = wp.zeros(4, dtype=wp.float32, device=self.device)
         self._update_stats_host = wp.empty(4, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
+
+    @property
+    def iteration(self) -> int:
+        """Number of PPO rollout-update iterations already applied."""
+
+        return self._iteration
+
+    @iteration.setter
+    def iteration(self, value: int) -> None:
+        self._iteration = max(int(value), 0)
+        if hasattr(self, "_iteration_counter"):
+            self._iteration_counter.assign(np.asarray([self._iteration], dtype=np.int32))
 
     def set_mirror_map(self, mirror_map: MirrorMapPPO | None) -> None:
         """Set or clear the optional PPO symmetry map."""
@@ -714,6 +736,7 @@ class TrainerPPO:
     ) -> StatsPPOUpdate:
         if buffer.obs_dim != self.obs_dim or buffer.action_dim != self.action_dim:
             raise ValueError("BufferRollout dimensions do not match trainer dimensions")
+        self._apply_lr_schedule(buffer.num_samples)
         if self._uses_minibatch_replay(buffer):
             return self._update_minibatches(buffer, read_stats=read_stats, seed_counter=seed_counter)
 
@@ -736,11 +759,35 @@ class TrainerPPO:
             else:
                 policy_loss, approx_kl, clip_fraction = self._update_actor(buffer, read_stats=epoch_read_stats)
                 value_loss = self._update_critic(buffer, read_stats=epoch_read_stats)
+        wp.launch(
+            seed_counter_increment_kernel,
+            dim=1,
+            inputs=[self._iteration_counter, 1],
+            device=self.device,
+        )
         return StatsPPOUpdate(
             policy_loss=policy_loss,
             value_loss=value_loss,
             approx_kl=approx_kl,
             clip_fraction=clip_fraction,
+        )
+
+    def _apply_lr_schedule(self, num_samples: int) -> None:
+        critic_lr_scale = (
+            self.critic_optimizer.lr_scale if self.critic_optimizer is not None else self.actor_optimizer.lr_scale
+        )
+        wp.launch(
+            ppo_lr_scale_kernel,
+            dim=1,
+            inputs=[
+                self._iteration_counter,
+                int(num_samples),
+                int(bool(self.config.anneal_lr)),
+                int(self.config.lr_anneal_timesteps),
+                float(self.config.min_lr_ratio),
+            ],
+            outputs=[self.actor_optimizer.lr_scale, critic_lr_scale],
+            device=self.device,
         )
 
     def _uses_minibatch_replay(self, buffer: BufferRollout) -> bool:
@@ -839,6 +886,12 @@ class TrainerPPO:
                 inputs=[seed_counter, 1000003],
                 device=self.device,
             )
+        wp.launch(
+            seed_counter_increment_kernel,
+            dim=1,
+            inputs=[self._iteration_counter, 1],
+            device=self.device,
+        )
 
         return StatsPPOUpdate(
             policy_loss=policy_loss,
@@ -1614,6 +1667,7 @@ def _config_from_checkpoint(data: np.lib.npyio.NpzFile) -> ConfigPPO:
         if key in data:
             value = data[key].item()
             if field in (
+                "anneal_lr",
                 "manual_actor_backward",
                 "manual_critic_backward",
                 "normalize_advantages",

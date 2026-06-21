@@ -778,6 +778,59 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertFalse(np.allclose(first_joints, second_joints))
         np.testing.assert_array_equal(seed_counter.numpy(), np.array([23], dtype=np.int32))
 
+    def test_ppo_lr_anneal_updates_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX PPO LR anneal test")
+        buffer = rl.BufferRollout(num_steps=2, num_envs=2, obs_dim=4, action_dim=2, device=device)
+        obs = np.array(
+            [
+                [0.0, 0.1, 0.2, 0.3],
+                [0.4, 0.5, 0.6, 0.7],
+                [0.8, 0.9, 1.0, 1.1],
+                [1.2, 1.3, 1.4, 1.5],
+            ],
+            dtype=np.float32,
+        )
+        buffer.obs.assign(obs)
+        buffer.actions.assign(np.zeros((buffer.num_samples, buffer.action_dim), dtype=np.float32))
+        buffer.old_log_probs.assign(np.zeros(buffer.num_samples, dtype=np.float32))
+        buffer.advantages.assign(np.array([1.0, -1.0, 0.5, -0.5], dtype=np.float32))
+        buffer.returns.assign(np.array([0.2, -0.2, 0.1, -0.1], dtype=np.float32))
+
+        config = rl.ConfigPPO(
+            actor_lr=1.0e-3,
+            critic_lr=1.0e-3,
+            anneal_lr=True,
+            lr_anneal_timesteps=buffer.num_samples * 2,
+            min_lr_ratio=0.0,
+            train_epochs=1,
+            manual_actor_backward=True,
+            manual_critic_backward=True,
+            normalize_advantages=True,
+            value_loss_coeff=0.5,
+            max_grad_norm=0.3,
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=buffer.obs_dim,
+            action_dim=buffer.action_dim,
+            hidden_layers=(8,),
+            config=config,
+            device=device,
+            seed=5,
+            squash_actions=False,
+            activation="relu",
+        )
+        trainer.reserve_update_buffers(buffer)
+        seed_counter = make_seed_counter(123, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            trainer.update_seed_counter(buffer, seed_counter=seed_counter, read_stats=False)
+
+        wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(trainer.actor_optimizer.lr_scale.numpy(), np.array([1.0], dtype=np.float32))
+        wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(trainer.actor_optimizer.lr_scale.numpy(), np.array([0.5], dtype=np.float32))
+        np.testing.assert_array_equal(trainer._iteration_counter.numpy(), np.array([2], dtype=np.int32))
+
     def test_reset_done_clears_contact_warmstart_inside_graph(self) -> None:
         env = _g1_test_env(world_count=2)
         shape_world = env.model.shape_world.numpy()

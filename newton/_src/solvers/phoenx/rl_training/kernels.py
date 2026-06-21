@@ -1221,6 +1221,7 @@ def adam_step_1d_kernel(
     grad_sumsq: wp.array[wp.float32],
     step_corrections: wp.array[wp.float32],
     lr: wp.float32,
+    lr_scale: wp.array[wp.float32],
     beta1: wp.float32,
     beta2: wp.float32,
     eps: wp.float32,
@@ -1235,7 +1236,8 @@ def adam_step_1d_kernel(
     vi = beta2 * v[i] + (wp.float32(1.0) - beta2) * g * g
     m[i] = mi
     v[i] = vi
-    param[i] = param[i] - lr * (mi / beta1_correction) / (wp.sqrt(vi / beta2_correction) + eps)
+    step_lr = lr * lr_scale[0]
+    param[i] = param[i] - step_lr * (mi / beta1_correction) / (wp.sqrt(vi / beta2_correction) + eps)
     grad[i] = wp.float32(0.0)
 
 
@@ -1248,6 +1250,7 @@ def adam_step_2d_kernel(
     grad_sumsq: wp.array[wp.float32],
     step_corrections: wp.array[wp.float32],
     lr: wp.float32,
+    lr_scale: wp.array[wp.float32],
     beta1: wp.float32,
     beta2: wp.float32,
     eps: wp.float32,
@@ -1262,7 +1265,8 @@ def adam_step_2d_kernel(
     vi = beta2 * v[i, j] + (wp.float32(1.0) - beta2) * g * g
     m[i, j] = mi
     v[i, j] = vi
-    param[i, j] = param[i, j] - lr * (mi / beta1_correction) / (wp.sqrt(vi / beta2_correction) + eps)
+    step_lr = lr * lr_scale[0]
+    param[i, j] = param[i, j] - step_lr * (mi / beta1_correction) / (wp.sqrt(vi / beta2_correction) + eps)
     grad[i, j] = wp.float32(0.0)
 
 
@@ -1272,12 +1276,35 @@ def optimizer_step_count_kernel(step_count: wp.array[wp.int32]):
 
 
 @wp.kernel
+def ppo_lr_scale_kernel(
+    iteration: wp.array[wp.int32],
+    num_samples: wp.int32,
+    anneal_lr: wp.int32,
+    anneal_timesteps: wp.int32,
+    min_lr_ratio: wp.float32,
+    actor_lr_scale: wp.array[wp.float32],
+    critic_lr_scale: wp.array[wp.float32],
+):
+    scale = wp.float32(1.0)
+    if anneal_lr != wp.int32(0) and anneal_timesteps > wp.int32(0):
+        progress = wp.float32(iteration[0]) * wp.float32(num_samples) / wp.float32(anneal_timesteps)
+        progress = wp.min(wp.max(progress, wp.float32(0.0)), wp.float32(1.0))
+        min_ratio = wp.min(wp.max(min_lr_ratio, wp.float32(0.0)), wp.float32(1.0))
+        scale = min_ratio + wp.float32(0.5) * (wp.float32(1.0) - min_ratio) * (
+            wp.float32(1.0) + wp.cos(wp.float32(3.141592653589793) * progress)
+        )
+    actor_lr_scale[0] = scale
+    critic_lr_scale[0] = scale
+
+
+@wp.kernel
 def muon_step_1d_kernel(
     param: wp.array[wp.float32],
     grad: wp.array[wp.float32],
     momentum_buffer: wp.array[wp.float32],
     grad_sumsq: wp.array[wp.float32],
     lr: wp.float32,
+    lr_scale: wp.array[wp.float32],
     momentum: wp.float32,
     weight_decay: wp.float32,
     max_grad_norm: wp.float32,
@@ -1287,7 +1314,8 @@ def muon_step_1d_kernel(
     m = momentum * momentum_buffer[i] + g
     momentum_buffer[i] = m
     update = g + momentum * m
-    param[i] = param[i] * (wp.float32(1.0) - lr * weight_decay) - lr * update
+    step_lr = lr * lr_scale[0]
+    param[i] = param[i] * (wp.float32(1.0) - step_lr * weight_decay) - step_lr * update
     grad[i] = wp.float32(0.0)
 
 
@@ -1383,9 +1411,11 @@ def muon_step_2d_kernel(
     grad: wp.array2d[wp.float32],
     update: wp.array2d[wp.float32],
     lr: wp.float32,
+    lr_scale: wp.array[wp.float32],
     weight_decay: wp.float32,
     scale: wp.float32,
 ):
     i, j = wp.tid()
-    param[i, j] = param[i, j] * (wp.float32(1.0) - lr * weight_decay) - lr * scale * update[i, j]
+    step_lr = lr * lr_scale[0]
+    param[i, j] = param[i, j] * (wp.float32(1.0) - step_lr * weight_decay) - step_lr * scale * update[i, j]
     grad[i, j] = wp.float32(0.0)
