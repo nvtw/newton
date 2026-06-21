@@ -17,6 +17,8 @@ FRAME_DT = 1.0 / 50.0
 SIM_SUBSTEPS = 10
 SOLVER_ITERATIONS = 4
 VELOCITY_ITERATIONS = 1
+JOINT_FRICTION_MODEL = "mujoco"
+JOINT_FRICTION_SCALE = 1.0
 ACTION_SCALE = 0.25
 CONTROLLED_ACTION_COUNT = 12
 COMMAND = (0.8, 0.0, 0.0)
@@ -111,6 +113,8 @@ def default_g1_env_config(**overrides: Any):
         "sim_substeps": SIM_SUBSTEPS,
         "solver_iterations": SOLVER_ITERATIONS,
         "velocity_iterations": VELOCITY_ITERATIONS,
+        "joint_friction_model": JOINT_FRICTION_MODEL,
+        "joint_friction_scale": JOINT_FRICTION_SCALE,
         "action_scale": ACTION_SCALE,
         "controlled_action_count": CONTROLLED_ACTION_COUNT,
         "command": COMMAND,

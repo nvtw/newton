@@ -11,6 +11,8 @@ slot 0 is the static world anchor, so Newton body ``i`` maps to PhoenX slot
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 import warp as wp
 
@@ -117,6 +119,35 @@ def _classify_d6_legacy_mode(
     return None, -1
 
 
+def _friction_slip_scale_from_mujoco(solref: np.ndarray | None, solimp: np.ndarray | None) -> float:
+    """Return MuJoCo friction slip scale from ``solreffriction/solimpfriction``.
+
+    MuJoCo frictionloss rows use ``R = (1 - impedance) / impedance * dA`` and
+    ``B = 2 / (dmax * timeconst)`` for positive-format ``solref``. PhoenX does
+    not know the row inverse effective mass until prepare, so the adapter stores
+    ``R / (B * dA)`` and the device row later multiplies by the current axial
+    inverse effective mass and friction limit.
+    """
+
+    if solref is None or solimp is None:
+        return -1.0
+    solref = np.asarray(solref, dtype=np.float32).reshape(-1)
+    solimp = np.asarray(solimp, dtype=np.float32).reshape(-1)
+    if len(solref) < 2 or len(solimp) < 2:
+        return -1.0
+    imp = float(np.clip(float(solimp[0]), 0.0001, 0.9999))
+    dmax = float(np.clip(float(solimp[1]), 0.0001, 0.9999))
+    timeconst = float(solref[0])
+    direct_damping = float(solref[1])
+    if timeconst > 0.0:
+        damping = 2.0 / max(1.0e-15, dmax * timeconst)
+    elif direct_damping < 0.0:
+        damping = -direct_damping / max(1.0e-15, dmax)
+    else:
+        return -1.0
+    return float(((1.0 - imp) / max(1.0e-15, imp)) / max(1.0e-15, damping))
+
+
 def _append_d6_angular_limit(
     qd: int,
     coord_offset: int,
@@ -189,6 +220,7 @@ class AdbsInitArrays:
         damping_limit: wp.array,
         armature: wp.array,
         friction_coefficient: wp.array,
+        friction_slip_scale: wp.array,
         d6_limit_axis0: wp.array,
         d6_limit_axis1: wp.array,
         d6_limit_axis2: wp.array,
@@ -226,6 +258,7 @@ class AdbsInitArrays:
         self.damping_limit = damping_limit
         self.armature = armature
         self.friction_coefficient = friction_coefficient
+        self.friction_slip_scale = friction_slip_scale
         self.d6_limit_axis0 = d6_limit_axis0
         self.d6_limit_axis1 = d6_limit_axis1
         self.d6_limit_axis2 = d6_limit_axis2
@@ -270,6 +303,7 @@ class AdbsInitArrays:
             "damping_limit": self.damping_limit,
             "armature": self.armature,
             "friction_coefficient": self.friction_coefficient,
+            "friction_slip_scale": self.friction_slip_scale,
             "d6_limit_axis0": self.d6_limit_axis0,
             "d6_limit_axis1": self.d6_limit_axis1,
             "d6_limit_axis2": self.d6_limit_axis2,
@@ -301,8 +335,16 @@ def _newton_target_mode_to_adbs_drive_mode(target_mode: int, stiffness: float, d
 def build_adbs_init_arrays(
     model: newton.Model,
     device: wp.context.Devicelike | None = None,
+    *,
+    joint_friction_model: Literal["hard", "mujoco"] = "hard",
 ) -> AdbsInitArrays:
     """Convert ``model``'s joints to ADBS init arrays on ``device``.
+
+    Args:
+        model: Newton model to convert.
+        device: Device for the generated Warp arrays.
+        joint_friction_model: ``"hard"`` keeps PhoenX Coulomb friction;
+            ``"mujoco"`` maps MuJoCo solref/solimp friction metadata.
 
     Raises:
         NotImplementedError: If any joint is DISTANCE or a D6 configuration
@@ -310,6 +352,8 @@ def build_adbs_init_arrays(
     """
     if device is None:
         device = model.device
+    if joint_friction_model not in ("hard", "mujoco"):
+        raise ValueError('joint_friction_model must be "hard" or "mujoco"')
 
     n_joints = int(model.joint_count)
     if n_joints == 0:
@@ -340,6 +384,7 @@ def build_adbs_init_arrays(
             damping_limit=empty_f,
             armature=empty_f,
             friction_coefficient=empty_f,
+            friction_slip_scale=empty_f,
             d6_limit_axis0=empty_v,
             d6_limit_axis1=empty_v,
             d6_limit_axis2=empty_v,
@@ -387,6 +432,9 @@ def build_adbs_init_arrays(
     target_kd = _pull_dof_f(model.joint_target_kd)
     joint_armature = _pull_dof_f(model.joint_armature)
     joint_friction = _pull_dof_f(model.joint_friction)
+    mujoco_attrs = getattr(model, "mujoco", None) if joint_friction_model == "mujoco" else None
+    friction_solref = _pull_dof_f(getattr(mujoco_attrs, "solreffriction", None)) if mujoco_attrs is not None else None
+    friction_solimp = _pull_dof_f(getattr(mujoco_attrs, "solimpfriction", None)) if mujoco_attrs is not None else None
     effort_limit = _pull_dof_f(model.joint_effort_limit)
     limit_lower = _pull_dof_f(model.joint_limit_lower)
     limit_upper = _pull_dof_f(model.joint_limit_upper)
@@ -492,6 +540,7 @@ def build_adbs_init_arrays(
         # Armature only applies to REVOLUTE/PRISMATIC axial rows; 0 elsewhere.
         armature_val = 0.0
         friction_val = 0.0
+        friction_slip_scale_val = -1.0
         d6_limit_axes = [np.zeros(3, dtype=np.float32) for _ in range(3)]
         d6_limit_lower = np.zeros(3, dtype=np.float32)
         d6_limit_upper = np.zeros(3, dtype=np.float32)
@@ -642,6 +691,10 @@ def build_adbs_init_arrays(
                 armature_val = float(joint_armature[effective_qd])
             if joint_friction is not None and effective_qd < len(joint_friction):
                 friction_val = float(joint_friction[effective_qd])
+            if friction_solref is not None and friction_solimp is not None and effective_qd < len(friction_solref):
+                friction_slip_scale_val = _friction_slip_scale_from_mujoco(
+                    friction_solref[effective_qd], friction_solimp[effective_qd]
+                )
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
@@ -687,6 +740,7 @@ def build_adbs_init_arrays(
                 "damping_limit": damp_limit,
                 "armature": armature_val,
                 "friction_coefficient": friction_val,
+                "friction_slip_scale": friction_slip_scale_val,
                 "d6_limit_axis0": d6_limit_axes[0],
                 "d6_limit_axis1": d6_limit_axes[1],
                 "d6_limit_axis2": d6_limit_axes[2],
@@ -749,6 +803,7 @@ def build_adbs_init_arrays(
         damping_limit=_stack_f("damping_limit"),
         armature=_stack_f("armature"),
         friction_coefficient=_stack_f("friction_coefficient"),
+        friction_slip_scale=_stack_f("friction_slip_scale"),
         d6_limit_axis0=_stack_v("d6_limit_axis0"),
         d6_limit_axis1=_stack_v("d6_limit_axis1"),
         d6_limit_axis2=_stack_v("d6_limit_axis2"),

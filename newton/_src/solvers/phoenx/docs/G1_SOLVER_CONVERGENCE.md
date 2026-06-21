@@ -44,8 +44,10 @@ PhoenX also folds nanoG1 passive `dof_damping` into all 29 G1 position-drive
 `joint_target_kd` values. For these drives the target velocity is zero, so this
 reproduces the same damping force contribution, `-damping * qd`. The generic
 PhoenX model adapter forwards `joint_friction` into the ADBS Coulomb-friction
-row, and the G1 recipe authors nanoG1 `dof_frictionloss = 0.1` on every
-actuated joint.
+row. `SolverPhoenX` defaults to hard PhoenX Coulomb friction; the G1 recipe
+uses `joint_friction_model="mujoco"` so imported `solreffriction` and
+`solimpfriction` soften the row in the same spirit as nanoG1 host physics. The
+G1 recipe authors nanoG1 `dof_frictionloss = 0.1` on every actuated joint.
 
 ## Open-Loop Parity
 
@@ -58,15 +60,21 @@ uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_open_loop_p
 
 Current results versus nanoG1 host physics:
 
-| case | setting | fall step | final base z | base-z max error | joint-q traj RMS | joint-qd traj RMS |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| zero action, 20 steps | `recipe_default` (`10x4`) | none | 0.762 m | 0.0185 m | 0.0189 rad | 5.95 rad/s |
-| leg step, 20 steps | `recipe_default` (`10x4`) | none | 0.758 m | 0.0175 m | 0.0194 rad | 5.86 rad/s |
+| case | friction mode | setting | fall step | final base z | base-z max error | joint-q traj RMS | joint-qd traj RMS |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| zero action, 20 steps | none (`scale=0`) | `recipe_default` (`10x4`) | none | 0.760 m | 0.0205 m | 0.0262 rad | 2.02 rad/s |
+| zero action, 20 steps | hard | `recipe_default` (`10x4`) | none | 0.763 m | 0.0182 m | 0.0187 rad | 6.20 rad/s |
+| zero action, 20 steps | MuJoCo soft | `recipe_default` (`10x4`) | none | 0.763 m | 0.0182 m | 0.0258 rad | 4.52 rad/s |
+| leg step, 20 steps | MuJoCo soft | `recipe_default` (`10x4`) | none | 0.758 m | 0.0168 m | 0.0232 rad | 4.48 rad/s |
+| zero action, 20 steps | MuJoCo soft | `phoenx_10x8` | none | 0.762 m | 0.0187 m | 0.0237 rad | 3.10 rad/s |
 
 Before the quaternion/contact fixes, the zero-action 5-step `10x4` base-z error
-was about 0.049 m and the leg-step run fell at policy step 15. Adding all-joint
-passive damping and joint friction improved joint-position agreement on the
-20-step probes, but the joint-velocity mismatch is still unresolved.
+was about 0.049 m and the leg-step run fell at policy step 15. Hard joint
+friction improves position parity but creates a large velocity mismatch. MuJoCo
+soft friction is more faithful for the nanoG1 comparison and reduces that
+velocity error, but it does not close the gap. Extra PhoenX iterations help,
+which points to a remaining convergence/formulation gap rather than a pure RL
+throughput issue.
 
 ## Convergence Sweep
 
@@ -97,16 +105,17 @@ trajectory agreement versus `5x2` without making the recipe as expensive as the
 ## Training Impact
 
 With the grounded G1 setup (`contact_geometry="nanog1_foot_boxes"`,
-`sim_substeps=10`, `solver_iterations=4`) and nanoG1 joint friction enabled, a
-20-iteration graph-leapfrog train-save-load probe measured about 193k env
-samples/s on the RTX PRO 6000 Blackwell. Against nanoG1 rounded 1.28M env
-samples/s reference, that short probe is about 6.6x slower.
+`sim_substeps=10`, `solver_iterations=4`) and MuJoCo-soft nanoG1 joint friction
+enabled, a 20-iteration graph-leapfrog train-save-load probe measured about
+188k train env samples/s and about 174k total env samples/s on the RTX PRO 6000
+Blackwell. Against the nanoG1 rounded 1.28M env samples/s reference, that short
+probe is about 6.8x slower and did not pass the walking gate at 20 iterations.
 
-The friction-enabled setup is more physically faithful and improves open-loop
-joint-position parity, but it adds a scalar axial row to every G1 joint and is a
-clear throughput regression. Further optimization should keep the friction path
-correct while reducing its per-joint cost, especially in the revolute-only G1
-fast path.
+The friction-enabled setup is more physically faithful, but it adds a scalar
+axial row to every G1 joint and remains a throughput regression. Further work
+should keep the friction path correct while reducing its per-joint cost and
+should prioritize simulator-quality gaps, since the current short probe still
+shows unstable velocity diagnostics rather than a merely slow PPO update.
 
 ## Current Decision
 

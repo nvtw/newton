@@ -17,6 +17,7 @@ import warp as wp
 import newton
 import newton.rl as rl
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import benchmark_train_to_gate
+from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.kernels import value_column_loss_grad_kernel, zero_scalar_kernel
@@ -270,6 +271,16 @@ class TestG1PhoenXRL(unittest.TestCase):
             rtol=0.0,
             atol=1.0e-6,
         )
+        self.assertEqual(env.config.joint_friction_model, "mujoco")
+        hard_adbs = build_adbs_init_arrays(env.model, device=device, joint_friction_model="hard")
+        mujoco_adbs = build_adbs_init_arrays(env.model, device=device, joint_friction_model="mujoco")
+        np.testing.assert_allclose(
+            hard_adbs.friction_slip_scale.numpy()[: rl.ACTION_DIM_G1],
+            -np.ones(rl.ACTION_DIM_G1, dtype=np.float32),
+            rtol=0.0,
+            atol=0.0,
+        )
+        self.assertGreater(float(np.min(mujoco_adbs.friction_slip_scale.numpy()[: rl.ACTION_DIM_G1])), 0.0)
         self.assertEqual(deploy.NU, rl.ACTION_DIM_G1)
         self.assertEqual(deploy.LEG_DOF, g1_recipe.CONTROLLED_ACTION_COUNT)
         self.assertAlmostEqual(deploy.CONTROL_DT, g1_recipe.FRAME_DT)

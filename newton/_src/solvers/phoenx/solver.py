@@ -142,6 +142,7 @@ class SolverPhoenX(SolverBase):
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
+        joint_friction_model: str = "hard",
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
@@ -167,6 +168,9 @@ class SolverPhoenX(SolverBase):
             substeps: PhoenX internal substeps per :meth:`step` call.
             solver_iterations: PGS iterations per substep.
             velocity_iterations: TGS-soft relax sweeps per substep.
+            joint_friction_model: "hard" uses PhoenX Coulomb friction;
+                "mujoco" maps MuJoCo solref/solimp friction metadata
+                when available.
             prepare_refresh_stride: Refresh cached rigid contact/joint
                 prepare data every N substeps. ``"auto"`` chooses a
                 conservative stride from the substep count and falls back
@@ -215,6 +219,12 @@ class SolverPhoenX(SolverBase):
         if velocity_readout not in valid_readouts:
             raise ValueError(f"velocity_readout must be one of {valid_readouts}, got {velocity_readout!r}")
         self._velocity_readout = velocity_readout
+        valid_friction_models = ("hard", "mujoco")
+        if joint_friction_model not in valid_friction_models:
+            raise ValueError(
+                f"joint_friction_model must be one of {valid_friction_models}, got {joint_friction_model!r}"
+            )
+        self._joint_friction_model = joint_friction_model
 
         num_bodies_phoenx = int(model.body_count) + 1
         self.bodies: BodyContainer = body_container_zeros(num_bodies_phoenx, device=self.device)
@@ -246,7 +256,9 @@ class SolverPhoenX(SolverBase):
         if int(model.body_count) > 0 and int(model.joint_count) > 0:
             newton.eval_fk(model, model.joint_q, model.joint_qd, model)
 
-        self._adbs: AdbsInitArrays = build_adbs_init_arrays(model, device=self.device)
+        self._adbs: AdbsInitArrays = build_adbs_init_arrays(
+            model, device=self.device, joint_friction_model=self._joint_friction_model
+        )
         num_joints = self._adbs.num_joint_columns
         self._adbs_articulation_joint_mask = self._build_adbs_articulation_joint_mask(model)
         if articulation_dvi_replaces_joint_pgs is None:
@@ -1040,7 +1052,9 @@ class SolverPhoenX(SolverBase):
             flags & (int(SolverNotifyFlags.JOINT_PROPERTIES) | int(SolverNotifyFlags.JOINT_DOF_PROPERTIES))
         )
         if joint_props_changed:
-            self._adbs = build_adbs_init_arrays(self.model, device=self.device)
+            self._adbs = build_adbs_init_arrays(
+                self.model, device=self.device, joint_friction_model=self._joint_friction_model
+            )
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
         if flags & int(SolverNotifyFlags.MODEL_PROPERTIES):

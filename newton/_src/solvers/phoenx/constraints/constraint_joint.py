@@ -298,6 +298,11 @@ class ActuatedDoubleBallSocketData:
     # prismatic]. Implemented as a saturated soft row on the same axial
     # Jacobian as the drive / limit rows.
     friction_coefficient: wp.float32
+    # MuJoCo-style slip scale for the friction row. Positive values are
+    # multiplied by the current axial inverse effective mass and friction
+    # limit to get the slip velocity; non-positive values use
+    # :data:`PHOENX_FRICTION_SLIP_VELOCITY` as a solver fallback.
+    friction_slip_scale: wp.float32
     # Limit window: rad (revolute) or m (prismatic). ``min_value >
     # max_value`` disables the limit (matches the standalone
     # angular_limit / linear_limit sentinel).
@@ -428,6 +433,7 @@ _OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData,
 _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_drive"))
 _OFF_ARMATURE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "armature"))
 _OFF_FRICTION_COEFFICIENT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "friction_coefficient"))
+_OFF_FRICTION_SLIP_SCALE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "friction_slip_scale"))
 _OFF_MIN_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "min_value"))
 _OFF_MAX_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_value"))
 _OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "hertz_limit"))
@@ -490,6 +496,7 @@ def actuated_double_ball_socket_initialize_kernel(
     damping_limit: wp.array[wp.float32],
     armature: wp.array[wp.float32],
     friction_coefficient: wp.array[wp.float32],
+    friction_slip_scale: wp.array[wp.float32],
     d6_limit_axis0: wp.array[wp.vec3f],
     d6_limit_axis1: wp.array[wp.vec3f],
     d6_limit_axis2: wp.array[wp.vec3f],
@@ -651,6 +658,7 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_DAMPING_DRIVE, cid, damping_drive[tid])
     write_float(constraints, _OFF_ARMATURE, cid, armature[tid])
     write_float(constraints, _OFF_FRICTION_COEFFICIENT, cid, friction_coefficient[tid])
+    write_float(constraints, _OFF_FRICTION_SLIP_SCALE, cid, friction_slip_scale[tid])
     write_float(constraints, _OFF_MIN_VALUE, cid, min_value[tid])
     write_float(constraints, _OFF_MAX_VALUE, cid, max_value[tid])
     write_float(constraints, _OFF_HERTZ_LIMIT, cid, hertz_limit[tid])
@@ -814,8 +822,9 @@ def _axial_drive_limit_iterate(
     clamp: wp.int32,
     idt: wp.float32,
     sor_boost: wp.float32,
+    store_friction: wp.bool,
 ) -> wp.float32:
-    """Scalar drive+limit PGS step for revolute/prismatic mode.
+    """Scalar drive, limit, and friction PGS step for revolute/prismatic mode.
 
     Both modes apply a single scalar impulse ``axial_lam`` along the
     free DoF axis. Revolute applies it as an angular impulse about
@@ -836,9 +845,12 @@ def _axial_drive_limit_iterate(
             conventions.
         clamp: Pre-computed limit clamp state (``_CLAMP_NONE`` / ``_CLAMP_MIN``
             / ``_CLAMP_MAX``) from prepare.
+        store_friction: Whether to persist the friction accumulator for later
+            warm-starting. Relax sweeps solve friction for velocity convergence
+            but keep the bias-solve accumulator intact.
 
     Returns:
-        Net per-iteration axial impulse ``lam_drive + lam_limit``.
+        Net per-iteration axial impulse ``lam_drive + lam_limit + lam_friction``.
     """
     # Single-fetch of every actuator scalar; the compiler hoists the
     # reads ahead of the branches so we don't pay for the ones that
@@ -930,7 +942,11 @@ def _axial_drive_limit_iterate(
         eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
         max_lambda_friction = friction * (wp.float32(1.0) / idt)
         if eff_inv_friction > 0.0 and max_lambda_friction > 0.0:
-            gamma_friction = PHOENX_FRICTION_SLIP_VELOCITY / max_lambda_friction
+            slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
+            slip_scale = read_float(constraints, base_offset + _OFF_FRICTION_SLIP_SCALE, cid)
+            if slip_scale > wp.float32(0.0):
+                slip_velocity = slip_scale * eff_inv_friction * friction
+            gamma_friction = slip_velocity / max_lambda_friction
             eff_mass_friction = wp.float32(1.0) / (eff_inv_friction + gamma_friction)
             lam_friction = -eff_mass_friction * (jv_axial + gamma_friction * acc_friction)
             lam_friction = lam_friction * sor_boost
@@ -941,8 +957,9 @@ def _axial_drive_limit_iterate(
                 max_lambda_friction,
             )
             lam_friction = acc_friction - old_acc_friction
-            write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
-    else:
+            if store_friction:
+                write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
+    elif friction <= 0.0:
         write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
 
     return lam_drive + lam_limit + lam_friction
@@ -1521,7 +1538,7 @@ def _universal_iterate_at(
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
     clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
     jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost, use_bias)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
     angular_velocity1, angular_velocity2 = _d6_angular_limits_block(
@@ -2099,7 +2116,7 @@ def _revolute_iterate_at(
     # the warm-start below: ``+n_hat`` for body 1, ``-n_hat`` for body
     # 2, so positive lambda spins body 1 *forward* and body 2 *back*.
     jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost, use_bias)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
@@ -2565,7 +2582,7 @@ def _prismatic_iterate_at(
     v1_anchor = velocity1 + wp.cross(angular_velocity1, r1_b1)
     v2_anchor = velocity2 + wp.cross(angular_velocity2, r1_b2)
     jv_axial = wp.dot(n_hat, v1_anchor - v2_anchor)
-    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost)
+    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost, use_bias)
 
     # Apply the combined linear impulse: lam along n_hat, with body 1
     # getting +n_hat and body 2 getting -n_hat (mirror of revolute's
@@ -3606,7 +3623,11 @@ def _revolute_iterate_at_multi(
     gamma_friction = wp.float32(0.0)
     eff_mass_friction = wp.float32(0.0)
     if friction_active:
-        gamma_friction = PHOENX_FRICTION_SLIP_VELOCITY / max_lambda_friction
+        slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
+        slip_scale = read_float(constraints, base_offset + _OFF_FRICTION_SLIP_SCALE, cid)
+        if slip_scale > wp.float32(0.0):
+            slip_velocity = slip_scale * eff_inv_friction * friction
+        gamma_friction = slip_velocity / max_lambda_friction
         eff_mass_friction = wp.float32(1.0) / (eff_inv_friction + gamma_friction)
 
     limit_active = clamp != _CLAMP_NONE
@@ -3743,9 +3764,9 @@ def _revolute_iterate_at_multi(
         write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
     if limit_active:
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
-    if friction_active:
+    if friction_active and use_bias:
         write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
-    else:
+    elif friction <= wp.float32(0.0):
         write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
 
 

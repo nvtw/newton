@@ -1083,6 +1083,8 @@ class ConfigEnvG1PhoenX:
             SolverPhoenX substep count at one.
         solver_iterations: PhoenX position iterations per substep.
         velocity_iterations: PhoenX velocity iterations per substep.
+        joint_friction_model: Solver joint-friction mode ("hard" or "mujoco").
+        joint_friction_scale: Dimensionless scale applied to nanoG1 joint friction.
         action_scale: Position target scale [rad].
         controlled_action_count: Number of leading policy actions applied to joints.
         command: Target body-frame command ``(vx, vy, yaw_rate)`` [m/s, m/s, rad/s].
@@ -1135,6 +1137,8 @@ class ConfigEnvG1PhoenX:
     sim_substeps: int = g1_recipe.SIM_SUBSTEPS
     solver_iterations: int = g1_recipe.SOLVER_ITERATIONS
     velocity_iterations: int = g1_recipe.VELOCITY_ITERATIONS
+    joint_friction_model: str = g1_recipe.JOINT_FRICTION_MODEL
+    joint_friction_scale: float = g1_recipe.JOINT_FRICTION_SCALE
     action_scale: float = g1_recipe.ACTION_SCALE
     controlled_action_count: int = g1_recipe.CONTROLLED_ACTION_COUNT
     command: tuple[float, float, float] = g1_recipe.COMMAND
@@ -1201,6 +1205,10 @@ class EnvG1PhoenX:
             raise ValueError("phase_period must be positive")
         if int(self.config.rigid_contact_max_per_world) < 0:
             raise ValueError("rigid_contact_max_per_world must be non-negative")
+        if str(self.config.joint_friction_model) not in ("hard", "mujoco"):
+            raise ValueError('joint_friction_model must be "hard" or "mujoco"')
+        if float(self.config.joint_friction_scale) < 0.0:
+            raise ValueError("joint_friction_scale must be non-negative")
         self._check_command_ranges(
             self.config.command_x_range, self.config.command_y_range, self.config.command_yaw_range
         )
@@ -1289,7 +1297,9 @@ class EnvG1PhoenX:
             dof = i + 6
             articulation_builder.joint_target_ke[dof] = _UNITREE_KP_G1[i]
             articulation_builder.joint_target_kd[dof] = _DRIVE_KD_G1[i]
-            articulation_builder.joint_friction[dof] = _NANOG1_DOF_FRICTIONLOSS_G1[i]
+            articulation_builder.joint_friction[dof] = (
+                float(self.config.joint_friction_scale) * _NANOG1_DOF_FRICTIONLOSS_G1[i]
+            )
             articulation_builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -1372,6 +1382,7 @@ class EnvG1PhoenX:
             substeps=1,
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
+            joint_friction_model=str(self.config.joint_friction_model),
             threads_per_world=self.config.threads_per_world,
             multi_world_scheduler=self.config.multi_world_scheduler,
             prepare_refresh_stride=self.config.prepare_refresh_stride,

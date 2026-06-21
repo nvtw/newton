@@ -1724,6 +1724,7 @@ class PhoenXWorld:
         damping_limit: wp.array,
         armature: wp.array | None = None,
         friction_coefficient: wp.array | None = None,
+        friction_slip_scale: wp.array | None = None,
         d6_limit_axis0: wp.array | None = None,
         d6_limit_axis1: wp.array | None = None,
         d6_limit_axis2: wp.array | None = None,
@@ -1786,6 +1787,8 @@ class PhoenXWorld:
             armature = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
         if friction_coefficient is None:
             friction_coefficient = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
+        if friction_slip_scale is None:
+            friction_slip_scale = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
         if d6_limit_axis0 is None:
             d6_limit_axis0 = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
         if d6_limit_axis1 is None:
@@ -1850,6 +1853,7 @@ class PhoenXWorld:
                 damping_limit,
                 armature,
                 friction_coefficient,
+                friction_slip_scale,
                 d6_limit_axis0,
                 d6_limit_axis1,
                 d6_limit_axis2,
