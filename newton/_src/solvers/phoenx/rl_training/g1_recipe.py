@@ -62,8 +62,12 @@ CLIP_RATIO = 0.2
 ENTROPY_COEFF = 1.0e-5
 VALUE_LOSS_COEFF = 0.5
 VALUE_CLIP_RANGE = 20.0
-ACTOR_LR = 2.0e-3
-CRITIC_LR = 2.0e-3
+ACTOR_LR = 2.0e-2
+CRITIC_LR = 2.0e-2
+OPTIMIZER = "muon"
+OPTIMIZER_EPS = 1.0e-12
+OPTIMIZER_WEIGHT_DECAY = 0.0
+MUON_MOMENTUM = 0.9
 TRAIN_EPOCHS = 3
 MINIBATCH_SIZE = 32768
 REPLAY_RATIO = 3.0
@@ -136,6 +140,10 @@ def default_g1_ppo_config(**overrides: Any):
         "value_clip_range": VALUE_CLIP_RANGE,
         "actor_lr": ACTOR_LR,
         "critic_lr": CRITIC_LR,
+        "optimizer": OPTIMIZER,
+        "optimizer_eps": OPTIMIZER_EPS,
+        "optimizer_weight_decay": OPTIMIZER_WEIGHT_DECAY,
+        "muon_momentum": MUON_MOMENTUM,
         "train_epochs": TRAIN_EPOCHS,
         "minibatch_size": MINIBATCH_SIZE,
         "replay_ratio": REPLAY_RATIO,

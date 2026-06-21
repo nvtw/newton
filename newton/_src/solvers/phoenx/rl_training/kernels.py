@@ -1264,3 +1264,128 @@ def adam_step_2d_kernel(
     v[i, j] = vi
     param[i, j] = param[i, j] - lr * (mi / beta1_correction) / (wp.sqrt(vi / beta2_correction) + eps)
     grad[i, j] = wp.float32(0.0)
+
+
+@wp.kernel
+def optimizer_step_count_kernel(step_count: wp.array[wp.int32]):
+    step_count[0] = step_count[0] + wp.int32(1)
+
+
+@wp.kernel
+def muon_step_1d_kernel(
+    param: wp.array[wp.float32],
+    grad: wp.array[wp.float32],
+    momentum_buffer: wp.array[wp.float32],
+    grad_sumsq: wp.array[wp.float32],
+    lr: wp.float32,
+    momentum: wp.float32,
+    weight_decay: wp.float32,
+    max_grad_norm: wp.float32,
+):
+    i = wp.tid()
+    g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i]
+    m = momentum * momentum_buffer[i] + g
+    momentum_buffer[i] = m
+    update = g + momentum * m
+    param[i] = param[i] * (wp.float32(1.0) - lr * weight_decay) - lr * update
+    grad[i] = wp.float32(0.0)
+
+
+@wp.kernel
+def muon_nesterov_2d_kernel(
+    grad: wp.array2d[wp.float32],
+    momentum_buffer: wp.array2d[wp.float32],
+    grad_sumsq: wp.array[wp.float32],
+    momentum: wp.float32,
+    max_grad_norm: wp.float32,
+    update: wp.array2d[wp.float32],
+):
+    i, j = wp.tid()
+    g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i, j]
+    m = momentum * momentum_buffer[i, j] + g
+    momentum_buffer[i, j] = m
+    update[i, j] = g + momentum * m
+
+
+@wp.kernel
+def muon_normalize_2d_kernel(x: wp.array2d[wp.float32], norm_sumsq: wp.array[wp.float32], eps: wp.float32):
+    i, j = wp.tid()
+    inv_norm = wp.float32(1.0) / wp.max(wp.sqrt(norm_sumsq[0]), eps)
+    x[i, j] = x[i, j] * inv_norm
+
+
+@wp.kernel
+def muon_gram_tall_kernel(x: wp.array2d[wp.float32], rows: wp.int32, gram: wp.array2d[wp.float32]):
+    i, j = wp.tid()
+    total = wp.float32(0.0)
+    for row in range(rows):
+        total = total + x[row, i] * x[row, j]
+    gram[i, j] = total
+
+
+@wp.kernel
+def muon_gram_wide_kernel(x: wp.array2d[wp.float32], cols: wp.int32, gram: wp.array2d[wp.float32]):
+    i, j = wp.tid()
+    total = wp.float32(0.0)
+    for col in range(cols):
+        total = total + x[i, col] * x[j, col]
+    gram[i, j] = total
+
+
+@wp.kernel
+def muon_poly_kernel(
+    gram: wp.array2d[wp.float32],
+    coeff_b: wp.float32,
+    coeff_c: wp.float32,
+    poly: wp.array2d[wp.float32],
+):
+    i, j = wp.tid()
+    total = wp.float32(0.0)
+    dim = gram.shape[0]
+    for k in range(dim):
+        total = total + gram[i, k] * gram[k, j]
+    poly[i, j] = coeff_c * total + coeff_b * gram[i, j]
+
+
+@wp.kernel
+def muon_ns_tall_kernel(
+    x: wp.array2d[wp.float32],
+    poly: wp.array2d[wp.float32],
+    coeff_a: wp.float32,
+    cols: wp.int32,
+    dst: wp.array2d[wp.float32],
+):
+    i, j = wp.tid()
+    total = wp.float32(0.0)
+    for k in range(cols):
+        total = total + x[i, k] * poly[k, j]
+    dst[i, j] = coeff_a * x[i, j] + total
+
+
+@wp.kernel
+def muon_ns_wide_kernel(
+    x: wp.array2d[wp.float32],
+    poly: wp.array2d[wp.float32],
+    coeff_a: wp.float32,
+    rows: wp.int32,
+    dst: wp.array2d[wp.float32],
+):
+    i, j = wp.tid()
+    total = wp.float32(0.0)
+    for k in range(rows):
+        total = total + poly[i, k] * x[k, j]
+    dst[i, j] = coeff_a * x[i, j] + total
+
+
+@wp.kernel
+def muon_step_2d_kernel(
+    param: wp.array2d[wp.float32],
+    grad: wp.array2d[wp.float32],
+    update: wp.array2d[wp.float32],
+    lr: wp.float32,
+    weight_decay: wp.float32,
+    scale: wp.float32,
+):
+    i, j = wp.tid()
+    param[i, j] = param[i, j] * (wp.float32(1.0) - lr * weight_decay) - lr * scale * update[i, j]
+    grad[i, j] = wp.float32(0.0)

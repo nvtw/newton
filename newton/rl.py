@@ -30,6 +30,7 @@ from ._src.solvers.phoenx.rl_training import (
     EnvPPO,
     GaussianActor,
     MirrorMapPPO,
+    Muon,
     ResultEvaluateAnymalPPO,
     ResultEvaluateG1GatePPO,
     ResultEvaluateG1PPO,
@@ -82,6 +83,7 @@ __all__ = [
     "EnvPPO",
     "GaussianActor",
     "MirrorMapPPO",
+    "Muon",
     "ResultEvaluateAnymalPPO",
     "ResultEvaluateG1GatePPO",
     "ResultEvaluateG1PPO",
@@ -190,6 +192,10 @@ def _main() -> int:
     g1_parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
     g1_parser.add_argument("--value-loss-coeff", type=float, default=g1_recipe.VALUE_LOSS_COEFF)
     g1_parser.add_argument("--value-clip-range", type=float, default=g1_recipe.VALUE_CLIP_RANGE)
+    g1_parser.add_argument("--optimizer", choices=("adam", "muon"), default=g1_recipe.OPTIMIZER)
+    g1_parser.add_argument("--optimizer-eps", type=float, default=g1_recipe.OPTIMIZER_EPS)
+    g1_parser.add_argument("--optimizer-weight-decay", type=float, default=g1_recipe.OPTIMIZER_WEIGHT_DECAY)
+    g1_parser.add_argument("--muon-momentum", type=float, default=g1_recipe.MUON_MOMENTUM)
     g1_parser.add_argument(
         "--squash-actions",
         action=argparse.BooleanOptionalAction,
@@ -321,6 +327,10 @@ def _main() -> int:
             max_grad_norm=args.max_grad_norm,
             value_loss_coeff=args.value_loss_coeff,
             value_clip_range=args.value_clip_range,
+            optimizer=args.optimizer,
+            optimizer_eps=args.optimizer_eps,
+            optimizer_weight_decay=args.optimizer_weight_decay,
+            muon_momentum=args.muon_momentum,
             mirror_loss_coeff=args.mirror_loss_coeff,
         )
         train_g1_ppo(

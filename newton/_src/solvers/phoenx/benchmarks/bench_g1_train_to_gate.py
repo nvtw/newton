@@ -80,6 +80,10 @@ def _make_ppo_config(args: argparse.Namespace) -> rl.ConfigPPO:
         args.max_grad_norm,
         args.value_loss_coeff,
         args.value_clip_range,
+        args.optimizer,
+        args.optimizer_eps,
+        args.optimizer_weight_decay,
+        args.muon_momentum,
     )
 
 
@@ -197,6 +201,10 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "squash_actions": bool(args.squash_actions),
         "value_loss_coeff": float(args.value_loss_coeff),
         "value_clip_range": float(args.value_clip_range),
+        "optimizer": str(args.optimizer),
+        "optimizer_eps": float(args.optimizer_eps),
+        "optimizer_weight_decay": float(args.optimizer_weight_decay),
+        "muon_momentum": float(args.muon_momentum),
         "max_iterations": int(args.max_iterations),
         "chunk_iterations": int(args.chunk_iterations),
         "completed_iterations": int(completed_iterations),
@@ -263,6 +271,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=g1_recipe.MAX_GRAD_NORM)
     parser.add_argument("--value-loss-coeff", type=float, default=g1_recipe.VALUE_LOSS_COEFF)
     parser.add_argument("--value-clip-range", type=float, default=g1_recipe.VALUE_CLIP_RANGE)
+    parser.add_argument("--optimizer", choices=("adam", "muon"), default=g1_recipe.OPTIMIZER)
+    parser.add_argument("--optimizer-eps", type=float, default=g1_recipe.OPTIMIZER_EPS)
+    parser.add_argument("--optimizer-weight-decay", type=float, default=g1_recipe.OPTIMIZER_WEIGHT_DECAY)
+    parser.add_argument("--muon-momentum", type=float, default=g1_recipe.MUON_MOMENTUM)
     parser.add_argument(
         "--squash-actions",
         action=argparse.BooleanOptionalAction,

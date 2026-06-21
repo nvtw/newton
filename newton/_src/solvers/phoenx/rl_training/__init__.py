@@ -5,7 +5,7 @@ from .anymal import ACTION_DIM_ANYMAL, OBS_DIM_ANYMAL, ConfigEnvAnymalPhoenX, En
 from .env import EnvPPO, capture_env_steps, collect_ppo_rollout
 from .g1 import ACTION_DIM_G1, OBS_DIM_G1, ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
 from .networks import GaussianActor, WarpMLP
-from .optim import Adam
+from .optim import Adam, Muon
 from .ppo import (
     BufferRollout,
     ConfigPPO,
@@ -63,6 +63,7 @@ __all__ = [
     "EnvPPO",
     "GaussianActor",
     "MirrorMapPPO",
+    "Muon",
     "ResultEvaluateAnymalPPO",
     "ResultEvaluateG1GatePPO",
     "ResultEvaluateG1PPO",

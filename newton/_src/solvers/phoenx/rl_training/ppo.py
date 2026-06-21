@@ -44,7 +44,7 @@ from .kernels import (
     zero_scalar_kernel,
 )
 from .networks import GaussianActor, WarpMLP
-from .optim import Adam
+from .optim import Adam, Muon
 
 
 @dataclass(frozen=True)
@@ -77,8 +77,12 @@ class ConfigPPO:
         value_clip_range: PPO value-function clip range against rollout
             value predictions. A value less than or equal to zero disables
             clipping.
-        actor_lr: Actor Adam learning rate.
-        critic_lr: Critic Adam learning rate.
+        actor_lr: Actor optimizer learning rate.
+        critic_lr: Critic optimizer learning rate.
+        optimizer: Optimizer implementation, either ``"adam"`` or ``"muon"``.
+        optimizer_eps: Numerical stabilizer for the selected optimizer.
+        optimizer_weight_decay: Decoupled weight decay for the selected optimizer.
+        muon_momentum: Momentum used when ``optimizer`` is ``"muon"``.
         train_epochs: Full-buffer optimization epochs per rollout when replay
             minibatches are disabled.
         minibatch_size: Optional trajectory-minibatch size. A value less than or
@@ -126,6 +130,10 @@ class ConfigPPO:
     value_clip_range: float = 0.0
     actor_lr: float = 3.0e-4
     critic_lr: float = 1.0e-3
+    optimizer: str = "adam"
+    optimizer_eps: float = 1.0e-8
+    optimizer_weight_decay: float = 0.0
+    muon_momentum: float = 0.9
     train_epochs: int = 4
     minibatch_size: int = 0
     replay_ratio: float = 0.0
@@ -403,7 +411,7 @@ class TrainerPPO:
                 manual_forward_dtype=self.config.manual_mlp_forward_dtype,
             )
             self.critic: WarpMLP | None = None
-            self.critic_optimizer: Adam | None = None
+            self.critic_optimizer: Adam | Muon | None = None
         else:
             self.critic = WarpMLP(
                 (self.obs_dim, *self.hidden_layers, 1),
@@ -414,12 +422,8 @@ class TrainerPPO:
                 manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
                 manual_forward_dtype=self.config.manual_mlp_forward_dtype,
             )
-            self.critic_optimizer = Adam(
-                self.critic.parameters(), lr=self.config.critic_lr, max_grad_norm=self.config.max_grad_norm
-            )
-        self.actor_optimizer = Adam(
-            self.actor.parameters(), lr=self.config.actor_lr, max_grad_norm=self.config.max_grad_norm
-        )
+            self.critic_optimizer = _make_optimizer(self.critic.parameters(), self.config, lr=self.config.critic_lr)
+        self.actor_optimizer = _make_optimizer(self.actor.parameters(), self.config, lr=self.config.actor_lr)
         self.iteration = 0
         self.mirror_map: MirrorMapPPO | None = None
         self._mirror_obs_src: wp.array[wp.int32] | None = None
@@ -496,12 +500,12 @@ class TrainerPPO:
             data[f"config_{key}"] = np.asarray(value)
         _pack_mlp(data, "actor", self.actor.net)
         data["actor_log_std"] = self.actor.log_std.numpy()
-        _pack_adam(data, "actor_optimizer", self.actor_optimizer)
+        _pack_optimizer(data, "actor_optimizer", self.actor_optimizer)
         if not self.shared_value_network:
             if self.critic is None or self.critic_optimizer is None:
                 raise RuntimeError("separate critic state was not initialized")
             _pack_mlp(data, "critic", self.critic)
-            _pack_adam(data, "critic_optimizer", self.critic_optimizer)
+            _pack_optimizer(data, "critic_optimizer", self.critic_optimizer)
         checkpoint_path = Path(path)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(checkpoint_path, **data)
@@ -540,12 +544,12 @@ class TrainerPPO:
             )
             _unpack_mlp(data, "actor", trainer.actor.net)
             trainer.actor.log_std.assign(data["actor_log_std"])
-            _unpack_adam(data, "actor_optimizer", trainer.actor_optimizer)
+            _unpack_optimizer(data, "actor_optimizer", trainer.actor_optimizer)
             if not trainer.shared_value_network:
                 if trainer.critic is None or trainer.critic_optimizer is None:
                     raise RuntimeError("separate critic state was not initialized")
                 _unpack_mlp(data, "critic", trainer.critic)
-                _unpack_adam(data, "critic_optimizer", trainer.critic_optimizer)
+                _unpack_optimizer(data, "critic_optimizer", trainer.critic_optimizer)
             if "iteration" in data:
                 trainer.iteration = max(int(data["iteration"]), 0)
         return trainer
@@ -1493,6 +1497,37 @@ def _is_signed_involution(src: np.ndarray, sign: np.ndarray) -> bool:
     return True
 
 
+def _make_optimizer(params: list[wp.array], config: ConfigPPO, *, lr: float) -> Adam | Muon:
+    optimizer = str(config.optimizer).lower()
+    if optimizer == "adam":
+        return Adam(
+            params,
+            lr=lr,
+            eps=config.optimizer_eps,
+            weight_decay=config.optimizer_weight_decay,
+            max_grad_norm=config.max_grad_norm,
+        )
+    if optimizer == "muon":
+        return Muon(
+            params,
+            lr=lr,
+            momentum=config.muon_momentum,
+            eps=config.optimizer_eps,
+            weight_decay=config.optimizer_weight_decay,
+            max_grad_norm=config.max_grad_norm,
+            matrix_transpose=True,
+        )
+    raise ValueError(f"Unsupported PPO optimizer {config.optimizer!r}")
+
+
+def _optimizer_type(optimizer: Adam | Muon) -> str:
+    if isinstance(optimizer, Adam):
+        return "adam"
+    if isinstance(optimizer, Muon):
+        return "muon"
+    raise TypeError(f"Unsupported optimizer type {type(optimizer)!r}")
+
+
 def _pack_mlp(data: dict[str, np.ndarray], prefix: str, mlp: WarpMLP) -> None:
     data[f"{prefix}_layer_count"] = np.asarray(len(mlp.weights), dtype=np.int64)
     for index, (weight, bias) in enumerate(zip(mlp.weights, mlp.biases, strict=True)):
@@ -1517,6 +1552,23 @@ def _pack_adam(data: dict[str, np.ndarray], prefix: str, optimizer: Adam) -> Non
         data[f"{prefix}_v_{index}"] = v.numpy()
 
 
+def _pack_muon(data: dict[str, np.ndarray], prefix: str, optimizer: Muon) -> None:
+    data[f"{prefix}_step_count"] = np.asarray(optimizer.step_count, dtype=np.int64)
+    data[f"{prefix}_state_count"] = np.asarray(len(optimizer.m), dtype=np.int64)
+    data[f"{prefix}_matrix_transpose"] = np.asarray(optimizer.matrix_transpose, dtype=np.bool_)
+    for index, momentum in enumerate(optimizer.m):
+        data[f"{prefix}_m_{index}"] = momentum.numpy()
+
+
+def _pack_optimizer(data: dict[str, np.ndarray], prefix: str, optimizer: Adam | Muon) -> None:
+    opt_type = _optimizer_type(optimizer)
+    data[f"{prefix}_type"] = np.asarray(opt_type)
+    if opt_type == "adam":
+        _pack_adam(data, prefix, optimizer)
+    else:
+        _pack_muon(data, prefix, optimizer)
+
+
 def _unpack_adam(data: np.lib.npyio.NpzFile, prefix: str, optimizer: Adam) -> None:
     state_count = int(data[f"{prefix}_state_count"])
     if state_count != len(optimizer.m):
@@ -1525,6 +1577,34 @@ def _unpack_adam(data: np.lib.npyio.NpzFile, prefix: str, optimizer: Adam) -> No
     for index, (m, v) in enumerate(zip(optimizer.m, optimizer.v, strict=True)):
         m.assign(data[f"{prefix}_m_{index}"])
         v.assign(data[f"{prefix}_v_{index}"])
+
+
+def _unpack_muon(data: np.lib.npyio.NpzFile, prefix: str, optimizer: Muon) -> None:
+    state_count = int(data[f"{prefix}_state_count"])
+    if state_count != len(optimizer.m):
+        raise ValueError(f"Checkpoint {prefix} state count does not match optimizer")
+    if f"{prefix}_matrix_transpose" in data:
+        saved_matrix_transpose = bool(data[f"{prefix}_matrix_transpose"].item())
+        if saved_matrix_transpose != optimizer.matrix_transpose:
+            raise ValueError(f"Checkpoint {prefix} Muon matrix layout does not match optimizer")
+    optimizer.step_count = int(data[f"{prefix}_step_count"])
+    for index, momentum in enumerate(optimizer.m):
+        momentum.assign(data[f"{prefix}_m_{index}"])
+
+
+def _unpack_optimizer(data: np.lib.npyio.NpzFile, prefix: str, optimizer: Adam | Muon) -> None:
+    saved_type = str(data[f"{prefix}_type"].item()) if f"{prefix}_type" in data else "adam"
+    current_type = _optimizer_type(optimizer)
+    if saved_type != current_type:
+        raise ValueError(f"Checkpoint {prefix} optimizer type {saved_type!r} does not match {current_type!r}")
+    if saved_type == "adam":
+        if not isinstance(optimizer, Adam):
+            raise TypeError("Adam checkpoint requires an Adam optimizer")
+        _unpack_adam(data, prefix, optimizer)
+    else:
+        if not isinstance(optimizer, Muon):
+            raise TypeError("Muon checkpoint requires a Muon optimizer")
+        _unpack_muon(data, prefix, optimizer)
 
 
 def _config_from_checkpoint(data: np.lib.npyio.NpzFile) -> ConfigPPO:

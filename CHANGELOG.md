@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add pure-Warp Muon optimizer support to `newton.rl` PPO trainers so experimental G1 runs can match nanoG1 optimizer settings without PyTorch.
 - Add `ConfigEnvG1PhoenX` scheduler knobs for `threads_per_world`, `multi_world_scheduler`, and `prepare_refresh_stride` so experimental G1 RL runs can benchmark PhoenX solver schedules without monkeypatching.
 - Add opt-in `SolverPhoenX` full-coordinate DVI articulation controls, including block-sparse solve modes and full closed-loop joint ownership for supported joint columns.
 - Add experimental pure-Warp `newton.rl` PPO and SAC training utilities, including a PhoenX Anymal sparse-target locomotion environment, deterministic evaluation metrics, and PPO checkpoint resume helpers.
@@ -59,6 +60,8 @@
 - Add rigid-soft contact example covering a rigid sphere dropping onto an XPBD tetrahedral soft grid
 
 ### Changed
+
+- Change the experimental PhoenX G1 PPO defaults to use nanoG1-style Muon optimizer hyperparameters; pass `--optimizer adam` to restore Adam.
 
 - Change the experimental PhoenX G1 PPO primitive-collision environment to cap rigid-contact buffers at 32 contacts per world by default; pass `rigid_contact_max_per_world=0` or `newton.rl train-g1-ppo --rigid-contact-max-per-world 0` to restore SolverPhoenX automatic sizing.
 

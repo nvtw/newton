@@ -71,6 +71,58 @@ def _read_c_array(path: Path, name: str, *, dtype: type = float) -> np.ndarray:
     return np.asarray([dtype(value) for value in values], dtype=np_dtype)
 
 
+def _muon_reference_step(
+    params: list[np.ndarray],
+    grads: list[np.ndarray],
+    momentum: list[np.ndarray],
+    *,
+    lr: float,
+    mu: float,
+    eps: float,
+    weight_decay: float,
+    max_grad_norm: float,
+    matrix_transpose: bool = False,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    grad_sumsq = sum(float(np.sum(g * g)) for g in grads)
+    clip = 1.0
+    if max_grad_norm > 0.0:
+        clip = min(float(max_grad_norm) / (math.sqrt(grad_sumsq) + 1.0e-6), 1.0)
+    out_params: list[np.ndarray] = []
+    out_momentum: list[np.ndarray] = []
+    coeffs = (
+        (4.0848, -6.8946, 2.9270),
+        (3.9505, -6.3029, 2.6377),
+        (3.7418, -5.5913, 2.3037),
+        (2.8769, -3.1427, 1.2046),
+        (2.8366, -3.0525, 1.2012),
+    )
+    for param, grad, mom in zip(params, grads, momentum, strict=True):
+        clipped = clip * grad
+        next_mom = mu * mom + clipped
+        update = clipped + mu * next_mom
+        if param.ndim >= 2:
+            x = update.T if matrix_transpose else update
+            x = x.reshape(x.shape[0], -1).astype(np.float32)
+            x = x / max(float(np.linalg.norm(x)), eps)
+            rows, cols = x.shape
+            for a, b, c in coeffs:
+                if rows > cols:
+                    gram = x.T @ x
+                    poly = c * (gram @ gram) + b * gram
+                    x = a * x + x @ poly
+                else:
+                    gram = x @ x.T
+                    poly = c * (gram @ gram) + b * gram
+                    x = a * x + poly @ x
+            update = (x * math.sqrt(max(1.0, rows / cols))).astype(np.float32)
+            if matrix_transpose:
+                update = update.T
+            update = update.reshape(param.shape)
+        out_params.append((param * (1.0 - lr * weight_decay) - lr * update).astype(np.float32))
+        out_momentum.append(next_mom.astype(np.float32))
+    return out_params, out_momentum
+
+
 def _reference_obs_from_nanog1_deploy(
     deploy,
     q: np.ndarray,
@@ -134,6 +186,10 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertAlmostEqual(g1_recipe.GAE_LAMBDA, float(recipe["train.gae_lambda"]))
         self.assertAlmostEqual(g1_recipe.CLIP_RATIO, float(recipe["train.clip_coef"]))
         self.assertAlmostEqual(g1_recipe.ENTROPY_COEFF, float(recipe["train.ent_coef"]))
+        self.assertAlmostEqual(g1_recipe.ACTOR_LR, float(recipe["train.learning_rate"]))
+        self.assertEqual(g1_recipe.OPTIMIZER, "muon")
+        self.assertAlmostEqual(g1_recipe.MUON_MOMENTUM, float(recipe["train.beta1"]))
+        self.assertAlmostEqual(g1_recipe.OPTIMIZER_EPS, float(recipe["train.eps"]))
         self.assertAlmostEqual(g1_recipe.VALUE_LOSS_COEFF, float(recipe["train.vf_coef"]))
         self.assertAlmostEqual(g1_recipe.VALUE_CLIP_RANGE, float(recipe["train.vf_clip_coef"]))
         self.assertAlmostEqual(g1_recipe.REPLAY_RATIO, float(recipe["train.replay_ratio"]))
@@ -299,6 +355,101 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected_clipped[:, g1_recipe.CONTROLLED_ACTION_COUNT :] = 0.0
         np.testing.assert_allclose(env.current_actions.numpy(), expected_clipped, rtol=0.0, atol=0.0)
 
+    def test_pufferlib_muon_optimizer_matches_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 Muon optimizer parity tests")
+        muon_py = _PUFFERLIB_ROOT / "pufferlib" / "muon.py"
+        muon_cu = _PUFFERLIB_ROOT / "src" / "muon.cu"
+        if not muon_py.is_file() or not muon_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib Muon reference files under {_PUFFERLIB_ROOT}")
+        self.assertIn("zeropower_via_newtonschulz5", muon_py.read_text())
+        self.assertIn("muon_nesterov", muon_cu.read_text())
+
+        param_np = [
+            np.asarray([[0.2, -0.4], [0.7, 0.1], [-0.3, 0.5]], dtype=np.float32),
+            np.asarray([[0.5, -0.2, 0.1], [-0.6, 0.3, 0.8]], dtype=np.float32),
+            np.asarray([0.1, -0.2, 0.3], dtype=np.float32),
+        ]
+        grad_np = [
+            np.asarray([[0.3, -0.7], [0.2, 0.4], [-0.5, 0.6]], dtype=np.float32),
+            np.asarray([[-0.1, 0.2, 0.3], [0.4, -0.6, 0.5]], dtype=np.float32),
+            np.asarray([0.7, -0.4, 0.2], dtype=np.float32),
+        ]
+        params = [wp.array(value, dtype=wp.float32, device=device, requires_grad=True) for value in param_np]
+        for param, grad in zip(params, grad_np, strict=True):
+            param.grad.assign(grad)
+        optimizer = rl.Muon(
+            params,
+            lr=0.02,
+            momentum=0.9,
+            eps=1.0e-12,
+            weight_decay=0.01,
+            max_grad_norm=1.2,
+        )
+        with wp.ScopedCapture(device=device) as capture:
+            optimizer.step()
+        wp.capture_launch(capture.graph)
+
+        expected_params, expected_momentum = _muon_reference_step(
+            param_np,
+            grad_np,
+            [np.zeros_like(value) for value in param_np],
+            lr=0.02,
+            mu=0.9,
+            eps=1.0e-12,
+            weight_decay=0.01,
+            max_grad_norm=1.2,
+        )
+        for actual, expected in zip(params, expected_params, strict=True):
+            np.testing.assert_allclose(actual.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
+            np.testing.assert_allclose(actual.grad.numpy(), np.zeros_like(expected), rtol=0.0, atol=0.0)
+        for actual, expected in zip(optimizer.m, expected_momentum, strict=True):
+            np.testing.assert_allclose(actual.numpy(), expected, rtol=2.0e-6, atol=2.0e-6)
+        self.assertFalse(optimizer.matrix_transpose)
+        self.assertEqual(optimizer.step_count, 1)
+
+    def test_pufferlib_muon_matches_warp_mlp_transposed_weight_layout(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 Muon WarpMLP layout parity tests")
+        muon_py = _PUFFERLIB_ROOT / "pufferlib" / "muon.py"
+        puffernet = _PUFFERLIB_ROOT / "src" / "puffernet.h"
+        if not muon_py.is_file() or not puffernet.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference files under {_PUFFERLIB_ROOT}")
+        self.assertIn("grad.view(grad.shape[0], -1)", muon_py.read_text())
+        self.assertIn("weights[o*input_dim + i]", puffernet.read_text())
+
+        param_np = np.linspace(-0.3, 0.4, 7 * 11, dtype=np.float32).reshape(7, 11)
+        grad_np = np.linspace(0.2, -0.5, 7 * 11, dtype=np.float32).reshape(7, 11)
+        param = wp.array(param_np, dtype=wp.float32, device=device, requires_grad=True)
+        param.grad.assign(grad_np)
+        optimizer = rl.Muon(
+            [param],
+            lr=0.02,
+            momentum=0.9,
+            eps=1.0e-12,
+            weight_decay=0.0,
+            max_grad_norm=0.3,
+            matrix_transpose=True,
+        )
+        with wp.ScopedCapture(device=device) as capture:
+            optimizer.step()
+        wp.capture_launch(capture.graph)
+
+        expected_params, expected_momentum = _muon_reference_step(
+            [param_np],
+            [grad_np],
+            [np.zeros_like(param_np)],
+            lr=0.02,
+            mu=0.9,
+            eps=1.0e-12,
+            weight_decay=0.0,
+            max_grad_norm=0.3,
+            matrix_transpose=True,
+        )
+        np.testing.assert_allclose(param.numpy(), expected_params[0], rtol=2.0e-5, atol=2.0e-5)
+        np.testing.assert_allclose(param.grad.numpy(), np.zeros_like(param_np), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(optimizer.m[0].numpy(), expected_momentum[0], rtol=2.0e-6, atol=2.0e-6)
+        self.assertTrue(optimizer.matrix_transpose)
+        self.assertEqual(optimizer.step_count, 1)
+
     def test_pufferlib_value_clip_formula_matches_warp_kernel(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 PufferLib value loss parity tests")
         pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
@@ -370,12 +521,19 @@ class TestG1PhoenXRL(unittest.TestCase):
     def test_shared_value_mlp_forward_matches_numpy_for_nanog1_shape(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL network parity tests")
         puffernet = _PUFFERLIB_ROOT / "src" / "puffernet.h"
+        nanog1_policy = _NANOG1_ROOT / "deploy" / "nanog1_policy.c"
         if not puffernet.is_file():
             raise unittest.SkipTest(f"missing PufferLib reference file: {puffernet}")
+        if not nanog1_policy.is_file():
+            raise unittest.SkipTest(f"missing nanoG1 policy reference file: {nanog1_policy}")
         text = puffernet.read_text()
         self.assertIn("decoder output", text)
         self.assertIn("_gaussian_mean", text)
         self.assertIn("MinGRU* mingru", text)
+        policy_text = nanog1_policy.read_text()
+        self.assertIn("NANOG1_OBS 98", policy_text)
+        self.assertIn("NANOG1_NU  29", policy_text)
+        self.assertIn("make_puffernet(w, 1, NANOG1_OBS, 128, 3", policy_text)
 
         trainer = rl.TrainerPPO(
             obs_dim=rl.OBS_DIM_G1,
@@ -403,7 +561,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             trainer.actor.net.forward_reuse(obs)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
 
         expected = obs_np
         for layer, (weight, bias) in enumerate(zip(trainer.actor.net.weights, trainer.actor.net.biases, strict=True)):
@@ -411,6 +568,36 @@ class TestG1PhoenXRL(unittest.TestCase):
             if layer < len(trainer.actor.net.weights) - 1:
                 expected = np.maximum(expected, 0.0)
         np.testing.assert_allclose(out.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
+
+    def test_puffernet_linear_layer_matches_warp_mlp_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX PufferNet linear parity tests")
+        puffernet = _PUFFERLIB_ROOT / "src" / "puffernet.h"
+        if not puffernet.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference file: {puffernet}")
+        text = puffernet.read_text()
+        self.assertIn("output[b*output_dim + o] = sum + bias[o];", text)
+        self.assertIn("weights[o*input_dim + i]", text)
+
+        batch_size = 5
+        input_dim = 7
+        output_dim = 11
+        obs_np = np.linspace(-0.6, 0.7, batch_size * input_dim, dtype=np.float32).reshape(batch_size, input_dim)
+        puffer_weight_np = np.linspace(-0.4, 0.5, output_dim * input_dim, dtype=np.float32).reshape(
+            output_dim, input_dim
+        )
+        bias_np = np.linspace(-0.2, 0.3, output_dim, dtype=np.float32)
+
+        net = rl.WarpMLP((input_dim, output_dim), activation="linear", device=device, seed=7)
+        net.weights[0].assign(puffer_weight_np.T.copy())
+        net.biases[0].assign(bias_np)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        out = net.forward_reuse(obs)
+        with wp.ScopedCapture(device=device) as capture:
+            net.forward_reuse(obs)
+        wp.capture_launch(capture.graph)
+
+        expected = obs_np @ puffer_weight_np.T + bias_np
+        np.testing.assert_allclose(out.numpy(), expected, rtol=1.0e-6, atol=1.0e-6)
 
     def test_default_recipe_enables_mirror_and_matches_config_defaults(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL recipe tests")
@@ -460,6 +647,10 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(ppo_config.minibatch_size, g1_recipe.MINIBATCH_SIZE)
         self.assertEqual(ppo_config.value_loss_coeff, g1_recipe.VALUE_LOSS_COEFF)
         self.assertEqual(ppo_config.value_clip_range, g1_recipe.VALUE_CLIP_RANGE)
+        self.assertEqual(ppo_config.optimizer, g1_recipe.OPTIMIZER)
+        self.assertEqual(ppo_config.optimizer_eps, g1_recipe.OPTIMIZER_EPS)
+        self.assertEqual(ppo_config.optimizer_weight_decay, g1_recipe.OPTIMIZER_WEIGHT_DECAY)
+        self.assertEqual(ppo_config.muon_momentum, g1_recipe.MUON_MOMENTUM)
         self.assertEqual(ppo_config.manual_mlp_forward_dtype, g1_recipe.MANUAL_MLP_FORWARD_DTYPE)
 
     def test_rejects_unknown_contact_geometry(self) -> None:
@@ -836,6 +1027,10 @@ class TestG1PhoenXRL(unittest.TestCase):
                 max_grad_norm=0.3,
                 value_loss_coeff=g1_recipe.VALUE_LOSS_COEFF,
                 value_clip_range=g1_recipe.VALUE_CLIP_RANGE,
+                optimizer=g1_recipe.OPTIMIZER,
+                optimizer_eps=g1_recipe.OPTIMIZER_EPS,
+                optimizer_weight_decay=g1_recipe.OPTIMIZER_WEIGHT_DECAY,
+                muon_momentum=g1_recipe.MUON_MOMENTUM,
                 squash_actions=g1_recipe.SQUASH_ACTIONS,
                 command_x=0.8,
                 command_y=0.0,
@@ -882,9 +1077,14 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(result["squash_actions"], g1_recipe.SQUASH_ACTIONS)
             self.assertEqual(result["value_loss_coeff"], g1_recipe.VALUE_LOSS_COEFF)
             self.assertEqual(result["value_clip_range"], g1_recipe.VALUE_CLIP_RANGE)
+            self.assertEqual(result["optimizer"], g1_recipe.OPTIMIZER)
+            self.assertEqual(result["optimizer_eps"], g1_recipe.OPTIMIZER_EPS)
+            self.assertEqual(result["optimizer_weight_decay"], g1_recipe.OPTIMIZER_WEIGHT_DECAY)
+            self.assertEqual(result["muon_momentum"], g1_recipe.MUON_MOMENTUM)
             self.assertEqual(result["completed_iterations"], 1)
             self.assertEqual(result["trained_samples"], 2)
             self.assertEqual(restored.iteration, 1)
+            self.assertTrue(restored.actor_optimizer.matrix_transpose)
             self.assertTrue(checkpoint_path.exists())
             self.assertEqual(len(result["gate_history"]), 1)
             self.assertEqual(len(result["train_history"]), 1)

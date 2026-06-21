@@ -33,6 +33,7 @@ Warp-only reinforcement learning utilities for Newton.
    EnvPPO
    GaussianActor
    MirrorMapPPO
+   Muon
    ResultEvaluateAnymalPPO
    ResultEvaluateG1GatePPO
    ResultEvaluateG1PPO
