@@ -205,22 +205,21 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertIn("-DG1_PD_UNITREE", reference.TASK_FLAGS)
 
         g1_gpu_path = _NANOG1_ROOT / "ocean" / "g1gpu" / "g1_gpu.cu"
-        if not g1_gpu_path.is_file():
-            raise unittest.SkipTest(f"missing nanoG1 reference file: {g1_gpu_path}")
-        g1_gpu = g1_gpu_path.read_text()
+        if g1_gpu_path.is_file():
+            g1_gpu = g1_gpu_path.read_text()
 
-        def read_define_number(name: str) -> float:
-            match = re.search(rf"#define {re.escape(name)}\s+\(?(-?[0-9.]+)f?\)?", g1_gpu)
-            self.assertIsNotNone(match, f"missing define {name}")
-            return float(match.group(1))
+            def read_define_number(name: str) -> float:
+                match = re.search(rf"#define {re.escape(name)}\s+\(?(-?[0-9.]+)f?\)?", g1_gpu)
+                self.assertIsNotNone(match, f"missing define {name}")
+                return float(match.group(1))
 
-        self.assertAlmostEqual(g1_recipe.GAIT_STANCE_FRACTION, read_define_number("G1_V3_STANCE"))
-        self.assertAlmostEqual(g1_recipe.W_GAIT_CONTACT, read_define_number("G1_V3_W_CONTACT"))
-        self.assertAlmostEqual(g1_recipe.W_GAIT_SWING, read_define_number("G1_V3_W_SWING"))
-        self.assertAlmostEqual(g1_recipe.W_GAIT_HIP, read_define_number("G1_V3_W_HIP"))
-        self.assertAlmostEqual(g1_recipe.GAIT_FOOT_HEIGHT, read_define_number("G1_V3_FOOT_Z0"))
-        self.assertAlmostEqual(g1_recipe.W_BASE_HEIGHT, read_define_number("G1_V3_W_BASE_HEIGHT"))
-        self.assertAlmostEqual(g1_recipe.BASE_HEIGHT_TARGET, read_define_number("G1_V3_BASE_Z0"))
+            self.assertAlmostEqual(g1_recipe.GAIT_STANCE_FRACTION, read_define_number("G1_V3_STANCE"))
+            self.assertAlmostEqual(g1_recipe.W_GAIT_CONTACT, read_define_number("G1_V3_W_CONTACT"))
+            self.assertAlmostEqual(g1_recipe.W_GAIT_SWING, read_define_number("G1_V3_W_SWING"))
+            self.assertAlmostEqual(g1_recipe.W_GAIT_HIP, read_define_number("G1_V3_W_HIP"))
+            self.assertAlmostEqual(g1_recipe.GAIT_FOOT_HEIGHT, read_define_number("G1_V3_FOOT_Z0"))
+            self.assertAlmostEqual(g1_recipe.W_BASE_HEIGHT, read_define_number("G1_V3_W_BASE_HEIGHT"))
+            self.assertAlmostEqual(g1_recipe.BASE_HEIGHT_TARGET, read_define_number("G1_V3_BASE_Z0"))
 
         self.assertAlmostEqual(g1_recipe.ACTION_SCALE, float(recipe["env.action_scale"]))
         self.assertEqual(g1_recipe.MAX_EPISODE_STEPS, int(recipe["env.max_episode_len"]))
