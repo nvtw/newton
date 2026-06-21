@@ -18,7 +18,7 @@ import newton
 import newton.rl as rl
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import benchmark_train_to_gate
 from newton._src.solvers.phoenx.rl_training import g1_recipe
-from newton._src.solvers.phoenx.rl_training.env import make_seed_counter
+from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.kernels import value_column_loss_grad_kernel, zero_scalar_kernel
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
@@ -37,6 +37,29 @@ def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
         auto_reset=False,
     )
     return rl.EnvG1PhoenX(config, device=device)
+
+
+class _ConstantPPOEnv:
+    def __init__(self, *, world_count: int, obs_dim: int, action_dim: int, device: wp.context.Device):
+        self.world_count = int(world_count)
+        self.obs_dim = int(obs_dim)
+        self.action_dim = int(action_dim)
+        self.device = device
+        obs = np.linspace(-0.3, 0.5, self.world_count * self.obs_dim, dtype=np.float32).reshape(
+            self.world_count, self.obs_dim
+        )
+        self.obs = wp.array(obs, dtype=wp.float32, device=device)
+        self.rewards = wp.zeros(self.world_count, dtype=wp.float32, device=device)
+        self.dones = wp.zeros(self.world_count, dtype=wp.float32, device=device)
+        self.step_successes = wp.zeros(self.world_count, dtype=wp.float32, device=device)
+
+    def observe(self) -> wp.array2d[wp.float32]:
+        return self.obs
+
+    def step(
+        self, actions: wp.array2d[wp.float32]
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array[wp.float32]]:
+        return self.obs, self.rewards, self.dones
 
 
 def _load_reference_module(path: Path, name: str):
@@ -316,7 +339,10 @@ class TestG1PhoenXRL(unittest.TestCase):
         pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
         if not models_py.is_file() or not pufferlib_cu.is_file():
             raise unittest.SkipTest(f"missing PufferLib reference files under {_PUFFERLIB_ROOT}")
-        self.assertIn("torch.distributions.Normal(mean, torch.exp(logstd))", models_py.read_text())
+        models_text = models_py.read_text()
+        self.assertIn("torch.distributions.Normal(mean, torch.exp(logstd))", models_text)
+        self.assertIn("decoder_logstd = nn.Parameter(torch.zeros(1, num_atns))", models_text)
+        self.assertEqual(g1_recipe.LOG_STD_INIT, 0.0)
         cuda_text = pufferlib_cu.read_text()
         self.assertIn("action = mean + std * noise", cuda_text)
         self.assertIn("normalized = (action - mean) / std", cuda_text)
@@ -535,6 +561,51 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         np.testing.assert_allclose(loss.numpy()[0], expected_loss, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(grad.numpy(), expected_grad, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_collect_rollout_resets_recurrent_state_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX recurrent rollout reset tests")
+        env = _ConstantPPOEnv(world_count=2, obs_dim=3, action_dim=1, device=device)
+        buffer = rl.BufferRollout(
+            num_steps=1, num_envs=env.world_count, obs_dim=env.obs_dim, action_dim=1, device=device
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=env.obs_dim,
+            action_dim=env.action_dim,
+            hidden_layers=(2,),
+            config=rl.ConfigPPO(
+                gamma=0.9,
+                gae_lambda=0.8,
+                shared_value_network=True,
+                policy_network="puffer_mingru",
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+            ),
+            device=device,
+            seed=3,
+            squash_actions=False,
+            log_std_init=-5.0,
+        )
+        trainer.actor.net.encoder_weight.assign(np.asarray([[0.7, -0.2], [0.1, 0.5], [-0.3, 0.4]], dtype=np.float32))
+        trainer.actor.net.recurrent_weights[0].assign(
+            np.asarray([[0.2, -0.1, 0.5, -0.4, 0.6, -0.3], [-0.3, 0.4, -0.2, 0.7, -0.5, 0.2]], dtype=np.float32)
+        )
+        trainer.actor.net.decoder_weight.assign(np.asarray([[0.6, 0.2], [-0.4, 0.3]], dtype=np.float32))
+        trainer.reserve_update_buffers(buffer)
+
+        trainer.reset_rollout_state()
+        expected_actions, _expected_log_probs, _expected_values = trainer.act_reuse(env.obs, seed=11)
+        expected = expected_actions.numpy().copy()
+        stale_actions, _stale_log_probs, _stale_values = trainer.act_reuse(env.obs, seed=11)
+        stale = stale_actions.numpy().copy()
+        self.assertFalse(np.allclose(stale, expected, rtol=1.0e-5, atol=1.0e-5))
+
+        seed_counter = make_seed_counter(11, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            collect_ppo_rollout_seed_counter(env, trainer, buffer, seed_counter=seed_counter)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(buffer.actions.numpy(), expected, rtol=1.0e-5, atol=1.0e-5)
+        np.testing.assert_array_equal(seed_counter.numpy(), np.array([12], dtype=np.int32))
 
     def test_puffer_mingru_forward_and_reset_match_numpy_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 MinGRU network tests")

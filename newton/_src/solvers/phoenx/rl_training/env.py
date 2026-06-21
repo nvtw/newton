@@ -170,6 +170,7 @@ def _collect_ppo_rollout_impl(
     if buffer.num_envs != env.world_count or buffer.obs_dim != env.obs_dim or buffer.action_dim != env.action_dim:
         raise ValueError("PPO buffer dimensions do not match environment")
 
+    trainer.reset_rollout_state()
     obs = env.observe()
     max_cols = max(env.obs_dim, env.action_dim, 1)
     value_col = trainer.value_column
