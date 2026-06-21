@@ -40,10 +40,12 @@ Two fixes were required before solver tuning was meaningful:
    friction `0.6`. The raw `contact_geometry="mjcf"` mode remains available
    as a diagnostic.
 
-PhoenX also folds nanoG1 passive leg `dof_damping` into the first 12 leg drive
-`joint_target_kd` values. For a position drive with zero target velocity, this
-is the same damping force contribution, `-damping * qd`, for the controlled G1
-legs.
+PhoenX also folds nanoG1 passive `dof_damping` into all 29 G1 position-drive
+`joint_target_kd` values. For these drives the target velocity is zero, so this
+reproduces the same damping force contribution, `-damping * qd`. The generic
+PhoenX model adapter forwards `joint_friction` into the ADBS Coulomb-friction
+row, and the G1 recipe authors nanoG1 `dof_frictionloss = 0.1` on every
+actuated joint.
 
 ## Open-Loop Parity
 
@@ -56,19 +58,15 @@ uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_open_loop_p
 
 Current results versus nanoG1 host physics:
 
-| case | setting | fall step | final base z | base-z max error | joint-q traj RMS |
-| --- | --- | ---: | ---: | ---: | ---: |
-| zero action, 5 steps | `fast_5x2` | none | 0.764 m | 0.019 m | 0.0044 rad |
-| zero action, 5 steps | `recipe_default` (`10x4`) | none | 0.777 m | 0.0066 m | 0.0048 rad |
-| zero action, 5 steps | `phoenx_10x8` | none | 0.778 m | 0.0059 m | 0.0048 rad |
-| leg step, 20 steps | `fast_5x2` | none | 0.751 m | 0.040 m | 0.0609 rad |
-| leg step, 20 steps | `recipe_default` (`10x4`) | none | 0.756 m | 0.019 m | 0.0295 rad |
-| leg step, 20 steps | `phoenx_10x8` | none | 0.757 m | 0.0176 m | 0.0266 rad |
+| case | setting | fall step | final base z | base-z max error | joint-q traj RMS | joint-qd traj RMS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| zero action, 20 steps | `recipe_default` (`10x4`) | none | 0.762 m | 0.0185 m | 0.0189 rad | 5.95 rad/s |
+| leg step, 20 steps | `recipe_default` (`10x4`) | none | 0.758 m | 0.0175 m | 0.0194 rad | 5.86 rad/s |
 
 Before the quaternion/contact fixes, the zero-action 5-step `10x4` base-z error
-was about 0.049 m and the leg-step run fell at policy step 15. The current
-remaining mismatch is a real solver/contact/drive-formulation difference, not a
-reset-layout bug.
+was about 0.049 m and the leg-step run fell at policy step 15. Adding all-joint
+passive damping and joint friction improved joint-position agreement on the
+20-step probes, but the joint-velocity mismatch is still unresolved.
 
 ## Convergence Sweep
 
@@ -99,15 +97,16 @@ trajectory agreement versus `5x2` without making the recipe as expensive as the
 ## Training Impact
 
 With the grounded G1 setup (`contact_geometry="nanog1_foot_boxes"`,
-`sim_substeps=10`, `solver_iterations=4`), a short graph-leapfrog training run
-measured about 442k env samples/s, or about 4.42M physics steps/s, on the RTX
-PRO 6000 Blackwell. Against nanoG1 rounded 1.28M env samples/s reference, that
-is about 2.9x slower.
+`sim_substeps=10`, `solver_iterations=4`) and nanoG1 joint friction enabled, a
+20-iteration graph-leapfrog train-save-load probe measured about 193k env
+samples/s on the RTX PRO 6000 Blackwell. Against nanoG1 rounded 1.28M env
+samples/s reference, that short probe is about 6.6x slower.
 
-This is slower than the pre-fix fast setting, but it is the first measured setup
-in which the full-coordinate PhoenX G1 starts grounded, keeps reset contacts,
-and tracks nanoG1 open-loop behavior closely enough for RL tuning to be
-meaningful.
+The friction-enabled setup is more physically faithful and improves open-loop
+joint-position parity, but it adds a scalar axial row to every G1 joint and is a
+clear throughput regression. Further optimization should keep the friction path
+correct while reducing its per-joint cost, especially in the revolute-only G1
+fast path.
 
 ## Current Decision
 

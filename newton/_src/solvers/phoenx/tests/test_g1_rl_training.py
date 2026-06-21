@@ -250,6 +250,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         key_qpos = _read_c_array(header, "hc_key_qpos")
         ctrl_range = _read_c_array(header, "hc_act_ctrlrange").reshape(rl.ACTION_DIM_G1, 2)
         dof_damping = _read_c_array(header, "hc_dof_damping")
+        dof_frictionloss = _read_c_array(header, "hc_dof_frictionloss")
 
         env = rl.EnvG1PhoenX(g1_recipe.default_g1_env_config(world_count=1), device=device)
         np.testing.assert_allclose(env.default_joint_pos.numpy(), deploy.HOME, rtol=0.0, atol=1.0e-6)
@@ -260,10 +261,15 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.ctrl_upper.numpy(), ctrl_range[:, 1], rtol=0.0, atol=1.0e-5)
 
         expected_kp = deploy.KP.astype(np.float32)
-        expected_kd = deploy.KD.astype(np.float32)
-        expected_kd[: g1_recipe.CONTROLLED_ACTION_COUNT] += dof_damping[6 : 6 + g1_recipe.CONTROLLED_ACTION_COUNT]
+        expected_kd = deploy.KD.astype(np.float32) + dof_damping[6 : 6 + rl.ACTION_DIM_G1].astype(np.float32)
         np.testing.assert_allclose(env.actuator_ke.numpy(), expected_kp, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_kd.numpy(), expected_kd, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(
+            env.model.joint_friction.numpy()[6 : 6 + rl.ACTION_DIM_G1],
+            dof_frictionloss[6 : 6 + rl.ACTION_DIM_G1],
+            rtol=0.0,
+            atol=1.0e-6,
+        )
         self.assertEqual(deploy.NU, rl.ACTION_DIM_G1)
         self.assertEqual(deploy.LEG_DOF, g1_recipe.CONTROLLED_ACTION_COUNT)
         self.assertAlmostEqual(deploy.CONTROL_DT, g1_recipe.FRAME_DT)
@@ -894,6 +900,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.prepare_refresh_stride, g1_recipe.PREPARE_REFRESH_STRIDE)
         expected_leg_kd = np.array([4.0, 4.0, 4.0, 6.0, 3.0, 2.2] * 2, dtype=np.float32)
         np.testing.assert_allclose(env.model.joint_target_kd.numpy()[6:18], expected_leg_kd, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.model.joint_friction.numpy()[6:35], 0.1, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.model.joint_q.numpy()[3:7], np.array([0.0, 0.0, 0.0, 1.0]), rtol=0.0, atol=0.0)
         labels = list(env.model.shape_label)
         self.assertIn("left_nanog1_foot_box", labels)

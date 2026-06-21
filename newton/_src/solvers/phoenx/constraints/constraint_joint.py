@@ -73,6 +73,7 @@ from newton._src.solvers.phoenx.solver_config import (
     PHOENX_BOOST_PRISMATIC_LIMIT,
     PHOENX_BOOST_REVOLUTE_DRIVE,
     PHOENX_BOOST_REVOLUTE_LIMIT,
+    PHOENX_FRICTION_SLIP_VELOCITY,
 )
 
 __all__ = [
@@ -293,6 +294,10 @@ class ActuatedDoubleBallSocketData:
     # an intermediate link has near-zero inertia about the joint axis
     # (e.g. humanoid waist-yaw / waist-roll links). ``0`` disables.
     armature: wp.float32
+    # Joint-axis Coulomb friction limit [N*m for revolute, N for
+    # prismatic]. Implemented as a saturated soft row on the same axial
+    # Jacobian as the drive / limit rows.
+    friction_coefficient: wp.float32
     # Limit window: rad (revolute) or m (prismatic). ``min_value >
     # max_value`` disables the limit (matches the standalone
     # angular_limit / linear_limit sentinel).
@@ -333,6 +338,7 @@ class ActuatedDoubleBallSocketData:
     axis_world: wp.vec3f
     accumulated_impulse_drive: wp.float32
     accumulated_impulse_limit: wp.float32
+    accumulated_impulse_friction: wp.float32
 
     #: Opt-in per-column wall-clock accumulator (microseconds). See
     #: :func:`constraint_accumulate_time_us`.
@@ -421,6 +427,7 @@ _OFF_MAX_FORCE_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData,
 _OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_drive"))
 _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_drive"))
 _OFF_ARMATURE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "armature"))
+_OFF_FRICTION_COEFFICIENT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "friction_coefficient"))
 _OFF_MIN_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "min_value"))
 _OFF_MAX_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_value"))
 _OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "hertz_limit"))
@@ -445,6 +452,7 @@ _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
 _OFF_ACC_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_drive"))
 _OFF_ACC_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_limit"))
+_OFF_ACC_FRICTION = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_friction"))
 ADBS_TIME_US_OFFSET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "time_us"))
 
 #: Total dword count of one unified joint constraint.
@@ -642,6 +650,7 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_STIFFNESS_DRIVE, cid, stiffness_drive[tid])
     write_float(constraints, _OFF_DAMPING_DRIVE, cid, damping_drive[tid])
     write_float(constraints, _OFF_ARMATURE, cid, armature[tid])
+    write_float(constraints, _OFF_FRICTION_COEFFICIENT, cid, friction_coefficient[tid])
     write_float(constraints, _OFF_MIN_VALUE, cid, min_value[tid])
     write_float(constraints, _OFF_MAX_VALUE, cid, max_value[tid])
     write_float(constraints, _OFF_HERTZ_LIMIT, cid, hertz_limit[tid])
@@ -662,6 +671,7 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
     write_float(constraints, _OFF_ACC_DRIVE, cid, 0.0)
     write_float(constraints, _OFF_ACC_LIMIT, cid, 0.0)
+    write_float(constraints, _OFF_ACC_FRICTION, cid, 0.0)
 
     if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
         count = d6_limit_count[tid]
@@ -912,7 +922,30 @@ def _axial_drive_limit_iterate(
         lam_limit = acc_limit - old_acc
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
 
-    return lam_drive + lam_limit
+    # ---- Coulomb friction row -----------------------------------------
+    lam_friction = float(0.0)
+    friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
+    acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+    if friction > 0.0:
+        eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+        max_lambda_friction = friction * (wp.float32(1.0) / idt)
+        if eff_inv_friction > 0.0 and max_lambda_friction > 0.0:
+            gamma_friction = PHOENX_FRICTION_SLIP_VELOCITY / max_lambda_friction
+            eff_mass_friction = wp.float32(1.0) / (eff_inv_friction + gamma_friction)
+            lam_friction = -eff_mass_friction * (jv_axial + gamma_friction * acc_friction)
+            lam_friction = lam_friction * sor_boost
+            old_acc_friction = acc_friction
+            acc_friction = wp.clamp(
+                acc_friction + lam_friction,
+                -max_lambda_friction,
+                max_lambda_friction,
+            )
+            lam_friction = acc_friction - old_acc_friction
+            write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
+    else:
+        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
+
+    return lam_drive + lam_limit + lam_friction
 
 
 # ---------------------------------------------------------------------------
@@ -1131,7 +1164,12 @@ def _axial_drive_limit_prepare_at(
     if clamp == _CLAMP_NONE:
         acc_limit = 0.0
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
-    return acc_drive + acc_limit
+    acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+    friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
+    if friction <= 0.0:
+        acc_friction = 0.0
+        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
+    return acc_drive + acc_limit + acc_friction
 
 
 # ---------------------------------------------------------------------------
@@ -2828,6 +2866,7 @@ def _cable_prepare_at(
     # cross-mode reads see a clean column.
     write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, 0.0)
     write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
+    write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
     write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, 0.0)
     write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
 
@@ -3238,6 +3277,7 @@ def _fixed_prepare_at(
     # pick up stale values from a previous mode assignment.
     write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, 0.0)
     write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
+    write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
     write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, 0.0)
     write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
 
@@ -3556,6 +3596,19 @@ def _revolute_iterate_at_multi(
     bias_box = wp.float32(0.0)
     mc_limit = wp.float32(0.0)
     ic_limit = wp.float32(0.0)
+    friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
+    acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+    eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+    max_lambda_friction = friction * (wp.float32(1.0) / idt)
+    friction_active = friction > wp.float32(0.0)
+    if eff_inv_friction <= wp.float32(0.0) or max_lambda_friction <= wp.float32(0.0):
+        friction_active = False
+    gamma_friction = wp.float32(0.0)
+    eff_mass_friction = wp.float32(0.0)
+    if friction_active:
+        gamma_friction = PHOENX_FRICTION_SLIP_VELOCITY / max_lambda_friction
+        eff_mass_friction = wp.float32(1.0) / (eff_inv_friction + gamma_friction)
+
     limit_active = clamp != _CLAMP_NONE
     if limit_active:
         acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
@@ -3650,7 +3703,19 @@ def _revolute_iterate_at_multi(
                 acc_limit = wp.min(wp.float32(0.0), acc_limit)
             lam_limit = acc_limit - old_acc_l
 
-        axial_lam = lam_drive + lam_limit
+        lam_friction = wp.float32(0.0)
+        if friction_active:
+            lam_friction = -eff_mass_friction * (jv_axial + gamma_friction * acc_friction)
+            lam_friction = lam_friction * sor_boost
+            old_acc_f = acc_friction
+            acc_friction = wp.clamp(
+                acc_friction + lam_friction,
+                -max_lambda_friction,
+                max_lambda_friction,
+            )
+            lam_friction = acc_friction - old_acc_f
+
+        axial_lam = lam_drive + lam_limit + lam_friction
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
         angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
@@ -3678,6 +3743,10 @@ def _revolute_iterate_at_multi(
         write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
     if limit_active:
         write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
+    if friction_active:
+        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
+    else:
+        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
 
 
 @wp.func
@@ -3888,22 +3957,24 @@ def actuated_double_ball_socket_world_wrench_at(
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
     acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
     acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+    acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+    acc_axial = acc_drive + acc_limit + acc_friction
 
     if joint_mode == JOINT_MODE_REVOLUTE:
         force = (acc1 + acc2) * idt
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt)
         # Axial block is a torque about -n_hat.
-        torque = torque - n_hat * ((acc_drive + acc_limit) * idt)
+        torque = torque - n_hat * (acc_axial * idt)
     elif joint_mode == JOINT_MODE_PRISMATIC:
         force = (acc1 + acc2 + acc3) * idt
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
         # Axial block is a linear force along -n_hat.
-        axial_force = n_hat * ((acc_drive + acc_limit) * idt)
+        axial_force = n_hat * (acc_axial * idt)
         force = force - axial_force
         torque = torque - wp.cross(r1_b2, axial_force)
     elif joint_mode == JOINT_MODE_UNIVERSAL:
         force = acc1 * idt
-        torque = wp.cross(r1_b2, acc1 * idt) - n_hat * ((acc_drive + acc_limit) * idt) - acc2 * idt
+        torque = wp.cross(r1_b2, acc1 * idt) - n_hat * (acc_axial * idt) - acc2 * idt
     elif joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_CABLE:
         # Same anchor layout (anchor-1 3-row + anchor-2 tangent 2-row +
         # anchor-3 scalar 1-row); no axial block. CABLE's PD softness

@@ -424,10 +424,9 @@ _NANOG1_DOF_DAMPING_G1 = (
     0.2,
 )
 
-_DRIVE_KD_G1 = tuple(
-    _UNITREE_KD_G1[i] + _NANOG1_DOF_DAMPING_G1[i] if i < g1_recipe.CONTROLLED_ACTION_COUNT else _UNITREE_KD_G1[i]
-    for i in range(ACTION_DIM_G1)
-)
+_NANOG1_DOF_FRICTIONLOSS_G1 = tuple(0.1 for _ in range(ACTION_DIM_G1))
+
+_DRIVE_KD_G1 = tuple(_UNITREE_KD_G1[i] + _NANOG1_DOF_DAMPING_G1[i] for i in range(ACTION_DIM_G1))
 
 _CTRL_LO_G1 = (
     -2.5307,
@@ -1290,6 +1289,7 @@ class EnvG1PhoenX:
             dof = i + 6
             articulation_builder.joint_target_ke[dof] = _UNITREE_KP_G1[i]
             articulation_builder.joint_target_kd[dof] = _DRIVE_KD_G1[i]
+            articulation_builder.joint_friction[dof] = _NANOG1_DOF_FRICTIONLOSS_G1[i]
             articulation_builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)

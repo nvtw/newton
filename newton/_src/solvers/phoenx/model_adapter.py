@@ -188,6 +188,7 @@ class AdbsInitArrays:
         stiffness_limit: wp.array,
         damping_limit: wp.array,
         armature: wp.array,
+        friction_coefficient: wp.array,
         d6_limit_axis0: wp.array,
         d6_limit_axis1: wp.array,
         d6_limit_axis2: wp.array,
@@ -224,6 +225,7 @@ class AdbsInitArrays:
         self.stiffness_limit = stiffness_limit
         self.damping_limit = damping_limit
         self.armature = armature
+        self.friction_coefficient = friction_coefficient
         self.d6_limit_axis0 = d6_limit_axis0
         self.d6_limit_axis1 = d6_limit_axis1
         self.d6_limit_axis2 = d6_limit_axis2
@@ -267,6 +269,7 @@ class AdbsInitArrays:
             "stiffness_limit": self.stiffness_limit,
             "damping_limit": self.damping_limit,
             "armature": self.armature,
+            "friction_coefficient": self.friction_coefficient,
             "d6_limit_axis0": self.d6_limit_axis0,
             "d6_limit_axis1": self.d6_limit_axis1,
             "d6_limit_axis2": self.d6_limit_axis2,
@@ -336,6 +339,7 @@ def build_adbs_init_arrays(
             stiffness_limit=empty_f,
             damping_limit=empty_f,
             armature=empty_f,
+            friction_coefficient=empty_f,
             d6_limit_axis0=empty_v,
             d6_limit_axis1=empty_v,
             d6_limit_axis2=empty_v,
@@ -382,6 +386,7 @@ def build_adbs_init_arrays(
     target_ke = _pull_dof_f(model.joint_target_ke)
     target_kd = _pull_dof_f(model.joint_target_kd)
     joint_armature = _pull_dof_f(model.joint_armature)
+    joint_friction = _pull_dof_f(model.joint_friction)
     effort_limit = _pull_dof_f(model.joint_effort_limit)
     limit_lower = _pull_dof_f(model.joint_limit_lower)
     limit_upper = _pull_dof_f(model.joint_limit_upper)
@@ -486,6 +491,7 @@ def build_adbs_init_arrays(
         damping_ratio_limit_val = float(DEFAULT_DAMPING_RATIO)
         # Armature only applies to REVOLUTE/PRISMATIC axial rows; 0 elsewhere.
         armature_val = 0.0
+        friction_val = 0.0
         d6_limit_axes = [np.zeros(3, dtype=np.float32) for _ in range(3)]
         d6_limit_lower = np.zeros(3, dtype=np.float32)
         d6_limit_upper = np.zeros(3, dtype=np.float32)
@@ -634,6 +640,8 @@ def build_adbs_init_arrays(
                     max_val = hi
             if joint_armature is not None and effective_qd < len(joint_armature):
                 armature_val = float(joint_armature[effective_qd])
+            if joint_friction is not None and effective_qd < len(joint_friction):
+                friction_val = float(joint_friction[effective_qd])
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
@@ -678,6 +686,7 @@ def build_adbs_init_arrays(
                 "stiffness_limit": stiff_limit,
                 "damping_limit": damp_limit,
                 "armature": armature_val,
+                "friction_coefficient": friction_val,
                 "d6_limit_axis0": d6_limit_axes[0],
                 "d6_limit_axis1": d6_limit_axes[1],
                 "d6_limit_axis2": d6_limit_axes[2],
@@ -739,6 +748,7 @@ def build_adbs_init_arrays(
         stiffness_limit=_stack_f("stiffness_limit"),
         damping_limit=_stack_f("damping_limit"),
         armature=_stack_f("armature"),
+        friction_coefficient=_stack_f("friction_coefficient"),
         d6_limit_axis0=_stack_v("d6_limit_axis0"),
         d6_limit_axis1=_stack_v("d6_limit_axis1"),
         d6_limit_axis2=_stack_v("d6_limit_axis2"),
