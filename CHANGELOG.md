@@ -9,6 +9,7 @@
 - Add `--render-fps` to cap example rendering rate without changing simulation frame timing
 - Add opt-in `SolverKamino` contact recovery-speed clamping for bounded constraint stabilization.
 - Add opt-in Kamino DVI contact block preconditioning for projected contact updates.
+- Add `--dynamics-solver dvi` to the Kamino DR Legs example.
 - Add physics accuracy metrics and DVI tuning overrides to the focused Kamino PADMM/DVI benchmark matrix.
 - Add explicit Kamino DVI contact Jacobi update controls, `contact_jacobi_omega` and `contact_jacobi_relaxation`.
 
