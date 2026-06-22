@@ -48,6 +48,11 @@ def _parse_int_or_auto(text: str) -> int | str:
 
 def _g1_ppo_config(
     train_epochs: int,
+    actor_lr: float,
+    critic_lr: float,
+    anneal_lr: bool,
+    lr_anneal_timesteps: int,
+    min_lr_ratio: float,
     mirror_loss_coeff: float,
     minibatch_size: int,
     replay_ratio: float,
@@ -71,6 +76,11 @@ def _g1_ppo_config(
 ) -> rl.ConfigPPO:
     return g1_recipe.default_g1_ppo_config(
         train_epochs=int(train_epochs),
+        actor_lr=float(actor_lr),
+        critic_lr=float(critic_lr),
+        anneal_lr=bool(anneal_lr),
+        lr_anneal_timesteps=int(lr_anneal_timesteps),
+        min_lr_ratio=float(min_lr_ratio),
         mirror_loss_coeff=float(mirror_loss_coeff),
         minibatch_size=int(minibatch_size),
         replay_ratio=float(replay_ratio),
@@ -207,6 +217,11 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         env_config=env_config,
         ppo_config=_g1_ppo_config(
             args.train_epochs,
+            args.actor_lr,
+            args.critic_lr,
+            args.anneal_lr,
+            args.lr_anneal_timesteps,
+            args.min_lr_ratio,
             args.mirror_loss_coeff,
             args.minibatch_size,
             args.replay_ratio,
@@ -267,6 +282,11 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "hidden_layers": list(args.hidden_layers),
         "policy_network": str(args.policy_network),
         "train_epochs": int(args.train_epochs),
+        "actor_lr": float(args.actor_lr),
+        "critic_lr": float(args.critic_lr),
+        "anneal_lr": bool(args.anneal_lr),
+        "lr_anneal_timesteps": int(args.lr_anneal_timesteps),
+        "min_lr_ratio": float(args.min_lr_ratio),
         "mirror_loss_coeff": float(args.mirror_loss_coeff),
         "minibatch_size": int(args.minibatch_size),
         "replay_ratio": float(args.replay_ratio),
@@ -354,6 +374,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-layers", type=_parse_hidden_layers, default=g1_recipe.HIDDEN_LAYERS)
     parser.add_argument("--policy-network", choices=("mlp", "puffer_mingru"), default=g1_recipe.POLICY_NETWORK)
     parser.add_argument("--train-epochs", type=int, default=g1_recipe.TRAIN_EPOCHS)
+    parser.add_argument("--actor-lr", type=float, default=g1_recipe.ACTOR_LR)
+    parser.add_argument("--critic-lr", type=float, default=g1_recipe.CRITIC_LR)
+    parser.add_argument("--anneal-lr", action=argparse.BooleanOptionalAction, default=g1_recipe.ANNEAL_LR)
+    parser.add_argument("--lr-anneal-timesteps", type=int, default=g1_recipe.LR_ANNEAL_TIMESTEPS)
+    parser.add_argument("--min-lr-ratio", type=float, default=g1_recipe.MIN_LR_RATIO)
     parser.add_argument("--mirror-loss-coeff", type=float, default=g1_recipe.MIRROR_LOSS_COEFF)
     parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
     parser.add_argument("--replay-ratio", type=float, default=g1_recipe.REPLAY_RATIO)

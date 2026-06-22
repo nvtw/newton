@@ -3586,6 +3586,11 @@ class TestG1PhoenXRL(unittest.TestCase):
                 chunk_iterations=1,
                 hidden_layers=(8,),
                 train_epochs=1,
+                actor_lr=g1_recipe.ACTOR_LR,
+                critic_lr=g1_recipe.CRITIC_LR,
+                anneal_lr=g1_recipe.ANNEAL_LR,
+                lr_anneal_timesteps=g1_recipe.LR_ANNEAL_TIMESTEPS,
+                min_lr_ratio=g1_recipe.MIN_LR_RATIO,
                 mirror_loss_coeff=0.25,
                 policy_network=g1_recipe.POLICY_NETWORK,
                 minibatch_size=1,
@@ -3613,18 +3618,42 @@ class TestG1PhoenXRL(unittest.TestCase):
                 command_x_range=(-0.5, 0.8),
                 command_y_range=(-0.4, 0.4),
                 command_yaw_range=(-1.0, 1.0),
+                command_zero_probability=g1_recipe.COMMAND_ZERO_PROBABILITY,
+                command_curriculum_start=g1_recipe.COMMAND_CURRICULUM_START,
+                command_curriculum_samples=g1_recipe.COMMAND_CURRICULUM_SAMPLES,
                 no_command_randomization=True,
                 sim_substeps=1,
                 solver_iterations=1,
                 velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                reward_mode=g1_recipe.REWARD_MODE,
+                w_alive=g1_recipe.W_ALIVE,
+                w_track_lin=g1_recipe.W_TRACK_LIN,
+                w_track_ang=g1_recipe.W_TRACK_ANG,
+                w_lin_vel_z=g1_recipe.W_LIN_VEL_Z,
+                w_ang_vel_xy=g1_recipe.W_ANG_VEL_XY,
+                w_orientation=g1_recipe.W_ORIENTATION,
+                w_torque=g1_recipe.W_TORQUE,
+                w_action_rate=g1_recipe.W_ACTION_RATE,
+                w_sparse_command_success=g1_recipe.W_SPARSE_COMMAND_SUCCESS,
+                sparse_command_velocity_tolerance=g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE,
+                sparse_command_yaw_tolerance=g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE,
+                w_mechanical_power=g1_recipe.W_MECHANICAL_POWER,
+                w_gait_contact=g1_recipe.W_GAIT_CONTACT,
+                w_gait_swing=g1_recipe.W_GAIT_SWING,
+                w_gait_swing_contact=g1_recipe.W_GAIT_SWING_CONTACT,
+                w_gait_hip=g1_recipe.W_GAIT_HIP,
+                w_base_height=g1_recipe.W_BASE_HEIGHT,
+                actuation_model=g1_recipe.ACTUATION_MODEL,
                 controlled_action_count=g1_recipe.CONTROLLED_ACTION_COUNT,
                 parse_meshes=False,
+                contact_geometry=g1_recipe.CONTACT_GEOMETRY,
                 rigid_contact_max_per_world=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
                 threads_per_world="auto",
                 multi_world_scheduler="auto",
                 prepare_refresh_stride="auto",
                 execution_mode="graph_leapfrog",
                 readback_diagnostics=False,
+                resume_checkpoint=None,
                 checkpoint_path=checkpoint_template,
                 device=device,
                 seed=31,
@@ -3649,9 +3678,15 @@ class TestG1PhoenXRL(unittest.TestCase):
             restored = rl.load_ppo_checkpoint(checkpoint_path, device=device)
 
             self.assertEqual(result["execution_mode"], "graph_leapfrog")
+            self.assertFalse(result["readback_diagnostics"])
             self.assertEqual(result["squash_actions"], g1_recipe.SQUASH_ACTIONS)
             self.assertEqual(result["value_loss_coeff"], g1_recipe.VALUE_LOSS_COEFF)
             self.assertEqual(result["value_clip_range"], g1_recipe.VALUE_CLIP_RANGE)
+            self.assertEqual(result["actor_lr"], g1_recipe.ACTOR_LR)
+            self.assertEqual(result["critic_lr"], g1_recipe.CRITIC_LR)
+            self.assertEqual(result["anneal_lr"], g1_recipe.ANNEAL_LR)
+            self.assertEqual(result["lr_anneal_timesteps"], g1_recipe.LR_ANNEAL_TIMESTEPS)
+            self.assertEqual(result["min_lr_ratio"], g1_recipe.MIN_LR_RATIO)
             self.assertEqual(result["optimizer"], g1_recipe.OPTIMIZER)
             self.assertEqual(result["optimizer_eps"], g1_recipe.OPTIMIZER_EPS)
             self.assertEqual(result["optimizer_weight_decay"], g1_recipe.OPTIMIZER_WEIGHT_DECAY)

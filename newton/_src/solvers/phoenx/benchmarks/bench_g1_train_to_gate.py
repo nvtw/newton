@@ -84,6 +84,11 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
 def _make_ppo_config(args: argparse.Namespace) -> rl.ConfigPPO:
     return _g1_ppo_config(
         args.train_epochs,
+        args.actor_lr,
+        args.critic_lr,
+        args.anneal_lr,
+        args.lr_anneal_timesteps,
+        args.min_lr_ratio,
         args.mirror_loss_coeff,
         args.minibatch_size,
         args.replay_ratio,
@@ -230,6 +235,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "metric": "train, save, reload, and evaluate G1 quality gate",
         "device": device.name,
         "execution_mode": str(args.execution_mode),
+        "readback_diagnostics": bool(args.readback_diagnostics),
         "world_count": int(args.world_count),
         "rollout_steps": int(args.rollout_steps),
         "squash_actions": bool(args.squash_actions),
@@ -256,6 +262,11 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "command_zero_probability": float(args.command_zero_probability),
         "value_loss_coeff": float(args.value_loss_coeff),
         "value_clip_range": float(args.value_clip_range),
+        "actor_lr": float(args.actor_lr),
+        "critic_lr": float(args.critic_lr),
+        "anneal_lr": bool(args.anneal_lr),
+        "lr_anneal_timesteps": int(args.lr_anneal_timesteps),
+        "min_lr_ratio": float(args.min_lr_ratio),
         "optimizer": str(args.optimizer),
         "optimizer_eps": float(args.optimizer_eps),
         "optimizer_weight_decay": float(args.optimizer_weight_decay),
@@ -307,6 +318,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-layers", type=_parse_hidden_layers, default=g1_recipe.HIDDEN_LAYERS)
     parser.add_argument("--policy-network", choices=("mlp", "puffer_mingru"), default=g1_recipe.POLICY_NETWORK)
     parser.add_argument("--train-epochs", type=int, default=g1_recipe.TRAIN_EPOCHS)
+    parser.add_argument("--actor-lr", type=float, default=g1_recipe.ACTOR_LR)
+    parser.add_argument("--critic-lr", type=float, default=g1_recipe.CRITIC_LR)
+    parser.add_argument("--anneal-lr", action=argparse.BooleanOptionalAction, default=g1_recipe.ANNEAL_LR)
+    parser.add_argument("--lr-anneal-timesteps", type=int, default=g1_recipe.LR_ANNEAL_TIMESTEPS)
+    parser.add_argument("--min-lr-ratio", type=float, default=g1_recipe.MIN_LR_RATIO)
     parser.add_argument("--mirror-loss-coeff", type=float, default=g1_recipe.MIRROR_LOSS_COEFF)
     parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
     parser.add_argument("--replay-ratio", type=float, default=g1_recipe.REPLAY_RATIO)
