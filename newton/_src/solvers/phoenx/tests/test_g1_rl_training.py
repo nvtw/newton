@@ -2257,6 +2257,27 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertFalse(np.allclose(first_joints, second_joints))
         np.testing.assert_array_equal(seed_counter.numpy(), np.array([23], dtype=np.int32))
 
+    def test_reset_done_masks_fk_to_done_worlds_inside_graph(self) -> None:
+        env = _g1_test_env(world_count=2)
+        q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        body_q_before = env.state_0.body_q.numpy().copy()
+        q[1, 2] += np.float32(1.0)
+        env.state_0.joint_q.assign(q.reshape(-1))
+        env.dones.assign(np.array([1.0, 0.0], dtype=np.float32))
+        seed_counter = make_seed_counter(33, device=env.device)
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.reset_done_seed_counter(seed_counter=seed_counter)
+
+        wp.capture_launch(capture.graph)
+        body_q_after = env.state_0.body_q.numpy()
+        mask = env._reset_articulation_mask.numpy()
+        non_done_root = env.body_stride
+
+        np.testing.assert_array_equal(mask, np.array([True, False]))
+        np.testing.assert_allclose(body_q_after[non_done_root], body_q_before[non_done_root], rtol=0.0, atol=0.0)
+        self.assertGreater(abs(float(q[1, 2] - body_q_after[non_done_root, 2])), 0.5)
+
     def test_ppo_lr_anneal_updates_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX PPO LR anneal test")
         buffer = rl.BufferRollout(num_steps=2, num_envs=2, obs_dim=4, action_dim=2, device=device)

@@ -948,9 +948,13 @@ def g1_reset_done_worlds_kernel(
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
+    reset_articulation_mask: wp.array[wp.bool],
 ):
     world, col = wp.tid()
-    if dones[world] <= wp.float32(0.5):
+    should_reset = dones[world] > wp.float32(0.5)
+    if col == 0:
+        reset_articulation_mask[world] = should_reset
+    if not should_reset:
         return
     if col < coord_stride:
         idx = world * coord_stride + col
@@ -987,9 +991,13 @@ def g1_reset_done_worlds_seed_counter_kernel(
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
+    reset_articulation_mask: wp.array[wp.bool],
 ):
     world, col = wp.tid()
-    if dones[world] <= wp.float32(0.5):
+    should_reset = dones[world] > wp.float32(0.5)
+    if col == 0:
+        reset_articulation_mask[world] = should_reset
+    if not should_reset:
         return
     seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
     if col < coord_stride:
@@ -1458,6 +1466,7 @@ class EnvG1PhoenX:
         self.obs = wp.zeros((self.world_count, self.obs_dim), dtype=wp.float32, device=self.device)
         self.rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self._reset_articulation_mask = wp.zeros(self.world_count, dtype=wp.bool, device=self.device)
         self.successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
@@ -1980,13 +1989,20 @@ class EnvG1PhoenX:
                 self.previous_actions,
                 self.current_actions,
                 self.actuator_force,
+                self._reset_articulation_mask,
             ],
             device=self.device,
         )
         self._reset_seed += 1
         self._clear_reset_solver_state()
         self._sample_done_commands()
-        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+        newton.eval_fk(
+            self.model,
+            self.state_0.joint_q,
+            self.state_0.joint_qd,
+            self.state_0,
+            mask=self._reset_articulation_mask,
+        )
 
     def use_reset_seed_counter(self, seed_counter: wp.array[wp.int32] | None) -> None:
         """Use a device seed counter for graph-captured reset noise."""
@@ -2020,6 +2036,7 @@ class EnvG1PhoenX:
                 self.previous_actions,
                 self.current_actions,
                 self.actuator_force,
+                self._reset_articulation_mask,
             ],
             device=self.device,
         )
@@ -2027,7 +2044,13 @@ class EnvG1PhoenX:
             advance_seed_counter(seed_counter, int(advance), device=self.device)
         self._clear_reset_solver_state()
         self._sample_done_commands()
-        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+        newton.eval_fk(
+            self.model,
+            self.state_0.joint_q,
+            self.state_0.joint_qd,
+            self.state_0,
+            mask=self._reset_articulation_mask,
+        )
 
     def _gather_actuator_force(self) -> None:
         wp.launch(
