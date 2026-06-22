@@ -11691,21 +11691,28 @@ class ModelBuilder:
         """
         filters: set[tuple[int, int]] = model.shape_collision_filter_pairs
         contact_pairs: list[tuple[int, int]] = []
+        shape_world = self.shape_world
+        shape_collision_group = self.shape_collision_group
+
+        kinematic_flag = int(BodyFlags.KINEMATIC)
+        shape_is_immovable = [
+            body < 0 or (int(self.body_flags[body]) & kinematic_flag) != 0 for body in self.shape_body
+        ]
 
         # Keep only colliding shapes (those with COLLIDE_SHAPES flag) and sort by world for optimization
         colliding_indices = [i for i, flag in enumerate(self.shape_flags) if flag & ShapeFlags.COLLIDE_SHAPES]
-        sorted_indices = sorted(colliding_indices, key=lambda i: self.shape_world[i])
+        sorted_indices = sorted(colliding_indices, key=shape_world.__getitem__)
 
         # Iterate over all pairs of colliding shapes
         for i1 in range(len(sorted_indices)):
             s1 = sorted_indices[i1]
-            world1 = self.shape_world[s1]
-            collision_group1 = self.shape_collision_group[s1]
+            world1 = shape_world[s1]
+            collision_group1 = shape_collision_group[s1]
 
             for i2 in range(i1 + 1, len(sorted_indices)):
                 s2 = sorted_indices[i2]
-                world2 = self.shape_world[s2]
-                collision_group2 = self.shape_collision_group[s2]
+                world2 = shape_world[s2]
+                collision_group2 = shape_collision_group[s2]
 
                 # Early break optimization: if both shapes are in non-global worlds and different worlds,
                 # they can never collide. Since shapes are sorted by world, all remaining shapes will also
@@ -11713,8 +11720,16 @@ class ModelBuilder:
                 if world1 != -1 and world2 != -1 and world1 != world2:
                     break
 
-                # Apply the exact same filtering logic as test_world_and_group_pair kernel
-                if not self._test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
+                # Apply the exact same filtering logic as test_world_and_group_pair kernel.
+                if collision_group1 == 0 or collision_group2 == 0:
+                    continue
+                if collision_group1 > 0:
+                    if collision_group1 != collision_group2 and collision_group2 >= 0:
+                        continue
+                elif collision_group1 < 0:
+                    if collision_group1 == collision_group2:
+                        continue
+                else:
                     continue
 
                 if s1 > s2:
@@ -11722,7 +11737,7 @@ class ModelBuilder:
                 else:
                     shape_a, shape_b = s1, s2
 
-                if not self._shape_pair_has_movable_body(shape_a, shape_b):
+                if shape_is_immovable[shape_a] and shape_is_immovable[shape_b]:
                     continue
 
                 # Skip if explicitly filtered
