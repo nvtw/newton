@@ -747,7 +747,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         with wp.ScopedCapture(device=env.device) as capture:
             env.step(actions)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(env.device)
 
         expected_actions = np.clip(raw_actions[0], -1.0, 1.0)
         expected_actions[g1_recipe.CONTROLLED_ACTION_COUNT :] = 0.0
@@ -2688,7 +2687,6 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         graph = rl.capture_env_steps(env, actions, steps_per_graph=2, warmup_steps=1)
         wp.capture_launch(graph)
-        wp.synchronize_device(env.device)
 
         self.assertFalse(env.solver.world.articulation_dvi_host)
         self.assertFalse(env.solver.world.articulation_dvi_replaces_joint_pgs)
@@ -2740,7 +2738,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             env.step(actions)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
 
         expected_actions = np.clip(actions_np[0], -1.0, 1.0)
         expected_actions[g1_recipe.CONTROLLED_ACTION_COUNT :] = 0.0
@@ -2812,7 +2809,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             env.step(actions)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(device)
 
         expected_force = env.actuator_force_kp.numpy()[None, :] * (
             env.default_joint_pos.numpy()[None, :] - q_before[:, 7 : 7 + rl.ACTION_DIM_G1]
@@ -2900,7 +2896,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         before = int(env.episode_steps.numpy()[0])
         for _ in range(3):
             wp.capture_launch(graph)
-        wp.synchronize_device(env.device)
         after = int(env.episode_steps.numpy()[0])
 
         self.assertEqual(after - before, 6)
@@ -3006,7 +3001,6 @@ class TestG1PhoenXRL(unittest.TestCase):
                 command_yaw_range=command_yaw_range,
             )
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(env.device)
 
         commands = env.command.numpy()
         self.assertTrue(np.all(commands[:, 0] >= command_x_range[0]))
