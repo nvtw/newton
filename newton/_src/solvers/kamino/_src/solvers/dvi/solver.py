@@ -28,14 +28,11 @@ from .kernels import (
     _apply_dvi_contact_jacobi_delta,
     _build_bilateral_free_velocity_rhs,
     _build_bilateral_rhs,
-    _build_sparse_bilateral_block,
-    _build_sparse_bilateral_rhs,
     _color_dvi_contacts,
     _compute_dvi_contact_block_inverse,
     _compute_dvi_contact_jacobi_delta,
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
-    _compute_dvi_sparse_solution_vectors,
     _compute_dvi_status_residuals,
     _copy_bilateral_block,
     _initialize_dvi_status,
@@ -44,16 +41,12 @@ from .kernels import (
     _scatter_bilateral_solution,
     _set_dvi_bilateral_active_dim,
     _set_dvi_direct_status_iterations,
-    _set_dvi_sparse_status_iterations,
-    _set_sparse_bilateral_diagonal,
     _solve_dvi_contacts_colored_gs,
     _solve_dvi_limits_pgs,
     _solve_dvi_pgs,
-    _solve_dvi_sparse_jacobi_update,
-    _solve_dvi_sparse_unilateral_jacobi_update,
     _unprecondition_dvi_solution,
-    _zero_bilateral_lambdas,
 )
+from .sparse import solve_sparse
 from .types import DVIConfigStruct, DVIData, convert_config_to_struct
 
 wp.set_module_options({"enable_backward": False})
@@ -250,10 +243,7 @@ class DVISolver(ForwardDynamicsSolver):
         )
 
         if problem.sparse:
-            if self._bilateral_solver is not None and self._data.bilateral_operator is not None:
-                self._solve_sparse_with_bilateral_direct_block(problem)
-            else:
-                self._solve_sparse_jacobi(problem)
+            solve_sparse(self, problem)
         elif self._has_contact_block_preconditioner and self._size.max_of_max_contacts > 0:
             wp.launch(
                 kernel=_compute_dvi_contact_block_inverse,
@@ -271,36 +261,34 @@ class DVISolver(ForwardDynamicsSolver):
                 device=self.device,
             )
 
-        if problem.sparse:
-            pass
-        elif self._bilateral_solver is not None and self._data.bilateral_operator is not None:
-            self._solve_with_bilateral_direct_block(problem)
-        else:
-            wp.launch(
-                kernel=_solve_dvi_pgs,
-                dim=self._size.num_worlds,
-                inputs=[
-                    problem.data.dim,
-                    problem.data.mio,
-                    problem.data.vio,
-                    problem.data.njc,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.cio,
-                    problem.data.mu,
-                    problem.data.D,
-                    problem.data.v_f,
-                    self._data.state.contact_block_inv,
-                    self._data.config,
-                    self._data.status,
-                    self._data.solution.lambdas,
-                ],
-                device=self.device,
-            )
-
         if not problem.sparse:
+            if self._bilateral_solver is not None and self._data.bilateral_operator is not None:
+                self._solve_with_bilateral_direct_block(problem)
+            else:
+                wp.launch(
+                    kernel=_solve_dvi_pgs,
+                    dim=self._size.num_worlds,
+                    inputs=[
+                        problem.data.dim,
+                        problem.data.mio,
+                        problem.data.vio,
+                        problem.data.njc,
+                        problem.data.nl,
+                        problem.data.nc,
+                        problem.data.lcgo,
+                        problem.data.ccgo,
+                        problem.data.cio,
+                        problem.data.mu,
+                        problem.data.D,
+                        problem.data.v_f,
+                        self._data.state.contact_block_inv,
+                        self._data.config,
+                        self._data.status,
+                        self._data.solution.lambdas,
+                    ],
+                    device=self.device,
+                )
+
             wp.launch(
                 kernel=_compute_dvi_solution_vectors,
                 dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
@@ -370,250 +358,6 @@ class DVISolver(ForwardDynamicsSolver):
             ],
             device=self.device,
         )
-
-    def _solve_sparse_jacobi(self, problem: DualProblem):
-        state = self._data.state
-        problem.delassus.diagonal(state.scratch)
-
-        for iteration in range(self._max_iterations):
-            problem.delassus.matvec(
-                x=self._data.solution.lambdas,
-                y=state.v_aug,
-                world_mask=state.world_mask,
-            )
-            wp.launch(
-                kernel=_solve_dvi_sparse_jacobi_update,
-                dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
-                inputs=[
-                    problem.data.dim,
-                    problem.data.vio,
-                    problem.data.njc,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.cio,
-                    problem.data.mu,
-                    state.scratch,
-                    problem.data.P,
-                    problem.data.v_f,
-                    state.v_aug,
-                    iteration,
-                    self._data.config,
-                    self._data.solution.lambdas,
-                ],
-                device=self.device,
-            )
-
-        problem.delassus.matvec(
-            x=self._data.solution.lambdas,
-            y=state.v_aug,
-            world_mask=state.world_mask,
-        )
-        wp.launch(
-            kernel=_compute_dvi_sparse_solution_vectors,
-            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
-            inputs=[
-                problem.data.dim,
-                problem.data.vio,
-                problem.data.v_f,
-                state.s,
-                state.v_aug,
-                self._data.solution.v_plus,
-            ],
-            device=self.device,
-        )
-        wp.launch(
-            kernel=_set_dvi_sparse_status_iterations,
-            dim=self._size.num_worlds,
-            inputs=[
-                problem.data.dim,
-                self._data.config,
-                self._data.status,
-            ],
-            device=self.device,
-        )
-
-    def _compute_sparse_solution_vectors(self, problem: DualProblem):
-        state = self._data.state
-        problem.delassus.matvec(
-            x=self._data.solution.lambdas,
-            y=state.v_aug,
-            world_mask=state.world_mask,
-        )
-        wp.launch(
-            kernel=_compute_dvi_sparse_solution_vectors,
-            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
-            inputs=[
-                problem.data.dim,
-                problem.data.vio,
-                problem.data.v_f,
-                state.s,
-                state.v_aug,
-                self._data.solution.v_plus,
-            ],
-            device=self.device,
-        )
-
-    def _factor_sparse_bilateral_block(self, problem: DualProblem):
-        operator = self._data.bilateral_operator
-        state = self._data.state
-        operator.info.dim = operator.info.maxdim
-        operator.mat.zero_()
-        state.bilateral_preconditioner.zero_()
-        problem.delassus.diagonal(state.scratch)
-
-        jacobian = problem.delassus.constraint_jacobian
-        wp.launch(
-            kernel=_build_sparse_bilateral_block,
-            dim=(self._size.num_worlds, jacobian.max_of_num_nzb * jacobian.max_of_num_nzb),
-            inputs=[
-                problem.delassus.model.info.bodies_offset,
-                problem.delassus.model.bodies.inv_m_i,
-                problem.delassus.data.bodies.inv_I_i,
-                problem.delassus.joint_constraint_nzb_count,
-                jacobian.nzb_start,
-                jacobian.nzb_coords,
-                jacobian.nzb_values,
-                problem.data.njc,
-                problem.data.vio,
-                operator.info.mio,
-                operator.info.vio,
-                state.scratch,
-                operator.mat,
-                state.bilateral_preconditioner,
-            ],
-            device=self.device,
-        )
-        wp.launch(
-            kernel=_set_sparse_bilateral_diagonal,
-            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
-            inputs=[
-                problem.data.njc,
-                problem.data.vio,
-                operator.info.mio,
-                operator.info.vio,
-                state.scratch,
-                operator.mat,
-                state.bilateral_preconditioner,
-            ],
-            device=self.device,
-        )
-        self._bilateral_solver.compute(A=operator.mat)
-
-    def _solve_sparse_bilateral_block(self, problem: DualProblem):
-        operator = self._data.bilateral_operator
-        state = self._data.state
-        wp.launch(
-            kernel=_zero_bilateral_lambdas,
-            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
-            inputs=[
-                problem.data.njc,
-                problem.data.vio,
-                self._data.solution.lambdas,
-            ],
-            device=self.device,
-        )
-        problem.delassus.matvec(
-            x=self._data.solution.lambdas,
-            y=state.v_aug,
-            world_mask=state.world_mask,
-        )
-        wp.launch(
-            kernel=_build_sparse_bilateral_rhs,
-            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
-            inputs=[
-                problem.data.vio,
-                problem.data.njc,
-                problem.data.v_f,
-                state.v_aug,
-                operator.info.vio,
-                state.bilateral_preconditioner,
-                state.bilateral_rhs,
-            ],
-            device=self.device,
-        )
-        self._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
-        wp.launch(
-            kernel=_scatter_bilateral_solution,
-            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
-            inputs=[
-                problem.data.vio,
-                problem.data.njc,
-                operator.info.vio,
-                state.bilateral_preconditioner,
-                state.bilateral_solution,
-                self._data.solution.lambdas,
-            ],
-            device=self.device,
-        )
-
-    def _solve_sparse_with_bilateral_direct_block(self, problem: DualProblem):
-        state = self._data.state
-        self._factor_sparse_bilateral_block(problem)
-        self._solve_sparse_bilateral_block(problem)
-        if not self._has_unilateral_constraints:
-            self._compute_sparse_solution_vectors(problem)
-            return
-
-        wp.launch(
-            kernel=_initialize_dvi_status,
-            dim=self._size.num_worlds,
-            inputs=[
-                self._data.config,
-                self._data.status,
-            ],
-            device=self.device,
-        )
-
-        for block_iteration in range(self._max_block_iterations):
-            for contact_iteration in range(self._max_contact_iterations):
-                problem.delassus.matvec(
-                    x=self._data.solution.lambdas,
-                    y=state.v_aug,
-                    world_mask=state.world_mask,
-                )
-                wp.launch(
-                    kernel=_solve_dvi_sparse_unilateral_jacobi_update,
-                    dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
-                    inputs=[
-                        problem.data.dim,
-                        problem.data.vio,
-                        problem.data.njc,
-                        problem.data.nl,
-                        problem.data.nc,
-                        problem.data.lcgo,
-                        problem.data.ccgo,
-                        problem.data.cio,
-                        problem.data.mu,
-                        state.scratch,
-                        problem.data.P,
-                        problem.data.v_f,
-                        state.v_aug,
-                        block_iteration,
-                        contact_iteration,
-                        self._data.config,
-                        self._data.solution.lambdas,
-                    ],
-                    device=self.device,
-                )
-
-            if block_iteration + 1 < self._max_block_iterations:
-                self._solve_sparse_bilateral_block(problem)
-
-        self._solve_sparse_bilateral_block(problem)
-        wp.launch(
-            kernel=_set_dvi_direct_status_iterations,
-            dim=self._size.num_worlds,
-            inputs=[
-                problem.data.nl,
-                problem.data.nc,
-                self._data.config,
-                self._data.status,
-            ],
-            device=self.device,
-        )
-        self._compute_sparse_solution_vectors(problem)
 
     def _solve_bilateral_block(self, problem: DualProblem, active_dim: wp.array | None = None):
         operator = self._data.bilateral_operator
