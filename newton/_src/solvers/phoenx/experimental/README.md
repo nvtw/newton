@@ -14,9 +14,11 @@ file that needs them.
 
 bench_g1_pbt.py is a pure-Warp outer-loop probe inspired by Sample Factory PBT
 design. It trains normal PhoenX PPO checkpoints, ranks them with the G1 quality
-gate, and mutates a small set of PPO/reward knobs. Keep this as an experimental
-research tool: the stable user path should remain newton.rl.train_g1_ppo plus
-the single G1 recipe file.
+gate and/or fixed-command no-reset progress metrics, and mutates a small set of
+PPO/reward/exploration knobs. The seeded candidates cover the current dense
+default, the best anti-standing dense probe, conservative exploration, and
+sparse-command reward. Keep this as an experimental research tool: the stable
+user path should remain newton.rl.train_g1_ppo plus the single G1 recipe file.
 
 nanog1_import.py imports the shipped nanoG1 PufferNet binary into a normal
 PhoenX PPO checkpoint. This gives us a PyTorch-free teacher or warm-start policy

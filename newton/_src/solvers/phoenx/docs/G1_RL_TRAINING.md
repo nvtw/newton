@@ -103,9 +103,12 @@ kept outside that path unless it becomes clearly reusable across environments.
 
 To reduce manual hyperparameter tuning without bloating the trainer, use PBT as
 an outer-loop experiment: train ordinary checkpoints, evaluate with the G1 gate
-or another task-level true objective, and mutate only a small allowlist of
+or fixed-command no-reset progress metrics, and mutate only a small allowlist of
 recipe values. Do not optimize the shaped reward itself as the objective, or the
 search can win by inflating coefficients instead of producing better walking.
+The experimental `bench_g1_pbt.py` probe keeps this outside the stable trainer
+and can seed the dense default, anti-standing dense, conservative-exploration,
+and sparse-command candidates for direct comparison.
 
 For sparse-target experiments, `reward_mode="sparse_target"` intentionally
 keeps the reward small: boolean target success, the tiny mechanical-power

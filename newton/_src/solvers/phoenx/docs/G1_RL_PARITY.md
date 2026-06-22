@@ -302,6 +302,15 @@ The cached Newton G1 policy is a plain ELU MLP with an identity normalizer.
 PhoenX now exposes `--policy-network` and `--activation` so these can be tested
 without source edits.
 
+A small true-objective PBT pilot compared four seeded candidates for 15
+iterations at 1024 worlds, using no-reset fixed-command progress scoring rather
+than training reward. All candidates still fell in the 150-step evaluator; the
+dense default had the least-bad score (`-2.34`), followed by the anti-standing
+dense recipe (`-2.47`), conservative exploration (`-2.48`), and sparse-command
+(`-2.49`). This short run is not a final ranking, but it confirms that reward
+shaping alone is not an instant fix and that candidate recipes should be judged
+by held-out displacement, survival, and falls before running full gates.
+
 Fresh probes with the corrected velocity reward still collapse to standing or
 low-motion behavior:
 
