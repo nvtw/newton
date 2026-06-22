@@ -91,6 +91,26 @@ benchmark defaults read from the same constants.
   `--manual-mlp-forward-dtype float32` to use exact FP32 manual kernels for
   those paths.
 
+## Keeping the Default Path Small
+
+PhoenX G1 training should stay usable as one recipe file plus one train command.
+The default path is still newton.rl.train_g1_ppo with values from
+newton/_src/solvers/phoenx/rl_training/g1_recipe.py. Extra machinery should be
+kept outside that path unless it becomes clearly reusable across environments.
+
+To reduce manual hyperparameter tuning without bloating the trainer, use PBT as
+an outer-loop experiment: train ordinary checkpoints, evaluate with the G1 gate
+or another task-level true objective, and mutate only a small allowlist of
+recipe values. Do not optimize the shaped reward itself as the objective, or the
+search can win by inflating coefficients instead of producing better walking.
+
+To reduce reward shaping, prefer demonstrations or teacher rollouts when they
+are available. A behavior-cloning warm start from nanoG1 or another working G1
+policy followed by PPO fine-tuning keeps the runtime policy and trainer simple.
+Adversarial imitation and learned reward models are plausible research tools,
+but they should remain experimental until they beat this simpler BC-plus-PPO
+path on the G1 gate.
+
 ## End-to-End Checkpoint Workflow
 
 The live G1 example supports the intended one-shot workflow: train with many

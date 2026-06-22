@@ -9,3 +9,17 @@ are removed.
 Code here should still be readable and reproducible, but it may depend on local
 checkouts or temporary assumptions. Document those assumptions at the top of the
 file that needs them.
+
+## G1 Training Search
+
+bench_g1_pbt.py is a pure-Warp outer-loop probe inspired by Sample Factory PBT
+design. It trains normal PhoenX PPO checkpoints, ranks them with the G1 quality
+gate, and mutates a small set of PPO/reward knobs. Keep this as an experimental
+research tool: the stable user path should remain newton.rl.train_g1_ppo plus
+the single G1 recipe file.
+
+The useful imitation-learning direction from HumanCompatibleAI/imitation is a
+behavior-cloning warm start from demonstrations or a teacher policy, followed by
+the existing PPO fine-tune. GAIL/AIRL/preference learning are plausible later,
+but they would add reward-model/discriminator complexity and should not enter
+the default PhoenX RL path until a concrete benefit is measured.
