@@ -1971,6 +1971,48 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected = obs_np @ weight_np + bias_np
         np.testing.assert_allclose(out.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
 
+    def test_elu_mlp_forward_and_manual_backward_match_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX ELU MLP graph tests")
+        batch_size = 4
+        input_dim = 3
+        hidden_dim = 5
+        output_dim = 2
+        obs_np = np.linspace(-0.7, 0.8, batch_size * input_dim, dtype=np.float32).reshape(batch_size, input_dim)
+        w0_np = np.linspace(-0.35, 0.45, input_dim * hidden_dim, dtype=np.float32).reshape(input_dim, hidden_dim)
+        b0_np = np.linspace(-0.2, 0.3, hidden_dim, dtype=np.float32)
+        w1_np = np.linspace(-0.25, 0.4, hidden_dim * output_dim, dtype=np.float32).reshape(hidden_dim, output_dim)
+        b1_np = np.asarray([0.15, -0.05], dtype=np.float32)
+        grad_out_np = np.linspace(-0.4, 0.5, batch_size * output_dim, dtype=np.float32).reshape(batch_size, output_dim)
+
+        net = rl.WarpMLP((input_dim, hidden_dim, output_dim), activation="elu", device=device, seed=13)
+        net.weights[0].assign(w0_np)
+        net.biases[0].assign(b0_np)
+        net.weights[1].assign(w1_np)
+        net.biases[1].assign(b1_np)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        grad_out = wp.array(grad_out_np, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            out = net.forward_manual(obs)
+            net.backward_manual(grad_out)
+        wp.capture_launch(capture.graph)
+
+        hidden_pre = obs_np @ w0_np + b0_np
+        hidden = np.where(hidden_pre > 0.0, hidden_pre, np.exp(hidden_pre) - 1.0).astype(np.float32)
+        expected_out = hidden @ w1_np + b1_np
+        grad_hidden = grad_out_np @ w1_np.T
+        grad_hidden_pre = grad_hidden * np.where(hidden > 0.0, 1.0, hidden + 1.0).astype(np.float32)
+        expected_w0_grad = obs_np.T @ grad_hidden_pre
+        expected_b0_grad = grad_hidden_pre.sum(axis=0)
+        expected_w1_grad = hidden.T @ grad_out_np
+        expected_b1_grad = grad_out_np.sum(axis=0)
+
+        np.testing.assert_allclose(out.numpy(), expected_out, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(net.weights[0].grad.numpy(), expected_w0_grad, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(net.biases[0].grad.numpy(), expected_b0_grad, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(net.weights[1].grad.numpy(), expected_w1_grad, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(net.biases[1].grad.numpy(), expected_b1_grad, rtol=1.0e-6, atol=1.0e-6)
+
     def test_puffernet_linear_layer_matches_warp_mlp_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX PufferNet linear parity tests")
         puffernet = _PUFFERLIB_ROOT / "src" / "puffernet.h"
