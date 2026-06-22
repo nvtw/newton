@@ -27,8 +27,9 @@ PufferLib G1 fork `kingjulio8238/PufferLib`, branch `g1`, pinned at commit
 - Value clipping, V-trace shifted rollout layout, PufferLib sample-variance
   advantage normalization, and priority replay probability / importance weights.
 - Muon optimizer update semantics, transposed MLP weight layout, PufferNet linear
-  layer layout, MinGRU equations, recurrent reset behavior, save/load/resume,
-  and graph-leapfrog smoke training.
+  layer layout, MinGRU equations, recurrent reset behavior, Puffer-style
+  zero-state mirror target forward, save/load/resume, and graph-leapfrog smoke
+  training.
 - G1 v3 reward decomposition for a deterministic state, including actual
   actuator-force torque penalty, gait phase, contact/swing/hip/base-height
   shaping, action-rate penalty, dt scaling, done, and success metrics.

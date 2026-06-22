@@ -74,6 +74,7 @@ from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_ca
 
 _NANOG1_ROOT = Path("/home/twidmer/Documents/git/nanoG1")
 _PUFFERLIB_ROOT = Path("/home/twidmer/Documents/git/PufferLib")
+_PUFFERLIB_G1_ROOT = Path("/tmp/pufferlib-g1")
 
 
 def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
@@ -1603,6 +1604,86 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(restored.actor.net.network_type, "puffer_mingru")
             for expected, actual in zip(trainer.actor.parameters(), restored.actor.parameters(), strict=True):
                 np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=0.0, atol=0.0)
+
+    def test_puffer_mingru_mirror_forward_uses_zero_sequence_state(self) -> None:
+        device = require_cuda_graph_capture("PhoenX recurrent mirror PPO tests")
+        pufferlib_cu = _PUFFERLIB_G1_ROOT / "src" / "pufferlib.cu"
+        if not pufferlib_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib G1 reference file: {pufferlib_cu}")
+        self.assertIn("puf_zero(&graph.mb_state_mir", pufferlib_cu.read_text())
+
+        buffer = rl.BufferRollout(num_steps=2, num_envs=2, obs_dim=2, action_dim=2, device=device)
+        buffer.obs.assign(
+            np.asarray(
+                [
+                    [0.1, -0.2],
+                    [0.3, -0.4],
+                    [0.5, -0.6],
+                    [0.7, -0.8],
+                ],
+                dtype=np.float32,
+            )
+        )
+        mirror_map = rl.MirrorMapPPO(
+            obs_src=(1, 0),
+            obs_sign=(1.0, 1.0),
+            action_src=(1, 0),
+            action_sign=(1.0, 1.0),
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=buffer.obs_dim,
+            action_dim=buffer.action_dim,
+            hidden_layers=(3,),
+            config=rl.ConfigPPO(
+                train_epochs=1,
+                normalize_advantages=False,
+                entropy_coeff=0.0,
+                shared_value_network=True,
+                policy_network="puffer_mingru",
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+                mirror_loss_coeff=0.25,
+                optimizer="adam",
+            ),
+            device=device,
+            seed=11,
+            squash_actions=False,
+            mirror_map=mirror_map,
+        )
+        trainer.reserve_update_buffers(buffer)
+        prime_obs = wp.array(
+            np.asarray(
+                [
+                    [1.0, -0.5],
+                    [0.8, -0.3],
+                    [0.6, -0.1],
+                    [0.4, 0.1],
+                ],
+                dtype=np.float32,
+            ),
+            dtype=wp.float32,
+            device=device,
+        )
+
+        with wp.ScopedCapture(device=device) as prime_capture:
+            trainer.actor.net.forward_reuse(prime_obs)
+        wp.capture_launch(prime_capture.graph)
+        state_before = trainer.actor.net._state.numpy().copy()
+
+        trainer._set_update_sequence_shape(buffer)
+        with wp.ScopedCapture(device=device) as mirror_capture:
+            mirror_obs = trainer._mirrored_obs(buffer)
+            mirror_out = trainer._policy_update_reuse(mirror_obs, buffer)
+        wp.capture_launch(mirror_capture.graph)
+        mirror_actual = mirror_out.numpy().copy()
+        np.testing.assert_allclose(trainer.actor.net._state.numpy(), state_before, rtol=0.0, atol=0.0)
+
+        with wp.ScopedCapture(device=device) as expected_capture:
+            expected_out = trainer.actor.net.forward_sequence_reuse(
+                mirror_obs, num_steps=buffer.num_steps, num_envs=buffer.num_envs
+            )
+        wp.capture_launch(expected_capture.graph)
+        np.testing.assert_allclose(mirror_actual, expected_out.numpy(), rtol=0.0, atol=0.0)
 
     def test_shared_value_mlp_forward_matches_numpy_for_nanog1_shape(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL network parity tests")
