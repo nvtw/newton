@@ -13,8 +13,11 @@ Last updated: June 22, 2026.
 ## What Mattered
 
 - The mraksha-style speedup came mainly from avoiding the dense contact/limit Schur complement, not from graph coloring.
-- Prefactoring the bilateral robot block is already used: DVI factors the joint-joint block once per solve and reuses it for the direct bilateral re-solves.
+- Do not treat the bilateral robot block as numerically constant. Its topology is fixed, but its values depend on current joint Jacobians and world-space inertia. A stale-factor test on DR Legs made contacts much worse, including multi-decimeter penetration when reusing one factor for a run.
+- Mraksha/Roblox-style "once per mechanism" applies to the symbolic factorization, ordering, fill pattern, and storage plan. The numeric block values are still assembled and factored at runtime.
+- Prefactoring the bilateral robot block is already used within a DVI solve: DVI factors the joint-joint block once per substep and reuses it for the direct bilateral re-solves in that substep.
 - The remaining hot path is the repeated sparse unilateral/contact sweep plus bilateral RHS rebuilds.
+- The PR 2998 native tile factorization update was slower on DR Legs. Only the native left-transpose back-solve fallback was kept; it gives a small LLT solve win.
 - Do not copy behavior-changing mraksha choices, such as tangential-only friction projection, unless Kamino intentionally changes its solver semantics.
 
 ## Failed Experiment
