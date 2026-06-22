@@ -43,6 +43,12 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
 from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
+from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
+    G1_FOOT_CONTACT_METRIC_COUNT,
+    G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
+    G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE,
+    scan_g1_foot_contact_metrics,
+)
 from newton._src.solvers.phoenx.rl_training.kernels import (
     DENSE_TILE_IN,
     DENSE_TILE_OUT,
@@ -2185,6 +2191,25 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected_shaped += env.config.w_base_height * (base_z - env.config.base_height_target) ** 2
         self.assertAlmostEqual(float(env.rewards.numpy()[0]), expected_shaped * env.config.frame_dt, places=5)
         self.assertEqual(float(env.dones.numpy()[0]), 0.0)
+
+    def test_g1_foot_contact_support_metrics_inside_graph(self) -> None:
+        env = _g1_test_env(world_count=1)
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=env.device)
+        foot_metrics = wp.zeros((env.world_count, 2, 3), dtype=wp.float32, device=env.device)
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            for _ in range(4):
+                env.step(actions)
+            scan_g1_foot_contact_metrics(env, foot_metrics)
+
+        wp.capture_launch(capture.graph)
+
+        metrics = foot_metrics.numpy()
+        self.assertTrue(np.isfinite(metrics).all())
+        self.assertGreater(metrics[0, 0, G1_FOOT_CONTACT_METRIC_COUNT], 0.0)
+        self.assertGreater(metrics[0, 1, G1_FOOT_CONTACT_METRIC_COUNT], 0.0)
+        self.assertGreater(float(np.sum(metrics[0, :, G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE])), 0.0)
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE] >= 0.0))
 
     def test_observe_clamps_extreme_state_to_finite_metrics(self) -> None:
         env = _g1_test_env(world_count=1)

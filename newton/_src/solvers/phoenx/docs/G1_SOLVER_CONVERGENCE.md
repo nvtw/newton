@@ -6,12 +6,15 @@ physically credible drive/contact behavior over the fastest possible sample rate
 
 ## Current Status (2026-06-22)
 
-Physics parity is not sufficient yet. The latest full 75M-sample training run
-with nanoG1/Puffer V-trace parity still failed the quality gate
-(`battery_perf=0.302`, `battery_falls=393`) while retaining acceptable speed
-(`train_seconds=184.3`, `total_wall_seconds=200.0`, about 3.1x slower than the
-nanoG1 59 s reference). That points away from pure trainer throughput as the
-main blocker.
+Physics parity is a diagnostic, not the final goal. Exact trajectory equality
+against nanoG1 is less important than preserving the intended actuator/drive
+behavior at the chosen PhoenX substep count: stiffness, damping, Coulomb
+friction, armature, force limits, and solver-induced effective compliance. The
+latest full 75M-sample training run with nanoG1/Puffer V-trace parity still
+failed the quality gate (`battery_perf=0.302`, `battery_falls=393`) while
+retaining acceptable speed (`train_seconds=184.3`, `total_wall_seconds=200.0`,
+about 3.1x slower than the nanoG1 59 s reference). That points away from pure
+trainer throughput as the main blocker, and toward actuator/contact response.
 
 Fresh 20-step open-loop comparisons against nanoG1 host physics show the
 current RL setting (`5x2`, 0.004 s physics dt, 2 position iterations, 1 velocity
@@ -37,11 +40,21 @@ constant mismatch:
 | `phoenx_10x8` | 0.002 | 8 + 2 | 0.0051 | 0.0082 rad | 0.053 rad/s |
 
 The next physics target is therefore not to lower accuracy for speed. It is to
-make the fast `5x2` formulation closer to the converged PhoenX/nanoG1 response,
-especially under stiff Unitree PD drives and foot contact. Candidate diagnostics:
-per-joint no-contact PD step response, grounded hold-pose contact impulse
-traces, per-foot normal/friction impulse totals, and reset-to-first-contact
-height/support evolution.
+understand and reduce effective actuator-model drift in the fast `5x2`
+formulation, especially Unitree PD stiffness/damping, passive friction, armature,
+force limits, and foot-contact coupling.
+
+Updated contact-support diagnostics now report per-foot contact counts for both
+nanoG1 host physics and PhoenX, plus PhoenX per-foot normal/tangent impulse
+sums. Gross foot support is present: zero-action runs match nanoG1 exactly at 4
+contacts per foot for both `5x2` and `10x8`. Under the 0.2 leg-step target,
+`10x8` still matches 4 contacts per foot, while `5x2` drops to mean contact
+counts of 3.80 left and 3.85 right against nanoG1's 4.0/4.0, with contact-count
+RMSE 0.418. This narrows the likely root cause to constraint/drive force
+response and solver convergence, not a simple absent-contact bug. Candidate
+remaining diagnostics: per-joint no-contact PD/friction/armature step response,
+grounded hold-pose contact impulse traces, and a substep sweep that reports
+tracking compliance against the configured Unitree gains and force limits.
 
 ## nanoG1 Reference
 

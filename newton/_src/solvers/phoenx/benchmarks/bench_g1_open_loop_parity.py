@@ -31,6 +31,12 @@ import warp as wp
 
 import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training import g1_recipe
+from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
+    G1_FOOT_CONTACT_METRIC_COUNT,
+    G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
+    G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE,
+    scan_g1_foot_contact_metrics,
+)
 
 _NANOG1_WEB_DIR = Path("/home/twidmer/Documents/git/nanoG1/web")
 _NANOG1_HOST = _NANOG1_WEB_DIR / "g1_host.c"
@@ -157,6 +163,20 @@ def _host_runner_source() -> str:
             putchar(']');
         }}
 
+        static int count_geom_contacts(int geom) {{
+            int count = 0;
+            for (int i = 0; i < ncon; ++i) {{
+                if (con_g1[i] == geom || con_g2[i] == geom) count++;
+            }}
+            return count;
+        }}
+
+        static double qfrc_constraint_norm(void) {{
+            double sum = 0.0;
+            for (int i = 0; i < HC_NV; ++i) sum += qfrc_constraint[i] * qfrc_constraint[i];
+            return sqrt(sum);
+        }}
+
         int main(int argc, char** argv) {{
             if (argc < 7) {{
                 fprintf(stderr, "usage: %s steps pattern amplitude decim dt newton [ls]\\n", argv[0]);
@@ -180,7 +200,10 @@ def _host_runner_source() -> str:
             double* qvel_traj = (double*)calloc((size_t)(steps + 1) * HC_NV, sizeof(double));
             double* base_z = (double*)calloc((size_t)(steps + 1), sizeof(double));
             double* upright = (double*)calloc((size_t)(steps + 1), sizeof(double));
-            if (!qpos_traj || !qvel_traj || !base_z || !upright) return 3;
+            double* left_contacts = (double*)calloc((size_t)steps, sizeof(double));
+            double* right_contacts = (double*)calloc((size_t)steps, sizeof(double));
+            double* qfrc_norm = (double*)calloc((size_t)steps, sizeof(double));
+            if (!qpos_traj || !qvel_traj || !base_z || !upright || !left_contacts || !right_contacts || !qfrc_norm) return 3;
 
             memcpy(qpos, hc_key_qpos, sizeof(qpos));
             memset(qvel, 0, sizeof(qvel));
@@ -215,6 +238,9 @@ def _host_runner_source() -> str:
                 memcpy(qvel_traj + (size_t)(t + 1) * HC_NV, qvel, sizeof(qvel));
                 base_z[t + 1] = qpos[2];
                 upright[t + 1] = upright_cos_host(qpos);
+                left_contacts[t] = (double)count_geom_contacts(17);
+                right_contacts[t] = (double)count_geom_contacts(31);
+                qfrc_norm[t] = qfrc_constraint_norm();
             }}
 
             printf("{{\\"qpos\\":");
@@ -225,6 +251,12 @@ def _host_runner_source() -> str:
             print_scalar_array(base_z, steps + 1);
             printf(",\\"upright_cos\\":");
             print_scalar_array(upright, steps + 1);
+            printf(",\\"left_contacts\\":");
+            print_scalar_array(left_contacts, steps);
+            printf(",\\"right_contacts\\":");
+            print_scalar_array(right_contacts, steps);
+            printf(",\\"qfrc_constraint_norm\\":");
+            print_scalar_array(qfrc_norm, steps);
             printf(",\\"decim\\":%d,\\"dt\\":%.17g,\\"newton\\":%d,\\"ls\\":%d}}\\n", decim, dt, newton, ls);
             return 0;
         }}
@@ -263,6 +295,14 @@ def _run_nanog1_host(args: argparse.Namespace, action_pattern: str, action_ampli
         "qvel": np.asarray(payload["qvel"], dtype=np.float64),
         "base_z": np.asarray(payload["base_z"], dtype=np.float64),
         "upright_cos": np.asarray(payload["upright_cos"], dtype=np.float64),
+        "foot_contacts": np.stack(
+            (
+                np.asarray(payload["left_contacts"], dtype=np.float64),
+                np.asarray(payload["right_contacts"], dtype=np.float64),
+            ),
+            axis=1,
+        ),
+        "qfrc_constraint_norm": np.asarray(payload["qfrc_constraint_norm"], dtype=np.float64),
     }
 
 
@@ -308,6 +348,10 @@ def _run_phoenx(
     qvel = np.zeros((int(args.steps) + 1, env.dof_stride), dtype=np.float64)
     base_z = np.zeros(int(args.steps) + 1, dtype=np.float64)
     upright = np.zeros(int(args.steps) + 1, dtype=np.float64)
+    foot_contacts = np.zeros((int(args.steps), 2), dtype=np.float64)
+    foot_normal_impulse = np.zeros((int(args.steps), 2), dtype=np.float64)
+    foot_tangent_impulse = np.zeros((int(args.steps), 2), dtype=np.float64)
+    foot_metrics = wp.zeros((env.world_count, 2, 3), dtype=wp.float32, device=device)
 
     env.reset()
     q0 = env.state_0.joint_q.numpy().reshape(1, env.coord_stride)[0]
@@ -323,12 +367,25 @@ def _run_phoenx(
         q = env.state_0.joint_q.numpy().reshape(1, env.coord_stride)[0]
         qd = env.state_0.joint_qd.numpy().reshape(1, env.dof_stride)[0]
         obs = env.obs.numpy()[0]
+        scan_g1_foot_contact_metrics(env, foot_metrics)
+        metrics = foot_metrics.numpy()[0]
         qpos[step + 1] = _phoenx_qpos_to_nanog1_layout(q)
         qvel[step + 1] = qd
         base_z[step + 1] = q[2]
         upright[step + 1] = -obs[5]
+        foot_contacts[step] = metrics[:, G1_FOOT_CONTACT_METRIC_COUNT]
+        foot_normal_impulse[step] = metrics[:, G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE]
+        foot_tangent_impulse[step] = metrics[:, G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE]
 
-    return {"qpos": qpos, "qvel": qvel, "base_z": base_z, "upright_cos": upright}
+    return {
+        "qpos": qpos,
+        "qvel": qvel,
+        "base_z": base_z,
+        "upright_cos": upright,
+        "foot_contacts": foot_contacts,
+        "foot_normal_impulse": foot_normal_impulse,
+        "foot_tangent_impulse": foot_tangent_impulse,
+    }
 
 
 def _fall_step(base_z: np.ndarray, upright_cos: np.ndarray) -> int | None:
@@ -358,6 +415,7 @@ def _compare_trajectory(
     base_quat_err = _quat_error(q[:, 3:7], hq[:, 3:7])
     base_z_err = phoenx["base_z"] - host["base_z"]
     upright_err = phoenx["upright_cos"] - host["upright_cos"]
+    foot_contact_err = phoenx["foot_contacts"] - host["foot_contacts"]
     return {
         "setting": setting.name,
         "sim_substeps": int(setting.sim_substeps),
@@ -382,6 +440,16 @@ def _compare_trajectory(
         "joint_q_final_max_abs_rad": float(np.max(np.abs(joint_err[-1]))),
         "joint_qd_final_rmse_rad_s": float(np.sqrt(np.mean(joint_qd_err[-1] * joint_qd_err[-1]))),
         "joint_qd_traj_rmse_rad_s": float(np.sqrt(np.mean(joint_qd_err * joint_qd_err))),
+        "left_contact_count_final_error": float(foot_contact_err[-1, 0]),
+        "right_contact_count_final_error": float(foot_contact_err[-1, 1]),
+        "contact_count_traj_rmse": float(np.sqrt(np.mean(foot_contact_err * foot_contact_err))),
+        "phoenx_left_contact_count_mean": float(np.mean(phoenx["foot_contacts"][:, 0])),
+        "phoenx_right_contact_count_mean": float(np.mean(phoenx["foot_contacts"][:, 1])),
+        "nanog1_left_contact_count_mean": float(np.mean(host["foot_contacts"][:, 0])),
+        "nanog1_right_contact_count_mean": float(np.mean(host["foot_contacts"][:, 1])),
+        "phoenx_foot_normal_impulse_mean": float(np.mean(phoenx["foot_normal_impulse"])),
+        "phoenx_foot_tangent_impulse_mean": float(np.mean(phoenx["foot_tangent_impulse"])),
+        "nanog1_qfrc_constraint_norm_mean": float(np.mean(host["qfrc_constraint_norm"])),
     }
 
 

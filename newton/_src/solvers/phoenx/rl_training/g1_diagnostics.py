@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import warp as wp
+
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    ContactContainer,
+    cc_get_normal_lambda,
+    cc_get_tangent1_lambda,
+    cc_get_tangent2_lambda,
+)
+
+G1_FOOT_CONTACT_METRIC_COUNT = 0
+G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE = 1
+G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE = 2
+G1_FOOT_CONTACT_METRIC_COUNT_TOTAL = 3
+
+
+@wp.func
+def _g1_add_foot_contact_metric(
+    shape_id: wp.int32,
+    shape_body: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    body_stride: wp.int32,
+    left_foot_body: wp.int32,
+    right_foot_body: wp.int32,
+    normal_impulse: wp.float32,
+    tangent_impulse: wp.float32,
+    foot_contact_metrics: wp.array3d[wp.float32],
+):
+    if shape_id < wp.int32(0):
+        return
+    body = shape_body[shape_id]
+    if body < wp.int32(0):
+        return
+
+    world = shape_world[shape_id]
+    if world < wp.int32(0):
+        if body_stride <= wp.int32(0):
+            return
+        world = body / body_stride
+    if world < wp.int32(0) or world >= foot_contact_metrics.shape[0]:
+        return
+
+    local_body = body
+    if body_stride > wp.int32(0):
+        local_body = body - world * body_stride
+
+    foot = wp.int32(-1)
+    if local_body == left_foot_body:
+        foot = wp.int32(0)
+    elif local_body == right_foot_body:
+        foot = wp.int32(1)
+    if foot < wp.int32(0):
+        return
+
+    wp.atomic_add(foot_contact_metrics, world, foot, wp.int32(G1_FOOT_CONTACT_METRIC_COUNT), wp.float32(1.0))
+    wp.atomic_add(
+        foot_contact_metrics,
+        world,
+        foot,
+        wp.int32(G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE),
+        normal_impulse,
+    )
+    wp.atomic_add(
+        foot_contact_metrics,
+        world,
+        foot,
+        wp.int32(G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE),
+        tangent_impulse,
+    )
+
+
+@wp.kernel(enable_backward=False)
+def g1_scan_foot_contact_metrics_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    rigid_contact_shape0: wp.array[wp.int32],
+    rigid_contact_shape1: wp.array[wp.int32],
+    shape_body: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    contact_container: ContactContainer,
+    body_stride: wp.int32,
+    left_foot_body: wp.int32,
+    right_foot_body: wp.int32,
+    foot_contact_metrics: wp.array3d[wp.float32],
+):
+    tid = wp.tid()
+    count = rigid_contact_count[0]
+    if count > rigid_contact_shape0.shape[0]:
+        count = rigid_contact_shape0.shape[0]
+    if tid >= count:
+        return
+
+    normal_impulse = wp.max(cc_get_normal_lambda(contact_container, tid), wp.float32(0.0))
+    tangent1 = cc_get_tangent1_lambda(contact_container, tid)
+    tangent2 = cc_get_tangent2_lambda(contact_container, tid)
+    tangent_impulse = wp.sqrt(tangent1 * tangent1 + tangent2 * tangent2)
+
+    _g1_add_foot_contact_metric(
+        rigid_contact_shape0[tid],
+        shape_body,
+        shape_world,
+        body_stride,
+        left_foot_body,
+        right_foot_body,
+        normal_impulse,
+        tangent_impulse,
+        foot_contact_metrics,
+    )
+    _g1_add_foot_contact_metric(
+        rigid_contact_shape1[tid],
+        shape_body,
+        shape_world,
+        body_stride,
+        left_foot_body,
+        right_foot_body,
+        normal_impulse,
+        tangent_impulse,
+        foot_contact_metrics,
+    )
+
+
+def scan_g1_foot_contact_metrics(env, foot_contact_metrics: wp.array3d[wp.float32]) -> None:
+    """Reduce current G1 foot contact count and impulse totals into a preallocated buffer."""
+
+    foot_contact_metrics.zero_()
+    if not getattr(env, "_can_scan_foot_contacts", False) or int(env.contacts.rigid_contact_max) <= 0:
+        return
+    contact_container = getattr(env.solver.world, "_contact_container", None)
+    if contact_container is None:
+        return
+
+    wp.launch(
+        g1_scan_foot_contact_metrics_kernel,
+        dim=int(env.contacts.rigid_contact_max),
+        inputs=[
+            env.contacts.rigid_contact_count,
+            env.contacts.rigid_contact_shape0,
+            env.contacts.rigid_contact_shape1,
+            env.model.shape_body,
+            env.model.shape_world,
+            contact_container,
+            env.body_stride,
+            env._left_foot_body_local,
+            env._right_foot_body_local,
+        ],
+        outputs=[foot_contact_metrics],
+        device=env.device,
+    )
