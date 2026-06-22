@@ -8,6 +8,7 @@ from __future__ import annotations
 import warp as wp
 
 from ...dynamics.dual import DualProblem
+from . import sparse_kernels
 from .kernels import _initialize_dvi_status, _scatter_bilateral_solution, _set_dvi_direct_status_iterations
 from .sparse_kernels import (
     _build_sparse_bilateral_block,
@@ -25,6 +26,9 @@ wp.set_module_options({"enable_backward": False})
 
 def solve_sparse(solver, problem: DualProblem) -> None:
     """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
+    if solver._has_contact_block_preconditioner and solver._size.max_of_max_contacts > 0:
+        _compute_sparse_contact_block_inverse(solver, problem)
+
     if solver._bilateral_solver is not None and solver._data.bilateral_operator is not None:
         _solve_sparse_with_bilateral_direct_block(solver, problem)
     else:
@@ -58,6 +62,7 @@ def _solve_sparse_jacobi(solver, problem: DualProblem) -> None:
                 problem.data.P,
                 problem.data.v_f,
                 state.v_aug,
+                state.contact_block_inv,
                 iteration,
                 solver._data.config,
                 solver._data.solution.lambdas,
@@ -112,6 +117,32 @@ def _compute_sparse_solution_vectors(solver, problem: DualProblem) -> None:
             state.s,
             state.v_aug,
             solver._data.solution.v_plus,
+        ],
+        device=solver.device,
+    )
+
+
+def _compute_sparse_contact_block_inverse(solver, problem: DualProblem) -> None:
+    jacobian = problem.delassus.constraint_jacobian
+    wp.launch(
+        kernel=sparse_kernels._compute_sparse_contact_block_inverse,
+        dim=(solver._size.num_worlds, solver._size.max_of_max_contacts),
+        inputs=[
+            problem.delassus.model.info.bodies_offset,
+            problem.delassus.model.bodies.inv_m_i,
+            problem.delassus.data.bodies.inv_I_i,
+            jacobian.nzb_start,
+            jacobian.num_nzb,
+            jacobian.nzb_coords,
+            jacobian.nzb_values,
+            problem.data.nc,
+            problem.data.ccgo,
+            problem.data.cio,
+            problem.data.vio,
+            problem.data.P,
+            solver._data.config,
+            jacobian.max_of_num_nzb,
+            solver._data.state.contact_block_inv,
         ],
         device=solver.device,
     )
@@ -254,6 +285,7 @@ def _solve_sparse_with_bilateral_direct_block(solver, problem: DualProblem) -> N
                     problem.data.P,
                     problem.data.v_f,
                     state.v_aug,
+                    state.contact_block_inv,
                     block_iteration,
                     contact_iteration,
                     solver._data.config,

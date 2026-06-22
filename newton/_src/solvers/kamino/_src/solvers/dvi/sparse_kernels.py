@@ -35,6 +35,25 @@ def _project_contact_diagonal_update(
 
 
 @wp.func
+def _project_contact_block_update(
+    lambda_old: vec3f,
+    v_c: vec3f,
+    D_diag: vec3f,
+    D_block_inv: mat33f,
+    regularization: float32,
+    omega: float32,
+    mu: float32,
+) -> vec3f:
+    inv_diag_norm = wp.abs(D_block_inv[0, 0]) + wp.abs(D_block_inv[1, 1]) + wp.abs(D_block_inv[2, 2])
+    lambda_arg = lambda_old
+    if inv_diag_norm > FLOAT32_EPS:
+        lambda_arg = lambda_old - omega * (D_block_inv * v_c)
+    else:
+        return _project_contact_diagonal_update(lambda_old, v_c, D_diag, regularization, omega, mu)
+    return project_to_coulomb_cone(lambda_arg, mu)
+
+
+@wp.func
 def _contact_trace_preconditioner(D_diag: vec3f) -> vec3f:
     D_eff = (D_diag.x + D_diag.y + D_diag.z) / float32(3.0)
     return vec3f(D_eff, D_eff, D_eff)
@@ -183,6 +202,96 @@ def _set_sparse_bilateral_diagonal(
 
 
 @wp.kernel
+def _compute_sparse_contact_block_inverse(
+    # Inputs:
+    model_info_bodies_offset: wp.array[int32],
+    model_bodies_inv_m_i: wp.array[float32],
+    data_bodies_inv_I_i: wp.array[mat33f],
+    jacobian_cts_nzb_start: wp.array[int32],
+    jacobian_cts_num_nzb: wp.array[int32],
+    jacobian_cts_nzb_coords: wp.array2d[int32],
+    jacobian_cts_nzb_values: wp.array[vec6f],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_P: wp.array[float32],
+    solver_config: wp.array[DVIConfigStruct],
+    max_num_nzb: int32,
+    # Outputs:
+    contact_block_inv: wp.array[mat33f],
+):
+    wid, cid = wp.tid()
+
+    nc = problem_nc[wid]
+    cio = problem_cio[wid]
+    if cid >= nc:
+        return
+
+    cfg = solver_config[wid]
+    if not cfg.contact_block_preconditioner:
+        contact_block_inv[cio + cid] = mat33f(0.0)
+        return
+
+    ccgo = problem_ccgo[wid]
+    ccio = ccgo + int32(3) * cid
+    nzb_start = jacobian_cts_nzb_start[wid]
+    num_nzb = jacobian_cts_num_nzb[wid]
+    pvio = problem_vio[wid]
+
+    D = mat33f(0.0)
+
+    for block_id_i in range(max_num_nzb):
+        if block_id_i >= num_nzb:
+            continue
+
+        global_block_id_i = nzb_start + block_id_i
+        block_coords_i = jacobian_cts_nzb_coords[global_block_id_i]
+        local_i = block_coords_i[0] - ccio
+        if local_i < 0 or local_i >= int32(3):
+            continue
+
+        block_i = jacobian_cts_nzb_values[global_block_id_i]
+        Jv_i = vec3f(block_i[0], block_i[1], block_i[2])
+        Jw_i = vec3f(block_i[3], block_i[4], block_i[5])
+        p_i = problem_P[pvio + ccio + local_i]
+
+        for block_id_j in range(max_num_nzb):
+            if block_id_j >= num_nzb:
+                continue
+
+            global_block_id_j = nzb_start + block_id_j
+            block_coords_j = jacobian_cts_nzb_coords[global_block_id_j]
+            local_j = block_coords_j[0] - ccio
+            if local_j < 0 or local_j >= int32(3) or block_coords_i[1] != block_coords_j[1]:
+                continue
+
+            block_j = jacobian_cts_nzb_values[global_block_id_j]
+            Jv_j = vec3f(block_j[0], block_j[1], block_j[2])
+            Jw_j = vec3f(block_j[3], block_j[4], block_j[5])
+            p_j = problem_P[pvio + ccio + local_j]
+
+            bid = model_info_bodies_offset[wid] + block_coords_i[1] // int32(6)
+            inv_m = model_bodies_inv_m_i[bid]
+            inv_I = data_bodies_inv_I_i[bid]
+            D[local_i, local_j] += p_i * (inv_m * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, inv_I @ Jw_j)) * p_j
+
+    D[0, 0] += cfg.regularization
+    D[1, 1] += cfg.regularization
+    D[2, 2] += cfg.regularization
+
+    diag_max = wp.max(wp.max(wp.abs(D[0, 0]), wp.abs(D[1, 1])), wp.abs(D[2, 2]))
+    if diag_max > FLOAT32_EPS:
+        det = wp.determinant(D)
+        det_min = FLOAT32_EPS * diag_max * diag_max * diag_max
+        if det > det_min:
+            contact_block_inv[cio + cid] = wp.inverse(D)
+            return
+
+    contact_block_inv[cio + cid] = mat33f(0.0)
+
+
+@wp.kernel
 def _solve_dvi_sparse_jacobi_update(
     # Inputs:
     problem_dim: wp.array[int32],
@@ -198,6 +307,7 @@ def _solve_dvi_sparse_jacobi_update(
     problem_P: wp.array[float32],
     problem_v_f: wp.array[float32],
     state_v_aug: wp.array[float32],
+    contact_block_inv: wp.array[mat33f],
     iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
     # Outputs:
@@ -263,14 +373,26 @@ def _solve_dvi_sparse_jacobi_update(
         solution_lambdas[ccio_v + 1],
         solution_lambdas[ccio_v + 2],
     )
-    lambda_projected = _project_contact_diagonal_update(
-        lambda_contact_old,
-        v_c,
-        _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
-        cfg.regularization,
-        cfg.contact_jacobi_omega,
-        mu_c,
-    )
+    D_diag = _contact_trace_preconditioner(vec3f(D_00, D_11, D_22))
+    if cfg.contact_block_preconditioner:
+        lambda_projected = _project_contact_block_update(
+            lambda_contact_old,
+            v_c,
+            D_diag,
+            contact_block_inv[problem_cio[wid] + cid],
+            cfg.regularization,
+            cfg.contact_jacobi_omega,
+            mu_c,
+        )
+    else:
+        lambda_projected = _project_contact_diagonal_update(
+            lambda_contact_old,
+            v_c,
+            D_diag,
+            cfg.regularization,
+            cfg.contact_jacobi_omega,
+            mu_c,
+        )
     lambda_contact_new = lambda_contact_old + cfg.contact_jacobi_relaxation * (lambda_projected - lambda_contact_old)
 
     solution_lambdas[ccio_v + 0] = lambda_contact_new.x
@@ -294,6 +416,7 @@ def _solve_dvi_sparse_unilateral_jacobi_update(
     problem_P: wp.array[float32],
     problem_v_f: wp.array[float32],
     state_v_aug: wp.array[float32],
+    contact_block_inv: wp.array[mat33f],
     block_iteration: int32,
     contact_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
@@ -359,14 +482,26 @@ def _solve_dvi_sparse_unilateral_jacobi_update(
         solution_lambdas[ccio_v + 1],
         solution_lambdas[ccio_v + 2],
     )
-    lambda_projected = _project_contact_diagonal_update(
-        lambda_contact_old,
-        v_c,
-        _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
-        cfg.regularization,
-        cfg.contact_jacobi_omega,
-        mu_c,
-    )
+    D_diag = _contact_trace_preconditioner(vec3f(D_00, D_11, D_22))
+    if cfg.contact_block_preconditioner:
+        lambda_projected = _project_contact_block_update(
+            lambda_contact_old,
+            v_c,
+            D_diag,
+            contact_block_inv[problem_cio[wid] + cid],
+            cfg.regularization,
+            cfg.contact_jacobi_omega,
+            mu_c,
+        )
+    else:
+        lambda_projected = _project_contact_diagonal_update(
+            lambda_contact_old,
+            v_c,
+            D_diag,
+            cfg.regularization,
+            cfg.contact_jacobi_omega,
+            mu_c,
+        )
     lambda_contact_new = lambda_contact_old + cfg.contact_jacobi_relaxation * (lambda_projected - lambda_contact_old)
 
     solution_lambdas[ccio_v + 0] = lambda_contact_new.x
