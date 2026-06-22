@@ -311,8 +311,8 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     config.constraints.beta = 0.011
     config.constraints.gamma = 0.015
     config.constraints.contact_recovery_speed = 1.0
-    config.constraints.contact_deep_recovery_gamma = 0.08
-    config.constraints.contact_deep_recovery_threshold = 2.5e-3
+    config.constraints.contact_deep_recovery_gamma = 0.10
+    config.constraints.contact_deep_recovery_threshold = 1.0e-3
     # ------------------------------------------------------------------------------
     # Jacobian representation
     config.sparse_dynamics = False

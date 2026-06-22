@@ -18,7 +18,7 @@ Last updated: June 22, 2026.
 - Sparse DVI now mirrors dense DVI's active bilateral dimension for repeated direct-block solves: worlds with no active limits/contacts keep the first bilateral result and skip later LLT solves.
 - Sparse DVI uses offset-owned fused limit/contact updates when sparse Jacobian offsets are available. This avoids rebuilding unilateral `v_aug` rows with atomics before applying the projected update.
 - For the focused sparse DR Legs benchmark using a `16x2` block/contact schedule, `bilateral_solve_period=2` was the best measured setting. The interactive DR Legs example uses a faster `4x2` schedule and keeps `bilateral_solve_period=1`; period `2` was faster but allowed visible tipped-contact drift at that lower work budget.
-- DR Legs tipped-foot sink needs stronger recovery only for already-deep contacts. The DR Legs DVI example keeps shallow `constraints.gamma=0.015`, then applies `contact_deep_recovery_gamma=0.08` beyond 2.5 mm plus a tiny example-only contact margin; focused tests keep standing vertical ripple below 1 mm while reducing tipped penetration.
+- DR Legs tipped-foot sink needs stronger recovery only for already-deep contacts. The DR Legs DVI example keeps shallow `constraints.gamma=0.015`, then applies `contact_deep_recovery_gamma=0.10` beyond 1.0 mm plus a tiny example-only contact margin; focused tests keep standing vertical ripple below 1 mm while reducing tipped penetration.
 - Do not copy behavior-changing mraksha choices, such as tangential-only friction projection, unless Kamino intentionally changes its solver semantics.
 
 ## Failed Experiment
@@ -39,6 +39,8 @@ Last updated: June 22, 2026.
   - Aggressive thresholds improved one FPS run but hurt NCP/natural-map residuals; conservative thresholds were only a small noisy gain with extra launches/atomics, so this was not kept.
 - Tried merging the fused limit/contact updates into one kernel.
   - It helped no-contact slightly but slowed the contact case, so the simpler separate fused kernels were kept.
+- Tried starting deep DR Legs contact recovery at 0.5 mm with stronger gains.
+  - It reduced tipped penetration further, but failed the standing force-balance guard and increased tipped lateral drift, so 1.0 mm was kept as the measured stable threshold.
 
 ## Next Hot-Path Targets
 

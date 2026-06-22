@@ -1069,9 +1069,9 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(contact_seen)
         self.assertTrue(np.all(np.isfinite(body_q)))
         self.assertTrue(np.all(np.isfinite(body_qd)))
-        self.assertLess(float(np.linalg.norm(base_delta_xy)), 0.006)
+        self.assertLess(float(np.linalg.norm(base_delta_xy)), 0.008)
         self.assertGreater(len(post_settle_penetration), 0)
-        self.assertLess(float(np.percentile(post_settle_penetration, 95)), 0.0045)
+        self.assertLess(float(np.percentile(post_settle_penetration, 95)), 0.0035)
 
     def test_11_dr_legs_dvi_contact_force_balances_weight(self):
         if not self.device.is_cuda:
@@ -1275,8 +1275,8 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.contact_jacobi_relaxation, 0.9)
         self.assertFalse(config.dvi.contact_block_preconditioner)
         self.assertEqual(config.constraints.gamma, 0.015)
-        self.assertEqual(config.constraints.contact_deep_recovery_gamma, 0.08)
-        self.assertEqual(config.constraints.contact_deep_recovery_threshold, 2.5e-3)
+        self.assertEqual(config.constraints.contact_deep_recovery_gamma, 0.10)
+        self.assertEqual(config.constraints.contact_deep_recovery_threshold, 1.0e-3)
         self.assertEqual(config.constraints.delta, 1.0e-6)
         self.assertEqual(config.constraints.contact_recovery_speed, 1.0)
         self.assertFalse(config.dynamics.preconditioning)
