@@ -77,6 +77,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
 )
 from newton._src.solvers.phoenx.rl_training.networks import _BF16_FORWARD_MIN_BATCH
 from newton._src.solvers.phoenx.rl_training.training import _quat_rotate_inverse_xyzw_np
+from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_REVOLUTE_DRIVE
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 _NANOG1_ROOT = Path("/home/twidmer/Documents/git/nanoG1")
@@ -2092,6 +2093,71 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.actuator_force.numpy(), expected_force, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(joint_f[:, :6], 0.0, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(joint_f[:, 6 : 6 + rl.ACTION_DIM_G1], expected_force, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_constraint_drive_softness_matches_implicit_pd_coefficients_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 implicit-drive coefficient tests")
+        perturb = np.float32(0.05)
+        substep_dt = np.float32(g1_recipe.FRAME_DT / g1_recipe.SIM_SUBSTEPS)
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=rl.ACTION_DIM_G1,
+                frame_dt=float(substep_dt),
+                sim_substeps=1,
+                solver_iterations=g1_recipe.SOLVER_ITERATIONS,
+                velocity_iterations=0,
+                max_episode_steps=0,
+                auto_reset=False,
+                actuation_model="constraint_drive",
+            ),
+            device=device,
+        )
+        self.assertEqual(env.config.actuation_model, "constraint_drive")
+
+        q = env.model.joint_q.numpy().reshape(env.world_count, env.coord_stride).copy()
+        qd = env.model.joint_qd.numpy().reshape(env.world_count, env.dof_stride).copy()
+        qd[:, :] = 0.0
+        q[:, 2] = 3.0
+        for world in range(env.world_count):
+            q[world, 7 + world] += perturb
+        env.state_0.joint_q.assign(q.reshape(-1))
+        env.state_0.joint_qd.assign(qd.reshape(-1))
+        newton.eval_fk(env.model, env.state_0.joint_q, env.state_0.joint_qd, env.state_0)
+
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            env.step(actions)
+        wp.capture_launch(capture.graph)
+
+        cids = env.solver._adbs.drive_cid.numpy().reshape(env.world_count, env.action_dim)
+        data = env.solver._constraints.data.numpy()
+        eff_inv = data[int(_OFF_EFF_INV_AXIAL), cids]
+        gamma = data[int(_OFF_GAMMA_DRIVE), cids]
+        bias = data[int(_OFF_BIAS_DRIVE), cids]
+        eff_mass_soft = data[int(_OFF_EFF_MASS_DRIVE_SOFT), cids]
+        acc_drive = data[int(_OFF_ACC_DRIVE), cids]
+
+        kp = env.actuator_ke.numpy()[None, :]
+        kd = env.actuator_kd.numpy()[None, :]
+        drive_c = np.zeros((env.world_count, env.action_dim), dtype=np.float32)
+        np.fill_diagonal(drive_c, perturb)
+        boost = np.float32(float(PHOENX_BOOST_REVOLUTE_DRIVE))
+        k_max = boost / (eff_inv * substep_dt * substep_dt)
+        k_clamped = np.minimum(kp, k_max)
+        softness = np.float32(1.0) / (kd + substep_dt * k_clamped)
+        expected_gamma = softness / substep_dt
+        expected_bias = drive_c * substep_dt * k_clamped * softness / substep_dt
+        expected_eff_mass = np.float32(1.0) / (eff_inv + expected_gamma)
+
+        np.testing.assert_allclose(gamma, expected_gamma, rtol=1.0e-6, atol=1.0e-5)
+        np.testing.assert_allclose(bias, expected_bias, rtol=1.0e-5, atol=1.0e-5)
+        np.testing.assert_allclose(eff_mass_soft, expected_eff_mass, rtol=1.0e-6, atol=1.0e-7)
+
+        coefficient_force_ratio = np.diag(expected_eff_mass / (substep_dt * (kd + substep_dt * k_clamped)))
+        observed_force_ratio = np.diag(acc_drive) / (substep_dt * env.actuator_ke.numpy() * perturb)
+        self.assertLess(float(np.max(coefficient_force_ratio)), 0.75)
+        self.assertLess(float(np.mean(coefficient_force_ratio)), 0.45)
+        self.assertLess(float(np.max(observed_force_ratio)), 0.95)
+        self.assertLess(float(np.mean(observed_force_ratio)), 0.65)
 
     def test_graph_replay_advances_policy_steps(self) -> None:
         env = _g1_test_env(world_count=1)

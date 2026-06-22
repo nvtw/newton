@@ -46,9 +46,17 @@ armature, force limits, and foot-contact coupling. A 2026-06-22 lifted
 per-joint stiffness check isolated one actuator issue: the old implicit PhoenX
 constraint-drive path produced only about `0.25x` to `0.85x` of the analytical
 `kp * (target - q) - kd * qd` torque at the default `8x4` training dt, plateauing
-near `0.60x` mean even with many PGS iterations. The G1 RL path now defaults to
-explicit clamped PD torques through `control.joint_f`, with a CUDA graph
-regression checking all 29 joints against the analytical nanoG1/MuJoCo formula.
+near `0.60x` mean even with many PGS iterations. The root cause is the intentional
+implicit-Euler PD row conversion, not a target mapping bug: PhoenX prepares
+`gamma = 1 / (dt * (kd + dt * kp_clamped))`,
+`bias = C * kp_clamped / (kd + dt * kp_clamped)`, and
+`M_soft = 1 / (M_inv + gamma)`, so the coefficient-level force ratio starts
+near `M_soft / (dt * (kd + dt * kp_clamped))` instead of `1.0`. The revolute
+drive boost is already at the configured `10x` cap and only limits
+`kp_clamped`; it does not remove the implicit damping/effective-mass softness.
+The G1 RL path now defaults to explicit clamped PD torques through
+`control.joint_f`, with CUDA graph regressions checking all 29 explicit torques
+and the implicit-drive coefficient softness against these formulas.
 
 Updated contact-support diagnostics now report per-foot contact counts for both
 nanoG1 host physics and PhoenX, plus PhoenX per-foot normal/tangent impulse
