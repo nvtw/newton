@@ -40,6 +40,12 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_R3_B1,
     _OFF_REVOLUTION_COUNTER,
 )
+from newton._src.solvers.phoenx.experimental.nanog1_import import (
+    PufferNetWeights,
+    assign_puffernet_weights,
+    load_puffernet_weights,
+    puffernet_numpy_forward,
+)
 from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
@@ -1675,6 +1681,107 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(net.decoder_weight.numpy(), expected_decoder, rtol=0.0, atol=2.0e-8)
         for actual, expected in zip(net.recurrent_weights, expected_recurrent, strict=True):
             np.testing.assert_allclose(actual.numpy(), expected, rtol=0.0, atol=2.0e-8)
+
+    def test_puffernet_weight_import_matches_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX PufferNet import tests")
+        input_dim = 3
+        hidden_size = 2
+        action_dim = 2
+        num_layers = 2
+        encoder_c = np.asarray(
+            [[0.2, -0.1, 0.4], [-0.3, 0.5, 0.7]],
+            dtype=np.float32,
+        )
+        decoder_c = np.asarray(
+            [[0.3, -0.2], [-0.4, 0.6], [0.1, 0.5]],
+            dtype=np.float32,
+        )
+        log_std = np.asarray([-0.7, -0.2], dtype=np.float32)
+        recurrent_c = (
+            np.linspace(-0.5, 0.6, 3 * hidden_size * hidden_size, dtype=np.float32).reshape(
+                3 * hidden_size, hidden_size
+            ),
+            np.linspace(0.4, -0.3, 3 * hidden_size * hidden_size, dtype=np.float32).reshape(
+                3 * hidden_size, hidden_size
+            ),
+        )
+
+        raw_parts = []
+        raw_count = 0
+
+        def append_aligned(values: np.ndarray) -> None:
+            nonlocal raw_count
+            flat = np.asarray(values, dtype=np.float32).reshape(-1)
+            raw_parts.append(flat)
+            raw_count += int(flat.size)
+            pad = (-raw_count) % 8
+            if pad:
+                raw_parts.append(np.full(pad, 99.0, dtype=np.float32))
+                raw_count += pad
+
+        append_aligned(encoder_c)
+        append_aligned(decoder_c)
+        append_aligned(log_std)
+        for recurrent in recurrent_c:
+            append_aligned(recurrent)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "puffernet.bin"
+            np.concatenate(raw_parts).astype(np.float32).tofile(path)
+            weights = load_puffernet_weights(
+                path,
+                input_dim=input_dim,
+                hidden_size=hidden_size,
+                action_dim=action_dim,
+                num_layers=num_layers,
+            )
+
+        expected_weights = PufferNetWeights(
+            encoder_weight=encoder_c.T.copy(),
+            decoder_weight=decoder_c.T.copy(),
+            log_std=log_std.copy(),
+            recurrent_weights=tuple(recurrent.T.copy() for recurrent in recurrent_c),
+            raw_float_count=raw_count,
+            aligned_float_count=raw_count,
+        )
+        np.testing.assert_allclose(weights.encoder_weight, expected_weights.encoder_weight, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(weights.decoder_weight, expected_weights.decoder_weight, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(weights.log_std, expected_weights.log_std, rtol=0.0, atol=0.0)
+        for actual, expected in zip(weights.recurrent_weights, expected_weights.recurrent_weights, strict=True):
+            np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+        trainer = rl.TrainerPPO(
+            obs_dim=input_dim,
+            action_dim=action_dim,
+            hidden_layers=(hidden_size, hidden_size),
+            config=rl.ConfigPPO(
+                shared_value_network=True,
+                policy_network="puffer_mingru",
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+            ),
+            device=device,
+            seed=13,
+            squash_actions=False,
+            log_std_init=-3.0,
+        )
+        assign_puffernet_weights(trainer, weights)
+        np.testing.assert_allclose(trainer.actor.log_std.numpy(), log_std, rtol=0.0, atol=0.0)
+
+        obs_np = np.asarray(
+            [[0.1, -0.2, 0.3], [0.4, 0.2, -0.1], [-0.3, 0.5, 0.2]],
+            dtype=np.float32,
+        )
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        out_snapshot = wp.empty((obs_np.shape[0], action_dim + 1), dtype=wp.float32, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            trainer.actor.net.zero_state()
+            out = trainer.actor.net.forward_reuse(obs)
+            wp.copy(out_snapshot, out)
+        wp.capture_launch(capture.graph)
+
+        expected_out, _ = puffernet_numpy_forward(weights, obs_np)
+        np.testing.assert_allclose(out_snapshot.numpy(), expected_out, rtol=1.0e-6, atol=1.0e-6)
 
     def test_puffer_mingru_backward_matches_finite_difference_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX MinGRU backward tests")

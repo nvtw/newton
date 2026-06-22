@@ -18,6 +18,10 @@ gate, and mutates a small set of PPO/reward knobs. Keep this as an experimental
 research tool: the stable user path should remain newton.rl.train_g1_ppo plus
 the single G1 recipe file.
 
+nanog1_import.py imports the shipped nanoG1 PufferNet binary into a normal
+PhoenX PPO checkpoint. This gives us a PyTorch-free teacher or warm-start policy
+for imitation experiments while keeping the default PPO trainer unchanged.
+
 The useful imitation-learning direction from HumanCompatibleAI/imitation is a
 behavior-cloning warm start from demonstrations or a teacher policy, followed by
 the existing PPO fine-tune. GAIL/AIRL/preference learning are plausible later,
