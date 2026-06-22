@@ -35,6 +35,8 @@ from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
     G1_FOOT_CONTACT_METRIC_ACTIVE_TANGENT_COUNT,
     G1_FOOT_CONTACT_METRIC_COUNT,
     G1_FOOT_CONTACT_METRIC_COUNT_TOTAL,
+    G1_FOOT_CONTACT_METRIC_FRICTION_LOAD,
+    G1_FOOT_CONTACT_METRIC_FRICTION_LOAD_RATIO_SUM,
     G1_FOOT_CONTACT_METRIC_HIGH_TANGENT_RATIO_COUNT,
     G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
     G1_FOOT_CONTACT_METRIC_SPECULATIVE_COUNT,
@@ -153,6 +155,8 @@ def _step_env_with_support_metrics(
     high_tangent_ratio_count_accum = np.zeros((env.world_count, 2), dtype=np.float64)
     active_normal_count_accum = np.zeros((env.world_count, 2), dtype=np.float64)
     active_tangent_count_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    friction_load_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    friction_load_ratio_sum_accum = np.zeros((env.world_count, 2), dtype=np.float64)
 
     for substep in range(substeps):
         env.state_0.clear_forces()
@@ -171,6 +175,8 @@ def _step_env_with_support_metrics(
         high_tangent_ratio_count_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_HIGH_TANGENT_RATIO_COUNT]
         active_normal_count_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT]
         active_tangent_count_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_ACTIVE_TANGENT_COUNT]
+        friction_load_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_FRICTION_LOAD]
+        friction_load_ratio_sum_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_FRICTION_LOAD_RATIO_SUM]
         env.state_0, env.state_1 = env.state_1, env.state_0
 
     wp.launch(g1_increment_episode_steps_kernel, dim=env.world_count, outputs=[env.episode_steps], device=env.device)
@@ -186,6 +192,12 @@ def _step_env_with_support_metrics(
         out=np.zeros_like(ratio_sum_accum),
         where=contact_count_accum > 1.0e-12,
     )
+    friction_load_ratio_mean = np.divide(
+        friction_load_ratio_sum_accum,
+        active_normal_count_accum,
+        out=np.zeros_like(friction_load_ratio_sum_accum),
+        where=active_normal_count_accum > 1.0e-12,
+    )
     substeps_f = float(substeps)
     return (
         contact_count_accum / substeps_f,
@@ -197,6 +209,8 @@ def _step_env_with_support_metrics(
         high_tangent_ratio_count_accum / substeps_f,
         active_normal_count_accum / substeps_f,
         active_tangent_count_accum / substeps_f,
+        friction_load_accum,
+        friction_load_ratio_mean,
     )
 
 
@@ -235,6 +249,8 @@ def _run_setting(
     foot_high_tangent_ratio_counts = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
     foot_active_normal_counts = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
     foot_active_tangent_counts = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_friction_loads = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_friction_load_ratios = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
 
     t0 = time.perf_counter()
     for step in range(step_count):
@@ -248,6 +264,8 @@ def _run_setting(
             high_tangent_ratio_counts,
             active_normal_counts,
             active_tangent_counts,
+            friction_loads,
+            friction_load_ratios,
         ) = _step_env_with_support_metrics(env, actions, foot_metrics)
         foot_counts[step] = counts
         foot_normal_impulses[step] = normal_impulses
@@ -258,6 +276,8 @@ def _run_setting(
         foot_high_tangent_ratio_counts[step] = high_tangent_ratio_counts
         foot_active_normal_counts[step] = active_normal_counts
         foot_active_tangent_counts[step] = active_tangent_counts
+        foot_friction_loads[step] = friction_loads
+        foot_friction_load_ratios[step] = friction_load_ratios
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
 
     obs = env.obs.numpy()
@@ -284,6 +304,7 @@ def _run_setting(
     support_normal_impulse = np.sum(foot_normal_impulses, axis=2)
     support_tangent_impulse = np.sum(foot_tangent_impulses, axis=2)
     support_tangent_bias = np.sum(foot_tangent_biases, axis=2)
+    support_friction_load = np.sum(foot_friction_loads, axis=2)
     foot_speculative_fraction = np.divide(
         foot_speculative_counts, foot_counts, out=np.zeros_like(foot_speculative_counts), where=foot_counts > 1.0e-12
     )
@@ -334,6 +355,8 @@ def _run_setting(
         "foot_high_tangent_ratio_fraction_mean": float(np.mean(foot_high_tangent_ratio_fraction)),
         "foot_active_normal_fraction_mean": float(np.mean(foot_active_normal_fraction)),
         "foot_active_tangent_fraction_mean": float(np.mean(foot_active_tangent_fraction)),
+        "support_friction_load_mean": float(np.mean(support_friction_load)),
+        "foot_friction_load_ratio_mean": float(np.mean(foot_friction_load_ratios)),
         "base_height_mean_m": float(np.mean(q[:, 2])),
         "base_height_min_m": float(np.min(q[:, 2])),
         "upright_cos_mean": float(np.mean(upright_cos)),
@@ -350,6 +373,8 @@ def _run_setting(
         "foot_high_tangent_ratio_fraction": foot_high_tangent_ratio_fraction,
         "foot_active_normal_fraction": foot_active_normal_fraction,
         "foot_active_tangent_fraction": foot_active_tangent_fraction,
+        "support_friction_load": support_friction_load,
+        "foot_friction_load_ratios": foot_friction_load_ratios,
     }
 
 
@@ -368,6 +393,8 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
     ref_high_tangent_ratio_fraction = reference["foot_high_tangent_ratio_fraction"]
     ref_active_normal_fraction = reference["foot_active_normal_fraction"]
     ref_active_tangent_fraction = reference["foot_active_tangent_fraction"]
+    ref_support_friction_load = reference["support_friction_load"]
+    ref_friction_load_ratios = reference["foot_friction_load_ratios"]
     ref_tracking_ratio = reference["joint_tracking_ratio_mean"]
     for result in results:
         q = result["q"]
@@ -390,6 +417,8 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
         high_tangent_ratio_fraction_err = result["foot_high_tangent_ratio_fraction"] - ref_high_tangent_ratio_fraction
         active_normal_fraction_err = result["foot_active_normal_fraction"] - ref_active_normal_fraction
         active_tangent_fraction_err = result["foot_active_tangent_fraction"] - ref_active_tangent_fraction
+        friction_load_err = result["support_friction_load"] - ref_support_friction_load
+        friction_load_ratio_err = result["foot_friction_load_ratios"] - ref_friction_load_ratios
         result["base_ref_rms"] = float(np.sqrt(np.mean(base_err * base_err)))
         result["foot_contact_count_ref_rmse"] = float(np.sqrt(np.mean(foot_count_err * foot_count_err)))
         result["support_normal_impulse_ref_rmse"] = float(np.sqrt(np.mean(normal_impulse_err * normal_impulse_err)))
@@ -406,6 +435,9 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
         result["foot_high_tangent_ratio_fraction_ref_delta_mean"] = float(np.mean(high_tangent_ratio_fraction_err))
         result["foot_active_normal_fraction_ref_delta_mean"] = float(np.mean(active_normal_fraction_err))
         result["foot_active_tangent_fraction_ref_delta_mean"] = float(np.mean(active_tangent_fraction_err))
+        result["support_friction_load_ref_delta_mean"] = float(np.mean(friction_load_err))
+        result["support_friction_load_ref_rmse"] = float(np.sqrt(np.mean(friction_load_err * friction_load_err)))
+        result["foot_friction_load_ratio_ref_delta_mean"] = float(np.mean(friction_load_ratio_err))
         if ref_tracking_ratio is not None and result["joint_tracking_ratio_mean"] is not None:
             result["joint_tracking_ratio_ref_delta"] = float(result["joint_tracking_ratio_mean"] - ref_tracking_ratio)
         else:
@@ -421,6 +453,8 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
         del result["foot_high_tangent_ratio_fraction"]
         del result["foot_active_normal_fraction"]
         del result["foot_active_tangent_fraction"]
+        del result["support_friction_load"]
+        del result["foot_friction_load_ratios"]
 
 
 def benchmark_g1_drive_convergence(args: argparse.Namespace) -> dict[str, Any]:

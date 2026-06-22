@@ -98,11 +98,16 @@ The gap is therefore not currently explained by disabled speculative rows or
 missing active tangent rows. The strongest new signal is high tangent-load usage:
 `5x2` reached the high tangent/load threshold on only `0.14` of active foot rows,
 `10x8` reached `0.48`, and `20x8` reached `0.79`. Tangent bias was actually
-higher at `5x2` (`0.137` frame-sum mean) than the `20x8` reference (`0.036`), so
-the next solver investigation should focus on tangential constraint
-projection/convergence and load coupling rather than contact generation or
-speculative activation. The diagnostic timing includes deliberate metric
-readbacks and is not a throughput benchmark.
+higher at `5x2` (`0.137` frame-sum mean) than the `20x8` reference (`0.036`). A
+follow-up friction-load diagnostic, using the same soft-contact normal debiasing
+formula as the Coulomb projection, showed that `5x2` does lose some available
+friction load (`5.53` versus `6.36` frame-sum mean; load ratio `0.869` versus
+`0.924`). That explains part of the coarse-setting tangent deficit, but not all
+of it: `10x8` matches the reference friction load almost exactly (`6.36`) while
+still lagging tangent impulse by `0.806`. The next solver investigation should
+therefore focus on tangential projection/convergence first, with normal-load
+debiasing as a secondary coupling effect. The diagnostic timing includes
+deliberate metric readbacks and is not a throughput benchmark.
 
 ## nanoG1 Reference
 

@@ -48,6 +48,8 @@ from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
     G1_FOOT_CONTACT_METRIC_ACTIVE_TANGENT_COUNT,
     G1_FOOT_CONTACT_METRIC_COUNT,
     G1_FOOT_CONTACT_METRIC_COUNT_TOTAL,
+    G1_FOOT_CONTACT_METRIC_FRICTION_LOAD,
+    G1_FOOT_CONTACT_METRIC_FRICTION_LOAD_RATIO_SUM,
     G1_FOOT_CONTACT_METRIC_HIGH_TANGENT_RATIO_COUNT,
     G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
     G1_FOOT_CONTACT_METRIC_SPECULATIVE_COUNT,
@@ -2552,6 +2554,20 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT] >= 0.0))
         self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT] <= foot_counts + 1.0e-5))
         self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_ACTIVE_TANGENT_COUNT] >= 0.0))
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_FRICTION_LOAD] >= 0.0))
+        self.assertTrue(
+            np.all(
+                metrics[0, :, G1_FOOT_CONTACT_METRIC_FRICTION_LOAD]
+                <= metrics[0, :, G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE] + 1.0e-5
+            )
+        )
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_FRICTION_LOAD_RATIO_SUM] >= 0.0))
+        self.assertTrue(
+            np.all(
+                metrics[0, :, G1_FOOT_CONTACT_METRIC_FRICTION_LOAD_RATIO_SUM]
+                <= metrics[0, :, G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT] + 1.0e-5
+            )
+        )
         self.assertTrue(
             np.all(
                 metrics[0, :, G1_FOOT_CONTACT_METRIC_HIGH_TANGENT_RATIO_COUNT]
