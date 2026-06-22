@@ -201,6 +201,35 @@ therefore focus on tangential projection/convergence first, with normal-load
 debiasing as a secondary coupling effect. The diagnostic timing includes
 deliberate metric readbacks and is not a throughput benchmark.
 
+## Action Parametrization and Startup Exploration
+
+The G1 RL action interface intentionally uses residual joint-position targets,
+not full-range joint-limit targets:
+
+```text
+target_q = default_joint_q + action_scale * clip(raw_action, -1, 1)
+```
+
+With the nanoG1/PhoenX default `action_scale = 0.25`, a saturated policy
+action requests only a `0.25 rad` offset from the nominal standing pose before
+the target is clamped to the actuator control range. This matches the common
+legged-locomotion pattern used by legged_gym-style PD position control and by
+Isaac Lab's default-offset joint-position action terms. It is deliberately not
+the more aggressive mapping where `action = -1` means the joint lower limit and
+`action = +1` means the joint upper limit. Full-range mapping would make early
+random PPO exploration much more violent and is not the current G1 reference
+recipe.
+
+A 2026-06-22 graph-leapfrog startup probe with the default G1 PPO config
+(`log_std_init = 0`, 1024 worlds, 64 rollout steps) measured clipped action RMS
+`0.72`, action clip fraction `0.32-0.33`, and mean `log_std` close to `0` over
+the first five updates. In physical target units, the initial clipped target RMS
+is therefore about `0.18 rad`. Startup exploration is not too small; if PhoenX
+needs a change here, the likely sweep is less aggressive or more structured
+exploration (`log_std_init`, per-joint `action_scale`, optional tanh squashing,
+or a short action-scale curriculum), not a switch to full actuator-range
+mapping.
+
 ## nanoG1 Reference
 
 nanoG1 v3 uses the following production physics and drive setup:

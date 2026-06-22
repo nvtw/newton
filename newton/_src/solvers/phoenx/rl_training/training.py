@@ -41,7 +41,7 @@ from .g1_recipe import (
 )
 from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_checkpoint
 
-_G1_TRAIN_STAT_COUNT = 10
+_G1_TRAIN_STAT_COUNT = 15
 
 
 @wp.kernel
@@ -49,9 +49,12 @@ def _g1_train_stat_sums_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
     successes: wp.array[wp.float32],
+    actions: wp.array2d[wp.float32],
+    log_std: wp.array[wp.float32],
     command: wp.array2d[wp.float32],
     num_samples: wp.int32,
     num_envs: wp.int32,
+    action_dim: wp.int32,
     policy_loss: wp.array[wp.float32],
     value_loss: wp.array[wp.float32],
     approx_kl: wp.array[wp.float32],
@@ -63,6 +66,22 @@ def _g1_train_stat_sums_kernel(
         wp.atomic_add(stats, 0, rewards[i])
         wp.atomic_add(stats, 1, dones[i])
         wp.atomic_add(stats, 2, successes[i])
+    action_total = num_samples * action_dim
+    if i < action_total:
+        row = i // action_dim
+        action = i - row * action_dim
+        a = actions[row, action]
+        abs_a = wp.abs(a)
+        clipped = wp.min(abs_a, wp.float32(1.0))
+        wp.atomic_add(stats, 10, a * a)
+        wp.atomic_add(stats, 11, clipped * clipped)
+        clip_hit = wp.float32(0.0)
+        if abs_a > wp.float32(1.0):
+            clip_hit = wp.float32(1.0)
+        wp.atomic_add(stats, 12, clip_hit)
+        wp.atomic_add(stats, 13, clipped)
+    if i < action_dim:
+        wp.atomic_add(stats, 14, log_std[i])
     if i < num_envs:
         wp.atomic_add(stats, 3, command[i, 0])
         wp.atomic_add(stats, 4, command[i, 1])
@@ -84,18 +103,23 @@ class _G1TrainDiagnosticsReadback:
 
     def read(
         self, buffer: BufferRollout, env: EnvG1PhoenX, trainer: TrainerPPO
-    ) -> tuple[tuple[float, float, float, float, float, float], StatsPPOUpdate]:
+    ) -> tuple[
+        tuple[float, float, float, float, float, float], StatsPPOUpdate, tuple[float, float, float, float, float]
+    ]:
         self._stats.zero_()
         wp.launch(
             _g1_train_stat_sums_kernel,
-            dim=max(buffer.num_samples, env.world_count),
+            dim=max(buffer.num_samples * env.action_dim, env.world_count, env.action_dim),
             inputs=[
                 buffer.rewards,
                 buffer.dones,
                 buffer.successes,
+                buffer.actions,
+                trainer.actor.log_std,
                 env.command,
                 buffer.num_samples,
                 env.world_count,
+                env.action_dim,
                 trainer._policy_loss,
                 trainer._value_loss,
                 trainer._approx_kl,
@@ -111,6 +135,8 @@ class _G1TrainDiagnosticsReadback:
         stats = self._stats_host.numpy()
         inv_samples = 1.0 / float(buffer.num_samples)
         inv_envs = 1.0 / float(env.world_count)
+        inv_actions = 1.0 / float(buffer.num_samples * env.action_dim)
+        inv_action_dim = 1.0 / float(env.action_dim)
         rollout_metrics = (
             float(stats[0]) * inv_samples,
             float(stats[1]) * inv_samples,
@@ -125,7 +151,14 @@ class _G1TrainDiagnosticsReadback:
             approx_kl=float(stats[8]),
             clip_fraction=float(stats[9]),
         )
-        return rollout_metrics, update_stats
+        action_metrics = (
+            float(np.sqrt(max(float(stats[10]) * inv_actions, 0.0))),
+            float(np.sqrt(max(float(stats[11]) * inv_actions, 0.0))),
+            float(stats[12]) * inv_actions,
+            float(stats[13]) * inv_actions,
+            float(stats[14]) * inv_action_dim,
+        )
+        return rollout_metrics, update_stats, action_metrics
 
 
 def _g1_disabled_rollout_metrics(env: EnvG1PhoenX) -> tuple[float, float, float, float, float, float]:
@@ -269,6 +302,11 @@ class StatsTrainG1PPO:
     value_loss: float
     approx_kl: float
     clip_fraction: float
+    raw_action_rms: float
+    clipped_action_rms: float
+    action_clip_fraction: float
+    clipped_action_abs_mean: float
+    mean_log_std: float
     rollout_seconds: float
     update_seconds: float
     samples_per_second: float
@@ -654,13 +692,14 @@ def _g1_graph_rollout_metrics(
     env: EnvG1PhoenX,
     trainer: TrainerPPO,
     cfg: ConfigTrainG1PPO,
-) -> tuple[tuple[float, float, float, float, float, float], StatsPPOUpdate]:
+) -> tuple[tuple[float, float, float, float, float, float], StatsPPOUpdate, tuple[float, float, float, float, float]]:
     if diagnostics is None:
-        return _g1_disabled_rollout_metrics(env), StatsPPOUpdate(0.0, 0.0, 0.0, 0.0)
-    rollout_metrics, update_stats = diagnostics.read(buffer, env, trainer)
+        action_metrics = (float("nan"), float("nan"), float("nan"), float("nan"), float("nan"))
+        return _g1_disabled_rollout_metrics(env), StatsPPOUpdate(0.0, 0.0, 0.0, 0.0), action_metrics
+    rollout_metrics, update_stats, action_metrics = diagnostics.read(buffer, env, trainer)
     command = _g1_command_metric_override(cfg, env)
     rollout_metrics = (rollout_metrics[0], rollout_metrics[1], rollout_metrics[2], *command)
-    return rollout_metrics, update_stats
+    return rollout_metrics, update_stats, action_metrics
 
 
 def _maybe_log_g1_train_stats(cfg: ConfigTrainG1PPO, stats: StatsTrainG1PPO, local_iteration: int) -> None:
@@ -670,6 +709,9 @@ def _maybe_log_g1_train_stats(cfg: ConfigTrainG1PPO, stats: StatsTrainG1PPO, loc
             f"reward={stats.mean_reward:.4f} "
             f"perf={stats.mean_tracking_perf:.3f} "
             f"done={stats.mean_done:.4f} "
+            f"act_rms={stats.clipped_action_rms:.3f} "
+            f"act_clip={stats.action_clip_fraction:.3f} "
+            f"logstd={stats.mean_log_std:.3f} "
             f"sps={stats.samples_per_second:.1f} "
             f"pi_loss={stats.policy_loss:.4f} "
             f"v_loss={stats.value_loss:.4f}"
@@ -779,8 +821,12 @@ def _train_g1_ppo_graph_leapfrog(
         t1 = time.perf_counter()
 
         trainer.iteration = iteration + 1
-        rollout_metrics, update_stats = _g1_graph_rollout_metrics(diagnostics, buffers[prev], env, trainer, cfg)
-        stats = _merge_g1_stats(iteration, rollout_metrics, update_stats, t1 - t0, 0.0, buffers[prev].num_samples)
+        rollout_metrics, update_stats, action_metrics = _g1_graph_rollout_metrics(
+            diagnostics, buffers[prev], env, trainer, cfg
+        )
+        stats = _merge_g1_stats(
+            iteration, rollout_metrics, update_stats, action_metrics, t1 - t0, 0.0, buffers[prev].num_samples
+        )
         history.append(stats)
         _maybe_log_g1_train_stats(cfg, stats, local_iteration)
         _maybe_checkpoint_g1(cfg, trainer)
@@ -923,11 +969,14 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         t1 = time.perf_counter()
         update_stats = trainer.update(buffer, read_stats=False)
         if diagnostics is not None:
-            rollout_metrics, update_stats = diagnostics.read(buffer, env, trainer)
+            rollout_metrics, update_stats, action_metrics = diagnostics.read(buffer, env, trainer)
         else:
             rollout_metrics = _g1_disabled_rollout_metrics(env)
+            action_metrics = (float("nan"), float("nan"), float("nan"), float("nan"), float("nan"))
         t2 = time.perf_counter()
-        stats = _merge_g1_stats(iteration, rollout_metrics, update_stats, t1 - t0, t2 - t1, buffer.num_samples)
+        stats = _merge_g1_stats(
+            iteration, rollout_metrics, update_stats, action_metrics, t1 - t0, t2 - t1, buffer.num_samples
+        )
         history.append(stats)
 
         _maybe_log_g1_train_stats(cfg, stats, local_iteration)
@@ -1690,11 +1739,13 @@ def _merge_g1_stats(
     iteration: int,
     rollout_metrics: tuple[float, float, float, float, float, float],
     update_stats: StatsPPOUpdate,
+    action_metrics: tuple[float, float, float, float, float],
     rollout_seconds: float,
     update_seconds: float,
     num_samples: int,
 ) -> StatsTrainG1PPO:
     mean_reward, mean_done, mean_tracking_perf, mean_command_x, mean_command_y, mean_command_yaw = rollout_metrics
+    raw_action_rms, clipped_action_rms, action_clip_fraction, clipped_action_abs_mean, mean_log_std = action_metrics
     elapsed = max(float(rollout_seconds) + float(update_seconds), 1.0e-12)
     return StatsTrainG1PPO(
         iteration=iteration,
@@ -1708,6 +1759,11 @@ def _merge_g1_stats(
         value_loss=update_stats.value_loss,
         approx_kl=update_stats.approx_kl,
         clip_fraction=update_stats.clip_fraction,
+        raw_action_rms=float(raw_action_rms),
+        clipped_action_rms=float(clipped_action_rms),
+        action_clip_fraction=float(action_clip_fraction),
+        clipped_action_abs_mean=float(clipped_action_abs_mean),
+        mean_log_std=float(mean_log_std),
         rollout_seconds=float(rollout_seconds),
         update_seconds=float(update_seconds),
         samples_per_second=float(num_samples) / elapsed,
