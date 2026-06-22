@@ -19,7 +19,7 @@
 - Change `SolverKamino.reset(world_mask=...)` to accept `wp.bool` arrays instead of `wp.int32`; callers passing `wp.int32` masks must switch to `wp.bool` (e.g. `wp.array([False, True, False], dtype=wp.bool)` or `wp.ones((num_worlds,), dtype=wp.bool)`). (#2934)
 - Change Kamino DVI direct-block joint limits to use the per-block unilateral sweep schedule instead of running `max_iterations` limit sweeps inside every block.
 - Change Kamino DVI direct-block scheduling to finish active unilateral solves with a final bilateral re-solve so the last contact/limit update does not remain as equality-constraint velocity.
-- Change the Kamino DR Legs DVI example defaults to use bounded contact recovery and fewer substeps for faster stable contact.
+- Change the Kamino DR Legs DVI example defaults to use bounded contact recovery and tuned DVI substeps/block iterations for faster stable contact.
 - Change the public Kamino DVI path to build an unpreconditioned dual problem so solver convergence is measured in physical constraint units.
 - Change Kamino DVI scalar contact updates to use a trace-average contact preconditioner before Coulomb cone projection.
 - Change Kamino DVI direct-block status iteration counts to report the total projected sweep work, `block_iterations * contact_iterations`.

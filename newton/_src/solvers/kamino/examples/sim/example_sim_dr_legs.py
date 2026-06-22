@@ -163,7 +163,7 @@ class Example:
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
         if target_sim_dt is None:
-            target_sim_dt = 0.002 if dynamics_solver == "dvi" else 0.01 if implicit_pd else 0.001
+            target_sim_dt = self.frame_dt / 12 if dynamics_solver == "dvi" else 0.01 if implicit_pd else 0.001
         elif target_sim_dt <= 0.0:
             raise ValueError("target_sim_dt must be positive.")
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
@@ -258,7 +258,7 @@ class Example:
             config.solver.dvi.tolerance = 1e-4
             config.solver.dvi.regularization = 1e-5
             config.solver.dvi.omega = 0.3
-            config.solver.dvi.block_iterations = 8
+            config.solver.dvi.block_iterations = 5
             config.solver.dvi.contact_iterations = 2
             config.solver.dvi.contact_jacobi_omega = 0.25
             config.solver.dvi.contact_jacobi_relaxation = 0.9
