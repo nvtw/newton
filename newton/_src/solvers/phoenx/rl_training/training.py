@@ -1229,7 +1229,7 @@ def _evaluate_g1_gate_battery(
         perf_np = env.step_successes.numpy().astype(np.float64)
         q = _joint_q_matrix_g1(env)
         qd = _joint_qd_matrix_g1(env)
-        lin_b = _quat_rotate_inverse_wxyz_np(q[:, 3:7], qd[:, 0:3])
+        lin_b = _quat_rotate_inverse_xyzw_np(q[:, 3:7], qd[:, 0:3])
         lin_err = np.linalg.norm(command_np[:, 0:2] - lin_b[:, 0:2], axis=1)
         yaw_err = np.abs(command_np[:, 2] - qd[:, 5])
 
@@ -1358,9 +1358,9 @@ def _joint_qd_matrix_g1(env: EnvG1PhoenX) -> np.ndarray:
     return env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
 
 
-def _quat_rotate_inverse_wxyz_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    qw = q[:, 0:1]
-    qv = q[:, 1:4]
+def _quat_rotate_inverse_xyzw_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    qw = q[:, 3:4]
+    qv = q[:, 0:3]
     return v * (2.0 * qw * qw - 1.0) - np.cross(qv, v) * (2.0 * qw) + qv * (2.0 * np.sum(qv * v, axis=1, keepdims=True))
 
 

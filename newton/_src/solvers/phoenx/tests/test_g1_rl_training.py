@@ -56,9 +56,12 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     DENSE_TILE_OUT,
     PPO_LOG_STD_PARTIAL_BATCH,
     compute_puffer_vtrace_returns_kernel,
+    gather_trajectory_minibatch_kernel,
     ppo_actor_loss_backward_kernel,
     reduce_ppo_log_std_grad_kernel,
     sample_trajectory_env_ids_kernel,
+    scatter_trajectory_ratios_kernel,
+    scatter_trajectory_values_kernel,
     trajectory_priority_kernel,
     trajectory_priority_weight_kernel,
     value_column_loss_grad_kernel,
@@ -66,6 +69,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     zero_scalar_kernel,
 )
 from newton._src.solvers.phoenx.rl_training.networks import _BF16_FORWARD_MIN_BATCH
+from newton._src.solvers.phoenx.rl_training.training import _quat_rotate_inverse_xyzw_np
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 _NANOG1_ROOT = Path("/home/twidmer/Documents/git/nanoG1")
@@ -494,6 +498,34 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         expected = _reference_obs_from_nanog1_deploy(deploy, q, qd, command, prev_action, episode_step)
         np.testing.assert_allclose(env.obs.numpy()[0], expected, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_g1_gate_velocity_metric_uses_phoenx_xyzw_quaternions(self) -> None:
+        env = _g1_test_env(world_count=1)
+        identity_xyzw = np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+        x_world = np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32)
+        np.testing.assert_allclose(_quat_rotate_inverse_xyzw_np(identity_xyzw, x_world), x_world, rtol=0.0, atol=0.0)
+
+        half_yaw = np.float32(0.25 * np.pi)
+        yaw_90_xyzw = np.asarray([[0.0, 0.0, np.sin(half_yaw), np.cos(half_yaw)]], dtype=np.float32)
+        q = env.state_0.joint_q.numpy()
+        qd = env.state_0.joint_qd.numpy()
+        q[3:7] = yaw_90_xyzw[0]
+        qd[:] = 0.0
+        qd[0:3] = x_world[0]
+        env.state_0.joint_q.assign(q)
+        env.state_0.joint_qd.assign(qd)
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(env.device)
+
+        expected_body = np.asarray([[0.0, -1.0, 0.0]], dtype=np.float32)
+        np.testing.assert_allclose(
+            _quat_rotate_inverse_xyzw_np(q.reshape(1, env.coord_stride)[:, 3:7], qd.reshape(1, env.dof_stride)[:, 0:3]),
+            expected_body,
+            rtol=1.0e-6,
+            atol=1.0e-6,
+        )
 
     def test_nanog1_action_target_contract_matches_graph_step(self) -> None:
         env = rl.EnvG1PhoenX(
@@ -975,6 +1007,114 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected_importance = np.power(np.float32(num_envs) * manual_probs[env_ids_np], -beta).astype(np.float32)
         self.assertIn(0, env_ids_np.tolist())
         np.testing.assert_allclose(importance_weights.numpy(), expected_importance, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_trajectory_minibatch_gather_scatter_matches_puffer_layout(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 trajectory minibatch layout tests")
+        pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
+        if not pufferlib_cu.is_file():
+            raise unittest.SkipTest(f"missing PufferLib reference file: {pufferlib_cu}")
+        text = pufferlib_cu.read_text()
+        self.assertIn("Transpose from rollout layout (T, B, ...) to train layout (B, T, ...)", text)
+        self.assertIn("select_copy<<<dim3(mb_segs, channels)", text)
+        self.assertIn("index_copy<<<grid_size(num_idx)", text)
+
+        num_steps = 3
+        num_envs = 4
+        segment_count = 2
+        obs_dim = 3
+        action_dim = 2
+        env_ids_np = np.asarray([3, 1], dtype=np.int32)
+        sample_count = num_steps * segment_count
+        src_count = num_steps * num_envs
+        obs_np = np.arange(src_count * obs_dim, dtype=np.float32).reshape(src_count, obs_dim)
+        actions_np = (100.0 + np.arange(src_count * action_dim, dtype=np.float32)).reshape(src_count, action_dim)
+        log_probs_np = 200.0 + np.arange(src_count, dtype=np.float32)
+        advantages_np = (300.0 + np.arange(src_count, dtype=np.float32)).reshape(num_steps, num_envs)
+        returns_np = (400.0 + np.arange(src_count, dtype=np.float32)).reshape(num_steps, num_envs)
+        values_np = (500.0 + np.arange((num_steps + 1) * num_envs, dtype=np.float32)).reshape(num_steps + 1, num_envs)
+
+        env_ids = wp.array(env_ids_np, dtype=wp.int32, device=device)
+        obs_src = wp.array(obs_np, dtype=wp.float32, device=device)
+        actions_src = wp.array(actions_np, dtype=wp.float32, device=device)
+        log_probs_src = wp.array(log_probs_np, dtype=wp.float32, device=device)
+        advantages_src = wp.array(advantages_np.reshape(-1), dtype=wp.float32, device=device)
+        returns_src = wp.array(returns_np.reshape(-1), dtype=wp.float32, device=device)
+        values_src = wp.array(values_np.reshape(-1), dtype=wp.float32, device=device)
+        obs_dst = wp.zeros((sample_count, obs_dim), dtype=wp.float32, device=device)
+        actions_dst = wp.zeros((sample_count, action_dim), dtype=wp.float32, device=device)
+        log_probs_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
+        advantages_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
+        returns_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
+        old_values_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
+        ratios_src_np = 600.0 + np.arange(sample_count, dtype=np.float32)
+        ratios_src = wp.array(ratios_src_np, dtype=wp.float32, device=device)
+        ratios_dst = wp.full(src_count, -1.0, dtype=wp.float32, device=device)
+        new_values_src_np = np.stack(
+            (
+                700.0 + np.arange(sample_count, dtype=np.float32),
+                800.0 + np.arange(sample_count, dtype=np.float32),
+            ),
+            axis=1,
+        ).astype(np.float32)
+        new_values_src = wp.array(new_values_src_np, dtype=wp.float32, device=device)
+        values_dst = wp.full(src_count, -1.0, dtype=wp.float32, device=device)
+        max_cols = max(obs_dim, action_dim)
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                gather_trajectory_minibatch_kernel,
+                dim=(sample_count, max_cols),
+                inputs=[
+                    env_ids,
+                    num_envs,
+                    segment_count,
+                    obs_dim,
+                    action_dim,
+                    obs_src,
+                    actions_src,
+                    log_probs_src,
+                    advantages_src,
+                    returns_src,
+                    values_src,
+                ],
+                outputs=[obs_dst, actions_dst, log_probs_dst, advantages_dst, returns_dst, old_values_dst],
+                device=device,
+            )
+            wp.launch(
+                scatter_trajectory_ratios_kernel,
+                dim=sample_count,
+                inputs=[env_ids, num_envs, segment_count, ratios_src],
+                outputs=[ratios_dst],
+                device=device,
+            )
+            wp.launch(
+                scatter_trajectory_values_kernel,
+                dim=sample_count,
+                inputs=[env_ids, num_envs, segment_count, new_values_src, 1],
+                outputs=[values_dst],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        selected_rows = []
+        for step in range(num_steps):
+            for env_id in env_ids_np:
+                selected_rows.append(step * num_envs + int(env_id))
+        selected_rows_np = np.asarray(selected_rows, dtype=np.int32)
+        np.testing.assert_allclose(obs_dst.numpy(), obs_np[selected_rows_np], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(actions_dst.numpy(), actions_np[selected_rows_np], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(log_probs_dst.numpy(), log_probs_np[selected_rows_np], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            advantages_dst.numpy(), advantages_np.reshape(-1)[selected_rows_np], rtol=0.0, atol=0.0
+        )
+        np.testing.assert_allclose(returns_dst.numpy(), returns_np.reshape(-1)[selected_rows_np], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(old_values_dst.numpy(), values_np.reshape(-1)[selected_rows_np], rtol=0.0, atol=0.0)
+
+        expected_ratios = np.full(src_count, -1.0, dtype=np.float32)
+        expected_values = np.full(src_count, -1.0, dtype=np.float32)
+        expected_ratios[selected_rows_np] = ratios_src_np
+        expected_values[selected_rows_np] = new_values_src_np[:, 1]
+        np.testing.assert_allclose(ratios_dst.numpy(), expected_ratios, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(values_dst.numpy(), expected_values, rtol=0.0, atol=0.0)
 
     def test_compact_rollout_and_update_metric_readbacks_reuse_pinned_buffers(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 compact metric readback tests")
