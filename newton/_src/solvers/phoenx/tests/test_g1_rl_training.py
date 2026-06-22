@@ -142,6 +142,77 @@ def _poison_adbs_reset_runtime_state_kernel(
     constraints.data[_OFF_ACC_FRICTION, cid] = poison
 
 
+@wp.kernel(enable_backward=False)
+def _adbs_runtime_nonfinite_flags_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    joint_count: wp.int32,
+    check_body_velocity: wp.int32,
+    flags: wp.array[wp.int32],
+):
+    cid = wp.tid()
+    if cid >= joint_count:
+        return
+
+    bad = wp.int32(0)
+    if check_body_velocity != wp.int32(0) and cid == wp.int32(0):
+        velocity = bodies.velocity[0]
+        angular_velocity = bodies.angular_velocity[0]
+        if not wp.isfinite(velocity[0]):
+            bad = wp.int32(1)
+        if not wp.isfinite(velocity[1]):
+            bad = wp.int32(1)
+        if not wp.isfinite(velocity[2]):
+            bad = wp.int32(1)
+        if not wp.isfinite(angular_velocity[0]):
+            bad = wp.int32(1)
+        if not wp.isfinite(angular_velocity[1]):
+            bad = wp.int32(1)
+        if not wp.isfinite(angular_velocity[2]):
+            bad = wp.int32(1)
+
+    for row in range(18):
+        if not wp.isfinite(constraints.data[_OFF_R1_B1 + row, cid]):
+            bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_MASS_COEFF, cid]):
+        bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_IMPULSE_COEFF, cid]):
+        bad = wp.int32(1)
+    for row in range(6):
+        if not wp.isfinite(constraints.data[_OFF_BIAS1 + row, cid]):
+            bad = wp.int32(1)
+    for row in range(27):
+        if not wp.isfinite(constraints.data[_OFF_MODE_CACHE + row, cid]):
+            bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_PREVIOUS_QUATERNION_ANGLE, cid]):
+        bad = wp.int32(1)
+    for row in range(6):
+        if not wp.isfinite(constraints.data[_OFF_ACC_IMP1 + row, cid]):
+            bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_EFF_INV_AXIAL, cid]):
+        bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_BIAS_DRIVE, cid]):
+        bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_GAMMA_DRIVE, cid]):
+        bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_EFF_MASS_DRIVE_SOFT, cid]):
+        bad = wp.int32(1)
+    for row in range(3):
+        if not wp.isfinite(constraints.data[_OFF_LIMIT_CACHE + row, cid]):
+            bad = wp.int32(1)
+    for row in range(3):
+        if not wp.isfinite(constraints.data[_OFF_AXIS_WORLD + row, cid]):
+            bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_ACC_DRIVE, cid]):
+        bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_ACC_LIMIT, cid]):
+        bad = wp.int32(1)
+    if not wp.isfinite(constraints.data[_OFF_ACC_FRICTION, cid]):
+        bad = wp.int32(1)
+
+    flags[cid] = bad
+
+
 def _load_reference_module(path: Path, name: str):
     if not path.is_file():
         raise unittest.SkipTest(f"missing nanoG1 reference file: {path}")
@@ -1613,18 +1684,61 @@ class TestG1PhoenXRL(unittest.TestCase):
             device=device,
         )
         actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+        joint_count = env.solver.world.num_joints
+        bad_before_reset = wp.zeros(joint_count, dtype=wp.int32, device=device)
+        bad_after_reset = wp.zeros(joint_count, dtype=wp.int32, device=device)
+        bad_after_step = wp.zeros(joint_count, dtype=wp.int32, device=device)
 
         with wp.ScopedCapture(device=device) as capture:
             wp.launch(
                 _poison_adbs_reset_runtime_state_kernel,
-                dim=env.solver.world.num_joints,
-                inputs=[env.solver.world.constraints, env.solver.world.bodies, env.solver.world.num_joints],
+                dim=joint_count,
+                inputs=[env.solver.world.constraints, env.solver.world.bodies, joint_count],
+                device=device,
+            )
+            wp.launch(
+                _adbs_runtime_nonfinite_flags_kernel,
+                dim=joint_count,
+                inputs=[
+                    env.solver.world.constraints,
+                    env.solver.world.bodies,
+                    joint_count,
+                    wp.int32(1),
+                    bad_before_reset,
+                ],
                 device=device,
             )
             env.reset()
+            wp.launch(
+                _adbs_runtime_nonfinite_flags_kernel,
+                dim=joint_count,
+                inputs=[
+                    env.solver.world.constraints,
+                    env.solver.world.bodies,
+                    joint_count,
+                    wp.int32(0),
+                    bad_after_reset,
+                ],
+                device=device,
+            )
             env.step(actions)
+            wp.launch(
+                _adbs_runtime_nonfinite_flags_kernel,
+                dim=joint_count,
+                inputs=[
+                    env.solver.world.constraints,
+                    env.solver.world.bodies,
+                    joint_count,
+                    wp.int32(1),
+                    bad_after_step,
+                ],
+                device=device,
+            )
         wp.capture_launch(capture.graph)
 
+        self.assertTrue(np.any(bad_before_reset.numpy() != 0))
+        self.assertFalse(np.any(bad_after_reset.numpy() != 0))
+        self.assertFalse(np.any(bad_after_step.numpy() != 0))
         self.assertFalse(np.any(env.step_dones.numpy() > 0.0))
         self.assertTrue(np.isfinite(env.state_0.joint_q.numpy()).all())
         self.assertTrue(np.isfinite(env.state_0.joint_qd.numpy()).all())
