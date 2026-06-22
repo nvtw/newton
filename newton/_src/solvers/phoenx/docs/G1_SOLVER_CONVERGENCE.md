@@ -81,7 +81,12 @@ secondary suspect. A follow-up `5x8` run improved normal-impulse delta only from
 cut those to -0.031 and -0.806. Smaller substeps therefore matter more than
 extra iterations at the 0.004 s substep size. The same tangential support gap is
 visible in a zero-action hold-pose sweep (`5x2`: -1.90, `10x8`: -1.01), so it
-is not caused only by the leg-step action target. The diagnostic timing includes
+is not caused only by the leg-step action target. A follow-up tangent/load ratio
+metric shows this is not simple friction-cone saturation: in the zero-action
+hold-pose sweep, mean tangent/normal ratio was `0.31` for `5x2`, `0.25` for
+`5x8`, `0.41` for `10x8`, and `0.54` for `20x8` with friction `0.6`. The coarse
+settings are using less of the available friction load, which points at
+substep-level tangential constraint convergence. The diagnostic timing includes
 deliberate metric readbacks and is not a throughput benchmark.
 
 ## nanoG1 Reference

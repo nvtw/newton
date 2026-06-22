@@ -35,8 +35,10 @@ import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
     G1_FOOT_CONTACT_METRIC_COUNT,
+    G1_FOOT_CONTACT_METRIC_COUNT_TOTAL,
     G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
     G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE,
+    G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM,
     scan_g1_foot_contact_metrics,
 )
 
@@ -365,7 +367,8 @@ def _run_phoenx(
     foot_contacts = np.zeros((int(args.steps), 2), dtype=np.float64)
     foot_normal_impulse = np.zeros((int(args.steps), 2), dtype=np.float64)
     foot_tangent_impulse = np.zeros((int(args.steps), 2), dtype=np.float64)
-    foot_metrics = wp.zeros((env.world_count, 2, 3), dtype=wp.float32, device=device)
+    foot_tangent_normal_ratio = np.zeros((int(args.steps), 2), dtype=np.float64)
+    foot_metrics = wp.zeros((env.world_count, 2, G1_FOOT_CONTACT_METRIC_COUNT_TOTAL), dtype=wp.float32, device=device)
 
     env.reset()
     if args.initial_base_z is not None:
@@ -399,6 +402,8 @@ def _run_phoenx(
         foot_contacts[step] = metrics[:, G1_FOOT_CONTACT_METRIC_COUNT]
         foot_normal_impulse[step] = metrics[:, G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE]
         foot_tangent_impulse[step] = metrics[:, G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE]
+        counts = np.maximum(metrics[:, G1_FOOT_CONTACT_METRIC_COUNT], 1.0e-12)
+        foot_tangent_normal_ratio[step] = metrics[:, G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM] / counts
 
     return {
         "qpos": qpos,
@@ -408,6 +413,7 @@ def _run_phoenx(
         "foot_contacts": foot_contacts,
         "foot_normal_impulse": foot_normal_impulse,
         "foot_tangent_impulse": foot_tangent_impulse,
+        "foot_tangent_normal_ratio": foot_tangent_normal_ratio,
     }
 
 
@@ -501,6 +507,7 @@ def _compare_trajectory(
         "nanog1_right_contact_count_mean": float(np.mean(host["foot_contacts"][:, 1])),
         "phoenx_foot_normal_impulse_mean": float(np.mean(phoenx["foot_normal_impulse"])),
         "phoenx_foot_tangent_impulse_mean": float(np.mean(phoenx["foot_tangent_impulse"])),
+        "phoenx_foot_tangent_normal_ratio_mean": float(np.mean(phoenx["foot_tangent_normal_ratio"])),
         "nanog1_qfrc_constraint_norm_mean": float(np.mean(host["qfrc_constraint_norm"])),
     }
 

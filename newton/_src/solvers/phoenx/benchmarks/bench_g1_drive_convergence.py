@@ -32,8 +32,10 @@ from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.g1 import g1_apply_actions_kernel, g1_increment_episode_steps_kernel
 from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
     G1_FOOT_CONTACT_METRIC_COUNT,
+    G1_FOOT_CONTACT_METRIC_COUNT_TOTAL,
     G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
     G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE,
+    G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM,
     scan_g1_foot_contact_metrics,
 )
 
@@ -116,7 +118,7 @@ def _step_env_with_support_metrics(
     env: rl.EnvG1PhoenX,
     actions: wp.array2d[wp.float32],
     foot_metrics: wp.array3d[wp.float32],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     wp.launch(
         g1_apply_actions_kernel,
         dim=(env.world_count, env.action_dim),
@@ -140,6 +142,7 @@ def _step_env_with_support_metrics(
     contact_count_accum = np.zeros((env.world_count, 2), dtype=np.float64)
     normal_impulse_accum = np.zeros((env.world_count, 2), dtype=np.float64)
     tangent_impulse_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    ratio_sum_accum = np.zeros((env.world_count, 2), dtype=np.float64)
 
     for substep in range(substeps):
         env.state_0.clear_forces()
@@ -152,6 +155,7 @@ def _step_env_with_support_metrics(
         contact_count_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_COUNT]
         normal_impulse_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE]
         tangent_impulse_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE]
+        ratio_sum_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM]
         env.state_0, env.state_1 = env.state_1, env.state_0
 
     wp.launch(g1_increment_episode_steps_kernel, dim=env.world_count, outputs=[env.episode_steps], device=env.device)
@@ -161,7 +165,13 @@ def _step_env_with_support_metrics(
     wp.copy(env.step_successes, env.successes)
     wp.copy(env.previous_actions, env.current_actions)
 
-    return contact_count_accum / float(substeps), normal_impulse_accum, tangent_impulse_accum
+    ratio_mean = np.divide(
+        ratio_sum_accum,
+        contact_count_accum,
+        out=np.zeros_like(ratio_sum_accum),
+        where=contact_count_accum > 1.0e-12,
+    )
+    return contact_count_accum / float(substeps), normal_impulse_accum, tangent_impulse_accum, ratio_mean
 
 
 def _run_setting(
@@ -189,17 +199,21 @@ def _run_setting(
     step_count = int(args.steps)
     initial_q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
     initial_controlled_q = initial_q[:, 7 : 7 + g1_recipe.CONTROLLED_ACTION_COUNT].copy()
-    foot_metrics = wp.zeros((env.world_count, 2, 3), dtype=wp.float32, device=device)
+    foot_metrics = wp.zeros((env.world_count, 2, G1_FOOT_CONTACT_METRIC_COUNT_TOTAL), dtype=wp.float32, device=device)
     foot_counts = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
     foot_normal_impulses = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
     foot_tangent_impulses = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_tangent_normal_ratios = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
 
     t0 = time.perf_counter()
     for step in range(step_count):
-        counts, normal_impulses, tangent_impulses = _step_env_with_support_metrics(env, actions, foot_metrics)
+        counts, normal_impulses, tangent_impulses, tangent_normal_ratios = _step_env_with_support_metrics(
+            env, actions, foot_metrics
+        )
         foot_counts[step] = counts
         foot_normal_impulses[step] = normal_impulses
         foot_tangent_impulses[step] = tangent_impulses
+        foot_tangent_normal_ratios[step] = tangent_normal_ratios
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
 
     obs = env.obs.numpy()
@@ -246,6 +260,8 @@ def _run_setting(
         "support_normal_impulse_mean": float(np.mean(support_normal_impulse)),
         "support_normal_impulse_min": float(np.min(support_normal_impulse)),
         "support_tangent_impulse_mean": float(np.mean(support_tangent_impulse)),
+        "foot_tangent_normal_ratio_mean": float(np.mean(foot_tangent_normal_ratios)),
+        "foot_tangent_normal_ratio_max": float(np.max(foot_tangent_normal_ratios)),
         "base_height_mean_m": float(np.mean(q[:, 2])),
         "base_height_min_m": float(np.min(q[:, 2])),
         "upright_cos_mean": float(np.mean(upright_cos)),
@@ -256,6 +272,7 @@ def _run_setting(
         "foot_counts": foot_counts,
         "support_normal_impulse": support_normal_impulse,
         "support_tangent_impulse": support_tangent_impulse,
+        "foot_tangent_normal_ratios": foot_tangent_normal_ratios,
     }
 
 
@@ -268,6 +285,7 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
     ref_foot_counts = reference["foot_counts"]
     ref_support_normal = reference["support_normal_impulse"]
     ref_support_tangent = reference["support_tangent_impulse"]
+    ref_tangent_normal_ratios = reference["foot_tangent_normal_ratios"]
     ref_tracking_ratio = reference["joint_tracking_ratio_mean"]
     for result in results:
         q = result["q"]
@@ -284,12 +302,17 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
         foot_count_err = result["foot_counts"] - ref_foot_counts
         normal_impulse_err = result["support_normal_impulse"] - ref_support_normal
         tangent_impulse_err = result["support_tangent_impulse"] - ref_support_tangent
+        tangent_normal_ratio_err = result["foot_tangent_normal_ratios"] - ref_tangent_normal_ratios
         result["base_ref_rms"] = float(np.sqrt(np.mean(base_err * base_err)))
         result["foot_contact_count_ref_rmse"] = float(np.sqrt(np.mean(foot_count_err * foot_count_err)))
         result["support_normal_impulse_ref_rmse"] = float(np.sqrt(np.mean(normal_impulse_err * normal_impulse_err)))
         result["support_normal_impulse_ref_delta_mean"] = float(np.mean(normal_impulse_err))
         result["support_tangent_impulse_ref_rmse"] = float(np.sqrt(np.mean(tangent_impulse_err * tangent_impulse_err)))
         result["support_tangent_impulse_ref_delta_mean"] = float(np.mean(tangent_impulse_err))
+        result["foot_tangent_normal_ratio_ref_rmse"] = float(
+            np.sqrt(np.mean(tangent_normal_ratio_err * tangent_normal_ratio_err))
+        )
+        result["foot_tangent_normal_ratio_ref_delta_mean"] = float(np.mean(tangent_normal_ratio_err))
         if ref_tracking_ratio is not None and result["joint_tracking_ratio_mean"] is not None:
             result["joint_tracking_ratio_ref_delta"] = float(result["joint_tracking_ratio_mean"] - ref_tracking_ratio)
         else:
@@ -299,6 +322,7 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
         del result["foot_counts"]
         del result["support_normal_impulse"]
         del result["support_tangent_impulse"]
+        del result["foot_tangent_normal_ratios"]
 
 
 def benchmark_g1_drive_convergence(args: argparse.Namespace) -> dict[str, Any]:

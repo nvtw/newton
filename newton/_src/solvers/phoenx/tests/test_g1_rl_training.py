@@ -45,8 +45,10 @@ from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
     G1_FOOT_CONTACT_METRIC_COUNT,
+    G1_FOOT_CONTACT_METRIC_COUNT_TOTAL,
     G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
     G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE,
+    G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM,
     scan_g1_foot_contact_metrics,
 )
 from newton._src.solvers.phoenx.rl_training.kernels import (
@@ -2195,7 +2197,9 @@ class TestG1PhoenXRL(unittest.TestCase):
     def test_g1_foot_contact_support_metrics_inside_graph(self) -> None:
         env = _g1_test_env(world_count=1)
         actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=env.device)
-        foot_metrics = wp.zeros((env.world_count, 2, 3), dtype=wp.float32, device=env.device)
+        foot_metrics = wp.zeros(
+            (env.world_count, 2, G1_FOOT_CONTACT_METRIC_COUNT_TOTAL), dtype=wp.float32, device=env.device
+        )
 
         with wp.ScopedCapture(device=env.device) as capture:
             for _ in range(4):
@@ -2210,6 +2214,11 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertGreater(metrics[0, 1, G1_FOOT_CONTACT_METRIC_COUNT], 0.0)
         self.assertGreater(float(np.sum(metrics[0, :, G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE])), 0.0)
         self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE] >= 0.0))
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM] >= 0.0))
+        ratio_mean = (
+            metrics[0, :, G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM] / metrics[0, :, G1_FOOT_CONTACT_METRIC_COUNT]
+        )
+        self.assertTrue(np.isfinite(ratio_mean).all())
 
     def test_observe_clamps_extreme_state_to_finite_metrics(self) -> None:
         env = _g1_test_env(world_count=1)

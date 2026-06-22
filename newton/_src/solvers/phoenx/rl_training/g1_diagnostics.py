@@ -15,7 +15,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 G1_FOOT_CONTACT_METRIC_COUNT = 0
 G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE = 1
 G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE = 2
-G1_FOOT_CONTACT_METRIC_COUNT_TOTAL = 3
+G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM = 3
+G1_FOOT_CONTACT_METRIC_COUNT_TOTAL = 4
 
 
 @wp.func
@@ -28,6 +29,7 @@ def _g1_add_foot_contact_metric(
     right_foot_body: wp.int32,
     normal_impulse: wp.float32,
     tangent_impulse: wp.float32,
+    tangent_normal_ratio: wp.float32,
     foot_contact_metrics: wp.array3d[wp.float32],
 ):
     if shape_id < wp.int32(0):
@@ -71,6 +73,13 @@ def _g1_add_foot_contact_metric(
         wp.int32(G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE),
         tangent_impulse,
     )
+    wp.atomic_add(
+        foot_contact_metrics,
+        world,
+        foot,
+        wp.int32(G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM),
+        tangent_normal_ratio,
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -97,6 +106,9 @@ def g1_scan_foot_contact_metrics_kernel(
     tangent1 = cc_get_tangent1_lambda(contact_container, tid)
     tangent2 = cc_get_tangent2_lambda(contact_container, tid)
     tangent_impulse = wp.sqrt(tangent1 * tangent1 + tangent2 * tangent2)
+    tangent_normal_ratio = wp.float32(0.0)
+    if normal_impulse > wp.float32(1.0e-8):
+        tangent_normal_ratio = tangent_impulse / normal_impulse
 
     _g1_add_foot_contact_metric(
         rigid_contact_shape0[tid],
@@ -107,6 +119,7 @@ def g1_scan_foot_contact_metrics_kernel(
         right_foot_body,
         normal_impulse,
         tangent_impulse,
+        tangent_normal_ratio,
         foot_contact_metrics,
     )
     _g1_add_foot_contact_metric(
@@ -118,12 +131,13 @@ def g1_scan_foot_contact_metrics_kernel(
         right_foot_body,
         normal_impulse,
         tangent_impulse,
+        tangent_normal_ratio,
         foot_contact_metrics,
     )
 
 
 def scan_g1_foot_contact_metrics(env, foot_contact_metrics: wp.array3d[wp.float32]) -> None:
-    """Reduce current G1 foot contact count and impulse totals into a preallocated buffer."""
+    """Reduce current G1 foot contact count, impulse totals, and tangent/load ratios."""
 
     foot_contact_metrics.zero_()
     if not getattr(env, "_can_scan_foot_contacts", False) or int(env.contacts.rigid_contact_max) <= 0:
