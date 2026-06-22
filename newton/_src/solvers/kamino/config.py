@@ -839,6 +839,13 @@ class DVISolverConfig:
     Must be greater than zero. Defaults to `4`.
     """
 
+    bilateral_solve_period: int = 1
+    """
+    Number of DVI block iterations between repeated direct bilateral solves.
+    A value of `1` re-solves after every projected inequality block, preserving
+    the standard direct-block schedule. Must be greater than zero. Defaults to `1`.
+    """
+
     contact_jacobi_omega: float = 0.3
     """
     Step size for contact Jacobi updates and block-preconditioned contact
@@ -910,6 +917,10 @@ class DVISolverConfig:
             raise ValueError(f"Invalid block iterations: {self.block_iterations}. Must be a positive integer.")
         if self.contact_iterations <= 0:
             raise ValueError(f"Invalid contact iterations: {self.contact_iterations}. Must be a positive integer.")
+        if self.bilateral_solve_period <= 0:
+            raise ValueError(
+                f"Invalid bilateral solve period: {self.bilateral_solve_period}. Must be a positive integer."
+            )
         if self.contact_jacobi_omega <= 0.0 or self.contact_jacobi_omega > 2.0:
             raise ValueError(f"Invalid contact Jacobi omega: {self.contact_jacobi_omega}. Must be in the range (0, 2].")
         if self.contact_jacobi_relaxation <= 0.0 or self.contact_jacobi_relaxation > 1.0:

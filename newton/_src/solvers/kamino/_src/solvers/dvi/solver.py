@@ -73,6 +73,7 @@ class DVISolver(ForwardDynamicsSolver):
         self._max_block_iterations: int = 1
         self._max_contact_iterations: int = 1
         self._max_iterations: int = 1
+        self._bilateral_solve_after_block: tuple[bool, ...] = ()
         self._has_contact_block_preconditioner: bool = False
         self._has_unilateral_constraints: bool = False
         self._contact_bid_AB: wp.array | None = None
@@ -122,6 +123,7 @@ class DVISolver(ForwardDynamicsSolver):
         self._max_iterations = max(c.max_iterations for c in self._config)
         self._max_block_iterations = max(c.block_iterations for c in self._config)
         self._max_contact_iterations = max(c.contact_iterations for c in self._config)
+        self._bilateral_solve_after_block = self._make_bilateral_solve_schedule(self._config)
         self._has_contact_block_preconditioner = any(c.contact_block_preconditioner for c in self._config)
         self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
         self._data = DVIData(size=self._size, device=self._device)
@@ -130,6 +132,19 @@ class DVISolver(ForwardDynamicsSolver):
         configs = [convert_config_to_struct(c) for c in self._config]
         with wp.ScopedDevice(self._device):
             self._data.config = wp.array(configs, dtype=DVIConfigStruct)
+
+    def _make_bilateral_solve_schedule(self, configs: list[DVISolver.Config]) -> tuple[bool, ...]:
+        """Return host-side repeated bilateral solve points for direct-block DVI."""
+        return tuple(
+            any(next_block < c.block_iterations and next_block % c.bilateral_solve_period == 0 for c in configs)
+            for next_block in range(1, self._max_block_iterations)
+        )
+
+    def _should_solve_bilateral_after_block(self, block_iteration: int) -> bool:
+        """Whether the direct bilateral block should be re-solved after this block."""
+        if block_iteration < 0 or block_iteration >= len(self._bilateral_solve_after_block):
+            return False
+        return self._bilateral_solve_after_block[block_iteration]
 
     def _allocate_bilateral_solver(self, model: ModelKamino):
         """Allocate the reduced dense operator used for bilateral DVI solves."""
@@ -589,7 +604,7 @@ class DVISolver(ForwardDynamicsSolver):
                             device=self.device,
                         )
 
-            if block_iteration + 1 < self._max_block_iterations:
+            if self._should_solve_bilateral_after_block(block_iteration):
                 self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
 
         self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)

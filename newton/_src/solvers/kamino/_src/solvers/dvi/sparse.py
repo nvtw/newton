@@ -354,7 +354,7 @@ def _solve_sparse_with_bilateral_direct_block(solver, problem: DualProblem) -> N
                 device=solver.device,
             )
 
-        if block_iteration + 1 < solver._max_block_iterations:
+        if solver._should_solve_bilateral_after_block(block_iteration):
             _solve_sparse_bilateral_block(solver, problem)
 
     _solve_sparse_bilateral_block(solver, problem)

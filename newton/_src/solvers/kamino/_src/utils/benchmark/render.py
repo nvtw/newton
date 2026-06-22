@@ -344,7 +344,7 @@ def render_solver_configs_table(
             - "linear": Linear solver settings (type, kwargs)
             - "padmm": PADMM settings (max_iterations, primal_tol, dual_tol, etc)
             - "dvi": DVI settings (max_iterations, tolerance, regularization, omega, block/contact iterations,
-              contact block preconditioning)
+              bilateral solve period, contact block preconditioning)
             - "warmstart": Warmstarting settings (mode, contact_method)
         to_console (bool, optional):
             If True, also prints the table to the console.
@@ -423,6 +423,7 @@ def render_solver_configs_table(
                 "omega",
                 "block_iter",
                 "contact_iter",
+                "bilateral_period",
                 "contact_jacobi_omega",
                 "contact_jacobi_relax",
                 "contact_block_precond",
@@ -482,6 +483,7 @@ def render_solver_configs_table(
                     f"{cfg.dvi.omega}",
                     str(cfg.dvi.block_iterations),
                     str(cfg.dvi.contact_iterations),
+                    str(cfg.dvi.bilateral_solve_period),
                     f"{cfg.dvi.contact_jacobi_omega}",
                     f"{cfg.dvi.contact_jacobi_relaxation}",
                     str(cfg.dvi.contact_block_preconditioner),

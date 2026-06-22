@@ -454,6 +454,7 @@ def save_solver_configs_to_hdf5(configs: dict[str, SolverKaminoImpl.Config], dat
         datafile[f"{scope}/dvi/omega"] = config.dvi.omega
         datafile[f"{scope}/dvi/block_iterations"] = config.dvi.block_iterations
         datafile[f"{scope}/dvi/contact_iterations"] = config.dvi.contact_iterations
+        datafile[f"{scope}/dvi/bilateral_solve_period"] = config.dvi.bilateral_solve_period
         datafile[f"{scope}/dvi/contact_jacobi_omega"] = config.dvi.contact_jacobi_omega
         datafile[f"{scope}/dvi/contact_jacobi_relaxation"] = config.dvi.contact_jacobi_relaxation
         datafile[f"{scope}/dvi/contact_block_preconditioner"] = config.dvi.contact_block_preconditioner
@@ -529,6 +530,8 @@ def load_solver_configs_to_hdf5(datafile) -> dict[str, SolverKaminoImpl.Config]:
                 config.dvi.block_iterations = int(datafile[f"{scope}/dvi/block_iterations"][()])
             if f"{scope}/dvi/contact_iterations" in datafile:
                 config.dvi.contact_iterations = int(datafile[f"{scope}/dvi/contact_iterations"][()])
+            if f"{scope}/dvi/bilateral_solve_period" in datafile:
+                config.dvi.bilateral_solve_period = int(datafile[f"{scope}/dvi/bilateral_solve_period"][()])
             if f"{scope}/dvi/contact_jacobi_omega" in datafile:
                 config.dvi.contact_jacobi_omega = float(datafile[f"{scope}/dvi/contact_jacobi_omega"][()])
             if f"{scope}/dvi/contact_jacobi_relaxation" in datafile:

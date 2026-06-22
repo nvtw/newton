@@ -117,6 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["total", "stepstats", "convergence", "accuracy"], default="convergence")
     parser.add_argument("--dvi-block-iterations", type=int)
     parser.add_argument("--dvi-contact-iterations", type=int)
+    parser.add_argument("--dvi-bilateral-solve-period", type=int)
     parser.add_argument("--dvi-contact-jacobi-omega", type=float)
     parser.add_argument("--dvi-contact-jacobi-relaxation", type=float)
     parser.add_argument("--dvi-contact-block-preconditioner", action=argparse.BooleanOptionalAction)
@@ -133,6 +134,8 @@ def apply_dvi_overrides(configs: dict[str, Any], args: argparse.Namespace) -> No
             config.dvi.block_iterations = args.dvi_block_iterations
         if args.dvi_contact_iterations is not None:
             config.dvi.contact_iterations = args.dvi_contact_iterations
+        if args.dvi_bilateral_solve_period is not None:
+            config.dvi.bilateral_solve_period = args.dvi_bilateral_solve_period
         if args.dvi_contact_jacobi_omega is not None:
             config.dvi.contact_jacobi_omega = args.dvi_contact_jacobi_omega
         if args.dvi_contact_jacobi_relaxation is not None:

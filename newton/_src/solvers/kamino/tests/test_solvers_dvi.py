@@ -216,6 +216,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.max_iterations, 32)
         self.assertEqual(config.dvi.block_iterations, 32)
         self.assertEqual(config.dvi.contact_iterations, 4)
+        self.assertEqual(config.dvi.bilateral_solve_period, 1)
         self.assertEqual(config.dvi.contact_jacobi_omega, 0.3)
         self.assertEqual(config.dvi.contact_jacobi_relaxation, 0.9)
         self.assertFalse(config.dvi.contact_block_preconditioner)
@@ -235,6 +236,8 @@ class TestDVISolver(unittest.TestCase):
             kamino_config.DVISolverConfig(block_iterations=0)
         with self.assertRaises(ValueError):
             kamino_config.DVISolverConfig(contact_iterations=0)
+        with self.assertRaises(ValueError):
+            kamino_config.DVISolverConfig(bilateral_solve_period=0)
         with self.assertRaises(ValueError):
             kamino_config.DVISolverConfig(contact_jacobi_omega=0.0)
         with self.assertRaises(ValueError):
@@ -1211,6 +1214,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.warmstart_mode, "containers")
         self.assertEqual(config.dvi.block_iterations, 32)
         self.assertEqual(config.dvi.contact_iterations, 4)
+        self.assertEqual(config.dvi.bilateral_solve_period, 1)
         self.assertEqual(config.dvi.contact_jacobi_omega, 0.3)
         self.assertEqual(config.dvi.contact_jacobi_relaxation, 0.9)
         self.assertFalse(config.dvi.contact_block_preconditioner)
@@ -1226,6 +1230,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(focused_configs["DVI"].sparse_dynamics)
         self.assertEqual(focused_configs["DVI"].dvi.block_iterations, 16)
         self.assertEqual(focused_configs["DVI"].dvi.contact_iterations, 2)
+        self.assertEqual(focused_configs["DVI"].dvi.bilateral_solve_period, 1)
         self.assertEqual(focused_configs["PADMM fast"].dynamics_solver, "padmm")
 
     def test_13b_dvi_benchmark_config_roundtrips_contact_controls(self):
@@ -1234,6 +1239,7 @@ class TestDVISolver(unittest.TestCase):
         config.dvi.contact_block_preconditioner = True
         config.dvi.contact_jacobi_omega = 0.25
         config.dvi.contact_jacobi_relaxation = 0.75
+        config.dvi.bilateral_solve_period = 2
         config.dvi.warmstart_mode = "internal"
         config.dvi.contact_warmstart_method = "reaction"
 
@@ -1242,20 +1248,27 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(bool(datafile["Solver/DVI tuned/dvi/contact_block_preconditioner"][()]))
         self.assertEqual(float(datafile["Solver/DVI tuned/dvi/contact_jacobi_omega"][()]), 0.25)
         self.assertEqual(float(datafile["Solver/DVI tuned/dvi/contact_jacobi_relaxation"][()]), 0.75)
+        self.assertEqual(int(datafile["Solver/DVI tuned/dvi/bilateral_solve_period"][()]), 2)
 
         loaded_configs = load_solver_configs_to_hdf5(datafile)
 
         self.assertTrue(loaded_configs["DVI tuned"].dvi.contact_block_preconditioner)
         self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_jacobi_omega, 0.25)
         self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_jacobi_relaxation, 0.75)
+        self.assertEqual(loaded_configs["DVI tuned"].dvi.bilateral_solve_period, 2)
         self.assertEqual(loaded_configs["DVI tuned"].dvi.warmstart_mode, "internal")
         self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_warmstart_method, "reaction")
 
         datafile._values.pop("Solver/DVI tuned/dvi/warmstart_mode")
         datafile._values.pop("Solver/DVI tuned/dvi/contact_warmstart_method")
+        datafile._values.pop("Solver/DVI tuned/dvi/bilateral_solve_period")
         loaded_legacy_configs = load_solver_configs_to_hdf5(datafile)
         dvi_defaults = kamino_config.DVISolverConfig()
 
+        self.assertEqual(
+            loaded_legacy_configs["DVI tuned"].dvi.bilateral_solve_period,
+            dvi_defaults.bilateral_solve_period,
+        )
         self.assertEqual(loaded_legacy_configs["DVI tuned"].dvi.warmstart_mode, dvi_defaults.warmstart_mode)
         self.assertEqual(
             loaded_legacy_configs["DVI tuned"].dvi.contact_warmstart_method,
@@ -1298,6 +1311,7 @@ class TestDVISolver(unittest.TestCase):
         args = SimpleNamespace(
             dvi_block_iterations=5,
             dvi_contact_iterations=6,
+            dvi_bilateral_solve_period=2,
             dvi_contact_jacobi_omega=0.4,
             dvi_contact_jacobi_relaxation=0.8,
             dvi_contact_block_preconditioner=True,
@@ -1306,6 +1320,7 @@ class TestDVISolver(unittest.TestCase):
 
         self.assertEqual(selected_configs["DVI"].dvi.block_iterations, 5)
         self.assertEqual(selected_configs["DVI"].dvi.contact_iterations, 6)
+        self.assertEqual(selected_configs["DVI"].dvi.bilateral_solve_period, 2)
         self.assertEqual(selected_configs["DVI"].dvi.contact_jacobi_omega, 0.4)
         self.assertEqual(selected_configs["DVI"].dvi.contact_jacobi_relaxation, 0.8)
         self.assertTrue(selected_configs["DVI"].dvi.contact_block_preconditioner)

@@ -38,6 +38,9 @@ class DVIConfigStruct:
     contact_iterations: int32
     """Projected sweeps for unilateral inequalities in each direct-bilateral block."""
 
+    bilateral_solve_period: int32
+    """Block iteration period for repeated direct bilateral solves."""
+
     contact_jacobi_omega: float32
     """Step size for contact Jacobi and block-preconditioned updates."""
 
@@ -149,6 +152,7 @@ def convert_config_to_struct(config: DVISolverConfig) -> DVIConfigStruct:
     config_struct.max_iterations = config.max_iterations
     config_struct.block_iterations = config.block_iterations
     config_struct.contact_iterations = config.contact_iterations
+    config_struct.bilateral_solve_period = config.bilateral_solve_period
     config_struct.contact_jacobi_omega = config.contact_jacobi_omega
     config_struct.contact_jacobi_relaxation = config.contact_jacobi_relaxation
     config_struct.contact_block_preconditioner = config.contact_block_preconditioner
