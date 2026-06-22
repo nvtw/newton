@@ -109,11 +109,12 @@ search can win by inflating coefficients instead of producing better walking.
 
 For sparse-target experiments, `reward_mode="sparse_target"` intentionally
 keeps the reward small: boolean target success, the tiny mechanical-power
-penalty, and fall termination. The optional target-distance curriculum changes
-the task distance on device between rollouts; it does not add a dense progress,
-velocity, gait, or base-height reward term. Use `target-g1-ppo` rather than the
-raw reward average to judge these runs, because a short lunge can satisfy a
-large target radius without being a useful walking policy.
+penalty, and fall termination. Target success requires the base to be within the
+XY radius and still balanced (`SPARSE_TARGET_SUCCESS_UPRIGHT_COS`, min/max base
+height), so a dive through the target is not counted as success. The optional
+target-distance curriculum changes the task distance on device between rollouts;
+it does not add a dense progress, velocity, gait, or base-height reward term.
+Use `target-g1-ppo` rather than the raw reward average to judge these runs.
 
 To reduce reward shaping, prefer demonstrations or teacher rollouts when they
 are available. A behavior-cloning warm start from nanoG1 or another working G1
@@ -294,11 +295,15 @@ quality/sample efficiency rather than only raw throughput. See
 
 A sparse-target curriculum probe (`reward_mode=sparse_target`, 2048 worlds, 64
 rollout steps, 60 graph-leapfrog iterations, distance ramp `0.6 -> 1.2 m` over
-7.86M samples) trained at roughly 246k env samples/s after warmup. The target
-evaluator showed `0.6 m` strict success 1.0, `1.0 m` success 1.0 but strict
-success 0.0 due tilt around 40 deg, and `1.4 m` success 0.0/fall 1.0. This is
-a useful no-dense-shaping probe, but it currently learns a reach/lunge, not a
-walking policy.
+7.86M samples) trained at roughly 246k env samples/s after warmup before the
+balanced-success gate was added. Re-evaluating that checkpoint with balanced
+success showed `0.6 m` strict success 1.0, but `1.0 m` and `1.4 m` both failed
+with large forward tilt/fall. Training from scratch with balanced success lost
+the sparse signal by iteration 40. Continuing from the non-strict checkpoint
+with a slower `0.6 -> 1.0 m` distance ramp kept about 3% rollout success and
+retained clean `0.6 m` strict success, but still failed at `1.0 m` and beyond.
+This fixes the false-positive lunge metric, but sparse target alone has not yet
+produced walking.
 
 The old fast graph-leapfrog production path was remeasured with the default
 auto fast-tail scheduler at 1,086,344 samples/s on 2026-06-20. Setting

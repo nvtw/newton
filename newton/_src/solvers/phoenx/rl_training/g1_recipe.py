@@ -44,6 +44,9 @@ SPARSE_COMMAND_VELOCITY_TOLERANCE = 0.35
 SPARSE_COMMAND_YAW_TOLERANCE = 0.4
 SPARSE_TARGET_POSITION = (0.6, 0.0)
 SPARSE_TARGET_RADIUS = 0.4
+SPARSE_TARGET_SUCCESS_UPRIGHT_COS = 0.8660254037844386
+SPARSE_TARGET_SUCCESS_MIN_BASE_HEIGHT = 0.35
+SPARSE_TARGET_SUCCESS_MAX_BASE_HEIGHT = 1.10
 SPARSE_TARGET_CURRICULUM_START = 0.6
 SPARSE_TARGET_CURRICULUM_END = 1.4
 SPARSE_TARGET_CURRICULUM_SAMPLES = 80_000_000
@@ -165,6 +168,9 @@ def default_g1_env_config(**overrides: Any):
         "sparse_command_yaw_tolerance": SPARSE_COMMAND_YAW_TOLERANCE,
         "sparse_target_position": SPARSE_TARGET_POSITION,
         "sparse_target_radius": SPARSE_TARGET_RADIUS,
+        "sparse_target_success_upright_cos": SPARSE_TARGET_SUCCESS_UPRIGHT_COS,
+        "sparse_target_success_min_base_height": SPARSE_TARGET_SUCCESS_MIN_BASE_HEIGHT,
+        "sparse_target_success_max_base_height": SPARSE_TARGET_SUCCESS_MAX_BASE_HEIGHT,
         "w_mechanical_power": W_MECHANICAL_POWER,
         "gait_stance_fraction": GAIT_STANCE_FRACTION,
         "w_gait_contact": W_GAIT_CONTACT,

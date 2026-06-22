@@ -203,6 +203,9 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         sparse_command_yaw_tolerance=float(args.sparse_command_yaw_tolerance),
         sparse_target_position=(float(args.target_x), float(args.target_y)),
         sparse_target_radius=float(args.sparse_target_radius),
+        sparse_target_success_upright_cos=float(args.sparse_target_success_upright_cos),
+        sparse_target_success_min_base_height=float(args.sparse_target_success_min_base_height),
+        sparse_target_success_max_base_height=float(args.sparse_target_success_max_base_height),
         w_mechanical_power=float(args.w_mechanical_power),
         w_gait_swing_contact=float(args.w_gait_swing_contact),
         parse_meshes=bool(args.parse_meshes),
@@ -336,6 +339,9 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "target_x": float(args.target_x),
         "target_y": float(args.target_y),
         "sparse_target_radius": float(args.sparse_target_radius),
+        "sparse_target_success_upright_cos": float(args.sparse_target_success_upright_cos),
+        "sparse_target_success_min_base_height": float(args.sparse_target_success_min_base_height),
+        "sparse_target_success_max_base_height": float(args.sparse_target_success_max_base_height),
         "use_target_curriculum": not bool(args.no_target_curriculum),
         "target_distance_start": float(args.target_distance_start),
         "target_distance_end": float(args.target_distance_end),
@@ -461,6 +467,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--target-x", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[0])
     parser.add_argument("--target-y", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[1])
     parser.add_argument("--sparse-target-radius", type=float, default=g1_recipe.SPARSE_TARGET_RADIUS)
+    parser.add_argument(
+        "--sparse-target-success-upright-cos", type=float, default=g1_recipe.SPARSE_TARGET_SUCCESS_UPRIGHT_COS
+    )
+    parser.add_argument(
+        "--sparse-target-success-min-base-height",
+        type=float,
+        default=g1_recipe.SPARSE_TARGET_SUCCESS_MIN_BASE_HEIGHT,
+    )
+    parser.add_argument(
+        "--sparse-target-success-max-base-height",
+        type=float,
+        default=g1_recipe.SPARSE_TARGET_SUCCESS_MAX_BASE_HEIGHT,
+    )
     parser.add_argument("--target-distance-start", type=float, default=g1_recipe.SPARSE_TARGET_CURRICULUM_START)
     parser.add_argument("--target-distance-end", type=float, default=g1_recipe.SPARSE_TARGET_CURRICULUM_END)
     parser.add_argument("--target-curriculum-samples", type=int, default=g1_recipe.SPARSE_TARGET_CURRICULUM_SAMPLES)

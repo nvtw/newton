@@ -2233,6 +2233,13 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.sparse_command_yaw_tolerance, g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE)
         self.assertEqual(env_config.sparse_target_position, g1_recipe.SPARSE_TARGET_POSITION)
         self.assertEqual(env_config.sparse_target_radius, g1_recipe.SPARSE_TARGET_RADIUS)
+        self.assertEqual(env_config.sparse_target_success_upright_cos, g1_recipe.SPARSE_TARGET_SUCCESS_UPRIGHT_COS)
+        self.assertEqual(
+            env_config.sparse_target_success_min_base_height, g1_recipe.SPARSE_TARGET_SUCCESS_MIN_BASE_HEIGHT
+        )
+        self.assertEqual(
+            env_config.sparse_target_success_max_base_height, g1_recipe.SPARSE_TARGET_SUCCESS_MAX_BASE_HEIGHT
+        )
         np.testing.assert_allclose(env.target_position.numpy()[0], np.asarray(g1_recipe.SPARSE_TARGET_POSITION))
         self.assertEqual(env_config.w_mechanical_power, g1_recipe.W_MECHANICAL_POWER)
         self.assertEqual(env_config.gait_stance_fraction, g1_recipe.GAIT_STANCE_FRACTION)
@@ -2365,6 +2372,38 @@ class TestG1PhoenXRL(unittest.TestCase):
         obs = env.obs.numpy()
         np.testing.assert_allclose(obs[:, 6:8], np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
         np.testing.assert_allclose(obs[:, 8], np.zeros(2, dtype=np.float32))
+
+    def test_sparse_target_requires_balanced_posture_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 sparse target balanced success tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=2,
+                reward_mode="sparse_target",
+                command=(0.0, 0.0, 0.0),
+                sparse_target_position=(0.0, 0.0),
+                sparse_target_radius=0.4,
+                sparse_target_success_upright_cos=math.cos(math.radians(30.0)),
+                w_sparse_command_success=5.0,
+                w_mechanical_power=0.0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        tilt = math.radians(45.0)
+        q[0, 3] = math.sin(0.5 * tilt)
+        q[0, 4] = 0.0
+        q[0, 5] = 0.0
+        q[0, 6] = math.cos(0.5 * tilt)
+        env.state_0.joint_q.assign(q.reshape(-1))
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(env.successes.numpy(), np.array([0.0, 1.0], dtype=np.float32))
+        np.testing.assert_allclose(env.dones.numpy(), np.array([0.0, 1.0], dtype=np.float32))
+        np.testing.assert_allclose(env.rewards.numpy(), np.array([0.0, 5.0], dtype=np.float32), atol=1.0e-6)
 
     def test_sparse_target_curriculum_updates_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 sparse target curriculum tests")
@@ -3900,6 +3939,9 @@ class TestG1PhoenXRL(unittest.TestCase):
                 target_x=g1_recipe.SPARSE_TARGET_POSITION[0],
                 target_y=g1_recipe.SPARSE_TARGET_POSITION[1],
                 sparse_target_radius=g1_recipe.SPARSE_TARGET_RADIUS,
+                sparse_target_success_upright_cos=g1_recipe.SPARSE_TARGET_SUCCESS_UPRIGHT_COS,
+                sparse_target_success_min_base_height=g1_recipe.SPARSE_TARGET_SUCCESS_MIN_BASE_HEIGHT,
+                sparse_target_success_max_base_height=g1_recipe.SPARSE_TARGET_SUCCESS_MAX_BASE_HEIGHT,
                 no_target_curriculum=False,
                 target_distance_start=g1_recipe.SPARSE_TARGET_CURRICULUM_START,
                 target_distance_end=g1_recipe.SPARSE_TARGET_CURRICULUM_END,
@@ -3959,6 +4001,15 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(result["target_x"], g1_recipe.SPARSE_TARGET_POSITION[0])
             self.assertEqual(result["target_y"], g1_recipe.SPARSE_TARGET_POSITION[1])
             self.assertEqual(result["sparse_target_radius"], g1_recipe.SPARSE_TARGET_RADIUS)
+            self.assertEqual(result["sparse_target_success_upright_cos"], g1_recipe.SPARSE_TARGET_SUCCESS_UPRIGHT_COS)
+            self.assertEqual(
+                result["sparse_target_success_min_base_height"],
+                g1_recipe.SPARSE_TARGET_SUCCESS_MIN_BASE_HEIGHT,
+            )
+            self.assertEqual(
+                result["sparse_target_success_max_base_height"],
+                g1_recipe.SPARSE_TARGET_SUCCESS_MAX_BASE_HEIGHT,
+            )
             self.assertEqual(result["target_distance_start"], g1_recipe.SPARSE_TARGET_CURRICULUM_START)
             self.assertEqual(result["target_distance_end"], g1_recipe.SPARSE_TARGET_CURRICULUM_END)
             self.assertEqual(result["target_curriculum_samples"], g1_recipe.SPARSE_TARGET_CURRICULUM_SAMPLES)

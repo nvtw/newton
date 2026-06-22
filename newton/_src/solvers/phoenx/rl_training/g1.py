@@ -776,6 +776,9 @@ def g1_observe_reward_kernel(
     sparse_command_velocity_tolerance: wp.float32,
     sparse_command_yaw_tolerance: wp.float32,
     sparse_target_radius: wp.float32,
+    sparse_target_success_upright_cos: wp.float32,
+    sparse_target_success_min_base_height: wp.float32,
+    sparse_target_success_max_base_height: wp.float32,
     w_mechanical_power: wp.float32,
     obs: wp.array2d[wp.float32],
     rewards: wp.array[wp.float32],
@@ -942,8 +945,14 @@ def g1_observe_reward_kernel(
         target_success = wp.float32(0.0)
         target_radius = wp.max(sparse_target_radius, wp.float32(0.0))
         target_dist_sq = target_delta_w[0] * target_delta_w[0] + target_delta_w[1] * target_delta_w[1]
+        target_success_min_height = wp.max(sparse_target_success_min_base_height, wp.float32(0.0))
+        target_success_max_height = wp.max(sparse_target_success_max_base_height, target_success_min_height)
+        target_success_upright = _clip_float(sparse_target_success_upright_cos, wp.float32(-1.0), wp.float32(1.0))
         if target_dist_sq <= target_radius * target_radius:
-            target_success = wp.float32(1.0)
+            if upright_cos >= target_success_upright:
+                if joint_q[q_base + wp.int32(2)] >= target_success_min_height:
+                    if joint_q[q_base + wp.int32(2)] <= target_success_max_height:
+                        target_success = wp.float32(1.0)
 
         fall = wp.float32(0.0)
         if joint_q[q_base + wp.int32(2)] < min_base_height or upright_cos < min_upright_cos:
@@ -1482,6 +1491,9 @@ class ConfigEnvG1PhoenX:
         sparse_command_yaw_tolerance: Yaw-rate command-success tolerance [rad/s].
         sparse_target_position: Sparse target XY position in each world [m].
         sparse_target_radius: Sparse target success radius [m].
+        sparse_target_success_upright_cos: Minimum upright cosine for sparse target success.
+        sparse_target_success_min_base_height: Minimum base height for sparse target success [m].
+        sparse_target_success_max_base_height: Maximum base height for sparse target success [m].
         w_mechanical_power: Absolute joint mechanical-power penalty scale.
         gait_stance_fraction: Fraction of each gait half-period spent in stance.
         w_gait_contact: Stance/contact phase-matching reward scale.
@@ -1548,6 +1560,9 @@ class ConfigEnvG1PhoenX:
     sparse_command_yaw_tolerance: float = g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE
     sparse_target_position: tuple[float, float] = g1_recipe.SPARSE_TARGET_POSITION
     sparse_target_radius: float = g1_recipe.SPARSE_TARGET_RADIUS
+    sparse_target_success_upright_cos: float = g1_recipe.SPARSE_TARGET_SUCCESS_UPRIGHT_COS
+    sparse_target_success_min_base_height: float = g1_recipe.SPARSE_TARGET_SUCCESS_MIN_BASE_HEIGHT
+    sparse_target_success_max_base_height: float = g1_recipe.SPARSE_TARGET_SUCCESS_MAX_BASE_HEIGHT
     w_mechanical_power: float = g1_recipe.W_MECHANICAL_POWER
     gait_stance_fraction: float = g1_recipe.GAIT_STANCE_FRACTION
     w_gait_contact: float = g1_recipe.W_GAIT_CONTACT
@@ -1611,6 +1626,10 @@ class EnvG1PhoenX:
             raise ValueError("gait_stance_fraction must be in [0, 1]")
         if float(self.config.sparse_target_radius) < 0.0:
             raise ValueError("sparse_target_radius must be non-negative")
+        if float(self.config.sparse_target_success_max_base_height) < float(
+            self.config.sparse_target_success_min_base_height
+        ):
+            raise ValueError("sparse_target_success_max_base_height must be >= sparse_target_success_min_base_height")
         if str(self.config.contact_geometry) not in _NANOG1_CONTACT_GEOMETRIES:
             raise ValueError(f"contact_geometry must be one of {_NANOG1_CONTACT_GEOMETRIES}")
         self._reward_mode_id = _g1_reward_mode_id(self.config.reward_mode)
@@ -2106,6 +2125,9 @@ class EnvG1PhoenX:
                 self.config.sparse_command_velocity_tolerance,
                 self.config.sparse_command_yaw_tolerance,
                 self.config.sparse_target_radius,
+                self.config.sparse_target_success_upright_cos,
+                self.config.sparse_target_success_min_base_height,
+                self.config.sparse_target_success_max_base_height,
                 self.config.w_mechanical_power,
             ],
             outputs=[self.obs, self.rewards, self.dones, self.successes],

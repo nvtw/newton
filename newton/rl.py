@@ -171,6 +171,19 @@ def _main() -> int:
     g1_parser.add_argument("--target-x", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[0])
     g1_parser.add_argument("--target-y", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[1])
     g1_parser.add_argument("--sparse-target-radius", type=float, default=g1_recipe.SPARSE_TARGET_RADIUS)
+    g1_parser.add_argument(
+        "--sparse-target-success-upright-cos", type=float, default=g1_recipe.SPARSE_TARGET_SUCCESS_UPRIGHT_COS
+    )
+    g1_parser.add_argument(
+        "--sparse-target-success-min-base-height",
+        type=float,
+        default=g1_recipe.SPARSE_TARGET_SUCCESS_MIN_BASE_HEIGHT,
+    )
+    g1_parser.add_argument(
+        "--sparse-target-success-max-base-height",
+        type=float,
+        default=g1_recipe.SPARSE_TARGET_SUCCESS_MAX_BASE_HEIGHT,
+    )
     g1_parser.add_argument("--target-distance-start", type=float, default=g1_recipe.SPARSE_TARGET_CURRICULUM_START)
     g1_parser.add_argument("--target-distance-end", type=float, default=g1_recipe.SPARSE_TARGET_CURRICULUM_END)
     g1_parser.add_argument("--target-curriculum-samples", type=int, default=g1_recipe.SPARSE_TARGET_CURRICULUM_SAMPLES)
@@ -338,6 +351,19 @@ def _main() -> int:
     g1_target_parser.add_argument("--target-x", type=float, action="append", default=None)
     g1_target_parser.add_argument("--target-y", type=float, action="append", default=None)
     g1_target_parser.add_argument("--sparse-target-radius", type=float, default=g1_recipe.SPARSE_TARGET_RADIUS)
+    g1_target_parser.add_argument(
+        "--sparse-target-success-upright-cos", type=float, default=g1_recipe.SPARSE_TARGET_SUCCESS_UPRIGHT_COS
+    )
+    g1_target_parser.add_argument(
+        "--sparse-target-success-min-base-height",
+        type=float,
+        default=g1_recipe.SPARSE_TARGET_SUCCESS_MIN_BASE_HEIGHT,
+    )
+    g1_target_parser.add_argument(
+        "--sparse-target-success-max-base-height",
+        type=float,
+        default=g1_recipe.SPARSE_TARGET_SUCCESS_MAX_BASE_HEIGHT,
+    )
     g1_target_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     g1_target_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_target_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
@@ -405,6 +431,9 @@ def _main() -> int:
             reward_mode=args.reward_mode,
             sparse_target_position=(args.target_x, args.target_y),
             sparse_target_radius=args.sparse_target_radius,
+            sparse_target_success_upright_cos=args.sparse_target_success_upright_cos,
+            sparse_target_success_min_base_height=args.sparse_target_success_min_base_height,
+            sparse_target_success_max_base_height=args.sparse_target_success_max_base_height,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
             rigid_contact_max_per_world=args.rigid_contact_max_per_world,
@@ -527,6 +556,9 @@ def _main() -> int:
             world_count=args.world_count,
             reward_mode="sparse_target",
             sparse_target_radius=args.sparse_target_radius,
+            sparse_target_success_upright_cos=args.sparse_target_success_upright_cos,
+            sparse_target_success_min_base_height=args.sparse_target_success_min_base_height,
+            sparse_target_success_max_base_height=args.sparse_target_success_max_base_height,
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,

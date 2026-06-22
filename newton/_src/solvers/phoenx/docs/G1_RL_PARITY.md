@@ -181,10 +181,14 @@ shows that the recurrent-state fix improves PPO consistency but the current
 recipe plateaus; simply running longer for about ten minutes is not enough.
 
 Sparse-target training now has a graph-compatible target-distance curriculum and
-a target evaluator that separates target hits from walking quality. A 7.86M
-sample curriculum probe hit 0.6 m cleanly and 1.0 m only with large tilt, then
-failed/fell at 1.4 m. Current evidence therefore points to a locomotion-quality
-gap after sparse task discovery, not a missing boolean success reward.
+a target evaluator that separates target hits from walking quality. Target
+success itself now requires balanced posture, which prevents the previous false
+positive where a policy lunged through the target with large tilt. A strict
+from-scratch run lost the sparse signal by iteration 40; a warm-start from the
+previous non-strict sparse checkpoint retained clean 0.6 m success but still
+failed at 1.0 m and 1.4 m. Current evidence therefore points to sparse task
+exploration/curriculum or teacher warm-start needs after the false-success bug,
+not a missing dense reward term.
 
 ## Next Checks
 
