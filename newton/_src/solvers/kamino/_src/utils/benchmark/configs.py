@@ -311,6 +311,8 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     config.constraints.beta = 0.011
     config.constraints.gamma = 0.015
     config.constraints.contact_recovery_speed = 1.0
+    config.constraints.contact_deep_recovery_gamma = 0.08
+    config.constraints.contact_deep_recovery_threshold = 2.5e-3
     # ------------------------------------------------------------------------------
     # Jacobian representation
     config.sparse_dynamics = False
@@ -426,6 +428,10 @@ def save_solver_configs_to_hdf5(configs: dict[str, SolverKaminoImpl.Config], dat
         datafile[f"{scope}/constraints/gamma"] = config.constraints.gamma
         datafile[f"{scope}/constraints/delta"] = config.constraints.delta
         datafile[f"{scope}/constraints/contact_recovery_speed"] = config.constraints.contact_recovery_speed
+        datafile[f"{scope}/constraints/contact_deep_recovery_gamma"] = config.constraints.contact_deep_recovery_gamma
+        datafile[f"{scope}/constraints/contact_deep_recovery_threshold"] = (
+            config.constraints.contact_deep_recovery_threshold
+        )
         # ------------------------------------------------------------------------------
         datafile[f"{scope}/dynamics/preconditioning"] = config.dynamics.preconditioning
         datafile[f"{scope}/dynamics/linear_solver/type"] = str(config.dynamics.linear_solver_type)
@@ -493,6 +499,14 @@ def load_solver_configs_to_hdf5(datafile) -> dict[str, SolverKaminoImpl.Config]:
         contact_recovery_speed_path = f"{scope}/constraints/contact_recovery_speed"
         if contact_recovery_speed_path in datafile:
             config.constraints.contact_recovery_speed = float(datafile[contact_recovery_speed_path][()])
+        contact_deep_recovery_gamma_path = f"{scope}/constraints/contact_deep_recovery_gamma"
+        if contact_deep_recovery_gamma_path in datafile:
+            config.constraints.contact_deep_recovery_gamma = float(datafile[contact_deep_recovery_gamma_path][()])
+        contact_deep_recovery_threshold_path = f"{scope}/constraints/contact_deep_recovery_threshold"
+        if contact_deep_recovery_threshold_path in datafile:
+            config.constraints.contact_deep_recovery_threshold = float(
+                datafile[contact_deep_recovery_threshold_path][()]
+            )
         # ------------------------------------------------------------------------------
         config.dynamics.preconditioning = bool(datafile[f"{scope}/dynamics/preconditioning"][()])
         config.dynamics.linear_solver_type = _read_hdf5_string(datafile, f"{scope}/dynamics/linear_solver/type")

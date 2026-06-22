@@ -223,6 +223,8 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.contact_warmstart_method, "geom_pair_net_force")
         self.assertFalse(config.dynamics.preconditioning)
         self.assertEqual(config.constraints.contact_recovery_speed, -1.0)
+        self.assertEqual(config.constraints.contact_deep_recovery_gamma, -1.0)
+        self.assertEqual(config.constraints.contact_deep_recovery_threshold, 0.0)
 
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
         self.assertTrue(sparse_config.sparse_dynamics)
@@ -232,6 +234,10 @@ class TestDVISolver(unittest.TestCase):
                 dynamics_solver="dvi",
                 dynamics=kamino_config.ConstrainedDynamicsConfig(preconditioning=True),
             )
+        with self.assertRaises(ValueError):
+            kamino_config.ConstraintStabilizationConfig(contact_deep_recovery_gamma=1.1)
+        with self.assertRaises(ValueError):
+            kamino_config.ConstraintStabilizationConfig(contact_deep_recovery_threshold=-1.0)
         with self.assertRaises(ValueError):
             kamino_config.DVISolverConfig(block_iterations=0)
         with self.assertRaises(ValueError):
@@ -1046,9 +1052,15 @@ class TestDVISolver(unittest.TestCase):
 
         base_start = example.state_0.body_q.numpy()[0, :3].copy()
         contact_seen = False
-        for _ in range(160):
+        post_settle_penetration = []
+        for step_idx in range(160):
             example.step()
             contact_seen = contact_seen or int(example.contacts.rigid_contact_count.numpy()[0]) > 0
+            contacts_kamino = example.solver._contacts_kamino
+            contact_count = int(contacts_kamino.world_active_contacts.numpy()[0])
+            if step_idx >= 40 and contact_count > 0:
+                gaps = contacts_kamino.gapfunc.numpy()[:contact_count, 3]
+                post_settle_penetration.append(float(max(0.0, -np.min(gaps))))
 
         body_q = example.state_0.body_q.numpy()
         body_qd = example.state_0.body_qd.numpy()
@@ -1058,6 +1070,8 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(body_q)))
         self.assertTrue(np.all(np.isfinite(body_qd)))
         self.assertLess(float(np.linalg.norm(base_delta_xy)), 0.006)
+        self.assertGreater(len(post_settle_penetration), 0)
+        self.assertLess(float(np.percentile(post_settle_penetration, 95)), 0.0045)
 
     def test_11_dr_legs_dvi_contact_force_balances_weight(self):
         if not self.device.is_cuda:
@@ -1079,8 +1093,10 @@ class TestDVISolver(unittest.TestCase):
         )
         example = Example(ViewerNull(num_frames=1), args)
 
+        base_z = []
         for _ in range(180):
             example.step()
+            base_z.append(float(example.state_0.body_q.numpy()[0, 2]))
 
         contacts_kamino = example.solver._contacts_kamino
         aggregation = ContactAggregation(model=example.solver._model_kamino, contacts=contacts_kamino)
@@ -1095,6 +1111,10 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(total_contact_force)))
         self.assertGreater(force_ratio, 0.95)
         self.assertLess(force_ratio, 1.05)
+        z = np.array(base_z[60:], dtype=np.float64)
+        x = np.arange(z.size, dtype=np.float64)
+        residual = z - np.polyval(np.polyfit(x, z, 1), x)
+        self.assertLess(float(np.max(residual) - np.min(residual)), 0.001)
 
     def test_12_dvi_opening_contact_releases_warmstarted_force(self):
         if not self.device.is_cuda:
@@ -1225,6 +1245,19 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_allclose(contact_bias(-0.05), [0.0, 0.0, -0.2], rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(contact_bias(0.05), [0.0, 0.0, 5.0], rtol=1e-6, atol=1e-6)
 
+        config = DualProblem.Config(
+            constraints=kamino_config.ConstraintStabilizationConfig(
+                gamma=0.015,
+                delta=0.0,
+                contact_recovery_speed=-1.0,
+                contact_deep_recovery_gamma=0.08,
+                contact_deep_recovery_threshold=0.0025,
+            )
+        )
+        problem_config = wp.array([config.to_struct()], dtype=DualProblemConfigStruct, device=self.device)
+        np.testing.assert_allclose(contact_bias(-0.001), [0.0, 0.0, -0.0015], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(contact_bias(-0.005), [0.0, 0.0, -0.02375], rtol=1e-6, atol=1e-6)
+
     def test_13_benchmark_configs_include_dvi_dr_legs(self):
         configs = make_benchmark_configs(include_default=False)
         self.assertIn("Dense DVI Dr Legs", configs)
@@ -1242,6 +1275,8 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.contact_jacobi_relaxation, 0.9)
         self.assertFalse(config.dvi.contact_block_preconditioner)
         self.assertEqual(config.constraints.gamma, 0.015)
+        self.assertEqual(config.constraints.contact_deep_recovery_gamma, 0.08)
+        self.assertEqual(config.constraints.contact_deep_recovery_threshold, 2.5e-3)
         self.assertEqual(config.constraints.delta, 1.0e-6)
         self.assertEqual(config.constraints.contact_recovery_speed, 1.0)
         self.assertFalse(config.dynamics.preconditioning)
@@ -1259,6 +1294,8 @@ class TestDVISolver(unittest.TestCase):
     def test_13b_dvi_benchmark_config_roundtrips_contact_controls(self):
         focused_configs = make_dvi_padmm_benchmark_configs()
         config = focused_configs["DVI"]
+        config.constraints.contact_deep_recovery_gamma = 0.07
+        config.constraints.contact_deep_recovery_threshold = 0.004
         config.dvi.contact_block_preconditioner = True
         config.dvi.contact_jacobi_omega = 0.25
         config.dvi.contact_jacobi_relaxation = 0.75
@@ -1268,6 +1305,8 @@ class TestDVISolver(unittest.TestCase):
 
         datafile = _MiniHDF5File()
         save_solver_configs_to_hdf5({"DVI tuned": config}, datafile)
+        self.assertEqual(float(datafile["Solver/DVI tuned/constraints/contact_deep_recovery_gamma"][()]), 0.07)
+        self.assertEqual(float(datafile["Solver/DVI tuned/constraints/contact_deep_recovery_threshold"][()]), 0.004)
         self.assertTrue(bool(datafile["Solver/DVI tuned/dvi/contact_block_preconditioner"][()]))
         self.assertEqual(float(datafile["Solver/DVI tuned/dvi/contact_jacobi_omega"][()]), 0.25)
         self.assertEqual(float(datafile["Solver/DVI tuned/dvi/contact_jacobi_relaxation"][()]), 0.75)
@@ -1276,6 +1315,8 @@ class TestDVISolver(unittest.TestCase):
         loaded_configs = load_solver_configs_to_hdf5(datafile)
 
         self.assertTrue(loaded_configs["DVI tuned"].dvi.contact_block_preconditioner)
+        self.assertEqual(loaded_configs["DVI tuned"].constraints.contact_deep_recovery_gamma, 0.07)
+        self.assertEqual(loaded_configs["DVI tuned"].constraints.contact_deep_recovery_threshold, 0.004)
         self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_jacobi_omega, 0.25)
         self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_jacobi_relaxation, 0.75)
         self.assertEqual(loaded_configs["DVI tuned"].dvi.bilateral_solve_period, 2)

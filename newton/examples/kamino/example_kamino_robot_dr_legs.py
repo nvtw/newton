@@ -87,6 +87,8 @@ class Example:
             self.config.constraints.beta = 0.011
             self.config.constraints.gamma = 0.015
             self.config.constraints.contact_recovery_speed = 1.0
+            self.config.constraints.contact_deep_recovery_gamma = 0.08
+            self.config.constraints.contact_deep_recovery_threshold = 2.5e-3
             self.config.dynamics.preconditioning = False
             self.config.dynamics.linear_solver_type = "CR"
             self.config.dynamics.linear_solver_kwargs = {"maxiter": 9}

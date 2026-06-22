@@ -259,6 +259,20 @@ class ConstraintStabilizationConfig(ConfigBase):
     clamping. Defaults to `-1.0`.
     """
 
+    contact_deep_recovery_gamma: float = -1.0
+    """
+    Baumgarte stabilization parameter for contact penetration beyond
+    `contact_deep_recovery_threshold` [m]. Negative values disable the
+    deep-contact recovery override. Defaults to `-1.0`.
+    """
+
+    contact_deep_recovery_threshold: float = 0.0
+    """
+    Contact penetration depth [m] beyond which `contact_deep_recovery_gamma`
+    is used for the excess penetration. Must be non-negative.
+    Defaults to `0.0`.
+    """
+
     delta: float = 1.0e-6
     """
     Contact penetration margin used for unilateral contact constraints.\n
@@ -368,6 +382,16 @@ class ConstraintStabilizationConfig(ConfigBase):
             raise ValueError(f"Invalid beta: {self.beta}. Must be in range [0, 1.0].")
         if self.gamma < 0.0 or self.gamma > 1.0:
             raise ValueError(f"Invalid gamma: {self.gamma}. Must be in range [0, 1.0].")
+        if self.contact_deep_recovery_gamma > 1.0:
+            raise ValueError(
+                "Invalid contact_deep_recovery_gamma: "
+                f"{self.contact_deep_recovery_gamma}. Must be negative or in range [0, 1.0]."
+            )
+        if self.contact_deep_recovery_threshold < 0.0:
+            raise ValueError(
+                "Invalid contact_deep_recovery_threshold: "
+                f"{self.contact_deep_recovery_threshold}. Must be non-negative."
+            )
         if self.delta < 0.0:
             raise ValueError(f"Invalid delta: {self.delta}. Must be non-negative.")
 

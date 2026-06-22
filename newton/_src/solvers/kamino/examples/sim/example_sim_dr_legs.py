@@ -258,6 +258,8 @@ class Example:
         config.solver.dynamics.preconditioning = dynamics_solver != "dvi"
         if dynamics_solver == "dvi":
             config.solver.constraints.contact_recovery_speed = 1.0
+            config.solver.constraints.contact_deep_recovery_gamma = 0.08
+            config.solver.constraints.contact_deep_recovery_threshold = 2.5e-3
             config.solver.dvi.max_iterations = 200
             config.solver.dvi.tolerance = 1e-4
             config.solver.dvi.regularization = 1e-5
