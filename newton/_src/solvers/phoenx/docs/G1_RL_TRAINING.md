@@ -110,6 +110,17 @@ The experimental `bench_g1_pbt.py` probe keeps this outside the stable trainer
 and can seed the dense default, anti-standing dense, conservative-exploration,
 and sparse-command candidates for direct comparison.
 
+For time-boxed walking experiments, `reward_mode="dense_sparse_command"` adds
+a boolean command-success bonus to the dense nanoG1-style reward. This is a
+shaping mode, not the parity reference. It is useful when standing is too easy
+relative to commanded motion; combine it with held-out fixed-command progress or
+the gate metrics rather than judging by training reward alone.
+
+The G1 material default keeps foot and ground friction at `0.6`, matching the
+nanoG1 pair coefficient and staying in a plausible real-world range. Use
+`--ground-friction 0.4` only as an explicit lower-grip material sweep; the first
+teacher-policy probes improved falls slightly but did not solve the full gate.
+
 For sparse-target experiments, `reward_mode="sparse_target"` intentionally
 keeps the reward small: boolean target success, the tiny mechanical-power
 penalty, and fall termination. Target success requires the base to be within the

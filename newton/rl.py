@@ -166,7 +166,9 @@ def _main() -> int:
     g1_parser.add_argument("--command-yaw-max", type=float, default=g1_recipe.COMMAND_YAW_RANGE[1])
     g1_parser.add_argument("--no-command-randomization", action="store_true")
     g1_parser.add_argument(
-        "--reward-mode", choices=("nanog1_dense", "sparse_command", "sparse_target"), default=g1_recipe.REWARD_MODE
+        "--reward-mode",
+        choices=("nanog1_dense", "sparse_command", "sparse_target", "dense_sparse_command"),
+        default=g1_recipe.REWARD_MODE,
     )
     g1_parser.add_argument("--w-track-lin", type=float, default=g1_recipe.W_TRACK_LIN)
     g1_parser.add_argument("--w-track-ang", type=float, default=g1_recipe.W_TRACK_ANG)
@@ -177,6 +179,13 @@ def _main() -> int:
     g1_parser.add_argument("--w-action-rate", type=float, default=g1_recipe.W_ACTION_RATE)
     g1_parser.add_argument("--w-alive", type=float, default=g1_recipe.W_ALIVE)
     g1_parser.add_argument("--w-termination", type=float, default=g1_recipe.W_TERMINATION)
+    g1_parser.add_argument("--w-sparse-command-success", type=float, default=g1_recipe.W_SPARSE_COMMAND_SUCCESS)
+    g1_parser.add_argument(
+        "--sparse-command-velocity-tolerance",
+        type=float,
+        default=g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE,
+    )
+    g1_parser.add_argument("--sparse-command-yaw-tolerance", type=float, default=g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE)
     g1_parser.add_argument("--w-base-height", type=float, default=g1_recipe.W_BASE_HEIGHT)
     g1_parser.add_argument("--target-x", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[0])
     g1_parser.add_argument("--target-y", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[1])
@@ -221,6 +230,8 @@ def _main() -> int:
     g1_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
     )
+    g1_parser.add_argument("--ground-friction", type=float, default=g1_recipe.GROUND_FRICTION)
+    g1_parser.add_argument("--foot-box-xy-scale", type=float, default=g1_recipe.FOOT_BOX_XY_SCALE)
     g1_parser.add_argument(
         "--rigid-contact-max-per-world",
         type=int,
@@ -329,6 +340,8 @@ def _main() -> int:
     g1_eval_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
     )
+    g1_eval_parser.add_argument("--ground-friction", type=float, default=g1_recipe.GROUND_FRICTION)
+    g1_eval_parser.add_argument("--foot-box-xy-scale", type=float, default=g1_recipe.FOOT_BOX_XY_SCALE)
     g1_eval_parser.add_argument(
         "--rigid-contact-max-per-world",
         type=int,
@@ -366,6 +379,8 @@ def _main() -> int:
     g1_gate_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
     )
+    g1_gate_parser.add_argument("--ground-friction", type=float, default=g1_recipe.GROUND_FRICTION)
+    g1_gate_parser.add_argument("--foot-box-xy-scale", type=float, default=g1_recipe.FOOT_BOX_XY_SCALE)
     g1_gate_parser.add_argument(
         "--rigid-contact-max-per-world",
         type=int,
@@ -418,6 +433,8 @@ def _main() -> int:
     g1_target_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
     )
+    g1_target_parser.add_argument("--ground-friction", type=float, default=g1_recipe.GROUND_FRICTION)
+    g1_target_parser.add_argument("--foot-box-xy-scale", type=float, default=g1_recipe.FOOT_BOX_XY_SCALE)
     g1_target_parser.add_argument(
         "--rigid-contact-max-per-world",
         type=int,
@@ -482,6 +499,9 @@ def _main() -> int:
             w_action_rate=args.w_action_rate,
             w_alive=args.w_alive,
             w_termination=args.w_termination,
+            w_sparse_command_success=args.w_sparse_command_success,
+            sparse_command_velocity_tolerance=args.sparse_command_velocity_tolerance,
+            sparse_command_yaw_tolerance=args.sparse_command_yaw_tolerance,
             w_base_height=args.w_base_height,
             sparse_target_position=(args.target_x, args.target_y),
             sparse_target_radius=args.sparse_target_radius,
@@ -490,6 +510,8 @@ def _main() -> int:
             sparse_target_success_max_base_height=args.sparse_target_success_max_base_height,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
+            ground_friction=args.ground_friction,
+            foot_box_xy_scale=args.foot_box_xy_scale,
             rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         ppo_config = g1_recipe.default_g1_ppo_config(
@@ -566,6 +588,8 @@ def _main() -> int:
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
+            ground_friction=args.ground_friction,
+            foot_box_xy_scale=args.foot_box_xy_scale,
             rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)
@@ -593,6 +617,8 @@ def _main() -> int:
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
+            ground_friction=args.ground_friction,
+            foot_box_xy_scale=args.foot_box_xy_scale,
             rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)
@@ -637,6 +663,8 @@ def _main() -> int:
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
+            ground_friction=args.ground_friction,
+            foot_box_xy_scale=args.foot_box_xy_scale,
             rigid_contact_max_per_world=args.rigid_contact_max_per_world,
         )
         trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)

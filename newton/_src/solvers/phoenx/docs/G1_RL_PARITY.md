@@ -376,6 +376,27 @@ and when nanoG1 is run at the same 10 x 0.002 s substep timing, so the next
 root-cause work should inspect tangential contact projection/convergence rather
 than adding more dense walking terms first.
 
+The G1 foot/plane friction default is `0.6`, matching nanoG1's authored
+foot-floor pair coefficient and staying in a plausible real-world range for
+rubber-like feet on common floors. A lower `0.4` coefficient is also physically
+plausible for less grippy contacts and is now exposed as a CLI sweep knob, but
+it should be treated as a material/robustness experiment rather than a hidden
+fix. In the current probes, `mu=0.4` reduced PhoenX tangent support and improved
+the imported-teacher full gate from roughly `battery_perf=0.70` to `0.735`. A
+PhoenX PPO fine-tune of the imported teacher at `mu=0.4` reached the best full
+gate so far, `battery_perf=0.754` with `75/24000` battery falls, but it still
+does not pass. From-scratch runs with the same material and extra shaping still
+fall too often, so the current reliable path is teacher warm-start plus PhoenX
+fine-tuning, not yet one-shot from-scratch training.
+
+A new experimental `dense_sparse_command` reward mode keeps the dense nanoG1
+tracking/stability terms and adds a boolean command-success bonus. CUDA graph
+unit coverage verifies the bonus and keeps the original sparse-command mode
+unchanged. The first short forward-only shaped run did not solve walking; it
+reached only about `0.16` tracking perf on a 150-step forward evaluator after
+120 iterations. Keep this mode available for compact reward/PBT sweeps, but do
+not treat it as the current solution.
+
 ## Next Checks
 
 1. Add or tighten command/reset/done-bootstrap tests against the pinned nanoG1

@@ -526,14 +526,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base-log-std-init", type=float, default=g1_recipe.LOG_STD_INIT)
     parser.add_argument(
         "--base-reward-mode",
-        choices=("nanog1_dense", "sparse_command", "sparse_target"),
+        choices=("nanog1_dense", "sparse_command", "sparse_target", "dense_sparse_command"),
         default=g1_recipe.REWARD_MODE,
     )
     parser.add_argument(
         "--reward-mode-choices",
-        choices=("nanog1_dense", "sparse_command", "sparse_target"),
+        choices=("nanog1_dense", "sparse_command", "sparse_target", "dense_sparse_command"),
         nargs="+",
-        default=("nanog1_dense", "sparse_command"),
+        default=("nanog1_dense", "sparse_command", "dense_sparse_command"),
     )
     parser.add_argument("--seed-presets", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)

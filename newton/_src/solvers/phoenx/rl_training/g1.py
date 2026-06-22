@@ -658,10 +658,12 @@ _NANOG1_CONTACT_GEOMETRIES = (_NANOG1_CONTACT_GEOMETRY_MJCF, _NANOG1_CONTACT_GEO
 _G1_REWARD_MODE_NANOG1_DENSE = 0
 _G1_REWARD_MODE_SPARSE_COMMAND = 1
 _G1_REWARD_MODE_SPARSE_TARGET = 2
+_G1_REWARD_MODE_DENSE_SPARSE_COMMAND = 3
 _G1_REWARD_MODES = {
     "nanog1_dense": _G1_REWARD_MODE_NANOG1_DENSE,
     "sparse_command": _G1_REWARD_MODE_SPARSE_COMMAND,
     "sparse_target": _G1_REWARD_MODE_SPARSE_TARGET,
+    "dense_sparse_command": _G1_REWARD_MODE_DENSE_SPARSE_COMMAND,
 }
 _NANOG1_FOOT_BOX_LOCAL_POS = (0.04, 0.0, -0.029)
 _NANOG1_FOOT_BOX_HALF_EXTENTS = (0.09, 0.03, 0.008)
@@ -1175,11 +1177,27 @@ def g1_observe_reward_kernel(
             shaped_reward = w_sparse_command_success * sparse_success + w_mechanical_power * mechanical_power_penalty
             reward = shaped_reward * reward_dt
             success_metric = sparse_success
-        else:
+        elif reward_mode == wp.int32(2):
             reward = (
                 w_sparse_command_success * target_success + w_mechanical_power * mechanical_power_penalty * reward_dt
             )
             success_metric = target_success
+        else:
+            shaped_reward = (
+                w_track_lin * track_lin
+                + w_track_ang * track_ang
+                + w_lin_vel_z * lin_vel_z_penalty
+                + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
+                + w_orientation * orientation_penalty * upright_gate
+                + w_torque * torque_sq_penalty
+                + w_action_rate * action_rate_penalty
+                + gait_reward
+                + w_alive
+                + w_sparse_command_success * sparse_success
+                + w_mechanical_power * mechanical_power_penalty
+            )
+            reward = shaped_reward * reward_dt
+            success_metric = sparse_success
         if fall > wp.float32(0.5):
             reward = reward + w_termination
             success_metric = wp.float32(0.0)
@@ -1680,8 +1698,8 @@ class ConfigEnvG1PhoenX:
         w_action_rate: Action-rate penalty scale.
         w_alive: Alive reward per policy step.
         w_termination: Termination reward applied on fall.
-        reward_mode: Reward mode, either ``"nanog1_dense"``, ``"sparse_command"``, or
-            ``"sparse_target"``.
+        reward_mode: Reward mode, either ``"nanog1_dense"``, ``"sparse_command"``,
+            ``"sparse_target"``, or ``"dense_sparse_command"``.
         w_sparse_command_success: Sparse command or target success reward scale.
         sparse_command_velocity_tolerance: Linear command-success tolerance [m/s].
         sparse_command_yaw_tolerance: Yaw-rate command-success tolerance [rad/s].

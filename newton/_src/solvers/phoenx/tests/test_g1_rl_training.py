@@ -2618,6 +2618,46 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.successes.numpy(), np.array([1.0, 0.0], dtype=np.float32))
         np.testing.assert_allclose(env.rewards.numpy(), np.array([0.1, 0.0], dtype=np.float32), atol=1.0e-6)
 
+    def test_dense_sparse_command_reward_adds_boolean_bonus_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 dense sparse command reward tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=2,
+                reward_mode="dense_sparse_command",
+                command=(0.8, 0.0, 0.0),
+                w_sparse_command_success=5.0,
+                sparse_command_velocity_tolerance=0.35,
+                sparse_command_yaw_tolerance=0.4,
+                w_track_lin=0.0,
+                w_track_ang=0.0,
+                w_lin_vel_z=0.0,
+                w_ang_vel_xy=0.0,
+                w_orientation=0.0,
+                w_torque=0.0,
+                w_action_rate=0.0,
+                w_alive=1.0,
+                w_gait_contact=0.0,
+                w_gait_swing=0.0,
+                w_gait_swing_contact=0.0,
+                w_gait_hip=0.0,
+                w_base_height=0.0,
+                w_mechanical_power=0.0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+        qd[:, :] = 0.0
+        qd[0, 0] = 0.8
+        env.state_0.joint_qd.assign(qd.reshape(-1))
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(env.successes.numpy(), np.array([1.0, 0.0], dtype=np.float32))
+        np.testing.assert_allclose(env.rewards.numpy(), np.array([0.12, 0.02], dtype=np.float32), atol=1.0e-6)
+
     def test_sparse_target_reward_is_terminal_boolean_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 sparse target reward tests")
         env = rl.EnvG1PhoenX(
