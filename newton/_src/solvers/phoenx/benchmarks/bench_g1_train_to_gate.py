@@ -52,8 +52,16 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
-        actuation_model=str(args.actuation_model),
+        actuation_model=str(getattr(args, "actuation_model", g1_recipe.ACTUATION_MODEL)),
         controlled_action_count=int(args.controlled_action_count),
+        reward_mode=str(args.reward_mode),
+        w_alive=float(args.w_alive),
+        w_track_lin=float(args.w_track_lin),
+        w_sparse_command_success=float(args.w_sparse_command_success),
+        sparse_command_velocity_tolerance=float(args.sparse_command_velocity_tolerance),
+        sparse_command_yaw_tolerance=float(args.sparse_command_yaw_tolerance),
+        w_mechanical_power=float(args.w_mechanical_power),
+        w_gait_swing_contact=float(args.w_gait_swing_contact),
         parse_meshes=bool(args.parse_meshes),
         contact_geometry=str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
         rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
@@ -109,6 +117,8 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     checkpoint_template = args.checkpoint_path or "/tmp/phoenx_g1_gate_{iteration}.npz"
     env_config = _make_env_config(args)
     ppo_config = _make_ppo_config(args)
+    command_curriculum_start = float(getattr(args, "command_curriculum_start", g1_recipe.COMMAND_CURRICULUM_START))
+    command_curriculum_samples = int(getattr(args, "command_curriculum_samples", g1_recipe.COMMAND_CURRICULUM_SAMPLES))
 
     train_seconds = 0.0
     gate_seconds = 0.0
@@ -136,6 +146,8 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 command_x_range=tuple(float(v) for v in args.command_x_range),
                 command_y_range=tuple(float(v) for v in args.command_y_range),
                 command_yaw_range=tuple(float(v) for v in args.command_yaw_range),
+                command_curriculum_start=command_curriculum_start,
+                command_curriculum_samples=command_curriculum_samples,
                 squash_actions=bool(args.squash_actions),
                 resume_checkpoint=resume_checkpoint,
                 checkpoint_path=checkpoint_template,
@@ -201,6 +213,16 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "world_count": int(args.world_count),
         "rollout_steps": int(args.rollout_steps),
         "squash_actions": bool(args.squash_actions),
+        "reward_mode": str(args.reward_mode),
+        "w_alive": float(args.w_alive),
+        "w_track_lin": float(args.w_track_lin),
+        "w_sparse_command_success": float(args.w_sparse_command_success),
+        "sparse_command_velocity_tolerance": float(args.sparse_command_velocity_tolerance),
+        "sparse_command_yaw_tolerance": float(args.sparse_command_yaw_tolerance),
+        "w_mechanical_power": float(args.w_mechanical_power),
+        "w_gait_swing_contact": float(args.w_gait_swing_contact),
+        "command_curriculum_start": float(command_curriculum_start),
+        "command_curriculum_samples": int(command_curriculum_samples),
         "value_loss_coeff": float(args.value_loss_coeff),
         "value_clip_range": float(args.value_clip_range),
         "optimizer": str(args.optimizer),
@@ -290,10 +312,38 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--command-x-range", type=float, nargs=2, default=g1_recipe.COMMAND_X_RANGE)
     parser.add_argument("--command-y-range", type=float, nargs=2, default=g1_recipe.COMMAND_Y_RANGE)
     parser.add_argument("--command-yaw-range", type=float, nargs=2, default=g1_recipe.COMMAND_YAW_RANGE)
+    parser.add_argument(
+        "--command-curriculum-start",
+        type=float,
+        default=g1_recipe.COMMAND_CURRICULUM_START,
+        help="Initial nanoG1 command-range scale for randomized G1 commands.",
+    )
+    parser.add_argument(
+        "--command-curriculum-samples",
+        type=int,
+        default=g1_recipe.COMMAND_CURRICULUM_SAMPLES,
+        help="Samples used to ramp randomized G1 commands to full range; 0 disables the ramp.",
+    )
     parser.add_argument("--no-command-randomization", action="store_true")
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    parser.add_argument("--reward-mode", choices=("nanog1_dense", "sparse_command"), default=g1_recipe.REWARD_MODE)
+    parser.add_argument("--w-alive", type=float, default=g1_recipe.W_ALIVE)
+    parser.add_argument("--w-track-lin", type=float, default=g1_recipe.W_TRACK_LIN)
+    parser.add_argument("--w-sparse-command-success", type=float, default=g1_recipe.W_SPARSE_COMMAND_SUCCESS)
+    parser.add_argument(
+        "--sparse-command-velocity-tolerance",
+        type=float,
+        default=g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE,
+    )
+    parser.add_argument(
+        "--sparse-command-yaw-tolerance",
+        type=float,
+        default=g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE,
+    )
+    parser.add_argument("--w-mechanical-power", type=float, default=g1_recipe.W_MECHANICAL_POWER)
+    parser.add_argument("--w-gait-swing-contact", type=float, default=g1_recipe.W_GAIT_SWING_CONTACT)
     parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),

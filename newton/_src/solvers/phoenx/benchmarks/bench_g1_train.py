@@ -185,6 +185,14 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         velocity_iterations=int(args.velocity_iterations),
         actuation_model=str(args.actuation_model),
         controlled_action_count=int(args.controlled_action_count),
+        reward_mode=str(args.reward_mode),
+        w_alive=float(args.w_alive),
+        w_track_lin=float(args.w_track_lin),
+        w_sparse_command_success=float(args.w_sparse_command_success),
+        sparse_command_velocity_tolerance=float(args.sparse_command_velocity_tolerance),
+        sparse_command_yaw_tolerance=float(args.sparse_command_yaw_tolerance),
+        w_mechanical_power=float(args.w_mechanical_power),
+        w_gait_swing_contact=float(args.w_gait_swing_contact),
         parse_meshes=bool(args.parse_meshes),
         contact_geometry=str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
         rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
@@ -224,6 +232,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         seed=int(args.seed),
         log_interval=0,
         randomize_commands=not bool(args.no_command_randomization),
+        command_curriculum_start=float(args.command_curriculum_start),
+        command_curriculum_samples=int(args.command_curriculum_samples),
         squash_actions=bool(args.squash_actions),
         readback_diagnostics=not bool(args.no_readback_diagnostics),
         execution_mode=str(args.execution_mode),
@@ -277,6 +287,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "optimizer_weight_decay": float(args.optimizer_weight_decay),
         "muon_momentum": float(args.muon_momentum),
         "squash_actions": bool(args.squash_actions),
+        "command_curriculum_start": float(args.command_curriculum_start),
+        "command_curriculum_samples": int(args.command_curriculum_samples),
         "readback_diagnostics": not bool(args.no_readback_diagnostics),
         "execution_mode": str(args.execution_mode),
         "sim_substeps": int(args.sim_substeps),
@@ -284,6 +296,14 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
         "actuation_model": str(args.actuation_model),
+        "reward_mode": str(args.reward_mode),
+        "w_alive": float(args.w_alive),
+        "w_track_lin": float(args.w_track_lin),
+        "w_sparse_command_success": float(args.w_sparse_command_success),
+        "sparse_command_velocity_tolerance": float(args.sparse_command_velocity_tolerance),
+        "sparse_command_yaw_tolerance": float(args.sparse_command_yaw_tolerance),
+        "w_mechanical_power": float(args.w_mechanical_power),
+        "w_gait_swing_contact": float(args.w_gait_swing_contact),
         "parse_meshes": bool(args.parse_meshes),
         "contact_geometry": str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
         "rigid_contact_max_per_world": int(args.rigid_contact_max_per_world),
@@ -370,6 +390,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    parser.add_argument("--reward-mode", choices=("nanog1_dense", "sparse_command"), default=g1_recipe.REWARD_MODE)
+    parser.add_argument("--w-alive", type=float, default=g1_recipe.W_ALIVE)
+    parser.add_argument("--w-track-lin", type=float, default=g1_recipe.W_TRACK_LIN)
+    parser.add_argument("--w-sparse-command-success", type=float, default=g1_recipe.W_SPARSE_COMMAND_SUCCESS)
+    parser.add_argument(
+        "--sparse-command-velocity-tolerance",
+        type=float,
+        default=g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE,
+    )
+    parser.add_argument(
+        "--sparse-command-yaw-tolerance",
+        type=float,
+        default=g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE,
+    )
+    parser.add_argument("--w-mechanical-power", type=float, default=g1_recipe.W_MECHANICAL_POWER)
+    parser.add_argument("--w-gait-swing-contact", type=float, default=g1_recipe.W_GAIT_SWING_CONTACT)
     parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
@@ -389,6 +425,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--multi-world-scheduler", default=g1_recipe.MULTI_WORLD_SCHEDULER)
     parser.add_argument("--prepare-refresh-stride", type=_parse_int_or_auto, default=g1_recipe.PREPARE_REFRESH_STRIDE)
     parser.add_argument("--no-command-randomization", action="store_true")
+    parser.add_argument(
+        "--command-curriculum-start",
+        type=float,
+        default=g1_recipe.COMMAND_CURRICULUM_START,
+        help="Initial nanoG1 command-range scale for randomized G1 commands.",
+    )
+    parser.add_argument(
+        "--command-curriculum-samples",
+        type=int,
+        default=g1_recipe.COMMAND_CURRICULUM_SAMPLES,
+        help="Samples used to ramp randomized G1 commands to full range; 0 disables the ramp.",
+    )
     parser.add_argument(
         "--no-readback-diagnostics",
         action="store_true",

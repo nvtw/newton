@@ -14,9 +14,9 @@ from typing import Any
 
 WORLD_COUNT = 4096
 FRAME_DT = 1.0 / 50.0
-SIM_SUBSTEPS = 8
-SOLVER_ITERATIONS = 4
-VELOCITY_ITERATIONS = 1
+SIM_SUBSTEPS = 10
+SOLVER_ITERATIONS = 8
+VELOCITY_ITERATIONS = 2
 JOINT_FRICTION_MODEL = "mujoco"
 JOINT_FRICTION_SCALE = 1.0
 ACTUATION_MODEL = "explicit_torque"
@@ -38,9 +38,15 @@ W_TORQUE = -2.0e-5
 W_ACTION_RATE = -0.01
 W_ALIVE = 3.0
 W_TERMINATION = -1.0
+REWARD_MODE = "nanog1_dense"
+W_SPARSE_COMMAND_SUCCESS = 5.0
+SPARSE_COMMAND_VELOCITY_TOLERANCE = 0.35
+SPARSE_COMMAND_YAW_TOLERANCE = 0.4
+W_MECHANICAL_POWER = -1.0e-4
 GAIT_STANCE_FRACTION = 0.55
 W_GAIT_CONTACT = 0.5
 W_GAIT_SWING = -20.0
+W_GAIT_SWING_CONTACT = -0.75
 W_GAIT_HIP = -4.0
 GAIT_FOOT_HEIGHT = 0.08
 W_BASE_HEIGHT = -10.0
@@ -70,6 +76,8 @@ COMMAND_Y_RANGE = (-0.6, 0.6)
 COMMAND_YAW_RANGE = (-1.0, 1.0)
 COMMAND_ZERO_PROBABILITY = 0.1
 COMMAND_RESAMPLE_STEPS = 500
+COMMAND_CURRICULUM_START = 0.4
+COMMAND_CURRICULUM_SAMPLES = 40_000_000
 RESET_RECURRENT_STATE_ON_ROLLOUT_START = False
 
 GAMMA = 0.97
@@ -143,9 +151,15 @@ def default_g1_env_config(**overrides: Any):
         "w_action_rate": W_ACTION_RATE,
         "w_alive": W_ALIVE,
         "w_termination": W_TERMINATION,
+        "reward_mode": REWARD_MODE,
+        "w_sparse_command_success": W_SPARSE_COMMAND_SUCCESS,
+        "sparse_command_velocity_tolerance": SPARSE_COMMAND_VELOCITY_TOLERANCE,
+        "sparse_command_yaw_tolerance": SPARSE_COMMAND_YAW_TOLERANCE,
+        "w_mechanical_power": W_MECHANICAL_POWER,
         "gait_stance_fraction": GAIT_STANCE_FRACTION,
         "w_gait_contact": W_GAIT_CONTACT,
         "w_gait_swing": W_GAIT_SWING,
+        "w_gait_swing_contact": W_GAIT_SWING_CONTACT,
         "w_gait_hip": W_GAIT_HIP,
         "gait_foot_height": GAIT_FOOT_HEIGHT,
         "w_base_height": W_BASE_HEIGHT,

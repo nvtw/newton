@@ -15,6 +15,8 @@ from .env import make_seed_counter
 from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
 from .g1_recipe import (
     ACTIVATION,
+    COMMAND_CURRICULUM_SAMPLES,
+    COMMAND_CURRICULUM_START,
     COMMAND_RESAMPLE_STEPS,
     COMMAND_SAMPLING,
     COMMAND_X_RANGE,
@@ -225,6 +227,8 @@ class ConfigTrainG1PPO:
     command_yaw_range: tuple[float, float] = COMMAND_YAW_RANGE
     command_zero_probability: float = COMMAND_ZERO_PROBABILITY
     command_resample_steps: int = COMMAND_RESAMPLE_STEPS
+    command_curriculum_start: float = COMMAND_CURRICULUM_START
+    command_curriculum_samples: int = COMMAND_CURRICULUM_SAMPLES
     reset_recurrent_state_on_rollout_start: bool = RESET_RECURRENT_STATE_ON_ROLLOUT_START
     resume_checkpoint: str | None = None
     checkpoint_path: str | None = None
@@ -513,6 +517,27 @@ def _g1_command_metric_override(cfg: ConfigTrainG1PPO, env: EnvG1PhoenX) -> tupl
     )
 
 
+def _make_g1_command_curriculum_counter(
+    cfg: ConfigTrainG1PPO, env: EnvG1PhoenX, start_iteration: int
+) -> wp.array[wp.int32]:
+    start_samples = int(start_iteration) * int(cfg.rollout_steps) * int(env.world_count)
+    start_samples = min(start_samples, np.iinfo(np.int32).max)
+    return wp.array(np.asarray([start_samples], dtype=np.int32), dtype=wp.int32, device=env.device)
+
+
+def _advance_g1_command_curriculum(
+    cfg: ConfigTrainG1PPO, env: EnvG1PhoenX, sample_counter: wp.array[wp.int32], sample_delta: int
+) -> None:
+    if not cfg.randomize_commands:
+        return
+    env.update_command_curriculum(
+        sample_counter,
+        sample_delta=int(sample_delta),
+        start_scale=float(cfg.command_curriculum_start),
+        ramp_samples=float(cfg.command_curriculum_samples),
+    )
+
+
 def _g1_graph_rollout_metrics(
     diagnostics: _G1TrainDiagnosticsReadback | None,
     buffer: BufferRollout,
@@ -553,6 +578,7 @@ def _train_g1_ppo_graph_leapfrog(
     env: EnvG1PhoenX,
     trainer: TrainerPPO,
     first_buffer: BufferRollout,
+    command_curriculum_counter: wp.array[wp.int32],
     *,
     start_iteration: int,
     diagnostics: _G1TrainDiagnosticsReadback | None,
@@ -580,6 +606,7 @@ def _train_g1_ppo_graph_leapfrog(
     env.use_command_seed_counter(command_seed_counter)
 
     def collect(buffer: BufferRollout) -> None:
+        _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, buffer.num_samples)
         if cfg.randomize_commands and cfg.command_sampling == "rollout":
             env.randomize_commands_seed_counter(
                 seed_counter=command_seed_counter,
@@ -676,6 +703,10 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         raise ValueError("command_zero_probability must be in [0, 1]")
     if cfg.command_resample_steps < 0:
         raise ValueError("command_resample_steps must be non-negative")
+    if not 0.0 <= float(cfg.command_curriculum_start) <= 1.0:
+        raise ValueError("command_curriculum_start must be in [0, 1]")
+    if int(cfg.command_curriculum_samples) < 0:
+        raise ValueError("command_curriculum_samples must be non-negative")
     if cfg.command_sampling not in ("episode", "rollout"):
         raise ValueError("command_sampling must be 'episode' or 'rollout'")
     if cfg.checkpoint_interval < 0:
@@ -725,14 +756,31 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
     history: list[StatsTrainG1PPO] = []
     start_iteration = int(getattr(trainer, "iteration", 0))
     diagnostics = _G1TrainDiagnosticsReadback(device) if cfg.readback_diagnostics else None
+    command_curriculum_counter = _make_g1_command_curriculum_counter(cfg, env, start_iteration)
+    _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, 0)
+    if cfg.randomize_commands and cfg.command_sampling == "episode":
+        env.randomize_commands(
+            seed=int(cfg.seed) + 53_321 + start_iteration,
+            command_x_range=cfg.command_x_range,
+            command_y_range=cfg.command_y_range,
+            command_yaw_range=cfg.command_yaw_range,
+            zero_probability=cfg.command_zero_probability,
+        )
 
     if cfg.execution_mode == "graph_leapfrog":
         return _train_g1_ppo_graph_leapfrog(
-            cfg, env, trainer, buffer, start_iteration=start_iteration, diagnostics=diagnostics
+            cfg,
+            env,
+            trainer,
+            buffer,
+            command_curriculum_counter,
+            start_iteration=start_iteration,
+            diagnostics=diagnostics,
         )
 
     for local_iteration in range(cfg.iterations):
         iteration = start_iteration + local_iteration
+        _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, buffer.num_samples)
         if cfg.randomize_commands and cfg.command_sampling == "rollout":
             env.randomize_commands(
                 seed=int(cfg.seed) + 53_321 + iteration,

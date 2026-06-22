@@ -22,9 +22,9 @@ from typing import Any
 import numpy as np
 import warp as wp
 
-from . import g1_recipe
-from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
-from .training import (
+from newton._src.solvers.phoenx.rl_training import g1_recipe
+from newton._src.solvers.phoenx.rl_training.g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
+from newton._src.solvers.phoenx.rl_training.training import (
     ConfigEvaluateG1GatePPO,
     ResultEvaluateG1GatePPO,
     StatsEvaluateG1GateCommandPPO,
@@ -105,6 +105,8 @@ class ConfigTrainG1PufferTorch:
     command_yaw_range: tuple[float, float] = g1_recipe.COMMAND_YAW_RANGE
     command_zero_probability: float = g1_recipe.COMMAND_ZERO_PROBABILITY
     command_resample_steps: int = g1_recipe.COMMAND_RESAMPLE_STEPS
+    command_curriculum_start: float = g1_recipe.COMMAND_CURRICULUM_START
+    command_curriculum_samples: int = g1_recipe.COMMAND_CURRICULUM_SAMPLES
     reset_recurrent_state_on_rollout_start: bool = True
     pufferlib_root: str | None = None
     checkpoint_path: str | None = None
@@ -589,8 +591,32 @@ def train_g1_puffer_torch(config: ConfigTrainG1PufferTorch | None = None) -> Res
     env = EnvG1PhoenX(env_config, device=device)
     trainer = PufferTorchTrainer(env, cfg)
     history: list[StatsTrainG1PufferTorch] = []
+    command_curriculum_counter = wp.array(np.zeros(1, dtype=np.int32), dtype=wp.int32, device=device)
+    samples = int(cfg.rollout_steps) * int(env.world_count)
+    if cfg.randomize_commands:
+        env.update_command_curriculum(
+            command_curriculum_counter,
+            sample_delta=0,
+            start_scale=float(cfg.command_curriculum_start),
+            ramp_samples=float(cfg.command_curriculum_samples),
+        )
+    if cfg.randomize_commands and cfg.command_sampling == "episode":
+        env.randomize_commands(
+            seed=int(cfg.seed) + 53_321,
+            command_x_range=cfg.command_x_range,
+            command_y_range=cfg.command_y_range,
+            command_yaw_range=cfg.command_yaw_range,
+            zero_probability=cfg.command_zero_probability,
+        )
 
     for iteration in range(int(cfg.iterations)):
+        if cfg.randomize_commands:
+            env.update_command_curriculum(
+                command_curriculum_counter,
+                sample_delta=samples,
+                start_scale=float(cfg.command_curriculum_start),
+                ramp_samples=float(cfg.command_curriculum_samples),
+            )
         if cfg.randomize_commands and cfg.command_sampling == "rollout":
             env.randomize_commands(
                 seed=int(cfg.seed) + 53_321 + iteration,
@@ -605,7 +631,6 @@ def train_g1_puffer_torch(config: ConfigTrainG1PufferTorch | None = None) -> Res
         losses = trainer.update()
         trainer.torch.cuda.synchronize(trainer.device)
         t2 = time.perf_counter()
-        samples = int(cfg.rollout_steps) * int(env.world_count)
         stats = StatsTrainG1PufferTorch(
             iteration=iteration,
             mean_reward=reward,
@@ -814,6 +839,10 @@ def _validate_train_config(cfg: ConfigTrainG1PufferTorch) -> None:
         raise ValueError("replay_ratio must be positive")
     if str(cfg.command_sampling) not in ("episode", "rollout"):
         raise ValueError("command_sampling must be 'episode' or 'rollout'")
+    if not 0.0 <= float(cfg.command_curriculum_start) <= 1.0:
+        raise ValueError("command_curriculum_start must be in [0, 1]")
+    if int(cfg.command_curriculum_samples) < 0:
+        raise ValueError("command_curriculum_samples must be non-negative")
     if int(cfg.checkpoint_interval) < 0:
         raise ValueError("checkpoint_interval must be non-negative")
 

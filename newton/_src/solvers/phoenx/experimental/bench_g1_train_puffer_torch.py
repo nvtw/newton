@@ -8,7 +8,7 @@ actuation come from PhoenX, while the RL update follows PufferLib/nanoG1
 conventions as closely as possible from Python/Torch.
 
 Example:
-    uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train_puffer_torch \
+    uv run --extra dev -m newton._src.solvers.phoenx.experimental.bench_g1_train_puffer_torch \
         --iterations 2 --world-count 64 --rollout-steps 8 \
         --pufferlib-root ../PufferLib
 """
@@ -24,12 +24,12 @@ from typing import Any
 
 import warp as wp
 
-from newton._src.solvers.phoenx.rl_training import g1_recipe
-from newton._src.solvers.phoenx.rl_training.puffer_torch import (
+from newton._src.solvers.phoenx.experimental.puffer_torch import (
     ConfigTrainG1PufferTorch,
     evaluate_g1_gate_puffer_torch,
     train_g1_puffer_torch,
 )
+from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.training import ConfigEvaluateG1GatePPO
 
 
@@ -64,6 +64,8 @@ def benchmark_train_puffer_torch(args: argparse.Namespace) -> dict[str, Any]:
         replay_ratio=float(args.replay_ratio),
         mirror_loss_coeff=0.0 if args.no_mirror_loss else float(args.mirror_loss_coeff),
         mirror_value_loss=not bool(args.no_mirror_value_loss),
+        command_curriculum_start=float(args.command_curriculum_start),
+        command_curriculum_samples=int(args.command_curriculum_samples),
         reset_recurrent_state_on_rollout_start=not bool(args.keep_recurrent_state),
         pufferlib_root=args.pufferlib_root,
         checkpoint_path=args.checkpoint_path,
@@ -87,6 +89,8 @@ def benchmark_train_puffer_torch(args: argparse.Namespace) -> dict[str, Any]:
         "sim_substeps": int(args.sim_substeps),
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
+        "command_curriculum_start": float(args.command_curriculum_start),
+        "command_curriculum_samples": int(args.command_curriculum_samples),
         "final": asdict(final),
         "history": [asdict(s) for s in result.history],
     }
@@ -132,6 +136,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-mirror-loss", action="store_true")
     parser.add_argument("--no-mirror-value-loss", action="store_true")
     parser.add_argument("--keep-recurrent-state", action="store_true")
+    parser.add_argument(
+        "--command-curriculum-start",
+        type=float,
+        default=g1_recipe.COMMAND_CURRICULUM_START,
+        help="Initial nanoG1 command-range scale for randomized G1 commands.",
+    )
+    parser.add_argument(
+        "--command-curriculum-samples",
+        type=int,
+        default=g1_recipe.COMMAND_CURRICULUM_SAMPLES,
+        help="Samples used to ramp randomized G1 commands to full range; 0 disables the ramp.",
+    )
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)

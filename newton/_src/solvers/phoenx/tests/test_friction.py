@@ -51,6 +51,112 @@ def _analytic_stop_time(v0: float, mu: float) -> float:
     return v0 / (mu * _G)
 
 
+def _quat_y(angle: float) -> tuple[float, float, float, float]:
+    half = 0.5 * float(angle)
+    return (0.0, math.sin(half), 0.0, math.cos(half))
+
+
+def _rotate_y(angle: float, vec: tuple[float, float, float]) -> np.ndarray:
+    x, y, z = (float(vec[0]), float(vec[1]), float(vec[2]))
+    c = math.cos(float(angle))
+    s = math.sin(float(angle))
+    return np.array((c * x + s * z, y, -s * x + c * z), dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
+# Inclined-plane friction: static threshold and dynamic acceleration
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX friction tests require CUDA")
+class TestInclinedPlaneFriction(unittest.TestCase):
+    """Cube on an inclined static box ramp.
+
+    These are first-principles checks for contact/friction behavior that do not
+    depend on MuJoCo contact details:
+
+    * static hold when ``tan(theta) <= mu``;
+    * downhill acceleration ``a = g * (sin(theta) - mu * cos(theta))`` when the
+      slope exceeds the friction cone.
+    """
+
+    FPS = 120
+    SUBSTEPS = 8
+    SOLVER_ITERATIONS = 24
+    VELOCITY_ITERATIONS = 2
+    BOX_HALF = 0.25
+    RAMP_HALF_Z = 0.05
+
+    def _run_ramp(self, *, angle: float, mu: float, frames: int) -> tuple[float, float, float]:
+        scene = _PhoenXScene(
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=self.SOLVER_ITERATIONS,
+            velocity_iterations=self.VELOCITY_ITERATIONS,
+            friction=mu,
+        )
+        scene.add_static_box(
+            position=(0.0, 0.0, 0.0),
+            half_extents=(5.0, 2.0, self.RAMP_HALF_Z),
+            orientation=_quat_y(angle),
+        )
+        start_local = (0.0, 0.0, self.RAMP_HALF_Z + self.BOX_HALF + 1.0e-3)
+        start_pos = _rotate_y(angle, start_local)
+        box = scene.add_box(
+            position=(float(start_pos[0]), float(start_pos[1]), float(start_pos[2])),
+            half_extents=(self.BOX_HALF, self.BOX_HALF, self.BOX_HALF),
+            orientation=_quat_y(angle),
+            mass=1.0,
+        )
+        scene.finalize()
+
+        for _ in range(frames):
+            scene.step()
+
+        downhill = _rotate_y(angle, (1.0, 0.0, 0.0))
+        pos = scene.body_position(box).astype(np.float64)
+        vel = scene.body_velocity(box).astype(np.float64)
+        downhill_displacement = float(np.dot(pos - start_pos, downhill))
+        downhill_speed = float(np.dot(vel, downhill))
+        return downhill_displacement, downhill_speed, float(np.linalg.norm(vel))
+
+    def test_high_friction_holds_on_incline(self) -> None:
+        angle = math.radians(25.0)
+        mu = 0.7
+        self.assertLess(math.tan(angle), mu)
+        displacement, downhill_speed, speed = self._run_ramp(angle=angle, mu=mu, frames=180)
+
+        self.assertLess(abs(displacement), 0.02, f"cube slipped {displacement:.4f} m down the ramp")
+        self.assertLess(abs(downhill_speed), 0.02, f"downhill speed {downhill_speed:.4f} m/s should be static")
+        self.assertLess(speed, 0.03, f"total speed {speed:.4f} m/s should be static")
+
+    def test_low_friction_slides_with_analytic_acceleration(self) -> None:
+        angle = math.radians(35.0)
+        mu = 0.3
+        frames = 180
+        self.assertGreater(math.tan(angle), mu)
+        displacement, downhill_speed, _speed = self._run_ramp(angle=angle, mu=mu, frames=frames)
+
+        expected_accel = _G * (math.sin(angle) - mu * math.cos(angle))
+        expected_time = frames / self.FPS
+        expected_speed = expected_accel * expected_time
+        expected_displacement = 0.5 * expected_accel * expected_time * expected_time
+        speed_rel_err = abs(downhill_speed - expected_speed) / expected_speed
+        displacement_rel_err = abs(displacement - expected_displacement) / expected_displacement
+
+        self.assertGreater(downhill_speed, 0.5, "cube did not slide downhill")
+        self.assertLess(
+            speed_rel_err,
+            0.20,
+            f"downhill speed {downhill_speed:.3f} m/s vs analytic {expected_speed:.3f} m/s",
+        )
+        self.assertLess(
+            displacement_rel_err,
+            0.25,
+            f"downhill displacement {displacement:.3f} m vs analytic {expected_displacement:.3f} m",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Kinetic friction: stopping distance
 # ---------------------------------------------------------------------------

@@ -83,6 +83,10 @@ from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_ca
 _NANOG1_ROOT = Path("/home/twidmer/Documents/git/nanoG1")
 _PUFFERLIB_ROOT = Path("/home/twidmer/Documents/git/PufferLib")
 _PUFFERLIB_G1_ROOT = Path("/tmp/pufferlib-g1")
+_G1_GROUND_SLOT = 0
+_G1_STANDING_HOLD_KP = 500.0
+_G1_STANDING_HOLD_KD = 10.0
+_G = 9.81
 
 
 def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
@@ -96,6 +100,46 @@ def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
         auto_reset=False,
     )
     return rl.EnvG1PhoenX(config, device=device)
+
+
+def _set_g1_standing_position_hold_gains(env: rl.EnvG1PhoenX) -> None:
+    """Use strong position-hold gains for a standing force-balance check."""
+
+    joint_target_ke = env.model.joint_target_ke.numpy()
+    joint_target_kd = env.model.joint_target_kd.numpy()
+    start = 6
+    stop = start + env.action_dim
+    joint_target_ke[start:stop] = _G1_STANDING_HOLD_KP
+    joint_target_kd[start:stop] = _G1_STANDING_HOLD_KD
+    env.model.joint_target_ke.assign(joint_target_ke)
+    env.model.joint_target_kd.assign(joint_target_kd)
+
+
+def _gather_g1_ground_contact_force(env: rl.EnvG1PhoenX) -> tuple[np.ndarray, int, int]:
+    """Return net force [N] on robot bodies from the static ground slot."""
+
+    n_cols = env.solver.world.max_contact_columns
+    pair_w = wp.zeros(n_cols, dtype=wp.spatial_vector, device=env.device)
+    pair_b1 = wp.zeros(n_cols, dtype=wp.int32, device=env.device)
+    pair_b2 = wp.zeros(n_cols, dtype=wp.int32, device=env.device)
+    pair_count = wp.zeros(n_cols, dtype=wp.int32, device=env.device)
+
+    env.solver.world.gather_contact_pair_wrenches(pair_w, pair_b1, pair_b2, pair_count)
+    with wp.ScopedCapture(device=env.device) as capture:
+        env.solver.world.gather_contact_pair_wrenches(pair_w, pair_b1, pair_b2, pair_count)
+    wp.capture_launch(capture.graph)
+
+    force_pairs = pair_w.numpy()[:, :3].astype(np.float64)
+    body1 = pair_b1.numpy()
+    body2 = pair_b2.numpy()
+    counts = pair_count.numpy()
+
+    ground_to_body2 = (counts > 0) & (body1 == _G1_GROUND_SLOT) & (body2 != _G1_GROUND_SLOT)
+    body1_to_ground = (counts > 0) & (body2 == _G1_GROUND_SLOT) & (body1 != _G1_GROUND_SLOT)
+    total = force_pairs[ground_to_body2].sum(axis=0) - force_pairs[body1_to_ground].sum(axis=0)
+    pair_total = int(np.count_nonzero(ground_to_body2) + np.count_nonzero(body1_to_ground))
+    point_total = int(counts[ground_to_body2].sum() + counts[body1_to_ground].sum())
+    return total, pair_total, point_total
 
 
 class _ConstantPPOEnv:
@@ -118,6 +162,78 @@ class _ConstantPPOEnv:
     def step(
         self, actions: wp.array2d[wp.float32]
     ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array[wp.float32]]:
+        return self.obs, self.rewards, self.dones
+
+
+@wp.kernel(enable_backward=False)
+def _sequence_env_step_values_kernel(
+    step_counter: wp.array[wp.int32],
+    obs: wp.array2d[wp.float32],
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    successes: wp.array[wp.float32],
+    step_rewards: wp.array[wp.float32],
+    step_dones: wp.array[wp.float32],
+    step_successes: wp.array[wp.float32],
+):
+    env = wp.tid()
+    step = step_counter[0]
+    reward = wp.float32(10.0) * wp.float32(step + wp.int32(1)) + wp.float32(env)
+    done = wp.float32(0.0)
+    if env == wp.int32(1) and step == wp.int32(0):
+        done = wp.float32(1.0)
+    success = wp.float32(0.25) * wp.float32(step + wp.int32(1)) + wp.float32(env)
+    rewards[env] = reward
+    dones[env] = done
+    successes[env] = success
+    step_rewards[env] = reward
+    step_dones[env] = done
+    step_successes[env] = success
+    obs[env, 0] = wp.float32(step + wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _sequence_env_increment_kernel(step_counter: wp.array[wp.int32]):
+    step_counter[0] = step_counter[0] + wp.int32(1)
+
+
+class _SequenceRewardPPOEnv:
+    def __init__(self, *, world_count: int, obs_dim: int, action_dim: int, device: wp.context.Device):
+        self.world_count = int(world_count)
+        self.obs_dim = int(obs_dim)
+        self.action_dim = int(action_dim)
+        self.device = device
+        self.obs = wp.zeros((self.world_count, self.obs_dim), dtype=wp.float32, device=device)
+        self.rewards = wp.zeros(self.world_count, dtype=wp.float32, device=device)
+        self.dones = wp.zeros(self.world_count, dtype=wp.float32, device=device)
+        self.successes = wp.zeros(self.world_count, dtype=wp.float32, device=device)
+        self.step_rewards = wp.array(np.asarray([1.0, 2.0], dtype=np.float32), dtype=wp.float32, device=device)
+        self.step_dones = wp.array(np.asarray([0.0, 1.0], dtype=np.float32), dtype=wp.float32, device=device)
+        self.step_successes = wp.array(np.asarray([0.5, 1.5], dtype=np.float32), dtype=wp.float32, device=device)
+        self.step_counter = wp.zeros(1, dtype=wp.int32, device=device)
+
+    def observe(self) -> wp.array2d[wp.float32]:
+        return self.obs
+
+    def step(
+        self, actions: wp.array2d[wp.float32]
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array[wp.float32]]:
+        wp.launch(
+            _sequence_env_step_values_kernel,
+            dim=self.world_count,
+            inputs=[self.step_counter],
+            outputs=[
+                self.obs,
+                self.rewards,
+                self.dones,
+                self.successes,
+                self.step_rewards,
+                self.step_dones,
+                self.step_successes,
+            ],
+            device=self.device,
+        )
+        wp.launch(_sequence_env_increment_kernel, dim=1, outputs=[self.step_counter], device=self.device)
         return self.obs, self.rewards, self.dones
 
 
@@ -389,11 +505,15 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertIn("urand_01(&rng) < 0.1f", g1_gpu)
             self.assertIn("g1e_cmd_scale * 1.0f * urand_pm1", g1_gpu)
             self.assertIn("g1e_cmd_scale * 0.6f * urand_pm1", g1_gpu)
+            self.assertIn("const float  CS_START = 0.4f", g1_gpu)
+            self.assertIn("const double CS_RAMP  = 40.0e6", g1_gpu)
 
         self.assertEqual(g1_recipe.COMMAND_X_RANGE, (-1.0, 1.0))
         self.assertEqual(g1_recipe.COMMAND_Y_RANGE, (-0.6, 0.6))
         self.assertEqual(g1_recipe.COMMAND_YAW_RANGE, (-1.0, 1.0))
         self.assertAlmostEqual(g1_recipe.COMMAND_ZERO_PROBABILITY, 0.1)
+        self.assertAlmostEqual(g1_recipe.COMMAND_CURRICULUM_START, 0.4)
+        self.assertEqual(g1_recipe.COMMAND_CURRICULUM_SAMPLES, 40_000_000)
         self.assertAlmostEqual(g1_recipe.ACTION_SCALE, float(recipe["env.action_scale"]))
         self.assertEqual(g1_recipe.MAX_EPISODE_STEPS, int(recipe["env.max_episode_len"]))
         self.assertAlmostEqual(g1_recipe.W_TRACK_LIN, float(recipe["env.w_track_lin"]))
@@ -453,7 +573,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.ctrl_upper.numpy(), ctrl_range[:, 1], rtol=0.0, atol=1.0e-5)
 
         expected_kp = deploy.KP.astype(np.float32)
-        expected_kd = deploy.KD.astype(np.float32) + dof_damping[6 : 6 + rl.ACTION_DIM_G1].astype(np.float32)
+        expected_damping = dof_damping[6 : 6 + rl.ACTION_DIM_G1].astype(np.float32)
+        expected_kd = deploy.KD.astype(np.float32) + expected_damping
         expected_force_kd = np.zeros(rl.ACTION_DIM_G1, dtype=np.float32)
         expected_force_kd[: g1_recipe.CONTROLLED_ACTION_COUNT] = deploy.KD[: g1_recipe.CONTROLLED_ACTION_COUNT]
         np.testing.assert_allclose(env.actuator_ke.numpy(), expected_kp, rtol=0.0, atol=1.0e-6)
@@ -461,9 +582,13 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.actuator_force_kp.numpy(), expected_kp, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_force_kp.numpy()[12:], act_gain0[12:], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_force_kd.numpy(), expected_force_kd, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.passive_damping.numpy(), expected_damping, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(act_bias2, np.zeros_like(act_bias2), rtol=0.0, atol=0.0)
         np.testing.assert_allclose(env.actuator_force_lower.numpy(), jnt_actfrcrange[:, 0], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_force_upper.numpy(), jnt_actfrcrange[:, 1], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(
+            env.model.joint_damping.numpy()[6 : 6 + rl.ACTION_DIM_G1], expected_damping, rtol=0.0, atol=1.0e-6
+        )
         np.testing.assert_allclose(
             env.model.joint_armature.numpy()[6 : 6 + rl.ACTION_DIM_G1],
             dof_armature[6 : 6 + rl.ACTION_DIM_G1],
@@ -1218,7 +1343,66 @@ class TestG1PhoenXRL(unittest.TestCase):
             buffer.returns.numpy().reshape(num_steps, num_envs), expected_returns, rtol=1.0e-6, atol=1.0e-6
         )
 
-    def test_pufferlib_vtrace_matches_phoenx_post_step_layout(self) -> None:
+    def test_rollout_uses_puffer_reward_layout_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX PPO Puffer rollout layout tests")
+        num_steps = 2
+        num_envs = 2
+
+        def collect_with_layout(*, puffer_layout: bool) -> rl.BufferRollout:
+            env = _SequenceRewardPPOEnv(world_count=num_envs, obs_dim=3, action_dim=2, device=device)
+            buffer = rl.BufferRollout(
+                num_steps=num_steps, num_envs=num_envs, obs_dim=env.obs_dim, action_dim=env.action_dim, device=device
+            )
+            trainer = rl.TrainerPPO(
+                obs_dim=env.obs_dim,
+                action_dim=env.action_dim,
+                hidden_layers=(4,),
+                config=rl.ConfigPPO(puffer_vtrace_advantage=puffer_layout),
+                device=device,
+                seed=17,
+                squash_actions=False,
+            )
+            seed_counter = make_seed_counter(123, device=device)
+            with wp.ScopedCapture(device=device) as capture:
+                collect_ppo_rollout_seed_counter(env, trainer, buffer, seed_counter=seed_counter)
+            wp.capture_launch(capture.graph)
+            return buffer
+
+        standard = collect_with_layout(puffer_layout=False)
+        puffer = collect_with_layout(puffer_layout=True)
+
+        np.testing.assert_allclose(
+            standard.rewards.numpy().reshape(num_steps, num_envs),
+            np.asarray([[10.0, 11.0], [20.0, 21.0]], dtype=np.float32),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            puffer.rewards.numpy().reshape(num_steps, num_envs),
+            np.asarray([[1.0, 2.0], [10.0, 11.0]], dtype=np.float32),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            standard.dones.numpy().reshape(num_steps, num_envs),
+            np.asarray([[0.0, 1.0], [0.0, 0.0]], dtype=np.float32),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            puffer.dones.numpy().reshape(num_steps, num_envs),
+            np.asarray([[0.0, 1.0], [0.0, 1.0]], dtype=np.float32),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            puffer.successes.numpy().reshape(num_steps, num_envs),
+            np.asarray([[0.5, 1.5], [0.25, 1.25]], dtype=np.float32),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_pufferlib_vtrace_matches_puffer_reward_layout(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 V-trace parity tests")
         pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
         if not pufferlib_cu.is_file():
@@ -1240,11 +1424,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         dones_np = np.asarray([[0.0, 0.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]], dtype=np.float32)
         values_np = np.asarray([[0.1, -0.2], [0.4, 0.3], [-0.1, 0.7], [0.5, -0.6], [0.2, 0.9]], dtype=np.float32)
         ratios_np = np.asarray([[0.8, 1.6], [1.2, 0.7], [2.0, 1.0], [0.5, 1.3]], dtype=np.float32)
-        puffer_rewards_np = np.zeros_like(rewards_np)
-        puffer_dones_np = np.zeros_like(dones_np)
-        puffer_rewards_np[1:] = rewards_np[:-1]
-        puffer_dones_np[1:] = dones_np[:-1]
-
         rewards = wp.array(rewards_np.reshape(-1), dtype=wp.float32, device=device)
         dones = wp.array(dones_np.reshape(-1), dtype=wp.float32, device=device)
         values = wp.array(values_np.reshape(-1), dtype=wp.float32, device=device)
@@ -1279,14 +1458,16 @@ class TestG1PhoenXRL(unittest.TestCase):
             trace = np.float32(0.0)
             for t in range(num_steps - 2, -1, -1):
                 next_t = t + 1
-                reward = np.clip(puffer_rewards_np[next_t, env_id], -reward_clip, reward_clip)
-                next_nonterminal = np.float32(1.0) - puffer_dones_np[next_t, env_id]
+                reward = np.clip(rewards_np[next_t, env_id], -reward_clip, reward_clip)
+                next_nonterminal = np.float32(1.0) - dones_np[next_t, env_id]
                 rho = min(ratios_np[t, env_id], rho_clip)
                 c = min(ratios_np[t, env_id], c_clip)
                 delta = rho * (reward + gamma * values_np[next_t, env_id] * next_nonterminal - values_np[t, env_id])
                 trace = delta + gamma * gae_lambda * c * trace * next_nonterminal
                 expected_adv[t, env_id] = trace
         expected_returns = expected_adv + values_np[:-1]
+        self.assertTrue(np.all(expected_adv[-1] == 0.0))
+        self.assertNotAlmostEqual(float(expected_adv[0, 0]), float(rewards_np[0, 0]))
 
         np.testing.assert_allclose(
             advantages.numpy().reshape(num_steps, num_envs), expected_adv, rtol=1.0e-6, atol=1.0e-6
@@ -1831,15 +2012,22 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.sim_substeps, g1_recipe.SIM_SUBSTEPS)
         self.assertEqual(env.solver.world.substeps, 1)
         self.assertEqual(env_config.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
-        self.assertEqual(g1_recipe.VELOCITY_ITERATIONS, 1)
+        self.assertEqual(g1_recipe.VELOCITY_ITERATIONS, 2)
         self.assertEqual(env_config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
         self.assertEqual(env_config.actuation_model, g1_recipe.ACTUATION_MODEL)
         self.assertEqual(env_config.actuation_model, "explicit_torque")
         self.assertEqual(env_config.w_track_lin, g1_recipe.W_TRACK_LIN)
         self.assertEqual(env_config.w_action_rate, g1_recipe.W_ACTION_RATE)
+        self.assertEqual(env_config.reward_mode, g1_recipe.REWARD_MODE)
+        self.assertEqual(env_config.reward_mode, "nanog1_dense")
+        self.assertEqual(env_config.w_sparse_command_success, g1_recipe.W_SPARSE_COMMAND_SUCCESS)
+        self.assertEqual(env_config.sparse_command_velocity_tolerance, g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE)
+        self.assertEqual(env_config.sparse_command_yaw_tolerance, g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE)
+        self.assertEqual(env_config.w_mechanical_power, g1_recipe.W_MECHANICAL_POWER)
         self.assertEqual(env_config.gait_stance_fraction, g1_recipe.GAIT_STANCE_FRACTION)
         self.assertEqual(env_config.w_gait_contact, g1_recipe.W_GAIT_CONTACT)
         self.assertEqual(env_config.w_gait_swing, g1_recipe.W_GAIT_SWING)
+        self.assertEqual(env_config.w_gait_swing_contact, g1_recipe.W_GAIT_SWING_CONTACT)
         self.assertEqual(env_config.w_gait_hip, g1_recipe.W_GAIT_HIP)
         self.assertEqual(env_config.gait_foot_height, g1_recipe.GAIT_FOOT_HEIGHT)
         self.assertEqual(env_config.w_base_height, g1_recipe.W_BASE_HEIGHT)
@@ -1851,10 +2039,13 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.multi_world_scheduler, g1_recipe.MULTI_WORLD_SCHEDULER)
         self.assertEqual(env_config.prepare_refresh_stride, g1_recipe.PREPARE_REFRESH_STRIDE)
         expected_leg_kd = np.array([4.0, 4.0, 4.0, 6.0, 3.0, 2.2] * 2, dtype=np.float32)
+        expected_leg_damping = np.array([2.0, 2.0, 2.0, 2.0, 1.0, 0.2] * 2, dtype=np.float32)
         expected_leg_armature = np.array(
             [0.01017752004, 0.025101925, 0.01017752004, 0.025101925, 0.00721945, 0.00721945] * 2, dtype=np.float32
         )
         np.testing.assert_allclose(env.model.joint_target_kd.numpy()[6:18], expected_leg_kd, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.model.joint_damping.numpy()[6:18], expected_leg_damping, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.passive_damping.numpy()[:12], expected_leg_damping, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.model.joint_armature.numpy()[6:18], expected_leg_armature, rtol=0.0, atol=1.0e-8)
         np.testing.assert_allclose(env.model.joint_friction.numpy()[6:35], 0.1, rtol=0.0, atol=1.0e-6)
         np.testing.assert_array_equal(
@@ -1902,6 +2093,56 @@ class TestG1PhoenXRL(unittest.TestCase):
             np.full(rl.ACTION_DIM_G1, int(newton.JointTargetMode.POSITION), dtype=np.int32),
         )
 
+    def test_sparse_command_reward_is_boolean_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 sparse command reward tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=2,
+                reward_mode="sparse_command",
+                command=(0.8, 0.0, 0.0),
+                w_sparse_command_success=5.0,
+                sparse_command_velocity_tolerance=0.35,
+                sparse_command_yaw_tolerance=0.4,
+                w_mechanical_power=0.0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+        qd[:, :] = 0.0
+        qd[0, 0] = 0.8
+        env.state_0.joint_qd.assign(qd.reshape(-1))
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(env.successes.numpy(), np.array([1.0, 0.0], dtype=np.float32))
+        np.testing.assert_allclose(env.rewards.numpy(), np.array([0.1, 0.0], dtype=np.float32), atol=1.0e-6)
+
+    def test_gait_swing_contact_penalizes_double_stance_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 gait contact reward tests")
+
+        def reward_with_swing_contact(weight: float) -> float:
+            env = rl.EnvG1PhoenX(
+                g1_recipe.default_g1_env_config(
+                    world_count=1,
+                    w_gait_swing_contact=weight,
+                    auto_reset=False,
+                ),
+                device=device,
+            )
+            env.episode_steps.assign(np.array([10], dtype=np.int32))
+            env.model.collide(env.state_0, env.contacts)
+            with wp.ScopedCapture(device=device) as capture:
+                env.observe()
+            wp.capture_launch(capture.graph)
+            return float(env.rewards.numpy()[0])
+
+        neutral_reward = reward_with_swing_contact(0.0)
+        penalized_reward = reward_with_swing_contact(-2.0)
+        self.assertLess(penalized_reward, neutral_reward - 0.03)
+
     def test_visual_mesh_mode_keeps_meshes_collision_free_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 visual mesh tests")
         env = rl.EnvG1PhoenX(
@@ -1937,6 +2178,124 @@ class TestG1PhoenXRL(unittest.TestCase):
             env.model.collide(env.state_0, env.contacts)
         wp.capture_launch(capture.graph)
         self.assertGreater(int(env.contacts.rigid_contact_count.numpy()[0]), 0)
+
+    def test_nanog1_foot_box_geometry_matches_reference_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 nanoG1 foot geometry tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+                parse_visuals=True,
+                parse_meshes=False,
+                contact_geometry="nanog1_foot_boxes",
+            ),
+            device=device,
+        )
+
+        labels = list(env.model.shape_label)
+        shape_body = env.model.shape_body.numpy()
+        shape_scale = env.model.shape_scale.numpy()
+        shape_transform = env.model.shape_transform.numpy()
+        shape_mu = env.model.shape_material_mu.numpy()
+        shape_flags = env.model.shape_flags.numpy()
+        collide_bit = int(newton.ShapeFlags.COLLIDE_SHAPES)
+        visible_bit = int(newton.ShapeFlags.VISIBLE)
+        expected_pos_quat = np.array([0.04, 0.0, -0.029, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        expected_half_extents = np.array([0.09, 0.03, 0.008], dtype=np.float32)
+        expected_body_by_label = {
+            "left_nanog1_foot_box": env._left_foot_body_local,
+            "right_nanog1_foot_box": env._right_foot_body_local,
+        }
+
+        for label, expected_body in expected_body_by_label.items():
+            shape_index = labels.index(label)
+            self.assertEqual(int(shape_body[shape_index]), expected_body)
+            np.testing.assert_allclose(shape_scale[shape_index], expected_half_extents, rtol=0.0, atol=1.0e-7)
+            np.testing.assert_allclose(shape_transform[shape_index], expected_pos_quat, rtol=0.0, atol=1.0e-7)
+            self.assertAlmostEqual(float(shape_mu[shape_index]), 0.6, places=6)
+            self.assertNotEqual(int(shape_flags[shape_index]) & collide_bit, 0)
+            self.assertEqual(int(shape_flags[shape_index]) & visible_bit, 0)
+
+        for shape_index, label in enumerate(labels):
+            if "ankle_roll_link_geom_" in label:
+                self.assertEqual(int(shape_flags[shape_index]) & collide_bit, 0)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.model.collide(env.state_0, env.contacts)
+        wp.capture_launch(capture.graph)
+        self.assertGreater(int(env.contacts.rigid_contact_count.numpy()[0]), 0)
+
+    def test_nanog1_foot_box_friction_material_matches_recipe_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 foot friction material tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(world_count=1, auto_reset=False),
+            device=device,
+        )
+
+        labels = list(env.model.shape_label)
+        foot_shapes = [labels.index("left_nanog1_foot_box"), labels.index("right_nanog1_foot_box")]
+        shape_mu = env.model.shape_material_mu.numpy()
+        # PhoenX currently exposes one Coulomb sliding coefficient; this
+        # value is used for the static cone limit and dynamic sliding.
+        np.testing.assert_allclose(
+            shape_mu[foot_shapes],
+            np.full(2, 0.6, dtype=np.float32),
+            rtol=0.0,
+            atol=1.0e-6,
+        )
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.model.collide(env.state_0, env.contacts)
+        wp.capture_launch(capture.graph)
+
+        self.assertGreater(int(env.contacts.rigid_contact_count.numpy()[0]), 0)
+
+    def test_g1_ground_normal_force_matches_weight_in_standing_equilibrium_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 normal force balance tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=1,
+                auto_reset=False,
+                randomize_commands_on_reset=False,
+                reset_noise=0.0,
+                actuation_model="constraint_drive",
+                max_episode_steps=0,
+            ),
+            device=device,
+        )
+        _set_g1_standing_position_hold_gains(env)
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=env.device)
+
+        settle_graph = rl.capture_env_steps(env, actions, steps_per_graph=400, warmup_steps=1)
+        wp.capture_launch(settle_graph)
+        settled_q = env.state_0.joint_q.numpy().copy()
+        drift_graph = rl.capture_env_steps(env, actions, steps_per_graph=20, warmup_steps=0)
+        wp.capture_launch(drift_graph)
+        drifted_q = env.state_0.joint_q.numpy().copy()
+
+        base_drift = float(np.max(np.abs(drifted_q[:7] - settled_q[:7])))
+        joint_drift = float(np.max(np.abs(drifted_q[7 : 7 + env.action_dim] - settled_q[7 : 7 + env.action_dim])))
+        self.assertLess(base_drift, 5.0e-4)
+        self.assertLess(joint_drift, 5.0e-4)
+        self.assertEqual(float(env.dones.numpy()[0]), 0.0)
+
+        ground_force, npairs, npoints = _gather_g1_ground_contact_force(env)
+        expected_weight = float(np.sum(env.model.body_mass.numpy(), dtype=np.float64) * _G)
+        rel_err = abs(float(ground_force[2]) - expected_weight) / expected_weight
+
+        self.assertGreaterEqual(npairs, 1)
+        self.assertGreater(npoints, 0)
+        self.assertLess(
+            rel_err,
+            0.02,
+            f"ground normal Fz = {float(ground_force[2]):.3f} N vs G1 weight {expected_weight:.3f} N",
+        )
+        lateral = math.hypot(float(ground_force[0]), float(ground_force[1]))
+        self.assertLess(lateral, 0.02 * expected_weight)
 
     def test_rejects_unknown_contact_geometry(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL contact geometry tests")
@@ -2020,9 +2379,10 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected_force = env.actuator_force_kp.numpy() * (target - q_before[7 : 7 + rl.ACTION_DIM_G1])
         expected_force -= env.actuator_force_kd.numpy() * qd_before[6 : 6 + rl.ACTION_DIM_G1]
         expected_force = np.clip(expected_force, env.actuator_force_lower.numpy(), env.actuator_force_upper.numpy())
+        expected_joint_f = expected_force - env.passive_damping.numpy() * qd_before[6 : 6 + rl.ACTION_DIM_G1]
         np.testing.assert_allclose(env.actuator_force.numpy()[0], expected_force, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(
-            env.control.joint_f.numpy()[6 : 6 + rl.ACTION_DIM_G1], expected_force, rtol=1.0e-6, atol=1.0e-6
+            env.control.joint_f.numpy()[6 : 6 + rl.ACTION_DIM_G1], expected_joint_f, rtol=1.0e-6, atol=1.0e-6
         )
         self.assertEqual(float(env.actuator_force.numpy()[0, 1]), float(env.actuator_force_upper.numpy()[1]))
         self.assertEqual(float(env.actuator_force.numpy()[0, 13]), float(env.actuator_force_lower.numpy()[13]))
@@ -2089,10 +2449,13 @@ class TestG1PhoenXRL(unittest.TestCase):
         )
         expected_force -= env.actuator_force_kd.numpy()[None, :] * qd_before[:, 6 : 6 + rl.ACTION_DIM_G1]
         expected_force = np.clip(expected_force, env.actuator_force_lower.numpy(), env.actuator_force_upper.numpy())
+        expected_joint_f = (
+            expected_force - env.passive_damping.numpy()[None, :] * qd_before[:, 6 : 6 + rl.ACTION_DIM_G1]
+        )
         joint_f = env.control.joint_f.numpy().reshape(env.world_count, env.dof_stride)
         np.testing.assert_allclose(env.actuator_force.numpy(), expected_force, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(joint_f[:, :6], 0.0, rtol=0.0, atol=0.0)
-        np.testing.assert_allclose(joint_f[:, 6 : 6 + rl.ACTION_DIM_G1], expected_force, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(joint_f[:, 6 : 6 + rl.ACTION_DIM_G1], expected_joint_f, rtol=1.0e-6, atol=1.0e-6)
 
     def test_constraint_drive_softness_matches_implicit_pd_coefficients_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 implicit-drive coefficient tests")
@@ -2282,6 +2645,30 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(commands[:, 1] <= command_y_range[1]))
         self.assertTrue(np.all(commands[:, 2] >= command_yaw_range[0]))
         self.assertTrue(np.all(commands[:, 2] <= command_yaw_range[1]))
+
+    def test_command_curriculum_scales_sampled_commands_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 command curriculum tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(world_count=2, sim_substeps=1, solver_iterations=1, max_episode_steps=0),
+            device=device,
+        )
+        sample_counter = wp.array(np.zeros(1, dtype=np.int32), dtype=wp.int32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.update_command_curriculum(sample_counter, sample_delta=20, start_scale=0.4, ramp_samples=40.0)
+            env.randomize_commands(
+                seed=17,
+                command_x_range=(1.0, 1.0),
+                command_y_range=(0.6, 0.6),
+                command_yaw_range=(-1.0, -1.0),
+                zero_probability=0.0,
+            )
+
+        wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(env.command_scale.numpy(), np.array([0.7], dtype=np.float32), rtol=0.0, atol=1.0e-6)
+        expected = np.array([[0.7, 0.42, -0.7], [0.7, 0.42, -0.7]], dtype=np.float32)
+        np.testing.assert_allclose(env.command.numpy(), expected, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_array_equal(sample_counter.numpy(), np.array([20], dtype=np.int32))
 
     def test_randomize_commands_seed_counter_advances_inside_graph(self) -> None:
         env = _g1_test_env(world_count=4)
@@ -3093,12 +3480,38 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertLess(done_mean, 0.35)
         self.assertGreater(reward_mean, -5.0)
 
-    def test_default_zero_action_no_reset_stays_finite_after_ground_contact(self) -> None:
+    def test_default_zero_action_no_reset_stays_finite_until_terminal_fall(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 no-reset stability regression tests")
         env_config = g1_recipe.default_g1_env_config(
             world_count=2,
             max_episode_steps=0,
             auto_reset=False,
+            randomize_commands_on_reset=False,
+            command_resample_steps=0,
+            parse_visuals=False,
+        )
+        env = rl.EnvG1PhoenX(env_config, device=device)
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            for _ in range(60):
+                env.step(actions)
+        wp.capture_launch(capture.graph)
+
+        joint_q = env.state_0.joint_q.numpy()
+        joint_qd = env.state_0.joint_qd.numpy()
+        self.assertTrue(np.isfinite(joint_q).all())
+        self.assertTrue(np.isfinite(joint_qd).all())
+        self.assertLess(float(np.max(np.abs(joint_qd))), 100.0)
+        self.assertFalse(np.any(env.step_dones.numpy() > 0.0))
+        self.assertTrue(np.isfinite(env.step_rewards.numpy()).all())
+
+    def test_default_zero_action_auto_reset_stays_finite_after_terminal_fall(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 auto-reset stability regression tests")
+        env_config = g1_recipe.default_g1_env_config(
+            world_count=2,
+            max_episode_steps=0,
+            auto_reset=True,
             randomize_commands_on_reset=False,
             command_resample_steps=0,
             parse_visuals=False,

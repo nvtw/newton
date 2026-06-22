@@ -121,8 +121,9 @@ class ConfigPPO:
         reward_clip: Absolute reward clamp used before advantage/return
             computation. A value less than or equal to zero disables clipping.
         puffer_vtrace_advantage: Use PufferLib's shifted V-trace scan for
-            replayed trajectories. This leaves the final horizon advantage zero
-            and matches nanoG1's CUDA trainer.
+            replayed trajectories. Rollout collection stores previous-step
+            rewards in each row so this matches nanoG1's CUDA trainer and
+            leaves the final horizon advantage zero.
         max_grad_norm: Global gradient-norm clipping threshold for actor and
             critic optimizers. A value less than or equal to zero disables clipping.
         mirror_loss_coeff: Coefficient for optional mirror-symmetry MSE on

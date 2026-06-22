@@ -1150,10 +1150,10 @@ def compute_puffer_vtrace_returns_kernel(
         t = num_steps - wp.int32(2) - t_rev
         idx = t * num_envs + env
         next_idx = (t + wp.int32(1)) * num_envs + env
-        reward = rewards[idx]
+        reward = rewards[next_idx]
         if reward_clip > wp.float32(0.0):
             reward = _clip(reward, -reward_clip, reward_clip)
-        non_terminal = wp.float32(1.0) - dones[idx]
+        non_terminal = wp.float32(1.0) - dones[next_idx]
         rho = ratios[idx]
         c = ratios[idx]
         if rho_clip > wp.float32(0.0):

@@ -74,6 +74,7 @@ class TestPhoenXContactForce(unittest.TestCase):
     FPS = 120
     SUBSTEPS = 8
     SOLVER_ITERATIONS = 40
+    VELOCITY_ITERATIONS = 2
     # 120 frames at 120 Hz = 1 s -- enough to bleed the drop
     # transient below a few mm/s under the iteration budget above.
     SETTLE_FRAMES = 120
@@ -87,6 +88,7 @@ class TestPhoenXContactForce(unittest.TestCase):
             fps=self.FPS,
             substeps=self.SUBSTEPS,
             solver_iterations=self.SOLVER_ITERATIONS,
+            velocity_iterations=self.VELOCITY_ITERATIONS,
             step_layout=step_layout,
             prepare_refresh_stride=prepare_refresh_stride,
         )
@@ -335,6 +337,83 @@ class TestPhoenXContactForce(unittest.TestCase):
             0.5,
             f"five-cube stack net Fz = {total_fz:.3f} N vs 5 m*g = {expected:.3f} N (rel err {rel_err:.2%})",
         )
+
+    def test_revolute_snowman_stack_ground_reaction_matches_total_weight(self) -> None:
+        """Joint-connected vertical boxes transmit weight through contacts.
+
+        Three boxes of decreasing size are connected by revolute joints whose
+        axes point upward (+Z). Only the bottom box touches the plane, so the
+        bottom contact's normal force must carry the combined weight of all
+        connected bodies. This is a first-principles check for the mixed
+        joint/contact support path relevant to articulated robots standing on
+        feet.
+        """
+        scene = _PhoenXScene(
+            fps=self.FPS,
+            substeps=self.SUBSTEPS,
+            solver_iterations=32,
+            velocity_iterations=self.VELOCITY_ITERATIONS,
+            friction=0.8,
+        )
+        scene.add_ground_plane()
+        half_extents = (0.50, 0.35, 0.25)
+        masses = (2.0, 1.0, 0.5)
+        clearance = 0.10
+        bodies: list[int] = []
+        z = half_extents[0] + 0.02
+        bodies.append(
+            scene.add_box(
+                position=(0.0, 0.0, z),
+                half_extents=(half_extents[0], half_extents[0], half_extents[0]),
+                mass=masses[0],
+            )
+        )
+        for i in range(1, len(half_extents)):
+            z += half_extents[i - 1] + clearance + half_extents[i]
+            bodies.append(
+                scene.add_box(
+                    position=(0.0, 0.0, z),
+                    half_extents=(half_extents[i], half_extents[i], half_extents[i]),
+                    mass=masses[i],
+                )
+            )
+
+        joints = []
+        for i in range(1, len(bodies)):
+            offset = half_extents[i - 1] + clearance + half_extents[i]
+            joints.append(
+                scene.mb.add_joint_revolute(
+                    parent=bodies[i - 1],
+                    child=bodies[i],
+                    parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, offset), q=wp.quat_identity()),
+                    child_xform=wp.transform_identity(),
+                    axis=(0.0, 0.0, 1.0),
+                )
+            )
+        scene.mb.add_articulation(joints)
+        scene.finalize()
+
+        for _ in range(240):
+            scene.step()
+
+        for body in bodies:
+            self.assertLess(float(np.linalg.norm(scene.body_velocity(body))), 0.02)
+
+        bottom_force, npairs, npoints = scene.gather_contact_wrench_on_body(bodies[0])
+        expected = sum(masses) * _G
+        rel_err = abs(float(bottom_force[2]) - expected) / expected
+        self.assertGreaterEqual(npairs, 1)
+        self.assertGreater(npoints, 0)
+        self.assertLess(
+            rel_err,
+            0.05,
+            f"bottom contact Fz = {float(bottom_force[2]):.3f} N vs total weight {expected:.3f} N",
+        )
+        lateral = math.hypot(float(bottom_force[0]), float(bottom_force[1]))
+        self.assertLess(lateral, 0.02 * expected)
+        for body in bodies[1:]:
+            force, _, _ = scene.gather_contact_wrench_on_body(body)
+            self.assertLess(float(np.linalg.norm(force)), 0.02 * expected)
 
     # ------------------------------------------------------------------
     # Resting-contact constraints

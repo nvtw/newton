@@ -194,6 +194,9 @@ def _collect_ppo_rollout_impl(
     obs = env.observe()
     max_cols = max(env.obs_dim, env.action_dim, 1)
     value_col = trainer.value_column
+    puffer_layout = bool(getattr(trainer.config, "puffer_vtrace_advantage", False))
+    if puffer_layout and (not hasattr(env, "step_rewards") or not hasattr(env, "step_dones")):
+        raise TypeError("Puffer V-trace rollout collection requires env.step_rewards and env.step_dones")
     for step in range(buffer.num_steps):
         if seed_counter is None:
             actions, log_probs, values = trainer.act_reuse(obs, seed=int(seed) + step)
@@ -218,14 +221,23 @@ def _collect_ppo_rollout_impl(
             outputs=[buffer.obs, buffer.actions, buffer.old_log_probs, buffer.values],
             device=env.device,
         )
+        if puffer_layout:
+            wp.launch(
+                rollout_store_post_step_kernel,
+                dim=env.world_count,
+                inputs=[step, env.world_count, env.step_rewards, env.step_dones, env.step_successes],
+                outputs=[buffer.rewards, buffer.dones, buffer.successes],
+                device=env.device,
+            )
         next_obs, rewards, dones = env.step(actions)
-        wp.launch(
-            rollout_store_post_step_kernel,
-            dim=env.world_count,
-            inputs=[step, env.world_count, rewards, dones, env.step_successes],
-            outputs=[buffer.rewards, buffer.dones, buffer.successes],
-            device=env.device,
-        )
+        if not puffer_layout:
+            wp.launch(
+                rollout_store_post_step_kernel,
+                dim=env.world_count,
+                inputs=[step, env.world_count, rewards, dones, env.step_successes],
+                outputs=[buffer.rewards, buffer.dones, buffer.successes],
+                device=env.device,
+            )
         trainer.reset_rollout_state(dones)
         obs = next_obs
 

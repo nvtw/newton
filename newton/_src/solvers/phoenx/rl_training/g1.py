@@ -655,6 +655,12 @@ _CTRL_HI_G1 = (
 _NANOG1_CONTACT_GEOMETRY_MJCF = "mjcf"
 _NANOG1_CONTACT_GEOMETRY_FOOT_BOXES = "nanog1_foot_boxes"
 _NANOG1_CONTACT_GEOMETRIES = (_NANOG1_CONTACT_GEOMETRY_MJCF, _NANOG1_CONTACT_GEOMETRY_FOOT_BOXES)
+_G1_REWARD_MODE_NANOG1_DENSE = 0
+_G1_REWARD_MODE_SPARSE_COMMAND = 1
+_G1_REWARD_MODES = {
+    "nanog1_dense": _G1_REWARD_MODE_NANOG1_DENSE,
+    "sparse_command": _G1_REWARD_MODE_SPARSE_COMMAND,
+}
 _NANOG1_FOOT_BOX_LOCAL_POS = (0.04, 0.0, -0.029)
 _NANOG1_FOOT_BOX_HALF_EXTENTS = (0.09, 0.03, 0.008)
 _NANOG1_FOOT_BOX_MU = 0.6
@@ -675,6 +681,14 @@ def _finite_or_zero(x: wp.float32) -> wp.float32:
 @wp.func
 def _clip_finite(x: wp.float32, lo: wp.float32, hi: wp.float32) -> wp.float32:
     return _clip_float(_finite_or_zero(x), lo, hi)
+
+
+def _g1_reward_mode_id(reward_mode: str) -> int:
+    try:
+        return _G1_REWARD_MODES[str(reward_mode)]
+    except KeyError as exc:
+        modes = ", ".join(sorted(_G1_REWARD_MODES))
+        raise ValueError(f"reward_mode must be one of: {modes}") from exc
 
 
 @wp.func
@@ -749,10 +763,16 @@ def g1_observe_reward_kernel(
     gait_stance_fraction: wp.float32,
     w_gait_contact: wp.float32,
     w_gait_swing: wp.float32,
+    w_gait_swing_contact: wp.float32,
     w_gait_hip: wp.float32,
     gait_foot_height: wp.float32,
     w_base_height: wp.float32,
     base_height_target: wp.float32,
+    reward_mode: wp.int32,
+    w_sparse_command_success: wp.float32,
+    sparse_command_velocity_tolerance: wp.float32,
+    sparse_command_yaw_tolerance: wp.float32,
+    w_mechanical_power: wp.float32,
     obs: wp.array2d[wp.float32],
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
@@ -833,11 +853,14 @@ def g1_observe_reward_kernel(
 
         action_rate_penalty = wp.float32(0.0)
         torque_sq_penalty = wp.float32(0.0)
+        mechanical_power_penalty = wp.float32(0.0)
         for j in range(ACTION_DIM_G1):
             da = current_actions[world, j] - previous_actions[world, j]
             action_rate_penalty = action_rate_penalty + da * da
             force = _clip_finite(actuator_force[world, j], wp.float32(-10000.0), wp.float32(10000.0))
             torque_sq_penalty = torque_sq_penalty + force * force
+            qd_joint = _clip_finite(joint_qd[qd_base + wp.int32(6) + j], wp.float32(-200.0), wp.float32(200.0))
+            mechanical_power_penalty = mechanical_power_penalty + wp.abs(force * qd_joint)
 
         gait_reward = wp.float32(0.0)
         if left_foot_body >= wp.int32(0) and right_foot_body >= wp.int32(0):
@@ -865,6 +888,10 @@ def g1_observe_reward_kernel(
                 gait_reward = gait_reward + w_gait_contact
             if right_stance == right_contact:
                 gait_reward = gait_reward + w_gait_contact
+            if left_stance == wp.int32(0) and left_contact != wp.int32(0):
+                gait_reward = gait_reward + w_gait_swing_contact
+            if right_stance == wp.int32(0) and right_contact != wp.int32(0):
+                gait_reward = gait_reward + w_gait_swing_contact
 
             if left_contact == wp.int32(0):
                 left_foot_z = wp.transform_get_translation(body_q[world * body_stride + left_foot_body])[2]
@@ -891,31 +918,46 @@ def g1_observe_reward_kernel(
             )
             gait_reward = gait_reward + w_base_height * base_dz * base_dz
 
+        sparse_success = wp.float32(0.0)
+        sparse_lin_tol = wp.max(sparse_command_velocity_tolerance, wp.float32(0.0))
+        sparse_yaw_tol = wp.max(sparse_command_yaw_tolerance, wp.float32(0.0))
+        if vx_err * vx_err + vy_err * vy_err <= sparse_lin_tol * sparse_lin_tol:
+            if wp.abs(yaw_err) <= sparse_yaw_tol:
+                sparse_success = wp.float32(1.0)
+
         fall = wp.float32(0.0)
         if joint_q[q_base + wp.int32(2)] < min_base_height or upright_cos < min_upright_cos:
             fall = wp.float32(1.0)
         if state_bad != wp.int32(0):
             fall = wp.float32(1.0)
 
-        shaped_reward = (
-            w_track_lin * track_lin
-            + w_track_ang * track_ang
-            + w_lin_vel_z * lin_vel_z_penalty
-            + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
-            + w_orientation * orientation_penalty * upright_gate
-            + w_torque * torque_sq_penalty
-            + w_action_rate * action_rate_penalty
-            + gait_reward
-            + w_alive
-        )
+        shaped_reward = wp.float32(0.0)
+        success_metric = track_lin
+        if reward_mode == wp.int32(0):
+            shaped_reward = (
+                w_track_lin * track_lin
+                + w_track_ang * track_ang
+                + w_lin_vel_z * lin_vel_z_penalty
+                + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
+                + w_orientation * orientation_penalty * upright_gate
+                + w_torque * torque_sq_penalty
+                + w_action_rate * action_rate_penalty
+                + gait_reward
+                + w_alive
+            )
+        else:
+            shaped_reward = w_sparse_command_success * sparse_success + w_mechanical_power * mechanical_power_penalty
+            success_metric = sparse_success
+
         reward = shaped_reward * reward_dt
         if fall > wp.float32(0.5):
             reward = reward + w_termination
+            success_metric = wp.float32(0.0)
         if state_bad != wp.int32(0) or not wp.isfinite(reward):
             reward = w_termination
-            track_lin = wp.float32(0.0)
+            success_metric = wp.float32(0.0)
         rewards[world] = reward
-        successes[world] = track_lin
+        successes[world] = success_metric
 
         done = wp.float32(0.0)
         if fall > wp.float32(0.5):
@@ -1033,6 +1075,7 @@ def _g1_sample_command_value(
     y_max: wp.float32,
     yaw_min: wp.float32,
     yaw_max: wp.float32,
+    command_scale: wp.float32,
     zero_probability: wp.float32,
 ):
     zero_rng = wp.rand_init(seed, world * wp.int32(4))
@@ -1046,7 +1089,7 @@ def _g1_sample_command_value(
         value = x_min + (x_max - x_min) * u
     elif col == wp.int32(1):
         value = y_min + (y_max - y_min) * u
-    return value
+    return command_scale * value
 
 
 @wp.kernel
@@ -1058,12 +1101,13 @@ def g1_sample_commands_kernel(
     y_max: wp.float32,
     yaw_min: wp.float32,
     yaw_max: wp.float32,
+    command_scale: wp.array[wp.float32],
     zero_probability: wp.float32,
     command: wp.array2d[wp.float32],
 ):
     world, col = wp.tid()
     command[world, col] = _g1_sample_command_value(
-        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, command_scale[0], zero_probability
     )
 
 
@@ -1077,13 +1121,14 @@ def g1_sample_commands_seed_counter_kernel(
     y_max: wp.float32,
     yaw_min: wp.float32,
     yaw_max: wp.float32,
+    command_scale: wp.array[wp.float32],
     zero_probability: wp.float32,
     command: wp.array2d[wp.float32],
 ):
     world, col = wp.tid()
     seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
     command[world, col] = _g1_sample_command_value(
-        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, command_scale[0], zero_probability
     )
 
 
@@ -1096,6 +1141,7 @@ def g1_sample_done_commands_kernel(
     y_max: wp.float32,
     yaw_min: wp.float32,
     yaw_max: wp.float32,
+    command_scale: wp.array[wp.float32],
     zero_probability: wp.float32,
     dones: wp.array[wp.float32],
     command: wp.array2d[wp.float32],
@@ -1104,7 +1150,7 @@ def g1_sample_done_commands_kernel(
     if dones[world] <= wp.float32(0.5):
         return
     command[world, col] = _g1_sample_command_value(
-        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, command_scale[0], zero_probability
     )
 
 
@@ -1118,6 +1164,7 @@ def g1_sample_done_commands_seed_counter_kernel(
     y_max: wp.float32,
     yaw_min: wp.float32,
     yaw_max: wp.float32,
+    command_scale: wp.array[wp.float32],
     zero_probability: wp.float32,
     dones: wp.array[wp.float32],
     command: wp.array2d[wp.float32],
@@ -1127,7 +1174,7 @@ def g1_sample_done_commands_seed_counter_kernel(
         return
     seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
     command[world, col] = _g1_sample_command_value(
-        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, command_scale[0], zero_probability
     )
 
 
@@ -1141,6 +1188,7 @@ def g1_sample_due_commands_kernel(
     y_max: wp.float32,
     yaw_min: wp.float32,
     yaw_max: wp.float32,
+    command_scale: wp.array[wp.float32],
     zero_probability: wp.float32,
     dones: wp.array[wp.float32],
     episode_steps: wp.array[wp.int32],
@@ -1152,7 +1200,7 @@ def g1_sample_due_commands_kernel(
     if episode_steps[world] <= wp.int32(0) or episode_steps[world] % resample_steps != wp.int32(0):
         return
     command[world, col] = _g1_sample_command_value(
-        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, command_scale[0], zero_probability
     )
 
 
@@ -1167,6 +1215,7 @@ def g1_sample_due_commands_seed_counter_kernel(
     y_max: wp.float32,
     yaw_min: wp.float32,
     yaw_max: wp.float32,
+    command_scale: wp.array[wp.float32],
     zero_probability: wp.float32,
     dones: wp.array[wp.float32],
     episode_steps: wp.array[wp.int32],
@@ -1179,8 +1228,30 @@ def g1_sample_due_commands_seed_counter_kernel(
         return
     seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
     command[world, col] = _g1_sample_command_value(
-        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, zero_probability
+        seed, world, col, x_min, x_max, y_min, y_max, yaw_min, yaw_max, command_scale[0], zero_probability
     )
+
+
+@wp.kernel(enable_backward=False)
+def g1_update_command_scale_kernel(
+    sample_counter: wp.array[wp.int32],
+    sample_delta: wp.int32,
+    start_scale: wp.float32,
+    ramp_samples: wp.float32,
+    command_scale: wp.array[wp.float32],
+):
+    next_count = sample_counter[0] + sample_delta
+    if next_count < sample_counter[0]:
+        next_count = sample_counter[0]
+    sample_counter[0] = next_count
+
+    start = _clip_float(start_scale, wp.float32(0.0), wp.float32(1.0))
+    scale = wp.float32(1.0)
+    if ramp_samples > wp.float32(0.0) and start < wp.float32(1.0):
+        progress = wp.float32(next_count) / ramp_samples
+        progress = _clip_float(progress, wp.float32(0.0), wp.float32(1.0))
+        scale = start + (wp.float32(1.0) - start) * progress
+    command_scale[0] = scale
 
 
 @wp.func
@@ -1247,6 +1318,7 @@ def g1_gather_actuator_force_kernel(
     joint_target_q: wp.array[wp.float32],
     actuator_force_kp: wp.array[wp.float32],
     actuator_force_kd: wp.array[wp.float32],
+    passive_damping: wp.array[wp.float32],
     actuator_force_lower: wp.array[wp.float32],
     actuator_force_upper: wp.array[wp.float32],
     coord_stride: wp.int32,
@@ -1267,7 +1339,7 @@ def g1_gather_actuator_force_kernel(
     force = _clip_float(force, actuator_force_lower[action], actuator_force_upper[action])
     actuator_force[world, action] = force
     if scatter_joint_f != wp.int32(0):
-        joint_f[world * dof_stride + wp.int32(6) + action] = force
+        joint_f[world * dof_stride + wp.int32(6) + action] = force - passive_damping[action] * qd
 
 
 @dataclass
@@ -1311,9 +1383,15 @@ class ConfigEnvG1PhoenX:
         w_action_rate: Action-rate penalty scale.
         w_alive: Alive reward per policy step.
         w_termination: Termination reward applied on fall.
+        reward_mode: Reward mode, either ``"nanog1_dense"`` or ``"sparse_command"``.
+        w_sparse_command_success: Sparse command-success reward scale.
+        sparse_command_velocity_tolerance: Linear command-success tolerance [m/s].
+        sparse_command_yaw_tolerance: Yaw-rate command-success tolerance [rad/s].
+        w_mechanical_power: Absolute joint mechanical-power penalty scale.
         gait_stance_fraction: Fraction of each gait half-period spent in stance.
         w_gait_contact: Stance/contact phase-matching reward scale.
         w_gait_swing: Swing-foot height penalty scale.
+        w_gait_swing_contact: Penalty for a swing foot that remains in contact.
         w_gait_hip: Hip-roll/yaw deviation penalty scale.
         gait_foot_height: Swing-foot target height [m].
         w_base_height: Base-height penalty scale.
@@ -1369,9 +1447,15 @@ class ConfigEnvG1PhoenX:
     w_action_rate: float = g1_recipe.W_ACTION_RATE
     w_alive: float = g1_recipe.W_ALIVE
     w_termination: float = g1_recipe.W_TERMINATION
+    reward_mode: str = g1_recipe.REWARD_MODE
+    w_sparse_command_success: float = g1_recipe.W_SPARSE_COMMAND_SUCCESS
+    sparse_command_velocity_tolerance: float = g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE
+    sparse_command_yaw_tolerance: float = g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE
+    w_mechanical_power: float = g1_recipe.W_MECHANICAL_POWER
     gait_stance_fraction: float = g1_recipe.GAIT_STANCE_FRACTION
     w_gait_contact: float = g1_recipe.W_GAIT_CONTACT
     w_gait_swing: float = g1_recipe.W_GAIT_SWING
+    w_gait_swing_contact: float = g1_recipe.W_GAIT_SWING_CONTACT
     w_gait_hip: float = g1_recipe.W_GAIT_HIP
     gait_foot_height: float = g1_recipe.GAIT_FOOT_HEIGHT
     w_base_height: float = g1_recipe.W_BASE_HEIGHT
@@ -1430,6 +1514,7 @@ class EnvG1PhoenX:
             raise ValueError("gait_stance_fraction must be in [0, 1]")
         if str(self.config.contact_geometry) not in _NANOG1_CONTACT_GEOMETRIES:
             raise ValueError(f"contact_geometry must be one of {_NANOG1_CONTACT_GEOMETRIES}")
+        self._reward_mode_id = _g1_reward_mode_id(self.config.reward_mode)
 
         self.model = self._build_model()
         self.coord_stride = int(self.model.joint_coord_count) // self.world_count
@@ -1466,6 +1551,9 @@ class EnvG1PhoenX:
         self.actuator_force_kd = wp.array(
             np.asarray(_NANOG1_ACTUATOR_FORCE_KD_G1, dtype=np.float32), dtype=wp.float32, device=self.device
         )
+        self.passive_damping = wp.array(
+            np.asarray(_NANOG1_DOF_DAMPING_G1, dtype=np.float32), dtype=wp.float32, device=self.device
+        )
         self.actuator_force_lower = wp.array(
             np.asarray(_NANOG1_ACTUATOR_FORCE_LO_G1, dtype=np.float32), dtype=wp.float32, device=self.device
         )
@@ -1477,6 +1565,7 @@ class EnvG1PhoenX:
         self.actuator_force = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
+        self.command_scale = wp.array(np.ones(1, dtype=np.float32), dtype=wp.float32, device=self.device)
         self.episode_steps = wp.zeros(self.world_count, dtype=wp.int32, device=self.device)
         self.obs = wp.zeros((self.world_count, self.obs_dim), dtype=wp.float32, device=self.device)
         self.rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
@@ -1533,6 +1622,7 @@ class EnvG1PhoenX:
             dof = i + 6
             articulation_builder.joint_target_ke[dof] = _UNITREE_KP_G1[i]
             articulation_builder.joint_target_kd[dof] = _DRIVE_KD_G1[i]
+            articulation_builder.joint_damping[dof] = _NANOG1_DOF_DAMPING_G1[i]
             articulation_builder.joint_friction[dof] = (
                 float(self.config.joint_friction_scale) * _NANOG1_DOF_FRICTIONLOSS_G1[i]
             )
@@ -1679,7 +1769,17 @@ class EnvG1PhoenX:
         wp.launch(
             g1_sample_commands_kernel,
             dim=(self.world_count, 3),
-            inputs=[int(seed), x_min, x_max, y_min, y_max, yaw_min, yaw_max, float(zero_probability)],
+            inputs=[
+                int(seed),
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                yaw_min,
+                yaw_max,
+                self.command_scale,
+                float(zero_probability),
+            ],
             outputs=[self.command],
             device=self.device,
         )
@@ -1712,6 +1812,7 @@ class EnvG1PhoenX:
                 y_max,
                 yaw_min,
                 yaw_max,
+                self.command_scale,
                 float(zero_probability),
             ],
             outputs=[self.command],
@@ -1809,10 +1910,16 @@ class EnvG1PhoenX:
                 self.config.gait_stance_fraction,
                 self.config.w_gait_contact,
                 self.config.w_gait_swing,
+                self.config.w_gait_swing_contact,
                 self.config.w_gait_hip,
                 self.config.gait_foot_height,
                 self.config.w_base_height,
                 self.config.base_height_target,
+                self._reward_mode_id,
+                self.config.w_sparse_command_success,
+                self.config.sparse_command_velocity_tolerance,
+                self.config.sparse_command_yaw_tolerance,
+                self.config.w_mechanical_power,
             ],
             outputs=[self.obs, self.rewards, self.dones, self.successes],
             device=self.device,
@@ -1857,6 +1964,24 @@ class EnvG1PhoenX:
 
         self._command_seed_counter = seed_counter
 
+    def update_command_curriculum(
+        self,
+        sample_counter: wp.array[wp.int32],
+        *,
+        sample_delta: int,
+        start_scale: float,
+        ramp_samples: float,
+    ) -> None:
+        """Advance the device-side command curriculum scale."""
+
+        wp.launch(
+            g1_update_command_scale_kernel,
+            dim=1,
+            inputs=[sample_counter, int(sample_delta), float(start_scale), float(ramp_samples)],
+            outputs=[self.command_scale],
+            device=self.device,
+        )
+
     def _sample_done_commands(self) -> bool:
         if not bool(self.config.randomize_commands_on_reset):
             return False
@@ -1874,6 +1999,7 @@ class EnvG1PhoenX:
                     y_max,
                     yaw_min,
                     yaw_max,
+                    self.command_scale,
                     zero_probability,
                     self.dones,
                 ],
@@ -1894,6 +2020,7 @@ class EnvG1PhoenX:
                     y_max,
                     yaw_min,
                     yaw_max,
+                    self.command_scale,
                     zero_probability,
                     self.dones,
                 ],
@@ -1924,6 +2051,7 @@ class EnvG1PhoenX:
                     y_max,
                     yaw_min,
                     yaw_max,
+                    self.command_scale,
                     zero_probability,
                     self.dones,
                     self.episode_steps,
@@ -1946,6 +2074,7 @@ class EnvG1PhoenX:
                     y_max,
                     yaw_min,
                     yaw_max,
+                    self.command_scale,
                     zero_probability,
                     self.dones,
                     self.episode_steps,
@@ -1971,6 +2100,9 @@ class EnvG1PhoenX:
         self._sample_done_commands()
         self.dones.zero_()
         self.successes.zero_()
+        self.step_rewards.zero_()
+        self.step_dones.zero_()
+        self.step_successes.zero_()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         self.sim_time = 0.0
         return self.observe()
@@ -2085,6 +2217,7 @@ class EnvG1PhoenX:
                 self.control.joint_target_q,
                 self.actuator_force_kp,
                 self.actuator_force_kd,
+                self.passive_damping,
                 self.actuator_force_lower,
                 self.actuator_force_upper,
                 self.coord_stride,

@@ -92,7 +92,7 @@ or benchmark note.
 The 2026-06-22 Puffer learner isolation run used:
 
 ```bash
-uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train_puffer_torch \
+uv run --extra dev -m newton._src.solvers.phoenx.experimental.bench_g1_train_puffer_torch \
     --iterations 287 --world-count 4096 --rollout-steps 64 \
     --checkpoint-path /tmp/phoenx_g1_puffer_{iteration}.pt \
     --checkpoint-interval 287 --gate

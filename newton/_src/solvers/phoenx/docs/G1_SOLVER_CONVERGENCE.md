@@ -6,10 +6,85 @@ physically credible drive/contact behavior over the fastest possible sample rate
 
 ## Current Status (2026-06-22)
 
+Update: a CUDA graph analytical stack-support regression exposed that one
+velocity-relax sweep leaves a five-cube stack with persistent residual contact
+velocity (`0.427 m/s` max in the measured fixture). Two velocity-relax sweeps
+settled the same fixture to `0.046 m/s` and restored the analytical contact-force
+test. On the full G1 open-loop leg-step comparison, this alone did not close the
+nanoG1 gap; the dominant effect was still position/contact convergence. The G1
+recipe therefore now defaults to `10` sim substeps, `8` position iterations, and
+`2` velocity-relax iterations. In the 40-step grounded leg-step parity benchmark
+against nanoG1 host physics, that default keeps `4.0/4.0` mean foot contacts, has
+no fall, and ends at `0.012 rad` joint-q RMSE with about `4.7 mm` final base-z
+error. The previous `8x4x2` recipe ended at about `0.043 rad` joint-q RMSE and
+`18 mm` final base-z error, so it was too compliant for G1 training quality.
+
+Current CUDA regression coverage for G1-relevant physics is now explicit:
+
+- Normal support and stacking: `test_contact_force` checks static sphere/cube
+  weights, two- and five-cube stacks, pyramid support, and momentum
+  conservation. The five-cube stack is the regression that requires two
+  velocity-relax sweeps.
+- Tangential contact: `test_friction` checks kinetic deceleration/stop distance,
+  static friction thresholds, circular friction-cone behavior, no drift at rest,
+  friction-induced rotation, and inclined-plane behavior. The ramp checks use
+  first principles directly: static hold for `tan(theta) <= mu`, and sliding
+  acceleration `g * (sin(theta) - mu * cos(theta))` above the friction cone.
+- Joint/friction/contact coupling: `test_contact_force` now also checks a
+  compact three-body revolute "snowman" stack with +Z joint axes. Only the
+  bottom box touches the floor, and its contact normal force must equal the
+  combined weight of all connected bodies.
+- Joint friction and drive/friction composition: `test_joint_friction` checks
+  stiction against gravity, Coulomb spin-down, acceleration under constant
+  torque, and the PD-drive deadband created by friction.
+- G1 actuator metadata and force law: `test_g1_rl_training` checks nanoG1 gain,
+  damping, armature, friction, force-limit imports, explicit clamped PD torque
+  formulas for every G1 joint, passive damping subtraction, and the intentionally
+  soft implicit-drive coefficients.
+- G1 contact geometry: `test_g1_rl_training` checks the nanoG1 foot boxes, their
+  transforms, half-extents, friction, collision/visibility flags, and CUDA graph
+  contact generation.
+- G1 foot friction material: `test_g1_rl_training` checks that both nanoG1 foot
+  boxes carry `shape_material_mu = 0.6`. PhoenX currently exposes one Coulomb
+  sliding coefficient on shapes; that value is used as the static cone limit and
+  dynamic sliding coefficient rather than separate static/dynamic material
+  fields.
+- G1 standing support balance: `test_g1_rl_training` now settles the RL MJCF G1
+  model with strong position-hold gains inside CUDA graphs, verifies negligible
+  pose drift over an additional captured window, and checks that the summed
+  robot-ground normal force matches total body weight within 2%.
+
+The current evidence says PhoenX contact physics is passing the analytical
+checks we know how to write. A PhoenX/nanoG1 difference in contact manifolds or
+solver response is therefore not, by itself, evidence that PhoenX contacts are
+wrong. The new G1 standing force-balance regression is also important: the same
+RL model's foot contacts can carry the full G1 weight when the posture is held
+stiffly enough, so a zero-action collapse is not explained by missing ground
+normal force alone. The remaining non-analytical gap is full grounded G1 support
+coupling: foot contacts, tangential impulses, base motion, and articulated drives
+interact in a way that has no compact closed-form solution. That is tracked by
+the nanoG1 open-loop parity benchmark rather than by a unit test.
+
+Latest current-default parity rerun (`10x8x2`, explicit torque, nanoG1 foot
+boxes) gives this split: lifted 10-step leg-step with no contacts has
+`0.00275 rad` joint-q trajectory RMSE and `0.00196 rad` final target-error delta
+against nanoG1 smooth dynamics. Grounded 60-step zero action has `6.96 mm`
+max base-z error and `0.0133 rad` joint-q trajectory RMSE. Grounded 60-step
+leg-step has `10.85 mm` max base-z error, `0.0188 rad` joint-q trajectory RMSE,
+and `0.0362 rad` final target-error delta. This keeps pointing at grounded
+contact/support coupling, not a gross no-contact actuator formula bug. The long
+zero-action stability test also now separates the pre-terminal no-reset window
+from the training path: continuing a fallen foot-box-only model without reset is
+outside the G1 RL contract, while the 120-step auto-reset graph path remains
+finite.
+
 Physics parity is a diagnostic, not the final goal. Exact trajectory equality
 against nanoG1 is less important than preserving the intended actuator/drive
 behavior at the chosen PhoenX substep count: stiffness, damping, Coulomb
-friction, armature, force limits, and solver-induced effective compliance. The
+friction, armature, force limits, and solver-induced effective compliance. If
+these first-principles contact tests stay green, the next practical lever is to
+tune G1 actuation, command curriculum, rewards, and initialization for PhoenX's
+contact model while staying close to nanoG1 where that remains useful. The
 latest full 75M-sample training run with nanoG1/Puffer V-trace parity still
 failed the quality gate (`battery_perf=0.302`, `battery_falls=393`) while
 retaining acceptable speed (`train_seconds=184.3`, `total_wall_seconds=200.0`,
