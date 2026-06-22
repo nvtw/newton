@@ -108,11 +108,21 @@ rather than rewriting the PPO learner again.
 
 The latest full quality-facing probe before the stability default change used
 4096 worlds, 64 rollout steps, the nanoG1-timed `5x2` recipe,
-graph-leapfrog execution, and one 75.2M sample chunk. It completed training in 185.4 s and the whole train-save-reload
-gate run in 201.2 s, about 405.7k train environment samples/s, but still failed
-the gate with `battery_perf=0.325` and `battery_falls=372`. A 60-iteration eager
-probe also failed at 15.7M samples with `battery_perf=0.321`, so the current
-blocker is quality/sample efficiency, not only the two-stream graph schedule.
+graph-leapfrog execution, and one 75.2M sample chunk. It completed training in
+185.4 s and the whole train-save-reload gate run in 201.2 s, about 405.7k train
+environment samples/s, but still failed the gate with `battery_perf=0.325` and
+`battery_falls=372`. A 60-iteration eager probe also failed at 15.7M samples
+with `battery_perf=0.321`, so the current blocker is quality/sample efficiency,
+not only the two-stream graph schedule.
+
+A 2026-06-22 sparse-command probe used 2048 worlds, 64 rollout steps, forward
+commands in `[0.2, 0.6] m/s`, no lateral/yaw commands, `reward_mode=sparse_command`,
+and graph-leapfrog execution. It trained 19.7M samples in 120 s at about 196k
+environment samples/s. The iteration-50 checkpoint showed that PhoenX can learn
+forward-ish motion quickly (`forward_0.8` perf `0.837`, `falls=5` in the short
+diagnostic), but the command battery was still weak (`battery_perf=0.467`) and
+later checkpoints regressed/generalized poorly. Treat sparse command reward as
+a promising anti-standing lever, not a solved walking recipe.
 
 ## Next Checks
 

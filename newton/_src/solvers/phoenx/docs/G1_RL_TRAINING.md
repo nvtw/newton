@@ -93,7 +93,35 @@ benchmark defaults read from the same constants.
 
 ## End-to-End Checkpoint Workflow
 
-A minimal user-facing pure-Warp lifecycle is:
+The live G1 example supports the intended one-shot workflow: train with many
+worlds, save the final policy, then either immediately replay one visible robot
+or load the checkpoint later on a single robot. The replay command can be
+steered with `I/K` for forward/backward, `J/L` for lateral, and `U/O` for yaw
+when the GL viewer exposes keyboard state. The fixed `--command-x/y/yaw` values
+remain active when no steering key is held. Passing `--target-x` and `--target-y`
+turns that fixed command into a simple world-space target follower for replay.
+
+```bash
+uv run --extra dev -m newton.examples robot_g1_rl_phoenx \
+    --viewer gl --mode train_replay \
+    --iterations 150 --checkpoint-path /tmp/phoenx_g1_policy_{iteration}.npz \
+    --reward-mode sparse_command --command-x-min 0.2 --command-x-max 0.6 \
+    --command-y-min 0.0 --command-y-max 0.0 \
+    --command-yaw-min 0.0 --command-yaw-max 0.0
+
+uv run --extra dev -m newton.examples robot_g1_rl_phoenx \
+    --viewer gl --mode replay --resume-checkpoint /tmp/phoenx_g1_policy_150.npz \
+    --world-count 1 --render-worlds 1 --interactive-command
+
+uv run --extra dev -m newton.examples robot_g1_rl_phoenx \
+    --viewer gl --mode replay --resume-checkpoint /tmp/phoenx_g1_policy_150.npz \
+    --world-count 1 --render-worlds 1 --target-x 2.0 --target-y 0.0
+```
+
+This workflow saves and reloads the policy deterministically; policy quality is
+still tracked by the train-to-gate measurements in `G1_RL_PARITY.md`.
+
+A minimal non-viewer pure-Warp lifecycle is:
 
 ```bash
 uv run --extra dev -m newton.rl train-g1-ppo \
