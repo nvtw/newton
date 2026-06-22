@@ -76,8 +76,13 @@ four contacts but still had similar tangential-impulse deficit. `10x8` reduced
 normal-impulse error to 0.031 but still lagged tangential impulse by 0.806.
 This points at grounded contact/friction coupling and solver convergence as the
 current drive-related gap; no-contact PD/damping/armature response remains a
-secondary suspect. The diagnostic timing includes deliberate metric readbacks
-and is not a throughput benchmark.
+secondary suspect. A follow-up `5x8` run improved normal-impulse delta only from
+-0.539 to -0.436 and tangential-impulse delta from -1.90 to -1.85, while `10x8`
+cut those to -0.031 and -0.806. Smaller substeps therefore matter more than
+extra iterations at the 0.004 s substep size. The same tangential support gap is
+visible in a zero-action hold-pose sweep (`5x2`: -1.90, `10x8`: -1.01), so it
+is not caused only by the leg-step action target. The diagnostic timing includes
+deliberate metric readbacks and is not a throughput benchmark.
 
 ## nanoG1 Reference
 
