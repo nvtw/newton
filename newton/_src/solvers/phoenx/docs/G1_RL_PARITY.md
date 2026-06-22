@@ -170,6 +170,16 @@ battery to `battery_perf=0.697`, with `forward_0.8` perf `0.688` and stand perf
 `0.891`. It still failed due falls and weak lateral/yaw generalization, but it
 is the best current anti-standing recipe and should be the next tuning baseline.
 
+After changing the default to reset recurrent state at PPO rollout boundaries, a
+full-command anti-standing run (`w_alive=0.0`, `w_track_lin=6.0`) reached the
+nanoG1 sample budget without a walking-quality pass. At 75.0M samples it trained
+for 327 s at `229k` env samples/s and reached `battery_perf=0.703`,
+`battery_falls=30/3000`, `forward_0.8` perf `0.581`, and stand perf `0.939`.
+Continuing the same checkpoint to 149.9M samples took another 328 s and did not
+improve the short gate: `battery_perf=0.699`, `battery_falls=35/3000`. This
+shows that the recurrent-state fix improves PPO consistency but the current
+recipe plateaus; simply running longer for about ten minutes is not enough.
+
 ## Next Checks
 
 1. Add or tighten command/reset/done-bootstrap tests against the pinned nanoG1
