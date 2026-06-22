@@ -112,6 +112,7 @@ class Example:
             parse_visuals=bool(args.parse_visuals),
             parse_meshes=bool(args.parse_meshes),
             contact_geometry=str(args.contact_geometry),
+            auto_reset=self.mode != "sim",
             rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
             threads_per_world=args.threads_per_world,
             multi_world_scheduler=str(args.multi_world_scheduler),
