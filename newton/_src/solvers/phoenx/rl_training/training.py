@@ -29,6 +29,12 @@ from .g1_recipe import (
     RESET_RECURRENT_STATE_ON_ROLLOUT_START,
     ROLLOUT_STEPS,
     SEED,
+    SPARSE_TARGET_ANGLE_MAX,
+    SPARSE_TARGET_ANGLE_MIN,
+    SPARSE_TARGET_CURRICULUM_END,
+    SPARSE_TARGET_CURRICULUM_SAMPLES,
+    SPARSE_TARGET_CURRICULUM_START,
+    SPARSE_TARGET_RANDOMIZE,
     SQUASH_ACTIONS,
     TRAIN_ITERATIONS,
     default_g1_ppo_config,
@@ -207,7 +213,11 @@ class ResultTrainAnymalPPO:
 
 @dataclass
 class ConfigTrainG1PPO:
-    """Configuration for train_g1_ppo."""
+    """Configuration for train_g1_ppo.
+
+    Sparse-target training keeps the reward sparse; the optional target
+    curriculum only changes task distance on the device between rollouts.
+    """
 
     iterations: int = TRAIN_ITERATIONS
     rollout_steps: int = ROLLOUT_STEPS
@@ -229,6 +239,13 @@ class ConfigTrainG1PPO:
     command_resample_steps: int = COMMAND_RESAMPLE_STEPS
     command_curriculum_start: float = COMMAND_CURRICULUM_START
     command_curriculum_samples: int = COMMAND_CURRICULUM_SAMPLES
+    use_target_curriculum: bool = True
+    target_distance_start: float = SPARSE_TARGET_CURRICULUM_START
+    target_distance_end: float = SPARSE_TARGET_CURRICULUM_END
+    target_curriculum_samples: int = SPARSE_TARGET_CURRICULUM_SAMPLES
+    randomize_target_positions: bool = SPARSE_TARGET_RANDOMIZE
+    target_angle_min: float = SPARSE_TARGET_ANGLE_MIN
+    target_angle_max: float = SPARSE_TARGET_ANGLE_MAX
     reset_recurrent_state_on_rollout_start: bool = RESET_RECURRENT_STATE_ON_ROLLOUT_START
     resume_checkpoint: str | None = None
     checkpoint_path: str | None = None
@@ -297,6 +314,65 @@ class ResultEvaluateG1PPO:
     """Result returned by :func:`evaluate_g1_ppo`."""
 
     stats: StatsEvaluateG1PPO
+
+
+@dataclass
+class ConfigEvaluateG1TargetPPO:
+    """Configuration for :func:`evaluate_g1_target_ppo`.
+
+    Args:
+        env_config: Base PhoenX G1 environment configuration.
+        target_positions: Target XY positions to evaluate [m].
+        steps: Maximum policy steps per target.
+        device: Warp device. Uses the trainer device when ``None``.
+        deterministic: Use deterministic policy means.
+        seed: Base action seed for stochastic evaluation.
+        max_tilt_degrees: Maximum allowed base tilt from upright [deg].
+        min_valid_base_height: Minimum allowed base height for strict walking [m].
+        max_valid_base_height: Maximum allowed base height for strict walking [m].
+    """
+
+    env_config: ConfigEnvG1PhoenX | None = None
+    target_positions: tuple[tuple[float, float], ...] = ((0.6, 0.0), (1.0, 0.0), (1.4, 0.0))
+    steps: int = 300
+    device: wp.context.Devicelike = None
+    deterministic: bool = True
+    seed: int = 1000
+    max_tilt_degrees: float = 30.0
+    min_valid_base_height: float = 0.35
+    max_valid_base_height: float = 1.10
+
+
+@dataclass
+class StatsEvaluateG1TargetPPO:
+    """Target-following diagnostics for one evaluated G1 target."""
+
+    target_position: tuple[float, float]
+    success_fraction: float
+    strict_success_fraction: float
+    fall_fraction: float
+    tilt_violation_fraction: float
+    height_violation_fraction: float
+    mean_first_success_step: float
+    mean_initial_distance: float
+    mean_final_distance: float
+    mean_min_distance: float
+    mean_target_aligned_displacement: float
+    mean_path_length: float
+    mean_speed: float
+    mean_forward_velocity: float
+    max_tilt_degrees: float
+    mean_max_tilt_degrees: float
+    min_base_height: float
+    max_base_height: float
+    mean_base_height: float
+
+
+@dataclass
+class ResultEvaluateG1TargetPPO:
+    """Result returned by :func:`evaluate_g1_target_ppo`."""
+
+    stats: list[StatsEvaluateG1TargetPPO]
 
 
 @dataclass
@@ -538,6 +614,40 @@ def _advance_g1_command_curriculum(
     )
 
 
+def _make_g1_target_curriculum_counter(
+    cfg: ConfigTrainG1PPO, env: EnvG1PhoenX, start_iteration: int
+) -> wp.array[wp.int32]:
+    start_samples = int(start_iteration) * int(cfg.rollout_steps) * int(env.world_count)
+    start_samples = min(start_samples, np.iinfo(np.int32).max)
+    return wp.array(np.asarray([start_samples], dtype=np.int32), dtype=wp.int32, device=env.device)
+
+
+def _configure_g1_sparse_targets(
+    cfg: ConfigTrainG1PPO,
+    env: EnvG1PhoenX,
+    sample_counter: wp.array[wp.int32],
+    seed_counter: wp.array[wp.int32],
+    sample_delta: int,
+) -> None:
+    if env.config.reward_mode != "sparse_target":
+        return
+    if cfg.use_target_curriculum:
+        env.update_sparse_target_distance_curriculum(
+            sample_counter,
+            sample_delta=int(sample_delta),
+            start_distance=float(cfg.target_distance_start),
+            end_distance=float(cfg.target_distance_end),
+            ramp_samples=float(cfg.target_curriculum_samples),
+        )
+    if cfg.randomize_target_positions:
+        env.randomize_target_positions_seed_counter(
+            seed_counter=seed_counter,
+            target_angle_range=(float(cfg.target_angle_min), float(cfg.target_angle_max)),
+        )
+    else:
+        env.set_sparse_targets_from_distance()
+
+
 def _g1_graph_rollout_metrics(
     diagnostics: _G1TrainDiagnosticsReadback | None,
     buffer: BufferRollout,
@@ -594,6 +704,8 @@ def _train_g1_ppo_graph_leapfrog(
             graph_trainer.reserve_update_buffers(buffer)
 
     command_seed_counter = make_seed_counter(int(cfg.seed) + 53_321 + int(start_iteration), device=device)
+    target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + int(start_iteration), device=device)
+    target_curriculum_counter = _make_g1_target_curriculum_counter(cfg, env, int(start_iteration))
     rollout_seed_counter = make_seed_counter(
         int(cfg.seed) + int(start_iteration) * int(cfg.rollout_steps), device=device
     )
@@ -615,6 +727,7 @@ def _train_g1_ppo_graph_leapfrog(
                 command_yaw_range=cfg.command_yaw_range,
                 zero_probability=cfg.command_zero_probability,
             )
+        _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, buffer.num_samples)
         env.collect_ppo_rollout_seed_counter(
             rollout_trainer,
             buffer,
@@ -707,6 +820,12 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         raise ValueError("command_curriculum_start must be in [0, 1]")
     if int(cfg.command_curriculum_samples) < 0:
         raise ValueError("command_curriculum_samples must be non-negative")
+    if float(cfg.target_distance_start) < 0.0 or float(cfg.target_distance_end) < 0.0:
+        raise ValueError("target curriculum distances must be non-negative")
+    if int(cfg.target_curriculum_samples) < 0:
+        raise ValueError("target_curriculum_samples must be non-negative")
+    if cfg.target_angle_max < cfg.target_angle_min:
+        raise ValueError("target_angle_max must be greater than or equal to target_angle_min")
     if cfg.command_sampling not in ("episode", "rollout"):
         raise ValueError("command_sampling must be 'episode' or 'rollout'")
     if cfg.checkpoint_interval < 0:
@@ -757,7 +876,10 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
     start_iteration = int(getattr(trainer, "iteration", 0))
     diagnostics = _G1TrainDiagnosticsReadback(device) if cfg.readback_diagnostics else None
     command_curriculum_counter = _make_g1_command_curriculum_counter(cfg, env, start_iteration)
+    target_curriculum_counter = _make_g1_target_curriculum_counter(cfg, env, start_iteration)
+    target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + int(start_iteration), device=device)
     _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, 0)
+    _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, 0)
     if cfg.randomize_commands and cfg.command_sampling == "episode":
         env.randomize_commands(
             seed=int(cfg.seed) + 53_321 + start_iteration,
@@ -789,6 +911,7 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
                 command_yaw_range=cfg.command_yaw_range,
                 zero_probability=cfg.command_zero_probability,
             )
+        _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, buffer.num_samples)
 
         t0 = time.perf_counter()
         env.collect_ppo_rollout(
@@ -862,6 +985,35 @@ def evaluate_g1_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1PPO | None = No
         samples_per_second=float(env.world_count * steps) / elapsed,
     )
     return ResultEvaluateG1PPO(stats=stats)
+
+
+def evaluate_g1_target_ppo(
+    trainer: TrainerPPO, config: ConfigEvaluateG1TargetPPO | None = None
+) -> ResultEvaluateG1TargetPPO:
+    """Evaluate whether a trained G1 PPO policy reaches sparse targets.
+
+    The evaluator disables auto-reset and records first terminal events, so a
+    target hit is not conflated with post-reset motion.
+    """
+
+    cfg = config or ConfigEvaluateG1TargetPPO()
+    if cfg.steps <= 0:
+        raise ValueError("steps must be positive")
+    device = wp.get_device(cfg.device if cfg.device is not None else trainer.device)
+    base_env_config = cfg.env_config or ConfigEnvG1PhoenX(world_count=64, reward_mode="sparse_target")
+    stats = []
+    for target in cfg.target_positions:
+        eval_config = replace(
+            base_env_config,
+            reward_mode="sparse_target",
+            sparse_target_position=(float(target[0]), float(target[1])),
+            auto_reset=False,
+            max_episode_steps=0,
+        )
+        env = EnvG1PhoenX(eval_config, device=device)
+        _check_g1_trainer_dimensions(trainer, env)
+        stats.append(_evaluate_g1_target(trainer, env, cfg, (float(target[0]), float(target[1]))))
+    return ResultEvaluateG1TargetPPO(stats=stats)
 
 
 def evaluate_g1_gate_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1GatePPO | None = None) -> ResultEvaluateG1GatePPO:
@@ -1221,6 +1373,109 @@ def _evaluate_target(
 
 def _joint_q_matrix(env: EnvAnymalPhoenX) -> np.ndarray:
     return env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+
+
+def _evaluate_g1_target(
+    trainer: TrainerPPO,
+    env: EnvG1PhoenX,
+    cfg: ConfigEvaluateG1TargetPPO,
+    target: tuple[float, float],
+) -> StatsEvaluateG1TargetPPO:
+    obs = env.reset()
+    trainer.reset_rollout_state()
+    q0 = _joint_q_matrix_g1(env)
+    start_xy = q0[:, 0:2].copy()
+    target_xy = np.asarray(target, dtype=np.float32)
+    initial_distance = np.linalg.norm(target_xy[None, :] - start_xy, axis=1)
+    min_distance = initial_distance.copy()
+    last_distance = initial_distance.copy()
+    previous_xy = start_xy.copy()
+    path_length = np.zeros(env.world_count, dtype=np.float32)
+    first_success_step = np.full(env.world_count, -1, dtype=np.int32)
+    first_done_step = np.full(env.world_count, -1, dtype=np.int32)
+    tilt_violation = np.zeros(env.world_count, dtype=bool)
+    height_violation = np.zeros(env.world_count, dtype=bool)
+    max_tilt_per_env = np.zeros(env.world_count, dtype=np.float32)
+    min_height_per_env = np.full(env.world_count, np.inf, dtype=np.float32)
+    max_height_per_env = np.full(env.world_count, -np.inf, dtype=np.float32)
+    height_sum = 0.0
+    height_count = 0
+    forward_velocity_sum = 0.0
+    forward_velocity_count = 0
+    max_upright_cos = float(np.cos(np.deg2rad(float(cfg.max_tilt_degrees))))
+
+    for step in range(int(cfg.steps)):
+        alive_before = first_done_step < 0
+        if not np.any(alive_before):
+            break
+        actions, _log_probs, _values = trainer.act(
+            obs, seed=int(cfg.seed) + step, deterministic=bool(cfg.deterministic)
+        )
+        obs, _rewards, dones = env.step(actions)
+        q = _joint_q_matrix_g1(env)
+        xy = q[:, 0:2].copy()
+        distance = np.linalg.norm(target_xy[None, :] - xy, axis=1)
+        min_distance = np.minimum(min_distance, distance)
+        path_length[alive_before] += np.linalg.norm(xy[alive_before] - previous_xy[alive_before], axis=1)
+        previous_xy = xy
+        last_distance[alive_before] = distance[alive_before]
+
+        obs_np = obs.numpy()
+        alive_heights = q[alive_before, 2]
+        alive_gravity = obs_np[alive_before, 3:6]
+        upright_cos = np.clip(-alive_gravity[:, 2], -1.0, 1.0)
+        tilt_degrees = np.rad2deg(np.arccos(upright_cos)).astype(np.float32)
+        alive_indices = np.nonzero(alive_before)[0]
+        max_tilt_per_env[alive_indices] = np.maximum(max_tilt_per_env[alive_indices], tilt_degrees)
+        min_height_per_env[alive_indices] = np.minimum(min_height_per_env[alive_indices], alive_heights)
+        max_height_per_env[alive_indices] = np.maximum(max_height_per_env[alive_indices], alive_heights)
+        tilt_violation[alive_indices] |= upright_cos < max_upright_cos
+        height_violation[alive_indices] |= (alive_heights < cfg.min_valid_base_height) | (
+            alive_heights > cfg.max_valid_base_height
+        )
+        height_sum += float(np.sum(alive_heights))
+        height_count += int(np.sum(alive_before))
+        forward_velocity_sum += float(np.sum(obs_np[alive_before, 0]))
+        forward_velocity_count += int(np.sum(alive_before))
+
+        successes = env.step_successes.numpy() > 0.5
+        done = dones.numpy() > 0.5
+        first_success_step[(first_success_step < 0) & successes] = step + 1
+        first_done_step[(first_done_step < 0) & done] = step + 1
+
+    success = first_success_step >= 0
+    done = first_done_step >= 0
+    fall = done & ~success
+    strict_success = success & ~tilt_violation & ~height_violation
+    target_vector = target_xy[None, :] - start_xy
+    target_norm = np.maximum(np.linalg.norm(target_vector, axis=1), 1.0e-6)
+    displacement = previous_xy - start_xy
+    aligned_displacement = np.sum(displacement * target_vector, axis=1) / target_norm
+    mean_first_success_step = float(np.mean(first_success_step[success])) if np.any(success) else float("nan")
+    elapsed = max(1, int(cfg.steps)) * float(env.config.frame_dt)
+    mean_forward_velocity = forward_velocity_sum / float(max(forward_velocity_count, 1))
+
+    return StatsEvaluateG1TargetPPO(
+        target_position=target,
+        success_fraction=float(np.mean(success)),
+        strict_success_fraction=float(np.mean(strict_success)),
+        fall_fraction=float(np.mean(fall)),
+        tilt_violation_fraction=float(np.mean(tilt_violation)),
+        height_violation_fraction=float(np.mean(height_violation)),
+        mean_first_success_step=mean_first_success_step,
+        mean_initial_distance=float(np.mean(initial_distance)),
+        mean_final_distance=float(np.mean(last_distance)),
+        mean_min_distance=float(np.mean(min_distance)),
+        mean_target_aligned_displacement=float(np.mean(aligned_displacement)),
+        mean_path_length=float(np.mean(path_length)),
+        mean_speed=float(np.mean(path_length) / elapsed),
+        mean_forward_velocity=float(mean_forward_velocity),
+        max_tilt_degrees=float(np.max(max_tilt_per_env)),
+        mean_max_tilt_degrees=float(np.mean(max_tilt_per_env)),
+        min_base_height=float(np.min(min_height_per_env)),
+        max_base_height=float(np.max(max_height_per_env)),
+        mean_base_height=float(height_sum / float(max(height_count, 1))),
+    )
 
 
 def _validate_g1_gate_config(cfg: ConfigEvaluateG1GatePPO) -> None:

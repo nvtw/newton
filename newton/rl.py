@@ -21,6 +21,7 @@ from ._src.solvers.phoenx.rl_training import (
     ConfigEvaluateAnymalPPO,
     ConfigEvaluateG1GatePPO,
     ConfigEvaluateG1PPO,
+    ConfigEvaluateG1TargetPPO,
     ConfigPPO,
     ConfigSAC,
     ConfigTrainAnymalPPO,
@@ -35,12 +36,14 @@ from ._src.solvers.phoenx.rl_training import (
     ResultEvaluateAnymalPPO,
     ResultEvaluateG1GatePPO,
     ResultEvaluateG1PPO,
+    ResultEvaluateG1TargetPPO,
     ResultTrainAnymalPPO,
     ResultTrainG1PPO,
     StatsEvaluateAnymalTargetPPO,
     StatsEvaluateG1GateCommandPPO,
     StatsEvaluateG1GatePPO,
     StatsEvaluateG1PPO,
+    StatsEvaluateG1TargetPPO,
     StatsPPOUpdate,
     StatsSACUpdate,
     StatsTrainAnymalPPO,
@@ -53,6 +56,7 @@ from ._src.solvers.phoenx.rl_training import (
     evaluate_anymal_ppo,
     evaluate_g1_gate_ppo,
     evaluate_g1_ppo,
+    evaluate_g1_target_ppo,
     g1_mirror_map_ppo,
     g1_recipe,
     load_ppo_checkpoint,
@@ -75,6 +79,7 @@ __all__ = [
     "ConfigEvaluateAnymalPPO",
     "ConfigEvaluateG1GatePPO",
     "ConfigEvaluateG1PPO",
+    "ConfigEvaluateG1TargetPPO",
     "ConfigPPO",
     "ConfigSAC",
     "ConfigTrainAnymalPPO",
@@ -89,12 +94,14 @@ __all__ = [
     "ResultEvaluateAnymalPPO",
     "ResultEvaluateG1GatePPO",
     "ResultEvaluateG1PPO",
+    "ResultEvaluateG1TargetPPO",
     "ResultTrainAnymalPPO",
     "ResultTrainG1PPO",
     "StatsEvaluateAnymalTargetPPO",
     "StatsEvaluateG1GateCommandPPO",
     "StatsEvaluateG1GatePPO",
     "StatsEvaluateG1PPO",
+    "StatsEvaluateG1TargetPPO",
     "StatsPPOUpdate",
     "StatsSACUpdate",
     "StatsTrainAnymalPPO",
@@ -107,6 +114,7 @@ __all__ = [
     "evaluate_anymal_ppo",
     "evaluate_g1_gate_ppo",
     "evaluate_g1_ppo",
+    "evaluate_g1_target_ppo",
     "g1_mirror_map_ppo",
     "load_ppo_checkpoint",
     "save_ppo_checkpoint",
@@ -157,6 +165,23 @@ def _main() -> int:
     g1_parser.add_argument("--command-yaw-min", type=float, default=g1_recipe.COMMAND_YAW_RANGE[0])
     g1_parser.add_argument("--command-yaw-max", type=float, default=g1_recipe.COMMAND_YAW_RANGE[1])
     g1_parser.add_argument("--no-command-randomization", action="store_true")
+    g1_parser.add_argument(
+        "--reward-mode", choices=("nanog1_dense", "sparse_command", "sparse_target"), default=g1_recipe.REWARD_MODE
+    )
+    g1_parser.add_argument("--target-x", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[0])
+    g1_parser.add_argument("--target-y", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[1])
+    g1_parser.add_argument("--sparse-target-radius", type=float, default=g1_recipe.SPARSE_TARGET_RADIUS)
+    g1_parser.add_argument("--target-distance-start", type=float, default=g1_recipe.SPARSE_TARGET_CURRICULUM_START)
+    g1_parser.add_argument("--target-distance-end", type=float, default=g1_recipe.SPARSE_TARGET_CURRICULUM_END)
+    g1_parser.add_argument("--target-curriculum-samples", type=int, default=g1_recipe.SPARSE_TARGET_CURRICULUM_SAMPLES)
+    g1_parser.add_argument("--no-target-curriculum", action="store_true")
+    g1_parser.add_argument(
+        "--randomize-target-positions",
+        action=argparse.BooleanOptionalAction,
+        default=g1_recipe.SPARSE_TARGET_RANDOMIZE,
+    )
+    g1_parser.add_argument("--target-angle-min", type=float, default=g1_recipe.SPARSE_TARGET_ANGLE_MIN)
+    g1_parser.add_argument("--target-angle-max", type=float, default=g1_recipe.SPARSE_TARGET_ANGLE_MAX)
     g1_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     g1_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
@@ -302,6 +327,42 @@ def _main() -> int:
     g1_gate_parser.add_argument("--stochastic", action="store_true")
     g1_gate_parser.add_argument("--no-fail-on-gate", action="store_true")
 
+    g1_target_parser = subparsers.add_parser(
+        "target-g1-ppo", help="Evaluate a saved Unitree G1 PPO checkpoint on sparse target-reaching metrics"
+    )
+    g1_target_parser.add_argument("--checkpoint", required=True)
+    g1_target_parser.add_argument("--steps", type=int, default=300)
+    g1_target_parser.add_argument("--world-count", type=int, default=64)
+    g1_target_parser.add_argument("--device", default=None)
+    g1_target_parser.add_argument("--seed", type=int, default=1000)
+    g1_target_parser.add_argument("--target-x", type=float, action="append", default=None)
+    g1_target_parser.add_argument("--target-y", type=float, action="append", default=None)
+    g1_target_parser.add_argument("--sparse-target-radius", type=float, default=g1_recipe.SPARSE_TARGET_RADIUS)
+    g1_target_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
+    g1_target_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
+    g1_target_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    g1_target_parser.add_argument(
+        "--actuation-model",
+        choices=("explicit_torque", "constraint_drive"),
+        default=g1_recipe.ACTUATION_MODEL,
+        help="G1 actuator path used during target evaluation.",
+    )
+    g1_target_parser.add_argument("--parse-meshes", action="store_true")
+    g1_target_parser.add_argument(
+        "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
+    )
+    g1_target_parser.add_argument(
+        "--rigid-contact-max-per-world",
+        type=int,
+        default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
+        help="Per-world G1 rigid-contact capacity; 0 keeps SolverPhoenX auto-sizing.",
+    )
+    g1_target_parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
+    g1_target_parser.add_argument("--max-tilt-degrees", type=float, default=30.0)
+    g1_target_parser.add_argument("--min-valid-base-height", type=float, default=0.35)
+    g1_target_parser.add_argument("--max-valid-base-height", type=float, default=1.10)
+    g1_target_parser.add_argument("--stochastic", action="store_true")
+
     args = parser.parse_args()
     if args.command == "train-anymal-ppo":
         env_config = ConfigEnvAnymalPhoenX(
@@ -341,6 +402,9 @@ def _main() -> int:
             velocity_iterations=args.velocity_iterations,
             actuation_model=args.actuation_model,
             controlled_action_count=args.controlled_action_count,
+            reward_mode=args.reward_mode,
+            sparse_target_position=(args.target_x, args.target_y),
+            sparse_target_radius=args.sparse_target_radius,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
             rigid_contact_max_per_world=args.rigid_contact_max_per_world,
@@ -380,6 +444,13 @@ def _main() -> int:
                 command_x_range=(args.command_x_min, args.command_x_max),
                 command_y_range=(args.command_y_min, args.command_y_max),
                 command_yaw_range=(args.command_yaw_min, args.command_yaw_max),
+                use_target_curriculum=not args.no_target_curriculum,
+                target_distance_start=args.target_distance_start,
+                target_distance_end=args.target_distance_end,
+                target_curriculum_samples=args.target_curriculum_samples,
+                randomize_target_positions=bool(args.randomize_target_positions),
+                target_angle_min=args.target_angle_min,
+                target_angle_max=args.target_angle_max,
                 reset_recurrent_state_on_rollout_start=bool(args.reset_recurrent_state_on_rollout_start),
                 squash_actions=bool(args.squash_actions),
                 resume_checkpoint=args.resume_checkpoint,
@@ -443,6 +514,45 @@ def _main() -> int:
         )
         print(json.dumps(asdict(result.stats), sort_keys=True))
         return 0 if result.stats.pass_gate or args.no_fail_on_gate else 1
+    if args.command == "target-g1-ppo":
+        if (args.target_x is None) != (args.target_y is None):
+            parser.error("--target-x and --target-y must be provided together")
+        if args.target_x is None:
+            target_positions = ConfigEvaluateG1TargetPPO().target_positions
+        else:
+            if len(args.target_x) != len(args.target_y):
+                parser.error("--target-x and --target-y must have the same count")
+            target_positions = tuple((float(x), float(y)) for x, y in zip(args.target_x, args.target_y, strict=True))
+        env_config = ConfigEnvG1PhoenX(
+            world_count=args.world_count,
+            reward_mode="sparse_target",
+            sparse_target_radius=args.sparse_target_radius,
+            sim_substeps=args.sim_substeps,
+            solver_iterations=args.solver_iterations,
+            velocity_iterations=args.velocity_iterations,
+            actuation_model=args.actuation_model,
+            controlled_action_count=args.controlled_action_count,
+            parse_meshes=args.parse_meshes,
+            contact_geometry=args.contact_geometry,
+            rigid_contact_max_per_world=args.rigid_contact_max_per_world,
+        )
+        trainer = load_ppo_checkpoint(args.checkpoint, device=args.device)
+        result = evaluate_g1_target_ppo(
+            trainer,
+            ConfigEvaluateG1TargetPPO(
+                env_config=env_config,
+                target_positions=target_positions,
+                steps=args.steps,
+                device=args.device,
+                deterministic=not args.stochastic,
+                seed=args.seed,
+                max_tilt_degrees=args.max_tilt_degrees,
+                min_valid_base_height=args.min_valid_base_height,
+                max_valid_base_height=args.max_valid_base_height,
+            ),
+        )
+        print(json.dumps({"stats": [asdict(stat) for stat in result.stats]}, sort_keys=True))
+        return 0
     parser.error(f"unsupported command {args.command!r}")
     return 2
 

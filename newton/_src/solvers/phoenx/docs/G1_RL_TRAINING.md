@@ -18,6 +18,8 @@ adding a PyTorch dependency to Newton's Warp-only RL stack.
   checkpoint.
 - `python -m newton.rl gate-g1-ppo`: Run the nanoG1-style quality gate on a
   saved G1 PPO checkpoint.
+- `python -m newton.rl target-g1-ppo`: Evaluate sparse-target checkpoints with
+  success, strict-success, fall, tilt, height, displacement, and path metrics.
 - `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_rl`: PhoenX G1
   env-step throughput benchmark with optional nanoG1 result ingestion.
 - `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_train`: Full
@@ -105,6 +107,14 @@ or another task-level true objective, and mutate only a small allowlist of
 recipe values. Do not optimize the shaped reward itself as the objective, or the
 search can win by inflating coefficients instead of producing better walking.
 
+For sparse-target experiments, `reward_mode="sparse_target"` intentionally
+keeps the reward small: boolean target success, the tiny mechanical-power
+penalty, and fall termination. The optional target-distance curriculum changes
+the task distance on device between rollouts; it does not add a dense progress,
+velocity, gait, or base-height reward term. Use `target-g1-ppo` rather than the
+raw reward average to judge these runs, because a short lunge can satisfy a
+large target radius without being a useful walking policy.
+
 To reduce reward shaping, prefer demonstrations or teacher rollouts when they
 are available. A behavior-cloning warm start from nanoG1 or another working G1
 policy followed by PPO fine-tuning keeps the runtime policy and trainer simple.
@@ -157,6 +167,10 @@ uv run --extra dev -m newton.rl eval-g1-ppo \
 
 uv run --extra dev -m newton.rl gate-g1-ppo \
     --checkpoint /tmp/phoenx_g1_2.npz --no-fail-on-gate
+
+uv run --extra dev -m newton.rl target-g1-ppo \
+    --checkpoint /tmp/phoenx_g1_2.npz --target-x 0.6 --target-y 0.0 \
+    --target-x 1.0 --target-y 0.0 --target-x 1.4 --target-y 0.0
 
 uv run --extra dev -m newton.rl train-g1-ppo \
     --iterations 1 --rollout-steps 8 --world-count 4096 \
@@ -277,6 +291,14 @@ samples. This still does not pass the gate; treat it as an early-learning
 regression point, not a solved policy. The remaining gap is policy
 quality/sample efficiency rather than only raw throughput. See
 `G1_SOLVER_CONVERGENCE.md` for the fidelity and stochastic-rollout study.
+
+A sparse-target curriculum probe (`reward_mode=sparse_target`, 2048 worlds, 64
+rollout steps, 60 graph-leapfrog iterations, distance ramp `0.6 -> 1.2 m` over
+7.86M samples) trained at roughly 246k env samples/s after warmup. The target
+evaluator showed `0.6 m` strict success 1.0, `1.0 m` success 1.0 but strict
+success 0.0 due tilt around 40 deg, and `1.4 m` success 0.0/fall 1.0. This is
+a useful no-dense-shaping probe, but it currently learns a reach/lunge, not a
+walking policy.
 
 The old fast graph-leapfrog production path was remeasured with the default
 auto fast-tail scheduler at 1,086,344 samples/s on 2026-06-20. Setting

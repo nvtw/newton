@@ -201,6 +201,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         w_sparse_command_success=float(args.w_sparse_command_success),
         sparse_command_velocity_tolerance=float(args.sparse_command_velocity_tolerance),
         sparse_command_yaw_tolerance=float(args.sparse_command_yaw_tolerance),
+        sparse_target_position=(float(args.target_x), float(args.target_y)),
+        sparse_target_radius=float(args.sparse_target_radius),
         w_mechanical_power=float(args.w_mechanical_power),
         w_gait_swing_contact=float(args.w_gait_swing_contact),
         parse_meshes=bool(args.parse_meshes),
@@ -249,6 +251,13 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         randomize_commands=not bool(args.no_command_randomization),
         command_curriculum_start=float(args.command_curriculum_start),
         command_curriculum_samples=int(args.command_curriculum_samples),
+        use_target_curriculum=not bool(args.no_target_curriculum),
+        target_distance_start=float(args.target_distance_start),
+        target_distance_end=float(args.target_distance_end),
+        target_curriculum_samples=int(args.target_curriculum_samples),
+        randomize_target_positions=bool(args.randomize_target_positions),
+        target_angle_min=float(args.target_angle_min),
+        target_angle_max=float(args.target_angle_max),
         reset_recurrent_state_on_rollout_start=bool(args.reset_recurrent_state_on_rollout_start),
         squash_actions=bool(args.squash_actions),
         readback_diagnostics=not bool(args.no_readback_diagnostics),
@@ -324,6 +333,16 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "w_sparse_command_success": float(args.w_sparse_command_success),
         "sparse_command_velocity_tolerance": float(args.sparse_command_velocity_tolerance),
         "sparse_command_yaw_tolerance": float(args.sparse_command_yaw_tolerance),
+        "target_x": float(args.target_x),
+        "target_y": float(args.target_y),
+        "sparse_target_radius": float(args.sparse_target_radius),
+        "use_target_curriculum": not bool(args.no_target_curriculum),
+        "target_distance_start": float(args.target_distance_start),
+        "target_distance_end": float(args.target_distance_end),
+        "target_curriculum_samples": int(args.target_curriculum_samples),
+        "randomize_target_positions": bool(args.randomize_target_positions),
+        "target_angle_min": float(args.target_angle_min),
+        "target_angle_max": float(args.target_angle_max),
         "w_mechanical_power": float(args.w_mechanical_power),
         "w_gait_swing_contact": float(args.w_gait_swing_contact),
         "parse_meshes": bool(args.parse_meshes),
@@ -423,7 +442,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
-    parser.add_argument("--reward-mode", choices=("nanog1_dense", "sparse_command"), default=g1_recipe.REWARD_MODE)
+    parser.add_argument(
+        "--reward-mode", choices=("nanog1_dense", "sparse_command", "sparse_target"), default=g1_recipe.REWARD_MODE
+    )
     parser.add_argument("--w-alive", type=float, default=g1_recipe.W_ALIVE)
     parser.add_argument("--w-track-lin", type=float, default=g1_recipe.W_TRACK_LIN)
     parser.add_argument("--w-sparse-command-success", type=float, default=g1_recipe.W_SPARSE_COMMAND_SUCCESS)
@@ -437,6 +458,20 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE,
     )
+    parser.add_argument("--target-x", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[0])
+    parser.add_argument("--target-y", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[1])
+    parser.add_argument("--sparse-target-radius", type=float, default=g1_recipe.SPARSE_TARGET_RADIUS)
+    parser.add_argument("--target-distance-start", type=float, default=g1_recipe.SPARSE_TARGET_CURRICULUM_START)
+    parser.add_argument("--target-distance-end", type=float, default=g1_recipe.SPARSE_TARGET_CURRICULUM_END)
+    parser.add_argument("--target-curriculum-samples", type=int, default=g1_recipe.SPARSE_TARGET_CURRICULUM_SAMPLES)
+    parser.add_argument("--no-target-curriculum", action="store_true")
+    parser.add_argument(
+        "--randomize-target-positions",
+        action=argparse.BooleanOptionalAction,
+        default=g1_recipe.SPARSE_TARGET_RANDOMIZE,
+    )
+    parser.add_argument("--target-angle-min", type=float, default=g1_recipe.SPARSE_TARGET_ANGLE_MIN)
+    parser.add_argument("--target-angle-max", type=float, default=g1_recipe.SPARSE_TARGET_ANGLE_MAX)
     parser.add_argument("--w-mechanical-power", type=float, default=g1_recipe.W_MECHANICAL_POWER)
     parser.add_argument("--w-gait-swing-contact", type=float, default=g1_recipe.W_GAIT_SWING_CONTACT)
     parser.add_argument(

@@ -180,6 +180,12 @@ improve the short gate: `battery_perf=0.699`, `battery_falls=35/3000`. This
 shows that the recurrent-state fix improves PPO consistency but the current
 recipe plateaus; simply running longer for about ten minutes is not enough.
 
+Sparse-target training now has a graph-compatible target-distance curriculum and
+a target evaluator that separates target hits from walking quality. A 7.86M
+sample curriculum probe hit 0.6 m cleanly and 1.0 m only with large tilt, then
+failed/fell at 1.4 m. Current evidence therefore points to a locomotion-quality
+gap after sparse task discovery, not a missing boolean success reward.
+
 ## Next Checks
 
 1. Add or tighten command/reset/done-bootstrap tests against the pinned nanoG1

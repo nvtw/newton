@@ -657,9 +657,11 @@ _NANOG1_CONTACT_GEOMETRY_FOOT_BOXES = "nanog1_foot_boxes"
 _NANOG1_CONTACT_GEOMETRIES = (_NANOG1_CONTACT_GEOMETRY_MJCF, _NANOG1_CONTACT_GEOMETRY_FOOT_BOXES)
 _G1_REWARD_MODE_NANOG1_DENSE = 0
 _G1_REWARD_MODE_SPARSE_COMMAND = 1
+_G1_REWARD_MODE_SPARSE_TARGET = 2
 _G1_REWARD_MODES = {
     "nanog1_dense": _G1_REWARD_MODE_NANOG1_DENSE,
     "sparse_command": _G1_REWARD_MODE_SPARSE_COMMAND,
+    "sparse_target": _G1_REWARD_MODE_SPARSE_TARGET,
 }
 _NANOG1_FOOT_BOX_LOCAL_POS = (0.04, 0.0, -0.029)
 _NANOG1_FOOT_BOX_HALF_EXTENTS = (0.09, 0.03, 0.008)
@@ -736,6 +738,7 @@ def g1_observe_reward_kernel(
     current_actions: wp.array2d[wp.float32],
     previous_actions: wp.array2d[wp.float32],
     command: wp.array2d[wp.float32],
+    target_position: wp.array2d[wp.float32],
     body_q: wp.array[wp.transform],
     foot_contacts: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
@@ -772,6 +775,7 @@ def g1_observe_reward_kernel(
     w_sparse_command_success: wp.float32,
     sparse_command_velocity_tolerance: wp.float32,
     sparse_command_yaw_tolerance: wp.float32,
+    sparse_target_radius: wp.float32,
     w_mechanical_power: wp.float32,
     obs: wp.array2d[wp.float32],
     rewards: wp.array[wp.float32],
@@ -795,6 +799,12 @@ def g1_observe_reward_kernel(
     lin_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, lin_w)
     ang_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, ang_w)
     gravity_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, wp.vec3(0.0, 0.0, -1.0))
+    target_delta_w = wp.vec3(
+        target_position[world, 0] - joint_q[q_base],
+        target_position[world, 1] - joint_q[q_base + wp.int32(1)],
+        wp.float32(0.0),
+    )
+    target_delta_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, target_delta_w)
 
     state_bad = wp.int32(0)
     if not wp.isfinite(qw) or not wp.isfinite(qx) or not wp.isfinite(qy) or not wp.isfinite(qz):
@@ -808,7 +818,10 @@ def g1_observe_reward_kernel(
     elif col < wp.int32(6):
         value = _clip_finite(gravity_b[col - wp.int32(3)], wp.float32(-1.0), wp.float32(1.0))
     elif col < wp.int32(9):
-        value = command[world, col - wp.int32(6)]
+        command_col = col - wp.int32(6)
+        value = command[world, command_col]
+        if reward_mode == wp.int32(2) and command_col < wp.int32(2):
+            value = target_delta_b[command_col]
     elif col < wp.int32(38):
         j = col - wp.int32(9)
         value = _clip_finite(
@@ -926,13 +939,19 @@ def g1_observe_reward_kernel(
             if wp.abs(yaw_err) <= sparse_yaw_tol:
                 sparse_success = wp.float32(1.0)
 
+        target_success = wp.float32(0.0)
+        target_radius = wp.max(sparse_target_radius, wp.float32(0.0))
+        target_dist_sq = target_delta_w[0] * target_delta_w[0] + target_delta_w[1] * target_delta_w[1]
+        if target_dist_sq <= target_radius * target_radius:
+            target_success = wp.float32(1.0)
+
         fall = wp.float32(0.0)
         if joint_q[q_base + wp.int32(2)] < min_base_height or upright_cos < min_upright_cos:
             fall = wp.float32(1.0)
         if state_bad != wp.int32(0):
             fall = wp.float32(1.0)
 
-        shaped_reward = wp.float32(0.0)
+        reward = wp.float32(0.0)
         success_metric = track_lin
         if reward_mode == wp.int32(0):
             shaped_reward = (
@@ -946,11 +965,16 @@ def g1_observe_reward_kernel(
                 + gait_reward
                 + w_alive
             )
-        else:
+            reward = shaped_reward * reward_dt
+        elif reward_mode == wp.int32(1):
             shaped_reward = w_sparse_command_success * sparse_success + w_mechanical_power * mechanical_power_penalty
+            reward = shaped_reward * reward_dt
             success_metric = sparse_success
-
-        reward = shaped_reward * reward_dt
+        else:
+            reward = (
+                w_sparse_command_success * target_success + w_mechanical_power * mechanical_power_penalty * reward_dt
+            )
+            success_metric = target_success
         if fall > wp.float32(0.5):
             reward = reward + w_termination
             success_metric = wp.float32(0.0)
@@ -962,6 +986,8 @@ def g1_observe_reward_kernel(
 
         done = wp.float32(0.0)
         if fall > wp.float32(0.5):
+            done = wp.float32(1.0)
+        if reward_mode == wp.int32(2) and target_success > wp.float32(0.5):
             done = wp.float32(1.0)
         if max_episode_steps > wp.int32(0):
             if episode_steps[world] >= max_episode_steps:
@@ -1255,6 +1281,71 @@ def g1_update_command_scale_kernel(
     command_scale[0] = scale
 
 
+@wp.kernel(enable_backward=False)
+def g1_update_sparse_target_distance_kernel(
+    sample_counter: wp.array[wp.int32],
+    sample_delta: wp.int32,
+    start_distance: wp.float32,
+    end_distance: wp.float32,
+    ramp_samples: wp.float32,
+    target_distance: wp.array[wp.float32],
+):
+    next_count = sample_counter[0] + sample_delta
+    if next_count < sample_counter[0]:
+        next_count = sample_counter[0]
+    sample_counter[0] = next_count
+
+    start = wp.max(start_distance, wp.float32(0.0))
+    end = wp.max(end_distance, wp.float32(0.0))
+    distance = end
+    if ramp_samples > wp.float32(0.0):
+        progress = wp.float32(next_count) / ramp_samples
+        progress = _clip_float(progress, wp.float32(0.0), wp.float32(1.0))
+        distance = start + (end - start) * progress
+    target_distance[0] = distance
+
+
+@wp.kernel
+def g1_set_sparse_targets_from_distance_kernel(
+    base_x: wp.float32,
+    base_y: wp.float32,
+    target_distance: wp.array[wp.float32],
+    target_position: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    norm = wp.sqrt(base_x * base_x + base_y * base_y)
+    dir_x = wp.float32(1.0)
+    dir_y = wp.float32(0.0)
+    if norm > wp.float32(1.0e-6):
+        inv_norm = wp.float32(1.0) / norm
+        dir_x = base_x * inv_norm
+        dir_y = base_y * inv_norm
+    value = target_distance[0] * dir_x
+    if col == wp.int32(1):
+        value = target_distance[0] * dir_y
+    target_position[world, col] = value
+
+
+@wp.kernel
+def g1_sample_sparse_targets_seed_counter_kernel(
+    seed_counter: wp.array[wp.int32],
+    seed_offset: wp.int32,
+    base_angle: wp.float32,
+    angle_min: wp.float32,
+    angle_max: wp.float32,
+    target_distance: wp.array[wp.float32],
+    target_position: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
+    rng = wp.rand_init(seed, world)
+    angle = base_angle + angle_min + (angle_max - angle_min) * wp.randf(rng)
+    value = target_distance[0] * wp.cos(angle)
+    if col == wp.int32(1):
+        value = target_distance[0] * wp.sin(angle)
+    target_position[world, col] = value
+
+
 @wp.func
 def _g1_mark_foot_contact(
     shape_id: wp.int32,
@@ -1384,10 +1475,13 @@ class ConfigEnvG1PhoenX:
         w_action_rate: Action-rate penalty scale.
         w_alive: Alive reward per policy step.
         w_termination: Termination reward applied on fall.
-        reward_mode: Reward mode, either ``"nanog1_dense"`` or ``"sparse_command"``.
-        w_sparse_command_success: Sparse command-success reward scale.
+        reward_mode: Reward mode, either ``"nanog1_dense"``, ``"sparse_command"``, or
+            ``"sparse_target"``.
+        w_sparse_command_success: Sparse command or target success reward scale.
         sparse_command_velocity_tolerance: Linear command-success tolerance [m/s].
         sparse_command_yaw_tolerance: Yaw-rate command-success tolerance [rad/s].
+        sparse_target_position: Sparse target XY position in each world [m].
+        sparse_target_radius: Sparse target success radius [m].
         w_mechanical_power: Absolute joint mechanical-power penalty scale.
         gait_stance_fraction: Fraction of each gait half-period spent in stance.
         w_gait_contact: Stance/contact phase-matching reward scale.
@@ -1452,6 +1546,8 @@ class ConfigEnvG1PhoenX:
     w_sparse_command_success: float = g1_recipe.W_SPARSE_COMMAND_SUCCESS
     sparse_command_velocity_tolerance: float = g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE
     sparse_command_yaw_tolerance: float = g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE
+    sparse_target_position: tuple[float, float] = g1_recipe.SPARSE_TARGET_POSITION
+    sparse_target_radius: float = g1_recipe.SPARSE_TARGET_RADIUS
     w_mechanical_power: float = g1_recipe.W_MECHANICAL_POWER
     gait_stance_fraction: float = g1_recipe.GAIT_STANCE_FRACTION
     w_gait_contact: float = g1_recipe.W_GAIT_CONTACT
@@ -1513,6 +1609,8 @@ class EnvG1PhoenX:
             raise ValueError("command_resample_steps must be non-negative")
         if not 0.0 <= float(self.config.gait_stance_fraction) <= 1.0:
             raise ValueError("gait_stance_fraction must be in [0, 1]")
+        if float(self.config.sparse_target_radius) < 0.0:
+            raise ValueError("sparse_target_radius must be non-negative")
         if str(self.config.contact_geometry) not in _NANOG1_CONTACT_GEOMETRIES:
             raise ValueError(f"contact_geometry must be one of {_NANOG1_CONTACT_GEOMETRIES}")
         self._reward_mode_id = _g1_reward_mode_id(self.config.reward_mode)
@@ -1565,7 +1663,11 @@ class EnvG1PhoenX:
         self.previous_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.actuator_force = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
+        target_np = np.tile(np.asarray(self.config.sparse_target_position, dtype=np.float32), (self.world_count, 1))
+        target_distance_np = np.asarray([np.linalg.norm(target_np[0])], dtype=np.float32)
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
+        self.target_position = wp.array(target_np, dtype=wp.float32, device=self.device)
+        self.target_distance = wp.array(target_distance_np, dtype=wp.float32, device=self.device)
         self.command_scale = wp.array(np.ones(1, dtype=np.float32), dtype=wp.float32, device=self.device)
         self.episode_steps = wp.zeros(self.world_count, dtype=wp.int32, device=self.device)
         self.obs = wp.zeros((self.world_count, self.obs_dim), dtype=wp.float32, device=self.device)
@@ -1753,6 +1855,88 @@ class EnvG1PhoenX:
         self.config.command = (float(cmds[0, 0]), float(cmds[0, 1]), float(cmds[0, 2]))
         self.command.assign(cmds)
 
+    def set_target_position(self, target_position: tuple[float, float]) -> None:
+        """Set the same sparse target XY position for every world [m]."""
+
+        target = (float(target_position[0]), float(target_position[1]))
+        self.config.sparse_target_position = target
+        target_np = np.tile(np.asarray(target, dtype=np.float32), (self.world_count, 1))
+        self.target_position.assign(target_np)
+        self.target_distance.assign(np.asarray([np.linalg.norm(target_np[0])], dtype=np.float32))
+
+    def set_target_positions(self, target_positions: np.ndarray) -> None:
+        """Set per-world sparse target XY positions [m]."""
+
+        targets = np.asarray(target_positions, dtype=np.float32)
+        if targets.shape != (self.world_count, 2):
+            raise ValueError(f"Expected target positions with shape {(self.world_count, 2)}, got {targets.shape}")
+        self.config.sparse_target_position = (float(targets[0, 0]), float(targets[0, 1]))
+        self.target_position.assign(targets)
+        self.target_distance.assign(np.asarray([np.linalg.norm(targets[0])], dtype=np.float32))
+
+    def update_sparse_target_distance_curriculum(
+        self,
+        sample_counter: wp.array[wp.int32],
+        *,
+        sample_delta: int,
+        start_distance: float,
+        end_distance: float,
+        ramp_samples: float,
+    ) -> None:
+        """Advance the device-side sparse-target distance curriculum [m]."""
+
+        wp.launch(
+            g1_update_sparse_target_distance_kernel,
+            dim=1,
+            inputs=[
+                sample_counter,
+                int(sample_delta),
+                float(start_distance),
+                float(end_distance),
+                float(ramp_samples),
+            ],
+            outputs=[self.target_distance],
+            device=self.device,
+        )
+
+    def set_sparse_targets_from_distance(self) -> None:
+        """Set all sparse targets from the current device-side target distance."""
+
+        base = self.config.sparse_target_position
+        wp.launch(
+            g1_set_sparse_targets_from_distance_kernel,
+            dim=(self.world_count, 2),
+            inputs=[float(base[0]), float(base[1]), self.target_distance],
+            outputs=[self.target_position],
+            device=self.device,
+        )
+
+    def randomize_target_positions_seed_counter(
+        self,
+        *,
+        seed_counter: wp.array[wp.int32],
+        target_angle_range: tuple[float, float],
+        seed_offset: int = 0,
+        advance: int = 1,
+    ) -> None:
+        """Sample per-world sparse targets using a graph-replay-safe device seed counter."""
+
+        angle_min = float(target_angle_range[0])
+        angle_max = float(target_angle_range[1])
+        if angle_max < angle_min:
+            raise ValueError("target_angle_range must be ordered")
+        base = self.config.sparse_target_position
+        base_angle = float(np.arctan2(float(base[1]), float(base[0])))
+        wp.launch(
+            g1_sample_sparse_targets_seed_counter_kernel,
+            dim=(self.world_count, 2),
+            inputs=[seed_counter, int(seed_offset), base_angle, angle_min, angle_max, self.target_distance],
+            outputs=[self.target_position],
+            device=self.device,
+        )
+        if int(advance) != 0:
+            advance_seed_counter(seed_counter, int(advance), device=self.device)
+
     def randomize_commands(
         self,
         *,
@@ -1884,6 +2068,7 @@ class EnvG1PhoenX:
                 self.current_actions,
                 self.previous_actions,
                 self.command,
+                self.target_position,
                 self.state_0.body_q,
                 self.foot_contacts,
                 self.actuator_force,
@@ -1920,6 +2105,7 @@ class EnvG1PhoenX:
                 self.config.w_sparse_command_success,
                 self.config.sparse_command_velocity_tolerance,
                 self.config.sparse_command_yaw_tolerance,
+                self.config.sparse_target_radius,
                 self.config.w_mechanical_power,
             ],
             outputs=[self.obs, self.rewards, self.dones, self.successes],

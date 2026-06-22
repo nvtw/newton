@@ -2231,6 +2231,9 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.w_sparse_command_success, g1_recipe.W_SPARSE_COMMAND_SUCCESS)
         self.assertEqual(env_config.sparse_command_velocity_tolerance, g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE)
         self.assertEqual(env_config.sparse_command_yaw_tolerance, g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE)
+        self.assertEqual(env_config.sparse_target_position, g1_recipe.SPARSE_TARGET_POSITION)
+        self.assertEqual(env_config.sparse_target_radius, g1_recipe.SPARSE_TARGET_RADIUS)
+        np.testing.assert_allclose(env.target_position.numpy()[0], np.asarray(g1_recipe.SPARSE_TARGET_POSITION))
         self.assertEqual(env_config.w_mechanical_power, g1_recipe.W_MECHANICAL_POWER)
         self.assertEqual(env_config.gait_stance_fraction, g1_recipe.GAIT_STANCE_FRACTION)
         self.assertEqual(env_config.w_gait_contact, g1_recipe.W_GAIT_CONTACT)
@@ -2243,6 +2246,12 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.rigid_contact_max_per_world, g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env_config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
         self.assertTrue(train_config.reset_recurrent_state_on_rollout_start)
+        self.assertEqual(train_config.target_distance_start, g1_recipe.SPARSE_TARGET_CURRICULUM_START)
+        self.assertEqual(train_config.target_distance_end, g1_recipe.SPARSE_TARGET_CURRICULUM_END)
+        self.assertEqual(train_config.target_curriculum_samples, g1_recipe.SPARSE_TARGET_CURRICULUM_SAMPLES)
+        self.assertEqual(train_config.randomize_target_positions, g1_recipe.SPARSE_TARGET_RANDOMIZE)
+        self.assertEqual(train_config.target_angle_min, g1_recipe.SPARSE_TARGET_ANGLE_MIN)
+        self.assertEqual(train_config.target_angle_max, g1_recipe.SPARSE_TARGET_ANGLE_MAX)
         self.assertEqual(env_config.contact_geometry, "nanog1_foot_boxes")
         self.assertEqual(env_config.threads_per_world, g1_recipe.THREADS_PER_WORLD)
         self.assertEqual(env_config.multi_world_scheduler, g1_recipe.MULTI_WORLD_SCHEDULER)
@@ -2328,6 +2337,71 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         np.testing.assert_allclose(env.successes.numpy(), np.array([1.0, 0.0], dtype=np.float32))
         np.testing.assert_allclose(env.rewards.numpy(), np.array([0.1, 0.0], dtype=np.float32), atol=1.0e-6)
+
+    def test_sparse_target_reward_is_terminal_boolean_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 sparse target reward tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=2,
+                reward_mode="sparse_target",
+                command=(0.0, 0.0, 0.0),
+                sparse_target_position=(0.0, 0.0),
+                sparse_target_radius=0.4,
+                w_sparse_command_success=5.0,
+                w_mechanical_power=0.0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        env.set_target_positions(np.asarray([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(env.successes.numpy(), np.array([1.0, 0.0], dtype=np.float32))
+        np.testing.assert_allclose(env.dones.numpy(), np.array([1.0, 0.0], dtype=np.float32))
+        np.testing.assert_allclose(env.rewards.numpy(), np.array([5.0, 0.0], dtype=np.float32), atol=1.0e-6)
+        obs = env.obs.numpy()
+        np.testing.assert_allclose(obs[:, 6:8], np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
+        np.testing.assert_allclose(obs[:, 8], np.zeros(2, dtype=np.float32))
+
+    def test_sparse_target_curriculum_updates_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 sparse target curriculum tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=4,
+                reward_mode="sparse_target",
+                sparse_target_position=(1.0, 0.0),
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        sample_counter = wp.array(np.asarray([0], dtype=np.int32), dtype=wp.int32, device=device)
+        seed_counter = make_seed_counter(123, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.update_sparse_target_distance_curriculum(
+                sample_counter, sample_delta=10, start_distance=0.5, end_distance=1.0, ramp_samples=20
+            )
+            env.randomize_target_positions_seed_counter(seed_counter=seed_counter, target_angle_range=(0.0, 0.0))
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(env.target_distance.numpy(), np.array([0.75], dtype=np.float32), atol=1.0e-6)
+        np.testing.assert_allclose(
+            env.target_position.numpy(),
+            np.tile(np.array([[0.75, 0.0]], dtype=np.float32), (env.world_count, 1)),
+            atol=1.0e-6,
+        )
+
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(env.target_distance.numpy(), np.array([1.0], dtype=np.float32), atol=1.0e-6)
+        np.testing.assert_allclose(
+            env.target_position.numpy(),
+            np.tile(np.array([[1.0, 0.0]], dtype=np.float32), (env.world_count, 1)),
+            atol=1.0e-6,
+        )
 
     def test_gait_swing_contact_penalizes_double_stance_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 gait contact reward tests")
@@ -3473,6 +3547,21 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(math.isfinite(eval_result.stats.mean_done))
             self.assertGreater(eval_result.stats.samples_per_second, 0.0)
 
+            target_result = rl.evaluate_g1_target_ppo(
+                restored,
+                rl.ConfigEvaluateG1TargetPPO(
+                    env_config=env_config,
+                    target_positions=((0.6, 0.0),),
+                    steps=1,
+                    device=device,
+                    deterministic=True,
+                ),
+            )
+            self.assertEqual(len(target_result.stats), 1)
+            self.assertTrue(math.isfinite(target_result.stats[0].success_fraction))
+            self.assertTrue(math.isfinite(target_result.stats[0].fall_fraction))
+            self.assertTrue(math.isfinite(target_result.stats[0].mean_path_length))
+
             gate_result = rl.evaluate_g1_gate_ppo(
                 restored,
                 rl.ConfigEvaluateG1GatePPO(
@@ -3808,6 +3897,16 @@ class TestG1PhoenXRL(unittest.TestCase):
                 w_sparse_command_success=g1_recipe.W_SPARSE_COMMAND_SUCCESS,
                 sparse_command_velocity_tolerance=g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE,
                 sparse_command_yaw_tolerance=g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE,
+                target_x=g1_recipe.SPARSE_TARGET_POSITION[0],
+                target_y=g1_recipe.SPARSE_TARGET_POSITION[1],
+                sparse_target_radius=g1_recipe.SPARSE_TARGET_RADIUS,
+                no_target_curriculum=False,
+                target_distance_start=g1_recipe.SPARSE_TARGET_CURRICULUM_START,
+                target_distance_end=g1_recipe.SPARSE_TARGET_CURRICULUM_END,
+                target_curriculum_samples=g1_recipe.SPARSE_TARGET_CURRICULUM_SAMPLES,
+                randomize_target_positions=g1_recipe.SPARSE_TARGET_RANDOMIZE,
+                target_angle_min=g1_recipe.SPARSE_TARGET_ANGLE_MIN,
+                target_angle_max=g1_recipe.SPARSE_TARGET_ANGLE_MAX,
                 w_mechanical_power=g1_recipe.W_MECHANICAL_POWER,
                 w_gait_contact=g1_recipe.W_GAIT_CONTACT,
                 w_gait_swing=g1_recipe.W_GAIT_SWING,
@@ -3857,6 +3956,15 @@ class TestG1PhoenXRL(unittest.TestCase):
             )
             self.assertEqual(result["value_loss_coeff"], g1_recipe.VALUE_LOSS_COEFF)
             self.assertEqual(result["value_clip_range"], g1_recipe.VALUE_CLIP_RANGE)
+            self.assertEqual(result["target_x"], g1_recipe.SPARSE_TARGET_POSITION[0])
+            self.assertEqual(result["target_y"], g1_recipe.SPARSE_TARGET_POSITION[1])
+            self.assertEqual(result["sparse_target_radius"], g1_recipe.SPARSE_TARGET_RADIUS)
+            self.assertEqual(result["target_distance_start"], g1_recipe.SPARSE_TARGET_CURRICULUM_START)
+            self.assertEqual(result["target_distance_end"], g1_recipe.SPARSE_TARGET_CURRICULUM_END)
+            self.assertEqual(result["target_curriculum_samples"], g1_recipe.SPARSE_TARGET_CURRICULUM_SAMPLES)
+            self.assertEqual(result["randomize_target_positions"], g1_recipe.SPARSE_TARGET_RANDOMIZE)
+            self.assertEqual(result["target_angle_min"], g1_recipe.SPARSE_TARGET_ANGLE_MIN)
+            self.assertEqual(result["target_angle_max"], g1_recipe.SPARSE_TARGET_ANGLE_MAX)
             self.assertEqual(result["actor_lr"], g1_recipe.ACTOR_LR)
             self.assertEqual(result["critic_lr"], g1_recipe.CRITIC_LR)
             self.assertEqual(result["anneal_lr"], g1_recipe.ANNEAL_LR)

@@ -42,6 +42,14 @@ REWARD_MODE = "nanog1_dense"
 W_SPARSE_COMMAND_SUCCESS = 5.0
 SPARSE_COMMAND_VELOCITY_TOLERANCE = 0.35
 SPARSE_COMMAND_YAW_TOLERANCE = 0.4
+SPARSE_TARGET_POSITION = (0.6, 0.0)
+SPARSE_TARGET_RADIUS = 0.4
+SPARSE_TARGET_CURRICULUM_START = 0.6
+SPARSE_TARGET_CURRICULUM_END = 1.4
+SPARSE_TARGET_CURRICULUM_SAMPLES = 80_000_000
+SPARSE_TARGET_RANDOMIZE = False
+SPARSE_TARGET_ANGLE_MIN = -0.5
+SPARSE_TARGET_ANGLE_MAX = 0.5
 W_MECHANICAL_POWER = -1.0e-4
 GAIT_STANCE_FRACTION = 0.55
 W_GAIT_CONTACT = 0.5
@@ -155,6 +163,8 @@ def default_g1_env_config(**overrides: Any):
         "w_sparse_command_success": W_SPARSE_COMMAND_SUCCESS,
         "sparse_command_velocity_tolerance": SPARSE_COMMAND_VELOCITY_TOLERANCE,
         "sparse_command_yaw_tolerance": SPARSE_COMMAND_YAW_TOLERANCE,
+        "sparse_target_position": SPARSE_TARGET_POSITION,
+        "sparse_target_radius": SPARSE_TARGET_RADIUS,
         "w_mechanical_power": W_MECHANICAL_POWER,
         "gait_stance_fraction": GAIT_STANCE_FRACTION,
         "w_gait_contact": W_GAIT_CONTACT,
