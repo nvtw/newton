@@ -124,6 +124,14 @@ diagnostic), but the command battery was still weak (`battery_perf=0.467`) and
 later checkpoints regressed/generalized poorly. Treat sparse command reward as
 a promising anti-standing lever, not a solved walking recipe.
 
+A same-day dense-command probe removed the alive bonus (`w_alive=0.0`), raised
+linear tracking to `w_track_lin=6.0`, and trained only forward commands in
+`[0.2, 0.6] m/s` for 160 iterations at 2048 worlds. It reached 20.9M samples
+in 111 s of training at about 189k samples/s and improved the short command
+battery to `battery_perf=0.697`, with `forward_0.8` perf `0.688` and stand perf
+`0.891`. It still failed due falls and weak lateral/yaw generalization, but it
+is the best current anti-standing recipe and should be the next tuning baseline.
+
 ## Next Checks
 
 1. Add or tighten command/reset/done-bootstrap tests against the pinned nanoG1
