@@ -7,9 +7,15 @@ from __future__ import annotations
 
 import warp as wp
 
+from ...core.types import int32
 from ...dynamics.dual import DualProblem
 from . import sparse_kernels
-from .kernels import _initialize_dvi_status, _scatter_bilateral_solution, _set_dvi_direct_status_iterations
+from .kernels import (
+    _initialize_dvi_status,
+    _scatter_bilateral_solution,
+    _set_dvi_bilateral_active_dim,
+    _set_dvi_direct_status_iterations,
+)
 from .sparse_kernels import (
     _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
@@ -263,7 +269,7 @@ def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
     solver._bilateral_solver.compute(A=operator.mat)
 
 
-def _solve_sparse_bilateral_block(solver, problem: DualProblem) -> None:
+def _solve_sparse_bilateral_block(solver, problem: DualProblem, active_dim: wp.array[int32] | None = None) -> None:
     operator = solver._data.bilateral_operator
     state = solver._data.state
     wp.launch(
@@ -291,7 +297,13 @@ def _solve_sparse_bilateral_block(solver, problem: DualProblem) -> None:
         ],
         device=solver.device,
     )
-    solver._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
+    full_dim = operator.info.dim
+    if active_dim is not None:
+        operator.info.dim = active_dim
+    try:
+        solver._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
+    finally:
+        operator.info.dim = full_dim
     wp.launch(
         kernel=_scatter_bilateral_solution,
         dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),
@@ -321,6 +333,17 @@ def _solve_sparse_with_bilateral_direct_block(solver, problem: DualProblem) -> N
         inputs=[
             solver._data.config,
             solver._data.status,
+        ],
+        device=solver.device,
+    )
+    wp.launch(
+        kernel=_set_dvi_bilateral_active_dim,
+        dim=solver._size.num_worlds,
+        inputs=[
+            problem.data.njc,
+            problem.data.nl,
+            problem.data.nc,
+            state.bilateral_active_dim,
         ],
         device=solver.device,
     )
@@ -355,9 +378,9 @@ def _solve_sparse_with_bilateral_direct_block(solver, problem: DualProblem) -> N
             )
 
         if solver._should_solve_bilateral_after_block(block_iteration):
-            _solve_sparse_bilateral_block(solver, problem)
+            _solve_sparse_bilateral_block(solver, problem, active_dim=state.bilateral_active_dim)
 
-    _solve_sparse_bilateral_block(solver, problem)
+    _solve_sparse_bilateral_block(solver, problem, active_dim=state.bilateral_active_dim)
     wp.launch(
         kernel=_set_dvi_direct_status_iterations,
         dim=solver._size.num_worlds,

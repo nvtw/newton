@@ -1230,7 +1230,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(focused_configs["DVI"].sparse_dynamics)
         self.assertEqual(focused_configs["DVI"].dvi.block_iterations, 16)
         self.assertEqual(focused_configs["DVI"].dvi.contact_iterations, 2)
-        self.assertEqual(focused_configs["DVI"].dvi.bilateral_solve_period, 1)
+        self.assertEqual(focused_configs["DVI"].dvi.bilateral_solve_period, 2)
         self.assertEqual(focused_configs["PADMM fast"].dynamics_solver, "padmm")
 
     def test_13b_dvi_benchmark_config_roundtrips_contact_controls(self):

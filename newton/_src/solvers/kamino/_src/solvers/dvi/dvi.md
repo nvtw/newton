@@ -15,6 +15,8 @@ Last updated: June 22, 2026.
 - The mraksha-style speedup came mainly from avoiding the dense contact/limit Schur complement, not from graph coloring.
 - Prefactoring the bilateral robot block is already used: DVI factors the joint-joint block once per solve and reuses it for the direct bilateral re-solves.
 - The remaining hot path is the repeated sparse unilateral/contact sweep plus bilateral RHS rebuilds.
+- Sparse DVI now mirrors dense DVI's active bilateral dimension for repeated direct-block solves: worlds with no active limits/contacts keep the first bilateral result and skip later LLT solves.
+- For the focused sparse DR Legs benchmark, `bilateral_solve_period=2` is the best measured default so far. Period `1` spends too much time in repeated LLT solves; period `4` worsened contact/NCP residuals and was not faster in the measured accuracy run.
 - Do not copy behavior-changing mraksha choices, such as tangential-only friction projection, unless Kamino intentionally changes its solver semantics.
 
 ## Failed Experiment
@@ -27,6 +29,10 @@ Last updated: June 22, 2026.
 - Also tried reducing joint-row sparse matvec work using the existing joint nonzero prefix, with and without an active-row initializer replacing `v_aug.zero_()`.
   - Both variants were neutral-to-worse on the 180-step DR Legs CUDA graph benchmark.
   - The extra launch/branching was not justified by the reduced block scan.
+- Tried fusing sparse bilateral diagonal setup into sparse bilateral block assembly.
+  - It passed focused tests but tied the baseline within noise, so it was not kept.
+- Tried a DVI-local filtered transpose for bilateral RHS rebuilds.
+  - It passed focused tests but regressed DR Legs contact timing, so it was not kept.
 
 ## Next Hot-Path Targets
 
