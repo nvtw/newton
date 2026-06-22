@@ -281,30 +281,37 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
   stack is not currently a torch-free route even though the environment core is
   specialized CUDA.
 - The Warp-only PPO loop is reusable and now supports trajectory minibatch
-  replay, rollout-advantage priority sampling, V-trace replay correction,
-  BF16 MLP weight-gradient tile matmul, and large-minibatch BF16 hidden forward
-  tile matmul, but it does not yet include nanoG1's Muon optimizer path or
-  PufferNet model stack.
+  replay, rollout-advantage priority sampling, PufferLib-equivalent V-trace
+  replay correction for PhoenX's post-step reward layout, Muon, a fused
+  actor/value PufferMinGRU policy, BF16 MLP
+  weight-gradient tile matmul, and large-minibatch BF16 hidden forward tile
+  matmul. Remaining RL parity risks are trainer-level details such as native
+  CUDA fusion, RNG stream equivalence, command/reset schedules, and domain
+  randomization.
 - Environment stepping, command randomization, stochastic action sampling,
-  priority minibatch sampling, Adam optimizer step state, and the manual PPO
-  update pieces are CUDA-graph capturable with device-side counters. The
+  priority minibatch sampling, Muon/Adam optimizer step state, and the manual
+  PPO update pieces are CUDA-graph capturable with device-side counters. The
   default train loop still uses the eager collect-update schedule, while the
   separate rollout/update/copy graph schedule is available through
   `execution_mode="graph_leapfrog"`. Logging and checkpointing remain
   host-driven.
 - Reset/domain randomization and command scheduling are still lighter than
-  nanoG1, so sample efficiency is not yet directly comparable.
+  nanoG1, so sample efficiency is not yet directly comparable. nanoG1 is the
+  RL/trainer reference, but its physics is a comparison point rather than ground
+  truth; solver changes should be justified by first-principles validation,
+  analytical tests, or PhoenX convergence studies.
 
 ## Next Optimization Targets
 
 1. Avoid generic replicated MJCF setup for high world counts; build or cache a
    compact fixed-topology G1 multi-world model path.
 2. Remove avoidable broadphase/contact work for independent flat-ground G1 worlds.
-3. Run `bench_g1_train_to_gate` to measure PhoenX samples-to-gate and identify
-   whether the remaining gap is throughput, sample efficiency, or both.
+3. Run `bench_g1_train_to_gate` after RL parity fixes to measure PhoenX
+   samples-to-gate and identify whether the remaining gap is throughput, sample
+   efficiency, or both.
 4. Tighten the remaining host synchronization around metrics/checkpoint cadence.
-5. Upgrade command scheduling and remaining domain randomization toward the
-   nanoG1 recipe.
+5. Upgrade command scheduling, reset behavior, and remaining domain
+   randomization toward the nanoG1/PufferLib recipe.
 6. Add a PufferLib interop path behind an optional dependency boundary if we want
    exact nanoG1 trainer compatibility. Its Python package currently depends on
    PyTorch, while its compiled `_C` backend is closer to torch-free.

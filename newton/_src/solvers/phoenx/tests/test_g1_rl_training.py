@@ -1016,7 +1016,45 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(stats_host_a.pinned)
         self.assertEqual(stats_host_a.shape, (4,))
 
-    def test_pufferlib_vtrace_advantage_matches_shifted_warp_layout(self) -> None:
+    def test_standard_gae_uses_current_reward_and_done_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX PPO GAE regression tests")
+        num_steps = 3
+        num_envs = 2
+        gamma = np.float32(0.91)
+        gae_lambda = np.float32(0.73)
+        reward_clip = np.float32(1.0)
+        rewards_np = np.asarray([[1.2, -0.3], [0.5, 2.4], [-1.7, 0.8]], dtype=np.float32)
+        dones_np = np.asarray([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+        values_np = np.asarray([[0.1, -0.2], [0.4, 0.3], [-0.1, 0.7], [0.2, 0.9]], dtype=np.float32)
+
+        buffer = rl.BufferRollout(num_steps=num_steps, num_envs=num_envs, obs_dim=1, action_dim=1, device=device)
+        buffer.rewards.assign(rewards_np.reshape(-1))
+        buffer.dones.assign(dones_np.reshape(-1))
+        buffer.values.assign(values_np.reshape(-1))
+
+        with wp.ScopedCapture(device=device) as capture:
+            buffer.compute_returns(gamma=float(gamma), gae_lambda=float(gae_lambda), reward_clip=float(reward_clip))
+        wp.capture_launch(capture.graph)
+
+        expected_adv = np.zeros((num_steps, num_envs), dtype=np.float32)
+        for env_id in range(num_envs):
+            trace = np.float32(0.0)
+            for t in range(num_steps - 1, -1, -1):
+                reward = np.clip(rewards_np[t, env_id], -reward_clip, reward_clip)
+                non_terminal = np.float32(1.0) - dones_np[t, env_id]
+                delta = reward + gamma * values_np[t + 1, env_id] * non_terminal - values_np[t, env_id]
+                trace = delta + gamma * gae_lambda * non_terminal * trace
+                expected_adv[t, env_id] = trace
+        expected_returns = expected_adv + values_np[:-1]
+
+        np.testing.assert_allclose(
+            buffer.advantages.numpy().reshape(num_steps, num_envs), expected_adv, rtol=1.0e-6, atol=1.0e-6
+        )
+        np.testing.assert_allclose(
+            buffer.returns.numpy().reshape(num_steps, num_envs), expected_returns, rtol=1.0e-6, atol=1.0e-6
+        )
+
+    def test_pufferlib_vtrace_matches_phoenx_post_step_layout(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 V-trace parity tests")
         pufferlib_cu = _PUFFERLIB_ROOT / "src" / "pufferlib.cu"
         if not pufferlib_cu.is_file():
@@ -1038,6 +1076,10 @@ class TestG1PhoenXRL(unittest.TestCase):
         dones_np = np.asarray([[0.0, 0.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]], dtype=np.float32)
         values_np = np.asarray([[0.1, -0.2], [0.4, 0.3], [-0.1, 0.7], [0.5, -0.6], [0.2, 0.9]], dtype=np.float32)
         ratios_np = np.asarray([[0.8, 1.6], [1.2, 0.7], [2.0, 1.0], [0.5, 1.3]], dtype=np.float32)
+        puffer_rewards_np = np.zeros_like(rewards_np)
+        puffer_dones_np = np.zeros_like(dones_np)
+        puffer_rewards_np[1:] = rewards_np[:-1]
+        puffer_dones_np[1:] = dones_np[:-1]
 
         rewards = wp.array(rewards_np.reshape(-1), dtype=wp.float32, device=device)
         dones = wp.array(dones_np.reshape(-1), dtype=wp.float32, device=device)
@@ -1072,11 +1114,12 @@ class TestG1PhoenXRL(unittest.TestCase):
         for env_id in range(num_envs):
             trace = np.float32(0.0)
             for t in range(num_steps - 2, -1, -1):
-                reward = np.clip(rewards_np[t, env_id], -reward_clip, reward_clip)
-                next_nonterminal = np.float32(1.0) - dones_np[t, env_id]
+                next_t = t + 1
+                reward = np.clip(puffer_rewards_np[next_t, env_id], -reward_clip, reward_clip)
+                next_nonterminal = np.float32(1.0) - puffer_dones_np[next_t, env_id]
                 rho = min(ratios_np[t, env_id], rho_clip)
                 c = min(ratios_np[t, env_id], c_clip)
-                delta = rho * (reward + gamma * values_np[t + 1, env_id] * next_nonterminal - values_np[t, env_id])
+                delta = rho * (reward + gamma * values_np[next_t, env_id] * next_nonterminal - values_np[t, env_id])
                 trace = delta + gamma * gae_lambda * c * trace * next_nonterminal
                 expected_adv[t, env_id] = trace
         expected_returns = expected_adv + values_np[:-1]
