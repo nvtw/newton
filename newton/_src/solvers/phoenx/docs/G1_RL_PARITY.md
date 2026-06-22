@@ -248,6 +248,17 @@ low-motion behavior:
   `perf=0.42`, so the default `0.25` action scale remains the best parity
   setting.
 
+Open-loop parity now narrows the physics gap further. With the G1 held at
+`z=2.0 m` for 20 control steps and nanoG1 using its smooth/no-contact stepper,
+PhoenX free dynamics and explicit drives are close: base-position RMSE `3.8 mm`,
+joint trajectory RMSE `0.0084 rad`, no contacts, and target-tracking-ratio delta
+`0.037`. The same leg-symmetric target pattern from the normal grounded reset is
+less close even over 20 steps (`base_pos_rmse=1.5 cm`,
+`joint_q_traj_rmse=0.019 rad`, tracking-ratio delta `0.309`), and over 80 steps
+the grounded falling trajectory diverges substantially. This makes grounded
+contact/constraint response the current primary suspect; free-body dynamics and
+explicit actuator math are not showing the same scale of mismatch.
+
 Current interpretation: pure-Warp PPO has enough validation that it is unlikely
 to be the only blocker, and the high-level policy/action contracts now look
 correct. The strongest remaining hypothesis is a closed-loop PhoenX environment
