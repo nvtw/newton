@@ -71,7 +71,7 @@ class Example:
         self.checkpoint_path = args.checkpoint_path
         self.checkpoint_interval = int(args.checkpoint_interval)
         self.render_contacts = bool(args.render_contacts)
-        self._last_stats: tuple[float, float, float, float, float, float, float] | None = None
+        self._last_stats: tuple[float, float, float, float, float, float, float, float] | None = None
         self._samples_seen = 0
 
         self.command_x_range = (float(args.command_x_min), float(args.command_x_max))
@@ -221,10 +221,12 @@ class Example:
         )
         if should_log:
             reward, done, tracking_perf = self.buffer.reward_done_success_means()
+            score = reward * float(self.rollout_steps)
             command_x, command_y, command_yaw = self._command_mean_estimate()
             elapsed = max(t2 - t0, 1.0e-12)
             samples_per_second = float(self.buffer.num_samples) / elapsed
             self._last_stats = (
+                score,
                 reward,
                 done,
                 tracking_perf,
@@ -235,7 +237,8 @@ class Example:
             )
             print(
                 f"iter={self.trainer.iteration:04d} "
-                f"reward={reward:.4f} "
+                f"score={score:.3f} "
+                f"reward_step={reward:.4f} "
                 f"perf={tracking_perf:.3f} "
                 f"done={done:.4f} "
                 f"cmd=({command_x:.2f},{command_y:.2f},{command_yaw:.2f}) "
