@@ -12,6 +12,7 @@ import warp as wp
 from .kernels import (
     PPO_LOG_STD_PARTIAL_BATCH,
     compute_gae_kernel,
+    compute_puffer_vtrace_returns_kernel,
     compute_vtrace_returns_kernel,
     gather_trajectory_minibatch_kernel,
     gaussian_entropy_kernel,
@@ -119,6 +120,9 @@ class ConfigPPO:
             minibatch.
         reward_clip: Absolute reward clamp used before advantage/return
             computation. A value less than or equal to zero disables clipping.
+        puffer_vtrace_advantage: Use PufferLib's shifted V-trace scan for
+            replayed trajectories. This leaves the final horizon advantage zero
+            and matches nanoG1's CUDA trainer.
         max_grad_norm: Global gradient-norm clipping threshold for actor and
             critic optimizers. A value less than or equal to zero disables clipping.
         mirror_loss_coeff: Coefficient for optional mirror-symmetry MSE on
@@ -159,6 +163,7 @@ class ConfigPPO:
     vtrace_c_clip: float = 0.0
     normalize_advantages: bool = True
     reward_clip: float = 0.0
+    puffer_vtrace_advantage: bool = False
     max_grad_norm: float = 0.0
     mirror_loss_coeff: float = 0.0
     shared_value_network: bool = False
@@ -948,6 +953,27 @@ class TrainerPPO:
         return float(self.config.vtrace_rho_clip) > 0.0 and float(self.config.vtrace_c_clip) > 0.0
 
     def _compute_vtrace_returns(self, buffer: BufferRollout) -> None:
+        if self.config.puffer_vtrace_advantage:
+            wp.launch(
+                compute_puffer_vtrace_returns_kernel,
+                dim=buffer.num_envs,
+                inputs=[
+                    buffer.rewards,
+                    buffer.dones,
+                    buffer.values,
+                    buffer.ratios,
+                    buffer.num_steps,
+                    buffer.num_envs,
+                    float(self.config.gamma),
+                    float(self.config.gae_lambda),
+                    float(self.config.vtrace_rho_clip),
+                    float(self.config.vtrace_c_clip),
+                    float(self.config.reward_clip),
+                ],
+                outputs=[buffer.advantages, buffer.returns],
+                device=self.device,
+            )
+            return
         buffer.compute_vtrace_returns(
             gamma=self.config.gamma,
             gae_lambda=self.config.gae_lambda,
@@ -1758,6 +1784,7 @@ def _config_from_checkpoint(data: np.lib.npyio.NpzFile) -> ConfigPPO:
                 "manual_actor_backward",
                 "manual_critic_backward",
                 "normalize_advantages",
+                "puffer_vtrace_advantage",
                 "shared_value_network",
             ):
                 value = bool(value)

@@ -1125,6 +1125,48 @@ def compute_vtrace_returns_kernel(
 
 
 @wp.kernel
+def compute_puffer_vtrace_returns_kernel(
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    values: wp.array[wp.float32],
+    ratios: wp.array[wp.float32],
+    num_steps: wp.int32,
+    num_envs: wp.int32,
+    gamma: wp.float32,
+    gae_lambda: wp.float32,
+    rho_clip: wp.float32,
+    c_clip: wp.float32,
+    reward_clip: wp.float32,
+    advantages: wp.array[wp.float32],
+    returns: wp.array[wp.float32],
+):
+    env = wp.tid()
+    last_idx = (num_steps - wp.int32(1)) * num_envs + env
+    advantages[last_idx] = wp.float32(0.0)
+    returns[last_idx] = values[last_idx]
+
+    trace = wp.float32(0.0)
+    for t_rev in range(num_steps - wp.int32(1)):
+        t = num_steps - wp.int32(2) - t_rev
+        idx = t * num_envs + env
+        next_idx = (t + wp.int32(1)) * num_envs + env
+        reward = rewards[idx]
+        if reward_clip > wp.float32(0.0):
+            reward = _clip(reward, -reward_clip, reward_clip)
+        non_terminal = wp.float32(1.0) - dones[idx]
+        rho = ratios[idx]
+        c = ratios[idx]
+        if rho_clip > wp.float32(0.0):
+            rho = wp.min(rho, rho_clip)
+        if c_clip > wp.float32(0.0):
+            c = wp.min(c, c_clip)
+        delta = rho * (reward + gamma * values[next_idx] * non_terminal - values[idx])
+        trace = delta + gamma * gae_lambda * c * trace * non_terminal
+        advantages[idx] = trace
+        returns[idx] = trace + values[idx]
+
+
+@wp.kernel
 def sum_and_sumsq_kernel(x: wp.array[wp.float32], count: wp.int32, stats: wp.array[wp.float32]):
     i = wp.tid()
     if i < count:

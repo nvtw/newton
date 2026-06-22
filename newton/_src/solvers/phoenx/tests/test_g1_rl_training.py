@@ -47,7 +47,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     DENSE_TILE_IN,
     DENSE_TILE_OUT,
     PPO_LOG_STD_PARTIAL_BATCH,
-    compute_vtrace_returns_kernel,
+    compute_puffer_vtrace_returns_kernel,
     ppo_actor_loss_backward_kernel,
     reduce_ppo_log_std_grad_kernel,
     sample_trajectory_env_ids_kernel,
@@ -386,6 +386,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertAlmostEqual(g1_recipe.REPLAY_RATIO, float(recipe["train.replay_ratio"]))
         self.assertAlmostEqual(g1_recipe.VTRACE_RHO_CLIP, float(recipe["train.vtrace_rho_clip"]))
         self.assertAlmostEqual(g1_recipe.VTRACE_C_CLIP, float(recipe["train.vtrace_c_clip"]))
+        self.assertTrue(g1_recipe.default_g1_ppo_config().puffer_vtrace_advantage)
+        self.assertFalse(rl.ConfigPPO().puffer_vtrace_advantage)
         self.assertAlmostEqual(g1_recipe.PRIORITY_ALPHA, float(recipe["train.prio_alpha"]))
         self.assertAlmostEqual(g1_recipe.PRIORITY_BETA, float(recipe["train.prio_beta0"]))
         self.assertEqual(g1_recipe.MINIBATCH_SIZE, int(recipe["train.minibatch_size"]))
@@ -1013,6 +1015,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             raise unittest.SkipTest(f"missing PufferLib reference file: {pufferlib_cu}")
         text = pufferlib_cu.read_text()
         self.assertIn("float r_nxt = to_float(rewards[t_next])", text)
+        self.assertIn("int start_idx = (chunk == num_chunks - 1) ? (N - 2) : (N - 1)", text)
         self.assertIn("float rho_t = fminf(imp, rho_clip)", text)
         self.assertIn("lastpufferlam = delta + gamma*lambda*c_t*lastpufferlam*nextnonterminal", text)
 
@@ -1037,7 +1040,7 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         with wp.ScopedCapture(device=device) as capture:
             wp.launch(
-                compute_vtrace_returns_kernel,
+                compute_puffer_vtrace_returns_kernel,
                 dim=num_envs,
                 inputs=[
                     rewards,
@@ -1057,22 +1060,15 @@ class TestG1PhoenXRL(unittest.TestCase):
             )
         wp.capture_launch(capture.graph)
 
-        puffer_rewards = np.zeros((num_steps + 1, num_envs), dtype=np.float32)
-        puffer_dones = np.zeros((num_steps + 1, num_envs), dtype=np.float32)
-        puffer_rewards[1:] = np.clip(rewards_np, -reward_clip, reward_clip)
-        puffer_dones[1:] = dones_np
         expected_adv = np.zeros((num_steps, num_envs), dtype=np.float32)
         for env_id in range(num_envs):
             trace = np.float32(0.0)
-            for t in range(num_steps - 1, -1, -1):
-                next_nonterminal = np.float32(1.0) - puffer_dones[t + 1, env_id]
+            for t in range(num_steps - 2, -1, -1):
+                reward = np.clip(rewards_np[t, env_id], -reward_clip, reward_clip)
+                next_nonterminal = np.float32(1.0) - dones_np[t, env_id]
                 rho = min(ratios_np[t, env_id], rho_clip)
                 c = min(ratios_np[t, env_id], c_clip)
-                delta = rho * (
-                    puffer_rewards[t + 1, env_id]
-                    + gamma * values_np[t + 1, env_id] * next_nonterminal
-                    - values_np[t, env_id]
-                )
+                delta = rho * (reward + gamma * values_np[t + 1, env_id] * next_nonterminal - values_np[t, env_id])
                 trace = delta + gamma * gae_lambda * c * trace * next_nonterminal
                 expected_adv[t, env_id] = trace
         expected_returns = expected_adv + values_np[:-1]
@@ -1328,6 +1324,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             value_loss_coeff=0.5,
             value_clip_range=1.0,
             max_grad_norm=0.3,
+            puffer_vtrace_advantage=True,
             shared_value_network=True,
             policy_network="puffer_mingru",
             manual_actor_backward=True,
@@ -1360,6 +1357,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             trainer.save_checkpoint(path, iteration=1)
             restored = rl.load_ppo_checkpoint(path, device=device)
             self.assertEqual(restored.config.policy_network, "puffer_mingru")
+            self.assertTrue(restored.config.puffer_vtrace_advantage)
             self.assertEqual(restored.actor.net.network_type, "puffer_mingru")
             for expected, actual in zip(trainer.actor.parameters(), restored.actor.parameters(), strict=True):
                 np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=0.0, atol=0.0)

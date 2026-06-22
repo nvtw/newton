@@ -98,6 +98,7 @@ VTRACE_RHO_CLIP = 3.0
 VTRACE_C_CLIP = 3.0
 NORMALIZE_ADVANTAGES = True
 REWARD_CLIP = 1.0
+PUFFER_VTRACE_ADVANTAGE = True
 MAX_GRAD_NORM = 0.3
 MIRROR_LOSS_COEFF = 0.25
 
@@ -193,6 +194,7 @@ def default_g1_ppo_config(**overrides: Any):
         "vtrace_c_clip": VTRACE_C_CLIP,
         "normalize_advantages": NORMALIZE_ADVANTAGES,
         "reward_clip": REWARD_CLIP,
+        "puffer_vtrace_advantage": PUFFER_VTRACE_ADVANTAGE,
         "max_grad_norm": MAX_GRAD_NORM,
         "mirror_loss_coeff": MIRROR_LOSS_COEFF,
     }
