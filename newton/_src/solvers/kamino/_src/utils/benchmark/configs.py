@@ -303,6 +303,7 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     # Dynamics solver
     config.dynamics_solver = "dvi"
     config.integrator = "moreau"
+    config.dynamics.preconditioning = False
     # ------------------------------------------------------------------------------
     # Constraint stabilization
     config.constraints.alpha = 0.1
@@ -325,6 +326,8 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     config.dvi.omega = 1.0
     config.dvi.block_iterations = 32
     config.dvi.contact_iterations = 4
+    config.dvi.contact_jacobi_omega = 0.3
+    config.dvi.contact_jacobi_relaxation = 0.9
     # ------------------------------------------------------------------------------
     # Warm-starting
     config.dvi.warmstart_mode = "containers"
@@ -425,6 +428,9 @@ def save_solver_configs_to_hdf5(configs: dict[str, SolverKaminoImpl.Config], dat
         datafile[f"{scope}/dvi/omega"] = config.dvi.omega
         datafile[f"{scope}/dvi/block_iterations"] = config.dvi.block_iterations
         datafile[f"{scope}/dvi/contact_iterations"] = config.dvi.contact_iterations
+        datafile[f"{scope}/dvi/contact_jacobi_omega"] = config.dvi.contact_jacobi_omega
+        datafile[f"{scope}/dvi/contact_jacobi_relaxation"] = config.dvi.contact_jacobi_relaxation
+        datafile[f"{scope}/dvi/contact_block_preconditioner"] = config.dvi.contact_block_preconditioner
         datafile[f"{scope}/dvi/warmstart_mode"] = config.dvi.warmstart_mode
         datafile[f"{scope}/dvi/contact_warmstart_method"] = config.dvi.contact_warmstart_method
         # ------------------------------------------------------------------------------
@@ -497,8 +503,20 @@ def load_solver_configs_to_hdf5(datafile) -> dict[str, SolverKaminoImpl.Config]:
                 config.dvi.block_iterations = int(datafile[f"{scope}/dvi/block_iterations"][()])
             if f"{scope}/dvi/contact_iterations" in datafile:
                 config.dvi.contact_iterations = int(datafile[f"{scope}/dvi/contact_iterations"][()])
-            config.dvi.warmstart_mode = _read_hdf5_string(datafile, f"{scope}/dvi/warmstart_mode")
-            config.dvi.contact_warmstart_method = _read_hdf5_string(datafile, f"{scope}/dvi/contact_warmstart_method")
+            if f"{scope}/dvi/contact_jacobi_omega" in datafile:
+                config.dvi.contact_jacobi_omega = float(datafile[f"{scope}/dvi/contact_jacobi_omega"][()])
+            if f"{scope}/dvi/contact_jacobi_relaxation" in datafile:
+                config.dvi.contact_jacobi_relaxation = float(datafile[f"{scope}/dvi/contact_jacobi_relaxation"][()])
+            if f"{scope}/dvi/contact_block_preconditioner" in datafile:
+                config.dvi.contact_block_preconditioner = bool(
+                    datafile[f"{scope}/dvi/contact_block_preconditioner"][()]
+                )
+            dvi_warmstart_mode_path = f"{scope}/dvi/warmstart_mode"
+            if dvi_warmstart_mode_path in datafile:
+                config.dvi.warmstart_mode = _read_hdf5_string(datafile, dvi_warmstart_mode_path)
+            dvi_contact_warmstart_method_path = f"{scope}/dvi/contact_warmstart_method"
+            if dvi_contact_warmstart_method_path in datafile:
+                config.dvi.contact_warmstart_method = _read_hdf5_string(datafile, dvi_contact_warmstart_method_path)
         # ------------------------------------------------------------------------------
         configs[config_name] = config
     return configs

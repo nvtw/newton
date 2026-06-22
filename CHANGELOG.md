@@ -8,17 +8,31 @@
 - Add user-defined pressure laws to hydroelastic SDF contact via `HydroelasticSDF.Config.pressure_func` (a `@wp.func` mapping `(signed_depth, shape_idx, data) -> pressure`) and `pressure_data` (a `@wp.struct` carrying per-shape state). The contact patch is the iso-pressure surface `p_a == p_b`; the default linear law `pressure = -kh * signed_depth` is preserved when no callback is supplied.
 - Add `--render-fps` to cap example rendering rate without changing simulation frame timing
 - Add opt-in `SolverKamino` contact recovery-speed clamping for bounded constraint stabilization.
+- Add opt-in Kamino DVI contact block preconditioning for projected contact updates.
+- Add physics accuracy metrics and DVI tuning overrides to the focused Kamino PADMM/DVI benchmark matrix.
+- Add explicit Kamino DVI contact Jacobi update controls, `contact_jacobi_omega` and `contact_jacobi_relaxation`.
 
 ### Changed
 
 - **Breaking change (experimental `SolverVBD`):** VBD now interprets all damping coefficients as absolute physical units instead of dimensionless stiffness-relative (Rayleigh) multipliers (`D = kd · ke`). Existing `kd`-family values will produce different damping. Affected parameters: tetrahedral `k_damp` [Pa·s], `tri_kd`, spring `kd` [N·s/m], cable `stretch_damping` [N·s/m] and `bend_damping` [N·m·s/rad] in `add_joint_cable()`/`add_rod()`/`add_rod_graph()`, `joint_target_kd` and `joint_limit_kd` (including `JointDofConfig.limit_kd`), shape contact `kd`/`shape_material_kd` and `soft_contact_kd` [N·s/m], and `SolverVBD(rigid_joint_linear_kd=…, rigid_joint_angular_kd=…)`. To preserve previous behavior, set `kd_new = kd_old · k`, where `k` is the stiffness or penalty coefficient the value was previously paired with, and pass the product to the same field.
 - Change `SolverKamino.reset(world_mask=...)` to accept `wp.bool` arrays instead of `wp.int32`; callers passing `wp.int32` masks must switch to `wp.bool` (e.g. `wp.array([False, True, False], dtype=wp.bool)` or `wp.ones((num_worlds,), dtype=wp.bool)`). (#2934)
+- Change Kamino DVI direct-block joint limits to use the per-block unilateral sweep schedule instead of running `max_iterations` limit sweeps inside every block.
+- Change Kamino DVI direct-block scheduling to finish active unilateral solves with a final bilateral re-solve so the last contact/limit update does not remain as equality-constraint velocity.
+- Change the public Kamino DVI path to build an unpreconditioned dual problem so solver convergence is measured in physical constraint units.
+- Change Kamino DVI scalar contact updates to use a trace-average contact preconditioner before Coulomb cone projection.
+- Change Kamino DVI direct-block status iteration counts to report the total projected sweep work, `block_iterations * contact_iterations`.
 - Change VBD Neo-Hookean membrane/tet damping to an objective metric based on the rate of `C = FᵀF`, so rigid-body rotations no longer generate damping force.
 - Change VBD spring damping to act only along the spring axis (damping edge-length rate), so transverse and rigid-rotational motion is no longer damped by springs.
 
 ### Fixed
 
 - Fix Kamino DVI opening contacts to release stale warm-started normal reactions instead of preserving large separating forces.
+- Fix Kamino DVI direct bilateral solves to use local diagonal scaling so closed-loop robots remain finite without global dual preconditioning.
+- Fix Kamino DVI direct-block contact sweeps to honor per-world `block_iterations` and `contact_iterations` in heterogeneous batches.
+- Fix Kamino DVI direct-block no-unilateral overhead by skipping repeated bilateral solves for worlds without active limit or contact rows.
+- Fix Kamino DVI direct-block status iteration counts for worlds with no active limit or contact rows.
+- Fix Kamino benchmark table rendering on non-UTF-8 Windows consoles.
+- Fix Kamino DVI status initialization for direct bilateral-only solves.
 - Fix Kamino DVI contact scheduling to use additional direct-bilateral/contact sweeps, reducing DR Legs tipped-contact sink and creep.
 - Fix `SolverVBD` rigid contact injecting kinetic energy for yawed finite-radius contacts (e.g. small-radius cables blowing up). The normal response now acts at the geometric skeleton point rather than the rotating surface anchor, which was non-conservative under reorientation; friction still uses the surface anchor to preserve finite-radius slip. (#3125)
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)

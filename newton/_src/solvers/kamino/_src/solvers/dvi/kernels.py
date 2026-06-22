@@ -8,7 +8,7 @@ from __future__ import annotations
 import warp as wp
 
 from ...core.math import FLOAT32_EPS
-from ...core.types import float32, int32, vec3f
+from ...core.types import float32, int32, mat33f, vec3f
 from ..padmm.math import project_to_coulomb_cone, project_to_coulomb_dual_cone
 from .types import DVIConfigStruct, DVIStatus
 
@@ -72,6 +72,31 @@ def _project_contact_diagonal_update(
     return project_to_coulomb_cone(lambda_arg, mu)
 
 
+@wp.func
+def _project_contact_block_update(
+    lambda_old: vec3f,
+    v_c: vec3f,
+    D_diag: vec3f,
+    D_block_inv: mat33f,
+    regularization: float32,
+    omega: float32,
+    mu: float32,
+) -> vec3f:
+    inv_diag_norm = wp.abs(D_block_inv[0, 0]) + wp.abs(D_block_inv[1, 1]) + wp.abs(D_block_inv[2, 2])
+    lambda_arg = lambda_old
+    if inv_diag_norm > FLOAT32_EPS:
+        lambda_arg = lambda_old - omega * (D_block_inv * v_c)
+    else:
+        return _project_contact_diagonal_update(lambda_old, v_c, D_diag, regularization, omega, mu)
+    return project_to_coulomb_cone(lambda_arg, mu)
+
+
+@wp.func
+def _contact_trace_preconditioner(D_diag: vec3f) -> vec3f:
+    D_eff = (D_diag.x + D_diag.y + D_diag.z) / float32(3.0)
+    return vec3f(D_eff, D_eff, D_eff)
+
+
 @wp.kernel
 def _reset_dvi_solver_data(
     # Inputs:
@@ -91,16 +116,26 @@ def _reset_dvi_solver_data(
 
 
 @wp.kernel
+def _reset_dvi_status(
+    # Outputs:
+    solver_status: wp.array[DVIStatus],
+):
+    wid = wp.tid()
+    solver_status[wid] = DVIStatus()
+
+
+@wp.kernel
 def _copy_bilateral_block(
     # Inputs:
     problem_dim: wp.array[int32],
     problem_mio: wp.array[int32],
     problem_njc: wp.array[int32],
     problem_D: wp.array[float32],
-    solver_config: wp.array[DVIConfigStruct],
     bilateral_mio: wp.array[int32],
+    bilateral_vio: wp.array[int32],
     # Outputs:
     bilateral_D: wp.array[float32],
+    bilateral_P: wp.array[float32],
 ):
     wid, tid = wp.tid()
 
@@ -111,13 +146,84 @@ def _copy_bilateral_block(
     ncts = problem_dim[wid]
     pmio = problem_mio[wid]
     bmio = bilateral_mio[wid]
+    bvio = bilateral_vio[wid]
     row = tid // njc
     col = tid - row * njc
 
-    val = problem_D[pmio + ncts * row + col]
+    D_rr = problem_D[pmio + ncts * row + row]
+    D_cc = problem_D[pmio + ncts * col + col]
+    p_row = wp.sqrt(1.0 / (wp.abs(D_rr) + FLOAT32_EPS))
+    p_col = wp.sqrt(1.0 / (wp.abs(D_cc) + FLOAT32_EPS))
+
+    val = p_row * problem_D[pmio + ncts * row + col] * p_col
     if row == col:
-        val += solver_config[wid].regularization
+        # Smaller floors reduce equality residual, but closed-loop robots lose contact below this.
+        val += float32(7.0e-7)
+        bilateral_P[bvio + row] = p_row
     bilateral_D[bmio + njc * row + col] = val
+
+
+@wp.kernel
+def _compute_dvi_contact_block_inverse(
+    # Inputs:
+    problem_dim: wp.array[int32],
+    problem_mio: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_D: wp.array[float32],
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    contact_block_inv: wp.array[mat33f],
+):
+    wid, cid = wp.tid()
+
+    nc = problem_nc[wid]
+    if cid >= nc:
+        return
+
+    ncts = problem_dim[wid]
+    mio = problem_mio[wid]
+    ccgo = problem_ccgo[wid]
+    cio = problem_cio[wid]
+    ccio = ccgo + int32(3) * cid
+    cfg = solver_config[wid]
+    D_inv = mat33f(0.0)
+
+    if not cfg.contact_block_preconditioner:
+        contact_block_inv[cio + cid] = D_inv
+        return
+
+    r0 = mio + ncts * (ccio + 0)
+    r1 = mio + ncts * (ccio + 1)
+    r2 = mio + ncts * (ccio + 2)
+
+    d00 = problem_D[r0 + ccio + 0]
+    d01 = float32(0.5) * (problem_D[r0 + ccio + 1] + problem_D[r1 + ccio + 0])
+    d02 = float32(0.5) * (problem_D[r0 + ccio + 2] + problem_D[r2 + ccio + 0])
+    d11 = problem_D[r1 + ccio + 1]
+    d12 = float32(0.5) * (problem_D[r1 + ccio + 2] + problem_D[r2 + ccio + 1])
+    d22 = problem_D[r2 + ccio + 2]
+
+    diag_max = wp.max(wp.max(wp.abs(d00), wp.abs(d11)), wp.abs(d22))
+    if diag_max > FLOAT32_EPS:
+        D_reg = mat33f(
+            d00 + cfg.regularization,
+            d01,
+            d02,
+            d01,
+            d11 + cfg.regularization,
+            d12,
+            d02,
+            d12,
+            d22 + cfg.regularization,
+        )
+        det = wp.determinant(D_reg)
+        det_min = FLOAT32_EPS * diag_max * diag_max * diag_max
+        if det > det_min:
+            D_inv = wp.inverse(D_reg)
+
+    contact_block_inv[cio + cid] = D_inv
 
 
 @wp.kernel
@@ -130,6 +236,7 @@ def _build_bilateral_rhs(
     problem_D: wp.array[float32],
     problem_v_f: wp.array[float32],
     bilateral_vio: wp.array[int32],
+    bilateral_P: wp.array[float32],
     solution_lambdas: wp.array[float32],
     # Outputs:
     bilateral_rhs: wp.array[float32],
@@ -148,7 +255,7 @@ def _build_bilateral_rhs(
     rhs = -problem_v_f[pvio + row]
     for col in range(njc, ncts):
         rhs -= problem_D[pmio + ncts * row + col] * solution_lambdas[pvio + col]
-    bilateral_rhs[bvio + row] = rhs
+    bilateral_rhs[bvio + row] = bilateral_P[bvio + row] * rhs
 
 
 @wp.kernel
@@ -157,6 +264,7 @@ def _scatter_bilateral_solution(
     problem_vio: wp.array[int32],
     problem_njc: wp.array[int32],
     bilateral_vio: wp.array[int32],
+    bilateral_P: wp.array[float32],
     bilateral_solution: wp.array[float32],
     # Outputs:
     solution_lambdas: wp.array[float32],
@@ -167,7 +275,8 @@ def _scatter_bilateral_solution(
     if row >= njc:
         return
 
-    solution_lambdas[problem_vio[wid] + row] = bilateral_solution[bilateral_vio[wid] + row]
+    bvio = bilateral_vio[wid]
+    solution_lambdas[problem_vio[wid] + row] = bilateral_P[bvio + row] * bilateral_solution[bvio + row]
 
 
 @wp.kernel
@@ -177,6 +286,7 @@ def _build_bilateral_free_velocity_rhs(
     problem_njc: wp.array[int32],
     problem_v_f: wp.array[float32],
     bilateral_vio: wp.array[int32],
+    bilateral_P: wp.array[float32],
     # Outputs:
     bilateral_rhs: wp.array[float32],
 ):
@@ -186,7 +296,8 @@ def _build_bilateral_free_velocity_rhs(
     if row >= njc:
         return
 
-    bilateral_rhs[bilateral_vio[wid] + row] = problem_v_f[problem_vio[wid] + row]
+    bvio = bilateral_vio[wid]
+    bilateral_rhs[bvio + row] = bilateral_P[bvio + row] * problem_v_f[problem_vio[wid] + row]
 
 
 @wp.kernel
@@ -276,6 +387,7 @@ def _solve_dvi_pgs(
     problem_mu: wp.array[float32],
     problem_D: wp.array[float32],
     problem_v_f: wp.array[float32],
+    contact_block_inv: wp.array[mat33f],
     solver_config: wp.array[DVIConfigStruct],
     # Outputs:
     solver_status: wp.array[DVIStatus],
@@ -359,14 +471,28 @@ def _solve_dvi_pgs(
                     solution_lambdas[vio + ccio + 1],
                     solution_lambdas[vio + ccio + 2],
                 )
-                lambda_contact_new = _project_contact_diagonal_update(
-                    lambda_contact_old,
-                    v_c,
-                    vec3f(D_00, D_11, D_22),
-                    cfg.regularization,
-                    cfg.omega,
-                    problem_mu[cio + cid],
-                )
+                if cfg.contact_block_preconditioner:
+                    lambda_contact_projected = _project_contact_block_update(
+                        lambda_contact_old,
+                        v_c,
+                        vec3f(D_00, D_11, D_22),
+                        contact_block_inv[cio + cid],
+                        cfg.regularization,
+                        cfg.contact_jacobi_omega,
+                        problem_mu[cio + cid],
+                    )
+                    lambda_contact_new = lambda_contact_old + cfg.contact_jacobi_relaxation * (
+                        lambda_contact_projected - lambda_contact_old
+                    )
+                else:
+                    lambda_contact_new = _project_contact_diagonal_update(
+                        lambda_contact_old,
+                        v_c,
+                        _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
+                        cfg.regularization,
+                        cfg.omega,
+                        problem_mu[cio + cid],
+                    )
                 solution_lambdas[vio + ccio + 0] = lambda_contact_new.x
                 solution_lambdas[vio + ccio + 1] = lambda_contact_new.y
                 solution_lambdas[vio + ccio + 2] = lambda_contact_new.z
@@ -403,6 +529,7 @@ def _solve_dvi_unilateral_pgs(
     problem_mu: wp.array[float32],
     problem_D: wp.array[float32],
     problem_v_f: wp.array[float32],
+    contact_block_inv: wp.array[mat33f],
     solver_config: wp.array[DVIConfigStruct],
     # Outputs:
     solver_status: wp.array[DVIStatus],
@@ -476,14 +603,28 @@ def _solve_dvi_unilateral_pgs(
                     solution_lambdas[vio + ccio + 1],
                     solution_lambdas[vio + ccio + 2],
                 )
-                lambda_contact_new = _project_contact_diagonal_update(
-                    lambda_contact_old,
-                    v_c,
-                    vec3f(D_00, D_11, D_22),
-                    cfg.regularization,
-                    cfg.omega,
-                    problem_mu[cio + cid],
-                )
+                if cfg.contact_block_preconditioner:
+                    lambda_contact_projected = _project_contact_block_update(
+                        lambda_contact_old,
+                        v_c,
+                        vec3f(D_00, D_11, D_22),
+                        contact_block_inv[cio + cid],
+                        cfg.regularization,
+                        cfg.contact_jacobi_omega,
+                        problem_mu[cio + cid],
+                    )
+                    lambda_contact_new = lambda_contact_old + cfg.contact_jacobi_relaxation * (
+                        lambda_contact_projected - lambda_contact_old
+                    )
+                else:
+                    lambda_contact_new = _project_contact_diagonal_update(
+                        lambda_contact_old,
+                        v_c,
+                        _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
+                        cfg.regularization,
+                        cfg.omega,
+                        problem_mu[cio + cid],
+                    )
                 solution_lambdas[vio + ccio + 0] = lambda_contact_new.x
                 solution_lambdas[vio + ccio + 1] = lambda_contact_new.y
                 solution_lambdas[vio + ccio + 2] = lambda_contact_new.z
@@ -526,6 +667,41 @@ def _initialize_dvi_status(
 
 
 @wp.kernel
+def _set_dvi_direct_status_iterations(
+    # Inputs:
+    problem_nl: wp.array[int32],
+    problem_nc: wp.array[int32],
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solver_status: wp.array[DVIStatus],
+):
+    wid = wp.tid()
+    cfg = solver_config[wid]
+    status = solver_status[wid]
+    if problem_nl[wid] == int32(0) and problem_nc[wid] == int32(0):
+        status.iterations = int32(1)
+    else:
+        status.iterations = cfg.block_iterations * cfg.contact_iterations
+    solver_status[wid] = status
+
+
+@wp.kernel
+def _set_dvi_bilateral_active_dim(
+    # Inputs:
+    problem_njc: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_nc: wp.array[int32],
+    # Outputs:
+    bilateral_active_dim: wp.array[int32],
+):
+    wid = wp.tid()
+    active_dim = int32(0)
+    if problem_nl[wid] > int32(0) or problem_nc[wid] > int32(0):
+        active_dim = problem_njc[wid]
+    bilateral_active_dim[wid] = active_dim
+
+
+@wp.kernel
 def _solve_dvi_limits_pgs(
     # Inputs:
     problem_dim: wp.array[int32],
@@ -535,6 +711,7 @@ def _solve_dvi_limits_pgs(
     problem_lcgo: wp.array[int32],
     problem_D: wp.array[float32],
     problem_v_f: wp.array[float32],
+    block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
     # Outputs:
     solver_status: wp.array[DVIStatus],
@@ -548,6 +725,9 @@ def _solve_dvi_limits_pgs(
     nl = problem_nl[wid]
     lcgo = problem_lcgo[wid]
     cfg = solver_config[wid]
+
+    if block_iteration >= cfg.block_iterations:
+        return
 
     status = DVIStatus()
     status.converged = int32(0)
@@ -563,7 +743,7 @@ def _solve_dvi_limits_pgs(
         return
 
     done = int32(0)
-    for iteration in range(cfg.max_iterations):
+    for iteration in range(cfg.contact_iterations):
         if done == 0:
             max_step = float32(0.0)
             max_velocity = float32(0.0)
@@ -621,6 +801,50 @@ def _contacts_share_dynamic_body(a: wp.vec2i, b: wp.vec2i) -> bool:
 
 
 @wp.kernel
+def _color_dvi_contacts(
+    # Inputs:
+    problem_nc: wp.array[int32],
+    problem_cio: wp.array[int32],
+    contact_bid_AB: wp.array[wp.vec2i],
+    # Outputs:
+    contact_colors: wp.array[int32],
+    contact_num_colors: wp.array[int32],
+):
+    wid = wp.tid()
+
+    nc = problem_nc[wid]
+    cio = problem_cio[wid]
+    if nc == 0:
+        contact_num_colors[wid] = int32(0)
+        return
+
+    num_colors = int32(0)
+    for cid in range(nc):
+        pair = contact_bid_AB[cio + cid]
+        color = int32(0)
+        found = int32(0)
+        while found == int32(0) and color < nc:
+            conflict = int32(0)
+            prev = int32(0)
+            while prev < cid:
+                if contact_colors[cio + prev] == color:
+                    prev_pair = contact_bid_AB[cio + prev]
+                    if _contacts_share_dynamic_body(pair, prev_pair):
+                        conflict = int32(1)
+                prev = prev + int32(1)
+
+            if conflict == int32(0):
+                found = int32(1)
+            else:
+                color = color + int32(1)
+
+        contact_colors[cio + cid] = color
+        num_colors = wp.max(num_colors, color + int32(1))
+
+    contact_num_colors[wid] = num_colors
+
+
+@wp.kernel
 def _solve_dvi_contacts_colored_gs(
     # Inputs:
     problem_dim: wp.array[int32],
@@ -631,11 +855,12 @@ def _solve_dvi_contacts_colored_gs(
     problem_cio: wp.array[int32],
     problem_mu: wp.array[float32],
     problem_D: wp.array[float32],
-    contact_bid_AB: wp.array[wp.vec2i],
-    solver_config: wp.array[DVIConfigStruct],
-    # Outputs:
+    block_iteration: int32,
+    contact_block_inv: wp.array[mat33f],
     contact_colors: wp.array[int32],
     contact_num_colors: wp.array[int32],
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
     state_v_aug: wp.array[float32],
     solution_lambdas: wp.array[float32],
 ):
@@ -647,8 +872,6 @@ def _solve_dvi_contacts_colored_gs(
     nc = problem_nc[wid]
     cio = problem_cio[wid]
     if nc == 0:
-        if lane == int32(0):
-            contact_num_colors[wid] = int32(0)
         return
 
     ncts = problem_dim[wid]
@@ -656,34 +879,8 @@ def _solve_dvi_contacts_colored_gs(
     mio = problem_mio[wid]
     ccgo = problem_ccgo[wid]
     cfg = solver_config[wid]
-
-    if lane == int32(0):
-        num_colors = int32(0)
-        for cid in range(nc):
-            pair = contact_bid_AB[cio + cid]
-            color = int32(0)
-            found = int32(0)
-            while found == int32(0) and color < nc:
-                conflict = int32(0)
-                prev = int32(0)
-                while prev < cid:
-                    if contact_colors[cio + prev] == color:
-                        prev_pair = contact_bid_AB[cio + prev]
-                        if _contacts_share_dynamic_body(pair, prev_pair):
-                            conflict = int32(1)
-                    prev = prev + int32(1)
-
-                if conflict == int32(0):
-                    found = int32(1)
-                else:
-                    color = color + int32(1)
-
-            contact_colors[cio + cid] = color
-            num_colors = wp.max(num_colors, color + int32(1))
-
-        contact_num_colors[wid] = num_colors
-
-    _sync_threads()
+    if block_iteration >= cfg.block_iterations:
+        return
 
     num_colors = contact_num_colors[wid]
     iteration = int32(0)
@@ -711,14 +908,26 @@ def _solve_dvi_contacts_colored_gs(
                         solution_lambdas[ccio_v + 1],
                         solution_lambdas[ccio_v + 2],
                     )
-                    lambda_new = _project_contact_diagonal_update(
-                        lambda_old,
-                        v_c,
-                        vec3f(D_00, D_11, D_22),
-                        cfg.regularization,
-                        cfg.omega,
-                        mu_c,
-                    )
+                    if cfg.contact_block_preconditioner:
+                        lambda_projected = _project_contact_block_update(
+                            lambda_old,
+                            v_c,
+                            vec3f(D_00, D_11, D_22),
+                            contact_block_inv[cio + cid],
+                            cfg.regularization,
+                            cfg.contact_jacobi_omega,
+                            mu_c,
+                        )
+                        lambda_new = lambda_old + cfg.contact_jacobi_relaxation * (lambda_projected - lambda_old)
+                    else:
+                        lambda_new = _project_contact_diagonal_update(
+                            lambda_old,
+                            v_c,
+                            _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
+                            cfg.regularization,
+                            cfg.omega,
+                            mu_c,
+                        )
 
                     delta = lambda_new - lambda_old
                     solution_lambdas[ccio_v + 0] = lambda_new.x
@@ -754,7 +963,10 @@ def _compute_dvi_contact_jacobi_delta(
     problem_cio: wp.array[int32],
     problem_mu: wp.array[float32],
     problem_D: wp.array[float32],
+    block_iteration: int32,
+    contact_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
+    contact_block_inv: wp.array[mat33f],
     state_v_aug: wp.array[float32],
     # Outputs:
     solution_lambdas: wp.array[float32],
@@ -774,12 +986,13 @@ def _compute_dvi_contact_jacobi_delta(
     ccio_v = vio + ccio
     mu_c = problem_mu[problem_cio[wid] + cid]
     cfg = solver_config[wid]
+    if block_iteration >= cfg.block_iterations or contact_iteration >= cfg.contact_iterations:
+        return
 
     v_t0 = state_v_aug[ccio_v + 0]
     v_t1 = state_v_aug[ccio_v + 1]
     v_n = state_v_aug[ccio_v + 2] + mu_c * wp.sqrt(v_t0 * v_t0 + v_t1 * v_t1)
     v_c = vec3f(v_t0, v_t1, v_n)
-
     D_00 = wp.abs(problem_D[mio + ncts * (ccio + 0) + (ccio + 0)])
     D_11 = wp.abs(problem_D[mio + ncts * (ccio + 1) + (ccio + 1)])
     D_22 = wp.abs(problem_D[mio + ncts * (ccio + 2) + (ccio + 2)])
@@ -789,16 +1002,26 @@ def _compute_dvi_contact_jacobi_delta(
         solution_lambdas[ccio_v + 1],
         solution_lambdas[ccio_v + 2],
     )
-    contact_omega = wp.min(cfg.omega, float32(0.3))
-    lambda_projected = _project_contact_diagonal_update(
-        lambda_old,
-        v_c,
-        vec3f(D_00, D_11, D_22),
-        cfg.regularization,
-        contact_omega,
-        mu_c,
-    )
-    lambda_new = lambda_old + float32(0.9) * (lambda_projected - lambda_old)
+    if cfg.contact_block_preconditioner:
+        lambda_projected = _project_contact_block_update(
+            lambda_old,
+            v_c,
+            vec3f(D_00, D_11, D_22),
+            contact_block_inv[problem_cio[wid] + cid],
+            cfg.regularization,
+            cfg.contact_jacobi_omega,
+            mu_c,
+        )
+    else:
+        lambda_projected = _project_contact_diagonal_update(
+            lambda_old,
+            v_c,
+            _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
+            cfg.regularization,
+            cfg.contact_jacobi_omega,
+            mu_c,
+        )
+    lambda_new = lambda_old + cfg.contact_jacobi_relaxation * (lambda_projected - lambda_old)
 
     delta = lambda_new - lambda_old
     solution_lambdas[ccio_v + 0] = lambda_new.x
@@ -818,6 +1041,9 @@ def _apply_dvi_contact_jacobi_delta(
     problem_nc: wp.array[int32],
     problem_ccgo: wp.array[int32],
     problem_D: wp.array[float32],
+    block_iteration: int32,
+    contact_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
     state_scratch: wp.array[float32],
     # Outputs:
     state_v_aug: wp.array[float32],
@@ -826,6 +1052,10 @@ def _apply_dvi_contact_jacobi_delta(
 
     ncts = problem_dim[wid]
     if row >= ncts:
+        return
+
+    cfg = solver_config[wid]
+    if block_iteration >= cfg.block_iterations or contact_iteration >= cfg.contact_iterations:
         return
 
     nc = problem_nc[wid]

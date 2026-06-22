@@ -296,6 +296,11 @@ class SolverKamino(SolverBase):
                 nested_kwargs = nested_config.__dict__ if nested_config is not None else {}
                 setattr(cfg, attr_name, config_cls.from_model(model, **nested_kwargs))
 
+            if cfg.dynamics_solver == "dvi" and "dynamics" not in kwargs:
+                cfg.dynamics.preconditioning = False
+
+            cfg.validate()
+
             # Return the fully constructed config with sub-configurations
             # parsed from the model's custom attributes if available,
             # otherwise using defaults or provided kwargs.
@@ -344,6 +349,11 @@ class SolverKamino(SolverBase):
                 )
             if self.dynamics_solver == "dvi" and self.sparse_dynamics:
                 raise ValueError("The DVI solver currently requires `sparse_dynamics=False`.")
+            if self.dynamics_solver == "dvi" and self.dynamics.preconditioning:
+                raise ValueError(
+                    "The DVI solver currently requires `dynamics.preconditioning=False` so convergence checks and "
+                    "contact cone updates stay in physical constraint units."
+                )
 
             # Conversion to JointCorrectionMode will raise an error if the input string is invalid.
             JointCorrectionMode.from_string(self.rotation_correction)
@@ -376,7 +386,7 @@ class SolverKamino(SolverBase):
             if self.constraints is None:
                 self.constraints = config.ConstraintStabilizationConfig()
             if self.dynamics is None:
-                self.dynamics = config.ConstrainedDynamicsConfig()
+                self.dynamics = config.ConstrainedDynamicsConfig(preconditioning=self.dynamics_solver != "dvi")
             if self.padmm is None:
                 self.padmm = config.PADMMSolverConfig()
             if self.dvi is None:

@@ -9,7 +9,7 @@ import warp as wp
 
 from ....config import DVISolverConfig
 from ...core.size import SizeKamino
-from ...core.types import float32, int32, vec2f
+from ...core.types import float32, int32, mat33f, vec2f
 from ...linalg import DenseLinearOperatorData
 from ..padmm.types import PADMMSolution
 
@@ -30,13 +30,22 @@ class DVIConfigStruct:
     """Projected Gauss-Seidel update relaxation."""
 
     max_iterations: int32
-    """Maximum number of projected Gauss-Seidel iterations."""
+    """Maximum projected Gauss-Seidel iterations for the fallback path."""
 
     block_iterations: int32
     """Outer direct-bilateral/projected-inequality block iterations."""
 
     contact_iterations: int32
-    """Projected Jacobi iterations for contact inequalities in each block."""
+    """Projected sweeps for unilateral inequalities in each direct-bilateral block."""
+
+    contact_jacobi_omega: float32
+    """Step size for contact Jacobi and block-preconditioned updates."""
+
+    contact_jacobi_relaxation: float32
+    """Solution mixing for contact Jacobi and block-preconditioned updates."""
+
+    contact_block_preconditioner: wp.bool
+    """Whether to use the full contact 3x3 diagonal block for projected updates."""
 
 
 @wp.struct
@@ -49,6 +58,7 @@ class DVIStatus:
 
     converged: int32
     iterations: int32
+    """Projected iteration count; direct-bilateral solves report block sweeps."""
     r_p: float32
     r_d: float32
     r_c: float32
@@ -65,6 +75,9 @@ class DVIState:
         self.scratch: wp.array | None = None
         self.bilateral_rhs: wp.array | None = None
         self.bilateral_solution: wp.array | None = None
+        self.bilateral_preconditioner: wp.array | None = None
+        self.bilateral_active_dim: wp.array | None = None
+        self.contact_block_inv: wp.array | None = None
         self.contact_colors: wp.array | None = None
         self.contact_num_colors: wp.array | None = None
         if size is not None:
@@ -78,6 +91,9 @@ class DVIState:
         self.scratch = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
         self.bilateral_rhs = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
         self.bilateral_solution = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
+        self.bilateral_preconditioner = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
+        self.bilateral_active_dim = wp.zeros(size.num_worlds, dtype=int32)
+        self.contact_block_inv = wp.zeros(max(1, size.sum_of_max_contacts), dtype=mat33f)
         self.contact_colors = wp.full(max(1, size.sum_of_max_contacts), -1, dtype=int32)
         self.contact_num_colors = wp.zeros(max(1, size.num_worlds), dtype=int32)
 
@@ -89,6 +105,9 @@ class DVIState:
         self.scratch.zero_()
         self.bilateral_rhs.zero_()
         self.bilateral_solution.zero_()
+        self.bilateral_preconditioner.zero_()
+        self.bilateral_active_dim.zero_()
+        self.contact_block_inv.zero_()
         self.contact_colors.fill_(-1)
         self.contact_num_colors.zero_()
 
@@ -128,4 +147,7 @@ def convert_config_to_struct(config: DVISolverConfig) -> DVIConfigStruct:
     config_struct.max_iterations = config.max_iterations
     config_struct.block_iterations = config.block_iterations
     config_struct.contact_iterations = config.contact_iterations
+    config_struct.contact_jacobi_omega = config.contact_jacobi_omega
+    config_struct.contact_jacobi_relaxation = config.contact_jacobi_relaxation
+    config_struct.contact_block_preconditioner = config.contact_block_preconditioner
     return config_struct

@@ -28,6 +28,8 @@ from .kernels import (
     _apply_dvi_contact_jacobi_delta,
     _build_bilateral_free_velocity_rhs,
     _build_bilateral_rhs,
+    _color_dvi_contacts,
+    _compute_dvi_contact_block_inverse,
     _compute_dvi_contact_jacobi_delta,
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
@@ -35,7 +37,10 @@ from .kernels import (
     _copy_bilateral_block,
     _initialize_dvi_status,
     _reset_dvi_solver_data,
+    _reset_dvi_status,
     _scatter_bilateral_solution,
+    _set_dvi_bilateral_active_dim,
+    _set_dvi_direct_status_iterations,
     _solve_dvi_contacts_colored_gs,
     _solve_dvi_limits_pgs,
     _solve_dvi_pgs,
@@ -66,6 +71,7 @@ class DVISolver(ForwardDynamicsSolver):
         self._bilateral_solver: LLTBlockedSolver | None = None
         self._max_block_iterations: int = 1
         self._max_contact_iterations: int = 1
+        self._has_contact_block_preconditioner: bool = False
         self._has_unilateral_constraints: bool = False
         self._contact_bid_AB: wp.array | None = None
         self._device: wp.DeviceLike = None
@@ -113,6 +119,7 @@ class DVISolver(ForwardDynamicsSolver):
         self._collect_info = collect_info
         self._max_block_iterations = max(c.block_iterations for c in self._config)
         self._max_contact_iterations = max(c.contact_iterations for c in self._config)
+        self._has_contact_block_preconditioner = any(c.contact_block_preconditioner for c in self._config)
         self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
         self._data = DVIData(size=self._size, device=self._device)
         self._allocate_bilateral_solver(model)
@@ -228,6 +235,30 @@ class DVISolver(ForwardDynamicsSolver):
         if problem.sparse:
             raise ValueError("The DVI solver currently requires `sparse_dynamics=False`.")
 
+        wp.launch(
+            kernel=_reset_dvi_status,
+            dim=self._size.num_worlds,
+            inputs=[self._data.status],
+            device=self.device,
+        )
+
+        if self._has_contact_block_preconditioner and self._size.max_of_max_contacts > 0:
+            wp.launch(
+                kernel=_compute_dvi_contact_block_inverse,
+                dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+                inputs=[
+                    problem.data.dim,
+                    problem.data.mio,
+                    problem.data.nc,
+                    problem.data.ccgo,
+                    problem.data.cio,
+                    problem.data.D,
+                    self._data.config,
+                    self._data.state.contact_block_inv,
+                ],
+                device=self.device,
+            )
+
         if self._bilateral_solver is not None and self._data.bilateral_operator is not None:
             self._solve_with_bilateral_direct_block(problem)
         else:
@@ -247,6 +278,7 @@ class DVISolver(ForwardDynamicsSolver):
                     problem.data.mu,
                     problem.data.D,
                     problem.data.v_f,
+                    self._data.state.contact_block_inv,
                     self._data.config,
                     self._data.status,
                     self._data.solution.lambdas,
@@ -324,7 +356,7 @@ class DVISolver(ForwardDynamicsSolver):
             device=self.device,
         )
 
-    def _solve_bilateral_block(self, problem: DualProblem):
+    def _solve_bilateral_block(self, problem: DualProblem, active_dim: wp.array | None = None):
         operator = self._data.bilateral_operator
         state = self._data.state
         wp.launch(
@@ -338,12 +370,19 @@ class DVISolver(ForwardDynamicsSolver):
                 problem.data.D,
                 problem.data.v_f,
                 operator.info.vio,
+                state.bilateral_preconditioner,
                 self._data.solution.lambdas,
                 state.bilateral_rhs,
             ],
             device=self.device,
         )
-        self._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
+        full_dim = operator.info.dim
+        if active_dim is not None:
+            operator.info.dim = active_dim
+        try:
+            self._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
+        finally:
+            operator.info.dim = full_dim
         wp.launch(
             kernel=_scatter_bilateral_solution,
             dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
@@ -351,6 +390,7 @@ class DVISolver(ForwardDynamicsSolver):
                 problem.data.vio,
                 problem.data.njc,
                 operator.info.vio,
+                state.bilateral_preconditioner,
                 state.bilateral_solution,
                 self._data.solution.lambdas,
             ],
@@ -359,6 +399,7 @@ class DVISolver(ForwardDynamicsSolver):
 
     def _factor_bilateral_block(self, problem: DualProblem):
         operator = self._data.bilateral_operator
+        operator.info.dim = operator.info.maxdim
         wp.launch(
             kernel=_copy_bilateral_block,
             dim=(self._size.num_worlds, self._size.max_of_num_joint_cts * self._size.max_of_num_joint_cts),
@@ -367,9 +408,10 @@ class DVISolver(ForwardDynamicsSolver):
                 problem.data.mio,
                 problem.data.njc,
                 problem.data.D,
-                self._data.config,
                 operator.info.mio,
+                operator.info.vio,
                 operator.mat,
+                self._data.state.bilateral_preconditioner,
             ],
             device=self.device,
         )
@@ -386,6 +428,7 @@ class DVISolver(ForwardDynamicsSolver):
                 problem.data.njc,
                 problem.data.v_f,
                 operator.info.vio,
+                state.bilateral_preconditioner,
                 state.bilateral_rhs,
             ],
             device=self.device,
@@ -408,7 +451,36 @@ class DVISolver(ForwardDynamicsSolver):
             device=self.device,
         )
 
-        for _ in range(self._max_block_iterations):
+        wp.launch(
+            kernel=_set_dvi_bilateral_active_dim,
+            dim=self._size.num_worlds,
+            inputs=[
+                problem.data.njc,
+                problem.data.nl,
+                problem.data.nc,
+                self._data.state.bilateral_active_dim,
+            ],
+            device=self.device,
+        )
+
+        use_colored_contacts = (
+            self._size.max_of_max_contacts > 0 and self.device.is_cuda and self._contact_bid_AB is not None
+        )
+        if use_colored_contacts:
+            wp.launch(
+                kernel=_color_dvi_contacts,
+                dim=self._size.num_worlds,
+                inputs=[
+                    problem.data.nc,
+                    problem.data.cio,
+                    self._contact_bid_AB,
+                    self._data.state.contact_colors,
+                    self._data.state.contact_num_colors,
+                ],
+                device=self.device,
+            )
+
+        for block_iteration in range(self._max_block_iterations):
             if self._size.max_of_max_limits > 0:
                 wp.launch(
                     kernel=_solve_dvi_limits_pgs,
@@ -421,6 +493,7 @@ class DVISolver(ForwardDynamicsSolver):
                         problem.data.lcgo,
                         problem.data.D,
                         problem.data.v_f,
+                        block_iteration,
                         self._data.config,
                         self._data.status,
                         self._data.solution.lambdas,
@@ -446,7 +519,7 @@ class DVISolver(ForwardDynamicsSolver):
                     device=self.device,
                 )
 
-                if self.device.is_cuda and self._contact_bid_AB is not None:
+                if use_colored_contacts:
                     wp.launch(
                         kernel=_solve_dvi_contacts_colored_gs,
                         dim=self._size.num_worlds * 64,
@@ -459,10 +532,11 @@ class DVISolver(ForwardDynamicsSolver):
                             problem.data.cio,
                             problem.data.mu,
                             problem.data.D,
-                            self._contact_bid_AB,
-                            self._data.config,
+                            block_iteration,
+                            self._data.state.contact_block_inv,
                             self._data.state.contact_colors,
                             self._data.state.contact_num_colors,
+                            self._data.config,
                             self._data.state.v_aug,
                             self._data.solution.lambdas,
                         ],
@@ -470,7 +544,7 @@ class DVISolver(ForwardDynamicsSolver):
                         block_dim=64,
                     )
                 else:
-                    for _ in range(self._max_contact_iterations):
+                    for contact_iteration in range(self._max_contact_iterations):
                         wp.launch(
                             kernel=_compute_dvi_contact_jacobi_delta,
                             dim=(self._size.num_worlds, self._size.max_of_max_contacts),
@@ -483,7 +557,10 @@ class DVISolver(ForwardDynamicsSolver):
                                 problem.data.cio,
                                 problem.data.mu,
                                 problem.data.D,
+                                block_iteration,
+                                contact_iteration,
                                 self._data.config,
+                                self._data.state.contact_block_inv,
                                 self._data.state.v_aug,
                                 self._data.solution.lambdas,
                                 self._data.state.scratch,
@@ -500,13 +577,31 @@ class DVISolver(ForwardDynamicsSolver):
                                 problem.data.nc,
                                 problem.data.ccgo,
                                 problem.data.D,
+                                block_iteration,
+                                contact_iteration,
+                                self._data.config,
                                 self._data.state.scratch,
                                 self._data.state.v_aug,
                             ],
                             device=self.device,
                         )
 
-            self._solve_bilateral_block(problem)
+            if block_iteration + 1 < self._max_block_iterations:
+                self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
+
+        self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
+
+        wp.launch(
+            kernel=_set_dvi_direct_status_iterations,
+            dim=self._size.num_worlds,
+            inputs=[
+                problem.data.nl,
+                problem.data.nc,
+                self._data.config,
+                self._data.status,
+            ],
+            device=self.device,
+        )
 
     def _warmstart_from_solution(self, problem: DualProblem):
         wp.launch(

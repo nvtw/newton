@@ -802,8 +802,10 @@ class DVISolverConfig:
 
     max_iterations: int = 100
     """
-    The maximum number of projected Gauss-Seidel iterations.
-    Must be greater than zero. Defaults to `100`.
+    Maximum projected Gauss-Seidel iterations for the all-constraint
+    fallback path. The direct bilateral block path is controlled by
+    `block_iterations` and `contact_iterations`. Must be greater than zero.
+    Defaults to `100`.
     """
 
     tolerance: float = 1e-5
@@ -832,8 +834,27 @@ class DVISolverConfig:
 
     contact_iterations: int = 4
     """
-    Number of graph-colored projected Gauss-Seidel sweeps used for contact
-    inequalities during each DVI block iteration. Must be greater than zero. Defaults to `4`.
+    Number of projected Gauss-Seidel sweeps used for unilateral inequalities
+    during each DVI block iteration. Contacts use graph-colored sweeps on CUDA.
+    Must be greater than zero. Defaults to `4`.
+    """
+
+    contact_jacobi_omega: float = 0.3
+    """
+    Step size for contact Jacobi updates and block-preconditioned contact
+    updates. Must be in the range `(0, 2]`. Defaults to `0.3`.
+    """
+
+    contact_jacobi_relaxation: float = 0.9
+    """
+    Solution mixing factor for contact Jacobi updates and block-preconditioned
+    contact updates. Must be in the range `(0, 1]`. Defaults to `0.9`.
+    """
+
+    contact_block_preconditioner: bool = False
+    """
+    Whether to use a full 3x3 contact diagonal block preconditioner for DVI
+    projected contact updates. Defaults to `False`.
     """
 
     warmstart_mode: Literal["none", "internal", "containers"] = "containers"
@@ -889,6 +910,12 @@ class DVISolverConfig:
             raise ValueError(f"Invalid block iterations: {self.block_iterations}. Must be a positive integer.")
         if self.contact_iterations <= 0:
             raise ValueError(f"Invalid contact iterations: {self.contact_iterations}. Must be a positive integer.")
+        if self.contact_jacobi_omega <= 0.0 or self.contact_jacobi_omega > 2.0:
+            raise ValueError(f"Invalid contact Jacobi omega: {self.contact_jacobi_omega}. Must be in the range (0, 2].")
+        if self.contact_jacobi_relaxation <= 0.0 or self.contact_jacobi_relaxation > 1.0:
+            raise ValueError(
+                f"Invalid contact Jacobi relaxation: {self.contact_jacobi_relaxation}. Must be in the range (0, 1]."
+            )
         PADMMWarmStartMode.from_string(self.warmstart_mode)
         WarmstarterContacts.Method.from_string(self.contact_warmstart_method)
 

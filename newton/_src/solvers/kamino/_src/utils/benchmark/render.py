@@ -81,9 +81,9 @@ def _render_table_to_console_and_file(
             console.print(table, crop=False)
     if to_console:
         console = Console(width=max_width)
-        console.rule()
+        console.rule(characters="-")
         console.print(table, crop=False)
-        console.rule()
+        console.rule(characters="-")
 
 
 def _format_cell(x, fmt):
@@ -144,6 +144,7 @@ def render_table(
         title=title,
         show_header=True,
         box=box.SIMPLE_HEAVY,
+        safe_box=True,
         show_lines=True,
         pad_edge=True,
     )
@@ -198,6 +199,7 @@ def render_subcolumn_table(
         title=title,
         show_header=True,
         box=box.SIMPLE_HEAVY,
+        safe_box=True,
         show_lines=True,
         pad_edge=True,
     )
@@ -275,6 +277,7 @@ def render_subcolumn_metrics_table(
         title=title,
         header_style="bold cyan",
         box=box.SIMPLE_HEAVY,
+        safe_box=True,
         show_lines=False,
         pad_edge=True,
     )
@@ -340,7 +343,8 @@ def render_solver_configs_table(
             - "sparse": Sparse representation settings (sparse, sparse_jacobian)
             - "linear": Linear solver settings (type, kwargs)
             - "padmm": PADMM settings (max_iterations, primal_tol, dual_tol, etc)
-            - "dvi": DVI settings (max_iterations, tolerance, regularization, omega, block/contact iterations)
+            - "dvi": DVI settings (max_iterations, tolerance, regularization, omega, block/contact iterations,
+              contact block preconditioning)
             - "warmstart": Warmstarting settings (mode, contact_method)
         to_console (bool, optional):
             If True, also prints the table to the console.
@@ -366,6 +370,7 @@ def render_solver_configs_table(
         title="Solver Configurations Summary",
         show_header=True,
         box=box.SIMPLE_HEAVY,
+        safe_box=True,
         show_lines=True,
         pad_edge=True,
     )
@@ -411,7 +416,17 @@ def render_solver_configs_table(
         _add_table_column_group(
             table,
             "DVI",
-            ["max_iterations", "tol", "reg", "omega", "block_iter", "contact_iter"],
+            [
+                "max_iterations",
+                "tol",
+                "reg",
+                "omega",
+                "block_iter",
+                "contact_iter",
+                "contact_jacobi_omega",
+                "contact_jacobi_relax",
+                "contact_block_precond",
+            ],
             color="cyan",
         )
     if "warmstart" in groups:
@@ -467,6 +482,9 @@ def render_solver_configs_table(
                     f"{cfg.dvi.omega}",
                     str(cfg.dvi.block_iterations),
                     str(cfg.dvi.contact_iterations),
+                    f"{cfg.dvi.contact_jacobi_omega}",
+                    f"{cfg.dvi.contact_jacobi_relaxation}",
+                    str(cfg.dvi.contact_block_preconditioner),
                 ]
             )
         if "warmstart" in groups:
@@ -522,6 +540,7 @@ def render_problem_dimensions_table(
         title="Problem Dimensions Summary",
         show_header=True,
         box=box.SIMPLE_HEAVY,
+        safe_box=True,
         show_lines=True,
         pad_edge=True,
     )

@@ -114,9 +114,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dt", type=float, default=0.001)
     parser.add_argument("--gravity", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--mode", choices=["total", "stepstats", "convergence"], default="convergence")
+    parser.add_argument("--mode", choices=["total", "stepstats", "convergence", "accuracy"], default="convergence")
+    parser.add_argument("--dvi-block-iterations", type=int)
+    parser.add_argument("--dvi-contact-iterations", type=int)
+    parser.add_argument("--dvi-contact-jacobi-omega", type=float)
+    parser.add_argument("--dvi-contact-jacobi-relaxation", type=float)
+    parser.add_argument("--dvi-contact-block-preconditioner", action=argparse.BooleanOptionalAction)
     parser.add_argument("--clear-cache", action=argparse.BooleanOptionalAction, default=False)
     return parser.parse_args()
+
+
+def apply_dvi_overrides(configs: dict[str, Any], args: argparse.Namespace) -> None:
+    """Apply CLI DVI tuning overrides to selected DVI solver configs."""
+    for config in configs.values():
+        if config.dynamics_solver != "dvi":
+            continue
+        if args.dvi_block_iterations is not None:
+            config.dvi.block_iterations = args.dvi_block_iterations
+        if args.dvi_contact_iterations is not None:
+            config.dvi.contact_iterations = args.dvi_contact_iterations
+        if args.dvi_contact_jacobi_omega is not None:
+            config.dvi.contact_jacobi_omega = args.dvi_contact_jacobi_omega
+        if args.dvi_contact_jacobi_relaxation is not None:
+            config.dvi.contact_jacobi_relaxation = args.dvi_contact_jacobi_relaxation
+        if args.dvi_contact_block_preconditioner is not None:
+            config.dvi.contact_block_preconditioner = args.dvi_contact_block_preconditioner
+        config.dvi.validate()
 
 
 def run_matrix(args: argparse.Namespace) -> BenchmarkMetrics:
@@ -137,16 +160,18 @@ def run_matrix(args: argparse.Namespace) -> BenchmarkMetrics:
         cuda_graph_modes=args.cuda_graph_modes,
     )
     configs = make_selected_solver_configs(args.solver_configs)
+    apply_dvi_overrides(configs, args)
 
-    collect_step_metrics = args.mode in {"stepstats", "convergence"}
-    collect_solver_metrics = args.mode == "convergence"
+    collect_step_metrics = args.mode in {"stepstats", "convergence", "accuracy"}
+    collect_solver_metrics = args.mode in {"convergence", "accuracy"}
+    collect_physics_metrics = args.mode == "accuracy"
     metrics = BenchmarkMetrics(
         problems=[scenario.name for scenario in scenarios],
         configs=configs,
         num_steps=args.num_steps,
         step_metrics=collect_step_metrics,
         solver_metrics=collect_solver_metrics,
-        physics_metrics=False,
+        physics_metrics=collect_physics_metrics,
     )
 
     render_solver_configs_table(configs=configs, groups=["solver", "sparse", "linear", "padmm", "dvi"], to_console=True)
@@ -192,6 +217,8 @@ def run_matrix(args: argparse.Namespace) -> BenchmarkMetrics:
         metrics.render_step_time_table()
     if metrics.solver_metrics is not None:
         metrics.render_padmm_metrics_table()
+    if metrics.physics_metrics is not None:
+        metrics.render_physics_metrics_table()
     return metrics
 
 

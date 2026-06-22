@@ -21,12 +21,16 @@ class Example:
         # Set simulation run-time configurations
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
-        self.sim_substeps = max(1, round(self.frame_dt / 0.01))
-        self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
         self.world_count = args.world_count if args else 1
         self.use_kamino_contacts = args.use_kamino_contacts if args else False
         self.dynamics_solver = args.dynamics_solver if args else "padmm"
+        target_sim_dt = 0.001 if self.dynamics_solver == "dvi" else 0.01
+        self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
+        self.sim_dt = self.frame_dt / self.sim_substeps
+        self.dvi_contact_block_preconditioner = bool(getattr(args, "dvi_contact_block_preconditioner", False))
+        self.dvi_contact_jacobi_omega = float(getattr(args, "dvi_contact_jacobi_omega", 0.3))
+        self.dvi_contact_jacobi_relaxation = float(getattr(args, "dvi_contact_jacobi_relaxation", 0.9))
         self.viewer = viewer
         self.device = wp.get_device()
 
@@ -76,7 +80,9 @@ class Example:
         self.config.padmm.dual_tolerance = 1e-4
         self.config.padmm.compl_tolerance = 1e-4
         if self.dynamics_solver == "dvi":
+            self.config.use_fk_solver = False
             self.config.constraints.contact_recovery_speed = 1.0
+            self.config.dynamics.preconditioning = False
             self.config.sparse_dynamics = False
             self.config.sparse_jacobian = False
             self.config.dvi.max_iterations = 200
@@ -84,6 +90,9 @@ class Example:
             self.config.dvi.regularization = 1e-5
             self.config.dvi.block_iterations = 32
             self.config.dvi.contact_iterations = 4
+            self.config.dvi.contact_jacobi_omega = self.dvi_contact_jacobi_omega
+            self.config.dvi.contact_jacobi_relaxation = self.dvi_contact_jacobi_relaxation
+            self.config.dvi.contact_block_preconditioner = self.dvi_contact_block_preconditioner
         self.solver = newton.solvers.SolverKamino(self.model, config=self.config)
 
         # Set joint armature and viscous damping for better
@@ -122,7 +131,10 @@ class Example:
         q_b = wp.quat_identity(dtype=wp.float32)
         q_base = wp.transformf((0.0, 0.0, 0.4), q_b)
         self.base_q.assign([q_base] * self.world_count)
+        self.state_0 = self.model.state()
+        self.state_1 = self.model.state()
         self.solver.reset(state=self.state_0, base_q=self.base_q)
+        self.solver.reset(state=self.state_1, base_q=self.base_q)
 
         # Capture the simulation graph if running on CUDA
         # NOTE: This only has an effect on GPU devices
@@ -183,6 +195,23 @@ class Example:
             choices=("padmm", "dvi"),
             default="padmm",
             help="Kamino dynamics solver to use.",
+        )
+        parser.add_argument(
+            "--dvi-contact-block-preconditioner",
+            action="store_true",
+            help="Use the opt-in full 3x3 contact block preconditioner for the Kamino DVI solver.",
+        )
+        parser.add_argument(
+            "--dvi-contact-jacobi-omega",
+            type=float,
+            default=0.3,
+            help="Step size for Kamino DVI non-colored contact Jacobi and block-preconditioned contact updates.",
+        )
+        parser.add_argument(
+            "--dvi-contact-jacobi-relaxation",
+            type=float,
+            default=0.9,
+            help="Solution mixing for Kamino DVI non-colored contact Jacobi and block-preconditioned contact updates.",
         )
         parser.set_defaults(world_count=1)
         parser.set_defaults(use_kamino_contacts=True)
