@@ -28,6 +28,7 @@ class Example:
         target_sim_dt = self.frame_dt / 12 if self.dynamics_solver == "dvi" else 0.01
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
+        dvi_contact_margin = 5.0e-4 if self.dynamics_solver == "dvi" else 1e-6
         self.dvi_contact_block_preconditioner = bool(getattr(args, "dvi_contact_block_preconditioner", False))
         self.dvi_contact_jacobi_omega = float(getattr(args, "dvi_contact_jacobi_omega", 0.25))
         self.dvi_contact_jacobi_relaxation = float(getattr(args, "dvi_contact_jacobi_relaxation", 0.9))
@@ -37,7 +38,7 @@ class Example:
         # Create a single-robot model builder and register the Kamino-specific custom attributes
         robot_builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverKamino.register_custom_attributes(robot_builder)
-        robot_builder.default_shape_cfg.margin = 1e-6
+        robot_builder.default_shape_cfg.margin = dvi_contact_margin
         robot_builder.default_shape_cfg.gap = 1e-2
 
         # Load the DR Legs USD and add it to the builder
@@ -57,7 +58,7 @@ class Example:
         # builder for the specified number of worlds
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         builder.request_contact_attributes("force")
-        builder.default_shape_cfg.margin = 1e-6
+        builder.default_shape_cfg.margin = dvi_contact_margin
         builder.default_shape_cfg.gap = 1e-2
         for _ in range(self.world_count):
             builder.add_world(robot_builder)

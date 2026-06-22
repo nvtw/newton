@@ -18,7 +18,7 @@ Last updated: June 22, 2026.
 - Sparse DVI now mirrors dense DVI's active bilateral dimension for repeated direct-block solves: worlds with no active limits/contacts keep the first bilateral result and skip later LLT solves.
 - Sparse DVI uses offset-owned fused limit/contact updates when sparse Jacobian offsets are available. This avoids rebuilding unilateral `v_aug` rows with atomics before applying the projected update.
 - For the focused sparse DR Legs benchmark using a `16x2` block/contact schedule, `bilateral_solve_period=2` was the best measured setting. The interactive DR Legs example uses a faster `4x2` schedule and keeps `bilateral_solve_period=1`; period `2` was faster but allowed visible tipped-contact drift at that lower work budget.
-- DR Legs standing jitter was mostly contact recovery bias, not contact-count flicker. `constraints.gamma=0.015` kept the contact set stable and reduced visible vertical pumping compared with `0.05` without changing iteration counts.
+- DR Legs standing jitter was mostly contact recovery bias, not contact-count flicker. Keep `constraints.gamma=0.015` and use a tiny example-only contact margin for visible foot sink; higher contact bias reduced physical penetration slightly but made instantaneous contact forces noisier.
 - Do not copy behavior-changing mraksha choices, such as tangential-only friction projection, unless Kamino intentionally changes its solver semantics.
 
 ## Failed Experiment

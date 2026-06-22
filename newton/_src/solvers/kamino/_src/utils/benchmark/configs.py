@@ -309,7 +309,7 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     # Constraint stabilization
     config.constraints.alpha = 0.1
     config.constraints.beta = 0.011
-    config.constraints.gamma = 0.05
+    config.constraints.gamma = 0.015
     config.constraints.contact_recovery_speed = 1.0
     # ------------------------------------------------------------------------------
     # Jacobian representation

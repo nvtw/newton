@@ -168,6 +168,7 @@ class Example:
             raise ValueError("target_sim_dt must be positive.")
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
+        dvi_contact_margin = 5.0e-4 if dynamics_solver == "dvi" else 0.0
         msg.info(f"Using sim_dt = {self.sim_dt} ({self.sim_substeps} substeps per frame)")
         self.max_steps = max_steps
 
@@ -204,6 +205,9 @@ class Example:
         if ground:
             for w in range(num_worlds):
                 add_ground_box(self.builder, world_index=w)
+        if dvi_contact_margin > 0.0:
+            for geom in self.builder.all_geoms:
+                geom.margin = max(geom.margin, dvi_contact_margin)
 
         # Set gravity
         for w in range(self.builder.num_worlds):

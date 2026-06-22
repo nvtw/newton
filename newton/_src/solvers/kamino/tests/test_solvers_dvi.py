@@ -1241,7 +1241,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.contact_jacobi_omega, 0.3)
         self.assertEqual(config.dvi.contact_jacobi_relaxation, 0.9)
         self.assertFalse(config.dvi.contact_block_preconditioner)
-        self.assertEqual(config.constraints.gamma, 0.05)
+        self.assertEqual(config.constraints.gamma, 0.015)
         self.assertEqual(config.constraints.delta, 1.0e-6)
         self.assertEqual(config.constraints.contact_recovery_speed, 1.0)
         self.assertFalse(config.dynamics.preconditioning)
