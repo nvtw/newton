@@ -31,9 +31,14 @@ import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.g1 import g1_apply_actions_kernel, g1_increment_episode_steps_kernel
 from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
+    G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT,
+    G1_FOOT_CONTACT_METRIC_ACTIVE_TANGENT_COUNT,
     G1_FOOT_CONTACT_METRIC_COUNT,
     G1_FOOT_CONTACT_METRIC_COUNT_TOTAL,
+    G1_FOOT_CONTACT_METRIC_HIGH_TANGENT_RATIO_COUNT,
     G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
+    G1_FOOT_CONTACT_METRIC_SPECULATIVE_COUNT,
+    G1_FOOT_CONTACT_METRIC_TANGENT_BIAS,
     G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE,
     G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM,
     scan_g1_foot_contact_metrics,
@@ -118,7 +123,7 @@ def _step_env_with_support_metrics(
     env: rl.EnvG1PhoenX,
     actions: wp.array2d[wp.float32],
     foot_metrics: wp.array3d[wp.float32],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, ...]:
     wp.launch(
         g1_apply_actions_kernel,
         dim=(env.world_count, env.action_dim),
@@ -143,6 +148,11 @@ def _step_env_with_support_metrics(
     normal_impulse_accum = np.zeros((env.world_count, 2), dtype=np.float64)
     tangent_impulse_accum = np.zeros((env.world_count, 2), dtype=np.float64)
     ratio_sum_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    speculative_count_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    tangent_bias_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    high_tangent_ratio_count_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    active_normal_count_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    active_tangent_count_accum = np.zeros((env.world_count, 2), dtype=np.float64)
 
     for substep in range(substeps):
         env.state_0.clear_forces()
@@ -156,6 +166,11 @@ def _step_env_with_support_metrics(
         normal_impulse_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE]
         tangent_impulse_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE]
         ratio_sum_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM]
+        speculative_count_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_SPECULATIVE_COUNT]
+        tangent_bias_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_TANGENT_BIAS]
+        high_tangent_ratio_count_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_HIGH_TANGENT_RATIO_COUNT]
+        active_normal_count_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT]
+        active_tangent_count_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_ACTIVE_TANGENT_COUNT]
         env.state_0, env.state_1 = env.state_1, env.state_0
 
     wp.launch(g1_increment_episode_steps_kernel, dim=env.world_count, outputs=[env.episode_steps], device=env.device)
@@ -171,7 +186,18 @@ def _step_env_with_support_metrics(
         out=np.zeros_like(ratio_sum_accum),
         where=contact_count_accum > 1.0e-12,
     )
-    return contact_count_accum / float(substeps), normal_impulse_accum, tangent_impulse_accum, ratio_mean
+    substeps_f = float(substeps)
+    return (
+        contact_count_accum / substeps_f,
+        normal_impulse_accum,
+        tangent_impulse_accum,
+        ratio_mean,
+        speculative_count_accum / substeps_f,
+        tangent_bias_accum,
+        high_tangent_ratio_count_accum / substeps_f,
+        active_normal_count_accum / substeps_f,
+        active_tangent_count_accum / substeps_f,
+    )
 
 
 def _run_setting(
@@ -204,16 +230,34 @@ def _run_setting(
     foot_normal_impulses = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
     foot_tangent_impulses = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
     foot_tangent_normal_ratios = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_speculative_counts = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_tangent_biases = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_high_tangent_ratio_counts = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_active_normal_counts = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_active_tangent_counts = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
 
     t0 = time.perf_counter()
     for step in range(step_count):
-        counts, normal_impulses, tangent_impulses, tangent_normal_ratios = _step_env_with_support_metrics(
-            env, actions, foot_metrics
-        )
+        (
+            counts,
+            normal_impulses,
+            tangent_impulses,
+            tangent_normal_ratios,
+            speculative_counts,
+            tangent_biases,
+            high_tangent_ratio_counts,
+            active_normal_counts,
+            active_tangent_counts,
+        ) = _step_env_with_support_metrics(env, actions, foot_metrics)
         foot_counts[step] = counts
         foot_normal_impulses[step] = normal_impulses
         foot_tangent_impulses[step] = tangent_impulses
         foot_tangent_normal_ratios[step] = tangent_normal_ratios
+        foot_speculative_counts[step] = speculative_counts
+        foot_tangent_biases[step] = tangent_biases
+        foot_high_tangent_ratio_counts[step] = high_tangent_ratio_counts
+        foot_active_normal_counts[step] = active_normal_counts
+        foot_active_tangent_counts[step] = active_tangent_counts
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
 
     obs = env.obs.numpy()
@@ -239,6 +283,28 @@ def _run_setting(
     upright_cos = -obs[:, 5]
     support_normal_impulse = np.sum(foot_normal_impulses, axis=2)
     support_tangent_impulse = np.sum(foot_tangent_impulses, axis=2)
+    support_tangent_bias = np.sum(foot_tangent_biases, axis=2)
+    foot_speculative_fraction = np.divide(
+        foot_speculative_counts, foot_counts, out=np.zeros_like(foot_speculative_counts), where=foot_counts > 1.0e-12
+    )
+    foot_high_tangent_ratio_fraction = np.divide(
+        foot_high_tangent_ratio_counts,
+        foot_active_normal_counts,
+        out=np.zeros_like(foot_high_tangent_ratio_counts),
+        where=foot_active_normal_counts > 1.0e-12,
+    )
+    foot_active_normal_fraction = np.divide(
+        foot_active_normal_counts,
+        foot_counts,
+        out=np.zeros_like(foot_active_normal_counts),
+        where=foot_counts > 1.0e-12,
+    )
+    foot_active_tangent_fraction = np.divide(
+        foot_active_tangent_counts,
+        foot_active_normal_counts,
+        out=np.zeros_like(foot_active_tangent_counts),
+        where=foot_active_normal_counts > 1.0e-12,
+    )
 
     return {
         "setting": setting.name,
@@ -262,6 +328,12 @@ def _run_setting(
         "support_tangent_impulse_mean": float(np.mean(support_tangent_impulse)),
         "foot_tangent_normal_ratio_mean": float(np.mean(foot_tangent_normal_ratios)),
         "foot_tangent_normal_ratio_max": float(np.max(foot_tangent_normal_ratios)),
+        "foot_speculative_fraction_mean": float(np.mean(foot_speculative_fraction)),
+        "foot_speculative_fraction_max": float(np.max(foot_speculative_fraction)),
+        "support_tangent_bias_mean": float(np.mean(support_tangent_bias)),
+        "foot_high_tangent_ratio_fraction_mean": float(np.mean(foot_high_tangent_ratio_fraction)),
+        "foot_active_normal_fraction_mean": float(np.mean(foot_active_normal_fraction)),
+        "foot_active_tangent_fraction_mean": float(np.mean(foot_active_tangent_fraction)),
         "base_height_mean_m": float(np.mean(q[:, 2])),
         "base_height_min_m": float(np.min(q[:, 2])),
         "upright_cos_mean": float(np.mean(upright_cos)),
@@ -273,6 +345,11 @@ def _run_setting(
         "support_normal_impulse": support_normal_impulse,
         "support_tangent_impulse": support_tangent_impulse,
         "foot_tangent_normal_ratios": foot_tangent_normal_ratios,
+        "support_tangent_bias": support_tangent_bias,
+        "foot_speculative_fraction": foot_speculative_fraction,
+        "foot_high_tangent_ratio_fraction": foot_high_tangent_ratio_fraction,
+        "foot_active_normal_fraction": foot_active_normal_fraction,
+        "foot_active_tangent_fraction": foot_active_tangent_fraction,
     }
 
 
@@ -286,6 +363,11 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
     ref_support_normal = reference["support_normal_impulse"]
     ref_support_tangent = reference["support_tangent_impulse"]
     ref_tangent_normal_ratios = reference["foot_tangent_normal_ratios"]
+    ref_support_tangent_bias = reference["support_tangent_bias"]
+    ref_speculative_fraction = reference["foot_speculative_fraction"]
+    ref_high_tangent_ratio_fraction = reference["foot_high_tangent_ratio_fraction"]
+    ref_active_normal_fraction = reference["foot_active_normal_fraction"]
+    ref_active_tangent_fraction = reference["foot_active_tangent_fraction"]
     ref_tracking_ratio = reference["joint_tracking_ratio_mean"]
     for result in results:
         q = result["q"]
@@ -303,6 +385,11 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
         normal_impulse_err = result["support_normal_impulse"] - ref_support_normal
         tangent_impulse_err = result["support_tangent_impulse"] - ref_support_tangent
         tangent_normal_ratio_err = result["foot_tangent_normal_ratios"] - ref_tangent_normal_ratios
+        tangent_bias_err = result["support_tangent_bias"] - ref_support_tangent_bias
+        speculative_fraction_err = result["foot_speculative_fraction"] - ref_speculative_fraction
+        high_tangent_ratio_fraction_err = result["foot_high_tangent_ratio_fraction"] - ref_high_tangent_ratio_fraction
+        active_normal_fraction_err = result["foot_active_normal_fraction"] - ref_active_normal_fraction
+        active_tangent_fraction_err = result["foot_active_tangent_fraction"] - ref_active_tangent_fraction
         result["base_ref_rms"] = float(np.sqrt(np.mean(base_err * base_err)))
         result["foot_contact_count_ref_rmse"] = float(np.sqrt(np.mean(foot_count_err * foot_count_err)))
         result["support_normal_impulse_ref_rmse"] = float(np.sqrt(np.mean(normal_impulse_err * normal_impulse_err)))
@@ -313,6 +400,12 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
             np.sqrt(np.mean(tangent_normal_ratio_err * tangent_normal_ratio_err))
         )
         result["foot_tangent_normal_ratio_ref_delta_mean"] = float(np.mean(tangent_normal_ratio_err))
+        result["support_tangent_bias_ref_rmse"] = float(np.sqrt(np.mean(tangent_bias_err * tangent_bias_err)))
+        result["support_tangent_bias_ref_delta_mean"] = float(np.mean(tangent_bias_err))
+        result["foot_speculative_fraction_ref_delta_mean"] = float(np.mean(speculative_fraction_err))
+        result["foot_high_tangent_ratio_fraction_ref_delta_mean"] = float(np.mean(high_tangent_ratio_fraction_err))
+        result["foot_active_normal_fraction_ref_delta_mean"] = float(np.mean(active_normal_fraction_err))
+        result["foot_active_tangent_fraction_ref_delta_mean"] = float(np.mean(active_tangent_fraction_err))
         if ref_tracking_ratio is not None and result["joint_tracking_ratio_mean"] is not None:
             result["joint_tracking_ratio_ref_delta"] = float(result["joint_tracking_ratio_mean"] - ref_tracking_ratio)
         else:
@@ -323,6 +416,11 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
         del result["support_normal_impulse"]
         del result["support_tangent_impulse"]
         del result["foot_tangent_normal_ratios"]
+        del result["support_tangent_bias"]
+        del result["foot_speculative_fraction"]
+        del result["foot_high_tangent_ratio_fraction"]
+        del result["foot_active_normal_fraction"]
+        del result["foot_active_tangent_fraction"]
 
 
 def benchmark_g1_drive_convergence(args: argparse.Namespace) -> dict[str, Any]:

@@ -86,8 +86,23 @@ metric shows this is not simple friction-cone saturation: in the zero-action
 hold-pose sweep, mean tangent/normal ratio was `0.31` for `5x2`, `0.25` for
 `5x8`, `0.41` for `10x8`, and `0.54` for `20x8` with friction `0.6`. The coarse
 settings are using less of the available friction load, which points at
-substep-level tangential constraint convergence. The diagnostic timing includes
-deliberate metric readbacks and is not a throughput benchmark.
+substep-level tangential constraint convergence.
+
+A post-merge diagnostic pass after merging
+`origin/dev/tw4/contact_reduction_improvements` did not change the G1 foot-box
+path measurements. It added graph-captured foot-contact diagnostics for
+speculative rows, tangent bias, and high tangent-load usage. On the same leg-step
+sweep, speculative contact fraction was `0.0` for `5x2`, `10x8`, and `20x8`;
+active-normal fraction stayed near `0.99`; and active tangent fraction was `1.0`.
+The gap is therefore not currently explained by disabled speculative rows or
+missing active tangent rows. The strongest new signal is high tangent-load usage:
+`5x2` reached the high tangent/load threshold on only `0.14` of active foot rows,
+`10x8` reached `0.48`, and `20x8` reached `0.79`. Tangent bias was actually
+higher at `5x2` (`0.137` frame-sum mean) than the `20x8` reference (`0.036`), so
+the next solver investigation should focus on tangential constraint
+projection/convergence and load coupling rather than contact generation or
+speculative activation. The diagnostic timing includes deliberate metric
+readbacks and is not a throughput benchmark.
 
 ## nanoG1 Reference
 

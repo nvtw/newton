@@ -44,9 +44,14 @@ from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
+    G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT,
+    G1_FOOT_CONTACT_METRIC_ACTIVE_TANGENT_COUNT,
     G1_FOOT_CONTACT_METRIC_COUNT,
     G1_FOOT_CONTACT_METRIC_COUNT_TOTAL,
+    G1_FOOT_CONTACT_METRIC_HIGH_TANGENT_RATIO_COUNT,
     G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
+    G1_FOOT_CONTACT_METRIC_SPECULATIVE_COUNT,
+    G1_FOOT_CONTACT_METRIC_TANGENT_BIAS,
     G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE,
     G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM,
     scan_g1_foot_contact_metrics,
@@ -2537,11 +2542,23 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertGreater(metrics[0, 0, G1_FOOT_CONTACT_METRIC_COUNT], 0.0)
         self.assertGreater(metrics[0, 1, G1_FOOT_CONTACT_METRIC_COUNT], 0.0)
         self.assertGreater(float(np.sum(metrics[0, :, G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE])), 0.0)
+        foot_counts = metrics[0, :, G1_FOOT_CONTACT_METRIC_COUNT]
         self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE] >= 0.0))
         self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM] >= 0.0))
-        ratio_mean = (
-            metrics[0, :, G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM] / metrics[0, :, G1_FOOT_CONTACT_METRIC_COUNT]
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_SPECULATIVE_COUNT] >= 0.0))
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_SPECULATIVE_COUNT] <= foot_counts + 1.0e-5))
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_TANGENT_BIAS] >= 0.0))
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_HIGH_TANGENT_RATIO_COUNT] >= 0.0))
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT] >= 0.0))
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT] <= foot_counts + 1.0e-5))
+        self.assertTrue(np.all(metrics[0, :, G1_FOOT_CONTACT_METRIC_ACTIVE_TANGENT_COUNT] >= 0.0))
+        self.assertTrue(
+            np.all(
+                metrics[0, :, G1_FOOT_CONTACT_METRIC_HIGH_TANGENT_RATIO_COUNT]
+                <= metrics[0, :, G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT] + 1.0e-5
+            )
         )
+        ratio_mean = metrics[0, :, G1_FOOT_CONTACT_METRIC_TANGENT_NORMAL_RATIO_SUM] / foot_counts
         self.assertTrue(np.isfinite(ratio_mean).all())
 
     def test_observe_clamps_extreme_state_to_finite_metrics(self) -> None:
