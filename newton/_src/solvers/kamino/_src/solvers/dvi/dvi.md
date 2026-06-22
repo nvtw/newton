@@ -18,6 +18,7 @@ Last updated: June 22, 2026.
 - Sparse DVI now mirrors dense DVI's active bilateral dimension for repeated direct-block solves: worlds with no active limits/contacts keep the first bilateral result and skip later LLT solves.
 - Sparse DVI uses offset-owned fused limit/contact updates when sparse Jacobian offsets are available. This avoids rebuilding unilateral `v_aug` rows with atomics before applying the projected update.
 - For the focused sparse DR Legs benchmark, `bilateral_solve_period=2` is the best measured default so far. Period `1` spends too much time in repeated LLT solves; period `4` worsened contact/NCP residuals and was not faster in the measured accuracy run.
+- Lower sparse DR Legs budgets are useful only as speed presets, not quality defaults. `4x2` and `8x2` degraded contact/NCP quality; `12x2` was faster but still worsened natural-map and complementarity enough that the trusted focused default remains `16x2`.
 - Do not copy behavior-changing mraksha choices, such as tangential-only friction projection, unless Kamino intentionally changes its solver semantics.
 
 ## Failed Experiment

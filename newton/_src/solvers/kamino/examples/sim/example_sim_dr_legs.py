@@ -258,7 +258,7 @@ class Example:
             config.solver.dvi.tolerance = 1e-4
             config.solver.dvi.regularization = 1e-5
             config.solver.dvi.omega = 0.3
-            config.solver.dvi.block_iterations = 4
+            config.solver.dvi.block_iterations = 16
             config.solver.dvi.contact_iterations = 2
             config.solver.dvi.bilateral_solve_period = 2
             config.solver.dvi.contact_jacobi_omega = 0.25
