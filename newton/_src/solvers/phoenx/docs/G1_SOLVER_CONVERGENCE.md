@@ -4,6 +4,45 @@ This note records the current G1 solver-fidelity findings that matter for
 PhoenX RL. The goal is sim-to-real-useful training, so these settings prioritize
 physically credible drive/contact behavior over the fastest possible sample rate.
 
+## Current Status (2026-06-22)
+
+Physics parity is not sufficient yet. The latest full 75M-sample training run
+with nanoG1/Puffer V-trace parity still failed the quality gate
+(`battery_perf=0.302`, `battery_falls=393`) while retaining acceptable speed
+(`train_seconds=184.3`, `total_wall_seconds=200.0`, about 3.1x slower than the
+nanoG1 59 s reference). That points away from pure trainer throughput as the
+main blocker.
+
+Fresh 20-step open-loop comparisons against nanoG1 host physics show the
+current RL setting (`5x2`, 0.004 s physics dt, 2 position iterations, 1 velocity
+iteration) diverges over only 0.4 s:
+
+| action | setting | final base-pos error | base-z max error | joint-q traj RMS | joint-qd traj RMS |
+| --- | --- | ---: | ---: | ---: | ---: |
+| zero | `recipe_default` (`5x2`) | 0.0514 m | 0.0286 m | 0.0214 rad | 0.227 rad/s |
+| zero | `phoenx_10x8` | 0.0125 m | 0.0048 m | 0.0062 rad | 0.081 rad/s |
+| leg step, amp 0.2 | `recipe_default` (`5x2`) | 0.0543 m | 0.0291 m | 0.0244 rad | 0.298 rad/s |
+| leg step, amp 0.2 | `phoenx_10x8` | 0.0179 m | 0.0059 m | 0.0080 rad | 0.119 rad/s |
+
+The same leg-step drive-convergence sweep against a high-resolution PhoenX
+reference (`20x8`, 0.001 s physics dt) shows most of the remaining fast-setting
+error is solver/contact/drive convergence, not only a nanoG1-vs-PhoenX modeling
+constant mismatch:
+
+| setting | physics dt | iterations | base RMS vs ref | joint-q RMS vs ref | joint-qd RMS vs ref |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `rl_current` (`5x2`) | 0.004 | 2 + 1 | 0.0227 | 0.0215 rad | 0.424 rad/s |
+| `phoenx_5x4` | 0.004 | 4 + 1 | 0.0206 | 0.0158 rad | 0.240 rad/s |
+| `phoenx_10x4` | 0.002 | 4 + 1 | 0.0059 | 0.0090 rad | 0.062 rad/s |
+| `phoenx_10x8` | 0.002 | 8 + 2 | 0.0051 | 0.0082 rad | 0.053 rad/s |
+
+The next physics target is therefore not to lower accuracy for speed. It is to
+make the fast `5x2` formulation closer to the converged PhoenX/nanoG1 response,
+especially under stiff Unitree PD drives and foot contact. Candidate diagnostics:
+per-joint no-contact PD step response, grounded hold-pose contact impulse
+traces, per-foot normal/friction impulse totals, and reset-to-first-contact
+height/support evolution.
+
 ## nanoG1 Reference
 
 nanoG1 v3 uses the following production physics and drive setup:
