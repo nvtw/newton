@@ -26,6 +26,11 @@ from newton._src.solvers.kamino._src.models.builders import basics, testing
 from newton._src.solvers.kamino._src.models.builders import utils as builder_utils
 from newton._src.solvers.kamino._src.solvers.dvi import DVISolver
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import _color_dvi_contacts, _initialize_dvi_status
+from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
+    _SPARSE_DELASSUS_ROWS_JOINTS,
+    _SPARSE_DELASSUS_ROWS_UNILATERAL,
+    _sparse_delassus_matvec_rows,
+)
 from newton._src.solvers.kamino._src.solvers.padmm.types import PADMMWarmStartMode
 from newton._src.solvers.kamino._src.utils.benchmark.configs import (
     load_solver_configs_to_hdf5,
@@ -78,6 +83,19 @@ def _make_dense_dual_problem(model, data, limits, contacts, jacobians) -> DualPr
         jacobians=jacobians,
         solver=LLTBlockedSolver,
         sparse=False,
+    )
+    problem.build(model=model, data=data, limits=limits, contacts=contacts, jacobians=jacobians)
+    return problem
+
+
+def _make_sparse_dual_problem(model, data, limits, contacts, jacobians) -> DualProblem:
+    problem = DualProblem(
+        model=model,
+        data=data,
+        limits=limits,
+        contacts=contacts,
+        jacobians=jacobians,
+        sparse=True,
     )
     problem.build(model=model, data=data, limits=limits, contacts=contacts, jacobians=jacobians)
     return problem
@@ -350,6 +368,54 @@ class TestDVISolver(unittest.TestCase):
         self.assertLessEqual(int(status["iterations"]), _status_iteration_budget(solver, 0))
         self.assertTrue(np.all(np.isfinite(solver.data.solution.lambdas.numpy())))
         self.assertTrue(np.all(np.isfinite(solver.data.solution.v_plus.numpy())))
+
+    def test_03a_sparse_dvi_filtered_matvec_matches_full_rows(self):
+        builder = basics.build_box_on_plane()
+        model, data, state, limits, detector, jacobians = make_containers(
+            builder=builder,
+            device=self.device,
+            max_world_contacts=4,
+            sparse=True,
+        )
+        update_containers(
+            model=model,
+            data=data,
+            state=state,
+            limits=limits,
+            detector=detector,
+            jacobians=jacobians,
+        )
+        self.assertGreater(int(detector.contacts.model_active_contacts.numpy()[0]), 0)
+
+        problem = _make_sparse_dual_problem(model, data, limits, detector.contacts, jacobians)
+        solver = DVISolver(
+            model=model,
+            config=kamino_config.DVISolverConfig(
+                tolerance=0.0,
+                regularization=1e-5,
+                block_iterations=1,
+                contact_iterations=1,
+            ),
+            warmstart=PADMMWarmStartMode.NONE,
+        )
+        solver.reset()
+
+        lambdas = np.linspace(-0.25, 0.5, problem.data.v_f.shape[0], dtype=np.float32)
+        solver.data.solution.lambdas.assign(lambdas)
+
+        full = wp.zeros_like(problem.data.v_f)
+        problem.delassus.matvec(solver.data.solution.lambdas, full, solver.data.state.world_mask)
+        full_np = full.numpy()
+
+        _sparse_delassus_matvec_rows(solver, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
+        joint_np = solver.data.state.v_aug.numpy()
+        _sparse_delassus_matvec_rows(solver, problem, _SPARSE_DELASSUS_ROWS_UNILATERAL)
+        unilateral_np = solver.data.state.v_aug.numpy()
+
+        dim = int(problem.data.dim.numpy()[0])
+        njc = int(problem.data.njc.numpy()[0])
+        np.testing.assert_allclose(joint_np[:njc], full_np[:njc], rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(unilateral_np[njc:dim], full_np[njc:dim], rtol=1e-5, atol=1e-5)
 
     def test_03b_dvi_contact_block_preconditioner_smoke(self):
         builder = basics.build_boxes_hinged()

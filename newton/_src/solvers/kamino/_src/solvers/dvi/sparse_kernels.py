@@ -101,6 +101,70 @@ def _build_sparse_bilateral_rhs(
 
 
 @wp.kernel
+def _sparse_delassus_gemv_rows(
+    # Matrix data:
+    dims: wp.array2d[int32],
+    num_nzb: wp.array[int32],
+    nzb_start: wp.array[int32],
+    nzb_coords: wp.array2d[int32],
+    nzb_values: wp.array[vec6f],
+    row_start: wp.array[int32],
+    col_start: wp.array[int32],
+    # Row ranges:
+    problem_dim: wp.array[int32],
+    problem_njc: wp.array[int32],
+    row_kind: int32,
+    # Regularization:
+    eta: wp.array[float32],
+    # Vectors:
+    body_space: wp.array[float32],
+    y: wp.array[float32],
+    lambdas: wp.array[float32],
+    # Mask:
+    world_mask: wp.array[bool],
+):
+    wid, block_idx = wp.tid()
+
+    if not world_mask[wid]:
+        return
+
+    dim = problem_dim[wid]
+    njc = problem_njc[wid]
+
+    if block_idx < dim:
+        row = block_idx
+        row_active = row < njc
+        if row_kind == int32(1):
+            row_active = row >= njc
+        if row_active:
+            vec_idx = row_start[wid] + row
+            wp.atomic_add(y, vec_idx, eta[vec_idx] * lambdas[vec_idx])
+
+    if block_idx >= num_nzb[wid]:
+        return
+
+    global_block_idx = nzb_start[wid] + block_idx
+    block_coord = nzb_coords[global_block_idx]
+    row = block_coord[0]
+    if row < 0 or row >= dim:
+        return
+
+    row_active = row < njc
+    if row_kind == int32(1):
+        row_active = row >= njc
+    if not row_active:
+        return
+
+    block = nzb_values[global_block_idx]
+    x_idx_base = col_start[wid] + block_coord[1]
+    acc = float32(0.0)
+    for j in range(6):
+        acc += block[j] * body_space[x_idx_base + j]
+
+    wp.atomic_add(y, row_start[wid] + row, acc)
+
+
+@wp.kernel
 def _build_sparse_bilateral_block(
     # Inputs:
     model_info_bodies_offset: wp.array[int32],

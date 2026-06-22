@@ -18,10 +18,15 @@ from .sparse_kernels import (
     _set_sparse_bilateral_diagonal,
     _solve_dvi_sparse_jacobi_update,
     _solve_dvi_sparse_unilateral_jacobi_update,
+    _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
 )
 
 wp.set_module_options({"enable_backward": False})
+
+
+_SPARSE_DELASSUS_ROWS_JOINTS = 0
+_SPARSE_DELASSUS_ROWS_UNILATERAL = 1
 
 
 def solve_sparse(solver, problem: DualProblem) -> None:
@@ -122,6 +127,69 @@ def _compute_sparse_solution_vectors(solver, problem: DualProblem) -> None:
     )
 
 
+def _sparse_delassus_regularization(problem: DualProblem) -> wp.array | None:
+    combined_regularization = getattr(problem.delassus, "_combined_regularization", None)
+    if combined_regularization is not None:
+        return combined_regularization
+    return getattr(problem.delassus, "_eta", None)
+
+
+def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) -> None:
+    delassus = problem.delassus
+    state = solver._data.state
+    regularization = _sparse_delassus_regularization(problem)
+    transpose_matrix = getattr(delassus, "_transpose_op_matrix", None)
+    body_space = getattr(delassus, "_vec_temp_body_space", None)
+    bsm = getattr(delassus, "bsm", None)
+
+    if (
+        regularization is None
+        or transpose_matrix is None
+        or body_space is None
+        or bsm is None
+        or getattr(delassus, "ATy_op", None) is None
+    ):
+        delassus.matvec(
+            x=solver._data.solution.lambdas,
+            y=state.v_aug,
+            world_mask=state.world_mask,
+        )
+        return
+
+    if getattr(delassus, "_needs_update", False):
+        delassus.update()
+
+    delassus.ATy_op(
+        transpose_matrix,
+        solver._data.solution.lambdas,
+        body_space,
+        state.world_mask,
+    )
+    state.v_aug.zero_()
+    wp.launch(
+        kernel=_sparse_delassus_gemv_rows,
+        dim=(bsm.num_matrices, bsm.max_of_num_nzb),
+        inputs=[
+            bsm.dims,
+            bsm.num_nzb,
+            bsm.nzb_start,
+            bsm.nzb_coords,
+            bsm.nzb_values,
+            bsm.row_start,
+            bsm.col_start,
+            problem.data.dim,
+            problem.data.njc,
+            row_kind,
+            regularization,
+            body_space,
+            state.v_aug,
+            solver._data.solution.lambdas,
+            state.world_mask,
+        ],
+        device=solver.device,
+    )
+
+
 def _compute_sparse_contact_block_inverse(solver, problem: DualProblem) -> None:
     jacobian = problem.delassus.constraint_jacobian
     wp.launch(
@@ -208,11 +276,7 @@ def _solve_sparse_bilateral_block(solver, problem: DualProblem) -> None:
         ],
         device=solver.device,
     )
-    problem.delassus.matvec(
-        x=solver._data.solution.lambdas,
-        y=state.v_aug,
-        world_mask=state.world_mask,
-    )
+    _sparse_delassus_matvec_rows(solver, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
     wp.launch(
         kernel=_build_sparse_bilateral_rhs,
         dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),
@@ -263,11 +327,7 @@ def _solve_sparse_with_bilateral_direct_block(solver, problem: DualProblem) -> N
 
     for block_iteration in range(solver._max_block_iterations):
         for contact_iteration in range(solver._max_contact_iterations):
-            problem.delassus.matvec(
-                x=solver._data.solution.lambdas,
-                y=state.v_aug,
-                world_mask=state.world_mask,
-            )
+            _sparse_delassus_matvec_rows(solver, problem, _SPARSE_DELASSUS_ROWS_UNILATERAL)
             wp.launch(
                 kernel=_solve_dvi_sparse_unilateral_jacobi_update,
                 dim=(solver._size.num_worlds, solver._size.max_of_max_total_cts),
