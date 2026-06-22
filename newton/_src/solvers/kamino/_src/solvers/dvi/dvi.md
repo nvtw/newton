@@ -16,6 +16,7 @@ Last updated: June 22, 2026.
 - Prefactoring the bilateral robot block is already used: DVI factors the joint-joint block once per solve and reuses it for the direct bilateral re-solves.
 - The remaining hot path is the repeated sparse unilateral/contact sweep plus bilateral RHS rebuilds.
 - Sparse DVI now mirrors dense DVI's active bilateral dimension for repeated direct-block solves: worlds with no active limits/contacts keep the first bilateral result and skip later LLT solves.
+- Sparse DVI uses offset-owned fused limit/contact updates when sparse Jacobian offsets are available. This avoids rebuilding unilateral `v_aug` rows with atomics before applying the projected update.
 - For the focused sparse DR Legs benchmark, `bilateral_solve_period=2` is the best measured default so far. Period `1` spends too much time in repeated LLT solves; period `4` worsened contact/NCP residuals and was not faster in the measured accuracy run.
 - Do not copy behavior-changing mraksha choices, such as tangential-only friction projection, unless Kamino intentionally changes its solver semantics.
 
@@ -35,9 +36,11 @@ Last updated: June 22, 2026.
   - It passed focused tests but regressed DR Legs contact timing, so it was not kept.
 - Tried a graph-compatible device-side adaptive skip for repeated bilateral solves.
   - Aggressive thresholds improved one FPS run but hurt NCP/natural-map residuals; conservative thresholds were only a small noisy gain with extra launches/atomics, so this was not kept.
+- Tried merging the fused limit/contact updates into one kernel.
+  - It helped no-contact slightly but slowed the contact case, so the simpler separate fused kernels were kept.
 
 ## Next Hot-Path Targets
 
-- Target the contact/unilateral sweep first; small bilateral row-matvec filtering changes have not produced a measured win.
+- Target the contact/unilateral sweep first; offset-owned fused updates were a small measured win, while small bilateral row-matvec filtering changes have not helped.
 - Keep DVI-specific changes isolated in `solvers/dvi/`; existing Kamino files should stay minimally touched.
 - Measure every optimization against the committed sparse baseline before keeping it.

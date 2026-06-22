@@ -165,6 +165,199 @@ def _sparse_delassus_gemv_rows(
 
 
 @wp.kernel
+def _solve_dvi_sparse_limits_offset_update(
+    # Matrix data:
+    num_nzb: wp.array[int32],
+    nzb_start: wp.array[int32],
+    nzb_coords: wp.array2d[int32],
+    nzb_values: wp.array[vec6f],
+    row_start: wp.array[int32],
+    col_start: wp.array[int32],
+    # Active limits:
+    limits_model_active: wp.array[int32],
+    limits_wid: wp.array[int32],
+    limits_lid: wp.array[int32],
+    limits_nzb_offsets: wp.array[int32],
+    # Problem data:
+    problem_vio: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_lcgo: wp.array[int32],
+    problem_diag: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    eta: wp.array[float32],
+    body_space: wp.array[float32],
+    block_iteration: int32,
+    contact_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solution_lambdas: wp.array[float32],
+):
+    limit_id = wp.tid()
+    if limit_id >= limits_model_active[0]:
+        return
+
+    wid = limits_wid[limit_id]
+    cfg = solver_config[wid]
+    if block_iteration >= cfg.block_iterations or contact_iteration >= cfg.contact_iterations:
+        return
+
+    lid = limits_lid[limit_id]
+    if lid >= problem_nl[wid]:
+        return
+
+    row = problem_lcgo[wid] + lid
+    vec_idx = problem_vio[wid] + row
+    eta_idx = row_start[wid] + row
+    value = eta[eta_idx] * solution_lambdas[vec_idx]
+    matrix_end = nzb_start[wid] + num_nzb[wid]
+    nzb_offset = limits_nzb_offsets[limit_id]
+    for k in range(2):
+        nzb_idx = nzb_offset + k
+        if nzb_idx < matrix_end:
+            block_coord = nzb_coords[nzb_idx]
+            if block_coord[0] == row:
+                block = nzb_values[nzb_idx]
+                x_idx_base = col_start[wid] + block_coord[1]
+                for j in range(6):
+                    value += block[j] * body_space[x_idx_base + j]
+
+    v_i = value + problem_v_f[vec_idx]
+    P_i = problem_P[vec_idx]
+    D_ii_raw = wp.abs(problem_diag[vec_idx]) * P_i * P_i
+    D_ii = D_ii_raw + cfg.regularization + FLOAT32_EPS
+
+    lambda_limit_old = solution_lambdas[vec_idx]
+    lambda_limit_new = lambda_limit_old
+    if D_ii_raw > FLOAT32_EPS:
+        lambda_limit_new = wp.max(0.0, lambda_limit_old - cfg.omega * v_i / D_ii)
+    solution_lambdas[vec_idx] = lambda_limit_new
+
+
+@wp.kernel
+def _solve_dvi_sparse_contacts_offset_update(
+    # Matrix data:
+    num_nzb: wp.array[int32],
+    nzb_start: wp.array[int32],
+    nzb_coords: wp.array2d[int32],
+    nzb_values: wp.array[vec6f],
+    row_start: wp.array[int32],
+    col_start: wp.array[int32],
+    # Active contacts:
+    contacts_model_active: wp.array[int32],
+    contacts_wid: wp.array[int32],
+    contacts_cid: wp.array[int32],
+    contacts_nzb_offsets: wp.array[int32],
+    # Problem data:
+    problem_vio: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_diag: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    eta: wp.array[float32],
+    body_space: wp.array[float32],
+    contact_block_inv: wp.array[mat33f],
+    block_iteration: int32,
+    contact_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solution_lambdas: wp.array[float32],
+):
+    contact_id = wp.tid()
+    if contact_id >= contacts_model_active[0]:
+        return
+
+    wid = contacts_wid[contact_id]
+    cfg = solver_config[wid]
+    if block_iteration >= cfg.block_iterations or contact_iteration >= cfg.contact_iterations:
+        return
+
+    cid = contacts_cid[contact_id]
+    nc = problem_nc[wid]
+    if cid >= nc:
+        return
+
+    ccio = problem_ccgo[wid] + int32(3) * cid
+    row_0 = ccio + int32(0)
+    row_1 = ccio + int32(1)
+    row_2 = ccio + int32(2)
+    vio = problem_vio[wid]
+    ccio_v = vio + ccio
+    row_offset = row_start[wid]
+
+    value_0 = eta[row_offset + row_0] * solution_lambdas[ccio_v + 0]
+    value_1 = eta[row_offset + row_1] * solution_lambdas[ccio_v + 1]
+    value_2 = eta[row_offset + row_2] * solution_lambdas[ccio_v + 2]
+
+    matrix_end = nzb_start[wid] + num_nzb[wid]
+    nzb_offset = contacts_nzb_offsets[contact_id]
+    for k in range(6):
+        nzb_idx = nzb_offset + k
+        if nzb_idx < matrix_end:
+            block_coord = nzb_coords[nzb_idx]
+            row = block_coord[0]
+            if row == row_0 or row == row_1 or row == row_2:
+                block = nzb_values[nzb_idx]
+                x_idx_base = col_start[wid] + block_coord[1]
+                acc = float32(0.0)
+                for j in range(6):
+                    acc += block[j] * body_space[x_idx_base + j]
+                if row == row_0:
+                    value_0 += acc
+                elif row == row_1:
+                    value_1 += acc
+                else:
+                    value_2 += acc
+
+    mu_c = problem_mu[problem_cio[wid] + cid]
+    v_t0 = value_0 + problem_v_f[ccio_v + 0]
+    v_t1 = value_1 + problem_v_f[ccio_v + 1]
+    v_n = value_2 + problem_v_f[ccio_v + 2] + mu_c * wp.sqrt(v_t0 * v_t0 + v_t1 * v_t1)
+    v_c = vec3f(v_t0, v_t1, v_n)
+
+    P_0 = problem_P[ccio_v + 0]
+    P_1 = problem_P[ccio_v + 1]
+    P_2 = problem_P[ccio_v + 2]
+    D_00 = wp.abs(problem_diag[ccio_v + 0]) * P_0 * P_0
+    D_11 = wp.abs(problem_diag[ccio_v + 1]) * P_1 * P_1
+    D_22 = wp.abs(problem_diag[ccio_v + 2]) * P_2 * P_2
+
+    lambda_contact_old = vec3f(
+        solution_lambdas[ccio_v + 0],
+        solution_lambdas[ccio_v + 1],
+        solution_lambdas[ccio_v + 2],
+    )
+    D_diag = _contact_trace_preconditioner(vec3f(D_00, D_11, D_22))
+    if cfg.contact_block_preconditioner:
+        lambda_projected = _project_contact_block_update(
+            lambda_contact_old,
+            v_c,
+            D_diag,
+            contact_block_inv[problem_cio[wid] + cid],
+            cfg.regularization,
+            cfg.contact_jacobi_omega,
+            mu_c,
+        )
+    else:
+        lambda_projected = _project_contact_diagonal_update(
+            lambda_contact_old,
+            v_c,
+            D_diag,
+            cfg.regularization,
+            cfg.contact_jacobi_omega,
+            mu_c,
+        )
+    lambda_contact_new = lambda_contact_old + cfg.contact_jacobi_relaxation * (lambda_projected - lambda_contact_old)
+
+    solution_lambdas[ccio_v + 0] = lambda_contact_new.x
+    solution_lambdas[ccio_v + 1] = lambda_contact_new.y
+    solution_lambdas[ccio_v + 2] = lambda_contact_new.z
+
+
+@wp.kernel
 def _build_sparse_bilateral_block(
     # Inputs:
     model_info_bodies_offset: wp.array[int32],
