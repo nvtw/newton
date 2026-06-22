@@ -134,6 +134,15 @@ makes the imported policy the best near-term diagnostic for contact/drive/env
 parity: a policy known to walk in nanoG1 still degrades in PhoenX before any PPO
 fine-tuning is involved.
 
+A follow-up parity fix changed G1 observation, reward, and gate diagnostics to
+use body-frame root angular velocity, matching nanoG1's deployed IMU convention
+and Newton's other robot-policy examples. The graph-captured observation and
+reward decomposition tests now use non-identity root orientations to guard this
+contract. The same short imported-policy gate at `10x8` remained essentially
+unchanged after the fix (`battery_perf=0.732`, `battery_falls=21/4800`, previous
+short baseline `0.730`), so this was a correctness fix rather than the root
+cause of the remaining walking gap.
+
 The latest full quality-facing probe before the stability default change used
 4096 worlds, 64 rollout steps, the nanoG1-timed `5x2` recipe,
 graph-leapfrog execution, and one 75.2M sample chunk. It completed training in

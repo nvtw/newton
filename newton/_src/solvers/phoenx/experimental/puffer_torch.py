@@ -742,8 +742,9 @@ def _evaluate_g1_gate_battery_torch(
         q = _joint_q_matrix_g1(env)
         qd = _joint_qd_matrix_g1(env)
         lin_b = _quat_rotate_inverse_xyzw_np(q[:, 3:7], qd[:, 0:3])
+        ang_b = _quat_rotate_inverse_xyzw_np(q[:, 3:7], qd[:, 3:6])
         lin_err = np.linalg.norm(command_np[:, 0:2] - lin_b[:, 0:2], axis=1)
-        yaw_err = np.abs(command_np[:, 2] - qd[:, 5])
+        yaw_err = np.abs(command_np[:, 2] - ang_b[:, 2])
 
         falls += np.bincount(command_ids, weights=done_np.astype(np.float64), minlength=commands.shape[0]).astype(
             np.int64
@@ -807,11 +808,15 @@ def _evaluate_g1_gate_diagnostics_torch(
             previous_actions[valid] = actions_np[valid]
             has_previous[valid] = True
         has_previous[done_np] = False
+        q = _joint_q_matrix_g1(env)
         qd = _joint_qd_matrix_g1(env)
         if np.any(valid):
             qd_valid = qd[valid]
-            ang_vel_xy_sum += float(np.sum(qd_valid[:, 3] * qd_valid[:, 3] + qd_valid[:, 4] * qd_valid[:, 4]))
-            yaw_rate_sum += float(np.sum(qd_valid[:, 5] * qd_valid[:, 5]))
+            ang_b_valid = _quat_rotate_inverse_xyzw_np(q[valid, 3:7], qd_valid[:, 3:6])
+            ang_vel_xy_sum += float(
+                np.sum(ang_b_valid[:, 0] * ang_b_valid[:, 0] + ang_b_valid[:, 1] * ang_b_valid[:, 1])
+            )
+            yaw_rate_sum += float(np.sum(ang_b_valid[:, 2] * ang_b_valid[:, 2]))
             leg_qvel = qd_valid[:, 6:18]
             leg_qvel_sum += float(np.sum(leg_qvel * leg_qvel))
             leg_qvel_count += int(leg_qvel.size)

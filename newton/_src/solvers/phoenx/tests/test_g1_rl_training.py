@@ -453,8 +453,9 @@ def _reference_obs_from_nanog1_deploy(
     # The deploy helper consumes the Unitree IMU convention, so use the
     # conjugate to compare the same projected-gravity observation.
     unitree_quat_wxyz = np.asarray((q[6], -q[3], -q[4], -q[5]), dtype=np.float64)
+    ang_b = _quat_rotate_inverse_xyzw_np(q[3:7].reshape(1, 4), qd[3:6].reshape(1, 3))[0]
     phase = 2.0 * math.pi * float(episode_step % deploy.PHASE_PERIOD) / float(deploy.PHASE_PERIOD)
-    obs[0:3] = np.float32(deploy.ANG_VEL_SCALE) * qd[3:6]
+    obs[0:3] = np.float32(deploy.ANG_VEL_SCALE) * ang_b
     obs[3:6] = deploy.projected_gravity(unitree_quat_wxyz).astype(np.float32)
     obs[6:9] = command
     obs[9:38] = q[7 : 7 + rl.ACTION_DIM_G1] - deploy.HOME.astype(np.float32)
@@ -647,7 +648,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         with wp.ScopedCapture(device=env.device) as capture:
             env.observe()
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(env.device)
 
         expected = _reference_obs_from_nanog1_deploy(deploy, q, qd, command, prev_action, episode_step)
         np.testing.assert_allclose(env.obs.numpy()[0], expected, rtol=1.0e-6, atol=1.0e-6)
@@ -3111,7 +3111,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         default_joint_pos = env.default_joint_pos.numpy()
         q[:] = 0.0
         q[2] = 0.79
-        q[6] = 1.0
+        yaw_half_angle = np.float32(0.25 * np.pi)
+        q[3:7] = np.asarray((0.0, 0.0, np.sin(yaw_half_angle), np.cos(yaw_half_angle)), dtype=np.float32)
         joint_delta = np.linspace(-0.015, 0.015, rl.ACTION_DIM_G1, dtype=np.float32)
         q[7 : 7 + rl.ACTION_DIM_G1] = default_joint_pos + joint_delta
         qd[:] = 0.0
@@ -3153,8 +3154,10 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         body_q = env.state_0.body_q.numpy()
         right_foot_z = float(body_q[env._right_foot_body_local, 2])
-        lin_b = qd[0:3]
-        ang = qd[3:6]
+        lin_b = _quat_rotate_inverse_xyzw_np(q[3:7].reshape(1, 4), qd[0:3].reshape(1, 3))[0]
+        ang = _quat_rotate_inverse_xyzw_np(q[3:7].reshape(1, 4), qd[3:6].reshape(1, 3))[0]
+        self.assertGreater(float(np.linalg.norm(lin_b - qd[0:3])), 0.1)
+        self.assertGreater(float(np.linalg.norm(ang - qd[3:6])), 0.1)
         vx_err = command_np[0, 0] - lin_b[0]
         vy_err = command_np[0, 1] - lin_b[1]
         yaw_err = command_np[0, 2] - ang[2]

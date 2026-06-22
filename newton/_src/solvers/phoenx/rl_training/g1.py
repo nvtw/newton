@@ -787,12 +787,13 @@ def g1_observe_reward_kernel(
     qz = joint_q[q_base + wp.int32(5)]
     qw = joint_q[q_base + wp.int32(6)]
     lin_w = wp.vec3(joint_qd[qd_base], joint_qd[qd_base + wp.int32(1)], joint_qd[qd_base + wp.int32(2)])
-    ang = wp.vec3(
+    ang_w = wp.vec3(
         joint_qd[qd_base + wp.int32(3)],
         joint_qd[qd_base + wp.int32(4)],
         joint_qd[qd_base + wp.int32(5)],
     )
     lin_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, lin_w)
+    ang_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, ang_w)
     gravity_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, wp.vec3(0.0, 0.0, -1.0))
 
     state_bad = wp.int32(0)
@@ -803,7 +804,7 @@ def g1_observe_reward_kernel(
 
     value = wp.float32(0.0)
     if col < wp.int32(3):
-        value = wp.float32(0.25) * _clip_finite(ang[col], wp.float32(-40.0), wp.float32(40.0))
+        value = wp.float32(0.25) * _clip_finite(ang_b[col], wp.float32(-40.0), wp.float32(40.0))
     elif col < wp.int32(6):
         value = _clip_finite(gravity_b[col - wp.int32(3)], wp.float32(-1.0), wp.float32(1.0))
     elif col < wp.int32(9):
@@ -834,9 +835,9 @@ def g1_observe_reward_kernel(
         lin_b_x = _clip_finite(lin_b[0], wp.float32(-50.0), wp.float32(50.0))
         lin_b_y = _clip_finite(lin_b[1], wp.float32(-50.0), wp.float32(50.0))
         lin_b_z = _clip_finite(lin_b[2], wp.float32(-50.0), wp.float32(50.0))
-        ang_x = _clip_finite(ang[0], wp.float32(-50.0), wp.float32(50.0))
-        ang_y = _clip_finite(ang[1], wp.float32(-50.0), wp.float32(50.0))
-        ang_z = _clip_finite(ang[2], wp.float32(-50.0), wp.float32(50.0))
+        ang_x = _clip_finite(ang_b[0], wp.float32(-50.0), wp.float32(50.0))
+        ang_y = _clip_finite(ang_b[1], wp.float32(-50.0), wp.float32(50.0))
+        ang_z = _clip_finite(ang_b[2], wp.float32(-50.0), wp.float32(50.0))
         gravity_x = _clip_finite(gravity_b[0], wp.float32(-1.0), wp.float32(1.0))
         gravity_y = _clip_finite(gravity_b[1], wp.float32(-1.0), wp.float32(1.0))
         gravity_z = _clip_finite(gravity_b[2], wp.float32(-1.0), wp.float32(1.0))
