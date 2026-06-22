@@ -25,7 +25,7 @@ class Example:
         self.world_count = args.world_count if args else 1
         self.use_kamino_contacts = args.use_kamino_contacts if args else False
         self.dynamics_solver = args.dynamics_solver if args else "padmm"
-        target_sim_dt = 0.001 if self.dynamics_solver == "dvi" else 0.01
+        target_sim_dt = self.frame_dt / 12 if self.dynamics_solver == "dvi" else 0.01
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.dvi_contact_block_preconditioner = bool(getattr(args, "dvi_contact_block_preconditioner", False))
@@ -81,15 +81,23 @@ class Example:
         self.config.padmm.compl_tolerance = 1e-4
         if self.dynamics_solver == "dvi":
             self.config.use_fk_solver = False
+            self.config.integrator = "moreau"
+            self.config.constraints.alpha = 0.1
+            self.config.constraints.beta = 0.011
+            self.config.constraints.gamma = 0.05
             self.config.constraints.contact_recovery_speed = 1.0
             self.config.dynamics.preconditioning = False
-            self.config.sparse_dynamics = False
-            self.config.sparse_jacobian = False
+            self.config.dynamics.linear_solver_type = "CR"
+            self.config.dynamics.linear_solver_kwargs = {"maxiter": 9}
+            self.config.sparse_dynamics = True
+            self.config.sparse_jacobian = True
             self.config.dvi.max_iterations = 200
             self.config.dvi.tolerance = 1e-4
             self.config.dvi.regularization = 1e-5
-            self.config.dvi.block_iterations = 32
-            self.config.dvi.contact_iterations = 4
+            self.config.dvi.omega = 0.3
+            self.config.dvi.block_iterations = 4
+            self.config.dvi.contact_iterations = 2
+            self.config.dvi.bilateral_solve_period = 2
             self.config.dvi.contact_jacobi_omega = self.dvi_contact_jacobi_omega
             self.config.dvi.contact_jacobi_relaxation = self.dvi_contact_jacobi_relaxation
             self.config.dvi.contact_block_preconditioner = self.dvi_contact_block_preconditioner
@@ -204,7 +212,7 @@ class Example:
         parser.add_argument(
             "--dvi-contact-jacobi-omega",
             type=float,
-            default=0.3,
+            default=0.25,
             help="Step size for Kamino DVI non-colored contact Jacobi and block-preconditioned contact updates.",
         )
         parser.add_argument(
