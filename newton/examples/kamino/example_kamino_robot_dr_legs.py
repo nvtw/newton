@@ -29,7 +29,7 @@ class Example:
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.dvi_contact_block_preconditioner = bool(getattr(args, "dvi_contact_block_preconditioner", False))
-        self.dvi_contact_jacobi_omega = float(getattr(args, "dvi_contact_jacobi_omega", 0.3))
+        self.dvi_contact_jacobi_omega = float(getattr(args, "dvi_contact_jacobi_omega", 0.25))
         self.dvi_contact_jacobi_relaxation = float(getattr(args, "dvi_contact_jacobi_relaxation", 0.9))
         self.viewer = viewer
         self.device = wp.get_device()
@@ -97,7 +97,7 @@ class Example:
             self.config.dvi.omega = 0.3
             self.config.dvi.block_iterations = 4
             self.config.dvi.contact_iterations = 2
-            self.config.dvi.bilateral_solve_period = 2
+            self.config.dvi.bilateral_solve_period = 1
             self.config.dvi.contact_jacobi_omega = self.dvi_contact_jacobi_omega
             self.config.dvi.contact_jacobi_relaxation = self.dvi_contact_jacobi_relaxation
             self.config.dvi.contact_block_preconditioner = self.dvi_contact_block_preconditioner

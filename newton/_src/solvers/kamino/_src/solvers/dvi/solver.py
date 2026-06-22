@@ -16,7 +16,6 @@ from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
 from ...linalg import DenseLinearOperatorData, DenseSquareMultiLinearInfo, LLTBlockedSolver
-from ..base import ForwardDynamicsSolver
 from ..padmm.kernels import (
     _apply_dual_preconditioner_to_solution,
     _warmstart_contact_constraints,
@@ -26,7 +25,6 @@ from ..padmm.kernels import (
 from ..padmm.types import PADMMWarmStartMode
 from .kernels import (
     _apply_dvi_contact_jacobi_delta,
-    _build_bilateral_free_velocity_rhs,
     _build_bilateral_rhs,
     _color_dvi_contacts,
     _compute_dvi_contact_block_inverse,
@@ -52,7 +50,7 @@ from .types import DVIConfigStruct, DVIData, convert_config_to_struct
 wp.set_module_options({"enable_backward": False})
 
 
-class DVISolver(ForwardDynamicsSolver):
+class DVISolver:
     """Projected Gauss-Seidel DVI solver for Kamino ``DualProblem`` systems."""
 
     Config = DVISolverConfig
@@ -434,24 +432,6 @@ class DVISolver(ForwardDynamicsSolver):
             device=self.device,
         )
         self._bilateral_solver.compute(A=operator.mat)
-
-    def _solve_bilateral_free_velocity(self, problem: DualProblem):
-        operator = self._data.bilateral_operator
-        state = self._data.state
-        wp.launch(
-            kernel=_build_bilateral_free_velocity_rhs,
-            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
-            inputs=[
-                problem.data.vio,
-                problem.data.njc,
-                problem.data.v_f,
-                operator.info.vio,
-                state.bilateral_preconditioner,
-                state.bilateral_rhs,
-            ],
-            device=self.device,
-        )
-        self._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
 
     def _solve_with_bilateral_direct_block(self, problem: DualProblem):
         self._factor_bilateral_block(problem)

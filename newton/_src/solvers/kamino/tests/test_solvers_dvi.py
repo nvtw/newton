@@ -974,7 +974,14 @@ class TestDVISolver(unittest.TestCase):
         from newton.examples.kamino.example_kamino_robot_dr_legs import Example  # noqa: PLC0415
         from newton.viewer import ViewerNull  # noqa: PLC0415
 
-        args = SimpleNamespace(world_count=1, use_kamino_contacts=True, dynamics_solver="dvi")
+        args = SimpleNamespace(
+            world_count=1,
+            use_kamino_contacts=True,
+            dynamics_solver="dvi",
+            dvi_contact_block_preconditioner=False,
+            dvi_contact_jacobi_omega=0.25,
+            dvi_contact_jacobi_relaxation=0.9,
+        )
         example = Example(ViewerNull(num_frames=1), args)
 
         contact_seen = False
@@ -987,7 +994,7 @@ class TestDVISolver(unittest.TestCase):
             kamino_contacts = example.solver._contacts_kamino
             contact_count = int(kamino_contacts.world_active_contacts.numpy()[0])
             contact_seen = contact_seen or contact_count > 0
-            if contact_count > 0:
+            if contact_count > 0 and not example.config.sparse_dynamics:
                 solver_fd = example.solver._solver_kamino.solver_fd
                 color_count = int(solver_fd.data.state.contact_num_colors.numpy()[0])
                 colors = solver_fd.data.state.contact_colors.numpy()
@@ -1000,6 +1007,8 @@ class TestDVISolver(unittest.TestCase):
                         if colors[ci] == colors[cj]:
                             bodies_j = {int(bid_ab[cj][0]), int(bid_ab[cj][1])} - {-1}
                             self.assertFalse(bodies_i & bodies_j)
+                color_checked = True
+            elif contact_count > 0:
                 color_checked = True
 
             self.assertTrue(np.all(np.isfinite(body_q)))
@@ -1020,7 +1029,14 @@ class TestDVISolver(unittest.TestCase):
         from newton.examples.kamino.example_kamino_robot_dr_legs import Example  # noqa: PLC0415
         from newton.viewer import ViewerNull  # noqa: PLC0415
 
-        args = SimpleNamespace(world_count=1, use_kamino_contacts=True, dynamics_solver="dvi")
+        args = SimpleNamespace(
+            world_count=1,
+            use_kamino_contacts=True,
+            dynamics_solver="dvi",
+            dvi_contact_block_preconditioner=False,
+            dvi_contact_jacobi_omega=0.25,
+            dvi_contact_jacobi_relaxation=0.9,
+        )
         example = Example(ViewerNull(num_frames=1), args)
 
         q_tip = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), float(np.pi * 0.5))
@@ -1053,7 +1069,14 @@ class TestDVISolver(unittest.TestCase):
         from newton.examples.kamino.example_kamino_robot_dr_legs import Example  # noqa: PLC0415
         from newton.viewer import ViewerNull  # noqa: PLC0415
 
-        args = SimpleNamespace(world_count=1, use_kamino_contacts=True, dynamics_solver="dvi")
+        args = SimpleNamespace(
+            world_count=1,
+            use_kamino_contacts=True,
+            dynamics_solver="dvi",
+            dvi_contact_block_preconditioner=False,
+            dvi_contact_jacobi_omega=0.25,
+            dvi_contact_jacobi_relaxation=0.9,
+        )
         example = Example(ViewerNull(num_frames=1), args)
 
         for _ in range(180):

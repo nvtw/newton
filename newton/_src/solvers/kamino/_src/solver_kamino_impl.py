@@ -57,7 +57,6 @@ from .kinematics.resets import (
     set_joint_state_masked,
 )
 from .linalg import ConjugateResidualSolver, IterativeSolver, LinearSolverNameToType
-from .solvers.base import ForwardDynamicsSolver
 from .solvers.dvi import DVISolver
 from .solvers.fk import ForwardKinematicsSolver
 from .solvers.metrics import SolutionMetrics
@@ -341,7 +340,7 @@ class SolverKaminoImpl(SolverBase):
         return self._problem_fd
 
     @property
-    def solver_fd(self) -> ForwardDynamicsSolver:
+    def solver_fd(self) -> PADMMSolver | DVISolver:
         """
         Returns the forward dynamics solver.
         """
