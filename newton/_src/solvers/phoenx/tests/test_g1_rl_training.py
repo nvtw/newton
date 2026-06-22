@@ -555,8 +555,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(g1_recipe.ROLLOUT_STEPS, int(recipe["train.horizon"]))
         self.assertAlmostEqual(g1_recipe.MAX_GRAD_NORM, float(recipe["train.max_grad_norm"]))
         self.assertAlmostEqual(g1_recipe.MIRROR_LOSS_COEFF, float(mirror_match.group(1)))
-        self.assertFalse(g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START)
-        self.assertFalse(rl.ConfigTrainG1PPO().reset_recurrent_state_on_rollout_start)
+        self.assertTrue(g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START)
+        self.assertTrue(rl.ConfigTrainG1PPO().reset_recurrent_state_on_rollout_start)
 
     def test_nanog1_model_and_deploy_constants_match_env(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 nanoG1 constant parity tests")
@@ -1576,6 +1576,60 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(buffer.actions.numpy(), preserved_expected, rtol=1.0e-5, atol=1.0e-5)
         np.testing.assert_array_equal(seed_counter.numpy(), np.array([12], dtype=np.int32))
 
+    def test_recurrent_rollout_reset_keeps_update_replay_consistent_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX recurrent PPO update replay tests")
+        env = _ConstantPPOEnv(world_count=2, obs_dim=3, action_dim=1, device=device)
+        buffer = rl.BufferRollout(
+            num_steps=2, num_envs=env.world_count, obs_dim=env.obs_dim, action_dim=1, device=device
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=env.obs_dim,
+            action_dim=env.action_dim,
+            hidden_layers=(2,),
+            config=rl.ConfigPPO(
+                gamma=0.9,
+                gae_lambda=0.8,
+                shared_value_network=True,
+                policy_network="puffer_mingru",
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+            ),
+            device=device,
+            seed=3,
+            squash_actions=False,
+            log_std_init=-5.0,
+        )
+        trainer.actor.net.encoder_weight.assign(np.asarray([[0.7, -0.2], [0.1, 0.5], [-0.3, 0.4]], dtype=np.float32))
+        trainer.actor.net.recurrent_weights[0].assign(
+            np.asarray([[0.2, -0.1, 0.5, -0.4, 0.6, -0.3], [-0.3, 0.4, -0.2, 0.7, -0.5, 0.2]], dtype=np.float32)
+        )
+        trainer.actor.net.decoder_weight.assign(np.asarray([[0.6, 0.2], [-0.4, 0.3]], dtype=np.float32))
+        trainer.reserve_update_buffers(buffer)
+
+        trainer.reset_rollout_state()
+        trainer.act_reuse(env.obs, seed=7)
+        seed_counter = make_seed_counter(11, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            collect_ppo_rollout_seed_counter(env, trainer, buffer, seed_counter=seed_counter)
+            reset_replay = trainer._policy_update_reuse(buffer.obs, buffer)
+        wp.capture_launch(capture.graph)
+        reset_values = buffer.values.numpy()[: buffer.num_samples].copy()
+        reset_replay_values = reset_replay.numpy()[: buffer.num_samples, trainer.value_column].copy()
+        np.testing.assert_allclose(reset_values, reset_replay_values, rtol=1.0e-6, atol=1.0e-6)
+
+        trainer.reset_rollout_state()
+        trainer.act_reuse(env.obs, seed=7)
+        seed_counter = make_seed_counter(11, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            collect_ppo_rollout_seed_counter(
+                env, trainer, buffer, seed_counter=seed_counter, reset_state_at_start=False
+            )
+            preserved_replay = trainer._policy_update_reuse(buffer.obs, buffer)
+        wp.capture_launch(capture.graph)
+        preserved_values = buffer.values.numpy()[: buffer.num_samples].copy()
+        preserved_replay_values = preserved_replay.numpy()[: buffer.num_samples, trainer.value_column].copy()
+        self.assertFalse(np.allclose(preserved_values, preserved_replay_values, rtol=1.0e-5, atol=1.0e-5))
+
     def test_puffer_mingru_forward_and_reset_match_numpy_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 MinGRU network tests")
         models_py = _PUFFERLIB_ROOT / "pufferlib" / "models.py"
@@ -2188,6 +2242,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.base_height_target, g1_recipe.BASE_HEIGHT_TARGET)
         self.assertEqual(env_config.rigid_contact_max_per_world, g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env_config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
+        self.assertTrue(train_config.reset_recurrent_state_on_rollout_start)
         self.assertEqual(env_config.contact_geometry, "nanog1_foot_boxes")
         self.assertEqual(env_config.threads_per_world, g1_recipe.THREADS_PER_WORLD)
         self.assertEqual(env_config.multi_world_scheduler, g1_recipe.MULTI_WORLD_SCHEDULER)
@@ -3727,6 +3782,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 optimizer_weight_decay=g1_recipe.OPTIMIZER_WEIGHT_DECAY,
                 muon_momentum=g1_recipe.MUON_MOMENTUM,
                 squash_actions=g1_recipe.SQUASH_ACTIONS,
+                reset_recurrent_state_on_rollout_start=g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START,
                 command_x=0.8,
                 command_y=0.0,
                 command_yaw=0.0,
@@ -3795,6 +3851,10 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(result["execution_mode"], "graph_leapfrog")
             self.assertFalse(result["readback_diagnostics"])
             self.assertEqual(result["squash_actions"], g1_recipe.SQUASH_ACTIONS)
+            self.assertEqual(
+                result["reset_recurrent_state_on_rollout_start"],
+                g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START,
+            )
             self.assertEqual(result["value_loss_coeff"], g1_recipe.VALUE_LOSS_COEFF)
             self.assertEqual(result["value_clip_range"], g1_recipe.VALUE_CLIP_RANGE)
             self.assertEqual(result["actor_lr"], g1_recipe.ACTOR_LR)

@@ -79,10 +79,11 @@ benchmark defaults read from the same constants.
 - Default G1 PPO uses nanoG1's N1 left/right mirror regularization with
   `mirror_loss_coeff=0.25`, implemented through the reusable Warp PPO mirror-map
   hook and the validated G1 observation/action mirror map from the pinned fork.
-- G1 keeps PufferMinGRU rollout state across rollout chunks by default
-  (`RESET_RECURRENT_STATE_ON_ROLLOUT_START=False`), matching the pinned
-  PufferLib `reset_state=False` training path. Done flags still clear recurrent
-  state per environment during rollout collection.
+- G1 clears PufferMinGRU rollout state at PPO rollout boundaries by default
+  (`RESET_RECURRENT_STATE_ON_ROLLOUT_START=True`). This keeps rollout log-probs
+  and PPO update replay consistent until the rollout buffer stores per-chunk
+  initial recurrent states. Done flags still clear recurrent state per
+  environment during rollout collection.
 - Default G1 PPO uses BF16 inputs with FP32 accumulation for manual CUDA MLP
   weight-gradient tile matmul, plus BF16 hidden-layer forward tile matmul for
   large PPO minibatches. This follows PufferLib's default precision direction

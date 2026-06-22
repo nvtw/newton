@@ -249,6 +249,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         randomize_commands=not bool(args.no_command_randomization),
         command_curriculum_start=float(args.command_curriculum_start),
         command_curriculum_samples=int(args.command_curriculum_samples),
+        reset_recurrent_state_on_rollout_start=bool(args.reset_recurrent_state_on_rollout_start),
         squash_actions=bool(args.squash_actions),
         readback_diagnostics=not bool(args.no_readback_diagnostics),
         execution_mode=str(args.execution_mode),
@@ -309,6 +310,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "squash_actions": bool(args.squash_actions),
         "command_curriculum_start": float(args.command_curriculum_start),
         "command_curriculum_samples": int(args.command_curriculum_samples),
+        "reset_recurrent_state_on_rollout_start": bool(args.reset_recurrent_state_on_rollout_start),
         "readback_diagnostics": not bool(args.no_readback_diagnostics),
         "execution_mode": str(args.execution_mode),
         "sim_substeps": int(args.sim_substeps),
@@ -411,6 +413,12 @@ def _parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=g1_recipe.SQUASH_ACTIONS,
         help="Use tanh-squashed PPO actions instead of the nanoG1-compatible raw Gaussian policy.",
+    )
+    parser.add_argument(
+        "--reset-recurrent-state-on-rollout-start",
+        action=argparse.BooleanOptionalAction,
+        default=g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START,
+        help="Clear recurrent policy state at each PPO rollout boundary.",
     )
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
