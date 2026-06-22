@@ -57,11 +57,21 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         reward_mode=str(args.reward_mode),
         w_alive=float(args.w_alive),
         w_track_lin=float(args.w_track_lin),
+        w_track_ang=float(args.w_track_ang),
+        w_lin_vel_z=float(args.w_lin_vel_z),
+        w_ang_vel_xy=float(args.w_ang_vel_xy),
+        w_orientation=float(args.w_orientation),
+        w_torque=float(args.w_torque),
+        w_action_rate=float(args.w_action_rate),
         w_sparse_command_success=float(args.w_sparse_command_success),
         sparse_command_velocity_tolerance=float(args.sparse_command_velocity_tolerance),
         sparse_command_yaw_tolerance=float(args.sparse_command_yaw_tolerance),
         w_mechanical_power=float(args.w_mechanical_power),
+        w_gait_contact=float(args.w_gait_contact),
+        w_gait_swing=float(args.w_gait_swing),
         w_gait_swing_contact=float(args.w_gait_swing_contact),
+        w_gait_hip=float(args.w_gait_hip),
+        w_base_height=float(args.w_base_height),
         parse_meshes=bool(args.parse_meshes),
         contact_geometry=str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
         rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
@@ -122,8 +132,16 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
 
     train_seconds = 0.0
     gate_seconds = 0.0
+    resume_checkpoint: str | None = str(args.resume_checkpoint) if args.resume_checkpoint is not None else None
     completed_iterations = 0
-    resume_checkpoint: str | None = None
+    if resume_checkpoint is not None:
+        completed_iterations = int(
+            rl.load_ppo_checkpoint(resume_checkpoint, config=ppo_config, device=device).iteration
+        )
+        if completed_iterations >= int(args.max_iterations):
+            raise ValueError("max_iterations must exceed the resumed checkpoint iteration")
+    start_iterations = int(completed_iterations)
+    start_samples = _samples_for_iteration(args, start_iterations)
     gate_history: list[dict[str, Any]] = []
     train_history: list[dict[str, Any]] = []
     first_pass: dict[str, Any] | None = None
@@ -146,6 +164,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 command_x_range=tuple(float(v) for v in args.command_x_range),
                 command_y_range=tuple(float(v) for v in args.command_y_range),
                 command_yaw_range=tuple(float(v) for v in args.command_yaw_range),
+                command_zero_probability=float(args.command_zero_probability),
                 command_curriculum_start=command_curriculum_start,
                 command_curriculum_samples=command_curriculum_samples,
                 squash_actions=bool(args.squash_actions),
@@ -199,8 +218,9 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
 
     total_seconds = max(time.perf_counter() - total_t0, 1.0e-12)
     trained_samples = _samples_for_iteration(args, completed_iterations)
-    train_sps = float(trained_samples) / max(train_seconds, 1.0e-12)
-    total_sps = float(trained_samples) / total_seconds
+    new_trained_samples = max(0, int(trained_samples) - int(start_samples))
+    train_sps = float(new_trained_samples) / max(train_seconds, 1.0e-12)
+    total_sps = float(new_trained_samples) / total_seconds
     estimated_target_train_seconds = float(args.target_samples) / max(train_sps, 1.0e-12)
     estimated_target_total_seconds = float(args.target_samples) / max(total_sps, 1.0e-12)
     pass_gate = first_pass is not None
@@ -216,13 +236,24 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "reward_mode": str(args.reward_mode),
         "w_alive": float(args.w_alive),
         "w_track_lin": float(args.w_track_lin),
+        "w_track_ang": float(args.w_track_ang),
+        "w_lin_vel_z": float(args.w_lin_vel_z),
+        "w_ang_vel_xy": float(args.w_ang_vel_xy),
+        "w_orientation": float(args.w_orientation),
+        "w_torque": float(args.w_torque),
+        "w_action_rate": float(args.w_action_rate),
         "w_sparse_command_success": float(args.w_sparse_command_success),
         "sparse_command_velocity_tolerance": float(args.sparse_command_velocity_tolerance),
         "sparse_command_yaw_tolerance": float(args.sparse_command_yaw_tolerance),
         "w_mechanical_power": float(args.w_mechanical_power),
+        "w_gait_contact": float(args.w_gait_contact),
+        "w_gait_swing": float(args.w_gait_swing),
         "w_gait_swing_contact": float(args.w_gait_swing_contact),
+        "w_gait_hip": float(args.w_gait_hip),
+        "w_base_height": float(args.w_base_height),
         "command_curriculum_start": float(command_curriculum_start),
         "command_curriculum_samples": int(command_curriculum_samples),
+        "command_zero_probability": float(args.command_zero_probability),
         "value_loss_coeff": float(args.value_loss_coeff),
         "value_clip_range": float(args.value_clip_range),
         "optimizer": str(args.optimizer),
@@ -231,8 +262,11 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "muon_momentum": float(args.muon_momentum),
         "max_iterations": int(args.max_iterations),
         "chunk_iterations": int(args.chunk_iterations),
+        "start_iterations": int(start_iterations),
         "completed_iterations": int(completed_iterations),
+        "start_samples": int(start_samples),
         "trained_samples": int(trained_samples),
+        "new_trained_samples": int(new_trained_samples),
         "target_samples": int(args.target_samples),
         "train_seconds": float(train_seconds),
         "gate_seconds": float(gate_seconds),
@@ -324,6 +358,7 @@ def _parse_args() -> argparse.Namespace:
         default=g1_recipe.COMMAND_CURRICULUM_SAMPLES,
         help="Samples used to ramp randomized G1 commands to full range; 0 disables the ramp.",
     )
+    parser.add_argument("--command-zero-probability", type=float, default=g1_recipe.COMMAND_ZERO_PROBABILITY)
     parser.add_argument("--no-command-randomization", action="store_true")
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
@@ -331,6 +366,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--reward-mode", choices=("nanog1_dense", "sparse_command"), default=g1_recipe.REWARD_MODE)
     parser.add_argument("--w-alive", type=float, default=g1_recipe.W_ALIVE)
     parser.add_argument("--w-track-lin", type=float, default=g1_recipe.W_TRACK_LIN)
+    parser.add_argument("--w-track-ang", type=float, default=g1_recipe.W_TRACK_ANG)
+    parser.add_argument("--w-lin-vel-z", type=float, default=g1_recipe.W_LIN_VEL_Z)
+    parser.add_argument("--w-ang-vel-xy", type=float, default=g1_recipe.W_ANG_VEL_XY)
+    parser.add_argument("--w-orientation", type=float, default=g1_recipe.W_ORIENTATION)
+    parser.add_argument("--w-torque", type=float, default=g1_recipe.W_TORQUE)
+    parser.add_argument("--w-action-rate", type=float, default=g1_recipe.W_ACTION_RATE)
     parser.add_argument("--w-sparse-command-success", type=float, default=g1_recipe.W_SPARSE_COMMAND_SUCCESS)
     parser.add_argument(
         "--sparse-command-velocity-tolerance",
@@ -343,7 +384,11 @@ def _parse_args() -> argparse.Namespace:
         default=g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE,
     )
     parser.add_argument("--w-mechanical-power", type=float, default=g1_recipe.W_MECHANICAL_POWER)
+    parser.add_argument("--w-gait-contact", type=float, default=g1_recipe.W_GAIT_CONTACT)
+    parser.add_argument("--w-gait-swing", type=float, default=g1_recipe.W_GAIT_SWING)
     parser.add_argument("--w-gait-swing-contact", type=float, default=g1_recipe.W_GAIT_SWING_CONTACT)
+    parser.add_argument("--w-gait-hip", type=float, default=g1_recipe.W_GAIT_HIP)
+    parser.add_argument("--w-base-height", type=float, default=g1_recipe.W_BASE_HEIGHT)
     parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
@@ -364,6 +409,7 @@ def _parse_args() -> argparse.Namespace:
         help="Use eager PPO or the separate-graph rollout/update schedule.",
     )
     parser.add_argument("--readback-diagnostics", action="store_true")
+    parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--checkpoint-path", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)
