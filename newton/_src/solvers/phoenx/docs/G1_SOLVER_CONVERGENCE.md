@@ -16,9 +16,9 @@ retaining acceptable speed (`train_seconds=184.3`, `total_wall_seconds=200.0`,
 about 3.1x slower than the nanoG1 59 s reference). That points away from pure
 trainer throughput as the main blocker, and toward actuator/contact response.
 
-Fresh 20-step open-loop comparisons against nanoG1 host physics show the
-current RL setting (`5x2`, 0.004 s physics dt, 2 position iterations, 1 velocity
-iteration) diverges over only 0.4 s:
+Fresh 20-step open-loop comparisons against nanoG1 host physics showed the
+historical fast RL setting (`5x2`, 0.004 s physics dt, 2 position iterations,
+1 velocity iteration) diverging over only 0.4 s:
 
 | action | setting | final base-pos error | base-z max error | joint-q traj RMS | joint-qd traj RMS |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -40,7 +40,7 @@ constant mismatch:
 | `phoenx_10x8` | 0.002 | 8 + 2 | 0.0051 | 0.0082 rad | 0.053 rad/s |
 
 The next physics target is therefore not to lower accuracy for speed. It is to
-understand and reduce effective actuator-model drift in the fast `5x2`
+understand and reduce effective actuator-model drift in fast low-iteration
 formulation, especially Unitree PD stiffness/damping, passive friction, armature,
 force limits, and foot-contact coupling.
 
@@ -221,22 +221,26 @@ different behaviors:
 | `5x2` (nanoG1 timing + armature) | Same timing plus nanoG1 exported per-DOF armature in the PhoenX model. | compact 60-iteration probe measured 252k train env samples/s and 237k total env samples/s; gate still failed but improved to `battery_perf=0.388`, `battery_falls=27`, and finite leg-velocity diagnostics. |
 | `10x4` (fidelity diagnostic) | same random policy became fall-dominated: first four rollout done means `0.115`, `0.536`, `0.724`, `0.757`. | prior 60-iteration probes degraded badly by iteration 60, with unstable velocity diagnostics. |
 
-The heavier `10x4` setting is closer to the high-resolution PhoenX reference in
-open-loop drive tests, but it moves the early stochastic training distribution
-away from nanoG1 and makes PPO spend most samples on resets/falls. The default
-RL recipe therefore uses `sim_substeps=5`, `solver_iterations=2`, and
-`contact_geometry="nanog1_foot_boxes"`, matching nanoG1 production timing.
+A later no-reset zero-action G1 simulation exposed a more severe failure mode:
+`5x2` can inject enough energy after ground impact to send the robot upward with
+multi-million-scale joint velocities (`max_abs_qd` around `1.0e7` after 200
+steps). The same 200-step probe stayed finite for `8x4` (`max_abs_qd` about
+`0.88`), `10x4` (`0.70`), and `12x6` (`0.57`). The old `5x2` setting is useful
+only as a historical throughput reference, not as a default for training or
+visual no-reset simulation.
+
 The model also carries nanoG1 damping, frictionloss, and armature; unit tests
 compare those values directly against `web/g1_model_const.h`. Further solver
-work should improve the constraint formulation so higher substep/iteration
-counts do not change the training distribution this much.
+work should improve the constraint formulation so lower substep/iteration counts
+become stable without sacrificing physical fidelity.
 
 ## Current Decision
 
-The default PhoenX G1 RL recipe uses `sim_substeps=5`, `solver_iterations=2`,
-and `contact_geometry="nanog1_foot_boxes"`. Speed remains important, but
-further optimization should preserve the grounded reset, active foot contacts,
-and open-loop parity checks above.
+The default PhoenX G1 RL recipe uses `sim_substeps=8`, `solver_iterations=4`,
+`velocity_iterations=1`, and `contact_geometry="nanog1_foot_boxes"`. Speed
+remains important, but the default must survive no-reset ground contact without
+numerical blow-up. Pass `--sim-substeps 5 --solver-iterations 2` only to
+reproduce the old fast setting.
 
 Next likely checks:
 

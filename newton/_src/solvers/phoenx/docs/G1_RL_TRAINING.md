@@ -45,10 +45,13 @@ benchmark defaults read from the same constants.
 - Observation size: 98.
 - Action size: 29.
 - Control frame dt: 0.02 s.
-- Physics dt: 0.004 s via `sim_substeps=5`, matching nanoG1's 0.004 s x 5
-  control decimation. The higher-resolution `10x4` setting remains useful as a
-  solver-fidelity diagnostic, but it made stochastic early PPO rollouts fall too
-  often for the default training recipe.
+- Physics dt: 0.0025 s via `sim_substeps=8`, with
+  `solver_iterations=4`. This is intentionally slower than the historical
+  nanoG1-timed `5x2` PhoenX recipe: no-reset zero-action G1 simulations showed
+  that `5x2` can explode after ground impact (`max_abs_qd` around `1e7` after
+  200 steps), while `8x4` stayed finite with `max_abs_qd` below `1`. Pass
+  `--sim-substeps 5 --solver-iterations 2` only when deliberately reproducing
+  the old throughput-oriented setting.
 - Primitive-only collision by default (`parse_meshes=False`), preserving the
   same G1 coordinates/DOFs/actions while avoiding generic mesh/SDF contact
   overflow in high-world-count RL runs.

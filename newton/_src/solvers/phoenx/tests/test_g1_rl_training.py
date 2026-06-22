@@ -355,10 +355,14 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertIsNotNone(solver_match)
         self.assertIsNotNone(mirror_match)
 
-        reference_frame_dt = float(dt_match.group(1)) * int(decimation_match.group(1))
+        reference_decimation = int(decimation_match.group(1))
+        reference_solver_iterations = int(solver_match.group(1))
+        reference_frame_dt = float(dt_match.group(1)) * reference_decimation
         self.assertAlmostEqual(g1_recipe.FRAME_DT, reference_frame_dt)
-        self.assertEqual(g1_recipe.SIM_SUBSTEPS, int(decimation_match.group(1)))
-        self.assertEqual(g1_recipe.SOLVER_ITERATIONS, int(solver_match.group(1)))
+        self.assertEqual(reference_decimation, 5)
+        self.assertEqual(reference_solver_iterations, 2)
+        self.assertGreaterEqual(g1_recipe.SIM_SUBSTEPS, reference_decimation)
+        self.assertGreaterEqual(g1_recipe.SOLVER_ITERATIONS, reference_solver_iterations)
         self.assertEqual(g1_recipe.CONTROLLED_ACTION_COUNT, 12)
         self.assertIn("-DG1_TASK_V3", reference.TASK_FLAGS)
         self.assertIn("-DG1_PD_UNITREE", reference.TASK_FLAGS)
@@ -2930,6 +2934,31 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(math.isfinite(success_mean))
         self.assertLess(done_mean, 0.35)
         self.assertGreater(reward_mean, -5.0)
+
+    def test_default_zero_action_no_reset_stays_finite_after_ground_contact(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 no-reset stability regression tests")
+        env_config = g1_recipe.default_g1_env_config(
+            world_count=2,
+            max_episode_steps=0,
+            auto_reset=False,
+            randomize_commands_on_reset=False,
+            command_resample_steps=0,
+            parse_visuals=False,
+        )
+        env = rl.EnvG1PhoenX(env_config, device=device)
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            for _ in range(120):
+                env.step(actions)
+        wp.capture_launch(capture.graph)
+
+        joint_q = env.state_0.joint_q.numpy()
+        joint_qd = env.state_0.joint_qd.numpy()
+        self.assertTrue(np.isfinite(joint_q).all())
+        self.assertTrue(np.isfinite(joint_qd).all())
+        self.assertLess(float(np.max(np.abs(joint_qd))), 100.0)
+        self.assertTrue(np.isfinite(env.step_rewards.numpy()).all())
 
     def test_train_to_gate_benchmark_smoke_graph_leapfrog(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 train-to-gate benchmark tests")

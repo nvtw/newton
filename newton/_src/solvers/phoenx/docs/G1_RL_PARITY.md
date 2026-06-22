@@ -73,14 +73,14 @@ or benchmark note.
 | Gate diagnostics | nanoG1-style command battery | Fixed Python velocity diagnostic quaternion order to Newton `xyzw`; graph-captured regression covers the case. | Re-run gates only when diagnostics are needed; do not treat this as quality progress. |
 | Graph overlap / stale policy | Same recipe in eager and graph-leapfrog modes | A 60-iteration eager train-to-gate probe failed similarly to graph mode, so stream overlap/stale rollout policy is not the primary quality blocker. | Keep graph mode for throughput, but debug quality in the simpler eager path when possible. |
 | G1 env/reward contract | `g1_gpu.cu`, `recipe.py`, deploy constants | Tests cover observation/action layout, actuator-force torque penalty, reward decomposition, gait/success terms, command constants, and graph recurrent reset behavior. | Add targeted tests for command resampling/reset timing and done/bootstrap semantics before changing rewards. |
-| Drive/contact physics | nanoG1 host physics plus first-principles drive tests | No-contact PD/friction/armature response is close; grounded contact/friction coupling still differs, especially tangential support at `5x2`. | Prioritize first-principles grounded drive/contact tests and compare solver settings before changing training hyperparameters. |
+| Drive/contact physics | nanoG1 host physics plus first-principles drive tests | No-contact PD/friction/armature response is close; grounded contact/friction coupling still differs. The historical `5x2` default also blows up in no-reset zero-action ground-contact simulation. | Keep the default at least `8x4`; use `5x2` only for historical throughput comparisons. |
 | End-to-end training quality | nanoG1 reaches a working policy in roughly the README time scale | Current 75M-sample PhoenX runs train in a few minutes but fail the gate. | Run full probes only after a ledger row changes; record before/after quality and throughput. |
 
 ## Current Measurement
 
-The latest full quality-facing probe used 4096 worlds, 64 rollout steps, the
-default nanoG1-timed `5x2` recipe, graph-leapfrog execution, and one 75.2M
-sample chunk. It completed training in 185.4 s and the whole train-save-reload
+The latest full quality-facing probe before the stability default change used
+4096 worlds, 64 rollout steps, the nanoG1-timed `5x2` recipe,
+graph-leapfrog execution, and one 75.2M sample chunk. It completed training in 185.4 s and the whole train-save-reload
 gate run in 201.2 s, about 405.7k train environment samples/s, but still failed
 the gate with `battery_perf=0.325` and `battery_falls=372`. A 60-iteration eager
 probe also failed at 15.7M samples with `battery_perf=0.321`, so the current
