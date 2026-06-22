@@ -356,7 +356,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertIn("-DG1_TASK_V3", reference.TASK_FLAGS)
         self.assertIn("-DG1_PD_UNITREE", reference.TASK_FLAGS)
 
-        g1_gpu_path = _NANOG1_ROOT / "ocean" / "g1gpu" / "g1_gpu.cu"
+        g1_gpu_path = _PUFFERLIB_G1_ROOT / "ocean" / "g1gpu" / "g1_gpu.cu"
         if g1_gpu_path.is_file():
             g1_gpu = g1_gpu_path.read_text()
 
@@ -372,7 +372,16 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertAlmostEqual(g1_recipe.GAIT_FOOT_HEIGHT, read_define_number("G1_V3_FOOT_Z0"))
             self.assertAlmostEqual(g1_recipe.W_BASE_HEIGHT, read_define_number("G1_V3_W_BASE_HEIGHT"))
             self.assertAlmostEqual(g1_recipe.BASE_HEIGHT_TARGET, read_define_number("G1_V3_BASE_Z0"))
+            self.assertAlmostEqual(g1_recipe.RESET_NOISE, read_define_number("ENV_RESET_NOISE"))
+            self.assertEqual(g1_recipe.COMMAND_RESAMPLE_STEPS, int(read_define_number("ENV_CMD_RESAMPLE")))
+            self.assertIn("urand_01(&rng) < 0.1f", g1_gpu)
+            self.assertIn("g1e_cmd_scale * 1.0f * urand_pm1", g1_gpu)
+            self.assertIn("g1e_cmd_scale * 0.6f * urand_pm1", g1_gpu)
 
+        self.assertEqual(g1_recipe.COMMAND_X_RANGE, (-1.0, 1.0))
+        self.assertEqual(g1_recipe.COMMAND_Y_RANGE, (-0.6, 0.6))
+        self.assertEqual(g1_recipe.COMMAND_YAW_RANGE, (-1.0, 1.0))
+        self.assertAlmostEqual(g1_recipe.COMMAND_ZERO_PROBABILITY, 0.1)
         self.assertAlmostEqual(g1_recipe.ACTION_SCALE, float(recipe["env.action_scale"]))
         self.assertEqual(g1_recipe.MAX_EPISODE_STEPS, int(recipe["env.max_episode_len"]))
         self.assertAlmostEqual(g1_recipe.W_TRACK_LIN, float(recipe["env.w_track_lin"]))
