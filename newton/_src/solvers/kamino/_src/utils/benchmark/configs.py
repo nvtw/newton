@@ -18,6 +18,7 @@ __all__ = [
     "make_solver_config_dense_jacobian_llt_fast",
     "make_solver_config_sparse_delassus_cr_accurate",
     "make_solver_config_sparse_delassus_cr_fast",
+    "make_solver_config_sparse_dvi_dr_legs",
     "make_solver_config_sparse_jacobian_llt_accurate",
     "make_solver_config_sparse_jacobian_llt_fast",
 ]
@@ -336,6 +337,30 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     return name, config
 
 
+def make_solver_config_sparse_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config]:
+    # ------------------------------------------------------------------------------
+    name = "Sparse DVI Dr Legs"
+    # ------------------------------------------------------------------------------
+    _, config = make_solver_config_dense_dvi_dr_legs()
+    # ------------------------------------------------------------------------------
+    # Jacobian representation
+    config.sparse_dynamics = True
+    config.sparse_jacobian = True
+    # ------------------------------------------------------------------------------
+    # Linear system solver
+    config.dynamics.linear_solver_type = "CR"
+    config.dynamics.linear_solver_kwargs = {"maxiter": 9}
+    # ------------------------------------------------------------------------------
+    # DVI
+    config.dvi.omega = 0.3
+    config.dvi.block_iterations = 16
+    config.dvi.contact_iterations = 2
+    config.dvi.contact_jacobi_omega = 0.25
+    config.dvi.contact_jacobi_relaxation = 0.9
+    # ------------------------------------------------------------------------------
+    return name, config
+
+
 ###
 # Utilities
 ###
@@ -355,6 +380,7 @@ def make_benchmark_configs(include_default: bool = True) -> dict[str, SolverKami
             make_solver_config_sparse_delassus_cr_accurate,
             make_solver_config_sparse_delassus_cr_fast,
             make_solver_config_dense_dvi_dr_legs,
+            make_solver_config_sparse_dvi_dr_legs,
         ]
     )
     solver_configs: dict[str, SolverKaminoImpl.Config] = {}
@@ -365,7 +391,7 @@ def make_benchmark_configs(include_default: bool = True) -> dict[str, SolverKami
 
 
 def make_dvi_padmm_benchmark_configs() -> dict[str, SolverKaminoImpl.Config]:
-    """Return the focused dense PADMM/DVI solver set used by DVI benchmarks."""
+    """Return the focused PADMM/DVI solver set used by DVI benchmarks."""
     configs: dict[str, SolverKaminoImpl.Config] = {}
 
     _, config = make_solver_config_dense_jacobian_llt_accurate()
@@ -374,7 +400,7 @@ def make_dvi_padmm_benchmark_configs() -> dict[str, SolverKaminoImpl.Config]:
     _, config = make_solver_config_dense_jacobian_llt_fast()
     configs["PADMM fast"] = config
 
-    _, config = make_solver_config_dense_dvi_dr_legs()
+    _, config = make_solver_config_sparse_dvi_dr_legs()
     configs["DVI"] = config
 
     return configs

@@ -205,8 +205,9 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(config.dynamics.preconditioning)
         self.assertEqual(config.constraints.contact_recovery_speed, -1.0)
 
-        with self.assertRaises(ValueError):
-            SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
+        sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
+        self.assertTrue(sparse_config.sparse_dynamics)
+        self.assertTrue(sparse_config.sparse_jacobian)
         with self.assertRaises(ValueError):
             SolverKamino.Config(
                 dynamics_solver="dvi",
@@ -1135,6 +1136,7 @@ class TestDVISolver(unittest.TestCase):
     def test_13_benchmark_configs_include_dvi_dr_legs(self):
         configs = make_benchmark_configs(include_default=False)
         self.assertIn("Dense DVI Dr Legs", configs)
+        self.assertIn("Sparse DVI Dr Legs", configs)
         config = configs["Dense DVI Dr Legs"]
         self.assertEqual(config.dynamics_solver, "dvi")
         self.assertEqual(config.integrator, "moreau")
@@ -1154,6 +1156,10 @@ class TestDVISolver(unittest.TestCase):
         focused_configs = make_dvi_padmm_benchmark_configs()
         self.assertEqual(set(focused_configs), {"PADMM accurate", "PADMM fast", "DVI"})
         self.assertEqual(focused_configs["DVI"].dynamics_solver, "dvi")
+        self.assertTrue(focused_configs["DVI"].sparse_jacobian)
+        self.assertTrue(focused_configs["DVI"].sparse_dynamics)
+        self.assertEqual(focused_configs["DVI"].dvi.block_iterations, 16)
+        self.assertEqual(focused_configs["DVI"].dvi.contact_iterations, 2)
         self.assertEqual(focused_configs["PADMM fast"].dynamics_solver, "padmm")
 
     def test_13b_dvi_benchmark_config_roundtrips_contact_controls(self):

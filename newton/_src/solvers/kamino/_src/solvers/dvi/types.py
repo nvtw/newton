@@ -80,6 +80,7 @@ class DVIState:
         self.contact_block_inv: wp.array | None = None
         self.contact_colors: wp.array | None = None
         self.contact_num_colors: wp.array | None = None
+        self.world_mask: wp.array | None = None
         if size is not None:
             self.finalize(size)
 
@@ -96,6 +97,7 @@ class DVIState:
         self.contact_block_inv = wp.zeros(max(1, size.sum_of_max_contacts), dtype=mat33f)
         self.contact_colors = wp.full(max(1, size.sum_of_max_contacts), -1, dtype=int32)
         self.contact_num_colors = wp.zeros(max(1, size.num_worlds), dtype=int32)
+        self.world_mask = wp.full(max(1, size.num_worlds), True, dtype=wp.bool)
 
     def reset(self):
         """Reset scratch arrays to zero."""

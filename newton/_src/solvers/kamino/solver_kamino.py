@@ -347,8 +347,6 @@ class SolverKamino(SolverBase):
                 raise ValueError(
                     f"Invalid dynamics solver: {self.dynamics_solver}. Must be one of {supported_dynamics_solvers}."
                 )
-            if self.dynamics_solver == "dvi" and self.sparse_dynamics:
-                raise ValueError("The DVI solver currently requires `sparse_dynamics=False`.")
             if self.dynamics_solver == "dvi" and self.dynamics.preconditioning:
                 raise ValueError(
                     "The DVI solver currently requires `dynamics.preconditioning=False` so convergence checks and "
