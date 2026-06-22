@@ -25,7 +25,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
-from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
+from newton._src.solvers.phoenx.body import MOTION_STATIC, BodyContainer, body_set_access_mode
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
@@ -92,6 +92,7 @@ __all__ = [
     "JOINT_MODE_UNIVERSAL",
     "ActuatedDoubleBallSocketData",
     "actuated_double_ball_socket_cached_warmstart",
+    "actuated_double_ball_socket_clear_reset_worlds",
     "actuated_double_ball_socket_initialize_kernel",
     "actuated_double_ball_socket_iterate",
     "actuated_double_ball_socket_iterate_at",
@@ -698,6 +699,105 @@ def actuated_double_ball_socket_initialize_kernel(
                 write_vec3(constraints, _OFF_LA2_B1, cid, wp.quat_rotate_inv(orient1, d6_limit_axis0[tid]))
                 if count > wp.int32(1):
                     write_vec3(constraints, _OFF_LA2_B2, cid, wp.quat_rotate_inv(orient1, d6_limit_axis1[tid]))
+
+
+# ---------------------------------------------------------------------------
+# Runtime reset
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _adbs_constraint_world(bodies: BodyContainer, b1: wp.int32, b2: wp.int32) -> wp.int32:
+    if b2 >= wp.int32(0) and b2 < bodies.world_id.shape[0] and bodies.motion_type[b2] != MOTION_STATIC:
+        return bodies.world_id[b2]
+    if b1 >= wp.int32(0) and b1 < bodies.world_id.shape[0] and bodies.motion_type[b1] != MOTION_STATIC:
+        return bodies.world_id[b1]
+    if b2 >= wp.int32(0) and b2 < bodies.world_id.shape[0]:
+        return bodies.world_id[b2]
+    if b1 >= wp.int32(0) and b1 < bodies.world_id.shape[0]:
+        return bodies.world_id[b1]
+    return wp.int32(-1)
+
+
+@wp.kernel(enable_backward=False)
+def _adbs_clear_reset_worlds_kernel(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    joint_count: wp.int32,
+    dones: wp.array[wp.float32],
+):
+    cid = wp.tid()
+    if cid >= joint_count:
+        return
+
+    world = _adbs_constraint_world(
+        bodies,
+        read_int(constraints, _OFF_BODY1, cid),
+        read_int(constraints, _OFF_BODY2, cid),
+    )
+    if world < wp.int32(0) or world >= dones.shape[0] or dones[world] <= wp.float32(0.5):
+        return
+
+    zero3 = wp.vec3f(0.0, 0.0, 0.0)
+    write_vec3(constraints, _OFF_R1_B1, cid, zero3)
+    write_vec3(constraints, _OFF_R1_B2, cid, zero3)
+    write_vec3(constraints, _OFF_R2_B1, cid, zero3)
+    write_vec3(constraints, _OFF_R2_B2, cid, zero3)
+    write_vec3(constraints, _OFF_T1, cid, zero3)
+    write_vec3(constraints, _OFF_T2, cid, zero3)
+    write_float(constraints, _OFF_MASS_COEFF, cid, wp.float32(1.0))
+    write_float(constraints, _OFF_IMPULSE_COEFF, cid, wp.float32(0.0))
+    write_vec3(constraints, _OFF_BIAS1, cid, zero3)
+    write_vec3(constraints, _OFF_BIAS2, cid, zero3)
+
+    for row in range(27):
+        write_float(constraints, _OFF_MODE_CACHE + row, cid, wp.float32(0.0))
+
+    mode = read_int(constraints, _OFF_JOINT_MODE, cid)
+    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED or mode == JOINT_MODE_CABLE:
+        write_vec3(constraints, _OFF_R3_B1, cid, zero3)
+        write_vec3(constraints, _OFF_R3_B2, cid, zero3)
+        write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
+        write_float(constraints, _OFF_BIAS3, cid, wp.float32(0.0))
+    else:
+        write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, wp.int32(0))
+        write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, wp.float32(0.0))
+        if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
+            write_vec3(constraints, _OFF_D6_LIMIT_EFF_INV, cid, zero3)
+
+    write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
+    write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
+    write_float(constraints, _OFF_EFF_INV_AXIAL, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_BIAS_DRIVE, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_GAMMA_DRIVE, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_EFF_MASS_DRIVE_SOFT, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_LIMIT_CACHE + 0, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_LIMIT_CACHE + 1, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_LIMIT_CACHE + 2, cid, wp.float32(0.0))
+    write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
+    write_vec3(constraints, _OFF_AXIS_WORLD, cid, zero3)
+    write_float(constraints, _OFF_ACC_DRIVE, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_ACC_LIMIT, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_ACC_FRICTION, cid, wp.float32(0.0))
+
+
+def actuated_double_ball_socket_clear_reset_worlds(
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    joint_count: int,
+    dones: wp.array[wp.float32],
+    device: wp.DeviceLike = None,
+) -> None:
+    """Clear ADBS runtime caches and warm starts for reset worlds."""
+    count = max(0, min(int(joint_count), int(constraints.data.shape[1])))
+    if count == 0:
+        return
+    wp.launch(
+        _adbs_clear_reset_worlds_kernel,
+        dim=count,
+        inputs=[constraints, bodies, wp.int32(count), dones],
+        device=device,
+    )
 
 
 # ---------------------------------------------------------------------------

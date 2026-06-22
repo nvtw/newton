@@ -161,7 +161,6 @@ def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer):
 def _contact_container_clear_reset_worlds_kernel(
     dones: wp.array[wp.float32],
     shape_world: wp.array[wp.int32],
-    rigid_contact_count: wp.array[wp.int32],
     rigid_contact_shape0: wp.array[wp.int32],
     rigid_contact_shape1: wp.array[wp.int32],
     cc: ContactContainer,
@@ -169,12 +168,6 @@ def _contact_container_clear_reset_worlds_kernel(
     cid_of_contact_prev: wp.array[wp.int32],
 ):
     k = wp.tid()
-    contact_count = rigid_contact_count[0]
-    contact_cap = rigid_contact_shape0.shape[0]
-    if contact_count > contact_cap:
-        contact_count = contact_cap
-    if k >= contact_count:
-        return
 
     world = wp.int32(-1)
     shape0 = rigid_contact_shape0[k]
@@ -578,7 +571,6 @@ def contact_container_clear_reset_worlds(
         inputs=[
             dones,
             shape_world,
-            contacts.rigid_contact_count,
             contacts.rigid_contact_shape0,
             contacts.rigid_contact_shape1,
         ],

@@ -43,6 +43,7 @@ __all__ = [
     "assert_constraint_header",
     "constraint_accumulate_time_us",
     "constraint_bodies_make",
+    "constraint_container_clear_reset_worlds",
     "constraint_container_zeros",
     "constraint_get_body1",
     "constraint_get_body2",
@@ -416,6 +417,97 @@ def constraint_get_body2(c: ConstraintContainer, cid: wp.int32) -> wp.int32:
 @wp.func
 def constraint_set_body2(c: ConstraintContainer, cid: wp.int32, b: wp.int32):
     write_int(c, CONSTRAINT_BODY2_OFFSET, cid, b)
+
+
+@wp.func
+def _constraint_endpoint_world(
+    endpoint: wp.int32,
+    num_bodies: wp.int32,
+    body_world: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
+    has_particle_world: bool,
+) -> wp.int32:
+    if endpoint < wp.int32(0):
+        return wp.int32(-1)
+    if endpoint < num_bodies:
+        if endpoint < body_world.shape[0]:
+            return body_world[endpoint]
+        return wp.int32(-1)
+    if not has_particle_world:
+        return wp.int32(-1)
+    particle = endpoint - num_bodies
+    if particle >= wp.int32(0) and particle < particle_world.shape[0]:
+        return particle_world[particle]
+    return wp.int32(-1)
+
+
+@wp.func
+def _constraint_endpoint_done(
+    endpoint: wp.int32,
+    num_bodies: wp.int32,
+    body_world: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
+    has_particle_world: bool,
+    dones: wp.array[wp.float32],
+) -> bool:
+    world = _constraint_endpoint_world(endpoint, num_bodies, body_world, particle_world, has_particle_world)
+    return world >= wp.int32(0) and world < dones.shape[0] and dones[world] > wp.float32(0.5)
+
+
+@wp.kernel(enable_backward=False)
+def _constraint_container_clear_reset_worlds_kernel(
+    constraints: ConstraintContainer,
+    constraint_count: wp.int32,
+    num_bodies: wp.int32,
+    body_world: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
+    has_particle_world: bool,
+    dones: wp.array[wp.float32],
+):
+    cid = wp.tid()
+    if cid >= constraint_count:
+        return
+
+    body1 = constraint_get_body1(constraints, cid)
+    body2 = constraint_get_body2(constraints, cid)
+    if not (
+        _constraint_endpoint_done(body1, num_bodies, body_world, particle_world, has_particle_world, dones)
+        or _constraint_endpoint_done(body2, num_bodies, body_world, particle_world, has_particle_world, dones)
+    ):
+        return
+
+    for row in range(CONSTRAINT_MULTIPLIER_DWORDS):
+        constraints.multipliers[row, cid] = wp.float32(0.0)
+
+
+def constraint_container_clear_reset_worlds(
+    constraints: ConstraintContainer,
+    constraint_count: int,
+    num_bodies: int,
+    body_world: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32] | None,
+    dones: wp.array[wp.float32],
+    device: wp.DeviceLike = None,
+) -> None:
+    """Clear generic constraint warm-start multipliers for reset worlds."""
+    count = max(0, min(int(constraint_count), int(constraints.multipliers.shape[1])))
+    if count == 0:
+        return
+    particle_world_arg = particle_world if particle_world is not None else body_world
+    wp.launch(
+        _constraint_container_clear_reset_worlds_kernel,
+        dim=count,
+        inputs=[
+            constraints,
+            wp.int32(count),
+            wp.int32(num_bodies),
+            body_world,
+            particle_world_arg,
+            particle_world is not None,
+            dones,
+        ],
+        device=device,
+    )
 
 
 @wp.func

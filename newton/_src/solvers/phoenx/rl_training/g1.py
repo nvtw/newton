@@ -10,6 +10,8 @@ import warp as wp
 
 import newton
 import newton.utils
+from newton._src.solvers.phoenx.constraints.constraint_container import constraint_container_clear_reset_worlds
+from newton._src.solvers.phoenx.constraints.constraint_joint import actuated_double_ball_socket_clear_reset_worlds
 from newton._src.solvers.phoenx.constraints.contact_container import contact_container_clear_reset_worlds
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 
@@ -1744,6 +1746,22 @@ class EnvG1PhoenX:
 
     def _clear_reset_solver_state(self) -> None:
         world = self.solver.world
+        actuated_double_ball_socket_clear_reset_worlds(
+            world.constraints,
+            world.bodies,
+            world.num_joints,
+            self.dones,
+            device=self.device,
+        )
+        constraint_container_clear_reset_worlds(
+            world.constraints,
+            world._contact_offset,
+            world.num_bodies,
+            world.bodies.world_id,
+            getattr(world, "_particle_world_id", None),
+            self.dones,
+            device=self.device,
+        )
         shape_world = getattr(self.model, "shape_world", None)
         cid_of_contact_cur = getattr(world, "_cid_of_contact_cur", None)
         cid_of_contact_prev = getattr(world, "_cid_of_contact_prev", None)
