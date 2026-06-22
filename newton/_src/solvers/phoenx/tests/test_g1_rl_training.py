@@ -151,6 +151,63 @@ def _gather_g1_ground_contact_force(env: rl.EnvG1PhoenX) -> tuple[np.ndarray, in
     return total, pair_total, point_total
 
 
+@wp.kernel(enable_backward=False)
+def _g1_apply_equal_foot_push_kernel(
+    force_x: wp.array[wp.float32],
+    body_stride: wp.int32,
+    left_foot_body: wp.int32,
+    right_foot_body: wp.int32,
+    body_f: wp.array[wp.spatial_vector],
+):
+    world = wp.tid()
+    force = wp.vec3(force_x[world], wp.float32(0.0), wp.float32(0.0))
+    wrench = wp.spatial_vector(force, wp.vec3(0.0, 0.0, 0.0))
+    body_f[world * body_stride + left_foot_body] = wrench
+    body_f[world * body_stride + right_foot_body] = wrench
+
+
+def _gather_g1_foot_ground_contact_forces(env: rl.EnvG1PhoenX) -> tuple[np.ndarray, np.ndarray]:
+    """Return per-foot ground contact forces [N] and contact counts."""
+
+    n_cols = env.solver.world.max_contact_columns
+    pair_w = wp.zeros(n_cols, dtype=wp.spatial_vector, device=env.device)
+    pair_b1 = wp.zeros(n_cols, dtype=wp.int32, device=env.device)
+    pair_b2 = wp.zeros(n_cols, dtype=wp.int32, device=env.device)
+    pair_count = wp.zeros(n_cols, dtype=wp.int32, device=env.device)
+
+    env.solver.world.gather_contact_pair_wrenches(pair_w, pair_b1, pair_b2, pair_count)
+    with wp.ScopedCapture(device=env.device) as capture:
+        env.solver.world.gather_contact_pair_wrenches(pair_w, pair_b1, pair_b2, pair_count)
+    wp.capture_launch(capture.graph)
+
+    foot_by_slot: dict[int, tuple[int, int]] = {}
+    for world in range(env.world_count):
+        base = 1 + world * env.body_stride
+        foot_by_slot[base + env._left_foot_body_local] = (world, 0)
+        foot_by_slot[base + env._right_foot_body_local] = (world, 1)
+
+    forces = np.zeros((env.world_count, 2, 3), dtype=np.float64)
+    counts_out = np.zeros((env.world_count, 2), dtype=np.int32)
+    force_pairs = pair_w.numpy()[:, :3].astype(np.float64)
+    body1 = pair_b1.numpy()
+    body2 = pair_b2.numpy()
+    counts = pair_count.numpy()
+    for pair_index, count in enumerate(counts):
+        if int(count) <= 0:
+            continue
+        b1 = int(body1[pair_index])
+        b2 = int(body2[pair_index])
+        if b1 == _G1_GROUND_SLOT and b2 in foot_by_slot:
+            world, foot = foot_by_slot[b2]
+            forces[world, foot] += force_pairs[pair_index]
+            counts_out[world, foot] += int(count)
+        elif b2 == _G1_GROUND_SLOT and b1 in foot_by_slot:
+            world, foot = foot_by_slot[b1]
+            forces[world, foot] -= force_pairs[pair_index]
+            counts_out[world, foot] += int(count)
+    return forces, counts_out
+
+
 class _ConstantPPOEnv:
     def __init__(self, *, world_count: int, obs_dim: int, action_dim: int, device: wp.context.Device):
         self.world_count = int(world_count)
@@ -2299,6 +2356,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.base_height_target, g1_recipe.BASE_HEIGHT_TARGET)
         self.assertEqual(env_config.rigid_contact_max_per_world, g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env_config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
+        self.assertEqual(env_config.ground_friction, g1_recipe.GROUND_FRICTION)
+        self.assertEqual(env_config.foot_box_xy_scale, g1_recipe.FOOT_BOX_XY_SCALE)
         self.assertTrue(train_config.reset_recurrent_state_on_rollout_start)
         self.assertEqual(train_config.target_distance_start, g1_recipe.SPARSE_TARGET_CURRICULUM_START)
         self.assertEqual(train_config.target_distance_end, g1_recipe.SPARSE_TARGET_CURRICULUM_END)
@@ -2607,15 +2666,22 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         labels = list(env.model.shape_label)
         foot_shapes = [labels.index("left_nanog1_foot_box"), labels.index("right_nanog1_foot_box")]
+        shape_body = env.model.shape_body.numpy()
+        ground_shape = int(np.flatnonzero(shape_body < 0)[0])
         shape_mu = env.model.shape_material_mu.numpy()
         # PhoenX currently exposes one Coulomb sliding coefficient; this
-        # value is used for the static cone limit and dynamic sliding.
+        # value is used for the static cone limit and dynamic sliding. Both
+        # sides of the G1 foot-floor pair must be 0.6 because PhoenX combines
+        # material friction by averaging by default, while nanoG1 authors the
+        # pair coefficient directly as 0.6.
         np.testing.assert_allclose(
             shape_mu[foot_shapes],
             np.full(2, 0.6, dtype=np.float32),
             rtol=0.0,
             atol=1.0e-6,
         )
+        self.assertAlmostEqual(float(shape_mu[ground_shape]), env.config.ground_friction, places=6)
+        self.assertAlmostEqual(float(shape_mu[ground_shape]), 0.6, places=6)
 
         with wp.ScopedCapture(device=device) as capture:
             env.model.collide(env.state_0, env.contacts)
@@ -2665,6 +2731,105 @@ class TestG1PhoenXRL(unittest.TestCase):
         )
         lateral = math.hypot(float(ground_force[0]), float(ground_force[1]))
         self.assertLess(lateral, 0.02 * expected_weight)
+
+    def test_g1_enlarged_foot_static_friction_threshold_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 foot friction threshold tests")
+
+        def run_force_case(force_ratio: float):
+            env = rl.EnvG1PhoenX(
+                g1_recipe.default_g1_env_config(
+                    world_count=1,
+                    sim_substeps=10,
+                    solver_iterations=8,
+                    velocity_iterations=2,
+                    auto_reset=False,
+                    randomize_commands_on_reset=False,
+                    reset_noise=0.0,
+                    actuation_model="constraint_drive",
+                    max_episode_steps=0,
+                    foot_box_xy_scale=2.5,
+                ),
+                device=device,
+            )
+            _set_g1_standing_position_hold_gains(env)
+            actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=env.device)
+
+            settle_graph = rl.capture_env_steps(env, actions, steps_per_graph=180, warmup_steps=1)
+            wp.capture_launch(settle_graph)
+
+            baseline_forces, baseline_counts = _gather_g1_foot_ground_contact_forces(env)
+            self.assertTrue(np.all(baseline_counts > 0), msg=f"missing standing foot contacts: {baseline_counts}")
+            baseline_normal = baseline_forces[:, :, 2]
+            self.assertGreater(float(np.min(baseline_normal)), 50.0)
+
+            mu = float(env.config.ground_friction)
+            per_foot_limit = mu * float(np.min(baseline_normal))
+            applied_force = force_ratio * per_foot_limit
+            force_x = wp.array(np.asarray([applied_force], dtype=np.float32), dtype=wp.float32, device=env.device)
+
+            def forced_step_pair() -> None:
+                for _ in range(2):
+                    env.state_0.clear_forces()
+                    wp.launch(
+                        _g1_apply_equal_foot_push_kernel,
+                        dim=env.world_count,
+                        inputs=[
+                            force_x,
+                            env.body_stride,
+                            env._left_foot_body_local,
+                            env._right_foot_body_local,
+                        ],
+                        outputs=[env.state_0.body_f],
+                        device=env.device,
+                    )
+                    env.model.collide(env.state_0, env.contacts)
+                    env.solver.step(
+                        env.state_0,
+                        env.state_1,
+                        env.control,
+                        env.contacts,
+                        float(env.config.frame_dt) / float(env.config.sim_substeps),
+                    )
+                    env.state_0, env.state_1 = env.state_1, env.state_0
+
+            forced_step_pair()
+            with wp.ScopedCapture(device=env.device) as capture:
+                forced_step_pair()
+            for _ in range(10):
+                wp.capture_launch(capture.graph)
+
+            foot_forces, foot_counts = _gather_g1_foot_ground_contact_forces(env)
+            normal = foot_forces[:, :, 2]
+            tangent = np.linalg.norm(foot_forces[:, :, :2], axis=2)
+            limit = mu * normal
+            body_qd = env.state_0.body_qd.numpy()
+            left_id = env._left_foot_body_local
+            right_id = env._right_foot_body_local
+            foot_vx = np.asarray([body_qd[left_id, 0], body_qd[right_id, 0]], dtype=np.float64)
+            return applied_force, foot_forces, foot_counts, normal, tangent, limit, foot_vx
+
+        low_force, _low_forces, low_counts, low_normal, low_tangent, low_limit, low_vx = run_force_case(0.35)
+        high_force, _high_forces, high_counts, high_normal, high_tangent, high_limit, high_vx = run_force_case(1.35)
+
+        self.assertTrue(np.all(low_counts > 0), msg=f"missing low-force foot contacts: {low_counts}")
+        self.assertTrue(np.all(high_counts > 0), msg=f"missing high-force foot contacts: {high_counts}")
+        self.assertGreater(float(np.min(low_normal)), 50.0)
+        self.assertGreater(float(np.min(high_normal)), 50.0)
+
+        np.testing.assert_allclose(low_tangent[0], low_force, rtol=0.08, atol=2.0)
+        self.assertTrue(np.all(low_tangent[0] < 0.50 * low_limit[0]))
+        self.assertLess(float(np.max(np.abs(low_vx))), 0.02)
+
+        self.assertTrue(
+            np.all(high_tangent[0] <= 1.20 * high_limit[0] + 5.0),
+            msg=f"high-force tangent exceeded Coulomb limit: tangent={high_tangent[0]}, limit={high_limit[0]}",
+        )
+        self.assertTrue(
+            np.all(high_tangent[0] >= 0.85 * high_limit[0]),
+            msg=f"high-force contacts did not approach friction limit: tangent={high_tangent[0]}, limit={high_limit[0]}",
+        )
+        self.assertGreater(float(np.mean(high_vx)), max(0.10, 5.0 * float(np.max(np.abs(low_vx)))))
+        self.assertGreater(high_force, float(np.max(high_limit[0])))
 
     def test_rejects_unknown_contact_geometry(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL contact geometry tests")

@@ -66,6 +66,8 @@ BASE_HEIGHT_TARGET = 0.78
 PARSE_MESHES = False
 PARSE_VISUALS = False
 CONTACT_GEOMETRY = "nanog1_foot_boxes"
+GROUND_FRICTION = 0.6
+FOOT_BOX_XY_SCALE = 1.0
 AUTO_RESET = True
 RIGID_CONTACT_MAX_PER_WORLD = 32
 THREADS_PER_WORLD: int | str = "auto"
@@ -183,6 +185,8 @@ def default_g1_env_config(**overrides: Any):
         "parse_meshes": PARSE_MESHES,
         "parse_visuals": PARSE_VISUALS,
         "contact_geometry": CONTACT_GEOMETRY,
+        "ground_friction": GROUND_FRICTION,
+        "foot_box_xy_scale": FOOT_BOX_XY_SCALE,
         "auto_reset": AUTO_RESET,
         "rigid_contact_max_per_world": RIGID_CONTACT_MAX_PER_WORLD,
         "threads_per_world": THREADS_PER_WORLD,

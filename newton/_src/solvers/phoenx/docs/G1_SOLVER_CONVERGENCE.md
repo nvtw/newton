@@ -44,11 +44,14 @@ Current CUDA regression coverage for G1-relevant physics is now explicit:
 - G1 contact geometry: `test_g1_rl_training` checks the nanoG1 foot boxes, their
   transforms, half-extents, friction, collision/visibility flags, and CUDA graph
   contact generation.
-- G1 foot friction material: `test_g1_rl_training` checks that both nanoG1 foot
-  boxes carry `shape_material_mu = 0.6`. PhoenX currently exposes one Coulomb
-  sliding coefficient on shapes; that value is used as the static cone limit and
-  dynamic sliding coefficient rather than separate static/dynamic material
-  fields.
+- G1 foot friction material and threshold: `test_g1_rl_training` checks that
+  both nanoG1 foot boxes and the G1 ground plane carry `shape_material_mu = 0.6`
+  and runs a graph-captured standing G1 push test. The push test enlarges the
+  foot boxes in X/Y for stability, applies equal horizontal forces to both feet,
+  verifies sub-threshold stiction, and verifies breakaway above the Coulomb
+  limit. PhoenX currently exposes one Coulomb sliding coefficient on shapes;
+  that value is used as the static cone limit and dynamic sliding coefficient
+  rather than separate static/dynamic material fields.
 - G1 standing support balance: `test_g1_rl_training` now settles the RL MJCF G1
   model with strong position-hold gains inside CUDA graphs, verifies negligible
   pose drift over an additional captured window, and checks that the summed
@@ -219,7 +222,7 @@ stores them as `w, x, y, z`, so parity tools must reorder only for comparison.
 
 ## PhoenX Parity Fixes
 
-Two fixes were required before solver tuning was meaningful:
+Three fixes were required before solver tuning was meaningful:
 
 1. The G1 RL environment initialized and observed the free-joint quaternion in
    nanoG1/MuJoCo order. In Newton layout, `[1, 0, 0, 0]` is a 180-degree X
@@ -233,6 +236,13 @@ Two fixes were required before solver tuning was meaningful:
    position `(0.04, 0.0, -0.029)`, half-extents `(0.09, 0.03, 0.008)`, and
    friction `0.6`. The raw `contact_geometry="mjcf"` mode remains available
    as a diagnostic.
+3. The G1 ground plane used to keep PhoenX's generic default friction `0.75`.
+   PhoenX combines material friction by averaging by default, so the effective
+   foot-floor coefficient was `(0.6 + 0.75) / 2 = 0.675`, while nanoG1's
+   generated model authors the relevant foot-floor pair friction directly as
+   `0.6`. The G1 recipe now sets the ground friction to `0.6`, making the
+   averaged PhoenX contact coefficient match nanoG1 without changing global
+   material-combine semantics.
 
 PhoenX also folds nanoG1 passive `dof_damping` into all 29 G1 position-drive
 `joint_target_kd` values. For these drives the target velocity is zero, so this

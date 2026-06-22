@@ -1525,6 +1525,8 @@ class ConfigEnvG1PhoenX:
         contact_geometry: G1 contact geometry preset. "mjcf" keeps the
             imported MJCF primitives; "nanog1_foot_boxes" replaces the
             four foot point contacts per foot with nanoG1's MuJoCo contact boxes.
+        ground_friction: Ground-plane Coulomb friction coefficient.
+        foot_box_xy_scale: Scale applied to the nanoG1 foot-box X/Y half-extents.
         auto_reset: Reset worlds whose done flag is set after each step.
         rigid_contact_max_per_world: Rigid-contact capacity per vectorized world.
             ``0`` keeps the solver's automatic sizing. The default is
@@ -1588,6 +1590,8 @@ class ConfigEnvG1PhoenX:
     parse_meshes: bool = g1_recipe.PARSE_MESHES
     parse_visuals: bool = g1_recipe.PARSE_VISUALS
     contact_geometry: str = g1_recipe.CONTACT_GEOMETRY
+    ground_friction: float = g1_recipe.GROUND_FRICTION
+    foot_box_xy_scale: float = g1_recipe.FOOT_BOX_XY_SCALE
     auto_reset: bool = g1_recipe.AUTO_RESET
     rigid_contact_max_per_world: int = g1_recipe.RIGID_CONTACT_MAX_PER_WORLD
     threads_per_world: int | str = g1_recipe.THREADS_PER_WORLD
@@ -1645,6 +1649,10 @@ class EnvG1PhoenX:
             raise ValueError("sparse_target_success_max_base_height must be >= sparse_target_success_min_base_height")
         if str(self.config.contact_geometry) not in _NANOG1_CONTACT_GEOMETRIES:
             raise ValueError(f"contact_geometry must be one of {_NANOG1_CONTACT_GEOMETRIES}")
+        if float(self.config.ground_friction) < 0.0:
+            raise ValueError("ground_friction must be non-negative")
+        if float(self.config.foot_box_xy_scale) <= 0.0:
+            raise ValueError("foot_box_xy_scale must be positive")
         self._reward_mode_id = _g1_reward_mode_id(self.config.reward_mode)
 
         self.model = self._build_model()
@@ -1770,7 +1778,7 @@ class EnvG1PhoenX:
         builder.default_shape_cfg.ke = 1.0e3
         builder.default_shape_cfg.kd = 1.0e2
         builder.default_shape_cfg.kf = 1.0e3
-        builder.default_shape_cfg.mu = 0.75
+        builder.default_shape_cfg.mu = float(self.config.ground_friction)
         builder.default_shape_cfg.gap = 0.0
         builder.add_ground_plane()
         model = builder.finalize(device=self.device)
@@ -1802,6 +1810,9 @@ class EnvG1PhoenX:
         if bool(self.config.parse_visuals):
             cfg.is_visible = False
         hx, hy, hz = _NANOG1_FOOT_BOX_HALF_EXTENTS
+        xy_scale = float(self.config.foot_box_xy_scale)
+        hx *= xy_scale
+        hy *= xy_scale
         xform = wp.transform(p=wp.vec3(*_NANOG1_FOOT_BOX_LOCAL_POS), q=wp.quat_identity())
         builder.add_shape_box(
             body=left_body,
