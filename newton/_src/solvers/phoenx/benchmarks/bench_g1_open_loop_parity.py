@@ -431,11 +431,84 @@ def _quat_error(q: np.ndarray, ref: np.ndarray) -> np.ndarray:
     return np.minimum(direct, flipped)
 
 
+def _mean_tracking_ratio_at_step(qpos: np.ndarray, action_row: np.ndarray, step: int) -> float | None:
+    controlled_count = int(g1_recipe.CONTROLLED_ACTION_COUNT)
+    action_delta = np.float64(g1_recipe.ACTION_SCALE) * action_row[:controlled_count].astype(np.float64)
+    active = np.abs(action_delta) > 1.0e-7
+    if not np.any(active):
+        return None
+    ratio = (qpos[step, 7 : 7 + controlled_count][active] - qpos[0, 7 : 7 + controlled_count][active]) / action_delta[
+        active
+    ]
+    return float(np.mean(ratio))
+
+
+def _trace_grounded_divergence(
+    phoenx: dict[str, np.ndarray],
+    host: dict[str, np.ndarray],
+    action_row: np.ndarray,
+    trace_steps: int,
+) -> list[dict[str, float | int | None]]:
+    count = min(int(trace_steps), int(phoenx["foot_contacts"].shape[0]), int(host["foot_contacts"].shape[0]))
+    if count <= 0:
+        return []
+
+    q = phoenx["qpos"]
+    qd = phoenx["qvel"]
+    hq = host["qpos"]
+    hqd = host["qvel"]
+    trace: list[dict[str, float | int | None]] = []
+    for row in range(count):
+        step = row + 1
+        joint_err = q[step, 7 : 7 + rl.ACTION_DIM_G1] - hq[step, 7 : 7 + rl.ACTION_DIM_G1]
+        joint_qd_err = qd[step, 6 : 6 + rl.ACTION_DIM_G1] - hqd[step, 6 : 6 + rl.ACTION_DIM_G1]
+        base_xy_err = q[step, 0:2] - hq[step, 0:2]
+        phoenx_tracking = _mean_tracking_ratio_at_step(q, action_row, step)
+        host_tracking = _mean_tracking_ratio_at_step(hq, action_row, step)
+        tracking_delta = None
+        if phoenx_tracking is not None and host_tracking is not None:
+            tracking_delta = float(phoenx_tracking - host_tracking)
+        phoenx_contacts = phoenx["foot_contacts"][row]
+        host_contacts = host["foot_contacts"][row]
+        support_normal = float(np.sum(phoenx["foot_normal_impulse"][row]))
+        support_tangent = float(np.sum(phoenx["foot_tangent_impulse"][row]))
+        trace.append(
+            {
+                "step": step,
+                "phoenx_base_z_m": float(phoenx["base_z"][step]),
+                "nanog1_base_z_m": float(host["base_z"][step]),
+                "base_z_delta_m": float(phoenx["base_z"][step] - host["base_z"][step]),
+                "base_xy_delta_m": float(np.linalg.norm(base_xy_err)),
+                "phoenx_upright_cos": float(phoenx["upright_cos"][step]),
+                "nanog1_upright_cos": float(host["upright_cos"][step]),
+                "upright_cos_delta": float(phoenx["upright_cos"][step] - host["upright_cos"][step]),
+                "joint_q_rmse_rad": float(np.sqrt(np.mean(joint_err * joint_err))),
+                "joint_qd_rmse_rad_s": float(np.sqrt(np.mean(joint_qd_err * joint_qd_err))),
+                "phoenx_tracking_ratio_mean": phoenx_tracking,
+                "nanog1_tracking_ratio_mean": host_tracking,
+                "tracking_ratio_delta_mean": tracking_delta,
+                "phoenx_left_contact_count": float(phoenx_contacts[0]),
+                "phoenx_right_contact_count": float(phoenx_contacts[1]),
+                "nanog1_left_contact_count": float(host_contacts[0]),
+                "nanog1_right_contact_count": float(host_contacts[1]),
+                "left_contact_count_delta": float(phoenx_contacts[0] - host_contacts[0]),
+                "right_contact_count_delta": float(phoenx_contacts[1] - host_contacts[1]),
+                "phoenx_support_normal_impulse": support_normal,
+                "phoenx_support_tangent_impulse": support_tangent,
+                "phoenx_support_tangent_normal_ratio": float(support_tangent / max(support_normal, 1.0e-12)),
+                "phoenx_foot_tangent_normal_ratio_mean": float(np.mean(phoenx["foot_tangent_normal_ratio"][row])),
+                "nanog1_qfrc_constraint_norm": float(host["qfrc_constraint_norm"][row]),
+            }
+        )
+    return trace
+
+
 def _compare_trajectory(
     setting: PhoenXSetting,
     phoenx: dict[str, np.ndarray],
     host: dict[str, np.ndarray],
     action_row: np.ndarray,
+    trace_steps: int = 0,
 ) -> dict[str, Any]:
     q = phoenx["qpos"]
     qd = phoenx["qvel"]
@@ -468,7 +541,7 @@ def _compare_trajectory(
         host_tracking_ratio = float(np.mean(host_ratio))
         phoenx_tracking_ratio = float(np.mean(phoenx_ratio))
         tracking_ratio_delta = float(phoenx_tracking_ratio - host_tracking_ratio)
-    return {
+    result: dict[str, Any] = {
         "setting": setting.name,
         "sim_substeps": int(setting.sim_substeps),
         "solver_iterations": int(setting.solver_iterations),
@@ -510,6 +583,9 @@ def _compare_trajectory(
         "phoenx_foot_tangent_normal_ratio_mean": float(np.mean(phoenx["foot_tangent_normal_ratio"])),
         "nanog1_qfrc_constraint_norm_mean": float(np.mean(host["qfrc_constraint_norm"])),
     }
+    if int(trace_steps) > 0:
+        result["trace"] = _trace_grounded_divergence(phoenx, host, action_row, int(trace_steps))
+    return result
 
 
 def benchmark_open_loop_parity(args: argparse.Namespace) -> dict[str, Any]:
@@ -524,7 +600,7 @@ def benchmark_open_loop_parity(args: argparse.Namespace) -> dict[str, Any]:
     for name in tuple(args.settings):
         setting = _SETTINGS[name]
         phoenx = _run_phoenx(setting, args, action_row, device=device)
-        results.append(_compare_trajectory(setting, phoenx, host, action_row))
+        results.append(_compare_trajectory(setting, phoenx, host, action_row, int(args.trace_steps)))
     return {
         "engine": "phoenx_vs_nanog1_host_open_loop",
         "metric": "same reset and open-loop action targets, state error, contact support, and drive tracking response",
@@ -537,6 +613,7 @@ def benchmark_open_loop_parity(args: argparse.Namespace) -> dict[str, Any]:
         "joint_friction_scale": float(args.joint_friction_scale),
         "initial_base_z": None if args.initial_base_z is None else float(args.initial_base_z),
         "nanog1_stepper": str(args.nanog1_stepper),
+        "trace_steps": int(args.trace_steps),
         "nanog1_reference": {
             "host_stepper": str(_NANOG1_HOST),
             "dt": float(args.nanog1_dt),
@@ -556,6 +633,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--action-pattern", choices=("zero", "leg_step", "leg_symmetric"), default="zero")
     parser.add_argument("--action-amplitude", type=float, default=0.2)
+    parser.add_argument(
+        "--trace-steps",
+        type=int,
+        default=0,
+        help="Include detailed per-control-step trace records for the first N steps.",
+    )
     parser.add_argument("--settings", type=_parse_csv, default=("fast_5x2", "recipe_default", "phoenx_10x8"))
     parser.add_argument("--nanog1-dt", type=float, default=0.004)
     parser.add_argument("--nanog1-decimation", type=int, default=5)

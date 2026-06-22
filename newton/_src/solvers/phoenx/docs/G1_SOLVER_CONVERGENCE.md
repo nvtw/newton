@@ -252,7 +252,25 @@ uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_open_loop_p
     --steps 20 --action-pattern leg_step --action-amplitude 0.2 --json-indent 0
 ```
 
-Current results versus nanoG1 host physics:
+Open-loop trace mode and historical nanoG1 host comparisons:
+
+The benchmark now accepts `--trace-steps N` to emit per-control-step
+records for early grounded divergence. A 6-step trace with the current default
+setting and leg-symmetric action,
+
+```bash
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_open_loop_parity \
+    --steps 6 --trace-steps 6 --action-pattern leg_symmetric \
+    --action-amplitude 0.6 --settings recipe_default --json-indent 2 --device cuda:0
+```
+
+shows that contact counts line up after the first two steps (`4/4` contacts per
+foot in both engines), but PhoenX already sits lower (`-5.37 mm` base-z delta at
+step 6) with `5.31 mm` base-XY delta and `0.0128 rad` joint-position RMSE. The
+mean target-tracking-ratio delta is still small at step 6 (`+0.016`), while the
+20-step run grows to about `+0.309`. This narrows the next check to grounded
+support coupling over the next few policy frames: contact counts alone match,
+but base support and effective drive response diverge before any fall.
 
 | case | friction mode | setting | fall step | final base z | base-z max error | joint-q traj RMS | joint-qd traj RMS |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -325,11 +343,10 @@ become stable without sacrificing physical fidelity.
 
 ## Current Decision
 
-The default PhoenX G1 RL recipe uses `sim_substeps=8`, `solver_iterations=4`,
-`velocity_iterations=1`, and `contact_geometry="nanog1_foot_boxes"`. Speed
-remains important, but the default must survive no-reset ground contact without
-numerical blow-up. Pass `--sim-substeps 5 --solver-iterations 2` only to
-reproduce the old fast setting.
+The default PhoenX G1 RL recipe uses `sim_substeps=10`, `solver_iterations=8`,
+`velocity_iterations=2`, and `contact_geometry="nanog1_foot_boxes"`. Speed
+remains important, but the default must preserve grounded support fidelity and
+survive contact without numerical blow-up. Pass `--sim-substeps 5 --solver-iterations 2` only to reproduce the old fast setting.
 
 Next likely checks:
 
