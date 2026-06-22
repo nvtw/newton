@@ -272,6 +272,18 @@ mean target-tracking-ratio delta is still small at step 6 (`+0.016`), while the
 support coupling over the next few policy frames: contact counts alone match,
 but base support and effective drive response diverge before any fall.
 
+The same benchmark now instruments nanoG1 host `force[]` rows for the foot
+contacts and reports PhoenX final-substep impulse divided by PhoenX substep dt
+as a force estimate. On the 20-step `recipe_default` leg-symmetric trace,
+normal support agrees (`339.3 N` PhoenX estimate versus `339.8 N` nanoG1), but
+tangential support does not (`131.8 N` PhoenX estimate versus `11.0 N` nanoG1).
+The mean tangent/normal ratio is therefore `0.396` in PhoenX versus `0.0367` in
+nanoG1. At step 6, after contact counts already match `4/4`, PhoenX reports a
+support tangent/normal ratio of `0.460`, while nanoG1 reports `0.0107`. This
+rules out a gross missing-normal-support issue for this trace and makes
+tangential contact/friction projection the highest-priority grounded-physics
+suspect.
+
 | case | friction mode | setting | fall step | final base z | base-z max error | joint-q traj RMS | joint-qd traj RMS |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | zero action, 20 steps | none (`scale=0`) | `recipe_default` (`10x4`) | none | 0.760 m | 0.0205 m | 0.0262 rad | 2.02 rad/s |

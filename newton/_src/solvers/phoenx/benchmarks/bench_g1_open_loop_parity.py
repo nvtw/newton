@@ -102,8 +102,8 @@ def _c_string_literal(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _host_runner_source() -> str:
-    host = _c_string_literal(_NANOG1_HOST)
+def _host_runner_source(host_path: Path) -> str:
+    host = _c_string_literal(host_path)
     return textwrap.dedent(
         f"""
         #include <math.h>
@@ -175,6 +175,47 @@ def _host_runner_source() -> str:
             return count;
         }}
 
+        static double contact_mu(int pair, int tangent_axis) {{
+            double fri5[5] = {{hc_pair_friction[pair * 5 + 0], hc_pair_friction[pair * 5 + 0],
+                              hc_pair_friction[pair * 5 + 1], hc_pair_friction[pair * 5 + 2],
+                              hc_pair_friction[pair * 5 + 2]}};
+            return fri5[tangent_axis - 1];
+        }}
+
+        static void contact_force_summary(int geom, double* normal_force, double* tangent_force) {{
+            *normal_force = 0.0;
+            *tangent_force = 0.0;
+            for (int ci = 0; ci < ncon; ++ci) {{
+                if (con_g1[ci] != geom && con_g2[ci] != geom) continue;
+                int dim = phx_trace_con_dim[ci];
+                int st = phx_trace_con_start[ci];
+                if (dim <= 0 || st < 0 || st >= efc_nefc) continue;
+                if (dim == 1) {{
+                    double fn = phx_trace_efc_force[st];
+                    if (fn > 0.0) *normal_force += fn;
+                    continue;
+                }}
+                double fn = 0.0;
+                double tangent_sq = 0.0;
+                int pair = con_ipair[ci];
+                for (int k = 1; k < dim; ++k) {{
+                    int rp = st + 2 * (k - 1);
+                    int rm = rp + 1;
+                    if (rm >= efc_nefc) break;
+                    double fp = phx_trace_efc_force[rp];
+                    double fm = phx_trace_efc_force[rm];
+                    if (fp < 0.0) fp = 0.0;
+                    if (fm < 0.0) fm = 0.0;
+                    double mu = contact_mu(pair, k);
+                    fn += fp + fm;
+                    double ft = mu * (fp - fm);
+                    tangent_sq += ft * ft;
+                }}
+                *normal_force += fn;
+                *tangent_force += sqrt(tangent_sq);
+            }}
+        }}
+
         static double qfrc_constraint_norm(void) {{
             double sum = 0.0;
             for (int i = 0; i < HC_NV; ++i) sum += qfrc_constraint[i] * qfrc_constraint[i];
@@ -209,8 +250,13 @@ def _host_runner_source() -> str:
             double* upright = (double*)calloc((size_t)(steps + 1), sizeof(double));
             double* left_contacts = (double*)calloc((size_t)steps, sizeof(double));
             double* right_contacts = (double*)calloc((size_t)steps, sizeof(double));
+            double* left_normal_force = (double*)calloc((size_t)steps, sizeof(double));
+            double* right_normal_force = (double*)calloc((size_t)steps, sizeof(double));
+            double* left_tangent_force = (double*)calloc((size_t)steps, sizeof(double));
+            double* right_tangent_force = (double*)calloc((size_t)steps, sizeof(double));
             double* qfrc_norm = (double*)calloc((size_t)steps, sizeof(double));
-            if (!qpos_traj || !qvel_traj || !base_z || !upright || !left_contacts || !right_contacts || !qfrc_norm) return 3;
+            if (!qpos_traj || !qvel_traj || !base_z || !upright || !left_contacts || !right_contacts ||
+                !left_normal_force || !right_normal_force || !left_tangent_force || !right_tangent_force || !qfrc_norm) return 3;
 
             memcpy(qpos, hc_key_qpos, sizeof(qpos));
             if (isfinite(initial_base_z)) qpos[2] = initial_base_z;
@@ -254,6 +300,8 @@ def _host_runner_source() -> str:
                 upright[t + 1] = upright_cos_host(qpos);
                 left_contacts[t] = (double)count_geom_contacts(17);
                 right_contacts[t] = (double)count_geom_contacts(31);
+                contact_force_summary(17, &left_normal_force[t], &left_tangent_force[t]);
+                contact_force_summary(31, &right_normal_force[t], &right_tangent_force[t]);
                 qfrc_norm[t] = qfrc_constraint_norm();
             }}
 
@@ -269,6 +317,14 @@ def _host_runner_source() -> str:
             print_scalar_array(left_contacts, steps);
             printf(",\\"right_contacts\\":");
             print_scalar_array(right_contacts, steps);
+            printf(",\\"left_normal_force\\":");
+            print_scalar_array(left_normal_force, steps);
+            printf(",\\"right_normal_force\\":");
+            print_scalar_array(right_normal_force, steps);
+            printf(",\\"left_tangent_force\\":");
+            print_scalar_array(left_tangent_force, steps);
+            printf(",\\"right_tangent_force\\":");
+            print_scalar_array(right_tangent_force, steps);
             printf(",\\"qfrc_constraint_norm\\":");
             print_scalar_array(qfrc_norm, steps);
             printf(",\\"decim\\":%d,\\"dt\\":%.17g,\\"newton\\":%d,\\"ls\\":%d}}\\n", decim, dt, newton, ls);
@@ -278,13 +334,52 @@ def _host_runner_source() -> str:
     )
 
 
+def _instrumented_host_source() -> str:
+    text = _NANOG1_HOST.read_text()
+    text = text.replace(
+        "static double qfrc_constraint[HC_NV], qacc_out[HC_NV];",
+        "static double qfrc_constraint[HC_NV], qacc_out[HC_NV];\n"
+        "static int phx_trace_con_start[HC_NCON_MAX], phx_trace_con_dim[HC_NCON_MAX];\n"
+        "static double phx_trace_efc_force[HC_NEFC_MAX];",
+        1,
+    )
+    text = text.replace(
+        "int con_start[HC_NCON_MAX], con_dim[HC_NCON_MAX]; double con_fri0[HC_NCON_MAX];",
+        "int con_start[HC_NCON_MAX], con_dim[HC_NCON_MAX]; double con_fri0[HC_NCON_MAX];\n"
+        "    for (int ci=0; ci<HC_NCON_MAX; ++ci) { con_start[ci]=-1; con_dim[ci]=0; }",
+        1,
+    )
+    text = text.replace(
+        "    efc_nefc=n;\n    // impedance -> R,K,B,I ; aref ; pyramidal R adjustment",
+        "    efc_nefc=n;\n"
+        "    for (int ci=0; ci<HC_NCON_MAX; ++ci) { phx_trace_con_start[ci]=con_start[ci]; phx_trace_con_dim[ci]=con_dim[ci]; }\n"
+        "    // impedance -> R,K,B,I ; aref ; pyramidal R adjustment",
+        1,
+    )
+    text = text.replace(
+        "if (efc_nefc==0){ memcpy(qacc_out, qacc_smooth, HC_NV*sizeof(double)); memset(qfrc_constraint,0,sizeof qfrc_constraint); return; }",
+        "if (efc_nefc==0){ memcpy(qacc_out, qacc_smooth, HC_NV*sizeof(double)); memset(qfrc_constraint,0,sizeof qfrc_constraint); memset(phx_trace_efc_force,0,sizeof phx_trace_efc_force); return; }",
+        1,
+    )
+    text = text.replace(
+        "    memcpy(qacc_out, qacc, HC_NV*sizeof(double));\n}",
+        "    memset(phx_trace_efc_force,0,sizeof phx_trace_efc_force);\n"
+        "    for (int i=0; i<efc_nefc; ++i) phx_trace_efc_force[i]=force[i];\n"
+        "    memcpy(qacc_out, qacc, HC_NV*sizeof(double));\n}",
+        1,
+    )
+    return text
+
+
 def _compile_host_runner(compiler: str, build_dir: Path) -> Path:
     if not _NANOG1_HOST.exists():
         raise FileNotFoundError(f"nanoG1 host stepper not found: {_NANOG1_HOST}")
+    host_source = build_dir / "g1_host_instrumented.c"
+    host_source.write_text(_instrumented_host_source())
     source = build_dir / "g1_host_runner.c"
     exe = build_dir / "g1_host_runner"
-    source.write_text(_host_runner_source())
-    cmd = [compiler, "-O3", "-std=c99", str(source), "-lm", "-o", str(exe)]
+    source.write_text(_host_runner_source(host_source))
+    cmd = [compiler, "-O3", "-std=c99", "-I", str(_NANOG1_WEB_DIR), str(source), "-lm", "-o", str(exe)]
     subprocess.run(cmd, check=True, cwd=build_dir, text=True, capture_output=True)
     return exe
 
@@ -315,6 +410,20 @@ def _run_nanog1_host(args: argparse.Namespace, action_pattern: str, action_ampli
             (
                 np.asarray(payload["left_contacts"], dtype=np.float64),
                 np.asarray(payload["right_contacts"], dtype=np.float64),
+            ),
+            axis=1,
+        ),
+        "foot_normal_force": np.stack(
+            (
+                np.asarray(payload["left_normal_force"], dtype=np.float64),
+                np.asarray(payload["right_normal_force"], dtype=np.float64),
+            ),
+            axis=1,
+        ),
+        "foot_tangent_force": np.stack(
+            (
+                np.asarray(payload["left_tangent_force"], dtype=np.float64),
+                np.asarray(payload["right_tangent_force"], dtype=np.float64),
             ),
             axis=1,
         ),
@@ -414,6 +523,7 @@ def _run_phoenx(
         "foot_normal_impulse": foot_normal_impulse,
         "foot_tangent_impulse": foot_tangent_impulse,
         "foot_tangent_normal_ratio": foot_tangent_normal_ratio,
+        "physics_dt": np.float64(float(env.config.frame_dt) / float(env.config.sim_substeps)),
     }
 
 
@@ -472,6 +582,9 @@ def _trace_grounded_divergence(
         host_contacts = host["foot_contacts"][row]
         support_normal = float(np.sum(phoenx["foot_normal_impulse"][row]))
         support_tangent = float(np.sum(phoenx["foot_tangent_impulse"][row]))
+        physics_dt = float(phoenx["physics_dt"])
+        nanog1_support_normal = float(np.sum(host["foot_normal_force"][row]))
+        nanog1_support_tangent = float(np.sum(host["foot_tangent_force"][row]))
         trace.append(
             {
                 "step": step,
@@ -495,8 +608,15 @@ def _trace_grounded_divergence(
                 "right_contact_count_delta": float(phoenx_contacts[1] - host_contacts[1]),
                 "phoenx_support_normal_impulse": support_normal,
                 "phoenx_support_tangent_impulse": support_tangent,
+                "phoenx_support_normal_force_est": float(support_normal / physics_dt),
+                "phoenx_support_tangent_force_est": float(support_tangent / physics_dt),
                 "phoenx_support_tangent_normal_ratio": float(support_tangent / max(support_normal, 1.0e-12)),
                 "phoenx_foot_tangent_normal_ratio_mean": float(np.mean(phoenx["foot_tangent_normal_ratio"][row])),
+                "nanog1_support_normal_force": nanog1_support_normal,
+                "nanog1_support_tangent_force": nanog1_support_tangent,
+                "nanog1_support_tangent_normal_ratio": float(
+                    nanog1_support_tangent / max(nanog1_support_normal, 1.0e-12)
+                ),
                 "nanog1_qfrc_constraint_norm": float(host["qfrc_constraint_norm"][row]),
             }
         )
@@ -521,6 +641,11 @@ def _compare_trajectory(
     base_z_err = phoenx["base_z"] - host["base_z"]
     upright_err = phoenx["upright_cos"] - host["upright_cos"]
     foot_contact_err = phoenx["foot_contacts"] - host["foot_contacts"]
+    physics_dt = float(g1_recipe.FRAME_DT) / float(setting.sim_substeps)
+    phoenx_support_normal_impulse = np.sum(phoenx["foot_normal_impulse"], axis=1)
+    phoenx_support_tangent_impulse = np.sum(phoenx["foot_tangent_impulse"], axis=1)
+    nanog1_support_normal_force = np.sum(host["foot_normal_force"], axis=1)
+    nanog1_support_tangent_force = np.sum(host["foot_tangent_force"], axis=1)
     controlled_count = int(g1_recipe.CONTROLLED_ACTION_COUNT)
     action_delta = np.float64(g1_recipe.ACTION_SCALE) * action_row[:controlled_count].astype(np.float64)
     target = hq[0, 7 : 7 + controlled_count] + action_delta
@@ -546,7 +671,7 @@ def _compare_trajectory(
         "sim_substeps": int(setting.sim_substeps),
         "solver_iterations": int(setting.solver_iterations),
         "velocity_iterations": int(setting.velocity_iterations),
-        "physics_dt": float(g1_recipe.FRAME_DT) / float(setting.sim_substeps),
+        "physics_dt": physics_dt,
         "phoenx_fall_step": _fall_step(phoenx["base_z"], phoenx["upright_cos"]),
         "nanog1_fall_step": _fall_step(host["base_z"], host["upright_cos"]),
         "phoenx_final_base_z_m": float(phoenx["base_z"][-1]),
@@ -580,7 +705,14 @@ def _compare_trajectory(
         "nanog1_right_contact_count_mean": float(np.mean(host["foot_contacts"][:, 1])),
         "phoenx_foot_normal_impulse_mean": float(np.mean(phoenx["foot_normal_impulse"])),
         "phoenx_foot_tangent_impulse_mean": float(np.mean(phoenx["foot_tangent_impulse"])),
+        "phoenx_support_normal_force_est_mean": float(np.mean(phoenx_support_normal_impulse / physics_dt)),
+        "phoenx_support_tangent_force_est_mean": float(np.mean(phoenx_support_tangent_impulse / physics_dt)),
         "phoenx_foot_tangent_normal_ratio_mean": float(np.mean(phoenx["foot_tangent_normal_ratio"])),
+        "nanog1_support_normal_force_mean": float(np.mean(nanog1_support_normal_force)),
+        "nanog1_support_tangent_force_mean": float(np.mean(nanog1_support_tangent_force)),
+        "nanog1_support_tangent_normal_ratio_mean": float(
+            np.mean(nanog1_support_tangent_force / np.maximum(nanog1_support_normal_force, 1.0e-12))
+        ),
         "nanog1_qfrc_constraint_norm_mean": float(np.mean(host["qfrc_constraint_norm"])),
     }
     if int(trace_steps) > 0:
