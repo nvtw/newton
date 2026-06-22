@@ -52,24 +52,46 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
 - Short train-to-gate probes still fail the walking gate. The current evidence
   points to remaining simulator/reward/solver quality gaps and sample-efficiency
   issues, not just PPO math.
+- The Python gate diagnostic now rotates root linear velocity with Newton's
+  free-joint quaternion layout, `x, y, z, w`. The previous helper interpreted
+  the same four numbers as `w, x, y, z`, corrupting the printed
+  `mean_linear_velocity_error` diagnostics. The actual gate pass/fail metric was
+  already computed on the device from `step_successes`, so this was a diagnostic
+  bug, not a training-quality fix.
+
+## Discrepancy Ledger
+
+This table is the working order for quality bugs. New tuning or optimization
+should land only after one row has a measured discrepancy and a regression test
+or benchmark note.
+
+| area | reference | PhoenX status | next action |
+| --- | --- | --- | --- |
+| PPO/V-trace replay math | PufferLib G1 fork at `e3825cea` | CUDA graph tests cover V-trace shifted rollout layout, priority weights, and whole-trajectory gather/scatter back to rollout buffers. | Keep as regression coverage; do not tune PPO until a new mismatch is proven. |
+| Muon/network kernels | PufferLib source plus local finite-difference tests | Tests cover Muon update semantics, PufferNet linear layout, MinGRU equations, mirror maps, and manual PPO actor/value gradients. | Re-check precision/layout only if training probes show learner instability independent of physics. |
+| Gate diagnostics | nanoG1-style command battery | Fixed Python velocity diagnostic quaternion order to Newton `xyzw`; graph-captured regression covers the case. | Re-run gates only when diagnostics are needed; do not treat this as quality progress. |
+| Graph overlap / stale policy | Same recipe in eager and graph-leapfrog modes | A 60-iteration eager train-to-gate probe failed similarly to graph mode, so stream overlap/stale rollout policy is not the primary quality blocker. | Keep graph mode for throughput, but debug quality in the simpler eager path when possible. |
+| G1 env/reward contract | `g1_gpu.cu`, `recipe.py`, deploy constants | Tests cover observation/action layout, actuator-force torque penalty, reward decomposition, gait/success terms, command constants, and graph recurrent reset behavior. | Add targeted tests for command resampling/reset timing and done/bootstrap semantics before changing rewards. |
+| Drive/contact physics | nanoG1 host physics plus first-principles drive tests | No-contact PD/friction/armature response is close; grounded contact/friction coupling still differs, especially tangential support at `5x2`. | Prioritize first-principles grounded drive/contact tests and compare solver settings before changing training hyperparameters. |
+| End-to-end training quality | nanoG1 reaches a working policy in roughly the README time scale | Current 75M-sample PhoenX runs train in a few minutes but fail the gate. | Run full probes only after a ledger row changes; record before/after quality and throughput. |
 
 ## Current Measurement
 
-After the RL parity fixes, short train-save-load-evaluate probes on the RTX PRO
-6000 Blackwell measured about 252k train env samples/s and 237k total env
-samples/s with the nanoG1-timed `5x2` training recipe plus nanoG1 per-DOF
-armature. Against the nanoG1 README/reference value of about 1.276M env
-samples/s, PhoenX is about 5.0x slower in these compact probes. The 60-iteration
-policy does not pass the walking gate yet, but the armature parity fix improved
-the compact gate to `battery_perf=0.388` and `battery_falls=27`, compared with
-`battery_perf=0.289` and `battery_falls=94` before armature. A full 75.2M-sample
-run before the armature fix failed the gate, so a fresh full run is still needed.
+The latest full quality-facing probe used 4096 worlds, 64 rollout steps, the
+default nanoG1-timed `5x2` recipe, graph-leapfrog execution, and one 75.2M
+sample chunk. It completed training in 185.4 s and the whole train-save-reload
+gate run in 201.2 s, about 405.7k train environment samples/s, but still failed
+the gate with `battery_perf=0.325` and `battery_falls=372`. A 60-iteration eager
+probe also failed at 15.7M samples with `battery_perf=0.321`, so the current
+blocker is quality/sample efficiency, not only the two-stream graph schedule.
 
 ## Next Checks
 
-1. Compare PhoenX drive dynamics against nanoG1/MuJoCo component scenarios now
-   that the reward force uses nanoG1's actuator-model signal.
-2. Run longer train-to-gate checkpoints after each quality fix and compare
-   learning curves, not just final throughput.
-3. Keep profiling after correctness changes; optimize kernels only when the
-   measured quality path is the one being profiled.
+1. Add or tighten command/reset/done-bootstrap tests against the pinned nanoG1
+   source so the environment contract is exhausted before reward tuning.
+2. Compare grounded drive/contact response against first-principles expectations
+   and nanoG1 traces, especially tangential support and effective stiffness at
+   the production `5x2` setting.
+3. Run longer train-to-gate checkpoints only after a concrete discrepancy is
+   fixed, then compare learning curves and gate diagnostics before profiling for
+   throughput.
