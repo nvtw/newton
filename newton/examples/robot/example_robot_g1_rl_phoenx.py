@@ -5,7 +5,8 @@
 # Example Robot G1 RL Training (PhoenX)
 #
 # Runs the pure-Warp PPO G1 training loop with PhoenX physics while rendering
-# a small subset of the vectorized training worlds.
+# a small subset of the vectorized training worlds. Use ``--mode sim`` for
+# zero-action position hold with the same G1 environment settings.
 #
 # Command: python -m newton.examples robot_g1_rl_phoenx
 #
@@ -51,17 +52,23 @@ class Example:
         self.viewer = viewer
         self.device = wp.get_device(args.device)
         if not self.device.is_cuda:
-            raise RuntimeError("G1 RL training requires CUDA; pass --device cuda:0 or set Warp's default CUDA device")
+            raise RuntimeError(
+                "G1 PhoenX example requires CUDA; pass --device cuda:0 or set Warp's default CUDA device"
+            )
 
         self.mode = str(args.mode)
         if self.mode == "replay" and args.resume_checkpoint is None:
             raise ValueError("--mode replay requires --resume-checkpoint")
+        if self.mode == "sim" and args.resume_checkpoint is not None:
+            raise ValueError("--resume-checkpoint is only valid for train/replay modes")
 
         self.iterations = int(args.iterations)
         self.iterations_per_frame = max(int(args.iterations_per_frame), 1)
         self.replay_steps_per_frame = max(int(args.replay_steps_per_frame), 1)
+        self.sim_steps_per_frame = max(int(args.sim_steps_per_frame), 1)
         self.deterministic_replay = bool(args.deterministic_replay)
         self.replay_step_count = 0
+        self.sim_step_count = 0
         self.rollout_steps = int(args.rollout_steps)
         self.seed = int(args.seed)
         self.randomize_commands = bool(args.randomize_commands)
@@ -71,7 +78,7 @@ class Example:
         self.checkpoint_path = args.checkpoint_path
         self.checkpoint_interval = int(args.checkpoint_interval)
         self.render_contacts = bool(args.render_contacts)
-        self._last_stats: tuple[float, float, float, float, float, float, float, float] | None = None
+        self._last_stats: tuple[float, ...] | None = None
         self._samples_seen = 0
 
         self.command_x_range = (float(args.command_x_min), float(args.command_x_max))
@@ -79,8 +86,12 @@ class Example:
         self.command_yaw_range = (float(args.command_yaw_min), float(args.command_yaw_max))
         self.command_zero_probability = float(args.command_zero_probability)
 
+        world_count = int(args.world_count) if args.world_count is not None else 4
+        if args.world_count is None and self.mode != "sim":
+            world_count = rl.g1_recipe.WORLD_COUNT
+
         env_config = rl.g1_recipe.default_g1_env_config(
-            world_count=int(args.world_count),
+            world_count=world_count,
             frame_dt=float(args.frame_dt),
             sim_substeps=int(args.sim_substeps),
             solver_iterations=int(args.solver_iterations),
@@ -107,31 +118,37 @@ class Example:
             prepare_refresh_stride=args.prepare_refresh_stride,
         )
 
-        ppo_config = rl.g1_recipe.default_g1_ppo_config(
-            mirror_loss_coeff=float(args.mirror_loss_coeff),
-            policy_network=str(args.policy_network),
-            minibatch_size=int(args.minibatch_size),
-            replay_ratio=float(args.replay_ratio),
-            priority_alpha=float(args.priority_alpha),
-            priority_beta=float(args.priority_beta),
-            manual_actor_backward=not bool(args.no_manual_actor_backward),
-            manual_critic_backward=not bool(args.no_manual_critic_backward),
-            manual_mlp_weight_grad_dtype=str(args.manual_mlp_weight_grad_dtype),
-            manual_mlp_forward_dtype=str(args.manual_mlp_forward_dtype),
-            vtrace_rho_clip=float(args.vtrace_rho_clip),
-            vtrace_c_clip=float(args.vtrace_c_clip),
-            reward_clip=float(args.reward_clip),
-            max_grad_norm=float(args.max_grad_norm),
-            value_loss_coeff=float(args.value_loss_coeff),
-            value_clip_range=float(args.value_clip_range),
-            optimizer=str(args.optimizer),
-            optimizer_eps=float(args.optimizer_eps),
-            optimizer_weight_decay=float(args.optimizer_weight_decay),
-            muon_momentum=float(args.muon_momentum),
-        )
-
         self.env = rl.EnvG1PhoenX(env_config, device=self.device)
-        if args.resume_checkpoint is not None:
+        self.trainer: rl.TrainerPPO | None = None
+        self.zero_actions: wp.array2d[float] | None = None
+        if self.mode == "sim":
+            self.zero_actions = wp.zeros(
+                (self.env.world_count, self.env.action_dim), dtype=wp.float32, device=self.device
+            )
+        else:
+            ppo_config = rl.g1_recipe.default_g1_ppo_config(
+                mirror_loss_coeff=float(args.mirror_loss_coeff),
+                policy_network=str(args.policy_network),
+                minibatch_size=int(args.minibatch_size),
+                replay_ratio=float(args.replay_ratio),
+                priority_alpha=float(args.priority_alpha),
+                priority_beta=float(args.priority_beta),
+                manual_actor_backward=not bool(args.no_manual_actor_backward),
+                manual_critic_backward=not bool(args.no_manual_critic_backward),
+                manual_mlp_weight_grad_dtype=str(args.manual_mlp_weight_grad_dtype),
+                manual_mlp_forward_dtype=str(args.manual_mlp_forward_dtype),
+                vtrace_rho_clip=float(args.vtrace_rho_clip),
+                vtrace_c_clip=float(args.vtrace_c_clip),
+                reward_clip=float(args.reward_clip),
+                max_grad_norm=float(args.max_grad_norm),
+                value_loss_coeff=float(args.value_loss_coeff),
+                value_clip_range=float(args.value_clip_range),
+                optimizer=str(args.optimizer),
+                optimizer_eps=float(args.optimizer_eps),
+                optimizer_weight_decay=float(args.optimizer_weight_decay),
+                muon_momentum=float(args.muon_momentum),
+            )
+        if self.mode != "sim" and args.resume_checkpoint is not None:
             checkpoint_config = None if self.mode == "replay" else ppo_config
             self.trainer = rl.load_ppo_checkpoint(args.resume_checkpoint, config=checkpoint_config, device=self.device)
             ppo_config = self.trainer.config
@@ -139,7 +156,7 @@ class Example:
                 raise ValueError("Checkpoint dimensions do not match the G1 environment")
             if self.trainer.config.mirror_loss_coeff > 0.0:
                 self.trainer.set_mirror_map(rl.g1_mirror_map_ppo())
-        else:
+        elif self.mode != "sim":
             self.trainer = rl.TrainerPPO(
                 obs_dim=self.env.obs_dim,
                 action_dim=self.env.action_dim,
@@ -163,7 +180,7 @@ class Example:
                 device=self.device,
             )
             self.trainer.reserve_update_buffers(self.buffer)
-        else:
+        elif self.trainer is not None:
             self.trainer.reset_rollout_state()
 
         self.viewer.set_model(self.env.model)
@@ -197,8 +214,8 @@ class Example:
         )
 
     def _train_iteration(self) -> None:
-        if self.buffer is None:
-            raise RuntimeError("Training mode requires a rollout buffer")
+        if self.buffer is None or self.trainer is None:
+            raise RuntimeError("Training mode requires a rollout buffer and PPO trainer")
         iteration = int(self.trainer.iteration)
         self._maybe_randomize_rollout_commands(iteration)
 
@@ -257,6 +274,8 @@ class Example:
                 )
 
     def _replay_policy_step(self) -> None:
+        if self.trainer is None:
+            raise RuntimeError("Replay mode requires a PPO trainer")
         actions, _log_probs, _values = self.trainer.act_reuse(
             self.env.obs,
             seed=self.seed + 1_000_003 + self.replay_step_count,
@@ -274,12 +293,34 @@ class Example:
                 f"replay_step={self.replay_step_count:06d} reward={reward:.4f} perf={tracking_perf:.3f} done={done:.4f}"
             )
 
+    def _sim_step(self) -> None:
+        if self.zero_actions is None:
+            raise RuntimeError("Simulation mode requires zero-action storage")
+        _obs, _rewards, _dones = self.env.step(self.zero_actions)
+        self.sim_step_count += 1
+
+        if self.log_interval > 0 and self.sim_step_count % self.log_interval == 0:
+            reward = float(np.mean(self.env.step_rewards.numpy()))
+            done = float(np.mean(self.env.step_dones.numpy()))
+            tracking_perf = float(np.mean(self.env.step_successes.numpy()))
+            self._last_stats = (reward, done, tracking_perf)
+            print(
+                f"sim_step={self.sim_step_count:06d} reward_step={reward:.4f} perf={tracking_perf:.3f} done={done:.4f}"
+            )
+
     def step(self):
+        if self.mode == "sim":
+            for _ in range(self.sim_steps_per_frame):
+                self._sim_step()
+            return
+
         if self.mode == "replay":
             for _ in range(self.replay_steps_per_frame):
                 self._replay_policy_step()
             return
 
+        if self.trainer is None:
+            raise RuntimeError("Training mode requires a PPO trainer")
         remaining = self.iterations - int(self.trainer.iteration)
         if remaining <= 0:
             return
@@ -294,10 +335,13 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        if self.mode == "replay":
+        if self.mode == "sim":
+            if self.sim_step_count <= 0:
+                raise RuntimeError("Expected at least one G1 simulation step")
+        elif self.mode == "replay":
             if self.replay_step_count <= 0:
                 raise RuntimeError("Expected at least one G1 PPO replay step")
-        elif int(self.trainer.iteration) <= 0:
+        elif self.trainer is None or int(self.trainer.iteration) <= 0:
             raise RuntimeError("Expected at least one G1 PPO training iteration")
         obs = self.env.obs.numpy()
         if not np.isfinite(obs).all():
@@ -313,13 +357,14 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=100000)
-        parser.add_argument("--mode", choices=("train", "replay"), default="train")
-        parser.add_argument("--world-count", type=int, default=rl.g1_recipe.WORLD_COUNT)
+        parser.add_argument("--mode", choices=("train", "replay", "sim"), default="train")
+        parser.add_argument("--world-count", type=int, default=None)
         parser.add_argument("--render-worlds", type=int, default=4)
         parser.add_argument("--world-spacing", type=float, default=2.0)
         parser.add_argument("--iterations", type=int, default=rl.g1_recipe.TRAIN_ITERATIONS)
         parser.add_argument("--iterations-per-frame", type=int, default=1)
         parser.add_argument("--replay-steps-per-frame", type=int, default=1)
+        parser.add_argument("--sim-steps-per-frame", type=int, default=1)
         parser.add_argument("--deterministic-replay", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--rollout-steps", type=int, default=rl.g1_recipe.ROLLOUT_STEPS)
         parser.add_argument("--seed", type=int, default=rl.g1_recipe.SEED)
