@@ -65,7 +65,9 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
   but the pinned PufferLib G1 fork does define `G1_V3_W_CONTACT`,
   `G1_V3_W_SWING`, `G1_V3_W_HIP`, and `G1_V3_W_BASE_HEIGHT` in the CUDA task
   source. PhoenX keeps these terms in the default G1 v3 reward and tests them
-  against the local pinned source when it is available.
+  against the local pinned source when it is available. PhoenX keeps a
+  configurable swing-foot-contact penalty for experiments, but the default is
+  0.0 because the pinned nanoG1 CUDA reward has no such term.
 - The local generic PufferLib checkout is branch `4.0` at `e90b58ed`, not the
   nanoG1 G1 fork. Parity work should use the nanoG1 recipe/deploy files plus
   the pinned fork source above.

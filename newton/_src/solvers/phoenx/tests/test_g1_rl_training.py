@@ -448,6 +448,20 @@ def _read_c_array(path: Path, name: str, *, dtype: type = float) -> np.ndarray:
     return np.asarray([dtype(value) for value in values], dtype=np_dtype)
 
 
+def _read_c_constant_array(path: Path, name: str, *, dtype: type = float) -> np.ndarray:
+    if not path.is_file():
+        raise unittest.SkipTest(f"missing nanoG1 reference file: {path}")
+    text = path.read_text()
+    pattern = rf"{re.escape(name)}\[[^\]]+\]\s*=\s*\{{([^}}]+)\}};"
+    match = re.search(pattern, text)
+    if match is None:
+        raise AssertionError(f"missing C constant array {name!r} in {path}")
+    raw = re.sub(r"//.*", "", match.group(1).replace("\n", " "))
+    values = [item.strip().removesuffix("f") for item in raw.split(",") if item.strip()]
+    np_dtype = np.int64 if dtype is int else np.float64
+    return np.asarray([dtype(value) for value in values], dtype=np_dtype)
+
+
 def _quat_wxyz_to_matrix_np(quat_wxyz: np.ndarray) -> np.ndarray:
     w, x, y, z = quat_wxyz
     return np.asarray(
@@ -579,6 +593,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertAlmostEqual(g1_recipe.GAIT_FOOT_HEIGHT, read_define_number("G1_V3_FOOT_Z0"))
             self.assertAlmostEqual(g1_recipe.W_BASE_HEIGHT, read_define_number("G1_V3_W_BASE_HEIGHT"))
             self.assertAlmostEqual(g1_recipe.BASE_HEIGHT_TARGET, read_define_number("G1_V3_BASE_Z0"))
+            self.assertNotIn("W_SWING_CONTACT", g1_gpu)
+            self.assertEqual(g1_recipe.W_GAIT_SWING_CONTACT, 0.0)
             self.assertAlmostEqual(g1_recipe.RESET_NOISE, read_define_number("ENV_RESET_NOISE"))
             self.assertEqual(g1_recipe.COMMAND_RESAMPLE_STEPS, int(read_define_number("ENV_CMD_RESAMPLE")))
             self.assertIn("urand_01(&rng) < 0.1f", g1_gpu)
@@ -630,13 +646,30 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START)
         self.assertTrue(rl.ConfigTrainG1PPO().reset_recurrent_state_on_rollout_start)
 
+    def test_nanog1_mirror_map_matches_pinned_pufferlib(self) -> None:
+        mirror_path = _PUFFERLIB_G1_ROOT / "ocean" / "g1gpu" / "g1_mirror.h"
+        obs_src = _read_c_constant_array(mirror_path, "G1_OBS_MIRROR_SRC", dtype=int)
+        obs_sign = _read_c_constant_array(mirror_path, "G1_OBS_MIRROR_SIGN")
+        action_src = _read_c_constant_array(mirror_path, "G1_ACT_MIRROR_SRC", dtype=int)
+        action_sign = _read_c_constant_array(mirror_path, "G1_ACT_MIRROR_SIGN")
+        mirror = rl.g1_mirror_map_ppo()
+
+        np.testing.assert_array_equal(np.asarray(mirror.obs_src, dtype=np.int64), obs_src)
+        np.testing.assert_allclose(np.asarray(mirror.obs_sign, dtype=np.float64), obs_sign, rtol=0.0, atol=0.0)
+        np.testing.assert_array_equal(np.asarray(mirror.action_src, dtype=np.int64), action_src)
+        np.testing.assert_allclose(np.asarray(mirror.action_sign, dtype=np.float64), action_sign, rtol=0.0, atol=0.0)
+        self.assertEqual(obs_src.size, rl.OBS_DIM_G1)
+        self.assertEqual(action_src.size, rl.ACTION_DIM_G1)
+
     def test_nanog1_model_and_deploy_constants_match_env(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 nanoG1 constant parity tests")
         deploy = _load_nanog1_deploy()
         header = _NANOG1_ROOT / "web" / "g1_model_const.h"
+        qpos0 = _read_c_array(header, "hc_qpos0")
         key_qpos = _read_c_array(header, "hc_key_qpos")
         ctrl_range = _read_c_array(header, "hc_act_ctrlrange").reshape(rl.ACTION_DIM_G1, 2)
         act_gain0 = _read_c_array(header, "hc_act_gain0")
+        act_bias1 = _read_c_array(header, "hc_act_bias1")
         act_bias2 = _read_c_array(header, "hc_act_bias2")
         jnt_actfrcrange = _read_c_array(header, "hc_jnt_actfrcrange").reshape(rl.ACTION_DIM_G1 + 1, 2)[1:]
         dof_damping = _read_c_array(header, "hc_dof_damping")
@@ -694,6 +727,12 @@ class TestG1PhoenXRL(unittest.TestCase):
         )
         np.testing.assert_array_equal(jnt_actfrclimited[1:], np.ones(rl.ACTION_DIM_G1, dtype=np.int64))
         np.testing.assert_array_equal(act_trnid, np.arange(1, 1 + rl.ACTION_DIM_G1, dtype=np.int64))
+        key_qpos_newton = key_qpos.copy()
+        key_qpos_newton[3:7] = np.asarray((key_qpos[4], key_qpos[5], key_qpos[6], key_qpos[3]))
+        np.testing.assert_allclose(
+            env.model.joint_q.numpy()[: env.coord_stride], key_qpos_newton, rtol=0.0, atol=1.0e-6
+        )
+        self.assertNotAlmostEqual(float(qpos0[2]), float(key_qpos[2]))
         np.testing.assert_allclose(env.default_joint_pos.numpy(), deploy.HOME, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.default_joint_pos.numpy(), key_qpos[7:], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.ctrl_lower.numpy(), deploy.CTRL_RANGE[:, 0], rtol=0.0, atol=1.0e-5)
@@ -716,6 +755,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         )
         np.testing.assert_allclose(env.actuator_force_kp.numpy(), expected_kp, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_force_kp.numpy()[12:], act_gain0[12:], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(act_bias1, -act_gain0, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_force_kd.numpy(), expected_force_kd, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.passive_damping.numpy(), expected_damping, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(act_bias2, np.zeros_like(act_bias2), rtol=0.0, atol=0.0)
