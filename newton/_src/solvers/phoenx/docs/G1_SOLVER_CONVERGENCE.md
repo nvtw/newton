@@ -230,6 +230,60 @@ exploration (`log_std_init`, per-joint `action_scale`, optional tanh squashing,
 or a short action-scale curriculum), not a switch to full actuator-range
 mapping.
 
+A same-seed, 50-iteration, 1024-world graph-leapfrog sweep compared the nanoG1
+startup (`action_scale = 0.25`, `log_std_init = 0.0`) with a conservative PhoenX
+startup (`action_scale = 0.18`, `log_std_init = -0.5`). The conservative run
+ended at reward `0.0646`, tracking perf `0.504`, done `0.0114`, and action clip
+fraction `0.217`; the baseline ended at reward `0.0472`, tracking perf `0.487`,
+done `0.0129`, and action clip fraction `0.340`. This is a candidate PhoenX
+recipe lead, not yet a default change. A longer 200-iteration conservative run
+continued to improve training metrics (`reward = 0.0855`, `perf = 0.536`,
+`done = 0.0069`), but its saved checkpoint still failed deterministic walking
+evaluation: at fixed `0.8 m/s` command it produced `mean_done = 0.711`,
+`mean_reward = -0.726`, and `mean_tracking_perf = 0.097`; at fixed `0.0`, `0.3`,
+and `0.5 m/s`, it also had high fall rates. After adding fixed-command progress
+metrics, the same `0.8 m/s` checkpoint showed `fall_fraction = 1.0`, mean
+survival `87.6/300` steps, command-aligned displacement `0.83 m`, and
+command-aligned velocity `0.138 m/s`. Lower early exploration therefore helps
+survival and curriculum-side training metrics, and the policy does attempt a
+weak forward stumble, but it is not sufficient by itself to produce a stable
+walking gait. Any automated tuning must optimize a true walking/gate objective,
+not only shaped training reward.
+
+## Reward Shaping and PBT Direction
+
+The current data supports investigating task/reward tuning, but not by adding
+unbounded dense terms blindly. The 200-iteration conservative policy makes weak
+forward progress and then falls; this is a locomotion-quality problem, not a
+proof that PPO or action mapping is inert. The next reward changes should be
+measured against fixed-command displacement, fall fraction, survival steps, and
+the G1 gate, not only rollout reward or instantaneous velocity-tracking `perf`.
+
+Sample Factory's PBT design is a useful experiment-management reference: train a
+population for fixed periods, rank by a true objective, copy strong policies
+into weak slots, and mutate hyperparameters. It can tune learning parameters and
+environment/reward coefficients, but it explicitly needs a `true_objective`;
+using shaped reward directly can let coefficient scaling win without improving
+the final task. Sample Factory itself is PyTorch-based, so PhoenX should not take
+it as a runtime dependency. A small pure-Python/Warp-compatible PBT harness can
+reuse our existing train/save/evaluate CLI and mutate only a bounded recipe
+surface.
+
+Initial PBT/search surface should stay compact and physically meaningful:
+
+- exploration/task schedule: `log_std_init`, `action_scale`, command curriculum
+  start/ramp, command zero probability;
+- PPO knobs already known to matter: actor/critic LR scale, entropy coefficient,
+  mirror coefficient;
+- reward terms only if bounded by the true objective: tracking weights, fall
+  penalty, gait/contact/foot-clearance weights, and possibly a small upright-gated
+  command-aligned progress term.
+
+Do not tune solver substeps, actuator gains, friction, armature, or force limits
+inside PBT unless the experiment is explicitly about sim-to-real tradeoffs. Those
+are physics-fidelity settings and should remain validated by first-principles and
+parity tests.
+
 ## nanoG1 Reference
 
 nanoG1 v3 uses the following production physics and drive setup:

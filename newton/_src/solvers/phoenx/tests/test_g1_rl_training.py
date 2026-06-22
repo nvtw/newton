@@ -3963,6 +3963,16 @@ class TestG1PhoenXRL(unittest.TestCase):
             )
             self.assertTrue(math.isfinite(eval_result.stats.mean_reward))
             self.assertTrue(math.isfinite(eval_result.stats.mean_done))
+            self.assertTrue(math.isfinite(eval_result.stats.fall_fraction))
+            self.assertTrue(math.isfinite(eval_result.stats.mean_survival_steps))
+            self.assertTrue(math.isfinite(eval_result.stats.mean_command_aligned_displacement))
+            self.assertTrue(math.isfinite(eval_result.stats.mean_command_aligned_velocity))
+            self.assertTrue(math.isfinite(eval_result.stats.mean_lateral_displacement_abs))
+            self.assertTrue(math.isfinite(eval_result.stats.mean_path_length))
+            self.assertGreaterEqual(eval_result.stats.fall_fraction, 0.0)
+            self.assertLessEqual(eval_result.stats.fall_fraction, 1.0)
+            self.assertGreaterEqual(eval_result.stats.mean_survival_steps, 0.0)
+            self.assertGreaterEqual(eval_result.stats.mean_path_length, 0.0)
             self.assertGreater(eval_result.stats.samples_per_second, 0.0)
 
             target_result = rl.evaluate_g1_target_ppo(

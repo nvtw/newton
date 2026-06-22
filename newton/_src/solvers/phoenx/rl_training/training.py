@@ -344,6 +344,12 @@ class StatsEvaluateG1PPO:
     mean_command_x: float
     mean_command_y: float
     mean_command_yaw: float
+    fall_fraction: float
+    mean_survival_steps: float
+    mean_command_aligned_displacement: float
+    mean_command_aligned_velocity: float
+    mean_lateral_displacement_abs: float
+    mean_path_length: float
     samples_per_second: float
 
 
@@ -1008,21 +1014,48 @@ def evaluate_g1_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1PPO | None = No
 
     obs = env.reset()
     trainer.reset_rollout_state()
+    start_q = _joint_q_matrix_g1(env)
+    start_xy = start_q[:, 0:2].copy()
+    previous_xy = start_xy.copy()
+    last_alive_xy = start_xy.copy()
+    path_length = np.zeros(env.world_count, dtype=np.float64)
+    first_done_step = np.full(env.world_count, -1, dtype=np.int32)
     reward_sum = 0.0
     done_sum = 0.0
     tracking_perf_sum = 0.0
     t0 = time.perf_counter()
     for step in range(int(cfg.steps)):
+        alive_before = first_done_step < 0
         actions, _log_probs, _values = trainer.act(
             obs, seed=int(cfg.seed) + step, deterministic=bool(cfg.deterministic)
         )
         obs, rewards, dones = env.step(actions)
         reward_sum += float(np.mean(rewards.numpy()))
-        done_sum += float(np.mean(dones.numpy()))
+        done_np = dones.numpy() > 0.5
+        done_sum += float(np.mean(done_np))
         tracking_perf_sum += float(np.mean(env.step_successes.numpy()))
+
+        q = _joint_q_matrix_g1(env)
+        xy = q[:, 0:2].copy()
+        path_length[alive_before] += np.linalg.norm(xy[alive_before] - previous_xy[alive_before], axis=1)
+        last_alive_xy[alive_before] = xy[alive_before]
+        previous_xy = xy
+        first_done_step[(first_done_step < 0) & done_np] = step + 1
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
     command_np = env.command.numpy()
     steps = int(cfg.steps)
+    command_xy = command_np[:, 0:2].astype(np.float64, copy=False)
+    command_norm = np.linalg.norm(command_xy, axis=1)
+    command_dir = np.zeros_like(command_xy, dtype=np.float64)
+    moving = command_norm > 1.0e-6
+    command_dir[moving] = command_xy[moving] / command_norm[moving, None]
+    command_dir[~moving, 0] = 1.0
+    lateral_dir = np.stack((-command_dir[:, 1], command_dir[:, 0]), axis=1)
+    displacement = last_alive_xy - start_xy
+    aligned_displacement = np.sum(displacement * command_dir, axis=1)
+    lateral_displacement = np.sum(displacement * lateral_dir, axis=1)
+    survival_steps = np.where(first_done_step >= 0, first_done_step, steps)
+    eval_seconds = max(float(steps) * float(env.config.frame_dt), 1.0e-12)
     stats = StatsEvaluateG1PPO(
         steps=steps,
         mean_reward=reward_sum / float(steps),
@@ -1031,6 +1064,12 @@ def evaluate_g1_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1PPO | None = No
         mean_command_x=float(np.mean(command_np[:, 0])),
         mean_command_y=float(np.mean(command_np[:, 1])),
         mean_command_yaw=float(np.mean(command_np[:, 2])),
+        fall_fraction=float(np.mean(first_done_step >= 0)),
+        mean_survival_steps=float(np.mean(survival_steps)),
+        mean_command_aligned_displacement=float(np.mean(aligned_displacement)),
+        mean_command_aligned_velocity=float(np.mean(aligned_displacement) / eval_seconds),
+        mean_lateral_displacement_abs=float(np.mean(np.abs(lateral_displacement))),
+        mean_path_length=float(np.mean(path_length)),
         samples_per_second=float(env.world_count * steps) / elapsed,
     )
     return ResultEvaluateG1PPO(stats=stats)
