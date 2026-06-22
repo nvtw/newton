@@ -60,6 +60,10 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
   prioritized replay, Muon, and mirror loss. It still failed the 75M-sample
   gate, so the current walking blocker is unlikely to be only PhoenX Warp PPO
   implementation.
+- The shipped `assets/nanoG1.bin` PufferNet policy can now be imported into a
+  normal PhoenX PPO checkpoint. A zero-observation smoke matched the nanoG1 C
+  inference shim to `1.2e-7` max absolute error, so this gives a verified
+  PyTorch-free teacher/warm-start path.
 - Short train-to-gate probes still fail the walking gate. The current evidence
   points to remaining simulator/reward/solver quality gaps and sample-efficiency
   issues, not just PPO math.
@@ -81,6 +85,7 @@ or benchmark note.
 | PPO/V-trace replay math | PufferLib G1 fork at `e3825cea` | CUDA graph tests cover V-trace shifted rollout layout, priority weights, and whole-trajectory gather/scatter back to rollout buffers. | Keep as regression coverage; do not tune PPO until a new mismatch is proven. |
 | Muon/network kernels | PufferLib source plus local finite-difference tests | Tests cover Muon update semantics, PufferNet linear layout, MinGRU equations, mirror maps, and manual PPO actor/value gradients. | Re-check precision/layout only if training probes show learner instability independent of physics. |
 | Puffer learner isolation | PufferLib-style Torch PPO/V-trace/Muon learner | `bench_g1_train_puffer_torch` keeps PhoenX physics fixed and swaps only the RL learner. A 75.2M-sample run failed similarly to Warp PPO: `battery_perf=0.553`, `battery_falls=43`, forward-command perf `0.096`. | Treat remaining root cause as PhoenX env/physics/reward parity unless a more exact pinned native Puffer integration contradicts this result. |
+| nanoG1 policy import | Shipped `assets/nanoG1.bin` plus `deploy/nanog1_policy.c` | `nanog1_import.py` converts the PufferNet binary into a PhoenX PPO checkpoint; imported Warp output matches the nanoG1 C shim to `1.2e-7` on a zero-observation smoke. The imported policy reaches only `battery_perf=0.700` on the full PhoenX gate and fails, so a known-good policy still degrades under PhoenX. | Use the imported policy as the next primary physics/env parity probe before changing PPO or adding reward terms. |
 | Gate diagnostics | nanoG1-style command battery | Fixed Python velocity diagnostic quaternion order to Newton `xyzw`; graph-captured regression covers the case. | Re-run gates only when diagnostics are needed; do not treat this as quality progress. |
 | Graph overlap / stale policy | Same recipe in eager and graph-leapfrog modes | A 60-iteration eager train-to-gate probe failed similarly to graph mode, so stream overlap/stale rollout policy is not the primary quality blocker. | Keep graph mode for throughput, but debug quality in the simpler eager path when possible. |
 | G1 env/reward contract | `g1_gpu.cu`, `recipe.py`, deploy constants | Tests cover observation/action layout, actuator-force torque penalty, reward decomposition, gait/success terms, command constants, and graph recurrent reset behavior. | Add targeted tests for command resampling/reset timing and done/bootstrap semantics before changing rewards. |
@@ -105,6 +110,29 @@ failed the gate with `battery_perf=0.553`, `battery_falls=43`, and forward
 walking. This matches the earlier pure-Warp PPO failure mode closely enough that
 the next root-cause work should focus on PhoenX G1 environment/physics parity
 rather than rewriting the PPO learner again.
+
+
+The 2026-06-22 nanoG1 policy import used:
+
+```bash
+uv run --extra dev -m newton._src.solvers.phoenx.experimental.nanog1_import \
+    --device cuda:0 \
+    --checkpoint /tmp/phoenx_nanog1_import_smoke.npz
+```
+
+A temporary C shim built from `deploy/nanog1_policy.c` and local PufferLib
+`puffernet.h` matched the imported Warp PufferMinGRU checkpoint at `1.2e-7` max
+absolute error for zero-observation inference. The full PhoenX gate with current
+stable defaults (`sim_substeps=10`, `solver_iterations=8`, explicit torque,
+foot-box contacts) failed but was much stronger than locally trained policies:
+`battery_perf=0.700`, `battery_falls=134/24000`, `stand` perf `0.952`, and
+`forward_0.8` perf `0.501`. Short 4800-sample sweeps showed `5x2` is unstable
+(huge velocity diagnostics), `8x4` is stable but weaker (`battery_perf=0.652`),
+`10x8` is best among tested settings (`0.730`), MJCF contact geometry did not
+help (`0.712`), and the old constraint-drive path was similar (`0.728`). This
+makes the imported policy the best near-term diagnostic for contact/drive/env
+parity: a policy known to walk in nanoG1 still degrades in PhoenX before any PPO
+fine-tuning is involved.
 
 The latest full quality-facing probe before the stability default change used
 4096 worlds, 64 rollout steps, the nanoG1-timed `5x2` recipe,
