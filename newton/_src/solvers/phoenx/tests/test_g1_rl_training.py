@@ -3652,6 +3652,70 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(second_restored.config.shared_value_network)
             self.assertIsNone(second_restored.critic)
 
+    def test_g1_gate_fixed_commands_survive_randomized_reset(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 gate command reset regression tests")
+
+        class RecorderPolicy:
+            def __init__(self, device):
+                self.device = device
+                self.obs_dim = rl.OBS_DIM_G1
+                self.action_dim = rl.ACTION_DIM_G1
+                self.battery_commands = []
+                self._actions = None
+                self._log_probs = None
+                self._values = None
+
+            def reset_rollout_state(self, dones=None):
+                return None
+
+            def act(self, obs, *, seed: int, deterministic: bool):
+                rows = int(obs.shape[0])
+                obs_np = obs.numpy()
+                if rows == 2:
+                    self.battery_commands.append(obs_np[:, 6:9].copy())
+                if self._actions is None or int(self._actions.shape[0]) != rows:
+                    self._actions = wp.zeros((rows, self.action_dim), dtype=wp.float32, device=self.device)
+                    self._log_probs = wp.zeros(rows, dtype=wp.float32, device=self.device)
+                    self._values = wp.zeros(rows, dtype=wp.float32, device=self.device)
+                return self._actions, self._log_probs, self._values
+
+        fixed_command = (0.75, -0.25, 0.5)
+        env_config = rl.ConfigEnvG1PhoenX(
+            world_count=2,
+            sim_substeps=1,
+            solver_iterations=1,
+            velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+            randomize_commands_on_reset=True,
+            command_x_range=(0.0, 0.0),
+            command_y_range=(0.0, 0.0),
+            command_yaw_range=(0.0, 0.0),
+            command_zero_probability=0.0,
+            command_resample_steps=0,
+            max_episode_steps=0,
+            auto_reset=False,
+        )
+        policy = RecorderPolicy(device)
+
+        rl.evaluate_g1_gate_ppo(
+            policy,
+            rl.ConfigEvaluateG1GatePPO(
+                env_config=env_config,
+                battery_commands=(fixed_command,),
+                seeds_per_command=2,
+                battery_steps=1,
+                diagnostic_steps=1,
+                diagnostic_world_count=1,
+                device=device,
+                deterministic=True,
+                seed=97,
+                min_battery_perf=2.0,
+            ),
+        )
+
+        self.assertEqual(len(policy.battery_commands), 1)
+        expected = np.tile(np.asarray(fixed_command, dtype=np.float32), (2, 1))
+        np.testing.assert_allclose(policy.battery_commands[0], expected, rtol=0.0, atol=0.0)
+
     def test_train_graph_leapfrog_save_and_resume(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 graph-leapfrog training tests")
         env_config = rl.ConfigEnvG1PhoenX(

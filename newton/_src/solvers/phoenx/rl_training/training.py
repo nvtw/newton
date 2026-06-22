@@ -1520,8 +1520,9 @@ def _evaluate_g1_gate_battery(
     yaw_err_sum = np.zeros(commands.shape[0], dtype=np.float64)
     sample_count = np.zeros(commands.shape[0], dtype=np.int64)
 
-    env.set_commands(command_np)
     obs = env.reset_noisy(seed=int(cfg.seed))
+    env.set_commands(command_np)
+    obs = env.observe()
     trainer.reset_rollout_state()
     for step in range(int(cfg.battery_steps)):
         actions, _log_probs, _values = trainer.act(
