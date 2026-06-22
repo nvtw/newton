@@ -25,6 +25,9 @@ adding a PyTorch dependency to Newton's Warp-only RL stack.
 - `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate`:
   End-to-end train, save, reload, and quality-gate benchmark for estimating
   samples/time-to-walk.
+- `python -m newton._src.solvers.phoenx.benchmarks.bench_g1_train_puffer_torch`:
+  isolation benchmark that keeps PhoenX physics/env/rewards fixed but replaces
+  the pure-Warp learner with a PufferLib-style Torch PPO/V-trace/Muon learner.
 - `python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog`:
   experimental rollout/update overlap benchmark using separate CUDA graphs.
 

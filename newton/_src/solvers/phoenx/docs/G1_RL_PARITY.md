@@ -54,6 +54,12 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
 - The local generic PufferLib checkout is branch `4.0` at `e90b58ed`, not the
   nanoG1 G1 fork. Parity work should use the nanoG1 recipe/deploy files plus
   the pinned fork source above.
+- A 2026-06-22 isolation run replaced the pure-Warp PPO update with a
+  PufferLib-style Torch learner while keeping PhoenX physics/env/rewards fixed.
+  The learner uses native PufferNet layout, MinGRU, Puffer shifted V-trace,
+  prioritized replay, Muon, and mirror loss. It still failed the 75M-sample
+  gate, so the current walking blocker is unlikely to be only PhoenX Warp PPO
+  implementation.
 - Short train-to-gate probes still fail the walking gate. The current evidence
   points to remaining simulator/reward/solver quality gaps and sample-efficiency
   issues, not just PPO math.
@@ -74,6 +80,7 @@ or benchmark note.
 | --- | --- | --- | --- |
 | PPO/V-trace replay math | PufferLib G1 fork at `e3825cea` | CUDA graph tests cover V-trace shifted rollout layout, priority weights, and whole-trajectory gather/scatter back to rollout buffers. | Keep as regression coverage; do not tune PPO until a new mismatch is proven. |
 | Muon/network kernels | PufferLib source plus local finite-difference tests | Tests cover Muon update semantics, PufferNet linear layout, MinGRU equations, mirror maps, and manual PPO actor/value gradients. | Re-check precision/layout only if training probes show learner instability independent of physics. |
+| Puffer learner isolation | PufferLib-style Torch PPO/V-trace/Muon learner | `bench_g1_train_puffer_torch` keeps PhoenX physics fixed and swaps only the RL learner. A 75.2M-sample run failed similarly to Warp PPO: `battery_perf=0.553`, `battery_falls=43`, forward-command perf `0.096`. | Treat remaining root cause as PhoenX env/physics/reward parity unless a more exact pinned native Puffer integration contradicts this result. |
 | Gate diagnostics | nanoG1-style command battery | Fixed Python velocity diagnostic quaternion order to Newton `xyzw`; graph-captured regression covers the case. | Re-run gates only when diagnostics are needed; do not treat this as quality progress. |
 | Graph overlap / stale policy | Same recipe in eager and graph-leapfrog modes | A 60-iteration eager train-to-gate probe failed similarly to graph mode, so stream overlap/stale rollout policy is not the primary quality blocker. | Keep graph mode for throughput, but debug quality in the simpler eager path when possible. |
 | G1 env/reward contract | `g1_gpu.cu`, `recipe.py`, deploy constants | Tests cover observation/action layout, actuator-force torque penalty, reward decomposition, gait/success terms, command constants, and graph recurrent reset behavior. | Add targeted tests for command resampling/reset timing and done/bootstrap semantics before changing rewards. |
@@ -81,6 +88,23 @@ or benchmark note.
 | End-to-end training quality | nanoG1 reaches a working policy in roughly the README time scale | Current 75M-sample PhoenX runs train in a few minutes but fail the gate. | Run full probes only after a ledger row changes; record before/after quality and throughput. |
 
 ## Current Measurement
+
+The 2026-06-22 Puffer learner isolation run used:
+
+```bash
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train_puffer_torch \
+    --iterations 287 --world-count 4096 --rollout-steps 64 \
+    --checkpoint-path /tmp/phoenx_g1_puffer_{iteration}.pt \
+    --checkpoint-interval 287 --gate
+```
+
+It trained `75,235,328` samples in `263.9 s` at `285k` env samples/s and
+failed the gate with `battery_perf=0.553`, `battery_falls=43`, and forward
+`0.8 m/s` command tracking perf `0.096`. The policy learned stable standing
+(`stand` perf `0.978`) and weak turning/lateral behavior, but not forward
+walking. This matches the earlier pure-Warp PPO failure mode closely enough that
+the next root-cause work should focus on PhoenX G1 environment/physics parity
+rather than rewriting the PPO learner again.
 
 The latest full quality-facing probe before the stability default change used
 4096 worlds, 64 rollout steps, the nanoG1-timed `5x2` recipe,
