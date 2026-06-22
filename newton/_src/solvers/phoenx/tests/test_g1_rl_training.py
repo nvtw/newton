@@ -1773,15 +1773,20 @@ class TestG1PhoenXRL(unittest.TestCase):
             dtype=np.float32,
         )
         obs = wp.array(obs_np, dtype=wp.float32, device=device)
-        out_snapshot = wp.empty((obs_np.shape[0], action_dim + 1), dtype=wp.float32, device=device)
+        out0_snapshot = wp.empty((obs_np.shape[0], action_dim + 1), dtype=wp.float32, device=device)
+        out1_snapshot = wp.empty((obs_np.shape[0], action_dim + 1), dtype=wp.float32, device=device)
         with wp.ScopedCapture(device=device) as capture:
             trainer.actor.net.zero_state()
-            out = trainer.actor.net.forward_reuse(obs)
-            wp.copy(out_snapshot, out)
+            out0 = trainer.actor.net.forward_reuse(obs)
+            wp.copy(out0_snapshot, out0)
+            out1 = trainer.actor.net.forward_reuse(obs)
+            wp.copy(out1_snapshot, out1)
         wp.capture_launch(capture.graph)
 
-        expected_out, _ = puffernet_numpy_forward(weights, obs_np)
-        np.testing.assert_allclose(out_snapshot.numpy(), expected_out, rtol=1.0e-6, atol=1.0e-6)
+        expected0, state0 = puffernet_numpy_forward(weights, obs_np)
+        expected1, _state1 = puffernet_numpy_forward(weights, obs_np, state=state0)
+        np.testing.assert_allclose(out0_snapshot.numpy(), expected0, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(out1_snapshot.numpy(), expected1, rtol=1.0e-6, atol=1.0e-6)
 
     def test_puffer_mingru_backward_matches_finite_difference_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX MinGRU backward tests")

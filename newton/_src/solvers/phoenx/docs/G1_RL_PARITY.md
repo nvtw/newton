@@ -122,8 +122,9 @@ uv run --extra dev -m newton._src.solvers.phoenx.experimental.nanog1_import \
 
 A temporary C shim built from `deploy/nanog1_policy.c` and local PufferLib
 `puffernet.h` matched the imported Warp PufferMinGRU checkpoint at `1.2e-7` max
-absolute error for zero-observation inference. The full PhoenX gate with current
-stable defaults (`sim_substeps=10`, `solver_iterations=8`, explicit torque,
+absolute error for zero-observation inference and `4.8e-6` max error over a
+32-step nonzero recurrent sequence. The full PhoenX gate with current stable
+defaults (`sim_substeps=10`, `solver_iterations=8`, explicit torque,
 foot-box contacts) failed but was much stronger than locally trained policies:
 `battery_perf=0.700`, `battery_falls=134/24000`, `stand` perf `0.952`, and
 `forward_0.8` perf `0.501`. Short 4800-sample sweeps showed `5x2` is unstable
