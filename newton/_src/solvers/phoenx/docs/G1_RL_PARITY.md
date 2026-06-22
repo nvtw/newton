@@ -320,6 +320,15 @@ PBT experiments should therefore be ranked by held-out fixed-command progress
 and gate metrics, and should run only after each concrete physics/env mismatch
 is recorded or ruled out.
 
+A short fixed-command evaluator confirms that this objective is not blind to
+walking-like behavior. At the 150-step `0.8 m/s` forward command, the imported
+nanoG1 teacher under PhoenX reached `1.92 m` aligned displacement, `0.64 m/s`
+mean aligned velocity, and `0.58` tracking perf before falling in some worlds.
+A recent from-scratch PhoenX checkpoint moved backward on average (`-0.81 m`,
+`-0.27 m/s`) with only `0.02` tracking perf. The objective therefore ranks the
+more walking-like policy higher; the current blocker is producing that behavior
+from scratch and keeping it stable under PhoenX physics.
+
 Fresh probes with the corrected velocity reward still collapse to standing or
 low-motion behavior:
 
