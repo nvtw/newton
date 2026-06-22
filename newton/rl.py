@@ -241,6 +241,7 @@ def _main() -> int:
         default=g1_recipe.ACTIVATION,
         help="Hidden activation for the MLP policy backbone. Ignored by puffer_mingru.",
     )
+    g1_parser.add_argument("--log-std-init", type=float, default=g1_recipe.LOG_STD_INIT)
     g1_parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
     g1_parser.add_argument("--train-epochs", type=int, default=g1_recipe.TRAIN_EPOCHS)
     g1_parser.add_argument("--actor-lr", type=float, default=g1_recipe.ACTOR_LR)
@@ -542,6 +543,7 @@ def _main() -> int:
                 reset_recurrent_state_on_rollout_start=bool(args.reset_recurrent_state_on_rollout_start),
                 squash_actions=bool(args.squash_actions),
                 activation=args.activation,
+                log_std_init=args.log_std_init,
                 resume_checkpoint=args.resume_checkpoint,
                 checkpoint_path=args.checkpoint_path,
                 checkpoint_interval=args.checkpoint_interval,

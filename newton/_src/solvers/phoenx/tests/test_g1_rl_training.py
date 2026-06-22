@@ -4353,6 +4353,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 optimizer_weight_decay=g1_recipe.OPTIMIZER_WEIGHT_DECAY,
                 muon_momentum=g1_recipe.MUON_MOMENTUM,
                 squash_actions=g1_recipe.SQUASH_ACTIONS,
+                log_std_init=g1_recipe.LOG_STD_INIT,
                 reset_recurrent_state_on_rollout_start=g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START,
                 command_x=0.8,
                 command_y=0.0,
@@ -4435,6 +4436,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(result["execution_mode"], "graph_leapfrog")
             self.assertFalse(result["readback_diagnostics"])
             self.assertEqual(result["squash_actions"], g1_recipe.SQUASH_ACTIONS)
+            self.assertEqual(result["log_std_init"], g1_recipe.LOG_STD_INIT)
             self.assertEqual(
                 result["reset_recurrent_state_on_rollout_start"],
                 g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START,

@@ -186,6 +186,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 target_angle_max=float(args.target_angle_max),
                 reset_recurrent_state_on_rollout_start=bool(args.reset_recurrent_state_on_rollout_start),
                 squash_actions=bool(args.squash_actions),
+                log_std_init=float(args.log_std_init),
                 resume_checkpoint=resume_checkpoint,
                 checkpoint_path=checkpoint_template,
                 checkpoint_interval=0,
@@ -252,6 +253,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "world_count": int(args.world_count),
         "rollout_steps": int(args.rollout_steps),
         "squash_actions": bool(args.squash_actions),
+        "log_std_init": float(args.log_std_init),
         "reward_mode": str(args.reward_mode),
         "w_alive": float(args.w_alive),
         "w_track_lin": float(args.w_track_lin),
@@ -383,6 +385,7 @@ def _parse_args() -> argparse.Namespace:
         default=g1_recipe.SQUASH_ACTIONS,
         help="Use tanh-squashed PPO actions instead of the nanoG1-compatible raw Gaussian policy.",
     )
+    parser.add_argument("--log-std-init", type=float, default=g1_recipe.LOG_STD_INIT)
     parser.add_argument(
         "--reset-recurrent-state-on-rollout-start",
         action=argparse.BooleanOptionalAction,
