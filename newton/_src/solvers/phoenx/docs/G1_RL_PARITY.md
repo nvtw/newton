@@ -190,13 +190,28 @@ failed at 1.0 m and 1.4 m. Current evidence therefore points to sparse task
 exploration/curriculum or teacher warm-start needs after the false-success bug,
 not a missing dense reward term.
 
+A current imported-teacher fine-tune probe used the verified nanoG1 checkpoint
+under PhoenX physics with `actor_lr=critic_lr=2e-4` and one PPO epoch. The first
+60 iterations improved the full gate from the imported baseline
+`battery_perf=0.707`, `battery_falls=122/24000` to `0.751`, `84/24000`.
+Continuing the same run to iteration 120 plateaued at `0.749`, `77/24000`; a
+higher `2e-3` learning-rate probe had unhealthy KL and clip fraction. A short
+physics-knob sweep on the imported teacher suggested MJCF contacts might help,
+but the full MJCF-contact gate was worse (`battery_perf=0.702`,
+`battery_falls=106/24000`). Keep the foot-box contact default and treat the
+teacher fine-tune as useful evidence, not a solved walking recipe: PPO can adapt
+the teacher slightly, but a known-good nanoG1 policy still degrades under
+PhoenX before optimization starts.
+
 ## Next Checks
 
 1. Add or tighten command/reset/done-bootstrap tests against the pinned nanoG1
    source so the environment contract is exhausted before reward tuning.
 2. Compare grounded drive/contact response against first-principles expectations
    and nanoG1 traces, especially tangential support and effective stiffness at
-   the production `5x2` setting.
-3. Run longer train-to-gate checkpoints only after a concrete discrepancy is
+   the stable `10x8` setting.
+3. Use the imported teacher plus low-LR PPO only as an env/physics parity probe;
+   do not keep extending it until another discrepancy is fixed.
+4. Run longer train-to-gate checkpoints only after a concrete discrepancy is
    fixed, then compare learning curves and gate diagnostics before profiling for
    throughput.

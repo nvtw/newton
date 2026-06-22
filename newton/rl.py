@@ -198,12 +198,15 @@ def _main() -> int:
     g1_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     g1_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    g1_parser.add_argument("--joint-friction-model", choices=("hard", "mujoco"), default=g1_recipe.JOINT_FRICTION_MODEL)
+    g1_parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
     g1_parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
         default=g1_recipe.ACTUATION_MODEL,
         help="G1 actuator path: nanoG1-style explicit clamped PD torques or legacy PhoenX drive rows.",
     )
+    g1_parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
     g1_parser.add_argument("--parse-meshes", action="store_true")
     g1_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -223,6 +226,9 @@ def _main() -> int:
         help="PPO policy backbone. puffer_mingru matches nanoG1/PufferLib's recurrent default.",
     )
     g1_parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
+    g1_parser.add_argument("--train-epochs", type=int, default=g1_recipe.TRAIN_EPOCHS)
+    g1_parser.add_argument("--actor-lr", type=float, default=g1_recipe.ACTOR_LR)
+    g1_parser.add_argument("--critic-lr", type=float, default=g1_recipe.CRITIC_LR)
     g1_parser.add_argument("--replay-ratio", type=float, default=g1_recipe.REPLAY_RATIO)
     g1_parser.add_argument("--priority-alpha", type=float, default=g1_recipe.PRIORITY_ALPHA)
     g1_parser.add_argument("--priority-beta", type=float, default=g1_recipe.PRIORITY_BETA)
@@ -289,11 +295,16 @@ def _main() -> int:
     g1_eval_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_eval_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_eval_parser.add_argument(
+        "--joint-friction-model", choices=("hard", "mujoco"), default=g1_recipe.JOINT_FRICTION_MODEL
+    )
+    g1_eval_parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
+    g1_eval_parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
         default=g1_recipe.ACTUATION_MODEL,
         help="G1 actuator path used during evaluation.",
     )
+    g1_eval_parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
     g1_eval_parser.add_argument("--parse-meshes", action="store_true")
     g1_eval_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -321,11 +332,16 @@ def _main() -> int:
     g1_gate_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_gate_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_gate_parser.add_argument(
+        "--joint-friction-model", choices=("hard", "mujoco"), default=g1_recipe.JOINT_FRICTION_MODEL
+    )
+    g1_gate_parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
+    g1_gate_parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
         default=g1_recipe.ACTUATION_MODEL,
         help="G1 actuator path used during the quality gate.",
     )
+    g1_gate_parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
     g1_gate_parser.add_argument("--parse-meshes", action="store_true")
     g1_gate_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -368,11 +384,16 @@ def _main() -> int:
     g1_target_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_target_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     g1_target_parser.add_argument(
+        "--joint-friction-model", choices=("hard", "mujoco"), default=g1_recipe.JOINT_FRICTION_MODEL
+    )
+    g1_target_parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
+    g1_target_parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
         default=g1_recipe.ACTUATION_MODEL,
         help="G1 actuator path used during target evaluation.",
     )
+    g1_target_parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
     g1_target_parser.add_argument("--parse-meshes", action="store_true")
     g1_target_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -426,7 +447,10 @@ def _main() -> int:
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
+            joint_friction_model=args.joint_friction_model,
+            joint_friction_scale=args.joint_friction_scale,
             actuation_model=args.actuation_model,
+            action_scale=args.action_scale,
             controlled_action_count=args.controlled_action_count,
             reward_mode=args.reward_mode,
             sparse_target_position=(args.target_x, args.target_y),
@@ -440,6 +464,9 @@ def _main() -> int:
         )
         ppo_config = g1_recipe.default_g1_ppo_config(
             minibatch_size=args.minibatch_size,
+            train_epochs=args.train_epochs,
+            actor_lr=args.actor_lr,
+            critic_lr=args.critic_lr,
             replay_ratio=args.replay_ratio,
             priority_alpha=args.priority_alpha,
             priority_beta=args.priority_beta,
@@ -497,7 +524,10 @@ def _main() -> int:
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
+            joint_friction_model=args.joint_friction_model,
+            joint_friction_scale=args.joint_friction_scale,
             actuation_model=args.actuation_model,
+            action_scale=args.action_scale,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
@@ -521,7 +551,10 @@ def _main() -> int:
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
+            joint_friction_model=args.joint_friction_model,
+            joint_friction_scale=args.joint_friction_scale,
             actuation_model=args.actuation_model,
+            action_scale=args.action_scale,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
@@ -562,7 +595,10 @@ def _main() -> int:
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
+            joint_friction_model=args.joint_friction_model,
+            joint_friction_scale=args.joint_friction_scale,
             actuation_model=args.actuation_model,
+            action_scale=args.action_scale,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,

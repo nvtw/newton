@@ -193,7 +193,9 @@ longer training runs. Use `--mirror-loss-coeff 0.0` on `train-g1-ppo` or
 the default nanoG1-style mirror regularizer for throughput-only comparisons. Use
 `--reward-clip 0.0` to disable PufferLib-style reward clipping,
 `--vtrace-rho-clip 0.0 --vtrace-c-clip 0.0` to disable V-trace replay
-correction, `--manual-mlp-weight-grad-dtype float32` to disable BF16 MLP
+correction, `--actor-lr`, `--critic-lr`, and `--train-epochs` for low-LR
+teacher fine-tunes, `--action-scale` and `--joint-friction-scale` for physics
+sensitivity probes, `--manual-mlp-weight-grad-dtype float32` to disable BF16 MLP
 weight-gradient tile matmul, `--manual-mlp-forward-dtype float32` to disable
 large-minibatch BF16 MLP forward tile matmul, or `--max-grad-norm 0.0` to
 disable gradient clipping. The default training loop samples randomized G1
