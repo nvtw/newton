@@ -1883,6 +1883,42 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(ppo_config.muon_momentum, g1_recipe.MUON_MOMENTUM)
         self.assertEqual(ppo_config.manual_mlp_forward_dtype, g1_recipe.MANUAL_MLP_FORWARD_DTYPE)
 
+    def test_visual_mesh_mode_keeps_meshes_collision_free_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 visual mesh tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+                parse_visuals=True,
+                parse_meshes=False,
+            ),
+            device=device,
+        )
+
+        shape_types = env.model.shape_type.numpy()
+        flags = env.model.shape_flags.numpy()
+        labels = list(env.model.shape_label)
+        mesh_mask = shape_types == int(newton.GeoType.MESH)
+        collide_bit = int(newton.ShapeFlags.COLLIDE_SHAPES)
+        visible_bit = int(newton.ShapeFlags.VISIBLE)
+
+        self.assertGreater(int(np.count_nonzero(mesh_mask)), 0)
+        self.assertFalse(np.any((flags[mesh_mask] & collide_bit) != 0))
+        self.assertTrue(np.any((flags[mesh_mask] & visible_bit) != 0))
+        for shape_index, label in enumerate(labels):
+            if label in ("left_nanog1_foot_box", "right_nanog1_foot_box"):
+                self.assertNotEqual(int(flags[shape_index]) & collide_bit, 0)
+                self.assertEqual(int(flags[shape_index]) & visible_bit, 0)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.model.collide(env.state_0, env.contacts)
+        wp.capture_launch(capture.graph)
+        self.assertGreater(int(env.contacts.rigid_contact_count.numpy()[0]), 0)
+
     def test_rejects_unknown_contact_geometry(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL contact geometry tests")
         config = rl.ConfigEnvG1PhoenX(world_count=1, contact_geometry="unknown")

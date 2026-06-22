@@ -53,8 +53,15 @@ class Example:
         if not self.device.is_cuda:
             raise RuntimeError("G1 RL training requires CUDA; pass --device cuda:0 or set Warp's default CUDA device")
 
+        self.mode = str(args.mode)
+        if self.mode == "replay" and args.resume_checkpoint is None:
+            raise ValueError("--mode replay requires --resume-checkpoint")
+
         self.iterations = int(args.iterations)
         self.iterations_per_frame = max(int(args.iterations_per_frame), 1)
+        self.replay_steps_per_frame = max(int(args.replay_steps_per_frame), 1)
+        self.deterministic_replay = bool(args.deterministic_replay)
+        self.replay_step_count = 0
         self.rollout_steps = int(args.rollout_steps)
         self.seed = int(args.seed)
         self.randomize_commands = bool(args.randomize_commands)
@@ -91,6 +98,7 @@ class Example:
             command_resample_steps=int(args.command_resample_steps)
             if self.randomize_commands and self.command_sampling == "episode"
             else 0,
+            parse_visuals=bool(args.parse_visuals),
             parse_meshes=bool(args.parse_meshes),
             contact_geometry=str(args.contact_geometry),
             rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
@@ -124,7 +132,9 @@ class Example:
 
         self.env = rl.EnvG1PhoenX(env_config, device=self.device)
         if args.resume_checkpoint is not None:
-            self.trainer = rl.load_ppo_checkpoint(args.resume_checkpoint, config=ppo_config, device=self.device)
+            checkpoint_config = None if self.mode == "replay" else ppo_config
+            self.trainer = rl.load_ppo_checkpoint(args.resume_checkpoint, config=checkpoint_config, device=self.device)
+            ppo_config = self.trainer.config
             if self.trainer.obs_dim != self.env.obs_dim or self.trainer.action_dim != self.env.action_dim:
                 raise ValueError("Checkpoint dimensions do not match the G1 environment")
             if self.trainer.config.mirror_loss_coeff > 0.0:
@@ -143,14 +153,18 @@ class Example:
                 mirror_map=rl.g1_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,
             )
 
-        self.buffer = rl.BufferRollout(
-            num_steps=self.rollout_steps,
-            num_envs=self.env.world_count,
-            obs_dim=self.env.obs_dim,
-            action_dim=self.env.action_dim,
-            device=self.device,
-        )
-        self.trainer.reserve_update_buffers(self.buffer)
+        self.buffer: rl.BufferRollout | None = None
+        if self.mode == "train":
+            self.buffer = rl.BufferRollout(
+                num_steps=self.rollout_steps,
+                num_envs=self.env.world_count,
+                obs_dim=self.env.obs_dim,
+                action_dim=self.env.action_dim,
+                device=self.device,
+            )
+            self.trainer.reserve_update_buffers(self.buffer)
+        else:
+            self.trainer.reset_rollout_state()
 
         self.viewer.set_model(self.env.model)
         render_worlds = min(max(int(args.render_worlds), 1), self.env.world_count)
@@ -183,6 +197,8 @@ class Example:
         )
 
     def _train_iteration(self) -> None:
+        if self.buffer is None:
+            raise RuntimeError("Training mode requires a rollout buffer")
         iteration = int(self.trainer.iteration)
         self._maybe_randomize_rollout_commands(iteration)
 
@@ -237,7 +253,30 @@ class Example:
                     iteration=self.trainer.iteration,
                 )
 
+    def _replay_policy_step(self) -> None:
+        actions, _log_probs, _values = self.trainer.act_reuse(
+            self.env.obs,
+            seed=self.seed + 1_000_003 + self.replay_step_count,
+            deterministic=self.deterministic_replay,
+        )
+        _obs, _rewards, dones = self.env.step(actions)
+        self.trainer.reset_rollout_state(dones)
+        self.replay_step_count += 1
+
+        if self.log_interval > 0 and self.replay_step_count % self.log_interval == 0:
+            reward = float(np.mean(self.env.step_rewards.numpy()))
+            done = float(np.mean(self.env.step_dones.numpy()))
+            tracking_perf = float(np.mean(self.env.step_successes.numpy()))
+            print(
+                f"replay_step={self.replay_step_count:06d} reward={reward:.4f} perf={tracking_perf:.3f} done={done:.4f}"
+            )
+
     def step(self):
+        if self.mode == "replay":
+            for _ in range(self.replay_steps_per_frame):
+                self._replay_policy_step()
+            return
+
         remaining = self.iterations - int(self.trainer.iteration)
         if remaining <= 0:
             return
@@ -252,7 +291,10 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        if int(self.trainer.iteration) <= 0:
+        if self.mode == "replay":
+            if self.replay_step_count <= 0:
+                raise RuntimeError("Expected at least one G1 PPO replay step")
+        elif int(self.trainer.iteration) <= 0:
             raise RuntimeError("Expected at least one G1 PPO training iteration")
         obs = self.env.obs.numpy()
         if not np.isfinite(obs).all():
@@ -268,11 +310,14 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=100000)
+        parser.add_argument("--mode", choices=("train", "replay"), default="train")
         parser.add_argument("--world-count", type=int, default=rl.g1_recipe.WORLD_COUNT)
         parser.add_argument("--render-worlds", type=int, default=4)
         parser.add_argument("--world-spacing", type=float, default=2.0)
         parser.add_argument("--iterations", type=int, default=rl.g1_recipe.TRAIN_ITERATIONS)
         parser.add_argument("--iterations-per-frame", type=int, default=1)
+        parser.add_argument("--replay-steps-per-frame", type=int, default=1)
+        parser.add_argument("--deterministic-replay", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--rollout-steps", type=int, default=rl.g1_recipe.ROLLOUT_STEPS)
         parser.add_argument("--seed", type=int, default=rl.g1_recipe.SEED)
         parser.add_argument("--frame-dt", type=float, default=rl.g1_recipe.FRAME_DT)
@@ -306,6 +351,7 @@ class Example:
             default=rl.g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START,
         )
         parser.add_argument("--parse-meshes", action=argparse.BooleanOptionalAction, default=rl.g1_recipe.PARSE_MESHES)
+        parser.add_argument("--parse-visuals", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument(
             "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=rl.g1_recipe.CONTACT_GEOMETRY
         )
@@ -355,7 +401,7 @@ class Example:
         parser.add_argument("--checkpoint-path", default=None)
         parser.add_argument("--checkpoint-interval", type=int, default=0)
         parser.add_argument("--log-interval", type=int, default=1)
-        parser.add_argument("--render-contacts", action=argparse.BooleanOptionalAction, default=True)
+        parser.add_argument("--render-contacts", action=argparse.BooleanOptionalAction, default=False)
         parser.add_argument("--camera-x", type=float, default=2.0)
         parser.add_argument("--camera-y", type=float, default=-5.0)
         parser.add_argument("--camera-z", type=float, default=2.0)

@@ -46,6 +46,7 @@ W_BASE_HEIGHT = -10.0
 BASE_HEIGHT_TARGET = 0.78
 
 PARSE_MESHES = False
+PARSE_VISUALS = False
 CONTACT_GEOMETRY = "nanog1_foot_boxes"
 AUTO_RESET = True
 RIGID_CONTACT_MAX_PER_WORLD = 32
@@ -148,6 +149,7 @@ def default_g1_env_config(**overrides: Any):
         "w_base_height": W_BASE_HEIGHT,
         "base_height_target": BASE_HEIGHT_TARGET,
         "parse_meshes": PARSE_MESHES,
+        "parse_visuals": PARSE_VISUALS,
         "contact_geometry": CONTACT_GEOMETRY,
         "auto_reset": AUTO_RESET,
         "rigid_contact_max_per_world": RIGID_CONTACT_MAX_PER_WORLD,

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import warp as wp
@@ -22,6 +24,36 @@ from .ppo import BufferRollout, MirrorMapPPO, TrainerPPO
 ACTION_DIM_G1 = 29
 OBS_DIM_G1 = 98
 NANOG1_PHASE_PERIOD = g1_recipe.PHASE_PERIOD
+
+
+def _mjcf_geom_collides(geom: ET.Element) -> bool:
+    contype = int(geom.get("contype", "1"))
+    conaffinity = int(geom.get("conaffinity", "1"))
+    return contype != 0 or conaffinity != 0
+
+
+def _g1_mjcf_with_visual_meshes_without_mesh_colliders(mjcf_path: Path) -> str:
+    """Return G1 MJCF XML that keeps mesh visuals but not mesh colliders."""
+
+    root = ET.parse(mjcf_path).getroot()
+    compiler = root.find("compiler")
+    mesh_dir = compiler.get("meshdir", ".") if compiler is not None else "."
+    mesh_base = (mjcf_path.parent / mesh_dir).resolve()
+
+    for mesh in root.findall(".//asset/mesh"):
+        file_attr = mesh.get("file")
+        if file_attr is not None and not Path(file_attr).is_absolute():
+            mesh.set("file", str(mesh_base / file_attr))
+    if compiler is not None:
+        compiler.attrib.pop("meshdir", None)
+
+    for parent in root.iter():
+        for child in list(parent):
+            if child.tag == "geom" and child.get("type") == "mesh" and _mjcf_geom_collides(child):
+                parent.remove(child)
+
+    return ET.tostring(root, encoding="unicode")
+
 
 _G1_OBS_MIRROR_SRC = (
     0,
@@ -1268,6 +1300,10 @@ class ConfigEnvG1PhoenX:
         base_height_target: Target base height [m].
         parse_meshes: Import MJCF mesh collision geoms. Disable for fast
             RL runs that use the primitive foot and arm geoms only.
+        parse_visuals: Import visual-only MJCF meshes for rendering. When this
+            is enabled with ``parse_meshes=False``, G1 mesh colliders are
+            filtered out so contact behavior stays on the primitive/nanoG1
+            collision recipe.
         contact_geometry: G1 contact geometry preset. "mjcf" keeps the
             imported MJCF primitives; "nanog1_foot_boxes" replaces the
             four foot point contacts per foot with nanoG1's MuJoCo contact boxes.
@@ -1320,6 +1356,7 @@ class ConfigEnvG1PhoenX:
     w_base_height: float = g1_recipe.W_BASE_HEIGHT
     base_height_target: float = g1_recipe.BASE_HEIGHT_TARGET
     parse_meshes: bool = g1_recipe.PARSE_MESHES
+    parse_visuals: bool = g1_recipe.PARSE_VISUALS
     contact_geometry: str = g1_recipe.CONTACT_GEOMETRY
     auto_reset: bool = g1_recipe.AUTO_RESET
     rigid_contact_max_per_world: int = g1_recipe.RIGID_CONTACT_MAX_PER_WORLD
@@ -1443,13 +1480,20 @@ class EnvG1PhoenX:
         articulation_builder.default_shape_cfg.gap = 0.0
 
         asset_path = newton.utils.download_asset("unitree_g1")
+        mjcf_path = asset_path / "mjcf" / "g1_29dof.xml"
+        parse_visuals = bool(self.config.parse_visuals)
+        parse_meshes = bool(self.config.parse_meshes)
+        mjcf_source = str(mjcf_path)
+        if parse_visuals and not parse_meshes:
+            mjcf_source = _g1_mjcf_with_visual_meshes_without_mesh_colliders(mjcf_path)
+            parse_meshes = True
         articulation_builder.add_mjcf(
-            str(asset_path / "mjcf" / "g1_29dof.xml"),
+            mjcf_source,
             floating=None,
             enable_self_collisions=False,
             ignore_names=("floor", "ground"),
-            parse_visuals=False,
-            parse_meshes=bool(self.config.parse_meshes),
+            parse_visuals=parse_visuals,
+            parse_meshes=parse_meshes,
             ignore_inertial_definitions=False,
         )
         self._apply_contact_geometry(articulation_builder)
@@ -1501,6 +1545,8 @@ class EnvG1PhoenX:
         cfg = builder.default_shape_cfg.copy()
         cfg.mu = _NANOG1_FOOT_BOX_MU
         cfg.gap = 0.0
+        if bool(self.config.parse_visuals):
+            cfg.is_visible = False
         hx, hy, hz = _NANOG1_FOOT_BOX_HALF_EXTENTS
         xform = wp.transform(p=wp.vec3(*_NANOG1_FOOT_BOX_LOCAL_POS), q=wp.quat_identity())
         builder.add_shape_box(
