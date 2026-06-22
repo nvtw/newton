@@ -948,6 +948,7 @@ def g1_reset_done_worlds_kernel(
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
+    joint_f: wp.array[wp.float32],
     reset_articulation_mask: wp.array[wp.bool],
 ):
     world, col = wp.tid()
@@ -966,6 +967,7 @@ def g1_reset_done_worlds_kernel(
     if col < dof_stride:
         idx = world * dof_stride + col
         joint_qd[idx] = default_joint_qd[idx]
+        joint_f[idx] = wp.float32(0.0)
     if col < action_dim:
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
@@ -991,6 +993,7 @@ def g1_reset_done_worlds_seed_counter_kernel(
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
+    joint_f: wp.array[wp.float32],
     reset_articulation_mask: wp.array[wp.bool],
 ):
     world, col = wp.tid()
@@ -1010,6 +1013,7 @@ def g1_reset_done_worlds_seed_counter_kernel(
     if col < dof_stride:
         idx = world * dof_stride + col
         joint_qd[idx] = default_joint_qd[idx]
+        joint_f[idx] = wp.float32(0.0)
     if col < action_dim:
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
@@ -1248,7 +1252,9 @@ def g1_gather_actuator_force_kernel(
     coord_stride: wp.int32,
     dof_stride: wp.int32,
     target_uses_coord_layout: wp.int32,
+    scatter_joint_f: wp.int32,
     actuator_force: wp.array2d[wp.float32],
+    joint_f: wp.array[wp.float32],
 ):
     world, action = wp.tid()
     q = joint_q[world * coord_stride + wp.int32(7) + action]
@@ -1258,7 +1264,10 @@ def g1_gather_actuator_force_kernel(
     else:
         target = joint_target_q[world * dof_stride + wp.int32(6) + action]
     force = actuator_force_kp[action] * (target - q) - actuator_force_kd[action] * qd
-    actuator_force[world, action] = _clip_float(force, actuator_force_lower[action], actuator_force_upper[action])
+    force = _clip_float(force, actuator_force_lower[action], actuator_force_upper[action])
+    actuator_force[world, action] = force
+    if scatter_joint_f != wp.int32(0):
+        joint_f[world * dof_stride + wp.int32(6) + action] = force
 
 
 @dataclass
@@ -1275,6 +1284,9 @@ class ConfigEnvG1PhoenX:
         velocity_iterations: PhoenX velocity iterations per substep.
         joint_friction_model: Solver joint-friction mode ("hard" or "mujoco").
         joint_friction_scale: Dimensionless scale applied to nanoG1 joint friction.
+        actuation_model: ``"explicit_torque"`` applies nanoG1/MuJoCo-style
+            clamped PD torques through ``control.joint_f``.
+            ``"constraint_drive"`` uses PhoenX implicit drive rows.
         action_scale: Position target scale [rad].
         controlled_action_count: Number of leading policy actions applied to joints.
         command: Target body-frame command ``(vx, vy, yaw_rate)`` [m/s, m/s, rad/s].
@@ -1333,6 +1345,7 @@ class ConfigEnvG1PhoenX:
     velocity_iterations: int = g1_recipe.VELOCITY_ITERATIONS
     joint_friction_model: str = g1_recipe.JOINT_FRICTION_MODEL
     joint_friction_scale: float = g1_recipe.JOINT_FRICTION_SCALE
+    actuation_model: str = g1_recipe.ACTUATION_MODEL
     action_scale: float = g1_recipe.ACTION_SCALE
     controlled_action_count: int = g1_recipe.CONTROLLED_ACTION_COUNT
     command: tuple[float, float, float] = g1_recipe.COMMAND
@@ -1404,6 +1417,8 @@ class EnvG1PhoenX:
             raise ValueError('joint_friction_model must be "hard" or "mujoco"')
         if float(self.config.joint_friction_scale) < 0.0:
             raise ValueError("joint_friction_scale must be non-negative")
+        if str(self.config.actuation_model) not in ("explicit_torque", "constraint_drive"):
+            raise ValueError('actuation_model must be "explicit_torque" or "constraint_drive"')
         self._check_command_ranges(
             self.config.command_x_range, self.config.command_y_range, self.config.command_yaw_range
         )
@@ -1509,6 +1524,11 @@ class EnvG1PhoenX:
         articulation_builder.joint_q[:3] = [0.0, 0.0, 0.785]
         articulation_builder.joint_q[3:7] = [0.0, 0.0, 0.0, 1.0]
         articulation_builder.joint_q[7 : 7 + ACTION_DIM_G1] = list(_DEFAULT_JOINT_POS_G1)
+        actuator_target_mode = (
+            int(newton.JointTargetMode.EFFORT)
+            if str(self.config.actuation_model) == "explicit_torque"
+            else int(newton.JointTargetMode.POSITION)
+        )
         for i in range(ACTION_DIM_G1):
             dof = i + 6
             articulation_builder.joint_target_ke[dof] = _UNITREE_KP_G1[i]
@@ -1517,7 +1537,7 @@ class EnvG1PhoenX:
                 float(self.config.joint_friction_scale) * _NANOG1_DOF_FRICTIONLOSS_G1[i]
             )
             articulation_builder.joint_armature[dof] = _NANOG1_DOF_ARMATURE_G1[i]
-            articulation_builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+            articulation_builder.joint_target_mode[dof] = actuator_target_mode
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         for _ in range(self.world_count):
@@ -1944,6 +1964,7 @@ class EnvG1PhoenX:
         self.current_actions.zero_()
         self.previous_actions.zero_()
         self.actuator_force.zero_()
+        self.control.joint_f.zero_()
         self.episode_steps.zero_()
         self.dones.fill_(1.0)
         self._clear_reset_solver_state()
@@ -1989,6 +2010,7 @@ class EnvG1PhoenX:
                 self.previous_actions,
                 self.current_actions,
                 self.actuator_force,
+                self.control.joint_f,
                 self._reset_articulation_mask,
             ],
             device=self.device,
@@ -2036,6 +2058,7 @@ class EnvG1PhoenX:
                 self.previous_actions,
                 self.current_actions,
                 self.actuator_force,
+                self.control.joint_f,
                 self._reset_articulation_mask,
             ],
             device=self.device,
@@ -2052,7 +2075,7 @@ class EnvG1PhoenX:
             mask=self._reset_articulation_mask,
         )
 
-    def _gather_actuator_force(self) -> None:
+    def _gather_actuator_force(self, *, scatter_joint_f: bool = False) -> None:
         wp.launch(
             g1_gather_actuator_force_kernel,
             dim=(self.world_count, self.action_dim),
@@ -2067,8 +2090,9 @@ class EnvG1PhoenX:
                 self.coord_stride,
                 self.dof_stride,
                 int(bool(self.model.use_coord_layout_targets)),
+                int(bool(scatter_joint_f)),
             ],
-            outputs=[self.actuator_force],
+            outputs=[self.actuator_force, self.control.joint_f],
             device=self.device,
         )
 
@@ -2095,11 +2119,12 @@ class EnvG1PhoenX:
 
         substeps = int(self.config.sim_substeps)
         sub_dt = float(self.config.frame_dt) / float(substeps)
+        explicit_torque = str(self.config.actuation_model) == "explicit_torque"
         for substep in range(substeps):
             self.state_0.clear_forces()
             self.model.collide(self.state_0, self.contacts)
-            if substep == substeps - 1:
-                self._gather_actuator_force()
+            if explicit_torque or substep == substeps - 1:
+                self._gather_actuator_force(scatter_joint_f=explicit_torque)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 

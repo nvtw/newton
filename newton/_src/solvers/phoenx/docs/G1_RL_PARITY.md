@@ -41,12 +41,16 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
 
 ## Current Difference List
 
-- PhoenX now feeds the G1 torque penalty from the same actuator-model force
-  signal nanoG1 writes to `g_af`: clamped `kp * (target - q) - kd * qd` for
-  the 12 Unitree leg actuators and clamped model position-actuator force for
-  the remaining waist/arm actuators. The signal is gathered before the final
-  decimation substep solve, matching nanoG1's `k3_rne_act_solve -> ... ->
-  k_epi` ordering.
+- PhoenX G1 actuation now defaults to `actuation_model="explicit_torque"`:
+  every substep computes the same actuator-model force signal nanoG1 writes to
+  `g_af`, `clip(kp * (target - q) - kd * qd, force_range)`, and scatters it to
+  `control.joint_f` so PhoenX consumes explicit generalized torques. The
+  legacy `actuation_model="constraint_drive"` path remains available as a
+  diagnostic for PhoenX implicit drive rows.
+- A graph-captured 29-world regression perturbs one G1 actuator per world and
+  checks every joint force against the analytical nanoG1/MuJoCo formula. This
+  guards the likely actuator-quality blocker directly instead of relying on a
+  training run to expose it.
 - The local generic PufferLib checkout is branch `4.0` at `e90b58ed`, not the
   nanoG1 G1 fork. Parity work should use the nanoG1 recipe/deploy files plus
   the pinned fork source above.
@@ -73,7 +77,7 @@ or benchmark note.
 | Gate diagnostics | nanoG1-style command battery | Fixed Python velocity diagnostic quaternion order to Newton `xyzw`; graph-captured regression covers the case. | Re-run gates only when diagnostics are needed; do not treat this as quality progress. |
 | Graph overlap / stale policy | Same recipe in eager and graph-leapfrog modes | A 60-iteration eager train-to-gate probe failed similarly to graph mode, so stream overlap/stale rollout policy is not the primary quality blocker. | Keep graph mode for throughput, but debug quality in the simpler eager path when possible. |
 | G1 env/reward contract | `g1_gpu.cu`, `recipe.py`, deploy constants | Tests cover observation/action layout, actuator-force torque penalty, reward decomposition, gait/success terms, command constants, and graph recurrent reset behavior. | Add targeted tests for command resampling/reset timing and done/bootstrap semantics before changing rewards. |
-| Drive/contact physics | nanoG1 host physics plus first-principles drive tests | No-contact PD/friction/armature response is close; grounded contact/friction coupling still differs. The historical `5x2` default also blows up in no-reset zero-action ground-contact simulation. | Keep the default at least `8x4`; use `5x2` only for historical throughput comparisons. |
+| Drive/contact physics | nanoG1 host physics plus first-principles drive tests | Explicit G1 actuator forces now match the analytical nanoG1/MuJoCo formula joint-by-joint; the old implicit drive-row path was effectively too compliant at training dt. Grounded contact/friction coupling still differs. | Keep explicit torque as the default; use `constraint_drive` only for diagnostics, and continue contact/friction convergence checks at `8x4`. |
 | End-to-end training quality | nanoG1 reaches a working policy in roughly the README time scale | Current 75M-sample PhoenX runs train in a few minutes but fail the gate. | Run full probes only after a ledger row changes; record before/after quality and throughput. |
 
 ## Current Measurement

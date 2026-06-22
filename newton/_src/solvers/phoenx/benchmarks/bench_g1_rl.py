@@ -42,6 +42,7 @@ def benchmark_phoenx(
     sim_substeps: int,
     solver_iterations: int,
     velocity_iterations: int,
+    actuation_model: str,
     parse_meshes: bool,
     measure_replays: int,
     warmup_steps: int,
@@ -60,6 +61,7 @@ def benchmark_phoenx(
         sim_substeps=int(sim_substeps),
         solver_iterations=int(solver_iterations),
         velocity_iterations=int(velocity_iterations),
+        actuation_model=str(actuation_model),
         parse_meshes=bool(parse_meshes),
     )
     env = rl.EnvG1PhoenX(cfg, device=dev)
@@ -93,6 +95,7 @@ def benchmark_phoenx(
         "solver_internal_substeps": int(env.solver.world.substeps),
         "solver_iterations": int(solver_iterations),
         "velocity_iterations": int(velocity_iterations),
+        "actuation_model": str(actuation_model),
         "parse_meshes": bool(parse_meshes),
         "warmup_steps": int(warmup_steps),
         "measure_replays": int(measure_replays),
@@ -156,6 +159,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sim-substeps", type=int, default=5)
     parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    parser.add_argument(
+        "--actuation-model",
+        choices=("explicit_torque", "constraint_drive"),
+        default=g1_recipe.ACTUATION_MODEL,
+        help="G1 actuator path used in the graph-captured env-step benchmark.",
+    )
     parser.add_argument("--parse-meshes", action="store_true")
     parser.add_argument("--measure-replays", type=int, default=64)
     parser.add_argument("--warmup-steps", type=int, default=4)
@@ -177,6 +186,7 @@ def main() -> int:
         sim_substeps=args.sim_substeps,
         solver_iterations=args.solver_iterations,
         velocity_iterations=args.velocity_iterations,
+        actuation_model=args.actuation_model,
         parse_meshes=args.parse_meshes,
         measure_replays=args.measure_replays,
         warmup_steps=args.warmup_steps,

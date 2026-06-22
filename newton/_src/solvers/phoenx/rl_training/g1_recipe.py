@@ -19,6 +19,7 @@ SOLVER_ITERATIONS = 4
 VELOCITY_ITERATIONS = 1
 JOINT_FRICTION_MODEL = "mujoco"
 JOINT_FRICTION_SCALE = 1.0
+ACTUATION_MODEL = "explicit_torque"
 ACTION_SCALE = 0.25
 CONTROLLED_ACTION_COUNT = 12
 COMMAND = (0.8, 0.0, 0.0)
@@ -118,6 +119,7 @@ def default_g1_env_config(**overrides: Any):
         "velocity_iterations": VELOCITY_ITERATIONS,
         "joint_friction_model": JOINT_FRICTION_MODEL,
         "joint_friction_scale": JOINT_FRICTION_SCALE,
+        "actuation_model": ACTUATION_MODEL,
         "action_scale": ACTION_SCALE,
         "controlled_action_count": CONTROLLED_ACTION_COUNT,
         "command": COMMAND,

@@ -1832,6 +1832,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
         self.assertEqual(g1_recipe.VELOCITY_ITERATIONS, 1)
         self.assertEqual(env_config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
+        self.assertEqual(env_config.actuation_model, g1_recipe.ACTUATION_MODEL)
+        self.assertEqual(env_config.actuation_model, "explicit_torque")
         self.assertEqual(env_config.w_track_lin, g1_recipe.W_TRACK_LIN)
         self.assertEqual(env_config.w_action_rate, g1_recipe.W_ACTION_RATE)
         self.assertEqual(env_config.gait_stance_fraction, g1_recipe.GAIT_STANCE_FRACTION)
@@ -1854,6 +1856,10 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.model.joint_target_kd.numpy()[6:18], expected_leg_kd, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.model.joint_armature.numpy()[6:18], expected_leg_armature, rtol=0.0, atol=1.0e-8)
         np.testing.assert_allclose(env.model.joint_friction.numpy()[6:35], 0.1, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_array_equal(
+            env.model.joint_target_mode.numpy()[6:35],
+            np.full(rl.ACTION_DIM_G1, int(newton.JointTargetMode.EFFORT), dtype=np.int32),
+        )
         np.testing.assert_allclose(env.model.joint_q.numpy()[3:7], np.array([0.0, 0.0, 0.0, 1.0]), rtol=0.0, atol=0.0)
         labels = list(env.model.shape_label)
         self.assertIn("left_nanog1_foot_box", labels)
@@ -1886,6 +1892,14 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(ppo_config.optimizer_weight_decay, g1_recipe.OPTIMIZER_WEIGHT_DECAY)
         self.assertEqual(ppo_config.muon_momentum, g1_recipe.MUON_MOMENTUM)
         self.assertEqual(ppo_config.manual_mlp_forward_dtype, g1_recipe.MANUAL_MLP_FORWARD_DTYPE)
+
+        constraint_drive_env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(world_count=1, actuation_model="constraint_drive"), device=device
+        )
+        np.testing.assert_array_equal(
+            constraint_drive_env.model.joint_target_mode.numpy()[6:35],
+            np.full(rl.ACTION_DIM_G1, int(newton.JointTargetMode.POSITION), dtype=np.int32),
+        )
 
     def test_visual_mesh_mode_keeps_meshes_collision_free_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 visual mesh tests")
@@ -2006,6 +2020,9 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected_force -= env.actuator_force_kd.numpy() * qd_before[6 : 6 + rl.ACTION_DIM_G1]
         expected_force = np.clip(expected_force, env.actuator_force_lower.numpy(), env.actuator_force_upper.numpy())
         np.testing.assert_allclose(env.actuator_force.numpy()[0], expected_force, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(
+            env.control.joint_f.numpy()[6 : 6 + rl.ACTION_DIM_G1], expected_force, rtol=1.0e-6, atol=1.0e-6
+        )
         self.assertEqual(float(env.actuator_force.numpy()[0, 1]), float(env.actuator_force_upper.numpy()[1]))
         self.assertEqual(float(env.actuator_force.numpy()[0, 13]), float(env.actuator_force_lower.numpy()[13]))
 
@@ -2021,6 +2038,60 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(
             env.actuator_force.numpy(), np.zeros_like(env.actuator_force.numpy()), rtol=0.0, atol=0.0
         )
+        np.testing.assert_allclose(
+            env.control.joint_f.numpy(),
+            np.zeros_like(env.control.joint_f.numpy()),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_explicit_torque_matches_analytical_g1_drive_forces_joint_by_joint_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 joint-by-joint drive-force tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=rl.ACTION_DIM_G1,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        self.assertEqual(env.config.actuation_model, "explicit_torque")
+        np.testing.assert_array_equal(
+            env.model.joint_target_mode.numpy()[6:35],
+            np.full(rl.ACTION_DIM_G1, int(newton.JointTargetMode.EFFORT), dtype=np.int32),
+        )
+
+        q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+        q_before = q.copy()
+        qd_before = qd.copy()
+        q_before[:, 7 : 7 + rl.ACTION_DIM_G1] = env.default_joint_pos.numpy()
+        qd_before[:, :] = 0.0
+        for world in range(env.world_count):
+            q_before[world, 7 + world] += np.float32(0.05)
+            qd_before[world, 6 : 6 + rl.ACTION_DIM_G1] = np.linspace(-1.5, 1.5, rl.ACTION_DIM_G1, dtype=np.float32)
+        env.state_0.joint_q.assign(q_before.reshape(-1))
+        env.state_0.joint_qd.assign(qd_before.reshape(-1))
+
+        actions_np = np.zeros((env.world_count, env.action_dim), dtype=np.float32)
+        actions = wp.array(actions_np, dtype=wp.float32, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            env.step(actions)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(device)
+
+        expected_force = env.actuator_force_kp.numpy()[None, :] * (
+            env.default_joint_pos.numpy()[None, :] - q_before[:, 7 : 7 + rl.ACTION_DIM_G1]
+        )
+        expected_force -= env.actuator_force_kd.numpy()[None, :] * qd_before[:, 6 : 6 + rl.ACTION_DIM_G1]
+        expected_force = np.clip(expected_force, env.actuator_force_lower.numpy(), env.actuator_force_upper.numpy())
+        joint_f = env.control.joint_f.numpy().reshape(env.world_count, env.dof_stride)
+        np.testing.assert_allclose(env.actuator_force.numpy(), expected_force, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(joint_f[:, :6], 0.0, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(joint_f[:, 6 : 6 + rl.ACTION_DIM_G1], expected_force, rtol=1.0e-6, atol=1.0e-6)
 
     def test_graph_replay_advances_policy_steps(self) -> None:
         env = _g1_test_env(world_count=1)

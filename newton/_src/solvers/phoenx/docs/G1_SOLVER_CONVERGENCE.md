@@ -40,9 +40,15 @@ constant mismatch:
 | `phoenx_10x8` | 0.002 | 8 + 2 | 0.0051 | 0.0082 rad | 0.053 rad/s |
 
 The next physics target is therefore not to lower accuracy for speed. It is to
-understand and reduce effective actuator-model drift in fast low-iteration
-formulation, especially Unitree PD stiffness/damping, passive friction, armature,
-force limits, and foot-contact coupling.
+understand and reduce effective actuator/contact drift in fast low-iteration
+formulations, especially Unitree PD stiffness/damping, passive friction,
+armature, force limits, and foot-contact coupling. A 2026-06-22 lifted
+per-joint stiffness check isolated one actuator issue: the old implicit PhoenX
+constraint-drive path produced only about `0.25x` to `0.85x` of the analytical
+`kp * (target - q) - kd * qd` torque at the default `8x4` training dt, plateauing
+near `0.60x` mean even with many PGS iterations. The G1 RL path now defaults to
+explicit clamped PD torques through `control.joint_f`, with a CUDA graph
+regression checking all 29 joints against the analytical nanoG1/MuJoCo formula.
 
 Updated contact-support diagnostics now report per-foot contact counts for both
 nanoG1 host physics and PhoenX, plus PhoenX per-foot normal/tangent impulse

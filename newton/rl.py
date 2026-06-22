@@ -160,6 +160,12 @@ def _main() -> int:
     g1_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     g1_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    g1_parser.add_argument(
+        "--actuation-model",
+        choices=("explicit_torque", "constraint_drive"),
+        default=g1_recipe.ACTUATION_MODEL,
+        help="G1 actuator path: nanoG1-style explicit clamped PD torques or legacy PhoenX drive rows.",
+    )
     g1_parser.add_argument("--parse-meshes", action="store_true")
     g1_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -238,6 +244,12 @@ def _main() -> int:
     g1_eval_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     g1_eval_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_eval_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    g1_eval_parser.add_argument(
+        "--actuation-model",
+        choices=("explicit_torque", "constraint_drive"),
+        default=g1_recipe.ACTUATION_MODEL,
+        help="G1 actuator path used during evaluation.",
+    )
     g1_eval_parser.add_argument("--parse-meshes", action="store_true")
     g1_eval_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -264,6 +276,12 @@ def _main() -> int:
     g1_gate_parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     g1_gate_parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     g1_gate_parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    g1_gate_parser.add_argument(
+        "--actuation-model",
+        choices=("explicit_torque", "constraint_drive"),
+        default=g1_recipe.ACTUATION_MODEL,
+        help="G1 actuator path used during the quality gate.",
+    )
     g1_gate_parser.add_argument("--parse-meshes", action="store_true")
     g1_gate_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -315,6 +333,7 @@ def _main() -> int:
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
+            actuation_model=args.actuation_model,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
@@ -371,6 +390,7 @@ def _main() -> int:
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
+            actuation_model=args.actuation_model,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
@@ -394,6 +414,7 @@ def _main() -> int:
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
+            actuation_model=args.actuation_model,
             controlled_action_count=args.controlled_action_count,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,

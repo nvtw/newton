@@ -57,6 +57,11 @@ benchmark defaults read from the same constants.
   overflow in high-world-count RL runs.
 - Leading 12 leg actions are controlled by default; remaining upper-body actions
   are masked to zero.
+- G1 actuation defaults to `actuation_model="explicit_torque"`, matching
+  nanoG1/MuJoCo position actuators by computing clamped PD generalized torques
+  directly and passing them through `control.joint_f` each substep. Pass
+  `--actuation-model constraint_drive` only when deliberately benchmarking the
+  older implicit PhoenX drive-row formulation.
 - Reward weights mirror the nanoG1 recipe for velocity tracking, base penalties,
   torque proxy, action-rate penalty, alive reward, and termination penalty.
 - Default G1 PPO uses trajectory-shaped prioritized minibatches with

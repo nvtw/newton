@@ -52,6 +52,7 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
+        actuation_model=str(args.actuation_model),
         controlled_action_count=int(args.controlled_action_count),
         parse_meshes=bool(args.parse_meshes),
         contact_geometry=str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
@@ -293,6 +294,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    parser.add_argument(
+        "--actuation-model",
+        choices=("explicit_torque", "constraint_drive"),
+        default=g1_recipe.ACTUATION_MODEL,
+        help="G1 actuator path used for train and gate environments.",
+    )
     parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     parser.add_argument("--parse-meshes", action="store_true")
     parser.add_argument("--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY)

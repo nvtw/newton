@@ -98,6 +98,7 @@ class Example:
             velocity_iterations=int(args.velocity_iterations),
             joint_friction_model=str(args.joint_friction_model),
             joint_friction_scale=float(args.joint_friction_scale),
+            actuation_model=str(args.actuation_model),
             action_scale=float(args.action_scale),
             controlled_action_count=int(args.controlled_action_count),
             command=(float(args.command_x), float(args.command_y), float(args.command_yaw)),
@@ -377,6 +378,12 @@ class Example:
             "--joint-friction-model", choices=("hard", "mujoco"), default=rl.g1_recipe.JOINT_FRICTION_MODEL
         )
         parser.add_argument("--joint-friction-scale", type=float, default=rl.g1_recipe.JOINT_FRICTION_SCALE)
+        parser.add_argument(
+            "--actuation-model",
+            choices=("explicit_torque", "constraint_drive"),
+            default=rl.g1_recipe.ACTUATION_MODEL,
+            help="G1 actuator path used by train, replay, and sim modes.",
+        )
         parser.add_argument("--action-scale", type=float, default=rl.g1_recipe.ACTION_SCALE)
         parser.add_argument("--controlled-action-count", type=int, default=rl.g1_recipe.CONTROLLED_ACTION_COUNT)
         parser.add_argument("--command-x", type=float, default=rl.g1_recipe.COMMAND[0])
