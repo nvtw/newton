@@ -241,10 +241,10 @@ def mingru_sequence_backward_kernel(
         proj = _sigmoid(proj_pre)
         x_val = x[row, hidden]
 
-        grad_total = grad_out[row, hidden] + grad_recurrent_next
-        grad_proj = grad_total * (recurrent - x_val)
-        grad_recurrent = grad_total * proj
-        grad_highway_input[row, hidden] = grad_total * (wp.float32(1.0) - proj)
+        grad_y = grad_out[row, hidden]
+        grad_proj = grad_y * (recurrent - x_val)
+        grad_recurrent = grad_y * proj + grad_recurrent_next
+        grad_highway_input[row, hidden] = grad_y * (wp.float32(1.0) - proj)
 
         grad_gate = grad_recurrent * (candidate - prev_recurrent)
         grad_candidate = grad_recurrent * gate

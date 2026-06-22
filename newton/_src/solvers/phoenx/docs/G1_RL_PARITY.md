@@ -91,6 +91,30 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
   already computed on the device from `step_successes`, so this was a diagnostic
   bug, not a training-quality fix.
 
+## 2026-06-22 MinGRU BPTT Fix
+
+A PPO-side root cause was found in the pure-Warp PufferMinGRU sequence backward
+kernel: the future recurrent gradient was added to the current output gradient
+before computing the projection/highway path. In MinGRU, future recurrent
+gradient should flow through the recurrent state into gate/candidate/previous
+state terms, but it must not change the current projection or highway-input
+gradients. A new CUDA graph regression test isolates a two-step sequence where
+only the second output has upstream loss; the first step projection/highway
+gradients must remain zero while hidden/gate gradients stay nonzero. The test
+fails against the old formula and passes with the corrected routing.
+
+The first quality probe after this fix is measurably better but still does not
+solve walking. At 100 training iterations, rollout perf improved from the
+previous post-reward-parity 0.618 to 0.683. The held-out gate improved from
+battery_perf=0.579, battery_falls=3/24000, and forward 0.8 m/s velocity error
+0.707 m/s to battery_perf=0.664, battery_falls=0/24000, and forward error
+0.549 m/s. This is real PPO progress, but still below the walking gate.
+Continuing the same run did not compound the gain: the 200, 300, and 400
+checkpoints reached battery_perf=0.649, 0.658, and 0.678 respectively, with the
+400 checkpoint at 1/24000 falls and forward error 0.590 m/s. Treat the 100-step
+checkpoint as the best post-fix quality reference for now; the remaining blocker
+is the longer-horizon training plateau, not this BPTT bug alone.
+
 ## Discrepancy Ledger
 
 This table is the working order for quality bugs. New tuning or optimization

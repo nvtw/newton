@@ -70,6 +70,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     PPO_LOG_STD_PARTIAL_BATCH,
     compute_puffer_vtrace_returns_kernel,
     gather_trajectory_minibatch_kernel,
+    mingru_sequence_backward_kernel,
     ppo_actor_loss_backward_kernel,
     reduce_ppo_log_std_grad_kernel,
     sample_trajectory_env_ids_kernel,
@@ -2053,6 +2054,64 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected1, _state1 = puffernet_numpy_forward(weights, obs_np, state=state0)
         np.testing.assert_allclose(out0_snapshot.numpy(), expected0, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(out1_snapshot.numpy(), expected1, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_mingru_backward_does_not_leak_future_grad_into_highway_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX MinGRU BPTT gradient routing tests")
+        combined_np = np.asarray([[0.2, -0.4, 0.7], [-0.3, 0.5, -0.2]], dtype=np.float32)
+        x_np = np.asarray([[0.25], [-0.15]], dtype=np.float32)
+        grad_out_np = np.asarray([[0.0], [1.0]], dtype=np.float32)
+        combined = wp.array(combined_np, dtype=wp.float32, device=device)
+        x = wp.array(x_np, dtype=wp.float32, device=device)
+        grad_out = wp.array(grad_out_np, dtype=wp.float32, device=device)
+        grad_combined = wp.zeros_like(combined)
+        grad_highway = wp.zeros_like(x)
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                mingru_sequence_backward_kernel,
+                dim=(1, 1),
+                inputs=[combined, x, grad_out, 2, 1, 1],
+                outputs=[grad_combined, grad_highway],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        def sigmoid(value: np.ndarray) -> np.ndarray:
+            return 1.0 / (1.0 + np.exp(-value))
+
+        hidden = combined_np[:, 0:1]
+        gate = sigmoid(combined_np[:, 1:2])
+        proj = sigmoid(combined_np[:, 2:3])
+        candidate = np.where(hidden >= 0.0, hidden + 0.5, sigmoid(hidden))
+        candidate_grad = np.where(hidden >= 0.0, 1.0, candidate * (1.0 - candidate))
+        prev = np.zeros((2, 1), dtype=np.float32)
+        recurrent = np.zeros((2, 1), dtype=np.float32)
+        state = np.zeros((1, 1), dtype=np.float32)
+        for step in range(2):
+            prev[step] = state
+            state = state + gate[step : step + 1] * (candidate[step : step + 1] - state)
+            recurrent[step] = state
+
+        expected_combined = np.zeros_like(combined_np)
+        expected_highway = np.zeros_like(x_np)
+        grad_recurrent_next = np.zeros((1, 1), dtype=np.float32)
+        for step in range(1, -1, -1):
+            grad_y = grad_out_np[step : step + 1]
+            grad_proj = grad_y * (recurrent[step : step + 1] - x_np[step : step + 1])
+            grad_recurrent = grad_y * proj[step : step + 1] + grad_recurrent_next
+            expected_highway[step] = grad_y * (1.0 - proj[step : step + 1])
+            grad_gate = grad_recurrent * (candidate[step : step + 1] - prev[step : step + 1])
+            grad_candidate = grad_recurrent * gate[step : step + 1]
+            grad_recurrent_next = grad_recurrent * (1.0 - gate[step : step + 1])
+            expected_combined[step, 0:1] = grad_candidate * candidate_grad[step : step + 1]
+            expected_combined[step, 1:2] = grad_gate * gate[step : step + 1] * (1.0 - gate[step : step + 1])
+            expected_combined[step, 2:3] = grad_proj * proj[step : step + 1] * (1.0 - proj[step : step + 1])
+
+        self.assertAlmostEqual(float(expected_combined[0, 2]), 0.0, places=7)
+        self.assertAlmostEqual(float(expected_highway[0, 0]), 0.0, places=7)
+        self.assertGreater(abs(float(expected_combined[0, 0])) + abs(float(expected_combined[0, 1])), 1.0e-4)
+        np.testing.assert_allclose(grad_combined.numpy(), expected_combined, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(grad_highway.numpy(), expected_highway, rtol=1.0e-6, atol=1.0e-6)
 
     def test_puffer_mingru_backward_matches_finite_difference_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX MinGRU backward tests")
