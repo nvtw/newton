@@ -161,7 +161,7 @@ class Example:
         # Initialize target frames per second and corresponding time-steps
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
-        target_sim_dt = 0.01 if implicit_pd else 0.001
+        target_sim_dt = 0.001 if dynamics_solver == "dvi" else 0.01 if implicit_pd else 0.001
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
         msg.info(f"Using sim_dt = {self.sim_dt} ({self.sim_substeps} substeps per frame)")
