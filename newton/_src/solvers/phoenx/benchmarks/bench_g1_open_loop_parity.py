@@ -65,6 +65,8 @@ _SETTINGS: dict[str, PhoenXSetting] = {
         g1_recipe.SOLVER_ITERATIONS,
         g1_recipe.VELOCITY_ITERATIONS,
     ),
+    "phoenx_10x8_v0": PhoenXSetting("phoenx_10x8_v0", 10, 8, 0),
+    "phoenx_10x8_v1": PhoenXSetting("phoenx_10x8_v1", 10, 8, 1),
     "phoenx_10x8": PhoenXSetting("phoenx_10x8", 10, 8, 2),
 }
 

@@ -377,6 +377,19 @@ rules out a gross missing-normal-support issue for this trace and makes
 tangential contact/friction projection the highest-priority grounded-physics
 suspect.
 
+A follow-up isolation added `phoenx_10x8_v0` and `phoenx_10x8_v1` settings to
+the same benchmark to separate position iterations from the velocity-relax pass.
+On the 6-step leg-symmetric trace, `10x8_v0` still matched normal support
+(`319.9 N` versus `324.9 N`) but kept a high tangential-support estimate
+(`145.3 N` versus `29.9 N`, tangent/normal ratio `0.489` versus `0.102`).
+`10x8_v1` reduced tangent support only partially (`117.5 N`). Running nanoG1 at
+the same 10 x 0.002 s timing made the gap larger rather than smaller
+(`19.2 N` nanoG1 tangent support). Temporarily zeroing the PhoenX tangential
+anchor bias also did not fix zero-action hold-pose tangential support. The next
+contact investigation should therefore focus on the tangential projection,
+effective mass, manifold, and static-friction solution selection, not on simply
+removing velocity relaxation or timestamp mismatch.
+
 | case | friction mode | setting | fall step | final base z | base-z max error | joint-q traj RMS | joint-qd traj RMS |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | zero action, 20 steps | none (`scale=0`) | `recipe_default` (`10x4`) | none | 0.760 m | 0.0205 m | 0.0262 rad | 2.02 rad/s |

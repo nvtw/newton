@@ -311,6 +311,15 @@ dense recipe (`-2.47`), conservative exploration (`-2.48`), and sparse-command
 shaping alone is not an instant fix and that candidate recipes should be judged
 by held-out displacement, survival, and falls before running full gates.
 
+Reward shaping may still be needed to make PhoenX policies prefer walking over
+standing, but the current evidence argues against treating it as the only
+blocker. A verified nanoG1 teacher policy and a PufferLib-style learner both
+degrade under PhoenX before any new reward recipe can help, while open-loop
+grounded traces show a large foot tangential-support mismatch. New reward or
+PBT experiments should therefore be ranked by held-out fixed-command progress
+and gate metrics, and should run only after each concrete physics/env mismatch
+is recorded or ruled out.
+
 Fresh probes with the corrected velocity reward still collapse to standing or
 low-motion behavior:
 
@@ -349,6 +358,14 @@ or physics discrepancy that makes the nanoG1 gait less viable: contact impulse
 behavior, tangential support, effective drive response under contact, or done /
 bootstrap semantics. The imported teacher remains the best probe because it
 walks in nanoG1 but degrades before PhoenX training starts.
+
+The newest open-loop isolation keeps that hypothesis alive. With current stable
+settings, PhoenX and nanoG1 agree on early foot contact counts and normal
+support, but PhoenX produces much larger tangential foot-ground support even for
+zero-action standing. The gap persists with PhoenX velocity relaxation disabled
+and when nanoG1 is run at the same 10 x 0.002 s substep timing, so the next
+root-cause work should inspect tangential contact projection/convergence rather
+than adding more dense walking terms first.
 
 ## Next Checks
 
