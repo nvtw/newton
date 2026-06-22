@@ -147,6 +147,7 @@ class Example:
         max_steps: int = 1000,
         use_cuda_graph: bool = False,
         implicit_pd: bool = False,
+        target_sim_dt: float | None = None,
         gravity: bool = True,
         ground: bool = True,
         logging: bool = False,
@@ -161,7 +162,10 @@ class Example:
         # Initialize target frames per second and corresponding time-steps
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
-        target_sim_dt = 0.001 if dynamics_solver == "dvi" else 0.01 if implicit_pd else 0.001
+        if target_sim_dt is None:
+            target_sim_dt = 0.001 if dynamics_solver == "dvi" else 0.01 if implicit_pd else 0.001
+        elif target_sim_dt <= 0.0:
+            raise ValueError("target_sim_dt must be positive.")
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
         msg.info(f"Using sim_dt = {self.sim_dt} ({self.sim_substeps} substeps per frame)")
@@ -469,6 +473,12 @@ if __name__ == "__main__":
         help="Enables implicit PD control of joints",
     )
     parser.add_argument(
+        "--target-sim-dt",
+        type=float,
+        default=None,
+        help="Target simulation timestep before rounding to an integer number of frame substeps",
+    )
+    parser.add_argument(
         "--gravity", action=argparse.BooleanOptionalAction, default=True, help="Enables gravity in the simulation"
     )
     parser.add_argument(
@@ -551,6 +561,7 @@ if __name__ == "__main__":
         use_graph_conditionals=args.use_graph_conditionals,
         max_steps=args.num_steps,
         implicit_pd=args.implicit_pd,
+        target_sim_dt=args.target_sim_dt,
         gravity=args.gravity,
         ground=args.ground,
         headless=args.headless,
