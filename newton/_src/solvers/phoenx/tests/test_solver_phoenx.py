@@ -70,6 +70,40 @@ def _make_box_margin_stack_model(*, margin: float) -> tuple[newton.Model, int]:
     return mb.finalize(), body
 
 
+def _make_offset_com_free_body_model() -> tuple[newton.Model, int]:
+    """Single free body with a nonzero local COM offset."""
+    mb = newton.ModelBuilder()
+    body = mb.add_body(
+        xform=wp.transform(p=wp.vec3(0.25, -0.4, 0.8), q=wp.quat_identity()),
+        mass=2.0,
+        inertia=((0.12, 0.0, 0.0), (0.0, 0.15, 0.0), (0.0, 0.0, 0.18)),
+    )
+    mb.body_com[body] = wp.vec3(0.35, -0.12, 0.22)
+    mb.gravity = 0.0
+    return mb.finalize(), body
+
+
+def _make_offset_com_free_joint_model() -> tuple[newton.Model, int]:
+    """Single FREE-root articulation with a rotated parent frame and offset COM."""
+    mb = newton.ModelBuilder()
+    body = mb.add_link(
+        mass=2.0,
+        inertia=((0.12, 0.0, 0.0), (0.0, 0.15, 0.0), (0.0, 0.0, 0.18)),
+    )
+    mb.body_com[body] = wp.vec3(0.35, -0.12, 0.22)
+    joint = mb.add_joint_free(
+        parent=-1,
+        child=body,
+        parent_xform=wp.transform(
+            p=wp.vec3(0.25, -0.4, 0.8),
+            q=wp.quat_from_axis_angle(wp.normalize(wp.vec3(0.2, -0.7, 1.0)), 0.6),
+        ),
+    )
+    mb.add_articulation([joint])
+    mb.gravity = 0.0
+    return mb.finalize(), body
+
+
 def _make_pendulum_model(*, target_angle: float = 0.0) -> newton.Model:
     """Static world body + dynamic cube + revolute joint with a PD
     drive towards ``target_angle`` (rad).
@@ -344,6 +378,76 @@ class TestSolverPhoenX(unittest.TestCase):
             delta=expected * 0.05,
             msg=f"external body_f did not propagate: v_x={v_x:.6f}, expected ~{expected:.6f}",
         )
+
+    def test_offset_com_free_body_preserves_newton_velocity_convention(self) -> None:
+        """PhoenX must round-trip Newton origin poses and COM-referenced twists."""
+        model, body = _make_offset_com_free_body_model()
+        solver = newton.solvers.SolverPhoenX(model, substeps=1, solver_iterations=1)
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+
+        qd_in = np.asarray([[0.4, -0.25, 0.15, 0.0, 1.2, -0.35]], dtype=np.float32)
+        state_0.body_qd.assign(qd_in)
+        dt = 1.0 / 120.0
+
+        with wp.ScopedCapture(device=model.device) as capture:
+            solver.step(state_0, state_1, control, None, dt)
+        wp.capture_launch(capture.graph)
+
+        body_q = state_1.body_q.numpy()[body]
+        body_qd = state_1.body_qd.numpy()[body]
+        com_local = model.body_com.numpy()[body]
+
+        omega = qd_in[0, 3:6].astype(np.float64)
+        speed = float(np.linalg.norm(omega))
+        half_angle = 0.5 * speed * dt
+        axis = omega / speed
+        expected_quat = np.asarray(
+            [
+                axis[0] * math.sin(half_angle),
+                axis[1] * math.sin(half_angle),
+                axis[2] * math.sin(half_angle),
+                math.cos(half_angle),
+            ],
+            dtype=np.float64,
+        )
+        initial_origin = state_0.body_q.numpy()[body, 0:3].astype(np.float64)
+        initial_com = initial_origin + com_local.astype(np.float64)
+        expected_com = initial_com + qd_in[0, 0:3].astype(np.float64) * dt
+        rot = np.array(wp.quat_to_matrix(wp.quat(*expected_quat)), dtype=np.float64).reshape(3, 3)
+        expected_origin = expected_com - rot @ com_local.astype(np.float64)
+
+        if np.dot(body_q[3:7], expected_quat) < 0.0:
+            expected_quat = -expected_quat
+        np.testing.assert_allclose(body_q[0:3], expected_origin, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(body_q[3:7], expected_quat, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(body_qd, qd_in[0], rtol=1.0e-6, atol=1.0e-6)
+
+    def test_offset_com_free_joint_qd_round_trips_parent_frame_in_graph(self) -> None:
+        """FREE joint_qd stays parent-frame COM velocity after PhoenX + eval_ik."""
+        model, body = _make_offset_com_free_joint_model()
+        solver = newton.solvers.SolverPhoenX(model, substeps=1, solver_iterations=1)
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+
+        q = state_0.joint_q.numpy()
+        q[0:3] = np.asarray([0.1, -0.2, 0.3], dtype=np.float32)
+        q[3:7] = np.asarray(wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, 0.2, -0.5)), -0.4), dtype=np.float32)
+        qd_in = np.asarray([0.45, -0.25, 0.15, 0.2, 1.1, -0.35], dtype=np.float32)
+        state_0.joint_q.assign(q)
+        state_0.joint_qd.assign(qd_in)
+        newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+        body_qd_0 = state_0.body_qd.numpy()[body].copy()
+
+        dt = 1.0 / 120.0
+        with wp.ScopedCapture(device=model.device) as capture:
+            solver.step(state_0, state_1, control, None, dt)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(state_1.body_qd.numpy()[body], body_qd_0, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(state_1.joint_qd.numpy(), qd_in, rtol=1.0e-5, atol=1.0e-5)
 
     def test_public_cloth_step_exports_particles(self) -> None:
         mb = newton.ModelBuilder()

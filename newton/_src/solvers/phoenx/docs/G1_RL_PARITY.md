@@ -255,6 +255,16 @@ and fails if COM velocity is tracked directly. This is a correctness fix, but it
 did not solve walking by itself: the imported nanoG1 teacher gate stayed near the
 previous result (`battery_perf=0.702`, `battery_falls=123/24000`).
 
+A PhoenX frame-convention audit on 2026-06-22 found no local-frame or COM-offset
+bug in the Newton adapter path. PhoenX imports Newton `body_q` as the body-origin
+pose, stores the body COM position internally, exports the body-origin pose by
+subtracting `R * body_com`, and exports `body_qd[:3]` as COM linear velocity.
+Targeted CUDA-graph regressions now cover both the raw offset-COM body path and
+a FREE-root articulation with rotated parent frame, nonzero COM offset, and
+nonzero angular velocity; the latter verifies PhoenX + `eval_ik` round-trips
+parent-frame COM `joint_qd`. These checks narrow the remaining G1 walking issue
+away from a simple PhoenX body-origin/COM or parent-frame `joint_qd` offset bug.
+
 
 
 A 2026-06-22 post-model-parity training probe used the default dense G1 recipe
