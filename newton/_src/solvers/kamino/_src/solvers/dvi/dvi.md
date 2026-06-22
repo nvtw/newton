@@ -33,6 +33,8 @@ Last updated: June 22, 2026.
   - It passed focused tests but tied the baseline within noise, so it was not kept.
 - Tried a DVI-local filtered transpose for bilateral RHS rebuilds.
   - It passed focused tests but regressed DR Legs contact timing, so it was not kept.
+- Tried a graph-compatible device-side adaptive skip for repeated bilateral solves.
+  - Aggressive thresholds improved one FPS run but hurt NCP/natural-map residuals; conservative thresholds were only a small noisy gain with extra launches/atomics, so this was not kept.
 
 ## Next Hot-Path Targets
 
