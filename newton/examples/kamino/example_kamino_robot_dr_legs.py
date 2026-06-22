@@ -84,7 +84,7 @@ class Example:
             self.config.integrator = "moreau"
             self.config.constraints.alpha = 0.1
             self.config.constraints.beta = 0.011
-            self.config.constraints.gamma = 0.05
+            self.config.constraints.gamma = 0.015
             self.config.constraints.contact_recovery_speed = 1.0
             self.config.dynamics.preconditioning = False
             self.config.dynamics.linear_solver_type = "CR"

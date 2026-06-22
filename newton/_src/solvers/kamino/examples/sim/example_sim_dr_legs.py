@@ -235,7 +235,7 @@ class Example:
         config.solver.integrator = "moreau"  # Select from {"euler", "moreau"}
         config.solver.constraints.alpha = 0.1
         config.solver.constraints.beta = 0.011
-        config.solver.constraints.gamma = 0.05
+        config.solver.constraints.gamma = 0.015
         config.solver.padmm.primal_tolerance = 1e-4
         config.solver.padmm.dual_tolerance = 1e-4
         config.solver.padmm.compl_tolerance = 1e-4
