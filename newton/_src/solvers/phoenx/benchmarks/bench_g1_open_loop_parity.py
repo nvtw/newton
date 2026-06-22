@@ -7,7 +7,8 @@ This benchmark compiles a tiny temporary C runner around nanoG1's host stepper
 (`web/g1_host.c`) and compares state trajectories for the same reset pose,
 action target pattern, v3 leg mask, action scale, and Unitree PD mode. The goal
 is trajectory-level evidence for simulator parity before spending more time on
-RL sample-efficiency tuning.
+RL sample-efficiency tuning. Use ``--initial-base-z`` to lift the robot for
+contact-free actuator/drive response checks.
 
 Examples:
     uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_open_loop_parity \
@@ -29,6 +30,7 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+import newton
 import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
@@ -178,8 +180,8 @@ def _host_runner_source() -> str:
         }}
 
         int main(int argc, char** argv) {{
-            if (argc < 7) {{
-                fprintf(stderr, "usage: %s steps pattern amplitude decim dt newton [ls]\\n", argv[0]);
+            if (argc < 10) {{
+                fprintf(stderr, "usage: %s steps pattern amplitude decim dt newton ls stepper initial_base_z\\n", argv[0]);
                 return 2;
             }}
             int steps = atoi(argv[1]);
@@ -188,8 +190,11 @@ def _host_runner_source() -> str:
             int decim = atoi(argv[4]);
             double dt = atof(argv[5]);
             int newton = atoi(argv[6]);
-            int ls = argc > 7 ? atoi(argv[7]) : 3;
+            int ls = atoi(argv[7]);
+            const char* stepper = argv[8];
+            double initial_base_z = atof(argv[9]);
             if (steps <= 0 || decim <= 0 || dt <= 0.0 || newton <= 0 || ls <= 0) return 2;
+            if (strcmp(stepper, "full") != 0 && strcmp(stepper, "smooth") != 0) return 2;
 
             hc_pd_unitree = 1;
             g_ls_iter = ls;
@@ -206,6 +211,7 @@ def _host_runner_source() -> str:
             if (!qpos_traj || !qvel_traj || !base_z || !upright || !left_contacts || !right_contacts || !qfrc_norm) return 3;
 
             memcpy(qpos, hc_key_qpos, sizeof(qpos));
+            if (isfinite(initial_base_z)) qpos[2] = initial_base_z;
             memset(qvel, 0, sizeof(qvel));
             memset(warmstart, 0, sizeof(warmstart));
             fill_actions(pattern, amplitude, actions);
@@ -229,10 +235,16 @@ def _host_runner_source() -> str:
                     ctrl[a] = target;
                 }}
                 for (int k = 0; k < decim; ++k) {{
-                    g1_full_step(qpos, qvel, ctrl, warmstart, dt, newton, qpn, qvn);
+                    if (strcmp(stepper, "smooth") == 0) {{
+                        g1_smooth_step(qpos, qvel, ctrl, dt, qpn, qvn);
+                        memset(qfrc_constraint, 0, sizeof(qfrc_constraint));
+                        ncon = 0;
+                    }} else {{
+                        g1_full_step(qpos, qvel, ctrl, warmstart, dt, newton, qpn, qvn);
+                        memcpy(warmstart, qacc_out, sizeof(warmstart));
+                    }}
                     memcpy(qpos, qpn, sizeof(qpos));
                     memcpy(qvel, qvn, sizeof(qvel));
-                    memcpy(warmstart, qacc_out, sizeof(warmstart));
                 }}
                 memcpy(qpos_traj + (size_t)(t + 1) * HC_NQ, qpos, sizeof(qpos));
                 memcpy(qvel_traj + (size_t)(t + 1) * HC_NV, qvel, sizeof(qvel));
@@ -287,6 +299,8 @@ def _run_nanog1_host(args: argparse.Namespace, action_pattern: str, action_ampli
             f"{float(args.nanog1_dt):.17g}",
             str(int(args.nanog1_newton_iterations)),
             str(int(args.nanog1_line_search_iterations)),
+            str(args.nanog1_stepper),
+            "nan" if args.initial_base_z is None else f"{float(args.initial_base_z):.17g}",
         ]
         completed = subprocess.run(cmd, check=True, text=True, capture_output=True)
     payload = json.loads(completed.stdout)
@@ -354,6 +368,15 @@ def _run_phoenx(
     foot_metrics = wp.zeros((env.world_count, 2, 3), dtype=wp.float32, device=device)
 
     env.reset()
+    if args.initial_base_z is not None:
+        q_init = env.state_0.joint_q.numpy()
+        qd_init = env.state_0.joint_qd.numpy()
+        q_init[2] = np.float32(args.initial_base_z)
+        qd_init.fill(0.0)
+        env.state_0.joint_q.assign(q_init)
+        env.state_0.joint_qd.assign(qd_init)
+        newton.eval_fk(env.model, env.state_0.joint_q, env.state_0.joint_qd, env.state_0)
+        env.observe()
     q0 = env.state_0.joint_q.numpy().reshape(1, env.coord_stride)[0]
     qd0 = env.state_0.joint_qd.numpy().reshape(1, env.dof_stride)[0]
     obs0 = env.obs.numpy()[0]
@@ -403,7 +426,10 @@ def _quat_error(q: np.ndarray, ref: np.ndarray) -> np.ndarray:
 
 
 def _compare_trajectory(
-    setting: PhoenXSetting, phoenx: dict[str, np.ndarray], host: dict[str, np.ndarray]
+    setting: PhoenXSetting,
+    phoenx: dict[str, np.ndarray],
+    host: dict[str, np.ndarray],
+    action_row: np.ndarray,
 ) -> dict[str, Any]:
     q = phoenx["qpos"]
     qd = phoenx["qvel"]
@@ -416,6 +442,26 @@ def _compare_trajectory(
     base_z_err = phoenx["base_z"] - host["base_z"]
     upright_err = phoenx["upright_cos"] - host["upright_cos"]
     foot_contact_err = phoenx["foot_contacts"] - host["foot_contacts"]
+    controlled_count = int(g1_recipe.CONTROLLED_ACTION_COUNT)
+    action_delta = np.float64(g1_recipe.ACTION_SCALE) * action_row[:controlled_count].astype(np.float64)
+    target = hq[0, 7 : 7 + controlled_count] + action_delta
+    host_final_error = hq[-1, 7 : 7 + controlled_count] - target
+    phoenx_final_error = q[-1, 7 : 7 + controlled_count] - target
+    target_error_delta = phoenx_final_error - host_final_error
+    active = np.abs(action_delta) > 1.0e-7
+    host_tracking_ratio = None
+    phoenx_tracking_ratio = None
+    tracking_ratio_delta = None
+    if np.any(active):
+        host_ratio = (
+            hq[-1, 7 : 7 + controlled_count][active] - hq[0, 7 : 7 + controlled_count][active]
+        ) / action_delta[active]
+        phoenx_ratio = (
+            q[-1, 7 : 7 + controlled_count][active] - q[0, 7 : 7 + controlled_count][active]
+        ) / action_delta[active]
+        host_tracking_ratio = float(np.mean(host_ratio))
+        phoenx_tracking_ratio = float(np.mean(phoenx_ratio))
+        tracking_ratio_delta = float(phoenx_tracking_ratio - host_tracking_ratio)
     return {
         "setting": setting.name,
         "sim_substeps": int(setting.sim_substeps),
@@ -440,6 +486,12 @@ def _compare_trajectory(
         "joint_q_final_max_abs_rad": float(np.max(np.abs(joint_err[-1]))),
         "joint_qd_final_rmse_rad_s": float(np.sqrt(np.mean(joint_qd_err[-1] * joint_qd_err[-1]))),
         "joint_qd_traj_rmse_rad_s": float(np.sqrt(np.mean(joint_qd_err * joint_qd_err))),
+        "phoenx_final_target_error_rmse_rad": float(np.sqrt(np.mean(phoenx_final_error * phoenx_final_error))),
+        "nanog1_final_target_error_rmse_rad": float(np.sqrt(np.mean(host_final_error * host_final_error))),
+        "target_error_final_delta_rmse_rad": float(np.sqrt(np.mean(target_error_delta * target_error_delta))),
+        "phoenx_tracking_ratio_mean": phoenx_tracking_ratio,
+        "nanog1_tracking_ratio_mean": host_tracking_ratio,
+        "tracking_ratio_delta_mean": tracking_ratio_delta,
         "left_contact_count_final_error": float(foot_contact_err[-1, 0]),
         "right_contact_count_final_error": float(foot_contact_err[-1, 1]),
         "contact_count_traj_rmse": float(np.sqrt(np.mean(foot_contact_err * foot_contact_err))),
@@ -465,10 +517,10 @@ def benchmark_open_loop_parity(args: argparse.Namespace) -> dict[str, Any]:
     for name in tuple(args.settings):
         setting = _SETTINGS[name]
         phoenx = _run_phoenx(setting, args, action_row, device=device)
-        results.append(_compare_trajectory(setting, phoenx, host))
+        results.append(_compare_trajectory(setting, phoenx, host, action_row))
     return {
         "engine": "phoenx_vs_nanog1_host_open_loop",
-        "metric": "same reset and open-loop action targets, final and trajectory state error",
+        "metric": "same reset and open-loop action targets, state error, contact support, and drive tracking response",
         "device": device.name,
         "steps": int(args.steps),
         "action_pattern": str(args.action_pattern),
@@ -476,12 +528,15 @@ def benchmark_open_loop_parity(args: argparse.Namespace) -> dict[str, Any]:
         "contact_geometry": str(args.contact_geometry),
         "joint_friction_model": str(args.joint_friction_model),
         "joint_friction_scale": float(args.joint_friction_scale),
+        "initial_base_z": None if args.initial_base_z is None else float(args.initial_base_z),
+        "nanog1_stepper": str(args.nanog1_stepper),
         "nanog1_reference": {
             "host_stepper": str(_NANOG1_HOST),
             "dt": float(args.nanog1_dt),
             "decimation": int(args.nanog1_decimation),
             "newton_iterations": int(args.nanog1_newton_iterations),
             "line_search_iterations": int(args.nanog1_line_search_iterations),
+            "stepper": str(args.nanog1_stepper),
             "action_scale": 0.25,
             "unitree_pd": True,
         },
@@ -499,6 +554,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--nanog1-decimation", type=int, default=5)
     parser.add_argument("--nanog1-newton-iterations", type=int, default=2)
     parser.add_argument("--nanog1-line-search-iterations", type=int, default=3)
+    parser.add_argument(
+        "--nanog1-stepper",
+        choices=("full", "smooth"),
+        default="full",
+        help="nanoG1 host stepper: full constraints/friction or smooth dynamics only.",
+    )
+    parser.add_argument(
+        "--initial-base-z",
+        type=float,
+        default=None,
+        help="Override reset base height [m], useful for contact-free drive response sweeps.",
+    )
     parser.add_argument("--joint-friction-model", choices=("hard", "mujoco"), default=g1_recipe.JOINT_FRICTION_MODEL)
     parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
     parser.add_argument("--parse-meshes", action="store_true")

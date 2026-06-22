@@ -56,6 +56,17 @@ remaining diagnostics: per-joint no-contact PD/friction/armature step response,
 grounded hold-pose contact impulse traces, and a substep sweep that reports
 tracking compliance against the configured Unitree gains and force limits.
 
+A lifted drive-response sweep separates the drive model from foot contact.
+With `--initial-base-z 3.0`, 20 policy steps, a 0.2 leg-step action, and the
+nanoG1 `full` stepper, both solvers reported zero foot contacts. PhoenX `5x2`
+ended with a target-error delta of 0.00131 rad RMS against nanoG1 and tracked
+1.061 of the command versus nanoG1's 1.053; `10x8` was similarly close. With
+nanoG1 `smooth` dynamics and PhoenX joint friction disabled, PhoenX overshot
+slightly more (tracking ratio +0.032 to +0.041), so the current data does not
+support a gross no-contact PD/friction/armature softness bug. The important
+remaining question is how those same drives behave when coupled to grounded
+contacts and solver compliance.
+
 ## nanoG1 Reference
 
 nanoG1 v3 uses the following production physics and drive setup:
