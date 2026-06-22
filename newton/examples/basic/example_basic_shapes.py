@@ -59,7 +59,7 @@ class Example:
         if self.solver_type == "vbd":
             # VBD: Higher stiffness for stable rigid body contacts
             builder.default_shape_cfg.ke = 1.0e6  # Contact stiffness
-            builder.default_shape_cfg.kd = 1.0e1  # Contact damping
+            builder.default_shape_cfg.kd = 1.0e7  # Contact damping
         elif self.solver_type == "phoenx":
             # PhoenX: PGS solver consumes contacts from the shared
             # collision pipeline; it does not use ke/kd (rigid contact),

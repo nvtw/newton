@@ -468,6 +468,36 @@ def _make_spatial_preprune_probe_det(score: float, is_inner: bool, fingerprint: 
     )
 
 
+@wp.func
+def _make_spatial_contact_value_det(score: float, is_inner: bool, fingerprint: int, contact_id: int) -> wp.uint64:
+    """Pack inner/outer priority, spatial score, fingerprint, and contact id."""
+    priority = wp.uint64(0)
+    if is_inner:
+        priority = wp.uint64(1)
+    score_bits = wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT + 1)))
+    return (
+        (priority << wp.uint64(63))
+        | (score_bits << wp.uint64(42))
+        | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
+        | (wp.uint64(contact_id) & CONTACT_ID_MASK)
+    )
+
+
+@wp.func
+def _make_spatial_preprune_probe_det(score: float, is_inner: bool, fingerprint: int) -> wp.uint64:
+    """Deterministic pre-prune probe for prioritized spatial slots."""
+    priority = wp.uint64(0)
+    if is_inner:
+        priority = wp.uint64(1)
+    score_bits = wp.uint64(float_flip(score) >> wp.uint32(wp.static(SCORE_SHIFT + 1)))
+    return (
+        (priority << wp.uint64(63))
+        | (score_bits << wp.uint64(42))
+        | ((wp.uint64(fingerprint) & FINGERPRINT_MASK) << CONTACT_ID_BITS)
+        | CONTACT_ID_MASK
+    )
+
+
 @wp.func_native("""
 return static_cast<int32_t>(packed & 0x3FFFFFull);
 """)
