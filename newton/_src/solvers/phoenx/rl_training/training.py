@@ -24,6 +24,7 @@ from .g1_recipe import (
     HIDDEN_LAYERS,
     LOG_STD_INIT,
     RANDOMIZE_COMMANDS,
+    RESET_RECURRENT_STATE_ON_ROLLOUT_START,
     ROLLOUT_STEPS,
     SEED,
     SQUASH_ACTIONS,
@@ -224,6 +225,7 @@ class ConfigTrainG1PPO:
     command_yaw_range: tuple[float, float] = COMMAND_YAW_RANGE
     command_zero_probability: float = COMMAND_ZERO_PROBABILITY
     command_resample_steps: int = COMMAND_RESAMPLE_STEPS
+    reset_recurrent_state_on_rollout_start: bool = RESET_RECURRENT_STATE_ON_ROLLOUT_START
     resume_checkpoint: str | None = None
     checkpoint_path: str | None = None
     checkpoint_interval: int = 0
@@ -586,7 +588,12 @@ def _train_g1_ppo_graph_leapfrog(
                 command_yaw_range=cfg.command_yaw_range,
                 zero_probability=cfg.command_zero_probability,
             )
-        env.collect_ppo_rollout_seed_counter(rollout_trainer, buffer, seed_counter=rollout_seed_counter)
+        env.collect_ppo_rollout_seed_counter(
+            rollout_trainer,
+            buffer,
+            seed_counter=rollout_seed_counter,
+            reset_state_at_start=bool(cfg.reset_recurrent_state_on_rollout_start),
+        )
 
     def update(buffer: BufferRollout) -> None:
         trainer.update_seed_counter(buffer, seed_counter=update_seed_counter, read_stats=False)
@@ -736,7 +743,12 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
             )
 
         t0 = time.perf_counter()
-        env.collect_ppo_rollout(trainer, buffer, seed=cfg.seed + iteration * cfg.rollout_steps)
+        env.collect_ppo_rollout(
+            trainer,
+            buffer,
+            seed=cfg.seed + iteration * cfg.rollout_steps,
+            reset_state_at_start=bool(cfg.reset_recurrent_state_on_rollout_start),
+        )
         t1 = time.perf_counter()
         update_stats = trainer.update(buffer, read_stats=False)
         if diagnostics is not None:

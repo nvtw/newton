@@ -137,7 +137,14 @@ def advance_seed_counter(
     wp.launch(seed_counter_increment_kernel, dim=1, inputs=[seed_counter, int(delta)], device=counter_device)
 
 
-def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout, *, seed: int) -> None:
+def collect_ppo_rollout(
+    env: EnvPPO,
+    trainer: TrainerPPO,
+    buffer: BufferRollout,
+    *,
+    seed: int,
+    reset_state_at_start: bool = True,
+) -> None:
     """Collect one PPO rollout from any vectorized Warp environment.
 
     Args:
@@ -145,17 +152,28 @@ def collect_ppo_rollout(env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout,
         trainer: PPO trainer used for action sampling and value estimates.
         buffer: Rollout buffer to fill.
         seed: Base stochastic action seed.
+        reset_state_at_start: Whether to clear recurrent policy state before
+            collecting this rollout chunk.
     """
 
-    _collect_ppo_rollout_impl(env, trainer, buffer, seed=int(seed), seed_counter=None)
+    _collect_ppo_rollout_impl(
+        env, trainer, buffer, seed=int(seed), seed_counter=None, reset_state_at_start=reset_state_at_start
+    )
 
 
 def collect_ppo_rollout_seed_counter(
-    env: EnvPPO, trainer: TrainerPPO, buffer: BufferRollout, *, seed_counter: wp.array[wp.int32]
+    env: EnvPPO,
+    trainer: TrainerPPO,
+    buffer: BufferRollout,
+    *,
+    seed_counter: wp.array[wp.int32],
+    reset_state_at_start: bool = True,
 ) -> None:
     """Collect one PPO rollout using a graph-replay-safe device seed counter."""
 
-    _collect_ppo_rollout_impl(env, trainer, buffer, seed=0, seed_counter=seed_counter)
+    _collect_ppo_rollout_impl(
+        env, trainer, buffer, seed=0, seed_counter=seed_counter, reset_state_at_start=reset_state_at_start
+    )
     advance_seed_counter(seed_counter, buffer.num_steps, device=env.device)
 
 
@@ -166,11 +184,13 @@ def _collect_ppo_rollout_impl(
     *,
     seed: int,
     seed_counter: wp.array[wp.int32] | None,
+    reset_state_at_start: bool,
 ) -> None:
     if buffer.num_envs != env.world_count or buffer.obs_dim != env.obs_dim or buffer.action_dim != env.action_dim:
         raise ValueError("PPO buffer dimensions do not match environment")
 
-    trainer.reset_rollout_state()
+    if reset_state_at_start:
+        trainer.reset_rollout_state()
     obs = env.observe()
     max_cols = max(env.obs_dim, env.action_dim, 1)
     value_col = trainer.value_column

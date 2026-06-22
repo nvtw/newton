@@ -68,6 +68,10 @@ benchmark defaults read from the same constants.
 - Default G1 PPO uses nanoG1's N1 left/right mirror regularization with
   `mirror_loss_coeff=0.25`, implemented through the reusable Warp PPO mirror-map
   hook and the validated G1 observation/action mirror map from the pinned fork.
+- G1 keeps PufferMinGRU rollout state across rollout chunks by default
+  (`RESET_RECURRENT_STATE_ON_ROLLOUT_START=False`), matching the pinned
+  PufferLib `reset_state=False` training path. Done flags still clear recurrent
+  state per environment during rollout collection.
 - Default G1 PPO uses BF16 inputs with FP32 accumulation for manual CUDA MLP
   weight-gradient tile matmul, plus BF16 hidden-layer forward tile matmul for
   large PPO minibatches. This follows PufferLib's default precision direction
@@ -203,9 +207,14 @@ adding that armature, a compact 60-iteration train-save-reload-gate probe on RTX
 PRO 6000 measured about 252k train env samples/s and 237k total env samples/s.
 It still failed the gate at 15.7M samples, but improved to `battery_perf=0.388`
 and `battery_falls=27` versus the previous no-armature `battery_perf=0.289` and
-`battery_falls=94`. The remaining gap is policy quality/sample efficiency rather
-than only raw throughput. See `G1_SOLVER_CONVERGENCE.md` for the fidelity and
-stochastic-rollout study.
+`battery_falls=94`. After switching G1 to preserve PufferMinGRU rollout state
+across rollout chunks, a 2026-06-22 60-iteration train-save-reload-gate probe
+measured about 246k train env samples/s and 142k total env samples/s including
+gate evaluation, with `battery_perf=0.424` and `battery_falls=292` at 15.7M
+samples. This still does not pass the gate; treat it as an early-learning
+regression point, not a solved policy. The remaining gap is policy
+quality/sample efficiency rather than only raw throughput. See
+`G1_SOLVER_CONVERGENCE.md` for the fidelity and stochastic-rollout study.
 
 The old fast graph-leapfrog production path was remeasured with the default
 auto fast-tail scheduler at 1,086,344 samples/s on 2026-06-20. Setting
@@ -283,11 +292,11 @@ cd /home/twidmer/Documents/git/nanoG1 && modal run bench/bench_nanog1.py --confi
 - The Warp-only PPO loop is reusable and now supports trajectory minibatch
   replay, rollout-advantage priority sampling, PufferLib-equivalent V-trace
   replay correction for PhoenX's post-step reward layout, Muon, a fused
-  actor/value PufferMinGRU policy, BF16 MLP
-  weight-gradient tile matmul, and large-minibatch BF16 hidden forward tile
-  matmul. Remaining RL parity risks are trainer-level details such as native
-  CUDA fusion, RNG stream equivalence, command/reset schedules, and domain
-  randomization.
+  actor/value PufferMinGRU policy, Puffer-style recurrent rollout-state
+  preservation, BF16 MLP weight-gradient tile matmul, and large-minibatch BF16
+  hidden forward tile matmul. Remaining RL parity risks are trainer-level
+  details such as native CUDA fusion, minibatch recurrent-state handling, RNG
+  stream equivalence, command/reset schedules, and domain randomization.
 - Environment stepping, command randomization, stochastic action sampling,
   priority minibatch sampling, Muon/Adam optimizer step state, and the manual
   PPO update pieces are CUDA-graph capturable with device-side counters. The

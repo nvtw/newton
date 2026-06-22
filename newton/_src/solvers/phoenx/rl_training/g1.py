@@ -2059,14 +2059,28 @@ class EnvG1PhoenX:
         self.sim_time += float(self.config.frame_dt)
         return self.obs, self.step_rewards, self.step_dones
 
-    def collect_ppo_rollout(self, trainer: TrainerPPO, buffer: BufferRollout, *, seed: int) -> None:
+    def collect_ppo_rollout(
+        self,
+        trainer: TrainerPPO,
+        buffer: BufferRollout,
+        *,
+        seed: int,
+        reset_state_at_start: bool = True,
+    ) -> None:
         """Collect one rollout and compute GAE returns for PPO."""
 
-        collect_ppo_rollout(self, trainer, buffer, seed=seed)
+        collect_ppo_rollout(self, trainer, buffer, seed=seed, reset_state_at_start=reset_state_at_start)
 
     def collect_ppo_rollout_seed_counter(
-        self, trainer: TrainerPPO, buffer: BufferRollout, *, seed_counter: wp.array[wp.int32]
+        self,
+        trainer: TrainerPPO,
+        buffer: BufferRollout,
+        *,
+        seed_counter: wp.array[wp.int32],
+        reset_state_at_start: bool = True,
     ) -> None:
         """Collect one rollout using a graph-replay-safe device seed counter."""
 
-        collect_ppo_rollout_seed_counter(self, trainer, buffer, seed_counter=seed_counter)
+        collect_ppo_rollout_seed_counter(
+            self, trainer, buffer, seed_counter=seed_counter, reset_state_at_start=reset_state_at_start
+        )

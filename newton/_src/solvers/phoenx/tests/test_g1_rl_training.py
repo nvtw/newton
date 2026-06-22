@@ -402,6 +402,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(g1_recipe.ROLLOUT_STEPS, int(recipe["train.horizon"]))
         self.assertAlmostEqual(g1_recipe.MAX_GRAD_NORM, float(recipe["train.max_grad_norm"]))
         self.assertAlmostEqual(g1_recipe.MIRROR_LOSS_COEFF, float(mirror_match.group(1)))
+        self.assertFalse(g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START)
+        self.assertFalse(rl.ConfigTrainG1PPO().reset_recurrent_state_on_rollout_start)
 
     def test_nanog1_model_and_deploy_constants_match_env(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 nanoG1 constant parity tests")
@@ -1174,6 +1176,55 @@ class TestG1PhoenXRL(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         np.testing.assert_allclose(buffer.actions.numpy(), expected, rtol=1.0e-5, atol=1.0e-5)
+        np.testing.assert_array_equal(seed_counter.numpy(), np.array([12], dtype=np.int32))
+
+    def test_collect_rollout_can_preserve_recurrent_state_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX recurrent rollout preserve-state tests")
+        env = _ConstantPPOEnv(world_count=2, obs_dim=3, action_dim=1, device=device)
+        buffer = rl.BufferRollout(
+            num_steps=1, num_envs=env.world_count, obs_dim=env.obs_dim, action_dim=1, device=device
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=env.obs_dim,
+            action_dim=env.action_dim,
+            hidden_layers=(2,),
+            config=rl.ConfigPPO(
+                gamma=0.9,
+                gae_lambda=0.8,
+                shared_value_network=True,
+                policy_network="puffer_mingru",
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+            ),
+            device=device,
+            seed=3,
+            squash_actions=False,
+            log_std_init=-5.0,
+        )
+        trainer.actor.net.encoder_weight.assign(np.asarray([[0.7, -0.2], [0.1, 0.5], [-0.3, 0.4]], dtype=np.float32))
+        trainer.actor.net.recurrent_weights[0].assign(
+            np.asarray([[0.2, -0.1, 0.5, -0.4, 0.6, -0.3], [-0.3, 0.4, -0.2, 0.7, -0.5, 0.2]], dtype=np.float32)
+        )
+        trainer.actor.net.decoder_weight.assign(np.asarray([[0.6, 0.2], [-0.4, 0.3]], dtype=np.float32))
+        trainer.reserve_update_buffers(buffer)
+
+        trainer.reset_rollout_state()
+        first_actions, _first_log_probs, _first_values = trainer.act_reuse(env.obs, seed=11)
+        reset_expected = first_actions.numpy().copy()
+        preserved_actions, _preserved_log_probs, _preserved_values = trainer.act_reuse(env.obs, seed=11)
+        preserved_expected = preserved_actions.numpy().copy()
+        self.assertFalse(np.allclose(preserved_expected, reset_expected, rtol=1.0e-5, atol=1.0e-5))
+
+        trainer.reset_rollout_state()
+        trainer.act_reuse(env.obs, seed=11)
+        seed_counter = make_seed_counter(11, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            collect_ppo_rollout_seed_counter(
+                env, trainer, buffer, seed_counter=seed_counter, reset_state_at_start=False
+            )
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(buffer.actions.numpy(), preserved_expected, rtol=1.0e-5, atol=1.0e-5)
         np.testing.assert_array_equal(seed_counter.numpy(), np.array([12], dtype=np.int32))
 
     def test_puffer_mingru_forward_and_reset_match_numpy_in_graph(self) -> None:
