@@ -8,9 +8,11 @@ import copy
 import glob
 import os
 import threading
+from dataclasses import dataclass
 from typing import ClassVar
 
 # Thirdparty
+import numpy as np
 import warp as wp
 
 from ......geometry.types import GeoType
@@ -26,6 +28,72 @@ from .simulator import Simulator
 ###
 # Kernels
 ###
+
+
+@dataclass
+class _RenderGroup:
+    name: str
+    mesh_path: str
+    body_indices: np.ndarray
+    local_xforms: np.ndarray
+    world_offsets: np.ndarray
+    xforms_host: np.ndarray
+    init_xforms: wp.array[wp.transform]
+    scales: wp.array[wp.vec3]
+    colors: wp.array[wp.vec3]
+    materials: wp.array[wp.vec4]
+    initialized: bool = False
+
+
+def _quat_multiply(q_a: np.ndarray, q_b: np.ndarray) -> np.ndarray:
+    ax, ay, az, aw = q_a
+    bx, by, bz, bw = q_b
+    return np.array(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ],
+        dtype=np.float32,
+    )
+
+
+def _quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    qv = q[:3]
+    t = np.float32(2.0) * np.cross(qv, v)
+    return v + q[3] * t + np.cross(qv, t)
+
+
+def _write_transform_mat44(dst: np.ndarray, index: int, p: np.ndarray, q: np.ndarray) -> None:
+    qx, qy, qz, qw = q
+    x2 = np.float32(2.0) * qx * qx
+    y2 = np.float32(2.0) * qy * qy
+    z2 = np.float32(2.0) * qz * qz
+    xy = np.float32(2.0) * qx * qy
+    xz = np.float32(2.0) * qx * qz
+    yz = np.float32(2.0) * qy * qz
+    wx = np.float32(2.0) * qw * qx
+    wy = np.float32(2.0) * qw * qy
+    wz = np.float32(2.0) * qw * qz
+    dst[index, :] = (
+        1.0 - y2 - z2,
+        xy + wz,
+        xz - wy,
+        0.0,
+        xy - wz,
+        1.0 - x2 - z2,
+        yz + wx,
+        0.0,
+        xz + wy,
+        yz - wx,
+        1.0 - x2 - y2,
+        0.0,
+        p[0],
+        p[1],
+        p[2],
+        1.0,
+    )
 
 
 @wp.kernel
@@ -242,45 +310,95 @@ class ViewerKamino(ViewerGL):
         # Contact visualization settings
         self._show_contacts = show_contacts
 
+        self._render_groups = self._build_render_groups()
+
         if self._record_video:
             os.makedirs(self._video_folder, exist_ok=True)
 
-    def render_geometry(self, body_poses: wp.array, geom: GeometryDescriptor, scope: str):
-        # TODO: Fix this
-        bid = geom.body + self._worlds[geom.wid].bodies_idx_offset if geom.body >= 0 else -1
+    def _build_render_groups(self) -> list[_RenderGroup]:
+        group_data: dict[str, dict[str, object]] = {}
+        for geom in self._geometry:
+            if geom.shape is None or geom.shape.type == GeoType.NONE:
+                continue
 
-        # Handle the case of static geometry (bid < 0)
-        if bid < 0:
-            body_transform = wp.transform_identity()
-        else:
-            body_transform = wp.transform(*body_poses[bid])
+            shape = geom.shape
+            mesh_path = self._populate_geometry(
+                int(shape.type),
+                shape.params,
+                0.0,
+                bool(shape.is_solid),
+                geo_src=shape.data if shape.type in (GeoType.MESH, GeoType.CONVEX_MESH, GeoType.HFIELD) else None,
+            )
+            data = group_data.setdefault(
+                mesh_path,
+                {
+                    "body_indices": [],
+                    "local_xforms": [],
+                    "world_offsets": [],
+                    "colors": [],
+                },
+            )
+            body_index = geom.body + self._worlds[geom.wid].bodies_idx_offset if geom.body >= 0 else -1
+            data["body_indices"].append(body_index)
+            data["local_xforms"].append(np.asarray(geom.offset, dtype=np.float32))
+            data["world_offsets"].append(np.asarray(self.world_spacing, dtype=np.float32) * np.float32(geom.wid))
 
-        # Retrieve the geometry ID as a float
-        wid = float(geom.wid)
+            color_index = geom.body % len(self.body_colors)
+            data["colors"].append(np.asarray(self.body_colors[color_index].numpy()[0], dtype=np.float32))
 
-        # Apply world spacing based on world ID
-        offset_transform = wp.transform(self.world_spacing * wid, wp.quat_identity())
+        groups: list[_RenderGroup] = []
+        for idx, (mesh_path, data) in enumerate(group_data.items()):
+            count = len(data["body_indices"])
+            groups.append(
+                _RenderGroup(
+                    name=f"/kamino/geoms/group_{idx}",
+                    mesh_path=mesh_path,
+                    body_indices=np.asarray(data["body_indices"], dtype=np.int32),
+                    local_xforms=np.asarray(data["local_xforms"], dtype=np.float32),
+                    world_offsets=np.asarray(data["world_offsets"], dtype=np.float32),
+                    xforms_host=np.empty((count, 16), dtype=np.float32),
+                    init_xforms=wp.array([wp.transform_identity()] * count, dtype=wp.transform, device=self.device),
+                    scales=wp.array([wp.vec3(1.0, 1.0, 1.0)] * count, dtype=wp.vec3, device=self.device),
+                    colors=wp.array(data["colors"], dtype=wp.vec3, device=self.device),
+                    materials=wp.array([wp.vec4(0.5, 0.0, 0.0, 0.0)] * count, dtype=wp.vec4, device=self.device),
+                )
+            )
+        return groups
 
-        # Combine body and offset transforms
-        geom_transform = wp.transform_multiply(body_transform, geom.offset)
-        geom_transform = wp.transform_multiply(offset_transform, geom_transform)
+    def _update_render_group(self, group: _RenderGroup, body_poses: np.ndarray) -> None:
+        for i, body_index in enumerate(group.body_indices):
+            local = group.local_xforms[i]
+            local_p = local[:3]
+            local_q = local[3:]
+            if body_index >= 0:
+                body = body_poses[body_index]
+                body_p = body[:3]
+                body_q = body[3:]
+                p = body_p + _quat_rotate(body_q, local_p)
+                q = _quat_multiply(body_q, local_q)
+            else:
+                p = local_p
+                q = local_q
+            _write_transform_mat44(group.xforms_host, i, p + group.world_offsets[i], q)
 
-        # Choose color based on body ID
-        color = self.body_colors[geom.body % len(self.body_colors)]
+    def _render_geometry_groups(self, body_poses: np.ndarray) -> None:
+        for group in self._render_groups:
+            self._update_render_group(group, body_poses)
+            if not group.initialized:
+                self.log_instances(
+                    group.name,
+                    group.mesh_path,
+                    group.init_xforms,
+                    group.scales,
+                    group.colors,
+                    group.materials,
+                )
+                group.initialized = True
 
-        # Shape params are already in Newton convention (half-extents, half-heights)
-        params = geom.shape.params
-
-        # Update the geometry data
-        self.log_shapes(
-            name=f"/world_{geom.wid}/body_{geom.body}/{scope}/{geom.gid}-{geom.name}",
-            geo_type=geom.shape.type,
-            geo_scale=params,
-            xforms=wp.array([geom_transform], dtype=wp.transform),
-            geo_is_solid=geom.shape.is_solid,
-            colors=color,
-            geo_src=geom.shape.data,
-        )
+            instancer = self.objects.get(group.name)
+            if instancer is not None:
+                instancer.update_from_pinned(group.xforms_host, len(group.body_indices))
+                instancer.hidden = False
 
     def render_frame(self, stop_recording: bool = False):
         # Begin a new frame
@@ -289,11 +407,7 @@ class ViewerKamino(ViewerGL):
         # Extract body poses from the kamino simulator
         body_poses = self._simulator.state.q_i.numpy()
 
-        # Render each collision geom
-        for geom in self._geometry:
-            if geom.shape.type == GeoType.NONE:
-                continue
-            self.render_geometry(body_poses, geom, scope="geoms")
+        self._render_geometry_groups(body_poses)
 
         # Render contacts if they exist and visualization is enabled
         if hasattr(self._simulator, "contacts") and self._simulator.contacts is not None:

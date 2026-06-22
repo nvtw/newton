@@ -32,6 +32,7 @@
 - Fix Kamino DVI direct-block contact sweeps to honor per-world `block_iterations` and `contact_iterations` in heterogeneous batches.
 - Fix Kamino DVI direct-block no-unilateral overhead by skipping repeated bilateral solves for worlds without active limit or contact rows.
 - Fix Kamino DVI direct-block status iteration counts for worlds with no active limit or contact rows.
+- Fix the Kamino DR Legs viewer path to batch shape instance updates instead of relogging each geometry every frame.
 - Fix Kamino benchmark table rendering on non-UTF-8 Windows consoles.
 - Fix Kamino DVI status initialization for direct bilateral-only solves.
 - Fix Kamino DVI contact scheduling to use additional direct-bilateral/contact sweeps, reducing DR Legs tipped-contact sink and creep.
