@@ -86,7 +86,9 @@ class Example:
         self.checkpoint_interval = int(args.checkpoint_interval)
         self.save_final_policy = bool(args.save_final_policy)
         self.render_contacts = bool(args.render_contacts)
+        self.debug_joint_interval = max(int(args.debug_joint_interval), 0)
         self._last_stats: tuple[float, ...] | None = None
+        self._last_joint_debug: tuple[float, ...] | None = None
         self._samples_seen = 0
         self._training_complete = False
         self._train_replay_active = False
@@ -307,6 +309,98 @@ class Example:
             0.5 * (self.command_yaw_range[0] + self.command_yaw_range[1]),
         )
 
+    @staticmethod
+    def _abs_mean_max(values: np.ndarray) -> tuple[float, float]:
+        if values.size == 0:
+            return 0.0, 0.0
+        abs_values = np.abs(values)
+        return float(np.mean(abs_values)), float(np.max(abs_values))
+
+    def _joint_action_diagnostics(self, raw_actions: np.ndarray | None = None) -> tuple[str, tuple[float, ...]]:
+        active_count = min(int(self.env.config.controlled_action_count), self.env.action_dim)
+        action_slice = slice(0, active_count)
+
+        current_actions = self.env.current_actions.numpy()
+        clipped_active = current_actions[:, action_slice]
+        clipped_mean, clipped_max = self._abs_mean_max(clipped_active)
+        inactive = current_actions[:, active_count:]
+        inactive_abs_max = 0.0 if inactive.size == 0 else float(np.max(np.abs(inactive)))
+
+        raw_abs_mean = 0.0
+        raw_abs_max = 0.0
+        raw_clip_frac = 0.0
+        raw_text = "raw_abs=na raw_clip=na"
+        if raw_actions is not None:
+            raw = np.asarray(raw_actions, dtype=np.float32).reshape(-1, self.env.action_dim)[:, action_slice]
+            raw_abs_mean, raw_abs_max = self._abs_mean_max(raw)
+            raw_clip_frac = 0.0 if raw.size == 0 else float(np.mean(np.abs(raw) > 1.0))
+            raw_text = f"raw_abs={raw_abs_mean:.3f}/{raw_abs_max:.3f} raw_clip={raw_clip_frac:.3f}"
+
+        joint_q = np.asarray(self.env.state_0.joint_q.numpy()).reshape(self.env.world_count, self.env.coord_stride)
+        joint_qd = np.asarray(self.env.state_0.joint_qd.numpy()).reshape(self.env.world_count, self.env.dof_stride)
+        q = joint_q[:, 7 : 7 + self.env.action_dim]
+        qd = joint_qd[:, 6 : 6 + self.env.action_dim]
+        default_q = self.env.default_joint_pos.numpy()[None, :]
+
+        target_q = np.asarray(self.env.control.joint_target_q.numpy())
+        if bool(self.env.model.use_coord_layout_targets):
+            target = target_q.reshape(self.env.world_count, self.env.coord_stride)[:, 7 : 7 + self.env.action_dim]
+        else:
+            target = target_q.reshape(self.env.world_count, self.env.dof_stride)[:, 6 : 6 + self.env.action_dim]
+
+        joint_delta_mean, joint_delta_max = self._abs_mean_max(q[:, action_slice] - default_q[:, action_slice])
+        target_delta_mean, target_delta_max = self._abs_mean_max(target[:, action_slice] - default_q[:, action_slice])
+        target_err_mean, target_err_max = self._abs_mean_max(target[:, action_slice] - q[:, action_slice])
+        qd_mean, qd_max = self._abs_mean_max(qd[:, action_slice])
+
+        tau = self.env.actuator_force.numpy()[:, action_slice]
+        tau_mean, tau_max = self._abs_mean_max(tau)
+        force_lower = self.env.actuator_force_lower.numpy()[None, action_slice]
+        force_upper = self.env.actuator_force_upper.numpy()[None, action_slice]
+        force_limit = np.broadcast_to(np.maximum(np.abs(force_lower), np.abs(force_upper)), tau.shape)
+        valid_limit = force_limit > 1.0e-6
+        tau_sat = 0.0
+        if np.any(valid_limit):
+            tau_sat = float(np.mean(np.abs(tau)[valid_limit] >= 0.98 * force_limit[valid_limit]))
+
+        metrics = (
+            raw_abs_mean,
+            raw_abs_max,
+            raw_clip_frac,
+            clipped_mean,
+            clipped_max,
+            inactive_abs_max,
+            target_delta_mean,
+            target_delta_max,
+            joint_delta_mean,
+            joint_delta_max,
+            target_err_mean,
+            target_err_max,
+            qd_mean,
+            qd_max,
+            tau_mean,
+            tau_max,
+            tau_sat,
+        )
+        text = (
+            f"active_joints={active_count} {raw_text} "
+            f"clipped_abs={clipped_mean:.3f}/{clipped_max:.3f} "
+            f"inactive_abs_max={inactive_abs_max:.3f} "
+            f"target_delta_abs={target_delta_mean:.3f}/{target_delta_max:.3f} "
+            f"joint_delta_abs={joint_delta_mean:.3f}/{joint_delta_max:.3f} "
+            f"target_err_abs={target_err_mean:.3f}/{target_err_max:.3f} "
+            f"qd_abs={qd_mean:.3f}/{qd_max:.3f} "
+            f"tau_abs={tau_mean:.1f}/{tau_max:.1f} tau_sat={tau_sat:.3f}"
+        )
+        return text, metrics
+
+    def _maybe_print_joint_debug(self, *, label: str, index: int, raw_actions: np.ndarray | None = None) -> None:
+        if self.debug_joint_interval <= 0 or int(index) % self.debug_joint_interval != 0:
+            return
+        text, metrics = self._joint_action_diagnostics(raw_actions)
+        self._last_joint_debug = metrics
+        print(f"joint_debug {label}={index:06d} {text}")
+
     def _train_iteration(self) -> None:
         if self.buffer is None or self.trainer is None:
             raise RuntimeError("Training mode requires a rollout buffer and PPO trainer")
@@ -359,6 +453,11 @@ class Example:
                 f"update={t2 - t1:.3f}s "
                 f"pi_loss={update_stats.policy_loss:.4f} "
                 f"v_loss={update_stats.value_loss:.4f}"
+            )
+
+        if self.debug_joint_interval > 0 and self.trainer.iteration % self.debug_joint_interval == 0:
+            self._maybe_print_joint_debug(
+                label="iter", index=int(self.trainer.iteration), raw_actions=self.buffer.actions.numpy()
             )
 
         if self.checkpoint_path is not None and self.checkpoint_interval > 0:
@@ -483,6 +582,10 @@ class Example:
             print(
                 f"replay_step={self.replay_step_count:06d} reward={reward:.4f} perf={tracking_perf:.3f} done={done:.4f}"
             )
+        if self.debug_joint_interval > 0 and self.replay_step_count % self.debug_joint_interval == 0:
+            self._maybe_print_joint_debug(
+                label="replay_step", index=self.replay_step_count, raw_actions=actions.numpy()
+            )
 
     def _sim_step(self) -> None:
         if self.zero_actions is None:
@@ -497,6 +600,10 @@ class Example:
             self._last_stats = (reward, done, tracking_perf)
             print(
                 f"sim_step={self.sim_step_count:06d} reward_step={reward:.4f} perf={tracking_perf:.3f} done={done:.4f}"
+            )
+        if self.debug_joint_interval > 0 and self.sim_step_count % self.debug_joint_interval == 0:
+            self._maybe_print_joint_debug(
+                label="sim_step", index=self.sim_step_count, raw_actions=self.zero_actions.numpy()
             )
 
     def step(self):
@@ -554,6 +661,8 @@ class Example:
             raise RuntimeError("G1 PPO state contains non-finite values")
         if self._last_stats is not None and not np.isfinite(np.asarray(self._last_stats)).all():
             raise RuntimeError("G1 PPO diagnostics contain non-finite values")
+        if self._last_joint_debug is not None and not np.isfinite(np.asarray(self._last_joint_debug)).all():
+            raise RuntimeError("G1 PPO joint diagnostics contain non-finite values")
 
     @staticmethod
     def create_parser():
@@ -697,6 +806,12 @@ class Example:
         parser.add_argument("--target-max-speed", type=float, default=rl.g1_recipe.COMMAND[0])
         parser.add_argument("--target-yaw-gain", type=float, default=2.0)
         parser.add_argument("--log-interval", type=int, default=1)
+        parser.add_argument(
+            "--debug-joint-interval",
+            type=int,
+            default=0,
+            help="Print action, target, joint, velocity, and actuator diagnostics every N iterations or steps.",
+        )
         parser.add_argument("--render-contacts", action=argparse.BooleanOptionalAction, default=False)
         parser.add_argument("--camera-x", type=float, default=2.0)
         parser.add_argument("--camera-y", type=float, default=-5.0)

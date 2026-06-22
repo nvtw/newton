@@ -135,6 +135,12 @@ when the GL viewer exposes keyboard state. The fixed `--command-x/y/yaw` values
 remain active when no steering key is held. Passing `--target-x` and `--target-y`
 turns that fixed command into a simple world-space target follower for replay.
 
+Pass `--debug-joint-interval N` when a run stands still or falls unexpectedly.
+It prints opt-in host-readback diagnostics for raw/clipped actions, inactive
+action leakage, target offsets, joint motion, target-following error, joint
+velocity, and actuator-force saturation every N train iterations or replay/sim
+steps. Leave it at `0` for normal throughput measurements.
+
 ```bash
 uv run --extra dev -m newton.examples robot_g1_rl_phoenx \
     --viewer gl --mode train_replay \
