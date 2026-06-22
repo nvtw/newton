@@ -246,6 +246,14 @@ sufficient; the remaining failure still points to training stability and/or
 physics-contact parity. The repeated very large value-loss spikes during this
 run are the next learner-side discrepancy to isolate.
 
+After disabling the non-nanoG1 default swing-foot-contact penalty and adding
+mirror/qpos/bias parity guards, a fresh 100-iteration probe ended around
+`reward=0.1005`, rollout `perf=0.618`, `done=0.0027`, and `228k-233k` samples/s.
+The gate still failed, but early behavior improved: `battery_perf=0.579`,
+`battery_falls=3/24000`, and the fast-forward command error dropped to
+`0.707 m/s` from the previous `0.802 m/s`. This supports the parity-cleanup
+direction but is not yet a successful walking policy.
+
 The action/actuator interface was rechecked numerically against
 `nanoG1/deploy/deploy_g1.py`: home pose, actuator target ranges, leg KP/KD,
 `ACTION_SCALE=0.25`, and the 12-leg action mask match exactly. The remaining KD
