@@ -7,7 +7,8 @@ The benchmark applies a fixed nanoG1-v3-style leg action target to the full
 coordinate G1 environment, then compares lower-cost PhoenX solver settings to a
 higher-resolution PhoenX reference. It is intended as a small, repeatable study
 for whether the RL recipe's solver settings are plausible for stiff Unitree PD
-drives, not as a policy-quality benchmark.
+drives, not as a policy-quality benchmark. Contact support diagnostics
+intentionally read back per substep, so reported timings are diagnostic-only.
 
 Examples:
     uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_drive_convergence \
@@ -25,8 +26,16 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+import newton
 import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training import g1_recipe
+from newton._src.solvers.phoenx.rl_training.g1 import g1_apply_actions_kernel, g1_increment_episode_steps_kernel
+from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
+    G1_FOOT_CONTACT_METRIC_COUNT,
+    G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE,
+    G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE,
+    scan_g1_foot_contact_metrics,
+)
 
 
 @dataclass(frozen=True)
@@ -88,7 +97,10 @@ def _make_env(setting: SolverSetting, args: argparse.Namespace, *, device: wp.co
         command=(0.0, 0.0, 0.0),
         max_episode_steps=0,
         auto_reset=False,
+        joint_friction_model=str(args.joint_friction_model),
+        joint_friction_scale=float(args.joint_friction_scale),
         parse_meshes=bool(args.parse_meshes),
+        contact_geometry=str(args.contact_geometry),
         controlled_action_count=g1_recipe.CONTROLLED_ACTION_COUNT,
         rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
         threads_per_world=args.threads_per_world,
@@ -96,6 +108,60 @@ def _make_env(setting: SolverSetting, args: argparse.Namespace, *, device: wp.co
         prepare_refresh_stride=args.prepare_refresh_stride,
     )
     return rl.EnvG1PhoenX(config, device=device)
+
+
+# This mirrors EnvG1PhoenX.step(auto_reset=False) so support impulses can
+# be accumulated across all physics substeps in one policy frame.
+def _step_env_with_support_metrics(
+    env: rl.EnvG1PhoenX,
+    actions: wp.array2d[wp.float32],
+    foot_metrics: wp.array3d[wp.float32],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    wp.launch(
+        g1_apply_actions_kernel,
+        dim=(env.world_count, env.action_dim),
+        inputs=[
+            actions,
+            env.default_joint_pos,
+            env.ctrl_lower,
+            env.ctrl_upper,
+            env.config.action_scale,
+            int(env.config.controlled_action_count),
+            env.dof_stride,
+            env.coord_stride,
+            int(bool(env.model.use_coord_layout_targets)),
+        ],
+        outputs=[env.current_actions, env.control.joint_target_q],
+        device=env.device,
+    )
+
+    substeps = int(env.config.sim_substeps)
+    sub_dt = float(env.config.frame_dt) / float(substeps)
+    contact_count_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    normal_impulse_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+    tangent_impulse_accum = np.zeros((env.world_count, 2), dtype=np.float64)
+
+    for substep in range(substeps):
+        env.state_0.clear_forces()
+        env.model.collide(env.state_0, env.contacts)
+        if substep == substeps - 1:
+            env._gather_actuator_force()
+        env.solver.step(env.state_0, env.state_1, env.control, env.contacts, sub_dt)
+        scan_g1_foot_contact_metrics(env, foot_metrics)
+        metrics = foot_metrics.numpy()
+        contact_count_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_COUNT]
+        normal_impulse_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_NORMAL_IMPULSE]
+        tangent_impulse_accum += metrics[:, :, G1_FOOT_CONTACT_METRIC_TANGENT_IMPULSE]
+        env.state_0, env.state_1 = env.state_1, env.state_0
+
+    wp.launch(g1_increment_episode_steps_kernel, dim=env.world_count, outputs=[env.episode_steps], device=env.device)
+    env.observe()
+    wp.copy(env.step_rewards, env.rewards)
+    wp.copy(env.step_dones, env.dones)
+    wp.copy(env.step_successes, env.successes)
+    wp.copy(env.previous_actions, env.current_actions)
+
+    return contact_count_accum / float(substeps), normal_impulse_accum, tangent_impulse_accum
 
 
 def _run_setting(
@@ -110,10 +176,30 @@ def _run_setting(
     actions = wp.array(actions_np, dtype=wp.float32, device=device)
 
     env.reset()
+    if args.initial_base_z is not None:
+        q_init = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        qd_init = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+        q_init[:, 2] = np.float32(args.initial_base_z)
+        qd_init.fill(0.0)
+        env.state_0.joint_q.assign(q_init.reshape(-1))
+        env.state_0.joint_qd.assign(qd_init.reshape(-1))
+        newton.eval_fk(env.model, env.state_0.joint_q, env.state_0.joint_qd, env.state_0)
+        env.observe()
+
+    step_count = int(args.steps)
+    initial_q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+    initial_controlled_q = initial_q[:, 7 : 7 + g1_recipe.CONTROLLED_ACTION_COUNT].copy()
+    foot_metrics = wp.zeros((env.world_count, 2, 3), dtype=wp.float32, device=device)
+    foot_counts = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_normal_impulses = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+    foot_tangent_impulses = np.zeros((step_count, env.world_count, 2), dtype=np.float64)
+
     t0 = time.perf_counter()
-    for _ in range(int(args.steps)):
-        env.step(actions)
-    wp.synchronize_device(device)
+    for step in range(step_count):
+        counts, normal_impulses, tangent_impulses = _step_env_with_support_metrics(env, actions, foot_metrics)
+        foot_counts[step] = counts
+        foot_normal_impulses[step] = normal_impulses
+        foot_tangent_impulses[step] = tangent_impulses
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
 
     obs = env.obs.numpy()
@@ -128,7 +214,17 @@ def _run_setting(
     controlled_q = joint_q[:, : g1_recipe.CONTROLLED_ACTION_COUNT]
     controlled_target = target[: g1_recipe.CONTROLLED_ACTION_COUNT]
     target_err = controlled_q - controlled_target[None, :]
+    action_delta = np.float32(env.config.action_scale) * action_row[: g1_recipe.CONTROLLED_ACTION_COUNT]
+    active = np.abs(action_delta) > np.float32(1.0e-7)
+    tracking_ratio_mean = None
+    tracking_ratio_std = None
+    if np.any(active):
+        tracking_ratio = (controlled_q[:, active] - initial_controlled_q[:, active]) / action_delta[active][None, :]
+        tracking_ratio_mean = float(np.mean(tracking_ratio))
+        tracking_ratio_std = float(np.std(tracking_ratio))
     upright_cos = -obs[:, 5]
+    support_normal_impulse = np.sum(foot_normal_impulses, axis=2)
+    support_tangent_impulse = np.sum(foot_tangent_impulses, axis=2)
 
     return {
         "setting": setting.name,
@@ -137,10 +233,19 @@ def _run_setting(
         "velocity_iterations": int(setting.velocity_iterations),
         "physics_dt": float(env.config.frame_dt) / float(setting.sim_substeps),
         "elapsed_seconds": float(elapsed),
-        "control_steps_per_s": float(env.world_count * int(args.steps)) / elapsed,
-        "physics_steps_per_s": float(env.world_count * int(args.steps) * int(setting.sim_substeps)) / elapsed,
+        "control_steps_per_s": float(env.world_count * step_count) / elapsed,
+        "physics_steps_per_s": float(env.world_count * step_count * int(setting.sim_substeps)) / elapsed,
         "joint_target_rms_rad": float(np.sqrt(np.mean(target_err * target_err))),
         "joint_target_max_abs_rad": float(np.max(np.abs(target_err))),
+        "joint_tracking_ratio_mean": tracking_ratio_mean,
+        "joint_tracking_ratio_std": tracking_ratio_std,
+        "foot_contact_count_mean": float(np.mean(foot_counts)),
+        "foot_contact_count_min": float(np.min(foot_counts)),
+        "left_foot_contact_count_mean": float(np.mean(foot_counts[:, :, 0])),
+        "right_foot_contact_count_mean": float(np.mean(foot_counts[:, :, 1])),
+        "support_normal_impulse_mean": float(np.mean(support_normal_impulse)),
+        "support_normal_impulse_min": float(np.min(support_normal_impulse)),
+        "support_tangent_impulse_mean": float(np.mean(support_tangent_impulse)),
         "base_height_mean_m": float(np.mean(q[:, 2])),
         "base_height_min_m": float(np.min(q[:, 2])),
         "upright_cos_mean": float(np.mean(upright_cos)),
@@ -148,6 +253,9 @@ def _run_setting(
         "fall_fraction": float(np.mean(dones > 0.5)),
         "q": q,
         "qd": qd,
+        "foot_counts": foot_counts,
+        "support_normal_impulse": support_normal_impulse,
+        "support_tangent_impulse": support_tangent_impulse,
     }
 
 
@@ -157,6 +265,10 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
     ref_joint = ref_q[:, 7 : 7 + rl.ACTION_DIM_G1]
     ref_qd_joint = ref_qd[:, 6 : 6 + rl.ACTION_DIM_G1]
     ref_base = ref_q[:, :7]
+    ref_foot_counts = reference["foot_counts"]
+    ref_support_normal = reference["support_normal_impulse"]
+    ref_support_tangent = reference["support_tangent_impulse"]
+    ref_tracking_ratio = reference["joint_tracking_ratio_mean"]
     for result in results:
         q = result["q"]
         qd = result["qd"]
@@ -169,15 +281,32 @@ def _attach_reference_errors(results: list[dict[str, Any]], reference: dict[str,
         result["joint_q_ref_rms_rad"] = float(np.sqrt(np.mean(joint_err * joint_err)))
         result["joint_q_ref_max_abs_rad"] = float(np.max(np.abs(joint_err)))
         result["joint_qd_ref_rms_rad_s"] = float(np.sqrt(np.mean(qd_err * qd_err)))
+        foot_count_err = result["foot_counts"] - ref_foot_counts
+        normal_impulse_err = result["support_normal_impulse"] - ref_support_normal
+        tangent_impulse_err = result["support_tangent_impulse"] - ref_support_tangent
         result["base_ref_rms"] = float(np.sqrt(np.mean(base_err * base_err)))
+        result["foot_contact_count_ref_rmse"] = float(np.sqrt(np.mean(foot_count_err * foot_count_err)))
+        result["support_normal_impulse_ref_rmse"] = float(np.sqrt(np.mean(normal_impulse_err * normal_impulse_err)))
+        result["support_normal_impulse_ref_delta_mean"] = float(np.mean(normal_impulse_err))
+        result["support_tangent_impulse_ref_rmse"] = float(np.sqrt(np.mean(tangent_impulse_err * tangent_impulse_err)))
+        result["support_tangent_impulse_ref_delta_mean"] = float(np.mean(tangent_impulse_err))
+        if ref_tracking_ratio is not None and result["joint_tracking_ratio_mean"] is not None:
+            result["joint_tracking_ratio_ref_delta"] = float(result["joint_tracking_ratio_mean"] - ref_tracking_ratio)
+        else:
+            result["joint_tracking_ratio_ref_delta"] = None
         del result["q"]
         del result["qd"]
+        del result["foot_counts"]
+        del result["support_normal_impulse"]
+        del result["support_tangent_impulse"]
 
 
 def benchmark_g1_drive_convergence(args: argparse.Namespace) -> dict[str, Any]:
     device = wp.get_device(args.device)
     if not device.is_cuda:
         raise RuntimeError("G1 drive convergence benchmark requires a CUDA device")
+    if int(args.steps) <= 0:
+        raise ValueError("steps must be positive")
     action_row = _leg_action_pattern(str(args.action_pattern), float(args.action_amplitude))
     setting_names = tuple(args.settings)
     reference_name = str(args.reference_setting)
@@ -194,14 +323,19 @@ def benchmark_g1_drive_convergence(args: argparse.Namespace) -> dict[str, Any]:
     _attach_reference_errors(results, reference)
     return {
         "engine": "phoenx_g1_drive_convergence",
-        "metric": "fixed G1 leg-target response versus high-resolution PhoenX reference",
+        "metric": "fixed G1 leg-target response, substep-averaged contact support, and frame impulses versus high-resolution PhoenX reference",
         "device": device.name,
+        "timing_includes_metric_readback": True,
         "world_count": int(args.world_count),
         "steps": int(args.steps),
         "policy_frame_dt": float(g1_recipe.FRAME_DT),
         "action_pattern": str(args.action_pattern),
         "action_amplitude": float(args.action_amplitude),
         "controlled_action_count": int(g1_recipe.CONTROLLED_ACTION_COUNT),
+        "contact_geometry": str(args.contact_geometry),
+        "joint_friction_model": str(args.joint_friction_model),
+        "joint_friction_scale": float(args.joint_friction_scale),
+        "initial_base_z": None if args.initial_base_z is None else float(args.initial_base_z),
         "reference_setting": reference_name,
         "nanog1_production_reference": {
             "source": "/home/twidmer/Documents/git/nanoG1/recipe.py TASK_FLAGS and web/g1_demo.c",
@@ -234,7 +368,11 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-separated setting names.",
     )
     parser.add_argument("--reference-setting", choices=tuple(sorted(_SETTINGS)), default="phoenx_20x8")
+    parser.add_argument("--initial-base-z", type=float, default=None)
+    parser.add_argument("--joint-friction-model", choices=("hard", "mujoco"), default=g1_recipe.JOINT_FRICTION_MODEL)
+    parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
     parser.add_argument("--parse-meshes", action="store_true")
+    parser.add_argument("--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY)
     parser.add_argument("--rigid-contact-max-per-world", type=int, default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
     parser.add_argument("--threads-per-world", default=g1_recipe.THREADS_PER_WORLD)
     parser.add_argument("--multi-world-scheduler", default=g1_recipe.MULTI_WORLD_SCHEDULER)

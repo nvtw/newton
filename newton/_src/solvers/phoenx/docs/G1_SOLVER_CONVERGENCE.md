@@ -67,6 +67,18 @@ support a gross no-contact PD/friction/armature softness bug. The important
 remaining question is how those same drives behave when coupled to grounded
 contacts and solver compliance.
 
+The PhoenX-only grounded convergence benchmark now accumulates support metrics
+over every physics substep in the 0.02 s policy frame. Against the `20x8`
+PhoenX reference on the same 20-step, 0.2 leg-step target, `5x2` averaged 3.83
+contacts per foot/substep sample versus 3.98 for the reference, with frame normal
+support impulse 0.626 lower and tangential impulse 1.92 lower. `5x4` restored
+four contacts but still had similar tangential-impulse deficit. `10x8` reduced
+normal-impulse error to 0.031 but still lagged tangential impulse by 0.806.
+This points at grounded contact/friction coupling and solver convergence as the
+current drive-related gap; no-contact PD/damping/armature response remains a
+secondary suspect. The diagnostic timing includes deliberate metric readbacks
+and is not a throughput benchmark.
+
 ## nanoG1 Reference
 
 nanoG1 v3 uses the following production physics and drive setup:
