@@ -51,6 +51,21 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
   checks every joint force against the analytical nanoG1/MuJoCo formula. This
   guards the likely actuator-quality blocker directly instead of relying on a
   training run to expose it.
+
+- A 2026-06-22 model-contract audit found that PhoenX was importing Newton's
+  cached Menagerie `unitree_g1/mjcf/g1_29dof.xml` body inertials (`35.112 kg`)
+  while nanoG1 trains against a compiled MuJoCo Playground model exported in
+  `web/g1_model_const.h` (`33.341 kg`). PhoenX G1 now pins body mass, COM, and
+  full body-frame inertia to the nanoG1 header after MJCF import. The same audit
+  found two imported joint-contract drifts: both hip-roll effort limits were
+  `88 N*m` instead of nanoG1's `139 N*m`, and the right hip-roll joint range was
+  sign-flipped. The G1 builder now overwrites all actuated joint ranges and
+  effort limits from the nanoG1 constants.
+- The high-level nanoG1 `recipe.py` does not list gait/base-height reward terms,
+  but the pinned PufferLib G1 fork does define `G1_V3_W_CONTACT`,
+  `G1_V3_W_SWING`, `G1_V3_W_HIP`, and `G1_V3_W_BASE_HEIGHT` in the CUDA task
+  source. PhoenX keeps these terms in the default G1 v3 reward and tests them
+  against the local pinned source when it is available.
 - The local generic PufferLib checkout is branch `4.0` at `e90b58ed`, not the
   nanoG1 G1 fork. Parity work should use the nanoG1 recipe/deploy files plus
   the pinned fork source above.
@@ -213,6 +228,21 @@ into the body frame. A CUDA graph regression drives nonzero root angular velocit
 and fails if COM velocity is tracked directly. This is a correctness fix, but it
 did not solve walking by itself: the imported nanoG1 teacher gate stayed near the
 previous result (`battery_perf=0.702`, `battery_falls=123/24000`).
+
+
+
+A 2026-06-22 post-model-parity training probe used the default dense G1 recipe
+with pinned nanoG1 body inertials, joint ranges, and effort limits. A fresh
+100-iteration run reached about `229k-233k` env samples/s and ended around
+`reward=0.084`, rollout `perf=0.609`, `done=0.0035`, but failed the gate:
+`battery_perf=0.570`, `battery_falls=20/24000`; the fast-forward command mostly
+stood still (`mean_linear_velocity_error=0.802 m/s`). Continuing the same
+checkpoint to 400 total iterations ended around `reward=0.092`, rollout
+`perf=0.457`, `done=0.0023`, and failed the gate with `battery_perf=0.524`,
+`battery_falls=29/24000`. The corrected model contract is necessary, but not
+sufficient; the remaining failure still points to training stability and/or
+physics-contact parity. The repeated very large value-loss spikes during this
+run are the next learner-side discrepancy to isolate.
 
 The action/actuator interface was rechecked numerically against
 `nanoG1/deploy/deploy_g1.py`: home pose, actuator target ranges, leg KP/KD,

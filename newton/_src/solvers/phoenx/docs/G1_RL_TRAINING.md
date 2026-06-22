@@ -290,6 +290,17 @@ The training recipe therefore now matches nanoG1 production timing,
 found that the PhoenX MJCF fixture was missing nanoG1 per-DOF armature. After
 adding that armature, a compact 60-iteration train-save-reload-gate probe on RTX
 PRO 6000 measured about 252k train env samples/s and 237k total env samples/s.
+
+A later full model-contract audit found a larger hidden mismatch than armature:
+PhoenX was loading Newton's cached Menagerie G1 inertials (`35.112 kg` total),
+while nanoG1's committed `web/g1_model_const.h` comes from the compiled MuJoCo
+Playground model (`33.341 kg`). G1 training now freezes body mass, COM, and
+rotated body-frame inertia from the nanoG1 header after MJCF import. The same
+audit also fixed both hip-roll effort limits (`139 N*m`, not `88 N*m`) and the
+right hip-roll joint range. The CUDA graph parity test now checks body inertials,
+topology, joint axes, ranges, effort limits, gear ratios, damping, armature,
+frictionloss, deploy gains, and action target ranges against nanoG1.
+
 It still failed the gate at 15.7M samples, but improved to `battery_perf=0.388`
 and `battery_falls=27` versus the previous no-armature `battery_perf=0.289` and
 `battery_falls=94`. After switching G1 to preserve PufferMinGRU rollout state

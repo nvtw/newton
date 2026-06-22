@@ -448,6 +448,18 @@ def _read_c_array(path: Path, name: str, *, dtype: type = float) -> np.ndarray:
     return np.asarray([dtype(value) for value in values], dtype=np_dtype)
 
 
+def _quat_wxyz_to_matrix_np(quat_wxyz: np.ndarray) -> np.ndarray:
+    w, x, y, z = quat_wxyz
+    return np.asarray(
+        (
+            (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)),
+            (2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)),
+            (2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)),
+        ),
+        dtype=np.float64,
+    )
+
+
 def _muon_reference_step(
     params: list[np.ndarray],
     grads: list[np.ndarray],
@@ -630,8 +642,58 @@ class TestG1PhoenXRL(unittest.TestCase):
         dof_damping = _read_c_array(header, "hc_dof_damping")
         dof_armature = _read_c_array(header, "hc_dof_armature")
         dof_frictionloss = _read_c_array(header, "hc_dof_frictionloss")
+        body_mass = _read_c_array(header, "hc_body_mass")
+        body_ipos = _read_c_array(header, "hc_body_ipos").reshape(-1, 3)
+        body_inertia_diag = _read_c_array(header, "hc_body_inertia").reshape(-1, 3)
+        body_iquat = _read_c_array(header, "hc_body_iquat").reshape(-1, 4)
+        body_parentid = _read_c_array(header, "hc_body_parentid", dtype=int)
+        jnt_qposadr = _read_c_array(header, "hc_jnt_qposadr", dtype=int)
+        jnt_dofadr = _read_c_array(header, "hc_jnt_dofadr", dtype=int)
+        jnt_bodyid = _read_c_array(header, "hc_jnt_bodyid", dtype=int)
+        jnt_axis = _read_c_array(header, "hc_jnt_axis").reshape(-1, 3)
+        jnt_range = _read_c_array(header, "hc_jnt_range").reshape(-1, 2)
+        jnt_actfrclimited = _read_c_array(header, "hc_jnt_actfrclimited", dtype=int)
+        act_trnid = _read_c_array(header, "hc_act_trnid", dtype=int)
 
         env = rl.EnvG1PhoenX(g1_recipe.default_g1_env_config(world_count=1), device=device)
+        self.assertEqual(env.model.body_count, body_mass.size - 1)
+        self.assertEqual(env.model.joint_count, jnt_qposadr.size)
+        np.testing.assert_allclose(env.model.body_mass.numpy(), body_mass[1:], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(env.model.body_com.numpy(), body_ipos[1:], rtol=0.0, atol=1.0e-6)
+        expected_body_inertia = np.stack(
+            [
+                _quat_wxyz_to_matrix_np(quat) @ np.diag(diag) @ _quat_wxyz_to_matrix_np(quat).T
+                for diag, quat in zip(body_inertia_diag[1:], body_iquat[1:], strict=True)
+            ]
+        )
+        np.testing.assert_allclose(env.model.body_inertia.numpy(), expected_body_inertia, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_array_equal(env.model.joint_q_start.numpy()[: env.model.joint_count], jnt_qposadr)
+        np.testing.assert_array_equal(env.model.joint_qd_start.numpy()[: env.model.joint_count], jnt_dofadr)
+        np.testing.assert_array_equal(env.model.joint_child.numpy(), jnt_bodyid - 1)
+        np.testing.assert_array_equal(env.model.joint_parent.numpy(), body_parentid[jnt_bodyid] - 1)
+        np.testing.assert_allclose(
+            env.model.joint_axis.numpy()[6 : 6 + rl.ACTION_DIM_G1], jnt_axis[1:], rtol=0.0, atol=1.0e-6
+        )
+        np.testing.assert_allclose(
+            env.model.joint_limit_lower.numpy()[6 : 6 + rl.ACTION_DIM_G1], jnt_range[1:, 0], rtol=0.0, atol=1.0e-6
+        )
+        np.testing.assert_allclose(
+            env.model.joint_limit_upper.numpy()[6 : 6 + rl.ACTION_DIM_G1], jnt_range[1:, 1], rtol=0.0, atol=1.0e-6
+        )
+        np.testing.assert_allclose(
+            env.model.joint_effort_limit.numpy()[6 : 6 + rl.ACTION_DIM_G1],
+            jnt_actfrcrange[:, 1],
+            rtol=0.0,
+            atol=1.0e-6,
+        )
+        np.testing.assert_allclose(
+            env.model.joint_gear.numpy()[6 : 6 + rl.ACTION_DIM_G1],
+            np.ones(rl.ACTION_DIM_G1, dtype=np.float32),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_array_equal(jnt_actfrclimited[1:], np.ones(rl.ACTION_DIM_G1, dtype=np.int64))
+        np.testing.assert_array_equal(act_trnid, np.arange(1, 1 + rl.ACTION_DIM_G1, dtype=np.int64))
         np.testing.assert_allclose(env.default_joint_pos.numpy(), deploy.HOME, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.default_joint_pos.numpy(), key_qpos[7:], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.ctrl_lower.numpy(), deploy.CTRL_RANGE[:, 0], rtol=0.0, atol=1.0e-5)
@@ -646,6 +708,12 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected_force_kd[: g1_recipe.CONTROLLED_ACTION_COUNT] = deploy.KD[: g1_recipe.CONTROLLED_ACTION_COUNT]
         np.testing.assert_allclose(env.actuator_ke.numpy(), expected_kp, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_kd.numpy(), expected_kd, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(
+            env.model.joint_target_ke.numpy()[6 : 6 + rl.ACTION_DIM_G1], expected_kp, rtol=0.0, atol=1.0e-6
+        )
+        np.testing.assert_allclose(
+            env.model.joint_target_kd.numpy()[6 : 6 + rl.ACTION_DIM_G1], expected_kd, rtol=0.0, atol=1.0e-6
+        )
         np.testing.assert_allclose(env.actuator_force_kp.numpy(), expected_kp, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_force_kp.numpy()[12:], act_gain0[12:], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.actuator_force_kd.numpy(), expected_force_kd, rtol=0.0, atol=1.0e-6)
