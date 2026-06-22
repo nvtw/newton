@@ -104,6 +104,27 @@ def _make_offset_com_free_joint_model() -> tuple[newton.Model, int]:
     return mb.finalize(), body
 
 
+def _make_offset_com_contact_model() -> tuple[newton.Model, int]:
+    """Box shape centered at body origin, with COM shifted upward."""
+    mb = newton.ModelBuilder()
+    mb.add_ground_plane()
+    body = mb.add_body(
+        xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.12), q=wp.quat_identity()),
+        mass=2.0,
+        inertia=((0.02, 0.0, 0.0), (0.0, 0.02, 0.0), (0.0, 0.0, 0.02)),
+    )
+    mb.body_com[body] = wp.vec3(0.0, 0.0, 0.05)
+    mb.add_shape_box(
+        body,
+        hx=0.1,
+        hy=0.1,
+        hz=0.1,
+        cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5),
+    )
+    mb.gravity = -GRAVITY
+    return mb.finalize(), body
+
+
 def _make_pendulum_model(*, target_angle: float = 0.0) -> newton.Model:
     """Static world body + dynamic cube + revolute joint with a PD
     drive towards ``target_angle`` (rad).
@@ -448,6 +469,34 @@ class TestSolverPhoenX(unittest.TestCase):
 
         np.testing.assert_allclose(state_1.body_qd.numpy()[body], body_qd_0, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(state_1.joint_qd.numpy(), qd_in, rtol=1.0e-5, atol=1.0e-5)
+
+    def test_offset_com_contact_uses_newton_shape_frame(self) -> None:
+        """Contacts must subtract local COM from Newton body-local shape anchors."""
+        model, body = _make_offset_com_contact_model()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=8,
+            solver_iterations=24,
+            velocity_iterations=2,
+            prepare_refresh_stride=1,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        collision_pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        contacts = model.contacts(collision_pipeline=collision_pipeline)
+
+        dt = 1.0 / 120.0
+        state_0, _state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
+
+        body_q = state_0.body_q.numpy()[body]
+        body_qd = state_0.body_qd.numpy()[body]
+        com_local = model.body_com.numpy()[body]
+        com_world_z = float(solver.bodies.position.numpy()[body + 1, 2])
+
+        self.assertAlmostEqual(float(body_q[2]), 0.1, delta=0.01)
+        self.assertAlmostEqual(com_world_z, 0.1 + float(com_local[2]), delta=0.01)
+        self.assertLess(float(np.linalg.norm(body_qd[:3])), 0.05)
 
     def test_public_cloth_step_exports_particles(self) -> None:
         mb = newton.ModelBuilder()
