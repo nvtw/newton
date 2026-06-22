@@ -7,12 +7,15 @@ Last updated: June 22, 2026.
 - Sparse direct-bilateral DVI runs inside Kamino and avoids dense Delassus materialization for DR Legs.
 - On measured DR Legs contact runs, DVI is much faster than `padmm-fast`; recent 60-step CUDA graph runs were roughly 5x-7x faster depending on world count.
 - DVI is not proven as good as PADMM in all cases. Joint/contact residuals are close in the tested DR Legs cases, but NCP/natural-map quality still needs broader validation and tuning.
+- Preserve Kamino behavior. Only keep mraksha ideas that improve matrix structure, reuse, or hot-path cost without changing contact/friction semantics.
+- Keep DVI lean and selectable through normal Kamino config, e.g. `dynamics_solver="dvi"` plus `DVISolverConfig`; avoid separate setup paths or unused solver variants.
 
 ## What Mattered
 
 - The mraksha-style speedup came mainly from avoiding the dense contact/limit Schur complement, not from graph coloring.
 - Prefactoring the bilateral robot block is already used: DVI factors the joint-joint block once per solve and reuses it for the direct bilateral re-solves.
 - The remaining hot path is the repeated sparse unilateral/contact sweep plus bilateral RHS rebuilds.
+- Do not copy behavior-changing mraksha choices, such as tangential-only friction projection, unless Kamino intentionally changes its solver semantics.
 
 ## Failed Experiment
 
