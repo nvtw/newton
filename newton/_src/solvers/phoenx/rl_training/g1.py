@@ -702,6 +702,15 @@ def _quat_rotate_inverse_wxyz(qw: wp.float32, qx: wp.float32, qy: wp.float32, qz
     return a - b + c
 
 
+@wp.func
+def _quat_rotate_wxyz(qw: wp.float32, qx: wp.float32, qy: wp.float32, qz: wp.float32, v: wp.vec3) -> wp.vec3:
+    q = wp.vec3(qx, qy, qz)
+    a = v * (wp.float32(2.0) * qw * qw - wp.float32(1.0))
+    b = wp.cross(q, v) * qw * wp.float32(2.0)
+    c = q * (wp.dot(q, v) * wp.float32(2.0))
+    return a + b + c
+
+
 @wp.kernel
 def g1_apply_actions_kernel(
     actions: wp.array2d[wp.float32],
@@ -740,6 +749,7 @@ def g1_observe_reward_kernel(
     command: wp.array2d[wp.float32],
     target_position: wp.array2d[wp.float32],
     body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
     foot_contacts: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
     coord_stride: wp.int32,
@@ -793,13 +803,16 @@ def g1_observe_reward_kernel(
     qy = joint_q[q_base + wp.int32(4)]
     qz = joint_q[q_base + wp.int32(5)]
     qw = joint_q[q_base + wp.int32(6)]
-    lin_w = wp.vec3(joint_qd[qd_base], joint_qd[qd_base + wp.int32(1)], joint_qd[qd_base + wp.int32(2)])
+    lin_com_w = wp.vec3(joint_qd[qd_base], joint_qd[qd_base + wp.int32(1)], joint_qd[qd_base + wp.int32(2)])
     ang_w = wp.vec3(
         joint_qd[qd_base + wp.int32(3)],
         joint_qd[qd_base + wp.int32(4)],
         joint_qd[qd_base + wp.int32(5)],
     )
-    lin_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, lin_w)
+    root_com_b = body_com[world * body_stride]
+    root_com_w = _quat_rotate_wxyz(qw, qx, qy, qz, root_com_b)
+    lin_origin_w = lin_com_w - wp.cross(ang_w, root_com_w)
+    lin_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, lin_origin_w)
     ang_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, ang_w)
     gravity_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, wp.vec3(0.0, 0.0, -1.0))
     target_delta_w = wp.vec3(
@@ -2089,6 +2102,7 @@ class EnvG1PhoenX:
                 self.command,
                 self.target_position,
                 self.state_0.body_q,
+                self.model.body_com,
                 self.foot_contacts,
                 self.actuator_force,
                 self.coord_stride,

@@ -168,6 +168,16 @@ def _main() -> int:
     g1_parser.add_argument(
         "--reward-mode", choices=("nanog1_dense", "sparse_command", "sparse_target"), default=g1_recipe.REWARD_MODE
     )
+    g1_parser.add_argument("--w-track-lin", type=float, default=g1_recipe.W_TRACK_LIN)
+    g1_parser.add_argument("--w-track-ang", type=float, default=g1_recipe.W_TRACK_ANG)
+    g1_parser.add_argument("--w-lin-vel-z", type=float, default=g1_recipe.W_LIN_VEL_Z)
+    g1_parser.add_argument("--w-ang-vel-xy", type=float, default=g1_recipe.W_ANG_VEL_XY)
+    g1_parser.add_argument("--w-orientation", type=float, default=g1_recipe.W_ORIENTATION)
+    g1_parser.add_argument("--w-torque", type=float, default=g1_recipe.W_TORQUE)
+    g1_parser.add_argument("--w-action-rate", type=float, default=g1_recipe.W_ACTION_RATE)
+    g1_parser.add_argument("--w-alive", type=float, default=g1_recipe.W_ALIVE)
+    g1_parser.add_argument("--w-termination", type=float, default=g1_recipe.W_TERMINATION)
+    g1_parser.add_argument("--w-base-height", type=float, default=g1_recipe.W_BASE_HEIGHT)
     g1_parser.add_argument("--target-x", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[0])
     g1_parser.add_argument("--target-y", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[1])
     g1_parser.add_argument("--sparse-target-radius", type=float, default=g1_recipe.SPARSE_TARGET_RADIUS)
@@ -225,10 +235,19 @@ def _main() -> int:
         default=g1_recipe.POLICY_NETWORK,
         help="PPO policy backbone. puffer_mingru matches nanoG1/PufferLib's recurrent default.",
     )
+    g1_parser.add_argument(
+        "--activation",
+        choices=("relu", "elu"),
+        default=g1_recipe.ACTIVATION,
+        help="Hidden activation for the MLP policy backbone. Ignored by puffer_mingru.",
+    )
     g1_parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
     g1_parser.add_argument("--train-epochs", type=int, default=g1_recipe.TRAIN_EPOCHS)
     g1_parser.add_argument("--actor-lr", type=float, default=g1_recipe.ACTOR_LR)
     g1_parser.add_argument("--critic-lr", type=float, default=g1_recipe.CRITIC_LR)
+    g1_parser.add_argument("--gamma", type=float, default=g1_recipe.GAMMA)
+    g1_parser.add_argument("--gae-lambda", type=float, default=g1_recipe.GAE_LAMBDA)
+    g1_parser.add_argument("--entropy-coeff", type=float, default=g1_recipe.ENTROPY_COEFF)
     g1_parser.add_argument("--replay-ratio", type=float, default=g1_recipe.REPLAY_RATIO)
     g1_parser.add_argument("--priority-alpha", type=float, default=g1_recipe.PRIORITY_ALPHA)
     g1_parser.add_argument("--priority-beta", type=float, default=g1_recipe.PRIORITY_BETA)
@@ -453,6 +472,16 @@ def _main() -> int:
             action_scale=args.action_scale,
             controlled_action_count=args.controlled_action_count,
             reward_mode=args.reward_mode,
+            w_track_lin=args.w_track_lin,
+            w_track_ang=args.w_track_ang,
+            w_lin_vel_z=args.w_lin_vel_z,
+            w_ang_vel_xy=args.w_ang_vel_xy,
+            w_orientation=args.w_orientation,
+            w_torque=args.w_torque,
+            w_action_rate=args.w_action_rate,
+            w_alive=args.w_alive,
+            w_termination=args.w_termination,
+            w_base_height=args.w_base_height,
             sparse_target_position=(args.target_x, args.target_y),
             sparse_target_radius=args.sparse_target_radius,
             sparse_target_success_upright_cos=args.sparse_target_success_upright_cos,
@@ -467,6 +496,9 @@ def _main() -> int:
             train_epochs=args.train_epochs,
             actor_lr=args.actor_lr,
             critic_lr=args.critic_lr,
+            gamma=args.gamma,
+            gae_lambda=args.gae_lambda,
+            entropy_coeff=args.entropy_coeff,
             replay_ratio=args.replay_ratio,
             priority_alpha=args.priority_alpha,
             priority_beta=args.priority_beta,
@@ -509,6 +541,7 @@ def _main() -> int:
                 target_angle_max=args.target_angle_max,
                 reset_recurrent_state_on_rollout_start=bool(args.reset_recurrent_state_on_rollout_start),
                 squash_actions=bool(args.squash_actions),
+                activation=args.activation,
                 resume_checkpoint=args.resume_checkpoint,
                 checkpoint_path=args.checkpoint_path,
                 checkpoint_interval=args.checkpoint_interval,

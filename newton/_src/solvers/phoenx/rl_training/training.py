@@ -1520,6 +1520,7 @@ def _evaluate_g1_gate_battery(
     yaw_err_sum = np.zeros(commands.shape[0], dtype=np.float64)
     sample_count = np.zeros(commands.shape[0], dtype=np.int64)
 
+    root_com_local = env.model.body_com.numpy().reshape(env.world_count, env.body_stride, 3)[:, 0, :].copy()
     obs = env.reset_noisy(seed=int(cfg.seed))
     env.set_commands(command_np)
     obs = env.observe()
@@ -1533,7 +1534,7 @@ def _evaluate_g1_gate_battery(
         perf_np = env.step_successes.numpy().astype(np.float64)
         q = _joint_q_matrix_g1(env)
         qd = _joint_qd_matrix_g1(env)
-        lin_b = _quat_rotate_inverse_xyzw_np(q[:, 3:7], qd[:, 0:3])
+        lin_b = _g1_root_origin_linear_velocity_body_np(q, qd, root_com_local)
         ang_b = _quat_rotate_inverse_xyzw_np(q[:, 3:7], qd[:, 3:6])
         lin_err = np.linalg.norm(command_np[:, 0:2] - lin_b[:, 0:2], axis=1)
         yaw_err = np.abs(command_np[:, 2] - ang_b[:, 2])
@@ -1667,10 +1668,22 @@ def _joint_qd_matrix_g1(env: EnvG1PhoenX) -> np.ndarray:
     return env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
 
 
+def _g1_root_origin_linear_velocity_body_np(q: np.ndarray, qd: np.ndarray, root_com_local: np.ndarray) -> np.ndarray:
+    root_com_w = _quat_rotate_xyzw_np(q[:, 3:7], root_com_local)
+    lin_origin_w = qd[:, 0:3] - np.cross(qd[:, 3:6], root_com_w)
+    return _quat_rotate_inverse_xyzw_np(q[:, 3:7], lin_origin_w)
+
+
 def _quat_rotate_inverse_xyzw_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     qw = q[:, 3:4]
     qv = q[:, 0:3]
     return v * (2.0 * qw * qw - 1.0) - np.cross(qv, v) * (2.0 * qw) + qv * (2.0 * np.sum(qv * v, axis=1, keepdims=True))
+
+
+def _quat_rotate_xyzw_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    qw = q[:, 3:4]
+    qv = q[:, 0:3]
+    return v * (2.0 * qw * qw - 1.0) + np.cross(qv, v) * (2.0 * qw) + qv * (2.0 * np.sum(qv * v, axis=1, keepdims=True))
 
 
 def _merge_g1_stats(

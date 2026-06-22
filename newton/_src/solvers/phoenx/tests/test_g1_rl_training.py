@@ -82,7 +82,10 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     zero_scalar_kernel,
 )
 from newton._src.solvers.phoenx.rl_training.networks import _BF16_FORWARD_MIN_BATCH
-from newton._src.solvers.phoenx.rl_training.training import _quat_rotate_inverse_xyzw_np
+from newton._src.solvers.phoenx.rl_training.training import (
+    _g1_root_origin_linear_velocity_body_np,
+    _quat_rotate_inverse_xyzw_np,
+)
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_REVOLUTE_DRIVE
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
@@ -670,7 +673,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         with wp.ScopedCapture(device=env.device) as capture:
             env.observe()
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(env.device)
 
         expected_body = np.asarray([[0.0, -1.0, 0.0]], dtype=np.float32)
         np.testing.assert_allclose(
@@ -679,6 +681,52 @@ class TestG1PhoenXRL(unittest.TestCase):
             rtol=1.0e-6,
             atol=1.0e-6,
         )
+
+    def test_g1_linear_tracking_uses_root_origin_velocity_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 root velocity convention tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+                w_track_lin=1.0,
+                w_track_ang=0.0,
+                w_lin_vel_z=0.0,
+                w_ang_vel_xy=0.0,
+                w_orientation=0.0,
+                w_torque=0.0,
+                w_action_rate=0.0,
+                w_alive=0.0,
+                w_base_height=0.0,
+                w_gait_contact=0.0,
+                w_gait_swing=0.0,
+                w_gait_swing_contact=0.0,
+                w_gait_hip=0.0,
+            ),
+            device=device,
+        )
+        q = env.state_0.joint_q.numpy()
+        qd = env.state_0.joint_qd.numpy()
+        q[3:7] = np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        qd[:] = 0.0
+        qd[0:6] = np.asarray([1.0, 0.0, 0.0, 0.0, 2.0, 0.0], dtype=np.float32)
+        root_com = env.model.body_com.numpy().reshape(env.world_count, env.body_stride, 3)[:, 0, :].copy()
+        lin_origin_b = _g1_root_origin_linear_velocity_body_np(
+            q.reshape(1, env.coord_stride), qd.reshape(1, env.dof_stride), root_com
+        )
+        self.assertGreater(float(abs(lin_origin_b[0, 0] - qd[0])), 0.05)
+
+        env.state_0.joint_q.assign(q)
+        env.state_0.joint_qd.assign(qd)
+        env.command.assign(np.asarray([[lin_origin_b[0, 0], lin_origin_b[0, 1], 0.0]], dtype=np.float32))
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(env.successes.numpy(), np.ones(1, dtype=np.float32), rtol=1.0e-6, atol=1.0e-6)
 
     def test_nanog1_action_target_contract_matches_graph_step(self) -> None:
         env = rl.EnvG1PhoenX(
@@ -3327,8 +3375,13 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         body_q = env.state_0.body_q.numpy()
         right_foot_z = float(body_q[env._right_foot_body_local, 2])
-        lin_b = _quat_rotate_inverse_xyzw_np(q[3:7].reshape(1, 4), qd[0:3].reshape(1, 3))[0]
+        root_com = env.model.body_com.numpy().reshape(env.world_count, env.body_stride, 3)[:, 0, :].copy()
+        lin_b = _g1_root_origin_linear_velocity_body_np(
+            q.reshape(1, env.coord_stride), qd.reshape(1, env.dof_stride), root_com
+        )[0]
+        lin_com_b = _quat_rotate_inverse_xyzw_np(q[3:7].reshape(1, 4), qd[0:3].reshape(1, 3))[0]
         ang = _quat_rotate_inverse_xyzw_np(q[3:7].reshape(1, 4), qd[3:6].reshape(1, 3))[0]
+        self.assertGreater(float(np.linalg.norm(lin_b - lin_com_b)), 0.005)
         self.assertGreater(float(np.linalg.norm(lin_b - qd[0:3])), 0.1)
         self.assertGreater(float(np.linalg.norm(ang - qd[3:6])), 0.1)
         vx_err = command_np[0, 0] - lin_b[0]

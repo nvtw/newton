@@ -203,6 +203,59 @@ teacher fine-tune as useful evidence, not a solved walking recipe: PPO can adapt
 the teacher slightly, but a known-good nanoG1 policy still degrades under
 PhoenX before optimization starts.
 
+## 2026-06-22 Contract And Training Probes
+
+A follow-up check found one real reward/metric convention bug: Newton free-joint
+`joint_qd[0:3]` stores child-COM velocity, while nanoG1/MuJoCo command tracking
+uses root body-origin velocity. G1 reward and gate diagnostics now subtract
+`cross(root_angular_velocity, root_com_offset)` before rotating linear velocity
+into the body frame. A CUDA graph regression drives nonzero root angular velocity
+and fails if COM velocity is tracked directly. This is a correctness fix, but it
+did not solve walking by itself: the imported nanoG1 teacher gate stayed near the
+previous result (`battery_perf=0.702`, `battery_falls=123/24000`).
+
+The action/actuator interface was rechecked numerically against
+`nanoG1/deploy/deploy_g1.py`: home pose, actuator target ranges, leg KP/KD,
+`ACTION_SCALE=0.25`, and the 12-leg action mask match exactly. The remaining KD
+difference is intentional: the explicit torque path applies Unitree derivative
+damping only to the 12 leg actuators and keeps passive DoF damping separate, as
+in the nanoG1 host code. Policies output normalized position-target deltas, not
+torques and not linear interpolation over the full actuator range.
+
+Network checks did not show a layer-normalization issue. The nanoG1/PufferNet
+path is bias-free encoder -> 3x MinGRU -> bias-free decoder with no layer norm.
+The cached Newton G1 policy is a plain ELU MLP with an identity normalizer.
+PhoenX now exposes `--policy-network` and `--activation` so these can be tested
+without source edits.
+
+Fresh probes with the corrected velocity reward still collapse to standing or
+low-motion behavior:
+
+- Default dense nanoG1-style recipe, 4096 worlds, 300 iterations / 78.6M samples:
+  training `perf` briefly reached `0.62` near iteration 60, then settled near
+  `0.47`; the saved checkpoint gated at `battery_perf=0.552` with forward
+  `0.8 m/s` perf `0.100` and stand perf `0.995`.
+- Sparse-target probe, 180 iterations / 47.2M samples: target success stayed in
+  the `1-3%` range and degraded late; it did not discover gait.
+- MLP+ELU probe, 180 iterations / 47.2M samples: peaked near `perf=0.65` and
+  then regressed like the recurrent policy, so the PufferMinGRU architecture is
+  not the obvious blocker.
+- Softer torso-penalty/lower-LR probe inspired by the local PufferLib fork
+  (`w_ang_vel_xy=-0.05`, `w_orientation=-5`, `lr=0.002`, `gamma=0.995`,
+  `gae_lambda=0.95`, `replay_ratio=1`, `entropy=1e-4`) was worse, ending near
+  `perf=0.36`.
+- Larger action authority (`action_scale=0.5`) was worse, ending near
+  `perf=0.42`, so the default `0.25` action scale remains the best parity
+  setting.
+
+Current interpretation: pure-Warp PPO has enough validation that it is unlikely
+to be the only blocker, and the high-level policy/action contracts now look
+correct. The strongest remaining hypothesis is a closed-loop PhoenX environment
+or physics discrepancy that makes the nanoG1 gait less viable: contact impulse
+behavior, tangential support, effective drive response under contact, or done /
+bootstrap semantics. The imported teacher remains the best probe because it
+walks in nanoG1 but degrades before PhoenX training starts.
+
 ## Next Checks
 
 1. Add or tighten command/reset/done-bootstrap tests against the pinned nanoG1
