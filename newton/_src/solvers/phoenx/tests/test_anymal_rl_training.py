@@ -21,6 +21,13 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(names[0], "balance_and_step_forward")
         self.assertEqual(names[-1], "robust_full_control")
+        for phase in phases:
+            if phase.name in {"balance_and_step_forward", "walk_forward", "fast_efficient_forward"}:
+                overrides = dict(phase.env_overrides)
+                self.assertTrue(phase.randomize_commands)
+                self.assertEqual(overrides["forward_progress_reward_scale"], 0.0)
+                self.assertEqual(phase.command_x_range[0], 0.0)
+                self.assertGreater(phase.command_zero_probability, 0.0)
 
         args = anymal_curriculum._make_parser().parse_args(
             [
