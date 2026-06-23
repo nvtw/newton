@@ -11218,11 +11218,11 @@ class TestMuJoCoSolverForceSpaceContactSolref(unittest.TestCase):
         self.assertAlmostEqual(float(actual_solref[0]), expected_ref, delta=abs(expected_ref) * rel_tol)
         self.assertAlmostEqual(float(actual_solref[1]), expected_damp, delta=abs(expected_damp) * rel_tol)
 
-    def test_force_space_contact_gains_constructor_promotes_mjcf_default_shapes(self):
+    def test_use_newton_contact_gains_promotes_mjcf_default_shapes(self):
         model, _ = self._build_box_on_plane(mass=2.0, ke=1.0e4, kd=100.0, make_force_space=False)
         np.testing.assert_array_equal(model.mujoco.solref_mode.numpy(), [SOLREF_MODE_MJCF_DEFAULT] * model.shape_count)
 
-        SolverMuJoCo(model, use_mujoco_contacts=False, force_space_contact_gains=True, njmax=20, nconmax=20)
+        SolverMuJoCo(model, use_mujoco_contacts=False, use_newton_contact_gains=True, njmax=20, nconmax=20)
 
         np.testing.assert_array_equal(model.mujoco.solref_mode.numpy(), [SOLREF_MODE_FORCE_SPACE] * model.shape_count)
 

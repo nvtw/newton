@@ -231,9 +231,9 @@ combine, with the same three states as joint limits:
 * :attr:`~newton.solvers.SolverMuJoCo.SolrefMode.MJCF_DEFAULT` — registered
   default; preserves MuJoCo's compile-time contact dynamics and the legacy
   ``convert_solref(ke, kd, 1, 1)`` round-trip in ``geom_solref``. Opt in to
-  force-space scaling by passing ``force_space_contact_gains=True`` to
-  :class:`~newton.solvers.SolverMuJoCo`, or by setting all relevant shapes
-  before constructing the solver:
+  Newton contact gain semantics by passing ``use_newton_contact_gains=True``
+  to :class:`~newton.solvers.SolverMuJoCo`, or by setting all relevant
+  shapes before constructing the solver:
 
   .. code-block:: python
 

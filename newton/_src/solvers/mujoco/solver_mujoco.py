@@ -3179,7 +3179,7 @@ class SolverMuJoCo(SolverBase):
         save_to_mjcf: str | None = None,
         ls_parallel: bool | None = None,  # Deprecated: being removed from mujoco_warp
         use_mujoco_contacts: bool = True,
-        force_space_contact_gains: bool = False,
+        use_newton_contact_gains: bool = False,
         include_sites: bool = True,
         skip_visual_only_geoms: bool = True,
     ):
@@ -3219,10 +3219,12 @@ class SolverMuJoCo(SolverBase):
             save_to_mjcf: Optional path to save the generated MJCF model file.
             ls_parallel: Deprecated. Parallel line search is being removed from ``mujoco_warp``; passing this option emits a ``DeprecationWarning``.
             use_mujoco_contacts: If True, use the MuJoCo contact solver. If False, use the Newton contact solver (newton contacts must be passed in through the step function in that case).
-            force_space_contact_gains: If True, promote shapes with
+            use_newton_contact_gains: If True, promote shapes with
                 :attr:`SolverMuJoCo.SolrefMode.MJCF_DEFAULT` contact settings to
                 :attr:`SolverMuJoCo.SolrefMode.FORCE_SPACE` before MuJoCo
-                compilation. Authored raw MuJoCo ``solref`` values are preserved.
+                compilation so shape ``ke`` / ``kd`` are interpreted as Newton
+                contact stiffness and damping gains. Authored raw MuJoCo
+                ``solref`` values are preserved.
             include_sites: If ``True`` (default), Newton shapes marked with ``ShapeFlags.SITE`` are exported as MuJoCo sites. Sites are non-colliding reference points used for sensor attachment, debugging, or as frames of reference. If ``False``, sites are skipped during export. Defaults to ``True``.
             skip_visual_only_geoms: If ``True`` (default), geometries used only for visualization (i.e. not involved in collision) are excluded from the exported MuJoCo spec. This avoids mismatches with models that use explicit ``<contact>`` definitions for collision geometry.
         """
@@ -3237,7 +3239,7 @@ class SolverMuJoCo(SolverBase):
 
         super().__init__(model)
 
-        if force_space_contact_gains:
+        if use_newton_contact_gains:
             mujoco_attrs = getattr(model, "mujoco", None)
             solref_mode = getattr(mujoco_attrs, "solref_mode", None) if mujoco_attrs is not None else None
             if solref_mode is not None:

@@ -162,6 +162,7 @@ class Example:
             self.solver = newton.solvers.SolverMuJoCo(
                 self.model,
                 use_mujoco_contacts=False,
+                use_newton_contact_gains=True,
                 solver="newton",
                 integrator="implicitfast",
                 cone="elliptic",
