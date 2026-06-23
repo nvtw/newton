@@ -192,6 +192,11 @@ def _main() -> int:
     g1_parser.add_argument("--w-feet-air-time", type=float, default=g1_recipe.W_FEET_AIR_TIME)
     g1_parser.add_argument("--feet-air-time-threshold", type=float, default=g1_recipe.FEET_AIR_TIME_THRESHOLD)
     g1_parser.add_argument("--w-feet-slide", type=float, default=g1_recipe.W_FEET_SLIDE)
+    g1_parser.add_argument("--w-joint-deviation-hip", type=float, default=g1_recipe.W_JOINT_DEVIATION_HIP)
+    g1_parser.add_argument("--w-joint-deviation-waist", type=float, default=g1_recipe.W_JOINT_DEVIATION_WAIST)
+    g1_parser.add_argument("--w-joint-deviation-upper", type=float, default=g1_recipe.W_JOINT_DEVIATION_UPPER)
+    g1_parser.add_argument("--w-joint-acc-legs", type=float, default=g1_recipe.W_JOINT_ACC_LEGS)
+    g1_parser.add_argument("--w-joint-pos-limit-ankle", type=float, default=g1_recipe.W_JOINT_POS_LIMIT_ANKLE)
     g1_parser.add_argument("--target-x", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[0])
     g1_parser.add_argument("--target-y", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[1])
     g1_parser.add_argument("--sparse-target-radius", type=float, default=g1_recipe.SPARSE_TARGET_RADIUS)
@@ -513,6 +518,11 @@ def _main() -> int:
             w_feet_air_time=args.w_feet_air_time,
             feet_air_time_threshold=args.feet_air_time_threshold,
             w_feet_slide=args.w_feet_slide,
+            w_joint_deviation_hip=args.w_joint_deviation_hip,
+            w_joint_deviation_waist=args.w_joint_deviation_waist,
+            w_joint_deviation_upper=args.w_joint_deviation_upper,
+            w_joint_acc_legs=args.w_joint_acc_legs,
+            w_joint_pos_limit_ankle=args.w_joint_pos_limit_ankle,
             sparse_target_position=(args.target_x, args.target_y),
             sparse_target_radius=args.sparse_target_radius,
             sparse_target_success_upright_cos=args.sparse_target_success_upright_cos,

@@ -118,13 +118,17 @@ the gate metrics rather than judging by training reward alone. The optional
 `--w-command-progress` knob adds a command-aligned velocity projection term and
 is default-off because nanoG1 does not use it in the frozen recipe.
 
-IsaacLab-inspired contact regularizers are available but default-off:
-`--w-feet-air-time`, `--feet-air-time-threshold`, and `--w-feet-slide`. They are
-graph-captured and use preallocated foot air/contact-time buffers. Use them as
-reusable biped contact terms, not as a default parity claim: a pure
-IsaacLab-style reward replacement regressed, and adding small contact terms to
-the anti-standing nanoG1-style recipe reached about the same `battery_perf`
-plateau as before.
+IsaacLab-inspired regularizers are available but default-off:
+`--w-feet-air-time`, `--feet-air-time-threshold`, `--w-feet-slide`,
+`--w-joint-deviation-hip`, `--w-joint-deviation-waist`,
+`--w-joint-deviation-upper`, `--w-joint-acc-legs`, and
+`--w-joint-pos-limit-ankle`. They are graph-captured and use preallocated state
+for foot timers and previous joint velocities. Use them as reusable locomotion
+terms, not as a default parity claim: a pure IsaacLab-style reward replacement
+regressed, adding small contact terms to the anti-standing nanoG1-style recipe
+reached about the same `battery_perf` plateau as before, and 120-iteration
+full-body/0.5-action plus 12-leg-action regularizer probes both regressed on the
+reduced gate.
 
 The G1 material default keeps foot and ground friction at `0.6`, matching the
 nanoG1 pair coefficient and staying in a plausible real-world range. Use

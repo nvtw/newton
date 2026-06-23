@@ -67,6 +67,11 @@ BASE_HEIGHT_TARGET = 0.78
 W_FEET_AIR_TIME = 0.0
 FEET_AIR_TIME_THRESHOLD = 0.4
 W_FEET_SLIDE = 0.0
+W_JOINT_DEVIATION_HIP = 0.0
+W_JOINT_DEVIATION_WAIST = 0.0
+W_JOINT_DEVIATION_UPPER = 0.0
+W_JOINT_ACC_LEGS = 0.0
+W_JOINT_POS_LIMIT_ANKLE = 0.0
 
 PARSE_MESHES = False
 PARSE_VISUALS = False
@@ -192,6 +197,11 @@ def default_g1_env_config(**overrides: Any):
         "w_feet_air_time": W_FEET_AIR_TIME,
         "feet_air_time_threshold": FEET_AIR_TIME_THRESHOLD,
         "w_feet_slide": W_FEET_SLIDE,
+        "w_joint_deviation_hip": W_JOINT_DEVIATION_HIP,
+        "w_joint_deviation_waist": W_JOINT_DEVIATION_WAIST,
+        "w_joint_deviation_upper": W_JOINT_DEVIATION_UPPER,
+        "w_joint_acc_legs": W_JOINT_ACC_LEGS,
+        "w_joint_pos_limit_ankle": W_JOINT_POS_LIMIT_ANKLE,
         "parse_meshes": PARSE_MESHES,
         "parse_visuals": PARSE_VISUALS,
         "contact_geometry": CONTACT_GEOMETRY,

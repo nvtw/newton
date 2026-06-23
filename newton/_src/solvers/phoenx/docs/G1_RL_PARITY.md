@@ -105,13 +105,19 @@ substeps, 8 PGS iterations, `velocity_readout="substep_end"`, and CUDA graphs.
 IsaacLab currently disables the contact-force sensor for its PhoenX preset, so
 its feet-air-time and feet-slide terms are dropped there.
 
-PhoenX RL now has default-off, graph-captured equivalents for the two reusable
-contact terms that IsaacLab drops on PhoenX: positive biped feet-air-time and
-contact foot-slide. They reuse the existing G1 foot-contact scan, maintain
-preallocated `(world, foot)` air/contact-time buffers, guard repeated `observe()`
-calls with a per-world episode-step stamp, clear on graph reset, and are covered
-by CUDA graph tests. Public knobs are `--w-feet-air-time`,
-`--feet-air-time-threshold`, and `--w-feet-slide`.
+PhoenX RL now has default-off, graph-captured equivalents for the reusable
+IsaacLab terms that fit the current G1 environment: positive biped feet-air-time,
+contact foot-slide, hip yaw/roll deviation, waist deviation, upper-body
+deviation, leg joint acceleration, and ankle position-limit violation. Contact
+terms reuse the existing G1 foot-contact scan, maintain preallocated
+`(world, foot)` air/contact-time buffers, guard repeated `observe()` calls with a
+per-world episode-step stamp, clear on graph reset, and are covered by CUDA graph
+tests. Joint acceleration uses preallocated `(world, action)` previous-velocity
+state plus a per-world episode-step stamp, so repeated graph-captured
+`observe()` calls are idempotent. Public knobs are `--w-feet-air-time`,
+`--feet-air-time-threshold`, `--w-feet-slide`, `--w-joint-deviation-hip`,
+`--w-joint-deviation-waist`, `--w-joint-deviation-upper`,
+`--w-joint-acc-legs`, and `--w-joint-pos-limit-ankle`.
 
 Quality result: these terms are useful infrastructure but not the missing
 walking lever by themselves. Replacing the nanoG1 phase-gait reward with a close
@@ -119,9 +125,16 @@ IsaacLab-style velocity/contact profile reached only `battery_perf=0.353` at
 120 iterations and failed badly. Adding smaller IsaacLab contact terms on top of
 the previous anti-standing nanoG1-style run reached `battery_perf=0.608` on the
 standard 1000-step gate at 120 iterations (`162/24000` falls), roughly the same
-plateau as the prior long anti-standing run. The next likely gaps are still
-joint-deviation/acceleration regularization, full-body action handling, or
-remaining physics/env mismatch, not just missing feet-air-time.
+plateau as the prior long anti-standing run. A 2026-06-23 full-body-action probe
+with `controlled_action_count=29`, `action_scale=0.5`, and joint/contact
+regularizers reached only reduced-gate `battery_perf=0.556` at 120 iterations
+(`28/3600` falls). Keeping the nanoG1 12-leg action space with the same
+regularizers reached reduced-gate `battery_perf=0.523` at 120 iterations
+(`50/3600` falls). The current evidence says full-body IsaacLab-style actions and
+these regularizer weights add exploration burden or over-regularize before they
+solve walking. The next likely gap is still remaining physics/env mismatch,
+reward-command curriculum behavior, or a teacher/open-loop parity issue, not the
+absence of these reward terms.
 
 ## 2026-06-22 MinGRU BPTT Fix
 

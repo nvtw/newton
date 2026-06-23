@@ -971,6 +971,13 @@ def g1_observe_reward_kernel(
     w_feet_air_time: wp.float32,
     feet_air_time_threshold: wp.float32,
     w_feet_slide: wp.float32,
+    ctrl_lower: wp.array[wp.float32],
+    ctrl_upper: wp.array[wp.float32],
+    w_joint_deviation_hip: wp.float32,
+    w_joint_deviation_waist: wp.float32,
+    w_joint_deviation_upper: wp.float32,
+    w_joint_acc_legs: wp.float32,
+    w_joint_pos_limit_ankle: wp.float32,
     reward_mode: wp.int32,
     w_sparse_command_success: wp.float32,
     w_target_progress: wp.float32,
@@ -984,6 +991,9 @@ def g1_observe_reward_kernel(
     foot_air_time: wp.array2d[wp.float32],
     foot_contact_time: wp.array2d[wp.float32],
     foot_timer_episode_step: wp.array[wp.int32],
+    previous_joint_qd: wp.array2d[wp.float32],
+    joint_acc_l2: wp.array[wp.float32],
+    joint_regularizer_episode_step: wp.array[wp.int32],
     obs: wp.array2d[wp.float32],
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
@@ -1189,6 +1199,56 @@ def g1_observe_reward_kernel(
 
         biped_contact_reward = w_feet_air_time * feet_air_time_reward + w_feet_slide * feet_slide_penalty
 
+        hip_deviation_l1 = wp.float32(0.0)
+        hip_q = joint_q[q_base + wp.int32(7) + wp.int32(1)] - default_joint_pos[wp.int32(1)]
+        hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
+        hip_q = joint_q[q_base + wp.int32(7) + wp.int32(2)] - default_joint_pos[wp.int32(2)]
+        hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
+        hip_q = joint_q[q_base + wp.int32(7) + wp.int32(7)] - default_joint_pos[wp.int32(7)]
+        hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
+        hip_q = joint_q[q_base + wp.int32(7) + wp.int32(8)] - default_joint_pos[wp.int32(8)]
+        hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
+
+        waist_deviation_l1 = wp.float32(0.0)
+        for j in range(12, 15):
+            waist_q = joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j]
+            waist_deviation_l1 = waist_deviation_l1 + wp.abs(_clip_finite(waist_q, wp.float32(-10.0), wp.float32(10.0)))
+
+        upper_deviation_l1 = wp.float32(0.0)
+        for j in range(15, ACTION_DIM_G1):
+            upper_q = joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j]
+            upper_deviation_l1 = upper_deviation_l1 + wp.abs(_clip_finite(upper_q, wp.float32(-10.0), wp.float32(10.0)))
+
+        ankle_limit_penalty = wp.float32(0.0)
+        for j in range(ACTION_DIM_G1):
+            if j == 4 or j == 5 or j == 10 or j == 11:
+                ankle_q = joint_q[q_base + wp.int32(7) + j]
+                ankle_limit_penalty = ankle_limit_penalty + wp.max(ctrl_lower[j] - ankle_q, wp.float32(0.0))
+                ankle_limit_penalty = ankle_limit_penalty + wp.max(ankle_q - ctrl_upper[j], wp.float32(0.0))
+
+        joint_acc_penalty = joint_acc_l2[world]
+        current_step_regularizer = episode_steps[world]
+        if current_step_regularizer > joint_regularizer_episode_step[world]:
+            joint_regularizer_episode_step[world] = current_step_regularizer
+            joint_acc_penalty = wp.float32(0.0)
+            inv_dt = wp.float32(1.0) / wp.max(reward_dt, wp.float32(1.0e-6))
+            for j in range(ACTION_DIM_G1):
+                qd_joint = _clip_finite(joint_qd[qd_base + wp.int32(6) + j], wp.float32(-200.0), wp.float32(200.0))
+                if current_step_regularizer > wp.int32(0):
+                    if j < 4 or (j >= 6 and j < 10):
+                        dqd = (qd_joint - previous_joint_qd[world, j]) * inv_dt
+                        joint_acc_penalty = joint_acc_penalty + dqd * dqd
+                previous_joint_qd[world, j] = qd_joint
+            joint_acc_l2[world] = joint_acc_penalty
+
+        joint_regularizer_reward = (
+            w_joint_deviation_hip * hip_deviation_l1
+            + w_joint_deviation_waist * waist_deviation_l1
+            + w_joint_deviation_upper * upper_deviation_l1
+            + w_joint_acc_legs * joint_acc_penalty
+            + w_joint_pos_limit_ankle * ankle_limit_penalty
+        )
+
         sparse_success = wp.float32(0.0)
         sparse_lin_tol = wp.max(sparse_command_velocity_tolerance, wp.float32(0.0))
         sparse_yaw_tol = wp.max(sparse_command_yaw_tolerance, wp.float32(0.0))
@@ -1234,6 +1294,7 @@ def g1_observe_reward_kernel(
                 + w_action_rate * action_rate_penalty
                 + gait_reward
                 + biped_contact_reward
+                + joint_regularizer_reward
                 + w_alive
             )
             reward = shaped_reward * reward_dt
@@ -1242,6 +1303,7 @@ def g1_observe_reward_kernel(
                 w_sparse_command_success * sparse_success
                 + w_mechanical_power * mechanical_power_penalty
                 + biped_contact_reward
+                + joint_regularizer_reward
             )
             reward = shaped_reward * reward_dt
             success_metric = sparse_success
@@ -1252,6 +1314,7 @@ def g1_observe_reward_kernel(
                     w_target_progress * target_progress
                     + w_mechanical_power * mechanical_power_penalty
                     + biped_contact_reward
+                    + joint_regularizer_reward
                 )
                 * reward_dt
             )
@@ -1268,6 +1331,7 @@ def g1_observe_reward_kernel(
                 + w_action_rate * action_rate_penalty
                 + gait_reward
                 + biped_contact_reward
+                + joint_regularizer_reward
                 + w_alive
                 + w_sparse_command_success * sparse_success
                 + w_mechanical_power * mechanical_power_penalty
@@ -1316,6 +1380,9 @@ def g1_reset_done_worlds_kernel(
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
+    previous_joint_qd: wp.array2d[wp.float32],
+    joint_acc_l2: wp.array[wp.float32],
+    joint_regularizer_episode_step: wp.array[wp.int32],
     foot_air_time: wp.array2d[wp.float32],
     foot_contact_time: wp.array2d[wp.float32],
     foot_timer_episode_step: wp.array[wp.int32],
@@ -1343,12 +1410,15 @@ def g1_reset_done_worlds_kernel(
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
         actuator_force[world, col] = wp.float32(0.0)
+        previous_joint_qd[world, col] = default_joint_qd[world * dof_stride + wp.int32(6) + col]
     if col < wp.int32(2):
         foot_air_time[world, col] = wp.float32(0.0)
         foot_contact_time[world, col] = wp.float32(0.0)
     if col == 0:
         episode_steps[world] = wp.int32(0)
         foot_timer_episode_step[world] = wp.int32(-1)
+        joint_acc_l2[world] = wp.float32(0.0)
+        joint_regularizer_episode_step[world] = wp.int32(-1)
 
 
 @wp.kernel
@@ -1368,6 +1438,9 @@ def g1_reset_done_worlds_seed_counter_kernel(
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
+    previous_joint_qd: wp.array2d[wp.float32],
+    joint_acc_l2: wp.array[wp.float32],
+    joint_regularizer_episode_step: wp.array[wp.int32],
     foot_air_time: wp.array2d[wp.float32],
     foot_contact_time: wp.array2d[wp.float32],
     foot_timer_episode_step: wp.array[wp.int32],
@@ -1396,12 +1469,15 @@ def g1_reset_done_worlds_seed_counter_kernel(
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
         actuator_force[world, col] = wp.float32(0.0)
+        previous_joint_qd[world, col] = default_joint_qd[world * dof_stride + wp.int32(6) + col]
     if col < wp.int32(2):
         foot_air_time[world, col] = wp.float32(0.0)
         foot_contact_time[world, col] = wp.float32(0.0)
     if col == 0:
         episode_steps[world] = wp.int32(0)
         foot_timer_episode_step[world] = wp.int32(-1)
+        joint_acc_l2[world] = wp.float32(0.0)
+        joint_regularizer_episode_step[world] = wp.int32(-1)
 
 
 @wp.func
@@ -1812,6 +1888,11 @@ class ConfigEnvG1PhoenX:
         w_feet_air_time: IsaacLab-style positive biped feet-air-time reward scale.
         feet_air_time_threshold: Saturation time for feet-air-time reward [s].
         w_feet_slide: Contact foot XY sliding penalty scale.
+        w_joint_deviation_hip: Hip yaw/roll joint-deviation penalty scale.
+        w_joint_deviation_waist: Waist joint-deviation penalty scale.
+        w_joint_deviation_upper: Upper-body joint-deviation penalty scale.
+        w_joint_acc_legs: Leg joint-acceleration penalty scale.
+        w_joint_pos_limit_ankle: Ankle position-limit violation penalty scale.
         parse_meshes: Import MJCF mesh collision geoms. Disable for fast
             RL runs that use the primitive foot and arm geoms only.
         parse_visuals: Import visual-only MJCF meshes for rendering. When this
@@ -1888,6 +1969,11 @@ class ConfigEnvG1PhoenX:
     w_feet_air_time: float = g1_recipe.W_FEET_AIR_TIME
     feet_air_time_threshold: float = g1_recipe.FEET_AIR_TIME_THRESHOLD
     w_feet_slide: float = g1_recipe.W_FEET_SLIDE
+    w_joint_deviation_hip: float = g1_recipe.W_JOINT_DEVIATION_HIP
+    w_joint_deviation_waist: float = g1_recipe.W_JOINT_DEVIATION_WAIST
+    w_joint_deviation_upper: float = g1_recipe.W_JOINT_DEVIATION_UPPER
+    w_joint_acc_legs: float = g1_recipe.W_JOINT_ACC_LEGS
+    w_joint_pos_limit_ankle: float = g1_recipe.W_JOINT_POS_LIMIT_ANKLE
     parse_meshes: bool = g1_recipe.PARSE_MESHES
     parse_visuals: bool = g1_recipe.PARSE_VISUALS
     contact_geometry: str = g1_recipe.CONTACT_GEOMETRY
@@ -1981,6 +2067,11 @@ class EnvG1PhoenX:
         self.foot_air_time = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
         self.foot_contact_time = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
         self.foot_timer_episode_step = wp.array(
+            np.full(self.world_count, -1, dtype=np.int32), dtype=wp.int32, device=self.device
+        )
+        self.previous_joint_qd = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
+        self.joint_acc_l2 = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.joint_regularizer_episode_step = wp.array(
             np.full(self.world_count, -1, dtype=np.int32), dtype=wp.int32, device=self.device
         )
         self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
@@ -2462,6 +2553,13 @@ class EnvG1PhoenX:
                 self.config.w_feet_air_time,
                 self.config.feet_air_time_threshold,
                 self.config.w_feet_slide,
+                self.ctrl_lower,
+                self.ctrl_upper,
+                self.config.w_joint_deviation_hip,
+                self.config.w_joint_deviation_waist,
+                self.config.w_joint_deviation_upper,
+                self.config.w_joint_acc_legs,
+                self.config.w_joint_pos_limit_ankle,
                 self._reward_mode_id,
                 self.config.w_sparse_command_success,
                 self.config.w_target_progress,
@@ -2477,6 +2575,9 @@ class EnvG1PhoenX:
                 self.foot_air_time,
                 self.foot_contact_time,
                 self.foot_timer_episode_step,
+                self.previous_joint_qd,
+                self.joint_acc_l2,
+                self.joint_regularizer_episode_step,
                 self.obs,
                 self.rewards,
                 self.dones,
@@ -2657,6 +2758,9 @@ class EnvG1PhoenX:
         self.foot_air_time.zero_()
         self.foot_contact_time.zero_()
         self.foot_timer_episode_step.fill_(-1)
+        self.previous_joint_qd.zero_()
+        self.joint_acc_l2.zero_()
+        self.joint_regularizer_episode_step.fill_(-1)
         self.control.joint_f.zero_()
         self.episode_steps.zero_()
         self.dones.fill_(1.0)
@@ -2706,6 +2810,9 @@ class EnvG1PhoenX:
                 self.previous_actions,
                 self.current_actions,
                 self.actuator_force,
+                self.previous_joint_qd,
+                self.joint_acc_l2,
+                self.joint_regularizer_episode_step,
                 self.foot_air_time,
                 self.foot_contact_time,
                 self.foot_timer_episode_step,
@@ -2757,6 +2864,9 @@ class EnvG1PhoenX:
                 self.previous_actions,
                 self.current_actions,
                 self.actuator_force,
+                self.previous_joint_qd,
+                self.joint_acc_l2,
+                self.joint_regularizer_episode_step,
                 self.foot_air_time,
                 self.foot_contact_time,
                 self.foot_timer_episode_step,

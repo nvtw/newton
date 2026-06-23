@@ -2525,6 +2525,14 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.gait_foot_height, g1_recipe.GAIT_FOOT_HEIGHT)
         self.assertEqual(env_config.w_base_height, g1_recipe.W_BASE_HEIGHT)
         self.assertEqual(env_config.base_height_target, g1_recipe.BASE_HEIGHT_TARGET)
+        self.assertEqual(env_config.w_feet_air_time, g1_recipe.W_FEET_AIR_TIME)
+        self.assertEqual(env_config.feet_air_time_threshold, g1_recipe.FEET_AIR_TIME_THRESHOLD)
+        self.assertEqual(env_config.w_feet_slide, g1_recipe.W_FEET_SLIDE)
+        self.assertEqual(env_config.w_joint_deviation_hip, g1_recipe.W_JOINT_DEVIATION_HIP)
+        self.assertEqual(env_config.w_joint_deviation_waist, g1_recipe.W_JOINT_DEVIATION_WAIST)
+        self.assertEqual(env_config.w_joint_deviation_upper, g1_recipe.W_JOINT_DEVIATION_UPPER)
+        self.assertEqual(env_config.w_joint_acc_legs, g1_recipe.W_JOINT_ACC_LEGS)
+        self.assertEqual(env_config.w_joint_pos_limit_ankle, g1_recipe.W_JOINT_POS_LIMIT_ANKLE)
         self.assertEqual(env_config.rigid_contact_max_per_world, g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env_config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
         self.assertEqual(env_config.ground_friction, g1_recipe.GROUND_FRICTION)
@@ -4047,6 +4055,99 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         expected_reward = np.float32(-2.0 * 0.5 * env.config.frame_dt)
         np.testing.assert_allclose(env.rewards.numpy(), np.array([expected_reward], dtype=np.float32), atol=1.0e-6)
+
+    def test_isaaclab_joint_regularizers_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 IsaacLab joint regularizer tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+                command=(0.0, 0.0, 0.0),
+                w_track_lin=0.0,
+                w_track_ang=0.0,
+                w_command_progress=0.0,
+                w_lin_vel_z=0.0,
+                w_ang_vel_xy=0.0,
+                w_orientation=0.0,
+                w_torque=0.0,
+                w_action_rate=0.0,
+                w_alive=0.0,
+                w_gait_contact=0.0,
+                w_gait_swing=0.0,
+                w_gait_swing_contact=0.0,
+                w_gait_hip=0.0,
+                w_base_height=0.0,
+                w_feet_air_time=0.0,
+                w_feet_slide=0.0,
+                w_joint_deviation_hip=-1.0,
+                w_joint_deviation_waist=-2.0,
+                w_joint_deviation_upper=-0.5,
+                w_joint_acc_legs=-1.0e-4,
+                w_joint_pos_limit_ankle=-3.0,
+            ),
+            device=device,
+        )
+
+        q = env.state_0.joint_q.numpy()
+        qd = env.state_0.joint_qd.numpy()
+        default = env.default_joint_pos.numpy()
+        ctrl_lower = env.ctrl_lower.numpy()
+        ctrl_upper = env.ctrl_upper.numpy()
+
+        hip_delta = {1: 0.1, 2: -0.2, 7: 0.05, 8: -0.1}
+        waist_delta = {12: 0.2, 13: -0.1, 14: 0.05}
+        upper_delta = {15: 0.2, 22: -0.1}
+        all_delta = {**hip_delta, **waist_delta, **upper_delta}
+        for joint, delta in all_delta.items():
+            q[7 + joint] = default[joint] + np.float32(delta)
+        q[7 + 4] = ctrl_upper[4] + np.float32(0.02)
+        q[7 + 10] = ctrl_lower[10] - np.float32(0.03)
+
+        leg_acc_indices = np.array([0, 1, 2, 3, 6, 7, 8, 9], dtype=np.int32)
+        qd_values = np.linspace(0.001, 0.008, leg_acc_indices.size, dtype=np.float32)
+        qd[6 + leg_acc_indices] = qd_values
+        env.state_0.joint_q.assign(q)
+        env.state_0.joint_qd.assign(qd)
+        env.previous_joint_qd.zero_()
+        env.joint_acc_l2.zero_()
+        env.joint_regularizer_episode_step.assign(np.array([-1], dtype=np.int32))
+        env.episode_steps.assign(np.array([1], dtype=np.int32))
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        hip_l1 = sum(abs(v) for v in hip_delta.values())
+        waist_l1 = sum(abs(v) for v in waist_delta.values())
+        upper_l1 = sum(abs(v) for v in upper_delta.values())
+        ankle_limit = 0.02 + 0.03
+        joint_acc_l2 = float(np.sum((qd_values / np.float32(env.config.frame_dt)) ** 2, dtype=np.float32))
+        shaped = (
+            env.config.w_joint_deviation_hip * hip_l1
+            + env.config.w_joint_deviation_waist * waist_l1
+            + env.config.w_joint_deviation_upper * upper_l1
+            + env.config.w_joint_acc_legs * joint_acc_l2
+            + env.config.w_joint_pos_limit_ankle * ankle_limit
+        )
+        expected_reward = np.float32(shaped * env.config.frame_dt)
+
+        np.testing.assert_allclose(env.previous_joint_qd.numpy()[0], qd[6 : 6 + rl.ACTION_DIM_G1], atol=0.0)
+        np.testing.assert_allclose(env.joint_regularizer_episode_step.numpy(), np.array([1], dtype=np.int32))
+        np.testing.assert_allclose(env.joint_acc_l2.numpy(), np.array([joint_acc_l2], dtype=np.float32), rtol=1.0e-6)
+        np.testing.assert_allclose(env.rewards.numpy(), np.array([expected_reward], dtype=np.float32), rtol=1.0e-6)
+
+        env.dones.assign(np.ones(1, dtype=np.float32))
+        with wp.ScopedCapture(device=device) as reset_capture:
+            env.reset_done()
+        wp.capture_launch(reset_capture.graph)
+        np.testing.assert_allclose(env.previous_joint_qd.numpy(), np.zeros((1, rl.ACTION_DIM_G1), dtype=np.float32))
+        np.testing.assert_allclose(env.joint_acc_l2.numpy(), np.zeros(1, dtype=np.float32))
+        np.testing.assert_allclose(env.joint_regularizer_episode_step.numpy(), np.array([-1], dtype=np.int32))
 
     def test_g1_foot_contact_support_metrics_inside_graph(self) -> None:
         env = _g1_test_env(world_count=1)

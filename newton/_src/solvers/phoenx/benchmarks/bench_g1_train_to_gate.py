@@ -53,6 +53,7 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
         actuation_model=str(getattr(args, "actuation_model", g1_recipe.ACTUATION_MODEL)),
+        action_scale=float(args.action_scale),
         controlled_action_count=int(args.controlled_action_count),
         reward_mode=str(args.reward_mode),
         w_alive=float(args.w_alive),
@@ -82,6 +83,11 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         w_feet_air_time=float(args.w_feet_air_time),
         feet_air_time_threshold=float(args.feet_air_time_threshold),
         w_feet_slide=float(args.w_feet_slide),
+        w_joint_deviation_hip=float(args.w_joint_deviation_hip),
+        w_joint_deviation_waist=float(args.w_joint_deviation_waist),
+        w_joint_deviation_upper=float(args.w_joint_deviation_upper),
+        w_joint_acc_legs=float(args.w_joint_acc_legs),
+        w_joint_pos_limit_ankle=float(args.w_joint_pos_limit_ankle),
         parse_meshes=bool(args.parse_meshes),
         contact_geometry=str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
         ground_friction=float(args.ground_friction),
@@ -261,6 +267,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "rollout_steps": int(args.rollout_steps),
         "squash_actions": bool(args.squash_actions),
         "log_std_init": float(args.log_std_init),
+        "action_scale": float(args.action_scale),
         "reward_mode": str(args.reward_mode),
         "w_alive": float(args.w_alive),
         "w_track_lin": float(args.w_track_lin),
@@ -297,6 +304,11 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "w_feet_air_time": float(args.w_feet_air_time),
         "feet_air_time_threshold": float(args.feet_air_time_threshold),
         "w_feet_slide": float(args.w_feet_slide),
+        "w_joint_deviation_hip": float(args.w_joint_deviation_hip),
+        "w_joint_deviation_waist": float(args.w_joint_deviation_waist),
+        "w_joint_deviation_upper": float(args.w_joint_deviation_upper),
+        "w_joint_acc_legs": float(args.w_joint_acc_legs),
+        "w_joint_pos_limit_ankle": float(args.w_joint_pos_limit_ankle),
         "ground_friction": float(args.ground_friction),
         "foot_box_xy_scale": float(args.foot_box_xy_scale),
         "command_curriculum_start": float(command_curriculum_start),
@@ -491,12 +503,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--w-feet-air-time", type=float, default=g1_recipe.W_FEET_AIR_TIME)
     parser.add_argument("--feet-air-time-threshold", type=float, default=g1_recipe.FEET_AIR_TIME_THRESHOLD)
     parser.add_argument("--w-feet-slide", type=float, default=g1_recipe.W_FEET_SLIDE)
+    parser.add_argument("--w-joint-deviation-hip", type=float, default=g1_recipe.W_JOINT_DEVIATION_HIP)
+    parser.add_argument("--w-joint-deviation-waist", type=float, default=g1_recipe.W_JOINT_DEVIATION_WAIST)
+    parser.add_argument("--w-joint-deviation-upper", type=float, default=g1_recipe.W_JOINT_DEVIATION_UPPER)
+    parser.add_argument("--w-joint-acc-legs", type=float, default=g1_recipe.W_JOINT_ACC_LEGS)
+    parser.add_argument("--w-joint-pos-limit-ankle", type=float, default=g1_recipe.W_JOINT_POS_LIMIT_ANKLE)
     parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
         default=g1_recipe.ACTUATION_MODEL,
         help="G1 actuator path used for train and gate environments.",
     )
+    parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
     parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     parser.add_argument("--parse-meshes", action="store_true")
     parser.add_argument("--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY)
