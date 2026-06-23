@@ -26,6 +26,7 @@ from .kernels import (
     dense_activation_grad_kernel,
     dense_bias_partial_grad_kernel,
     dense_bias_reduce_grad_kernel,
+    dense_forward_tiled_kernel,
     dense_input_grad_kernel,
     dense_input_grad_tiled_kernel,
     dense_layer_kernel,
@@ -56,6 +57,11 @@ from .kernels_bf16 import (
 )
 
 _BF16_FORWARD_MIN_BATCH = 16_384
+# Minimum batch for the f32 tiled forward. The naive forward re-reads the
+# weight matrix per row, so tiling only pays once the batch is large (training
+# updates), not for per-step rollout inference. Gated to tile-aligned shapes so
+# the rounded-up tile loads/stores stay in bounds.
+_F32_FORWARD_TILED_MIN_BATCH = 16_384
 
 
 def activation_code(name: str) -> int:
@@ -311,6 +317,21 @@ class WarpMLP:
                 inputs=[out, bias, activation],
                 device=self.device,
             )
+        elif self._uses_f32_tiled_forward(weight, rows):
+            wp.launch_tiled(
+                dense_forward_tiled_kernel,
+                dim=(_ceil_div(rows, DENSE_TILE_BATCH), _ceil_div(cols, DENSE_TILE_OUT)),
+                inputs=[x, weight, int(weight.shape[0])],
+                outputs=[out],
+                block_dim=DENSE_TILE_BLOCK_DIM,
+                device=self.device,
+            )
+            wp.launch(
+                dense_bias_activation_kernel,
+                dim=(rows, cols),
+                inputs=[out, bias, activation],
+                device=self.device,
+            )
         else:
             wp.launch(
                 dense_layer_kernel,
@@ -327,6 +348,17 @@ class WarpMLP:
             and int(batch_size) >= _BF16_FORWARD_MIN_BATCH
             and int(weight.shape[0]) >= DENSE_TILE_IN
             and int(weight.shape[1]) >= 64
+        )
+
+    def _uses_f32_tiled_forward(self, weight: wp.array2d[wp.float32], batch_size: int) -> bool:
+        # Tile loads/stores read rounded-up tiles, so require tile-aligned
+        # shapes (batch, in_dim, out_dim) to stay in bounds without padding.
+        return (
+            self.device.is_cuda
+            and int(batch_size) >= _F32_FORWARD_TILED_MIN_BATCH
+            and int(batch_size) % DENSE_TILE_BATCH == 0
+            and int(weight.shape[0]) % DENSE_TILE_IN == 0
+            and int(weight.shape[1]) % DENSE_TILE_OUT == 0
         )
 
     def backward_manual(self, output_grad: wp.array2d[wp.float32]) -> None:

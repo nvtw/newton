@@ -2516,6 +2516,34 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(net.weights[1].grad.numpy(), expected_w1_grad, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(net.biases[1].grad.numpy(), expected_b1_grad, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_f32_tiled_forward_matches_numpy_for_large_batch(self) -> None:
+        # The tiled forward only activates for large, tile-aligned batches; it
+        # must match the naive/numpy forward it replaces.
+        device = require_cuda_graph_capture("PhoenX f32 tiled forward tests")
+        batch_size = 16_384  # >= _F32_FORWARD_TILED_MIN_BATCH, multiple of 128
+        input_dim = 48
+        hidden_dim = 128
+        output_dim = 128
+
+        rng = np.random.default_rng(11)
+        obs_np = (0.3 * rng.standard_normal((batch_size, input_dim))).astype(np.float32)
+        net = rl.WarpMLP((input_dim, hidden_dim, output_dim), activation="elu", device=device, seed=4)
+        net.reserve_buffers(batch_size)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            out = net.forward_manual(obs)
+        wp.capture_launch(capture.graph)
+
+        w0 = net.weights[0].numpy()
+        b0 = net.biases[0].numpy()
+        w1 = net.weights[1].numpy()
+        b1 = net.biases[1].numpy()
+        h_pre = obs_np @ w0 + b0
+        h = np.where(h_pre > 0.0, h_pre, np.exp(h_pre) - 1.0).astype(np.float32)
+        expected = (h @ w1 + b1).astype(np.float32)  # output layer is linear
+        np.testing.assert_allclose(out.numpy(), expected, rtol=2.0e-3, atol=2.0e-3)
+
     def test_split_k_weight_grad_matches_numpy_across_chunks_and_is_deterministic(self) -> None:
         # The split-K weight gradient reduces the batch contraction across
         # several blocks per output tile. Use a batch large enough that the

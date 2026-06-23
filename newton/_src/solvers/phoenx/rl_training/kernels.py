@@ -75,6 +75,36 @@ def dense_layer_kernel(
     y[row, col] = _activation(total, activation)
 
 
+@wp.kernel
+def dense_forward_tiled_kernel(
+    x: wp.array2d[wp.float32],
+    weight: wp.array2d[wp.float32],
+    in_dim: wp.int32,
+    y: wp.array2d[wp.float32],
+):
+    # Matmul only; bias + activation are applied by dense_bias_activation_kernel.
+    # The naive forward re-reads the full weight matrix for every row; tiling
+    # caches weight/input tiles so the weight traffic drops by the batch-tile
+    # factor. Reads rounded-up tiles, so the caller must launch only for
+    # tile-aligned, large batches (see WarpMLP._dense_layer gating).
+    batch_tile, out_tile = wp.tid()
+    total = wp.tile_zeros(shape=(DENSE_TILE_BATCH, DENSE_TILE_OUT), dtype=wp.float32)
+    in_tiles = (in_dim + DENSE_TILE_IN - wp.int32(1)) // DENSE_TILE_IN
+    for tile in range(in_tiles):
+        x_tile = wp.tile_load(
+            x,
+            shape=(DENSE_TILE_BATCH, DENSE_TILE_IN),
+            offset=(batch_tile * DENSE_TILE_BATCH, tile * DENSE_TILE_IN),
+        )
+        weight_tile = wp.tile_load(
+            weight,
+            shape=(DENSE_TILE_IN, DENSE_TILE_OUT),
+            offset=(tile * DENSE_TILE_IN, out_tile * DENSE_TILE_OUT),
+        )
+        wp.tile_matmul(x_tile, weight_tile, total)
+    wp.tile_store(y, total, offset=(batch_tile * DENSE_TILE_BATCH, out_tile * DENSE_TILE_OUT))
+
+
 @wp.func
 def _activation_grad_from_output(y: wp.float32, activation: wp.int32) -> wp.float32:
     if activation == ACTIVATION_TANH:
