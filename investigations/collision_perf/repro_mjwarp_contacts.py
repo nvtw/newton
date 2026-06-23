@@ -399,9 +399,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "full_seconds": full_seconds,
             "full_ms_per_step": 1000.0 * full_seconds / args.steps,
             "collision_seconds": collision_seconds,
-            "collision_ms_per_step": None
-            if collision_seconds is None
-            else 1000.0 * collision_seconds / args.steps,
+            "collision_ms_per_step": None if collision_seconds is None else 1000.0 * collision_seconds / args.steps,
         },
         "stages": stages,
     }
