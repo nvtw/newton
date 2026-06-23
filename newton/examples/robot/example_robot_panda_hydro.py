@@ -291,7 +291,8 @@ class Example:
             solver="newton",
             integrator="implicitfast",
             cone="elliptic",
-            njmax=500,
+            # Elliptic contacts can consume multiple constraint rows per contact.
+            njmax=1500,
             nconmax=500,
             iterations=15,
             ls_iterations=100,

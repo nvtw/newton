@@ -437,25 +437,38 @@ def convert_newton_contacts_to_mjwarp_kernel(
                         1.0,
                     )
 
-        # Convert Newton per-contact stiffness/damping to MuJoCo's direct
-        # negative solref format. Per-contact stiffness comes from collision
-        # reduction (for example hydroelastic contacts) and must not be softened
-        # by MuJoCo's positive-solref refsafe timestep clamp. solimp is set to
-        # approximate a linear force-displacement relationship at rest,
-        # compensating for impedance scaling. See
-        # https://mujoco.readthedocs.io/en/latest/modeling.html#solver-parameters
+        # Convert Newton per-contact stiffness/damping to MuJoCo's positive
+        # solref format. Per-contact stiffness comes from collision reduction
+        # (for example hydroelastic contacts) in force space; MuJoCo contact
+        # rows operate in acceleration space, so pre-scale by the row inverse
+        # effective mass before converting to time constant / damping ratio.
         if rigid_contact_stiffness:
             contact_ke = rigid_contact_stiffness[tid]
             if contact_ke > 0.0:
                 imp = solimp[1]
-                solimp = vec5(imp, imp, 0.001, 1.0, 0.5)
-                direct_ke = wp.max(contact_ke * (1.0 - imp), MJ_MINVAL)
-                direct_kd = rigid_contact_damping[tid]
-                if direct_kd <= 0.0:
-                    direct_kd = mix * shape_material_kd[shape_a] + (1.0 - mix) * shape_material_kd[shape_b]
-                if direct_kd <= 0.0:
-                    direct_kd = 2.0 * wp.sqrt(direct_ke)
-                solref = wp.vec2(-direct_ke, -direct_kd)
+                invw_a = float(0.0)
+                invw_b = float(0.0)
+                if body_a >= 0:
+                    invw_a = body_invweight0[worldid, mj_body_a][0]
+                if body_b >= 0:
+                    invw_b = body_invweight0[worldid, mj_body_b][0]
+                m_inv = invw_a + invw_b
+                if m_inv > 0.0 and imp < 1.0:
+                    factor = m_inv * (1.0 - imp)
+                    direct_ke = wp.max(contact_ke * factor, MJ_MINVAL)
+                    contact_kd = rigid_contact_damping[tid]
+                    has_contact_kd = contact_kd > 0.0
+                    if contact_kd <= 0.0:
+                        contact_kd = mix * shape_material_kd[shape_a] + (1.0 - mix) * shape_material_kd[shape_b]
+                    direct_kd = wp.max(contact_kd * factor, MJ_MINVAL)
+                    if not has_contact_kd:
+                        direct_kd = wp.max(direct_kd, 2.0 * wp.sqrt(direct_ke))
+                    solref = convert_solref(
+                        direct_ke,
+                        direct_kd,
+                        1.0,
+                        1.0,
+                    )
 
             friction_scale = rigid_contact_friction[tid]
             if friction_scale > 0.0:

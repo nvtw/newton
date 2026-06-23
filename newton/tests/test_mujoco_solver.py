@@ -11096,20 +11096,43 @@ class TestMuJoCoSolverPerContactSolref(unittest.TestCase):
         self.assertEqual(int(solver.mjw_data.nacon.numpy()[0]), 1)
         return solver
 
-    def test_per_contact_stiffness_uses_direct_negative_solref(self):
+    @staticmethod
+    def _contact_invweight(solver) -> float:
+        geom_a, geom_b = solver.mjw_data.contact.geom.numpy()[0]
+        geom_bodyid = solver.mjw_model.geom_bodyid.numpy()
+        body_invweight0 = solver.mjw_model.body_invweight0.numpy()
+        invweight = 0.0
+        for geom in (int(geom_a), int(geom_b)):
+            body = int(geom_bodyid[geom])
+            if body >= 0:
+                invweight += float(body_invweight0[0, body, 0])
+        return invweight
+
+    def test_per_contact_stiffness_uses_force_space_solref(self):
         contact_stiffness = 12345.0
         solver = self._run_single_contact(contact_stiffness=contact_stiffness, contact_damping=0.0)
 
         actual_solref = solver.mjw_data.contact.solref.numpy()[0]
         actual_solimp = solver.mjw_data.contact.solimp.numpy()[0]
         imp = float(actual_solimp[1])
-        expected_stiffness = contact_stiffness * (1.0 - imp)
-        expected_damping = 0.5 * 40.0 + 0.5 * 160.0
+        direct_factor = self._contact_invweight(solver) * (1.0 - imp)
+        expected_stiffness = contact_stiffness * direct_factor
+        expected_damping = max((0.5 * 40.0 + 0.5 * 160.0) * direct_factor, 2.0 * np.sqrt(expected_stiffness))
+        expected_solref = convert_solref(
+            max(float(expected_stiffness), MJ_MINVAL),
+            max(float(expected_damping), MJ_MINVAL),
+            1.0,
+            1.0,
+        )
 
-        self.assertLess(float(actual_solref[0]), 0.0)
-        self.assertLess(float(actual_solref[1]), 0.0)
-        self.assertAlmostEqual(float(actual_solref[0]), -expected_stiffness, delta=abs(expected_stiffness) * 1.0e-5)
-        self.assertAlmostEqual(float(actual_solref[1]), -expected_damping, delta=abs(expected_damping) * 1.0e-5)
+        self.assertGreater(float(actual_solref[0]), 0.0)
+        self.assertGreater(float(actual_solref[1]), 0.0)
+        self.assertAlmostEqual(
+            float(actual_solref[0]), float(expected_solref[0]), delta=abs(float(expected_solref[0])) * 1.0e-5
+        )
+        self.assertAlmostEqual(
+            float(actual_solref[1]), float(expected_solref[1]), delta=abs(float(expected_solref[1])) * 1.0e-5
+        )
 
     def test_per_contact_damping_takes_precedence_over_shape_material(self):
         contact_stiffness = 12345.0
@@ -11119,10 +11142,22 @@ class TestMuJoCoSolverPerContactSolref(unittest.TestCase):
         actual_solref = solver.mjw_data.contact.solref.numpy()[0]
         actual_solimp = solver.mjw_data.contact.solimp.numpy()[0]
         imp = float(actual_solimp[1])
-        expected_stiffness = contact_stiffness * (1.0 - imp)
+        direct_factor = self._contact_invweight(solver) * (1.0 - imp)
+        expected_stiffness = contact_stiffness * direct_factor
+        expected_damping = contact_damping * direct_factor
+        expected_solref = convert_solref(
+            max(float(expected_stiffness), MJ_MINVAL),
+            max(float(expected_damping), MJ_MINVAL),
+            1.0,
+            1.0,
+        )
 
-        self.assertAlmostEqual(float(actual_solref[0]), -expected_stiffness, delta=abs(expected_stiffness) * 1.0e-5)
-        self.assertAlmostEqual(float(actual_solref[1]), -contact_damping, delta=contact_damping * 1.0e-5)
+        self.assertAlmostEqual(
+            float(actual_solref[0]), float(expected_solref[0]), delta=abs(float(expected_solref[0])) * 1.0e-5
+        )
+        self.assertAlmostEqual(
+            float(actual_solref[1]), float(expected_solref[1]), delta=abs(float(expected_solref[1])) * 1.0e-5
+        )
 
 
 class TestMuJoCoSolverForceSpaceContactSolref(unittest.TestCase):
