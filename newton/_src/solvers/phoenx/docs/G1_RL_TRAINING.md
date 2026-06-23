@@ -149,9 +149,13 @@ are available. A behavior-cloning warm start from nanoG1 or another working G1
 policy followed by PPO fine-tuning keeps the runtime policy and trainer simple.
 The experimental nanog1_import.py helper can import the shipped nanoG1 binary
 as a normal PhoenX PPO checkpoint for teacher or warm-start studies without
-adding PyTorch. Adversarial imitation and learned reward models are plausible
-research tools, but they should remain experimental until they beat this simpler
-BC-plus-PPO path on the G1 gate.
+adding PyTorch. The best current teacher fine-tune uses conservative updates
+(`actor_lr=critic_lr=1e-4`, `train_epochs=1`, `replay_ratio=1.0`) and improves
+the standard gate only from `battery_perf=0.735` to `0.747`; continuing longer or
+using stronger reward changes regresses. Treat this as a diagnostic baseline,
+not a solved recipe. Adversarial imitation and learned reward models are
+plausible research tools, but they should remain experimental until they beat
+this simpler BC-plus-PPO path on the G1 gate.
 
 ## End-to-End Checkpoint Workflow
 

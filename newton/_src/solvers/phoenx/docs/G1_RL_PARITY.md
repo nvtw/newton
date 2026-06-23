@@ -171,7 +171,7 @@ or benchmark note.
 | PPO/V-trace replay math | PufferLib G1 fork at `e3825cea` | CUDA graph tests cover V-trace shifted rollout layout, priority weights, and whole-trajectory gather/scatter back to rollout buffers. | Keep as regression coverage; do not tune PPO until a new mismatch is proven. |
 | Muon/network kernels | PufferLib source plus local finite-difference tests | Tests cover Muon update semantics, PufferNet linear layout, MinGRU equations, mirror maps, and manual PPO actor/value gradients. | Re-check precision/layout only if training probes show learner instability independent of physics. |
 | Puffer learner isolation | PufferLib-style Torch PPO/V-trace/Muon learner | `bench_g1_train_puffer_torch` keeps PhoenX physics fixed and swaps only the RL learner. A 75.2M-sample run failed similarly to Warp PPO: `battery_perf=0.553`, `battery_falls=43`, forward-command perf `0.096`. | Treat remaining root cause as PhoenX env/physics/reward parity unless a more exact pinned native Puffer integration contradicts this result. |
-| nanoG1 policy import | Shipped `assets/nanoG1.bin` plus `deploy/nanog1_policy.c` | `nanog1_import.py` converts the PufferNet binary into a PhoenX PPO checkpoint; imported Warp output matches the nanoG1 C shim to `1.2e-7` on a zero-observation smoke. The imported policy reaches only `battery_perf=0.700` on the full PhoenX gate and fails, so a known-good policy still degrades under PhoenX. | Use the imported policy as the next primary physics/env parity probe before changing PPO or adding reward terms. |
+| nanoG1 policy import | Shipped `assets/nanoG1.bin` plus `deploy/nanog1_policy.c` | `nanog1_import.py` converts the PufferNet binary into a PhoenX PPO checkpoint; imported Warp output matches the nanoG1 C shim to `1.2e-7` on a zero-observation smoke. On current defaults the imported policy reaches about `battery_perf=0.735` on the full PhoenX gate and fails, so a known-good policy still degrades under PhoenX. Low-LR PhoenX PPO fine-tuning improves this only slightly to `0.747`. | Use the imported policy and its small fine-tune gain as the primary physics/env parity probe; do not expect scalar reward tweaks alone to close the gap. |
 | Gate diagnostics | nanoG1-style command battery | Fixed Python velocity diagnostic quaternion order to Newton `xyzw`; graph-captured regression covers the case. | Re-run gates only when diagnostics are needed; do not treat this as quality progress. |
 | Graph overlap / stale policy | Same recipe in eager and graph-leapfrog modes | A 60-iteration eager train-to-gate probe failed similarly to graph mode, so stream overlap/stale rollout policy is not the primary quality blocker. | Keep graph mode for throughput, but debug quality in the simpler eager path when possible. |
 | G1 env/reward contract | `g1_gpu.cu`, `recipe.py`, deploy constants | Tests cover observation/action layout, actuator-force torque penalty, reward decomposition, gait/success terms, command constants, and graph recurrent reset behavior. The default now resets recurrent state at PPO rollout boundaries because the Warp buffer does not yet store initial hidden states for update-time replay. | Add targeted tests for command resampling/reset timing and done/bootstrap semantics before changing rewards. |
@@ -276,18 +276,20 @@ failed at 1.0 m and 1.4 m. Current evidence therefore points to sparse task
 exploration/curriculum or teacher warm-start needs after the false-success bug,
 not a missing dense reward term.
 
-A current imported-teacher fine-tune probe used the verified nanoG1 checkpoint
-under PhoenX physics with `actor_lr=critic_lr=2e-4` and one PPO epoch. The first
-60 iterations improved the full gate from the imported baseline
-`battery_perf=0.707`, `battery_falls=122/24000` to `0.751`, `84/24000`.
-Continuing the same run to iteration 120 plateaued at `0.749`, `77/24000`; a
-higher `2e-3` learning-rate probe had unhealthy KL and clip fraction. A short
-physics-knob sweep on the imported teacher suggested MJCF contacts might help,
-but the full MJCF-contact gate was worse (`battery_perf=0.702`,
-`battery_falls=106/24000`). Keep the foot-box contact default and treat the
-teacher fine-tune as useful evidence, not a solved walking recipe: PPO can adapt
-the teacher slightly, but a known-good nanoG1 policy still degrades under
-PhoenX before optimization starts.
+A 2026-06-23 imported-teacher fine-tune probe used the verified nanoG1
+checkpoint under PhoenX physics and the stable default foot-box contacts. On
+current code, the freshly imported policy reached the standard gate at
+`battery_perf=0.735`, `battery_falls=94/24000` and a reduced 300-step gate at
+`0.751`, `12/3600`. Conservative PhoenX PPO fine-tuning with
+`actor_lr=critic_lr=1e-4`, `train_epochs=1`, and `replay_ratio=1.0` improved the
+reduced gate to `0.782`, `9/3600` at 60 iterations and the standard gate to
+`0.747`, `90/24000`. Continuing to 120 iterations regressed on the reduced gate
+(`0.773`, `10/3600`), while a `2e-4` learning rate, full-command curriculum, and
+anti-standing reward variant were all weaker. Treat this as useful evidence but
+not a solved walking recipe: PhoenX RL can adapt a known-good teacher slightly,
+then plateaus well below the `0.90` gate. The remaining gap is likely an
+environment/physics or teacher-distribution mismatch that PPO fine-tuning alone
+does not remove.
 
 ## 2026-06-22 Contract And Training Probes
 
