@@ -24,6 +24,18 @@ nanog1_import.py imports the shipped nanoG1 PufferNet binary into a normal
 PhoenX PPO checkpoint. This gives us a PyTorch-free teacher or warm-start policy
 for imitation experiments while keeping the default PPO trainer unchanged.
 
+train_g1_curriculum.py runs repeatable dense-target G1 curricula through the
+normal PhoenX PPO API. `simple-target` is a short from-scratch probe and is not
+expected to produce a perfect policy. `advanced-target` stages the task from
+short forward targets to longer target-conditioned walking and guards against
+the degenerate case where the initial target is already inside the sparse
+success radius. Run it with:
+
+```
+uv run --extra dev -m newton._src.solvers.phoenx.experimental.train_g1_curriculum \
+    --recipe advanced-target --output-dir /tmp/phoenx_g1_advanced --device cuda:0
+```
+
 The useful imitation-learning direction from HumanCompatibleAI/imitation is a
 behavior-cloning warm start from demonstrations or a teacher policy, followed by
 the existing PPO fine-tune. GAIL/AIRL/preference learning are plausible later,
