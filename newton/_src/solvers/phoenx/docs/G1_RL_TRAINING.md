@@ -50,11 +50,11 @@ benchmark defaults read from the same constants.
 - Observation size: 98.
 - Action size: 29.
 - Control frame dt: 0.02 s.
-- Physics dt: 0.0025 s via `sim_substeps=8`, with
-  `solver_iterations=4`. This is intentionally slower than the historical
+- Physics dt: 0.002 s via `sim_substeps=10`, with
+  `solver_iterations=8`. This is intentionally slower than the historical
   nanoG1-timed `5x2` PhoenX recipe: no-reset zero-action G1 simulations showed
   that `5x2` can explode after ground impact (`max_abs_qd` around `1e7` after
-  200 steps), while `8x4` stayed finite with `max_abs_qd` below `1`. Pass
+  200 steps), while higher-substep/high-iteration settings stayed finite. Pass
   `--sim-substeps 5 --solver-iterations 2` only when deliberately reproducing
   the old throughput-oriented setting.
 - Primitive-only collision by default (`parse_meshes=False`), preserving the
@@ -114,7 +114,17 @@ For time-boxed walking experiments, `reward_mode="dense_sparse_command"` adds
 a boolean command-success bonus to the dense nanoG1-style reward. This is a
 shaping mode, not the parity reference. It is useful when standing is too easy
 relative to commanded motion; combine it with held-out fixed-command progress or
-the gate metrics rather than judging by training reward alone.
+the gate metrics rather than judging by training reward alone. The optional
+`--w-command-progress` knob adds a command-aligned velocity projection term and
+is default-off because nanoG1 does not use it in the frozen recipe.
+
+IsaacLab-inspired contact regularizers are available but default-off:
+`--w-feet-air-time`, `--feet-air-time-threshold`, and `--w-feet-slide`. They are
+graph-captured and use preallocated foot air/contact-time buffers. Use them as
+reusable biped contact terms, not as a default parity claim: a pure
+IsaacLab-style reward replacement regressed, and adding small contact terms to
+the anti-standing nanoG1-style recipe reached about the same `battery_perf`
+plateau as before.
 
 The G1 material default keeps foot and ground friction at `0.6`, matching the
 nanoG1 pair coefficient and staying in a plausible real-world range. Use

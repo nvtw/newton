@@ -31,6 +31,7 @@ PHASE_PERIOD = 40
 
 W_TRACK_LIN = 2.5
 W_TRACK_ANG = 1.25
+W_COMMAND_PROGRESS = 0.0
 W_LIN_VEL_Z = -2.0
 W_ANG_VEL_XY = -1.3
 W_ORIENTATION = -10.0
@@ -40,6 +41,7 @@ W_ALIVE = 3.0
 W_TERMINATION = -1.0
 REWARD_MODE = "nanog1_dense"
 W_SPARSE_COMMAND_SUCCESS = 5.0
+W_TARGET_PROGRESS = 0.0
 SPARSE_COMMAND_VELOCITY_TOLERANCE = 0.35
 SPARSE_COMMAND_YAW_TOLERANCE = 0.4
 SPARSE_TARGET_POSITION = (0.6, 0.0)
@@ -62,6 +64,9 @@ W_GAIT_HIP = -4.0
 GAIT_FOOT_HEIGHT = 0.08
 W_BASE_HEIGHT = -10.0
 BASE_HEIGHT_TARGET = 0.78
+W_FEET_AIR_TIME = 0.0
+FEET_AIR_TIME_THRESHOLD = 0.4
+W_FEET_SLIDE = 0.0
 
 PARSE_MESHES = False
 PARSE_VISUALS = False
@@ -157,6 +162,7 @@ def default_g1_env_config(**overrides: Any):
         "phase_period": PHASE_PERIOD,
         "w_track_lin": W_TRACK_LIN,
         "w_track_ang": W_TRACK_ANG,
+        "w_command_progress": W_COMMAND_PROGRESS,
         "w_lin_vel_z": W_LIN_VEL_Z,
         "w_ang_vel_xy": W_ANG_VEL_XY,
         "w_orientation": W_ORIENTATION,
@@ -166,6 +172,7 @@ def default_g1_env_config(**overrides: Any):
         "w_termination": W_TERMINATION,
         "reward_mode": REWARD_MODE,
         "w_sparse_command_success": W_SPARSE_COMMAND_SUCCESS,
+        "w_target_progress": W_TARGET_PROGRESS,
         "sparse_command_velocity_tolerance": SPARSE_COMMAND_VELOCITY_TOLERANCE,
         "sparse_command_yaw_tolerance": SPARSE_COMMAND_YAW_TOLERANCE,
         "sparse_target_position": SPARSE_TARGET_POSITION,
@@ -182,6 +189,9 @@ def default_g1_env_config(**overrides: Any):
         "gait_foot_height": GAIT_FOOT_HEIGHT,
         "w_base_height": W_BASE_HEIGHT,
         "base_height_target": BASE_HEIGHT_TARGET,
+        "w_feet_air_time": W_FEET_AIR_TIME,
+        "feet_air_time_threshold": FEET_AIR_TIME_THRESHOLD,
+        "w_feet_slide": W_FEET_SLIDE,
         "parse_meshes": PARSE_MESHES,
         "parse_visuals": PARSE_VISUALS,
         "contact_geometry": CONTACT_GEOMETRY,

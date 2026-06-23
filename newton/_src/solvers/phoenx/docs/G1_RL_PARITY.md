@@ -91,6 +91,38 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
   already computed on the device from `step_successes`, so this was a diagnostic
   bug, not a training-quality fix.
 
+## IsaacLab / PhysX Comparison
+
+A 2026-06-23 IsaacLab pass checked the manager-based G1 velocity locomotion
+recipe under PhysX because PhysX and PhoenX are both PGS-style rigid-contact
+solvers. The relevant IsaacLab G1 task uses affine joint-position actions,
+`default_joint + 0.5 * action`, not full joint-range mapping. Its flat-task
+reward is velocity tracking plus yaw tracking, flat-orientation, action-rate,
+joint-acceleration/torque penalties, positive biped feet-air-time, foot-slide,
+ankle joint-limit, and joint-deviation penalties for hip yaw/roll, torso, arms,
+and fingers. The IsaacLab PhoenX preset for this task uses 4 internal PhoenX
+substeps, 8 PGS iterations, `velocity_readout="substep_end"`, and CUDA graphs.
+IsaacLab currently disables the contact-force sensor for its PhoenX preset, so
+its feet-air-time and feet-slide terms are dropped there.
+
+PhoenX RL now has default-off, graph-captured equivalents for the two reusable
+contact terms that IsaacLab drops on PhoenX: positive biped feet-air-time and
+contact foot-slide. They reuse the existing G1 foot-contact scan, maintain
+preallocated `(world, foot)` air/contact-time buffers, guard repeated `observe()`
+calls with a per-world episode-step stamp, clear on graph reset, and are covered
+by CUDA graph tests. Public knobs are `--w-feet-air-time`,
+`--feet-air-time-threshold`, and `--w-feet-slide`.
+
+Quality result: these terms are useful infrastructure but not the missing
+walking lever by themselves. Replacing the nanoG1 phase-gait reward with a close
+IsaacLab-style velocity/contact profile reached only `battery_perf=0.353` at
+120 iterations and failed badly. Adding smaller IsaacLab contact terms on top of
+the previous anti-standing nanoG1-style run reached `battery_perf=0.608` on the
+standard 1000-step gate at 120 iterations (`162/24000` falls), roughly the same
+plateau as the prior long anti-standing run. The next likely gaps are still
+joint-deviation/acceleration regularization, full-body action handling, or
+remaining physics/env mismatch, not just missing feet-air-time.
+
 ## 2026-06-22 MinGRU BPTT Fix
 
 A PPO-side root cause was found in the pure-Warp PufferMinGRU sequence backward
@@ -394,8 +426,30 @@ tracking/stability terms and adds a boolean command-success bonus. CUDA graph
 unit coverage verifies the bonus and keeps the original sparse-command mode
 unchanged. The first short forward-only shaped run did not solve walking; it
 reached only about `0.16` tracking perf on a 150-step forward evaluator after
-120 iterations. Keep this mode available for compact reward/PBT sweeps, but do
-not treat it as the current solution.
+120 iterations. A lower-exploration from-scratch run (`log_std_init=-0.7`,
+`action_scale=0.18`, `mu=0.4`) was also not viable under held-out evaluation:
+its saved checkpoints still fell in every 150-step forward world and topped out
+near `0.19` tracking perf. Keep this mode available for compact reward/PBT
+sweeps, but do not treat it as the current solution.
+
+Two follow-up warm-start fine-tunes also failed to beat the best dense `mu=0.4`
+teacher run. Adding the sparse command bonus to teacher fine-tuning reached only
+`battery_perf=0.766` on the cheap 4800-sample gate. Raising yaw tracking weight
+to `4.0` reduced yaw-rate RMS on the cheap gate (`0.67-0.70` versus roughly
+`0.72`), but overall cheap-gate battery perf stayed below the previous best
+(`0.760` versus `0.774`).
+
+`w_command_progress` is now available as an explicit PhoenX-only bootstrap term
+that rewards the command-aligned body-frame velocity projection. Its default is
+zero, so the nanoG1 parity recipe is unchanged, and CUDA graph unit coverage
+pins the scalar contribution when it is enabled. A short `mu=0.4` teacher
+fine-tune with `reward_mode=dense_sparse_command`, `w_command_progress=2.0`,
+and `w_sparse_command_success=2.0` was still flat: the cheap 4800-sample gate
+reached about `battery_perf=0.785` and a 300-step `0.5 m/s` forward evaluator
+still fell in roughly half the worlds. The next high-value work is therefore not
+more scalar reward-weight nudging; it is either a stronger warm-start/imitation
+stage, a proper curriculum/PBT pass that selects on held-out gate metrics, or
+fixing the remaining contact/actuation mismatch.
 
 ## Next Checks
 

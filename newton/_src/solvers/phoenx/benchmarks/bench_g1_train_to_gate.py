@@ -58,12 +58,14 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         w_alive=float(args.w_alive),
         w_track_lin=float(args.w_track_lin),
         w_track_ang=float(args.w_track_ang),
+        w_command_progress=float(args.w_command_progress),
         w_lin_vel_z=float(args.w_lin_vel_z),
         w_ang_vel_xy=float(args.w_ang_vel_xy),
         w_orientation=float(args.w_orientation),
         w_torque=float(args.w_torque),
         w_action_rate=float(args.w_action_rate),
         w_sparse_command_success=float(args.w_sparse_command_success),
+        w_target_progress=float(args.w_target_progress),
         sparse_command_velocity_tolerance=float(args.sparse_command_velocity_tolerance),
         sparse_command_yaw_tolerance=float(args.sparse_command_yaw_tolerance),
         sparse_target_position=(float(args.target_x), float(args.target_y)),
@@ -77,8 +79,13 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         w_gait_swing_contact=float(args.w_gait_swing_contact),
         w_gait_hip=float(args.w_gait_hip),
         w_base_height=float(args.w_base_height),
+        w_feet_air_time=float(args.w_feet_air_time),
+        feet_air_time_threshold=float(args.feet_air_time_threshold),
+        w_feet_slide=float(args.w_feet_slide),
         parse_meshes=bool(args.parse_meshes),
         contact_geometry=str(getattr(args, "contact_geometry", g1_recipe.CONTACT_GEOMETRY)),
+        ground_friction=float(args.ground_friction),
+        foot_box_xy_scale=float(args.foot_box_xy_scale),
         rigid_contact_max_per_world=int(args.rigid_contact_max_per_world),
         threads_per_world=args.threads_per_world,
         multi_world_scheduler=str(args.multi_world_scheduler),
@@ -258,12 +265,14 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "w_alive": float(args.w_alive),
         "w_track_lin": float(args.w_track_lin),
         "w_track_ang": float(args.w_track_ang),
+        "w_command_progress": float(args.w_command_progress),
         "w_lin_vel_z": float(args.w_lin_vel_z),
         "w_ang_vel_xy": float(args.w_ang_vel_xy),
         "w_orientation": float(args.w_orientation),
         "w_torque": float(args.w_torque),
         "w_action_rate": float(args.w_action_rate),
         "w_sparse_command_success": float(args.w_sparse_command_success),
+        "w_target_progress": float(args.w_target_progress),
         "sparse_command_velocity_tolerance": float(args.sparse_command_velocity_tolerance),
         "sparse_command_yaw_tolerance": float(args.sparse_command_yaw_tolerance),
         "target_x": float(args.target_x),
@@ -285,6 +294,11 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "w_gait_swing_contact": float(args.w_gait_swing_contact),
         "w_gait_hip": float(args.w_gait_hip),
         "w_base_height": float(args.w_base_height),
+        "w_feet_air_time": float(args.w_feet_air_time),
+        "feet_air_time_threshold": float(args.feet_air_time_threshold),
+        "w_feet_slide": float(args.w_feet_slide),
+        "ground_friction": float(args.ground_friction),
+        "foot_box_xy_scale": float(args.foot_box_xy_scale),
         "command_curriculum_start": float(command_curriculum_start),
         "command_curriculum_samples": int(command_curriculum_samples),
         "command_zero_probability": float(args.command_zero_probability),
@@ -416,17 +430,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument(
-        "--reward-mode", choices=("nanog1_dense", "sparse_command", "sparse_target"), default=g1_recipe.REWARD_MODE
+        "--reward-mode",
+        choices=("nanog1_dense", "sparse_command", "sparse_target", "dense_sparse_command"),
+        default=g1_recipe.REWARD_MODE,
     )
     parser.add_argument("--w-alive", type=float, default=g1_recipe.W_ALIVE)
     parser.add_argument("--w-track-lin", type=float, default=g1_recipe.W_TRACK_LIN)
     parser.add_argument("--w-track-ang", type=float, default=g1_recipe.W_TRACK_ANG)
+    parser.add_argument("--w-command-progress", type=float, default=g1_recipe.W_COMMAND_PROGRESS)
     parser.add_argument("--w-lin-vel-z", type=float, default=g1_recipe.W_LIN_VEL_Z)
     parser.add_argument("--w-ang-vel-xy", type=float, default=g1_recipe.W_ANG_VEL_XY)
     parser.add_argument("--w-orientation", type=float, default=g1_recipe.W_ORIENTATION)
     parser.add_argument("--w-torque", type=float, default=g1_recipe.W_TORQUE)
     parser.add_argument("--w-action-rate", type=float, default=g1_recipe.W_ACTION_RATE)
     parser.add_argument("--w-sparse-command-success", type=float, default=g1_recipe.W_SPARSE_COMMAND_SUCCESS)
+    parser.add_argument("--w-target-progress", type=float, default=g1_recipe.W_TARGET_PROGRESS)
     parser.add_argument(
         "--sparse-command-velocity-tolerance",
         type=float,
@@ -470,6 +488,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--w-gait-swing-contact", type=float, default=g1_recipe.W_GAIT_SWING_CONTACT)
     parser.add_argument("--w-gait-hip", type=float, default=g1_recipe.W_GAIT_HIP)
     parser.add_argument("--w-base-height", type=float, default=g1_recipe.W_BASE_HEIGHT)
+    parser.add_argument("--w-feet-air-time", type=float, default=g1_recipe.W_FEET_AIR_TIME)
+    parser.add_argument("--feet-air-time-threshold", type=float, default=g1_recipe.FEET_AIR_TIME_THRESHOLD)
+    parser.add_argument("--w-feet-slide", type=float, default=g1_recipe.W_FEET_SLIDE)
     parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
@@ -479,6 +500,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
     parser.add_argument("--parse-meshes", action="store_true")
     parser.add_argument("--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY)
+    parser.add_argument("--ground-friction", type=float, default=g1_recipe.GROUND_FRICTION)
+    parser.add_argument("--foot-box-xy-scale", type=float, default=g1_recipe.FOOT_BOX_XY_SCALE)
     parser.add_argument("--rigid-contact-max-per-world", type=int, default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
     parser.add_argument("--threads-per-world", type=_parse_int_or_auto, default=g1_recipe.THREADS_PER_WORLD)
     parser.add_argument("--multi-world-scheduler", default=g1_recipe.MULTI_WORLD_SCHEDULER)

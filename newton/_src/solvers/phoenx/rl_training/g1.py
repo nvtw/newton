@@ -934,6 +934,7 @@ def g1_observe_reward_kernel(
     command: wp.array2d[wp.float32],
     target_position: wp.array2d[wp.float32],
     body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
     body_com: wp.array[wp.vec3],
     foot_contacts: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
@@ -951,6 +952,7 @@ def g1_observe_reward_kernel(
     reward_dt: wp.float32,
     w_track_lin: wp.float32,
     w_track_ang: wp.float32,
+    w_command_progress: wp.float32,
     w_lin_vel_z: wp.float32,
     w_ang_vel_xy: wp.float32,
     w_orientation: wp.float32,
@@ -966,8 +968,12 @@ def g1_observe_reward_kernel(
     gait_foot_height: wp.float32,
     w_base_height: wp.float32,
     base_height_target: wp.float32,
+    w_feet_air_time: wp.float32,
+    feet_air_time_threshold: wp.float32,
+    w_feet_slide: wp.float32,
     reward_mode: wp.int32,
     w_sparse_command_success: wp.float32,
+    w_target_progress: wp.float32,
     sparse_command_velocity_tolerance: wp.float32,
     sparse_command_yaw_tolerance: wp.float32,
     sparse_target_radius: wp.float32,
@@ -975,6 +981,9 @@ def g1_observe_reward_kernel(
     sparse_target_success_min_base_height: wp.float32,
     sparse_target_success_max_base_height: wp.float32,
     w_mechanical_power: wp.float32,
+    foot_air_time: wp.array2d[wp.float32],
+    foot_contact_time: wp.array2d[wp.float32],
+    foot_timer_episode_step: wp.array[wp.int32],
     obs: wp.array2d[wp.float32],
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
@@ -1060,6 +1069,7 @@ def g1_observe_reward_kernel(
         yaw_err = _clip_finite(command[world, 2] - ang_z, wp.float32(-20.0), wp.float32(20.0))
         track_lin = wp.exp(-(vx_err * vx_err + vy_err * vy_err) / wp.float32(0.25))
         track_ang = wp.exp(-(yaw_err * yaw_err) / wp.float32(0.25))
+        command_progress = command[world, 0] * lin_b_x + command[world, 1] * lin_b_y + command[world, 2] * ang_z
         lin_vel_z_penalty = lin_b_z * lin_b_z
         ang_vel_xy_penalty = ang_x * ang_x + ang_y * ang_y
         orientation_penalty = gravity_x * gravity_x + gravity_y * gravity_y
@@ -1077,8 +1087,59 @@ def g1_observe_reward_kernel(
             qd_joint = _clip_finite(joint_qd[qd_base + wp.int32(6) + j], wp.float32(-200.0), wp.float32(200.0))
             mechanical_power_penalty = mechanical_power_penalty + wp.abs(force * qd_joint)
 
+        left_contact = wp.int32(0)
+        right_contact = wp.int32(0)
         gait_reward = wp.float32(0.0)
+        feet_air_time_reward = wp.float32(0.0)
+        feet_slide_penalty = wp.float32(0.0)
         if left_foot_body >= wp.int32(0) and right_foot_body >= wp.int32(0):
+            if foot_contacts[world, 0] > wp.float32(0.5):
+                left_contact = wp.int32(1)
+            if foot_contacts[world, 1] > wp.float32(0.5):
+                right_contact = wp.int32(1)
+
+            current_step = episode_steps[world]
+            if current_step > foot_timer_episode_step[world]:
+                foot_timer_episode_step[world] = current_step
+                if current_step <= wp.int32(0):
+                    foot_air_time[world, 0] = wp.float32(0.0)
+                    foot_air_time[world, 1] = wp.float32(0.0)
+                    foot_contact_time[world, 0] = wp.float32(0.0)
+                    foot_contact_time[world, 1] = wp.float32(0.0)
+                else:
+                    if left_contact != wp.int32(0):
+                        foot_contact_time[world, 0] = foot_contact_time[world, 0] + reward_dt
+                        foot_air_time[world, 0] = wp.float32(0.0)
+                    else:
+                        foot_air_time[world, 0] = foot_air_time[world, 0] + reward_dt
+                        foot_contact_time[world, 0] = wp.float32(0.0)
+                    if right_contact != wp.int32(0):
+                        foot_contact_time[world, 1] = foot_contact_time[world, 1] + reward_dt
+                        foot_air_time[world, 1] = wp.float32(0.0)
+                    else:
+                        foot_air_time[world, 1] = foot_air_time[world, 1] + reward_dt
+                        foot_contact_time[world, 1] = wp.float32(0.0)
+
+            command_speed_sq = command[world, 0] * command[world, 0] + command[world, 1] * command[world, 1]
+            if command_speed_sq > wp.float32(0.01):
+                if left_contact + right_contact == wp.int32(1):
+                    left_mode_time = foot_air_time[world, 0]
+                    if left_contact != wp.int32(0):
+                        left_mode_time = foot_contact_time[world, 0]
+                    right_mode_time = foot_air_time[world, 1]
+                    if right_contact != wp.int32(0):
+                        right_mode_time = foot_contact_time[world, 1]
+                    feet_air_time_reward = wp.min(wp.min(left_mode_time, right_mode_time), feet_air_time_threshold)
+
+            if left_contact != wp.int32(0):
+                left_vel = wp.spatial_top(body_qd[world * body_stride + left_foot_body])
+                feet_slide_penalty = feet_slide_penalty + wp.sqrt(left_vel[0] * left_vel[0] + left_vel[1] * left_vel[1])
+            if right_contact != wp.int32(0):
+                right_vel = wp.spatial_top(body_qd[world * body_stride + right_foot_body])
+                feet_slide_penalty = feet_slide_penalty + wp.sqrt(
+                    right_vel[0] * right_vel[0] + right_vel[1] * right_vel[1]
+                )
+
             phase_step = episode_steps[world] % phase_period
             left_phase = wp.float32(phase_step) / wp.float32(phase_period)
             right_phase = left_phase + wp.float32(0.5)
@@ -1091,13 +1152,6 @@ def g1_observe_reward_kernel(
             right_stance = wp.int32(0)
             if right_phase < gait_stance_fraction:
                 right_stance = wp.int32(1)
-
-            left_contact = wp.int32(0)
-            if foot_contacts[world, 0] > wp.float32(0.5):
-                left_contact = wp.int32(1)
-            right_contact = wp.int32(0)
-            if foot_contacts[world, 1] > wp.float32(0.5):
-                right_contact = wp.int32(1)
 
             if left_stance == left_contact:
                 gait_reward = gait_reward + w_gait_contact
@@ -1133,6 +1187,8 @@ def g1_observe_reward_kernel(
             )
             gait_reward = gait_reward + w_base_height * base_dz * base_dz
 
+        biped_contact_reward = w_feet_air_time * feet_air_time_reward + w_feet_slide * feet_slide_penalty
+
         sparse_success = wp.float32(0.0)
         sparse_lin_tol = wp.max(sparse_command_velocity_tolerance, wp.float32(0.0))
         sparse_yaw_tol = wp.max(sparse_command_yaw_tolerance, wp.float32(0.0))
@@ -1143,6 +1199,12 @@ def g1_observe_reward_kernel(
         target_success = wp.float32(0.0)
         target_radius = wp.max(sparse_target_radius, wp.float32(0.0))
         target_dist_sq = target_delta_w[0] * target_delta_w[0] + target_delta_w[1] * target_delta_w[1]
+        target_progress = wp.float32(0.0)
+        if target_dist_sq > wp.float32(1.0e-8):
+            inv_target_dist = wp.float32(1.0) / wp.sqrt(target_dist_sq)
+            target_progress = (
+                target_delta_w[0] * lin_origin_w[0] + target_delta_w[1] * lin_origin_w[1]
+            ) * inv_target_dist
         target_success_min_height = wp.max(sparse_target_success_min_base_height, wp.float32(0.0))
         target_success_max_height = wp.max(sparse_target_success_max_base_height, target_success_min_height)
         target_success_upright = _clip_float(sparse_target_success_upright_cos, wp.float32(-1.0), wp.float32(1.0))
@@ -1164,34 +1226,48 @@ def g1_observe_reward_kernel(
             shaped_reward = (
                 w_track_lin * track_lin
                 + w_track_ang * track_ang
+                + w_command_progress * command_progress
                 + w_lin_vel_z * lin_vel_z_penalty
                 + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
                 + w_orientation * orientation_penalty * upright_gate
                 + w_torque * torque_sq_penalty
                 + w_action_rate * action_rate_penalty
                 + gait_reward
+                + biped_contact_reward
                 + w_alive
             )
             reward = shaped_reward * reward_dt
         elif reward_mode == wp.int32(1):
-            shaped_reward = w_sparse_command_success * sparse_success + w_mechanical_power * mechanical_power_penalty
+            shaped_reward = (
+                w_sparse_command_success * sparse_success
+                + w_mechanical_power * mechanical_power_penalty
+                + biped_contact_reward
+            )
             reward = shaped_reward * reward_dt
             success_metric = sparse_success
         elif reward_mode == wp.int32(2):
             reward = (
-                w_sparse_command_success * target_success + w_mechanical_power * mechanical_power_penalty * reward_dt
+                w_sparse_command_success * target_success
+                + (
+                    w_target_progress * target_progress
+                    + w_mechanical_power * mechanical_power_penalty
+                    + biped_contact_reward
+                )
+                * reward_dt
             )
             success_metric = target_success
         else:
             shaped_reward = (
                 w_track_lin * track_lin
                 + w_track_ang * track_ang
+                + w_command_progress * command_progress
                 + w_lin_vel_z * lin_vel_z_penalty
                 + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
                 + w_orientation * orientation_penalty * upright_gate
                 + w_torque * torque_sq_penalty
                 + w_action_rate * action_rate_penalty
                 + gait_reward
+                + biped_contact_reward
                 + w_alive
                 + w_sparse_command_success * sparse_success
                 + w_mechanical_power * mechanical_power_penalty
@@ -1240,6 +1316,9 @@ def g1_reset_done_worlds_kernel(
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
+    foot_air_time: wp.array2d[wp.float32],
+    foot_contact_time: wp.array2d[wp.float32],
+    foot_timer_episode_step: wp.array[wp.int32],
     joint_f: wp.array[wp.float32],
     reset_articulation_mask: wp.array[wp.bool],
 ):
@@ -1264,8 +1343,12 @@ def g1_reset_done_worlds_kernel(
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
         actuator_force[world, col] = wp.float32(0.0)
+    if col < wp.int32(2):
+        foot_air_time[world, col] = wp.float32(0.0)
+        foot_contact_time[world, col] = wp.float32(0.0)
     if col == 0:
         episode_steps[world] = wp.int32(0)
+        foot_timer_episode_step[world] = wp.int32(-1)
 
 
 @wp.kernel
@@ -1285,6 +1368,9 @@ def g1_reset_done_worlds_seed_counter_kernel(
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
     actuator_force: wp.array2d[wp.float32],
+    foot_air_time: wp.array2d[wp.float32],
+    foot_contact_time: wp.array2d[wp.float32],
+    foot_timer_episode_step: wp.array[wp.int32],
     joint_f: wp.array[wp.float32],
     reset_articulation_mask: wp.array[wp.bool],
 ):
@@ -1310,8 +1396,12 @@ def g1_reset_done_worlds_seed_counter_kernel(
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
         actuator_force[world, col] = wp.float32(0.0)
+    if col < wp.int32(2):
+        foot_air_time[world, col] = wp.float32(0.0)
+        foot_contact_time[world, col] = wp.float32(0.0)
     if col == 0:
         episode_steps[world] = wp.int32(0)
+        foot_timer_episode_step[world] = wp.int32(-1)
 
 
 @wp.func
@@ -1691,6 +1781,7 @@ class ConfigEnvG1PhoenX:
         phase_period: Gait clock period in policy steps.
         w_track_lin: Linear XY velocity tracking reward scale.
         w_track_ang: Yaw-rate tracking reward scale.
+        w_command_progress: Command-aligned velocity projection reward scale.
         w_lin_vel_z: Vertical body-velocity penalty scale.
         w_ang_vel_xy: Base roll/pitch angular-velocity penalty scale.
         w_orientation: Projected-gravity tilt penalty scale.
@@ -1701,6 +1792,7 @@ class ConfigEnvG1PhoenX:
         reward_mode: Reward mode, either ``"nanog1_dense"``, ``"sparse_command"``,
             ``"sparse_target"``, or ``"dense_sparse_command"``.
         w_sparse_command_success: Sparse command or target success reward scale.
+        w_target_progress: Sparse-target progress velocity reward scale.
         sparse_command_velocity_tolerance: Linear command-success tolerance [m/s].
         sparse_command_yaw_tolerance: Yaw-rate command-success tolerance [rad/s].
         sparse_target_position: Sparse target XY position in each world [m].
@@ -1717,6 +1809,9 @@ class ConfigEnvG1PhoenX:
         gait_foot_height: Swing-foot target height [m].
         w_base_height: Base-height penalty scale.
         base_height_target: Target base height [m].
+        w_feet_air_time: IsaacLab-style positive biped feet-air-time reward scale.
+        feet_air_time_threshold: Saturation time for feet-air-time reward [s].
+        w_feet_slide: Contact foot XY sliding penalty scale.
         parse_meshes: Import MJCF mesh collision geoms. Disable for fast
             RL runs that use the primitive foot and arm geoms only.
         parse_visuals: Import visual-only MJCF meshes for rendering. When this
@@ -1763,6 +1858,7 @@ class ConfigEnvG1PhoenX:
     phase_period: int = g1_recipe.PHASE_PERIOD
     w_track_lin: float = g1_recipe.W_TRACK_LIN
     w_track_ang: float = g1_recipe.W_TRACK_ANG
+    w_command_progress: float = g1_recipe.W_COMMAND_PROGRESS
     w_lin_vel_z: float = g1_recipe.W_LIN_VEL_Z
     w_ang_vel_xy: float = g1_recipe.W_ANG_VEL_XY
     w_orientation: float = g1_recipe.W_ORIENTATION
@@ -1772,6 +1868,7 @@ class ConfigEnvG1PhoenX:
     w_termination: float = g1_recipe.W_TERMINATION
     reward_mode: str = g1_recipe.REWARD_MODE
     w_sparse_command_success: float = g1_recipe.W_SPARSE_COMMAND_SUCCESS
+    w_target_progress: float = g1_recipe.W_TARGET_PROGRESS
     sparse_command_velocity_tolerance: float = g1_recipe.SPARSE_COMMAND_VELOCITY_TOLERANCE
     sparse_command_yaw_tolerance: float = g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE
     sparse_target_position: tuple[float, float] = g1_recipe.SPARSE_TARGET_POSITION
@@ -1788,6 +1885,9 @@ class ConfigEnvG1PhoenX:
     gait_foot_height: float = g1_recipe.GAIT_FOOT_HEIGHT
     w_base_height: float = g1_recipe.W_BASE_HEIGHT
     base_height_target: float = g1_recipe.BASE_HEIGHT_TARGET
+    w_feet_air_time: float = g1_recipe.W_FEET_AIR_TIME
+    feet_air_time_threshold: float = g1_recipe.FEET_AIR_TIME_THRESHOLD
+    w_feet_slide: float = g1_recipe.W_FEET_SLIDE
     parse_meshes: bool = g1_recipe.PARSE_MESHES
     parse_visuals: bool = g1_recipe.PARSE_VISUALS
     contact_geometry: str = g1_recipe.CONTACT_GEOMETRY
@@ -1844,6 +1944,8 @@ class EnvG1PhoenX:
             raise ValueError("gait_stance_fraction must be in [0, 1]")
         if float(self.config.sparse_target_radius) < 0.0:
             raise ValueError("sparse_target_radius must be non-negative")
+        if float(self.config.feet_air_time_threshold) < 0.0:
+            raise ValueError("feet_air_time_threshold must be non-negative")
         if float(self.config.sparse_target_success_max_base_height) < float(
             self.config.sparse_target_success_min_base_height
         ):
@@ -1876,6 +1978,11 @@ class EnvG1PhoenX:
         self.control = self.model.control()
         self.contacts = self.model.contacts()
         self.foot_contacts = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
+        self.foot_air_time = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
+        self.foot_contact_time = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
+        self.foot_timer_episode_step = wp.array(
+            np.full(self.world_count, -1, dtype=np.int32), dtype=wp.int32, device=self.device
+        )
         self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
 
         self.default_joint_pos = wp.array(
@@ -2318,6 +2425,7 @@ class EnvG1PhoenX:
                 self.command,
                 self.target_position,
                 self.state_0.body_q,
+                self.state_0.body_qd,
                 self.model.body_com,
                 self.foot_contacts,
                 self.actuator_force,
@@ -2335,6 +2443,7 @@ class EnvG1PhoenX:
                 self.config.frame_dt,
                 self.config.w_track_lin,
                 self.config.w_track_ang,
+                self.config.w_command_progress,
                 self.config.w_lin_vel_z,
                 self.config.w_ang_vel_xy,
                 self.config.w_orientation,
@@ -2350,8 +2459,12 @@ class EnvG1PhoenX:
                 self.config.gait_foot_height,
                 self.config.w_base_height,
                 self.config.base_height_target,
+                self.config.w_feet_air_time,
+                self.config.feet_air_time_threshold,
+                self.config.w_feet_slide,
                 self._reward_mode_id,
                 self.config.w_sparse_command_success,
+                self.config.w_target_progress,
                 self.config.sparse_command_velocity_tolerance,
                 self.config.sparse_command_yaw_tolerance,
                 self.config.sparse_target_radius,
@@ -2360,7 +2473,15 @@ class EnvG1PhoenX:
                 self.config.sparse_target_success_max_base_height,
                 self.config.w_mechanical_power,
             ],
-            outputs=[self.obs, self.rewards, self.dones, self.successes],
+            outputs=[
+                self.foot_air_time,
+                self.foot_contact_time,
+                self.foot_timer_episode_step,
+                self.obs,
+                self.rewards,
+                self.dones,
+                self.successes,
+            ],
             device=self.device,
         )
         return self.obs
@@ -2532,6 +2653,10 @@ class EnvG1PhoenX:
         self.current_actions.zero_()
         self.previous_actions.zero_()
         self.actuator_force.zero_()
+        self.foot_contacts.zero_()
+        self.foot_air_time.zero_()
+        self.foot_contact_time.zero_()
+        self.foot_timer_episode_step.fill_(-1)
         self.control.joint_f.zero_()
         self.episode_steps.zero_()
         self.dones.fill_(1.0)
@@ -2581,6 +2706,9 @@ class EnvG1PhoenX:
                 self.previous_actions,
                 self.current_actions,
                 self.actuator_force,
+                self.foot_air_time,
+                self.foot_contact_time,
+                self.foot_timer_episode_step,
                 self.control.joint_f,
                 self._reset_articulation_mask,
             ],
@@ -2629,6 +2757,9 @@ class EnvG1PhoenX:
                 self.previous_actions,
                 self.current_actions,
                 self.actuator_force,
+                self.foot_air_time,
+                self.foot_contact_time,
+                self.foot_timer_episode_step,
                 self.control.joint_f,
                 self._reset_articulation_mask,
             ],

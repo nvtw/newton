@@ -172,6 +172,7 @@ def _main() -> int:
     )
     g1_parser.add_argument("--w-track-lin", type=float, default=g1_recipe.W_TRACK_LIN)
     g1_parser.add_argument("--w-track-ang", type=float, default=g1_recipe.W_TRACK_ANG)
+    g1_parser.add_argument("--w-command-progress", type=float, default=g1_recipe.W_COMMAND_PROGRESS)
     g1_parser.add_argument("--w-lin-vel-z", type=float, default=g1_recipe.W_LIN_VEL_Z)
     g1_parser.add_argument("--w-ang-vel-xy", type=float, default=g1_recipe.W_ANG_VEL_XY)
     g1_parser.add_argument("--w-orientation", type=float, default=g1_recipe.W_ORIENTATION)
@@ -180,6 +181,7 @@ def _main() -> int:
     g1_parser.add_argument("--w-alive", type=float, default=g1_recipe.W_ALIVE)
     g1_parser.add_argument("--w-termination", type=float, default=g1_recipe.W_TERMINATION)
     g1_parser.add_argument("--w-sparse-command-success", type=float, default=g1_recipe.W_SPARSE_COMMAND_SUCCESS)
+    g1_parser.add_argument("--w-target-progress", type=float, default=g1_recipe.W_TARGET_PROGRESS)
     g1_parser.add_argument(
         "--sparse-command-velocity-tolerance",
         type=float,
@@ -187,6 +189,9 @@ def _main() -> int:
     )
     g1_parser.add_argument("--sparse-command-yaw-tolerance", type=float, default=g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE)
     g1_parser.add_argument("--w-base-height", type=float, default=g1_recipe.W_BASE_HEIGHT)
+    g1_parser.add_argument("--w-feet-air-time", type=float, default=g1_recipe.W_FEET_AIR_TIME)
+    g1_parser.add_argument("--feet-air-time-threshold", type=float, default=g1_recipe.FEET_AIR_TIME_THRESHOLD)
+    g1_parser.add_argument("--w-feet-slide", type=float, default=g1_recipe.W_FEET_SLIDE)
     g1_parser.add_argument("--target-x", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[0])
     g1_parser.add_argument("--target-y", type=float, default=g1_recipe.SPARSE_TARGET_POSITION[1])
     g1_parser.add_argument("--sparse-target-radius", type=float, default=g1_recipe.SPARSE_TARGET_RADIUS)
@@ -492,6 +497,7 @@ def _main() -> int:
             reward_mode=args.reward_mode,
             w_track_lin=args.w_track_lin,
             w_track_ang=args.w_track_ang,
+            w_command_progress=args.w_command_progress,
             w_lin_vel_z=args.w_lin_vel_z,
             w_ang_vel_xy=args.w_ang_vel_xy,
             w_orientation=args.w_orientation,
@@ -500,9 +506,13 @@ def _main() -> int:
             w_alive=args.w_alive,
             w_termination=args.w_termination,
             w_sparse_command_success=args.w_sparse_command_success,
+            w_target_progress=args.w_target_progress,
             sparse_command_velocity_tolerance=args.sparse_command_velocity_tolerance,
             sparse_command_yaw_tolerance=args.sparse_command_yaw_tolerance,
             w_base_height=args.w_base_height,
+            w_feet_air_time=args.w_feet_air_time,
+            feet_air_time_threshold=args.feet_air_time_threshold,
+            w_feet_slide=args.w_feet_slide,
             sparse_target_position=(args.target_x, args.target_y),
             sparse_target_radius=args.sparse_target_radius,
             sparse_target_success_upright_cos=args.sparse_target_success_upright_cos,
