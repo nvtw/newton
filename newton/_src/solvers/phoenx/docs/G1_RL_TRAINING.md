@@ -132,8 +132,9 @@ reduced gate.
 
 The G1 material default keeps foot and ground friction at `0.6`, matching the
 nanoG1 pair coefficient and staying in a plausible real-world range. Use
-`--ground-friction 0.4` only as an explicit lower-grip material sweep; the first
-teacher-policy probes improved falls slightly but did not solve the full gate.
+`--ground-friction 0.4` only as an explicit lower-grip material sweep; current
+imported-teacher probes moved the reduced gate only from `0.751` to `0.760`, and
+low-LR teacher fine-tuning at `0.4` did not beat the default-friction fine-tune.
 
 For sparse-target experiments, `reward_mode="sparse_target"` intentionally
 keeps the reward small: boolean target success, the tiny mechanical-power

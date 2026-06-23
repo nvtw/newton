@@ -285,11 +285,14 @@ current code, the freshly imported policy reached the standard gate at
 reduced gate to `0.782`, `9/3600` at 60 iterations and the standard gate to
 `0.747`, `90/24000`. Continuing to 120 iterations regressed on the reduced gate
 (`0.773`, `10/3600`), while a `2e-4` learning rate, full-command curriculum, and
-anti-standing reward variant were all weaker. Treat this as useful evidence but
-not a solved walking recipe: PhoenX RL can adapt a known-good teacher slightly,
-then plateaus well below the `0.90` gate. The remaining gap is likely an
-environment/physics or teacher-distribution mismatch that PPO fine-tuning alone
-does not remove.
+anti-standing reward variant were all weaker. A small material sweep on the
+imported teacher gave reduced-gate `0.760` at ground friction `0.4`, `0.759` at
+`0.5`, and `0.748` at `0.7`; fine-tuning at `0.4` reached only `0.777`, below
+the default-friction fine-tune. Treat this as useful evidence but not a solved
+walking recipe: PhoenX RL can adapt a known-good teacher slightly, then plateaus
+well below the `0.90` gate. The remaining gap is likely an environment/physics
+or teacher-distribution mismatch that PPO fine-tuning and simple material
+changes do not remove.
 
 ## 2026-06-22 Contract And Training Probes
 
