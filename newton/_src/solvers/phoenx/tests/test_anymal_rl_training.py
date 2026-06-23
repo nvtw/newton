@@ -9,10 +9,51 @@ import numpy as np
 import warp as wp
 
 import newton.rl as rl
+from newton._src.solvers.phoenx.experimental import train_anymal_full_control_curriculum as anymal_curriculum
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
 class TestAnymalPhoenXRL(unittest.TestCase):
+    def test_full_control_curriculum_phase_env_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal RL tests")
+        phases = anymal_curriculum.build_full_control_curriculum()
+        names = [phase.name for phase in phases]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(names[0], "balance_and_step_forward")
+        self.assertEqual(names[-1], "robust_full_control")
+
+        args = anymal_curriculum._make_parser().parse_args(
+            [
+                "--world-count",
+                "2",
+                "--sim-substeps",
+                "1",
+                "--solver-iterations",
+                "1",
+                "--velocity-iterations",
+                "1",
+                "--max-episode-steps",
+                "0",
+            ]
+        )
+        env_config = anymal_curriculum.build_phase_env_config(
+            args,
+            phases[-1],
+            world_count=2,
+            auto_reset=False,
+        )
+        env = rl.EnvAnymalPhoenX(env_config, device=device)
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            obs, rewards, dones = env.step(actions)
+        wp.capture_launch(capture.graph)
+
+        self.assertEqual(obs.shape, (env.world_count, env.obs_dim))
+        self.assertEqual(rewards.shape, (env.world_count,))
+        self.assertEqual(dones.shape, (env.world_count,))
+        self.assertTrue(np.all(np.isfinite(obs.numpy())))
+
     def test_dense_command_ppo_step_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX Anymal RL tests")
         env = rl.EnvAnymalPhoenX(

@@ -503,10 +503,11 @@ def check_phase_gate(stats: StatsEvaluateAnymalWalk, phase: PhaseAnymalWalk) -> 
         failures.append(f"survival={stats.survival_fraction:.3f} < {phase.gate_min_survival_fraction:.3f}")
     command_x = float(stats.command[0])
     min_vx = abs(command_x) * float(phase.gate_min_forward_velocity_fraction)
-    if command_x >= 0.0 and stats.mean_forward_velocity < min_vx:
-        failures.append(f"vx={stats.mean_forward_velocity:.3f} < {min_vx:.3f}")
-    if command_x < 0.0 and stats.mean_forward_velocity > -min_vx:
-        failures.append(f"vx={stats.mean_forward_velocity:.3f} > {-min_vx:.3f}")
+    if abs(command_x) > 1.0e-6:
+        if command_x > 0.0 and stats.mean_forward_velocity < min_vx:
+            failures.append(f"vx={stats.mean_forward_velocity:.3f} < {min_vx:.3f}")
+        if command_x < 0.0 and stats.mean_forward_velocity > -min_vx:
+            failures.append(f"vx={stats.mean_forward_velocity:.3f} > {-min_vx:.3f}")
     if stats.mean_abs_forward_velocity_error > phase.gate_max_abs_forward_velocity_error:
         failures.append(
             f"|vx-cmd|={stats.mean_abs_forward_velocity_error:.3f} > {phase.gate_max_abs_forward_velocity_error:.3f}"
