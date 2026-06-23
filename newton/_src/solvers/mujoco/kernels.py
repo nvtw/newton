@@ -437,9 +437,10 @@ def convert_newton_contacts_to_mjwarp_kernel(
                         1.0,
                     )
 
-        # Convert Newton per-contact stiffness/damping to MuJoCo solref
-        # (timeconst, dampratio). Per-contact overrides take precedence over
-        # the shape-material force-space override above. solimp is set to
+        # Convert Newton per-contact stiffness/damping to MuJoCo's direct
+        # negative solref format. Per-contact stiffness comes from collision
+        # reduction (for example hydroelastic contacts) and must not be softened
+        # by MuJoCo's positive-solref refsafe timestep clamp. solimp is set to
         # approximate a linear force-displacement relationship at rest,
         # compensating for impedance scaling. See
         # https://mujoco.readthedocs.io/en/latest/modeling.html#solver-parameters
@@ -448,15 +449,13 @@ def convert_newton_contacts_to_mjwarp_kernel(
             if contact_ke > 0.0:
                 imp = solimp[1]
                 solimp = vec5(imp, imp, 0.001, 1.0, 0.5)
-                contact_ke = contact_ke * (1.0 - imp)
-                kd = rigid_contact_damping[tid]
-                if kd > 0.0:
-                    timeconst = 2.0 / kd
-                    dampratio = wp.sqrt(1.0 / (timeconst * timeconst * contact_ke))
-                else:
-                    timeconst = wp.sqrt(1.0 / contact_ke)
-                    dampratio = 1.0
-                solref = wp.vec2(timeconst, dampratio)
+                direct_ke = wp.max(contact_ke * (1.0 - imp), MJ_MINVAL)
+                direct_kd = rigid_contact_damping[tid]
+                if direct_kd <= 0.0:
+                    direct_kd = mix * shape_material_kd[shape_a] + (1.0 - mix) * shape_material_kd[shape_b]
+                if direct_kd <= 0.0:
+                    direct_kd = 2.0 * wp.sqrt(direct_ke)
+                solref = wp.vec2(-direct_ke, -direct_kd)
 
             friction_scale = rigid_contact_friction[tid]
             if friction_scale > 0.0:

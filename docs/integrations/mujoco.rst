@@ -224,24 +224,32 @@ makes the contact stiffness independent of either body's mass, so
 ``shape_material_ke`` / ``shape_material_kd`` and ``mujoco.solref``
 combine, with the same three states as joint limits:
 
-* ``SOLREF_MODE_FORCE_SPACE`` — Newton force-space gains; the per-contact
-  factor above applies.
-* ``SOLREF_MODE_RAW`` — forward the authored ``mujoco.solref`` (e.g.
+* :attr:`~newton.solvers.SolverMuJoCo.SolrefMode.FORCE_SPACE` — Newton
+  force-space gains; the per-contact factor above applies.
+* :attr:`~newton.solvers.SolverMuJoCo.SolrefMode.RAW` — forward the authored ``mujoco.solref`` (e.g.
   from an MJCF/USD import) unchanged.
-* ``SOLREF_MODE_MJCF_DEFAULT`` — registered default; preserves MuJoCo's
-  compile-time contact dynamics and the legacy
-  ``convert_solref(ke, kd, 1, 1)`` round-trip in ``geom_solref``. Opt
-  in to force-space scaling by setting
-  ``model.mujoco.solref_mode[shape] = SOLREF_MODE_FORCE_SPACE``.
+* :attr:`~newton.solvers.SolverMuJoCo.SolrefMode.MJCF_DEFAULT` — registered
+  default; preserves MuJoCo's compile-time contact dynamics and the legacy
+  ``convert_solref(ke, kd, 1, 1)`` round-trip in ``geom_solref``. Opt in to
+  force-space scaling by passing ``force_space_contact_gains=True`` to
+  :class:`~newton.solvers.SolverMuJoCo`, or by setting all relevant shapes
+  before constructing the solver:
+
+  .. code-block:: python
+
+     mode = model.mujoco.solref_mode.numpy()
+     mode[:] = int(newton.solvers.SolverMuJoCo.SolrefMode.FORCE_SPACE)
+     model.mujoco.solref_mode.assign(mode)
 
 .. note::
 
    ``use_mujoco_contacts=True`` and the MuJoCo CPU backend do not
    apply the per-contact two-body factor — MuJoCo's internal
    ``contact_params`` averages per-geom ``solref``, which cannot
-   reproduce the inverse-mass sum. ``SOLREF_MODE_FORCE_SPACE`` shapes
-   fall back to the legacy ``convert_solref(ke, kd, 1, 1)``
-   approximation on those paths.
+   reproduce the inverse-mass sum.
+   :attr:`~newton.solvers.SolverMuJoCo.SolrefMode.FORCE_SPACE` shapes fall
+   back to the legacy ``convert_solref(ke, kd, 1, 1)`` approximation on those
+   paths.
 
 
 Actuators
