@@ -149,8 +149,14 @@ class ContactContainer:
 
 
 @wp.kernel(enable_backward=False)
-def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer):
+def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer, valid_count: wp.array[wp.int32]):
     k = wp.tid()
+    # Newton packs live contacts into [0, count); slots at or beyond the prior
+    # solve's count hold no warm-start state, so skip them. The launch still
+    # spans the full capacity (graph-stable dim); the early-out elides the copy
+    # traffic for the typically large inactive tail.
+    if k >= valid_count[0]:
+        return
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         cc.prev_impulses[row, k] = cc.impulses[row, k]
     for row in range(CC_DWORDS_PER_CONTACT):
@@ -545,12 +551,20 @@ def contact_container_zeros(
     return cc
 
 
-def contact_container_copy_current_to_prev(cc: ContactContainer, device: wp.DeviceLike = None) -> None:
-    """Copy current persistent contact state into prev buffers."""
+def contact_container_copy_current_to_prev(
+    cc: ContactContainer, valid_count: wp.array[wp.int32], device: wp.DeviceLike = None
+) -> None:
+    """Copy current persistent contact state into prev buffers.
+
+    Args:
+        valid_count: Single-element device array with the number of live
+            contact slots (the prior solve's contact count). Slots beyond it
+            are skipped, since Newton packs contacts into ``[0, count)``.
+    """
     wp.launch(
         _contact_container_copy_current_to_prev_kernel,
         dim=int(cc.impulses.shape[1]),
-        outputs=[cc],
+        inputs=[cc, valid_count],
         device=device,
     )
 

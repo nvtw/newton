@@ -1201,6 +1201,11 @@ class PhoenXWorld:
             self._cid_of_contact_prev = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
             self._last_contact_generation = wp.full(1, -1, dtype=wp.int32, device=self.device)
             self._reuse_contact_indices = wp.zeros(1, dtype=wp.int32, device=self.device)
+            # Number of contact slots holding live warm-start state (the prior
+            # solve's contact count). Newton packs contacts into [0, count), so
+            # the current->prev copy only needs to touch this many slots, not
+            # the full ``rigid_contact_max`` capacity. Starts at 0 (cc zeroed).
+            self._cc_valid_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
             self._contact_cols = contact_column_container_zeros(1, device=self.device)
@@ -1209,6 +1214,7 @@ class PhoenXWorld:
             self._cid_of_contact_prev = None
             self._last_contact_generation = wp.full(1, -1, dtype=wp.int32, device=self.device)
             self._reuse_contact_indices = wp.zeros(1, dtype=wp.int32, device=self.device)
+            self._cc_valid_count = wp.zeros(1, dtype=wp.int32, device=self.device)
             self._enable_body_pair_grouping = False
 
         self._contact_views: ContactViews | None = None
@@ -3040,7 +3046,11 @@ class PhoenXWorld:
         )
 
         # Keep history pointers stable so one-step CUDA graphs replay correctly.
-        contact_container_copy_current_to_prev(self._contact_container, device=self.device)
+        # The copy uses the prior solve's contact count (the live range of the
+        # cc buffers); we then refresh it to this frame's count, which is the
+        # range the upcoming solve writes and the next copy must preserve.
+        contact_container_copy_current_to_prev(self._contact_container, self._cc_valid_count, device=self.device)
+        wp.copy(self._cc_valid_count, contacts.rigid_contact_count, count=1)
         wp.copy(
             self._cid_of_contact_prev,
             self._cid_of_contact_cur,
