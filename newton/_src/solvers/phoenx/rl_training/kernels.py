@@ -19,6 +19,12 @@ DENSE_TILE_IN = 16
 DENSE_TILE_OUT = 16
 DENSE_TILE_BLOCK_DIM = 256
 DENSE_BIAS_TILE_BATCH = 256
+# Split-K factor for the weight gradient. The weight matrices are small
+# (e.g. 128x128 -> 64 output tiles) but the batch contraction is huge, so a
+# plain tiled reduction leaves most SMs idle while one block serially sweeps
+# the whole batch. Splitting the batch across DENSE_WEIGHT_GRAD_KCHUNKS blocks
+# per output tile fills the GPU; a fixed-order reduction keeps it deterministic.
+DENSE_WEIGHT_GRAD_KCHUNKS = 8
 PPO_LOG_STD_PARTIAL_BATCH = 256
 
 
@@ -363,6 +369,48 @@ def dense_weight_grad_tiled_kernel(
         )
         wp.tile_matmul(wp.tile_transpose(x_tile), grad_tile, total)
     wp.tile_store(weight_grad, total, offset=(in_tile * DENSE_TILE_IN, out_tile * DENSE_TILE_OUT))
+
+
+@wp.kernel
+def dense_weight_grad_splitk_tiled_kernel(
+    x: wp.array2d[wp.float32],
+    grad_pre: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    partials: wp.array3d[wp.float32],
+):
+    in_tile, out_tile, kc = wp.tid()
+    total = wp.tile_zeros(shape=(DENSE_TILE_IN, DENSE_TILE_OUT), dtype=wp.float32)
+    batch_tiles = (batch_size + DENSE_TILE_BATCH - wp.int32(1)) // DENSE_TILE_BATCH
+    # Each k-chunk strides through the batch tiles; the trip count is uniform
+    # across the whole block so the tile ops stay collective.
+    t = kc
+    while t < batch_tiles:
+        x_tile = wp.tile_load(
+            x,
+            shape=(DENSE_TILE_BATCH, DENSE_TILE_IN),
+            offset=(t * DENSE_TILE_BATCH, in_tile * DENSE_TILE_IN),
+        )
+        grad_tile = wp.tile_load(
+            grad_pre,
+            shape=(DENSE_TILE_BATCH, DENSE_TILE_OUT),
+            offset=(t * DENSE_TILE_BATCH, out_tile * DENSE_TILE_OUT),
+        )
+        wp.tile_matmul(wp.tile_transpose(x_tile), grad_tile, total)
+        t += wp.int32(DENSE_WEIGHT_GRAD_KCHUNKS)
+    wp.tile_store(partials[kc], total, offset=(in_tile * DENSE_TILE_IN, out_tile * DENSE_TILE_OUT))
+
+
+@wp.kernel
+def dense_weight_grad_reduce_kernel(
+    partials: wp.array3d[wp.float32],
+    kchunks: wp.int32,
+    weight_grad: wp.array2d[wp.float32],
+):
+    in_col, out_col = wp.tid()
+    total = wp.float32(0.0)
+    for k in range(kchunks):
+        total = total + partials[k, in_col, out_col]
+    weight_grad[in_col, out_col] = total
 
 
 @wp.kernel

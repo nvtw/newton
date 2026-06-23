@@ -19,6 +19,7 @@ from .kernels import (
     DENSE_TILE_BLOCK_DIM,
     DENSE_TILE_IN,
     DENSE_TILE_OUT,
+    DENSE_WEIGHT_GRAD_KCHUNKS,
     add_2d_kernel,
     copy_1d_kernel,
     copy_2d_kernel,
@@ -29,6 +30,8 @@ from .kernels import (
     dense_input_grad_tiled_kernel,
     dense_layer_kernel,
     dense_weight_bias_grad_kernel,
+    dense_weight_grad_reduce_kernel,
+    dense_weight_grad_splitk_tiled_kernel,
     dense_weight_grad_tiled_kernel,
     fill_eps_kernel,
     fill_eps_seed_counter_kernel,
@@ -127,6 +130,7 @@ class WarpMLP:
         self._manual_output_grads: list[wp.array2d[wp.float32]] = []
         self._manual_pre_grads: list[wp.array2d[wp.float32]] = []
         self._manual_bias_partials: list[wp.array2d[wp.float32]] = []
+        self._manual_weight_grad_partials: list[wp.array3d[wp.float32]] = []
         self._manual_bf16_inputs: list[wp.array2d[wp.bfloat16]] = []
         self._manual_bf16_pre_grads: list[wp.array2d[wp.bfloat16]] = []
         self._manual_bf16_weights: list[wp.array2d[wp.bfloat16]] = []
@@ -392,15 +396,24 @@ class WarpMLP:
                         device=self.device,
                     )
                 else:
+                    weight_grad_partials = self._manual_weight_grad_partials[layer]
                     wp.launch_tiled(
-                        dense_weight_grad_tiled_kernel,
+                        dense_weight_grad_splitk_tiled_kernel,
                         dim=(
                             _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
                             _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
+                            DENSE_WEIGHT_GRAD_KCHUNKS,
                         ),
                         inputs=[x, grad_pre, rows],
-                        outputs=[weight.grad],
+                        outputs=[weight_grad_partials],
                         block_dim=DENSE_TILE_BLOCK_DIM,
+                        device=self.device,
+                    )
+                    wp.launch(
+                        dense_weight_grad_reduce_kernel,
+                        dim=(int(weight.shape[0]), int(weight.shape[1])),
+                        inputs=[weight_grad_partials, DENSE_WEIGHT_GRAD_KCHUNKS],
+                        outputs=[weight.grad],
                         device=self.device,
                     )
                 bias_partial = self._manual_bias_partials[layer]
@@ -484,6 +497,7 @@ class WarpMLP:
         self._manual_output_grads = []
         self._manual_pre_grads = []
         self._manual_bias_partials = []
+        self._manual_weight_grad_partials = []
         self._manual_bf16_inputs = []
         self._manual_bf16_pre_grads = []
         self._manual_bf16_weights = []
@@ -496,6 +510,17 @@ class WarpMLP:
             if self.device.is_cuda:
                 self._manual_bias_partials.append(
                     wp.empty((bias_tile_count, int(width)), dtype=wp.float32, device=self.device, requires_grad=False)
+                )
+                # Split-K partials, padded to the tile grid so the tiled store stays in bounds.
+                padded_in = _ceil_div(int(in_dim), DENSE_TILE_IN) * DENSE_TILE_IN
+                padded_out = _ceil_div(int(width), DENSE_TILE_OUT) * DENSE_TILE_OUT
+                self._manual_weight_grad_partials.append(
+                    wp.empty(
+                        (DENSE_WEIGHT_GRAD_KCHUNKS, padded_in, padded_out),
+                        dtype=wp.float32,
+                        device=self.device,
+                        requires_grad=False,
+                    )
                 )
                 if self.manual_weight_grad_dtype == "bfloat16" or self.manual_forward_dtype == "bfloat16":
                     self._manual_bf16_inputs.append(

@@ -2516,6 +2516,52 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(net.weights[1].grad.numpy(), expected_w1_grad, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(net.biases[1].grad.numpy(), expected_b1_grad, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_split_k_weight_grad_matches_numpy_across_chunks_and_is_deterministic(self) -> None:
+        # The split-K weight gradient reduces the batch contraction across
+        # several blocks per output tile. Use a batch large enough that the
+        # tile count exceeds the k-chunk count so the cross-chunk reduction is
+        # exercised, and confirm the result matches numpy and is bit-stable.
+        device = require_cuda_graph_capture("PhoenX split-K weight grad tests")
+        batch_size = 1536  # > DENSE_WEIGHT_GRAD_KCHUNKS * DENSE_TILE_BATCH
+        input_dim = 48
+        hidden_dim = 32
+        output_dim = 17
+
+        rng = np.random.default_rng(7)
+        obs_np = rng.standard_normal((batch_size, input_dim)).astype(np.float32)
+        grad_out_np = rng.standard_normal((batch_size, output_dim)).astype(np.float32)
+
+        net = rl.WarpMLP((input_dim, hidden_dim, output_dim), activation="elu", device=device, seed=5)
+        net.reserve_buffers(batch_size)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        grad_out = wp.array(grad_out_np, dtype=wp.float32, device=device)
+
+        w0_np = net.weights[0].numpy()
+        b0_np = net.biases[0].numpy()
+        w1_np = net.weights[1].numpy()
+
+        with wp.ScopedCapture(device=device) as capture:
+            net.forward_manual(obs)
+            net.backward_manual(grad_out)
+        wp.capture_launch(capture.graph)
+        w0_grad_first = net.weights[0].grad.numpy().copy()
+        w1_grad_first = net.weights[1].grad.numpy().copy()
+
+        hidden_pre = obs_np @ w0_np + b0_np
+        hidden = np.where(hidden_pre > 0.0, hidden_pre, np.exp(hidden_pre) - 1.0).astype(np.float32)
+        grad_hidden = grad_out_np @ w1_np.T
+        grad_hidden_pre = grad_hidden * np.where(hidden > 0.0, 1.0, hidden + 1.0).astype(np.float32)
+        expected_w0_grad = obs_np.T @ grad_hidden_pre
+        expected_w1_grad = hidden.T @ grad_out_np
+
+        np.testing.assert_allclose(w0_grad_first, expected_w0_grad, rtol=2.0e-3, atol=2.0e-3)
+        np.testing.assert_allclose(w1_grad_first, expected_w1_grad, rtol=2.0e-3, atol=2.0e-3)
+
+        # The fixed-order chunk reduction must be bit-reproducible across launches.
+        wp.capture_launch(capture.graph)
+        np.testing.assert_array_equal(net.weights[0].grad.numpy(), w0_grad_first)
+        np.testing.assert_array_equal(net.weights[1].grad.numpy(), w1_grad_first)
+
     def test_puffernet_linear_layer_matches_warp_mlp_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX PufferNet linear parity tests")
         puffernet = _PUFFERLIB_ROOT / "src" / "puffernet.h"
