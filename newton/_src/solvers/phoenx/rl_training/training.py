@@ -193,8 +193,9 @@ class ConfigTrainAnymalPPO:
         command_x_range: Sampled forward command range [m/s].
         command_y_range: Sampled lateral command range [m/s].
         command_yaw_range: Sampled yaw-rate command range [rad/s].
+        command_height_range: Sampled base-height offset range [m].
         command_yaw_min_abs: Minimum non-zero sampled yaw-rate magnitude [rad/s].
-        command_zero_probability: Probability of replacing a sampled command with zero velocity.
+        command_zero_probability: Probability of replacing a sampled command with zero velocity and height offset.
         resume_checkpoint: Optional PPO checkpoint to resume from.
         checkpoint_path: Optional path for writing PPO checkpoints.
         checkpoint_interval: Save a checkpoint every N iterations when positive.
@@ -222,6 +223,7 @@ class ConfigTrainAnymalPPO:
     command_x_range: tuple[float, float] = (0.0, 0.0)
     command_y_range: tuple[float, float] = (0.0, 0.0)
     command_yaw_range: tuple[float, float] = (0.0, 0.0)
+    command_height_range: tuple[float, float] = (0.0, 0.0)
     command_yaw_min_abs: float = 0.0
     command_zero_probability: float = 0.0
     resume_checkpoint: str | None = None
@@ -1210,6 +1212,8 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
         raise ValueError("command_y_range must be ordered")
     if cfg.command_yaw_range[1] < cfg.command_yaw_range[0]:
         raise ValueError("command_yaw_range must be ordered")
+    if cfg.command_height_range[1] < cfg.command_height_range[0]:
+        raise ValueError("command_height_range must be ordered")
     if float(cfg.command_yaw_min_abs) < 0.0:
         raise ValueError("command_yaw_min_abs must be non-negative")
     if not 0.0 <= float(cfg.command_zero_probability) <= 1.0:
@@ -1380,6 +1384,7 @@ def _configure_rollout_commands(env: EnvAnymalPhoenX, cfg: ConfigTrainAnymalPPO,
         x_range=cfg.command_x_range,
         y_range=cfg.command_y_range,
         yaw_range=cfg.command_yaw_range,
+        height_range=cfg.command_height_range,
         yaw_min_abs=cfg.command_yaw_min_abs,
         zero_probability=cfg.command_zero_probability,
     )
@@ -1393,13 +1398,17 @@ def _sample_velocity_commands(
     x_range: tuple[float, float],
     y_range: tuple[float, float],
     yaw_range: tuple[float, float],
+    height_range: tuple[float, float],
     yaw_min_abs: float,
     zero_probability: float,
 ) -> np.ndarray:
-    commands = np.empty((int(world_count), 3), dtype=np.float32)
+    commands = np.empty((int(world_count), 4), dtype=np.float32)
     commands[:, 0] = rng.uniform(float(x_range[0]), float(x_range[1]), size=int(world_count)).astype(np.float32)
     commands[:, 1] = rng.uniform(float(y_range[0]), float(y_range[1]), size=int(world_count)).astype(np.float32)
     commands[:, 2] = rng.uniform(float(yaw_range[0]), float(yaw_range[1]), size=int(world_count)).astype(np.float32)
+    commands[:, 3] = rng.uniform(float(height_range[0]), float(height_range[1]), size=int(world_count)).astype(
+        np.float32
+    )
     min_abs_yaw = float(max(yaw_min_abs, 0.0))
     if min_abs_yaw > 0.0:
         yaw = commands[:, 2]

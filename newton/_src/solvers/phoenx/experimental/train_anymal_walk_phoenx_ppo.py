@@ -26,12 +26,14 @@ import newton.rl as rl
 
 _BASE_ENV = {
     "reward_mode": "dense_command",
-    "command": (0.6, 0.0, 0.0),
+    "command": (0.6, 0.0, 0.0, 0.0),
     "max_episode_steps": 500,
     "lin_vel_reward_scale": 1.0,
     "yaw_rate_reward_scale": 0.5,
     "lin_vel_tracking_sigma": 0.5,
     "yaw_rate_tracking_sigma": 0.5,
+    "base_height_reward_scale": 0.75,
+    "base_height_tracking_sigma": 0.06,
     "z_vel_reward_scale": -2.0,
     "ang_vel_reward_scale": -0.05,
     "action_rate_reward_scale": -0.01,
@@ -40,6 +42,7 @@ _BASE_ENV = {
     "forward_progress_reward_scale": 0.0,
     "fall_reward_scale": -2.0,
     "energy_reward_scale": -2.5e-5,
+    "hip_abduction_reward_scale": -0.15,
     "min_base_height": 0.30,
     "min_upright_cos": 0.35,
     "disturbance_warmup_steps": 0,
@@ -53,15 +56,15 @@ _BASE_ENV = {
 
 
 _STEERING_EVAL_COMMANDS = (
-    (0.0, 0.0, 0.0),
-    (0.75, 0.0, 0.0),
-    (-0.35, 0.0, 0.0),
-    (0.0, 0.35, 0.0),
-    (0.0, -0.35, 0.0),
-    (0.0, 0.0, 0.65),
-    (0.0, 0.0, -0.65),
-    (0.55, 0.0, 0.65),
-    (0.55, 0.0, -0.65),
+    (0.0, 0.0, 0.0, 0.0),
+    (0.75, 0.0, 0.0, 0.0),
+    (-0.35, 0.0, 0.0, 0.0),
+    (0.0, 0.35, 0.0, 0.0),
+    (0.0, -0.35, 0.0, 0.0),
+    (0.0, 0.0, 0.65, 0.0),
+    (0.0, 0.0, -0.65, 0.0),
+    (0.55, 0.0, 0.65, 0.0),
+    (0.55, 0.0, -0.65, 0.0),
 )
 
 
@@ -70,16 +73,17 @@ class PhaseAnymalWalk:
     """One Anymal command-walking training phase."""
 
     name: str
-    command: tuple[float, float, float]
+    command: tuple[float, ...]
     iterations: int
     env_overrides: tuple[tuple[str, object], ...] = ()
     randomize_commands: bool = False
     command_x_range: tuple[float, float] = (0.0, 0.0)
     command_y_range: tuple[float, float] = (0.0, 0.0)
     command_yaw_range: tuple[float, float] = (0.0, 0.0)
+    command_height_range: tuple[float, float] = (0.0, 0.0)
     command_yaw_min_abs: float = 0.0
     command_zero_probability: float = 0.0
-    eval_commands: tuple[tuple[float, float, float], ...] = ()
+    eval_commands: tuple[tuple[float, ...], ...] = ()
     gate_min_tracking_perf: float = 0.45
     gate_max_fall_fraction: float = 0.35
     gate_min_survival_fraction: float = 0.70
@@ -87,6 +91,7 @@ class PhaseAnymalWalk:
     gate_max_abs_forward_velocity_error: float = 0.45
     gate_max_abs_lateral_velocity_error: float = 0.45
     gate_max_abs_yaw_rate_error: float = 0.65
+    gate_max_abs_base_height_error: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -94,7 +99,7 @@ class StatsEvaluateAnymalWalk:
     """No-reset command-walking evaluation metrics."""
 
     steps: int
-    command: tuple[float, float, float]
+    command: tuple[float, ...]
     mean_reward: float
     mean_done: float
     fall_fraction: float
@@ -107,6 +112,8 @@ class StatsEvaluateAnymalWalk:
     mean_abs_forward_velocity_error: float
     mean_abs_lateral_velocity: float
     mean_abs_yaw_rate_error: float
+    mean_base_height: float
+    mean_abs_base_height_error: float
     mean_displacement_forward: float
     mean_displacement_x: float
     mean_displacement_y: float
@@ -288,7 +295,7 @@ def build_env_config(
     *,
     world_count: int | None = None,
     auto_reset: bool = True,
-    command: tuple[float, float, float] | None = None,
+    command: tuple[float, ...] | None = None,
     env_overrides: dict[str, object] | None = None,
 ) -> rl.ConfigEnvAnymalPhoenX:
     values = dict(_BASE_ENV)
@@ -299,7 +306,9 @@ def build_env_config(
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
         action_scale=float(args.action_scale),
-        command=tuple(float(v) for v in (command or (args.command_x, args.command_y, args.command_yaw))),
+        command=tuple(
+            float(v) for v in (command or (args.command_x, args.command_y, args.command_yaw, args.command_height))
+        ),
         max_episode_steps=int(args.max_episode_steps),
         target_base_height=float(args.target_base_height),
         actuator_ke=float(args.actuator_ke),
@@ -392,10 +401,13 @@ def evaluate_checkpoint(
     trainer: rl.TrainerPPO,
     args: argparse.Namespace,
     *,
-    command: tuple[float, float, float] | None = None,
+    command: tuple[float, ...] | None = None,
     env_overrides: dict[str, object] | None = None,
 ) -> StatsEvaluateAnymalWalk:
-    eval_command = tuple(float(v) for v in (command or (args.command_x, args.command_y, args.command_yaw)))
+    raw_command = tuple(
+        float(v) for v in (command or (args.command_x, args.command_y, args.command_yaw, args.command_height))
+    )
+    eval_command = raw_command if len(raw_command) == 4 else (raw_command[0], raw_command[1], raw_command[2], 0.0)
     eval_overrides = {"max_episode_steps": 0}
     if env_overrides:
         eval_overrides.update(env_overrides)
@@ -427,6 +439,8 @@ def evaluate_checkpoint(
     forward_error_sum = 0.0
     lateral_abs_sum = 0.0
     yaw_error_sum = 0.0
+    height_error_sum = 0.0
+    height_sum = 0.0
     forward_sum = 0.0
     alive_count = 0
     action_sq_sum = 0.0
@@ -444,6 +458,7 @@ def evaluate_checkpoint(
     command_np = np.asarray(eval_command, dtype=np.float32)
     lin_sigma_sq = max(float(env.config.lin_vel_tracking_sigma) ** 2, 1.0e-6)
     yaw_sigma_sq = max(float(env.config.yaw_rate_tracking_sigma) ** 2, 1.0e-6)
+    height_sigma_sq = max(float(env.config.base_height_tracking_sigma) ** 2, 1.0e-6)
     t0 = time.perf_counter()
     for step in range(int(args.eval_steps)):
         alive_before = first_done_step < 0
@@ -464,23 +479,30 @@ def evaluate_checkpoint(
             yaw_alive = obs_np[alive_idx, 5]
             vel_err = lin_alive - command_np[None, 0:2]
             yaw_err = yaw_alive - float(command_np[2])
+            height_alive = q[alive_idx, 2]
+            height_err = height_alive - (float(env.config.target_base_height) + float(command_np[3]))
             vel_perf = np.exp(-np.sum(vel_err * vel_err, axis=1) / lin_sigma_sq)
             yaw_perf = np.exp(-(yaw_err * yaw_err) / yaw_sigma_sq)
+            height_perf = np.exp(-(height_err * height_err) / height_sigma_sq)
             command_speed_sq = float(command_np[0] * command_np[0] + command_np[1] * command_np[1])
             if command_speed_sq > 1.0e-6:
                 speed_quality = np.clip(np.sum(lin_alive * command_np[None, 0:2], axis=1) / command_speed_sq, 0.0, 1.0)
             else:
                 speed_quality = np.ones(lin_alive.shape[0], dtype=np.float32)
-            tracking_sum += float(np.sum(vel_perf * yaw_perf * speed_quality))
+            tracking_sum += float(np.sum(vel_perf * yaw_perf * height_perf * speed_quality))
             velocity_tracking_sum += float(np.sum(vel_perf))
             yaw_tracking_sum += float(np.sum(yaw_perf))
             forward_sum += float(np.sum(lin_alive[:, 0]))
             forward_error_sum += float(np.sum(np.abs(lin_alive[:, 0] - float(command_np[0]))))
             lateral_abs_sum += float(np.sum(np.abs(lin_alive[:, 1] - float(command_np[1]))))
             yaw_error_sum += float(np.sum(np.abs(yaw_err)))
-            action_alive = obs_np[alive_idx, 36:48]
+            height_error_sum += float(np.sum(np.abs(height_err)))
+            height_sum += float(np.sum(height_alive))
+            action_alive = obs_np[alive_idx, rl.ACTION_OBS_OFFSET_ANYMAL : rl.ACTION_OBS_OFFSET_ANYMAL + env.action_dim]
             previous_action_alive = previous_actions_np[alive_idx]
-            joint_speed_alive = obs_np[alive_idx, 24:36]
+            joint_speed_alive = obs_np[
+                alive_idx, rl.JOINT_VEL_OBS_OFFSET_ANYMAL : rl.JOINT_VEL_OBS_OFFSET_ANYMAL + env.action_dim
+            ]
             action_sq_sum += float(np.sum(action_alive * action_alive))
             action_rate = action_alive - previous_action_alive
             action_rate_sq_sum += float(np.sum(action_rate * action_rate))
@@ -495,7 +517,9 @@ def evaluate_checkpoint(
             power_proxy_sum += float(np.sum(power_proxy))
             action_count += int(action_alive.size)
             alive_count += int(np.sum(alive_idx))
-        previous_actions_np = obs_np[:, 36:48].copy()
+        previous_actions_np = obs_np[
+            :, rl.ACTION_OBS_OFFSET_ANYMAL : rl.ACTION_OBS_OFFSET_ANYMAL + env.action_dim
+        ].copy()
         previous_xy = xy
         first_done_step[(first_done_step < 0) & done_np] = step + 1
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
@@ -518,6 +542,8 @@ def evaluate_checkpoint(
         mean_abs_forward_velocity_error=forward_error_sum / alive_den,
         mean_abs_lateral_velocity=lateral_abs_sum / alive_den,
         mean_abs_yaw_rate_error=yaw_error_sum / alive_den,
+        mean_base_height=height_sum / alive_den,
+        mean_abs_base_height_error=height_error_sum / alive_den,
         mean_displacement_forward=float(np.mean(displacement_forward)),
         mean_displacement_x=float(np.mean(displacement[:, 0])),
         mean_displacement_y=float(np.mean(displacement[:, 1])),
@@ -555,10 +581,14 @@ def check_phase_gate(stats: StatsEvaluateAnymalWalk, phase: PhaseAnymalWalk) -> 
         )
     if stats.mean_abs_yaw_rate_error > phase.gate_max_abs_yaw_rate_error:
         failures.append(f"|yaw-cmd|={stats.mean_abs_yaw_rate_error:.3f} > {phase.gate_max_abs_yaw_rate_error:.3f}")
+    if stats.mean_abs_base_height_error > phase.gate_max_abs_base_height_error:
+        failures.append(
+            f"|height-cmd|={stats.mean_abs_base_height_error:.3f} > {phase.gate_max_abs_base_height_error:.3f}"
+        )
     return failures
 
 
-def _phase_eval_commands(phase: PhaseAnymalWalk) -> tuple[tuple[float, float, float], ...]:
+def _phase_eval_commands(phase: PhaseAnymalWalk) -> tuple[tuple[float, ...], ...]:
     if phase.eval_commands:
         return phase.eval_commands
     return (phase.command,)
@@ -579,7 +609,7 @@ def evaluate_phase_commands(
 def check_phase_gates(stats: list[StatsEvaluateAnymalWalk], phase: PhaseAnymalWalk) -> list[str]:
     failures: list[str] = []
     for item in stats:
-        prefix = f"cmd=({item.command[0]:.2f},{item.command[1]:.2f},{item.command[2]:.2f})"
+        prefix = f"cmd=({item.command[0]:.2f},{item.command[1]:.2f},{item.command[2]:.2f},{item.command[3]:.2f})"
         failures.extend(f"{prefix} {failure}" for failure in check_phase_gate(item, phase))
     return failures
 
@@ -684,6 +714,7 @@ def train_curriculum(args: argparse.Namespace) -> dict[str, object]:
                 command_x_range=tuple(float(v) for v in phase.command_x_range),
                 command_y_range=tuple(float(v) for v in phase.command_y_range),
                 command_yaw_range=tuple(float(v) for v in phase.command_yaw_range),
+                command_height_range=tuple(float(v) for v in phase.command_height_range),
                 command_yaw_min_abs=float(phase.command_yaw_min_abs),
                 command_zero_probability=float(phase.command_zero_probability),
                 resume_checkpoint=resume_checkpoint,
@@ -752,6 +783,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--command-x", type=float, default=0.6)
     parser.add_argument("--command-y", type=float, default=0.0)
     parser.add_argument("--command-yaw", type=float, default=0.0)
+    parser.add_argument("--command-height", type=float, default=0.0)
     parser.add_argument("--frame-dt", type=float, default=1.0 / 50.0)
     parser.add_argument("--sim-substeps", type=int, default=4)
     parser.add_argument("--solver-iterations", type=int, default=8)

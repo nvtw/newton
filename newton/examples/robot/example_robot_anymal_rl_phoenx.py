@@ -6,8 +6,8 @@
 #
 # Replays a Warp-only PPO Anymal policy trained with PhoenX physics. The
 # command interface is body-frame velocity tracking: I/K forward/backward,
-# J/L left/right, and U/O yaw-rate about the up axis. No key means zero
-# velocity command, so a properly trained steering policy should stand still.
+# J/L left/right, U/O yaw-rate about the up axis, and N/M lower/raise
+# the body-height command. No key means zero velocity and nominal height.
 #
 # Command: python -m newton.examples robot_anymal_rl_phoenx --checkpoint policy.npz
 #
@@ -42,16 +42,24 @@ class Example:
         self.backward_speed = float(args.backward_speed)
         self.lateral_speed = float(args.lateral_speed)
         self.yaw_rate = float(args.yaw_rate)
-        self.fallback_command = (float(args.command_x), float(args.command_y), float(args.command_yaw))
+        self.height_offset = float(args.height_offset)
+        self.fallback_command = (
+            float(args.command_x),
+            float(args.command_y),
+            float(args.command_yaw),
+            float(args.command_height),
+        )
         self.forward_key = str(args.forward_key).lower()
         self.backward_key = str(args.backward_key).lower()
         self.left_key = str(args.left_key).lower()
         self.right_key = str(args.right_key).lower()
         self.yaw_left_key = str(args.yaw_left_key).lower()
         self.yaw_right_key = str(args.yaw_right_key).lower()
+        self.height_down_key = str(args.height_down_key).lower()
+        self.height_up_key = str(args.height_up_key).lower()
         self.render_contacts = bool(args.render_contacts)
         self.log_interval = max(int(args.log_interval), 0)
-        self._last_command: tuple[float, float, float] | None = None
+        self._last_command: tuple[float, float, float, float] | None = None
         self._last_stats: tuple[float, float, float] | None = None
 
         self.env = rl.EnvAnymalPhoenX(
@@ -63,7 +71,7 @@ class Example:
                 velocity_iterations=int(args.velocity_iterations),
                 action_scale=float(args.action_scale),
                 reward_mode="dense_command",
-                command=(0.0, 0.0, 0.0),
+                command=(0.0, 0.0, 0.0, 0.0),
                 max_episode_steps=int(args.max_episode_steps),
                 target_base_height=float(args.target_base_height),
                 min_base_height=float(args.min_base_height),
@@ -78,7 +86,7 @@ class Example:
         if self.trainer.obs_dim != self.env.obs_dim or self.trainer.action_dim != self.env.action_dim:
             raise ValueError("Checkpoint dimensions do not match the Anymal PhoenX environment")
         self.trainer.reset_rollout_state()
-        self.env.set_command((0.0, 0.0, 0.0))
+        self.env.set_command((0.0, 0.0, 0.0, 0.0))
 
         self.viewer.set_model(self.env.model)
         self.viewer.set_visible_worlds(range(1))
@@ -91,13 +99,14 @@ class Example:
     def _key_down(self, key: str) -> bool:
         return bool(hasattr(self.viewer, "is_key_down") and self.viewer.is_key_down(key))
 
-    def _keyboard_command(self) -> tuple[float, float, float]:
+    def _keyboard_command(self) -> tuple[float, float, float, float]:
         if not self.interactive_command:
             return self.fallback_command
 
         forward = 0.0
         lateral = 0.0
         yaw = 0.0
+        height = 0.0
         used = False
         if self._key_down(self.forward_key):
             forward += self.forward_speed
@@ -117,12 +126,18 @@ class Example:
         if self._key_down(self.yaw_right_key):
             yaw -= self.yaw_rate
             used = True
+        if self._key_down(self.height_down_key):
+            height -= self.height_offset
+            used = True
+        if self._key_down(self.height_up_key):
+            height += self.height_offset
+            used = True
         if used:
-            return (forward, lateral, yaw)
-        return (0.0, 0.0, 0.0)
+            return (forward, lateral, yaw, height)
+        return (0.0, 0.0, 0.0, 0.0)
 
-    def _apply_command(self, command: tuple[float, float, float]) -> None:
-        command = (float(command[0]), float(command[1]), float(command[2]))
+    def _apply_command(self, command: tuple[float, ...]) -> None:
+        command = (float(command[0]), float(command[1]), float(command[2]), float(command[3]))
         if self._last_command == command:
             return
         self.env.set_command(command)
@@ -144,9 +159,9 @@ class Example:
                 done = float(np.mean(dones.numpy()))
                 perf = float(np.mean(self.env.step_successes.numpy()))
                 self._last_stats = (reward, done, perf)
-                cmd = self._last_command or (0.0, 0.0, 0.0)
+                cmd = self._last_command or (0.0, 0.0, 0.0, 0.0)
                 print(
-                    f"step={self.step_count:06d} cmd=({cmd[0]:.2f},{cmd[1]:.2f},{cmd[2]:.2f}) "
+                    f"step={self.step_count:06d} cmd=({cmd[0]:.2f},{cmd[1]:.2f},{cmd[2]:.2f},{cmd[3]:.2f}) "
                     f"reward={reward:.4f} perf={perf:.3f} done={done:.4f}"
                 )
 
@@ -183,15 +198,19 @@ class Example:
         parser.add_argument("--backward-speed", type=float, default=0.20)
         parser.add_argument("--lateral-speed", type=float, default=0.20)
         parser.add_argument("--yaw-rate", type=float, default=0.65)
+        parser.add_argument("--height-offset", type=float, default=0.07)
         parser.add_argument("--forward-key", default="i")
         parser.add_argument("--backward-key", default="k")
         parser.add_argument("--left-key", default="j")
         parser.add_argument("--right-key", default="l")
         parser.add_argument("--yaw-left-key", default="u")
         parser.add_argument("--yaw-right-key", default="o")
+        parser.add_argument("--height-down-key", default="n")
+        parser.add_argument("--height-up-key", default="m")
         parser.add_argument("--command-x", type=float, default=0.0)
         parser.add_argument("--command-y", type=float, default=0.0)
         parser.add_argument("--command-yaw", type=float, default=0.0)
+        parser.add_argument("--command-height", type=float, default=0.0)
         parser.add_argument("--frame-dt", type=float, default=1.0 / 50.0)
         parser.add_argument("--sim-substeps", type=int, default=4)
         parser.add_argument("--solver-iterations", type=int, default=8)

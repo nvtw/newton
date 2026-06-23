@@ -1,7 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-from .anymal import ACTION_DIM_ANYMAL, OBS_DIM_ANYMAL, ConfigEnvAnymalPhoenX, EnvAnymalPhoenX, anymal_mirror_map_ppo
+from .anymal import (
+    ACTION_DIM_ANYMAL,
+    ACTION_OBS_OFFSET_ANYMAL,
+    COMMAND_DIM_ANYMAL,
+    COMMAND_OBS_OFFSET_ANYMAL,
+    JOINT_POS_OBS_OFFSET_ANYMAL,
+    JOINT_VEL_OBS_OFFSET_ANYMAL,
+    OBS_DIM_ANYMAL,
+    ConfigEnvAnymalPhoenX,
+    EnvAnymalPhoenX,
+    anymal_mirror_map_ppo,
+)
 from .env import EnvPPO, capture_env_steps, collect_ppo_rollout
 from .g1 import (
     ACTION_DIM_G1,
@@ -55,6 +66,11 @@ from .training import (
 __all__ = [
     "ACTION_DIM_ANYMAL",
     "ACTION_DIM_G1",
+    "ACTION_OBS_OFFSET_ANYMAL",
+    "COMMAND_DIM_ANYMAL",
+    "COMMAND_OBS_OFFSET_ANYMAL",
+    "JOINT_POS_OBS_OFFSET_ANYMAL",
+    "JOINT_VEL_OBS_OFFSET_ANYMAL",
     "OBS_DIM_ANYMAL",
     "OBS_DIM_G1",
     "OBS_DIM_G1_ISAACLAB_FLAT",

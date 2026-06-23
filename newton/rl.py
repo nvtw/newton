@@ -10,6 +10,11 @@ from dataclasses import asdict
 from ._src.solvers.phoenx.rl_training import (
     ACTION_DIM_ANYMAL,
     ACTION_DIM_G1,
+    ACTION_OBS_OFFSET_ANYMAL,
+    COMMAND_DIM_ANYMAL,
+    COMMAND_OBS_OFFSET_ANYMAL,
+    JOINT_POS_OBS_OFFSET_ANYMAL,
+    JOINT_VEL_OBS_OFFSET_ANYMAL,
     OBS_DIM_ANYMAL,
     OBS_DIM_G1,
     OBS_DIM_G1_ISAACLAB_FLAT,
@@ -71,6 +76,11 @@ from ._src.solvers.phoenx.rl_training import (
 __all__ = [
     "ACTION_DIM_ANYMAL",
     "ACTION_DIM_G1",
+    "ACTION_OBS_OFFSET_ANYMAL",
+    "COMMAND_DIM_ANYMAL",
+    "COMMAND_OBS_OFFSET_ANYMAL",
+    "JOINT_POS_OBS_OFFSET_ANYMAL",
+    "JOINT_VEL_OBS_OFFSET_ANYMAL",
     "OBS_DIM_ANYMAL",
     "OBS_DIM_G1",
     "OBS_DIM_G1_ISAACLAB_FLAT",
@@ -141,6 +151,7 @@ def _main() -> int:
     train_parser.add_argument("--command-x", type=float, default=1.0)
     train_parser.add_argument("--command-y", type=float, default=0.0)
     train_parser.add_argument("--command-yaw", type=float, default=0.0)
+    train_parser.add_argument("--command-height", type=float, default=0.0)
     train_parser.add_argument("--reward-mode", choices=("sparse_target", "dense_command"), default="sparse_target")
     train_parser.add_argument("--target-distance", type=float, default=0.45)
     train_parser.add_argument("--target-distance-end", type=float, default=1.0)
@@ -500,7 +511,7 @@ def _main() -> int:
         env_config = ConfigEnvAnymalPhoenX(
             world_count=args.world_count,
             reward_mode=args.reward_mode,
-            command=(args.command_x, args.command_y, args.command_yaw),
+            command=(args.command_x, args.command_y, args.command_yaw, args.command_height),
             target_position=(0.0, args.target_distance),
         )
         train_anymal_ppo(

@@ -35,20 +35,24 @@ from pathlib import Path
 import newton.rl as rl
 from newton._src.solvers.phoenx.experimental import train_anymal_walk_phoenx_ppo as base
 
-Command = tuple[float, float, float]
+Command = tuple[float, float, float, float]
 Override = tuple[str, object]
 
-IDLE: Command = (0.0, 0.0, 0.0)
-FORWARD_SLOW: Command = (0.35, 0.0, 0.0)
-FORWARD: Command = (0.70, 0.0, 0.0)
-FORWARD_FAST: Command = (0.75, 0.0, 0.0)
-BACKWARD: Command = (-0.20, 0.0, 0.0)
-LEFT: Command = (0.0, 0.35, 0.0)
-RIGHT: Command = (0.0, -0.35, 0.0)
-TURN_LEFT: Command = (0.0, 0.0, 0.65)
-TURN_RIGHT: Command = (0.0, 0.0, -0.65)
-CURVE_LEFT: Command = (0.55, 0.0, 0.65)
-CURVE_RIGHT: Command = (0.55, 0.0, -0.65)
+IDLE: Command = (0.0, 0.0, 0.0, 0.0)
+IDLE_LOW: Command = (0.0, 0.0, 0.0, -0.07)
+IDLE_HIGH: Command = (0.0, 0.0, 0.0, 0.07)
+FORWARD_SLOW: Command = (0.35, 0.0, 0.0, 0.0)
+FORWARD: Command = (0.70, 0.0, 0.0, 0.0)
+FORWARD_FAST: Command = (0.75, 0.0, 0.0, 0.0)
+FORWARD_LOW: Command = (0.45, 0.0, 0.0, -0.07)
+FORWARD_HIGH: Command = (0.45, 0.0, 0.0, 0.07)
+BACKWARD: Command = (-0.20, 0.0, 0.0, 0.0)
+LEFT: Command = (0.0, 0.35, 0.0, 0.0)
+RIGHT: Command = (0.0, -0.35, 0.0, 0.0)
+TURN_LEFT: Command = (0.0, 0.0, 0.65, 0.0)
+TURN_RIGHT: Command = (0.0, 0.0, -0.65, 0.0)
+CURVE_LEFT: Command = (0.55, 0.0, 0.65, 0.0)
+CURVE_RIGHT: Command = (0.55, 0.0, -0.65, 0.0)
 
 FULL_CONTROL_EVAL_COMMANDS: tuple[Command, ...] = (
     IDLE,
@@ -61,6 +65,10 @@ FULL_CONTROL_EVAL_COMMANDS: tuple[Command, ...] = (
     TURN_RIGHT,
     CURVE_LEFT,
     CURVE_RIGHT,
+    IDLE_LOW,
+    IDLE_HIGH,
+    FORWARD_LOW,
+    FORWARD_HIGH,
 )
 
 
@@ -78,6 +86,7 @@ class CurriculumPhase:
     command_x_range: tuple[float, float] = (0.0, 0.0)
     command_y_range: tuple[float, float] = (0.0, 0.0)
     command_yaw_range: tuple[float, float] = (0.0, 0.0)
+    command_height_range: tuple[float, float] = (0.0, 0.0)
     command_yaw_min_abs: float = 0.0
     command_zero_probability: float = 0.0
     eval_commands: tuple[Command, ...] = ()
@@ -88,6 +97,7 @@ class CurriculumPhase:
     gate_max_abs_forward_velocity_error: float = 0.45
     gate_max_abs_lateral_velocity_error: float = 0.45
     gate_max_abs_yaw_rate_error: float = 0.65
+    gate_max_abs_base_height_error: float = 1.0
 
     def as_training_phase(self) -> base.PhaseAnymalWalk:
         """Convert to the compact phase type used by the PPO runner."""
@@ -101,6 +111,7 @@ class CurriculumPhase:
             command_x_range=self.command_x_range,
             command_y_range=self.command_y_range,
             command_yaw_range=self.command_yaw_range,
+            command_height_range=self.command_height_range,
             command_yaw_min_abs=self.command_yaw_min_abs,
             command_zero_probability=self.command_zero_probability,
             eval_commands=self.eval_commands,
@@ -111,6 +122,7 @@ class CurriculumPhase:
             gate_max_abs_forward_velocity_error=self.gate_max_abs_forward_velocity_error,
             gate_max_abs_lateral_velocity_error=self.gate_max_abs_lateral_velocity_error,
             gate_max_abs_yaw_rate_error=self.gate_max_abs_yaw_rate_error,
+            gate_max_abs_base_height_error=self.gate_max_abs_base_height_error,
         )
 
 
@@ -239,6 +251,42 @@ def phase_robust_forward() -> CurriculumPhase:
         gate_min_survival_fraction=0.90,
         gate_min_forward_velocity_fraction=0.48,
         gate_max_abs_forward_velocity_error=0.45,
+    )
+
+
+def phase_base_height_control() -> CurriculumPhase:
+    """Teach commanded lower and higher body heights on stable walking."""
+
+    return CurriculumPhase(
+        name="base_height_control",
+        title="Base Height Control",
+        purpose="Condition the policy on a commanded body-height offset before adding yaw and lateral commands.",
+        command=FORWARD_HIGH,
+        iterations=220,
+        env_overrides=(
+            ("action_scale", 0.50),
+            ("lin_vel_reward_scale", 2.25),
+            ("yaw_rate_reward_scale", 1.00),
+            ("base_height_reward_scale", 1.40),
+            ("base_height_tracking_sigma", 0.055),
+            ("hip_abduction_reward_scale", -0.25),
+            ("forward_progress_reward_scale", 0.10),
+            ("energy_reward_scale", -3.0e-5),
+            ("action_rate_reward_scale", -0.015),
+        ),
+        randomize_commands=True,
+        command_x_range=(0.0, 0.65),
+        command_y_range=(0.0, 0.0),
+        command_yaw_range=(0.0, 0.0),
+        command_height_range=(-0.08, 0.08),
+        command_zero_probability=0.15,
+        eval_commands=(IDLE, IDLE_LOW, IDLE_HIGH, FORWARD_LOW, FORWARD_HIGH),
+        gate_min_tracking_perf=0.35,
+        gate_max_fall_fraction=0.18,
+        gate_min_survival_fraction=0.82,
+        gate_min_forward_velocity_fraction=0.20,
+        gate_max_abs_forward_velocity_error=0.50,
+        gate_max_abs_base_height_error=0.085,
     )
 
 
@@ -432,6 +480,7 @@ def phase_full_control_mix() -> CurriculumPhase:
         command_x_range=(-0.25, 0.75),
         command_y_range=(-0.45, 0.45),
         command_yaw_range=(-0.90, 0.90),
+        command_height_range=(-0.07, 0.07),
         command_zero_probability=0.08,
         eval_commands=FULL_CONTROL_EVAL_COMMANDS,
         gate_min_tracking_perf=0.38,
@@ -474,6 +523,7 @@ def phase_robust_full_control() -> CurriculumPhase:
         command_x_range=(-0.25, 0.75),
         command_y_range=(-0.45, 0.45),
         command_yaw_range=(-0.90, 0.90),
+        command_height_range=(-0.07, 0.07),
         command_zero_probability=0.10,
         eval_commands=FULL_CONTROL_EVAL_COMMANDS,
         gate_min_tracking_perf=0.35,
@@ -494,6 +544,7 @@ def build_full_control_curriculum() -> tuple[CurriculumPhase, ...]:
         phase_walk_forward(),
         phase_fast_efficient_forward(),
         phase_robust_forward(),
+        phase_base_height_control(),
         phase_turn_in_place(),
         phase_recover_forward_after_turning(),
         phase_curved_forward(),
@@ -536,6 +587,10 @@ def _phase_env_overrides(args: argparse.Namespace, phase: CurriculumPhase) -> di
         env_overrides["action_rate_reward_scale"] = float(args.phase_action_rate_reward_scale)
     if args.phase_joint_speed_reward_scale is not None:
         env_overrides["joint_speed_reward_scale"] = float(args.phase_joint_speed_reward_scale)
+    if args.phase_base_height_reward_scale is not None:
+        env_overrides["base_height_reward_scale"] = float(args.phase_base_height_reward_scale)
+    if args.phase_hip_abduction_reward_scale is not None:
+        env_overrides["hip_abduction_reward_scale"] = float(args.phase_hip_abduction_reward_scale)
     return env_overrides
 
 
@@ -568,7 +623,7 @@ def _print_phase_header(
         print(
             "command_ranges="
             f"x{phase.command_x_range} y{phase.command_y_range} yaw{phase.command_yaw_range} "
-            f"zero_probability={phase.command_zero_probability:.2f}"
+            f"height{phase.command_height_range} zero_probability={phase.command_zero_probability:.2f}"
         )
 
 
@@ -631,6 +686,7 @@ def _run_one_phase(
             command_x_range=tuple(float(v) for v in training_phase.command_x_range),
             command_y_range=tuple(float(v) for v in training_phase.command_y_range),
             command_yaw_range=tuple(float(v) for v in training_phase.command_yaw_range),
+            command_height_range=tuple(float(v) for v in training_phase.command_height_range),
             command_yaw_min_abs=float(training_phase.command_yaw_min_abs),
             command_zero_probability=float(training_phase.command_zero_probability),
             resume_checkpoint=resume_checkpoint,
@@ -721,6 +777,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase-energy-reward-scale", type=float, default=None)
     parser.add_argument("--phase-action-rate-reward-scale", type=float, default=None)
     parser.add_argument("--phase-joint-speed-reward-scale", type=float, default=None)
+    parser.add_argument("--phase-base-height-reward-scale", type=float, default=None)
+    parser.add_argument("--phase-hip-abduction-reward-scale", type=float, default=None)
     parser.add_argument("--allow-gate-failure", action="store_true")
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -769,6 +827,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--command-x", type=float, default=0.6)
     parser.add_argument("--command-y", type=float, default=0.0)
     parser.add_argument("--command-yaw", type=float, default=0.0)
+    parser.add_argument("--command-height", type=float, default=0.0)
     return parser
 
 

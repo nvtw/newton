@@ -15,14 +15,29 @@ from .env import collect_ppo_rollout
 from .ppo import BufferRollout, MirrorMapPPO, TrainerPPO
 from .sac import BufferReplaySAC, TrainerSAC
 
-OBS_DIM_ANYMAL = 48
 ACTION_DIM_ANYMAL = 12
+COMMAND_DIM_ANYMAL = 4
+COMMAND_OBS_OFFSET_ANYMAL = 9
+JOINT_POS_OBS_OFFSET_ANYMAL = COMMAND_OBS_OFFSET_ANYMAL + COMMAND_DIM_ANYMAL
+JOINT_VEL_OBS_OFFSET_ANYMAL = JOINT_POS_OBS_OFFSET_ANYMAL + ACTION_DIM_ANYMAL
+ACTION_OBS_OFFSET_ANYMAL = JOINT_VEL_OBS_OFFSET_ANYMAL + ACTION_DIM_ANYMAL
+OBS_DIM_ANYMAL = ACTION_OBS_OFFSET_ANYMAL + ACTION_DIM_ANYMAL
 REWARD_MODE_DENSE_COMMAND = 0
 REWARD_MODE_SPARSE_TARGET = 1
 _REWARD_MODES = {
     "dense_command": REWARD_MODE_DENSE_COMMAND,
     "sparse_target": REWARD_MODE_SPARSE_TARGET,
 }
+
+
+def _normalize_command(command: tuple[float, ...]) -> tuple[float, float, float, float]:
+    values = tuple(float(v) for v in command)
+    if len(values) == 3:
+        return (values[0], values[1], values[2], 0.0)
+    if len(values) == COMMAND_DIM_ANYMAL:
+        return (values[0], values[1], values[2], values[3])
+    raise ValueError(f"Expected Anymal command with 3 or {COMMAND_DIM_ANYMAL} values, got {len(values)}")
+
 
 _LAB_TO_MUJOCO = (0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11)
 _INITIAL_JOINT_Q = {
@@ -55,10 +70,10 @@ def anymal_mirror_map_ppo() -> MirrorMapPPO:
     obs_sign[3] = -1.0
     obs_sign[5] = -1.0
     obs_sign[7] = -1.0
-    obs_sign[10] = -1.0
-    obs_sign[11] = -1.0
+    obs_sign[COMMAND_OBS_OFFSET_ANYMAL + 1] = -1.0
+    obs_sign[COMMAND_OBS_OFFSET_ANYMAL + 2] = -1.0
 
-    for base in (12, 24, 36):
+    for base in (JOINT_POS_OBS_OFFSET_ANYMAL, JOINT_VEL_OBS_OFFSET_ANYMAL, ACTION_OBS_OFFSET_ANYMAL):
         for joint in range(ACTION_DIM_ANYMAL):
             obs_src[base + joint] = base + _ANYMAL_JOINT_MIRROR_SRC[joint]
             obs_sign[base + joint] = _ANYMAL_JOINT_MIRROR_SIGN[joint]
@@ -190,12 +205,15 @@ def anymal_observe_reward_kernel(
     episode_steps: wp.array[wp.int32],
     max_episode_steps: wp.int32,
     reward_mode: wp.int32,
+    target_base_height: wp.float32,
     min_base_height: wp.float32,
     min_upright_cos: wp.float32,
     lin_vel_reward_scale: wp.float32,
     yaw_rate_reward_scale: wp.float32,
     lin_vel_tracking_sigma: wp.float32,
     yaw_rate_tracking_sigma: wp.float32,
+    base_height_reward_scale: wp.float32,
+    base_height_tracking_sigma: wp.float32,
     z_vel_reward_scale: wp.float32,
     ang_vel_reward_scale: wp.float32,
     action_rate_reward_scale: wp.float32,
@@ -206,6 +224,7 @@ def anymal_observe_reward_kernel(
     target_progress_reward_scale: wp.float32,
     fall_reward_scale: wp.float32,
     energy_reward_scale: wp.float32,
+    hip_abduction_reward_scale: wp.float32,
     target_radius: wp.float32,
     action_scale: wp.float32,
     actuator_ke: wp.float32,
@@ -246,33 +265,36 @@ def anymal_observe_reward_kernel(
         value = ang_b[col - wp.int32(3)]
     elif col < wp.int32(9):
         value = gravity_b[col - wp.int32(6)]
-    elif col < wp.int32(12):
+    elif col < wp.int32(13):
         command_col = col - wp.int32(9)
         value = command[world, command_col]
-        if reward_mode == REWARD_MODE_SPARSE_TARGET:
+        if reward_mode == REWARD_MODE_SPARSE_TARGET and command_col < wp.int32(3):
             value = target_delta_b[command_col]
             if command_col == wp.int32(2):
                 value = command[world, 2]
-    elif col < wp.int32(24):
-        j = col - wp.int32(12)
+    elif col < wp.int32(25):
+        j = col - wp.int32(13)
         model_joint = lab_to_mujoco[j]
         value = joint_q[q_base + wp.int32(7) + model_joint] - default_joint_pos[model_joint]
-    elif col < wp.int32(36):
-        j = col - wp.int32(24)
+    elif col < wp.int32(37):
+        j = col - wp.int32(25)
         model_joint = lab_to_mujoco[j]
         value = joint_qd[qd_base + wp.int32(6) + model_joint]
     else:
-        value = current_actions[world, col - wp.int32(36)]
+        value = current_actions[world, col - wp.int32(37)]
     obs[world, col] = value
 
     if col == 0:
         vx_err = lin_b[0] - command[world, 0]
         vy_err = lin_b[1] - command[world, 1]
         yaw_err = ang_b[2] - command[world, 2]
+        height_err = joint_q[q_base + wp.int32(2)] - (target_base_height + command[world, 3])
         lin_sigma_sq = wp.max(lin_vel_tracking_sigma * lin_vel_tracking_sigma, wp.float32(1.0e-6))
         yaw_sigma_sq = wp.max(yaw_rate_tracking_sigma * yaw_rate_tracking_sigma, wp.float32(1.0e-6))
+        height_sigma_sq = wp.max(base_height_tracking_sigma * base_height_tracking_sigma, wp.float32(1.0e-6))
         vel_reward = wp.exp(-(vx_err * vx_err + vy_err * vy_err) / lin_sigma_sq)
         yaw_reward = wp.exp(-(yaw_err * yaw_err) / yaw_sigma_sq)
+        height_reward = wp.exp(-(height_err * height_err) / height_sigma_sq)
         z_vel_penalty = lin_b[2] * lin_b[2]
         ang_xy_penalty = ang_b[0] * ang_b[0] + ang_b[1] * ang_b[1]
         flat_orientation_penalty = gravity_b[0] * gravity_b[0] + gravity_b[1] * gravity_b[1]
@@ -280,6 +302,7 @@ def anymal_observe_reward_kernel(
 
         action_rate_penalty = wp.float32(0.0)
         joint_speed_penalty = wp.float32(0.0)
+        hip_abduction_penalty = wp.float32(0.0)
         power_proxy = wp.float32(0.0)
         for j in range(ACTION_DIM_ANYMAL):
             da = current_actions[world, j] - previous_actions[world, j]
@@ -287,10 +310,13 @@ def anymal_observe_reward_kernel(
             model_joint = lab_to_mujoco[j]
             q_idx = q_base + wp.int32(7) + model_joint
             qd_idx = qd_base + wp.int32(6) + model_joint
+            q = joint_q[q_idx]
             qd = joint_qd[qd_idx]
             joint_speed_penalty = joint_speed_penalty + qd * qd
+            if j < 4:
+                hip_abduction_penalty = hip_abduction_penalty + q * q
             target = default_joint_pos[model_joint] + current_actions[world, j] * action_scale
-            tau_proxy = actuator_ke * (target - joint_q[q_idx]) - actuator_kd * qd
+            tau_proxy = actuator_ke * (target - q) - actuator_kd * qd
             power_proxy = power_proxy + wp.abs(tau_proxy * qd)
 
         forward_progress = lin_b[0] * command[world, 0] + lin_b[1] * command[world, 1]
@@ -312,18 +338,22 @@ def anymal_observe_reward_kernel(
         dense_reward = (
             lin_vel_reward_scale * vel_reward
             + yaw_rate_reward_scale * yaw_reward
+            + base_height_reward_scale * height_reward
             + forward_progress_reward_scale * forward_progress
             + z_vel_reward_scale * z_vel_penalty
             + ang_vel_reward_scale * ang_xy_penalty
             + action_rate_reward_scale * action_rate_penalty
             + joint_speed_reward_scale * joint_speed_penalty
             + flat_orientation_reward_scale * flat_orientation_penalty
+            + hip_abduction_reward_scale * hip_abduction_penalty
             + fall_reward_scale * fall
             + energy_reward_scale * power_proxy
         )
         sparse_reward = (
             sparse_success_reward_scale * success
+            + base_height_reward_scale * height_reward
             + target_progress_reward_scale * target_progress
+            + hip_abduction_reward_scale * hip_abduction_penalty
             + fall_reward_scale * fall
             + energy_reward_scale * power_proxy
         )
@@ -332,7 +362,7 @@ def anymal_observe_reward_kernel(
         if reward_mode == REWARD_MODE_SPARSE_TARGET:
             reward = sparse_reward
         else:
-            success_metric = vel_reward * yaw_reward * upright * speed_quality
+            success_metric = vel_reward * yaw_reward * height_reward * upright * speed_quality
         rewards[world] = reward
         successes[world] = success_metric
 
@@ -402,7 +432,8 @@ class ConfigEnvAnymalPhoenX:
         velocity_iterations: PhoenX velocity iterations per substep.
         action_scale: Position target scale [rad].
         reward_mode: Reward mode, either ``"sparse_target"`` or ``"dense_command"``.
-        command: Target body-frame velocity command ``(vx, vy, yaw_rate)`` [m/s, m/s, rad/s].
+        command: Target body-frame command ``(vx, vy, yaw_rate, base_height_offset)`` [m/s, m/s, rad/s, m].
+            Three-value velocity commands are accepted and use a zero height offset.
         target_position: Sparse target XY position in each world [m].
         target_radius: Sparse target success radius [m].
         target_base_height: Nominal base height [m].
@@ -413,6 +444,8 @@ class ConfigEnvAnymalPhoenX:
         yaw_rate_reward_scale: Yaw-rate tracking reward scale.
         lin_vel_tracking_sigma: Linear velocity tracking Gaussian sigma [m/s].
         yaw_rate_tracking_sigma: Yaw-rate tracking Gaussian sigma [rad/s].
+        base_height_reward_scale: Base-height tracking reward scale.
+        base_height_tracking_sigma: Base-height tracking Gaussian sigma [m].
         z_vel_reward_scale: Vertical velocity penalty scale.
         ang_vel_reward_scale: Roll/pitch angular velocity penalty scale.
         action_rate_reward_scale: Action-rate penalty scale.
@@ -423,6 +456,7 @@ class ConfigEnvAnymalPhoenX:
         target_progress_reward_scale: Target-distance reduction reward scale.
         fall_reward_scale: Fall penalty scale.
         energy_reward_scale: Mechanical power proxy penalty scale.
+        hip_abduction_reward_scale: HAA joint position penalty scale that keeps lateral hip joints near zero.
         actuator_ke: Position actuator stiffness used by the model and power proxy.
         actuator_kd: Position actuator damping used by the model and power proxy.
         disturbance_warmup_steps: Policy steps before disturbances may start.
@@ -442,7 +476,7 @@ class ConfigEnvAnymalPhoenX:
     velocity_iterations: int = 1
     action_scale: float = 0.5
     reward_mode: str = "sparse_target"
-    command: tuple[float, float, float] = (1.0, 0.0, 0.0)
+    command: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0)
     target_position: tuple[float, float] = (0.0, 0.45)
     target_radius: float = 0.4
     target_base_height: float = 0.62
@@ -453,6 +487,8 @@ class ConfigEnvAnymalPhoenX:
     yaw_rate_reward_scale: float = 0.5
     lin_vel_tracking_sigma: float = 0.5
     yaw_rate_tracking_sigma: float = 0.5
+    base_height_reward_scale: float = 0.0
+    base_height_tracking_sigma: float = 0.06
     z_vel_reward_scale: float = -2.0
     ang_vel_reward_scale: float = -0.05
     action_rate_reward_scale: float = -0.01
@@ -463,6 +499,7 @@ class ConfigEnvAnymalPhoenX:
     target_progress_reward_scale: float = 0.8
     fall_reward_scale: float = -0.25
     energy_reward_scale: float = -1.0e-5
+    hip_abduction_reward_scale: float = 0.0
     actuator_ke: float = 150.0
     actuator_kd: float = 5.0
     disturbance_warmup_steps: int = 0
@@ -513,6 +550,7 @@ class EnvAnymalPhoenX:
         self.default_joint_pos = wp.array(default_q_np[7 : 7 + ACTION_DIM_ANYMAL], dtype=wp.float32, device=self.device)
         self.current_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.previous_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
+        self.config.command = _normalize_command(self.config.command)
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
         target_np = np.tile(np.asarray(self.config.target_position, dtype=np.float32), (self.world_count, 1))
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
@@ -587,21 +625,23 @@ class EnvAnymalPhoenX:
             velocity_iterations=int(self.config.velocity_iterations),
         )
 
-    def set_command(self, command: tuple[float, float, float]) -> None:
-        """Set the same body-frame velocity command for every world [m/s, m/s, rad/s]."""
+    def set_command(self, command: tuple[float, ...]) -> None:
+        """Set the same body-frame command for every world [m/s, m/s, rad/s, m]."""
 
-        cmd = (float(command[0]), float(command[1]), float(command[2]))
+        cmd = _normalize_command(command)
         self.config.command = cmd
         command_np = np.tile(np.asarray(cmd, dtype=np.float32), (self.world_count, 1))
         self.command.assign(command_np)
 
     def set_commands(self, commands: np.ndarray) -> None:
-        """Set per-world body-frame velocity commands [m/s, m/s, rad/s]."""
+        """Set per-world body-frame commands [m/s, m/s, rad/s, m]."""
 
         cmds = np.asarray(commands, dtype=np.float32)
-        if cmds.shape != (self.world_count, 3):
-            raise ValueError(f"Expected commands with shape {(self.world_count, 3)}, got {cmds.shape}")
-        self.config.command = (float(cmds[0, 0]), float(cmds[0, 1]), float(cmds[0, 2]))
+        if cmds.shape == (self.world_count, 3):
+            cmds = np.concatenate((cmds, np.zeros((self.world_count, 1), dtype=np.float32)), axis=1)
+        if cmds.shape != (self.world_count, COMMAND_DIM_ANYMAL):
+            raise ValueError(f"Expected commands with shape {(self.world_count, COMMAND_DIM_ANYMAL)}, got {cmds.shape}")
+        self.config.command = tuple(float(v) for v in cmds[0])
         self.command.assign(cmds)
 
     def set_target_position(self, target_position: tuple[float, float]) -> None:
@@ -642,12 +682,15 @@ class EnvAnymalPhoenX:
                 self.episode_steps,
                 self.config.max_episode_steps,
                 self.reward_mode,
+                self.config.target_base_height,
                 self.config.min_base_height,
                 self.config.min_upright_cos,
                 self.config.lin_vel_reward_scale,
                 self.config.yaw_rate_reward_scale,
                 self.config.lin_vel_tracking_sigma,
                 self.config.yaw_rate_tracking_sigma,
+                self.config.base_height_reward_scale,
+                self.config.base_height_tracking_sigma,
                 self.config.z_vel_reward_scale,
                 self.config.ang_vel_reward_scale,
                 self.config.action_rate_reward_scale,
@@ -658,6 +701,7 @@ class EnvAnymalPhoenX:
                 self.config.target_progress_reward_scale,
                 self.config.fall_reward_scale,
                 self.config.energy_reward_scale,
+                self.config.hip_abduction_reward_scale,
                 self.config.target_radius,
                 self.config.action_scale,
                 self.config.actuator_ke,

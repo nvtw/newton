@@ -21,6 +21,7 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(names[0], "balance_and_step_forward")
         self.assertEqual(names[-1], "robust_full_control")
+        self.assertLess(names.index("base_height_control"), names.index("turn_in_place"))
         self.assertLess(names.index("curved_forward"), names.index("reverse_walk"))
         for phase in phases:
             if phase.name in {"balance_and_step_forward", "walk_forward", "fast_efficient_forward"}:
@@ -44,6 +45,7 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         robust = phases[-1]
         robust_overrides = dict(robust.env_overrides)
         self.assertIn("lin_vel_tracking_sigma", robust_overrides)
+        self.assertNotEqual(robust.command_height_range, (0.0, 0.0))
         self.assertGreater(robust_overrides["forward_progress_reward_scale"], 0.0)
 
         args = anymal_curriculum._make_parser().parse_args(
@@ -199,7 +201,7 @@ class TestAnymalPhoenXRL(unittest.TestCase):
             rl.ConfigEnvAnymalPhoenX(
                 world_count=4,
                 reward_mode="dense_command",
-                command=(0.0, 0.0, 0.0),
+                command=(0.0, 0.0, 0.0, 0.0),
                 sim_substeps=1,
                 solver_iterations=1,
                 velocity_iterations=1,
@@ -210,10 +212,10 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         )
         commands = np.asarray(
             (
-                (0.0, 0.0, 0.0),
-                (0.6, 0.0, 0.0),
-                (0.0, 0.35, 0.0),
-                (0.0, 0.0, 0.75),
+                (0.0, 0.0, 0.0, 0.0),
+                (0.6, 0.0, 0.0, 0.02),
+                (0.0, 0.35, 0.0, -0.03),
+                (0.0, 0.0, 0.75, 0.04),
             ),
             dtype=np.float32,
         )
@@ -224,10 +226,88 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         obs_np = obs.numpy()
-        np.testing.assert_allclose(obs_np[:, 9:12], commands, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(
+            obs_np[:, rl.COMMAND_OBS_OFFSET_ANYMAL : rl.COMMAND_OBS_OFFSET_ANYMAL + rl.COMMAND_DIM_ANYMAL],
+            commands,
+            rtol=0.0,
+            atol=1.0e-6,
+        )
         success = env.successes.numpy()
         self.assertGreater(float(success[0]), 0.95)
         self.assertLess(float(success[3]), 0.25)
+
+    def test_dense_command_accepts_legacy_three_value_commands_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal RL tests")
+        env = rl.EnvAnymalPhoenX(
+            rl.ConfigEnvAnymalPhoenX(
+                world_count=2,
+                reward_mode="dense_command",
+                command=(0.0, 0.0, 0.0),
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=1,
+                max_episode_steps=0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        commands = np.asarray(((0.2, 0.0, 0.0), (0.0, -0.2, 0.1)), dtype=np.float32)
+        expected = np.concatenate((commands, np.zeros((env.world_count, 1), dtype=np.float32)), axis=1)
+        env.set_commands(commands)
+
+        with wp.ScopedCapture(device=device) as capture:
+            obs = env.observe()
+        wp.capture_launch(capture.graph)
+
+        obs_np = obs.numpy()
+        np.testing.assert_allclose(
+            obs_np[:, rl.COMMAND_OBS_OFFSET_ANYMAL : rl.COMMAND_OBS_OFFSET_ANYMAL + rl.COMMAND_DIM_ANYMAL],
+            expected,
+            rtol=0.0,
+            atol=1.0e-6,
+        )
+
+    def test_dense_command_height_reward_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal RL tests")
+        common = {
+            "world_count": 1,
+            "reward_mode": "dense_command",
+            "sim_substeps": 1,
+            "solver_iterations": 1,
+            "velocity_iterations": 1,
+            "max_episode_steps": 0,
+            "auto_reset": False,
+            "lin_vel_reward_scale": 0.0,
+            "yaw_rate_reward_scale": 0.0,
+            "base_height_reward_scale": 1.0,
+            "base_height_tracking_sigma": 0.04,
+            "z_vel_reward_scale": 0.0,
+            "ang_vel_reward_scale": 0.0,
+            "action_rate_reward_scale": 0.0,
+            "joint_speed_reward_scale": 0.0,
+            "flat_orientation_reward_scale": 0.0,
+            "forward_progress_reward_scale": 0.0,
+            "fall_reward_scale": 0.0,
+            "energy_reward_scale": 0.0,
+        }
+        nominal_env = rl.EnvAnymalPhoenX(
+            rl.ConfigEnvAnymalPhoenX(**common, command=(0.0, 0.0, 0.0, 0.0)),
+            device=device,
+        )
+        high_env = rl.EnvAnymalPhoenX(
+            rl.ConfigEnvAnymalPhoenX(**common, command=(0.0, 0.0, 0.0, 0.10)),
+            device=device,
+        )
+
+        with wp.ScopedCapture(device=device) as capture:
+            nominal_env.observe()
+            high_env.observe()
+        wp.capture_launch(capture.graph)
+
+        nominal_reward = float(nominal_env.rewards.numpy()[0])
+        high_reward = float(high_env.rewards.numpy()[0])
+        self.assertGreater(nominal_reward, 0.9)
+        self.assertLess(high_reward, 0.01)
 
     def test_velocity_disturbance_inside_graph_changes_root_velocity(self) -> None:
         device = require_cuda_graph_capture("PhoenX Anymal RL tests")
