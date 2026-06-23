@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-from .anymal import ACTION_DIM_ANYMAL, OBS_DIM_ANYMAL, ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
+from .anymal import ACTION_DIM_ANYMAL, OBS_DIM_ANYMAL, ConfigEnvAnymalPhoenX, EnvAnymalPhoenX, anymal_mirror_map_ppo
 from .env import EnvPPO, capture_env_steps, collect_ppo_rollout
 from .g1 import (
     ACTION_DIM_G1,
@@ -98,6 +98,7 @@ __all__ = [
     "TrainerPPO",
     "TrainerSAC",
     "WarpMLP",
+    "anymal_mirror_map_ppo",
     "capture_env_steps",
     "collect_ppo_rollout",
     "evaluate_anymal_ppo",

@@ -12,7 +12,7 @@ import newton
 import newton.utils
 
 from .env import collect_ppo_rollout
-from .ppo import BufferRollout, TrainerPPO
+from .ppo import BufferRollout, MirrorMapPPO, TrainerPPO
 from .sac import BufferReplaySAC, TrainerSAC
 
 OBS_DIM_ANYMAL = 48
@@ -39,6 +39,36 @@ _INITIAL_JOINT_Q = {
     "LF_HFE": 0.4,
     "LF_KFE": -0.8,
 }
+
+
+_ANYMAL_JOINT_MIRROR_SRC = (2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9)
+_ANYMAL_JOINT_MIRROR_SIGN = (-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+
+
+def anymal_mirror_map_ppo() -> MirrorMapPPO:
+    """Return the left/right Anymal C PPO mirror map."""
+
+    obs_src = list(range(OBS_DIM_ANYMAL))
+    obs_sign = [1.0] * OBS_DIM_ANYMAL
+
+    obs_sign[1] = -1.0
+    obs_sign[3] = -1.0
+    obs_sign[5] = -1.0
+    obs_sign[7] = -1.0
+    obs_sign[10] = -1.0
+    obs_sign[11] = -1.0
+
+    for base in (12, 24, 36):
+        for joint in range(ACTION_DIM_ANYMAL):
+            obs_src[base + joint] = base + _ANYMAL_JOINT_MIRROR_SRC[joint]
+            obs_sign[base + joint] = _ANYMAL_JOINT_MIRROR_SIGN[joint]
+
+    return MirrorMapPPO(
+        obs_src=tuple(obs_src),
+        obs_sign=tuple(obs_sign),
+        action_src=_ANYMAL_JOINT_MIRROR_SRC,
+        action_sign=_ANYMAL_JOINT_MIRROR_SIGN,
+    )
 
 
 def _reward_mode_code(reward_mode: str) -> int:

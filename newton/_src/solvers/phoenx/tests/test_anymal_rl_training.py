@@ -32,10 +32,11 @@ class TestAnymalPhoenXRL(unittest.TestCase):
             obs_dim=env.obs_dim,
             action_dim=env.action_dim,
             hidden_layers=(16,),
-            config=rl.ConfigPPO(),
+            config=rl.ConfigPPO(mirror_loss_coeff=1.0e-3),
             device=device,
             seed=19,
             activation="elu",
+            mirror_map=rl.anymal_mirror_map_ppo(),
         )
         trainer.reserve_buffers(8)
         warmup_actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
@@ -84,6 +85,42 @@ class TestAnymalPhoenXRL(unittest.TestCase):
 
         self.assertGreater(float(np.min(zero_command_success)), 0.95)
         self.assertLess(float(np.max(fast_command_success)), 0.05)
+
+    def test_dense_command_observes_per_world_steering_commands_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal RL tests")
+        env = rl.EnvAnymalPhoenX(
+            rl.ConfigEnvAnymalPhoenX(
+                world_count=4,
+                reward_mode="dense_command",
+                command=(0.0, 0.0, 0.0),
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=1,
+                max_episode_steps=0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        commands = np.asarray(
+            (
+                (0.0, 0.0, 0.0),
+                (0.6, 0.0, 0.0),
+                (0.0, 0.35, 0.0),
+                (0.0, 0.0, 0.75),
+            ),
+            dtype=np.float32,
+        )
+        env.set_commands(commands)
+
+        with wp.ScopedCapture(device=device) as capture:
+            obs = env.observe()
+        wp.capture_launch(capture.graph)
+
+        obs_np = obs.numpy()
+        np.testing.assert_allclose(obs_np[:, 9:12], commands, rtol=0.0, atol=1.0e-6)
+        success = env.successes.numpy()
+        self.assertGreater(float(success[0]), 0.95)
+        self.assertLess(float(success[3]), 0.25)
 
     def test_velocity_disturbance_inside_graph_changes_root_velocity(self) -> None:
         device = require_cuda_graph_capture("PhoenX Anymal RL tests")

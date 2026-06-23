@@ -5,9 +5,10 @@
 
 This experimental runner validates PhoenX RL on a quadruped that is simpler
 than G1 while still using the production Anymal PhoenX environment. It supports
-both a single fixed velocity command and a small phased straight-walking recipe
-that trains from scratch, checkpoints between phases, and evaluates without
-auto-reset so falls cannot be hidden by rollout resets.
+both a single fixed velocity command and phased curricula for straight walking
+and ASDWQE-style steering. Curriculum phases train from scratch, checkpoint
+between phases, and evaluate without auto-reset so falls cannot be hidden by
+rollout resets.
 """
 
 from __future__ import annotations
@@ -49,19 +50,41 @@ _BASE_ENV = {
 }
 
 
+_STEERING_EVAL_COMMANDS = (
+    (0.0, 0.0, 0.0),
+    (0.75, 0.0, 0.0),
+    (-0.35, 0.0, 0.0),
+    (0.0, 0.35, 0.0),
+    (0.0, -0.35, 0.0),
+    (0.0, 0.0, 0.65),
+    (0.0, 0.0, -0.65),
+    (0.55, 0.0, 0.65),
+    (0.55, 0.0, -0.65),
+)
+
+
 @dataclass(frozen=True)
 class PhaseAnymalWalk:
-    """One straight-walking training phase."""
+    """One Anymal command-walking training phase."""
 
     name: str
     command: tuple[float, float, float]
     iterations: int
     env_overrides: tuple[tuple[str, object], ...] = ()
+    randomize_commands: bool = False
+    command_x_range: tuple[float, float] = (0.0, 0.0)
+    command_y_range: tuple[float, float] = (0.0, 0.0)
+    command_yaw_range: tuple[float, float] = (0.0, 0.0)
+    command_yaw_min_abs: float = 0.0
+    command_zero_probability: float = 0.0
+    eval_commands: tuple[tuple[float, float, float], ...] = ()
     gate_min_tracking_perf: float = 0.45
     gate_max_fall_fraction: float = 0.35
     gate_min_survival_fraction: float = 0.70
     gate_min_forward_velocity_fraction: float = 0.35
     gate_max_abs_forward_velocity_error: float = 0.45
+    gate_max_abs_lateral_velocity_error: float = 0.45
+    gate_max_abs_yaw_rate_error: float = 0.65
 
 
 @dataclass(frozen=True)
@@ -95,68 +118,161 @@ def anymal_recipe(name: str) -> tuple[PhaseAnymalWalk, ...]:
 
     if name == "single":
         return ()
+
+    forward = (
+        PhaseAnymalWalk(
+            name="warmup_forward",
+            command=(0.35, 0.0, 0.0),
+            iterations=120,
+            env_overrides=(("action_scale", 0.45), ("forward_progress_reward_scale", 1.0)),
+            gate_min_tracking_perf=0.30,
+            gate_max_fall_fraction=0.55,
+            gate_min_survival_fraction=0.45,
+            gate_min_forward_velocity_fraction=0.20,
+            gate_max_abs_forward_velocity_error=0.50,
+        ),
+        PhaseAnymalWalk(
+            name="walk_forward",
+            command=(0.65, 0.0, 0.0),
+            iterations=220,
+            env_overrides=(("action_scale", 0.50), ("forward_progress_reward_scale", 0.75)),
+            gate_min_tracking_perf=0.48,
+            gate_max_fall_fraction=0.30,
+            gate_min_survival_fraction=0.70,
+            gate_min_forward_velocity_fraction=0.45,
+            gate_max_abs_forward_velocity_error=0.40,
+        ),
+        PhaseAnymalWalk(
+            name="fast_efficient_forward",
+            command=(0.90, 0.0, 0.0),
+            iterations=260,
+            env_overrides=(
+                ("action_scale", 0.50),
+                ("energy_reward_scale", -3.0e-5),
+                ("action_rate_reward_scale", -0.015),
+                ("forward_progress_reward_scale", 0.35),
+            ),
+            gate_min_tracking_perf=0.58,
+            gate_max_fall_fraction=0.18,
+            gate_min_survival_fraction=0.82,
+            gate_min_forward_velocity_fraction=0.55,
+            gate_max_abs_forward_velocity_error=0.35,
+        ),
+        PhaseAnymalWalk(
+            name="disturbed_forward",
+            command=(0.90, 0.0, 0.0),
+            iterations=180,
+            env_overrides=(
+                ("action_scale", 0.50),
+                ("energy_reward_scale", -3.0e-5),
+                ("action_rate_reward_scale", -0.015),
+                ("forward_progress_reward_scale", 0.25),
+                ("disturbance_warmup_steps", 50),
+                ("disturbance_noise_velocity_xy", 0.025),
+                ("disturbance_noise_yaw_velocity", 0.015),
+                ("disturbance_kick_probability", 0.003),
+                ("disturbance_kick_velocity_xy", 0.45),
+                ("disturbance_kick_yaw_velocity", 0.35),
+                ("disturbance_seed", 41_337),
+            ),
+            gate_min_tracking_perf=0.50,
+            gate_max_fall_fraction=0.08,
+            gate_min_survival_fraction=0.92,
+            gate_min_forward_velocity_fraction=0.50,
+            gate_max_abs_forward_velocity_error=0.45,
+        ),
+    )
     if name == "forward":
+        return forward
+    if name == "steering":
         return (
+            *forward,
             PhaseAnymalWalk(
-                name="warmup_forward",
-                command=(0.35, 0.0, 0.0),
-                iterations=120,
-                env_overrides=(("action_scale", 0.45), ("forward_progress_reward_scale", 1.0)),
-                gate_min_tracking_perf=0.30,
-                gate_max_fall_fraction=0.55,
-                gate_min_survival_fraction=0.45,
-                gate_min_forward_velocity_fraction=0.20,
-                gate_max_abs_forward_velocity_error=0.50,
-            ),
-            PhaseAnymalWalk(
-                name="walk_forward",
-                command=(0.65, 0.0, 0.0),
+                name="turn_stand",
+                command=(0.0, 0.0, 0.65),
                 iterations=220,
-                env_overrides=(("action_scale", 0.50), ("forward_progress_reward_scale", 0.75)),
-                gate_min_tracking_perf=0.48,
-                gate_max_fall_fraction=0.30,
-                gate_min_survival_fraction=0.70,
-                gate_min_forward_velocity_fraction=0.45,
-                gate_max_abs_forward_velocity_error=0.40,
+                env_overrides=(
+                    ("action_scale", 0.55),
+                    ("lin_vel_reward_scale", 0.35),
+                    ("yaw_rate_reward_scale", 2.50),
+                    ("forward_progress_reward_scale", 0.0),
+                    ("energy_reward_scale", -3.0e-5),
+                    ("action_rate_reward_scale", -0.015),
+                ),
+                randomize_commands=True,
+                command_x_range=(0.0, 0.0),
+                command_y_range=(0.0, 0.0),
+                command_yaw_range=(-0.85, 0.85),
+                command_yaw_min_abs=0.45,
+                command_zero_probability=0.10,
+                eval_commands=((0.0, 0.0, 0.0), (0.0, 0.0, 0.65), (0.0, 0.0, -0.65)),
+                gate_min_tracking_perf=0.35,
+                gate_max_fall_fraction=0.12,
+                gate_min_survival_fraction=0.88,
+                gate_max_abs_forward_velocity_error=0.30,
+                gate_max_abs_lateral_velocity_error=0.30,
+                gate_max_abs_yaw_rate_error=0.48,
             ),
             PhaseAnymalWalk(
-                name="fast_efficient_forward",
-                command=(0.90, 0.0, 0.0),
+                name="omni_steering",
+                command=(0.55, 0.0, 0.0),
+                iterations=320,
+                env_overrides=(
+                    ("action_scale", 0.50),
+                    ("lin_vel_reward_scale", 2.50),
+                    ("yaw_rate_reward_scale", 1.25),
+                    ("forward_progress_reward_scale", 0.20),
+                    ("energy_reward_scale", -3.0e-5),
+                    ("action_rate_reward_scale", -0.015),
+                ),
+                randomize_commands=True,
+                command_x_range=(-0.40, 0.95),
+                command_y_range=(-0.45, 0.45),
+                command_yaw_range=(-0.90, 0.90),
+                command_yaw_min_abs=0.0,
+                command_zero_probability=0.05,
+                eval_commands=_STEERING_EVAL_COMMANDS,
+                gate_min_tracking_perf=0.42,
+                gate_max_fall_fraction=0.15,
+                gate_min_survival_fraction=0.85,
+                gate_min_forward_velocity_fraction=0.35,
+                gate_max_abs_forward_velocity_error=0.40,
+                gate_max_abs_lateral_velocity_error=0.32,
+                gate_max_abs_yaw_rate_error=0.55,
+            ),
+            PhaseAnymalWalk(
+                name="disturbed_steering",
+                command=(0.55, 0.0, 0.0),
                 iterations=260,
                 env_overrides=(
                     ("action_scale", 0.50),
+                    ("lin_vel_reward_scale", 2.50),
+                    ("yaw_rate_reward_scale", 1.25),
+                    ("forward_progress_reward_scale", 0.20),
                     ("energy_reward_scale", -3.0e-5),
                     ("action_rate_reward_scale", -0.015),
-                    ("forward_progress_reward_scale", 0.35),
-                ),
-                gate_min_tracking_perf=0.58,
-                gate_max_fall_fraction=0.18,
-                gate_min_survival_fraction=0.82,
-                gate_min_forward_velocity_fraction=0.55,
-                gate_max_abs_forward_velocity_error=0.35,
-            ),
-            PhaseAnymalWalk(
-                name="disturbed_forward",
-                command=(0.90, 0.0, 0.0),
-                iterations=180,
-                env_overrides=(
-                    ("action_scale", 0.50),
-                    ("energy_reward_scale", -3.0e-5),
-                    ("action_rate_reward_scale", -0.015),
-                    ("forward_progress_reward_scale", 0.25),
                     ("disturbance_warmup_steps", 50),
                     ("disturbance_noise_velocity_xy", 0.025),
                     ("disturbance_noise_yaw_velocity", 0.015),
                     ("disturbance_kick_probability", 0.003),
                     ("disturbance_kick_velocity_xy", 0.45),
                     ("disturbance_kick_yaw_velocity", 0.35),
-                    ("disturbance_seed", 41_337),
+                    ("disturbance_seed", 52_091),
                 ),
-                gate_min_tracking_perf=0.50,
-                gate_max_fall_fraction=0.08,
-                gate_min_survival_fraction=0.92,
-                gate_min_forward_velocity_fraction=0.50,
+                randomize_commands=True,
+                command_x_range=(-0.40, 0.95),
+                command_y_range=(-0.45, 0.45),
+                command_yaw_range=(-0.90, 0.90),
+                command_yaw_min_abs=0.0,
+                command_zero_probability=0.10,
+                eval_commands=_STEERING_EVAL_COMMANDS,
+                gate_min_tracking_perf=0.38,
+                gate_max_fall_fraction=0.12,
+                gate_min_survival_fraction=0.88,
+                gate_min_forward_velocity_fraction=0.30,
                 gate_max_abs_forward_velocity_error=0.45,
+                gate_max_abs_lateral_velocity_error=0.36,
+                gate_max_abs_yaw_rate_error=0.60,
             ),
         )
     raise ValueError(f"Unknown Anymal recipe {name!r}")
@@ -213,6 +329,7 @@ def build_ppo_config(args: argparse.Namespace) -> rl.ConfigPPO:
         normalize_advantages=True,
         reward_clip=float(args.reward_clip),
         max_grad_norm=float(args.max_grad_norm),
+        mirror_loss_coeff=float(args.mirror_loss_coeff),
         manual_actor_backward=not bool(args.disable_manual_backward),
         manual_critic_backward=not bool(args.disable_manual_backward),
     )
@@ -384,7 +501,7 @@ def check_phase_gate(stats: StatsEvaluateAnymalWalk, phase: PhaseAnymalWalk) -> 
         failures.append(f"fall_fraction={stats.fall_fraction:.3f} > {phase.gate_max_fall_fraction:.3f}")
     if stats.survival_fraction < phase.gate_min_survival_fraction:
         failures.append(f"survival={stats.survival_fraction:.3f} < {phase.gate_min_survival_fraction:.3f}")
-    command_x = float(phase.command[0])
+    command_x = float(stats.command[0])
     min_vx = abs(command_x) * float(phase.gate_min_forward_velocity_fraction)
     if command_x >= 0.0 and stats.mean_forward_velocity < min_vx:
         failures.append(f"vx={stats.mean_forward_velocity:.3f} < {min_vx:.3f}")
@@ -394,6 +511,38 @@ def check_phase_gate(stats: StatsEvaluateAnymalWalk, phase: PhaseAnymalWalk) -> 
         failures.append(
             f"|vx-cmd|={stats.mean_abs_forward_velocity_error:.3f} > {phase.gate_max_abs_forward_velocity_error:.3f}"
         )
+    if stats.mean_abs_lateral_velocity > phase.gate_max_abs_lateral_velocity_error:
+        failures.append(
+            f"|vy-cmd|={stats.mean_abs_lateral_velocity:.3f} > {phase.gate_max_abs_lateral_velocity_error:.3f}"
+        )
+    if stats.mean_abs_yaw_rate_error > phase.gate_max_abs_yaw_rate_error:
+        failures.append(f"|yaw-cmd|={stats.mean_abs_yaw_rate_error:.3f} > {phase.gate_max_abs_yaw_rate_error:.3f}")
+    return failures
+
+
+def _phase_eval_commands(phase: PhaseAnymalWalk) -> tuple[tuple[float, float, float], ...]:
+    if phase.eval_commands:
+        return phase.eval_commands
+    return (phase.command,)
+
+
+def evaluate_phase_commands(
+    trainer: rl.TrainerPPO,
+    args: argparse.Namespace,
+    phase: PhaseAnymalWalk,
+    env_overrides: dict[str, object],
+) -> list[StatsEvaluateAnymalWalk]:
+    return [
+        evaluate_checkpoint(trainer, args, command=command, env_overrides=env_overrides)
+        for command in _phase_eval_commands(phase)
+    ]
+
+
+def check_phase_gates(stats: list[StatsEvaluateAnymalWalk], phase: PhaseAnymalWalk) -> list[str]:
+    failures: list[str] = []
+    for item in stats:
+        prefix = f"cmd=({item.command[0]:.2f},{item.command[1]:.2f},{item.command[2]:.2f})"
+        failures.extend(f"{prefix} {failure}" for failure in check_phase_gate(item, phase))
     return failures
 
 
@@ -465,7 +614,7 @@ def train_curriculum(args: argparse.Namespace) -> dict[str, object]:
         output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_pattern = _default_checkpoint_pattern(args, curriculum=True)
     if checkpoint_pattern is None:
-        raise ValueError("--recipe forward requires --output-dir or --checkpoint-path so phases can resume")
+        raise ValueError("Curriculum recipes require --output-dir or --checkpoint-path so phases can resume")
     resume_checkpoint = args.resume_checkpoint
     phase_payloads: list[dict[str, object]] = []
     final_checkpoint = resume_checkpoint
@@ -493,6 +642,12 @@ def train_curriculum(args: argparse.Namespace) -> dict[str, object]:
                 log_interval=int(args.log_interval),
                 use_target_curriculum=False,
                 randomize_target_positions=False,
+                randomize_commands=bool(phase.randomize_commands),
+                command_x_range=tuple(float(v) for v in phase.command_x_range),
+                command_y_range=tuple(float(v) for v in phase.command_y_range),
+                command_yaw_range=tuple(float(v) for v in phase.command_yaw_range),
+                command_yaw_min_abs=float(phase.command_yaw_min_abs),
+                command_zero_probability=float(phase.command_zero_probability),
                 resume_checkpoint=resume_checkpoint,
                 checkpoint_path=phase_checkpoint_pattern,
                 checkpoint_interval=int(args.checkpoint_interval),
@@ -500,17 +655,8 @@ def train_curriculum(args: argparse.Namespace) -> dict[str, object]:
         )
         final_iteration = int(result.trainer.iteration)
         final_checkpoint = _format_checkpoint_path(phase_checkpoint_pattern, final_iteration)
-        eval_stats = (
-            None
-            if bool(args.no_eval)
-            else evaluate_checkpoint(
-                result.trainer,
-                args,
-                command=phase.command,
-                env_overrides=env_overrides,
-            )
-        )
-        gate_failures = [] if eval_stats is None else check_phase_gate(eval_stats, phase)
+        eval_stats = None if bool(args.no_eval) else evaluate_phase_commands(result.trainer, args, phase, env_overrides)
+        gate_failures = [] if eval_stats is None else check_phase_gates(eval_stats, phase)
         pass_gate = not gate_failures
         phase_payload = {
             "phase_index": local_index,
@@ -518,7 +664,8 @@ def train_curriculum(args: argparse.Namespace) -> dict[str, object]:
             "iterations": phase_iterations,
             "checkpoint": final_checkpoint,
             "final_train_stats": asdict(result.history[-1]) if result.history else {},
-            "eval_stats": asdict(eval_stats) if eval_stats is not None else None,
+            "eval_stats": asdict(eval_stats[0]) if eval_stats else None,
+            "eval_command_stats": [asdict(item) for item in eval_stats] if eval_stats else None,
             "pass_gate": pass_gate,
             "gate_failures": gate_failures,
         }
@@ -558,7 +705,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--eval-only", action="store_true")
-    parser.add_argument("--recipe", choices=("single", "forward"), default="single")
+    parser.add_argument("--recipe", choices=("single", "forward", "steering"), default="single")
     parser.add_argument("--iteration-scale", type=float, default=1.0)
     parser.add_argument("--start-phase", type=int, default=0)
     parser.add_argument("--phase-count", type=int, default=None)
@@ -600,6 +747,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replay-ratio", type=float, default=0.0)
     parser.add_argument("--reward-clip", type=float, default=0.0)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--mirror-loss-coeff", type=float, default=0.02)
     parser.add_argument("--disable-manual-backward", action="store_true")
 
     parser.add_argument("--eval-world-count", type=int, default=64)

@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
-from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
+from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX, anymal_mirror_map_ppo
 from .env import make_seed_counter
 from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
 from .g1_recipe import (
@@ -189,6 +189,12 @@ class ConfigTrainAnymalPPO:
         randomize_target_positions: Sample target directions per world before each rollout.
         target_angle_min: Minimum sampled target angle relative to initial body-forward [rad].
         target_angle_max: Maximum sampled target angle relative to initial body-forward [rad].
+        randomize_commands: Sample dense velocity commands per world before each rollout.
+        command_x_range: Sampled forward command range [m/s].
+        command_y_range: Sampled lateral command range [m/s].
+        command_yaw_range: Sampled yaw-rate command range [rad/s].
+        command_yaw_min_abs: Minimum non-zero sampled yaw-rate magnitude [rad/s].
+        command_zero_probability: Probability of replacing a sampled command with zero velocity.
         resume_checkpoint: Optional PPO checkpoint to resume from.
         checkpoint_path: Optional path for writing PPO checkpoints.
         checkpoint_interval: Save a checkpoint every N iterations when positive.
@@ -212,6 +218,12 @@ class ConfigTrainAnymalPPO:
     randomize_target_positions: bool = True
     target_angle_min: float = -float(np.pi)
     target_angle_max: float = float(np.pi)
+    randomize_commands: bool = False
+    command_x_range: tuple[float, float] = (0.0, 0.0)
+    command_y_range: tuple[float, float] = (0.0, 0.0)
+    command_yaw_range: tuple[float, float] = (0.0, 0.0)
+    command_yaw_min_abs: float = 0.0
+    command_zero_probability: float = 0.0
     resume_checkpoint: str | None = None
     checkpoint_path: str | None = None
     checkpoint_interval: int = 0
@@ -1192,6 +1204,16 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
         raise ValueError("rollout_steps must be positive")
     if cfg.target_angle_max <= cfg.target_angle_min:
         raise ValueError("target_angle_max must be greater than target_angle_min")
+    if cfg.command_x_range[1] < cfg.command_x_range[0]:
+        raise ValueError("command_x_range must be ordered")
+    if cfg.command_y_range[1] < cfg.command_y_range[0]:
+        raise ValueError("command_y_range must be ordered")
+    if cfg.command_yaw_range[1] < cfg.command_yaw_range[0]:
+        raise ValueError("command_yaw_range must be ordered")
+    if float(cfg.command_yaw_min_abs) < 0.0:
+        raise ValueError("command_yaw_min_abs must be non-negative")
+    if not 0.0 <= float(cfg.command_zero_probability) <= 1.0:
+        raise ValueError("command_zero_probability must be in [0, 1]")
     if cfg.checkpoint_interval < 0:
         raise ValueError("checkpoint_interval must be non-negative")
 
@@ -1204,6 +1226,8 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
         ppo_config = trainer.config
         if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
             raise ValueError("Checkpoint dimensions do not match the Anymal environment")
+        if trainer.config.mirror_loss_coeff > 0.0:
+            trainer.set_mirror_map(anymal_mirror_map_ppo())
     else:
         trainer = TrainerPPO(
             obs_dim=env.obs_dim,
@@ -1215,6 +1239,7 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
             squash_actions=True,
             activation=cfg.activation,
             log_std_init=cfg.log_std_init,
+            mirror_map=anymal_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,
         )
     buffer = BufferRollout(
         num_steps=cfg.rollout_steps,
@@ -1238,8 +1263,14 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
         iteration = start_iteration + local_iteration
         target_rng = np.random.default_rng(int(cfg.seed) + 17_917 + iteration)
         _configure_rollout_targets(env, cfg, target_rng, target_direction, target_distance)
+        _configure_rollout_commands(env, cfg, target_rng)
         env.collect_ppo_rollout(trainer, buffer, seed=cfg.seed + iteration * cfg.rollout_steps)
-        rollout_metrics = _rollout_metrics(buffer, command_x, target_distance)
+        rollout_metrics = _rollout_metrics(
+            buffer,
+            command_x,
+            target_distance,
+            use_observed_command=cfg.randomize_commands,
+        )
         update_stats = trainer.update(buffer)
         stats = _merge_stats(iteration, rollout_metrics, update_stats)
         history.append(stats)
@@ -1338,6 +1369,47 @@ def _configure_rollout_targets(
     else:
         target_xy = target_direction * np.float32(target_distance)
         env.set_target_position((float(target_xy[0]), float(target_xy[1])))
+
+
+def _configure_rollout_commands(env: EnvAnymalPhoenX, cfg: ConfigTrainAnymalPPO, rng: np.random.Generator) -> None:
+    if env.config.reward_mode != "dense_command" or not cfg.randomize_commands:
+        return
+    commands = _sample_velocity_commands(
+        rng=rng,
+        world_count=env.world_count,
+        x_range=cfg.command_x_range,
+        y_range=cfg.command_y_range,
+        yaw_range=cfg.command_yaw_range,
+        yaw_min_abs=cfg.command_yaw_min_abs,
+        zero_probability=cfg.command_zero_probability,
+    )
+    env.set_commands(commands)
+
+
+def _sample_velocity_commands(
+    *,
+    rng: np.random.Generator,
+    world_count: int,
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+    yaw_range: tuple[float, float],
+    yaw_min_abs: float,
+    zero_probability: float,
+) -> np.ndarray:
+    commands = np.empty((int(world_count), 3), dtype=np.float32)
+    commands[:, 0] = rng.uniform(float(x_range[0]), float(x_range[1]), size=int(world_count)).astype(np.float32)
+    commands[:, 1] = rng.uniform(float(y_range[0]), float(y_range[1]), size=int(world_count)).astype(np.float32)
+    commands[:, 2] = rng.uniform(float(yaw_range[0]), float(yaw_range[1]), size=int(world_count)).astype(np.float32)
+    min_abs_yaw = float(max(yaw_min_abs, 0.0))
+    if min_abs_yaw > 0.0:
+        yaw = commands[:, 2]
+        signs = np.where(yaw < 0.0, -1.0, 1.0).astype(np.float32)
+        commands[:, 2] = np.clip(signs * np.maximum(np.abs(yaw), min_abs_yaw), yaw_range[0], yaw_range[1])
+    zero_p = float(np.clip(zero_probability, 0.0, 1.0))
+    if zero_p > 0.0:
+        zero_mask = rng.random(int(world_count)) < zero_p
+        commands[zero_mask, :] = 0.0
+    return commands
 
 
 def _target_direction(target_xy: np.ndarray) -> np.ndarray:
@@ -1818,20 +1890,21 @@ def _merge_g1_stats(
 
 
 def _rollout_metrics(
-    buffer: BufferRollout, command_x: float, target_distance: float
+    buffer: BufferRollout, command_x: float, target_distance: float, *, use_observed_command: bool = False
 ) -> tuple[float, float, float, float, float, float]:
     rewards = buffer.rewards.numpy()
     dones = buffer.dones.numpy()
     successes = buffer.successes.numpy()
     obs = buffer.obs.numpy()
     forward_velocity = obs[:, 0]
+    target_forward_velocity = obs[:, 9] if use_observed_command else command_x
     return (
         float(np.mean(rewards)),
         float(np.mean(dones)),
         float(np.mean(successes)),
         float(target_distance),
         float(np.mean(forward_velocity)),
-        float(np.mean(np.abs(forward_velocity - command_x))),
+        float(np.mean(np.abs(forward_velocity - target_forward_velocity))),
     )
 
 
