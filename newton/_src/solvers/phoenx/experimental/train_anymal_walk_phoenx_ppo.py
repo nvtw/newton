@@ -3,16 +3,18 @@
 
 """Train Anymal C command walking with PhoenX and Warp-only PPO.
 
-This is a focused experimental runner for validating PhoenX RL on a quadruped
-that is simpler than G1 but uses the production Anymal PhoenX environment. It
-uses dense velocity-command rewards and evaluates checkpoints without auto-reset
-so short rollout reward cannot hide falls.
+This experimental runner validates PhoenX RL on a quadruped that is simpler
+than G1 while still using the production Anymal PhoenX environment. It supports
+both a single fixed velocity command and a small phased straight-walking recipe
+that trains from scratch, checkpoints between phases, and evaluates without
+auto-reset so falls cannot be hidden by rollout resets.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -25,19 +27,34 @@ _BASE_ENV = {
     "reward_mode": "dense_command",
     "command": (0.6, 0.0, 0.0),
     "max_episode_steps": 500,
-    "lin_vel_reward_scale": 2.0,
+    "lin_vel_reward_scale": 1.0,
     "yaw_rate_reward_scale": 0.5,
-    "z_vel_reward_scale": -1.0,
-    "ang_vel_reward_scale": -0.2,
+    "z_vel_reward_scale": -2.0,
+    "ang_vel_reward_scale": -0.05,
     "action_rate_reward_scale": -0.01,
     "joint_speed_reward_scale": -1.0e-4,
-    "flat_orientation_reward_scale": -3.0,
-    "forward_progress_reward_scale": 0.5,
+    "flat_orientation_reward_scale": -5.0,
+    "forward_progress_reward_scale": 0.0,
     "fall_reward_scale": -2.0,
-    "energy_reward_scale": -2.0e-5,
+    "energy_reward_scale": -2.5e-5,
     "min_base_height": 0.30,
     "min_upright_cos": 0.35,
 }
+
+
+@dataclass(frozen=True)
+class PhaseAnymalWalk:
+    """One straight-walking training phase."""
+
+    name: str
+    command: tuple[float, float, float]
+    iterations: int
+    env_overrides: tuple[tuple[str, object], ...] = ()
+    gate_min_tracking_perf: float = 0.45
+    gate_max_fall_fraction: float = 0.35
+    gate_min_survival_fraction: float = 0.70
+    gate_min_forward_velocity_fraction: float = 0.35
+    gate_max_abs_forward_velocity_error: float = 0.45
 
 
 @dataclass(frozen=True)
@@ -52,15 +69,76 @@ class StatsEvaluateAnymalWalk:
     mean_survival_steps: float
     survival_fraction: float
     mean_tracking_perf: float
+    mean_velocity_tracking_perf: float
+    mean_yaw_tracking_perf: float
     mean_forward_velocity: float
     mean_abs_forward_velocity_error: float
+    mean_abs_lateral_velocity: float
+    mean_abs_yaw_rate_error: float
+    mean_displacement_forward: float
     mean_displacement_x: float
+    mean_displacement_y: float
     mean_path_length: float
+    mean_action_rms: float
     samples_per_second: float
 
 
+def anymal_recipe(name: str) -> tuple[PhaseAnymalWalk, ...]:
+    """Return a named Anymal walking curriculum."""
+
+    if name == "single":
+        return ()
+    if name == "forward":
+        return (
+            PhaseAnymalWalk(
+                name="warmup_forward",
+                command=(0.35, 0.0, 0.0),
+                iterations=120,
+                env_overrides=(("action_scale", 0.45), ("forward_progress_reward_scale", 1.0)),
+                gate_min_tracking_perf=0.30,
+                gate_max_fall_fraction=0.55,
+                gate_min_survival_fraction=0.45,
+                gate_min_forward_velocity_fraction=0.20,
+                gate_max_abs_forward_velocity_error=0.50,
+            ),
+            PhaseAnymalWalk(
+                name="walk_forward",
+                command=(0.65, 0.0, 0.0),
+                iterations=220,
+                env_overrides=(("action_scale", 0.50), ("forward_progress_reward_scale", 0.75)),
+                gate_min_tracking_perf=0.48,
+                gate_max_fall_fraction=0.30,
+                gate_min_survival_fraction=0.70,
+                gate_min_forward_velocity_fraction=0.45,
+                gate_max_abs_forward_velocity_error=0.40,
+            ),
+            PhaseAnymalWalk(
+                name="fast_efficient_forward",
+                command=(0.90, 0.0, 0.0),
+                iterations=260,
+                env_overrides=(
+                    ("action_scale", 0.50),
+                    ("energy_reward_scale", -3.0e-5),
+                    ("action_rate_reward_scale", -0.015),
+                    ("forward_progress_reward_scale", 0.35),
+                ),
+                gate_min_tracking_perf=0.58,
+                gate_max_fall_fraction=0.18,
+                gate_min_survival_fraction=0.82,
+                gate_min_forward_velocity_fraction=0.55,
+                gate_max_abs_forward_velocity_error=0.35,
+            ),
+        )
+    raise ValueError(f"Unknown Anymal recipe {name!r}")
+
+
 def build_env_config(
-    args: argparse.Namespace, *, world_count: int | None = None, auto_reset: bool = True
+    args: argparse.Namespace,
+    *,
+    world_count: int | None = None,
+    auto_reset: bool = True,
+    command: tuple[float, float, float] | None = None,
+    env_overrides: dict[str, object] | None = None,
 ) -> rl.ConfigEnvAnymalPhoenX:
     values = dict(_BASE_ENV)
     values.update(
@@ -70,13 +148,15 @@ def build_env_config(
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
         action_scale=float(args.action_scale),
-        command=(float(args.command_x), float(args.command_y), float(args.command_yaw)),
+        command=tuple(float(v) for v in (command or (args.command_x, args.command_y, args.command_yaw))),
         max_episode_steps=int(args.max_episode_steps),
         target_base_height=float(args.target_base_height),
         actuator_ke=float(args.actuator_ke),
         actuator_kd=float(args.actuator_kd),
         auto_reset=bool(auto_reset),
     )
+    if env_overrides:
+        values.update(env_overrides)
     return rl.ConfigEnvAnymalPhoenX(**values)
 
 
@@ -101,15 +181,71 @@ def build_ppo_config(args: argparse.Namespace) -> rl.ConfigPPO:
     )
 
 
-def _format_checkpoint_path(pattern: str | None, iteration: int) -> str | None:
+def _phase_checkpoint_pattern(pattern: str, phase: PhaseAnymalWalk | None, phase_index: int | None) -> str:
+    text = str(pattern)
+    if phase is None or phase_index is None:
+        return text
+    text = text.replace("{phase_index:02d}", f"{int(phase_index):02d}")
+    text = text.replace("{phase_index}", str(int(phase_index)))
+    return text.replace("{phase}", phase.name)
+
+
+def _format_checkpoint_path(
+    pattern: str | None,
+    iteration: int,
+    *,
+    phase: PhaseAnymalWalk | None = None,
+    phase_index: int | None = None,
+) -> str | None:
     if pattern is None:
         return None
-    return str(pattern).format(iteration=int(iteration))
+    return _phase_checkpoint_pattern(str(pattern), phase, phase_index).format(iteration=int(iteration))
 
 
-def evaluate_checkpoint(trainer: rl.TrainerPPO, args: argparse.Namespace) -> StatsEvaluateAnymalWalk:
+def _default_checkpoint_pattern(args: argparse.Namespace, *, curriculum: bool) -> str | None:
+    if args.checkpoint_path is not None:
+        return str(args.checkpoint_path)
+    if args.output_dir is None:
+        return None
+    name = "checkpoint_{phase_index:02d}_{phase}_{iteration}.npz" if curriculum else "checkpoint_{iteration}.npz"
+    return str(Path(args.output_dir) / name)
+
+
+def _summary_path(args: argparse.Namespace) -> Path | None:
+    if args.summary_path is not None:
+        return Path(args.summary_path)
+    if args.output_dir is not None:
+        return Path(args.output_dir) / "summary.json"
+    return None
+
+
+def _quat_rotate_xyzw(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    q_vec = q[..., :3]
+    qw = q[..., 3:4]
+    return (
+        v * (2.0 * qw * qw - 1.0)
+        + np.cross(q_vec, v) * (2.0 * qw)
+        + q_vec * (2.0 * np.sum(q_vec * v, axis=-1, keepdims=True))
+    )
+
+
+def evaluate_checkpoint(
+    trainer: rl.TrainerPPO,
+    args: argparse.Namespace,
+    *,
+    command: tuple[float, float, float] | None = None,
+    env_overrides: dict[str, object] | None = None,
+) -> StatsEvaluateAnymalWalk:
+    eval_command = tuple(float(v) for v in (command or (args.command_x, args.command_y, args.command_yaw)))
     env = rl.EnvAnymalPhoenX(
-        build_env_config(args, world_count=int(args.eval_world_count), auto_reset=False), device=args.device
+        build_env_config(
+            args,
+            world_count=int(args.eval_world_count),
+            auto_reset=False,
+            command=eval_command,
+            env_overrides=env_overrides,
+        ),
+        device=args.device,
     )
     obs = env.reset()
     trainer.reset_rollout_state()
@@ -117,16 +253,25 @@ def evaluate_checkpoint(trainer: rl.TrainerPPO, args: argparse.Namespace) -> Sta
     start_xy = q0[:, 0:2].copy()
     previous_xy = start_xy.copy()
     last_alive_xy = start_xy.copy()
+    forward_w = _quat_rotate_xyzw(
+        q0[:, 3:7], np.tile(np.asarray((1.0, 0.0, 0.0), dtype=np.float32), (env.world_count, 1))
+    )
     first_done_step = np.full(env.world_count, -1, dtype=np.int32)
     reward_sum = 0.0
     done_sum = 0.0
     tracking_sum = 0.0
+    velocity_tracking_sum = 0.0
+    yaw_tracking_sum = 0.0
     forward_error_sum = 0.0
+    lateral_abs_sum = 0.0
+    yaw_error_sum = 0.0
     forward_sum = 0.0
     alive_count = 0
+    action_sq_sum = 0.0
+    action_count = 0
     path_length = np.zeros(env.world_count, dtype=np.float64)
+    command_np = np.asarray(eval_command, dtype=np.float32)
     t0 = time.perf_counter()
-    command_x = float(args.command_x)
     for step in range(int(args.eval_steps)):
         alive_before = first_done_step < 0
         actions, _log_probs, _values = trainer.act(obs, seed=int(args.seed) + 90_000 + step, deterministic=True)
@@ -134,7 +279,6 @@ def evaluate_checkpoint(trainer: rl.TrainerPPO, args: argparse.Namespace) -> Sta
         done_np = dones.numpy() > 0.5
         reward_sum += float(np.mean(rewards.numpy()))
         done_sum += float(np.mean(done_np))
-        step_successes = env.step_successes.numpy()
         obs_np = obs.numpy()
         q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
         xy = q[:, 0:2].copy()
@@ -142,10 +286,27 @@ def evaluate_checkpoint(trainer: rl.TrainerPPO, args: argparse.Namespace) -> Sta
             alive_idx = alive_before
             path_length[alive_idx] += np.linalg.norm(xy[alive_idx] - previous_xy[alive_idx], axis=1)
             last_alive_xy[alive_idx] = xy[alive_idx]
-            vx_alive = obs_np[alive_idx, 0]
-            forward_sum += float(np.sum(vx_alive))
-            forward_error_sum += float(np.sum(np.abs(vx_alive - command_x)))
-            tracking_sum += float(np.sum(step_successes[alive_idx]))
+            lin_alive = obs_np[alive_idx, 0:2]
+            yaw_alive = obs_np[alive_idx, 5]
+            vel_err = lin_alive - command_np[None, 0:2]
+            yaw_err = yaw_alive - float(command_np[2])
+            vel_perf = np.exp(-np.sum(vel_err * vel_err, axis=1) / 0.25)
+            yaw_perf = np.exp(-(yaw_err * yaw_err) / 0.25)
+            command_speed_sq = float(command_np[0] * command_np[0] + command_np[1] * command_np[1])
+            if command_speed_sq > 1.0e-6:
+                speed_quality = np.clip(np.sum(lin_alive * command_np[None, 0:2], axis=1) / command_speed_sq, 0.0, 1.0)
+            else:
+                speed_quality = np.ones(lin_alive.shape[0], dtype=np.float32)
+            tracking_sum += float(np.sum(vel_perf * yaw_perf * speed_quality))
+            velocity_tracking_sum += float(np.sum(vel_perf))
+            yaw_tracking_sum += float(np.sum(yaw_perf))
+            forward_sum += float(np.sum(lin_alive[:, 0]))
+            forward_error_sum += float(np.sum(np.abs(lin_alive[:, 0] - float(command_np[0]))))
+            lateral_abs_sum += float(np.sum(np.abs(lin_alive[:, 1] - float(command_np[1]))))
+            yaw_error_sum += float(np.sum(np.abs(yaw_err)))
+            action_alive = obs_np[alive_idx, 36:48]
+            action_sq_sum += float(np.sum(action_alive * action_alive))
+            action_count += int(action_alive.size)
             alive_count += int(np.sum(alive_idx))
         previous_xy = xy
         first_done_step[(first_done_step < 0) & done_np] = step + 1
@@ -153,24 +314,61 @@ def evaluate_checkpoint(trainer: rl.TrainerPPO, args: argparse.Namespace) -> Sta
     survival_steps = np.where(first_done_step >= 0, first_done_step, int(args.eval_steps))
     alive_den = float(max(alive_count, 1))
     displacement = last_alive_xy - start_xy
+    displacement_forward = np.sum(displacement * forward_w[:, :2], axis=1)
     return StatsEvaluateAnymalWalk(
         steps=int(args.eval_steps),
-        command=(float(args.command_x), float(args.command_y), float(args.command_yaw)),
+        command=eval_command,
         mean_reward=reward_sum / float(args.eval_steps),
         mean_done=done_sum / float(args.eval_steps),
         fall_fraction=float(np.mean(first_done_step >= 0)),
         mean_survival_steps=float(np.mean(survival_steps)),
         survival_fraction=float(np.mean(survival_steps)) / float(max(int(args.eval_steps), 1)),
         mean_tracking_perf=tracking_sum / alive_den,
+        mean_velocity_tracking_perf=velocity_tracking_sum / alive_den,
+        mean_yaw_tracking_perf=yaw_tracking_sum / alive_den,
         mean_forward_velocity=forward_sum / alive_den,
         mean_abs_forward_velocity_error=forward_error_sum / alive_den,
+        mean_abs_lateral_velocity=lateral_abs_sum / alive_den,
+        mean_abs_yaw_rate_error=yaw_error_sum / alive_den,
+        mean_displacement_forward=float(np.mean(displacement_forward)),
         mean_displacement_x=float(np.mean(displacement[:, 0])),
+        mean_displacement_y=float(np.mean(displacement[:, 1])),
         mean_path_length=float(np.mean(path_length)),
+        mean_action_rms=float(math.sqrt(action_sq_sum / float(max(action_count, 1)))),
         samples_per_second=float(env.world_count * int(args.eval_steps)) / elapsed,
     )
 
 
-def train(args: argparse.Namespace) -> dict[str, object]:
+def check_phase_gate(stats: StatsEvaluateAnymalWalk, phase: PhaseAnymalWalk) -> list[str]:
+    failures: list[str] = []
+    if stats.mean_tracking_perf < phase.gate_min_tracking_perf:
+        failures.append(f"tracking={stats.mean_tracking_perf:.3f} < {phase.gate_min_tracking_perf:.3f}")
+    if stats.fall_fraction > phase.gate_max_fall_fraction:
+        failures.append(f"fall_fraction={stats.fall_fraction:.3f} > {phase.gate_max_fall_fraction:.3f}")
+    if stats.survival_fraction < phase.gate_min_survival_fraction:
+        failures.append(f"survival={stats.survival_fraction:.3f} < {phase.gate_min_survival_fraction:.3f}")
+    command_x = float(phase.command[0])
+    min_vx = abs(command_x) * float(phase.gate_min_forward_velocity_fraction)
+    if command_x >= 0.0 and stats.mean_forward_velocity < min_vx:
+        failures.append(f"vx={stats.mean_forward_velocity:.3f} < {min_vx:.3f}")
+    if command_x < 0.0 and stats.mean_forward_velocity > -min_vx:
+        failures.append(f"vx={stats.mean_forward_velocity:.3f} > {-min_vx:.3f}")
+    if stats.mean_abs_forward_velocity_error > phase.gate_max_abs_forward_velocity_error:
+        failures.append(
+            f"|vx-cmd|={stats.mean_abs_forward_velocity_error:.3f} > {phase.gate_max_abs_forward_velocity_error:.3f}"
+        )
+    return failures
+
+
+def _write_summary(args: argparse.Namespace, payload: dict[str, object]) -> None:
+    path = _summary_path(args)
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def train_single(args: argparse.Namespace) -> dict[str, object]:
     env_config = build_env_config(args)
     ppo_config = build_ppo_config(args)
     if bool(args.eval_only):
@@ -179,13 +377,11 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         trainer = rl.load_ppo_checkpoint(args.resume_checkpoint, config=ppo_config, device=args.device)
         eval_stats = evaluate_checkpoint(trainer, args)
         result = {"final_checkpoint": args.resume_checkpoint, "final_train_stats": {}, "eval_stats": asdict(eval_stats)}
-        if args.summary_path is not None:
-            Path(args.summary_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.summary_path).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        _write_summary(args, result)
         print(json.dumps(result, sort_keys=True))
         return result
 
-    checkpoint_path = args.checkpoint_path
+    checkpoint_path = _default_checkpoint_pattern(args, curriculum=False)
     result = rl.train_anymal_ppo(
         rl.ConfigTrainAnymalPPO(
             iterations=int(args.iterations),
@@ -210,15 +406,104 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     eval_stats = None if bool(args.no_eval) else evaluate_checkpoint(result.trainer, args)
     final_stats = asdict(result.history[-1]) if result.history else {}
     payload = {
+        "recipe": "single",
         "final_checkpoint": final_checkpoint,
         "final_train_stats": final_stats,
         "eval_stats": asdict(eval_stats) if eval_stats is not None else None,
     }
-    if args.summary_path is not None:
-        Path(args.summary_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.summary_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    _write_summary(args, payload)
     print(json.dumps(payload, sort_keys=True))
     return payload
+
+
+def train_curriculum(args: argparse.Namespace) -> dict[str, object]:
+    phases = anymal_recipe(str(args.recipe))
+    selected = phases[int(args.start_phase) :]
+    if args.phase_count is not None:
+        selected = selected[: int(args.phase_count)]
+    if not selected:
+        raise ValueError("Selected curriculum is empty")
+    output_dir = Path(args.output_dir) if args.output_dir is not None else None
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_pattern = _default_checkpoint_pattern(args, curriculum=True)
+    if checkpoint_pattern is None:
+        raise ValueError("--recipe forward requires --output-dir or --checkpoint-path so phases can resume")
+    resume_checkpoint = args.resume_checkpoint
+    phase_payloads: list[dict[str, object]] = []
+    final_checkpoint = resume_checkpoint
+    for local_index, phase in enumerate(selected, start=int(args.start_phase)):
+        phase_iterations = max(1, int(round(float(phase.iterations) * float(args.iteration_scale))))
+        env_overrides = dict(phase.env_overrides)
+        phase_checkpoint_pattern = None
+        if checkpoint_pattern is not None:
+            phase_checkpoint_pattern = _phase_checkpoint_pattern(checkpoint_pattern, phase, local_index)
+        print(
+            f"phase={local_index}:{phase.name} command={phase.command} iterations={phase_iterations} "
+            f"resume={resume_checkpoint or '-'}"
+        )
+        result = rl.train_anymal_ppo(
+            rl.ConfigTrainAnymalPPO(
+                iterations=phase_iterations,
+                rollout_steps=int(args.rollout_steps),
+                hidden_layers=tuple(int(v) for v in args.hidden_layers),
+                activation=str(args.activation),
+                log_std_init=float(args.log_std_init),
+                env_config=build_env_config(args, command=phase.command, env_overrides=env_overrides),
+                ppo_config=build_ppo_config(args),
+                device=args.device,
+                seed=int(args.seed) + local_index * 10_003,
+                log_interval=int(args.log_interval),
+                use_target_curriculum=False,
+                randomize_target_positions=False,
+                resume_checkpoint=resume_checkpoint,
+                checkpoint_path=phase_checkpoint_pattern,
+                checkpoint_interval=int(args.checkpoint_interval),
+            )
+        )
+        final_iteration = int(result.trainer.iteration)
+        final_checkpoint = _format_checkpoint_path(phase_checkpoint_pattern, final_iteration)
+        eval_stats = (
+            None
+            if bool(args.no_eval)
+            else evaluate_checkpoint(
+                result.trainer,
+                args,
+                command=phase.command,
+                env_overrides=env_overrides,
+            )
+        )
+        gate_failures = [] if eval_stats is None else check_phase_gate(eval_stats, phase)
+        pass_gate = not gate_failures
+        phase_payload = {
+            "phase_index": local_index,
+            "phase": asdict(phase),
+            "iterations": phase_iterations,
+            "checkpoint": final_checkpoint,
+            "final_train_stats": asdict(result.history[-1]) if result.history else {},
+            "eval_stats": asdict(eval_stats) if eval_stats is not None else None,
+            "pass_gate": pass_gate,
+            "gate_failures": gate_failures,
+        }
+        phase_payloads.append(phase_payload)
+        payload = {"recipe": args.recipe, "final_checkpoint": final_checkpoint, "phases": phase_payloads}
+        _write_summary(args, payload)
+        print(json.dumps(phase_payload, sort_keys=True))
+        if gate_failures and not bool(args.allow_gate_failure):
+            raise RuntimeError(f"Anymal phase {phase.name!r} failed gate: {', '.join(gate_failures)}")
+        resume_checkpoint = final_checkpoint
+    payload = {"recipe": args.recipe, "final_checkpoint": final_checkpoint, "phases": phase_payloads}
+    _write_summary(args, payload)
+    print(json.dumps(payload, sort_keys=True))
+    return payload
+
+
+def train(args: argparse.Namespace) -> dict[str, object]:
+    if str(args.recipe) == "single":
+        return train_single(args)
+    if bool(args.eval_only):
+        return train_single(args)
+    return train_curriculum(args)
 
 
 def _make_parser() -> argparse.ArgumentParser:
@@ -226,15 +511,21 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=12_321)
     parser.add_argument("--world-count", type=int, default=1024)
-    parser.add_argument("--iterations", type=int, default=120)
-    parser.add_argument("--rollout-steps", type=int, default=64)
+    parser.add_argument("--iterations", type=int, default=300)
+    parser.add_argument("--rollout-steps", type=int, default=32)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--checkpoint-path", default=None)
-    parser.add_argument("--checkpoint-interval", type=int, default=0)
+    parser.add_argument("--checkpoint-interval", type=int, default=50)
     parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--summary-path", default=None)
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--recipe", choices=("single", "forward"), default="single")
+    parser.add_argument("--iteration-scale", type=float, default=1.0)
+    parser.add_argument("--start-phase", type=int, default=0)
+    parser.add_argument("--phase-count", type=int, default=None)
+    parser.add_argument("--allow-gate-failure", action="store_true")
 
     parser.add_argument("--command-x", type=float, default=0.6)
     parser.add_argument("--command-y", type=float, default=0.0)
@@ -251,16 +542,16 @@ def _make_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--hidden-layers", type=int, nargs="+", default=[128, 128, 128])
     parser.add_argument("--activation", choices=("relu", "elu", "tanh"), default="elu")
-    parser.add_argument("--log-std-init", type=float, default=-0.6)
-    parser.add_argument("--actor-lr", type=float, default=3.0e-4)
-    parser.add_argument("--critic-lr", type=float, default=3.0e-4)
+    parser.add_argument("--log-std-init", type=float, default=0.0)
+    parser.add_argument("--actor-lr", type=float, default=1.0e-3)
+    parser.add_argument("--critic-lr", type=float, default=1.0e-3)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-ratio", type=float, default=0.2)
-    parser.add_argument("--entropy-coeff", type=float, default=1.0e-4)
+    parser.add_argument("--entropy-coeff", type=float, default=5.0e-3)
     parser.add_argument("--value-loss-coeff", type=float, default=1.0)
-    parser.add_argument("--value-clip-range", type=float, default=0.0)
-    parser.add_argument("--train-epochs", type=int, default=4)
+    parser.add_argument("--value-clip-range", type=float, default=0.2)
+    parser.add_argument("--train-epochs", type=int, default=5)
     parser.add_argument("--minibatch-size", type=int, default=0)
     parser.add_argument("--replay-ratio", type=float, default=0.0)
     parser.add_argument("--reward-clip", type=float, default=0.0)

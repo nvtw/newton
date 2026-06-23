@@ -55,6 +55,36 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(rewards.numpy())))
         self.assertTrue(np.all(np.isfinite(dones.numpy())))
 
+    def test_dense_command_success_metric_tracks_velocity_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal RL tests")
+        env = rl.EnvAnymalPhoenX(
+            rl.ConfigEnvAnymalPhoenX(
+                world_count=2,
+                reward_mode="dense_command",
+                command=(0.0, 0.0, 0.0),
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=1,
+                max_episode_steps=0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+
+        with wp.ScopedCapture(device=device) as zero_capture:
+            env.observe()
+        wp.capture_launch(zero_capture.graph)
+        zero_command_success = env.successes.numpy()
+
+        env.set_command((1.0, 0.0, 0.0))
+        with wp.ScopedCapture(device=device) as fast_capture:
+            env.observe()
+        wp.capture_launch(fast_capture.graph)
+        fast_command_success = env.successes.numpy()
+
+        self.assertGreater(float(np.min(zero_command_success)), 0.95)
+        self.assertLess(float(np.max(fast_command_success)), 0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -199,6 +199,10 @@ def anymal_observe_reward_kernel(
             power_proxy = power_proxy + wp.abs(tau_proxy * qd)
 
         forward_progress = lin_b[0] * command[world, 0] + lin_b[1] * command[world, 1]
+        command_speed_sq = command[world, 0] * command[world, 0] + command[world, 1] * command[world, 1]
+        speed_quality = wp.float32(1.0)
+        if command_speed_sq > wp.float32(1.0e-6):
+            speed_quality = _clip_float(forward_progress / command_speed_sq, wp.float32(0.0), wp.float32(1.0))
         target_dist_sq = target_delta_w[0] * target_delta_w[0] + target_delta_w[1] * target_delta_w[1]
         target_dist = wp.sqrt(target_dist_sq)
         target_progress = previous_target_distance[world] - target_dist
@@ -219,6 +223,8 @@ def anymal_observe_reward_kernel(
             + action_rate_reward_scale * action_rate_penalty
             + joint_speed_reward_scale * joint_speed_penalty
             + flat_orientation_reward_scale * flat_orientation_penalty
+            + fall_reward_scale * fall
+            + energy_reward_scale * power_proxy
         )
         sparse_reward = (
             sparse_success_reward_scale * success
@@ -226,11 +232,14 @@ def anymal_observe_reward_kernel(
             + fall_reward_scale * fall
             + energy_reward_scale * power_proxy
         )
+        success_metric = success
         reward = dense_reward
         if reward_mode == REWARD_MODE_SPARSE_TARGET:
             reward = sparse_reward
+        else:
+            success_metric = vel_reward * yaw_reward * upright * speed_quality
         rewards[world] = reward
-        successes[world] = success
+        successes[world] = success_metric
 
         done = wp.float32(0.0)
         if fall > wp.float32(0.5):

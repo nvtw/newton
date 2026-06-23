@@ -667,12 +667,43 @@ than in a basic PPO implementation failure.
 
 ## 2026-06-23 Anymal Walk PPO Runner
 
-A separate experimental `train_anymal_walk_phoenx_ppo.py` runner now trains
+A separate experimental `train_anymal_walk_phoenx_ppo.py` runner trains
 Anymal C command walking with SolverPhoenX and the same Warp-only PPO stack. It
-uses dense body-frame velocity tracking, configurable command/action/solver
-knobs, checkpoint save/resume, `--eval-only`, and no-reset evaluation metrics so
-falling episodes cannot be hidden by auto-reset. The corresponding Anymal RL
-unit test captures PPO action selection plus a PhoenX step in a CUDA graph.
+supports a single fixed command and a phased `--recipe forward` curriculum that
+checkpoints between phases, evaluates without auto-reset, and gates on actual
+walking quality: fall fraction, survival, body-forward velocity, velocity error,
+and command-aligned tracking. The corresponding Anymal RL unit test captures
+PPO action selection plus a PhoenX step in a CUDA graph, and now also verifies
+that a stationary Anymal is not counted as successful for a nonzero velocity
+command.
+
+The first metric bug found here was that dense-command `successes` still
+reported sparse target proximity. That made standing look good in logs. Dense
+command mode now reports `velocity_tracking * yaw_tracking * upright *
+command_aligned_speed_fraction`, while pure velocity and yaw tracking remain
+separate eval metrics. Dense command rewards also include the configured fall
+and energy penalties; those fields previously existed but only affected sparse
+target mode.
+
+A measured from-scratch forward-walking run used `512` worlds, `32` rollout
+steps, ELU MLP `128-128-128`, log standard deviation `0.0`, Adam LR `1e-3`,
+entropy `0.005`, five PPO epochs, and stable PhoenX defaults (`4` substeps,
+`8` solver iterations). The run was chained manually through the same phase
+checkpoints that `--recipe forward` automates:
+
+| Phase | Command | Iterations | No-reset eval result |
+| --- | ---: | ---: | --- |
+| `warmup_forward` | `0.35 m/s` | `120` | pass; fall_fraction=`0.0`, vx=`0.393 m/s`, `|vx-cmd|=0.197`, quality=`0.432` |
+| `walk_forward` | `0.65 m/s` | `110` | pass; fall_fraction=`0.0`, vx=`0.718 m/s`, `|vx-cmd|=0.131`, quality=`0.569` |
+| `fast_efficient_forward` | `0.90 m/s` | `260` | pass; fall_fraction=`0.0`, vx=`0.914 m/s`, `|vx-cmd|=0.176`, quality=`0.657` |
+
+The final checkpoint from that probe is
+`/tmp/phoenx_anymal_forward_probe_progress/checkpoint_02_fast_efficient_forward_490.npz`.
+It is not a public artifact, but it proves the current PhoenX physics plus
+PhoenX PPO stack can train a stable Anymal forward walker from scratch. The
+remaining gaps before calling the task robust are omnidirectional command
+randomization, longer no-reset eval horizons, disturbance pushes, and a cleaner
+foot-contact/air-time term if we want IsaacLab-style gait regularization.
 
 This also exposed a reusable-buffer bug in PPO: after reserving update-sized
 network buffers, `act_reuse()` returned the full reserved action/value arrays
@@ -680,15 +711,6 @@ instead of views over the active observation batch. Small debug runs could then
 produce `1024 x action_dim` actions for a smaller environment. `WarpMLP`,
 `PufferMinGRUNet`, and `GaussianActor` now return active-batch views, with a
 CUDA graph regression test that reserves eight rows and acts on a two-row batch.
-
-Quick validation run: `512` worlds, `32` rollout steps, `20` PPO iterations,
-ELU MLP `128-128-128`, command `(0.6, 0.0, 0.0)`. Rollout reward improved from
-about `-0.34` to `0.44`, rollout forward velocity reached `0.13 m/s`, and
-rollout done rate was `0.0037` at the final iteration. Deterministic no-reset
-eval over `200` steps reported fall_fraction=`0.656`, mean_survival_steps=
-`158/200`, mean_forward_velocity=`0.189 m/s`, tracking_perf=`0.824`, and
-mean_displacement_x=`0.117 m`. This is a working training/eval harness rather
-than a solved Anymal gait; longer training and reward tuning remain open.
 
 The G1 lifted-drive regression now also covers all 29 joints. With the robot
 lifted out of contact and a `0.05 rad` diagonal action command, the first 12
