@@ -21,6 +21,7 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(names[0], "balance_and_step_forward")
         self.assertEqual(names[-1], "robust_full_control")
+        self.assertLess(names.index("curved_forward"), names.index("reverse_walk"))
         for phase in phases:
             if phase.name in {"balance_and_step_forward", "walk_forward", "fast_efficient_forward"}:
                 overrides = dict(phase.env_overrides)
@@ -31,6 +32,8 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         reverse = next(phase for phase in phases if phase.name == "reverse_walk")
         reverse_overrides = dict(reverse.env_overrides)
         self.assertLessEqual(reverse.command_x_range[1], 0.0)
+        self.assertGreaterEqual(reverse.command_x_range[0], -0.25)
+        self.assertLessEqual(abs(reverse.command[0]), 0.25)
         self.assertLess(reverse_overrides["lin_vel_tracking_sigma"], 0.5)
         self.assertGreater(reverse_overrides["forward_progress_reward_scale"], 0.0)
         side = next(phase for phase in phases if phase.name == "side_step")

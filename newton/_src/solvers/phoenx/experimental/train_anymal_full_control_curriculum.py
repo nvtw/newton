@@ -42,7 +42,7 @@ IDLE: Command = (0.0, 0.0, 0.0)
 FORWARD_SLOW: Command = (0.35, 0.0, 0.0)
 FORWARD: Command = (0.70, 0.0, 0.0)
 FORWARD_FAST: Command = (0.75, 0.0, 0.0)
-BACKWARD: Command = (-0.30, 0.0, 0.0)
+BACKWARD: Command = (-0.20, 0.0, 0.0)
 LEFT: Command = (0.0, 0.35, 0.0)
 RIGHT: Command = (0.0, -0.35, 0.0)
 TURN_LEFT: Command = (0.0, 0.0, 0.65)
@@ -343,35 +343,35 @@ def phase_curved_forward() -> CurriculumPhase:
 
 
 def phase_reverse_walk() -> CurriculumPhase:
-    """Add backwards control as a narrow distribution."""
+    """Add gentle backwards control after the forward and yaw gait is stable."""
 
     return CurriculumPhase(
         name="reverse_walk",
         title="Reverse Walk",
-        purpose="Add S-key style reverse walking without also changing lateral or yaw behavior.",
+        purpose="Add S-key style reverse walking as a late refinement, at a speed the no-reset eval can hold.",
         command=BACKWARD,
-        iterations=260,
+        iterations=320,
         env_overrides=(
             ("action_scale", 0.50),
-            ("lin_vel_reward_scale", 3.25),
-            ("yaw_rate_reward_scale", 1.00),
-            ("lin_vel_tracking_sigma", 0.22),
+            ("lin_vel_reward_scale", 4.00),
+            ("yaw_rate_reward_scale", 0.35),
+            ("lin_vel_tracking_sigma", 0.16),
             ("yaw_rate_tracking_sigma", 0.40),
-            ("forward_progress_reward_scale", 2.00),
+            ("forward_progress_reward_scale", 3.00),
             ("energy_reward_scale", -3.0e-5),
             ("action_rate_reward_scale", -0.015),
         ),
         randomize_commands=True,
-        command_x_range=(-0.35, -0.05),
+        command_x_range=(-0.25, -0.04),
         command_y_range=(0.0, 0.0),
         command_yaw_range=(0.0, 0.0),
-        command_zero_probability=0.05,
+        command_zero_probability=0.10,
         eval_commands=(IDLE, BACKWARD),
-        gate_min_tracking_perf=0.35,
+        gate_min_tracking_perf=0.30,
         gate_max_fall_fraction=0.18,
         gate_min_survival_fraction=0.82,
-        gate_min_forward_velocity_fraction=0.20,
-        gate_max_abs_forward_velocity_error=0.45,
+        gate_min_forward_velocity_fraction=0.25,
+        gate_max_abs_forward_velocity_error=0.35,
     )
 
 
@@ -429,7 +429,7 @@ def phase_full_control_mix() -> CurriculumPhase:
             ("action_rate_reward_scale", -0.015),
         ),
         randomize_commands=True,
-        command_x_range=(-0.35, 0.75),
+        command_x_range=(-0.25, 0.75),
         command_y_range=(-0.45, 0.45),
         command_yaw_range=(-0.90, 0.90),
         command_zero_probability=0.08,
@@ -471,7 +471,7 @@ def phase_robust_full_control() -> CurriculumPhase:
             ("disturbance_seed", 52_091),
         ),
         randomize_commands=True,
-        command_x_range=(-0.35, 0.75),
+        command_x_range=(-0.25, 0.75),
         command_y_range=(-0.45, 0.45),
         command_yaw_range=(-0.90, 0.90),
         command_zero_probability=0.10,
@@ -491,13 +491,13 @@ def build_full_control_curriculum() -> tuple[CurriculumPhase, ...]:
 
     return (
         phase_balance_and_step_forward(),
-        phase_reverse_walk(),
         phase_walk_forward(),
         phase_fast_efficient_forward(),
         phase_robust_forward(),
         phase_turn_in_place(),
         phase_recover_forward_after_turning(),
         phase_curved_forward(),
+        phase_reverse_walk(),
         phase_side_step(),
         phase_full_control_mix(),
         phase_robust_full_control(),
