@@ -592,3 +592,38 @@ trainer iteration. A fresh run with the same `--seed` intentionally repeats the
 same experiment; independent sweeps should pass different seeds. A CUDA graph
 regression now verifies that repeated launches of the same captured PPO rollout
 graph produce different stochastic actions and advance the seed counter.
+
+## 2026-06-23 Phase-Gated From-Scratch Curricula
+
+The experimental target curriculum runner now saves and evaluates every phase
+checkpoint before chaining to the next phase. This exposed three concrete
+failure modes that were previously easy to miss:
+
+- Dense target progress was paid while the torso was outside the upright gate,
+  so a falling forward lunge could get shaped progress reward. Target progress
+  is now multiplied by the existing upright gate in sparse_target and
+  dense_target modes, with a CUDA graph regression test.
+- Resumed target phases initialized the target-distance curriculum counter from
+  the saved PPO iteration. That made later phases begin near their endpoint
+  distance instead of their phase start. `ConfigTrainG1PPO` now supports an
+  explicit `target_curriculum_start_samples`; the curriculum runner resets it
+  to zero for each phase while keeping policy weights.
+- Later target phases trained only one distance per rollout. The G1 target
+  sampler now has a graph-safe distance-range mode that samples per-world target
+  distances from `[phase_start, current_distance]`, also covered by a CUDA graph
+  test.
+
+Measured result after these fixes: phase 0 from scratch reaches the 0.6 m target
+with strict_success=1.0, fall_fraction=0.0, and max tilt below 11 degrees. The
+next one-meter target phase still fails its gate: the best measured run kept
+0.6 m strict_success=1.0 but had 1.0 m strict_success=0.0 and fall_fraction=1.0.
+This says the phase mechanics are now honest, but the current target objective
+still induces a lunge before it induces a sustained gait.
+
+A separate velocity-command curriculum runner was added to train nanoG1-like
+sustained walking before target steering. The first simple-forward run from
+scratch (`0.15..0.45 m/s`, 220 PPO iterations) reached rollout tracking perf
+around 0.69 but failed no-reset evaluation at the 0.3 m/s gate: fall_fraction=1.0,
+mean_survival_steps=89.98/700, and mean_tracking_perf=0.096. This confirms that
+short-horizon rollout reward is not enough; command phases must be judged by
+no-reset survival/tracking gates before they are chained.

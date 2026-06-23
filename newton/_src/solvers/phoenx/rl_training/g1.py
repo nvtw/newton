@@ -1341,6 +1341,7 @@ def g1_observe_reward_kernel(
             target_progress = (
                 target_delta_w[0] * lin_origin_w[0] + target_delta_w[1] * lin_origin_w[1]
             ) * inv_target_dist
+        target_progress_upright = target_progress * upright_gate
         target_success_min_height = wp.max(sparse_target_success_min_base_height, wp.float32(0.0))
         target_success_max_height = wp.max(sparse_target_success_max_base_height, target_success_min_height)
         target_success_upright = _clip_float(sparse_target_success_upright_cos, wp.float32(-1.0), wp.float32(1.0))
@@ -1387,7 +1388,7 @@ def g1_observe_reward_kernel(
             reward = (
                 w_sparse_command_success * target_success
                 + (
-                    w_target_progress * target_progress
+                    w_target_progress * target_progress_upright
                     + w_mechanical_power * mechanical_power_penalty
                     + biped_contact_reward
                     + joint_regularizer_reward
@@ -1397,7 +1398,7 @@ def g1_observe_reward_kernel(
             success_metric = target_success
         elif reward_mode == wp.int32(4):
             shaped_reward = (
-                w_target_progress * target_progress
+                w_target_progress * target_progress_upright
                 + w_track_ang * track_ang
                 + w_lin_vel_z * lin_vel_z_penalty
                 + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
@@ -1825,6 +1826,30 @@ def g1_sample_sparse_targets_seed_counter_kernel(
     value = target_distance[0] * wp.cos(angle)
     if col == wp.int32(1):
         value = target_distance[0] * wp.sin(angle)
+    target_position[world, col] = value
+
+
+@wp.kernel
+def g1_sample_sparse_target_range_seed_counter_kernel(
+    seed_counter: wp.array[wp.int32],
+    seed_offset: wp.int32,
+    base_angle: wp.float32,
+    angle_min: wp.float32,
+    angle_max: wp.float32,
+    min_distance: wp.float32,
+    target_distance: wp.array[wp.float32],
+    target_position: wp.array2d[wp.float32],
+):
+    world, col = wp.tid()
+    seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
+    rng = wp.rand_init(seed, world)
+    max_distance = wp.max(target_distance[0], wp.float32(0.0))
+    lo = _clip_float(min_distance, wp.float32(0.0), max_distance)
+    distance = lo + (max_distance - lo) * wp.randf(rng)
+    angle = base_angle + angle_min + (angle_max - angle_min) * wp.randf(rng)
+    value = distance * wp.cos(angle)
+    if col == wp.int32(1):
+        value = distance * wp.sin(angle)
     target_position[world, col] = value
 
 
@@ -2498,6 +2523,7 @@ class EnvG1PhoenX:
         target_angle_range: tuple[float, float],
         seed_offset: int = 0,
         advance: int = 1,
+        target_distance_min: float | None = None,
     ) -> None:
         """Sample per-world sparse targets using a graph-replay-safe device seed counter."""
 
@@ -2507,13 +2533,30 @@ class EnvG1PhoenX:
             raise ValueError("target_angle_range must be ordered")
         base = self.config.sparse_target_position
         base_angle = float(np.arctan2(float(base[1]), float(base[0])))
-        wp.launch(
-            g1_sample_sparse_targets_seed_counter_kernel,
-            dim=(self.world_count, 2),
-            inputs=[seed_counter, int(seed_offset), base_angle, angle_min, angle_max, self.target_distance],
-            outputs=[self.target_position],
-            device=self.device,
-        )
+        if target_distance_min is None:
+            wp.launch(
+                g1_sample_sparse_targets_seed_counter_kernel,
+                dim=(self.world_count, 2),
+                inputs=[seed_counter, int(seed_offset), base_angle, angle_min, angle_max, self.target_distance],
+                outputs=[self.target_position],
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                g1_sample_sparse_target_range_seed_counter_kernel,
+                dim=(self.world_count, 2),
+                inputs=[
+                    seed_counter,
+                    int(seed_offset),
+                    base_angle,
+                    angle_min,
+                    angle_max,
+                    float(target_distance_min),
+                    self.target_distance,
+                ],
+                outputs=[self.target_position],
+                device=self.device,
+            )
         if int(advance) != 0:
             advance_seed_counter(seed_counter, int(advance), device=self.device)
 

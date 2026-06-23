@@ -276,7 +276,9 @@ class ConfigTrainG1PPO:
     target_distance_start: float = SPARSE_TARGET_CURRICULUM_START
     target_distance_end: float = SPARSE_TARGET_CURRICULUM_END
     target_curriculum_samples: int = SPARSE_TARGET_CURRICULUM_SAMPLES
+    target_curriculum_start_samples: int | None = None
     randomize_target_positions: bool = SPARSE_TARGET_RANDOMIZE
+    randomize_target_distance_range: bool = False
     target_angle_min: float = SPARSE_TARGET_ANGLE_MIN
     target_angle_max: float = SPARSE_TARGET_ANGLE_MAX
     reset_recurrent_state_on_rollout_start: bool = RESET_RECURRENT_STATE_ON_ROLLOUT_START
@@ -661,7 +663,10 @@ def _advance_g1_command_curriculum(
 def _make_g1_target_curriculum_counter(
     cfg: ConfigTrainG1PPO, env: EnvG1PhoenX, start_iteration: int
 ) -> wp.array[wp.int32]:
-    start_samples = int(start_iteration) * int(cfg.rollout_steps) * int(env.world_count)
+    if cfg.target_curriculum_start_samples is None:
+        start_samples = int(start_iteration) * int(cfg.rollout_steps) * int(env.world_count)
+    else:
+        start_samples = int(cfg.target_curriculum_start_samples)
     start_samples = min(start_samples, np.iinfo(np.int32).max)
     return wp.array(np.asarray([start_samples], dtype=np.int32), dtype=wp.int32, device=env.device)
 
@@ -687,6 +692,7 @@ def _configure_g1_sparse_targets(
         env.randomize_target_positions_seed_counter(
             seed_counter=seed_counter,
             target_angle_range=(float(cfg.target_angle_min), float(cfg.target_angle_max)),
+            target_distance_min=float(cfg.target_distance_start) if cfg.randomize_target_distance_range else None,
         )
     else:
         env.set_sparse_targets_from_distance()
@@ -876,6 +882,8 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         raise ValueError("target curriculum distances must be non-negative")
     if int(cfg.target_curriculum_samples) < 0:
         raise ValueError("target_curriculum_samples must be non-negative")
+    if cfg.target_curriculum_start_samples is not None and int(cfg.target_curriculum_start_samples) < 0:
+        raise ValueError("target_curriculum_start_samples must be non-negative when provided")
     if cfg.target_angle_max < cfg.target_angle_min:
         raise ValueError("target_angle_max must be greater than or equal to target_angle_min")
     if cfg.command_sampling not in ("episode", "rollout"):

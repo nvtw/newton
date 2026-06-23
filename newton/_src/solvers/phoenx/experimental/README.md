@@ -29,11 +29,35 @@ normal PhoenX PPO API. `simple-target` is a short from-scratch probe and is not
 expected to produce a perfect policy. `advanced-target` stages the task from
 short forward targets to longer target-conditioned walking and guards against
 the degenerate case where the initial target is already inside the sparse
-success radius. Run it with:
+success radius. The runner saves a normal PPO checkpoint and evaluates target
+walking after every phase; by default it stops before chaining to the next phase
+when the current phase fails its strict target success/fall/tilt gate. Each
+phase resets its target-distance curriculum counter while preserving policy
+weights, and samples per-world target distances across the current phase range
+so later phases do not train only on the endpoint distance. Run it with:
 
 ```
 uv run --extra dev -m newton._src.solvers.phoenx.experimental.train_g1_curriculum \
     --recipe advanced-target --output-dir /tmp/phoenx_g1_advanced --device cuda:0
+```
+
+To debug one phase at a time, resume from the previous phase checkpoint:
+
+```
+uv run --extra dev -m newton._src.solvers.phoenx.experimental.train_g1_curriculum \
+    --recipe advanced-target --start-phase 1 --phase-count 1 \
+    --resume-checkpoint /tmp/phoenx_g1_advanced/00_short_forward_targets_140.npz \
+    --output-dir /tmp/phoenx_g1_advanced_phase1 --device cuda:0
+```
+
+train_g1_command_curriculum.py trains sustained velocity-command walking before
+target steering. This is closer to the nanoG1 task shape and gives each phase a
+no-reset command-following gate based on fall rate, survival, and tracking
+performance. Run the simple forward-walking probe with:
+
+```
+uv run --extra dev -m newton._src.solvers.phoenx.experimental.train_g1_command_curriculum \
+    --recipe simple-forward --output-dir /tmp/phoenx_g1_command_simple --device cuda:0
 ```
 
 The useful imitation-learning direction from HumanCompatibleAI/imitation is a

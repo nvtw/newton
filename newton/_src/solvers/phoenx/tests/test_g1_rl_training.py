@@ -2743,11 +2743,11 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(obs[:, 6:8], np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32))
         np.testing.assert_allclose(obs[:, 8], np.zeros(2, dtype=np.float32))
 
-    def test_sparse_target_progress_reward_is_optional_inside_graph(self) -> None:
+    def test_sparse_target_progress_reward_requires_upright_gate_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 sparse target progress reward tests")
         env = rl.EnvG1PhoenX(
             g1_recipe.default_g1_env_config(
-                world_count=1,
+                world_count=2,
                 reward_mode="sparse_target",
                 command=(0.0, 0.0, 0.0),
                 sparse_target_position=(1.0, 0.0),
@@ -2759,22 +2759,24 @@ class TestG1PhoenXRL(unittest.TestCase):
             ),
             device=device,
         )
-        q = env.state_0.joint_q.numpy()
-        qd = env.state_0.joint_qd.numpy()
-        q[0:2] = np.asarray((0.0, 0.0), dtype=np.float32)
-        q[3:7] = np.asarray((0.0, 0.0, 0.0, 1.0), dtype=np.float32)
-        qd[:] = 0.0
-        qd[0] = 0.5
-        env.state_0.joint_q.assign(q)
-        env.state_0.joint_qd.assign(qd)
+        q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+        q[:, 0:2] = np.asarray((0.0, 0.0), dtype=np.float32)
+        q[:, 3:7] = np.asarray((0.0, 0.0, 0.0, 1.0), dtype=np.float32)
+        tilt = math.radians(45.0)
+        q[1, 3:7] = np.asarray((math.sin(0.5 * tilt), 0.0, 0.0, math.cos(0.5 * tilt)), dtype=np.float32)
+        qd[:, :] = 0.0
+        qd[:, 0] = 0.5
+        env.state_0.joint_q.assign(q.reshape(-1))
+        env.state_0.joint_qd.assign(qd.reshape(-1))
 
         with wp.ScopedCapture(device=device) as capture:
             env.observe()
         wp.capture_launch(capture.graph)
 
-        expected = np.asarray([3.0 * 0.5 * env.config.frame_dt], dtype=np.float32)
-        np.testing.assert_allclose(env.successes.numpy(), np.zeros(1, dtype=np.float32))
-        np.testing.assert_allclose(env.dones.numpy(), np.zeros(1, dtype=np.float32))
+        expected = np.asarray([3.0 * 0.5 * env.config.frame_dt, 0.0], dtype=np.float32)
+        np.testing.assert_allclose(env.successes.numpy(), np.zeros(2, dtype=np.float32))
+        np.testing.assert_allclose(env.dones.numpy(), np.zeros(2, dtype=np.float32))
         np.testing.assert_allclose(env.rewards.numpy(), expected, atol=1.0e-6)
 
     def test_dense_target_reward_combines_progress_and_stability_inside_graph(self) -> None:
@@ -2863,6 +2865,33 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.successes.numpy(), np.array([0.0, 1.0], dtype=np.float32))
         np.testing.assert_allclose(env.dones.numpy(), np.array([0.0, 1.0], dtype=np.float32))
         np.testing.assert_allclose(env.rewards.numpy(), np.array([0.0, 5.0], dtype=np.float32), atol=1.0e-6)
+
+    def test_sparse_target_randomizes_distance_range_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 sparse target distance range tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=16,
+                reward_mode="sparse_target",
+                sparse_target_position=(1.0, 0.0),
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        seed_counter = make_seed_counter(321, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.randomize_target_positions_seed_counter(
+                seed_counter=seed_counter,
+                target_angle_range=(0.0, 0.0),
+                target_distance_min=0.5,
+            )
+        wp.capture_launch(capture.graph)
+
+        targets = env.target_position.numpy()
+        self.assertGreater(float(targets[:, 0].min()), 0.5 - 1.0e-6)
+        self.assertLess(float(targets[:, 0].max()), 1.0 + 1.0e-6)
+        self.assertGreater(float(np.ptp(targets[:, 0])), 0.05)
+        np.testing.assert_allclose(targets[:, 1], np.zeros(env.world_count, dtype=np.float32), atol=1.0e-6)
 
     def test_sparse_target_curriculum_updates_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 sparse target curriculum tests")

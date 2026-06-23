@@ -78,6 +78,10 @@ class PhaseG1Curriculum:
     log_std_init: float = -0.7
     env_overrides: tuple[tuple[str, Any], ...] = ()
     ppo_overrides: tuple[tuple[str, Any], ...] = ()
+    gate_targets: tuple[float, ...] = ()
+    gate_min_strict_success_fraction: float = 0.90
+    gate_max_fall_fraction: float = 0.05
+    gate_max_tilt_violation_fraction: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,8 @@ class PhaseG1Result:
     elapsed_seconds: float
     final_train_stats: dict[str, Any]
     target_eval_stats: list[dict[str, Any]]
+    phase_gate_passed: bool
+    phase_gate_failures: list[str]
 
 
 def build_curriculum(
@@ -126,6 +132,7 @@ def build_curriculum(
                 target_angle_max=0.20,
                 sparse_target_radius=0.30,
                 target_curriculum_samples=45_000_000,
+                gate_targets=(0.6,),
             )
         ]
     elif recipe == "advanced-target":
@@ -139,40 +146,64 @@ def build_curriculum(
                 target_angle_max=0.15,
                 sparse_target_radius=0.30,
                 target_curriculum_samples=45_000_000,
+                gate_targets=(0.6,),
+            ),
+            PhaseG1Curriculum(
+                name="one_meter_forward",
+                iterations=200,
+                target_distance_start=0.45,
+                target_distance_end=1.00,
+                target_angle_min=-0.15,
+                target_angle_max=0.15,
+                sparse_target_radius=0.30,
+                target_curriculum_samples=70_000_000,
+                env_overrides=(("w_sparse_command_success", 6.0), ("w_target_progress", 2.0), ("w_termination", -4.0)),
+                ppo_overrides=(("actor_lr", 1.5e-4), ("critic_lr", 1.5e-4)),
+                gate_targets=(0.6, 1.0),
             ),
             PhaseG1Curriculum(
                 name="medium_forward_cone",
                 iterations=180,
                 target_distance_start=0.75,
-                target_distance_end=1.55,
+                target_distance_end=1.40,
                 target_angle_min=-0.30,
                 target_angle_max=0.30,
                 sparse_target_radius=0.30,
-                target_curriculum_samples=70_000_000,
-                ppo_overrides=(("actor_lr", 1.5e-4), ("critic_lr", 1.5e-4)),
+                target_curriculum_samples=80_000_000,
+                env_overrides=(("w_sparse_command_success", 6.0), ("w_target_progress", 2.0), ("w_termination", -4.0)),
+                ppo_overrides=(("actor_lr", 1.0e-4), ("critic_lr", 1.0e-4)),
+                gate_targets=(0.6, 1.0, 1.4),
             ),
             PhaseG1Curriculum(
                 name="long_forward_cone",
                 iterations=180,
-                target_distance_start=1.10,
-                target_distance_end=2.20,
+                target_distance_start=1.00,
+                target_distance_end=2.00,
                 target_angle_min=-0.45,
                 target_angle_max=0.45,
                 sparse_target_radius=0.30,
                 target_curriculum_samples=90_000_000,
-                ppo_overrides=(("actor_lr", 1.0e-4), ("critic_lr", 1.0e-4)),
+                env_overrides=(("w_sparse_command_success", 6.0), ("w_target_progress", 2.0), ("w_termination", -4.0)),
+                ppo_overrides=(("actor_lr", 7.5e-5), ("critic_lr", 7.5e-5)),
+                gate_targets=(0.6, 1.0, 1.4),
             ),
             PhaseG1Curriculum(
                 name="strict_finish",
                 iterations=120,
-                target_distance_start=1.40,
+                target_distance_start=1.20,
                 target_distance_end=2.40,
                 target_angle_min=-0.50,
                 target_angle_max=0.50,
                 sparse_target_radius=0.25,
                 target_curriculum_samples=80_000_000,
-                env_overrides=(("w_mechanical_power", -1.0e-4),),
+                env_overrides=(
+                    ("w_sparse_command_success", 6.0),
+                    ("w_target_progress", 2.0),
+                    ("w_termination", -4.0),
+                    ("w_mechanical_power", -1.0e-4),
+                ),
                 ppo_overrides=(("actor_lr", 5.0e-5), ("critic_lr", 5.0e-5)),
+                gate_targets=(0.6, 1.0, 1.4, 2.0),
             ),
         ]
     else:
@@ -274,7 +305,9 @@ def build_train_config(
         target_distance_start=float(phase.target_distance_start),
         target_distance_end=float(phase.target_distance_end),
         target_curriculum_samples=int(phase.target_curriculum_samples),
+        target_curriculum_start_samples=0,
         randomize_target_positions=True,
+        randomize_target_distance_range=True,
         target_angle_min=float(phase.target_angle_min),
         target_angle_max=float(phase.target_angle_max),
         reset_recurrent_state_on_rollout_start=True,
@@ -306,6 +339,56 @@ def _parse_eval_targets(raw: str) -> tuple[tuple[float, float], ...]:
     if not targets:
         raise ValueError("at least one evaluation target is required")
     return tuple(targets)
+
+
+def select_curriculum_phases(
+    phases: list[PhaseG1Curriculum],
+    *,
+    start_phase: int,
+    phase_count: int | None,
+) -> list[tuple[int, PhaseG1Curriculum]]:
+    """Select indexed phases for a full or resumed run."""
+
+    if start_phase < 0:
+        raise ValueError("start_phase must be non-negative")
+    if start_phase >= len(phases):
+        raise ValueError("start_phase must select an existing phase")
+    if phase_count is not None and phase_count <= 0:
+        raise ValueError("phase_count must be positive when provided")
+    selected = list(enumerate(phases[start_phase:], start=start_phase))
+    if phase_count is not None:
+        selected = selected[: int(phase_count)]
+    return selected
+
+
+def check_phase_gate(phase: PhaseG1Curriculum, target_eval_stats: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+    """Check whether a phase is good enough to feed the next phase."""
+
+    failures: list[str] = []
+    if not phase.gate_targets:
+        return True, failures
+    stats_by_x = {round(float(stat["target_position"][0]), 6): stat for stat in target_eval_stats}
+    for target in phase.gate_targets:
+        key = round(float(target), 6)
+        stat = stats_by_x.get(key)
+        if stat is None:
+            failures.append(f"missing eval target x={target:g}")
+            continue
+        strict_success = float(stat["strict_success_fraction"])
+        fall_fraction = float(stat["fall_fraction"])
+        tilt_fraction = float(stat["tilt_violation_fraction"])
+        if strict_success < float(phase.gate_min_strict_success_fraction):
+            failures.append(
+                f"x={target:g} strict_success={strict_success:.3f} < {phase.gate_min_strict_success_fraction:.3f}"
+            )
+        if fall_fraction > float(phase.gate_max_fall_fraction):
+            failures.append(f"x={target:g} fall_fraction={fall_fraction:.3f} > {phase.gate_max_fall_fraction:.3f}")
+        if tilt_fraction > float(phase.gate_max_tilt_violation_fraction):
+            failures.append(
+                f"x={target:g} tilt_violation_fraction={tilt_fraction:.3f} "
+                f"> {phase.gate_max_tilt_violation_fraction:.3f}"
+            )
+    return not failures, failures
 
 
 def evaluate_checkpoint(
@@ -342,9 +425,24 @@ def run_curriculum(args: argparse.Namespace) -> list[PhaseG1Result]:
         iteration_scale=float(args.iteration_scale),
         min_target_margin=float(args.min_target_margin),
     )
+    selected_phases = select_curriculum_phases(
+        phases,
+        start_phase=int(args.start_phase),
+        phase_count=args.phase_count,
+    )
     if bool(args.dry_run):
-        print(json.dumps({"recipe": args.recipe, "phases": [asdict(phase) for phase in phases]}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "recipe": args.recipe,
+                    "phases": [{"index": index, **asdict(phase)} for index, phase in selected_phases],
+                },
+                indent=2,
+            )
+        )
         return []
+    if int(args.start_phase) > 0 and args.resume_checkpoint is None:
+        raise ValueError("--resume-checkpoint is required when --start-phase is greater than zero")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -352,7 +450,7 @@ def run_curriculum(args: argparse.Namespace) -> list[PhaseG1Result]:
     results: list[PhaseG1Result] = []
     resume_checkpoint = args.resume_checkpoint
     summary_path = output_dir / "summary.json"
-    for phase_index, phase in enumerate(phases):
+    for phase_index, phase in selected_phases:
         checkpoint_pattern = output_dir / f"{phase_index:02d}_{phase.name}_{{iteration}}.npz"
         train_seed = int(args.seed) + phase_index * 10_003
         train_config = build_train_config(
@@ -368,12 +466,21 @@ def run_curriculum(args: argparse.Namespace) -> list[PhaseG1Result]:
         checkpoint = _format_checkpoint_path(checkpoint_pattern, int(train_result.trainer.iteration))
         final_stats = asdict(train_result.history[-1]) if train_result.history else {}
         eval_stats = [] if bool(args.no_eval) else evaluate_checkpoint(checkpoint, phase, args)
+        gate_passed, gate_failures = (True, [])
+        if not bool(args.no_phase_gates):
+            if bool(args.no_eval):
+                gate_passed = False
+                gate_failures = ["phase gates require evaluation; remove --no-eval or pass --no-phase-gates"]
+            else:
+                gate_passed, gate_failures = check_phase_gate(phase, eval_stats)
         phase_result = PhaseG1Result(
             phase=phase,
             checkpoint=str(checkpoint),
             elapsed_seconds=float(elapsed),
             final_train_stats=final_stats,
             target_eval_stats=eval_stats,
+            phase_gate_passed=bool(gate_passed),
+            phase_gate_failures=list(gate_failures),
         )
         results.append(phase_result)
         resume_checkpoint = str(checkpoint)
@@ -389,6 +496,8 @@ def run_curriculum(args: argparse.Namespace) -> list[PhaseG1Result]:
             )
             + "\n"
         )
+        if not gate_passed and not bool(args.allow_gate_failure):
+            raise RuntimeError(f"phase {phase_index} {phase.name!r} failed quality gate: {gate_failures}")
     print(json.dumps({"summary": str(summary_path), "final_checkpoint": resume_checkpoint}, sort_keys=True))
     return results
 
@@ -406,6 +515,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--checkpoint-interval", type=int, default=0)
+    parser.add_argument("--start-phase", type=int, default=0)
+    parser.add_argument("--phase-count", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
 
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
@@ -441,6 +552,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-grad-norm", type=float, default=None)
 
     parser.add_argument("--no-eval", action="store_true")
+    parser.add_argument("--no-phase-gates", action="store_true")
+    parser.add_argument("--allow-gate-failure", action="store_true")
     parser.add_argument("--eval-targets", default="0.6,1.0,1.4,2.0")
     parser.add_argument("--eval-world-count", type=int, default=64)
     parser.add_argument("--eval-steps", type=int, default=350)
