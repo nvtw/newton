@@ -168,6 +168,7 @@ from newton._src.solvers.phoenx.solver_kernels import (
     _accumulate_substep_velocity_kernel,
 )
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+    _BLOCK_WORLD_SOLVE_INNER_SWEEPS,
     _PER_WORLD_COLORING_BLOCK_DIM,
     _PER_WORLD_FAST_FAMILIES,
     _STRAGGLER_BLOCK_DIM,
@@ -4202,6 +4203,7 @@ class PhoenXWorld:
             "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
             "enable_column_timers": dispatch_kw["enable_column_timers"],
             "block_dim": int(block_dim),
+            "solve_inner_sweeps": int(_BLOCK_WORLD_SOLVE_INNER_SWEEPS),
         }
         if cached_prepare is not None:
             kw["cached_prepare"] = bool(cached_prepare)

@@ -134,6 +134,10 @@ class TestMultiWorldPgsOrder(unittest.TestCase):
         variants = (
             ("fast_tail", _phoenx_factory("multi_world")),
             ("block_world_64", _phoenx_factory("multi_world", "block_world_64")),
+            # block_world_32 is the config the auto-heuristic selects for robot
+            # RL fleets (e.g. Anymal); it runs the inner-sweep register-cached
+            # solve, so guard it against single-world drift explicitly.
+            ("block_world_32", _phoenx_factory("multi_world", "block_world_32")),
         )
         window = slice(-20, None)
         tol = math.radians(1.0)

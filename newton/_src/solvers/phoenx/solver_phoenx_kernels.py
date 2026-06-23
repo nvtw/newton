@@ -125,6 +125,17 @@ _FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS = 3
 _FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS = 3
 _FAST_TAIL_SOLVE_OUTER_ITERATION_CHUNK = 1
 
+# Block-world inner-sweep count. Each iterate dispatch solves a constraint
+# ``inner_sweeps`` times back-to-back with its per-cid constants and both
+# bodies' kinematic state held in registers, so the constraint container is
+# read once per ``inner_sweeps`` outer rounds instead of every sweep. The
+# outer loop runs ``num_iterations / inner_sweeps`` rounds plus a single-sweep
+# remainder, keeping the total sweep count identical to ``solver_iterations``
+# (matching the fast-tail (2,2,2) schedule). Trades some cross-colour PGS
+# feedback for register reuse; validated to stay within 1 deg of the
+# single-world reference by test_multi_world_pgs_order.
+_BLOCK_WORLD_SOLVE_INNER_SWEEPS = 2
+
 # Body-N dword offsets in the per-constraint header. Each constraint
 # type stores (type, body1, body2) at dwords 0/1/2 then extra bodies
 # at dwords 3/4 (cloth-tri uses body3 only; soft-tet and cloth-bend
@@ -1785,6 +1796,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
     block_dim: int = 128,
+    solve_inner_sweeps: int = 1,
 ):
     """Build a multi-world kernel where one physical block owns one world."""
     (
@@ -1871,11 +1883,21 @@ def _make_block_world_prepare_plus_iterate_kernel(
                 )
                 base += wp.int32(block_dim)
 
-            _sync_threads()
+            if wp.static(block_dim == 32):
+                _sync_warp()
+            else:
+                _sync_threads()
             c += wp.int32(1)
 
-        it_outer = wp.int32(0)
-        while it_outer < num_iterations:
+        # Outer rounds run ``solve_inner_sweeps`` register-cached sweeps per
+        # dispatch; a final short round mops up any remainder so the total
+        # sweep count always equals ``num_iterations``. ``sweeps`` is uniform
+        # across the block, so the per-colour barriers stay collective.
+        done_sweeps = wp.int32(0)
+        while done_sweeps < num_iterations:
+            sweeps = wp.int32(solve_inner_sweeps)
+            if done_sweeps + sweeps > num_iterations:
+                sweeps = num_iterations - done_sweeps
             c = wp.int32(0)
             while c < n_colors:
                 start = world_base + world_color_starts[world_id, c]
@@ -1899,13 +1921,16 @@ def _make_block_world_prepare_plus_iterate_kernel(
                         cid,
                         num_joints,
                         joint_pgs_enabled,
-                        wp.int32(1),
+                        sweeps,
                     )
                     base += wp.int32(block_dim)
 
-                _sync_threads()
+                if wp.static(block_dim == 32):
+                    _sync_warp()
+                else:
+                    _sync_threads()
                 c += wp.int32(1)
-            it_outer += wp.int32(1)
+            done_sweeps += sweeps
 
     return kernel
 
@@ -2000,7 +2025,10 @@ def _make_block_world_relax_kernel(
                     )
                     base += wp.int32(block_dim)
 
-                _sync_threads()
+                if wp.static(block_dim == 32):
+                    _sync_warp()
+                else:
+                    _sync_threads()
                 c += wp.int32(1)
             it += wp.int32(1)
 
@@ -2122,6 +2150,7 @@ def get_block_world_kernel(
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
     block_dim: int = 128,
+    solve_inner_sweeps: int = 1,
 ):
     """Lazy block-per-world kernel builder.
 
@@ -2141,6 +2170,7 @@ def get_block_world_kernel(
             cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
             block_dim=block_dim,
+            solve_inner_sweeps=solve_inner_sweeps,
         )
     if kind == "relax":
         return _make_block_world_relax_kernel(
