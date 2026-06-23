@@ -84,6 +84,67 @@ def anymal_apply_actions_kernel(
 
 
 @wp.kernel
+def anymal_apply_random_velocity_disturbance_kernel(
+    seed: wp.int32,
+    episode_steps: wp.array[wp.int32],
+    warmup_steps: wp.int32,
+    noise_velocity_xy: wp.float32,
+    noise_yaw_velocity: wp.float32,
+    kick_probability: wp.float32,
+    kick_velocity_xy: wp.float32,
+    kick_yaw_velocity: wp.float32,
+    dof_stride: wp.int32,
+    body_stride: wp.int32,
+    joint_qd: wp.array[wp.float32],
+    body_qd: wp.array[wp.spatial_vector],
+):
+    world = wp.tid()
+    step = episode_steps[world]
+    if step < warmup_steps:
+        return
+    if (
+        noise_velocity_xy <= wp.float32(0.0)
+        and noise_yaw_velocity <= wp.float32(0.0)
+        and (
+            kick_probability <= wp.float32(0.0)
+            or (kick_velocity_xy <= wp.float32(0.0) and kick_yaw_velocity <= wp.float32(0.0))
+        )
+    ):
+        return
+
+    rng = wp.rand_init(seed, world * wp.int32(747796405) + step * wp.int32(289133645))
+    dv = wp.vec3(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    dyaw = wp.float32(0.0)
+
+    if noise_velocity_xy > wp.float32(0.0):
+        noise_angle = wp.float32(2.0) * wp.pi * wp.randf(rng)
+        noise_radius = noise_velocity_xy * wp.sqrt(wp.randf(rng))
+        dv = dv + wp.vec3(noise_radius * wp.cos(noise_angle), noise_radius * wp.sin(noise_angle), wp.float32(0.0))
+    if noise_yaw_velocity > wp.float32(0.0):
+        dyaw = dyaw + (wp.float32(2.0) * wp.randf(rng) - wp.float32(1.0)) * noise_yaw_velocity
+
+    kick_p = _clip_float(kick_probability, wp.float32(0.0), wp.float32(1.0))
+    if wp.randf(rng) < kick_p:
+        if kick_velocity_xy > wp.float32(0.0):
+            kick_angle = wp.float32(2.0) * wp.pi * wp.randf(rng)
+            kick_radius = kick_velocity_xy * wp.sqrt(wp.randf(rng))
+            dv = dv + wp.vec3(kick_radius * wp.cos(kick_angle), kick_radius * wp.sin(kick_angle), wp.float32(0.0))
+        if kick_yaw_velocity > wp.float32(0.0):
+            dyaw = dyaw + (wp.float32(2.0) * wp.randf(rng) - wp.float32(1.0)) * kick_yaw_velocity
+
+    qd_base = world * dof_stride
+    joint_qd[qd_base] = joint_qd[qd_base] + dv[0]
+    joint_qd[qd_base + wp.int32(1)] = joint_qd[qd_base + wp.int32(1)] + dv[1]
+    joint_qd[qd_base + wp.int32(5)] = joint_qd[qd_base + wp.int32(5)] + dyaw
+
+    body = world * body_stride
+    qd = body_qd[body]
+    lin = wp.spatial_top(qd) + dv
+    ang = wp.spatial_bottom(qd) + wp.vec3(wp.float32(0.0), wp.float32(0.0), dyaw)
+    body_qd[body] = wp.spatial_vector(lin, ang)
+
+
+@wp.kernel
 def anymal_observe_reward_kernel(
     joint_q: wp.array[wp.float32],
     joint_qd: wp.array[wp.float32],
@@ -328,6 +389,13 @@ class ConfigEnvAnymalPhoenX:
         energy_reward_scale: Mechanical power proxy penalty scale.
         actuator_ke: Position actuator stiffness used by the model and power proxy.
         actuator_kd: Position actuator damping used by the model and power proxy.
+        disturbance_warmup_steps: Policy steps before disturbances may start.
+        disturbance_noise_velocity_xy: Maximum per-step horizontal root velocity jitter [m/s].
+        disturbance_noise_yaw_velocity: Maximum per-step yaw-rate jitter [rad/s].
+        disturbance_kick_probability: Per-policy-step probability of a larger root-velocity kick.
+        disturbance_kick_velocity_xy: Maximum horizontal root velocity kick [m/s].
+        disturbance_kick_yaw_velocity: Maximum yaw-rate kick [rad/s].
+        disturbance_seed: Base RNG seed for stochastic disturbances.
         auto_reset: Reset worlds whose done flag is set after each step.
     """
 
@@ -359,6 +427,13 @@ class ConfigEnvAnymalPhoenX:
     energy_reward_scale: float = -1.0e-5
     actuator_ke: float = 150.0
     actuator_kd: float = 5.0
+    disturbance_warmup_steps: int = 0
+    disturbance_noise_velocity_xy: float = 0.0
+    disturbance_noise_yaw_velocity: float = 0.0
+    disturbance_kick_probability: float = 0.0
+    disturbance_kick_velocity_xy: float = 0.0
+    disturbance_kick_yaw_velocity: float = 0.0
+    disturbance_seed: int = 0
     auto_reset: bool = True
 
 
@@ -388,6 +463,7 @@ class EnvAnymalPhoenX:
         self.model = self._build_model()
         self.coord_stride = int(self.model.joint_coord_count) // self.world_count
         self.dof_stride = int(self.model.joint_dof_count) // self.world_count
+        self.body_stride = int(self.model.body_count) // self.world_count
         self.solver = self._make_solver()
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -612,6 +688,34 @@ class EnvAnymalPhoenX:
             outputs=[self.control.joint_target_q],
             device=self.device,
         )
+
+        disturbances_enabled = (
+            self.config.disturbance_noise_velocity_xy > 0.0
+            or self.config.disturbance_noise_yaw_velocity > 0.0
+            or (
+                self.config.disturbance_kick_probability > 0.0
+                and (self.config.disturbance_kick_velocity_xy > 0.0 or self.config.disturbance_kick_yaw_velocity > 0.0)
+            )
+        )
+        if disturbances_enabled:
+            wp.launch(
+                anymal_apply_random_velocity_disturbance_kernel,
+                dim=self.world_count,
+                inputs=[
+                    int(self.config.disturbance_seed),
+                    self.episode_steps,
+                    int(self.config.disturbance_warmup_steps),
+                    float(self.config.disturbance_noise_velocity_xy),
+                    float(self.config.disturbance_noise_yaw_velocity),
+                    float(self.config.disturbance_kick_probability),
+                    float(self.config.disturbance_kick_velocity_xy),
+                    float(self.config.disturbance_kick_yaw_velocity),
+                    self.dof_stride,
+                    self.body_stride,
+                ],
+                outputs=[self.state_0.joint_qd, self.state_0.body_qd],
+                device=self.device,
+            )
 
         sub_dt = float(self.config.frame_dt) / float(self.config.sim_substeps)
         for _ in range(int(self.config.sim_substeps)):

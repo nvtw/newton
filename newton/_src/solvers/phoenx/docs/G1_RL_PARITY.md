@@ -696,13 +696,19 @@ checkpoints that `--recipe forward` automates:
 | `warmup_forward` | `0.35 m/s` | `120` | pass; fall_fraction=`0.0`, vx=`0.393 m/s`, `|vx-cmd|=0.197`, quality=`0.432` |
 | `walk_forward` | `0.65 m/s` | `110` | pass; fall_fraction=`0.0`, vx=`0.718 m/s`, `|vx-cmd|=0.131`, quality=`0.569` |
 | `fast_efficient_forward` | `0.90 m/s` | `260` | pass; fall_fraction=`0.0`, vx=`0.914 m/s`, `|vx-cmd|=0.176`, quality=`0.657` |
+| `disturbed_forward` | `0.90 m/s` | `180` | robustness phase with stochastic jitter and rare kicks; smoke-probed from checkpoint at `18` iterations with fall_fraction=`0.0`, vx=`0.993 m/s`, quality=`0.688` |
 
 The final checkpoint from that probe is
 `/tmp/phoenx_anymal_forward_probe_progress/checkpoint_02_fast_efficient_forward_490.npz`.
 It is not a public artifact, but it proves the current PhoenX physics plus
 PhoenX PPO stack can train a stable Anymal forward walker from scratch. The
-remaining gaps before calling the task robust are omnidirectional command
-randomization, longer no-reset eval horizons, disturbance pushes, and a cleaner
+recipe now also includes `disturbed_forward`, which continues from the fast
+walker and applies small stochastic root-velocity jitter plus rare Bernoulli
+kick impulses after a warmup (`p=0.003` per policy step, max `0.45 m/s` XY and
+`0.35 rad/s` yaw). This follows the same principle as IsaacLab/RSL-style random
+push events while remaining fully graph-capturable in Warp. Remaining gaps
+before calling the task robust are omnidirectional command randomization,
+longer no-reset eval horizons, stronger kick sweeps, and a cleaner
 foot-contact/air-time term if we want IsaacLab-style gait regularization.
 
 This also exposed a reusable-buffer bug in PPO: after reserving update-sized

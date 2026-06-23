@@ -39,6 +39,13 @@ _BASE_ENV = {
     "energy_reward_scale": -2.5e-5,
     "min_base_height": 0.30,
     "min_upright_cos": 0.35,
+    "disturbance_warmup_steps": 0,
+    "disturbance_noise_velocity_xy": 0.0,
+    "disturbance_noise_yaw_velocity": 0.0,
+    "disturbance_kick_probability": 0.0,
+    "disturbance_kick_velocity_xy": 0.0,
+    "disturbance_kick_yaw_velocity": 0.0,
+    "disturbance_seed": 0,
 }
 
 
@@ -128,6 +135,29 @@ def anymal_recipe(name: str) -> tuple[PhaseAnymalWalk, ...]:
                 gate_min_forward_velocity_fraction=0.55,
                 gate_max_abs_forward_velocity_error=0.35,
             ),
+            PhaseAnymalWalk(
+                name="disturbed_forward",
+                command=(0.90, 0.0, 0.0),
+                iterations=180,
+                env_overrides=(
+                    ("action_scale", 0.50),
+                    ("energy_reward_scale", -3.0e-5),
+                    ("action_rate_reward_scale", -0.015),
+                    ("forward_progress_reward_scale", 0.25),
+                    ("disturbance_warmup_steps", 50),
+                    ("disturbance_noise_velocity_xy", 0.025),
+                    ("disturbance_noise_yaw_velocity", 0.015),
+                    ("disturbance_kick_probability", 0.003),
+                    ("disturbance_kick_velocity_xy", 0.45),
+                    ("disturbance_kick_yaw_velocity", 0.35),
+                    ("disturbance_seed", 41_337),
+                ),
+                gate_min_tracking_perf=0.50,
+                gate_max_fall_fraction=0.08,
+                gate_min_survival_fraction=0.92,
+                gate_min_forward_velocity_fraction=0.50,
+                gate_max_abs_forward_velocity_error=0.45,
+            ),
         )
     raise ValueError(f"Unknown Anymal recipe {name!r}")
 
@@ -153,6 +183,13 @@ def build_env_config(
         target_base_height=float(args.target_base_height),
         actuator_ke=float(args.actuator_ke),
         actuator_kd=float(args.actuator_kd),
+        disturbance_warmup_steps=int(args.disturbance_warmup_steps),
+        disturbance_noise_velocity_xy=float(args.disturbance_noise_velocity_xy),
+        disturbance_noise_yaw_velocity=float(args.disturbance_noise_yaw_velocity),
+        disturbance_kick_probability=float(args.disturbance_kick_probability),
+        disturbance_kick_velocity_xy=float(args.disturbance_kick_velocity_xy),
+        disturbance_kick_yaw_velocity=float(args.disturbance_kick_yaw_velocity),
+        disturbance_seed=int(args.disturbance_seed),
         auto_reset=bool(auto_reset),
     )
     if env_overrides:
@@ -539,6 +576,13 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--actuator-ke", type=float, default=150.0)
     parser.add_argument("--actuator-kd", type=float, default=5.0)
     parser.add_argument("--max-episode-steps", type=int, default=500)
+    parser.add_argument("--disturbance-warmup-steps", type=int, default=0)
+    parser.add_argument("--disturbance-noise-velocity-xy", type=float, default=0.0)
+    parser.add_argument("--disturbance-noise-yaw-velocity", type=float, default=0.0)
+    parser.add_argument("--disturbance-kick-probability", type=float, default=0.0)
+    parser.add_argument("--disturbance-kick-velocity-xy", type=float, default=0.0)
+    parser.add_argument("--disturbance-kick-yaw-velocity", type=float, default=0.0)
+    parser.add_argument("--disturbance-seed", type=int, default=0)
 
     parser.add_argument("--hidden-layers", type=int, nargs="+", default=[128, 128, 128])
     parser.add_argument("--activation", choices=("relu", "elu", "tanh"), default="elu")
