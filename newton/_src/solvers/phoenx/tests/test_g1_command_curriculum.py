@@ -47,6 +47,21 @@ class TestG1CommandCurriculum(unittest.TestCase):
         self.assertEqual(config.command_sampling, "rollout")
         self.assertEqual(config.command_x_range, phase.command_x_range)
         self.assertGreater(config.ppo_config.mirror_loss_coeff, 0.0)
+        self.assertEqual(config.ppo_config.reward_clip, 4.0)
+
+    def test_reward_clip_override_supports_survival_ablation(self):
+        args = _make_parser().parse_args(["--dry-run", "--reward-clip", "0.0"])
+        phase = build_command_curriculum("simple-forward")[0]
+
+        config = build_train_config(
+            phase,
+            args,
+            seed=123,
+            resume_checkpoint=None,
+            checkpoint_path=Path("/tmp/phoenx_g1_command_test_{iteration}.npz"),
+        )
+
+        self.assertEqual(config.ppo_config.reward_clip, 0.0)
 
     def test_phase_gate_checks_command_metrics(self):
         phase = build_command_curriculum("simple-forward")[0]

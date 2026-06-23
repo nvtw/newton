@@ -48,7 +48,7 @@ _BASE_COMMAND_PPO_OVERRIDES: tuple[tuple[str, Any], ...] = (
     ("critic_lr", 2.0e-4),
     ("entropy_coeff", 1.0e-5),
     ("max_grad_norm", 0.3),
-    ("reward_clip", 1.0),
+    ("reward_clip", 4.0),
     ("mirror_loss_coeff", 0.25),
 )
 
@@ -200,6 +200,8 @@ def build_ppo_config(phase: PhaseG1Command, args: argparse.Namespace):
         values["actor_lr"] = float(args.actor_lr)
     if args.critic_lr is not None:
         values["critic_lr"] = float(args.critic_lr)
+    if args.reward_clip is not None:
+        values["reward_clip"] = float(args.reward_clip)
     return g1_recipe.default_g1_ppo_config(**values)
 
 
@@ -400,6 +402,12 @@ def _make_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--actor-lr", type=float, default=None)
     parser.add_argument("--critic-lr", type=float, default=None)
+    parser.add_argument(
+        "--reward-clip",
+        type=float,
+        default=None,
+        help="Override PPO reward clipping; command defaults preserve the -4 fall penalty.",
+    )
 
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--no-phase-gates", action="store_true")

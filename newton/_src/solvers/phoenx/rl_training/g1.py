@@ -1331,6 +1331,10 @@ def g1_observe_reward_kernel(
         if vx_err * vx_err + vy_err * vy_err <= sparse_lin_tol * sparse_lin_tol:
             if wp.abs(yaw_err) <= sparse_yaw_tol:
                 sparse_success = wp.float32(1.0)
+        track_lin_upright = track_lin * upright_gate
+        track_ang_upright = track_ang * upright_gate
+        command_progress_upright = command_progress * upright_gate
+        sparse_success_upright = sparse_success * upright_gate
 
         target_success = wp.float32(0.0)
         target_radius = wp.max(sparse_target_radius, wp.float32(0.0))
@@ -1358,12 +1362,12 @@ def g1_observe_reward_kernel(
             fall = wp.float32(1.0)
 
         reward = wp.float32(0.0)
-        success_metric = track_lin
+        success_metric = track_lin_upright
         if reward_mode == wp.int32(0):
             shaped_reward = (
-                w_track_lin * track_lin
-                + w_track_ang * track_ang
-                + w_command_progress * command_progress
+                w_track_lin * track_lin_upright
+                + w_track_ang * track_ang_upright
+                + w_command_progress * command_progress_upright
                 + w_lin_vel_z * lin_vel_z_penalty
                 + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
                 + w_orientation * orientation_penalty * upright_gate
@@ -1377,13 +1381,13 @@ def g1_observe_reward_kernel(
             reward = shaped_reward * reward_dt
         elif reward_mode == wp.int32(1):
             shaped_reward = (
-                w_sparse_command_success * sparse_success
+                w_sparse_command_success * sparse_success_upright
                 + w_mechanical_power * mechanical_power_penalty
                 + biped_contact_reward
                 + joint_regularizer_reward
             )
             reward = shaped_reward * reward_dt
-            success_metric = sparse_success
+            success_metric = sparse_success_upright
         elif reward_mode == wp.int32(2):
             reward = (
                 w_sparse_command_success * target_success
@@ -1399,7 +1403,7 @@ def g1_observe_reward_kernel(
         elif reward_mode == wp.int32(4):
             shaped_reward = (
                 w_target_progress * target_progress_upright
-                + w_track_ang * track_ang
+                + w_track_ang * track_ang_upright
                 + w_lin_vel_z * lin_vel_z_penalty
                 + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
                 + w_orientation * orientation_penalty * upright_gate
@@ -1415,9 +1419,9 @@ def g1_observe_reward_kernel(
             success_metric = target_success
         else:
             shaped_reward = (
-                w_track_lin * track_lin
-                + w_track_ang * track_ang
-                + w_command_progress * command_progress
+                w_track_lin * track_lin_upright
+                + w_track_ang * track_ang_upright
+                + w_command_progress * command_progress_upright
                 + w_lin_vel_z * lin_vel_z_penalty
                 + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
                 + w_orientation * orientation_penalty * upright_gate
@@ -1427,11 +1431,11 @@ def g1_observe_reward_kernel(
                 + biped_contact_reward
                 + joint_regularizer_reward
                 + w_alive
-                + w_sparse_command_success * sparse_success
+                + w_sparse_command_success * sparse_success_upright
                 + w_mechanical_power * mechanical_power_penalty
             )
             reward = shaped_reward * reward_dt
-            success_metric = sparse_success
+            success_metric = sparse_success_upright
         if fall > wp.float32(0.5):
             reward = reward + w_termination
             success_metric = wp.float32(0.0)

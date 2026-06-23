@@ -627,3 +627,40 @@ around 0.69 but failed no-reset evaluation at the 0.3 m/s gate: fall_fraction=1.
 mean_survival_steps=89.98/700, and mean_tracking_perf=0.096. This confirms that
 short-horizon rollout reward is not enough; command phases must be judged by
 no-reset survival/tracking gates before they are chained.
+
+Command-tracking reward and sparse command success are now also multiplied by
+the existing upright gate. A repeated simple-forward probe still failed the
+no-reset command gate with fall_fraction=1.0, mean survival about 89/700 steps,
+and tracking_perf=0.091. That narrows the issue: rewarding command tracking
+while falling was wrong and is now regression-tested, but it was not the main
+survival bottleneck.
+
+The command runner now exposes `--reward-clip` and defaults to `4.0` so the
+configured `w_termination=-4` is not clipped to `-1` during advantage
+computation. The matched simple-forward probe with `reward_clip=4.0` still
+failed the no-reset gate: fall_fraction=1.0, survival_fraction=0.154, and
+tracking_perf=0.105. Preserving the terminal penalty is semantically cleaner,
+but it is not the root cause of the G1 walking failure.
+
+## 2026-06-23 Ant PPO Validation
+
+An experimental `train_ant_phoenx_ppo.py` runner now trains the classic Ant
+locomotion task using the same Warp PPO implementation and SolverPhoenX. It
+parses `nv_ant.xml`, uses the existing Y-up Newton Ant convention, drives the
+eight hinge DOFs with direct clamped torques, and evaluates checkpoints without
+auto-reset. The runner includes an `--eval-only` mode for checkpoint scoring and
+a CUDA graph regression test for the Ant step path.
+
+Measured validation run (`2048` worlds, `64` rollout steps, ELU MLP
+`128-64-32`, `log_std_init=-1.0`, `400` PPO iterations) trained a slow but real
+locomotion policy. Rollout done rate dropped from `0.5245` at iteration 0 to
+`0.0039` at iteration 399, and rollout reward rose from `-0.463` to `1.037` at
+about `330k` samples/s after warmup. Deterministic no-reset eval over `300`
+steps had fall_fraction=`0.234`, mean_survival_steps=`240.9/300`, alive-only
+mean_forward_velocity=`0.167 m/s`, and mean_displacement_x=`0.81 m`.
+
+This does not prove the G1 task is solved, but it is strong evidence that the
+Warp PPO path can learn a contact-rich articulated locomotion policy with
+PhoenX physics. The remaining G1 blocker is therefore more likely in the G1
+robot/task/physics interface, curriculum, observations, or actuation details
+than in a basic PPO implementation failure.

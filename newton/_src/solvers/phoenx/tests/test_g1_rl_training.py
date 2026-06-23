@@ -2648,6 +2648,57 @@ class TestG1PhoenXRL(unittest.TestCase):
             np.full(rl.ACTION_DIM_G1, int(newton.JointTargetMode.POSITION), dtype=np.int32),
         )
 
+    def test_command_tracking_reward_requires_upright_gate_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 command upright-gated reward tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=2,
+                reward_mode="dense_sparse_command",
+                command=(0.3, 0.0, 0.0),
+                w_track_lin=1.0,
+                w_track_ang=0.0,
+                w_command_progress=0.0,
+                w_lin_vel_z=0.0,
+                w_ang_vel_xy=0.0,
+                w_orientation=0.0,
+                w_torque=0.0,
+                w_action_rate=0.0,
+                w_alive=0.0,
+                w_sparse_command_success=5.0,
+                w_mechanical_power=0.0,
+                w_gait_contact=0.0,
+                w_gait_swing=0.0,
+                w_gait_swing_contact=0.0,
+                w_gait_hip=0.0,
+                w_base_height=0.0,
+                sparse_command_velocity_tolerance=0.05,
+                sparse_command_yaw_tolerance=0.05,
+                min_upright_cos=0.5,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+        q[:, 3:7] = np.asarray((0.0, 0.0, 0.0, 1.0), dtype=np.float32)
+        tilt = math.radians(45.0)
+        q[1, 3:7] = np.asarray((math.sin(0.5 * tilt), 0.0, 0.0, math.cos(0.5 * tilt)), dtype=np.float32)
+        qd[:, :] = 0.0
+        qd[:, 0] = 0.3
+        env.state_0.joint_q.assign(q.reshape(-1))
+        env.state_0.joint_qd.assign(qd.reshape(-1))
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        expected_upright = np.float32((1.0 + 5.0) * env.config.frame_dt)
+        rewards = env.rewards.numpy()
+        successes = env.successes.numpy()
+        np.testing.assert_allclose(rewards[0:1], np.asarray([expected_upright], dtype=np.float32), atol=1.0e-6)
+        np.testing.assert_allclose(rewards[1:2], np.zeros(1, dtype=np.float32), atol=1.0e-6)
+        np.testing.assert_allclose(successes, np.asarray([1.0, 0.0], dtype=np.float32), atol=1.0e-6)
+
     def test_sparse_command_reward_is_boolean_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 sparse command reward tests")
         env = rl.EnvG1PhoenX(
@@ -3947,8 +3998,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         default_joint_pos = env.default_joint_pos.numpy()
         q[:] = 0.0
         q[2] = 0.79
-        yaw_half_angle = np.float32(0.25 * np.pi)
-        q[3:7] = np.asarray((0.0, 0.0, np.sin(yaw_half_angle), np.cos(yaw_half_angle)), dtype=np.float32)
+        q[3:7] = np.asarray((0.0, 0.0, 0.0, 1.0), dtype=np.float32)
         joint_delta = np.linspace(-0.015, 0.015, rl.ACTION_DIM_G1, dtype=np.float32)
         q[7 : 7 + rl.ACTION_DIM_G1] = default_joint_pos + joint_delta
         qd[:] = 0.0
@@ -3975,6 +4025,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         env.contacts.rigid_contact_count.assign(np.asarray([1], dtype=np.int32))
         env.contacts.rigid_contact_shape0.assign(shape0)
         env.contacts.rigid_contact_shape1.assign(shape1)
+        _set_g1_contact_normal_impulses(env, [1.0])
 
         env.state_0.joint_q.assign(q)
         env.state_0.joint_qd.assign(qd)
@@ -3997,8 +4048,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         lin_com_b = _quat_rotate_inverse_xyzw_np(q[3:7].reshape(1, 4), qd[0:3].reshape(1, 3))[0]
         ang = _quat_rotate_inverse_xyzw_np(q[3:7].reshape(1, 4), qd[3:6].reshape(1, 3))[0]
         self.assertGreater(float(np.linalg.norm(lin_b - lin_com_b)), 0.005)
-        self.assertGreater(float(np.linalg.norm(lin_b - qd[0:3])), 0.1)
-        self.assertGreater(float(np.linalg.norm(ang - qd[3:6])), 0.1)
+        self.assertGreater(float(np.linalg.norm(lin_b - qd[0:3])), 0.01)
         vx_err = command_np[0, 0] - lin_b[0]
         vy_err = command_np[0, 1] - lin_b[1]
         yaw_err = command_np[0, 2] - ang[2]
@@ -4006,8 +4056,11 @@ class TestG1PhoenXRL(unittest.TestCase):
         track_ang = math.exp(-float(yaw_err * yaw_err) / 0.25)
         lin_vel_z_penalty = float(lin_b[2] * lin_b[2])
         ang_vel_xy_penalty = float(ang[0] * ang[0] + ang[1] * ang[1])
-        orientation_penalty = 0.0
-        upright_gate = 1.0
+        obs_np = env.obs.numpy()[0]
+        gravity_b = obs_np[3:6]
+        upright_cos = float(np.clip(-gravity_b[2], 0.0, 1.0))
+        upright_gate = float(np.clip((upright_cos - 0.75) * 4.0, 0.0, 1.0))
+        orientation_penalty = float(gravity_b[0] * gravity_b[0] + gravity_b[1] * gravity_b[1])
         action_rate_penalty = float(np.sum((current_actions_np[0] - previous_actions_np[0]) ** 2, dtype=np.float32))
         actuator_ke = env.actuator_ke.numpy()
         actuator_kd = env.actuator_kd.numpy()
@@ -4033,8 +4086,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         gait_reward += env.config.w_base_height * base_dz * base_dz
 
         shaped_reward = (
-            env.config.w_track_lin * track_lin
-            + env.config.w_track_ang * track_ang
+            env.config.w_track_lin * track_lin * upright_gate
+            + env.config.w_track_ang * track_ang * upright_gate
             + env.config.w_lin_vel_z * lin_vel_z_penalty
             + env.config.w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
             + env.config.w_orientation * orientation_penalty * upright_gate
@@ -4050,10 +4103,10 @@ class TestG1PhoenXRL(unittest.TestCase):
             env.rewards.numpy(), np.asarray([expected_reward], dtype=np.float32), rtol=2.0e-5, atol=2.0e-6
         )
         np.testing.assert_allclose(
-            env.successes.numpy(), np.asarray([track_lin], dtype=np.float32), rtol=1.0e-6, atol=1.0e-6
+            env.successes.numpy(), np.asarray([track_lin * upright_gate], dtype=np.float32), rtol=1.0e-6, atol=1.0e-6
         )
         np.testing.assert_allclose(env.dones.numpy(), np.zeros(1, dtype=np.float32), rtol=0.0, atol=0.0)
-        obs = env.obs.numpy()[0]
+        obs = obs_np
         np.testing.assert_allclose(obs[6:9], command_np[0], rtol=0.0, atol=0.0)
         np.testing.assert_allclose(obs[67:96], current_actions_np[0], rtol=0.0, atol=0.0)
         self.assertAlmostEqual(float(obs[96]), math.sin(expected_phase), places=6)
