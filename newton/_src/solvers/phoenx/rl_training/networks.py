@@ -225,7 +225,7 @@ class WarpMLP:
                 bf16_weights=scratch.bf16_weights,
             )
             y = out
-        return y
+        return y[:batch_size]
 
     def forward_manual(self, x: wp.array) -> wp.array:
         """Evaluate the MLP and retain activations for manual backpropagation."""
@@ -971,7 +971,7 @@ class PufferMinGRUNet:
             outputs=[scratch.decoder_out],
             device=self.device,
         )
-        return scratch.decoder_out
+        return scratch.decoder_out[:rows]
 
     def _forward_sequence(
         self,
@@ -1016,7 +1016,7 @@ class PufferMinGRUNet:
             outputs=[scratch.decoder_out],
             device=self.device,
         )
-        return scratch.decoder_out
+        return scratch.decoder_out[:rows]
 
     def _zero_tail(self, x: wp.array2d[wp.float32], rows: int, width: int) -> None:
         if not self.device.is_cuda:
@@ -1353,7 +1353,7 @@ class GaussianActor:
             outputs=[actions, log_probs],
             device=self.device,
         )
-        return actions, log_probs, policy_out
+        return actions[:batch_size], log_probs[:batch_size], policy_out
 
     def _ensure_sample_reuse_buffers(self, batch_size: int) -> None:
         requested = int(batch_size)

@@ -664,3 +664,37 @@ Warp PPO path can learn a contact-rich articulated locomotion policy with
 PhoenX physics. The remaining G1 blocker is therefore more likely in the G1
 robot/task/physics interface, curriculum, observations, or actuation details
 than in a basic PPO implementation failure.
+
+## 2026-06-23 Anymal Walk PPO Runner
+
+A separate experimental `train_anymal_walk_phoenx_ppo.py` runner now trains
+Anymal C command walking with SolverPhoenX and the same Warp-only PPO stack. It
+uses dense body-frame velocity tracking, configurable command/action/solver
+knobs, checkpoint save/resume, `--eval-only`, and no-reset evaluation metrics so
+falling episodes cannot be hidden by auto-reset. The corresponding Anymal RL
+unit test captures PPO action selection plus a PhoenX step in a CUDA graph.
+
+This also exposed a reusable-buffer bug in PPO: after reserving update-sized
+network buffers, `act_reuse()` returned the full reserved action/value arrays
+instead of views over the active observation batch. Small debug runs could then
+produce `1024 x action_dim` actions for a smaller environment. `WarpMLP`,
+`PufferMinGRUNet`, and `GaussianActor` now return active-batch views, with a
+CUDA graph regression test that reserves eight rows and acts on a two-row batch.
+
+Quick validation run: `512` worlds, `32` rollout steps, `20` PPO iterations,
+ELU MLP `128-128-128`, command `(0.6, 0.0, 0.0)`. Rollout reward improved from
+about `-0.34` to `0.44`, rollout forward velocity reached `0.13 m/s`, and
+rollout done rate was `0.0037` at the final iteration. Deterministic no-reset
+eval over `200` steps reported fall_fraction=`0.656`, mean_survival_steps=
+`158/200`, mean_forward_velocity=`0.189 m/s`, tracking_perf=`0.824`, and
+mean_displacement_x=`0.117 m`. This is a working training/eval harness rather
+than a solved Anymal gait; longer training and reward tuning remain open.
+
+The G1 lifted-drive regression now also covers all 29 joints. With the robot
+lifted out of contact and a `0.05 rad` diagonal action command, the first 12
+controlled leg joints reach more than `0.90x` of target within 25 policy steps
+at the current default solver settings, and high-gain joints stay within
+`0.80..1.20x`. The deliberately low-gain upper-body joints are much slower
+(`0.18..0.40x`), matching their configured gains rather than indicating a gross
+leg-drive responsiveness bug.
+

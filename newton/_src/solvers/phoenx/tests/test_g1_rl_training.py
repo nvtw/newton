@@ -939,6 +939,31 @@ class TestG1PhoenXRL(unittest.TestCase):
             actual_target = target_q[6 : 6 + rl.ACTION_DIM_G1]
         np.testing.assert_allclose(actual_target, expected_target, rtol=0.0, atol=1.0e-6)
 
+    def test_ppo_reuse_buffers_return_active_batch_views_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX PPO reuse buffer shape tests")
+        trainer = rl.TrainerPPO(
+            obs_dim=5,
+            action_dim=3,
+            hidden_layers=(4,),
+            config=rl.ConfigPPO(),
+            device=device,
+            seed=7,
+            activation="tanh",
+        )
+        trainer.reserve_buffers(8)
+        obs = wp.zeros((2, 5), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            actions, log_probs, values = trainer.act_reuse(obs, seed=23, deterministic=True)
+        wp.capture_launch(capture.graph)
+
+        self.assertEqual(actions.shape, (2, 3))
+        self.assertEqual(log_probs.shape, (2,))
+        self.assertEqual(values.shape, (2, 1))
+        self.assertTrue(np.all(np.isfinite(actions.numpy())))
+        self.assertTrue(np.all(np.isfinite(log_probs.numpy())))
+        self.assertTrue(np.all(np.isfinite(values.numpy())))
+
     def test_pufferlib_continuous_actor_matches_unsquashed_warp_gaussian(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 PufferLib actor parity tests")
         models_py = _PUFFERLIB_ROOT / "pufferlib" / "models.py"
@@ -3452,6 +3477,60 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.actuator_force.numpy(), expected_force, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(joint_f[:, :6], 0.0, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(joint_f[:, 6 : 6 + rl.ACTION_DIM_G1], expected_joint_f, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_explicit_torque_g1_joint_step_response_is_responsive_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 joint step-response tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=rl.ACTION_DIM_G1,
+                sim_substeps=g1_recipe.SIM_SUBSTEPS,
+                solver_iterations=g1_recipe.SOLVER_ITERATIONS,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+                controlled_action_count=rl.ACTION_DIM_G1,
+            ),
+            device=device,
+        )
+        self.assertEqual(env.config.actuation_model, "explicit_torque")
+
+        q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+        q[:, :] = env.model.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        qd[:, :] = 0.0
+        q[:, 2] = 3.0
+        q[:, 7 : 7 + rl.ACTION_DIM_G1] = env.default_joint_pos.numpy()
+        env.state_0.joint_q.assign(q.reshape(-1))
+        env.state_0.joint_qd.assign(qd.reshape(-1))
+        newton.eval_fk(env.model, env.state_0.joint_q, env.state_0.joint_qd, env.state_0)
+
+        target_delta = np.float32(0.05)
+        actions_np = np.zeros((env.world_count, env.action_dim), dtype=np.float32)
+        for joint in range(rl.ACTION_DIM_G1):
+            actions_np[joint, joint] = target_delta / np.float32(env.config.action_scale)
+        actions = wp.array(actions_np, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            for _ in range(25):
+                env.step(actions)
+        wp.capture_launch(capture.graph)
+
+        joint_q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)[:, 7 : 7 + rl.ACTION_DIM_G1]
+        responses = np.diag(joint_q - env.default_joint_pos.numpy()[None, :])
+        response_ratio = responses / target_delta
+        gains = env.actuator_force_kp.numpy()
+        controlled_leg_ratio = response_ratio[: g1_recipe.CONTROLLED_ACTION_COUNT]
+        high_gain_ratio = response_ratio[gains >= 40.0]
+        low_gain_ratio = response_ratio[gains < 40.0]
+
+        self.assertFalse(np.any(env.dones.numpy() > 0.5))
+        self.assertGreater(float(np.min(controlled_leg_ratio)), 0.90)
+        self.assertLess(float(np.max(controlled_leg_ratio)), 1.15)
+        self.assertGreater(float(np.min(high_gain_ratio)), 0.80)
+        self.assertLess(float(np.max(high_gain_ratio)), 1.20)
+        self.assertGreater(float(np.min(low_gain_ratio)), 0.18)
+        self.assertLess(float(np.max(low_gain_ratio)), 0.40)
+        self.assertTrue(np.all(np.isfinite(joint_q)))
 
     def test_constraint_drive_softness_matches_implicit_pd_coefficients_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 implicit-drive coefficient tests")

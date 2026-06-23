@@ -19,6 +19,10 @@ OBS_DIM_ANYMAL = 48
 ACTION_DIM_ANYMAL = 12
 REWARD_MODE_DENSE_COMMAND = 0
 REWARD_MODE_SPARSE_TARGET = 1
+_REWARD_MODES = {
+    "dense_command": REWARD_MODE_DENSE_COMMAND,
+    "sparse_target": REWARD_MODE_SPARSE_TARGET,
+}
 
 _LAB_TO_MUJOCO = (0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11)
 _INITIAL_JOINT_Q = {
@@ -35,6 +39,14 @@ _INITIAL_JOINT_Q = {
     "LF_HFE": 0.4,
     "LF_KFE": -0.8,
 }
+
+
+def _reward_mode_code(reward_mode: str) -> int:
+    try:
+        return _REWARD_MODES[str(reward_mode)]
+    except KeyError as exc:
+        modes = ", ".join(sorted(_REWARD_MODES))
+        raise ValueError(f"Unknown Anymal reward mode {reward_mode!r}; expected one of: {modes}") from exc
 
 
 @wp.func
