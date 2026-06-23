@@ -3648,10 +3648,16 @@ class PhoenXWorld:
             outputs=[self._per_world_scatter_keys, self._per_world_elements],
             device=self.device,
         )
+        # The scatter key is the world id (< num_worlds); cap the radix passes
+        # to just the bits that range spans (e.g. 2 passes for <=64k worlds
+        # instead of the full 4). The INT32_MAX tail sentinel still sorts last
+        # because its low end_bit bits exceed any world id, so the grouping is
+        # identical to a full-width sort.
         sort_variable_length_int(
             self._per_world_scatter_keys,
             self._per_world_elements,
             self._num_active_constraints,
+            end_bit=max(1, int(self.num_worlds).bit_length()),
         )
 
         # Per-world JP/greedy clears assigned flags for each active world.

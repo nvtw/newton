@@ -38,10 +38,16 @@ def scan_variable_length(array: wp.array, active_length: wp.array[int], inclusiv
 # entries to the end.
 
 
-def sort_variable_length_int(keys: wp.array[int], values: wp.array[int], active_length: wp.array[int]) -> None:
+def sort_variable_length_int(
+    keys: wp.array[int], values: wp.array[int], active_length: wp.array[int], end_bit: int | None = None
+) -> None:
     count = keys.shape[0] // 2
     wp.launch(_mask_tail_int, dim=count, inputs=[keys, active_length])
-    wp.utils.radix_sort_pairs(keys, values, count)
+    # ``end_bit`` lets callers cap the radix passes when the key range is known
+    # to be small (e.g. a world id). The inactive-tail sentinel is INT32_MAX, so
+    # its low ``end_bit`` bits (2**end_bit - 1) still exceed any in-range key and
+    # sort to the end -- the result is identical to a full-width sort.
+    wp.utils.radix_sort_pairs(keys, values, count, end_bit=end_bit)
 
 
 def sort_variable_length_int64(keys: wp.array[wp.int64], values: wp.array[int], active_length: wp.array[int]) -> None:
