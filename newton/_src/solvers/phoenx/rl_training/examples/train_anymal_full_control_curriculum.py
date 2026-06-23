@@ -678,15 +678,18 @@ def _phase_payload(
     *,
     phase_index: int,
     phase: CurriculumPhase,
+    env_overrides: dict[str, object],
     iterations: int,
     checkpoint: str | None,
     result: rl.ResultTrainAnymalPPO,
     eval_stats: list[base.StatsEvaluateAnymalWalk] | None,
     gate_failures: list[str],
 ) -> dict[str, object]:
+    phase_payload = asdict(phase)
+    phase_payload["env_overrides"] = tuple(env_overrides.items())
     return {
         "phase_index": phase_index,
-        "phase": asdict(phase),
+        "phase": phase_payload,
         "iterations": iterations,
         "checkpoint": checkpoint,
         "final_train_stats": asdict(result.history[-1]) if result.history else {},
@@ -714,6 +717,7 @@ def _run_one_phase(
     training_phase = phase.as_training_phase()
     phase_iterations = max(1, int(round(float(training_phase.iterations) * float(args.iteration_scale))))
     checkpoint_pattern = _checkpoint_pattern(output_dir, phase_index, phase)
+    env_overrides = _phase_env_overrides(args, phase)
     _print_phase_header(phase_number, phase_count, phase, resume_checkpoint)
     result = rl.train_anymal_ppo(
         rl.ConfigTrainAnymalPPO(
@@ -745,13 +749,12 @@ def _run_one_phase(
     eval_stats = None
     gate_failures: list[str] = []
     if not bool(args.no_eval):
-        eval_stats = base.evaluate_phase_commands(
-            result.trainer, args, training_phase, _phase_env_overrides(args, phase)
-        )
+        eval_stats = base.evaluate_phase_commands(result.trainer, args, training_phase, env_overrides)
         gate_failures = base.check_phase_gates(eval_stats, training_phase)
     payload = _phase_payload(
         phase_index=phase_index,
         phase=phase,
+        env_overrides=env_overrides,
         iterations=phase_iterations,
         checkpoint=final_checkpoint,
         result=result,
