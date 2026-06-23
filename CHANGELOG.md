@@ -45,6 +45,7 @@
 ### Removed
 
 - Remove the deprecated Style3D `CollisionHandler`; use `Collision` instead
+- Remove the deprecated `state=None` and `refit_bvh` arguments of `SensorTiledCamera.update()`; pass a `State` and refit BVHs explicitly via `Model.bvh_refit_shapes()` / `Model.bvh_refit_particles()` before rendering frames that change geometry
 - Remove support for the legacy `newton_actuators`-style `ModelBuilder.add_actuator(actuator_class, input_indices=...)` signature; use `add_actuator(controller_class, index=..., ...)` with `newton.actuators` controllers (e.g. `ControllerPD`, `ControllerPID`) instead
 - Remove the deprecated `newton-actuators` package dependency; all actuator functionality is built into `newton.actuators`
 - Remove the deprecated implicit MPM `collider_velocity_mode` aliases `'finite_difference'` and `'instantaneous'` (deprecated in 1.1.0); use `'backward'` and `'forward'` instead
