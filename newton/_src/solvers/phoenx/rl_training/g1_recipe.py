@@ -28,6 +28,7 @@ RESET_NOISE = 0.05
 MIN_BASE_HEIGHT = 0.35
 MIN_UPRIGHT_COS = 0.6
 PHASE_PERIOD = 40
+OBSERVATION_MODE = "nanog1"
 
 W_TRACK_LIN = 2.5
 W_TRACK_ANG = 1.25
@@ -165,6 +166,7 @@ def default_g1_env_config(**overrides: Any):
         "min_base_height": MIN_BASE_HEIGHT,
         "min_upright_cos": MIN_UPRIGHT_COS,
         "phase_period": PHASE_PERIOD,
+        "observation_mode": OBSERVATION_MODE,
         "w_track_lin": W_TRACK_LIN,
         "w_track_ang": W_TRACK_ANG,
         "w_command_progress": W_COMMAND_PROGRESS,

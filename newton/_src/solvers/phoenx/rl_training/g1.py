@@ -22,7 +22,9 @@ from .env import advance_seed_counter, collect_ppo_rollout, collect_ppo_rollout_
 from .ppo import BufferRollout, MirrorMapPPO, TrainerPPO
 
 ACTION_DIM_G1 = 29
-OBS_DIM_G1 = 98
+OBS_DIM_G1_NANOG1 = 98
+OBS_DIM_G1_ISAACLAB_FLAT = 99
+OBS_DIM_G1 = OBS_DIM_G1_NANOG1
 NANOG1_PHASE_PERIOD = g1_recipe.PHASE_PERIOD
 
 
@@ -665,6 +667,12 @@ _G1_REWARD_MODES = {
     "sparse_target": _G1_REWARD_MODE_SPARSE_TARGET,
     "dense_sparse_command": _G1_REWARD_MODE_DENSE_SPARSE_COMMAND,
 }
+_G1_OBSERVATION_MODE_NANOG1 = 0
+_G1_OBSERVATION_MODE_ISAACLAB_FLAT = 1
+_G1_OBSERVATION_MODES = {
+    "nanog1": _G1_OBSERVATION_MODE_NANOG1,
+    "isaaclab_flat": _G1_OBSERVATION_MODE_ISAACLAB_FLAT,
+}
 _NANOG1_FOOT_BOX_LOCAL_POS = (0.04, 0.0, -0.029)
 _NANOG1_FOOT_BOX_HALF_EXTENTS = (0.09, 0.03, 0.008)
 _NANOG1_FOOT_BOX_MU = 0.6
@@ -878,6 +886,20 @@ def _g1_reward_mode_id(reward_mode: str) -> int:
         raise ValueError(f"reward_mode must be one of: {modes}") from exc
 
 
+def _g1_observation_mode_id(observation_mode: str) -> int:
+    try:
+        return _G1_OBSERVATION_MODES[str(observation_mode)]
+    except KeyError as exc:
+        modes = ", ".join(sorted(_G1_OBSERVATION_MODES))
+        raise ValueError(f"observation_mode must be one of: {modes}") from exc
+
+
+def _g1_observation_dim(observation_mode_id: int) -> int:
+    if int(observation_mode_id) == _G1_OBSERVATION_MODE_ISAACLAB_FLAT:
+        return OBS_DIM_G1_ISAACLAB_FLAT
+    return OBS_DIM_G1_NANOG1
+
+
 @wp.func
 def _quat_rotate_inverse_wxyz(qw: wp.float32, qx: wp.float32, qy: wp.float32, qz: wp.float32, v: wp.vec3) -> wp.vec3:
     q = wp.vec3(qx, qy, qz)
@@ -979,6 +1001,7 @@ def g1_observe_reward_kernel(
     w_joint_acc_legs: wp.float32,
     w_joint_pos_limit_ankle: wp.float32,
     reward_mode: wp.int32,
+    observation_mode: wp.int32,
     w_sparse_command_success: wp.float32,
     w_target_progress: wp.float32,
     sparse_command_velocity_tolerance: wp.float32,
@@ -1033,35 +1056,58 @@ def g1_observe_reward_kernel(
         state_bad = wp.int32(1)
 
     value = wp.float32(0.0)
-    if col < wp.int32(3):
-        value = wp.float32(0.25) * _clip_finite(ang_b[col], wp.float32(-40.0), wp.float32(40.0))
-    elif col < wp.int32(6):
-        value = _clip_finite(gravity_b[col - wp.int32(3)], wp.float32(-1.0), wp.float32(1.0))
-    elif col < wp.int32(9):
-        command_col = col - wp.int32(6)
-        value = command[world, command_col]
-        if reward_mode == wp.int32(2) and command_col < wp.int32(2):
-            value = target_delta_b[command_col]
-    elif col < wp.int32(38):
-        j = col - wp.int32(9)
-        value = _clip_finite(
-            joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j], wp.float32(-10.0), wp.float32(10.0)
-        )
-    elif col < wp.int32(67):
-        j = col - wp.int32(38)
-        value = wp.float32(0.05) * _clip_finite(
-            joint_qd[qd_base + wp.int32(6) + j], wp.float32(-200.0), wp.float32(200.0)
-        )
-    elif col < wp.int32(96):
-        value = current_actions[world, col - wp.int32(67)]
-    elif col == wp.int32(96):
-        phase_step = episode_steps[world] % phase_period
-        phase = wp.float32(6.283185307179586) * wp.float32(phase_step) / wp.float32(phase_period)
-        value = wp.sin(phase)
+    if observation_mode == wp.int32(1):
+        if col < wp.int32(3):
+            value = _clip_finite(lin_b[col], wp.float32(-50.0), wp.float32(50.0))
+        elif col < wp.int32(6):
+            value = _clip_finite(ang_b[col - wp.int32(3)], wp.float32(-50.0), wp.float32(50.0))
+        elif col < wp.int32(9):
+            value = _clip_finite(gravity_b[col - wp.int32(6)], wp.float32(-1.0), wp.float32(1.0))
+        elif col < wp.int32(12):
+            command_col = col - wp.int32(9)
+            value = command[world, command_col]
+            if reward_mode == wp.int32(2) and command_col < wp.int32(2):
+                value = target_delta_b[command_col]
+        elif col < wp.int32(41):
+            j = col - wp.int32(12)
+            value = _clip_finite(
+                joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j], wp.float32(-10.0), wp.float32(10.0)
+            )
+        elif col < wp.int32(70):
+            j = col - wp.int32(41)
+            value = _clip_finite(joint_qd[qd_base + wp.int32(6) + j], wp.float32(-200.0), wp.float32(200.0))
+        else:
+            value = current_actions[world, col - wp.int32(70)]
     else:
-        phase_step = episode_steps[world] % phase_period
-        phase = wp.float32(6.283185307179586) * wp.float32(phase_step) / wp.float32(phase_period)
-        value = wp.cos(phase)
+        if col < wp.int32(3):
+            value = wp.float32(0.25) * _clip_finite(ang_b[col], wp.float32(-40.0), wp.float32(40.0))
+        elif col < wp.int32(6):
+            value = _clip_finite(gravity_b[col - wp.int32(3)], wp.float32(-1.0), wp.float32(1.0))
+        elif col < wp.int32(9):
+            command_col = col - wp.int32(6)
+            value = command[world, command_col]
+            if reward_mode == wp.int32(2) and command_col < wp.int32(2):
+                value = target_delta_b[command_col]
+        elif col < wp.int32(38):
+            j = col - wp.int32(9)
+            value = _clip_finite(
+                joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j], wp.float32(-10.0), wp.float32(10.0)
+            )
+        elif col < wp.int32(67):
+            j = col - wp.int32(38)
+            value = wp.float32(0.05) * _clip_finite(
+                joint_qd[qd_base + wp.int32(6) + j], wp.float32(-200.0), wp.float32(200.0)
+            )
+        elif col < wp.int32(96):
+            value = current_actions[world, col - wp.int32(67)]
+        elif col == wp.int32(96):
+            phase_step = episode_steps[world] % phase_period
+            phase = wp.float32(6.283185307179586) * wp.float32(phase_step) / wp.float32(phase_period)
+            value = wp.sin(phase)
+        else:
+            phase_step = episode_steps[world] % phase_period
+            phase = wp.float32(6.283185307179586) * wp.float32(phase_step) / wp.float32(phase_period)
+            value = wp.cos(phase)
     obs[world, col] = _clip_finite(value, wp.float32(-100.0), wp.float32(100.0))
 
     if col == 0:
@@ -1855,6 +1901,10 @@ class ConfigEnvG1PhoenX:
         min_base_height: Episode ends below this base height [m].
         min_upright_cos: Episode ends below this base-upright cosine threshold.
         phase_period: Gait clock period in policy steps.
+        observation_mode: Observation layout. ``"nanog1"`` keeps the
+            nanoG1 deploy contract. ``"isaaclab_flat"`` uses the IsaacLab
+            flat-locomotion layout with body-frame base linear velocity and no
+            phase clock.
         w_track_lin: Linear XY velocity tracking reward scale.
         w_track_ang: Yaw-rate tracking reward scale.
         w_command_progress: Command-aligned velocity projection reward scale.
@@ -1937,6 +1987,7 @@ class ConfigEnvG1PhoenX:
     min_base_height: float = g1_recipe.MIN_BASE_HEIGHT
     min_upright_cos: float = g1_recipe.MIN_UPRIGHT_COS
     phase_period: int = g1_recipe.PHASE_PERIOD
+    observation_mode: str = g1_recipe.OBSERVATION_MODE
     w_track_lin: float = g1_recipe.W_TRACK_LIN
     w_track_ang: float = g1_recipe.W_TRACK_ANG
     w_command_progress: float = g1_recipe.W_COMMAND_PROGRESS
@@ -2043,6 +2094,8 @@ class EnvG1PhoenX:
         if float(self.config.foot_box_xy_scale) <= 0.0:
             raise ValueError("foot_box_xy_scale must be positive")
         self._reward_mode_id = _g1_reward_mode_id(self.config.reward_mode)
+        self._observation_mode_id = _g1_observation_mode_id(self.config.observation_mode)
+        self.obs_dim = _g1_observation_dim(self._observation_mode_id)
 
         self.model = self._build_model()
         self.coord_stride = int(self.model.joint_coord_count) // self.world_count
@@ -2561,6 +2614,7 @@ class EnvG1PhoenX:
                 self.config.w_joint_acc_legs,
                 self.config.w_joint_pos_limit_ankle,
                 self._reward_mode_id,
+                self._observation_mode_id,
                 self.config.w_sparse_command_success,
                 self.config.w_target_progress,
                 self.config.sparse_command_velocity_tolerance,

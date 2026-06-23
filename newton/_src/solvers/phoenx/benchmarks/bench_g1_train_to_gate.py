@@ -55,6 +55,7 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         actuation_model=str(getattr(args, "actuation_model", g1_recipe.ACTUATION_MODEL)),
         action_scale=float(args.action_scale),
         controlled_action_count=int(args.controlled_action_count),
+        observation_mode=str(args.observation_mode),
         reward_mode=str(args.reward_mode),
         w_alive=float(args.w_alive),
         w_track_lin=float(args.w_track_lin),
@@ -178,6 +179,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 iterations=chunk_iterations,
                 rollout_steps=int(args.rollout_steps),
                 hidden_layers=tuple(args.hidden_layers),
+                activation=str(args.activation),
                 env_config=env_config,
                 ppo_config=ppo_config,
                 device=device,
@@ -371,6 +373,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-iterations", type=int, default=None)
     parser.add_argument("--chunk-iterations", type=int, default=25)
     parser.add_argument("--hidden-layers", type=_parse_hidden_layers, default=g1_recipe.HIDDEN_LAYERS)
+    parser.add_argument("--activation", choices=("relu", "elu"), default=g1_recipe.ACTIVATION)
     parser.add_argument("--policy-network", choices=("mlp", "puffer_mingru"), default=g1_recipe.POLICY_NETWORK)
     parser.add_argument("--train-epochs", type=int, default=g1_recipe.TRAIN_EPOCHS)
     parser.add_argument("--actor-lr", type=float, default=g1_recipe.ACTOR_LR)
@@ -516,6 +519,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
     parser.add_argument("--controlled-action-count", type=int, default=g1_recipe.CONTROLLED_ACTION_COUNT)
+    parser.add_argument("--observation-mode", choices=("nanog1", "isaaclab_flat"), default=g1_recipe.OBSERVATION_MODE)
     parser.add_argument("--parse-meshes", action="store_true")
     parser.add_argument("--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY)
     parser.add_argument("--ground-friction", type=float, default=g1_recipe.GROUND_FRICTION)

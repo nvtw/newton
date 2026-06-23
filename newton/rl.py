@@ -12,6 +12,8 @@ from ._src.solvers.phoenx.rl_training import (
     ACTION_DIM_G1,
     OBS_DIM_ANYMAL,
     OBS_DIM_G1,
+    OBS_DIM_G1_ISAACLAB_FLAT,
+    OBS_DIM_G1_NANOG1,
     Adam,
     BatchSAC,
     BufferReplaySAC,
@@ -70,6 +72,8 @@ __all__ = [
     "ACTION_DIM_G1",
     "OBS_DIM_ANYMAL",
     "OBS_DIM_G1",
+    "OBS_DIM_G1_ISAACLAB_FLAT",
+    "OBS_DIM_G1_NANOG1",
     "Adam",
     "BatchSAC",
     "BufferReplaySAC",
@@ -236,6 +240,12 @@ def _main() -> int:
         help="G1 actuator path: nanoG1-style explicit clamped PD torques or legacy PhoenX drive rows.",
     )
     g1_parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
+    g1_parser.add_argument(
+        "--observation-mode",
+        choices=("nanog1", "isaaclab_flat"),
+        default=g1_recipe.OBSERVATION_MODE,
+        help="G1 policy observation layout. Use isaaclab_flat only for checkpoints trained with that mode.",
+    )
     g1_parser.add_argument("--parse-meshes", action="store_true")
     g1_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -346,6 +356,12 @@ def _main() -> int:
         help="G1 actuator path used during evaluation.",
     )
     g1_eval_parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
+    g1_eval_parser.add_argument(
+        "--observation-mode",
+        choices=("nanog1", "isaaclab_flat"),
+        default=g1_recipe.OBSERVATION_MODE,
+        help="G1 policy observation layout used by the checkpoint.",
+    )
     g1_eval_parser.add_argument("--parse-meshes", action="store_true")
     g1_eval_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -385,6 +401,12 @@ def _main() -> int:
         help="G1 actuator path used during the quality gate.",
     )
     g1_gate_parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
+    g1_gate_parser.add_argument(
+        "--observation-mode",
+        choices=("nanog1", "isaaclab_flat"),
+        default=g1_recipe.OBSERVATION_MODE,
+        help="G1 policy observation layout used by the checkpoint.",
+    )
     g1_gate_parser.add_argument("--parse-meshes", action="store_true")
     g1_gate_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -439,6 +461,12 @@ def _main() -> int:
         help="G1 actuator path used during target evaluation.",
     )
     g1_target_parser.add_argument("--action-scale", type=float, default=g1_recipe.ACTION_SCALE)
+    g1_target_parser.add_argument(
+        "--observation-mode",
+        choices=("nanog1", "isaaclab_flat"),
+        default=g1_recipe.OBSERVATION_MODE,
+        help="G1 policy observation layout used by the checkpoint.",
+    )
     g1_target_parser.add_argument("--parse-meshes", action="store_true")
     g1_target_parser.add_argument(
         "--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY
@@ -499,6 +527,7 @@ def _main() -> int:
             actuation_model=args.actuation_model,
             action_scale=args.action_scale,
             controlled_action_count=args.controlled_action_count,
+            observation_mode=args.observation_mode,
             reward_mode=args.reward_mode,
             w_track_lin=args.w_track_lin,
             w_track_ang=args.w_track_ang,
@@ -606,6 +635,7 @@ def _main() -> int:
             actuation_model=args.actuation_model,
             action_scale=args.action_scale,
             controlled_action_count=args.controlled_action_count,
+            observation_mode=args.observation_mode,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
             ground_friction=args.ground_friction,
@@ -635,6 +665,7 @@ def _main() -> int:
             actuation_model=args.actuation_model,
             action_scale=args.action_scale,
             controlled_action_count=args.controlled_action_count,
+            observation_mode=args.observation_mode,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
             ground_friction=args.ground_friction,
@@ -681,6 +712,7 @@ def _main() -> int:
             actuation_model=args.actuation_model,
             action_scale=args.action_scale,
             controlled_action_count=args.controlled_action_count,
+            observation_mode=args.observation_mode,
             parse_meshes=args.parse_meshes,
             contact_geometry=args.contact_geometry,
             ground_friction=args.ground_friction,

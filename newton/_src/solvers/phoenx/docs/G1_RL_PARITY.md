@@ -469,6 +469,37 @@ more scalar reward-weight nudging; it is either a stronger warm-start/imitation
 stage, a proper curriculum/PBT pass that selects on held-out gate metrics, or
 fixing the remaining contact/actuation mismatch.
 
+## IsaacLab / PhysX G1 Check
+
+The local IsaacLab G1 flat/rough velocity tasks are useful as a PhysX-near
+reference, but they are not a drop-in nanoG1 replacement. The main flat G1
+config uses PhysX by default and a PhoenX preset of `substeps=4`,
+`solver_iterations=8`, `velocity_iterations=1`, and
+`velocity_readout="substep_end"`. Its G1 asset uses 8/4 PhysX articulation
+iterations, default-position actions with `scale=0.5`, ELU MLP PPO, and
+4096 envs with 24 steps per rollout. The reward stack includes velocity
+tracking, foot air-time, foot slide, ankle limit, joint-deviation, torque,
+acceleration, and action-rate terms; on PhoenX inside IsaacLab, contact-sensor
+terms are disabled there because the manager backend lacks a contact sensor.
+
+Two direct PhoenX probes did not improve learning. An IsaacLab-style
+all-29-joint action/reward/PPO probe with the existing nanoG1 observation
+reached only `battery_perf=0.324` on the cheap 3600-sample gate after 80
+iterations and fell `61/3600` samples. Adding an optional
+`observation_mode="isaaclab_flat"` layout with body-frame base linear velocity
+(no nanoG1 phase clock) made the same probe worse: `battery_perf=0.255`,
+`90/3600` falls, high action clipping, and unstable value losses. This does
+not disprove IsaacLab's recipe in its native manager/PhysX stack; it means that
+blindly mixing IsaacLab observations/PPO with the current nanoG1-derived
+PhoenX environment is not the current path to a walking policy.
+
+Keep the optional IsaacLab-flat observation mode as an isolated experimental
+knob with CUDA graph coverage. The practical takeaways for PhoenX remain: use
+stable 8-iteration solver defaults, treat `default + scale * action` as a
+valid SOTA action convention, keep contact/lift/slide rewards available for
+controlled sweeps, and focus root-cause work on grounded contact/actuation
+behavior rather than more unstructured reward transplants.
+
 ## Next Checks
 
 1. Add or tighten command/reset/done-bootstrap tests against the pinned nanoG1

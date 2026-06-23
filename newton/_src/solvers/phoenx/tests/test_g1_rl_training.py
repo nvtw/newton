@@ -3098,6 +3098,38 @@ class TestG1PhoenXRL(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "rigid_contact_max_per_world"):
             rl.EnvG1PhoenX(config, device=device)
 
+    def test_rejects_unknown_observation_mode(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 RL observation-mode tests")
+        config = rl.ConfigEnvG1PhoenX(world_count=1, observation_mode="unknown")
+
+        with self.assertRaisesRegex(ValueError, "observation_mode"):
+            rl.EnvG1PhoenX(config, device=device)
+
+    def test_isaaclab_flat_observation_mode_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 RL IsaacLab observation tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=2,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+                observation_mode="isaaclab_flat",
+            ),
+            device=device,
+        )
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+
+        graph = rl.capture_env_steps(env, actions, steps_per_graph=1, warmup_steps=1)
+        wp.capture_launch(graph)
+
+        self.assertEqual(rl.OBS_DIM_G1, rl.OBS_DIM_G1_NANOG1)
+        self.assertEqual(env.obs.shape, (2, rl.OBS_DIM_G1_ISAACLAB_FLAT))
+        obs = env.obs.numpy()
+        self.assertTrue(np.isfinite(obs).all())
+        np.testing.assert_allclose(obs[:, 70:], 0.0, rtol=0.0, atol=0.0)
+
     def test_step_graph_capture_shapes_and_masks_actions(self) -> None:
         env = _g1_test_env(world_count=2)
         actions_np = np.full((env.world_count, env.action_dim), 1.5, dtype=np.float32)

@@ -3,7 +3,15 @@
 
 from .anymal import ACTION_DIM_ANYMAL, OBS_DIM_ANYMAL, ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
 from .env import EnvPPO, capture_env_steps, collect_ppo_rollout
-from .g1 import ACTION_DIM_G1, OBS_DIM_G1, ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
+from .g1 import (
+    ACTION_DIM_G1,
+    OBS_DIM_G1,
+    OBS_DIM_G1_ISAACLAB_FLAT,
+    OBS_DIM_G1_NANOG1,
+    ConfigEnvG1PhoenX,
+    EnvG1PhoenX,
+    g1_mirror_map_ppo,
+)
 from .networks import GaussianActor, PufferMinGRUNet, WarpMLP
 from .optim import Adam, Muon
 from .ppo import (
@@ -49,6 +57,8 @@ __all__ = [
     "ACTION_DIM_G1",
     "OBS_DIM_ANYMAL",
     "OBS_DIM_G1",
+    "OBS_DIM_G1_ISAACLAB_FLAT",
+    "OBS_DIM_G1_NANOG1",
     "Adam",
     "BatchSAC",
     "BufferReplaySAC",
