@@ -391,13 +391,16 @@ def evaluate_checkpoint(
     env_overrides: dict[str, object] | None = None,
 ) -> StatsEvaluateAnymalWalk:
     eval_command = tuple(float(v) for v in (command or (args.command_x, args.command_y, args.command_yaw)))
+    eval_overrides = {"max_episode_steps": 0}
+    if env_overrides:
+        eval_overrides.update(env_overrides)
     env = rl.EnvAnymalPhoenX(
         build_env_config(
             args,
             world_count=int(args.eval_world_count),
             auto_reset=False,
             command=eval_command,
-            env_overrides=env_overrides,
+            env_overrides=eval_overrides,
         ),
         device=args.device,
     )
