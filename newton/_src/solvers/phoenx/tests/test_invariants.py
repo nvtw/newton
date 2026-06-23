@@ -175,6 +175,15 @@ class TestSelectionHeuristics(unittest.TestCase):
             ),
             ("fast_tail", 128),
         )
+        self.assertEqual(
+            _choose_multi_world_scheduler(
+                block_world_supported=True,
+                num_worlds=1024,
+                num_joints=1024 * 38,
+                max_contact_columns=1024 * 320,
+            ),
+            ("block_world", 32),
+        )
 
     def test_fast_tail_worlds_per_block_helper(self) -> None:
         self.assertEqual(

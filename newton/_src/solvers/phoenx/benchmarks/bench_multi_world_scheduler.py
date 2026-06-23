@@ -26,7 +26,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver, _force_tpw
-from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
+from newton._src.solvers.phoenx.benchmarks.scenarios import anymal_rl, dr_legs, g1_flat, h1_flat, tower
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 
 
@@ -57,6 +57,14 @@ def _build_scene(
             substeps,
             solver_iterations,
             step_layout="multi_world",
+            prepare_refresh_stride=prepare_refresh_stride,
+        )
+    if scene == "anymal":
+        return anymal_rl.build(
+            num_worlds,
+            "phoenx",
+            substeps,
+            solver_iterations,
             prepare_refresh_stride=prepare_refresh_stride,
         )
     raise ValueError(f"unknown scene {scene!r}")
@@ -289,7 +297,10 @@ def _run_adaptive_case(args: argparse.Namespace, scene: str, num_worlds: int) ->
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
-        "--scenes", nargs="+", choices=("h1", "g1", "dr_legs", "tower"), default=["h1", "g1", "dr_legs", "tower"]
+        "--scenes",
+        nargs="+",
+        choices=("h1", "g1", "dr_legs", "tower", "anymal"),
+        default=["h1", "g1", "dr_legs", "tower"],
     )
     parser.add_argument("--mode", choices=("sweep", "adaptive"), default="sweep")
     parser.add_argument("--worlds", type=_parse_csv_ints, default=(64, 512))

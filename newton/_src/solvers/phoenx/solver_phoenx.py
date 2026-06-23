@@ -352,9 +352,18 @@ def _choose_multi_world_scheduler(
     if joints_per_world == 0.0 and contacts_per_world >= 512.0:
         return "block_world", 128
 
-    # Robot fleets are currently too mixed for a static topology-only
-    # block-world rule: solve-only sweeps can improve, but full-frame graph
-    # replay regresses on DR-style scenes.
+    # Robot RL fleets with many small mixed joint/contact worlds are limited
+    # by fast-tail lane underfill across short colour loops. A 32-thread block
+    # per world keeps the same colouring/PGS order while giving each world a
+    # full CTA scheduler slot; measured on H1/G1/DR-Legs/Anymal fleets.
+    if (
+        num_worlds >= 512
+        and 0.0 < joints_per_world <= 64.0
+        and 64.0 <= contacts_per_world <= 512.0
+        and rows_per_world >= 128.0
+    ):
+        return "block_world", 32
+
     return "fast_tail", 128
 
 

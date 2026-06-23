@@ -64,6 +64,27 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
   hottest solve loops. Narrow G1/H1/DR-Legs scheduling sweeps on RTX PRO 6000
   showed 5-18% lower frame time for the affected fast-tail path.
 
+
+### Block-world scheduler for dense mixed robot fleets
+- 2026-06-23: Anymal PPO profiling showed multi-world fast-tail
+  `prepare_plus_iterate` dominated kernel time. A scheduler sweep on the real
+  Anymal RL environment, plus H1/G1/DR-Legs benchmark scenes, found that one
+  32-thread CUDA block per world preserves the same colouring and PGS row work
+  while improving lane utilisation on short mixed joint/contact colour loops.
+- Stable auto-vs-`block_world_32` graph replay sweep (`substeps=4`,
+  `solver_iterations=8`, `prepare_refresh_stride=auto`, 32 captured frames,
+  3 trials, RTX PRO 6000): H1 512/1024 improved `1.20x`/`1.25x`, G1
+  `1.11x`/`1.12x`, DR-Legs `1.12x`/`1.19x`, Anymal `1.13x`/`1.12x`.
+- Short Anymal PPO nsys before/after: prepare+iterate changed from
+  `_make_fast_tail_prepare_plus_iterate` at `733.4 ms` total / `286.5 us`
+  average to `_make_block_world_prepare_plus_iterate` at `376.0 ms` total /
+  `146.9 us` average over the same 2,560 launches. Total CUDA kernel time in
+  that short profile dropped roughly `29%` (`~1.29 s` -> `~0.91 s`).
+- Production `multi_world_scheduler="auto"` now selects `block_world_32` only
+  for supported rigid mixed fleets with many worlds, moderate joint count, and
+  substantial contact capacity. Sparse mixed scenes and dense contact-only
+  scenes keep their existing choices.
+
 ### Inertia + force-clear fusion
 - Damping + rotated-inertia refresh + force/torque zeroing were three back-to-back per-body kernels with the same dim/gate. Fused into `_phoenx_update_inertia_and_clear_forces_kernel`. Saves ~3 launches per step.
 

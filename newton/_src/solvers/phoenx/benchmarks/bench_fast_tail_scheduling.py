@@ -24,7 +24,7 @@ import types
 import warp as wp
 
 from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _bench, _extract_solver, _force_tpw
-from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
+from newton._src.solvers.phoenx.benchmarks.scenarios import anymal_rl, dr_legs, g1_flat, h1_flat, tower
 
 
 def _build_scene(
@@ -54,6 +54,14 @@ def _build_scene(
             substeps,
             solver_iterations,
             step_layout="multi_world",
+            prepare_refresh_stride=prepare_refresh_stride,
+        )
+    if scene == "anymal":
+        return anymal_rl.build(
+            num_worlds,
+            "phoenx",
+            substeps,
+            solver_iterations,
             prepare_refresh_stride=prepare_refresh_stride,
         )
     raise ValueError(f"unknown scene: {scene}")
@@ -181,7 +189,7 @@ def main() -> None:
     parser.add_argument(
         "--scenes",
         nargs="+",
-        choices=("h1", "g1", "dr_legs", "tower"),
+        choices=("h1", "g1", "dr_legs", "tower", "anymal"),
         default=["h1", "dr_legs", "tower"],
     )
     parser.add_argument("--worlds", type=_parse_csv_ints, default=(32, 64, 128, 512))
