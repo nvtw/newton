@@ -14,7 +14,7 @@ Run from scratch with, for example:
 
 .. code-block:: bash
 
-    uv run --extra dev -m newton._src.solvers.phoenx.experimental.train_anymal_full_control_curriculum \
+    uv run --extra dev -m newton._src.solvers.phoenx.rl_training.examples.train_anymal_full_control_curriculum \
         --device cuda:0 --output-dir /tmp/phoenx_anymal_full_control
 
 The resulting checkpoint can be replayed with:
@@ -33,7 +33,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import newton.rl as rl
-from newton._src.solvers.phoenx.experimental import train_anymal_walk_phoenx_ppo as base
+from newton._src.solvers.phoenx.rl_training.examples import train_anymal_walk_phoenx_ppo as base
 
 Command = tuple[float, float, float, float]
 Override = tuple[str, object]

@@ -21,7 +21,7 @@
 - Keep curriculum command limits aligned with playback. The current trained command targets are 0.75 m/s forward, 0.20 m/s backward, 0.35 m/s lateral, and 0.75 rad/s yaw; a 0.95 m/s no-reset eval was unstable and is not needed for the default interactive policy.
 - Later command-family phases should retain earlier commands in their sampling ranges where practical. Narrow reverse or lateral-only phases can cause avoidable forgetting of forward walking before the final full-control mix.
 - A failed v5 run that placed reverse immediately after the first balance phase confirmed this: reverse learned a weak negative velocity, but the following forward phases collapsed to near-zero/backward motion. Keep reverse after forward, yaw, and curved-forward behavior, and use a gentler backward speed for no-reset stability.
-- The final policy is intended for `robot_anymal_rl_phoenx`, whose viewer controls are body-frame velocity commands: `W/S` forward/backward, `A/D` lateral, and `Q/E` yaw. No key pressed sends a zero command.
+- The final policy is intended for `robot_anymal_rl_phoenx`, whose viewer controls are body-frame velocity commands: `I/K` forward/backward, `J/L` lateral, `U/O` yaw, and `N/M` body height. No key pressed sends a zero command.
 
 ## Playback
 
@@ -31,4 +31,4 @@ Use the viewer example with a checkpoint trained for command steering:
 uv run --extra examples -m newton.examples robot_anymal_rl_phoenx --device cuda:0 --checkpoint /path/to/policy.npz
 ```
 
-Controls are body-frame velocity commands: `W/S` forward/backward, `A/D` lateral, `Q/E` yaw about the up axis. With no key pressed, the command is zero.
+Controls are body-frame velocity commands: `I/K` forward/backward, `J/L` lateral, `U/O` yaw, `N/M` body height about the up axis. With no key pressed, the command is zero.

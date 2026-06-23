@@ -52,6 +52,41 @@ _BASE_COMMAND_PPO_OVERRIDES: tuple[tuple[str, Any], ...] = (
     ("mirror_loss_coeff", 0.25),
 )
 
+_NANOG1_REWARD_ENV_OVERRIDES: tuple[tuple[str, Any], ...] = (
+    ("reward_mode", "nanog1_dense"),
+    ("w_alive", g1_recipe.W_ALIVE),
+    ("w_termination", g1_recipe.W_TERMINATION),
+    ("w_track_lin", g1_recipe.W_TRACK_LIN),
+    ("w_track_ang", g1_recipe.W_TRACK_ANG),
+    ("w_command_progress", g1_recipe.W_COMMAND_PROGRESS),
+    ("w_lin_vel_z", g1_recipe.W_LIN_VEL_Z),
+    ("w_ang_vel_xy", g1_recipe.W_ANG_VEL_XY),
+    ("w_orientation", g1_recipe.W_ORIENTATION),
+    ("w_torque", g1_recipe.W_TORQUE),
+    ("w_action_rate", g1_recipe.W_ACTION_RATE),
+    ("w_gait_contact", 0.0),
+    ("w_gait_swing", 0.0),
+    ("w_gait_swing_contact", 0.0),
+    ("w_gait_hip", 0.0),
+    ("w_base_height", 0.0),
+    ("w_feet_air_time", 0.0),
+    ("w_feet_slide", 0.0),
+    ("w_joint_deviation_hip", 0.0),
+    ("w_joint_deviation_waist", 0.0),
+    ("w_joint_deviation_upper", 0.0),
+    ("w_joint_acc_legs", 0.0),
+    ("w_joint_pos_limit_ankle", 0.0),
+)
+
+_NANOG1_PPO_OVERRIDES: tuple[tuple[str, Any], ...] = (
+    ("actor_lr", g1_recipe.ACTOR_LR),
+    ("critic_lr", g1_recipe.CRITIC_LR),
+    ("entropy_coeff", g1_recipe.ENTROPY_COEFF),
+    ("max_grad_norm", g1_recipe.MAX_GRAD_NORM),
+    ("reward_clip", g1_recipe.REWARD_CLIP),
+    ("mirror_loss_coeff", g1_recipe.MIRROR_LOSS_COEFF),
+)
+
 
 @dataclass(frozen=True)
 class PhaseG1Command:
@@ -72,6 +107,7 @@ class PhaseG1Command:
     gate_min_tracking_perf: float = 0.30
     gate_max_fall_fraction: float = 0.05
     gate_min_survival_fraction: float = 0.95
+    gate_min_aligned_velocity_fraction: float = 0.50
 
 
 @dataclass(frozen=True)
@@ -99,6 +135,33 @@ def build_command_curriculum(recipe: str, *, iteration_scale: float = 1.0) -> li
                 iterations=220,
                 command_x_range=(0.15, 0.45),
                 gate_commands=((0.3, 0.0, 0.0),),
+            )
+        ]
+    elif recipe == "nanog1-forward":
+        phases = [
+            PhaseG1Command(
+                name="nanog1_slow_forward",
+                iterations=220,
+                command_x_range=(0.15, 0.45),
+                gate_commands=((0.3, 0.0, 0.0),),
+                env_overrides=_NANOG1_REWARD_ENV_OVERRIDES,
+                ppo_overrides=_NANOG1_PPO_OVERRIDES,
+            )
+        ]
+    elif recipe == "nanog1-full":
+        phases = [
+            PhaseG1Command(
+                name="nanog1_full_command",
+                iterations=286,
+                command_x_range=g1_recipe.COMMAND_X_RANGE,
+                command_y_range=g1_recipe.COMMAND_Y_RANGE,
+                command_yaw_range=g1_recipe.COMMAND_YAW_RANGE,
+                command_zero_probability=g1_recipe.COMMAND_ZERO_PROBABILITY,
+                command_curriculum_start=g1_recipe.COMMAND_CURRICULUM_START,
+                command_curriculum_samples=g1_recipe.COMMAND_CURRICULUM_SAMPLES,
+                gate_commands=((0.8, 0.0, 0.0), (-0.5, 0.0, 0.0), (0.0, 0.4, 0.0), (0.0, 0.0, 0.0)),
+                env_overrides=_NANOG1_REWARD_ENV_OVERRIDES,
+                ppo_overrides=_NANOG1_PPO_OVERRIDES,
             )
         ]
     elif recipe == "advanced-command":
@@ -130,7 +193,7 @@ def build_command_curriculum(recipe: str, *, iteration_scale: float = 1.0) -> li
             ),
         ]
     else:
-        raise ValueError("recipe must be 'simple-forward' or 'advanced-command'")
+        raise ValueError("recipe must be 'simple-forward', 'advanced-command', 'nanog1-forward', or 'nanog1-full'")
     return [replace(phase, iterations=max(1, int(round(phase.iterations * iteration_scale)))) for phase in phases]
 
 
@@ -286,6 +349,9 @@ def check_phase_gate(phase: PhaseG1Command, command_eval_stats: list[dict[str, A
         fall_fraction = float(stat["fall_fraction"])
         survival_fraction = float(stat["mean_survival_steps"]) / max(float(stat["steps"]), 1.0)
         tracking_perf = float(stat["mean_tracking_perf"])
+        aligned_velocity = float(stat.get("mean_command_aligned_velocity", 0.0))
+        command_speed = (float(command[0]) * float(command[0]) + float(command[1]) * float(command[1])) ** 0.5
+        min_aligned_velocity = float(phase.gate_min_aligned_velocity_fraction) * command_speed
         if fall_fraction > float(phase.gate_max_fall_fraction):
             failures.append(f"command={command} fall_fraction={fall_fraction:.3f} > {phase.gate_max_fall_fraction:.3f}")
         if survival_fraction < float(phase.gate_min_survival_fraction):
@@ -294,6 +360,8 @@ def check_phase_gate(phase: PhaseG1Command, command_eval_stats: list[dict[str, A
             )
         if tracking_perf < float(phase.gate_min_tracking_perf):
             failures.append(f"command={command} tracking_perf={tracking_perf:.3f} < {phase.gate_min_tracking_perf:.3f}")
+        if command_speed > 1.0e-6 and aligned_velocity < min_aligned_velocity:
+            failures.append(f"command={command} aligned_velocity={aligned_velocity:.3f} < {min_aligned_velocity:.3f}")
     return not failures, failures
 
 
@@ -363,7 +431,11 @@ def run_curriculum(args: argparse.Namespace) -> list[PhaseG1CommandResult]:
 
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--recipe", choices=("simple-forward", "advanced-command"), default="simple-forward")
+    parser.add_argument(
+        "--recipe",
+        choices=("simple-forward", "advanced-command", "nanog1-forward", "nanog1-full"),
+        default="simple-forward",
+    )
     parser.add_argument("--output-dir", default="/tmp/phoenx_g1_command_curriculum")
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=41_001)

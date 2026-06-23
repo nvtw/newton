@@ -644,7 +644,7 @@ but it is not the root cause of the G1 walking failure.
 
 ## 2026-06-23 Ant PPO Validation
 
-An experimental `train_ant_phoenx_ppo.py` runner now trains the classic Ant
+An `rl_training/examples/train_ant_phoenx_ppo.py` runner now trains the classic Ant
 locomotion task using the same Warp PPO implementation and SolverPhoenX. It
 parses `nv_ant.xml`, uses the existing Y-up Newton Ant convention, drives the
 eight hinge DOFs with direct clamped torques, and evaluates checkpoints without
@@ -667,7 +667,7 @@ than in a basic PPO implementation failure.
 
 ## 2026-06-23 Anymal Walk PPO Runner
 
-A separate experimental `train_anymal_walk_phoenx_ppo.py` runner trains
+A separate `rl_training/examples/train_anymal_walk_phoenx_ppo.py` runner trains
 Anymal C command walking with SolverPhoenX and the same Warp-only PPO stack. It
 supports a single fixed command and a phased `--recipe forward` curriculum that
 checkpoints between phases, evaluates without auto-reset, and gates on actual

@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton.rl as rl
-from newton._src.solvers.phoenx.experimental import train_anymal_full_control_curriculum as anymal_curriculum
+from newton._src.solvers.phoenx.rl_training.examples import train_anymal_full_control_curriculum as anymal_curriculum
 from newton._src.solvers.phoenx.rl_training.reward_functions import (
     command_progress_2d,
     fall_indicator,

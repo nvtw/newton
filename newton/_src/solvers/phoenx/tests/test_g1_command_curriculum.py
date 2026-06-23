@@ -6,7 +6,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from newton._src.solvers.phoenx.experimental.train_g1_command_curriculum import (
+from newton._src.solvers.phoenx.rl_training import g1_recipe
+from newton._src.solvers.phoenx.rl_training.examples.train_g1_command_curriculum import (
     _make_parser,
     build_command_curriculum,
     build_train_config,
@@ -49,6 +50,39 @@ class TestG1CommandCurriculum(unittest.TestCase):
         self.assertGreater(config.ppo_config.mirror_loss_coeff, 0.0)
         self.assertEqual(config.ppo_config.reward_clip, 4.0)
 
+    def test_nanog1_forward_recipe_uses_reference_reward_and_ppo_scale(self):
+        args = _make_parser().parse_args(["--dry-run", "--recipe", "nanog1-forward"])
+        phase = build_command_curriculum("nanog1-forward")[0]
+
+        config = build_train_config(
+            phase,
+            args,
+            seed=123,
+            resume_checkpoint=None,
+            checkpoint_path=Path("/tmp/phoenx_g1_command_test_{iteration}.npz"),
+        )
+
+        self.assertEqual(phase.name, "nanog1_slow_forward")
+        self.assertEqual(config.env_config.w_alive, g1_recipe.W_ALIVE)
+        self.assertEqual(config.env_config.w_termination, g1_recipe.W_TERMINATION)
+        self.assertEqual(config.env_config.w_track_lin, g1_recipe.W_TRACK_LIN)
+        self.assertEqual(config.env_config.w_track_ang, g1_recipe.W_TRACK_ANG)
+        self.assertEqual(config.env_config.w_gait_contact, 0.0)
+        self.assertEqual(config.env_config.w_gait_swing, 0.0)
+        self.assertEqual(config.env_config.w_gait_hip, 0.0)
+        self.assertEqual(config.env_config.w_base_height, 0.0)
+        self.assertEqual(config.env_config.w_feet_air_time, 0.0)
+        self.assertEqual(config.env_config.w_feet_slide, 0.0)
+        self.assertEqual(config.env_config.w_joint_deviation_hip, 0.0)
+        self.assertEqual(config.env_config.w_joint_deviation_waist, 0.0)
+        self.assertEqual(config.env_config.w_joint_deviation_upper, 0.0)
+        self.assertEqual(config.env_config.w_joint_acc_legs, 0.0)
+        self.assertEqual(config.env_config.w_joint_pos_limit_ankle, 0.0)
+        self.assertEqual(config.ppo_config.actor_lr, g1_recipe.ACTOR_LR)
+        self.assertEqual(config.ppo_config.critic_lr, g1_recipe.CRITIC_LR)
+        self.assertEqual(config.ppo_config.reward_clip, g1_recipe.REWARD_CLIP)
+        self.assertEqual(config.ppo_config.mirror_loss_coeff, g1_recipe.MIRROR_LOSS_COEFF)
+
     def test_reward_clip_override_supports_survival_ablation(self):
         args = _make_parser().parse_args(["--dry-run", "--reward-clip", "0.0"])
         phase = build_command_curriculum("simple-forward")[0]
@@ -72,6 +106,7 @@ class TestG1CommandCurriculum(unittest.TestCase):
                 "fall_fraction": 0.0,
                 "mean_survival_steps": 700.0,
                 "mean_tracking_perf": 0.5,
+                "mean_command_aligned_velocity": 0.2,
             }
         ]
 
@@ -89,6 +124,7 @@ class TestG1CommandCurriculum(unittest.TestCase):
                 "fall_fraction": 1.0,
                 "mean_survival_steps": 100.0,
                 "mean_tracking_perf": 0.0,
+                "mean_command_aligned_velocity": 0.0,
             }
         ]
 
@@ -96,6 +132,24 @@ class TestG1CommandCurriculum(unittest.TestCase):
 
         self.assertFalse(passed)
         self.assertTrue(any("fall_fraction" in failure for failure in failures))
+
+    def test_phase_gate_rejects_stationary_forward_policy(self):
+        phase = build_command_curriculum("nanog1-forward")[0]
+        stats = [
+            {
+                "command": (0.3, 0.0, 0.0),
+                "steps": 700,
+                "fall_fraction": 0.0,
+                "mean_survival_steps": 700.0,
+                "mean_tracking_perf": 0.70,
+                "mean_command_aligned_velocity": 0.003,
+            }
+        ]
+
+        passed, failures = check_phase_gate(phase, stats)
+
+        self.assertFalse(passed)
+        self.assertTrue(any("aligned_velocity" in failure for failure in failures))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from newton._src.solvers.phoenx.experimental.train_g1_curriculum import (
+from newton._src.solvers.phoenx.rl_training.examples.train_g1_curriculum import (
     _make_parser,
     build_curriculum,
     build_train_config,

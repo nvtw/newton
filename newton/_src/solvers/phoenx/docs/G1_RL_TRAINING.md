@@ -30,10 +30,10 @@ adding a PyTorch dependency to Newton's Warp-only RL stack.
 - `python -m newton._src.solvers.phoenx.experimental.bench_g1_train_puffer_torch`:
   isolation benchmark that keeps PhoenX physics/env/rewards fixed but replaces
   the pure-Warp learner with a PufferLib-style Torch PPO/V-trace/Muon learner.
-- `python -m newton._src.solvers.phoenx.experimental.train_g1_curriculum`:
+- `python -m newton._src.solvers.phoenx.rl_training.examples.train_g1_curriculum`:
   phase-gated target-walking curriculum that saves/evaluates every checkpoint
   before chaining to the next target-distance phase.
-- `python -m newton._src.solvers.phoenx.experimental.train_g1_command_curriculum`:
+- `python -m newton._src.solvers.phoenx.rl_training.examples.train_g1_command_curriculum`:
   phase-gated velocity-command curriculum for nanoG1-like sustained walking
   before target steering.
 - `python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog`:

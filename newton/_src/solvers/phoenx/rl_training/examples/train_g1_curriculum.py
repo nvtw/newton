@@ -11,7 +11,7 @@ from short, nearly-forward targets to longer target-conditioned walking.
 Example:
 
 ```
-uv run --extra dev -m newton._src.solvers.phoenx.experimental.train_g1_curriculum \
+uv run --extra dev -m newton._src.solvers.phoenx.rl_training.examples.train_g1_curriculum \
     --recipe advanced-target --output-dir /tmp/phoenx_g1_advanced --device cuda:0
 ```
 """

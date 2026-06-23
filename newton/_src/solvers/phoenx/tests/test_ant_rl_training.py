@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.experimental.train_ant_phoenx_ppo import ConfigEnvAntPhoenX, EnvAntPhoenX
+from newton._src.solvers.phoenx.rl_training.examples.train_ant_phoenx_ppo import ConfigEnvAntPhoenX, EnvAntPhoenX
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
