@@ -41,7 +41,7 @@ Override = tuple[str, object]
 IDLE: Command = (0.0, 0.0, 0.0)
 FORWARD_SLOW: Command = (0.35, 0.0, 0.0)
 FORWARD: Command = (0.70, 0.0, 0.0)
-FORWARD_FAST: Command = (0.95, 0.0, 0.0)
+FORWARD_FAST: Command = (0.75, 0.0, 0.0)
 BACKWARD: Command = (-0.30, 0.0, 0.0)
 LEFT: Command = (0.0, 0.35, 0.0)
 RIGHT: Command = (0.0, -0.35, 0.0)
@@ -181,7 +181,7 @@ def phase_fast_efficient_forward() -> CurriculumPhase:
     return CurriculumPhase(
         name="fast_efficient_forward",
         title="Fast Efficient Forward",
-        purpose="Push the commanded-speed range toward a useful fast gait while penalizing excess action and energy.",
+        purpose="Push the commanded-speed range to the viewer forward speed while penalizing excess action and energy.",
         command=FORWARD_FAST,
         iterations=280,
         env_overrides=(
@@ -192,7 +192,7 @@ def phase_fast_efficient_forward() -> CurriculumPhase:
             ("action_rate_reward_scale", -0.015),
         ),
         randomize_commands=True,
-        command_x_range=(0.0, 1.00),
+        command_x_range=(0.0, 0.75),
         command_y_range=(0.0, 0.0),
         command_yaw_range=(0.0, 0.0),
         command_zero_probability=0.15,
@@ -229,7 +229,7 @@ def phase_robust_forward() -> CurriculumPhase:
             ("disturbance_seed", 41_337),
         ),
         randomize_commands=True,
-        command_x_range=(0.0, 1.00),
+        command_x_range=(0.0, 0.75),
         command_y_range=(0.0, 0.0),
         command_yaw_range=(0.0, 0.0),
         command_zero_probability=0.15,
@@ -325,7 +325,7 @@ def phase_curved_forward() -> CurriculumPhase:
             ("action_rate_reward_scale", -0.015),
         ),
         randomize_commands=True,
-        command_x_range=(0.0, 0.95),
+        command_x_range=(0.0, 0.75),
         command_y_range=(0.0, 0.0),
         command_yaw_range=(-0.85, 0.85),
         command_zero_probability=0.10,
@@ -357,7 +357,7 @@ def phase_reverse_walk() -> CurriculumPhase:
             ("action_rate_reward_scale", -0.015),
         ),
         randomize_commands=True,
-        command_x_range=(-0.45, 0.20),
+        command_x_range=(-0.35, 0.75),
         command_y_range=(0.0, 0.0),
         command_yaw_range=(0.0, 0.0),
         command_zero_probability=0.10,
@@ -388,7 +388,7 @@ def phase_side_step() -> CurriculumPhase:
             ("action_rate_reward_scale", -0.015),
         ),
         randomize_commands=True,
-        command_x_range=(0.0, 0.25),
+        command_x_range=(0.0, 0.75),
         command_y_range=(-0.45, 0.45),
         command_yaw_range=(0.0, 0.0),
         command_zero_probability=0.08,
@@ -420,7 +420,7 @@ def phase_full_control_mix() -> CurriculumPhase:
             ("action_rate_reward_scale", -0.015),
         ),
         randomize_commands=True,
-        command_x_range=(-0.45, 1.00),
+        command_x_range=(-0.35, 0.75),
         command_y_range=(-0.45, 0.45),
         command_yaw_range=(-0.90, 0.90),
         command_zero_probability=0.08,
@@ -460,7 +460,7 @@ def phase_robust_full_control() -> CurriculumPhase:
             ("disturbance_seed", 52_091),
         ),
         randomize_commands=True,
-        command_x_range=(-0.45, 1.00),
+        command_x_range=(-0.35, 0.75),
         command_y_range=(-0.45, 0.45),
         command_yaw_range=(-0.90, 0.90),
         command_zero_probability=0.10,

@@ -18,6 +18,8 @@
 - `train_anymal_full_control_curriculum.py` is the readable from-scratch runner for a steerable Anymal policy. It keeps the phase list explicit: balance/forward, faster forward, robust forward, turn-in-place, recover forward, curved walking, reverse, side-step, full command mix, then robust full control.
 - The split is intentional. The earlier broad `omni_steering` phase exposed forward, lateral, reverse, and yaw commands at the same time and could collapse a useful forward/yaw policy back toward standing. The new runner expands one command family at a time and evaluates every phase without auto-reset.
 - Early forward phases must be command-conditioned. A fixed-command forward phase produced a stable gait that ignored zero commands and kept walking in idle eval, so these phases now sample forward command ranges that include zero and use no unconditional forward-progress reward.
+- Keep curriculum command limits aligned with the playback example. The viewer defaults are 0.75 m/s forward, 0.35 m/s backward/lateral, and 0.75 rad/s yaw; a 0.95 m/s no-reset eval was unstable and is not needed for the default interactive policy.
+- Later command-family phases should retain earlier commands in their sampling ranges where practical. Narrow reverse or lateral-only phases can cause avoidable forgetting of forward walking before the final full-control mix.
 - The final policy is intended for `robot_anymal_rl_phoenx`, whose viewer controls are body-frame velocity commands: `W/S` forward/backward, `A/D` lateral, and `Q/E` yaw. No key pressed sends a zero command.
 
 ## Playback
