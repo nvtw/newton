@@ -44,6 +44,7 @@ IDLE_HIGH: Command = (0.0, 0.0, 0.0, 0.07)
 FORWARD_SLOW: Command = (0.35, 0.0, 0.0, 0.0)
 FORWARD: Command = (0.70, 0.0, 0.0, 0.0)
 FORWARD_FAST: Command = (0.75, 0.0, 0.0, 0.0)
+FORWARD_RUN: Command = (1.15, 0.0, 0.0, 0.0)
 FORWARD_LOW: Command = (0.45, 0.0, 0.0, -0.07)
 FORWARD_HIGH: Command = (0.45, 0.0, 0.0, 0.07)
 BACKWARD: Command = (-0.20, 0.0, 0.0, 0.0)
@@ -58,6 +59,7 @@ FULL_CONTROL_EVAL_COMMANDS: tuple[Command, ...] = (
     IDLE,
     FORWARD,
     FORWARD_FAST,
+    FORWARD_RUN,
     BACKWARD,
     LEFT,
     RIGHT,
@@ -214,6 +216,46 @@ def phase_fast_efficient_forward() -> CurriculumPhase:
         gate_min_survival_fraction=0.82,
         gate_min_forward_velocity_fraction=0.52,
         gate_max_abs_forward_velocity_error=0.36,
+    )
+
+
+def phase_run_forward() -> CurriculumPhase:
+    """Teach a higher-speed forward gait without giving up posture quality."""
+
+    return CurriculumPhase(
+        name="run_forward",
+        title="Run Forward",
+        purpose="Extend the command-conditioned forward gait to running speeds while regularizing posture and lateral hips.",
+        command=FORWARD_RUN,
+        iterations=260,
+        env_overrides=(
+            ("action_scale", 0.58),
+            ("lin_vel_reward_scale", 3.25),
+            ("yaw_rate_reward_scale", 0.75),
+            ("lin_vel_tracking_sigma", 0.32),
+            ("yaw_rate_tracking_sigma", 0.45),
+            ("base_height_reward_scale", 0.80),
+            ("base_height_tracking_sigma", 0.075),
+            ("hip_abduction_reward_scale", -0.35),
+            ("joint_position_reward_scale", -0.025),
+            ("forward_progress_reward_scale", 0.25),
+            ("energy_reward_scale", -4.0e-5),
+            ("action_rate_reward_scale", -0.020),
+        ),
+        randomize_commands=True,
+        command_x_range=(0.45, 1.20),
+        command_y_range=(0.0, 0.0),
+        command_yaw_range=(0.0, 0.0),
+        command_zero_probability=0.05,
+        eval_commands=(FORWARD, FORWARD_FAST, FORWARD_RUN),
+        gate_min_tracking_perf=0.42,
+        gate_max_fall_fraction=0.20,
+        gate_min_survival_fraction=0.80,
+        gate_min_forward_velocity_fraction=0.45,
+        gate_max_abs_forward_velocity_error=0.60,
+        gate_max_abs_lateral_velocity_error=0.35,
+        gate_max_abs_yaw_rate_error=0.50,
+        gate_max_abs_base_height_error=0.12,
     )
 
 
@@ -473,11 +515,13 @@ def phase_full_control_mix() -> CurriculumPhase:
             ("lin_vel_tracking_sigma", 0.28),
             ("yaw_rate_tracking_sigma", 0.35),
             ("forward_progress_reward_scale", 1.00),
+            ("hip_abduction_reward_scale", -0.20),
+            ("joint_position_reward_scale", -0.015),
             ("energy_reward_scale", -3.0e-5),
             ("action_rate_reward_scale", -0.015),
         ),
         randomize_commands=True,
-        command_x_range=(-0.25, 0.75),
+        command_x_range=(-0.25, 1.15),
         command_y_range=(-0.45, 0.45),
         command_yaw_range=(-0.90, 0.90),
         command_height_range=(-0.07, 0.07),
@@ -509,6 +553,8 @@ def phase_robust_full_control() -> CurriculumPhase:
             ("lin_vel_tracking_sigma", 0.28),
             ("yaw_rate_tracking_sigma", 0.35),
             ("forward_progress_reward_scale", 1.00),
+            ("hip_abduction_reward_scale", -0.20),
+            ("joint_position_reward_scale", -0.015),
             ("energy_reward_scale", -3.0e-5),
             ("action_rate_reward_scale", -0.015),
             ("disturbance_warmup_steps", 50),
@@ -520,7 +566,7 @@ def phase_robust_full_control() -> CurriculumPhase:
             ("disturbance_seed", 52_091),
         ),
         randomize_commands=True,
-        command_x_range=(-0.25, 0.75),
+        command_x_range=(-0.25, 1.15),
         command_y_range=(-0.45, 0.45),
         command_yaw_range=(-0.90, 0.90),
         command_height_range=(-0.07, 0.07),
@@ -544,6 +590,7 @@ def build_full_control_curriculum() -> tuple[CurriculumPhase, ...]:
         phase_walk_forward(),
         phase_fast_efficient_forward(),
         phase_robust_forward(),
+        phase_run_forward(),
         phase_base_height_control(),
         phase_turn_in_place(),
         phase_recover_forward_after_turning(),

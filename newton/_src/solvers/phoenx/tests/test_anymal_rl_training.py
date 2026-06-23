@@ -42,6 +42,8 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(names[0], "balance_and_step_forward")
         self.assertEqual(names[-1], "robust_full_control")
+        self.assertLess(names.index("robust_forward"), names.index("run_forward"))
+        self.assertLess(names.index("run_forward"), names.index("base_height_control"))
         self.assertLess(names.index("base_height_control"), names.index("turn_in_place"))
         self.assertLess(names.index("curved_forward"), names.index("reverse_walk"))
         for phase in phases:
@@ -58,6 +60,12 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         self.assertLessEqual(abs(reverse.command[0]), 0.25)
         self.assertLess(reverse_overrides["lin_vel_tracking_sigma"], 0.5)
         self.assertGreater(reverse_overrides["forward_progress_reward_scale"], 0.0)
+        run = next(phase for phase in phases if phase.name == "run_forward")
+        run_overrides = dict(run.env_overrides)
+        self.assertGreater(run.command_x_range[1], 1.0)
+        self.assertLess(run_overrides["hip_abduction_reward_scale"], 0.0)
+        self.assertLess(run_overrides["joint_position_reward_scale"], 0.0)
+        self.assertIn(anymal_curriculum.FORWARD_RUN, run.eval_commands)
         side = next(phase for phase in phases if phase.name == "side_step")
         side_overrides = dict(side.env_overrides)
         self.assertEqual(side.command_x_range, (0.0, 0.0))
@@ -67,6 +75,8 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         robust_overrides = dict(robust.env_overrides)
         self.assertIn("lin_vel_tracking_sigma", robust_overrides)
         self.assertNotEqual(robust.command_height_range, (0.0, 0.0))
+        self.assertGreater(robust.command_x_range[1], 1.0)
+        self.assertLess(robust_overrides["joint_position_reward_scale"], 0.0)
         self.assertGreater(robust_overrides["forward_progress_reward_scale"], 0.0)
 
         args = anymal_curriculum._make_parser().parse_args(

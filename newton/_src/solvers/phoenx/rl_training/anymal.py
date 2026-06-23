@@ -243,6 +243,7 @@ def anymal_observe_reward_kernel(
     fall_reward_scale: wp.float32,
     energy_reward_scale: wp.float32,
     hip_abduction_reward_scale: wp.float32,
+    joint_position_reward_scale: wp.float32,
     target_radius: wp.float32,
     action_scale: wp.float32,
     actuator_ke: wp.float32,
@@ -319,6 +320,7 @@ def anymal_observe_reward_kernel(
         action_rate_cost = wp.float32(0.0)
         joint_speed_penalty = wp.float32(0.0)
         hip_abduction_penalty = wp.float32(0.0)
+        joint_position_cost = wp.float32(0.0)
         power_proxy = wp.float32(0.0)
         for j in range(ACTION_DIM_ANYMAL):
             action_rate_cost = action_rate_cost + action_rate_penalty(
@@ -330,6 +332,7 @@ def anymal_observe_reward_kernel(
             q = joint_q[q_idx]
             qd = joint_qd[qd_idx]
             joint_speed_penalty = joint_speed_penalty + square(qd)
+            joint_position_cost = joint_position_cost + joint_position_penalty(q, default_joint_pos[model_joint])
             if j < 4:
                 hip_abduction_penalty = hip_abduction_penalty + joint_position_penalty(q, wp.float32(0.0))
             target = default_joint_pos[model_joint] + current_actions[world, j] * action_scale
@@ -356,6 +359,7 @@ def anymal_observe_reward_kernel(
             + joint_speed_reward_scale * joint_speed_penalty
             + flat_orientation_reward_scale * flat_orientation_penalty
             + hip_abduction_reward_scale * hip_abduction_penalty
+            + joint_position_reward_scale * joint_position_cost
             + fall_reward_scale * fall
             + energy_reward_scale * power_proxy
         )
@@ -364,6 +368,7 @@ def anymal_observe_reward_kernel(
             + base_height_reward_scale * height_reward
             + target_progress_reward_scale * target_progress
             + hip_abduction_reward_scale * hip_abduction_penalty
+            + joint_position_reward_scale * joint_position_cost
             + fall_reward_scale * fall
             + energy_reward_scale * power_proxy
         )
@@ -467,6 +472,7 @@ class ConfigEnvAnymalPhoenX:
         fall_reward_scale: Fall penalty scale.
         energy_reward_scale: Mechanical power proxy penalty scale.
         hip_abduction_reward_scale: HAA joint position penalty scale that keeps lateral hip joints near zero.
+        joint_position_reward_scale: Joint position penalty scale toward the nominal pose.
         actuator_ke: Position actuator stiffness used by the model and power proxy.
         actuator_kd: Position actuator damping used by the model and power proxy.
         disturbance_warmup_steps: Policy steps before disturbances may start.
@@ -510,6 +516,7 @@ class ConfigEnvAnymalPhoenX:
     fall_reward_scale: float = -0.25
     energy_reward_scale: float = -1.0e-5
     hip_abduction_reward_scale: float = 0.0
+    joint_position_reward_scale: float = 0.0
     actuator_ke: float = 150.0
     actuator_kd: float = 5.0
     disturbance_warmup_steps: int = 0
@@ -712,6 +719,7 @@ class EnvAnymalPhoenX:
                 self.config.fall_reward_scale,
                 self.config.energy_reward_scale,
                 self.config.hip_abduction_reward_scale,
+                self.config.joint_position_reward_scale,
                 self.config.target_radius,
                 self.config.action_scale,
                 self.config.actuator_ke,
