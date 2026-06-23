@@ -112,6 +112,9 @@ class StatsEvaluateAnymalWalk:
     mean_displacement_y: float
     mean_path_length: float
     mean_action_rms: float
+    mean_action_rate_rms: float
+    mean_joint_speed_rms: float
+    mean_power_proxy: float
     samples_per_second: float
 
 
@@ -427,7 +430,16 @@ def evaluate_checkpoint(
     forward_sum = 0.0
     alive_count = 0
     action_sq_sum = 0.0
+    action_rate_sq_sum = 0.0
+    joint_speed_sq_sum = 0.0
+    power_proxy_sum = 0.0
     action_count = 0
+    previous_actions_np = np.zeros((env.world_count, env.action_dim), dtype=np.float32)
+    lab_to_mujoco_np = env.lab_to_mujoco.numpy().astype(np.int32)
+    default_joint_pos_np = env.default_joint_pos.numpy()
+    action_scale = float(env.config.action_scale)
+    actuator_ke = float(env.config.actuator_ke)
+    actuator_kd = float(env.config.actuator_kd)
     path_length = np.zeros(env.world_count, dtype=np.float64)
     command_np = np.asarray(eval_command, dtype=np.float32)
     lin_sigma_sq = max(float(env.config.lin_vel_tracking_sigma) ** 2, 1.0e-6)
@@ -442,6 +454,7 @@ def evaluate_checkpoint(
         done_sum += float(np.mean(done_np))
         obs_np = obs.numpy()
         q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
         xy = q[:, 0:2].copy()
         if np.any(alive_before):
             alive_idx = alive_before
@@ -466,9 +479,23 @@ def evaluate_checkpoint(
             lateral_abs_sum += float(np.sum(np.abs(lin_alive[:, 1] - float(command_np[1]))))
             yaw_error_sum += float(np.sum(np.abs(yaw_err)))
             action_alive = obs_np[alive_idx, 36:48]
+            previous_action_alive = previous_actions_np[alive_idx]
+            joint_speed_alive = obs_np[alive_idx, 24:36]
             action_sq_sum += float(np.sum(action_alive * action_alive))
+            action_rate = action_alive - previous_action_alive
+            action_rate_sq_sum += float(np.sum(action_rate * action_rate))
+            joint_speed_sq_sum += float(np.sum(joint_speed_alive * joint_speed_alive))
+            power_proxy = np.zeros(action_alive.shape[0], dtype=np.float64)
+            for lab_joint, model_joint in enumerate(lab_to_mujoco_np):
+                target = default_joint_pos_np[model_joint] + action_scale * action_alive[:, lab_joint]
+                joint_q = q[alive_idx, 7 + model_joint]
+                joint_qd = qd[alive_idx, 6 + model_joint]
+                tau_proxy = actuator_ke * (target - joint_q) - actuator_kd * joint_qd
+                power_proxy += np.abs(tau_proxy * joint_qd)
+            power_proxy_sum += float(np.sum(power_proxy))
             action_count += int(action_alive.size)
             alive_count += int(np.sum(alive_idx))
+        previous_actions_np = obs_np[:, 36:48].copy()
         previous_xy = xy
         first_done_step[(first_done_step < 0) & done_np] = step + 1
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
@@ -496,6 +523,9 @@ def evaluate_checkpoint(
         mean_displacement_y=float(np.mean(displacement[:, 1])),
         mean_path_length=float(np.mean(path_length)),
         mean_action_rms=float(math.sqrt(action_sq_sum / float(max(action_count, 1)))),
+        mean_action_rate_rms=float(math.sqrt(action_rate_sq_sum / float(max(action_count, 1)))),
+        mean_joint_speed_rms=float(math.sqrt(joint_speed_sq_sum / float(max(action_count, 1)))),
+        mean_power_proxy=power_proxy_sum / alive_den,
         samples_per_second=float(env.world_count * int(args.eval_steps)) / elapsed,
     )
 

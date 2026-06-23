@@ -518,13 +518,25 @@ def build_phase_env_config(
 ) -> rl.ConfigEnvAnymalPhoenX:
     """Build the PhoenX Anymal environment config for one phase."""
 
+    env_overrides = _phase_env_overrides(args, phase)
     return base.build_env_config(
         args,
         world_count=world_count,
         auto_reset=auto_reset,
         command=phase.command,
-        env_overrides=dict(phase.env_overrides),
+        env_overrides=env_overrides,
     )
+
+
+def _phase_env_overrides(args: argparse.Namespace, phase: CurriculumPhase) -> dict[str, object]:
+    env_overrides = dict(phase.env_overrides)
+    if args.phase_energy_reward_scale is not None:
+        env_overrides["energy_reward_scale"] = float(args.phase_energy_reward_scale)
+    if args.phase_action_rate_reward_scale is not None:
+        env_overrides["action_rate_reward_scale"] = float(args.phase_action_rate_reward_scale)
+    if args.phase_joint_speed_reward_scale is not None:
+        env_overrides["joint_speed_reward_scale"] = float(args.phase_joint_speed_reward_scale)
+    return env_overrides
 
 
 def _selected_phases(args: argparse.Namespace) -> tuple[CurriculumPhase, ...]:
@@ -630,7 +642,9 @@ def _run_one_phase(
     eval_stats = None
     gate_failures: list[str] = []
     if not bool(args.no_eval):
-        eval_stats = base.evaluate_phase_commands(result.trainer, args, training_phase, dict(phase.env_overrides))
+        eval_stats = base.evaluate_phase_commands(
+            result.trainer, args, training_phase, _phase_env_overrides(args, phase)
+        )
         gate_failures = base.check_phase_gates(eval_stats, training_phase)
     payload = _phase_payload(
         phase_index=phase_index,
@@ -704,6 +718,9 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-phase", type=int, default=0)
     parser.add_argument("--phase-count", type=int, default=None)
     parser.add_argument("--iteration-scale", type=float, default=1.0)
+    parser.add_argument("--phase-energy-reward-scale", type=float, default=None)
+    parser.add_argument("--phase-action-rate-reward-scale", type=float, default=None)
+    parser.add_argument("--phase-joint-speed-reward-scale", type=float, default=None)
     parser.add_argument("--allow-gate-failure", action="store_true")
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

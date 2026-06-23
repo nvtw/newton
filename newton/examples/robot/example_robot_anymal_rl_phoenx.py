@@ -5,8 +5,8 @@
 # Example Robot Anymal RL Playback (PhoenX)
 #
 # Replays a Warp-only PPO Anymal policy trained with PhoenX physics. The
-# command interface is body-frame velocity tracking: W/S forward/backward,
-# A/D left/right, and Q/E yaw-rate about the up axis. No key means zero
+# command interface is body-frame velocity tracking: I/K forward/backward,
+# J/L left/right, and U/O yaw-rate about the up axis. No key means zero
 # velocity command, so a properly trained steering policy should stand still.
 #
 # Command: python -m newton.examples robot_anymal_rl_phoenx --checkpoint policy.npz
@@ -43,6 +43,12 @@ class Example:
         self.lateral_speed = float(args.lateral_speed)
         self.yaw_rate = float(args.yaw_rate)
         self.fallback_command = (float(args.command_x), float(args.command_y), float(args.command_yaw))
+        self.forward_key = str(args.forward_key).lower()
+        self.backward_key = str(args.backward_key).lower()
+        self.left_key = str(args.left_key).lower()
+        self.right_key = str(args.right_key).lower()
+        self.yaw_left_key = str(args.yaw_left_key).lower()
+        self.yaw_right_key = str(args.yaw_right_key).lower()
         self.render_contacts = bool(args.render_contacts)
         self.log_interval = max(int(args.log_interval), 0)
         self._last_command: tuple[float, float, float] | None = None
@@ -93,22 +99,22 @@ class Example:
         lateral = 0.0
         yaw = 0.0
         used = False
-        if self._key_down("w"):
+        if self._key_down(self.forward_key):
             forward += self.forward_speed
             used = True
-        if self._key_down("s"):
+        if self._key_down(self.backward_key):
             forward -= self.backward_speed
             used = True
-        if self._key_down("a"):
+        if self._key_down(self.left_key):
             lateral += self.lateral_speed
             used = True
-        if self._key_down("d"):
+        if self._key_down(self.right_key):
             lateral -= self.lateral_speed
             used = True
-        if self._key_down("q"):
+        if self._key_down(self.yaw_left_key):
             yaw += self.yaw_rate
             used = True
-        if self._key_down("e"):
+        if self._key_down(self.yaw_right_key):
             yaw -= self.yaw_rate
             used = True
         if used:
@@ -174,9 +180,15 @@ class Example:
         parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--interactive-command", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--forward-speed", type=float, default=0.75)
-        parser.add_argument("--backward-speed", type=float, default=0.35)
-        parser.add_argument("--lateral-speed", type=float, default=0.35)
-        parser.add_argument("--yaw-rate", type=float, default=0.75)
+        parser.add_argument("--backward-speed", type=float, default=0.20)
+        parser.add_argument("--lateral-speed", type=float, default=0.20)
+        parser.add_argument("--yaw-rate", type=float, default=0.65)
+        parser.add_argument("--forward-key", default="i")
+        parser.add_argument("--backward-key", default="k")
+        parser.add_argument("--left-key", default="j")
+        parser.add_argument("--right-key", default="l")
+        parser.add_argument("--yaw-left-key", default="u")
+        parser.add_argument("--yaw-right-key", default="o")
         parser.add_argument("--command-x", type=float, default=0.0)
         parser.add_argument("--command-y", type=float, default=0.0)
         parser.add_argument("--command-yaw", type=float, default=0.0)
