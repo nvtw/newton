@@ -84,6 +84,19 @@ All of these tests run CUDA-only and use Warp CUDA graph capture.
 - Short train-to-gate probes still fail the walking gate. The current evidence
   points to remaining simulator/reward/solver quality gaps and sample-efficiency
   issues, not just PPO math.
+- No-reset long-horizon evaluation exposed a finite numerical-explosion failure
+  mode: a partially trained forward policy could reach enormous root positions
+  before the height/upright fall test fired. PhoenX G1 now treats generous root
+  position/velocity and joint position/velocity limits as environment
+  invariants. These limits are not walking reward shaping; they terminate
+  physically invalid simulation states so PPO cannot learn from corrupted
+  trajectories.
+- G1 foot-contact rewards now require accumulated normal contact impulse above
+  a small threshold instead of using shape-pair presence alone. This avoids
+  treating speculative/gap contacts as stance contacts for gait phase,
+  feet-air-time, and foot-slide rewards. A CUDA graph regression creates foot
+  shape pairs with zero impulse and verifies they do not count as active
+  contacts.
 - The Python gate diagnostic now rotates root linear velocity with Newton's
   free-joint quaternion layout, `x, y, z, w`. The previous helper interpreted
   the same four numbers as `w, x, y, z`, corrupting the printed
@@ -176,7 +189,34 @@ or benchmark note.
 | Graph overlap / stale policy | Same recipe in eager and graph-leapfrog modes | A 60-iteration eager train-to-gate probe failed similarly to graph mode, so stream overlap/stale rollout policy is not the primary quality blocker. | Keep graph mode for throughput, but debug quality in the simpler eager path when possible. |
 | G1 env/reward contract | `g1_gpu.cu`, `recipe.py`, deploy constants | Tests cover observation/action layout, actuator-force torque penalty, reward decomposition, gait/success terms, command constants, and graph recurrent reset behavior. The default now resets recurrent state at PPO rollout boundaries because the Warp buffer does not yet store initial hidden states for update-time replay. | Add targeted tests for command resampling/reset timing and done/bootstrap semantics before changing rewards. |
 | Drive/contact physics | nanoG1 host physics plus first-principles drive tests | Explicit G1 actuator forces now match the analytical nanoG1/MuJoCo formula joint-by-joint; the old implicit drive-row path was effectively too compliant at training dt. G1 foot-ground friction now matches nanoG1 pair friction (`0.6`): the previous PhoenX ground `0.75` averaged with foot `0.6` to an unintended effective `0.675`. | Keep explicit torque as the default; use `constraint_drive` only for diagnostics, and re-run policy gates/open-loop parity after the friction fix. |
-| End-to-end training quality | nanoG1 reaches a working policy in roughly the README time scale | Current 75M-sample PhoenX runs train in a few minutes but fail the gate. | Run full probes only after a ledger row changes; record before/after quality and throughput. |
+| End-to-end training quality | nanoG1 reaches a working policy in roughly the README time scale | Velocity-command PhoenX runs still fail the nanoG1 gate, but dense target-conditioned PhoenX RL now trains a conservative G1 walking policy that reaches forward targets up to 2 m without falls in the target evaluator. | Extend the target horizon and then bridge back to sustained velocity-command walking; record before/after quality and throughput. |
+
+## 2026-06-23 Target-Conditioned Walking
+
+A clean target-conditioned G1 mode now exists as reward_mode=dense_target.
+The policy observation reuses the existing target path: the first two command
+slots carry the target XY vector in the robot body frame, while the third slot
+remains the yaw-rate command. The reward combines target-directed progress and
+target success with the same locomotion stability, gait/contact, action, torque,
+power, and joint regularizers used elsewhere. This is different from the older
+sparse_target mode, which was too sparse and repeatedly collapsed back to a
+low-motion strategy.
+
+The best current checkpoint is /tmp/phoenx_g1_dense_target_forwardcone_550.npz.
+It was warm-started from the nanoG1 import/forward fine-tune path and trained
+with a forward-cone target curriculum, PhoenX physics, and PhoenX PPO. Target
+evaluation with ground_friction=0.4, radius 0.35 m, and 64 worlds reaches
+0.6 m, 1.0 m, 1.4 m, 1.6 m, and 2.0 m forward targets with
+success_fraction=1.0, fall_fraction=0.0, no height violations, and no tilt
+violations. The 2.0 m case reaches success at about 161 policy steps on average,
+with mean path length about 1.74 m and mean max tilt about 9 degrees. The same
+policy does not yet solve a 3.0 m target: it falls in about 98% of worlds.
+
+This is the first working end-to-end PhoenX + PhoenX RL G1 walking result, but
+it is conservative target walking rather than a fast velocity-tracking gait. The
+next quality step is extending the target horizon beyond 2 m or converting this
+target-conditioned policy into a sustained velocity-command policy without
+reintroducing the standing/stalling attractor.
 
 ## Current Measurement
 

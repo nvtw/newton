@@ -174,7 +174,7 @@ def _main() -> int:
     g1_parser.add_argument("--no-command-randomization", action="store_true")
     g1_parser.add_argument(
         "--reward-mode",
-        choices=("nanog1_dense", "sparse_command", "sparse_target", "dense_sparse_command"),
+        choices=("nanog1_dense", "sparse_command", "sparse_target", "dense_sparse_command", "dense_target"),
         default=g1_recipe.REWARD_MODE,
     )
     g1_parser.add_argument("--w-track-lin", type=float, default=g1_recipe.W_TRACK_LIN)

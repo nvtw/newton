@@ -27,6 +27,11 @@ MAX_EPISODE_STEPS = 1000
 RESET_NOISE = 0.05
 MIN_BASE_HEIGHT = 0.35
 MIN_UPRIGHT_COS = 0.6
+MAX_ABS_ROOT_POSITION = 100.0
+MAX_ABS_ROOT_LINEAR_VELOCITY = 50.0
+MAX_ABS_ROOT_ANGULAR_VELOCITY = 100.0
+MAX_ABS_JOINT_POSITION = 20.0
+MAX_ABS_JOINT_VELOCITY = 200.0
 PHASE_PERIOD = 40
 OBSERVATION_MODE = "nanog1"
 
@@ -68,6 +73,7 @@ BASE_HEIGHT_TARGET = 0.78
 W_FEET_AIR_TIME = 0.0
 FEET_AIR_TIME_THRESHOLD = 0.4
 W_FEET_SLIDE = 0.0
+FOOT_CONTACT_NORMAL_IMPULSE_THRESHOLD = 1.0e-6
 W_JOINT_DEVIATION_HIP = 0.0
 W_JOINT_DEVIATION_WAIST = 0.0
 W_JOINT_DEVIATION_UPPER = 0.0
@@ -165,6 +171,11 @@ def default_g1_env_config(**overrides: Any):
         "reset_noise": RESET_NOISE,
         "min_base_height": MIN_BASE_HEIGHT,
         "min_upright_cos": MIN_UPRIGHT_COS,
+        "max_abs_root_position": MAX_ABS_ROOT_POSITION,
+        "max_abs_root_linear_velocity": MAX_ABS_ROOT_LINEAR_VELOCITY,
+        "max_abs_root_angular_velocity": MAX_ABS_ROOT_ANGULAR_VELOCITY,
+        "max_abs_joint_position": MAX_ABS_JOINT_POSITION,
+        "max_abs_joint_velocity": MAX_ABS_JOINT_VELOCITY,
         "phase_period": PHASE_PERIOD,
         "observation_mode": OBSERVATION_MODE,
         "w_track_lin": W_TRACK_LIN,
@@ -199,6 +210,7 @@ def default_g1_env_config(**overrides: Any):
         "w_feet_air_time": W_FEET_AIR_TIME,
         "feet_air_time_threshold": FEET_AIR_TIME_THRESHOLD,
         "w_feet_slide": W_FEET_SLIDE,
+        "foot_contact_normal_impulse_threshold": FOOT_CONTACT_NORMAL_IMPULSE_THRESHOLD,
         "w_joint_deviation_hip": W_JOINT_DEVIATION_HIP,
         "w_joint_deviation_waist": W_JOINT_DEVIATION_WAIST,
         "w_joint_deviation_upper": W_JOINT_DEVIATION_UPPER,

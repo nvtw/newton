@@ -673,7 +673,7 @@ def _configure_g1_sparse_targets(
     seed_counter: wp.array[wp.int32],
     sample_delta: int,
 ) -> None:
-    if env.config.reward_mode != "sparse_target":
+    if env.config.reward_mode not in ("sparse_target", "dense_target"):
         return
     if cfg.use_target_curriculum:
         env.update_sparse_target_distance_curriculum(

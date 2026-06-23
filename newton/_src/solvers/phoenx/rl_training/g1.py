@@ -14,7 +14,11 @@ import newton
 import newton.utils
 from newton._src.solvers.phoenx.constraints.constraint_container import constraint_container_clear_reset_worlds
 from newton._src.solvers.phoenx.constraints.constraint_joint import actuated_double_ball_socket_clear_reset_worlds
-from newton._src.solvers.phoenx.constraints.contact_container import contact_container_clear_reset_worlds
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    ContactContainer,
+    cc_get_normal_lambda,
+    contact_container_clear_reset_worlds,
+)
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 
 from . import g1_recipe
@@ -661,11 +665,13 @@ _G1_REWARD_MODE_NANOG1_DENSE = 0
 _G1_REWARD_MODE_SPARSE_COMMAND = 1
 _G1_REWARD_MODE_SPARSE_TARGET = 2
 _G1_REWARD_MODE_DENSE_SPARSE_COMMAND = 3
+_G1_REWARD_MODE_DENSE_TARGET = 4
 _G1_REWARD_MODES = {
     "nanog1_dense": _G1_REWARD_MODE_NANOG1_DENSE,
     "sparse_command": _G1_REWARD_MODE_SPARSE_COMMAND,
     "sparse_target": _G1_REWARD_MODE_SPARSE_TARGET,
     "dense_sparse_command": _G1_REWARD_MODE_DENSE_SPARSE_COMMAND,
+    "dense_target": _G1_REWARD_MODE_DENSE_TARGET,
 }
 _G1_OBSERVATION_MODE_NANOG1 = 0
 _G1_OBSERVATION_MODE_ISAACLAB_FLAT = 1
@@ -970,6 +976,11 @@ def g1_observe_reward_kernel(
     phase_period: wp.int32,
     min_base_height: wp.float32,
     min_upright_cos: wp.float32,
+    max_abs_root_position: wp.float32,
+    max_abs_root_linear_velocity: wp.float32,
+    max_abs_root_angular_velocity: wp.float32,
+    max_abs_joint_position: wp.float32,
+    max_abs_joint_velocity: wp.float32,
     action_scale: wp.float32,
     reward_dt: wp.float32,
     w_track_lin: wp.float32,
@@ -1052,8 +1063,27 @@ def g1_observe_reward_kernel(
     state_bad = wp.int32(0)
     if not wp.isfinite(qw) or not wp.isfinite(qx) or not wp.isfinite(qy) or not wp.isfinite(qz):
         state_bad = wp.int32(1)
-    if not wp.isfinite(joint_q[q_base + wp.int32(2)]):
-        state_bad = wp.int32(1)
+    for i in range(3):
+        root_q = joint_q[q_base + i]
+        if not wp.isfinite(root_q):
+            state_bad = wp.int32(1)
+        if max_abs_root_position > wp.float32(0.0) and wp.abs(root_q) > max_abs_root_position:
+            state_bad = wp.int32(1)
+    if max_abs_root_linear_velocity > wp.float32(0.0):
+        if wp.dot(lin_origin_w, lin_origin_w) > max_abs_root_linear_velocity * max_abs_root_linear_velocity:
+            state_bad = wp.int32(1)
+    if max_abs_root_angular_velocity > wp.float32(0.0):
+        if wp.dot(ang_w, ang_w) > max_abs_root_angular_velocity * max_abs_root_angular_velocity:
+            state_bad = wp.int32(1)
+    for j in range(ACTION_DIM_G1):
+        joint_pos = joint_q[q_base + wp.int32(7) + j]
+        joint_vel = joint_qd[qd_base + wp.int32(6) + j]
+        if not wp.isfinite(joint_pos) or not wp.isfinite(joint_vel):
+            state_bad = wp.int32(1)
+        if max_abs_joint_position > wp.float32(0.0) and wp.abs(joint_pos) > max_abs_joint_position:
+            state_bad = wp.int32(1)
+        if max_abs_joint_velocity > wp.float32(0.0) and wp.abs(joint_vel) > max_abs_joint_velocity:
+            state_bad = wp.int32(1)
 
     value = wp.float32(0.0)
     if observation_mode == wp.int32(1):
@@ -1066,7 +1096,7 @@ def g1_observe_reward_kernel(
         elif col < wp.int32(12):
             command_col = col - wp.int32(9)
             value = command[world, command_col]
-            if reward_mode == wp.int32(2) and command_col < wp.int32(2):
+            if (reward_mode == wp.int32(2) or reward_mode == wp.int32(4)) and command_col < wp.int32(2):
                 value = target_delta_b[command_col]
         elif col < wp.int32(41):
             j = col - wp.int32(12)
@@ -1086,7 +1116,7 @@ def g1_observe_reward_kernel(
         elif col < wp.int32(9):
             command_col = col - wp.int32(6)
             value = command[world, command_col]
-            if reward_mode == wp.int32(2) and command_col < wp.int32(2):
+            if (reward_mode == wp.int32(2) or reward_mode == wp.int32(4)) and command_col < wp.int32(2):
                 value = target_delta_b[command_col]
         elif col < wp.int32(38):
             j = col - wp.int32(9)
@@ -1365,6 +1395,23 @@ def g1_observe_reward_kernel(
                 * reward_dt
             )
             success_metric = target_success
+        elif reward_mode == wp.int32(4):
+            shaped_reward = (
+                w_target_progress * target_progress
+                + w_track_ang * track_ang
+                + w_lin_vel_z * lin_vel_z_penalty
+                + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
+                + w_orientation * orientation_penalty * upright_gate
+                + w_torque * torque_sq_penalty
+                + w_action_rate * action_rate_penalty
+                + gait_reward
+                + biped_contact_reward
+                + joint_regularizer_reward
+                + w_alive
+                + w_mechanical_power * mechanical_power_penalty
+            )
+            reward = w_sparse_command_success * target_success + shaped_reward * reward_dt
+            success_metric = target_success
         else:
             shaped_reward = (
                 w_track_lin * track_lin
@@ -1396,7 +1443,7 @@ def g1_observe_reward_kernel(
         done = wp.float32(0.0)
         if fall > wp.float32(0.5):
             done = wp.float32(1.0)
-        if reward_mode == wp.int32(2) and target_success > wp.float32(0.5):
+        if (reward_mode == wp.int32(2) or reward_mode == wp.int32(4)) and target_success > wp.float32(0.5):
             done = wp.float32(1.0)
         if max_episode_steps > wp.int32(0):
             if episode_steps[world] >= max_episode_steps:
@@ -1819,9 +1866,11 @@ def g1_scan_foot_contacts_kernel(
     rigid_contact_shape1: wp.array[wp.int32],
     shape_body: wp.array[wp.int32],
     shape_world: wp.array[wp.int32],
+    contact_container: ContactContainer,
     body_stride: wp.int32,
     left_foot_body: wp.int32,
     right_foot_body: wp.int32,
+    normal_impulse_threshold: wp.float32,
     foot_contacts: wp.array2d[wp.float32],
 ):
     tid = wp.tid()
@@ -1829,6 +1878,8 @@ def g1_scan_foot_contacts_kernel(
     if count > rigid_contact_shape0.shape[0]:
         count = rigid_contact_shape0.shape[0]
     if tid >= count:
+        return
+    if wp.max(cc_get_normal_lambda(contact_container, tid), wp.float32(0.0)) <= normal_impulse_threshold:
         return
     _g1_mark_foot_contact(
         rigid_contact_shape0[tid], shape_body, shape_world, body_stride, left_foot_body, right_foot_body, foot_contacts
@@ -1900,6 +1951,16 @@ class ConfigEnvG1PhoenX:
         reset_noise: Uniform joint-position reset noise half-width [rad].
         min_base_height: Episode ends below this base height [m].
         min_upright_cos: Episode ends below this base-upright cosine threshold.
+        max_abs_root_position: Episode ends if any free-root coordinate exceeds
+            this absolute world-space position limit [m]. Use ``0`` to disable.
+        max_abs_root_linear_velocity: Episode ends if root linear velocity
+            exceeds this magnitude [m/s]. Use ``0`` to disable.
+        max_abs_root_angular_velocity: Episode ends if root angular velocity
+            exceeds this magnitude [rad/s]. Use ``0`` to disable.
+        max_abs_joint_position: Episode ends if any actuated joint coordinate
+            exceeds this absolute angle limit [rad]. Use ``0`` to disable.
+        max_abs_joint_velocity: Episode ends if any actuated joint velocity
+            exceeds this absolute speed limit [rad/s]. Use ``0`` to disable.
         phase_period: Gait clock period in policy steps.
         observation_mode: Observation layout. ``"nanog1"`` keeps the
             nanoG1 deploy contract. ``"isaaclab_flat"`` uses the IsaacLab
@@ -1938,6 +1999,8 @@ class ConfigEnvG1PhoenX:
         w_feet_air_time: IsaacLab-style positive biped feet-air-time reward scale.
         feet_air_time_threshold: Saturation time for feet-air-time reward [s].
         w_feet_slide: Contact foot XY sliding penalty scale.
+        foot_contact_normal_impulse_threshold: Minimum accumulated normal
+            impulse [N*s] for a foot contact to count as active.
         w_joint_deviation_hip: Hip yaw/roll joint-deviation penalty scale.
         w_joint_deviation_waist: Waist joint-deviation penalty scale.
         w_joint_deviation_upper: Upper-body joint-deviation penalty scale.
@@ -1986,6 +2049,11 @@ class ConfigEnvG1PhoenX:
     reset_noise: float = g1_recipe.RESET_NOISE
     min_base_height: float = g1_recipe.MIN_BASE_HEIGHT
     min_upright_cos: float = g1_recipe.MIN_UPRIGHT_COS
+    max_abs_root_position: float = g1_recipe.MAX_ABS_ROOT_POSITION
+    max_abs_root_linear_velocity: float = g1_recipe.MAX_ABS_ROOT_LINEAR_VELOCITY
+    max_abs_root_angular_velocity: float = g1_recipe.MAX_ABS_ROOT_ANGULAR_VELOCITY
+    max_abs_joint_position: float = g1_recipe.MAX_ABS_JOINT_POSITION
+    max_abs_joint_velocity: float = g1_recipe.MAX_ABS_JOINT_VELOCITY
     phase_period: int = g1_recipe.PHASE_PERIOD
     observation_mode: str = g1_recipe.OBSERVATION_MODE
     w_track_lin: float = g1_recipe.W_TRACK_LIN
@@ -2020,6 +2088,7 @@ class ConfigEnvG1PhoenX:
     w_feet_air_time: float = g1_recipe.W_FEET_AIR_TIME
     feet_air_time_threshold: float = g1_recipe.FEET_AIR_TIME_THRESHOLD
     w_feet_slide: float = g1_recipe.W_FEET_SLIDE
+    foot_contact_normal_impulse_threshold: float = g1_recipe.FOOT_CONTACT_NORMAL_IMPULSE_THRESHOLD
     w_joint_deviation_hip: float = g1_recipe.W_JOINT_DEVIATION_HIP
     w_joint_deviation_waist: float = g1_recipe.W_JOINT_DEVIATION_WAIST
     w_joint_deviation_upper: float = g1_recipe.W_JOINT_DEVIATION_UPPER
@@ -2083,6 +2152,18 @@ class EnvG1PhoenX:
             raise ValueError("sparse_target_radius must be non-negative")
         if float(self.config.feet_air_time_threshold) < 0.0:
             raise ValueError("feet_air_time_threshold must be non-negative")
+        if float(self.config.foot_contact_normal_impulse_threshold) < 0.0:
+            raise ValueError("foot_contact_normal_impulse_threshold must be non-negative")
+        if float(self.config.max_abs_root_position) < 0.0:
+            raise ValueError("max_abs_root_position must be non-negative")
+        if float(self.config.max_abs_root_linear_velocity) < 0.0:
+            raise ValueError("max_abs_root_linear_velocity must be non-negative")
+        if float(self.config.max_abs_root_angular_velocity) < 0.0:
+            raise ValueError("max_abs_root_angular_velocity must be non-negative")
+        if float(self.config.max_abs_joint_position) < 0.0:
+            raise ValueError("max_abs_joint_position must be non-negative")
+        if float(self.config.max_abs_joint_velocity) < 0.0:
+            raise ValueError("max_abs_joint_velocity must be non-negative")
         if float(self.config.sparse_target_success_max_base_height) < float(
             self.config.sparse_target_success_min_base_height
         ):
@@ -2539,7 +2620,8 @@ class EnvG1PhoenX:
         """Update and return the current observation array."""
 
         self.foot_contacts.zero_()
-        if self._can_scan_foot_contacts and int(self.contacts.rigid_contact_max) > 0:
+        contact_container = getattr(self.solver.world, "_contact_container", None)
+        if self._can_scan_foot_contacts and contact_container is not None and int(self.contacts.rigid_contact_max) > 0:
             wp.launch(
                 g1_scan_foot_contacts_kernel,
                 dim=int(self.contacts.rigid_contact_max),
@@ -2549,9 +2631,11 @@ class EnvG1PhoenX:
                     self.contacts.rigid_contact_shape1,
                     self.model.shape_body,
                     self.model.shape_world,
+                    contact_container,
                     self.body_stride,
                     self._left_foot_body_local,
                     self._right_foot_body_local,
+                    self.config.foot_contact_normal_impulse_threshold,
                 ],
                 outputs=[self.foot_contacts],
                 device=self.device,
@@ -2583,6 +2667,11 @@ class EnvG1PhoenX:
                 self.config.phase_period,
                 self.config.min_base_height,
                 self.config.min_upright_cos,
+                self.config.max_abs_root_position,
+                self.config.max_abs_root_linear_velocity,
+                self.config.max_abs_root_angular_velocity,
+                self.config.max_abs_joint_position,
+                self.config.max_abs_joint_velocity,
                 self.config.action_scale,
                 self.config.frame_dt,
                 self.config.w_track_lin,

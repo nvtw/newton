@@ -112,6 +112,14 @@ def _g1_test_env(world_count: int = 1) -> rl.EnvG1PhoenX:
     return rl.EnvG1PhoenX(config, device=device)
 
 
+def _set_g1_contact_normal_impulses(env: rl.EnvG1PhoenX, values: list[float]) -> None:
+    impulses = env.solver.world._contact_container.impulses.numpy()
+    impulses[...] = 0.0
+    count = min(len(values), impulses.shape[1])
+    impulses[0, :count] = np.asarray(values[:count], dtype=np.float32)
+    env.solver.world._contact_container.impulses.assign(impulses)
+
+
 def _set_g1_standing_position_hold_gains(env: rl.EnvG1PhoenX) -> None:
     """Use strong position-hold gains for a standing force-balance check."""
 
@@ -2546,6 +2554,11 @@ class TestG1PhoenXRL(unittest.TestCase):
         )
         np.testing.assert_allclose(env.target_position.numpy()[0], np.asarray(g1_recipe.SPARSE_TARGET_POSITION))
         self.assertEqual(env_config.w_mechanical_power, g1_recipe.W_MECHANICAL_POWER)
+        self.assertEqual(env_config.max_abs_root_position, g1_recipe.MAX_ABS_ROOT_POSITION)
+        self.assertEqual(env_config.max_abs_root_linear_velocity, g1_recipe.MAX_ABS_ROOT_LINEAR_VELOCITY)
+        self.assertEqual(env_config.max_abs_root_angular_velocity, g1_recipe.MAX_ABS_ROOT_ANGULAR_VELOCITY)
+        self.assertEqual(env_config.max_abs_joint_position, g1_recipe.MAX_ABS_JOINT_POSITION)
+        self.assertEqual(env_config.max_abs_joint_velocity, g1_recipe.MAX_ABS_JOINT_VELOCITY)
         self.assertEqual(env_config.gait_stance_fraction, g1_recipe.GAIT_STANCE_FRACTION)
         self.assertEqual(env_config.w_gait_contact, g1_recipe.W_GAIT_CONTACT)
         self.assertEqual(env_config.w_gait_swing, g1_recipe.W_GAIT_SWING)
@@ -2557,6 +2570,9 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.w_feet_air_time, g1_recipe.W_FEET_AIR_TIME)
         self.assertEqual(env_config.feet_air_time_threshold, g1_recipe.FEET_AIR_TIME_THRESHOLD)
         self.assertEqual(env_config.w_feet_slide, g1_recipe.W_FEET_SLIDE)
+        self.assertEqual(
+            env_config.foot_contact_normal_impulse_threshold, g1_recipe.FOOT_CONTACT_NORMAL_IMPULSE_THRESHOLD
+        )
         self.assertEqual(env_config.w_joint_deviation_hip, g1_recipe.W_JOINT_DEVIATION_HIP)
         self.assertEqual(env_config.w_joint_deviation_waist, g1_recipe.W_JOINT_DEVIATION_WAIST)
         self.assertEqual(env_config.w_joint_deviation_upper, g1_recipe.W_JOINT_DEVIATION_UPPER)
@@ -2760,6 +2776,61 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.successes.numpy(), np.zeros(1, dtype=np.float32))
         np.testing.assert_allclose(env.dones.numpy(), np.zeros(1, dtype=np.float32))
         np.testing.assert_allclose(env.rewards.numpy(), expected, atol=1.0e-6)
+
+    def test_dense_target_reward_combines_progress_and_stability_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 dense target reward tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=2,
+                reward_mode="dense_target",
+                command=(0.0, 0.0, 0.0),
+                sparse_target_position=(1.0, 0.0),
+                sparse_target_radius=0.2,
+                w_sparse_command_success=5.0,
+                w_target_progress=3.0,
+                w_track_ang=0.0,
+                w_lin_vel_z=0.0,
+                w_ang_vel_xy=0.0,
+                w_orientation=0.0,
+                w_torque=0.0,
+                w_action_rate=0.0,
+                w_alive=1.0,
+                w_gait_contact=0.0,
+                w_gait_swing=0.0,
+                w_gait_swing_contact=0.0,
+                w_gait_hip=0.0,
+                w_base_height=0.0,
+                w_mechanical_power=0.0,
+                auto_reset=False,
+            ),
+            device=device,
+        )
+        env.set_target_positions(np.asarray([[1.0, 0.0], [0.0, 0.0]], dtype=np.float32))
+        q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+        q[:, 0:2] = 0.0
+        q[:, 3:7] = np.asarray((0.0, 0.0, 0.0, 1.0), dtype=np.float32)
+        qd[:, :] = 0.0
+        qd[0, 0] = 0.5
+        env.state_0.joint_q.assign(q.reshape(-1))
+        env.state_0.joint_qd.assign(qd.reshape(-1))
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        expected = np.asarray(
+            [
+                (3.0 * 0.5 + 1.0) * env.config.frame_dt,
+                5.0 + 1.0 * env.config.frame_dt,
+            ],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(env.successes.numpy(), np.array([0.0, 1.0], dtype=np.float32))
+        np.testing.assert_allclose(env.dones.numpy(), np.array([0.0, 1.0], dtype=np.float32))
+        np.testing.assert_allclose(env.rewards.numpy(), expected, atol=1.0e-6)
+        obs = env.obs.numpy()
+        np.testing.assert_allclose(obs[:, 6:8], np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.float32))
 
     def test_sparse_target_requires_balanced_posture_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 sparse target balanced success tests")
@@ -3959,6 +4030,66 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertAlmostEqual(float(obs[96]), math.sin(expected_phase), places=6)
         self.assertAlmostEqual(float(obs[97]), math.cos(expected_phase), places=6)
 
+    def test_g1_foot_contact_scan_requires_normal_impulse_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 active foot-contact tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+                command=(0.0, 0.0, 0.0),
+                w_track_lin=0.0,
+                w_track_ang=0.0,
+                w_command_progress=0.0,
+                w_lin_vel_z=0.0,
+                w_ang_vel_xy=0.0,
+                w_orientation=0.0,
+                w_torque=0.0,
+                w_action_rate=0.0,
+                w_alive=0.0,
+                w_gait_contact=0.0,
+                w_gait_swing=0.0,
+                w_gait_swing_contact=0.0,
+                w_gait_hip=0.0,
+                w_base_height=0.0,
+            ),
+            device=device,
+        )
+        labels = list(env.model.shape_label)
+        left_shape = labels.index("left_nanog1_foot_box")
+        right_shape = labels.index("right_nanog1_foot_box")
+        ground_shape = int(np.flatnonzero(env.model.shape_body.numpy() < 0)[0])
+
+        shape0 = np.full(int(env.contacts.rigid_contact_max), ground_shape, dtype=np.int32)
+        shape1 = np.full(int(env.contacts.rigid_contact_max), ground_shape, dtype=np.int32)
+        shape0[:2] = np.array([left_shape, right_shape], dtype=np.int32)
+        env.contacts.rigid_contact_count.assign(np.array([2], dtype=np.int32))
+        env.contacts.rigid_contact_shape0.assign(shape0)
+        env.contacts.rigid_contact_shape1.assign(shape1)
+        _set_g1_contact_normal_impulses(env, [0.0, 0.5 * env.config.foot_contact_normal_impulse_threshold])
+
+        with wp.ScopedCapture(device=device) as gap_capture:
+            env.observe()
+        wp.capture_launch(gap_capture.graph)
+
+        np.testing.assert_allclose(env.foot_contacts.numpy()[0], np.zeros(2, dtype=np.float32), rtol=0.0, atol=0.0)
+
+        _set_g1_contact_normal_impulses(
+            env,
+            [
+                2.0 * env.config.foot_contact_normal_impulse_threshold,
+                3.0 * env.config.foot_contact_normal_impulse_threshold,
+            ],
+        )
+        with wp.ScopedCapture(device=device) as active_capture:
+            env.observe()
+        wp.capture_launch(active_capture.graph)
+
+        np.testing.assert_allclose(env.foot_contacts.numpy()[0], np.ones(2, dtype=np.float32), rtol=0.0, atol=0.0)
+
     def test_gait_reward_uses_foot_contacts_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 gait reward tests")
         config = rl.ConfigEnvG1PhoenX(
@@ -3990,6 +4121,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         env.contacts.rigid_contact_count.assign(np.array([2], dtype=np.int32))
         env.contacts.rigid_contact_shape0.assign(shape0)
         env.contacts.rigid_contact_shape1.assign(shape1)
+        _set_g1_contact_normal_impulses(env, [1.0, 1.0])
 
         with wp.ScopedCapture(device=device) as capture:
             env.observe()
@@ -4043,6 +4175,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         env.contacts.rigid_contact_count.assign(np.array([1], dtype=np.int32))
         env.contacts.rigid_contact_shape0.assign(shape0)
         env.contacts.rigid_contact_shape1.assign(shape1)
+        _set_g1_contact_normal_impulses(env, [1.0])
         env.episode_steps.assign(np.array([1], dtype=np.int32))
 
         with wp.ScopedCapture(device=device) as capture:
@@ -4104,6 +4237,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         env.contacts.rigid_contact_count.assign(np.array([1], dtype=np.int32))
         env.contacts.rigid_contact_shape0.assign(shape0)
         env.contacts.rigid_contact_shape1.assign(shape1)
+        _set_g1_contact_normal_impulses(env, [1.0])
 
         body_qd = env.state_0.body_qd.numpy()
         body_qd[env._left_foot_body_local, :6] = np.array([0.3, 0.4, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -4272,6 +4406,28 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(np.isfinite(obs.numpy()).all())
         self.assertTrue(np.isfinite(env.rewards.numpy()).all())
         self.assertTrue(np.isfinite(env.dones.numpy()).all())
+
+    def test_g1_observe_terminates_finite_explosions_inside_graph(self) -> None:
+        env = _g1_test_env(world_count=2)
+        q = env.state_0.joint_q.numpy()
+        qd = env.state_0.joint_qd.numpy()
+        q[0] = np.float32(env.config.max_abs_root_position + 1.0)
+        qd[env.dof_stride + 6] = np.float32(env.config.max_abs_joint_velocity + 1.0)
+        env.state_0.joint_q.assign(q)
+        env.state_0.joint_qd.assign(qd)
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(env.dones.numpy(), np.ones(2, dtype=np.float32), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            env.rewards.numpy(),
+            np.full(2, env.config.w_termination, dtype=np.float32),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(env.successes.numpy(), np.zeros(2, dtype=np.float32), rtol=0.0, atol=0.0)
 
     def test_train_save_load_evaluate_and_resume(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL training tests")
