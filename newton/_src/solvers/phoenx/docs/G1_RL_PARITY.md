@@ -512,3 +512,43 @@ behavior rather than more unstructured reward transplants.
 4. Run longer train-to-gate checkpoints only after a concrete discrepancy is
    fixed, then compare learning curves and gate diagnostics before profiling for
    throughput.
+
+## Auto-Reset Metric Trap
+
+A later diagnostic refined the contact interpretation above. The open-loop
+``support_tangent`` metric sums per-contact tangent magnitudes. A direct
+per-foot net wrench gather on the same zero-action standing trace showed much
+smaller horizontal net forces, typically single-digit Newtons after the first
+few policy steps while each foot carried roughly `130-225 N` vertically. The
+large summed tangent metric is therefore mostly opposing shear inside each foot
+contact patch. It is still useful as a convergence/friction diagnostic, but it
+is not by itself evidence that PhoenX applies a large net horizontal ground
+force to the robot.
+
+From-scratch PPO probes exposed a more immediate RL failure mode. A
+movement-biased run improved the auto-reset training/gate metric
+(`battery_perf` rose from about `0.53` at 80 iterations to about `0.68` at 400
+iterations), but no-reset forward evaluation showed the policy was only making
+a short burst and then falling after about 52 policy steps. The auto-reset gate
+counted the falls, but its average tracking metric was still too forgiving
+because each reset produced another short burst.
+
+A survival-biased continuation with a much stronger terminal penalty improved
+no-reset mean survival from about `52` to about `578` steps on a 1000-step
+forward evaluator, but tracking collapsed toward near-standing behavior. This
+means the current blocker is not simply ignored terminal rewards. We need
+checkpoint selection on held-out no-reset survival plus tracking, and a staged
+command curriculum that preserves movement while increasing fall cost. Treat
+auto-reset rollout `perf` as a training diagnostic only, not as proof of a
+working walking policy.
+
+CUDA graph RNG was audited at the same time. Rollout action sampling, command
+sampling, reset noise, sparse target sampling, and PPO replay sampling all use
+device seed counters in graph-captured code. Rollout collection advances the
+action seed counter by `rollout_steps`, reset/command counters advance inside
+the captured environment step path, and PPO replay advances its update counter
+by `1_000_003` per update. Resumed chunks initialize counters from the saved
+trainer iteration. A fresh run with the same `--seed` intentionally repeats the
+same experiment; independent sweeps should pass different seeds. A CUDA graph
+regression now verifies that repeated launches of the same captured PPO rollout
+graph produce different stochastic actions and advance the seed counter.

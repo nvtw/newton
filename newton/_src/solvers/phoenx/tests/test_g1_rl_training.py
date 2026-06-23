@@ -1744,6 +1744,35 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(buffer.actions.numpy(), expected, rtol=1.0e-5, atol=1.0e-5)
         np.testing.assert_array_equal(seed_counter.numpy(), np.array([12], dtype=np.int32))
 
+    def test_rollout_seed_counter_changes_actions_across_graph_replays(self) -> None:
+        device = require_cuda_graph_capture("PhoenX PPO stochastic rollout seed tests")
+        env = _ConstantPPOEnv(world_count=3, obs_dim=4, action_dim=2, device=device)
+        buffer = rl.BufferRollout(
+            num_steps=2, num_envs=env.world_count, obs_dim=env.obs_dim, action_dim=env.action_dim, device=device
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=env.obs_dim,
+            action_dim=env.action_dim,
+            hidden_layers=(8,),
+            config=rl.ConfigPPO(),
+            device=device,
+            seed=5,
+            squash_actions=False,
+            log_std_init=-0.1,
+        )
+        seed_counter = make_seed_counter(101, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            collect_ppo_rollout_seed_counter(env, trainer, buffer, seed_counter=seed_counter)
+
+        wp.capture_launch(capture.graph)
+        first_actions = buffer.actions.numpy().copy()
+        wp.capture_launch(capture.graph)
+        second_actions = buffer.actions.numpy().copy()
+
+        self.assertFalse(np.allclose(first_actions, second_actions))
+        np.testing.assert_array_equal(seed_counter.numpy(), np.array([105], dtype=np.int32))
+
     def test_collect_rollout_can_preserve_recurrent_state_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX recurrent rollout preserve-state tests")
         env = _ConstantPPOEnv(world_count=2, obs_dim=3, action_dim=1, device=device)

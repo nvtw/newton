@@ -168,6 +168,9 @@ def _main() -> int:
     g1_parser.add_argument("--command-y-max", type=float, default=g1_recipe.COMMAND_Y_RANGE[1])
     g1_parser.add_argument("--command-yaw-min", type=float, default=g1_recipe.COMMAND_YAW_RANGE[0])
     g1_parser.add_argument("--command-yaw-max", type=float, default=g1_recipe.COMMAND_YAW_RANGE[1])
+    g1_parser.add_argument("--command-zero-probability", type=float, default=g1_recipe.COMMAND_ZERO_PROBABILITY)
+    g1_parser.add_argument("--command-curriculum-start", type=float, default=g1_recipe.COMMAND_CURRICULUM_START)
+    g1_parser.add_argument("--command-curriculum-samples", type=int, default=g1_recipe.COMMAND_CURRICULUM_SAMPLES)
     g1_parser.add_argument("--no-command-randomization", action="store_true")
     g1_parser.add_argument(
         "--reward-mode",
@@ -193,6 +196,11 @@ def _main() -> int:
     )
     g1_parser.add_argument("--sparse-command-yaw-tolerance", type=float, default=g1_recipe.SPARSE_COMMAND_YAW_TOLERANCE)
     g1_parser.add_argument("--w-base-height", type=float, default=g1_recipe.W_BASE_HEIGHT)
+    g1_parser.add_argument("--w-mechanical-power", type=float, default=g1_recipe.W_MECHANICAL_POWER)
+    g1_parser.add_argument("--w-gait-contact", type=float, default=g1_recipe.W_GAIT_CONTACT)
+    g1_parser.add_argument("--w-gait-swing", type=float, default=g1_recipe.W_GAIT_SWING)
+    g1_parser.add_argument("--w-gait-swing-contact", type=float, default=g1_recipe.W_GAIT_SWING_CONTACT)
+    g1_parser.add_argument("--w-gait-hip", type=float, default=g1_recipe.W_GAIT_HIP)
     g1_parser.add_argument("--w-feet-air-time", type=float, default=g1_recipe.W_FEET_AIR_TIME)
     g1_parser.add_argument("--feet-air-time-threshold", type=float, default=g1_recipe.FEET_AIR_TIME_THRESHOLD)
     g1_parser.add_argument("--w-feet-slide", type=float, default=g1_recipe.W_FEET_SLIDE)
@@ -541,8 +549,13 @@ def _main() -> int:
             w_termination=args.w_termination,
             w_sparse_command_success=args.w_sparse_command_success,
             w_target_progress=args.w_target_progress,
+            w_mechanical_power=args.w_mechanical_power,
             sparse_command_velocity_tolerance=args.sparse_command_velocity_tolerance,
             sparse_command_yaw_tolerance=args.sparse_command_yaw_tolerance,
+            w_gait_contact=args.w_gait_contact,
+            w_gait_swing=args.w_gait_swing,
+            w_gait_swing_contact=args.w_gait_swing_contact,
+            w_gait_hip=args.w_gait_hip,
             w_base_height=args.w_base_height,
             w_feet_air_time=args.w_feet_air_time,
             feet_air_time_threshold=args.feet_air_time_threshold,
@@ -604,6 +617,9 @@ def _main() -> int:
                 command_x_range=(args.command_x_min, args.command_x_max),
                 command_y_range=(args.command_y_min, args.command_y_max),
                 command_yaw_range=(args.command_yaw_min, args.command_yaw_max),
+                command_zero_probability=args.command_zero_probability,
+                command_curriculum_start=args.command_curriculum_start,
+                command_curriculum_samples=args.command_curriculum_samples,
                 use_target_curriculum=not args.no_target_curriculum,
                 target_distance_start=args.target_distance_start,
                 target_distance_end=args.target_distance_end,
