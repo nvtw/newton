@@ -4,13 +4,34 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import warp as wp
 
 import newton.rl as rl
 from newton._src.solvers.phoenx.experimental import train_anymal_full_control_curriculum as anymal_curriculum
+from newton._src.solvers.phoenx.rl_training.reward_functions import (
+    command_progress_2d,
+    fall_indicator,
+    gaussian_reward,
+    pd_torque,
+    projected_gravity_upright_reward,
+    tracking_reward_2d,
+)
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
+
+
+@wp.kernel
+def reward_functions_smoke_kernel(out: wp.array[wp.float32]):
+    out[0] = tracking_reward_2d(wp.float32(1.0), wp.float32(0.0), wp.float32(1.0), wp.float32(0.0), wp.float32(0.5))
+    out[1] = tracking_reward_2d(wp.float32(0.0), wp.float32(0.0), wp.float32(1.0), wp.float32(0.0), wp.float32(0.5))
+    out[2] = gaussian_reward(wp.float32(0.5), wp.float32(0.25))
+    out[3] = projected_gravity_upright_reward(wp.vec3(0.0, 0.0, -1.0))
+    out[4] = fall_indicator(wp.float32(0.2), wp.float32(0.3), wp.float32(1.0), wp.float32(0.3))
+    out[5] = command_progress_2d(wp.float32(0.4), wp.float32(0.2), wp.float32(0.5), wp.float32(-0.5))
+    out[6] = pd_torque(wp.float32(1.0), wp.float32(0.5), wp.float32(0.2), wp.float32(100.0), wp.float32(2.0))
 
 
 class TestAnymalPhoenXRL(unittest.TestCase):
@@ -79,6 +100,77 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         self.assertEqual(rewards.shape, (env.world_count,))
         self.assertEqual(dones.shape, (env.world_count,))
         self.assertTrue(np.all(np.isfinite(obs.numpy())))
+
+    def test_reward_functions_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal RL tests")
+        out = wp.zeros(7, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(reward_functions_smoke_kernel, dim=1, outputs=[out], device=device)
+        wp.capture_launch(capture.graph)
+
+        values = out.numpy()
+        self.assertGreater(float(values[0]), 0.99)
+        self.assertLess(float(values[1]), 0.05)
+        self.assertLess(float(values[2]), 0.02)
+        self.assertAlmostEqual(float(values[3]), 1.0, places=6)
+        self.assertAlmostEqual(float(values[4]), 1.0, places=6)
+        self.assertAlmostEqual(float(values[5]), 0.10, places=6)
+        self.assertAlmostEqual(float(values[6]), 49.6, places=4)
+
+    def test_ppo_checkpoint_insert_input_preserves_zero_inserted_policy_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal RL tests")
+        old_obs_dim = rl.OBS_DIM_ANYMAL - 1
+        row_count = 3
+        rng = np.random.default_rng(123)
+        old_obs_np = rng.normal(size=(row_count, old_obs_dim)).astype(np.float32)
+        insert_at = rl.COMMAND_OBS_OFFSET_ANYMAL + 3
+        new_obs_np = np.concatenate(
+            (old_obs_np[:, :insert_at], np.zeros((row_count, 1), dtype=np.float32), old_obs_np[:, insert_at:]),
+            axis=1,
+        )
+
+        old_trainer = rl.TrainerPPO(
+            obs_dim=old_obs_dim,
+            action_dim=rl.ACTION_DIM_ANYMAL,
+            hidden_layers=(16,),
+            config=rl.ConfigPPO(),
+            device=device,
+            seed=37,
+            activation="elu",
+        )
+        old_trainer.reserve_buffers(row_count)
+        with TemporaryDirectory() as tmpdir:
+            old_path = Path(tmpdir) / "old.npz"
+            new_path = Path(tmpdir) / "new.npz"
+            old_trainer.save_checkpoint(old_path, iteration=17)
+            rl.insert_ppo_checkpoint_inputs(old_path, new_path, index=insert_at)
+
+            with np.load(old_path, allow_pickle=False) as old_data, np.load(new_path, allow_pickle=False) as new_data:
+                self.assertEqual(int(new_data["obs_dim"]), rl.OBS_DIM_ANYMAL)
+                self.assertEqual(new_data["actor_weight_0"].shape[0], rl.OBS_DIM_ANYMAL)
+                np.testing.assert_allclose(
+                    new_data["actor_weight_0"][:insert_at], old_data["actor_weight_0"][:insert_at]
+                )
+                np.testing.assert_allclose(new_data["actor_weight_0"][insert_at], 0.0)
+                np.testing.assert_allclose(
+                    new_data["actor_weight_0"][insert_at + 1 :], old_data["actor_weight_0"][insert_at:]
+                )
+                np.testing.assert_allclose(new_data["actor_optimizer_m_0"][insert_at], 0.0)
+
+            new_trainer = rl.load_ppo_checkpoint(new_path, device=device)
+            new_trainer.reserve_buffers(row_count)
+
+        old_obs = wp.array(old_obs_np, dtype=wp.float32, device=device)
+        new_obs = wp.array(new_obs_np, dtype=wp.float32, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            old_actions, old_log_probs, old_values = old_trainer.act_reuse(old_obs, seed=9, deterministic=True)
+            new_actions, new_log_probs, new_values = new_trainer.act_reuse(new_obs, seed=9, deterministic=True)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(new_actions.numpy(), old_actions.numpy(), rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(new_log_probs.numpy(), old_log_probs.numpy(), rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(new_values.numpy(), old_values.numpy(), rtol=0.0, atol=1.0e-6)
 
     def test_dense_command_ppo_step_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX Anymal RL tests")

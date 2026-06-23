@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+from . import reward_functions
 from .anymal import (
     ACTION_DIM_ANYMAL,
     ACTION_OBS_OFFSET_ANYMAL,
@@ -35,6 +36,7 @@ from .ppo import (
     save_ppo_checkpoint,
 )
 from .sac import BatchSAC, BufferReplaySAC, ConfigSAC, StatsSACUpdate, TrainerSAC
+from .toolbox import drop_ppo_checkpoint_inputs, insert_ppo_checkpoint_inputs, resize_ppo_checkpoint_inputs
 from .training import (
     ConfigEvaluateAnymalPPO,
     ConfigEvaluateG1GatePPO,
@@ -117,12 +119,16 @@ __all__ = [
     "anymal_mirror_map_ppo",
     "capture_env_steps",
     "collect_ppo_rollout",
+    "drop_ppo_checkpoint_inputs",
     "evaluate_anymal_ppo",
     "evaluate_g1_gate_ppo",
     "evaluate_g1_ppo",
     "evaluate_g1_target_ppo",
     "g1_mirror_map_ppo",
+    "insert_ppo_checkpoint_inputs",
     "load_ppo_checkpoint",
+    "resize_ppo_checkpoint_inputs",
+    "reward_functions",
     "save_ppo_checkpoint",
     "train_anymal_ppo",
     "train_g1_ppo",

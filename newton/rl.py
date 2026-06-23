@@ -61,13 +61,17 @@ from ._src.solvers.phoenx.rl_training import (
     anymal_mirror_map_ppo,
     capture_env_steps,
     collect_ppo_rollout,
+    drop_ppo_checkpoint_inputs,
     evaluate_anymal_ppo,
     evaluate_g1_gate_ppo,
     evaluate_g1_ppo,
     evaluate_g1_target_ppo,
     g1_mirror_map_ppo,
     g1_recipe,
+    insert_ppo_checkpoint_inputs,
     load_ppo_checkpoint,
+    resize_ppo_checkpoint_inputs,
+    reward_functions,
     save_ppo_checkpoint,
     train_anymal_ppo,
     train_g1_ppo,
@@ -127,12 +131,16 @@ __all__ = [
     "anymal_mirror_map_ppo",
     "capture_env_steps",
     "collect_ppo_rollout",
+    "drop_ppo_checkpoint_inputs",
     "evaluate_anymal_ppo",
     "evaluate_g1_gate_ppo",
     "evaluate_g1_ppo",
     "evaluate_g1_target_ppo",
     "g1_mirror_map_ppo",
+    "insert_ppo_checkpoint_inputs",
     "load_ppo_checkpoint",
+    "resize_ppo_checkpoint_inputs",
+    "reward_functions",
     "save_ppo_checkpoint",
     "train_anymal_ppo",
     "train_g1_ppo",
@@ -506,7 +514,57 @@ def _main() -> int:
     g1_target_parser.add_argument("--max-valid-base-height", type=float, default=1.10)
     g1_target_parser.add_argument("--stochastic", action="store_true")
 
+    resize_inputs_parser = subparsers.add_parser(
+        "resize-ppo-inputs", help="Resize observation inputs in an MLP PPO checkpoint"
+    )
+    resize_inputs_parser.add_argument("checkpoint")
+    resize_inputs_parser.add_argument("output")
+    resize_inputs_parser.add_argument("--new-obs-dim", type=int, required=True)
+    resize_inputs_parser.add_argument(
+        "--fill-value",
+        type=float,
+        default=0.0,
+        help="First-layer weight value for newly inserted inputs; zero preserves old behavior.",
+    )
+
+    insert_inputs_parser = subparsers.add_parser(
+        "insert-ppo-inputs", help="Insert observation inputs in an MLP PPO checkpoint"
+    )
+    insert_inputs_parser.add_argument("checkpoint")
+    insert_inputs_parser.add_argument("output")
+    insert_inputs_parser.add_argument("--index", type=int, required=True, help="Insert before this old input column")
+    insert_inputs_parser.add_argument("--count", type=int, default=1)
+    insert_inputs_parser.add_argument(
+        "--fill-value",
+        type=float,
+        default=0.0,
+        help="First-layer weight value for inserted inputs; zero preserves old behavior.",
+    )
+
+    drop_inputs_parser = subparsers.add_parser(
+        "drop-ppo-inputs", help="Drop observation inputs from an MLP PPO checkpoint"
+    )
+    drop_inputs_parser.add_argument("checkpoint")
+    drop_inputs_parser.add_argument("output")
+    drop_inputs_parser.add_argument("--indices", type=int, nargs="+", required=True)
+
     args = parser.parse_args()
+    if args.command == "resize-ppo-inputs":
+        output = resize_ppo_checkpoint_inputs(
+            args.checkpoint, args.output, args.new_obs_dim, fill_value=args.fill_value
+        )
+        print(json.dumps({"output": str(output)}, sort_keys=True))
+        return 0
+    if args.command == "insert-ppo-inputs":
+        output = insert_ppo_checkpoint_inputs(
+            args.checkpoint, args.output, index=args.index, count=args.count, fill_value=args.fill_value
+        )
+        print(json.dumps({"output": str(output)}, sort_keys=True))
+        return 0
+    if args.command == "drop-ppo-inputs":
+        output = drop_ppo_checkpoint_inputs(args.checkpoint, args.output, indices=tuple(args.indices))
+        print(json.dumps({"output": str(output)}, sort_keys=True))
+        return 0
     if args.command == "train-anymal-ppo":
         env_config = ConfigEnvAnymalPhoenX(
             world_count=args.world_count,

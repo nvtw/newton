@@ -13,6 +13,24 @@ import newton.utils
 
 from .env import collect_ppo_rollout
 from .ppo import BufferRollout, MirrorMapPPO, TrainerPPO
+from .reward_functions import (
+    abs_mechanical_power,
+    action_rate_penalty,
+    command_progress_2d,
+    command_progress_quality_2d,
+    fall_indicator,
+    gaussian_reward,
+    height_tracking_reward,
+    joint_position_penalty,
+    pd_torque,
+    progress_delta,
+    projected_gravity_flat_penalty,
+    projected_gravity_upright_reward,
+    radius_success_2d,
+    square,
+    tracking_reward_2d,
+    vec2_length_sq,
+)
 from .sac import BufferReplaySAC, TrainerSAC
 
 ACTION_DIM_ANYMAL = 12
@@ -285,55 +303,47 @@ def anymal_observe_reward_kernel(
     obs[world, col] = value
 
     if col == 0:
-        vx_err = lin_b[0] - command[world, 0]
-        vy_err = lin_b[1] - command[world, 1]
         yaw_err = ang_b[2] - command[world, 2]
-        height_err = joint_q[q_base + wp.int32(2)] - (target_base_height + command[world, 3])
-        lin_sigma_sq = wp.max(lin_vel_tracking_sigma * lin_vel_tracking_sigma, wp.float32(1.0e-6))
-        yaw_sigma_sq = wp.max(yaw_rate_tracking_sigma * yaw_rate_tracking_sigma, wp.float32(1.0e-6))
-        height_sigma_sq = wp.max(base_height_tracking_sigma * base_height_tracking_sigma, wp.float32(1.0e-6))
-        vel_reward = wp.exp(-(vx_err * vx_err + vy_err * vy_err) / lin_sigma_sq)
-        yaw_reward = wp.exp(-(yaw_err * yaw_err) / yaw_sigma_sq)
-        height_reward = wp.exp(-(height_err * height_err) / height_sigma_sq)
-        z_vel_penalty = lin_b[2] * lin_b[2]
-        ang_xy_penalty = ang_b[0] * ang_b[0] + ang_b[1] * ang_b[1]
-        flat_orientation_penalty = gravity_b[0] * gravity_b[0] + gravity_b[1] * gravity_b[1]
-        upright = _clip_float(-gravity_b[2], wp.float32(0.0), wp.float32(1.0))
+        vel_reward = tracking_reward_2d(
+            lin_b[0], lin_b[1], command[world, 0], command[world, 1], lin_vel_tracking_sigma
+        )
+        yaw_reward = gaussian_reward(yaw_err, yaw_rate_tracking_sigma)
+        height_reward = height_tracking_reward(
+            joint_q[q_base + wp.int32(2)], target_base_height + command[world, 3], base_height_tracking_sigma
+        )
+        z_vel_penalty = square(lin_b[2])
+        ang_xy_penalty = vec2_length_sq(ang_b[0], ang_b[1])
+        flat_orientation_penalty = projected_gravity_flat_penalty(gravity_b)
+        upright = projected_gravity_upright_reward(gravity_b)
 
-        action_rate_penalty = wp.float32(0.0)
+        action_rate_cost = wp.float32(0.0)
         joint_speed_penalty = wp.float32(0.0)
         hip_abduction_penalty = wp.float32(0.0)
         power_proxy = wp.float32(0.0)
         for j in range(ACTION_DIM_ANYMAL):
-            da = current_actions[world, j] - previous_actions[world, j]
-            action_rate_penalty = action_rate_penalty + da * da
+            action_rate_cost = action_rate_cost + action_rate_penalty(
+                current_actions[world, j], previous_actions[world, j]
+            )
             model_joint = lab_to_mujoco[j]
             q_idx = q_base + wp.int32(7) + model_joint
             qd_idx = qd_base + wp.int32(6) + model_joint
             q = joint_q[q_idx]
             qd = joint_qd[qd_idx]
-            joint_speed_penalty = joint_speed_penalty + qd * qd
+            joint_speed_penalty = joint_speed_penalty + square(qd)
             if j < 4:
-                hip_abduction_penalty = hip_abduction_penalty + q * q
+                hip_abduction_penalty = hip_abduction_penalty + joint_position_penalty(q, wp.float32(0.0))
             target = default_joint_pos[model_joint] + current_actions[world, j] * action_scale
-            tau_proxy = actuator_ke * (target - q) - actuator_kd * qd
-            power_proxy = power_proxy + wp.abs(tau_proxy * qd)
+            tau_proxy = pd_torque(target, q, qd, actuator_ke, actuator_kd)
+            power_proxy = power_proxy + abs_mechanical_power(tau_proxy, qd)
 
-        forward_progress = lin_b[0] * command[world, 0] + lin_b[1] * command[world, 1]
-        command_speed_sq = command[world, 0] * command[world, 0] + command[world, 1] * command[world, 1]
-        speed_quality = wp.float32(1.0)
-        if command_speed_sq > wp.float32(1.0e-6):
-            speed_quality = _clip_float(forward_progress / command_speed_sq, wp.float32(0.0), wp.float32(1.0))
-        target_dist_sq = target_delta_w[0] * target_delta_w[0] + target_delta_w[1] * target_delta_w[1]
+        forward_progress = command_progress_2d(lin_b[0], lin_b[1], command[world, 0], command[world, 1])
+        speed_quality = command_progress_quality_2d(forward_progress, command[world, 0], command[world, 1])
+        target_dist_sq = vec2_length_sq(target_delta_w[0], target_delta_w[1])
         target_dist = wp.sqrt(target_dist_sq)
-        target_progress = previous_target_distance[world] - target_dist
+        target_progress = progress_delta(previous_target_distance[world], target_dist)
         previous_target_distance[world] = target_dist
-        success = wp.float32(0.0)
-        if target_dist_sq < target_radius * target_radius:
-            success = wp.float32(1.0)
-        fall = wp.float32(0.0)
-        if joint_q[q_base + wp.int32(2)] < min_base_height or upright < min_upright_cos:
-            fall = wp.float32(1.0)
+        success = radius_success_2d(target_delta_w[0], target_delta_w[1], target_radius)
+        fall = fall_indicator(joint_q[q_base + wp.int32(2)], min_base_height, upright, min_upright_cos)
 
         dense_reward = (
             lin_vel_reward_scale * vel_reward
@@ -342,7 +352,7 @@ def anymal_observe_reward_kernel(
             + forward_progress_reward_scale * forward_progress
             + z_vel_reward_scale * z_vel_penalty
             + ang_vel_reward_scale * ang_xy_penalty
-            + action_rate_reward_scale * action_rate_penalty
+            + action_rate_reward_scale * action_rate_cost
             + joint_speed_reward_scale * joint_speed_penalty
             + flat_orientation_reward_scale * flat_orientation_penalty
             + hip_abduction_reward_scale * hip_abduction_penalty
