@@ -30,6 +30,8 @@ _BASE_ENV = {
     "max_episode_steps": 500,
     "lin_vel_reward_scale": 1.0,
     "yaw_rate_reward_scale": 0.5,
+    "lin_vel_tracking_sigma": 0.5,
+    "yaw_rate_tracking_sigma": 0.5,
     "z_vel_reward_scale": -2.0,
     "ang_vel_reward_scale": -0.05,
     "action_rate_reward_scale": -0.01,
@@ -428,6 +430,8 @@ def evaluate_checkpoint(
     action_count = 0
     path_length = np.zeros(env.world_count, dtype=np.float64)
     command_np = np.asarray(eval_command, dtype=np.float32)
+    lin_sigma_sq = max(float(env.config.lin_vel_tracking_sigma) ** 2, 1.0e-6)
+    yaw_sigma_sq = max(float(env.config.yaw_rate_tracking_sigma) ** 2, 1.0e-6)
     t0 = time.perf_counter()
     for step in range(int(args.eval_steps)):
         alive_before = first_done_step < 0
@@ -447,8 +451,8 @@ def evaluate_checkpoint(
             yaw_alive = obs_np[alive_idx, 5]
             vel_err = lin_alive - command_np[None, 0:2]
             yaw_err = yaw_alive - float(command_np[2])
-            vel_perf = np.exp(-np.sum(vel_err * vel_err, axis=1) / 0.25)
-            yaw_perf = np.exp(-(yaw_err * yaw_err) / 0.25)
+            vel_perf = np.exp(-np.sum(vel_err * vel_err, axis=1) / lin_sigma_sq)
+            yaw_perf = np.exp(-(yaw_err * yaw_err) / yaw_sigma_sq)
             command_speed_sq = float(command_np[0] * command_np[0] + command_np[1] * command_np[1])
             if command_speed_sq > 1.0e-6:
                 speed_quality = np.clip(np.sum(lin_alive * command_np[None, 0:2], axis=1) / command_speed_sq, 0.0, 1.0)

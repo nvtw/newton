@@ -194,6 +194,8 @@ def anymal_observe_reward_kernel(
     min_upright_cos: wp.float32,
     lin_vel_reward_scale: wp.float32,
     yaw_rate_reward_scale: wp.float32,
+    lin_vel_tracking_sigma: wp.float32,
+    yaw_rate_tracking_sigma: wp.float32,
     z_vel_reward_scale: wp.float32,
     ang_vel_reward_scale: wp.float32,
     action_rate_reward_scale: wp.float32,
@@ -267,8 +269,10 @@ def anymal_observe_reward_kernel(
         vx_err = lin_b[0] - command[world, 0]
         vy_err = lin_b[1] - command[world, 1]
         yaw_err = ang_b[2] - command[world, 2]
-        vel_reward = wp.exp(-(vx_err * vx_err + vy_err * vy_err) / wp.float32(0.25))
-        yaw_reward = wp.exp(-(yaw_err * yaw_err) / wp.float32(0.25))
+        lin_sigma_sq = wp.max(lin_vel_tracking_sigma * lin_vel_tracking_sigma, wp.float32(1.0e-6))
+        yaw_sigma_sq = wp.max(yaw_rate_tracking_sigma * yaw_rate_tracking_sigma, wp.float32(1.0e-6))
+        vel_reward = wp.exp(-(vx_err * vx_err + vy_err * vy_err) / lin_sigma_sq)
+        yaw_reward = wp.exp(-(yaw_err * yaw_err) / yaw_sigma_sq)
         z_vel_penalty = lin_b[2] * lin_b[2]
         ang_xy_penalty = ang_b[0] * ang_b[0] + ang_b[1] * ang_b[1]
         flat_orientation_penalty = gravity_b[0] * gravity_b[0] + gravity_b[1] * gravity_b[1]
@@ -407,12 +411,14 @@ class ConfigEnvAnymalPhoenX:
         max_episode_steps: Episode timeout in policy steps. Use ``0`` to disable.
         lin_vel_reward_scale: Linear XY velocity tracking reward scale.
         yaw_rate_reward_scale: Yaw-rate tracking reward scale.
+        lin_vel_tracking_sigma: Linear velocity tracking Gaussian sigma [m/s].
+        yaw_rate_tracking_sigma: Yaw-rate tracking Gaussian sigma [rad/s].
         z_vel_reward_scale: Vertical velocity penalty scale.
         ang_vel_reward_scale: Roll/pitch angular velocity penalty scale.
         action_rate_reward_scale: Action-rate penalty scale.
         joint_speed_reward_scale: Joint velocity penalty scale.
         flat_orientation_reward_scale: Flat-orientation penalty scale.
-        forward_progress_reward_scale: Forward velocity projection shaping scale.
+        forward_progress_reward_scale: Command-aligned horizontal velocity projection shaping scale.
         sparse_success_reward_scale: Sparse target success reward scale.
         target_progress_reward_scale: Target-distance reduction reward scale.
         fall_reward_scale: Fall penalty scale.
@@ -445,6 +451,8 @@ class ConfigEnvAnymalPhoenX:
     max_episode_steps: int = 96
     lin_vel_reward_scale: float = 1.0
     yaw_rate_reward_scale: float = 0.5
+    lin_vel_tracking_sigma: float = 0.5
+    yaw_rate_tracking_sigma: float = 0.5
     z_vel_reward_scale: float = -2.0
     ang_vel_reward_scale: float = -0.05
     action_rate_reward_scale: float = -0.01
@@ -638,6 +646,8 @@ class EnvAnymalPhoenX:
                 self.config.min_upright_cos,
                 self.config.lin_vel_reward_scale,
                 self.config.yaw_rate_reward_scale,
+                self.config.lin_vel_tracking_sigma,
+                self.config.yaw_rate_tracking_sigma,
                 self.config.z_vel_reward_scale,
                 self.config.ang_vel_reward_scale,
                 self.config.action_rate_reward_scale,
