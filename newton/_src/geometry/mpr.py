@@ -39,6 +39,47 @@ from .support_function import GeoTypeEx, closest_point_on_triangle, unpack_mesh_
 from .types import GeoType
 
 
+@wp.func
+def closest_point_on_box_surface(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
+    """
+    Closest point on the SURFACE of an axis-aligned box (centered at origin) to p.
+
+    When p is outside the box the result is the clamped nearest surface point.
+    When p is inside the box the result is the projection onto the nearest face —
+    the face whose inward distance from p is smallest (minimum penetration face).
+
+    Args:
+        p: Query point in the box's local frame.
+        half_extents: Box half-extents along each axis.
+
+    Returns:
+        Closest point on the box surface in the box's local frame.
+    """
+    cx = wp.clamp(p[0], -half_extents[0], half_extents[0])
+    cy = wp.clamp(p[1], -half_extents[1], half_extents[1])
+    cz = wp.clamp(p[2], -half_extents[2], half_extents[2])
+
+    outside = wp.abs(p[0]) > half_extents[0] or wp.abs(p[1]) > half_extents[1] or wp.abs(p[2]) > half_extents[2]
+
+    if outside:
+        return wp.vec3(cx, cy, cz)
+
+    # p is inside — project onto the nearest face (minimum penetration depth).
+    dx = half_extents[0] - wp.abs(p[0])
+    dy = half_extents[1] - wp.abs(p[1])
+    dz = half_extents[2] - wp.abs(p[2])
+
+    if dx <= dy and dx <= dz:
+        sx = wp.where(p[0] >= 0.0, 1.0, -1.0)
+        return wp.vec3(sx * half_extents[0], cy, cz)
+    elif dy <= dz:
+        sy = wp.where(p[1] >= 0.0, 1.0, -1.0)
+        return wp.vec3(cx, sy * half_extents[1], cz)
+    else:
+        sz = wp.where(p[2] >= 0.0, 1.0, -1.0)
+        return wp.vec3(cx, cy, sz * half_extents[2])
+
+
 @wp.struct
 class Vert:
     """Vertex structure for MPR algorithm containing points on both shapes."""
@@ -230,6 +271,38 @@ def create_support_map_function(support_func: Any):
             center_b_local = 0.5 * (min_b + max_b)
 
         center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
+
+        # BOX: replace geometric center with the closest point on the box SURFACE to
+        # the other shape's center.  For large flat boxes (e.g. a table) the true
+        # center is deep inside the shape and far from the contact region; the
+        # center-to-center vector then points mostly sideways, causing MPR/GJK to
+        # start searching toward the wrong face and report enormous penetration depths
+        # (e.g. -0.4 m through the side of a 2 cm-thick table).  Projecting onto the
+        # nearest surface point gives an initial direction that is almost perpendicular
+        # to the contact face, so MPR/GJK converges to the correct shallow contact.
+        # The 1 % nudge toward the centroid mirrors the triangle-case treatment.
+        #
+        # The fix is guarded by a flatness check (min/max half-extent ratio < 0.3) to
+        # avoid corrupting the interior point for roughly-equidimensional boxes (cubes,
+        # finger-tip boxes) where the geometric center is already a good starting point.
+        BOX_FLAT_THRESHOLD = 0.3
+        if geom_a.shape_type == int(GeoType.BOX):
+            box_a_min = wp.min(geom_a.scale[0], wp.min(geom_a.scale[1], geom_a.scale[2]))
+            box_a_max = wp.max(geom_a.scale[0], wp.max(geom_a.scale[1], geom_a.scale[2]))
+            if box_a_min < BOX_FLAT_THRESHOLD * box_a_max:
+                surf_a = closest_point_on_box_surface(center_b_world, geom_a.scale)
+                center_a = surf_a + 0.01 * (wp.vec3(0.0, 0.0, 0.0) - surf_a)
+
+        if geom_b.shape_type == int(GeoType.BOX):
+            # Everything here is in A's local frame (solve_mpr pre-transforms to A's frame).
+            # Transform center_a to B's local frame to find the surface point on B.
+            box_b_min = wp.min(geom_b.scale[0], wp.min(geom_b.scale[1], geom_b.scale[2]))
+            box_b_max = wp.max(geom_b.scale[0], wp.max(geom_b.scale[1], geom_b.scale[2]))
+            if box_b_min < BOX_FLAT_THRESHOLD * box_b_max:
+                center_a_in_b = wp.quat_rotate_inv(orientation_b, center_a - position_b)
+                surf_b_local = closest_point_on_box_surface(center_a_in_b, geom_b.scale)
+                center_b_local = surf_b_local + 0.01 * (wp.vec3(0.0, 0.0, 0.0) - surf_b_local)
+                center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
 
         if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
             # Project shape B's center onto the triangle for a starting
