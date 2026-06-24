@@ -601,8 +601,8 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
         t in [0, 1]. The initial midpoint SDF value is provided by the
         caller (cached from culling) to avoid a redundant evaluation.
 
-        ``precision_target`` is the world-space precision the caller cares
-        about (typically the contact gap). Brent's tolerance floor is set
+        ``precision_target`` is the unscaled SDF space precision the caller
+        cares about. Brent's tolerance floor is set
         to ``precision_target / edge_length / 2`` in parametric space so
         edges much shorter than the target precision exit Brent in 0
         iters (the midpoint is already accurate enough). Long edges still
@@ -725,27 +725,40 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                     v_brent = u
                     fv = fu
 
-        # Check the closer endpoint only when Brent converged near a
-        # boundary (x < 0.2 or x > 0.8).  When solidly interior the
-        # bracket has moved both boundaries inward, so the endpoint
-        # cannot beat the interior minimum.
+        # Check endpoints only while Brent's bracket still includes them.
+        # Once a bound has moved inward, Brent has already excluded that
+        # endpoint from containing the minimum.
         best_t = x
         best_f = fx
-        if x < 0.2 or x > 0.8:
-            check_t = 0.0 if x < 0.5 else 1.0
+        if a == 0.0:
             f_end = _sample_sdf_at_t(
                 texture_sdf,
                 sdf_mesh_id,
                 v0,
                 edge_dir,
-                check_t,
+                0.0,
                 use_bvh_for_sdf,
                 sdf_is_heightfield,
                 hfd_sdf,
                 elevation_data,
             )
             if f_end < best_f:
-                best_t = check_t
+                best_t = 0.0
+                best_f = f_end
+        if b == 1.0:
+            f_end = _sample_sdf_at_t(
+                texture_sdf,
+                sdf_mesh_id,
+                v0,
+                edge_dir,
+                1.0,
+                use_bvh_for_sdf,
+                sdf_is_heightfield,
+                hfd_sdf,
+                elevation_data,
+            )
+            if f_end < best_f:
+                best_t = 1.0
                 best_f = f_end
 
         p = v0 + edge_dir * best_t
