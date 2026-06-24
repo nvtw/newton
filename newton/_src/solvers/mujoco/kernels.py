@@ -459,12 +459,14 @@ def convert_newton_contacts_to_mjwarp_kernel(
                     factor = m_inv * (1.0 - imp)
                     direct_ke = wp.max(contact_ke * factor, MJ_MINVAL)
                     contact_kd = rigid_contact_damping[tid]
-                    has_contact_kd = contact_kd > 0.0
-                    if contact_kd <= 0.0:
-                        contact_kd = mix * shape_material_kd[shape_a] + (1.0 - mix) * shape_material_kd[shape_b]
-                    direct_kd = wp.max(contact_kd * factor, MJ_MINVAL)
-                    if not has_contact_kd:
-                        direct_kd = wp.max(direct_kd, 2.0 * wp.sqrt(direct_ke))
+                    if contact_kd > 0.0:
+                        direct_kd = wp.max(contact_kd * factor, MJ_MINVAL)
+                    else:
+                        # No authored per-contact damping: critically damp the
+                        # force-space spring for stability without over-damping
+                        # (a large authored shape ``kd`` would otherwise make
+                        # threading contacts sluggish).
+                        direct_kd = 2.0 * wp.sqrt(direct_ke)
                     solref = convert_solref(
                         direct_ke,
                         direct_kd,

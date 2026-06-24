@@ -11123,7 +11123,8 @@ class TestMuJoCoSolverPerContactSolref(unittest.TestCase):
         )
         direct_factor = self._contact_invweight(solver) * (1.0 - imp)
         expected_stiffness = contact_stiffness * direct_factor
-        expected_damping = max((0.5 * 40.0 + 0.5 * 160.0) * direct_factor, 2.0 * np.sqrt(expected_stiffness))
+        # No per-contact damping authored: the force-space spring is critically damped.
+        expected_damping = 2.0 * np.sqrt(expected_stiffness)
         expected_solref = convert_solref(
             max(float(expected_stiffness), MJ_MINVAL),
             max(float(expected_damping), MJ_MINVAL),
@@ -11140,7 +11141,7 @@ class TestMuJoCoSolverPerContactSolref(unittest.TestCase):
             float(actual_solref[1]), float(expected_solref[1]), delta=abs(float(expected_solref[1])) * 1.0e-5
         )
 
-    def test_per_contact_damping_takes_precedence_over_shape_material(self):
+    def test_authored_per_contact_damping_overrides_critical_default(self):
         contact_stiffness = 12345.0
         contact_damping = 250.0
         solver = self._run_single_contact(contact_stiffness=contact_stiffness, contact_damping=contact_damping)
