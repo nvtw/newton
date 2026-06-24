@@ -172,7 +172,15 @@ class DVISolver:
         )
         operator.mat = wp.zeros(shape=(operator.info.total_mat_size,), dtype=float32, device=self._device)
         self._data.bilateral_operator = operator
-        self._bilateral_solver = LLTBlockedSolver(operator=operator, device=self._device)
+        # The factorization and the single-RHS solve tile the same dense factor
+        # independently. A larger factorization block size cuts the panel count and
+        # measurably speeds up the once-per-step factorization; the solve is left at
+        # the default smaller block size, which is faster for its single-column RHS.
+        self._bilateral_solver = LLTBlockedSolver(
+            operator=operator,
+            device=self._device,
+            factorize_block_size=64,
+        )
 
     @staticmethod
     def _check_config(
