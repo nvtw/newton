@@ -445,6 +445,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
             contact_ke = rigid_contact_stiffness[tid]
             if contact_ke > 0.0:
                 imp = solimp[1]
+                # Keep impedance constant so the per-contact Newton stiffness
+                # behaves like a linear force-space spring near rest.
+                solimp = vec5(imp, imp, 0.001, 1.0, 0.5)
                 invw_a = float(0.0)
                 invw_b = float(0.0)
                 if body_a >= 0:

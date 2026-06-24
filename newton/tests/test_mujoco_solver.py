@@ -11115,6 +11115,12 @@ class TestMuJoCoSolverPerContactSolref(unittest.TestCase):
         actual_solref = solver.mjw_data.contact.solref.numpy()[0]
         actual_solimp = solver.mjw_data.contact.solimp.numpy()[0]
         imp = float(actual_solimp[1])
+        np.testing.assert_allclose(
+            actual_solimp,
+            [imp, imp, 0.001, 1.0, 0.5],
+            rtol=1.0e-6,
+            atol=1.0e-6,
+        )
         direct_factor = self._contact_invweight(solver) * (1.0 - imp)
         expected_stiffness = contact_stiffness * direct_factor
         expected_damping = max((0.5 * 40.0 + 0.5 * 160.0) * direct_factor, 2.0 * np.sqrt(expected_stiffness))

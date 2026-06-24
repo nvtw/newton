@@ -219,6 +219,9 @@ damping (``N/m`` and ``N·s/m``). For the Newton-contacts path
 writes the resulting per-contact ``solref``. The two-body inverse-mass sum
 makes the contact stiffness independent of either body's mass, so
 :attr:`~newton.Model.shape_material_ke` behaves as a true force-space gain.
+Newton per-contact stiffness overrides, such as hydroelastic contacts, use
+the same scaling and write a constant-impedance contact row from the mixed
+``dmax`` so the local response remains linear near rest.
 
 ``model.mujoco.solref_mode`` (per shape) controls how
 ``shape_material_ke`` / ``shape_material_kd`` and ``mujoco.solref``
