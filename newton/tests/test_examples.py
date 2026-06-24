@@ -13,6 +13,7 @@ manipulating cloth example, which takes approximately 35 seconds to run on a
 CUDA device.
 """
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -30,6 +31,8 @@ from newton.tests.unittest_utils import (
     get_test_devices,
     sanitize_identifier,
 )
+
+_HAS_ONNX_RUNTIME = importlib.util.find_spec("onnx") is not None and importlib.util.find_spec("warp_nn") is not None
 
 
 def _build_command_line_options(test_options: dict[str, Any]) -> list:
@@ -88,18 +91,10 @@ def add_example_test(
         else:
             options = _merge_options(test_options, test_options_cpu)
 
-        # Mark the test as skipped if Torch is not installed but required
-        torch_required = options.pop("torch_required", False)
-        if torch_required:
-            try:
-                import torch
-
-                if wp.get_device(device).is_cuda and not torch.cuda.is_available():
-                    # Ensure torch has CUDA support
-                    test.skipTest("Torch not compiled with CUDA support")
-
-            except Exception as e:
-                test.skipTest(f"{e}")
+        # Mark the test as skipped if ONNX policy inference is not installed but required.
+        onnx_required = options.pop("onnx_required", False) or options.pop("torch_required", False)
+        if onnx_required and not _HAS_ONNX_RUNTIME:
+            test.skipTest("onnx or warp-nn not installed")
 
         # Mark the test as skipped if USD is not installed but required
         usd_required = options.pop("usd_required", False)
@@ -434,7 +429,7 @@ add_example_test(
     TestRobotExamples,
     name="robot.example_robot_anymal_c_walk",
     devices=cuda_test_devices,
-    test_options={"usd_required": True, "num-frames": 500, "torch_required": True},
+    test_options={"usd_required": True, "num-frames": 500, "onnx_required": True},
     use_viewer=True,
 )
 add_example_test(
@@ -491,7 +486,7 @@ add_example_test(
     TestRobotPolicyExamples,
     name="robot.example_robot_policy",
     devices=cuda_test_devices,
-    test_options={"num-frames": 500, "torch_required": True, "robot": "g1_29dof"},
+    test_options={"num-frames": 500, "onnx_required": True, "robot": "g1_29dof"},
     test_options_cpu={"num-frames": 10},
     use_viewer=True,
     test_suffix="G1_29dof",
@@ -500,7 +495,7 @@ add_example_test(
     TestRobotPolicyExamples,
     name="robot.example_robot_policy",
     devices=cuda_test_devices,
-    test_options={"num-frames": 500, "torch_required": True, "robot": "g1_23dof"},
+    test_options={"num-frames": 500, "onnx_required": True, "robot": "g1_23dof"},
     use_viewer=True,
     test_suffix="G1_23dof",
 )
@@ -508,7 +503,7 @@ add_example_test(
     TestRobotPolicyExamples,
     name="robot.example_robot_policy",
     devices=cuda_test_devices,
-    test_options={"num-frames": 500, "torch_required": True, "robot": "g1_23dof", "physx": True},
+    test_options={"num-frames": 500, "onnx_required": True, "robot": "g1_23dof", "physx": True},
     use_viewer=True,
     test_suffix="G1_23dof_Physx",
 )
@@ -516,7 +511,7 @@ add_example_test(
     TestRobotPolicyExamples,
     name="robot.example_robot_policy",
     devices=cuda_test_devices,
-    test_options={"num-frames": 500, "torch_required": True, "robot": "anymal"},
+    test_options={"num-frames": 500, "onnx_required": True, "robot": "anymal"},
     use_viewer=True,
     test_suffix="Anymal",
 )
@@ -524,7 +519,7 @@ add_example_test(
     TestRobotPolicyExamples,
     name="robot.example_robot_policy",
     devices=cuda_test_devices,
-    test_options={"num-frames": 500, "torch_required": True, "robot": "anymal", "physx": True},
+    test_options={"num-frames": 500, "onnx_required": True, "robot": "anymal", "physx": True},
     use_viewer=True,
     test_suffix="Anymal_Physx",
 )
@@ -532,7 +527,7 @@ add_example_test(
     TestRobotPolicyExamples,
     name="robot.example_robot_policy",
     devices=cuda_test_devices,
-    test_options={"torch_required": True},
+    test_options={"onnx_required": True},
     test_options_cuda={"num-frames": 500, "robot": "go2"},
     use_viewer=True,
     test_suffix="Go2",
@@ -541,7 +536,7 @@ add_example_test(
     TestRobotPolicyExamples,
     name="robot.example_robot_policy",
     devices=cuda_test_devices,
-    test_options={"torch_required": True},
+    test_options={"onnx_required": True},
     test_options_cuda={"num-frames": 500, "robot": "go2", "physx": True},
     use_viewer=True,
     test_suffix="Go2_Physx",
@@ -556,7 +551,7 @@ add_example_test(
     TestAdvancedRobotExamples,
     name="mpm.example_mpm_anymal",
     devices=cuda_test_devices,
-    test_options={"num-frames": 100, "torch_required": True},
+    test_options={"num-frames": 100, "onnx_required": True},
     use_viewer=True,
 )
 
