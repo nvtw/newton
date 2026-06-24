@@ -436,43 +436,26 @@ def convert_newton_contacts_to_mjwarp_kernel(
                         1.0,
                     )
 
-        # Convert Newton per-contact stiffness/damping to MuJoCo's positive
-        # solref format. Per-contact stiffness comes from collision reduction
-        # (for example hydroelastic contacts) in force space; MuJoCo contact
-        # rows operate in acceleration space, so pre-scale by the row inverse
-        # effective mass before converting to time constant / damping ratio.
+        # Convert Newton per-contact stiffness/damping to MuJoCo solref
+        # (timeconst, dampratio). Per-contact overrides take precedence over
+        # the shape-material force-space override above. solimp is set to
+        # approximate a linear force-displacement relationship at rest,
+        # compensating for impedance scaling. See
+        # https://mujoco.readthedocs.io/en/latest/modeling.html#solver-parameters
         if rigid_contact_stiffness:
             contact_ke = rigid_contact_stiffness[tid]
             if contact_ke > 0.0:
                 imp = solimp[1]
-                # Keep impedance constant so the per-contact Newton stiffness
-                # behaves like a linear force-space spring near rest.
                 solimp = vec5(imp, imp, 0.001, 1.0, 0.5)
-                invw_a = float(0.0)
-                invw_b = float(0.0)
-                if body_a >= 0:
-                    invw_a = body_invweight0[worldid, mj_body_a][0]
-                if body_b >= 0:
-                    invw_b = body_invweight0[worldid, mj_body_b][0]
-                m_inv = invw_a + invw_b
-                if m_inv > 0.0 and imp < 1.0:
-                    factor = m_inv * (1.0 - imp)
-                    direct_ke = wp.max(contact_ke * factor, MJ_MINVAL)
-                    contact_kd = rigid_contact_damping[tid]
-                    if contact_kd > 0.0:
-                        direct_kd = wp.max(contact_kd * factor, MJ_MINVAL)
-                    else:
-                        # No authored per-contact damping: critically damp the
-                        # force-space spring for stability without over-damping
-                        # (a large authored shape ``kd`` would otherwise make
-                        # threading contacts sluggish).
-                        direct_kd = 2.0 * wp.sqrt(direct_ke)
-                    solref = convert_solref(
-                        direct_ke,
-                        direct_kd,
-                        1.0,
-                        1.0,
-                    )
+                contact_ke = contact_ke * (1.0 - imp)
+                kd = rigid_contact_damping[tid]
+                if kd > 0.0:
+                    timeconst = 2.0 / kd
+                    dampratio = wp.sqrt(1.0 / (timeconst * timeconst * contact_ke))
+                else:
+                    timeconst = wp.sqrt(1.0 / contact_ke)
+                    dampratio = 1.0
+                solref = wp.vec2(timeconst, dampratio)
 
             friction_scale = rigid_contact_friction[tid]
             if friction_scale > 0.0:

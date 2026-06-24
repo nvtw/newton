@@ -1309,6 +1309,7 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
 
     # Calculate expected and measured penetration for each case
     total_force = gravity * mass_upper + external_force
+    effective_mass = (mass_lower * mass_upper) / (mass_lower + mass_upper)
 
     for i in range(len(test_cases)):
         lower_shape = lower_shape_indices[i]
@@ -1316,10 +1317,10 @@ def test_mujoco_hydroelastic_penetration_depth(test, device):
         kh_val = kh_values[i]
         area = areas[i]
 
-        # SolverMuJoCo scales per-contact Newton stiffness into MuJoCo's
-        # acceleration-space rows, so the static depth remains force-space.
+        # Expected: depth = F / (k_eff * A_eff) / mujoco_scaling
         effective_area = area
         expected = total_force / (kh_val * effective_area)
+        expected /= effective_mass
 
         # Filter depths for this shape pair
         mask = ((shape_pairs[:, 0] == lower_shape) & (shape_pairs[:, 1] == upper_shape)) | (

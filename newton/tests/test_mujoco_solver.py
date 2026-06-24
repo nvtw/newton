@@ -11041,132 +11041,6 @@ class TestMuJoCoSolverInvweightScaledSolref(unittest.TestCase):
         )
 
 
-class TestMuJoCoSolverPerContactSolref(unittest.TestCase):
-    """Per-contact Newton stiffness/damping conversion for ``SolverMuJoCo``."""
-
-    def test_public_solref_mode_values_match_internal_modes(self):
-        self.assertEqual(int(SolverMuJoCo.SolrefMode.FORCE_SPACE), SOLREF_MODE_FORCE_SPACE)
-        self.assertEqual(int(SolverMuJoCo.SolrefMode.RAW), SOLREF_MODE_RAW)
-        self.assertEqual(int(SolverMuJoCo.SolrefMode.MJCF_DEFAULT), SOLREF_MODE_MJCF_DEFAULT)
-
-    def _run_single_contact(
-        self,
-        *,
-        contact_stiffness: float,
-        contact_damping: float,
-        ground_kd: float = 40.0,
-        box_kd: float = 160.0,
-    ):
-        builder = newton.ModelBuilder(gravity=0.0)
-        SolverMuJoCo.register_custom_attributes(builder)
-        builder.default_shape_cfg.kd = ground_kd
-        builder.add_ground_plane()
-        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()), label="dyn")
-        cfg = newton.ModelBuilder.ShapeConfig()
-        cfg.kd = box_kd
-        cfg.density = 1000.0
-        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
-        model = builder.finalize()
-        solver = SolverMuJoCo(model, use_mujoco_contacts=False, njmax=20, nconmax=20, iterations=1)
-
-        contacts = newton.Contacts(4, 0, device=model.device, per_contact_shape_properties=True)
-        contacts.rigid_contact_count.assign(np.array([1], dtype=np.int32))
-        contacts.rigid_contact_shape0.assign(np.array([0, -1, -1, -1], dtype=np.int32))
-        contacts.rigid_contact_shape1.assign(np.array([1, -1, -1, -1], dtype=np.int32))
-        contacts.rigid_contact_point0.assign(
-            np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)
-        )
-        contacts.rigid_contact_point1.assign(
-            np.array([[0.0, 0.0, -0.1], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)
-        )
-        contacts.rigid_contact_normal.assign(
-            np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)
-        )
-        contacts.rigid_contact_offset0.assign(np.zeros((4, 3), dtype=np.float32))
-        contacts.rigid_contact_offset1.assign(np.zeros((4, 3), dtype=np.float32))
-        contacts.rigid_contact_margin0.assign(np.zeros(4, dtype=np.float32))
-        contacts.rigid_contact_margin1.assign(np.zeros(4, dtype=np.float32))
-        contacts.rigid_contact_stiffness.assign(np.array([contact_stiffness, 0.0, 0.0, 0.0], dtype=np.float32))
-        contacts.rigid_contact_damping.assign(np.array([contact_damping, 0.0, 0.0, 0.0], dtype=np.float32))
-        contacts.rigid_contact_friction.assign(np.zeros(4, dtype=np.float32))
-
-        state_in, state_out, control = model.state(), model.state(), model.control()
-        newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
-        solver.step(state_in, state_out, control, contacts, 1.0 / 240.0)
-        self.assertEqual(int(solver.mjw_data.nacon.numpy()[0]), 1)
-        return solver
-
-    @staticmethod
-    def _contact_invweight(solver) -> float:
-        geom_a, geom_b = solver.mjw_data.contact.geom.numpy()[0]
-        geom_bodyid = solver.mjw_model.geom_bodyid.numpy()
-        body_invweight0 = solver.mjw_model.body_invweight0.numpy()
-        invweight = 0.0
-        for geom in (int(geom_a), int(geom_b)):
-            body = int(geom_bodyid[geom])
-            if body >= 0:
-                invweight += float(body_invweight0[0, body, 0])
-        return invweight
-
-    def test_per_contact_stiffness_uses_force_space_solref(self):
-        contact_stiffness = 12345.0
-        solver = self._run_single_contact(contact_stiffness=contact_stiffness, contact_damping=0.0)
-
-        actual_solref = solver.mjw_data.contact.solref.numpy()[0]
-        actual_solimp = solver.mjw_data.contact.solimp.numpy()[0]
-        imp = float(actual_solimp[1])
-        np.testing.assert_allclose(
-            actual_solimp,
-            [imp, imp, 0.001, 1.0, 0.5],
-            rtol=1.0e-6,
-            atol=1.0e-6,
-        )
-        direct_factor = self._contact_invweight(solver) * (1.0 - imp)
-        expected_stiffness = contact_stiffness * direct_factor
-        # No per-contact damping authored: the force-space spring is critically damped.
-        expected_damping = 2.0 * np.sqrt(expected_stiffness)
-        expected_solref = convert_solref(
-            max(float(expected_stiffness), MJ_MINVAL),
-            max(float(expected_damping), MJ_MINVAL),
-            1.0,
-            1.0,
-        )
-
-        self.assertGreater(float(actual_solref[0]), 0.0)
-        self.assertGreater(float(actual_solref[1]), 0.0)
-        self.assertAlmostEqual(
-            float(actual_solref[0]), float(expected_solref[0]), delta=abs(float(expected_solref[0])) * 1.0e-5
-        )
-        self.assertAlmostEqual(
-            float(actual_solref[1]), float(expected_solref[1]), delta=abs(float(expected_solref[1])) * 1.0e-5
-        )
-
-    def test_authored_per_contact_damping_overrides_critical_default(self):
-        contact_stiffness = 12345.0
-        contact_damping = 250.0
-        solver = self._run_single_contact(contact_stiffness=contact_stiffness, contact_damping=contact_damping)
-
-        actual_solref = solver.mjw_data.contact.solref.numpy()[0]
-        actual_solimp = solver.mjw_data.contact.solimp.numpy()[0]
-        imp = float(actual_solimp[1])
-        direct_factor = self._contact_invweight(solver) * (1.0 - imp)
-        expected_stiffness = contact_stiffness * direct_factor
-        expected_damping = contact_damping * direct_factor
-        expected_solref = convert_solref(
-            max(float(expected_stiffness), MJ_MINVAL),
-            max(float(expected_damping), MJ_MINVAL),
-            1.0,
-            1.0,
-        )
-
-        self.assertAlmostEqual(
-            float(actual_solref[0]), float(expected_solref[0]), delta=abs(float(expected_solref[0])) * 1.0e-5
-        )
-        self.assertAlmostEqual(
-            float(actual_solref[1]), float(expected_solref[1]), delta=abs(float(expected_solref[1])) * 1.0e-5
-        )
-
-
 class TestMuJoCoSolverForceSpaceContactSolref(unittest.TestCase):
     """Force-space ``shape_material_ke``/``shape_material_kd`` for the MuJoCo solver.
 
@@ -11195,7 +11069,7 @@ class TestMuJoCoSolverForceSpaceContactSolref(unittest.TestCase):
         mode = np.full(model.shape_count, SOLREF_MODE_FORCE_SPACE, dtype=np.int32)
         model.mujoco.solref_mode.assign(mode)
 
-    def _build_box_on_plane(self, *, mass: float, ke: float, kd: float, make_force_space: bool = True):
+    def _build_box_on_plane(self, *, mass: float, ke: float, kd: float):
         builder = newton.ModelBuilder(gravity=-9.81)
         SolverMuJoCo.register_custom_attributes(builder)
         builder.default_shape_cfg.ke = ke
@@ -11208,8 +11082,7 @@ class TestMuJoCoSolverForceSpaceContactSolref(unittest.TestCase):
         cfg.density = mass / 0.008  # Box half-extents 0.1 → volume 0.008 m³.
         builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
         model = builder.finalize()
-        if make_force_space:
-            self._make_force_space(model)
+        self._make_force_space(model)
         return model, body
 
     def _run_to_first_contact(self, model, solver, *, max_substeps: int = 60, sim_dt: float = 1.0 / 240.0):
@@ -11259,14 +11132,6 @@ class TestMuJoCoSolverForceSpaceContactSolref(unittest.TestCase):
         rel_tol = 1.0e-4
         self.assertAlmostEqual(float(actual_solref[0]), expected_ref, delta=abs(expected_ref) * rel_tol)
         self.assertAlmostEqual(float(actual_solref[1]), expected_damp, delta=abs(expected_damp) * rel_tol)
-
-    def test_use_newton_contact_gains_promotes_mjcf_default_shapes(self):
-        model, _ = self._build_box_on_plane(mass=2.0, ke=1.0e4, kd=100.0, make_force_space=False)
-        np.testing.assert_array_equal(model.mujoco.solref_mode.numpy(), [SOLREF_MODE_MJCF_DEFAULT] * model.shape_count)
-
-        SolverMuJoCo(model, use_mujoco_contacts=False, use_newton_contact_gains=True, njmax=20, nconmax=20)
-
-        np.testing.assert_array_equal(model.mujoco.solref_mode.numpy(), [SOLREF_MODE_FORCE_SPACE] * model.shape_count)
 
     def test_force_space_contact_solref_uses_two_body_invweight_sum(self):
         """Dynamic-vs-dynamic contact: factor uses the sum of both bodies' invweight0."""
