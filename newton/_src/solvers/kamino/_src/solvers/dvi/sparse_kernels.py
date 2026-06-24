@@ -164,8 +164,9 @@ def _sparse_delassus_gemv_rows(
     wp.atomic_add(y, row_start[wid] + row, acc)
 
 
-@wp.kernel
-def _solve_dvi_sparse_limits_offset_update(
+@wp.func
+def _apply_limit_offset_update(
+    limit_id: int32,
     # Matrix data:
     num_nzb: wp.array[int32],
     nzb_start: wp.array[int32],
@@ -193,7 +194,6 @@ def _solve_dvi_sparse_limits_offset_update(
     # Outputs:
     solution_lambdas: wp.array[float32],
 ):
-    limit_id = wp.tid()
     if limit_id >= limits_model_active[0]:
         return
 
@@ -235,7 +235,64 @@ def _solve_dvi_sparse_limits_offset_update(
 
 
 @wp.kernel
-def _solve_dvi_sparse_contacts_offset_update(
+def _solve_dvi_sparse_limits_offset_update(
+    # Matrix data:
+    num_nzb: wp.array[int32],
+    nzb_start: wp.array[int32],
+    nzb_coords: wp.array2d[int32],
+    nzb_values: wp.array[vec6f],
+    row_start: wp.array[int32],
+    col_start: wp.array[int32],
+    # Active limits:
+    limits_model_active: wp.array[int32],
+    limits_wid: wp.array[int32],
+    limits_lid: wp.array[int32],
+    limits_nzb_offsets: wp.array[int32],
+    # Problem data:
+    problem_vio: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_lcgo: wp.array[int32],
+    problem_diag: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    eta: wp.array[float32],
+    body_space: wp.array[float32],
+    block_iteration: int32,
+    contact_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solution_lambdas: wp.array[float32],
+):
+    _apply_limit_offset_update(
+        wp.tid(),
+        num_nzb,
+        nzb_start,
+        nzb_coords,
+        nzb_values,
+        row_start,
+        col_start,
+        limits_model_active,
+        limits_wid,
+        limits_lid,
+        limits_nzb_offsets,
+        problem_vio,
+        problem_nl,
+        problem_lcgo,
+        problem_diag,
+        problem_P,
+        problem_v_f,
+        eta,
+        body_space,
+        block_iteration,
+        contact_iteration,
+        solver_config,
+        solution_lambdas,
+    )
+
+
+@wp.func
+def _apply_contact_offset_update(
+    contact_id: int32,
     # Matrix data:
     num_nzb: wp.array[int32],
     nzb_start: wp.array[int32],
@@ -266,7 +323,6 @@ def _solve_dvi_sparse_contacts_offset_update(
     # Outputs:
     solution_lambdas: wp.array[float32],
 ):
-    contact_id = wp.tid()
     if contact_id >= contacts_model_active[0]:
         return
 
@@ -355,6 +411,173 @@ def _solve_dvi_sparse_contacts_offset_update(
     solution_lambdas[ccio_v + 0] = lambda_contact_new.x
     solution_lambdas[ccio_v + 1] = lambda_contact_new.y
     solution_lambdas[ccio_v + 2] = lambda_contact_new.z
+
+
+@wp.kernel
+def _solve_dvi_sparse_contacts_offset_update(
+    # Matrix data:
+    num_nzb: wp.array[int32],
+    nzb_start: wp.array[int32],
+    nzb_coords: wp.array2d[int32],
+    nzb_values: wp.array[vec6f],
+    row_start: wp.array[int32],
+    col_start: wp.array[int32],
+    # Active contacts:
+    contacts_model_active: wp.array[int32],
+    contacts_wid: wp.array[int32],
+    contacts_cid: wp.array[int32],
+    contacts_nzb_offsets: wp.array[int32],
+    # Problem data:
+    problem_vio: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_diag: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    eta: wp.array[float32],
+    body_space: wp.array[float32],
+    contact_block_inv: wp.array[mat33f],
+    block_iteration: int32,
+    contact_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solution_lambdas: wp.array[float32],
+):
+    _apply_contact_offset_update(
+        wp.tid(),
+        num_nzb,
+        nzb_start,
+        nzb_coords,
+        nzb_values,
+        row_start,
+        col_start,
+        contacts_model_active,
+        contacts_wid,
+        contacts_cid,
+        contacts_nzb_offsets,
+        problem_vio,
+        problem_nc,
+        problem_ccgo,
+        problem_cio,
+        problem_mu,
+        problem_diag,
+        problem_P,
+        problem_v_f,
+        eta,
+        body_space,
+        contact_block_inv,
+        block_iteration,
+        contact_iteration,
+        solver_config,
+        solution_lambdas,
+    )
+
+
+@wp.kernel
+def _solve_dvi_sparse_unilateral_offset_update(
+    limits_capacity: int32,
+    # Shared matrix data:
+    num_nzb: wp.array[int32],
+    nzb_start: wp.array[int32],
+    nzb_coords: wp.array2d[int32],
+    nzb_values: wp.array[vec6f],
+    row_start: wp.array[int32],
+    col_start: wp.array[int32],
+    # Active limits:
+    limits_model_active: wp.array[int32],
+    limits_wid: wp.array[int32],
+    limits_lid: wp.array[int32],
+    limits_nzb_offsets: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_lcgo: wp.array[int32],
+    # Active contacts:
+    contacts_model_active: wp.array[int32],
+    contacts_wid: wp.array[int32],
+    contacts_cid: wp.array[int32],
+    contacts_nzb_offsets: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    contact_block_inv: wp.array[mat33f],
+    # Shared problem data:
+    problem_vio: wp.array[int32],
+    problem_diag: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    eta: wp.array[float32],
+    body_space: wp.array[float32],
+    block_iteration: int32,
+    contact_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solution_lambdas: wp.array[float32],
+):
+    """Fused limit + contact projection sweep.
+
+    Threads ``[0, limits_capacity)`` update joint limits; the remainder update
+    contacts. Both read the same ``body_space`` and write disjoint regions of
+    ``solution_lambdas``, so merging them into one launch is equivalent to the
+    two separate sweeps while removing a per-iteration kernel launch.
+    """
+    tid = wp.tid()
+    if tid < limits_capacity:
+        _apply_limit_offset_update(
+            tid,
+            num_nzb,
+            nzb_start,
+            nzb_coords,
+            nzb_values,
+            row_start,
+            col_start,
+            limits_model_active,
+            limits_wid,
+            limits_lid,
+            limits_nzb_offsets,
+            problem_vio,
+            problem_nl,
+            problem_lcgo,
+            problem_diag,
+            problem_P,
+            problem_v_f,
+            eta,
+            body_space,
+            block_iteration,
+            contact_iteration,
+            solver_config,
+            solution_lambdas,
+        )
+    else:
+        _apply_contact_offset_update(
+            tid - limits_capacity,
+            num_nzb,
+            nzb_start,
+            nzb_coords,
+            nzb_values,
+            row_start,
+            col_start,
+            contacts_model_active,
+            contacts_wid,
+            contacts_cid,
+            contacts_nzb_offsets,
+            problem_vio,
+            problem_nc,
+            problem_ccgo,
+            problem_cio,
+            problem_mu,
+            problem_diag,
+            problem_P,
+            problem_v_f,
+            eta,
+            body_space,
+            contact_block_inv,
+            block_iteration,
+            contact_iteration,
+            solver_config,
+            solution_lambdas,
+        )
 
 
 @wp.kernel

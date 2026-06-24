@@ -26,6 +26,7 @@ from .sparse_kernels import (
     _solve_dvi_sparse_jacobi_update,
     _solve_dvi_sparse_limits_offset_update,
     _solve_dvi_sparse_unilateral_jacobi_update,
+    _solve_dvi_sparse_unilateral_offset_update,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
 )
@@ -275,6 +276,51 @@ def _sparse_delassus_update_unilateral_offsets(
         body_space,
         state.world_mask,
     )
+
+    if has_limits and has_contacts:
+        # Fuse the two independent sweeps (disjoint lambda outputs, shared
+        # body_space) into one launch to remove a per-iteration kernel launch.
+        limits_capacity = limits.model_max_limits_host
+        wp.launch(
+            kernel=_solve_dvi_sparse_unilateral_offset_update,
+            dim=limits_capacity + contacts.model_max_contacts_host,
+            inputs=[
+                limits_capacity,
+                bsm.num_nzb,
+                bsm.nzb_start,
+                bsm.nzb_coords,
+                bsm.nzb_values,
+                bsm.row_start,
+                bsm.col_start,
+                limits.model_active_limits,
+                limits.wid,
+                limits.lid,
+                limit_offsets,
+                problem.data.nl,
+                problem.data.lcgo,
+                contacts.model_active_contacts,
+                contacts.wid,
+                contacts.cid,
+                contact_offsets,
+                problem.data.nc,
+                problem.data.ccgo,
+                problem.data.cio,
+                problem.data.mu,
+                state.contact_block_inv,
+                problem.data.vio,
+                state.scratch,
+                problem.data.P,
+                problem.data.v_f,
+                regularization,
+                body_space,
+                block_iteration,
+                contact_iteration,
+                solver._data.config,
+                solver._data.solution.lambdas,
+            ],
+            device=solver.device,
+        )
+        return True
 
     if has_limits:
         wp.launch(
