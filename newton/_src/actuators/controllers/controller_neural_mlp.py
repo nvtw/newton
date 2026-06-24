@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 
 import warp as wp
 
-from ..utils import _TorchModuleAdapter, load_checkpoint, load_metadata
+from ..utils import _parse_metadata_scale, _runtime_shape, _TorchModuleAdapter, load_checkpoint, load_metadata
 from .base import Controller
 
 
@@ -181,9 +181,9 @@ class ControllerNeuralMLP(Controller):
             raise ValueError(f"input_idx must contain non-negative integers; got {self.input_idx}")
         self.history_length = max(self.input_idx) + 1
 
-        self.pos_scale = float(metadata.get("pos_scale", 1.0))
-        self.vel_scale = float(metadata.get("vel_scale", 1.0))
-        self.effort_scale = float(metadata.get("effort_scale", metadata.get("torque_scale", 1.0)))
+        self.pos_scale = _parse_metadata_scale(metadata, "pos_scale", model_path)
+        self.vel_scale = _parse_metadata_scale(metadata, "vel_scale", model_path)
+        self.effort_scale = _parse_metadata_scale(metadata, "effort_scale", model_path, fallback_key="torque_scale")
 
         self._network = None
         self._device: wp.Device | None = None
@@ -216,10 +216,11 @@ class ControllerNeuralMLP(Controller):
         self._vel_error = wp.zeros(num_actuators, dtype=wp.float32, device=device)
         self._input_idx_wp = wp.array(self.input_idx, dtype=wp.int32, device=device)
 
-        if self._net_output_name not in runtime._shapes:
+        try:
+            out_shape = _runtime_shape(runtime, self._net_output_name)
+        except ValueError:
             runtime({self._net_input_name: self._net_input})
-
-        out_shape = runtime._shapes[self._net_output_name]
+            out_shape = _runtime_shape(runtime, self._net_output_name)
         if out_shape != (num_actuators, 1):
             raise ValueError(
                 f"ControllerNeuralMLP: network output '{self._net_output_name}' has shape {out_shape}, "

@@ -42,9 +42,7 @@ sim = [
 
 # Optional ONNX policy inference for neural actuators and RL policy examples.
 onnx = [
-    # OnnxRuntime currently lives on warp-nn's develop branch; main does not
-    # expose warp_nn.runtime yet.
-    "warp-nn[onnx] @ git+https://github.com/NVIDIA/warp-nn.git@develop",
+    "warp-nn[onnx] @ git+https://github.com/NVIDIA/warp-nn.git@4200c82b2c9617b4367f87f411e7df66f1e5c5a0",
 ]
 
 # Asset import and mesh processing dependencies

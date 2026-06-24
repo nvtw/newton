@@ -174,36 +174,6 @@ Pass ``--help`` to either run method below to see all available flags.
             # run tests
             python -m newton.tests
             
-Most tests run when the ``dev`` extras are installed. RL policy inference tests
-use ONNX checkpoints through Warp-NN and are included in ``dev`` via the
-``examples`` extra:
-
-.. tab-set::
-    :sync-group: env
-
-    .. tab-item:: uv
-        :sync: uv
-
-        .. code-block:: console
-
-            # install development extras and run tests
-            uv run --extra dev -m newton.tests
-
-    .. tab-item:: venv
-        :sync: venv
-
-        .. code-block:: console
-
-            # install dev extras
-            python -m pip install -e ".[dev]"
-            # run tests
-            python -m newton.tests
-
-.. note::
-
-    The ``torch-cu12`` and ``torch-cu13`` extras remain available for workflows
-    that explicitly need PyTorch, such as training or exporting policies.
-
 Specific Newton examples can be tested in isolation via the ``-k`` argument:
 
 .. tab-set::

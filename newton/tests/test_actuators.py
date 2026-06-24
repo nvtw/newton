@@ -363,6 +363,45 @@ class TestControllerNeuralMLP(unittest.TestCase):
         )
         self.assertAlmostEqual(forces.numpy()[0], 30.0, places=3, msg="bias=10 * effort_scale=3 -> 30")
 
+    def test_corrupt_single_metadata_property_raises(self):
+        """A corrupt JSON metadata blob must not silently fall back to defaults."""
+        weights = np.zeros((1, 2), dtype=np.float32)
+        bias = np.zeros((1,), dtype=np.float32)
+        path = self._save_mlp(weights, bias, metadata={"effort_scale": 1.0})
+
+        onnx_mod, _, _, _ = _onnx_modules()
+        model = onnx_mod.load(path)
+        model.metadata_props[0].value = "{"
+        onnx_mod.save(model, path)
+
+        with self.assertRaisesRegex(ValueError, "Invalid JSON.*metadata.*mlp.onnx"):
+            ControllerNeuralMLP(model_path=path)
+
+    def test_non_mapping_single_metadata_property_raises(self):
+        weights = np.zeros((1, 2), dtype=np.float32)
+        bias = np.zeros((1,), dtype=np.float32)
+        path = self._save_mlp(weights, bias, metadata={"effort_scale": 1.0})
+
+        onnx_mod, _, _, _ = _onnx_modules()
+        model = onnx_mod.load(path)
+        model.metadata_props[0].value = json.dumps(["not", "a", "mapping"])
+        onnx_mod.save(model, path)
+
+        with self.assertRaisesRegex(ValueError, "mlp.onnx.*expected a JSON object"):
+            ControllerNeuralMLP(model_path=path)
+
+    def test_invalid_scale_metadata_names_key_and_path(self):
+        weights = np.zeros((1, 2), dtype=np.float32)
+        bias = np.zeros((1,), dtype=np.float32)
+        path = self._save_mlp(weights, bias, metadata={"effort_scale": None})
+
+        with self.assertRaisesRegex(ValueError, "effort_scale.*mlp.onnx"):
+            ControllerNeuralMLP(model_path=path)
+
+        path = self._save_mlp(weights, bias, filename="zero_scale.onnx", metadata={"effort_scale": 0.0})
+        with self.assertRaisesRegex(ValueError, "effort_scale.*zero_scale.onnx"):
+            ControllerNeuralMLP(model_path=path)
+
     def test_finalize_fixed_batch_onnx_with_multiple_actuators(self):
         """Fixed-batch ONNX exports can still run one scalar per actuator."""
         weights = np.array([[2.0, 0.0]], dtype=np.float32)
@@ -393,58 +432,6 @@ class TestControllerNeuralMLP(unittest.TestCase):
             self.device,
         )
         np.testing.assert_allclose(forces.numpy(), np.array([3.0, 5.0, 7.0], dtype=np.float32), rtol=1e-5)
-
-    @unittest.skipUnless(_HAS_TORCH, "torch not installed")
-    def test_finalize_legacy_torchscript_checkpoint(self):
-        """Legacy .pt checkpoints remain loadable during the deprecation window."""
-        import torch
-
-        n = 1
-        in_features = 2
-
-        class _BiasOnlyMLP(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.fc = torch.nn.Linear(in_features, 1, bias=True)
-                with torch.no_grad():
-                    self.fc.weight.zero_()
-                    self.fc.bias.fill_(7.0)
-
-            def forward(self, x):
-                return self.fc(x)
-
-        model = _BiasOnlyMLP().eval()
-        scripted = torch.jit.script(model)
-        path = os.path.join(self._tmp_dir, "legacy_mlp.pt")
-        scripted.save(path, _extra_files={"metadata.json": json.dumps({"effort_scale": 1.0})})
-
-        ctrl = ControllerNeuralMLP(model_path=path)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            ctrl.finalize(self.device, n)
-
-        self.assertEqual(ctrl._net_output_name, "action")
-        self.assertEqual(ctrl._network._shapes["action"], (n, 1))
-
-        indices = wp.array([0], dtype=wp.uint32, device=self.device)
-        forces = wp.zeros(n, dtype=wp.float32, device=self.device)
-        state_a = ctrl.state(n, self.device)
-        ctrl.compute(
-            wp.zeros(n, dtype=wp.float32, device=self.device),
-            wp.zeros(n, dtype=wp.float32, device=self.device),
-            wp.array([1.0], dtype=wp.float32, device=self.device),
-            wp.zeros(n, dtype=wp.float32, device=self.device),
-            None,
-            indices,
-            indices,
-            indices,
-            indices,
-            forces,
-            state_a,
-            0.01,
-            self.device,
-        )
-        self.assertAlmostEqual(float(forces.numpy()[0]), 7.0, places=3)
 
 
 @unittest.skipUnless(_HAS_ONNX and _HAS_WARP_NN, "onnx or warp-nn not installed")
@@ -515,6 +502,75 @@ class TestControllerNeuralLSTM(unittest.TestCase):
 
         self._run_lstm_compute(ctrl)
 
+    def test_invalid_scale_metadata_names_key_and_path(self):
+        path = self._save_lstm(filename="invalid_lstm.onnx", metadata={"vel_scale": float("inf")})
+
+        with self.assertRaisesRegex(ValueError, "vel_scale.*invalid_lstm.onnx"):
+            ControllerNeuralLSTM(model_path=path)
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class TestControllerNeuralMLPLegacyTorchScript(unittest.TestCase):
+    """Regression tests for the deprecated .pt MLP checkpoint path."""
+
+    def setUp(self):
+        self.device = wp.get_device()
+        self._tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
+
+    def test_finalize_legacy_torchscript_checkpoint(self):
+        """Legacy .pt checkpoints remain loadable during the deprecation window."""
+        import torch
+
+        n = 1
+        in_features = 2
+
+        class _BiasOnlyMLP(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = torch.nn.Linear(in_features, 1, bias=True)
+                with torch.no_grad():
+                    self.fc.weight.zero_()
+                    self.fc.bias.fill_(7.0)
+
+            def forward(self, x):
+                return self.fc(x)
+
+        model = _BiasOnlyMLP().eval()
+        scripted = torch.jit.script(model)
+        path = os.path.join(self._tmp_dir, "legacy_mlp.pt")
+        scripted.save(path, _extra_files={"metadata.json": json.dumps({"effort_scale": 1.0})})
+
+        ctrl = ControllerNeuralMLP(model_path=path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            ctrl.finalize(self.device, n)
+
+        self.assertEqual(ctrl._net_output_name, "action")
+        self.assertEqual(ctrl._network._shapes["action"], (n, 1))
+
+        indices = wp.array([0], dtype=wp.uint32, device=self.device)
+        forces = wp.zeros(n, dtype=wp.float32, device=self.device)
+        state_a = ctrl.state(n, self.device)
+        ctrl.compute(
+            wp.zeros(n, dtype=wp.float32, device=self.device),
+            wp.zeros(n, dtype=wp.float32, device=self.device),
+            wp.array([1.0], dtype=wp.float32, device=self.device),
+            wp.zeros(n, dtype=wp.float32, device=self.device),
+            None,
+            indices,
+            indices,
+            indices,
+            indices,
+            forces,
+            state_a,
+            0.01,
+            self.device,
+        )
+        self.assertAlmostEqual(float(forces.numpy()[0]), 7.0, places=3)
+
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class TestControllerNeuralLSTMLegacyTorchScript(unittest.TestCase):
@@ -555,18 +611,6 @@ class TestControllerNeuralLSTMLegacyTorchScript(unittest.TestCase):
         scripted = torch.jit.script(model)
         extra_files = {"metadata.json": json.dumps(metadata or {})}
         scripted.save(path, _extra_files=extra_files)
-
-    def test_load_emits_deprecation_warning(self):
-        path = os.path.join(self._tmp_dir, "legacy_lstm.pt")
-        self._build_legacy_lstm_checkpoint(path)
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            ControllerNeuralLSTM(model_path=path)
-
-        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-        self.assertTrue(deprecations, "expected a DeprecationWarning when loading a .pt LSTM checkpoint")
-        self.assertIn(".pt", str(deprecations[0].message))
 
     def test_synthesizes_metadata_from_torch_module(self):
         path = os.path.join(self._tmp_dir, "legacy_lstm.pt")

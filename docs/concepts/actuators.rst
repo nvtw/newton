@@ -223,10 +223,10 @@ Controllers
 * :class:`ControllerPD` — proportional-derivative control law (stateless).
 * :class:`ControllerPID` — proportional-integral-derivative control law
   (stateful: integral accumulator with anti-windup clamp).
-* :class:`ControllerNeuralMLP` — MLP neural-network controller (ONNX/Warp-NN,
-  stateful: position/velocity history buffers).
-* :class:`ControllerNeuralLSTM` — LSTM neural-network controller (ONNX/Warp-NN,
-  stateful: hidden/cell state).
+* :class:`ControllerNeuralMLP` — MLP neural-network controller
+  (stateful: position/velocity history buffers).
+* :class:`ControllerNeuralLSTM` — LSTM neural-network controller
+  (stateful: hidden/cell state).
 
 See the API documentation for each controller's control-law equations.
 

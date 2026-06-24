@@ -92,7 +92,9 @@ def add_example_test(
             options = _merge_options(test_options, test_options_cpu)
 
         # Mark the test as skipped if ONNX policy inference is not installed but required.
-        onnx_required = options.pop("onnx_required", False) or options.pop("torch_required", False)
+        onnx_required = options.pop("onnx_required", False)
+        torch_required = options.pop("torch_required", False)
+        onnx_required = onnx_required or torch_required
         if onnx_required and not _HAS_ONNX_RUNTIME:
             test.skipTest("onnx or warp-nn not installed")
 

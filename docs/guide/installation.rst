@@ -124,17 +124,12 @@ After installing Newton with the ``examples`` extra, launch the default
 
 Run an example that performs RL policy inference. The ``examples`` extra
 includes ``newton[onnx]``, which installs Warp-NN's ONNX runtime and the ONNX
-parser; PyTorch is not required for these pre-exported policies:
+parser:
 
 .. code-block:: console
 
     pip install "newton[examples]"
     python -m newton.examples robot_anymal_c_walk
-
-.. note::
-
-    The ``torch-cu12`` and ``torch-cu13`` extras remain available for workflows
-    that explicitly use PyTorch, such as training or exporting policies.
 
 See a list of all available examples (also browsable from the viewer's side panel):
 

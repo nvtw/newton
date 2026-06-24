@@ -11,6 +11,8 @@ import warp as wp
 from ..utils import (
     _LegacyLstmTorchAdapter,
     _load_legacy_lstm_torch_checkpoint,
+    _parse_metadata_scale,
+    _runtime_shape,
     _TorchModuleAdapter,
     load_checkpoint,
     load_metadata,
@@ -127,9 +129,9 @@ class ControllerNeuralLSTM(Controller):
         else:
             metadata = load_metadata(model_path)
 
-        self.pos_scale = float(metadata.get("pos_scale", 1.0))
-        self.vel_scale = float(metadata.get("vel_scale", 1.0))
-        self.effort_scale = float(metadata.get("effort_scale", metadata.get("torque_scale", 1.0)))
+        self.pos_scale = _parse_metadata_scale(metadata, "pos_scale", model_path)
+        self.vel_scale = _parse_metadata_scale(metadata, "vel_scale", model_path)
+        self.effort_scale = _parse_metadata_scale(metadata, "effort_scale", model_path, fallback_key="torque_scale")
 
         for key in (
             "input_name",
@@ -166,10 +168,7 @@ class ControllerNeuralLSTM(Controller):
         self._num_actuators = num_actuators
 
         if self._legacy_adapter is not None:
-            self._legacy_adapter._device = device
-            self._legacy_adapter._torch_device = self._legacy_adapter._resolve_torch_device(device)
-            self._legacy_adapter._model = self._legacy_adapter._model.to(self._legacy_adapter._torch_device)
-            self._network = self._legacy_adapter
+            self._network = self._legacy_adapter.to(device)
         else:
             runtime, _ = load_checkpoint(
                 self.model_path,
@@ -183,23 +182,15 @@ class ControllerNeuralLSTM(Controller):
             )
             self._network = runtime
 
-            out_shape = runtime._shapes[self._output_name]
+            out_shape = _runtime_shape(runtime, self._output_name)
             if out_shape != (num_actuators, 1):
                 raise ValueError(
                     f"ControllerNeuralLSTM: ONNX output '{self._output_name}' has shape {out_shape}, "
                     f"expected {(num_actuators, 1)} (one scalar effort per actuator)"
                 )
 
-            for role, name in (
-                ("hidden_out", self._hidden_out_name),
-                ("cell_out", self._cell_out_name),
-            ):
-                if name not in runtime._shapes:
-                    raise ValueError(
-                        f"ControllerNeuralLSTM: ONNX model is missing the '{role}' output '{name}'; "
-                        f"available outputs: {sorted(runtime._shapes)}"
-                    )
-                state_shape = runtime._shapes[name]
+            for name in (self._hidden_out_name, self._cell_out_name):
+                state_shape = _runtime_shape(runtime, name)
                 expected_state_shape = (self._num_layers, num_actuators, self._hidden_size)
                 if tuple(state_shape) != expected_state_shape:
                     raise ValueError(

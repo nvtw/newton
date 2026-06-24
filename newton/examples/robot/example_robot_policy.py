@@ -24,11 +24,13 @@ from typing import Any
 import numpy as np
 import warp as wp
 import yaml
+from warp_nn.runtime import OnnxRuntime
 
 import newton
 import newton.examples
 import newton.utils
 from newton import JointTargetMode
+from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 
 
 @dataclass
@@ -67,17 +69,6 @@ ROBOT_CONFIGS = {
         yaml_path="rl_policies/g1_23dof.yaml",
     ),
 }
-
-
-def _load_onnx_runtime(path: str, device: wp.Device):
-    try:
-        from warp_nn.runtime import OnnxRuntime  # noqa: PLC0415
-    except ImportError as exc:
-        raise ImportError(
-            "Running ONNX policy examples requires Warp-NN. Install it with `pip install newton[onnx]`."
-        ) from exc
-    return OnnxRuntime(path, device=device)
-
 
 @wp.kernel
 def _compute_obs_kernel(
@@ -141,7 +132,7 @@ def _build_joint_target_q_kernel(
 def load_policy_and_setup_arrays(example: Any, policy_path: str, num_dofs: int, joint_pos_slice: slice):
     """Load ONNX policy and setup device buffers for the policy step."""
     print("[INFO] Loading policy from:", policy_path)
-    example.policy = _load_onnx_runtime(policy_path, example.device)
+    example.policy = OnnxRuntime(policy_path, device=example.device)
     example.policy_input_name = example.policy.input_names[0]
     example.policy_output_name = example.policy.output_names[0]
 
@@ -150,20 +141,22 @@ def load_policy_and_setup_arrays(example: Any, policy_path: str, num_dofs: int, 
     else:
         example._joint_pos_initial_wp = wp.zeros(num_dofs, dtype=wp.float32, device=example.device)
 
-    model_obs_dim = int(example.policy._shapes[example.policy_input_name][1])
     expected = 12 + 3 * num_dofs
-    config_obs_dim = int(example.config["num_observations"]) if "num_observations" in example.config else None
-    if config_obs_dim is not None and config_obs_dim != model_obs_dim:
+    obs_dim = int(example.config["num_observations"]) if "num_observations" in example.config else expected
+    if obs_dim != expected:
         raise ValueError(
-            f"load_policy_and_setup_arrays: config num_observations={config_obs_dim} does not match "
-            f"the ONNX model's declared input shape ({model_obs_dim})"
-        )
-    if model_obs_dim != expected:
-        raise ValueError(
-            f"load_policy_and_setup_arrays: policy obs_dim={model_obs_dim} does not match the expected "
+            f"load_policy_and_setup_arrays: config num_observations={obs_dim} does not match the expected "
             f"layout (12 + 3*num_dofs = {expected})"
         )
-    example._obs_wp = wp.zeros((1, model_obs_dim), dtype=wp.float32, device=example.device)
+    validate_policy_io_shapes(
+        policy_path,
+        example.policy_input_name,
+        example.policy_output_name,
+        obs_width=obs_dim,
+        action_width=num_dofs,
+        context="load_policy_and_setup_arrays",
+    )
+    example._obs_wp = wp.zeros((1, obs_dim), dtype=wp.float32, device=example.device)
     example._prev_act_wp = wp.zeros((1, num_dofs), dtype=wp.float32, device=example.device)
 
     example._physx_to_mjc_wp = wp.array(

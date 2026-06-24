@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import warnings
 from typing import Any
@@ -56,7 +57,7 @@ def load_metadata(path: str) -> dict[str, Any]:
         return _load_torch_metadata(path)
     onnx = _require_onnx()
     model = onnx.load(path, load_external_data=False)
-    return _extract_metadata(model)
+    return _extract_metadata(model, path)
 
 
 def load_checkpoint(
@@ -97,13 +98,19 @@ def load_checkpoint(
     return runtime, metadata
 
 
-def _extract_metadata(model) -> dict[str, Any]:
+def _extract_metadata(model, path: str) -> dict[str, Any]:
     props = {p.key: p.value for p in model.metadata_props}
     if "metadata" in props:
         try:
-            return json.loads(props["metadata"])
-        except json.JSONDecodeError:
-            pass
+            metadata = json.loads(props["metadata"])
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in ONNX metadata property 'metadata' for '{path}'") from exc
+        if not isinstance(metadata, dict):
+            raise ValueError(
+                f"Invalid ONNX metadata property 'metadata' for '{path}': expected a JSON object, "
+                f"got {type(metadata).__name__}"
+            )
+        return metadata
     parsed: dict[str, Any] = {}
     for k, v in props.items():
         try:
@@ -111,6 +118,46 @@ def _extract_metadata(model) -> dict[str, Any]:
         except json.JSONDecodeError:
             parsed[k] = v
     return parsed
+
+
+def _parse_metadata_scale(
+    metadata: dict[str, Any],
+    key: str,
+    model_path: str,
+    default: float = 1.0,
+    fallback_key: str | None = None,
+) -> float:
+    value_key = key
+    value = default
+    if key in metadata:
+        value = metadata[key]
+    elif fallback_key is not None and fallback_key in metadata:
+        value_key = fallback_key
+        value = metadata[fallback_key]
+
+    try:
+        scale = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid metadata value for '{value_key}' in '{model_path}': expected a finite non-zero number, got {value!r}"
+        ) from exc
+    if not math.isfinite(scale) or scale == 0.0:
+        raise ValueError(
+            f"Invalid metadata value for '{value_key}' in '{model_path}': expected a finite non-zero number, got {value!r}"
+        )
+    return scale
+
+
+def _runtime_shape(runtime, name: str) -> tuple[int, ...]:
+    """Return a runtime tensor shape while isolating Warp-NN private access."""
+    shapes = getattr(runtime, "_shapes", None)
+    if shapes is None:
+        raise AttributeError(
+            f"{type(runtime).__name__} does not expose tensor shapes; update Warp-NN to provide shape metadata"
+        )
+    if name not in shapes:
+        raise ValueError(f"{type(runtime).__name__} has no shape for tensor '{name}'; available tensors: {sorted(shapes)}")
+    return tuple(shapes[name])
 
 
 _TORCH_DEPRECATION_MSG = (
@@ -237,6 +284,12 @@ class _LegacyLstmTorchAdapter:
         self._torch_device = self._resolve_torch_device(device)
         self._model = self._model.to(self._torch_device)
         self._shapes: dict[str, tuple[int, ...]] = {}
+
+    def to(self, device: str | wp.Device | None):
+        self._device = device
+        self._torch_device = self._resolve_torch_device(device)
+        self._model = self._model.to(self._torch_device)
+        return self
 
     def _resolve_torch_device(self, device: str | wp.Device | None):
         torch = self._torch

@@ -13,24 +13,15 @@
 
 import numpy as np
 import warp as wp
+from warp_nn.runtime import OnnxRuntime
 
 import newton
 import newton.examples
 import newton.utils
+from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 
 lab_to_mujoco = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11]
 mujoco_to_lab = [0, 4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11]
-
-
-def _load_onnx_runtime(path: str, device: wp.Device):
-    try:
-        from warp_nn.runtime import OnnxRuntime  # noqa: PLC0415
-    except ImportError as exc:
-        raise ImportError(
-            "Running ONNX policy examples requires Warp-NN. Install it with `pip install newton[onnx]`."
-        ) from exc
-    return OnnxRuntime(path, device=device)
-
 
 @wp.kernel
 def _build_joint_target_q_kernel(
@@ -193,9 +184,17 @@ class Example:
             self.contacts = self.model.contacts()
 
         policy_path = str(asset_path / "rl_policies" / "anymal_walking_policy_physx.onnx")
-        self.policy = _load_onnx_runtime(policy_path, self.device)
+        self.policy = OnnxRuntime(policy_path, device=self.device)
         self._policy_input_name = self.policy.input_names[0]
         self._policy_output_name = self.policy.output_names[0]
+        validate_policy_io_shapes(
+            policy_path,
+            self._policy_input_name,
+            self._policy_output_name,
+            obs_width=48,
+            action_width=12,
+            context="example_robot_anymal_c_walk",
+        )
 
         self._joint_pos_initial_wp = wp.clone(self.state_0.joint_q[7:])
         self._lab_to_mujoco_wp = wp.array(np.asarray(lab_to_mujoco, dtype=np.int32), dtype=wp.int32, device=self.device)
