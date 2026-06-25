@@ -188,6 +188,12 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Tried and reverted
 
+### Further inertia compression: vec6 → uvec4 (21-bit packed)
+- 2026-06-25: after the lossless vec6 win, tried compressing `inverse_inertia_world` further to a `uvec4` (16 B) — the C# `DataCompression.CompressMat3Sym` scheme: each of the 6 symmetric entries → 21-bit float (radix flip + keep sign+8-bit-exp+top-12-mantissa; preserves full exponent range, unlike fp16, which matters for dr_legs' ~6 g bodies whose *inverse* inertia is huge), six packed 3-into-2-uint32.
+- Validated: device decode bit-exact vs a numpy reference, roundtrip rel err max 0.024% / mean 0.009% across 10⁻⁷..10⁷; 12 regression tests pass.
+- **Perf: neutral-to-slightly-negative.** Back-to-back vs vec6 (median of 3, 4096 worlds): dr_legs 2.231M → 2.227M (neutral), h1_flat 2.567M → 2.532M (−1.4%). Reverted.
+- **Why:** vec6 already cut inertia 36→24 B, after which inertia is no longer the dominant per-cid load, so shaving another 8 B buys almost no bandwidth — while the bit-twiddle decode (6× float-flip + unpack vs vec6's free float rearrange) adds ALU. Net wash, plus 0.024% precision lost for nothing. **General lesson: compression pays only on the *largest uncompressed* per-cid field and only while the decode stays cheap; once the big field is lossless-packed, further lossy packing of it (or of smaller fields) tends to net neutral.** Likely the same verdict for octahedral-encoding the per-contact normals/tangents (12 B → 8 B, lossy + decode normalize) and for quaternion compression — measure before implementing; expect marginal.
+
 ### Contact-major (AoS) `cc.derived` layout
 - 2026-06-25: `cc.derived` is SoA `(CC_DERIVED_DWORDS, n)` with k inner ("for coalesced loads"). Probing the kapla colour CSR showed the 8 colored partitions (56% of contacts) have **scattered cids** within a colour (median |Δcid|=11, only ~15% within 4), so adjacent warp lanes touch non-adjacent contacts and those per-contact derived reads do *not* coalesce across the warp — each thread pays ~1 cache line per field (~15 lines/contact). The 32k overflow colour (45%) has sequential cids and *does* coalesce. Hypothesis: a contact-major `(n, CC_DERIVED_DWORDS)` AoS layout packs a contact's ~15 fields into ~1 cache line, cutting lines/contact on the scattered 56%.
 - Implemented cleanly via two `_derived_read`/`_derived_write` wrappers (kept the `(field, k)` accessor call signature, so zero index-swap risk). **Bit-identical** (kapla regression test passes).
