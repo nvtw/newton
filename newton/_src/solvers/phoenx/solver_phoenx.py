@@ -343,26 +343,29 @@ def _choose_multi_world_scheduler(
     contacts_per_world = float(max_contact_columns) * inv_worlds
     rows_per_world = joints_per_world + contacts_per_world
 
-    # Sparse toy worlds are better packed by fast-tail; one physical
-    # block per world only starts to pay once each world has enough rows.
+    # Sparse worlds are better packed by fast-tail (many worlds per block
+    # keeps lanes busy); one physical block per world only pays off once
+    # each world carries enough rows to fill a CTA's scheduling.
     if rows_per_world < 16.0:
         return "fast_tail", 128
 
-    # Dense contact-only fleets are consistently limited by fast-tail's
-    # per-world tail work; one full block per world keeps more lanes useful.
-    if joints_per_world == 0.0 and contacts_per_world >= 512.0:
-        return "block_world", 128
+    # Contact-only fleets: a dedicated block per world pays off only when the
+    # per-world contact graph is dense enough to fill it; otherwise fast-tail's
+    # cross-world packing keeps more lanes busy.
+    if joints_per_world == 0.0:
+        if contacts_per_world >= 512.0:
+            return "block_world", 128
+        return "fast_tail", 128
 
-    # Robot RL fleets with many small mixed joint/contact worlds are limited
-    # by fast-tail lane underfill across short colour loops. A 32-thread block
-    # per world keeps the same colouring/PGS order while giving each world a
-    # full CTA scheduler slot; measured on H1/G1/DR-Legs/Anymal fleets.
-    if (
-        num_worlds >= 512
-        and 0.0 < joints_per_world <= 64.0
-        and 64.0 <= contacts_per_world <= 512.0
-        and rows_per_world >= 128.0
-    ):
+    # Joint-bearing fleets (humanoids, quadrupeds, articulations) suffer
+    # fast-tail lane underfill: the per-world colour loops diverge across the
+    # worlds packed into one block, idling lanes (ncu on dr_legs@4096 showed
+    # only ~12/32 active threads/warp at 25% occupancy -- latency-bound). One
+    # 32-thread block per world keeps the same colouring / PGS row order while
+    # giving each world a full CTA scheduler slot, restoring lane utilisation.
+    # Measured wins across H1/G1/DR-Legs/Anymal (+12-19% env_fps); applies
+    # regardless of contact density once the fleet is large and non-sparse.
+    if num_worlds >= 512:
         return "block_world", 32
 
     return "fast_tail", 128

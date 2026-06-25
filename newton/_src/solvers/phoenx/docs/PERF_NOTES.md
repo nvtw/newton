@@ -80,10 +80,21 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
   average to `_make_block_world_prepare_plus_iterate` at `376.0 ms` total /
   `146.9 us` average over the same 2,560 launches. Total CUDA kernel time in
   that short profile dropped roughly `29%` (`~1.29 s` -> `~0.91 s`).
-- Production `multi_world_scheduler="auto"` now selects `block_world_32` only
-  for supported rigid mixed fleets with many worlds, moderate joint count, and
-  substantial contact capacity. Sparse mixed scenes and dense contact-only
-  scenes keep their existing choices.
+- Production `multi_world_scheduler="auto"` selects `block_world_32` for
+  supported mixed fleets with many worlds. The selector was originally gated on
+  *substantial contact capacity* (64-512 contacts/world), which wrongly excluded
+  **joint-heavy contact-light fleets** like dr_legs (38 joints + 30
+  contacts/world) -- they stayed on fast-tail and lost ~18%.
+- 2026-06-25: generalised the selector (`_choose_multi_world_scheduler`) -- once
+  a fleet is large and non-sparse, *any* joint-bearing topology picks
+  `block_world_32` regardless of contact density. Diagnosis via ncu
+  (`analysis_tools/ncu_profile_iterate.sh`): dr_legs@4096 fast-tail was
+  latency-bound, only ~12/32 active threads/warp at 25% occupancy -- one CTA
+  per world restores lane utilisation. **dr_legs@4096: +17.9% env_fps**
+  (2.18M -> 2.57M, drift-controlled interleave). h1/g1/Anymal already met the
+  old contact-dense gate (320-510 contacts/world) so their selection and
+  performance are unchanged; contact-only (big_box/tower) and sparse fleets
+  keep their existing choices. Guarded by `test_multi_world_scheduler_helper`.
 
 ### Inertia + force-clear fusion
 - Damping + rotated-inertia refresh + force/torque zeroing were three back-to-back per-body kernels with the same dim/gate. Fused into `_phoenx_update_inertia_and_clear_forces_kernel`. Saves ~3 launches per step.
