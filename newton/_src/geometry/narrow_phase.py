@@ -21,6 +21,7 @@ from ..geometry.collision_core import (
 )
 from ..geometry.collision_primitive import (
     collide_box_box,
+    collide_capsule_box,
     collide_capsule_capsule,
     collide_plane_box,
     collide_plane_capsule,
@@ -549,6 +550,52 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                                     bb_contact.sort_sub_key = bk
                                     writer_func(bb_contact, writer_data, bb_idx)
                                     bb_idx += 1
+                continue
+
+            elif is_capsule_a and is_box_b:
+                # Analytical capsule-box manifold (up to 2 contacts). Unlike box-box
+                # the two endpoint contacts can carry DIFFERENT normals, so the normal
+                # is set per contact. Written here directly to keep that per-contact
+                # normal (the shared 4-slot block below uses a single normal).
+                capsule_axis = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+                cb_dists, cb_pos, cb_normals = collide_capsule_box(
+                    pos_a, capsule_axis, scale_a[0], scale_a[1], pos_b, wp.quat_to_matrix(quat_b), scale_b
+                )
+                cb_contact = ContactData()
+                cb_contact.radius_eff_a = radius_eff_a
+                cb_contact.radius_eff_b = radius_eff_b
+                cb_contact.margin_a = margin_offset_a
+                cb_contact.margin_b = margin_offset_b
+                cb_contact.shape_a = shape_a
+                cb_contact.shape_b = shape_b
+                cb_contact.gap_sum = gap_sum
+
+                cb_valid = int(0)
+                for ck in range(2):
+                    if cb_dists[ck] < MAXVAL:
+                        cb_contact.contact_normal_a_to_b = wp.vec3(
+                            cb_normals[ck, 0], cb_normals[ck, 1], cb_normals[ck, 2]
+                        )
+                        cb_contact.contact_point_center = wp.vec3(cb_pos[ck, 0], cb_pos[ck, 1], cb_pos[ck, 2])
+                        cb_contact.contact_distance = cb_dists[ck]
+                        if contact_passes_gap_check(cb_contact):
+                            cb_valid += 1
+
+                if cb_valid > 0:
+                    cb_base = wp.atomic_add(writer_data.contact_count, 0, cb_valid)
+                    if cb_base + cb_valid <= writer_data.contact_max:
+                        cb_idx = cb_base
+                        for ck in range(2):
+                            if cb_dists[ck] < MAXVAL:
+                                cb_contact.contact_normal_a_to_b = wp.vec3(
+                                    cb_normals[ck, 0], cb_normals[ck, 1], cb_normals[ck, 2]
+                                )
+                                cb_contact.contact_point_center = wp.vec3(cb_pos[ck, 0], cb_pos[ck, 1], cb_pos[ck, 2])
+                                cb_contact.contact_distance = cb_dists[ck]
+                                if contact_passes_gap_check(cb_contact):
+                                    cb_contact.sort_sub_key = ck
+                                    writer_func(cb_contact, writer_data, cb_idx)
+                                    cb_idx += 1
                 continue
 
             # =====================================================================
