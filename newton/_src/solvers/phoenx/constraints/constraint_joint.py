@@ -2583,27 +2583,17 @@ def _d6_rigid_prepare_at(
         a2 = a2 + inv_mass2 * eye3
         a2 = a2 + cr2_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
 
-        b_mat = (inv_mass1 + inv_mass2) * eye3
-        b_mat = b_mat + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1))
-        b_mat = b_mat + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
-
-        # U columns are B @ t1, B @ t2 (the t_mat third column is zero).
-        u_col0 = b_mat @ t1
-        u_col1 = b_mat @ t2
-
-        # ut_ai = U^T A1^-1. A1^-1 is symmetric, so row i = A1^-1 @ u_col_i.
-        ut_ai_row0 = mul_sym3(a1_inv_s6, u_col0)
-        ut_ai_row1 = mul_sym3(a1_inv_s6, u_col1)
-        write_vec3(constraints, base_offset + _OFF_UT_AI_ROW0, cid, ut_ai_row0)
-        write_vec3(constraints, base_offset + _OFF_UT_AI_ROW1, cid, ut_ai_row1)
-
-        # 2x2 swing Schur S = T^T A2 T - U^T A1^-1 U (symmetric); store sym3.
+        # BLOCK-GAUSS-SEIDEL EXPERIMENT: anchor-1 and anchor-2-swing solved
+        # as two independent blocks (no anchor1<->anchor2 Schur coupling).
+        # Anchor-2 swing effective mass is the STANDALONE point-lock mass
+        # ``a2`` projected onto the tangent basis: d2[i,j] = t_i . (a2 @ t_j),
+        # a symmetric 2x2, inverted via inv_sym2. ``ut_ai`` is dropped.
         a2_t1 = a2 @ t1
         a2_t2 = a2 @ t2
-        s00 = wp.dot(t1, a2_t1) - wp.dot(ut_ai_row0, u_col0)
-        s01 = wp.dot(t1, a2_t2) - wp.dot(ut_ai_row0, u_col1)
-        s11 = wp.dot(t2, a2_t2) - wp.dot(ut_ai_row1, u_col1)
-        s_inv_s3 = inv_sym2(wp.vec3f(s00, s01, s11))
+        d2_00 = wp.dot(t1, a2_t1)
+        d2_01 = wp.dot(t1, a2_t2)
+        d2_11 = wp.dot(t2, a2_t2)
+        s_inv_s3 = inv_sym2(wp.vec3f(d2_00, d2_01, d2_11))
         write_vec3(constraints, base_offset + _OFF_S_INV_S3, cid, s_inv_s3)
 
         drift2 = p2_b2 - p2_b1
@@ -2847,7 +2837,8 @@ def _d6_rigid_iterate_at(
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
 
     if has_swing:
-        # ---- Anchor-1 3-row + anchor-2 tangent 2-row Schur ----------
+        # ---- BLOCK-GAUSS-SEIDEL: anchor-1 3-row, then anchor-2 swing
+        # 2-row -- two independent blocks, no Schur coupling -----------
         r2_b1 = read_vec3(constraints, base_offset + _OFF_R2_B1, cid)
         r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
         t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
@@ -2855,52 +2846,45 @@ def _d6_rigid_iterate_at(
         cr2_b1 = wp.skew(r2_b1)
         cr2_b2 = wp.skew(r2_b2)
 
-        ut_ai_row0 = read_vec3(constraints, base_offset + _OFF_UT_AI_ROW0, cid)
-        ut_ai_row1 = read_vec3(constraints, base_offset + _OFF_UT_AI_ROW1, cid)
         s_inv_s3 = read_vec3(constraints, base_offset + _OFF_S_INV_S3, cid)
         if use_bias:
             bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
         else:
             bias2 = wp.vec3f(0.0, 0.0, 0.0)
+        bias2_tan = wp.vec2f(bias2[0], bias2[1])
 
         acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+
+        # Block 1: anchor-1 point lock.
+        jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
+        lam1_us = -(mul_sym3(a1_inv_s6, jv1 + bias1))
+        lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+        lam1 = lam1 * sor_boost
+
+        velocity1 = velocity1 - inv_mass1 * lam1
+        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
+        velocity2 = velocity2 + inv_mass2 * lam1
+        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
+        write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
+
+        # Block 2: anchor-2 swing tangent lock (uses updated v/w).
         acc2_t1 = wp.dot(t1, acc2_world)
         acc2_t2 = wp.dot(t2, acc2_world)
         acc2_tan = wp.vec2f(acc2_t1, acc2_t2)
 
-        jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
         jv2_world = -velocity1 + cr2_b1 @ angular_velocity1 + velocity2 - cr2_b2 @ angular_velocity2
         jv2 = wp.vec2f(wp.dot(t1, jv2_world), wp.dot(t2, jv2_world))
-        bias2_tan = wp.vec2f(bias2[0], bias2[1])
 
-        rhs1 = jv1 + bias1
-        rhs2 = jv2 + bias2_tan
-
-        ut_ai_rhs1 = wp.vec2f(wp.dot(ut_ai_row0, rhs1), wp.dot(ut_ai_row1, rhs1))
-
-        lam2_us = -(mul_sym2(s_inv_s3, rhs2 - ut_ai_rhs1))
+        lam2_us = -(mul_sym2(s_inv_s3, jv2 + bias2_tan))
         lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
         lam2 = lam2 * sor_boost
 
         lam2_world = lam2[0] * t1 + lam2[1] * t2
-        lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
 
-        u_lam2_us = (inv_mass1 + inv_mass2) * lam2_us_world
-        u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
-        u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
-
-        lam1_us = -(mul_sym3(a1_inv_s6, rhs1 + u_lam2_us))
-        lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
-        lam1 = lam1 * sor_boost
-
-        total_lin = lam1 + lam2_world
-
-        velocity1 = velocity1 - inv_mass1 * total_lin
-        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1 + cr2_b1 @ lam2_world)
-        velocity2 = velocity2 + inv_mass2 * total_lin
-        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
-
-        write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
+        velocity1 = velocity1 - inv_mass1 * lam2_world
+        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr2_b1 @ lam2_world)
+        velocity2 = velocity2 + inv_mass2 * lam2_world
+        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr2_b2 @ lam2_world)
         write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world + lam2_world)
 
         if has_twist:
@@ -3227,8 +3211,6 @@ def _revolute_iterate_at_multi(
     cr2_b2 = wp.skew(r2_b2)
 
     a1_inv_s6 = read_vec6(constraints, base_offset + _OFF_A1_INV_S6, cid)
-    ut_ai_row0 = read_vec3(constraints, base_offset + _OFF_UT_AI_ROW0, cid)
-    ut_ai_row1 = read_vec3(constraints, base_offset + _OFF_UT_AI_ROW1, cid)
     s_inv_s3 = read_vec3(constraints, base_offset + _OFF_S_INV_S3, cid)
     if use_bias:
         bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
@@ -3308,45 +3290,38 @@ def _revolute_iterate_at_multi(
     # ---- Sweep loop (all state register-resident) --------------------
     it = wp.int32(0)
     while it < num_sweeps:
-        # Positional PGS: anchor-1 (3 rows) + anchor-2 tangent (2 rows)
+        # BLOCK-GAUSS-SEIDEL positional PGS: anchor-1 (3 rows) solved,
+        # applied, then anchor-2 swing tangent (2 rows) on updated v/w.
+        # No anchor1<->anchor2 Schur coupling.
+        jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
+        lam1_us = -(mul_sym3(a1_inv_s6, jv1 + bias1))
+        lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+        lam1 = lam1 * sor_boost
+
+        velocity1 = velocity1 - inv_mass1 * lam1
+        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
+        velocity2 = velocity2 + inv_mass2 * lam1
+        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
+        acc1 = acc1 + lam1
+
         acc2_t1 = wp.dot(t1, acc2_world)
         acc2_t2 = wp.dot(t2, acc2_world)
         acc2_tan = wp.vec2f(acc2_t1, acc2_t2)
 
-        jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
         jv2_world = -velocity1 + cr2_b1 @ angular_velocity1 + velocity2 - cr2_b2 @ angular_velocity2
-        jv2_t1 = wp.dot(t1, jv2_world)
-        jv2_t2 = wp.dot(t2, jv2_world)
-        jv2 = wp.vec2f(jv2_t1, jv2_t2)
+        jv2 = wp.vec2f(wp.dot(t1, jv2_world), wp.dot(t2, jv2_world))
 
-        rhs1 = jv1 + bias1
-        rhs2 = jv2 + bias2_tan
-
-        ut_ai_rhs1 = wp.vec2f(wp.dot(ut_ai_row0, rhs1), wp.dot(ut_ai_row1, rhs1))
-
-        lam2_us = -(mul_sym2(s_inv_s3, rhs2 - ut_ai_rhs1))
+        lam2_us = -(mul_sym2(s_inv_s3, jv2 + bias2_tan))
         lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
         lam2 = lam2 * sor_boost
 
         lam2_world = lam2[0] * t1 + lam2[1] * t2
-        lam2_us_world = lam2_us[0] * t1 + lam2_us[1] * t2
 
-        u_lam2_us = (inv_mass1 + inv_mass2) * lam2_us_world
-        u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
-        u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
+        velocity1 = velocity1 - inv_mass1 * lam2_world
+        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr2_b1 @ lam2_world)
+        velocity2 = velocity2 + inv_mass2 * lam2_world
+        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr2_b2 @ lam2_world)
 
-        lam1_us = -(mul_sym3(a1_inv_s6, rhs1 + u_lam2_us))
-        lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
-        lam1 = lam1 * sor_boost
-
-        total_lin = lam1 + lam2_world
-
-        velocity1 = velocity1 - inv_mass1 * total_lin
-        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1 + cr2_b1 @ lam2_world)
-        velocity2 = velocity2 + inv_mass2 * total_lin
-        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
-
-        acc1 = acc1 + lam1
         acc2_world = acc2_world + lam2_world
 
         # Axial drive + limit scalar PGS
