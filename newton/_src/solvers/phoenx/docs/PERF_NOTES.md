@@ -88,6 +88,13 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 ### Inertia + force-clear fusion
 - Damping + rotated-inertia refresh + force/torque zeroing were three back-to-back per-body kernels with the same dim/gate. Fused into `_phoenx_update_inertia_and_clear_forces_kernel`. Saves ~3 launches per step.
 
+### Packed symmetric `inverse_inertia_world` (vec6)
+- 2026-06-25: `inverse_inertia_world` (= R·I⁻¹·Rᵀ) is always symmetric, so the full `mat33f` carries 3 redundant entries. Stored as `inertia_sym6` (6 floats, `body.py`) and reconstructed via `mat33_from_sym6` at read sites / packed via `sym6_from_mat33` at writes; host I/O uses `inertia_sym6_{pack,unpack}_np`. It is the **largest single body field** (36 B → 24 B).
+- **Why it's a broad win:** the multi-world fast-tail iterate/prepare is memory-bound and loads inertia **per-cid** (two bodies per joint/contact row ≈ the bulk of per-row traffic), so the 33% field shrink cuts real bandwidth. Single-world (kapla) loads inertia once per *contact column* (amortised over the column's contacts) so it sees no change.
+- **Measured (RTX PRO 6000, env_fps median of 3, ~1.5% within-session variance):** dr_legs @4096 **1.83M → 2.23M (+22%)**; h1_flat @4096 **2.25M → 2.55M (+13%)**; kapla single-world **66.83 → 66.84 fps (neutral)**. 12 PhoenX regression tests pass.
+- Reconstruction is a few register moves (cheap on a bandwidth-bound kernel). Off-diagonals come from the upper triangle, which also drops the FP asymmetry a general `R*I*Rᵀ` store could carry. `inverse_inertia` (body frame) stays `mat33f` — it's only touched in the once-per-substep refresh, not the per-cid hot path.
+- **Likely applies to other narrow per-body fields too** if a future scene shows them dominating per-cid traffic; inertia was the obvious first target as the widest field.
+
 ### Contact prepare: defer tangent effective masses past the sticky-break
 - 2026-06-25: `_make_contact_prepare_for_iteration_at` (rigid path) computed `eff_n`/`eff_t1`/`eff_t2` up front, but the sticky-friction-break block then re-projects fresh anchors and recomputes all three — so the tangent masses were computed twice whenever a contact's anchor broke. Only `eff_n` is consumed before that block (the Baumgarte `load_boost`/bias). Now only `eff_n` is computed up front; `eff_t1`/`eff_t2` are computed once after the anchor decision, from the final `r1`/`r2`.
 - **Bit-identical** (no-break: same inputs; break: same fresh-anchor inputs as the old recompute). Removes one `effective_mass_scalar` pair per broken contact.
