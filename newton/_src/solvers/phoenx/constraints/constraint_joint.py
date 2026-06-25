@@ -2306,8 +2306,12 @@ def _d6_prepare_at(
     minimal footprint."""
     is_revolute = mode_cfg == JOINT_MODE_REVOLUTE
     is_fixed = mode_cfg == JOINT_MODE_FIXED
+    is_universal = mode_cfg == JOINT_MODE_UNIVERSAL
     n_ang_full = is_fixed
-    has_ang_axial = is_revolute
+    n_ang_swing = is_revolute
+    has_angular_hardlock = n_ang_full or n_ang_swing
+    has_ang_axial = is_revolute or is_universal
+    has_d6_limits = mode_cfg == JOINT_MODE_BALL_SOCKET or is_universal
 
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -2380,40 +2384,46 @@ def _d6_prepare_at(
     # axis is the bilateral constraint error (locked at 0). Same ``diff``
     # and extractor as the D6 angular-limit path. n_ang=2 locks swing
     # (t1, t2) only; n_ang=3 also locks twist (n_hat) -> full angular
-    # weld, solved as a 3x3 in the world frame.
+    # weld, solved as a 3x3 in the world frame. n_ang=0 (ball/universal)
+    # leaves rotation free -- the optional D6 angular limits below own the
+    # BIAS2 / ACC_IMP2 slots instead.
     inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
     diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
-    angle_t1 = extract_rotation_angle(diff, t1)
-    angle_t2 = extract_rotation_angle(diff, t2)
     iinv_sum = inv_inertia1 + inv_inertia2
-    if n_ang_full:
-        angle_n = extract_rotation_angle(diff, n_hat)
-        # World-frame full lock: error vector along the orthonormal
-        # {t1, t2, n_hat} frame, effective mass = (I1^-1 + I2^-1).
-        bias_ang = (-angle_t1 * bias_rate) * t1 + (-angle_t2 * bias_rate) * t2 + (-angle_n * bias_rate) * n_hat
-        write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias_ang)
-        write_mat33(constraints, base_offset + _OFF_UT_AI, cid, wp.inverse(iinv_sum))
-    else:
-        bias_ang = wp.vec3f(-angle_t1 * bias_rate, -angle_t2 * bias_rate, 0.0)
-        write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias_ang)
-        m11 = wp.dot(t1, iinv_sum @ t1)
-        m12 = wp.dot(t1, iinv_sum @ t2)
-        m22 = wp.dot(t2, iinv_sum @ t2)
-        m_ang_inv = wp.inverse(wp.mat22f(m11, m12, m12, m22))
-        write_mat33(
-            constraints,
-            base_offset + _OFF_S_INV,
-            cid,
-            wp.mat33f(m_ang_inv[0, 0], m_ang_inv[0, 1], 0.0, m_ang_inv[1, 0], m_ang_inv[1, 1], 0.0, 0.0, 0.0, 0.0),
-        )
+    if has_angular_hardlock:
+        angle_t1 = extract_rotation_angle(diff, t1)
+        angle_t2 = extract_rotation_angle(diff, t2)
+        if n_ang_full:
+            angle_n = extract_rotation_angle(diff, n_hat)
+            # World-frame full lock: error vector along the orthonormal
+            # {t1, t2, n_hat} frame, effective mass = (I1^-1 + I2^-1).
+            bias_ang = (-angle_t1 * bias_rate) * t1 + (-angle_t2 * bias_rate) * t2 + (-angle_n * bias_rate) * n_hat
+            write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias_ang)
+            write_mat33(constraints, base_offset + _OFF_UT_AI, cid, wp.inverse(iinv_sum))
+        else:
+            bias_ang = wp.vec3f(-angle_t1 * bias_rate, -angle_t2 * bias_rate, 0.0)
+            write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias_ang)
+            m11 = wp.dot(t1, iinv_sum @ t1)
+            m12 = wp.dot(t1, iinv_sum @ t2)
+            m22 = wp.dot(t2, iinv_sum @ t2)
+            m_ang_inv = wp.inverse(wp.mat22f(m11, m12, m12, m22))
+            write_mat33(
+                constraints,
+                base_offset + _OFF_S_INV,
+                cid,
+                wp.mat33f(m_ang_inv[0, 0], m_ang_inv[0, 1], 0.0, m_ang_inv[1, 0], m_ang_inv[1, 1], 0.0, 0.0, 0.0, 0.0),
+            )
 
-    # ---- Warm-start: linear (acc1) + angular (acc2) -----------------
+    # ---- Warm-start: linear (acc1) + angular hard-lock (acc2) -------
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
     velocity1 = velocity1 - inv_mass1 * acc1
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1) + inv_inertia1 @ acc2
+    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1)
     velocity2 = velocity2 + inv_mass2 * acc1
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1) - inv_inertia2 @ acc2
+    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1)
+    if has_angular_hardlock:
+        acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+        angular_velocity1 = angular_velocity1 + inv_inertia1 @ acc2
+        angular_velocity2 = angular_velocity2 - inv_inertia2 @ acc2
 
     # ---- Axial drive + limit row (twist about n_hat) ----------------
     if has_ang_axial:
@@ -2438,6 +2448,22 @@ def _d6_prepare_at(
         )
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
         angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
+
+    # ---- Optional D6 angular limits on the free swing axes ----------
+    if has_d6_limits:
+        angular_velocity1, angular_velocity2 = _d6_angular_limits_prepare_at(
+            constraints,
+            cid,
+            base_offset,
+            mode_cfg,
+            orientation1,
+            orientation2,
+            inv_inertia1,
+            inv_inertia2,
+            angular_velocity1,
+            angular_velocity2,
+            dt,
+        )
 
     _ms_store_body_pair(
         bodies,
@@ -2476,8 +2502,12 @@ def _d6_iterate_at(
     row. ``mode_cfg`` selects the lock mask (see :func:`_d6_prepare_at`)."""
     is_revolute = mode_cfg == JOINT_MODE_REVOLUTE
     is_fixed = mode_cfg == JOINT_MODE_FIXED
+    is_universal = mode_cfg == JOINT_MODE_UNIVERSAL
     n_ang_full = is_fixed
-    has_ang_axial = is_revolute
+    n_ang_swing = is_revolute
+    has_angular_hardlock = n_ang_full or n_ang_swing
+    has_ang_axial = is_revolute or is_universal
+    has_d6_limits = mode_cfg == JOINT_MODE_BALL_SOCKET or is_universal
 
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -2527,27 +2557,28 @@ def _d6_iterate_at(
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
 
     # ---- Angular block: lock n_ang axes about {t1, t2, n_hat} -------
-    acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-    w_rel = angular_velocity1 - angular_velocity2
-    if n_ang_full:
-        # Full 3x3 world-frame lock (bias_ang is a world error vector).
-        m_inv3 = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
-        lam_us3 = -(m_inv3 @ (w_rel + bias_ang))
-        torque = mass_coeff * lam_us3 - impulse_coeff * acc2
-        torque = torque * sor_boost
-    else:
-        # 2x2 swing lock on (t1, t2); bias_ang holds the tangent angles.
-        s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-        m_ang_inv = wp.mat22f(s_inv_packed[0, 0], s_inv_packed[0, 1], s_inv_packed[1, 0], s_inv_packed[1, 1])
-        acc2_tan = wp.vec2f(wp.dot(t1, acc2), wp.dot(t2, acc2))
-        jvr = wp.vec2f(wp.dot(t1, w_rel) + bias_ang[0], wp.dot(t2, w_rel) + bias_ang[1])
-        lam_ang_us = -(m_ang_inv @ jvr)
-        lam_ang = mass_coeff * lam_ang_us - impulse_coeff * acc2_tan
-        lam_ang = lam_ang * sor_boost
-        torque = lam_ang[0] * t1 + lam_ang[1] * t2
-    angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque
-    angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2 + torque)
+    if has_angular_hardlock:
+        acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+        w_rel = angular_velocity1 - angular_velocity2
+        if n_ang_full:
+            # Full 3x3 world-frame lock (bias_ang is a world error vector).
+            m_inv3 = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
+            lam_us3 = -(m_inv3 @ (w_rel + bias_ang))
+            torque = mass_coeff * lam_us3 - impulse_coeff * acc2
+            torque = torque * sor_boost
+        else:
+            # 2x2 swing lock on (t1, t2); bias_ang holds the tangent angles.
+            s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
+            m_ang_inv = wp.mat22f(s_inv_packed[0, 0], s_inv_packed[0, 1], s_inv_packed[1, 0], s_inv_packed[1, 1])
+            acc2_tan = wp.vec2f(wp.dot(t1, acc2), wp.dot(t2, acc2))
+            jvr = wp.vec2f(wp.dot(t1, w_rel) + bias_ang[0], wp.dot(t2, w_rel) + bias_ang[1])
+            lam_ang_us = -(m_ang_inv @ jvr)
+            lam_ang = mass_coeff * lam_ang_us - impulse_coeff * acc2_tan
+            lam_ang = lam_ang * sor_boost
+            torque = lam_ang[0] * t1 + lam_ang[1] * t2
+        angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque
+        angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque
+        write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2 + torque)
 
     # ---- Axial drive + limit scalar row (twist about n_hat) ---------
     if has_ang_axial:
@@ -2559,6 +2590,23 @@ def _d6_iterate_at(
         )
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
         angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
+
+    # ---- Optional D6 angular limits on the free swing axes ----------
+    if has_d6_limits:
+        angular_velocity1, angular_velocity2 = _d6_angular_limits_block(
+            constraints,
+            cid,
+            base_offset,
+            bodies,
+            b1,
+            mode_cfg,
+            angular_velocity1,
+            angular_velocity2,
+            inv_inertia1,
+            inv_inertia2,
+            idt,
+            sor_boost,
+        )
 
     _ms_store_body_pair(
         bodies,
@@ -4157,8 +4205,8 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
         )
     elif joint_mode == JOINT_MODE_UNIVERSAL:
-        _universal_prepare_at(
-            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        _d6_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, JOINT_MODE_UNIVERSAL
         )
     elif joint_mode == JOINT_MODE_FIXED:
         _d6_prepare_at(
@@ -4169,8 +4217,8 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
         )
     else:
-        _ball_socket_prepare_at(
-            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        _d6_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, JOINT_MODE_BALL_SOCKET
         )
 
 
@@ -4566,7 +4614,7 @@ def actuated_double_ball_socket_iterate_at(
             use_bias,
         )
     elif joint_mode == JOINT_MODE_UNIVERSAL:
-        _universal_iterate_at(
+        _d6_iterate_at(
             constraints,
             cid,
             base_offset,
@@ -4579,6 +4627,7 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            JOINT_MODE_UNIVERSAL,
         )
     elif joint_mode == JOINT_MODE_FIXED:
         _d6_iterate_at(
@@ -4612,7 +4661,7 @@ def actuated_double_ball_socket_iterate_at(
             use_bias,
         )
     else:
-        _ball_socket_iterate_at(
+        _d6_iterate_at(
             constraints,
             cid,
             base_offset,
@@ -4625,6 +4674,7 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            JOINT_MODE_BALL_SOCKET,
         )
 
 
