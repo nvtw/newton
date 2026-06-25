@@ -38,18 +38,14 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     read_float,
     read_int,
     read_mat33,
-    read_mat44,
     read_quat,
     read_vec3,
-    read_vec4,
     soft_constraint_coefficients,
     write_float,
     write_int,
     write_mat33,
-    write_mat44,
     write_quat,
     write_vec3,
-    write_vec4,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.helpers.math_helpers import (
@@ -213,11 +209,9 @@ class ActuatedDoubleBallSocketData:
     local_anchor1_b2: wp.vec3f
     local_anchor2_b1: wp.vec3f
     local_anchor2_b2: wp.vec3f
-    # Runtime (per-substep) lever arms for the two shared anchors.
+    # Runtime (per-substep) lever arms for the anchor-1 point lock.
     r1_b1: wp.vec3f
     r1_b2: wp.vec3f
-    r2_b1: wp.vec3f
-    r2_b2: wp.vec3f
     # Runtime tangent basis perpendicular to the current world joint axis.
     t1: wp.vec3f
     t2: wp.vec3f
@@ -232,27 +226,26 @@ class ActuatedDoubleBallSocketData:
     # Prismatic: bias1, bias2 = a1, a2 tangent drifts (t1,t2,0).
     bias1: wp.vec3f
     bias2: wp.vec3f
-    # Mode-specific Schur cache, aliased onto one 27-dword block sized
-    # for the larger mode (joint mode is fixed at construction).
-    # Reads/writes go through :func:`_read_revo_*` / :func:`_read_pris_*`.
-    #
-    # Revolute  (27 used): [0..8] a1_inv mat33, [9..17] ut_ai mat33,
-    #                      [18..26] s_inv mat33.
-    # Prismatic (21 used, 6 unused tail): [0..15] a4_inv mat44,
-    #                      [16..19] c_pris vec4, [20] s_scalar_inv.
-    mode_cache: wp.types.vector(length=27, dtype=wp.float32)
-    # Mode-specific extras, same alias trick. 16 dwords sized for the
-    # larger (prismatic) layout.
-    #
-    # Prismatic (16 used): [0..2] local_anchor3_b1, [3..5] local_anchor3_b2,
-    #     [6..8] r3_b1, [9..11] r3_b2, [12..14] accumulated_impulse3,
-    #     [15] bias3.
-    # Revolute  (6 used, 10 unused tail):
-    #     [0..3] inv_initial_orientation (quat),
-    #     [4] revolution_counter, [5] previous_quaternion_angle.
+    # Unified D6 effective-mass cache (18 dwords). The angular slot is
+    # mode-exclusive, so the linear inverse and the angular inverse share
+    # this one block:
+    #   [0..8]  a1_inv  -- linear point-lock inverse (3x3, or a packed 2x2
+    #                      for prismatic's perpendicular slide lock).
+    #   [9..17] ang     -- angular inverse: 3x3 world weld (fixed/prismatic),
+    #                      packed 2x2 swing (revolute), or the cable PD-soft
+    #                      bend 2x2 + twist scalars. See _OFF_S_INV / _OFF_UT_AI.
+    mode_cache: wp.types.vector(length=18, dtype=wp.float32)
+    # Mode-extras (16 dwords). Holds the relative-orientation tracker that
+    # the D6 angular weld needs in every mode, plus the optional D6
+    # angular-limit rows for ball-socket / universal:
+    #   [0..3]  inv_initial_orientation (quat)
+    #   [4]     revolution_counter
+    #   [5]     previous_quaternion_angle
+    #   [6..15] D6 angular-limit lower/upper/count/eff_inv (ball/universal)
     mode_extras: wp.types.vector(length=16, dtype=wp.float32)
-    # Warm-start accumulated impulses for the shared anchors. The
-    # third (prismatic-only) impulse moved into ``mode_extras`` above.
+    # Warm-start accumulated impulses: acc1 = linear (anchor 1), acc2 =
+    # angular (world torque, also carries cable bend+twist and the D6
+    # limit torque).
     accumulated_impulse1: wp.vec3f
     accumulated_impulse2: wp.vec3f
 
@@ -264,7 +257,6 @@ class ActuatedDoubleBallSocketData:
     # one axis is both simpler and more numerically stable than the
     # old two-axis projection.
     axis_local1: wp.vec3f
-    rest_length: wp.float32
     # NB: ``inv_initial_orientation``, ``revolution_counter``, and
     # ``previous_quaternion_angle`` (revolute twist-tracker scratch)
     # used to live here as separate fields. They've been folded into
@@ -364,8 +356,6 @@ _OFF_LA2_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_a
 _OFF_LA2_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor2_b2"))
 _OFF_R1_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r1_b1"))
 _OFF_R1_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r1_b2"))
-_OFF_R2_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r2_b1"))
-_OFF_R2_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r2_b2"))
 _OFF_T1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "t1"))
 _OFF_T2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "t2"))
 _OFF_HERTZ = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "hertz"))
@@ -374,45 +364,37 @@ _OFF_MASS_COEFF = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mas
 _OFF_IMPULSE_COEFF = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "impulse_coeff"))
 _OFF_BIAS1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias1"))
 _OFF_BIAS2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias2"))
-# Aliased mode-specific Schur cache. Revolute uses dwords [0..27),
-# prismatic uses [0..21) of the same 27-dword block. Joint mode is
-# fixed at construction so the two layouts never collide.
+# Unified D6 effective-mass cache (18 dwords). The angular inverse slot
+# is mode-exclusive, so ``_OFF_S_INV`` and ``_OFF_UT_AI`` are the SAME
+# block: the 3x3 world weld (fixed/prismatic) and the 2x2 swing / cable
+# PD-soft cache (revolute/cable) never coexist on one joint.
 _OFF_MODE_CACHE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mode_cache"))
 _OFF_A1_INV = wp.constant(int(_OFF_MODE_CACHE) + 0)
 _OFF_UT_AI = wp.constant(int(_OFF_MODE_CACHE) + 9)
-_OFF_S_INV = wp.constant(int(_OFF_MODE_CACHE) + 18)
-_OFF_A4_INV = wp.constant(int(_OFF_MODE_CACHE) + 0)
-_OFF_C_PRIS = wp.constant(int(_OFF_MODE_CACHE) + 16)
-_OFF_S_SCALAR_INV = wp.constant(int(_OFF_MODE_CACHE) + 20)
-# Aliased mode-extras block. Prismatic packs anchor-3 / r3 / acc_imp3
-# / bias3 (16 dwords); revolute packs the twist-tracker scratch
-# (inv_initial_orientation + revolution_counter + previous_quaternion_angle
-# = 6 dwords). Mutually exclusive, so we share the 16-dword block.
+_OFF_S_INV = wp.constant(int(_OFF_MODE_CACHE) + 9)
+# Mode-extras block. Holds the relative-orientation tracker (all modes)
+# and the optional D6 angular-limit rows (ball-socket / universal).
 _OFF_MODE_EXTRAS = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mode_extras"))
-# Prismatic-only fields, dwords 0..15 of mode_extras:
-_OFF_LA3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
-_OFF_LA3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 3)
-_OFF_R3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
-_OFF_R3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
-_OFF_ACC_IMP3 = wp.constant(int(_OFF_MODE_EXTRAS) + 12)
-_OFF_BIAS3 = wp.constant(int(_OFF_MODE_EXTRAS) + 15)
-# Revolute / universal fields, dwords 0..5 of mode_extras (10 unused tail):
 _OFF_INV_INITIAL_ORIENTATION = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_REVOLUTION_COUNTER = wp.constant(int(_OFF_MODE_EXTRAS) + 4)
 _OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(int(_OFF_MODE_EXTRAS) + 5)
+# Legacy anchor-3 aliases, retained only so the in-progress full-coordinate
+# DVI articulation path (``articulations/device.py``) still imports. The D6
+# joint no longer uses anchor 3 -- these now overlap the orientation tracker
+# and must be reconciled when the DVI assembly is updated to the D6 schema.
+_OFF_LA3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
+_OFF_LA3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 3)
 # BALL / UNIVERSAL D6 angular limit aliases, dwords 6..15 of mode_extras.
 _OFF_D6_LIMIT_LOWER = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
 _OFF_D6_LIMIT_UPPER = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
 _OFF_D6_LIMIT_COUNT = wp.constant(int(_OFF_MODE_EXTRAS) + 12)
 _OFF_D6_LIMIT_EFF_INV = wp.constant(int(_OFF_MODE_EXTRAS) + 13)
-# Cable-only PD soft-cache aliases over the existing ``s_inv`` mat33 slot
-# (9 dwords). Cable never uses the 3+2 Schur, so the revolute / fixed
-# layout for these dwords is free to reinterpret here.
+# Cable PD soft-cache, packed into the shared angular slot (cable never
+# uses the rigid 2x2/3x3 angular inverse):
 #   dwords 0..3 = K22_soft inverse (2x2 packed: m00, m01, m10, m11)
-#   dword 4     = gamma_bend       (PD softness coefficient, anchor-2 PD rows)
-#   dword 5     = M_twist_soft     (PD softened effective mass for anchor-3 row)
-#   dword 6     = gamma_twist      (PD softness coefficient, anchor-3 PD row)
-#   dwords 7..8 = unused
+#   dword 4     = gamma_bend     (PD softness, swing rows)
+#   dword 5     = M_twist_soft   (PD softened effective mass, twist row)
+#   dword 6     = gamma_twist    (PD softness, twist row)
 _OFF_CABLE_K22_INV_00 = wp.constant(int(_OFF_S_INV) + 0)
 _OFF_CABLE_K22_INV_01 = wp.constant(int(_OFF_S_INV) + 1)
 _OFF_CABLE_K22_INV_10 = wp.constant(int(_OFF_S_INV) + 2)
@@ -425,7 +407,6 @@ _OFF_ACC_IMP1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accum
 _OFF_ACC_IMP2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse2"))
 
 _OFF_AXIS_LOCAL1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_local1"))
-_OFF_REST_LENGTH = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "rest_length"))
 _OFF_DRIVE_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "drive_mode"))
 _OFF_TARGET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target"))
 _OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target_velocity"))
@@ -573,20 +554,10 @@ def actuated_double_ball_socket_initialize_kernel(
         n_hat_init = wp.vec3f(1.0, 0.0, 0.0)
 
     axis_local1 = wp.quat_rotate_inv(orient1, n_hat_init)
-    # Rest relative orientation used by the revolute twist tracker.
+    # Rest relative orientation used by the D6 angular weld / twist tracker.
     # ``diff = q2 * inv_initial_orientation * q1^*`` is the identity at
     # finalize() time, so the revolution-counter starts in-branch at 0.
-    # Matches the standalone angular motor / angular limit exactly.
     inv_initial_orientation = wp.quat_inverse(orient2) * orient1
-
-    # ---- Anchor 3 auto-derivation (prismatic only) -------------------
-    # Pick any unit perpendicular to the slide axis, offset anchor 1 by
-    # ``rest_length`` along it. Body-local snapshot so the runtime math
-    # can rotate anchor 3 with each body independently.
-    t_ref_init = create_orthonormal(n_hat_init)
-    a3_w = a1_w + rest_length * t_ref_init
-    la3_b1 = wp.quat_rotate_inv(orient1, a3_w - pos1)
-    la3_b2 = wp.quat_rotate_inv(orient2, a3_w - pos2)
 
     constraint_set_type(constraints, cid, CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET)
     mode = joint_mode[tid]
@@ -602,8 +573,6 @@ def actuated_double_ball_socket_initialize_kernel(
     zero3 = wp.vec3f(0.0, 0.0, 0.0)
     write_vec3(constraints, _OFF_R1_B1, cid, zero3)
     write_vec3(constraints, _OFF_R1_B2, cid, zero3)
-    write_vec3(constraints, _OFF_R2_B1, cid, zero3)
-    write_vec3(constraints, _OFF_R2_B2, cid, zero3)
     write_vec3(constraints, _OFF_T1, cid, zero3)
     write_vec3(constraints, _OFF_T2, cid, zero3)
     write_vec3(constraints, _OFF_BIAS1, cid, zero3)
@@ -611,18 +580,9 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
     write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
 
-    # ``mode_extras`` block is mode-aliased: modes whose D6 angular lock
-    # needs the relative-orientation tracker (REVOLUTE / BALL / UNIVERSAL /
-    # FIXED) store inv_initial_orientation + revolution_counter +
-    # previous_quaternion_angle there; the still-bespoke anchor-based modes
-    # (PRISMATIC / CABLE) store the anchor-3 snapshot + bias3 + acc_imp3.
-    # Writing both layouts would clobber the alias, so we branch. (FIXED
-    # moved to the tracker group when it migrated to the D6 angular weld,
-    # which locks rotation directly and no longer needs anchor 3.)
-    # Every joint mode now uses the unified D6 angular formulation, which
-    # reads the relative-orientation tracker (and no longer the anchor-3
-    # snapshot). Cable's bend/twist accumulators live in ACC_IMP2 (zeroed
-    # above), so anchor 3 is fully retired.
+    # Relative-orientation tracker -- the D6 angular weld reads it in every
+    # mode; ball-socket / universal also use the mode_extras tail for D6
+    # angular-limit rows.
     write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
     write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
     write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
@@ -635,18 +595,8 @@ def actuated_double_ball_socket_initialize_kernel(
     eye3 = wp.identity(3, dtype=wp.float32)
     write_mat33(constraints, _OFF_A1_INV, cid, eye3)
     write_mat33(constraints, _OFF_UT_AI, cid, eye3)
-    write_mat33(constraints, _OFF_S_INV, cid, eye3)
-    eye4 = wp.identity(4, dtype=wp.float32)
-    write_mat44(constraints, _OFF_A4_INV, cid, eye4)
-    write_vec4(constraints, _OFF_C_PRIS, cid, wp.vec4f(0.0, 0.0, 0.0, 0.0))
-    write_float(constraints, _OFF_S_SCALAR_INV, cid, 0.0)
 
-    # Actuator block. Twist-tracker init (inv_initial_orientation +
-    # revolution_counter + previous_quaternion_angle) ran in the
-    # mode-conditional block above since those fields share dwords
-    # with the prismatic anchor-3 snapshot.
     write_vec3(constraints, _OFF_AXIS_LOCAL1, cid, axis_local1)
-    write_float(constraints, _OFF_REST_LENGTH, cid, rest_length)
     write_int(constraints, _OFF_DRIVE_MODE, cid, drive_mode[tid])
     write_float(constraints, _OFF_TARGET, cid, target[tid])
     write_float(constraints, _OFF_TARGET_VELOCITY, cid, target_velocity[tid])
@@ -737,8 +687,6 @@ def _adbs_clear_reset_worlds_kernel(
     zero3 = wp.vec3f(0.0, 0.0, 0.0)
     write_vec3(constraints, _OFF_R1_B1, cid, zero3)
     write_vec3(constraints, _OFF_R1_B2, cid, zero3)
-    write_vec3(constraints, _OFF_R2_B1, cid, zero3)
-    write_vec3(constraints, _OFF_R2_B2, cid, zero3)
     write_vec3(constraints, _OFF_T1, cid, zero3)
     write_vec3(constraints, _OFF_T2, cid, zero3)
     write_float(constraints, _OFF_MASS_COEFF, cid, wp.float32(1.0))
@@ -746,20 +694,15 @@ def _adbs_clear_reset_worlds_kernel(
     write_vec3(constraints, _OFF_BIAS1, cid, zero3)
     write_vec3(constraints, _OFF_BIAS2, cid, zero3)
 
-    for row in range(27):
+    for row in range(18):
         write_float(constraints, _OFF_MODE_CACHE + row, cid, wp.float32(0.0))
 
+    # Relative-orientation tracker (all modes) + D6 limit scratch (ball/univ).
+    write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, wp.int32(0))
+    write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, wp.float32(0.0))
     mode = read_int(constraints, _OFF_JOINT_MODE, cid)
-    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED or mode == JOINT_MODE_CABLE:
-        write_vec3(constraints, _OFF_R3_B1, cid, zero3)
-        write_vec3(constraints, _OFF_R3_B2, cid, zero3)
-        write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
-        write_float(constraints, _OFF_BIAS3, cid, wp.float32(0.0))
-    else:
-        write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, wp.int32(0))
-        write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, wp.float32(0.0))
-        if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
-            write_vec3(constraints, _OFF_D6_LIMIT_EFF_INV, cid, zero3)
+    if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
+        write_vec3(constraints, _OFF_D6_LIMIT_EFF_INV, cid, zero3)
 
     write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
     write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
@@ -2376,46 +2319,28 @@ def actuated_double_ball_socket_world_wrench_at(
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-    acc3 = read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
-    r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
-    r3_b2 = read_vec3(constraints, base_offset + _OFF_R3_B2, cid)
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
     acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
     acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
     acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
     acc_axial = acc_drive + acc_limit + acc_friction
 
-    if joint_mode == JOINT_MODE_REVOLUTE:
-        # D6 revolute: anchor-1 linear impulse + angular swing torque
-        # (``acc2`` is a pure torque, applied to body 2 with -sign) +
-        # axial drive/limit torque about -n_hat.
-        force = acc1 * idt
-        torque = wp.cross(r1_b2, acc1 * idt) - acc2 * idt - n_hat * (acc_axial * idt)
-    elif joint_mode == JOINT_MODE_PRISMATIC:
-        force = (acc1 + acc2 + acc3) * idt
-        torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
-        # Axial block is a linear force along -n_hat.
+    # Unified D6 reaction on body 2: the linear lock applies ``+acc1`` at
+    # anchor 1, the angular block applies the pure torque ``-acc2`` (body 2
+    # gets the opposite sign of the iterate's ``w1 += I1^-1 @ acc2``). The
+    # angular axial (revolute/universal twist) adds a torque about -n_hat;
+    # the linear axial (prismatic slide) adds a force/torque along -n_hat.
+    # ``acc2`` already carries the D6 angular-limit torque for ball/universal
+    # and the bend/twist torque for cable, so no per-mode anchor terms remain.
+    force = acc1 * idt
+    torque = wp.cross(r1_b2, acc1 * idt) - acc2 * idt
+    if joint_mode == JOINT_MODE_PRISMATIC:
         axial_force = n_hat * (acc_axial * idt)
         force = force - axial_force
         torque = torque - wp.cross(r1_b2, axial_force)
-    elif joint_mode == JOINT_MODE_UNIVERSAL:
-        force = acc1 * idt
-        torque = wp.cross(r1_b2, acc1 * idt) - n_hat * (acc_axial * idt) - acc2 * idt
-    elif joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_CABLE:
-        # Same anchor layout (anchor-1 3-row + anchor-2 tangent 2-row +
-        # anchor-3 scalar 1-row); no axial block. CABLE's PD softness
-        # is already baked into the accumulated impulses, so the
-        # wrench reflects the actual reaction the joint applied this
-        # substep.
-        force = (acc1 + acc2 + acc3) * idt
-        torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
-    else:
-        # Ball-socket: anchor-1 impulse plus optional D6 angular-limit torque.
-        force = acc1 * idt
-        torque = wp.cross(r1_b2, acc1 * idt)
-        if read_int(constraints, base_offset + _OFF_D6_LIMIT_COUNT, cid) > wp.int32(0):
-            torque = torque - acc2 * idt
+    elif joint_mode == JOINT_MODE_REVOLUTE or joint_mode == JOINT_MODE_UNIVERSAL:
+        torque = torque - n_hat * (acc_axial * idt)
     return force, torque
 
 
@@ -2675,21 +2600,20 @@ def actuated_double_ball_socket_world_error_at(
     p1_b2 = pos2 + wp.quat_rotate(q2, la1_b2)
     anchor1_drift = p1_b2 - p1_b1
 
-    # Anchor 2 tangent drift (revolute / prismatic only). Project onto
-    # the persisted tangent basis written by the last prepare pass; the
-    # basis is stable across substeps.
+    # Angular swing drift (D6): the rotation about the locked tangent
+    # axes, read off the relative-orientation quaternion -- the same
+    # ``diff`` and extractor the iterate uses. Zero for ball / universal
+    # (swing is free there).
+    t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
+    t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
+    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+    inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
+    diff = q2 * inv_init * wp.quat_inverse(q1)
     drift_t1 = wp.float32(0.0)
     drift_t2 = wp.float32(0.0)
     if joint_mode != JOINT_MODE_BALL_SOCKET and joint_mode != JOINT_MODE_UNIVERSAL:
-        la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
-        la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
-        p2_b1 = pos1 + wp.quat_rotate(q1, la2_b1)
-        p2_b2 = pos2 + wp.quat_rotate(q2, la2_b2)
-        t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
-        t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
-        anchor2_drift = p2_b2 - p2_b1
-        drift_t1 = wp.dot(t1, anchor2_drift)
-        drift_t2 = wp.dot(t2, anchor2_drift)
+        drift_t1 = extract_rotation_angle(diff, t1)
+        drift_t2 = extract_rotation_angle(diff, t2)
 
     # Actuator residual (drive position error OR active limit C).
     actuator_err = wp.float32(0.0)
@@ -2710,18 +2634,11 @@ def actuated_double_ball_socket_world_error_at(
             elif cumulative < min_value:
                 actuator_err = actuator_err + (cumulative - min_value)
     elif joint_mode == JOINT_MODE_PRISMATIC:
-        # Recompute slide from anchors + rest_length (same expression
-        # as _prismatic_prepare_at). The axial sign matches the
-        # prepare convention: slide > 0 when anchor 2 on body 2 has
-        # moved past its rest position along the world axis.
-        axis_local1 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
-        rest_length = read_float(constraints, base_offset + _OFF_REST_LENGTH, cid)
-        la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
-        la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
-        p2_b1 = pos1 + wp.quat_rotate(q1, la2_b1)
-        p2_b2 = pos2 + wp.quat_rotate(q2, la2_b2)
-        n_hat = wp.quat_rotate(q1, axis_local1)
-        slide = wp.dot(n_hat, p2_b2 - p2_b1) - rest_length
+        # Slide is the free translation along n_hat at anchor 1 (the D6
+        # linear block locks only the two perpendicular axes), so the
+        # signed slide is just n_hat . anchor1_drift -- no anchor-3 / rest
+        # length needed.
+        slide = wp.dot(n_hat, anchor1_drift)
         if drive_mode == DRIVE_MODE_POSITION:
             actuator_err = actuator_err + (slide - target)
         if min_value <= max_value:
@@ -2730,18 +2647,9 @@ def actuated_double_ball_socket_world_error_at(
             elif slide < min_value:
                 actuator_err = actuator_err + (slide - min_value)
     elif joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_CABLE:
-        # Anchor-3 scalar drift along the persisted ``t2`` (the 6th
-        # locked DoF). FIXED has no drive / limit; CABLE has no axial
-        # drive / limit either (its bend / twist gains live in the
-        # drive / limit slots but enter the iterate as PD soft
-        # coefficients on the anchor-2 / anchor-3 rows). Reported in
-        # the "actuator" slot for consistency with FIXED.
-        la3_b1 = read_vec3(constraints, base_offset + _OFF_LA3_B1, cid)
-        la3_b2 = read_vec3(constraints, base_offset + _OFF_LA3_B2, cid)
-        p3_b1 = pos1 + wp.quat_rotate(q1, la3_b1)
-        p3_b2 = pos2 + wp.quat_rotate(q2, la3_b2)
-        t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
-        actuator_err = wp.dot(t2, p3_b2 - p3_b1)
+        # Twist drift about n_hat -- the 6th locked (fixed) or soft
+        # (cable) angular DoF.
+        actuator_err = extract_rotation_angle(diff, n_hat)
 
     return wp.spatial_vector(anchor1_drift, wp.vec3f(drift_t1, drift_t2, actuator_err))
 
