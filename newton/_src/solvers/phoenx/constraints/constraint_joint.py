@@ -42,6 +42,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     read_quat,
     read_vec3,
     read_vec4,
+    read_vec6,
     soft_constraint_coefficients,
     write_float,
     write_int,
@@ -50,13 +51,19 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_quat,
     write_vec3,
     write_vec4,
+    write_vec6,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     create_orthonormal,
     extract_rotation_angle,
+    inv_sym2,
+    inv_sym3,
+    mul_sym2,
+    mul_sym3,
     revolution_tracker_angle,
     revolution_tracker_update,
+    sym6_from_mat33_upper,
 )
 from newton._src.solvers.phoenx.mass_splitting.access import (
     read_angular_velocity_unified,
@@ -381,6 +388,17 @@ _OFF_MODE_CACHE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mod
 _OFF_A1_INV = wp.constant(int(_OFF_MODE_CACHE) + 0)
 _OFF_UT_AI = wp.constant(int(_OFF_MODE_CACHE) + 9)
 _OFF_S_INV = wp.constant(int(_OFF_MODE_CACHE) + 18)
+# Compressed rigid-family Schur cache (BALL / REVOLUTE / FIXED / UNIVERSAL).
+# Symmetric-aware packing of the same Schur quantities the mat33 layout
+# above stored: a1_inv as sym6 (upper triangle), ut_ai as two vec3 rows
+# (2x3, not symmetric), s_inv (the 2x2 swing Schur) as sym3 (m00, m01, m11).
+# Laid out in dwords [0..15) of mode_cache, clear of FIXED's
+# ``_OFF_S_SCALAR_INV`` (dword 20). Rigid modes never coexist with
+# prismatic / cable on a cid, so this overlaps their layouts harmlessly.
+_OFF_A1_INV_S6 = wp.constant(int(_OFF_MODE_CACHE) + 0)
+_OFF_UT_AI_ROW0 = wp.constant(int(_OFF_MODE_CACHE) + 6)
+_OFF_UT_AI_ROW1 = wp.constant(int(_OFF_MODE_CACHE) + 9)
+_OFF_S_INV_S3 = wp.constant(int(_OFF_MODE_CACHE) + 12)
 _OFF_A4_INV = wp.constant(int(_OFF_MODE_CACHE) + 0)
 _OFF_C_PRIS = wp.constant(int(_OFF_MODE_CACHE) + 16)
 _OFF_S_SCALAR_INV = wp.constant(int(_OFF_MODE_CACHE) + 20)
@@ -2501,8 +2519,9 @@ def _d6_rigid_prepare_at(
     a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
     a1 = a1 + inv_mass2 * eye3
     a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
-    a1_inv = wp.inverse(a1)
-    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
+    # Symmetric 3x3; invert and store the upper triangle as sym6.
+    a1_inv_s6 = inv_sym3(sym6_from_mat33_upper(a1))
+    write_vec6(constraints, base_offset + _OFF_A1_INV_S6, cid, a1_inv_s6)
 
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
@@ -2568,45 +2587,24 @@ def _d6_rigid_prepare_at(
         b_mat = b_mat + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr2_b1))
         b_mat = b_mat + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr2_b2))
 
-        t_mat = wp.mat33f(
-            t1[0],
-            t2[0],
-            0.0,
-            t1[1],
-            t2[1],
-            0.0,
-            t1[2],
-            t2[2],
-            0.0,
-        )
-        tt = wp.transpose(t_mat)
+        # U columns are B @ t1, B @ t2 (the t_mat third column is zero).
+        u_col0 = b_mat @ t1
+        u_col1 = b_mat @ t2
 
-        u_mat = b_mat @ t_mat
-        d_mat = tt @ (a2 @ t_mat)
+        # ut_ai = U^T A1^-1. A1^-1 is symmetric, so row i = A1^-1 @ u_col_i.
+        ut_ai_row0 = mul_sym3(a1_inv_s6, u_col0)
+        ut_ai_row1 = mul_sym3(a1_inv_s6, u_col1)
+        write_vec3(constraints, base_offset + _OFF_UT_AI_ROW0, cid, ut_ai_row0)
+        write_vec3(constraints, base_offset + _OFF_UT_AI_ROW1, cid, ut_ai_row1)
 
-        ut_ai = wp.transpose(u_mat) @ a1_inv
-        s_mat = d_mat - ut_ai @ u_mat
-
-        s22 = wp.mat22f(
-            s_mat[0, 0],
-            s_mat[0, 1],
-            s_mat[1, 0],
-            s_mat[1, 1],
-        )
-        s22_inv = wp.inverse(s22)
-        s_inv_packed = wp.mat33f(
-            s22_inv[0, 0],
-            s22_inv[0, 1],
-            0.0,
-            s22_inv[1, 0],
-            s22_inv[1, 1],
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        )
-        write_mat33(constraints, base_offset + _OFF_UT_AI, cid, ut_ai)
-        write_mat33(constraints, base_offset + _OFF_S_INV, cid, s_inv_packed)
+        # 2x2 swing Schur S = T^T A2 T - U^T A1^-1 U (symmetric); store sym3.
+        a2_t1 = a2 @ t1
+        a2_t2 = a2 @ t2
+        s00 = wp.dot(t1, a2_t1) - wp.dot(ut_ai_row0, u_col0)
+        s01 = wp.dot(t1, a2_t2) - wp.dot(ut_ai_row0, u_col1)
+        s11 = wp.dot(t2, a2_t2) - wp.dot(ut_ai_row1, u_col1)
+        s_inv_s3 = inv_sym2(wp.vec3f(s00, s01, s11))
+        write_vec3(constraints, base_offset + _OFF_S_INV_S3, cid, s_inv_s3)
 
         drift2 = p2_b2 - p2_b1
         bias2 = wp.vec3f(
@@ -2838,7 +2836,7 @@ def _d6_rigid_iterate_at(
     cr1_b1 = wp.skew(r1_b1)
     cr1_b2 = wp.skew(r1_b2)
 
-    a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
+    a1_inv_s6 = read_vec6(constraints, base_offset + _OFF_A1_INV_S6, cid)
     if use_bias:
         bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
     else:
@@ -2857,8 +2855,9 @@ def _d6_rigid_iterate_at(
         cr2_b1 = wp.skew(r2_b1)
         cr2_b2 = wp.skew(r2_b2)
 
-        ut_ai = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
-        s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
+        ut_ai_row0 = read_vec3(constraints, base_offset + _OFF_UT_AI_ROW0, cid)
+        ut_ai_row1 = read_vec3(constraints, base_offset + _OFF_UT_AI_ROW1, cid)
+        s_inv_s3 = read_vec3(constraints, base_offset + _OFF_S_INV_S3, cid)
         if use_bias:
             bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
         else:
@@ -2877,16 +2876,9 @@ def _d6_rigid_iterate_at(
         rhs1 = jv1 + bias1
         rhs2 = jv2 + bias2_tan
 
-        ut_ai_rhs1_3 = ut_ai @ rhs1
-        ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
+        ut_ai_rhs1 = wp.vec2f(wp.dot(ut_ai_row0, rhs1), wp.dot(ut_ai_row1, rhs1))
 
-        s_inv_22 = wp.mat22f(
-            s_inv_packed[0, 0],
-            s_inv_packed[0, 1],
-            s_inv_packed[1, 0],
-            s_inv_packed[1, 1],
-        )
-        lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
+        lam2_us = -(mul_sym2(s_inv_s3, rhs2 - ut_ai_rhs1))
         lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
         lam2 = lam2 * sor_boost
 
@@ -2897,7 +2889,7 @@ def _d6_rigid_iterate_at(
         u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
         u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
 
-        lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
+        lam1_us = -(mul_sym3(a1_inv_s6, rhs1 + u_lam2_us))
         lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
         lam1 = lam1 * sor_boost
 
@@ -2945,7 +2937,7 @@ def _d6_rigid_iterate_at(
         # ---- Plain anchor-1 3x3 solve (BALL/UNIVERSAL) --------------
         jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
         rhs1 = jv1 + bias1
-        lam1_us = -(a1_inv @ rhs1)
+        lam1_us = -(mul_sym3(a1_inv_s6, rhs1))
         lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
         lam1 = lam1 * sor_boost
 
@@ -3234,15 +3226,10 @@ def _revolute_iterate_at_multi(
     cr2_b1 = wp.skew(r2_b1)
     cr2_b2 = wp.skew(r2_b2)
 
-    a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
-    ut_ai = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
-    s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-    s_inv_22 = wp.mat22f(
-        s_inv_packed[0, 0],
-        s_inv_packed[0, 1],
-        s_inv_packed[1, 0],
-        s_inv_packed[1, 1],
-    )
+    a1_inv_s6 = read_vec6(constraints, base_offset + _OFF_A1_INV_S6, cid)
+    ut_ai_row0 = read_vec3(constraints, base_offset + _OFF_UT_AI_ROW0, cid)
+    ut_ai_row1 = read_vec3(constraints, base_offset + _OFF_UT_AI_ROW1, cid)
+    s_inv_s3 = read_vec3(constraints, base_offset + _OFF_S_INV_S3, cid)
     if use_bias:
         bias1 = read_vec3(constraints, base_offset + _OFF_BIAS1, cid)
         bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
@@ -3335,10 +3322,9 @@ def _revolute_iterate_at_multi(
         rhs1 = jv1 + bias1
         rhs2 = jv2 + bias2_tan
 
-        ut_ai_rhs1_3 = ut_ai @ rhs1
-        ut_ai_rhs1 = wp.vec2f(ut_ai_rhs1_3[0], ut_ai_rhs1_3[1])
+        ut_ai_rhs1 = wp.vec2f(wp.dot(ut_ai_row0, rhs1), wp.dot(ut_ai_row1, rhs1))
 
-        lam2_us = -(s_inv_22 @ (rhs2 - ut_ai_rhs1))
+        lam2_us = -(mul_sym2(s_inv_s3, rhs2 - ut_ai_rhs1))
         lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
         lam2 = lam2 * sor_boost
 
@@ -3349,7 +3335,7 @@ def _revolute_iterate_at_multi(
         u_lam2_us = u_lam2_us + cr1_b1 @ (inv_inertia1 @ (wp.transpose(cr2_b1) @ lam2_us_world))
         u_lam2_us = u_lam2_us + cr1_b2 @ (inv_inertia2 @ (wp.transpose(cr2_b2) @ lam2_us_world))
 
-        lam1_us = -(a1_inv @ (rhs1 + u_lam2_us))
+        lam1_us = -(mul_sym3(a1_inv_s6, rhs1 + u_lam2_us))
         lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
         lam1 = lam1 * sor_boost
 

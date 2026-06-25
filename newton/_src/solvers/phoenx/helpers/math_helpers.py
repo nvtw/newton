@@ -17,15 +17,95 @@ __all__ = [
     "create_orthonormal",
     "effective_mass_scalar",
     "extract_rotation_angle",
+    "inv_sym2",
+    "inv_sym3",
+    "mul_sym2",
+    "mul_sym3",
     "qmatrix_project_multiply_left_right",
     "revolution_tracker_angle",
     "revolution_tracker_update",
     "rotate_inertia",
+    "sym6_from_mat33_upper",
+    "vec6f",
 ]
 
 
 PI = wp.constant(wp.float32(math.pi))
 TWO_PI = wp.constant(wp.float32(2.0 * math.pi))
+
+# Compressed symmetric-matrix storage.
+#   sym6 (symmetric 3x3) packs the upper triangle as
+#       (m00, m01, m02, m11, m12, m22)
+#   sym3 (symmetric 2x2) reuses ``wp.vec3f`` as (m00, m01, m11)
+vec6f = wp.types.vector(length=6, dtype=wp.float32)
+
+
+@wp.func
+def mul_sym3(s: vec6f, v: wp.vec3f) -> wp.vec3f:
+    """Symmetric 3x3 matrix-vector product. ``s`` packs the upper
+    triangle ``(m00, m01, m02, m11, m12, m22)``."""
+    return wp.vec3f(
+        s[0] * v[0] + s[1] * v[1] + s[2] * v[2],
+        s[1] * v[0] + s[3] * v[1] + s[4] * v[2],
+        s[2] * v[0] + s[4] * v[1] + s[5] * v[2],
+    )
+
+
+@wp.func
+def inv_sym3(s: vec6f) -> vec6f:
+    """Inverse of a symmetric 3x3 (via cofactors). Result is symmetric,
+    returned in the same ``(m00, m01, m02, m11, m12, m22)`` packing.
+    Returns the zero matrix when the determinant collapses."""
+    a = s[0]
+    b = s[1]
+    c = s[2]
+    d = s[3]
+    e = s[4]
+    f = s[5]
+    c00 = d * f - e * e
+    c01 = c * e - b * f
+    c02 = b * e - c * d
+    c11 = a * f - c * c
+    c12 = b * c - a * e
+    c22 = a * d - b * b
+    det = a * c00 + b * c01 + c * c02
+    if wp.abs(det) <= 1.0e-20:
+        return vec6f(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    inv_det = 1.0 / det
+    return vec6f(
+        c00 * inv_det,
+        c01 * inv_det,
+        c02 * inv_det,
+        c11 * inv_det,
+        c12 * inv_det,
+        c22 * inv_det,
+    )
+
+
+@wp.func
+def mul_sym2(s: wp.vec3f, v: wp.vec2f) -> wp.vec2f:
+    """Symmetric 2x2 matrix-vector product. ``s`` packs ``(m00, m01, m11)``."""
+    return wp.vec2f(
+        s[0] * v[0] + s[1] * v[1],
+        s[1] * v[0] + s[2] * v[1],
+    )
+
+
+@wp.func
+def inv_sym2(s: wp.vec3f) -> wp.vec3f:
+    """Inverse of a symmetric 2x2. ``s`` packs ``(m00, m01, m11)``.
+    Returns the zero matrix when the determinant collapses."""
+    det = s[0] * s[2] - s[1] * s[1]
+    if wp.abs(det) <= 1.0e-20:
+        return wp.vec3f(0.0, 0.0, 0.0)
+    inv_det = 1.0 / det
+    return wp.vec3f(s[2] * inv_det, -s[1] * inv_det, s[0] * inv_det)
+
+
+@wp.func
+def sym6_from_mat33_upper(m: wp.mat33f) -> vec6f:
+    """Pack the upper triangle of a (symmetric) 3x3 into a ``sym6``."""
+    return vec6f(m[0, 0], m[0, 1], m[0, 2], m[1, 1], m[1, 2], m[2, 2])
 
 
 @wp.func

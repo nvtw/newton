@@ -62,6 +62,7 @@ __all__ = [
     "read_quat",
     "read_vec3",
     "read_vec4",
+    "read_vec6",
     "soft_constraint_coefficients",
     "write_float",
     "write_int",
@@ -71,6 +72,7 @@ __all__ = [
     "write_quat",
     "write_vec3",
     "write_vec4",
+    "write_vec6",
 ]
 
 
@@ -328,6 +330,31 @@ def read_vec4(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.vec4f:
         read2d_f32(c.data, off + 2, cid),
         read2d_f32(c.data, off + 3, cid),
     )
+
+
+_vec6f = wp.types.vector(length=6, dtype=wp.float32)
+
+
+@wp.func
+def read_vec6(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> _vec6f:
+    return _vec6f(
+        read2d_f32(c.data, off + 0, cid),
+        read2d_f32(c.data, off + 1, cid),
+        read2d_f32(c.data, off + 2, cid),
+        read2d_f32(c.data, off + 3, cid),
+        read2d_f32(c.data, off + 4, cid),
+        read2d_f32(c.data, off + 5, cid),
+    )
+
+
+@wp.func
+def write_vec6(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: _vec6f):
+    write2d_f32(c.data, off + 0, cid, v[0])
+    write2d_f32(c.data, off + 1, cid, v[1])
+    write2d_f32(c.data, off + 2, cid, v[2])
+    write2d_f32(c.data, off + 3, cid, v[3])
+    write2d_f32(c.data, off + 4, cid, v[4])
+    write2d_f32(c.data, off + 5, cid, v[5])
 
 
 @wp.func
