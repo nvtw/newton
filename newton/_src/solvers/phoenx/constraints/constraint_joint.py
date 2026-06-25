@@ -619,7 +619,7 @@ def actuated_double_ball_socket_initialize_kernel(
     # Writing both layouts would clobber the alias, so we branch. (FIXED
     # moved to the tracker group when it migrated to the D6 angular weld,
     # which locks rotation directly and no longer needs anchor 3.)
-    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_CABLE:
+    if mode == JOINT_MODE_CABLE:
         write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
         write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
         write_vec3(constraints, _OFF_R3_B1, cid, zero3)
@@ -627,9 +627,9 @@ def actuated_double_ball_socket_initialize_kernel(
         write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, 0.0)
     else:
-        # REVOLUTE / BALL_SOCKET / UNIVERSAL / FIXED: store the
-        # relative-orientation tracker. BALL_SOCKET only reads it when it
-        # carries D6 angular limit rows.
+        # REVOLUTE / BALL_SOCKET / UNIVERSAL / FIXED / PRISMATIC: store the
+        # relative-orientation tracker (the D6 angular weld reads it).
+        # BALL_SOCKET only reads it when it carries D6 angular limit rows.
         write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
         write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
         write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
@@ -2307,10 +2307,13 @@ def _d6_prepare_at(
     is_revolute = mode_cfg == JOINT_MODE_REVOLUTE
     is_fixed = mode_cfg == JOINT_MODE_FIXED
     is_universal = mode_cfg == JOINT_MODE_UNIVERSAL
-    n_ang_full = is_fixed
+    is_prismatic = mode_cfg == JOINT_MODE_PRISMATIC
+    n_lin_partial = is_prismatic  # lock only the 2 axes perpendicular to n_hat
+    n_ang_full = is_fixed or is_prismatic
     n_ang_swing = is_revolute
     has_angular_hardlock = n_ang_full or n_ang_swing
     has_ang_axial = is_revolute or is_universal
+    has_lin_axial = is_prismatic
     has_d6_limits = mode_cfg == JOINT_MODE_BALL_SOCKET or is_universal
 
     b1 = body_pair.b1
@@ -2359,15 +2362,16 @@ def _d6_prepare_at(
     write_vec3(constraints, base_offset + _OFF_T1, cid, t1)
     write_vec3(constraints, base_offset + _OFF_T2, cid, t2)
 
-    # ---- Linear block: 3x3 point lock at anchor1 --------------------
+    # ---- Linear block: point lock at anchor1 ------------------------
+    # n_lin=3 locks all translation (3x3); n_lin=2 (prismatic) locks
+    # only the (t1, t2) translation perpendicular to the slide axis,
+    # leaving n_hat free for the linear axial drive/limit row.
     cr1_b1 = wp.skew(r1_b1)
     cr1_b2 = wp.skew(r1_b2)
     eye3 = wp.identity(3, dtype=wp.float32)
     a1 = (inv_mass1 + inv_mass2) * eye3
     a1 = a1 + cr1_b1 @ (inv_inertia1 @ wp.transpose(cr1_b1))
     a1 = a1 + cr1_b2 @ (inv_inertia2 @ wp.transpose(cr1_b2))
-    a1_inv = wp.inverse(a1)
-    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
 
     hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
     damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
@@ -2376,7 +2380,22 @@ def _d6_prepare_at(
     write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
     write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
 
-    bias1 = (p1_b2 - p1_b1) * bias_rate
+    drift1 = p1_b2 - p1_b1
+    if n_lin_partial:
+        lm11 = wp.dot(t1, a1 @ t1)
+        lm12 = wp.dot(t1, a1 @ t2)
+        lm22 = wp.dot(t2, a1 @ t2)
+        lin2_inv = wp.inverse(wp.mat22f(lm11, lm12, lm12, lm22))
+        write_mat33(
+            constraints,
+            base_offset + _OFF_A1_INV,
+            cid,
+            wp.mat33f(lin2_inv[0, 0], lin2_inv[0, 1], 0.0, lin2_inv[1, 0], lin2_inv[1, 1], 0.0, 0.0, 0.0, 0.0),
+        )
+        bias1 = wp.vec3f(wp.dot(t1, drift1) * bias_rate, wp.dot(t2, drift1) * bias_rate, 0.0)
+    else:
+        write_mat33(constraints, base_offset + _OFF_A1_INV, cid, wp.inverse(a1))
+        bias1 = drift1 * bias_rate
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
 
     # ---- Angular block: lock n_ang axes about {t1, t2, n_hat} -------
@@ -2449,6 +2468,26 @@ def _d6_prepare_at(
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
         angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
 
+    # ---- Linear axial drive + limit row (slide along n_hat) ---------
+    if has_lin_axial:
+        eff_inv_lin = wp.dot(n_hat, a1 @ n_hat)
+        slide = wp.dot(n_hat, drift1)
+        axial_imp_lin = _axial_drive_limit_prepare_at(
+            constraints,
+            cid,
+            base_offset,
+            slide,
+            eff_inv_lin,
+            dt,
+            PHOENX_BOOST_PRISMATIC_DRIVE,
+            PHOENX_BOOST_PRISMATIC_LIMIT,
+        )
+        imp = n_hat * axial_imp_lin
+        velocity1 = velocity1 + inv_mass1 * imp
+        angular_velocity1 = angular_velocity1 + inv_inertia1 @ wp.cross(r1_b1, imp)
+        velocity2 = velocity2 - inv_mass2 * imp
+        angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, imp)
+
     # ---- Optional D6 angular limits on the free swing axes ----------
     if has_d6_limits:
         angular_velocity1, angular_velocity2 = _d6_angular_limits_prepare_at(
@@ -2503,10 +2542,13 @@ def _d6_iterate_at(
     is_revolute = mode_cfg == JOINT_MODE_REVOLUTE
     is_fixed = mode_cfg == JOINT_MODE_FIXED
     is_universal = mode_cfg == JOINT_MODE_UNIVERSAL
-    n_ang_full = is_fixed
+    is_prismatic = mode_cfg == JOINT_MODE_PRISMATIC
+    n_lin_partial = is_prismatic  # lock only the 2 axes perpendicular to n_hat
+    n_ang_full = is_fixed or is_prismatic
     n_ang_swing = is_revolute
     has_angular_hardlock = n_ang_full or n_ang_swing
     has_ang_axial = is_revolute or is_universal
+    has_lin_axial = is_prismatic
     has_d6_limits = mode_cfg == JOINT_MODE_BALL_SOCKET or is_universal
 
     b1 = body_pair.b1
@@ -2542,14 +2584,24 @@ def _d6_iterate_at(
         bias1 = wp.vec3f(0.0, 0.0, 0.0)
         bias_ang = wp.vec3f(0.0, 0.0, 0.0)
 
-    # ---- Linear block: 3x3 point lock at anchor1 --------------------
+    # ---- Linear block: point lock at anchor1 ------------------------
     a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
-    rhs1 = jv1 + bias1
-    lam1_us = -(a1_inv @ rhs1)
-    lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
-    lam1 = lam1 * sor_boost
+    if n_lin_partial:
+        # 2x2 lock on (t1, t2); n_hat translation is the free slide axis.
+        lin2_inv = wp.mat22f(a1_inv[0, 0], a1_inv[0, 1], a1_inv[1, 0], a1_inv[1, 1])
+        acc1_tan = wp.vec2f(wp.dot(t1, acc1), wp.dot(t2, acc1))
+        jv1_tan = wp.vec2f(wp.dot(t1, jv1) + bias1[0], wp.dot(t2, jv1) + bias1[1])
+        lam2_us = -(lin2_inv @ jv1_tan)
+        lam2 = mass_coeff * lam2_us - impulse_coeff * acc1_tan
+        lam2 = lam2 * sor_boost
+        lam1 = lam2[0] * t1 + lam2[1] * t2
+    else:
+        rhs1 = jv1 + bias1
+        lam1_us = -(a1_inv @ rhs1)
+        lam1 = mass_coeff * lam1_us - impulse_coeff * acc1
+        lam1 = lam1 * sor_boost
     velocity1 = velocity1 - inv_mass1 * lam1
     angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
     velocity2 = velocity2 + inv_mass2 * lam1
@@ -2590,6 +2642,22 @@ def _d6_iterate_at(
         )
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
         angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
+
+    # ---- Linear axial drive + limit scalar row (slide along n_hat) --
+    if has_lin_axial:
+        n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+        clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
+        v1_anchor = velocity1 + wp.cross(angular_velocity1, r1_b1)
+        v2_anchor = velocity2 + wp.cross(angular_velocity2, r1_b2)
+        jv_slide = wp.dot(n_hat, v1_anchor - v2_anchor)
+        axial_lam = _axial_drive_limit_iterate(
+            constraints, cid, base_offset, jv_slide, clamp, idt, sor_boost, use_bias
+        )
+        imp = n_hat * axial_lam
+        velocity1 = velocity1 + inv_mass1 * imp
+        angular_velocity1 = angular_velocity1 + inv_inertia1 @ wp.cross(r1_b1, imp)
+        velocity2 = velocity2 - inv_mass2 * imp
+        angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, imp)
 
     # ---- Optional D6 angular limits on the free swing axes ----------
     if has_d6_limits:
@@ -4201,8 +4269,8 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, JOINT_MODE_REVOLUTE
         )
     elif joint_mode == JOINT_MODE_PRISMATIC:
-        _prismatic_prepare_at(
-            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        _d6_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, JOINT_MODE_PRISMATIC
         )
     elif joint_mode == JOINT_MODE_UNIVERSAL:
         _d6_prepare_at(
@@ -4599,7 +4667,7 @@ def actuated_double_ball_socket_iterate_at(
             JOINT_MODE_REVOLUTE,
         )
     elif joint_mode == JOINT_MODE_PRISMATIC:
-        _prismatic_iterate_at(
+        _d6_iterate_at(
             constraints,
             cid,
             base_offset,
@@ -4612,6 +4680,7 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            JOINT_MODE_PRISMATIC,
         )
     elif joint_mode == JOINT_MODE_UNIVERSAL:
         _d6_iterate_at(
