@@ -3656,14 +3656,8 @@ def _revolute_iterate_at_multi(
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
     r2_b1 = read_vec3(constraints, base_offset + _OFF_R2_B1, cid)
     r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
-    # The tangent basis is a deterministic function of the joint axis
-    # (prepare writes ``t1 = create_orthonormal(n_hat)``, ``t2 = cross(n_hat,
-    # t1)``). Recompute it from ``n_hat`` (loaded once here) instead of loading
-    # two extra vec3 -- saves 24 B/cid on this bandwidth-bound multi-world
-    # iterate, bit-identical to the stored basis.
-    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    t1 = create_orthonormal(n_hat)
-    t2 = wp.cross(n_hat, t1)
+    t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
+    t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
 
     cr1_b1 = wp.skew(r1_b1)
     cr1_b2 = wp.skew(r1_b2)
@@ -3692,6 +3686,7 @@ def _revolute_iterate_at_multi(
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
 
+    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
     clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
 
     # ---- Axial drive + limit constants -------------------------------
