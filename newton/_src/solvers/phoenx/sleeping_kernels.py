@@ -44,7 +44,13 @@ all sleep-aware orchestration lives here.
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_KINEMATIC, MOTION_STATIC, BodyContainer
+from newton._src.solvers.phoenx.body import (
+    MOTION_DYNAMIC,
+    MOTION_KINEMATIC,
+    MOTION_STATIC,
+    BodyContainer,
+    mat33_from_sym6,
+)
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
@@ -356,7 +362,7 @@ def _phoenx_island_max_velocity_kernel(
         force = bodies.force[b]
         torque = bodies.torque[b]
         v_pred = bodies.velocity[b] + force * (inv_mass * step_dt)
-        w_pred = bodies.angular_velocity[b] + (bodies.inverse_inertia_world[b] * torque) * step_dt
+        w_pred = bodies.angular_velocity[b] + (mat33_from_sym6(bodies.inverse_inertia_world[b]) * torque) * step_dt
     else:
         # KINEMATIC: inv_mass / inv_inertia are zero so external wrench
         # can't change velocity; use the inferred pose-derivative directly.
@@ -499,7 +505,7 @@ def _phoenx_self_wake_fanin_kernel(
     force = bodies.force[b]
     torque = bodies.torque[b]
     v_pred = bodies.velocity[b] + force * (inv_mass * step_dt)
-    w_pred = bodies.angular_velocity[b] + (bodies.inverse_inertia_world[b] * torque) * step_dt
+    w_pred = bodies.angular_velocity[b] + (mat33_from_sym6(bodies.inverse_inertia_world[b]) * torque) * step_dt
     score = wp.length(v_pred) + 0.5 * body_aabb_diagonal[b] * wp.length(w_pred)
     if wp.length_sq(force) > wp.float32(0.0) or wp.length_sq(torque) > wp.float32(0.0):
         score = wp.max(score, sleeping_velocity_threshold)

@@ -3,6 +3,7 @@
 One ``wp.array`` per field, indexed by body id. All fields are float32.
 """
 
+import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import (
@@ -19,6 +20,11 @@ __all__ = [
     "BodyContainer",
     "body_container_zeros",
     "body_set_access_mode",
+    "inertia_sym6",
+    "inertia_sym6_pack_np",
+    "inertia_sym6_unpack_np",
+    "mat33_from_sym6",
+    "sym6_from_mat33",
 ]
 
 
@@ -26,6 +32,51 @@ __all__ = [
 MOTION_STATIC = wp.constant(0)
 MOTION_KINEMATIC = wp.constant(1)
 MOTION_DYNAMIC = wp.constant(2)
+
+
+# Symmetric 3x3 packed as 6 floats: [I00, I11, I22, I01, I02, I12].
+# ``inverse_inertia_world`` (= R I^-1 R^T) is always symmetric, so storing the
+# 6 unique entries instead of a full ``mat33f`` cuts its per-body footprint
+# 36 B -> 24 B. The hot multi-world iterate reads it per-cid, so the narrower
+# load reduces memory traffic on the bandwidth-bound solve; the mat33
+# reconstruction is a few register moves.
+inertia_sym6 = wp.types.vector(length=6, dtype=wp.float32)
+
+
+@wp.func
+def mat33_from_sym6(s: inertia_sym6) -> wp.mat33f:
+    """Expand a packed symmetric 3x3 (see :data:`inertia_sym6`) to ``mat33f``."""
+    return wp.mat33f(s[0], s[3], s[4], s[3], s[1], s[5], s[4], s[5], s[2])
+
+
+@wp.func
+def sym6_from_mat33(m: wp.mat33f) -> inertia_sym6:
+    """Pack the upper triangle of a (symmetric) ``mat33f`` into :data:`inertia_sym6`."""
+    return inertia_sym6(m[0, 0], m[1, 1], m[2, 2], m[0, 1], m[0, 2], m[1, 2])
+
+
+def inertia_sym6_pack_np(m: np.ndarray) -> np.ndarray:
+    """Host-side pack of a ``(..., 3, 3)`` symmetric array into ``(..., 6)``
+    (:data:`inertia_sym6` order). Inverse of :func:`inertia_sym6_unpack_np`."""
+    m = np.asarray(m, dtype=np.float32)
+    return np.stack(
+        [m[..., 0, 0], m[..., 1, 1], m[..., 2, 2], m[..., 0, 1], m[..., 0, 2], m[..., 1, 2]],
+        axis=-1,
+    )
+
+
+def inertia_sym6_unpack_np(s: np.ndarray) -> np.ndarray:
+    """Host-side expand of a ``(..., 6)`` packed symmetric array (see
+    :data:`inertia_sym6`) back to ``(..., 3, 3)``."""
+    s = np.asarray(s, dtype=np.float32)
+    out = np.zeros((*s.shape[:-1], 3, 3), dtype=np.float32)
+    out[..., 0, 0] = s[..., 0]
+    out[..., 1, 1] = s[..., 1]
+    out[..., 2, 2] = s[..., 2]
+    out[..., 0, 1] = out[..., 1, 0] = s[..., 3]
+    out[..., 0, 2] = out[..., 2, 0] = s[..., 4]
+    out[..., 1, 2] = out[..., 2, 1] = s[..., 5]
+    return out
 
 
 @wp.struct
@@ -43,7 +94,9 @@ class BodyContainer:
     #: before being used as lever arms about the COM.
     body_com: wp.array[wp.vec3f]
 
-    inverse_inertia_world: wp.array[wp.mat33f]
+    #: Symmetric inverse inertia in world frame, packed as 6 floats
+    #: (:data:`inertia_sym6`). Read via :func:`mat33_from_sym6`.
+    inverse_inertia_world: wp.array[inertia_sym6]
     inverse_inertia: wp.array[wp.mat33f]
 
     inverse_mass: wp.array[wp.float32]
@@ -131,7 +184,7 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.angular_velocity = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.orientation = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.body_com = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
-    c.inverse_inertia_world = wp.zeros(num_bodies, dtype=wp.mat33f, device=device)
+    c.inverse_inertia_world = wp.zeros(num_bodies, dtype=inertia_sym6, device=device)
     c.inverse_inertia = wp.zeros(num_bodies, dtype=wp.mat33f, device=device)
     c.inverse_mass = wp.zeros(num_bodies, dtype=wp.float32, device=device)
     c.force = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)

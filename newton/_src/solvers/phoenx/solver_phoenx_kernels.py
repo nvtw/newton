@@ -18,6 +18,8 @@ from newton._src.solvers.phoenx.body import (
     MOTION_STATIC,
     BodyContainer,
     body_set_access_mode,
+    mat33_from_sym6,
+    sym6_from_mat33,
 )
 from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
@@ -2870,7 +2872,7 @@ def _phoenx_apply_forces_and_gravity_kernel(
     v = bodies.velocity[i]
     w = bodies.angular_velocity[i]
     inv_mass = bodies.inverse_mass[i]
-    inv_inertia_world = bodies.inverse_inertia_world[i]
+    inv_inertia_world = mat33_from_sym6(bodies.inverse_inertia_world[i])
     v = v + bodies.force[i] * (inv_mass * substep_dt)
     w = w + (inv_inertia_world * bodies.torque[i]) * substep_dt
     if bodies.affected_by_gravity[i] != 0:
@@ -2891,7 +2893,7 @@ def _phoenx_update_inertia_and_clear_forces_kernel(
         bodies.velocity[i] = bodies.velocity[i] * bodies.linear_damping[i]
         bodies.angular_velocity[i] = bodies.angular_velocity[i] * bodies.angular_damping[i]
         r = wp.quat_to_matrix(bodies.orientation[i])
-        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+        bodies.inverse_inertia_world[i] = sym6_from_mat33(rotate_inertia(r, bodies.inverse_inertia[i]))
     # Force / torque clear: every body slot, including kinematic / static.
     bodies.force[i] = wp.vec3f(0.0, 0.0, 0.0)
     bodies.torque[i] = wp.vec3f(0.0, 0.0, 0.0)
@@ -2907,7 +2909,7 @@ def _phoenx_refresh_world_inertia_kernel(
     i = wp.tid()
     if bodies.motion_type[i] == MOTION_DYNAMIC:
         r = wp.quat_to_matrix(bodies.orientation[i])
-        bodies.inverse_inertia_world[i] = rotate_inertia(r, bodies.inverse_inertia[i])
+        bodies.inverse_inertia_world[i] = sym6_from_mat33(rotate_inertia(r, bodies.inverse_inertia[i]))
 
 
 @wp.kernel(enable_backward=False)

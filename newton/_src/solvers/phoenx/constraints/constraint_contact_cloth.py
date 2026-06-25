@@ -13,7 +13,7 @@ import warp as wp
 
 from newton._src.geometry.types import GeoType
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer
+from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
@@ -391,8 +391,8 @@ def _make_contact_prepare_for_iteration_at(
                 slot2 = wp.int32(-1)
                 inv_mass1 = bodies.inverse_mass[b1]
                 inv_mass2 = bodies.inverse_mass[b2]
-                inv_inertia1 = bodies.inverse_inertia_world[b1]
-                inv_inertia2 = bodies.inverse_inertia_world[b2]
+                inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
+                inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
             else:
                 slot1 = contact_get_slot1(constraints, cid)
                 slot2 = contact_get_slot2(constraints, cid)
@@ -402,8 +402,8 @@ def _make_contact_prepare_for_iteration_at(
                 inv_factor2_f = wp.float32(inv_factor2)
                 inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
                 inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
-                inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
-                inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
+                inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * inv_factor1_f
+                inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * inv_factor2_f
             # Batched warm-start accumulators (one velocity scatter at end).
             total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
             total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
@@ -844,8 +844,8 @@ def contact_cached_warmstart_lean(
 
     inv_mass1 = bodies.inverse_mass[b1]
     inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = bodies.inverse_inertia_world[b1]
-    inv_inertia2 = bodies.inverse_inertia_world[b2]
+    inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
+    inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
 
     total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
     total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
@@ -975,8 +975,8 @@ def _make_contact_iterate_at(
                 w2 = bodies.angular_velocity[b2]
                 inv_mass1 = bodies.inverse_mass[b1]
                 inv_mass2 = bodies.inverse_mass[b2]
-                inv_inertia1 = bodies.inverse_inertia_world[b1]
-                inv_inertia2 = bodies.inverse_inertia_world[b2]
+                inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
+                inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
                 slot1 = wp.int32(-1)
                 slot2 = wp.int32(-1)
             else:
@@ -1000,8 +1000,8 @@ def _make_contact_iterate_at(
                 inv_factor2_f = wp.float32(inv_factor2)
                 inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
                 inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
-                inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_factor1_f
-                inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_factor2_f
+                inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * inv_factor1_f
+                inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * inv_factor2_f
 
         for i in range(contact_count):
             k = contact_first + i

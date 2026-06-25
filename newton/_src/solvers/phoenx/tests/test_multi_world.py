@@ -29,6 +29,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_STATIC,
     body_container_zeros,
+    inertia_sym6_pack_np,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_lame_from_youngs_poisson_plane_stress,
@@ -108,7 +109,7 @@ def _build_n_pendulums(
     bodies.orientation.assign(ori)
     bodies.inverse_mass.assign(inv_m)
     bodies.inverse_inertia.assign(inv_I)
-    bodies.inverse_inertia_world.assign(inv_I)
+    bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(inv_I))
     bodies.motion_type.assign(motion)
     bodies.world_id.assign(world_id)
     bodies.angular_velocity.assign(ang_v)

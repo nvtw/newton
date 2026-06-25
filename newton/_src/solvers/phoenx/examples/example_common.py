@@ -32,6 +32,8 @@ import warp as wp
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_STATIC,
+    inertia_sym6,
+    sym6_from_mat33,
 )
 
 __all__ = [
@@ -103,7 +105,7 @@ def init_phoenx_bodies_kernel(
     angular_velocity: wp.array[wp.vec3],
     inverse_mass: wp.array[wp.float32],
     inverse_inertia: wp.array[wp.mat33f],
-    inverse_inertia_world: wp.array[wp.mat33f],
+    inverse_inertia_world: wp.array[inertia_sym6],
     motion_type: wp.array[wp.int32],
     body_com_out: wp.array[wp.vec3],
 ):
@@ -142,7 +144,7 @@ def init_phoenx_bodies_kernel(
     inverse_mass[dst] = inv_m
     inverse_inertia[dst] = inv_I
     r = wp.quat_to_matrix(rot)
-    inverse_inertia_world[dst] = r * inv_I * wp.transpose(r)
+    inverse_inertia_world[dst] = sym6_from_mat33(r * inv_I * wp.transpose(r))
     if inv_m > 0.0:
         motion_type[dst] = wp.int32(MOTION_DYNAMIC)
     else:

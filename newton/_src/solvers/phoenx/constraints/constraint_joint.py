@@ -25,7 +25,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
-from newton._src.solvers.phoenx.body import MOTION_STATIC, BodyContainer, body_set_access_mode
+from newton._src.solvers.phoenx.body import MOTION_STATIC, BodyContainer, body_set_access_mode, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     _PD_NYQUIST_HEADROOM_MAX,
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
@@ -848,8 +848,8 @@ def _ms_load_body_pair(
         w2 = bodies.angular_velocity[b2]
         inv_mass1 = bodies.inverse_mass[b1]
         inv_mass2 = bodies.inverse_mass[b2]
-        inv_inertia1 = bodies.inverse_inertia_world[b1]
-        inv_inertia2 = bodies.inverse_inertia_world[b2]
+        inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
+        inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
         return (
             v1,
             v2,
@@ -870,8 +870,8 @@ def _ms_load_body_pair(
     inv_f2 = wp.float32(inv_factor2)
     inv_mass1 = bodies.inverse_mass[b1] * inv_f1
     inv_mass2 = bodies.inverse_mass[b2] * inv_f2
-    inv_inertia1 = bodies.inverse_inertia_world[b1] * inv_f1
-    inv_inertia2 = bodies.inverse_inertia_world[b2] * inv_f2
+    inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * inv_f1
+    inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * inv_f2
     return v1, v2, w1, w2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, slot1, slot2
 
 

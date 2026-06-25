@@ -419,7 +419,7 @@ class Example:
             inv_I_np[slot] = np.zeros((3, 3), dtype=np.float32)
             bodies.inverse_inertia.assign(inv_I_np)
             inv_Iw_np = bodies.inverse_inertia_world.numpy()
-            inv_Iw_np[slot] = np.zeros((3, 3), dtype=np.float32)
+            inv_Iw_np[slot] = 0.0  # packed symmetric (inertia_sym6): zero all 6 entries
             bodies.inverse_inertia_world.assign(inv_Iw_np)
         else:
             self._camera_phoenx_slot: int | None = None  # type: ignore[no-redef]

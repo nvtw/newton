@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     pd_coefficients,
@@ -1679,7 +1679,7 @@ def _apply_body_delta(
         jacobian[row, offset + 5],
     )
     delta_lin = inverse_mass[body] * lam * lin
-    delta_ang = inverse_inertia_world[body] * (lam * ang)
+    delta_ang = mat33_from_sym6(inverse_inertia_world[body]) * (lam * ang)
     wp.atomic_add(velocity, body, delta_lin)
     wp.atomic_add(angular_velocity, body, delta_ang)
 
@@ -1716,5 +1716,5 @@ def _body_metric_dot(
         jacobian[col, col_offset + 5],
     )
     value = inverse_mass[body] * wp.dot(row_lin, col_lin)
-    value += wp.dot(row_ang, inverse_inertia_world[body] * col_ang)
+    value += wp.dot(row_ang, mat33_from_sym6(inverse_inertia_world[body]) * col_ang)
     return value

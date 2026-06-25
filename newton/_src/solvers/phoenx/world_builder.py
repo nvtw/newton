@@ -24,6 +24,8 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
+    inertia_sym6,
+    inertia_sym6_pack_np,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -1047,7 +1049,7 @@ class WorldBuilder:
         c.orientation = wp.array(orientations, dtype=wp.quatf, device=device)
         # Builder bodies assume mesh origin == COM; meshed offsets must set body_com directly.
         c.body_com = wp.zeros(n, dtype=wp.vec3f, device=device)
-        c.inverse_inertia_world = wp.array(inverse_inertia, dtype=wp.mat33f, device=device)
+        c.inverse_inertia_world = wp.array(inertia_sym6_pack_np(inverse_inertia), dtype=inertia_sym6, device=device)
         c.inverse_inertia = wp.array(inverse_inertia, dtype=wp.mat33f, device=device)
         c.inverse_mass = wp.array(inverse_mass, dtype=wp.float32, device=device)
         c.force = wp.zeros(n, dtype=wp.vec3f, device=device)

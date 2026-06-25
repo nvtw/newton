@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
@@ -633,8 +633,8 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
         w2 = bodies.angular_velocity[b2]
         inv_mass1 = bodies.inverse_mass[b1]
         inv_mass2 = bodies.inverse_mass[b2]
-        inv_inertia1 = bodies.inverse_inertia_world[b1]
-        inv_inertia2 = bodies.inverse_inertia_world[b2]
+        inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
+        inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
 
         # Body pose for per-contact lever-arm recompute.
         orientation1 = bodies.orientation[b1]

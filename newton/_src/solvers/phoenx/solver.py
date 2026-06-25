@@ -19,6 +19,8 @@ from newton._src.solvers.flags import SolverNotifyFlags
 from newton._src.solvers.phoenx.body import (
     BodyContainer,
     body_container_zeros,
+    inertia_sym6_pack_np,
+    inertia_sym6_unpack_np,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_DAMPING_DRIVE,
@@ -503,7 +505,7 @@ class SolverPhoenX(SolverBase):
 
         body_inv_mass = self.bodies.inverse_mass.numpy().copy()
         body_inv_inertia = self.bodies.inverse_inertia.numpy().copy()
-        body_inv_inertia_world = self.bodies.inverse_inertia_world.numpy().copy()
+        body_inv_inertia_world = inertia_sym6_unpack_np(self.bodies.inverse_inertia_world.numpy())
         body_orientation = self.bodies.orientation.numpy()
 
         n_phoenx = body_inv_inertia.shape[0]
@@ -622,7 +624,7 @@ class SolverPhoenX(SolverBase):
 
         self.bodies.inverse_mass.assign(body_inv_mass)
         self.bodies.inverse_inertia.assign(body_inv_inertia)
-        self.bodies.inverse_inertia_world.assign(body_inv_inertia_world)
+        self.bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(body_inv_inertia_world))
 
     def _install_shape_materials(self) -> None:
         """Stream Model's per-shape (mu_static, mu_dynamic, restitution) into

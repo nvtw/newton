@@ -48,6 +48,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_STATIC,
     body_container_zeros,
+    inertia_sym6_pack_np,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -217,7 +218,7 @@ def _populate_chain_bodies(
     bodies.inverse_inertia.assign(inv_inertia_np)
     # World-space inertia starts at the same value because every cube
     # is rotated purely about +z and ``eye`` is rotation-invariant.
-    bodies.inverse_inertia_world.assign(inv_inertia_np)
+    bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(inv_inertia_np))
 
     motion = np.full(NUM_BODIES, int(MOTION_STATIC), dtype=np.int32)
     motion[1:] = int(MOTION_DYNAMIC)

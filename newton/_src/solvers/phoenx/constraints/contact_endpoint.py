@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
@@ -226,7 +226,7 @@ def contact_endpoint_inv_mass_along_cached(
     inv_f = wp.float32(counts[0])
     r = contact_point_world - bodies.position[b]
     rc = wp.cross(r, direction)
-    inv_i = bodies.inverse_inertia_world[b] * inv_f
+    inv_i = mat33_from_sym6(bodies.inverse_inertia_world[b]) * inv_f
     return inv_m * inv_f + wp.dot(rc, inv_i @ rc)
 
 
@@ -314,7 +314,7 @@ def contact_endpoint_apply_impulse_cached(
     v_lin = _read_body_velocity_with_slot(bodies, copy_state, b, slot)
     v_ang = read_angular_velocity_with_slot(bodies, copy_state, b, slot)
     inv_m = inv_m_raw * inv_f_f
-    inv_i = bodies.inverse_inertia_world[b] * inv_f_f
+    inv_i = mat33_from_sym6(bodies.inverse_inertia_world[b]) * inv_f_f
     r = contact_point_world - bodies.position[b]
     v_lin_new, v_ang_new = apply_body_spatial_impulse(
         v_lin,

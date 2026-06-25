@@ -17,6 +17,8 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
+    inertia_sym6,
+    sym6_from_mat33,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
@@ -59,7 +61,7 @@ def _init_phoenx_body_container_kernel(
     # Outputs (length N + 1; slot 0 is the static world anchor).
     inv_mass_out: wp.array[wp.float32],
     inv_inertia_out: wp.array[wp.mat33f],
-    inv_inertia_world_out: wp.array[wp.mat33f],
+    inv_inertia_world_out: wp.array[inertia_sym6],
     body_com_out: wp.array[wp.vec3f],
     affected_by_gravity_out: wp.array[wp.int32],
     motion_type_out: wp.array[wp.int32],
@@ -74,7 +76,7 @@ def _init_phoenx_body_container_kernel(
         zero_mat = wp.mat33f(0.0)
         inv_mass_out[0] = 0.0
         inv_inertia_out[0] = zero_mat
-        inv_inertia_world_out[0] = zero_mat
+        inv_inertia_world_out[0] = sym6_from_mat33(zero_mat)
         body_com_out[0] = wp.vec3f(0.0, 0.0, 0.0)
         affected_by_gravity_out[0] = 0
         motion_type_out[0] = MOTION_STATIC
@@ -87,7 +89,7 @@ def _init_phoenx_body_container_kernel(
     inv_mass_out[tid] = body_inv_mass[i]
     inv_inertia_out[tid] = body_inv_inertia[i]
     # First _update_inertia launch rotates this by current orientation.
-    inv_inertia_world_out[tid] = body_inv_inertia[i]
+    inv_inertia_world_out[tid] = sym6_from_mat33(body_inv_inertia[i])
     body_com_out[tid] = body_com[i]
     flags = body_flags[i]
     if (flags & kinematic_flag) != 0:
