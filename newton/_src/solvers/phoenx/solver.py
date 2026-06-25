@@ -990,6 +990,7 @@ class SolverPhoenX(SolverBase):
             dt=float(dt),
             contacts=contacts,
             shape_body=self._shape_body,
+            shape_type=self.model.shape_type,
             vel_accum=world_vel_accum,
             omega_accum=world_omega_accum,
             shape_aabb_lower=shape_aabb_lower,

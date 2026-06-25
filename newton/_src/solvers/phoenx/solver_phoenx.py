@@ -1228,9 +1228,11 @@ class PhoenXWorld:
         # ----- Optional material table -----
         self._shape_material: wp.array[wp.int32] | None = None
         self._materials: wp.array[MaterialData] | None = None
-        # Optional shape_body installed via set_shape_body (used when callers
-        # don't pass shape_body to step()).
+        # Optional shape metadata installed for callers that do not pass it
+        # directly to step(). Shape types let the solver keep SDF-specific
+        # contact safeguards out of primitive stack contacts.
         self._shape_body_internal: wp.array[wp.int32] | None = None
+        self._shape_type_internal: wp.array[wp.int32] | None = None
         # Lazy sentinel for optional per-contact stiffness/damping/friction.
         self._soft_contact_sentinel: wp.array[wp.float32] | None = None
 
@@ -1495,6 +1497,10 @@ class PhoenXWorld:
         """Install the shape->body map used by contact ingest. ``None`` clears."""
         self._shape_body_internal = shape_body
 
+    def set_shape_type(self, shape_type: wp.array | None) -> None:
+        """Install the shape type map used by contact prepare. ``None`` clears."""
+        self._shape_type_internal = shape_type
+
     @staticmethod
     def broad_phase_filter() -> tuple:
         """Return the ``(filter_func, filter_data_type)`` tuple to pass
@@ -1568,6 +1574,8 @@ class PhoenXWorld:
         shape_body_phx = _np.where(shape_body_np < 0, 0, shape_body_np + int(phoenx_body_offset))
         shape_body_phx_arr = wp.array(shape_body_phx.astype(_np.int32), dtype=wp.int32, device=self.device)
         self.set_shape_body(shape_body_phx_arr)
+        if getattr(collision_pipeline, "unified_shape_type", None) is not None:
+            self.set_shape_type(collision_pipeline.unified_shape_type)
 
         tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
         tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
@@ -2704,6 +2712,7 @@ class PhoenXWorld:
             shape_body_raw = model.shape_body.numpy()
             shape_body_phx[:S_int] = np.where(shape_body_raw < 0, 0, shape_body_raw + int(phoenx_body_offset))
         self.set_shape_body(wp.array(shape_body_phx, dtype=wp.int32, device=self.device))
+        self.set_shape_type(pipeline.unified_shape_type)
 
         # Per-shape endpoint table for cloth-aware contact ingest.
         # Allocated for the full unified shape range and populated once:
@@ -2822,6 +2831,7 @@ class PhoenXWorld:
             rigid_contact_margin0=dummy_float,
             rigid_contact_margin1=dummy_float,
             shape_body=dummy_int,
+            shape_type=dummy_int,
             rigid_contact_stiffness=sentinel_float,
             rigid_contact_damping=sentinel_float,
             rigid_contact_friction=sentinel_float,
@@ -2859,6 +2869,7 @@ class PhoenXWorld:
         dt: float,
         contacts=None,
         shape_body=None,
+        shape_type=None,
         picking=None,
         vel_accum: wp.array[wp.vec3f] | None = None,
         omega_accum: wp.array[wp.vec3f] | None = None,
@@ -2893,7 +2904,7 @@ class PhoenXWorld:
         if self.enable_column_timers:
             self._zero_column_timers()
 
-        self._ingest_and_warmstart_contacts(contacts, shape_body)
+        self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
         if self._ingest_scratch is not None:
             # Contacts begin after the joint + cloth-tri + cloth-bending
             # + soft-tet blocks in the cid space. Contact cids are compacted
@@ -2988,7 +2999,7 @@ class PhoenXWorld:
 
         self._update_inertia_and_clear_forces()
 
-    def _ingest_and_warmstart_contacts(self, contacts, shape_body) -> None:
+    def _ingest_and_warmstart_contacts(self, contacts, shape_body, shape_type) -> None:
         """Translate Newton ``Contacts`` -> contact columns. Swap prev/current
         per-cid state, ingest -> warm-start -> forward-map stamp, fuse counts."""
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
@@ -3001,6 +3012,8 @@ class PhoenXWorld:
             raise ValueError('PhoenX requires Contacts with non-disabled contact_matching (use "sticky").')
         if shape_body is None:
             shape_body = self._shape_body_internal
+        if shape_type is None:
+            shape_type = self._shape_type_internal
         # When the cloth-aware pipeline is active, contact slots can
         # reference shape indices up to S + T. Use the PhoenX-indexed
         # full-length map stamped by setup_cloth_collision_pipeline.
@@ -3014,11 +3027,17 @@ class PhoenXWorld:
                 shape_body = self._shape_body_internal
             else:
                 shape_body = self._collision_pipeline.unified_shape_body
+            if getattr(self._collision_pipeline, "unified_shape_type", None) is not None:
+                shape_type = self._collision_pipeline.unified_shape_type
         if shape_body is None:
             raise ValueError(
                 "step(contacts=...) requires shape_body. Pass model.shape_body or "
                 "register shapes via WorldBuilder.add_shape_*."
             )
+        if shape_type is None:
+            # Backward-compatible fallback for direct world.step() callers: no
+            # shape type metadata means no SDF-only start-gap safeguard.
+            shape_type = self._contact_views_placeholder.shape_type
 
         # Soft-contact arrays are optional; length-0 sentinel short-circuits
         # the per-contact shape check in the kernels.
@@ -3097,6 +3116,7 @@ class PhoenXWorld:
                 rigid_contact_margin0=self._ingest_scratch.sorted_margin0,
                 rigid_contact_margin1=self._ingest_scratch.sorted_margin1,
                 shape_body=shape_body,
+                shape_type=shape_type,
                 rigid_contact_stiffness=self._ingest_scratch.sorted_stiffness,
                 rigid_contact_damping=self._ingest_scratch.sorted_damping,
                 rigid_contact_friction=self._ingest_scratch.sorted_friction,
@@ -3113,6 +3133,7 @@ class PhoenXWorld:
                 rigid_contact_margin0=contacts.rigid_contact_margin0,
                 rigid_contact_margin1=contacts.rigid_contact_margin1,
                 shape_body=shape_body,
+                shape_type=shape_type,
                 rigid_contact_stiffness=contact_stiffness,
                 rigid_contact_damping=contact_damping,
                 rigid_contact_friction=contact_friction,
