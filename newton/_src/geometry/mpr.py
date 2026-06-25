@@ -39,6 +39,29 @@ from .support_function import GeoTypeEx, closest_point_on_triangle, unpack_mesh_
 from .types import GeoType
 
 
+@wp.func
+def closest_point_on_box_surface(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
+    """Closest point on an axis-aligned box (centered at the origin) to ``p``.
+
+    Only used for points ``p`` that lie OUTSIDE the box, where the result is the
+    component-wise clamp of ``p`` to the box — i.e. the nearest surface point,
+    which stays laterally aligned with ``p``. (For interior points the clamp
+    returns ``p`` unchanged; callers guard against that case.)
+
+    Args:
+        p: Query point in the box's local frame.
+        half_extents: Box half-extents along each axis.
+
+    Returns:
+        Nearest point on/in the box to ``p`` in the box's local frame.
+    """
+    return wp.vec3(
+        wp.clamp(p[0], -half_extents[0], half_extents[0]),
+        wp.clamp(p[1], -half_extents[1], half_extents[1]),
+        wp.clamp(p[2], -half_extents[2], half_extents[2]),
+    )
+
+
 @wp.struct
 class Vert:
     """Vertex structure for MPR algorithm containing points on both shapes."""
@@ -230,6 +253,42 @@ def create_support_map_function(support_func: Any):
             center_b_local = 0.5 * (min_b + max_b)
 
         center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
+
+        # BOX initial-direction improvement (mirrors the triangle treatment below).
+        # When the partner's center lies OUTSIDE the box, seed v0 from the closest
+        # point on the box to that center. This keeps v0 laterally aligned with the
+        # partner, so MPR/GJK's initial ray (normal = -v0.BtoA) is ~perpendicular to
+        # the contact face. It fixes the side-face degeneracy a small shape hits
+        # against a large flat box (e.g. an object on a thin table), where the box
+        # center is far from the contact region and the center-to-center ray points
+        # sideways. Gated on "outside": projecting a partner center that is INSIDE
+        # the slab can seed MPR toward the wrong (far) face, and deep penetration is
+        # legitimately ambiguous — keep the box center there. The 1% blend toward the
+        # box center (origin) makes v0 a STRICT interior point — exactly as the
+        # triangle case blends toward its centroid. A v0 left exactly on the box face
+        # is a boundary point, which makes box-box falsely register overlap.
+        box_center = wp.vec3(0.0, 0.0, 0.0)
+        if geom_a.shape_type == int(GeoType.BOX):
+            h_a = geom_a.scale
+            if (
+                wp.abs(center_b_world[0]) > h_a[0]
+                or wp.abs(center_b_world[1]) > h_a[1]
+                or wp.abs(center_b_world[2]) > h_a[2]
+            ):
+                surf_a = closest_point_on_box_surface(center_b_world, h_a)
+                center_a = surf_a + 0.01 * (box_center - surf_a)
+
+        if geom_b.shape_type == int(GeoType.BOX):
+            h_b = geom_b.scale
+            center_a_in_b = wp.quat_rotate_inv(orientation_b, center_a - position_b)
+            if (
+                wp.abs(center_a_in_b[0]) > h_b[0]
+                or wp.abs(center_a_in_b[1]) > h_b[1]
+                or wp.abs(center_a_in_b[2]) > h_b[2]
+            ):
+                surf_b = closest_point_on_box_surface(center_a_in_b, h_b)
+                center_b_local = surf_b + 0.01 * (box_center - surf_b)
+                center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
 
         if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
             # Project shape B's center onto the triangle for a starting
