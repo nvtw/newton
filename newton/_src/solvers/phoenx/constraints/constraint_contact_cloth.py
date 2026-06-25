@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.geometry.types import GeoType
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer
 from newton._src.solvers.phoenx.cloth_collision import (
@@ -116,6 +117,32 @@ from newton._src.solvers.phoenx.mass_splitting.access import (
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
+
+
+@wp.func
+def _contact_uses_stale_anchor_start_gap(contacts: ContactViews, k: wp.int32) -> bool:
+    shape0 = contacts.rigid_contact_shape0[k]
+    shape1 = contacts.rigid_contact_shape1[k]
+    shape_type_count = contacts.shape_type.shape[0]
+    uses_start_gap = False
+    if shape0 >= wp.int32(0) and shape0 < shape_type_count:
+        type0 = contacts.shape_type[shape0]
+        uses_start_gap = (
+            uses_start_gap
+            or type0 == wp.int32(GeoType.MESH)
+            or type0 == wp.int32(GeoType.HFIELD)
+            or type0 == wp.int32(GeoType.TETRAHEDRON)
+        )
+    if shape1 >= wp.int32(0) and shape1 < shape_type_count:
+        type1 = contacts.shape_type[shape1]
+        uses_start_gap = (
+            uses_start_gap
+            or type1 == wp.int32(GeoType.MESH)
+            or type1 == wp.int32(GeoType.HFIELD)
+            or type1 == wp.int32(GeoType.TETRAHEDRON)
+        )
+    return uses_start_gap
+
 
 __all__ = [
     "contact_cached_warmstart_lean",
@@ -551,25 +578,21 @@ def _make_contact_prepare_for_iteration_at(
             lam_n_ref = wp.float32(1.0) / wp.max(eff_n * idt, wp.float32(1.0e-6))
             load_boost = wp.min(wp.float32(1.0) + lam_n_ws / lam_n_ref, wp.float32(4.0))
 
-            # Speculative (>0) vs penetrating (<0) Baumgarte bias.
-            # Rows generated separated keep their generation-time gap as
-            # an activation barrier for this solver step. Without a
-            # substep narrow-phase refresh, letting a far SDF row become
-            # penetrating later in the frame turns stale anchors into
-            # hard/frictional constraints.
-            start_gap = cc_get_start_gap(cc, k)
+            # Speculative (>0) vs penetrating (<0) Baumgarte bias. Rows
+            # generated from stale anchors keep their generation-time gap as an
+            # activation barrier; box/plane primitive stacks use the live
+            # substep gap so dense stacks can become load-bearing within TGS.
             solver_gap = effective_gap
-            if start_gap > wp.float32(0.0) and solver_gap < start_gap:
-                solver_gap = start_gap
+            use_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
+            if use_start_gap:
+                start_gap = cc_get_start_gap(cc, k)
+                if start_gap > wp.float32(0.0) and solver_gap < start_gap:
+                    solver_gap = start_gap
             if solver_gap > wp.float32(0.0):
                 bias_val = solver_gap * idt
-                # Positive speculative bias is the activation barrier for a
-                # separated row. Capping it below the generated gap can make a
-                # far SDF candidate react even though it has not reached the
-                # contact margin.
             else:
                 bias_val = effective_gap * bias_rate
-                bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
+            bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
 
             drift_t1_raw = wp.dot(p_diff, t1_dir)
             drift_t2_raw = wp.dot(p_diff, t2_dir)
@@ -609,10 +632,8 @@ def _make_contact_prepare_for_iteration_at(
                     drift_t1_raw = wp.dot(p_diff, t1_dir)
                     drift_t2_raw = wp.dot(p_diff, t2_dir)
 
-            if solver_gap > wp.float32(0.0):
-                # Positive-gap rows warm-start with no stored load. The
-                # bias solve treats them as normal-only speculative
-                # constraints; the relax pass skips them.
+            if (use_start_gap and solver_gap > wp.float32(0.0)) or effective_gap > wp.float32(0.002):
+                # Far speculative rows are normal velocity caps, not manifolds.
                 cc_set_normal_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
@@ -1074,14 +1095,20 @@ def _make_contact_iterate_at(
                     pd_gamma_n = cc_get_pd_gamma(cc, k)
                     pd_bias_n = cc_get_pd_bias(cc, k)
 
-            if wp.static(use_bias):
+            if is_speculative:
+                mass_coeff_n = wp.float32(1.0)
+                impulse_coeff_n = wp.float32(0.0)
+                if speculative_bias <= idt * wp.float32(0.002):
+                    mu_s_eff = mu_s
+                    mu_k_eff = mu_k
+                else:
+                    mu_s_eff = wp.float32(0.0)
+                    mu_k_eff = wp.float32(0.0)
+            elif wp.static(use_bias):
                 mass_coeff_n = mass_coeff
                 impulse_coeff_n = impulse_coeff
                 mu_s_eff = mu_s
                 mu_k_eff = mu_k
-                if is_speculative:
-                    mu_s_eff = wp.float32(0.0)
-                    mu_k_eff = wp.float32(0.0)
             else:
                 mass_coeff_n = wp.float32(1.0)
                 impulse_coeff_n = wp.float32(0.0)

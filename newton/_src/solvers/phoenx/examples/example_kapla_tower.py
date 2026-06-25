@@ -472,6 +472,7 @@ class Example:
                 dt=self.frame_dt,
                 contacts=self.contacts,
                 shape_body=self._shape_body,
+                shape_type=self.model.shape_type,
             )
             self._sync_phoenx_to_newton()
 

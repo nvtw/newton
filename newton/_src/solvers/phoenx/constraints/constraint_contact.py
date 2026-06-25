@@ -300,6 +300,8 @@ class ContactViews:
 
     #: ``model.shape_body``.
     shape_body: wp.array[wp.int32]
+    #: ``model.shape_type`` (or unified collision-pipeline shape types).
+    shape_type: wp.array[wp.int32]
 
     #: Soft-contact stiffness [N/m] / damping [N·s/m]. ``0`` falls
     #: back to the legacy Box2D hertz-based normal row.
@@ -320,6 +322,7 @@ def contact_views_make(
     rigid_contact_margin0: wp.array,
     rigid_contact_margin1: wp.array,
     shape_body: wp.array,
+    shape_type: wp.array,
     rigid_contact_stiffness: wp.array,
     rigid_contact_damping: wp.array,
     rigid_contact_friction: wp.array,
@@ -340,6 +343,7 @@ def contact_views_make(
     v.rigid_contact_margin0 = rigid_contact_margin0
     v.rigid_contact_margin1 = rigid_contact_margin1
     v.shape_body = shape_body
+    v.shape_type = shape_type
     v.rigid_contact_stiffness = rigid_contact_stiffness
     v.rigid_contact_damping = rigid_contact_damping
     v.rigid_contact_friction = rigid_contact_friction
