@@ -567,9 +567,12 @@ def _make_contact_prepare_for_iteration_at(
                 p1_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
                 r1 = p0_world - position1
                 r2 = p1_world - position2
+                # Only ``eff_n`` is consumed before the sticky-break anchor
+                # decision (load_boost / bias below). ``eff_t1`` / ``eff_t2``
+                # are deferred until after that block so they are computed once
+                # from the final ``r1`` / ``r2`` instead of twice when the
+                # break re-projects fresh anchors. Bit-identical either way.
                 eff_n = effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-                eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-                eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
                 effective_gap = wp.dot(p1_world - p0_world, n)
                 p_diff = p1_world - p0_world
 
@@ -626,8 +629,6 @@ def _make_contact_prepare_for_iteration_at(
                     r1 = p0_world - position1
                     r2 = p1_world - position2
                     eff_n = effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-                    eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-                    eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
                     p_diff = p1_world - p0_world
                     drift_t1_raw = wp.dot(p_diff, t1_dir)
                     drift_t2_raw = wp.dot(p_diff, t2_dir)
@@ -644,6 +645,14 @@ def _make_contact_prepare_for_iteration_at(
                 drift_t2 = wp.clamp(drift_t2_raw, -friction_slop, friction_slop)
                 bias_t1_val = friction_bias_factor * drift_t1 * idt * load_boost
                 bias_t2_val = friction_bias_factor * drift_t2 * idt * load_boost
+
+            if wp.static(not cloth_support):
+                # Deferred from the anchor-projection block above: compute the
+                # tangent effective masses once from the final ``r1`` / ``r2``
+                # (post sticky-break). Cloth fills these via the endpoint
+                # inverse-mass helpers earlier.
+                eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+                eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
 
             cc_set_eff_n(cc, k, eff_n)
             cc_set_eff_t1(cc, k, eff_t1)

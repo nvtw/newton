@@ -88,6 +88,11 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 ### Inertia + force-clear fusion
 - Damping + rotated-inertia refresh + force/torque zeroing were three back-to-back per-body kernels with the same dim/gate. Fused into `_phoenx_update_inertia_and_clear_forces_kernel`. Saves ~3 launches per step.
 
+### Contact prepare: defer tangent effective masses past the sticky-break
+- 2026-06-25: `_make_contact_prepare_for_iteration_at` (rigid path) computed `eff_n`/`eff_t1`/`eff_t2` up front, but the sticky-friction-break block then re-projects fresh anchors and recomputes all three — so the tangent masses were computed twice whenever a contact's anchor broke. Only `eff_n` is consumed before that block (the Baumgarte `load_boost`/bias). Now only `eff_n` is computed up front; `eff_t1`/`eff_t2` are computed once after the anchor decision, from the final `r1`/`r2`.
+- **Bit-identical** (no-break: same inputs; break: same fresh-anchor inputs as the old recompute). Removes one `effective_mass_scalar` pair per broken contact.
+- Kapla steady-state prepare kernel: **252.6 → 248.5 ms / 16.70 → 16.44 us (-1.6%)** (drift-robust nsys, 100 frames). Small at steady state (few breaks) but free, and helps the transient settle / make-and-break phase of every rigid contact scene (single + multi world share this code).
+
 ### Unified local-block pipeline prototype
 - `benchmarks/experimental/bench_unified_block_pipeline.py` extracts real PhoenX coloured graphs and maps rigid contacts / ADBS joint modes into a shared local-block operation set: contact3, point3, angular3, tangent4, scalar-linear, scalar-angular. It compares compact typed math (`split`), shape-grouped compact math, fully uniform 4-row sidecar descriptors, and a graph-capture-safe hybrid dispatcher.
 - Real 2048-world RL scenes, 20 substeps, `prepare_refresh_stride=auto`, `tpw=16`: hybrid is consistently best on the local-block proxy (`h1`: 0.0616 ms vs split 0.0738, +19.8%; `g1`: 0.1015 vs 0.1413, +39.2%; `dr_legs`: 0.1005 vs 0.1121, +11.6%).
@@ -175,6 +180,13 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Use the production benchmark suite and the unified-block proxy benchmark for decisions that affect defaults. Re-enable actual-solve prototype modes only for isolated scheduler debugging with short timeouts.
 
 ## Tried and reverted
+
+### Cooperative grid-sync iterate megakernel (single-world)
+- 2026-06-25: collapsed the per-colour single-world PGS iterate launches into ONE cooperative kernel that walks all colours internally with a grid-wide `wp.kernel_sync()` barrier between colours (Gauss-Seidel ordering), grid-striding each colour across a co-resident grid. Built on the local Warp `dev/tw/cooperative_launch_experiment` branch (`wp.kernel_sync()` + `wp.launch(cooperative=True)`).
+- **Both feasibility gates pass:** cooperative launch *does* capture into a CUDA graph and replay correctly under standard `wp.ScopedCapture` (the branch only blocks cooperative under *APIC* capture). Occupancy is ample — a register-heavy iterate co-resides ≥1504 blocks (8/SM) on the RTX PRO 6000, far more than the ~126 the 32k-contact overflow colour needs.
+- **Bit-identical:** `max|Δ| = 0` on brick positions over 60 frames vs the per-colour path (non-overflow colours are an independent set, so thread→cid assignment is irrelevant; overflow `parallel_id` is the slot index, independent of grid size).
+- **Perf: neutral.** Kapla 65.2-65.8 fps with the megakernel vs 65.5-65.7 baseline, flat across grid sizes {188, 376, 752, 1504} (median of 3, interleaved). Collapsing ~90 per-colour launches/substep into one buys nothing because the single-world PGS solve is **work-bound, not launch-bound** — the per-colour launch/spin-up overhead in the captured-graph persistent-grid design is already negligible, and the grid-wide barrier across many blocks costs about what the launch saved. Corroborates the earlier flat `NUM_INNER_WHILE_ITERATIONS` sweep.
+- **Don't redo for the solve.** Inlining the mass-splitting average/broadcast wouldn't help either — its 5.2% is averaging *work*, not launch overhead. A grid-sync megakernel could still pay off on a scene that is genuinely launch-bound (many tiny colours / near-no-op launches), but kapla and the like are not. Reverted (kept stock-warp compatible).
 
 ### Substep mega-kernel (one block per world, all substeps in one launch)
 - Goal: collapse the entire `num_substeps` loop (forces, prepare, iterate, integrate, relax, inertia refresh, kinematic, damping, accumulate) into a single block-per-world kernel using the existing per-world body / constraint CSRs.
