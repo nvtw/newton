@@ -24,13 +24,13 @@ from typing import Any
 import numpy as np
 import warp as wp
 import yaml
+from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 from warp_nn.runtime import OnnxRuntime
 
 import newton
 import newton.examples
 import newton.utils
 from newton import JointTargetMode
-from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 
 
 @dataclass
@@ -69,6 +69,7 @@ ROBOT_CONFIGS = {
         yaml_path="rl_policies/g1_23dof.yaml",
     ),
 }
+
 
 @wp.kernel
 def _compute_obs_kernel(

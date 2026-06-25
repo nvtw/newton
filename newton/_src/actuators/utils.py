@@ -156,7 +156,9 @@ def _runtime_shape(runtime, name: str) -> tuple[int, ...]:
             f"{type(runtime).__name__} does not expose tensor shapes; update Warp-NN to provide shape metadata"
         )
     if name not in shapes:
-        raise ValueError(f"{type(runtime).__name__} has no shape for tensor '{name}'; available tensors: {sorted(shapes)}")
+        raise ValueError(
+            f"{type(runtime).__name__} has no shape for tensor '{name}'; available tensors: {sorted(shapes)}"
+        )
     return tuple(shapes[name])
 
 

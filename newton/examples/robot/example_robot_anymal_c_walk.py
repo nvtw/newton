@@ -13,15 +13,16 @@
 
 import numpy as np
 import warp as wp
+from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 from warp_nn.runtime import OnnxRuntime
 
 import newton
 import newton.examples
 import newton.utils
-from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 
 lab_to_mujoco = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11]
 mujoco_to_lab = [0, 4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11]
+
 
 @wp.kernel
 def _build_joint_target_q_kernel(

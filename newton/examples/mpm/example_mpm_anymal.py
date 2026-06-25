@@ -14,6 +14,7 @@ import sys
 
 import numpy as np
 import warp as wp
+from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 from warp_nn.runtime import OnnxRuntime
 
 import newton
@@ -25,7 +26,6 @@ from newton.examples.robot.example_robot_anymal_c_walk import (
     lab_to_mujoco,
     mujoco_to_lab,
 )
-from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 from newton.solvers import SolverImplicitMPM
 
 
