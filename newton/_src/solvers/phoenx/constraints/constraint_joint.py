@@ -611,12 +611,15 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
     write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
 
-    # ``mode_extras`` block is mode-aliased: REVOLUTE / UNIVERSAL store the
-    # twist-tracker scratch (inv_initial_orientation, revolution_counter,
-    # previous_quaternion_angle); PRISMATIC / FIXED / CABLE store the
-    # anchor-3 snapshot + bias3 + acc_imp3. Writing both layouts
-    # unconditionally would clobber the alias, so we branch.
-    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED or mode == JOINT_MODE_CABLE:
+    # ``mode_extras`` block is mode-aliased: modes whose D6 angular lock
+    # needs the relative-orientation tracker (REVOLUTE / BALL / UNIVERSAL /
+    # FIXED) store inv_initial_orientation + revolution_counter +
+    # previous_quaternion_angle there; the still-bespoke anchor-based modes
+    # (PRISMATIC / CABLE) store the anchor-3 snapshot + bias3 + acc_imp3.
+    # Writing both layouts would clobber the alias, so we branch. (FIXED
+    # moved to the tracker group when it migrated to the D6 angular weld,
+    # which locks rotation directly and no longer needs anchor 3.)
+    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_CABLE:
         write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
         write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
         write_vec3(constraints, _OFF_R3_B1, cid, zero3)
@@ -624,9 +627,9 @@ def actuated_double_ball_socket_initialize_kernel(
         write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, 0.0)
     else:
-        # REVOLUTE / BALL_SOCKET / UNIVERSAL: zero out the anchor-3 slots
-        # via the twist-tracker layout. BALL_SOCKET only reads this when
-        # it carries D6 angular limit rows.
+        # REVOLUTE / BALL_SOCKET / UNIVERSAL / FIXED: store the
+        # relative-orientation tracker. BALL_SOCKET only reads it when it
+        # carries D6 angular limit rows.
         write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
         write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
         write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
@@ -2274,7 +2277,7 @@ def _revolute_iterate_at(
 
 
 @wp.func
-def _d6_revolute_prepare_at(
+def _d6_prepare_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
     base_offset: wp.int32,
@@ -2285,9 +2288,27 @@ def _d6_revolute_prepare_at(
     parallel_id: wp.int32,
     body_pair: ConstraintBodies,
     idt: wp.float32,
+    mode_cfg: wp.int32,
 ):
-    """D6 revolute prepare: 3x3 linear lock + 2x2 angular swing lock +
-    scalar axial drive/limit row. See the section header for the layout."""
+    """Generic D6 prepare. ``mode_cfg`` selects the per-axis lock mask:
+
+    * linear: 3x3 point lock at anchor1 (n_lin=3, all modes so far).
+    * angular: n_ang locked axes about ``{t1, t2, n_hat}`` --
+      ``n_ang=2`` swing-only (revolute), ``n_ang=3`` full lock (fixed),
+      ``n_ang=0`` free (ball/universal). The locked-axis bias is the
+      ``extract_rotation_angle`` swing error (locked at 0); the coupled
+      effective mass is stored as a 2x2 in ``s_inv`` (n_ang=2) or a 3x3
+      world matrix in ``ut_ai`` (n_ang=3).
+    * axial: optional twist drive/limit on ``n_hat`` (revolute).
+
+    When called with a compile-time-constant ``mode_cfg`` the unused
+    branches fold away, so the revolute-specialised kernels keep their
+    minimal footprint."""
+    is_revolute = mode_cfg == JOINT_MODE_REVOLUTE
+    is_fixed = mode_cfg == JOINT_MODE_FIXED
+    n_ang_full = is_fixed
+    has_ang_axial = is_revolute
+
     b1 = body_pair.b1
     b2 = body_pair.b2
 
@@ -2354,29 +2375,37 @@ def _d6_revolute_prepare_at(
     bias1 = (p1_b2 - p1_b1) * bias_rate
     write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
 
-    # ---- Angular block: 2x2 swing lock on (t1, t2) ------------------
-    # Relative rotation from the rest pose; swing angle about each
-    # tangent is the bilateral constraint error (locked at 0). Same
-    # ``diff`` and extractor as the D6 angular-limit path.
+    # ---- Angular block: lock n_ang axes about {t1, t2, n_hat} -------
+    # Relative rotation from the rest pose; the angle about each locked
+    # axis is the bilateral constraint error (locked at 0). Same ``diff``
+    # and extractor as the D6 angular-limit path. n_ang=2 locks swing
+    # (t1, t2) only; n_ang=3 also locks twist (n_hat) -> full angular
+    # weld, solved as a 3x3 in the world frame.
     inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
     diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
     angle_t1 = extract_rotation_angle(diff, t1)
     angle_t2 = extract_rotation_angle(diff, t2)
-    bias_ang = wp.vec3f(-angle_t1 * bias_rate, -angle_t2 * bias_rate, 0.0)
-    write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias_ang)
-
     iinv_sum = inv_inertia1 + inv_inertia2
-    m11 = wp.dot(t1, iinv_sum @ t1)
-    m12 = wp.dot(t1, iinv_sum @ t2)
-    m22 = wp.dot(t2, iinv_sum @ t2)
-    m_ang = wp.mat22f(m11, m12, m12, m22)
-    m_ang_inv = wp.inverse(m_ang)
-    write_mat33(
-        constraints,
-        base_offset + _OFF_S_INV,
-        cid,
-        wp.mat33f(m_ang_inv[0, 0], m_ang_inv[0, 1], 0.0, m_ang_inv[1, 0], m_ang_inv[1, 1], 0.0, 0.0, 0.0, 0.0),
-    )
+    if n_ang_full:
+        angle_n = extract_rotation_angle(diff, n_hat)
+        # World-frame full lock: error vector along the orthonormal
+        # {t1, t2, n_hat} frame, effective mass = (I1^-1 + I2^-1).
+        bias_ang = (-angle_t1 * bias_rate) * t1 + (-angle_t2 * bias_rate) * t2 + (-angle_n * bias_rate) * n_hat
+        write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias_ang)
+        write_mat33(constraints, base_offset + _OFF_UT_AI, cid, wp.inverse(iinv_sum))
+    else:
+        bias_ang = wp.vec3f(-angle_t1 * bias_rate, -angle_t2 * bias_rate, 0.0)
+        write_vec3(constraints, base_offset + _OFF_BIAS2, cid, bias_ang)
+        m11 = wp.dot(t1, iinv_sum @ t1)
+        m12 = wp.dot(t1, iinv_sum @ t2)
+        m22 = wp.dot(t2, iinv_sum @ t2)
+        m_ang_inv = wp.inverse(wp.mat22f(m11, m12, m12, m22))
+        write_mat33(
+            constraints,
+            base_offset + _OFF_S_INV,
+            cid,
+            wp.mat33f(m_ang_inv[0, 0], m_ang_inv[0, 1], 0.0, m_ang_inv[1, 0], m_ang_inv[1, 1], 0.0, 0.0, 0.0, 0.0),
+        )
 
     # ---- Warm-start: linear (acc1) + angular (acc2) -----------------
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
@@ -2387,28 +2416,28 @@ def _d6_revolute_prepare_at(
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1) - inv_inertia2 @ acc2
 
     # ---- Axial drive + limit row (twist about n_hat) ----------------
-    eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
-    j1 = n_hat
-    new_q_angle = extract_rotation_angle(diff, j1)
-    old_counter = read_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid)
-    old_prev = read_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
-    new_counter, new_prev = revolution_tracker_update(new_q_angle, old_counter, old_prev)
-    write_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid, new_counter)
-    write_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid, new_prev)
-    cumulative_angle = revolution_tracker_angle(new_counter, new_prev)
+    if has_ang_axial:
+        eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
+        new_q_angle = extract_rotation_angle(diff, n_hat)
+        old_counter = read_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid)
+        old_prev = read_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+        new_counter, new_prev = revolution_tracker_update(new_q_angle, old_counter, old_prev)
+        write_int(constraints, base_offset + _OFF_REVOLUTION_COUNTER, cid, new_counter)
+        write_float(constraints, base_offset + _OFF_PREVIOUS_QUATERNION_ANGLE, cid, new_prev)
+        cumulative_angle = revolution_tracker_angle(new_counter, new_prev)
 
-    axial_imp = _axial_drive_limit_prepare_at(
-        constraints,
-        cid,
-        base_offset,
-        cumulative_angle,
-        eff_inv,
-        dt,
-        PHOENX_BOOST_REVOLUTE_DRIVE,
-        PHOENX_BOOST_REVOLUTE_LIMIT,
-    )
-    angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
-    angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
+        axial_imp = _axial_drive_limit_prepare_at(
+            constraints,
+            cid,
+            base_offset,
+            cumulative_angle,
+            eff_inv,
+            dt,
+            PHOENX_BOOST_REVOLUTE_DRIVE,
+            PHOENX_BOOST_REVOLUTE_LIMIT,
+        )
+        angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_imp)
+        angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_imp)
 
     _ms_store_body_pair(
         bodies,
@@ -2427,7 +2456,7 @@ def _d6_revolute_prepare_at(
 
 
 @wp.func
-def _d6_revolute_iterate_at(
+def _d6_iterate_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
     base_offset: wp.int32,
@@ -2440,9 +2469,16 @@ def _d6_revolute_iterate_at(
     idt: wp.float32,
     sor_boost: wp.float32,
     use_bias: wp.bool,
+    mode_cfg: wp.int32,
 ):
-    """D6 revolute iterate: block Gauss-Seidel over the linear point
-    lock, the angular swing lock, and the scalar axial drive/limit row."""
+    """Generic D6 iterate: block Gauss-Seidel over the linear point
+    lock, the n_ang angular lock, and the optional axial drive/limit
+    row. ``mode_cfg`` selects the lock mask (see :func:`_d6_prepare_at`)."""
+    is_revolute = mode_cfg == JOINT_MODE_REVOLUTE
+    is_fixed = mode_cfg == JOINT_MODE_FIXED
+    n_ang_full = is_fixed
+    has_ang_axial = is_revolute
+
     b1 = body_pair.b1
     b2 = body_pair.b2
 
@@ -2490,28 +2526,39 @@ def _d6_revolute_iterate_at(
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
     write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
 
-    # ---- Angular block: 2x2 swing lock on (t1, t2) ------------------
-    s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
-    m_ang_inv = wp.mat22f(s_inv_packed[0, 0], s_inv_packed[0, 1], s_inv_packed[1, 0], s_inv_packed[1, 1])
+    # ---- Angular block: lock n_ang axes about {t1, t2, n_hat} -------
     acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-    acc2_tan = wp.vec2f(wp.dot(t1, acc2), wp.dot(t2, acc2))
     w_rel = angular_velocity1 - angular_velocity2
-    jvr = wp.vec2f(wp.dot(t1, w_rel) + bias_ang[0], wp.dot(t2, w_rel) + bias_ang[1])
-    lam_ang_us = -(m_ang_inv @ jvr)
-    lam_ang = mass_coeff * lam_ang_us - impulse_coeff * acc2_tan
-    lam_ang = lam_ang * sor_boost
-    torque = lam_ang[0] * t1 + lam_ang[1] * t2
+    if n_ang_full:
+        # Full 3x3 world-frame lock (bias_ang is a world error vector).
+        m_inv3 = read_mat33(constraints, base_offset + _OFF_UT_AI, cid)
+        lam_us3 = -(m_inv3 @ (w_rel + bias_ang))
+        torque = mass_coeff * lam_us3 - impulse_coeff * acc2
+        torque = torque * sor_boost
+    else:
+        # 2x2 swing lock on (t1, t2); bias_ang holds the tangent angles.
+        s_inv_packed = read_mat33(constraints, base_offset + _OFF_S_INV, cid)
+        m_ang_inv = wp.mat22f(s_inv_packed[0, 0], s_inv_packed[0, 1], s_inv_packed[1, 0], s_inv_packed[1, 1])
+        acc2_tan = wp.vec2f(wp.dot(t1, acc2), wp.dot(t2, acc2))
+        jvr = wp.vec2f(wp.dot(t1, w_rel) + bias_ang[0], wp.dot(t2, w_rel) + bias_ang[1])
+        lam_ang_us = -(m_ang_inv @ jvr)
+        lam_ang = mass_coeff * lam_ang_us - impulse_coeff * acc2_tan
+        lam_ang = lam_ang * sor_boost
+        torque = lam_ang[0] * t1 + lam_ang[1] * t2
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque
     write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2 + torque)
 
     # ---- Axial drive + limit scalar row (twist about n_hat) ---------
-    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
-    jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-    axial_lam = _axial_drive_limit_iterate(constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost, use_bias)
-    angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
-    angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
+    if has_ang_axial:
+        n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+        clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
+        jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
+        axial_lam = _axial_drive_limit_iterate(
+            constraints, cid, base_offset, jv_axial, clamp, idt, sor_boost, use_bias
+        )
+        angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
+        angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
     _ms_store_body_pair(
         bodies,
@@ -4102,8 +4149,8 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
-        _d6_revolute_prepare_at(
-            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        _d6_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, JOINT_MODE_REVOLUTE
         )
     elif joint_mode == JOINT_MODE_PRISMATIC:
         _prismatic_prepare_at(
@@ -4114,8 +4161,8 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
         )
     elif joint_mode == JOINT_MODE_FIXED:
-        _fixed_prepare_at(
-            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        _d6_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, JOINT_MODE_FIXED
         )
     elif joint_mode == JOINT_MODE_CABLE:
         _cable_prepare_at(
@@ -4488,7 +4535,7 @@ def actuated_double_ball_socket_iterate_at(
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
     if joint_mode == JOINT_MODE_REVOLUTE:
-        _d6_revolute_iterate_at(
+        _d6_iterate_at(
             constraints,
             cid,
             base_offset,
@@ -4501,6 +4548,7 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            JOINT_MODE_REVOLUTE,
         )
     elif joint_mode == JOINT_MODE_PRISMATIC:
         _prismatic_iterate_at(
@@ -4533,7 +4581,7 @@ def actuated_double_ball_socket_iterate_at(
             use_bias,
         )
     elif joint_mode == JOINT_MODE_FIXED:
-        _fixed_iterate_at(
+        _d6_iterate_at(
             constraints,
             cid,
             base_offset,
@@ -4546,6 +4594,7 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            JOINT_MODE_FIXED,
         )
     elif joint_mode == JOINT_MODE_CABLE:
         _cable_iterate_at(
@@ -4742,8 +4791,20 @@ def revolute_iterate(
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    _d6_revolute_iterate_at(
-        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, sor_boost, use_bias
+    _d6_iterate_at(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        copy_state,
+        num_bodies,
+        parallel_id,
+        body_pair,
+        idt,
+        sor_boost,
+        use_bias,
+        JOINT_MODE_REVOLUTE,
     )
 
 
@@ -4765,7 +4826,9 @@ def revolute_prepare_for_iteration(
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_pair = constraint_bodies_make(b1, b2)
-    _d6_revolute_prepare_at(constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt)
+    _d6_prepare_at(
+        constraints, cid, 0, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, JOINT_MODE_REVOLUTE
+    )
 
 
 @wp.func
