@@ -62,6 +62,39 @@ def closest_point_on_box_surface(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
     )
 
 
+@wp.func
+def box_v0_seed(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
+    """MPR/GJK ``v0`` seed point on a box for a partner center ``p`` outside the box.
+
+    For a roughly-equidimensional box this is the clamped nearest-surface point.
+    For a FLAT box (one half-extent much smaller than the others) the contact is,
+    geometrically, almost always on one of the two large faces — so we seed on the
+    near large face while keeping the partner's in-plane coordinates. That keeps the
+    seed laterally aligned with the partner even when it overhangs the box edge, so
+    the initial search direction stays perpendicular to the contact face instead of
+    pointing toward the edge/side face.
+    """
+    ti = int(0)
+    if half_extents[1] < half_extents[ti]:
+        ti = 1
+    if half_extents[2] < half_extents[ti]:
+        ti = 2
+    max_h = wp.max(half_extents[0], wp.max(half_extents[1], half_extents[2]))
+
+    clamped = wp.vec3(
+        wp.clamp(p[0], -half_extents[0], half_extents[0]),
+        wp.clamp(p[1], -half_extents[1], half_extents[1]),
+        wp.clamp(p[2], -half_extents[2], half_extents[2]),
+    )
+    if half_extents[ti] >= 0.5 * max_h:
+        return clamped  # not flat: nearest-surface clamp
+
+    face = wp.where(p[ti] >= 0.0, half_extents[ti], -half_extents[ti])
+    out = p
+    out[ti] = face  # near large face, in-plane coords kept (lateral alignment)
+    return out
+
+
 @wp.struct
 class Vert:
     """Vertex structure for MPR algorithm containing points on both shapes."""
@@ -275,7 +308,7 @@ def create_support_map_function(support_func: Any):
                 or wp.abs(center_b_world[1]) > h_a[1]
                 or wp.abs(center_b_world[2]) > h_a[2]
             ):
-                surf_a = closest_point_on_box_surface(center_b_world, h_a)
+                surf_a = box_v0_seed(center_b_world, h_a)
                 center_a = surf_a + 0.01 * (box_center - surf_a)
 
         if geom_b.shape_type == int(GeoType.BOX):
@@ -286,7 +319,7 @@ def create_support_map_function(support_func: Any):
                 or wp.abs(center_a_in_b[1]) > h_b[1]
                 or wp.abs(center_a_in_b[2]) > h_b[2]
             ):
-                surf_b = closest_point_on_box_surface(center_a_in_b, h_b)
+                surf_b = box_v0_seed(center_a_in_b, h_b)
                 center_b_local = surf_b + 0.01 * (box_center - surf_b)
                 center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
 
