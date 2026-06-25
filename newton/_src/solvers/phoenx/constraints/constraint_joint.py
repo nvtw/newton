@@ -619,20 +619,13 @@ def actuated_double_ball_socket_initialize_kernel(
     # Writing both layouts would clobber the alias, so we branch. (FIXED
     # moved to the tracker group when it migrated to the D6 angular weld,
     # which locks rotation directly and no longer needs anchor 3.)
-    if mode == JOINT_MODE_CABLE:
-        write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
-        write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
-        write_vec3(constraints, _OFF_R3_B1, cid, zero3)
-        write_vec3(constraints, _OFF_R3_B2, cid, zero3)
-        write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
-        write_float(constraints, _OFF_BIAS3, cid, 0.0)
-    else:
-        # REVOLUTE / BALL_SOCKET / UNIVERSAL / FIXED / PRISMATIC: store the
-        # relative-orientation tracker (the D6 angular weld reads it).
-        # BALL_SOCKET only reads it when it carries D6 angular limit rows.
-        write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
-        write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
-        write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
+    # Every joint mode now uses the unified D6 angular formulation, which
+    # reads the relative-orientation tracker (and no longer the anchor-3
+    # snapshot). Cable's bend/twist accumulators live in ACC_IMP2 (zeroed
+    # above), so anchor 3 is fully retired.
+    write_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid, inv_initial_orientation)
+    write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, 0)
+    write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, 0.0)
 
     write_float(constraints, _OFF_HERTZ, cid, hertz[tid])
     write_float(constraints, _OFF_DAMPING_RATIO, cid, damping_ratio[tid])
@@ -2315,6 +2308,7 @@ def _d6_prepare_at(
     has_ang_axial = is_revolute or is_universal
     has_lin_axial = is_prismatic
     has_d6_limits = mode_cfg == JOINT_MODE_BALL_SOCKET or is_universal
+    ang_soft = mode_cfg == JOINT_MODE_CABLE  # PD-soft angular weld (bend + twist)
 
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -2432,14 +2426,91 @@ def _d6_prepare_at(
                 cid,
                 wp.mat33f(m_ang_inv[0, 0], m_ang_inv[0, 1], 0.0, m_ang_inv[1, 0], m_ang_inv[1, 1], 0.0, 0.0, 0.0, 0.0),
             )
+    elif ang_soft:
+        # Cable: PD-soft angular weld. Bend = 2 swing axes (t1, t2),
+        # twist = n_hat, each a spring-damper toward zero relative
+        # rotation. Direct-angular form -- the user gains are angular
+        # stiffness/damping applied to the swing/twist angle directly
+        # (no rest_length rescale; that was an artefact of the old
+        # positional anchor-2/3 rows). Implicit-Euler softening adds
+        # gamma to the diagonal; the bias is the spring restitution.
+        angle_t1 = extract_rotation_angle(diff, t1)
+        angle_t2 = extract_rotation_angle(diff, t2)
+        angle_n = extract_rotation_angle(diff, n_hat)
+        k2_00 = wp.dot(t1, iinv_sum @ t1)
+        k2_01 = wp.dot(t1, iinv_sum @ t2)
+        k2_11 = wp.dot(t2, iinv_sum @ t2)
 
-    # ---- Warm-start: linear (acc1) + angular hard-lock (acc2) -------
+        k_bend = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
+        d_bend = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
+        bend_boost = wp.clamp(PHOENX_BOOST_CABLE_BEND, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
+        eff_inv_bend = wp.float32(0.5) * (k2_00 + k2_11)
+        bias_factor_bend = wp.float32(0.0)
+        gamma_bend = wp.float32(0.0)
+        if (k_bend > wp.float32(0.0)) or (d_bend > wp.float32(0.0)):
+            if eff_inv_bend > wp.float32(0.0):
+                k_cl_bend = wp.min(k_bend, bend_boost / (eff_inv_bend * dt * dt))
+            else:
+                k_cl_bend = k_bend
+            denom_bend = d_bend + dt * k_cl_bend
+            if denom_bend > wp.float32(0.0):
+                soft_bend = wp.float32(1.0) / denom_bend
+                bias_factor_bend = dt * k_cl_bend * soft_bend
+                gamma_bend = soft_bend * idt
+        k2s_00 = k2_00 + gamma_bend
+        k2s_11 = k2_11 + gamma_bend
+        det_b = k2s_00 * k2s_11 - k2_01 * k2_01
+        if wp.abs(det_b) > wp.float32(1.0e-20):
+            inv_det_b = wp.float32(1.0) / det_b
+        else:
+            inv_det_b = wp.float32(0.0)
+        write_float(constraints, base_offset + _OFF_CABLE_K22_INV_00, cid, k2s_11 * inv_det_b)
+        write_float(constraints, base_offset + _OFF_CABLE_K22_INV_01, cid, -k2_01 * inv_det_b)
+        write_float(constraints, base_offset + _OFF_CABLE_K22_INV_10, cid, -k2_01 * inv_det_b)
+        write_float(constraints, base_offset + _OFF_CABLE_K22_INV_11, cid, k2s_00 * inv_det_b)
+        write_float(constraints, base_offset + _OFF_CABLE_GAMMA_BEND, cid, gamma_bend)
+
+        eff_inv_twist = wp.dot(n_hat, iinv_sum @ n_hat)
+        k_twist = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+        d_twist = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
+        twist_boost = wp.clamp(PHOENX_BOOST_CABLE_TWIST, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
+        bias_factor_twist = wp.float32(0.0)
+        gamma_twist = wp.float32(0.0)
+        m_twist_soft = wp.float32(0.0)
+        if (k_twist > wp.float32(0.0)) or (d_twist > wp.float32(0.0)):
+            if eff_inv_twist > wp.float32(0.0):
+                k_cl_twist = wp.min(k_twist, twist_boost / (eff_inv_twist * dt * dt))
+            else:
+                k_cl_twist = k_twist
+            denom_twist = d_twist + dt * k_cl_twist
+            if denom_twist > wp.float32(0.0):
+                soft_twist = wp.float32(1.0) / denom_twist
+                bias_factor_twist = dt * k_cl_twist * soft_twist
+                gamma_twist = soft_twist * idt
+                m_twist_soft = wp.float32(1.0) / (eff_inv_twist + gamma_twist)
+        write_float(constraints, base_offset + _OFF_CABLE_M_TWIST_SOFT, cid, m_twist_soft)
+        write_float(constraints, base_offset + _OFF_CABLE_GAMMA_TWIST, cid, gamma_twist)
+
+        # Spring restitution bias (velocity-level), one per angular axis.
+        # BIAS2 = (bend_t1, bend_t2, twist) -- twist shares the same vec3.
+        write_vec3(
+            constraints,
+            base_offset + _OFF_BIAS2,
+            cid,
+            wp.vec3f(
+                -angle_t1 * bias_factor_bend * idt,
+                -angle_t2 * bias_factor_bend * idt,
+                -angle_n * bias_factor_twist * idt,
+            ),
+        )
+
+    # ---- Warm-start: linear (acc1) + angular (acc2 world torque) ----
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     velocity1 = velocity1 - inv_mass1 * acc1
     angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1)
     velocity2 = velocity2 + inv_mass2 * acc1
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1)
-    if has_angular_hardlock:
+    if has_angular_hardlock or ang_soft:
         acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ acc2
         angular_velocity2 = angular_velocity2 - inv_inertia2 @ acc2
@@ -2550,6 +2621,7 @@ def _d6_iterate_at(
     has_ang_axial = is_revolute or is_universal
     has_lin_axial = is_prismatic
     has_d6_limits = mode_cfg == JOINT_MODE_BALL_SOCKET or is_universal
+    ang_soft = mode_cfg == JOINT_MODE_CABLE  # PD-soft angular weld (bend + twist)
 
     b1 = body_pair.b1
     b2 = body_pair.b2
@@ -2628,6 +2700,35 @@ def _d6_iterate_at(
             lam_ang = mass_coeff * lam_ang_us - impulse_coeff * acc2_tan
             lam_ang = lam_ang * sor_boost
             torque = lam_ang[0] * t1 + lam_ang[1] * t2
+        angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque
+        angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque
+        write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2 + torque)
+    elif ang_soft:
+        # Cable PD-soft angular weld: bend (t1, t2) + twist (n_hat). The
+        # spring bias is unconditional (a restitution force, not drift),
+        # so it stays on through the relax pass regardless of use_bias.
+        n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+        cable_bias = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
+        k22_00 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_00, cid)
+        k22_01 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_01, cid)
+        k22_10 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_10, cid)
+        k22_11 = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_11, cid)
+        gamma_bend = read_float(constraints, base_offset + _OFF_CABLE_GAMMA_BEND, cid)
+        m_twist_soft = read_float(constraints, base_offset + _OFF_CABLE_M_TWIST_SOFT, cid)
+        gamma_twist = read_float(constraints, base_offset + _OFF_CABLE_GAMMA_TWIST, cid)
+        acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+        w_rel = angular_velocity1 - angular_velocity2
+        # Bend: 2x2 soft solve on (t1, t2).
+        acc_t1 = wp.dot(t1, acc2)
+        acc_t2 = wp.dot(t2, acc2)
+        rhs_t1 = wp.dot(t1, w_rel) + cable_bias[0] + gamma_bend * acc_t1
+        rhs_t2 = wp.dot(t2, w_rel) + cable_bias[1] + gamma_bend * acc_t2
+        lam_t1 = -(k22_00 * rhs_t1 + k22_01 * rhs_t2) * sor_boost
+        lam_t2 = -(k22_10 * rhs_t1 + k22_11 * rhs_t2) * sor_boost
+        # Twist: scalar soft solve on n_hat.
+        acc_n = wp.dot(n_hat, acc2)
+        lam_n = -m_twist_soft * (wp.dot(n_hat, w_rel) + cable_bias[2] + gamma_twist * acc_n) * sor_boost
+        torque = lam_t1 * t1 + lam_t2 * t2 + lam_n * n_hat
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ torque
         angular_velocity2 = angular_velocity2 - inv_inertia2 @ torque
         write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2 + torque)
@@ -4281,8 +4382,8 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
             constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, JOINT_MODE_FIXED
         )
     elif joint_mode == JOINT_MODE_CABLE:
-        _cable_prepare_at(
-            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt
+        _d6_prepare_at(
+            constraints, cid, base_offset, bodies, particles, copy_state, num_bodies, parallel_id, body_pair, idt, JOINT_MODE_CABLE
         )
     else:
         _d6_prepare_at(
@@ -4715,7 +4816,7 @@ def actuated_double_ball_socket_iterate_at(
             JOINT_MODE_FIXED,
         )
     elif joint_mode == JOINT_MODE_CABLE:
-        _cable_iterate_at(
+        _d6_iterate_at(
             constraints,
             cid,
             base_offset,
@@ -4728,6 +4829,7 @@ def actuated_double_ball_socket_iterate_at(
             idt,
             sor_boost,
             use_bias,
+            JOINT_MODE_CABLE,
         )
     else:
         _d6_iterate_at(
