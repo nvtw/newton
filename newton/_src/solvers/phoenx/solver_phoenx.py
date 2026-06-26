@@ -2878,8 +2878,18 @@ class PhoenXWorld:
         omega_accum: wp.array[wp.vec3f] | None = None,
         shape_aabb_lower: wp.array[wp.vec3f] | None = None,
         shape_aabb_upper: wp.array[wp.vec3f] | None = None,
+        reuse_partition: bool = False,
     ) -> None:
         """Advance the world by ``dt`` seconds.
+
+        ``reuse_partition=True`` skips the contact ingest + element rebuild +
+        graph colouring and reuses the colouring from the previous step. Valid
+        only when the constraint graph is unchanged since the last step -- e.g.
+        a caller that runs collision detection once and then takes several
+        solver substeps against the same contact set (the Anymal RL env's
+        ``collide_once_per_frame`` path). The per-substep solve still
+        re-projects anchors from the current pose, so accuracy is unaffected;
+        it just stops re-colouring an identical graph every substep.
 
         Phases: ingest contacts -> JP colouring -> substep loop (forces+gravity,
         main solve, integrate, relax) -> damping + inertia refresh -> clear forces.
@@ -2907,23 +2917,29 @@ class PhoenXWorld:
         if self.enable_column_timers:
             self._zero_column_timers()
 
-        self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
-        if self._ingest_scratch is not None:
-            # Contacts begin after the joint + cloth-tri + cloth-bending
-            # + soft-tet blocks in the cid space. Contact cids are compacted
-            # every step, so use the stable shape-pair key for contact
-            # priority tie-breaks; otherwise lower-world contact count changes
-            # perturb colouring and PGS order in later worlds.
-            self._partitioner.set_costs_from_contact_pairs(
-                self._contact_offset,
-                self._ingest_scratch.num_contact_columns,
-                self._contact_cols,
-                self._ingest_scratch.pair_source_idx,
-                self._ingest_scratch.pair_shape_a,
-                self._ingest_scratch.pair_shape_b,
-            )
+        # Contact ingest + element rebuild + graph colouring all depend only
+        # on the (unchanged) contact graph when ``reuse_partition`` is set, so
+        # skip them and reuse the previous step's columns / elements / CSR. The
+        # within-frame contact warm-start is preserved -- the lambdas in the
+        # reused columns are exactly the prior substep's converged values.
+        if not reuse_partition:
+            self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
+            if self._ingest_scratch is not None:
+                # Contacts begin after the joint + cloth-tri + cloth-bending
+                # + soft-tet blocks in the cid space. Contact cids are compacted
+                # every step, so use the stable shape-pair key for contact
+                # priority tie-breaks; otherwise lower-world contact count changes
+                # perturb colouring and PGS order in later worlds.
+                self._partitioner.set_costs_from_contact_pairs(
+                    self._contact_offset,
+                    self._ingest_scratch.num_contact_columns,
+                    self._contact_cols,
+                    self._ingest_scratch.pair_source_idx,
+                    self._ingest_scratch.pair_shape_a,
+                    self._ingest_scratch.pair_shape_b,
+                )
 
-        self._rebuild_elements()
+            self._rebuild_elements()
         # Kinematic prepare BEFORE the sleeping pass: the per-island
         # score kernel reads ``bodies.velocity`` and must see the
         # pose-target-derived velocity for kinematic movers, otherwise a
@@ -2933,24 +2949,25 @@ class PhoenXWorld:
         if self._sleeping_enabled:
             self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
         if self._constraint_capacity > 0:
-            self._partitioner.reset(self._elements, self._num_active_constraints)
-            if self.step_layout == "single_world":
-                compute_family_starts = self._singleworld_needs_family_starts()
-                if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
-                    # In-graph JP fallback if greedy's 64-colour bitmask overflows.
-                    self._partitioner.build_csr_greedy_with_jp_fallback(compute_family_starts=compute_family_starts)
+            if not reuse_partition:
+                self._partitioner.reset(self._elements, self._num_active_constraints)
+                if self.step_layout == "single_world":
+                    compute_family_starts = self._singleworld_needs_family_starts()
+                    if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
+                        # In-graph JP fallback if greedy's 64-colour bitmask overflows.
+                        self._partitioner.build_csr_greedy_with_jp_fallback(compute_family_starts=compute_family_starts)
+                    else:
+                        self._partitioner.build_csr(compute_family_starts=compute_family_starts)
                 else:
-                    self._partitioner.build_csr(compute_family_starts=compute_family_starts)
-            else:
-                self._build_per_world_coloring()
+                    self._build_per_world_coloring()
 
-            if self._tpw_auto and self.step_layout != "single_world":
-                self._pick_tpw()
+                if self._tpw_auto and self.step_layout != "single_world":
+                    self._pick_tpw()
 
-            # Per-step setup that depends on the just-built CSR. The
-            # dispatcher rebuilds the mass-splitting interaction graph
-            # here (no-op when mass splitting is disabled).
-            self._dispatcher.begin_step()
+                # Per-step setup that depends on the just-built CSR. The
+                # dispatcher rebuilds the mass-splitting interaction graph
+                # here (no-op when mass splitting is disabled).
+                self._dispatcher.begin_step()
 
         # Substep order: bias-on solve -> integrate -> bias-off relax. Reversing
         # would discard the positional bias's penetration recovery.

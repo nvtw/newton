@@ -997,6 +997,10 @@ class SolverPhoenX(SolverBase):
             omega_accum=world_omega_accum,
             shape_aabb_lower=shape_aabb_lower,
             shape_aabb_upper=shape_aabb_upper,
+            # Opt-in (set by callers that substep against a fixed contact set,
+            # e.g. the Anymal env's collide-once path): reuse the prior step's
+            # graph colouring instead of re-colouring an unchanged graph.
+            reuse_partition=bool(getattr(self, "reuse_partition", False)),
         )
         self._last_dt = float(dt) / max(1, self.world.substeps)
 
