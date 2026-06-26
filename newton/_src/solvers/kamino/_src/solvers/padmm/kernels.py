@@ -904,7 +904,7 @@ def _make_project_dual_convergence_accel_kernel(reduction_size: int):
     acceleration state, then cache the current iterates for the next iteration.
     """
 
-    @wp.kernel
+    @wp.kernel(module="unique", enable_backward=False)
     def _project_dual_convergence_accel(
         # Inputs:
         problem_dim: wp.array[int32],
