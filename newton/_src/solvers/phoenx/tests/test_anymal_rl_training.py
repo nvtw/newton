@@ -111,6 +111,40 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         self.assertEqual(dones.shape, (env.world_count,))
         self.assertTrue(np.all(np.isfinite(obs.numpy())))
 
+    def test_collide_once_per_frame_steps_and_differs_from_per_substep(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal RL tests")
+
+        def run(collide_once: bool) -> np.ndarray:
+            cfg = rl.ConfigEnvAnymalPhoenX(
+                world_count=2,
+                reward_mode="dense_command",
+                command=(0.6, 0.0, 0.0, 0.0),
+                sim_substeps=4,
+                solver_iterations=2,
+                velocity_iterations=1,
+                max_episode_steps=0,
+                collide_once_per_frame=collide_once,
+                auto_reset=False,
+            )
+            env = rl.EnvAnymalPhoenX(cfg, device=device)
+            env.reset()
+            actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+            with wp.ScopedCapture(device=device) as capture:
+                for _ in range(8):
+                    env.step(actions)
+            wp.capture_launch(capture.graph)
+            q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
+            self.assertTrue(np.all(np.isfinite(q)))
+            return q[:, 2].copy()  # base heights
+
+        per_substep = run(False)
+        once = run(True)
+        # Both modes stay finite and upright (no fall-through), but the coarser
+        # contact cadence yields a measurably different trajectory.
+        self.assertTrue(np.all(per_substep > 0.2))
+        self.assertTrue(np.all(once > 0.2))
+        self.assertFalse(np.allclose(per_substep, once))
+
     def test_reward_functions_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX Anymal RL tests")
         out = wp.zeros(7, dtype=wp.float32, device=device)
@@ -224,6 +258,131 @@ class TestAnymalPhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(next_obs.numpy())))
         self.assertTrue(np.all(np.isfinite(rewards.numpy())))
         self.assertTrue(np.all(np.isfinite(dones.numpy())))
+
+    def test_train_dense_command_graph_leapfrog_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal graph-leapfrog training tests")
+        env_config = rl.ConfigEnvAnymalPhoenX(
+            world_count=2,
+            reward_mode="dense_command",
+            command=(0.0, 0.0, 0.0, 0.0),
+            sim_substeps=1,
+            solver_iterations=1,
+            velocity_iterations=1,
+            max_episode_steps=0,
+            auto_reset=False,
+        )
+        ppo_config = rl.ConfigPPO(
+            train_epochs=1,
+            normalize_advantages=False,
+            actor_lr=1.0e-3,
+            critic_lr=1.0e-3,
+            entropy_coeff=0.0,
+            mirror_loss_coeff=0.0,
+            shared_value_network=True,
+            manual_actor_backward=True,
+            manual_critic_backward=True,
+        )
+
+        result = rl.train_anymal_ppo(
+            rl.ConfigTrainAnymalPPO(
+                iterations=2,
+                rollout_steps=1,
+                hidden_layers=(8,),
+                env_config=env_config,
+                ppo_config=ppo_config,
+                device=device,
+                seed=41,
+                log_interval=0,
+                use_target_curriculum=False,
+                randomize_target_positions=False,
+                randomize_commands=True,
+                command_x_range=(-0.10, 0.10),
+                command_y_range=(-0.05, 0.05),
+                command_yaw_range=(-0.20, 0.20),
+                command_height_range=(-0.02, 0.02),
+                command_yaw_min_abs=0.05,
+                command_zero_probability=0.10,
+                execution_mode="graph_leapfrog",
+            )
+        )
+
+        self.assertEqual([stat.iteration for stat in result.history], [0, 1])
+        self.assertEqual(result.trainer.iteration, 2)
+        self.assertGreater(result.trainer.actor_optimizer.step_count, 0)
+        for stat in result.history:
+            self.assertTrue(np.isfinite(stat.mean_reward))
+            self.assertTrue(np.isfinite(stat.mean_done))
+            self.assertTrue(np.isfinite(stat.mean_forward_velocity))
+            self.assertTrue(np.isfinite(stat.policy_loss))
+            self.assertTrue(np.isfinite(stat.value_loss))
+
+    def test_train_dense_command_graph_leapfrog_repeatable_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX Anymal deterministic graph-leapfrog training tests")
+
+        def run_once():
+            env_config = rl.ConfigEnvAnymalPhoenX(
+                world_count=2,
+                reward_mode="dense_command",
+                command=(0.0, 0.0, 0.0, 0.0),
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=1,
+                max_episode_steps=0,
+                auto_reset=False,
+            )
+            ppo_config = rl.ConfigPPO(
+                train_epochs=1,
+                normalize_advantages=False,
+                actor_lr=1.0e-3,
+                critic_lr=1.0e-3,
+                entropy_coeff=0.0,
+                mirror_loss_coeff=0.0,
+                shared_value_network=True,
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+            )
+            return rl.train_anymal_ppo(
+                rl.ConfigTrainAnymalPPO(
+                    iterations=2,
+                    rollout_steps=2,
+                    hidden_layers=(8,),
+                    env_config=env_config,
+                    ppo_config=ppo_config,
+                    device=device,
+                    seed=43,
+                    log_interval=0,
+                    use_target_curriculum=False,
+                    randomize_target_positions=False,
+                    randomize_commands=True,
+                    command_x_range=(-0.10, 0.10),
+                    command_y_range=(-0.05, 0.05),
+                    command_yaw_range=(-0.20, 0.20),
+                    command_height_range=(-0.02, 0.02),
+                    command_yaw_min_abs=0.05,
+                    command_zero_probability=0.10,
+                    execution_mode="graph_leapfrog",
+                )
+            )
+
+        first = run_once()
+        second = run_once()
+
+        for first_stat, second_stat in zip(first.history, second.history, strict=True):
+            np.testing.assert_allclose(
+                tuple(first_stat.__dict__.values()), tuple(second_stat.__dict__.values()), rtol=0.0, atol=0.0
+            )
+
+        for first_weight, second_weight in zip(
+            first.trainer.actor.net.weights, second.trainer.actor.net.weights, strict=True
+        ):
+            np.testing.assert_allclose(first_weight.numpy(), second_weight.numpy(), rtol=0.0, atol=0.0)
+        for first_bias, second_bias in zip(
+            first.trainer.actor.net.biases, second.trainer.actor.net.biases, strict=True
+        ):
+            np.testing.assert_allclose(first_bias.numpy(), second_bias.numpy(), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            first.trainer.actor.log_std.numpy(), second.trainer.actor.log_std.numpy(), rtol=0.0, atol=0.0
+        )
 
     def test_dense_command_success_metric_tracks_velocity_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX Anymal RL tests")

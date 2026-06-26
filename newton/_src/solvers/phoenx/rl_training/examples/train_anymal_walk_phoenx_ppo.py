@@ -303,6 +303,7 @@ def build_env_config(
         world_count=int(args.world_count if world_count is None else world_count),
         frame_dt=float(args.frame_dt),
         sim_substeps=int(args.sim_substeps),
+        collide_once_per_frame=bool(getattr(args, "collide_once_per_frame", True)),
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
         action_scale=float(args.action_scale),
@@ -653,6 +654,7 @@ def train_single(args: argparse.Namespace) -> dict[str, object]:
             resume_checkpoint=args.resume_checkpoint,
             checkpoint_path=checkpoint_path,
             checkpoint_interval=int(args.checkpoint_interval),
+            execution_mode=str(args.execution_mode),
         )
     )
     final_iteration = int(result.trainer.iteration)
@@ -720,6 +722,7 @@ def train_curriculum(args: argparse.Namespace) -> dict[str, object]:
                 resume_checkpoint=resume_checkpoint,
                 checkpoint_path=phase_checkpoint_pattern,
                 checkpoint_interval=int(args.checkpoint_interval),
+                execution_mode=str(args.execution_mode),
             )
         )
         final_iteration = int(result.trainer.iteration)
@@ -779,6 +782,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-phase", type=int, default=0)
     parser.add_argument("--phase-count", type=int, default=None)
     parser.add_argument("--allow-gate-failure", action="store_true")
+    parser.add_argument("--execution-mode", choices=("eager", "graph_leapfrog"), default="eager")
 
     parser.add_argument("--command-x", type=float, default=0.6)
     parser.add_argument("--command-y", type=float, default=0.0)
@@ -786,6 +790,12 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--command-height", type=float, default=0.0)
     parser.add_argument("--frame-dt", type=float, default=1.0 / 50.0)
     parser.add_argument("--sim-substeps", type=int, default=4)
+    parser.add_argument(
+        "--no-collide-once-per-frame",
+        dest="collide_once_per_frame",
+        action="store_false",
+        help="Re-detect contacts every substep instead of once per frame (slower, fresher contacts).",
+    )
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--velocity-iterations", type=int, default=1)
     parser.add_argument("--action-scale", type=float, default=0.5)

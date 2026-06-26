@@ -743,6 +743,7 @@ def _run_one_phase(
             resume_checkpoint=resume_checkpoint,
             checkpoint_path=checkpoint_pattern,
             checkpoint_interval=int(args.checkpoint_interval),
+            execution_mode=str(args.execution_mode),
         )
     )
     final_checkpoint = _format_checkpoint(checkpoint_pattern, int(result.trainer.iteration))
@@ -832,6 +833,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-gate-failure", action="store_true")
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--execution-mode", choices=("eager", "graph_leapfrog"), default="eager")
 
     parser.add_argument("--world-count", type=int, default=1024)
     parser.add_argument("--rollout-steps", type=int, default=32)

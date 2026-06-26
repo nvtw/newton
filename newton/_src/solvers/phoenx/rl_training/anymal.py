@@ -11,7 +11,7 @@ import warp as wp
 import newton
 import newton.utils
 
-from .env import collect_ppo_rollout
+from .env import advance_seed_counter, collect_ppo_rollout
 from .ppo import BufferRollout, MirrorMapPPO, TrainerPPO
 from .reward_functions import (
     abs_mechanical_power,
@@ -144,6 +144,49 @@ def anymal_apply_actions_kernel(
         joint_target_q[world * coord_stride + wp.int32(7) + model_joint] = target
     else:
         joint_target_q[world * dof_stride + wp.int32(6) + model_joint] = target
+
+
+@wp.kernel
+def anymal_sample_commands_seed_counter_kernel(
+    seed_counter: wp.array[wp.int32],
+    seed_offset: wp.int32,
+    command_x_min: wp.float32,
+    command_x_max: wp.float32,
+    command_y_min: wp.float32,
+    command_y_max: wp.float32,
+    command_yaw_min: wp.float32,
+    command_yaw_max: wp.float32,
+    command_height_min: wp.float32,
+    command_height_max: wp.float32,
+    command_yaw_min_abs: wp.float32,
+    zero_probability: wp.float32,
+    command: wp.array2d[wp.float32],
+):
+    world = wp.tid()
+    rng = wp.rand_init(seed_counter[0] + seed_offset, world * wp.int32(747796405) + wp.int32(915488749))
+    x = command_x_min + (command_x_max - command_x_min) * wp.randf(rng)
+    y = command_y_min + (command_y_max - command_y_min) * wp.randf(rng)
+    yaw = command_yaw_min + (command_yaw_max - command_yaw_min) * wp.randf(rng)
+    height = command_height_min + (command_height_max - command_height_min) * wp.randf(rng)
+
+    min_abs_yaw = wp.max(command_yaw_min_abs, wp.float32(0.0))
+    if min_abs_yaw > wp.float32(0.0):
+        sign = wp.float32(1.0)
+        if yaw < wp.float32(0.0):
+            sign = wp.float32(-1.0)
+        yaw = _clip_float(sign * wp.max(wp.abs(yaw), min_abs_yaw), command_yaw_min, command_yaw_max)
+
+    zero_p = _clip_float(zero_probability, wp.float32(0.0), wp.float32(1.0))
+    if wp.randf(rng) < zero_p:
+        x = wp.float32(0.0)
+        y = wp.float32(0.0)
+        yaw = wp.float32(0.0)
+        height = wp.float32(0.0)
+
+    command[world, 0] = x
+    command[world, 1] = y
+    command[world, 2] = yaw
+    command[world, 3] = height
 
 
 @wp.kernel
@@ -443,6 +486,11 @@ class ConfigEnvAnymalPhoenX:
         world_count: Number of vectorized Anymal worlds.
         frame_dt: Policy step duration [s].
         sim_substeps: PhoenX substeps per policy step.
+        collide_once_per_frame: Run collision detection once per policy step and
+            reuse the contact set across substeps, instead of re-detecting every
+            substep. Default (on); ~20% faster on the 4-substep config. Set
+            False to re-detect contacts every substep for maximum sub-frame
+            contact freshness.
         solver_iterations: PhoenX position iterations per substep.
         velocity_iterations: PhoenX velocity iterations per substep.
         action_scale: Position target scale [rad].
@@ -488,6 +536,7 @@ class ConfigEnvAnymalPhoenX:
     world_count: int = 1024
     frame_dt: float = 1.0 / 50.0
     sim_substeps: int = 4
+    collide_once_per_frame: bool = True
     solver_iterations: int = 8
     velocity_iterations: int = 1
     action_scale: float = 0.5
@@ -661,6 +710,56 @@ class EnvAnymalPhoenX:
         self.config.command = tuple(float(v) for v in cmds[0])
         self.command.assign(cmds)
 
+    def randomize_commands_seed_counter(
+        self,
+        *,
+        seed_counter: wp.array[wp.int32],
+        command_x_range: tuple[float, float],
+        command_y_range: tuple[float, float],
+        command_yaw_range: tuple[float, float],
+        command_height_range: tuple[float, float],
+        command_yaw_min_abs: float = 0.0,
+        zero_probability: float = 0.0,
+        seed_offset: int = 0,
+        advance: int = 1,
+    ) -> None:
+        """Sample per-world commands using a graph-replay-safe device seed counter."""
+
+        x_min, x_max = float(command_x_range[0]), float(command_x_range[1])
+        y_min, y_max = float(command_y_range[0]), float(command_y_range[1])
+        yaw_min, yaw_max = float(command_yaw_range[0]), float(command_yaw_range[1])
+        height_min, height_max = float(command_height_range[0]), float(command_height_range[1])
+        if x_max < x_min or y_max < y_min or yaw_max < yaw_min or height_max < height_min:
+            raise ValueError("command ranges must be ordered")
+        self.config.command = (
+            0.5 * (x_min + x_max),
+            0.5 * (y_min + y_max),
+            0.5 * (yaw_min + yaw_max),
+            0.5 * (height_min + height_max),
+        )
+        wp.launch(
+            anymal_sample_commands_seed_counter_kernel,
+            dim=self.world_count,
+            inputs=[
+                seed_counter,
+                int(seed_offset),
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                yaw_min,
+                yaw_max,
+                height_min,
+                height_max,
+                float(command_yaw_min_abs),
+                float(zero_probability),
+            ],
+            outputs=[self.command],
+            device=self.device,
+        )
+        if int(advance) != 0:
+            advance_seed_counter(seed_counter, int(advance), device=self.device)
+
     def set_target_position(self, target_position: tuple[float, float]) -> None:
         """Set the same sparse target XY position for every world [m]."""
 
@@ -820,9 +919,22 @@ class EnvAnymalPhoenX:
             )
 
         sub_dt = float(self.config.frame_dt) / float(self.config.sim_substeps)
-        for _ in range(int(self.config.sim_substeps)):
-            self.state_0.clear_forces()
+        collide_once = bool(self.config.collide_once_per_frame)
+        if collide_once:
+            # Detect contacts once at the frame pose and reuse the set across
+            # substeps (anchors are re-projected each solve). ~20% faster on the
+            # 4-substep Anymal config since the narrow phase + contact sort run
+            # once instead of per substep; trades sub-frame contact freshness.
             self.model.collide(self.state_0, self.contacts)
+        for sub in range(int(self.config.sim_substeps)):
+            self.state_0.clear_forces()
+            if not collide_once:
+                self.model.collide(self.state_0, self.contacts)
+            # When the contact set is detected once and reused, the constraint
+            # graph is identical across substeps -- colour it on the first
+            # substep and reuse that colouring on the rest (the solver still
+            # re-projects contact anchors from the live pose each substep).
+            self.solver.reuse_partition = collide_once and sub > 0
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 

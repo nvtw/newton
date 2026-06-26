@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX, anymal_mirror_map_ppo
-from .env import make_seed_counter
+from .env import collect_ppo_rollout_seed_counter, make_seed_counter
 from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
 from .g1_recipe import (
     ACTIVATION,
@@ -42,6 +42,7 @@ from .g1_recipe import (
 from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_checkpoint
 
 _G1_TRAIN_STAT_COUNT = 15
+_ANYMAL_TRAIN_STAT_COUNT = 9
 
 
 @wp.kernel
@@ -166,6 +167,165 @@ def _g1_disabled_rollout_metrics(env: EnvG1PhoenX) -> tuple[float, float, float,
     return (0.0, 0.0, 0.0, float(command[0]), float(command[1]), float(command[2]))
 
 
+@wp.kernel
+def _anymal_train_stat_partials_kernel(
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    successes: wp.array[wp.float32],
+    obs: wp.array2d[wp.float32],
+    num_samples: wp.int32,
+    command_x: wp.float32,
+    use_observed_command: wp.int32,
+    partials: wp.array2d[wp.float32],
+):
+    tile, lane = wp.tid()
+    i = tile * wp.int32(32) + lane
+    reward_sum = wp.float32(0.0)
+    done_sum = wp.float32(0.0)
+    success_sum = wp.float32(0.0)
+    vx_sum = wp.float32(0.0)
+    vx_error_sum = wp.float32(0.0)
+    if i < num_samples:
+        vx = obs[i, 0]
+        target_vx = command_x
+        if use_observed_command != wp.int32(0):
+            target_vx = obs[i, 9]
+        reward_sum = rewards[i]
+        done_sum = dones[i]
+        success_sum = successes[i]
+        vx_sum = vx
+        vx_error_sum = wp.abs(vx - target_vx)
+
+    reward_tile = wp.tile_sum(wp.tile(reward_sum))
+    done_tile = wp.tile_sum(wp.tile(done_sum))
+    success_tile = wp.tile_sum(wp.tile(success_sum))
+    vx_tile = wp.tile_sum(wp.tile(vx_sum))
+    vx_error_tile = wp.tile_sum(wp.tile(vx_error_sum))
+    if lane == wp.int32(0):
+        partials[tile, 0] = reward_tile[0]
+        partials[tile, 1] = done_tile[0]
+        partials[tile, 2] = success_tile[0]
+        partials[tile, 3] = vx_tile[0]
+        partials[tile, 4] = vx_error_tile[0]
+
+
+@wp.kernel
+def _anymal_train_stat_finalize_kernel(
+    partials: wp.array2d[wp.float32],
+    partial_count: wp.int32,
+    policy_loss: wp.array[wp.float32],
+    value_loss: wp.array[wp.float32],
+    approx_kl: wp.array[wp.float32],
+    clip_fraction: wp.array[wp.float32],
+    stats: wp.array[wp.float32],
+):
+    lane = wp.tid()
+    reward_sum = wp.float32(0.0)
+    done_sum = wp.float32(0.0)
+    success_sum = wp.float32(0.0)
+    vx_sum = wp.float32(0.0)
+    vx_error_sum = wp.float32(0.0)
+    p = lane
+    while p < partial_count:
+        reward_sum = reward_sum + partials[p, 0]
+        done_sum = done_sum + partials[p, 1]
+        success_sum = success_sum + partials[p, 2]
+        vx_sum = vx_sum + partials[p, 3]
+        vx_error_sum = vx_error_sum + partials[p, 4]
+        p = p + wp.int32(32)
+
+    reward_tile = wp.tile_sum(wp.tile(reward_sum))
+    done_tile = wp.tile_sum(wp.tile(done_sum))
+    success_tile = wp.tile_sum(wp.tile(success_sum))
+    vx_tile = wp.tile_sum(wp.tile(vx_sum))
+    vx_error_tile = wp.tile_sum(wp.tile(vx_error_sum))
+    if lane == wp.int32(0):
+        stats[0] = reward_tile[0]
+        stats[1] = done_tile[0]
+        stats[2] = success_tile[0]
+        stats[3] = vx_tile[0]
+        stats[4] = vx_error_tile[0]
+        stats[5] = policy_loss[0]
+        stats[6] = value_loss[0]
+        stats[7] = approx_kl[0]
+        stats[8] = clip_fraction[0]
+
+
+class _AnymalTrainDiagnosticsReadback:
+    """Preallocated compact host readback for monitored Anymal PPO training."""
+
+    def __init__(self, device: wp.context.Devicelike, max_samples: int):
+        self.device = wp.get_device(device)
+        self._partial_count = max(1, (int(max_samples) + 31) // 32)
+        self._partials = wp.empty((self._partial_count, 5), dtype=wp.float32, device=self.device)
+        self._stats = wp.empty(_ANYMAL_TRAIN_STAT_COUNT, dtype=wp.float32, device=self.device)
+        self._stats_host = wp.empty(
+            _ANYMAL_TRAIN_STAT_COUNT, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda
+        )
+
+    def read(
+        self,
+        buffer: BufferRollout,
+        trainer: TrainerPPO,
+        command_x: float,
+        target_distance: float,
+        *,
+        use_observed_command: bool,
+    ) -> tuple[tuple[float, float, float, float, float, float], StatsPPOUpdate]:
+        partial_count = max(1, (int(buffer.num_samples) + 31) // 32)
+        if partial_count > self._partial_count:
+            raise RuntimeError("Anymal diagnostics partial buffer is too small")
+        wp.launch(
+            _anymal_train_stat_partials_kernel,
+            dim=(partial_count, 32),
+            inputs=[
+                buffer.rewards,
+                buffer.dones,
+                buffer.successes,
+                buffer.obs,
+                buffer.num_samples,
+                float(command_x),
+                int(bool(use_observed_command)),
+            ],
+            outputs=[self._partials],
+            device=self.device,
+        )
+        wp.launch(
+            _anymal_train_stat_finalize_kernel,
+            dim=32,
+            inputs=[
+                self._partials,
+                partial_count,
+                trainer._policy_loss,
+                trainer._value_loss,
+                trainer._approx_kl,
+                trainer._clip_fraction,
+            ],
+            outputs=[self._stats],
+            device=self.device,
+        )
+        wp.copy(self._stats_host, self._stats, count=_ANYMAL_TRAIN_STAT_COUNT)
+        if self.device.is_cuda:
+            wp.synchronize_device(self.device)
+        stats = self._stats_host.numpy()
+        inv_samples = 1.0 / float(buffer.num_samples)
+        rollout_metrics = (
+            float(stats[0]) * inv_samples,
+            float(stats[1]) * inv_samples,
+            float(stats[2]) * inv_samples,
+            float(target_distance),
+            float(stats[3]) * inv_samples,
+            float(stats[4]) * inv_samples,
+        )
+        update_stats = StatsPPOUpdate(
+            policy_loss=float(stats[5]),
+            value_loss=float(stats[6]),
+            approx_kl=float(stats[7]),
+            clip_fraction=float(stats[8]),
+        )
+        return rollout_metrics, update_stats
+
+
 @dataclass
 class ConfigTrainAnymalPPO:
     """Configuration for :func:`train_anymal_ppo`.
@@ -199,6 +359,9 @@ class ConfigTrainAnymalPPO:
         resume_checkpoint: Optional PPO checkpoint to resume from.
         checkpoint_path: Optional path for writing PPO checkpoints.
         checkpoint_interval: Save a checkpoint every N iterations when positive.
+        execution_mode: ``"eager"`` for serial collect-update or
+            ``"graph_leapfrog"`` to overlap rollout and previous update graphs
+            on separate CUDA streams.
     """
 
     iterations: int = 100
@@ -229,6 +392,7 @@ class ConfigTrainAnymalPPO:
     resume_checkpoint: str | None = None
     checkpoint_path: str | None = None
     checkpoint_interval: int = 0
+    execution_mode: str = "eager"
 
 
 @dataclass
@@ -566,14 +730,6 @@ class ResultEvaluateAnymalPPO:
     stats: list[StatsEvaluateAnymalTargetPPO]
 
 
-def _ppo_trainer_reserve_rows(buffer: BufferRollout, config: ConfigPPO) -> int:
-    update_rows = buffer.num_samples
-    minibatch_size = int(config.minibatch_size)
-    if minibatch_size > 0 and float(config.replay_ratio) > 0.0 and minibatch_size < buffer.num_samples:
-        update_rows = minibatch_size
-    return max(buffer.num_envs, update_rows)
-
-
 def _default_ppo_config() -> ConfigPPO:
     return ConfigPPO(
         gamma=0.99,
@@ -591,12 +747,16 @@ def _default_g1_ppo_config() -> ConfigPPO:
     return default_g1_ppo_config()
 
 
-def _copy_g1_trainer_policy(dst: TrainerPPO, src: TrainerPPO) -> None:
+def _copy_trainer_policy(dst: TrainerPPO, src: TrainerPPO) -> None:
     dst.actor.copy_from(src.actor)
     if dst.critic is not None or src.critic is not None:
         if dst.critic is None or src.critic is None:
             raise RuntimeError("trainer critic layouts do not match")
         dst.critic.copy_from(src.critic)
+
+
+def _copy_g1_trainer_policy(dst: TrainerPPO, src: TrainerPPO) -> None:
+    _copy_trainer_policy(dst, src)
 
 
 def _make_g1_rollout_trainer(env: EnvG1PhoenX, trainer: TrainerPPO) -> TrainerPPO:
@@ -612,11 +772,38 @@ def _make_g1_rollout_trainer(env: EnvG1PhoenX, trainer: TrainerPPO) -> TrainerPP
         log_std_init=trainer.log_std_init,
         mirror_map=g1_mirror_map_ppo() if trainer.config.mirror_loss_coeff > 0.0 else None,
     )
-    _copy_g1_trainer_policy(rollout, trainer)
+    _copy_trainer_policy(rollout, trainer)
+    return rollout
+
+
+def _make_anymal_rollout_trainer(env: EnvAnymalPhoenX, trainer: TrainerPPO) -> TrainerPPO:
+    rollout = TrainerPPO(
+        obs_dim=env.obs_dim,
+        action_dim=env.action_dim,
+        hidden_layers=trainer.hidden_layers,
+        config=trainer.config,
+        device=env.device,
+        seed=trainer.seed + 17,
+        squash_actions=trainer.squash_actions,
+        activation=trainer.activation,
+        log_std_init=trainer.log_std_init,
+        mirror_map=anymal_mirror_map_ppo() if trainer.config.mirror_loss_coeff > 0.0 else None,
+    )
+    _copy_trainer_policy(rollout, trainer)
     return rollout
 
 
 def _make_g1_buffer(env: EnvG1PhoenX, steps: int) -> BufferRollout:
+    return BufferRollout(
+        num_steps=int(steps),
+        num_envs=env.world_count,
+        obs_dim=env.obs_dim,
+        action_dim=env.action_dim,
+        device=env.device,
+    )
+
+
+def _make_anymal_buffer(env: EnvAnymalPhoenX, steps: int) -> BufferRollout:
     return BufferRollout(
         num_steps=int(steps),
         num_envs=env.world_count,
@@ -868,6 +1055,134 @@ def _train_g1_ppo_graph_leapfrog(
         )
 
     return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffers[prev], history=history)
+
+
+def _check_anymal_graph_leapfrog_config(cfg: ConfigTrainAnymalPPO, env: EnvAnymalPhoenX) -> None:
+    if cfg.randomize_commands and env.config.reward_mode != "dense_command":
+        raise RuntimeError("Anymal graph_leapfrog command randomization requires dense_command reward mode")
+    if env.config.reward_mode == "sparse_target" and (cfg.randomize_target_positions or cfg.use_target_curriculum):
+        raise RuntimeError("Anymal graph_leapfrog currently requires a fixed sparse target")
+
+
+def _train_anymal_ppo_graph_leapfrog(
+    cfg: ConfigTrainAnymalPPO,
+    env: EnvAnymalPhoenX,
+    trainer: TrainerPPO,
+    first_buffer: BufferRollout,
+    *,
+    start_iteration: int,
+    command_x: float,
+    target_distance: float,
+    diagnostics: _AnymalTrainDiagnosticsReadback,
+) -> ResultTrainAnymalPPO:
+    _check_anymal_graph_leapfrog_config(cfg, env)
+    device = env.device
+    if not device.is_cuda or not wp.is_mempool_enabled(device):
+        raise RuntimeError("Anymal graph_leapfrog training requires CUDA with Warp mempool enabled")
+
+    rollout_trainer = _make_anymal_rollout_trainer(env, trainer)
+    buffers = (first_buffer, _make_anymal_buffer(env, int(cfg.rollout_steps)))
+    for graph_trainer in (trainer, rollout_trainer):
+        for buffer in buffers:
+            graph_trainer.reserve_update_buffers(buffer)
+
+    rollout_seed_counter = make_seed_counter(
+        int(cfg.seed) + int(start_iteration) * int(cfg.rollout_steps), device=device
+    )
+    command_seed_counter = make_seed_counter(int(cfg.seed) + 29_131 + int(start_iteration), device=device)
+    update_seed_counter = make_seed_counter(int(trainer.seed) + 1_000_003 * int(start_iteration), device=device)
+
+    def collect(buffer: BufferRollout) -> None:
+        if cfg.randomize_commands:
+            env.randomize_commands_seed_counter(
+                seed_counter=command_seed_counter,
+                command_x_range=cfg.command_x_range,
+                command_y_range=cfg.command_y_range,
+                command_yaw_range=cfg.command_yaw_range,
+                command_height_range=cfg.command_height_range,
+                command_yaw_min_abs=cfg.command_yaw_min_abs,
+                zero_probability=cfg.command_zero_probability,
+            )
+        collect_ppo_rollout_seed_counter(env, rollout_trainer, buffer, seed_counter=rollout_seed_counter)
+
+    def update(buffer: BufferRollout) -> None:
+        trainer.update_seed_counter(buffer, seed_counter=update_seed_counter, read_stats=False)
+
+    collect(buffers[0])
+    wp.synchronize_device(device)
+
+    rollout_stream = wp.Stream(device)
+    update_stream = wp.Stream(device)
+    copy_stream = wp.Stream(device)
+    phases = (
+        _G1GraphTrainPhase(
+            _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[1])),
+            _capture_stream_graph(update_stream, device, lambda: update(buffers[0])),
+        ),
+        _G1GraphTrainPhase(
+            _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[0])),
+            _capture_stream_graph(update_stream, device, lambda: update(buffers[1])),
+        ),
+    )
+    copy_graph = _capture_stream_graph(copy_stream, device, lambda: _copy_trainer_policy(rollout_trainer, trainer))
+
+    history: list[StatsTrainAnymalPPO] = []
+    prev = 0
+    for local_iteration in range(int(cfg.iterations)):
+        iteration = int(start_iteration) + local_iteration
+        if local_iteration < int(cfg.iterations) - 1:
+            phase = phases[prev]
+            wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
+            wp.capture_launch(phase.update_graph, stream=update_stream)
+            with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
+                wp.wait_stream(rollout_stream)
+                wp.wait_stream(update_stream)
+            wp.capture_launch(copy_graph, stream=copy_stream)
+            wp.synchronize_device(device)
+        else:
+            wp.capture_launch(phases[prev].update_graph, stream=update_stream)
+            with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
+                wp.wait_stream(update_stream)
+            wp.capture_launch(copy_graph, stream=copy_stream)
+            wp.synchronize_device(device)
+
+        rollout_metrics, update_stats = diagnostics.read(
+            buffers[prev],
+            trainer,
+            command_x,
+            target_distance,
+            use_observed_command=cfg.randomize_commands,
+        )
+        stats = _merge_stats(iteration, rollout_metrics, update_stats)
+        history.append(stats)
+        if cfg.log_interval > 0 and (iteration % cfg.log_interval == 0 or local_iteration == cfg.iterations - 1):
+            print(
+                f"iter={iteration:04d} "
+                f"reward={stats.mean_reward:.4f} "
+                f"success={stats.mean_success:.3f} "
+                f"target={stats.target_distance:.2f} "
+                f"vx={stats.mean_forward_velocity:.4f} "
+                f"|vx-cmd|={stats.mean_abs_forward_velocity_error:.4f} "
+                f"done={stats.mean_done:.4f} "
+                f"pi_loss={stats.policy_loss:.4f} "
+                f"v_loss={stats.value_loss:.4f}"
+            )
+        trainer.iteration = iteration + 1
+        if cfg.checkpoint_path is not None and cfg.checkpoint_interval > 0:
+            if trainer.iteration % int(cfg.checkpoint_interval) == 0:
+                checkpoint_path = _format_checkpoint_path(cfg.checkpoint_path, trainer.iteration)
+                trainer.save_checkpoint(checkpoint_path, iteration=trainer.iteration)
+        if local_iteration < int(cfg.iterations) - 1:
+            prev = 1 - prev
+
+    if cfg.checkpoint_path is not None:
+        final_iteration = int(start_iteration) + int(cfg.iterations)
+        trainer.iteration = final_iteration
+        trainer.save_checkpoint(
+            _format_checkpoint_path(cfg.checkpoint_path, final_iteration), iteration=final_iteration
+        )
+
+    return ResultTrainAnymalPPO(trainer=trainer, env=env, buffer=buffers[prev], history=history)
 
 
 def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
@@ -1220,6 +1535,8 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
         raise ValueError("command_zero_probability must be in [0, 1]")
     if cfg.checkpoint_interval < 0:
         raise ValueError("checkpoint_interval must be non-negative")
+    if cfg.execution_mode not in ("eager", "graph_leapfrog"):
+        raise ValueError("execution_mode must be 'eager' or 'graph_leapfrog'")
 
     device = wp.get_device(cfg.device)
     env_config = cfg.env_config or ConfigEnvAnymalPhoenX()
@@ -1245,14 +1562,9 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
             log_std_init=cfg.log_std_init,
             mirror_map=anymal_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,
         )
-    buffer = BufferRollout(
-        num_steps=cfg.rollout_steps,
-        num_envs=env.world_count,
-        obs_dim=env.obs_dim,
-        action_dim=env.action_dim,
-        device=device,
-    )
-    trainer.reserve_buffers(_ppo_trainer_reserve_rows(buffer, ppo_config))
+    buffer = _make_anymal_buffer(env, int(cfg.rollout_steps))
+    trainer.reserve_update_buffers(buffer)
+    diagnostics = _AnymalTrainDiagnosticsReadback(device, buffer.num_samples)
 
     history: list[StatsTrainAnymalPPO] = []
     start_iteration = int(getattr(trainer, "iteration", 0))
@@ -1263,19 +1575,36 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
     if cfg.use_target_curriculum and env.config.reward_mode == "sparse_target":
         target_distance = float(cfg.target_distance_start)
 
+    target_rng = np.random.default_rng(int(cfg.seed) + 17_917 + start_iteration)
+    _configure_rollout_targets(env, cfg, target_rng, target_direction, target_distance)
+    _configure_rollout_commands(env, cfg, target_rng)
+
+    if cfg.execution_mode == "graph_leapfrog":
+        return _train_anymal_ppo_graph_leapfrog(
+            cfg,
+            env,
+            trainer,
+            buffer,
+            start_iteration=start_iteration,
+            command_x=command_x,
+            target_distance=target_distance,
+            diagnostics=diagnostics,
+        )
+
     for local_iteration in range(cfg.iterations):
         iteration = start_iteration + local_iteration
         target_rng = np.random.default_rng(int(cfg.seed) + 17_917 + iteration)
         _configure_rollout_targets(env, cfg, target_rng, target_direction, target_distance)
         _configure_rollout_commands(env, cfg, target_rng)
         env.collect_ppo_rollout(trainer, buffer, seed=cfg.seed + iteration * cfg.rollout_steps)
-        rollout_metrics = _rollout_metrics(
+        trainer.update(buffer, read_stats=False)
+        rollout_metrics, update_stats = diagnostics.read(
             buffer,
+            trainer,
             command_x,
             target_distance,
             use_observed_command=cfg.randomize_commands,
         )
-        update_stats = trainer.update(buffer)
         stats = _merge_stats(iteration, rollout_metrics, update_stats)
         history.append(stats)
         if cfg.log_interval > 0 and (iteration % cfg.log_interval == 0 or local_iteration == cfg.iterations - 1):
