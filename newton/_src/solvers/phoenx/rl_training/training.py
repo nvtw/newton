@@ -1243,6 +1243,75 @@ def _train_g1_ppo_cycle(
     return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffer, history=[])
 
 
+def _train_anymal_ppo_cycle(
+    result: ResultTrainAnymalPPO,
+    cfg: ConfigTrainAnymalPPO,
+) -> ResultTrainAnymalPPO:
+    """Continue training a live Anymal worker without rebuilding the env.
+
+    The trainer's learning rate and entropy coefficient should already be
+    updated in-place before calling this function.  The env, trainer, and
+    buffer are reused from *result*.  Intended for the PBT live-worker path
+    with a fixed task (no host-side target curriculum across cycles).
+    """
+    env = result.env
+    trainer = result.trainer
+    buffer = result.buffer
+    device = env.device
+    start_iteration = int(getattr(trainer, "iteration", 0))
+    diagnostics = _AnymalTrainDiagnosticsReadback(device, buffer.num_samples)
+
+    command_x = float(env.config.command[0])
+    target_xy = np.asarray(env.config.target_position, dtype=np.float32)
+    target_distance = float(np.linalg.norm(target_xy))
+    target_direction = _target_direction(target_xy)
+    if cfg.use_target_curriculum and env.config.reward_mode == "sparse_target":
+        target_distance = float(cfg.target_distance_start)
+
+    target_rng = np.random.default_rng(int(cfg.seed) + 17_917 + start_iteration)
+    _configure_rollout_targets(env, cfg, target_rng, target_direction, target_distance)
+    _configure_rollout_commands(env, cfg, target_rng)
+
+    if cfg.execution_mode == "graph_leapfrog":
+        return _train_anymal_ppo_graph_leapfrog(
+            cfg,
+            env,
+            trainer,
+            buffer,
+            start_iteration=start_iteration,
+            command_x=command_x,
+            target_distance=target_distance,
+            diagnostics=diagnostics,
+        )
+
+    history: list[StatsTrainAnymalPPO] = []
+    for local_iteration in range(cfg.iterations):
+        iteration = start_iteration + local_iteration
+        target_rng = np.random.default_rng(int(cfg.seed) + 17_917 + iteration)
+        _configure_rollout_targets(env, cfg, target_rng, target_direction, target_distance)
+        _configure_rollout_commands(env, cfg, target_rng)
+        env.collect_ppo_rollout(trainer, buffer, seed=cfg.seed + iteration * cfg.rollout_steps)
+        trainer.update(buffer, read_stats=False)
+        rollout_metrics, update_stats = diagnostics.read(
+            buffer,
+            trainer,
+            command_x,
+            target_distance,
+            use_observed_command=cfg.randomize_commands,
+        )
+        stats = _merge_stats(iteration, rollout_metrics, update_stats)
+        history.append(stats)
+        if (
+            cfg.use_target_curriculum
+            and env.config.reward_mode == "sparse_target"
+            and stats.mean_success >= cfg.target_success_threshold
+            and target_distance < cfg.target_distance_end
+        ):
+            target_distance = min(float(cfg.target_distance_end), target_distance + float(cfg.target_distance_step))
+        trainer.iteration = iteration + 1
+    return ResultTrainAnymalPPO(trainer=trainer, env=env, buffer=buffer, history=history)
+
+
 def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
     """Train a Unitree G1 walking policy with PhoenX and Warp-only PPO."""
 

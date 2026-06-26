@@ -9,15 +9,26 @@ import dataclasses
 import json
 import math
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
+from .g1_recipe import default_g1_ppo_config
 from .ppo import ConfigPPO, TrainerPPO
-from .training import ConfigTrainAnymalPPO, ConfigTrainG1PPO, ResultTrainAnymalPPO, ResultTrainG1PPO
-
+from .training import (
+    ConfigTrainAnymalPPO,
+    ConfigTrainG1PPO,
+    ResultTrainAnymalPPO,
+    ResultTrainG1PPO,
+    _default_ppo_config,
+    _train_anymal_ppo_cycle,
+    _train_g1_ppo_cycle,
+    train_anymal_ppo,
+    train_g1_ppo,
+)
 
 # ---------------------------------------------------------------------------
 # Hyperparameter specification
@@ -287,9 +298,7 @@ def _perturb_pb2(
             return (val - spec.low) / (spec.high - spec.low + 1e-12)
         return 0.0
 
-    X = np.array(
-        [[_normalise(hp[f], spec_map[f]) for f in fields] for hp, _ in all_observations], dtype=np.float64
-    )
+    X = np.array([[_normalise(hp[f], spec_map[f]) for f in fields] for hp, _ in all_observations], dtype=np.float64)
     y = np.array([fitness for _, fitness in all_observations], dtype=np.float64)
     y = (y - y.mean()) / (y.std() + 1e-8)
 
@@ -341,7 +350,7 @@ def _compute_fitness(history: list[Any], fitness_window: int, fitness_metric: st
     """Compute scalar fitness from the tail of a stats history."""
     if not history:
         return float("-inf")
-    tail = history[-max(1, fitness_window):]
+    tail = history[-max(1, fitness_window) :]
     values = []
     for stat in tail:
         v = getattr(stat, fitness_metric, None)
@@ -392,7 +401,7 @@ def _exploit_explore(
     all_obs: list[tuple[dict[str, float], float]] = []
     if pbt_config.exploit_strategy == "pb2":
         for w in workers:
-            for hp, fit in zip(w.hparam_history, w.fitness_history):
+            for hp, fit in zip(w.hparam_history, w.fitness_history, strict=False):
                 all_obs.append((hp, fit))
 
     for bot_id in bottom_ids:
@@ -516,7 +525,6 @@ def _apply_ppo_hparams_to_trainer(config: ConfigPPO, trainer: Any, specs: list[H
         # to code that reads it as a Python float (e.g. reward_clip in GAE,
         # clip_ratio in the next graph capture).
         setattr(trainer.config, spec.field, val)
-
 
 
 def population_based_train(
@@ -666,9 +674,7 @@ def population_based_train(
             cycle_fitness = _compute_fitness(hist, pbt_config.fitness_window, pbt_config.fitness_metric)
             worker.fitness_history.append(cycle_fitness)
 
-        workers, gen_result, replaced_ids = _exploit_explore(
-            workers, hparam_specs, pbt_config, rng, out, cycle
-        )
+        workers, gen_result, replaced_ids = _exploit_explore(workers, hparam_specs, pbt_config, rng, out, cycle)
         generations.append(gen_result)
 
         if pbt_config.fresh_optimizer_on_exploit:
@@ -750,15 +756,11 @@ def population_based_train_g1(
     Returns:
         :class:`ResultPBT` with all worker states.
     """
-    from .training import _train_g1_ppo_cycle, train_g1_ppo
-
     pbt = pbt_config or ConfigPBT()
     specs = hparam_specs or default_g1_hparam_specs()
     initial_ppo = base_config.ppo_config
 
     if initial_ppo is None:
-        from .g1_recipe import default_g1_ppo_config
-
         initial_ppo = default_g1_ppo_config()
 
     def make_config(
@@ -824,8 +826,6 @@ def population_based_train_anymal(
     Returns:
         :class:`ResultPBT` with all worker states.
     """
-    from .training import _default_ppo_config, train_anymal_ppo
-
     pbt = pbt_config or ConfigPBT()
     specs = hparam_specs or default_anymal_hparam_specs()
     initial_ppo = base_config.ppo_config
@@ -855,6 +855,12 @@ def population_based_train_anymal(
     def get_history(result: ResultTrainAnymalPPO) -> list[Any]:
         return result.history
 
+    def continue_training(result: ResultTrainAnymalPPO, cycle_cfg: ConfigTrainAnymalPPO) -> ResultTrainAnymalPPO:
+        return _train_anymal_ppo_cycle(result, cycle_cfg)
+
+    def get_trainer(result: ResultTrainAnymalPPO) -> TrainerPPO:
+        return result.trainer
+
     return population_based_train(
         train_fn=train_anymal_ppo,
         make_config_fn=make_config,
@@ -863,4 +869,6 @@ def population_based_train_anymal(
         hparam_specs=specs,
         initial_ppo_config=initial_ppo,
         output_dir=output_dir,
+        continue_fn=continue_training,
+        get_trainer_fn=get_trainer,
     )
