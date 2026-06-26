@@ -10555,10 +10555,11 @@ class ModelBuilder:
             # build list of ids for geometry sources (meshes, sdfs, heightfields)
             geo_sources = []
             shape_mesh_query_type = []
+            mesh_query_type_by_geo_hash: dict[int, int] = {}
             finalized_geos = {}  # do not duplicate geometry
             gaussians = []
             heightfield_meshes = []
-            for shape_type, geo in zip(self.shape_type, self.shape_source, strict=True):
+            for shape_type, geo, shape_flags in zip(self.shape_type, self.shape_source, self.shape_flags, strict=True):
                 geo_hash = hash(geo)  # avoid repeated hash computations
                 if isinstance(geo, Heightfield):
                     if geo_hash not in finalized_geos:
@@ -10588,10 +10589,18 @@ class ModelBuilder:
                     geo_sources.append(finalized_geos[geo_hash])
                 else:
                     geo_sources.append(0)
-                if shape_type in (GeoType.MESH, GeoType.CONVEX_MESH) and isinstance(geo, Mesh) and geo.is_watertight:
-                    shape_mesh_query_type.append(MESH_SIGN_QUERY_PARITY)
-                else:
-                    shape_mesh_query_type.append(MESH_SIGN_QUERY_NORMAL)
+
+                mesh_query_type = MESH_SIGN_QUERY_NORMAL
+                if (
+                    shape_flags & (ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)
+                    and shape_type in (GeoType.MESH, GeoType.CONVEX_MESH)
+                    and isinstance(geo, Mesh)
+                ):
+                    mesh_query_type = mesh_query_type_by_geo_hash.get(geo_hash)
+                    if mesh_query_type is None:
+                        mesh_query_type = MESH_SIGN_QUERY_PARITY if geo.is_watertight else MESH_SIGN_QUERY_NORMAL
+                        mesh_query_type_by_geo_hash[geo_hash] = mesh_query_type
+                shape_mesh_query_type.append(mesh_query_type)
 
             m.shape_type = wp.array(self.shape_type, dtype=wp.int32)
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)

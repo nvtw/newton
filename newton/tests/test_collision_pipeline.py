@@ -806,6 +806,30 @@ def test_mesh_query_type_tracks_watertight(test, device):
     test.assertEqual(int(query_types[closed_shape]), MESH_SIGN_QUERY_PARITY)
 
 
+def test_mesh_query_type_skips_visual_only_mesh(test, device):
+    vertices, faces = _make_watertight_box((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+
+    class VisualMesh(newton.Mesh):
+        @property
+        def is_watertight(self):
+            raise AssertionError("visual-only meshes should not require a mesh sign query type")
+
+    mesh = VisualMesh(vertices, faces, compute_inertia=False)
+    cfg = newton.ModelBuilder.ShapeConfig(
+        density=0.0,
+        has_shape_collision=False,
+        has_particle_collision=False,
+        is_visible=True,
+    )
+
+    builder = newton.ModelBuilder(gravity=0.0)
+    shape = builder.add_shape_mesh(body=-1, mesh=mesh, cfg=cfg)
+    model = builder.finalize(device=device)
+
+    query_types = model.shape_mesh_query_type.numpy()
+    test.assertEqual(int(query_types[shape]), MESH_SIGN_QUERY_NORMAL)
+
+
 add_function_test(
     TestMeshSignQueries,
     "test_mixed_winding_convex_pile_contact_normal",
@@ -824,6 +848,13 @@ add_function_test(
     TestMeshSignQueries,
     "test_mesh_query_type_tracks_watertight",
     test_mesh_query_type_tracks_watertight,
+    devices=devices,
+    check_output=False,
+)
+add_function_test(
+    TestMeshSignQueries,
+    "test_mesh_query_type_skips_visual_only_mesh",
+    test_mesh_query_type_skips_visual_only_mesh,
     devices=devices,
     check_output=False,
 )
