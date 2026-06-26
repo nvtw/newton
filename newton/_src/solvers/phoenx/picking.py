@@ -10,11 +10,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.geometry.raycast import (
-    _ray_intersect_triangle_mt,
-    _spinlock_acquire,
-    _spinlock_release,
-)
+from newton._src.geometry.raycast import _spinlock_acquire, _spinlock_release
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
@@ -22,6 +18,41 @@ __all__ = [
     "Picking",
     "register_with_viewer_gl",
 ]
+
+
+@wp.func
+def _ray_intersect_triangle_mt(
+    # In:
+    ro: wp.vec3,
+    rd: wp.vec3,
+    v0: wp.vec3,
+    v1: wp.vec3,
+    v2: wp.vec3,
+) -> tuple[float, wp.vec3]:
+    """Moller-Trumbore ray-triangle intersection without back-face culling."""
+    e1 = v1 - v0
+    e2 = v2 - v0
+    h = wp.cross(rd, e2)
+    a = wp.dot(e1, h)
+    if wp.abs(a) < wp.float32(1.0e-6):
+        return -1.0, wp.vec3(0.0)
+
+    f = wp.float32(1.0) / a
+    s = ro - v0
+    u = f * wp.dot(s, h)
+    if u < 0.0 or u > 1.0:
+        return -1.0, wp.vec3(0.0)
+
+    q = wp.cross(s, e1)
+    v = f * wp.dot(rd, q)
+    if v < 0.0 or u + v > 1.0:
+        return -1.0, wp.vec3(0.0)
+
+    t = f * wp.dot(e2, q)
+    if t < 0.0:
+        return -1.0, wp.vec3(0.0)
+
+    return t, wp.cross(e1, e2)
 
 
 @wp.kernel(enable_backward=False)
