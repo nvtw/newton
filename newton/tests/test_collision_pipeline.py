@@ -12,12 +12,7 @@ import newton
 from newton import GeoType
 from newton._src.geometry import create_mesh_terrain
 from newton._src.geometry.flags import ParticleFlags, ShapeFlags
-from newton._src.geometry.kernels import (
-    MESH_SIGN_QUERY_NORMAL,
-    MESH_SIGN_QUERY_PARITY,
-    create_soft_contacts,
-    mesh_sdf,
-)
+from newton._src.geometry.kernels import create_soft_contacts, mesh_sdf
 from newton._src.sim.collide import _compute_per_world_shape_pairs_max, _estimate_rigid_contact_max
 from newton._src.utils.heightfield import HeightfieldData
 from newton.examples import test_body_state
@@ -625,20 +620,6 @@ def _make_watertight_box(
     return vertices, faces
 
 
-def _make_open_square() -> tuple[np.ndarray, np.ndarray]:
-    vertices = np.array(
-        [
-            [-1.0, -1.0, 0.0],
-            [1.0, -1.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [-1.0, 1.0, 0.0],
-        ],
-        dtype=np.float32,
-    )
-    faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
-    return vertices, faces
-
-
 def _make_thin_gap_box_pair() -> tuple[np.ndarray, np.ndarray]:
     gap = 2.0e-4
     hx, hy, hz = 0.75, 0.55, 0.45
@@ -696,7 +677,6 @@ def test_mixed_winding_convex_pile_contact_normal(test, device):
             wp.array([int(GeoType.CONVEX_MESH)], dtype=wp.int32, device=device),
             wp.array([wp.vec3(1.0, 1.0, 1.0)], dtype=wp.vec3, device=device),
             wp.array([mesh.id], dtype=wp.uint64, device=device),
-            wp.array([MESH_SIGN_QUERY_PARITY], dtype=wp.int32, device=device),
             wp.array([-1], dtype=wp.int32, device=device),
             0.0,
             1,
@@ -786,67 +766,10 @@ def test_parity_sign_accuracy_exceeds_normal_query(test, device):
     )
 
 
-def test_mesh_query_type_tracks_watertight(test, device):
-    open_vertices, open_faces = _make_open_square()
-    closed_vertices, closed_faces = _make_watertight_box((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
-
-    open_mesh = newton.Mesh(open_vertices, open_faces, compute_inertia=False)
-    closed_mesh = newton.Mesh(closed_vertices, closed_faces, compute_inertia=False)
-    test.assertFalse(open_mesh.is_watertight)
-    test.assertTrue(closed_mesh.is_watertight)
-
-    builder = newton.ModelBuilder(gravity=0.0)
-    open_shape = builder.add_shape_mesh(body=-1, mesh=open_mesh)
-    closed_shape = builder.add_shape_mesh(body=-1, mesh=closed_mesh)
-    model = builder.finalize(device=device)
-
-    query_types = model._shape_mesh_query_type.numpy()
-    test.assertEqual(int(query_types[open_shape]), MESH_SIGN_QUERY_NORMAL)
-    test.assertEqual(int(query_types[closed_shape]), MESH_SIGN_QUERY_PARITY)
-
-
-def test_mesh_query_type_skips_visual_only_mesh(test, device):
-    vertices, faces = _make_watertight_box((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
-
-    class VisualMesh(newton.Mesh):
-        @property
-        def is_watertight(self):
-            raise AssertionError("visual-only meshes should not require a mesh sign query type")
-
-    mesh = VisualMesh(vertices, faces, compute_inertia=False)
-    cfg = newton.ModelBuilder.ShapeConfig(
-        density=0.0,
-        has_shape_collision=False,
-        has_particle_collision=False,
-        is_visible=True,
-    )
-
-    builder = newton.ModelBuilder(gravity=0.0)
-    shape = builder.add_shape_mesh(body=-1, mesh=mesh, cfg=cfg)
-    model = builder.finalize(device=device)
-
-    query_types = model._shape_mesh_query_type.numpy()
-    test.assertEqual(int(query_types[shape]), MESH_SIGN_QUERY_NORMAL)
-
-
 add_function_test(
     TestMeshSignQueries,
     "test_mixed_winding_convex_pile_contact_normal",
     test_mixed_winding_convex_pile_contact_normal,
-    devices=devices,
-    check_output=False,
-)
-add_function_test(
-    TestMeshSignQueries,
-    "test_mesh_query_type_tracks_watertight",
-    test_mesh_query_type_tracks_watertight,
-    devices=devices,
-    check_output=False,
-)
-add_function_test(
-    TestMeshSignQueries,
-    "test_mesh_query_type_skips_visual_only_mesh",
-    test_mesh_query_type_skips_visual_only_mesh,
     devices=devices,
     check_output=False,
 )

@@ -11,9 +11,6 @@ from .types import (
     GeoType,
 )
 
-MESH_SIGN_QUERY_NORMAL = 0
-MESH_SIGN_QUERY_PARITY = 1
-
 
 @wp.func
 def triangle_closest_point_barycentric(a: wp.vec3, b: wp.vec3, c: wp.vec3, p: wp.vec3):
@@ -869,34 +866,13 @@ def closest_edge_coordinate_cylinder(
 
 
 @wp.func
-def mesh_query_point_sign(mesh: wp.uint64, point: wp.vec3, max_dist: float, sign_query_type: int):
-    if sign_query_type == MESH_SIGN_QUERY_PARITY:
-        query = wp.mesh_query_point_sign_parity(mesh, point, max_dist)
-        if query.result:
-            return True, query.sign, query.face, query.u, query.v
-        return False, 0.0, int(0), 0.0, 0.0
-
-    face_index = int(0)
-    face_u = float(0.0)
-    face_v = float(0.0)
-    sign = float(0.0)
-    hit = wp.mesh_query_point_sign_normal(mesh, point, max_dist, sign, face_index, face_u, face_v)
-    return hit, sign, face_index, face_u, face_v
-
-
-@wp.func
-def mesh_sdf_with_sign_query(mesh: wp.uint64, point: wp.vec3, max_dist: float, sign_query_type: int):
-    hit, sign, face_index, face_u, face_v = mesh_query_point_sign(mesh, point, max_dist, sign_query_type)
-
-    if hit:
-        closest = wp.mesh_eval_position(mesh, face_index, face_u, face_v)
-        return wp.length(point - closest) * sign
-    return max_dist
-
-
-@wp.func
 def mesh_sdf(mesh: wp.uint64, point: wp.vec3, max_dist: float):
-    return mesh_sdf_with_sign_query(mesh, point, max_dist, MESH_SIGN_QUERY_PARITY)
+    res = wp.mesh_query_point_sign_parity(mesh, point, max_dist)
+
+    if res.result:
+        closest = wp.mesh_eval_position(mesh, res.face, res.u, res.v)
+        return wp.length(point - closest) * res.sign
+    return max_dist
 
 
 @wp.func
@@ -1025,7 +1001,6 @@ def create_soft_contacts(
     shape_type: wp.array[int],
     shape_scale: wp.array[wp.vec3],
     shape_source_ptr: wp.array[wp.uint64],
-    shape_mesh_query_type: wp.array[wp.int32],
     shape_world: wp.array[int],  # World indices for shapes
     margin: float,
     soft_contact_max: int,
@@ -1119,13 +1094,13 @@ def create_soft_contacts(
         # Use magnitude of components: the search radius must always be positive
         # regardless of mirror parity.
         min_scale = wp.min(wp.min(wp.abs(geo_scale[0]), wp.abs(geo_scale[1])), wp.abs(geo_scale[2]))
-        hit, sign, face_index, face_u, face_v = mesh_query_point_sign(
-            mesh,
-            wp.cw_div(x_local, geo_scale),
-            margin + radius / min_scale,
-            shape_mesh_query_type[shape_index],
-        )
-        if hit:
+        query = wp.mesh_query_point_sign_parity(mesh, wp.cw_div(x_local, geo_scale), margin + radius / min_scale)
+        if query.result:
+            sign = query.sign
+            face_index = query.face
+            face_u = query.u
+            face_v = query.v
+
             shape_p = wp.mesh_eval_position(mesh, face_index, face_u, face_v)
             shape_v = wp.mesh_eval_velocity(mesh, face_index, face_u, face_v)
 
