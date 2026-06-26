@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
 import warp as wp
 
 # Masking kernels: set entries in [active_length[0], count) to the type's max
@@ -17,13 +20,6 @@ def _mask_tail_int64(array: wp.array[wp.int64], active_length: wp.array[int]):
     tid = wp.tid()
     if tid >= active_length[0]:
         array[tid] = wp.int64(9223372036854775807)  # INT64_MAX
-
-
-@wp.kernel
-def _mask_tail_float(array: wp.array[float], active_length: wp.array[int]):
-    tid = wp.tid()
-    if tid >= active_length[0]:
-        array[tid] = 3.4028235e38  # FLT_MAX
 
 
 # Scan: full-array; values past active_length are don't-care.
@@ -53,12 +49,6 @@ def sort_variable_length_int(
 def sort_variable_length_int64(keys: wp.array[wp.int64], values: wp.array[int], active_length: wp.array[int]) -> None:
     count = keys.shape[0] // 2
     wp.launch(_mask_tail_int64, dim=count, inputs=[keys, active_length])
-    wp.utils.radix_sort_pairs(keys, values, count)
-
-
-def sort_variable_length_float(keys: wp.array[float], values: wp.array[int], active_length: wp.array[int]) -> None:
-    count = keys.shape[0] // 2
-    wp.launch(_mask_tail_float, dim=count, inputs=[keys, active_length])
     wp.utils.radix_sort_pairs(keys, values, count)
 
 

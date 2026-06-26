@@ -93,10 +93,10 @@ CONSTRAINT_TYPE_CLOTH_TRIANGLE = wp.constant(wp.int32(10))
 #: XPBD soft-body tetrahedron (FemTetPBD corotational shear row). Endpoints
 #: body1..body4 are particle indices. See :mod:`constraint_soft_tetrahedron`.
 CONSTRAINT_TYPE_SOFT_TETRAHEDRON = wp.constant(wp.int32(11))
-#: XPBD cloth bending hinge (Bergou / Wardetzky 2007 quadratic curvature
-#: energy). Endpoints body1..body4 are particle indices. body1 / body2 are
-#: opposite vertices of the two triangles; body3 / body4 are the shared
-#: edge. See :mod:`constraint_cloth_bending`.
+#: XPBD cloth bending hinge (PhysX FEMCloth dihedral-angle model). Endpoints
+#: body1..body4 are particle indices. body1 / body2 are opposite vertices of
+#: the two triangles; body3 / body4 are the shared edge.
+#: See :mod:`constraint_cloth_bending`.
 CONSTRAINT_TYPE_CLOTH_BENDING = wp.constant(wp.int32(12))
 #: Block stable Neo-Hookean XPBD soft-body tetrahedron (Ton-That, Kry &
 #: Andrews 2024 ``Parallel Block Neo-Hookean XPBD using Graph Clustering``).

@@ -38,22 +38,6 @@ def _adjacency_zero_section_ends_kernel(
         section_end_indices[tid] = wp.int32(0)
 
 
-@wp.kernel(enable_backward=False)
-def _adjacency_zero_partition_data_kernel(
-    partition_data_concat: wp.array[wp.int64],
-    color_tags: wp.array[wp.int32],
-    num_elements: wp.array[wp.int32],
-):
-    """Mirror of the tail of ``partitioning_adjacency_store_kernel`` for the
-    side-channel buffers that kernel writes -- used when callers want only
-    the adjacency CSR built without the coloring scratch."""
-    tid = wp.tid()
-    if tid >= num_elements[0]:
-        return
-    partition_data_concat[tid] = wp.int64(0)
-    color_tags[tid] = wp.int32(0)
-
-
 class ElementVertexAdjacency:
     """Build & own a vertex -> adjacent-element CSR.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
 """Incremental Jones-Plassmann graph partitioner.
 
 One partition per :meth:`launch` call. No max_num_partitions budget; loop state

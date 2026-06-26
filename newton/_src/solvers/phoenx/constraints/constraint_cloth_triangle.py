@@ -265,7 +265,6 @@ def cloth_triangle_set_beta_mu(c: ConstraintContainer, cid: wp.int32, v: wp.floa
 _ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
 _PROJECTOR_EPS = wp.constant(wp.float32(1.0e-12))
 _EXTRACT_ROT_EPS = wp.constant(wp.float32(1.0e-6))
-_EXTRACT_ROT_MAX_ITERS = wp.constant(wp.int32(15))
 _DET_F_EPS = wp.constant(wp.float32(1.0e-12))
 _CLOTH_BLOCK_DET_FLOOR = wp.constant(wp.float32(1.0e-30))
 

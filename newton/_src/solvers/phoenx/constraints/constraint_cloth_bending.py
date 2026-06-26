@@ -89,7 +89,6 @@ __all__ = [
 
 
 _ACCESS_MODE_POSITION_LEVEL = wp.constant(wp.int32(ACCESS_MODE_POSITION_LEVEL))
-_PHOENX_CLOTH_BENDING_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
 _DEGENERATE_EPS = wp.constant(wp.float32(1.0e-12))
 _FEMCLOTH_THRESHOLD = wp.constant(wp.float32(1.0e-7))
 _HALF_PI = wp.constant(wp.float32(1.5707963267948966))
@@ -142,7 +141,6 @@ _OFF_BODY3 = wp.constant(dword_offset_of(ClothBendingData, "body3"))
 _OFF_BODY4 = wp.constant(dword_offset_of(ClothBendingData, "body4"))
 _OFF_REST_ANGLE = wp.constant(dword_offset_of(ClothBendingData, "rest_angle"))
 _OFF_ALPHA = wp.constant(dword_offset_of(ClothBendingData, "alpha"))
-_OFF_LAMBDA_SUM = wp.constant(dword_offset_of(ClothBendingData, "lambda_sum"))
 _OFF_INV_MASS_A = wp.constant(dword_offset_of(ClothBendingData, "inv_mass_a"))
 _OFF_INV_MASS_B = wp.constant(dword_offset_of(ClothBendingData, "inv_mass_b"))
 _OFF_INV_MASS_C = wp.constant(dword_offset_of(ClothBendingData, "inv_mass_c"))

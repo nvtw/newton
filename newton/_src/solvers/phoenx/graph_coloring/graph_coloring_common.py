@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared primitives for the batch and incremental graph-coloring partitioners.
 
 Holds data structures, bit-packing constants, adjacency-building kernels,

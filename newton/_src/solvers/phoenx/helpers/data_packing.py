@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
 """C-style ``offsetof`` / ``sizeof`` for Warp structs.
 
 Warp ``@wp.struct`` types are backed by a ``ctypes.Structure`` whose layout

@@ -128,8 +128,8 @@ def material_table_from_list(materials: list[Material], device: wp.context.Devic
 
 
 # Kernel-side combine helpers. Per PhysX, the effective mode is max(mode_a, mode_b).
+# AVERAGE is the fallthrough default in _combine_values, so it needs no constant.
 
-_COMBINE_AVERAGE_C = wp.constant(wp.int32(COMBINE_AVERAGE))
 _COMBINE_MIN_C = wp.constant(wp.int32(COMBINE_MIN))
 _COMBINE_MULTIPLY_C = wp.constant(wp.int32(COMBINE_MULTIPLY))
 _COMBINE_MAX_C = wp.constant(wp.int32(COMBINE_MAX))

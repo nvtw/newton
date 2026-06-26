@@ -195,9 +195,6 @@ __all__ = [
 #: Dynamic auto launches keep this upper bound; fixed launches may use less.
 _STRAGGLER_BLOCK_DIM: int = 32
 
-_PRIORITY_COST_SHIFT = wp.constant(wp.int64(32))
-_PRIORITY_JITTER_MASK = wp.constant(wp.int64((1 << 32) - 1))
-
 
 def _choose_fast_tail_worlds_per_block(num_worlds: int) -> int:
     """Worlds per physical block in the fast-tail kernels.
