@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import math
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +17,8 @@ import newton.examples
 from newton._src.geometry.sdf_texture import TextureSDFData, texture_sample_sdf
 
 MAXWELL_TOP_USD_ENV = "NEWTON_MAXWELL_TOP_USD"
-DEFAULT_MAXWELL_TOP_USD_PATH = Path(r"C:\Users\twidmer\Downloads\MaxwellTopSI\MaxwellTopSI2.usda")
+MAXWELL_TOP_USD_FILENAME = "MaxwellTopSI2.usda"
+DEFAULT_WINDOWS_MAXWELL_TOP_USD_PATH = Path(r"C:\Users\twidmer\Downloads\MaxwellTopSI\MaxwellTopSI2.usda")
 FPS = 300
 SUBSTEPS = 5
 SOLVER_ITERATIONS = 5
@@ -34,6 +36,53 @@ CONTACT_DUMP_TOP_N = 12
 TRAJECTORY_CSV = None
 TRAJECTORY_INTERVAL = 1
 SDF_LINEARITY_BAD_RELERR = 0.2
+
+
+def _linux_download_dir() -> Path:
+    user_dirs_path = Path.home() / ".config" / "user-dirs.dirs"
+    if user_dirs_path.exists():
+        for raw_line in user_dirs_path.read_text().splitlines():
+            user_dir_entry = raw_line.strip()
+            if not user_dir_entry.startswith("XDG_DOWNLOAD_DIR="):
+                continue
+            download_dir = user_dir_entry.split("=", 1)[1].strip().strip('"')
+            download_dir = download_dir.replace("$HOME", str(Path.home())).replace("${HOME}", str(Path.home()))
+            return Path(download_dir).expanduser()
+
+    return Path.home() / "Downloads"
+
+
+def _find_linux_maxwell_top_usd() -> Path:
+    download_dir = _linux_download_dir()
+    candidates = (
+        download_dir / "MaxwellTopSI" / MAXWELL_TOP_USD_FILENAME,
+        download_dir / MAXWELL_TOP_USD_FILENAME,
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    if download_dir.exists():
+        matches = sorted(download_dir.rglob(MAXWELL_TOP_USD_FILENAME))
+        if matches:
+            return matches[0]
+
+    return candidates[0]
+
+
+def _resolve_maxwell_top_usd_path(usd_path: str | None) -> Path:
+    if usd_path:
+        return Path(usd_path).expanduser()
+
+    env_path = os.environ.get(MAXWELL_TOP_USD_ENV)
+    if env_path:
+        return Path(env_path).expanduser()
+
+    if sys.platform.startswith("linux"):
+        return _find_linux_maxwell_top_usd()
+
+    return DEFAULT_WINDOWS_MAXWELL_TOP_USD_PATH
+
 
 # World-frame initial angular velocity for the spinning body [deg/s].
 # Main2 carries the authored spin in the USD; Spiral is the tip (zero spin).
@@ -372,11 +421,11 @@ class Example:
         self.sim_time = 0.0
         self._printed_contact_count = False
 
-        usd_path = Path(args.usd_path).expanduser() if args.usd_path else None
-        if usd_path is None or not usd_path.exists():
+        usd_path = _resolve_maxwell_top_usd_path(args.usd_path)
+        if not usd_path.exists():
             raise FileNotFoundError(
                 "example_maxwell_top_si requires the MaxwellTopSI2.usda asset. "
-                f"Pass --usd-path or set {MAXWELL_TOP_USD_ENV}."
+                f"Pass --usd-path, set {MAXWELL_TOP_USD_ENV}, or place it in your Downloads folder."
             )
         sdf_cache_dir = Path(args.sdf_cache_dir).expanduser() if args.sdf_cache_dir else usd_path.parent / ".sdf_cache"
 
@@ -501,7 +550,9 @@ class Example:
         return body_q[body_idx, :3] + Example._quat_rotate(body_q[body_idx, 3:], point)
 
     @staticmethod
-    def _body_point_velocity(body_q: np.ndarray, body_qd: np.ndarray, body_idx: int, point_world: np.ndarray) -> np.ndarray:
+    def _body_point_velocity(
+        body_q: np.ndarray, body_qd: np.ndarray, body_idx: int, point_world: np.ndarray
+    ) -> np.ndarray:
         if body_idx < 0:
             return np.zeros(3, dtype=np.float64)
         qd = body_qd[body_idx]
@@ -534,7 +585,9 @@ class Example:
                 if vertices is None:
                     continue
 
-                scaled_vertices = np.asarray(vertices, dtype=np.float64) * np.asarray(shape_scale[shape_id], dtype=np.float64)
+                scaled_vertices = np.asarray(vertices, dtype=np.float64) * np.asarray(
+                    shape_scale[shape_id], dtype=np.float64
+                )
                 for vertex in scaled_vertices:
                     body_point = self._transform_point_np(shape_transform[shape_id], vertex)
                     world_point = self._body_point_world(body_q, body_id, body_point)
@@ -660,9 +713,7 @@ class Example:
             "edge_anchor_p95": float(np.percentile(anchor_errors, 95.0)) if edge_count else float("nan"),
             "edge_anchor_max": float(np.max(anchor_errors)) if edge_count else float("nan"),
             "edge_anchor_signed_mean": float(np.mean(signed_errors)) if edge_count else float("nan"),
-            "edge_anchor_over_sep_p50": float(np.percentile(error_to_sep, 50.0))
-            if len(error_to_sep)
-            else float("nan"),
+            "edge_anchor_over_sep_p50": float(np.percentile(error_to_sep, 50.0)) if len(error_to_sep) else float("nan"),
             "sdf_endpoint_abs_p50": float(np.percentile(sdf_endpoint_abs[valid_sdf], 50.0))
             if np.any(valid_sdf)
             else float("nan"),
@@ -678,7 +729,9 @@ class Example:
             "sdf_min_signed_delta_p05": float(np.percentile(sdf_min_signed_delta[valid_sdf], 5.0))
             if np.any(valid_sdf)
             else float("nan"),
-            "sdf_nonmonotone_frac": float(np.count_nonzero(sdf_min_signed_delta[valid_sdf] < 0.0) / np.count_nonzero(valid_sdf))
+            "sdf_nonmonotone_frac": float(
+                np.count_nonzero(sdf_min_signed_delta[valid_sdf] < 0.0) / np.count_nonzero(valid_sdf)
+            )
             if np.any(valid_sdf)
             else float("nan"),
             "sdf_gen_delta_ratio_p50": float(np.percentile(sdf_gen_delta_ratio[valid_gen_delta], 50.0))
@@ -699,10 +752,14 @@ class Example:
             )
             if np.any(valid_gen_delta)
             else float("nan"),
-            "sdf_two_sided_delta_relerr_p50": float(np.percentile(sdf_two_sided_delta_relerr[valid_two_sided_delta], 50.0))
+            "sdf_two_sided_delta_relerr_p50": float(
+                np.percentile(sdf_two_sided_delta_relerr[valid_two_sided_delta], 50.0)
+            )
             if np.any(valid_two_sided_delta)
             else float("nan"),
-            "sdf_two_sided_delta_relerr_p95": float(np.percentile(sdf_two_sided_delta_relerr[valid_two_sided_delta], 95.0))
+            "sdf_two_sided_delta_relerr_p95": float(
+                np.percentile(sdf_two_sided_delta_relerr[valid_two_sided_delta], 95.0)
+            )
             if np.any(valid_two_sided_delta)
             else float("nan"),
             "sdf_two_sided_bad_frac": float(
@@ -790,6 +847,7 @@ class Example:
                 f"jvn_bias={float(jvn_plus_bias[idx]):.9g} match={matched} "
                 f"sort_sub={sort_sub_key} edge={edge_idx} mode={mode}"
             )
+
         for idx in order:
             print_row("jvn", int(idx))
         print(f"[contact-dump frame={self._frame}] active_rows={len(active_order)}")
@@ -986,10 +1044,11 @@ class Example:
         parser.add_argument(
             "--usd-path",
             type=str,
-            default=os.environ.get(MAXWELL_TOP_USD_ENV, str(DEFAULT_MAXWELL_TOP_USD_PATH)),
+            default=None,
             help=(
                 "Path to MaxwellTopSI2.usda. Defaults to NEWTON_MAXWELL_TOP_USD, "
-                f"then {DEFAULT_MAXWELL_TOP_USD_PATH}."
+                "then searches the Linux Downloads folder, or falls back to "
+                f"{DEFAULT_WINDOWS_MAXWELL_TOP_USD_PATH} on other platforms."
             ),
         )
         parser.add_argument(
