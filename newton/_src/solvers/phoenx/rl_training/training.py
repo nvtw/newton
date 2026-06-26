@@ -760,10 +760,6 @@ def _copy_trainer_policy(dst: TrainerPPO, src: TrainerPPO) -> None:
         dst.critic.copy_from(src.critic)
 
 
-def _copy_g1_trainer_policy(dst: TrainerPPO, src: TrainerPPO) -> None:
-    _copy_trainer_policy(dst, src)
-
-
 def _make_g1_rollout_trainer(env: EnvG1PhoenX, trainer: TrainerPPO) -> TrainerPPO:
     rollout = TrainerPPO(
         obs_dim=env.obs_dim,
@@ -829,7 +825,7 @@ def _capture_stream_graph(stream: wp.Stream, device: wp.context.Device, workload
     return capture.graph
 
 
-class _G1GraphTrainPhase:
+class _GraphTrainPhase:
     def __init__(self, rollout_graph, update_graph):
         self.rollout_graph = rollout_graph
         self.update_graph = update_graph
@@ -1005,16 +1001,16 @@ def _train_g1_ppo_graph_leapfrog(
     update_stream = wp.Stream(device)
     copy_stream = wp.Stream(device)
     phases = (
-        _G1GraphTrainPhase(
+        _GraphTrainPhase(
             _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[1])),
             _capture_stream_graph(update_stream, device, lambda: update(buffers[0])),
         ),
-        _G1GraphTrainPhase(
+        _GraphTrainPhase(
             _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[0])),
             _capture_stream_graph(update_stream, device, lambda: update(buffers[1])),
         ),
     )
-    copy_graph = _capture_stream_graph(copy_stream, device, lambda: _copy_g1_trainer_policy(rollout_trainer, trainer))
+    copy_graph = _capture_stream_graph(copy_stream, device, lambda: _copy_trainer_policy(rollout_trainer, trainer))
 
     history: list[StatsTrainG1PPO] = []
     prev = 0
@@ -1120,11 +1116,11 @@ def _train_anymal_ppo_graph_leapfrog(
     update_stream = wp.Stream(device)
     copy_stream = wp.Stream(device)
     phases = (
-        _G1GraphTrainPhase(
+        _GraphTrainPhase(
             _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[1])),
             _capture_stream_graph(update_stream, device, lambda: update(buffers[0])),
         ),
-        _G1GraphTrainPhase(
+        _GraphTrainPhase(
             _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[0])),
             _capture_stream_graph(update_stream, device, lambda: update(buffers[1])),
         ),

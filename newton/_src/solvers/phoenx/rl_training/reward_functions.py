@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-from __future__ import annotations
-
-import warp as wp
-
 """Composable Warp reward/cost primitives for PhoenX RL environments.
 
 The functions are intentionally small and sign-neutral. They return positive
 rewards, positive penalties, or simple indicators; environment recipes decide
 whether a term is added or subtracted by choosing the scale sign.
 """
+
+from __future__ import annotations
+
+import warp as wp
 
 
 @wp.func

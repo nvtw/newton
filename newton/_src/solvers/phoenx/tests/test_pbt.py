@@ -354,10 +354,7 @@ class TestPBTCorePythonLogic(unittest.TestCase):
             for i in range(4)
         ]
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workers_out, gen_result, replaced_ids = _exploit_explore(
-                workers, specs, pbt_cfg, rng, Path(tmpdir), generation=0
-            )
+        workers_out, gen_result, replaced_ids = _exploit_explore(workers, specs, pbt_cfg, rng, generation=0)
 
         # Lowest fitness worker (index 0) should be replaced
         self.assertIn(0, replaced_ids)

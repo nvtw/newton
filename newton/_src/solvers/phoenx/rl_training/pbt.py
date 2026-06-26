@@ -376,7 +376,6 @@ def _exploit_explore(
     specs: list[HparamSpec],
     pbt_config: ConfigPBT,
     rng: np.random.Generator,
-    output_dir: Path,
     generation: int,
 ) -> tuple[list[WorkerState], GenerationResult, set[int]]:
     """Truncation selection: bottom workers inherit from the top.
@@ -674,7 +673,7 @@ def population_based_train(
             cycle_fitness = _compute_fitness(hist, pbt_config.fitness_window, pbt_config.fitness_metric)
             worker.fitness_history.append(cycle_fitness)
 
-        workers, gen_result, replaced_ids = _exploit_explore(workers, hparam_specs, pbt_config, rng, out, cycle)
+        workers, gen_result, replaced_ids = _exploit_explore(workers, hparam_specs, pbt_config, rng, cycle)
         generations.append(gen_result)
 
         if pbt_config.fresh_optimizer_on_exploit:
