@@ -484,6 +484,12 @@ class TrainerPPO:
         self._clip_fraction = wp.zeros(1, dtype=wp.float32, device=self.device)
         self._update_stats = wp.zeros(4, dtype=wp.float32, device=self.device)
         self._update_stats_host = wp.empty(4, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
+        self._entropy_coeff_buf = wp.array(
+            [self.config.entropy_coeff], dtype=wp.float32, device=self.device, requires_grad=False
+        )
+        self._mirror_loss_coeff_buf = wp.array(
+            [self.config.mirror_loss_coeff], dtype=wp.float32, device=self.device, requires_grad=False
+        )
 
     @property
     def iteration(self) -> int:
@@ -523,6 +529,49 @@ class TrainerPPO:
             np.asarray(mirror_map.action_sign, dtype=np.float32), dtype=wp.float32, device=self.device
         )
         self._mirror_obs = None
+
+    def set_entropy_coeff(self, coeff: float) -> None:
+        """Update entropy coefficient in-place (no graph rebuild)."""
+        self._entropy_coeff_buf.assign(np.asarray([float(coeff)], dtype=np.float32))
+
+    def set_mirror_loss_coeff(self, coeff: float) -> None:
+        """Update mirror-loss coefficient in-place (no graph rebuild)."""
+        self._mirror_loss_coeff_buf.assign(np.asarray([float(coeff)], dtype=np.float32))
+
+    def set_actor_lr(self, lr: float) -> None:
+        """Update actor learning rate via PBT scale (no graph rebuild)."""
+        self.actor_optimizer.set_pbt_lr(lr)
+
+    def set_critic_lr(self, lr: float) -> None:
+        """Update critic learning rate via PBT scale (no graph rebuild)."""
+        if self.critic_optimizer is not None:
+            self.critic_optimizer.set_pbt_lr(lr)
+        else:
+            # shared network: actor optimizer handles both
+            self.actor_optimizer.set_pbt_lr(lr)
+
+    def copy_weights_from(self, other: TrainerPPO) -> None:
+        """Copy network weights from *other* and reset optimizer state (GPU-side)."""
+        # Copy actor weights
+        for dst, src in zip(self.actor.parameters(), other.actor.parameters()):
+            wp.copy(dst, src)
+        wp.copy(self.actor.log_std, other.actor.log_std)
+        # Copy critic weights (if separate)
+        if self.critic is not None and other.critic is not None:
+            for dst, src in zip(self.critic.parameters(), other.critic.parameters()):
+                wp.copy(dst, src)
+        # Reset optimizer state
+        self.actor_optimizer.step_count = 0
+        for m in self.actor_optimizer.m:
+            m.zero_()
+        for v in getattr(self.actor_optimizer, 'v', []):
+            v.zero_()
+        if self.critic_optimizer is not None:
+            self.critic_optimizer.step_count = 0
+            for m in self.critic_optimizer.m:
+                m.zero_()
+            for v in getattr(self.critic_optimizer, 'v', []):
+                v.zero_()
 
     def save_checkpoint(self, path: str | Path, *, iteration: int | None = None) -> None:
         """Save network parameters and optimizer state to a NumPy archive.
@@ -599,6 +648,52 @@ class TrainerPPO:
                 _unpack_optimizer(data, "critic_optimizer", trainer.critic_optimizer)
             if "iteration" in data:
                 trainer.iteration = max(int(data["iteration"]), 0)
+        return trainer
+
+    @classmethod
+    def load_checkpoint_policy_only(
+        cls,
+        path: str | Path,
+        *,
+        config: ConfigPPO,
+        device: wp.context.Devicelike = None,
+        seed: int = 0,
+    ) -> TrainerPPO:
+        """Load network weights from a checkpoint, starting a fresh optimizer.
+
+        Unlike :meth:`load_checkpoint`, this method creates a new trainer using
+        *config* (including its optimizer settings) and copies only the actor and
+        critic network weights.  The optimizer state and iteration counter are
+        reset to zero.  Use this when transitioning between training phases that
+        use different optimizers (e.g. Adam → Muon).
+
+        Args:
+            path: Input ``.npz`` path.
+            config: PPO config for the new trainer (optimizer type may differ).
+            device: Warp device for restored arrays.
+            seed: RNG seed for the new trainer.
+
+        Returns:
+            New trainer with weights from *path* and a fresh optimizer.
+        """
+        with np.load(Path(path), allow_pickle=False) as data:
+            trainer = cls(
+                obs_dim=int(data["obs_dim"]),
+                action_dim=int(data["action_dim"]),
+                hidden_layers=tuple(int(width) for width in data["hidden_layers"]),
+                config=config,
+                device=device,
+                seed=seed,
+                squash_actions=bool(int(data["squash_actions"])),
+                activation=str(data["activation"].item()),
+                log_std_init=float(data["log_std_init"]),
+            )
+            _unpack_policy_network(data, "actor", trainer.actor.net)
+            trainer.actor.log_std.assign(data["actor_log_std"])
+            if not trainer.shared_value_network:
+                if trainer.critic is None:
+                    raise RuntimeError("separate critic state was not initialized")
+                _unpack_policy_network(data, "critic", trainer.critic)
         return trainer
 
     @property
@@ -1149,7 +1244,7 @@ class TrainerPPO:
                 buffer.old_log_probs,
                 buffer.advantages,
                 self.config.clip_ratio,
-                self.config.entropy_coeff,
+                self._entropy_coeff_buf,
                 self.action_dim,
                 int(self.actor.state_dependent_std),
                 int(self.actor.squash),
@@ -1177,7 +1272,7 @@ class TrainerPPO:
                     self._mirror_action_src,
                     self._mirror_action_sign,
                     self.action_dim,
-                    self.config.mirror_loss_coeff,
+                    self._mirror_loss_coeff_buf,
                     buffer.num_samples,
                 ],
                 outputs=[policy_out_grad, self._policy_loss],
@@ -1206,7 +1301,7 @@ class TrainerPPO:
                     policy_out,
                     self.value_column,
                     mirror_policy_out,
-                    self.config.mirror_loss_coeff,
+                    self._mirror_loss_coeff_buf,
                     buffer.num_samples,
                 ],
                 outputs=[self._value_loss, policy_out_grad],
@@ -1290,7 +1385,7 @@ class TrainerPPO:
                 buffer.old_log_probs,
                 buffer.advantages,
                 self.config.clip_ratio,
-                self.config.entropy_coeff,
+                self._entropy_coeff_buf,
                 self.action_dim,
                 int(self.actor.state_dependent_std),
                 int(self.actor.squash),
@@ -1318,7 +1413,7 @@ class TrainerPPO:
                     self._mirror_action_src,
                     self._mirror_action_sign,
                     self.action_dim,
-                    self.config.mirror_loss_coeff,
+                    self._mirror_loss_coeff_buf,
                     buffer.num_samples,
                 ],
                 outputs=[policy_out_grad, self._policy_loss],
@@ -1383,7 +1478,7 @@ class TrainerPPO:
                     buffer.advantages,
                     entropy,
                     self.config.clip_ratio,
-                    self.config.entropy_coeff,
+                    self._entropy_coeff_buf,
                     buffer.num_samples,
                 ],
                 outputs=[self._policy_loss, self._approx_kl, self._clip_fraction, buffer.ratios],
@@ -1399,7 +1494,7 @@ class TrainerPPO:
                         self._mirror_action_src,
                         self._mirror_action_sign,
                         self.action_dim,
-                        self.config.mirror_loss_coeff,
+                        self._mirror_loss_coeff_buf,
                         buffer.num_samples,
                     ],
                     outputs=[self._policy_loss],
@@ -1458,7 +1553,7 @@ class TrainerPPO:
             wp.launch(
                 value_symmetry_loss_grad_kernel,
                 dim=buffer.num_samples,
-                inputs=[values, mirror_values, self.config.mirror_loss_coeff, buffer.num_samples],
+                inputs=[values, mirror_values, self._mirror_loss_coeff_buf, buffer.num_samples],
                 outputs=[self._value_loss, value_grad],
                 device=self.device,
             )
@@ -1494,7 +1589,7 @@ class TrainerPPO:
                 wp.launch(
                     value_symmetry_loss_kernel,
                     dim=buffer.num_samples,
-                    inputs=[values, mirror_values, self.config.mirror_loss_coeff, buffer.num_samples],
+                    inputs=[values, mirror_values, self._mirror_loss_coeff_buf, buffer.num_samples],
                     outputs=[self._value_loss],
                     device=self.device,
                 )

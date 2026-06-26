@@ -357,6 +357,9 @@ class ConfigTrainAnymalPPO:
         command_yaw_min_abs: Minimum non-zero sampled yaw-rate magnitude [rad/s].
         command_zero_probability: Probability of replacing a sampled command with zero velocity and height offset.
         resume_checkpoint: Optional PPO checkpoint to resume from.
+        resume_policy_only: Load only network weights from ``resume_checkpoint``,
+            discarding optimizer state and iteration counter.  Useful when
+            transitioning between training phases (e.g. PBT exploit step).
         checkpoint_path: Optional path for writing PPO checkpoints.
         checkpoint_interval: Save a checkpoint every N iterations when positive.
         execution_mode: ``"eager"`` for serial collect-update or
@@ -390,6 +393,7 @@ class ConfigTrainAnymalPPO:
     command_yaw_min_abs: float = 0.0
     command_zero_probability: float = 0.0
     resume_checkpoint: str | None = None
+    resume_policy_only: bool = False
     checkpoint_path: str | None = None
     checkpoint_interval: int = 0
     execution_mode: str = "eager"
@@ -461,6 +465,7 @@ class ConfigTrainG1PPO:
     target_angle_max: float = SPARSE_TARGET_ANGLE_MAX
     reset_recurrent_state_on_rollout_start: bool = RESET_RECURRENT_STATE_ON_ROLLOUT_START
     resume_checkpoint: str | None = None
+    resume_policy_only: bool = False
     checkpoint_path: str | None = None
     checkpoint_interval: int = 0
     readback_diagnostics: bool = True
@@ -1185,6 +1190,59 @@ def _train_anymal_ppo_graph_leapfrog(
     return ResultTrainAnymalPPO(trainer=trainer, env=env, buffer=buffers[prev], history=history)
 
 
+def _train_g1_ppo_cycle(
+    result: ResultTrainG1PPO,
+    cfg: ConfigTrainG1PPO,
+) -> ResultTrainG1PPO:
+    """Continue training a live G1 worker without rebuilding the env.
+
+    The trainer's learning rate, entropy coefficient, and mirror-loss
+    coefficient should already be updated in-place before calling this
+    function.  The env, trainer, and buffer are reused from *result*.
+    """
+    env = result.env
+    trainer = result.trainer
+    buffer = result.buffer
+    device = env.device
+    start_iteration = int(getattr(trainer, "iteration", 0))
+    diagnostics = _G1TrainDiagnosticsReadback(device) if cfg.readback_diagnostics else None
+    command_curriculum_counter = _make_g1_command_curriculum_counter(cfg, env, start_iteration)
+    target_curriculum_counter = _make_g1_target_curriculum_counter(cfg, env, start_iteration)
+    target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + start_iteration, device=device)
+    _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, 0)
+    _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, 0)
+    if cfg.execution_mode == "graph_leapfrog":
+        return _train_g1_ppo_graph_leapfrog(
+            cfg,
+            env,
+            trainer,
+            buffer,
+            command_curriculum_counter,
+            start_iteration=start_iteration,
+            diagnostics=diagnostics,
+        )
+    for local_iteration in range(cfg.iterations):
+        iteration = start_iteration + local_iteration
+        _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, buffer.num_samples)
+        if cfg.randomize_commands and cfg.command_sampling == "rollout":
+            env.randomize_commands(
+                seed=int(cfg.seed) + 53_321 + iteration,
+                command_x_range=cfg.command_x_range,
+                command_y_range=cfg.command_y_range,
+                command_yaw_range=cfg.command_yaw_range,
+                zero_probability=cfg.command_zero_probability,
+            )
+        _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, buffer.num_samples)
+        env.collect_ppo_rollout_seed_counter(
+            trainer,
+            buffer,
+            seed_counter=make_seed_counter(int(cfg.seed) + iteration * int(cfg.rollout_steps), device=device),
+            reset_state_at_start=bool(cfg.reset_recurrent_state_on_rollout_start),
+        )
+        trainer.update(buffer)
+    return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffer, history=[])
+
+
 def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
     """Train a Unitree G1 walking policy with PhoenX and Warp-only PPO."""
 
@@ -1239,8 +1297,13 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
     ppo_config = cfg.ppo_config or _default_g1_ppo_config()
     env = EnvG1PhoenX(env_config, device=device)
     if cfg.resume_checkpoint is not None:
-        trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=cfg.ppo_config, device=device)
-        ppo_config = trainer.config
+        if cfg.resume_policy_only:
+            trainer = TrainerPPO.load_checkpoint_policy_only(
+                cfg.resume_checkpoint, config=ppo_config, device=device, seed=cfg.seed
+            )
+        else:
+            trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=cfg.ppo_config, device=device)
+            ppo_config = trainer.config
         if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
             raise ValueError("Checkpoint dimensions do not match the G1 environment")
         if trainer.config.mirror_loss_coeff > 0.0:
@@ -1543,8 +1606,13 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
     ppo_config = cfg.ppo_config or _default_ppo_config()
     env = EnvAnymalPhoenX(env_config, device=device)
     if cfg.resume_checkpoint is not None:
-        trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=cfg.ppo_config, device=device)
-        ppo_config = trainer.config
+        if cfg.resume_policy_only:
+            trainer = TrainerPPO.load_checkpoint_policy_only(
+                cfg.resume_checkpoint, config=ppo_config, device=device, seed=cfg.seed
+            )
+        else:
+            trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=cfg.ppo_config, device=device)
+            ppo_config = trainer.config
         if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
             raise ValueError("Checkpoint dimensions do not match the Anymal environment")
         if trainer.config.mirror_loss_coeff > 0.0:

@@ -134,7 +134,7 @@ class TestRolloutBuffer(unittest.TestCase):
             buffer.normalize_advantages()
         wp.capture_launch(capture.graph)
 
-        expected = (advantages_np - float(np.mean(advantages_np))) / float(np.sqrt(np.var(advantages_np) + 1.0e-8))
+        expected = (advantages_np - float(np.mean(advantages_np))) / float(np.sqrt(np.var(advantages_np, ddof=1) + 1.0e-8))
         np.testing.assert_allclose(buffer.advantages.numpy(), expected, rtol=2.0e-6, atol=2.0e-6)
 
     def test_reward_done_success_sums_are_graph_capturable(self) -> None:
@@ -258,6 +258,9 @@ class TestTrainerPPO(unittest.TestCase):
         mirror_src = wp.array(np.array([1, 0], dtype=np.int32), dtype=wp.int32, device=device)
         mirror_sign = wp.array(np.array([1.0, 1.0], dtype=np.float32), dtype=wp.float32, device=device)
 
+        entropy_coeff_buf = wp.array([1.0e-4], dtype=wp.float32, device=device)
+        mirror_coeff_buf = wp.array([0.1], dtype=wp.float32, device=device)
+
         def launch_manual_backward() -> None:
             wp.launch(zero_scalar_kernel, dim=1, outputs=[loss], device=device)
             wp.launch(zero_scalar_kernel, dim=1, outputs=[approx_kl], device=device)
@@ -273,7 +276,7 @@ class TestTrainerPPO(unittest.TestCase):
                     old_log_probs,
                     advantages,
                     0.2,
-                    1.0e-4,
+                    entropy_coeff_buf,
                     action_dim,
                     0,
                     1,
@@ -294,7 +297,7 @@ class TestTrainerPPO(unittest.TestCase):
             wp.launch(
                 mirrored_action_mse_grad_kernel,
                 dim=rows,
-                inputs=[policy_out, mirrored_policy_out, mirror_src, mirror_sign, action_dim, 0.1, rows],
+                inputs=[policy_out, mirrored_policy_out, mirror_src, mirror_sign, action_dim, mirror_coeff_buf, rows],
                 outputs=[policy_out_grad, loss],
                 device=device,
             )
@@ -324,19 +327,22 @@ class TestTrainerPPO(unittest.TestCase):
         loss = wp.zeros(1, dtype=wp.float32, device=device)
         value_grad = wp.zeros((rows, 1), dtype=wp.float32, device=device)
 
+        coeff_buf = wp.array([coeff], dtype=wp.float32, device=device)
+        old_values = wp.zeros(rows, dtype=wp.float32, device=device)
+
         def launch_manual_backward() -> None:
             wp.launch(zero_scalar_kernel, dim=1, outputs=[loss], device=device)
             wp.launch(
                 value_loss_grad_kernel,
                 dim=rows,
-                inputs=[values, returns, rows],
+                inputs=[values, old_values, returns, 1.0, 0.0, rows],
                 outputs=[loss, value_grad],
                 device=device,
             )
             wp.launch(
                 value_symmetry_loss_grad_kernel,
                 dim=rows,
-                inputs=[values, mirrored, coeff, rows],
+                inputs=[values, mirrored, coeff_buf, rows],
                 outputs=[loss, value_grad],
                 device=device,
             )
@@ -371,20 +377,23 @@ class TestTrainerPPO(unittest.TestCase):
         loss = wp.zeros(1, dtype=wp.float32, device=device)
         output_grad = wp.zeros((rows, action_dim + 1), dtype=wp.float32, device=device)
 
+        coeff_buf = wp.array([coeff], dtype=wp.float32, device=device)
+        old_values = wp.zeros(rows, dtype=wp.float32, device=device)
+
         def launch_manual_backward() -> None:
             wp.launch(zero_scalar_kernel, dim=1, outputs=[loss], device=device)
             output_grad.zero_()
             wp.launch(
                 value_column_loss_grad_kernel,
                 dim=rows,
-                inputs=[values, value_col, returns, rows],
+                inputs=[values, value_col, old_values, returns, 1.0, 0.0, rows],
                 outputs=[loss, output_grad],
                 device=device,
             )
             wp.launch(
                 value_column_symmetry_loss_grad_kernel,
                 dim=rows,
-                inputs=[values, value_col, mirrored, coeff, rows],
+                inputs=[values, value_col, mirrored, coeff_buf, rows],
                 outputs=[loss, output_grad],
                 device=device,
             )

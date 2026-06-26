@@ -1075,6 +1075,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         partial_count = (rows + PPO_LOG_STD_PARTIAL_BATCH - 1) // PPO_LOG_STD_PARTIAL_BATCH
         log_std_grad_partials = wp.zeros((partial_count, action_dim), dtype=wp.float32, device=device)
         log_std_grad = wp.zeros(action_dim, dtype=wp.float32, device=device)
+        entropy_coeff_buf = wp.array([float(entropy_coeff)], dtype=wp.float32, device=device)
 
         with wp.ScopedCapture(device=device) as capture:
             wp.launch(
@@ -1094,7 +1095,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                     old_log_probs,
                     advantages,
                     float(clip_ratio),
-                    float(entropy_coeff),
+                    entropy_coeff_buf,
                     action_dim,
                     0,
                     0,

@@ -621,7 +621,7 @@ def ppo_actor_loss_kernel(
     advantages: wp.array[wp.float32],
     entropy: wp.array[wp.float32],
     clip_ratio: wp.float32,
-    entropy_coeff: wp.float32,
+    entropy_coeff: wp.array[wp.float32],
     batch_size: wp.int32,
     loss: wp.array[wp.float32],
     approx_kl: wp.array[wp.float32],
@@ -636,7 +636,7 @@ def ppo_actor_loss_kernel(
     unclipped_obj = ratio * advantages[i]
     clipped_obj = clipped * advantages[i]
     obj = wp.min(unclipped_obj, clipped_obj)
-    wp.atomic_add(loss, 0, (-obj - entropy_coeff * entropy[i]) / wp.float32(batch_size))
+    wp.atomic_add(loss, 0, (-obj - entropy_coeff[0] * entropy[i]) / wp.float32(batch_size))
     wp.atomic_add(approx_kl, 0, ((ratio - wp.float32(1.0)) - log_ratio) / wp.float32(batch_size))
     if wp.abs(ratio - wp.float32(1.0)) > clip_ratio:
         wp.atomic_add(clip_fraction, 0, wp.float32(1.0) / wp.float32(batch_size))
@@ -663,7 +663,7 @@ def ppo_actor_loss_backward_kernel(
     old_log_probs: wp.array[wp.float32],
     advantages: wp.array[wp.float32],
     clip_ratio: wp.float32,
-    entropy_coeff: wp.float32,
+    entropy_coeff: wp.array[wp.float32],
     action_dim: wp.int32,
     state_dependent_std: wp.int32,
     squash: wp.int32,
@@ -704,7 +704,7 @@ def ppo_actor_loss_backward_kernel(
     pg_loss_clipped = -adv * clipped
     pg_loss = wp.max(pg_loss_unclipped, pg_loss_clipped)
     inv_batch = wp.float32(1.0) / wp.float32(batch_size)
-    wp.atomic_add(loss, 0, (pg_loss - entropy_coeff * total_entropy) * inv_batch)
+    wp.atomic_add(loss, 0, (pg_loss - entropy_coeff[0] * total_entropy) * inv_batch)
     wp.atomic_add(approx_kl, 0, ((ratio - wp.float32(1.0)) - log_ratio) * inv_batch)
     clipped_branch = pg_loss_clipped > pg_loss_unclipped
     outside_clip = ratio <= wp.float32(1.0) - clip_ratio or ratio >= wp.float32(1.0) + clip_ratio
@@ -730,7 +730,7 @@ def ppo_actor_loss_backward_kernel(
         raw_log_std_active = raw_log_std >= log_std_min and raw_log_std <= log_std_max
         d_log_std = wp.float32(0.0)
         if raw_log_std_active:
-            d_log_std = d_log_prob * (diff * diff / var - wp.float32(1.0)) - entropy_coeff * inv_batch
+            d_log_std = d_log_prob * (diff * diff / var - wp.float32(1.0)) - entropy_coeff[0] * inv_batch
         if state_dependent_std != 0:
             policy_out_grad[row, action_dim + j] = d_log_std
         else:
@@ -745,7 +745,7 @@ def mirrored_action_mse_grad_kernel(
     action_mirror_src: wp.array[wp.int32],
     action_mirror_sign: wp.array[wp.float32],
     action_dim: wp.int32,
-    coeff: wp.float32,
+    coeff: wp.array[wp.float32],
     batch_size: wp.int32,
     policy_out_grad: wp.array2d[wp.float32],
     loss: wp.array[wp.float32],
@@ -756,8 +756,8 @@ def mirrored_action_mse_grad_kernel(
     for action in range(action_dim):
         target = action_mirror_sign[action] * mirrored_policy_out[row, action_mirror_src[action]]
         delta = policy_out[row, action] - target
-        policy_out_grad[row, action] = policy_out_grad[row, action] + coeff * delta * inv_batch
-        row_loss = row_loss + wp.float32(0.5) * coeff * delta * delta * inv_batch
+        policy_out_grad[row, action] = policy_out_grad[row, action] + coeff[0] * delta * inv_batch
+        row_loss = row_loss + wp.float32(0.5) * coeff[0] * delta * delta * inv_batch
     wp.atomic_add(loss, 0, row_loss)
 
 
@@ -876,7 +876,7 @@ def mirrored_action_mse_loss_kernel(
     action_mirror_src: wp.array[wp.int32],
     action_mirror_sign: wp.array[wp.float32],
     action_dim: wp.int32,
-    coeff: wp.float32,
+    coeff: wp.array[wp.float32],
     batch_size: wp.int32,
     loss: wp.array[wp.float32],
 ):
@@ -886,7 +886,7 @@ def mirrored_action_mse_loss_kernel(
     for action in range(action_dim):
         target = action_mirror_sign[action] * mirrored_policy_out[row, action_mirror_src[action]]
         delta = policy_out[row, action] - target
-        row_loss = row_loss + wp.float32(0.5) * coeff * delta * delta * inv_batch
+        row_loss = row_loss + wp.float32(0.5) * coeff[0] * delta * delta * inv_batch
     wp.atomic_add(loss, 0, row_loss)
 
 
@@ -894,20 +894,20 @@ def mirrored_action_mse_loss_kernel(
 def value_symmetry_loss_kernel(
     values: wp.array2d[wp.float32],
     mirrored_values: wp.array2d[wp.float32],
-    coeff: wp.float32,
+    coeff: wp.array[wp.float32],
     batch_size: wp.int32,
     loss: wp.array[wp.float32],
 ):
     row = wp.tid()
     delta = values[row, 0] - mirrored_values[row, 0]
-    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta / wp.float32(batch_size))
+    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff[0] * delta * delta / wp.float32(batch_size))
 
 
 @wp.kernel
 def value_symmetry_loss_grad_kernel(
     values: wp.array2d[wp.float32],
     mirrored_values: wp.array2d[wp.float32],
-    coeff: wp.float32,
+    coeff: wp.array[wp.float32],
     batch_size: wp.int32,
     loss: wp.array[wp.float32],
     value_grad: wp.array2d[wp.float32],
@@ -915,8 +915,8 @@ def value_symmetry_loss_grad_kernel(
     row = wp.tid()
     inv_batch = wp.float32(1.0) / wp.float32(batch_size)
     delta = values[row, 0] - mirrored_values[row, 0]
-    value_grad[row, 0] = value_grad[row, 0] + coeff * delta * inv_batch
-    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta * inv_batch)
+    value_grad[row, 0] = value_grad[row, 0] + coeff[0] * delta * inv_batch
+    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff[0] * delta * delta * inv_batch)
 
 
 @wp.kernel
@@ -924,7 +924,7 @@ def value_column_symmetry_loss_grad_kernel(
     values: wp.array2d[wp.float32],
     value_col: wp.int32,
     mirrored_values: wp.array2d[wp.float32],
-    coeff: wp.float32,
+    coeff: wp.array[wp.float32],
     batch_size: wp.int32,
     loss: wp.array[wp.float32],
     output_grad: wp.array2d[wp.float32],
@@ -932,8 +932,8 @@ def value_column_symmetry_loss_grad_kernel(
     row = wp.tid()
     inv_batch = wp.float32(1.0) / wp.float32(batch_size)
     delta = values[row, value_col] - mirrored_values[row, value_col]
-    output_grad[row, value_col] = output_grad[row, value_col] + coeff * delta * inv_batch
-    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff * delta * delta * inv_batch)
+    output_grad[row, value_col] = output_grad[row, value_col] + coeff[0] * delta * inv_batch
+    wp.atomic_add(loss, 0, wp.float32(0.5) * coeff[0] * delta * delta * inv_batch)
 
 
 @wp.kernel
@@ -1484,6 +1484,7 @@ def adam_step_1d_kernel(
     step_corrections: wp.array[wp.float32],
     lr: wp.float32,
     lr_scale: wp.array[wp.float32],
+    pbt_lr_scale: wp.array[wp.float32],
     beta1: wp.float32,
     beta2: wp.float32,
     eps: wp.float32,
@@ -1498,7 +1499,7 @@ def adam_step_1d_kernel(
     vi = beta2 * v[i] + (wp.float32(1.0) - beta2) * g * g
     m[i] = mi
     v[i] = vi
-    step_lr = lr * lr_scale[0]
+    step_lr = lr * lr_scale[0] * pbt_lr_scale[0]
     param[i] = param[i] - step_lr * (mi / beta1_correction) / (wp.sqrt(vi / beta2_correction) + eps)
     grad[i] = wp.float32(0.0)
 
@@ -1513,6 +1514,7 @@ def adam_step_2d_kernel(
     step_corrections: wp.array[wp.float32],
     lr: wp.float32,
     lr_scale: wp.array[wp.float32],
+    pbt_lr_scale: wp.array[wp.float32],
     beta1: wp.float32,
     beta2: wp.float32,
     eps: wp.float32,
@@ -1527,7 +1529,7 @@ def adam_step_2d_kernel(
     vi = beta2 * v[i, j] + (wp.float32(1.0) - beta2) * g * g
     m[i, j] = mi
     v[i, j] = vi
-    step_lr = lr * lr_scale[0]
+    step_lr = lr * lr_scale[0] * pbt_lr_scale[0]
     param[i, j] = param[i, j] - step_lr * (mi / beta1_correction) / (wp.sqrt(vi / beta2_correction) + eps)
     grad[i, j] = wp.float32(0.0)
 
@@ -1567,6 +1569,7 @@ def muon_step_1d_kernel(
     grad_sumsq: wp.array[wp.float32],
     lr: wp.float32,
     lr_scale: wp.array[wp.float32],
+    pbt_lr_scale: wp.array[wp.float32],
     momentum: wp.float32,
     weight_decay: wp.float32,
     max_grad_norm: wp.float32,
@@ -1576,7 +1579,7 @@ def muon_step_1d_kernel(
     m = momentum * momentum_buffer[i] + g
     momentum_buffer[i] = m
     update = g + momentum * m
-    step_lr = lr * lr_scale[0]
+    step_lr = lr * lr_scale[0] * pbt_lr_scale[0]
     param[i] = param[i] * (wp.float32(1.0) - step_lr * weight_decay) - step_lr * update
     grad[i] = wp.float32(0.0)
 
@@ -1674,10 +1677,11 @@ def muon_step_2d_kernel(
     update: wp.array2d[wp.float32],
     lr: wp.float32,
     lr_scale: wp.array[wp.float32],
+    pbt_lr_scale: wp.array[wp.float32],
     weight_decay: wp.float32,
     scale: wp.float32,
 ):
     i, j = wp.tid()
-    step_lr = lr * lr_scale[0]
+    step_lr = lr * lr_scale[0] * pbt_lr_scale[0]
     param[i, j] = param[i, j] * (wp.float32(1.0) - step_lr * weight_decay) - step_lr * scale * update[i, j]
     grad[i, j] = wp.float32(0.0)

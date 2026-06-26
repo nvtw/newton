@@ -35,6 +35,18 @@ from .ppo import (
     load_ppo_checkpoint,
     save_ppo_checkpoint,
 )
+from .pbt import (
+    ConfigPBT,
+    GenerationResult,
+    HparamSpec,
+    ResultPBT,
+    WorkerState,
+    default_anymal_hparam_specs,
+    default_g1_hparam_specs,
+    population_based_train,
+    population_based_train_anymal,
+    population_based_train_g1,
+)
 from .sac import BatchSAC, BufferReplaySAC, ConfigSAC, StatsSACUpdate, TrainerSAC
 from .toolbox import drop_ppo_checkpoint_inputs, insert_ppo_checkpoint_inputs, resize_ppo_checkpoint_inputs
 from .training import (
@@ -67,6 +79,17 @@ from .training import (
 
 __all__ = [
     "ACTION_DIM_ANYMAL",
+    "ConfigPBT",
+    "GenerationResult",
+    "HparamSpec",
+    "ResultPBT",
+    "WorkerState",
+    "default_anymal_hparam_specs",
+    "default_g1_hparam_specs",
+    "population_based_train",
+    "population_based_train_anymal",
+    "population_based_train_g1",
+
     "ACTION_DIM_G1",
     "ACTION_OBS_OFFSET_ANYMAL",
     "COMMAND_DIM_ANYMAL",
