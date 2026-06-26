@@ -1074,6 +1074,9 @@ class CollisionPipeline:
                 f"or pass matching rigid_contact_max."
             )
         writer_data.out_sort_key = self._sort_key_array
+        shape_mesh_query_type = model.shape_mesh_query_type
+        if shape_mesh_query_type is None:
+            shape_mesh_query_type = wp.zeros(model.shape_count, dtype=wp.int32, device=self.device)
 
         # Run narrow phase with custom contact writer (writes directly to Contacts format)
         self.narrow_phase.launch_custom_write(
@@ -1083,6 +1086,7 @@ class CollisionPipeline:
             shape_data=self.geom_data,
             shape_transform=self.geom_transform,
             shape_source=model.shape_source_ptr,
+            shape_mesh_query_type=shape_mesh_query_type,
             shape_sdf_index=model._shape_sdf_index,
             texture_sdf_data=model._texture_sdf_data,
             shape_gap=model.shape_gap,
@@ -1228,6 +1232,7 @@ class CollisionPipeline:
                     model.shape_type,
                     model.shape_scale,
                     model.shape_source_ptr,
+                    shape_mesh_query_type,
                     model.shape_world,
                     soft_contact_margin,
                     self.soft_contact_max,

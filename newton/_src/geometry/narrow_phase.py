@@ -1770,6 +1770,7 @@ class NarrowPhase:
         shape_data: wp.array[wp.vec4],  # Shape data (scale xyz, margin w)
         shape_transform: wp.array[wp.transform],  # In world space
         shape_source: wp.array[wp.uint64],  # The index into the source array, type define by shape_types
+        shape_mesh_query_type: wp.array[wp.int32] | None = None,  # Per-shape mesh sign query strategy
         shape_sdf_index: wp.array[wp.int32],  # Per-shape index into texture_sdf_data (-1 for none)
         shape_gap: wp.array[wp.float32],  # per-shape contact gap (detection threshold)
         shape_collision_radius: wp.array[wp.float32],  # per-shape collision radius for AABB fallback
@@ -1799,6 +1800,7 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and margin (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
+            shape_mesh_query_type: Per-shape mesh sign query strategy.
             shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
             texture_sdf_data: Compact array of TextureSDFData structs
             shape_gap: Array of per-shape contact gaps (detection threshold) for each shape
@@ -1814,6 +1816,8 @@ class NarrowPhase:
         """
         if device is None:
             device = self.device if self.device is not None else candidate_pair.device
+        if shape_mesh_query_type is None:
+            shape_mesh_query_type = wp.zeros(shape_types.shape[0], dtype=wp.int32, device=device)
 
         # Clear all counters with a single kernel launch (consolidated counter array)
         self._counter_array.zero_()
@@ -2077,6 +2081,7 @@ class NarrowPhase:
                             shape_source,
                             texture_sdf_data,
                             shape_sdf_index,
+                            shape_mesh_query_type,
                             shape_gap,
                             shape_collision_aabb_lower,
                             shape_collision_aabb_upper,
@@ -2107,6 +2112,7 @@ class NarrowPhase:
                             shape_source,
                             texture_sdf_data,
                             shape_sdf_index,
+                            shape_mesh_query_type,
                             shape_gap,
                             shape_collision_aabb_lower,
                             shape_collision_aabb_upper,
@@ -2216,6 +2222,7 @@ class NarrowPhase:
         shape_data: wp.array[wp.vec4],  # Shape data (scale xyz, margin w)
         shape_transform: wp.array[wp.transform],  # In world space
         shape_source: wp.array[wp.uint64],  # The index into the source array, type define by shape_types
+        shape_mesh_query_type: wp.array[wp.int32] | None = None,  # Per-shape mesh sign query strategy
         shape_sdf_index: wp.array[wp.int32] | None = None,  # Per-shape index into texture_sdf_data (-1 for none)
         texture_sdf_data: wp.array[TextureSDFData] | None = None,  # Compact texture SDF data table
         shape_gap: wp.array[wp.float32],  # per-shape contact gap (detection threshold)
@@ -2246,6 +2253,7 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and margin (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
+            shape_mesh_query_type: Per-shape mesh sign query strategy.
             shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
             texture_sdf_data: Compact array of TextureSDFData structs
             shape_gap: Array of per-shape contact gaps (detection threshold) for each shape
@@ -2331,6 +2339,7 @@ class NarrowPhase:
             shape_data=shape_data,
             shape_transform=shape_transform,
             shape_source=shape_source,
+            shape_mesh_query_type=shape_mesh_query_type,
             shape_sdf_index=shape_sdf_index,
             texture_sdf_data=texture_sdf_data,
             shape_gap=shape_gap,

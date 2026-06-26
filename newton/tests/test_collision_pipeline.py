@@ -12,7 +12,12 @@ import newton
 from newton import GeoType
 from newton._src.geometry import create_mesh_terrain
 from newton._src.geometry.flags import ParticleFlags, ShapeFlags
-from newton._src.geometry.kernels import create_soft_contacts, mesh_sdf
+from newton._src.geometry.kernels import (
+    MESH_SIGN_QUERY_NORMAL,
+    MESH_SIGN_QUERY_PARITY,
+    create_soft_contacts,
+    mesh_sdf_with_sign_query,
+)
 from newton._src.sim.collide import _compute_per_world_shape_pairs_max, _estimate_rigid_contact_max
 from newton._src.utils.heightfield import HeightfieldData
 from newton.examples import test_body_state
@@ -490,10 +495,11 @@ def _query_mesh_sdf(
     mesh: wp.uint64,
     points: wp.array[wp.vec3],
     max_dist: float,
+    sign_query_type: int,
     distances: wp.array[float],
 ):
     i = wp.tid()
-    distances[i] = mesh_sdf(mesh, points[i], max_dist)
+    distances[i] = mesh_sdf_with_sign_query(mesh, points[i], max_dist, sign_query_type)
 
 
 @wp.func
@@ -641,6 +647,20 @@ def _sample_thin_gap_points(sample_count: int = 8192) -> np.ndarray:
     return points
 
 
+def _make_open_square() -> tuple[np.ndarray, np.ndarray]:
+    vertices = np.array(
+        [
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+    return vertices, faces
+
+
 def test_mixed_winding_convex_pile_contact_normal(test, device):
     vertices, faces = _make_mixed_winding_convex_pile_proxy()
     mesh = _make_warp_mesh(vertices, faces, device)
@@ -677,6 +697,7 @@ def test_mixed_winding_convex_pile_contact_normal(test, device):
             wp.array([int(GeoType.CONVEX_MESH)], dtype=wp.int32, device=device),
             wp.array([wp.vec3(1.0, 1.0, 1.0)], dtype=wp.vec3, device=device),
             wp.array([mesh.id], dtype=wp.uint64, device=device),
+            wp.array([MESH_SIGN_QUERY_PARITY], dtype=wp.int32, device=device),
             wp.array([-1], dtype=wp.int32, device=device),
             0.0,
             1,
@@ -732,7 +753,7 @@ def test_parity_sign_accuracy_exceeds_normal_query(test, device):
     wp.launch(
         _query_mesh_sdf,
         dim=points_np.shape[0],
-        inputs=[mesh.id, points_wp, 10.0, distances],
+        inputs=[mesh.id, points_wp, 10.0, MESH_SIGN_QUERY_PARITY, distances],
         device=device,
     )
 
@@ -766,6 +787,25 @@ def test_parity_sign_accuracy_exceeds_normal_query(test, device):
     )
 
 
+def test_mesh_query_type_tracks_watertight(test, device):
+    open_vertices, open_faces = _make_open_square()
+    closed_vertices, closed_faces = _make_watertight_box((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+
+    open_mesh = newton.Mesh(open_vertices, open_faces, compute_inertia=False)
+    closed_mesh = newton.Mesh(closed_vertices, closed_faces, compute_inertia=False)
+    test.assertFalse(open_mesh.is_watertight)
+    test.assertTrue(closed_mesh.is_watertight)
+
+    builder = newton.ModelBuilder(gravity=0.0)
+    open_shape = builder.add_shape_mesh(body=-1, mesh=open_mesh)
+    closed_shape = builder.add_shape_mesh(body=-1, mesh=closed_mesh)
+    model = builder.finalize(device=device)
+
+    query_types = model.shape_mesh_query_type.numpy()
+    test.assertEqual(int(query_types[open_shape]), MESH_SIGN_QUERY_NORMAL)
+    test.assertEqual(int(query_types[closed_shape]), MESH_SIGN_QUERY_PARITY)
+
+
 add_function_test(
     TestMeshSignQueries,
     "test_mixed_winding_convex_pile_contact_normal",
@@ -777,6 +817,13 @@ add_function_test(
     TestMeshSignQueries,
     "test_parity_sign_accuracy_exceeds_normal_query",
     test_parity_sign_accuracy_exceeds_normal_query,
+    devices=devices,
+    check_output=False,
+)
+add_function_test(
+    TestMeshSignQueries,
+    "test_mesh_query_type_tracks_watertight",
+    test_mesh_query_type_tracks_watertight,
     devices=devices,
     check_output=False,
 )
