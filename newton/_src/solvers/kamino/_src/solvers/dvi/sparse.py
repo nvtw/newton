@@ -425,9 +425,20 @@ def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
     problem.delassus.diagonal(state.scratch)
 
     jacobian = problem.delassus.constraint_jacobian
+    # The assembly only iterates the *joint* constraint nonzeros, so launching
+    # over the total nonzero count (joints + limits + contacts) wastes threads
+    # that immediately return. Size the grid to the joint nonzero count instead.
+    max_joint_nzb = solver._max_of_num_joint_nzb
+    if max_joint_nzb is None:
+        joint_nzb_count = getattr(problem.delassus, "joint_constraint_nzb_count", None)
+        if joint_nzb_count is not None:
+            max_joint_nzb = int(joint_nzb_count.numpy().max())
+        else:
+            max_joint_nzb = jacobian.max_of_num_nzb
+        solver._max_of_num_joint_nzb = max_joint_nzb
     wp.launch(
         kernel=_build_sparse_bilateral_block,
-        dim=(solver._size.num_worlds, jacobian.max_of_num_nzb * jacobian.max_of_num_nzb),
+        dim=(solver._size.num_worlds, max_joint_nzb * max_joint_nzb),
         inputs=[
             problem.delassus.model.info.bodies_offset,
             problem.delassus.model.bodies.inv_m_i,

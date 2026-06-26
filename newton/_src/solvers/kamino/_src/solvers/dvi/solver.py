@@ -75,6 +75,7 @@ class DVISolver:
         self._has_contact_block_preconditioner: bool = False
         self._has_unilateral_constraints: bool = False
         self._contact_bid_AB: wp.array | None = None
+        self._max_of_num_joint_nzb: int | None = None
         self._device: wp.DeviceLike = None
 
         if model is not None:
