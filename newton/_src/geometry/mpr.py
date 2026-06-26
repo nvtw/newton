@@ -63,35 +63,35 @@ def closest_point_on_box_surface(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
 
 
 @wp.func
-def box_v0_seed(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
-    """MPR/GJK ``v0`` seed point on a box for a partner center ``p`` outside the box.
-
-    For a roughly-equidimensional box this is the clamped nearest-surface point.
-    For a FLAT box (one half-extent much smaller than the others) the contact is,
-    geometrically, almost always on one of the two large faces — so we seed on the
-    near large face while keeping the partner's in-plane coordinates. That keeps the
-    seed laterally aligned with the partner even when it overhangs the box edge, so
-    the initial search direction stays perpendicular to the contact face instead of
-    pointing toward the edge/side face.
-    """
+def box_thin_axis(half_extents: wp.vec3) -> int:
     ti = int(0)
     if half_extents[1] < half_extents[ti]:
         ti = 1
     if half_extents[2] < half_extents[ti]:
         ti = 2
+    return ti
+
+
+@wp.func
+def box_is_extreme_slab(half_extents: wp.vec3) -> bool:
+    min_h = wp.min(half_extents[0], wp.min(half_extents[1], half_extents[2]))
     max_h = wp.max(half_extents[0], wp.max(half_extents[1], half_extents[2]))
+    return min_h < 0.02 * max_h
 
-    clamped = wp.vec3(
-        wp.clamp(p[0], -half_extents[0], half_extents[0]),
-        wp.clamp(p[1], -half_extents[1], half_extents[1]),
-        wp.clamp(p[2], -half_extents[2], half_extents[2]),
-    )
-    if half_extents[ti] >= 0.5 * max_h:
-        return clamped  # not flat: nearest-surface clamp
 
+@wp.func
+def box_v0_seed(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
+    """Face-aligned MPR/GJK ``v0`` seed for an extreme slab.
+
+    This is only used when the partner center is outside the slab through its
+    thin axis. Keeping the partner's in-plane coordinates preserves a top/bottom
+    face initial direction for edge overhangs, where clamping to the finite box
+    footprint would bias the initial ray toward the side edge.
+    """
+    ti = box_thin_axis(half_extents)
     face = wp.where(p[ti] >= 0.0, half_extents[ti], -half_extents[ti])
     out = p
-    out[ti] = face  # near large face, in-plane coords kept (lateral alignment)
+    out[ti] = face
     return out
 
 
@@ -288,42 +288,35 @@ def create_support_map_function(support_func: Any):
         center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
 
         # BOX initial-direction improvement (mirrors the triangle treatment below).
-        # When the partner's center lies OUTSIDE the box, seed v0 from the closest
-        # point on the box to that center. This keeps v0 laterally aligned with the
-        # partner, so MPR/GJK's initial ray (normal = -v0.BtoA) is ~perpendicular to
-        # the contact face. It fixes the side-face degeneracy a small shape hits
-        # against a large flat box (e.g. an object on a thin table), where the box
-        # center is far from the contact region and the center-to-center ray points
-        # sideways. Gated on "outside": projecting a partner center that is INSIDE
-        # the slab can seed MPR toward the wrong (far) face, and deep penetration is
-        # legitimately ambiguous — keep the box center there. The 1% blend toward the
-        # box center (origin) makes v0 a STRICT interior point — exactly as the
-        # triangle case blends toward its centroid. A v0 left exactly on the box face
-        # is a boundary point, which makes box-box falsely register overlap.
+        # This is deliberately limited to extreme slabs and partners outside through
+        # the slab's thin axis. In that case the true contact is on the broad face,
+        # but a center-to-center ray points sideways and can make MPR/GJK select an
+        # edge/side normal. Side-face cases and ordinary boxes keep their centers.
+        # The 1% blend toward the box center avoids leaving v0 exactly on the face.
         box_center = wp.vec3(0.0, 0.0, 0.0)
+        geom_a_is_triangle = geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(
+            GeoTypeEx.TRIANGLE_PRISM
+        )
+        geom_b_is_triangle = geom_b.shape_type == int(GeoTypeEx.TRIANGLE) or geom_b.shape_type == int(
+            GeoTypeEx.TRIANGLE_PRISM
+        )
         if geom_a.shape_type == int(GeoType.BOX):
             h_a = geom_a.scale
-            if (
-                wp.abs(center_b_world[0]) > h_a[0]
-                or wp.abs(center_b_world[1]) > h_a[1]
-                or wp.abs(center_b_world[2]) > h_a[2]
-            ):
+            ti_a = box_thin_axis(h_a)
+            if box_is_extreme_slab(h_a) and not geom_b_is_triangle and wp.abs(center_b_world[ti_a]) > h_a[ti_a]:
                 surf_a = box_v0_seed(center_b_world, h_a)
                 center_a = surf_a + 0.01 * (box_center - surf_a)
 
         if geom_b.shape_type == int(GeoType.BOX):
             h_b = geom_b.scale
+            ti_b = box_thin_axis(h_b)
             center_a_in_b = wp.quat_rotate_inv(orientation_b, center_a - position_b)
-            if (
-                wp.abs(center_a_in_b[0]) > h_b[0]
-                or wp.abs(center_a_in_b[1]) > h_b[1]
-                or wp.abs(center_a_in_b[2]) > h_b[2]
-            ):
+            if box_is_extreme_slab(h_b) and not geom_a_is_triangle and wp.abs(center_a_in_b[ti_b]) > h_b[ti_b]:
                 surf_b = box_v0_seed(center_a_in_b, h_b)
                 center_b_local = surf_b + 0.01 * (box_center - surf_b)
                 center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
 
-        if geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(GeoTypeEx.TRIANGLE_PRISM):
+        if geom_a_is_triangle:
             # Project shape B's center onto the triangle for a starting
             # point near the contact region — this dramatically improves
             # MPR convergence for large triangles.
