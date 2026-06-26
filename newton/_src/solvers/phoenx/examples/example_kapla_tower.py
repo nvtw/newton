@@ -354,7 +354,10 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
-            max_thread_blocks=256,
+            # Let the solver auto-size the single-world persistent grid to
+            # ``sm_count * 4`` blocks. The old hard pin of 256 under-filled
+            # large GPUs (e.g. 188-SM Blackwell -> 256 vs 752 blocks, ~2%
+            # achieved occupancy on the iterate); auto-sizing is ~+5% FPS.
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
