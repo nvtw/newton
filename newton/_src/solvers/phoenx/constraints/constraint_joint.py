@@ -164,21 +164,12 @@ JOINT_MODE_UNIVERSAL = wp.constant(wp.int32(5))
 JOINT_MODE_CYLINDRICAL = wp.constant(wp.int32(6))
 JOINT_MODE_PLANAR = wp.constant(wp.int32(7))
 
-# D6 row-layout tags. Joint modes pick semantics (drive units, limits,
-# public behavior); row layouts pick the metric rows used by the solver.
-_D6_ROW_LAYOUT_RIGID = wp.constant(wp.int32(0))
-_D6_ROW_LAYOUT_PRISMATIC_LINEAR = wp.constant(wp.int32(1))
-_D6_ROW_LAYOUT_CABLE_SOFT = wp.constant(wp.int32(2))
-
 # Per-anchor solve kinds for the unified D6 row engine. Each anchor block
-# in :func:`_d6_iterate_rows_at` / :func:`_d6_prepare_rows_at` selects one
-# of these; the heavy math lives once in the shared ``_d6_solve_anchor*``
-# / ``_d6_prepare_anchor*`` helpers.
+# in :func:`_d6_iterate_rows_at` selects one; the math lives once in the
+# shared ``_d6_solve_anchor*`` helpers.
 _D6_ROW_SOLVE_SKIP = wp.constant(wp.int32(0))
-_D6_ROW_SOLVE_HARD3 = wp.constant(wp.int32(1))  # anchor-1 sym6 point lock (rigid)
+_D6_ROW_SOLVE_HARD3 = wp.constant(wp.int32(1))  # anchor-1 sym6 point lock (ball/universal)
 _D6_ROW_SOLVE_SOFT3 = wp.constant(wp.int32(2))  # anchor-1 mat33 Box2D-soft lock (cable)
-_D6_ROW_SOLVE_HARD1_TAN = wp.constant(wp.int32(7))  # anchor-1 sym3 tangent-only lock (prismatic slide)
-_D6_ROW_SOLVE_HARD2_TAN = wp.constant(wp.int32(3))  # anchor-2 sym3 tangent lock (revolute/fixed)
 _D6_ROW_SOLVE_PD2_TAN = wp.constant(wp.int32(4))  # anchor-2 PD tangent (cable bend)
 _D6_ROW_SOLVE_HARD1_SCALAR = wp.constant(wp.int32(5))  # anchor-3 scalar twist lock (fixed)
 _D6_ROW_SOLVE_PD1_SCALAR = wp.constant(wp.int32(6))  # anchor-3 PD scalar (cable twist)
@@ -424,16 +415,6 @@ _OFF_UT_AI_ROW0 = wp.constant(int(_OFF_MODE_CACHE) + 6)
 _OFF_UT_AI_ROW1 = wp.constant(int(_OFF_MODE_CACHE) + 9)
 _OFF_S_INV_S3 = wp.constant(int(_OFF_MODE_CACHE) + 12)
 _OFF_S_SCALAR_INV = wp.constant(int(_OFF_MODE_CACHE) + 20)
-# Prismatic linear-slider cache. Independent block-Gauss-Seidel, same
-# shape as the rigid swing family: three decoupled inverses instead of a
-# coupled 4x4 Schur (no mat44 inverse, no cross-anchor ``c`` coupling).
-#   dwords 0..2 = anchor-1 tangent sym3 (m00, m01, m11)
-#   dwords 3..5 = anchor-2 tangent sym3 (m00, m01, m11)
-#   dword 6     = anchor-3 twist scalar inverse
-# Anchor-2 reuses the rigid swing slot ``_OFF_S_INV_S3`` (dword 12) and
-# anchor-3 reuses the FIXED twist slot ``_OFF_S_SCALAR_INV`` (dword 20),
-# so prismatic only needs one extra slot for the anchor-1 tangent block.
-_OFF_PRIS_A1_TAN_S3 = wp.constant(int(_OFF_MODE_CACHE) + 0)
 # Prismatic coupled 4+1 Schur cache (the convergent slider formulation):
 #   dwords 0..15 = a4_inv  (4x4 tangent-block inverse for a1+a2 tangents)
 #   dwords 16..19 = c_pris (vec4 coupling of the 4 tangent rows to a3)
@@ -1125,110 +1106,6 @@ def _axial_drive_limit_iterate(
 
 
 # ---------------------------------------------------------------------------
-# Shared anchor-1 positional prepare helper
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _anchor1_positional_prepare_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    copy_state: CopyStateContainer,
-    num_bodies: wp.int32,
-    parallel_id: wp.int32,
-    body_pair: ConstraintBodies,
-    idt: wp.float32,
-):
-    """Anchor-1 3-row positional lock prepare. Shared by BALL_SOCKET
-    mode (which uses a standalone anchor-1 lock as its only positional
-    constraint).
-
-    Reads the body-local snapshots ``la1_b{1,2}``, rotates them into
-    world frame, rebuilds the 3x3 effective mass ``a1`` and its
-    inverse, folds Box2D soft-constraint coefficients from
-    ``hertz / damping_ratio`` into ``bias1`` + ``mass_coeff`` +
-    ``impulse_coeff``, and applies the anchor-1 warm-start to the
-    body velocities. Writes ``r1_b{1,2}``, ``a1_inv``, ``bias_rate``,
-    ``mass_coeff``, ``impulse_coeff``, ``bias1`` to the column.
-
-    Returns ``(r1_b1, r1_b2, cr1_b1, cr1_b2, velocity1,
-    angular_velocity1, velocity2, angular_velocity2, slot1, slot2,
-    inv_inertia1, inv_inertia2)`` so
-    callers can continue with additional positional / angular rows
-    before committing body velocities via :func:`_ms_store_body_pair`.
-    """
-    b1 = body_pair.b1
-    b2 = body_pair.b2
-
-    orient1 = bodies.orientation[b1]
-    orient2 = bodies.orientation[b2]
-    position1 = bodies.position[b1]
-    position2 = bodies.position[b2]
-    (
-        velocity1,
-        velocity2,
-        angular_velocity1,
-        angular_velocity2,
-        inv_mass1,
-        inv_mass2,
-        inv_inertia1,
-        inv_inertia2,
-        slot1,
-        slot2,
-    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
-
-    la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
-    la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
-    r1_b1 = wp.quat_rotate(orient1, la1_b1)
-    r1_b2 = wp.quat_rotate(orient2, la1_b2)
-    write_vec3(constraints, base_offset + _OFF_R1_B1, cid, r1_b1)
-    write_vec3(constraints, base_offset + _OFF_R1_B2, cid, r1_b2)
-
-    p1_b1 = position1 + r1_b1
-    p1_b2 = position2 + r1_b2
-
-    cr1_b1 = wp.skew(r1_b1)
-    cr1_b2 = wp.skew(r1_b2)
-    a1 = _d6_metric_anchor_block(inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, r1_b1, r1_b2, r1_b1, r1_b2)
-    a1_inv = wp.inverse(a1)
-    write_mat33(constraints, base_offset + _OFF_A1_INV, cid, a1_inv)
-
-    hertz = read_float(constraints, base_offset + _OFF_HERTZ, cid)
-    damping_ratio = read_float(constraints, base_offset + _OFF_DAMPING_RATIO, cid)
-    dt = 1.0 / idt
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz, damping_ratio, dt)
-    write_float(constraints, base_offset + _OFF_MASS_COEFF, cid, mass_coeff)
-    write_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid, impulse_coeff)
-    bias1 = (p1_b2 - p1_b1) * bias_rate
-    write_vec3(constraints, base_offset + _OFF_BIAS1, cid, bias1)
-
-    # 3-DoF positional warm-start (only the anchor-1 impulse).
-    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    velocity1 = velocity1 - inv_mass1 * acc1
-    angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1)
-    velocity2 = velocity2 + inv_mass2 * acc1
-    angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1)
-
-    return (
-        r1_b1,
-        r1_b2,
-        cr1_b1,
-        cr1_b2,
-        velocity1,
-        angular_velocity1,
-        velocity2,
-        angular_velocity2,
-        slot1,
-        slot2,
-        inv_inertia1,
-        inv_inertia2,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Shared axial (drive + limit) prepare helper
 # ---------------------------------------------------------------------------
 
@@ -1508,10 +1385,7 @@ def _d6_solve_anchor1_at(
     use_bias: wp.bool,
 ):
     """Anchor-1 point lock. ``HARD3`` uses the sym6-packed 3x3 inverse
-    (rigid family); ``SOFT3`` uses the mat33 inverse (cable Box2D-soft);
-    ``HARD1_TAN`` locks only the two tangent rows ``(t1, t2)`` via the
-    prismatic anchor-1 sym3 inverse, leaving the ``n_hat`` slide axis
-    free (slider).
+    (ball / universal); ``SOFT3`` uses the mat33 inverse (cable Box2D-soft).
     """
     cr1_b1 = wp.skew(r1_b1)
     cr1_b2 = wp.skew(r1_b2)
@@ -1524,21 +1398,7 @@ def _d6_solve_anchor1_at(
     acc1_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     jv1 = _d6_anchor_relative_velocity(velocity1, angular_velocity1, velocity2, angular_velocity2, r1_b1, r1_b2)
 
-    if solve_kind == _D6_ROW_SOLVE_HARD1_TAN:
-        # Tangent-only 2-row lock (PRISMATIC). Project onto (t1, t2),
-        # solve the 2x2, lift back to world along the tangents. bias1 is
-        # already stored in tangent components (t1, t2, 0).
-        t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
-        t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
-        s_inv = read_vec3(constraints, base_offset + _OFF_PRIS_A1_TAN_S3, cid)
-        acc1_t1 = wp.dot(t1, acc1_world)
-        acc1_t2 = wp.dot(t2, acc1_world)
-        rhs = wp.vec2f(wp.dot(t1, jv1) + bias1[0], wp.dot(t2, jv1) + bias1[1])
-        lam_us = -(mul_sym2(s_inv, rhs))
-        lam = mass_coeff * lam_us - impulse_coeff * wp.vec2f(acc1_t1, acc1_t2)
-        lam = lam * sor_boost
-        lam1 = lam[0] * t1 + lam[1] * t2
-    elif solve_kind == _D6_ROW_SOLVE_SOFT3:
+    if solve_kind == _D6_ROW_SOLVE_SOFT3:
         a1_inv = read_mat33(constraints, base_offset + _OFF_A1_INV, cid)
         lam1_us = -(a1_inv @ (jv1 + bias1))
         lam1 = mass_coeff * lam1_us - impulse_coeff * acc1_world
@@ -2621,11 +2481,10 @@ def _d6_iterate_rows_at(
         a1_kind = _D6_ROW_SOLVE_SKIP
         a2_kind = _D6_ROW_SOLVE_SKIP
         a3_kind = _D6_ROW_SOLVE_SKIP
-    else:
-        if has_swing:
-            a2_kind = _D6_ROW_SOLVE_HARD2_TAN
-        if has_twist:
-            a3_kind = _D6_ROW_SOLVE_HARD1_SCALAR
+    elif has_twist:
+        # FIXED: anchor-1+anchor-2 via the coupled rigid-swing helper; the
+        # anchor-3 twist scalar is solved as its own block below.
+        a3_kind = _D6_ROW_SOLVE_HARD1_SCALAR
 
     axial_kind = _D6_AXIAL_NONE
     if is_prismatic:
