@@ -176,6 +176,21 @@ class TestPhoenXBlockWorldGraphCapture(unittest.TestCase):
 
         self.assertTrue(np.isfinite(world.bodies.position.numpy()).all())
 
+    def test_forced_block_world_32_capture_replay(self) -> None:
+        world, _ = _build_n_pendulums(num_worlds=4, multi_world_scheduler="fast_tail")
+        world._multi_world_scheduler = "block_world"
+        world._multi_world_block_dim = 32
+
+        world.step(dt=1.0 / 60.0, contacts=None, shape_body=None)
+        wp.synchronize_device(world.device)
+
+        with wp.ScopedCapture(device=world.device) as capture:
+            world.step(dt=1.0 / 60.0, contacts=None, shape_body=None)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(world.device)
+
+        self.assertTrue(np.isfinite(world.bodies.position.numpy()).all())
+
     def test_auto_robot_like_worlds_capture_replay(self) -> None:
         world, _ = _build_n_pendulums(num_worlds=16, pendulums_per_world=32)
         self.assertEqual(world._multi_world_scheduler, "fast_tail")
