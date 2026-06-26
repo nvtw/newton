@@ -23,7 +23,13 @@ from newton._src.solvers.phoenx.articulations import (
     joint_drive_row_count,
     revolute_rows,
 )
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_STATIC, body_container_zeros
+from newton._src.solvers.phoenx.body import (
+    MOTION_DYNAMIC,
+    MOTION_STATIC,
+    body_container_zeros,
+    inertia_sym6,
+    inertia_sym6_pack_np,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_LIMIT,
@@ -56,6 +62,7 @@ def _make_adbs_world(
     drive_mode_np: np.ndarray | None = None,
     target_np: np.ndarray | None = None,
     target_velocity_np: np.ndarray | None = None,
+    max_force_drive_np: np.ndarray | None = None,
     stiffness_drive_np: np.ndarray | None = None,
     damping_drive_np: np.ndarray | None = None,
     min_np: np.ndarray | None = None,
@@ -92,7 +99,7 @@ def _make_adbs_world(
 
     inverse_inertia_np = np.repeat(np.eye(3, dtype=np.float32)[None, :, :], body_count, axis=0)
     inverse_inertia_np[0] = 0.0
-    bodies.inverse_inertia_world.assign(inverse_inertia_np)
+    bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(inverse_inertia_np))
 
     constraints = PhoenXWorld.make_constraint_container(num_joints=joint_count, device=device)
     if world_kwargs is None:
@@ -115,6 +122,8 @@ def _make_adbs_world(
         target_np = zeros_np.copy()
     if target_velocity_np is None:
         target_velocity_np = zeros_np.copy()
+    if max_force_drive_np is None:
+        max_force_drive_np = zeros_np.copy()
     if stiffness_drive_np is None:
         stiffness_drive_np = zeros_np.copy()
     if damping_drive_np is None:
@@ -156,7 +165,7 @@ def _make_adbs_world(
         wp.array(drive_mode_np.astype(np.int32), dtype=wp.int32, device=device),
         wp.array(target_np.astype(np.float32), dtype=wp.float32, device=device),
         wp.array(target_velocity_np.astype(np.float32), dtype=wp.float32, device=device),
-        wp.array(zeros_np, dtype=wp.float32, device=device),
+        wp.array(max_force_drive_np.astype(np.float32), dtype=wp.float32, device=device),
         wp.array(stiffness_drive_np.astype(np.float32), dtype=wp.float32, device=device),
         wp.array(damping_drive_np.astype(np.float32), dtype=wp.float32, device=device),
         wp.array(min_np, dtype=wp.float32, device=device),
@@ -443,7 +452,9 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         device_system = ArticulationDeviceSystem.from_topology(topology, device, system.symbolic)
         device_system.jacobian.assign(jac.astype(np.float32))
         inv_mass_wp = wp.array(inv_mass.astype(np.float32), dtype=wp.float32, device=device)
-        inv_inertia_wp = wp.array(inv_inertia.astype(np.float32), dtype=wp.mat33f, device=device)
+        inv_inertia_wp = wp.array(
+            inertia_sym6_pack_np(inv_inertia.astype(np.float32)), dtype=inertia_sym6, device=device
+        )
         device_system.assemble_dense_matrix(inv_mass_wp, inv_inertia_wp, device=device)
         np.testing.assert_allclose(device_system.matrix.numpy()[:6, :6], expected, rtol=1.0e-6, atol=1.0e-6)
 
@@ -726,6 +737,30 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
             atol=1.0e-5,
         )
 
+    def test_device_dvi_velocity_drive_respects_max_force(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_REVOLUTE)], dtype=np.int32),
+            world_kwargs={"articulation_dvi_host": True, "gravity": (0.0, 0.0, 0.0)},
+            drive_mode_np=np.array([int(DRIVE_MODE_VELOCITY)], dtype=np.int32),
+            target_velocity_np=np.array([20.0], dtype=np.float32),
+            max_force_drive_np=np.array([0.5], dtype=np.float32),
+            damping_drive_np=np.array([1.0], dtype=np.float32),
+        )
+
+        self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
+
+        np.testing.assert_allclose(
+            world.bodies.angular_velocity.numpy()[1],
+            np.array([0.0, 0.0, 0.05], dtype=np.float32),
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        )
+        np.testing.assert_allclose(world.articulation_device_system.solution_upper.numpy()[5], 0.05, atol=1.0e-6)
+
     def test_device_dvi_position_drive_row_uses_pd_bias(self):
         device = wp.get_preferred_device()
         world = _make_adbs_world(
@@ -821,6 +856,31 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
 
         self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
         self.assertLess(world.bodies.angular_velocity.numpy()[1, 2], -2.0)
+
+    def test_device_dvi_active_limit_does_not_pull_when_separating(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_REVOLUTE)], dtype=np.int32),
+            world_kwargs={"articulation_dvi_host": True, "gravity": (0.0, 0.0, 0.0)},
+            min_np=np.array([-1.0], dtype=np.float32),
+            max_np=np.array([0.1], dtype=np.float32),
+            hertz_limit_np=np.array([float(DEFAULT_HERTZ_LIMIT)], dtype=np.float32),
+            damping_ratio_limit_np=np.array([float(DEFAULT_DAMPING_RATIO)], dtype=np.float32),
+        )
+        world.bodies.orientation.assign(
+            np.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.24740396, 0.9689124]], dtype=np.float32)
+        )
+        angular_velocity = np.zeros((2, 3), dtype=np.float32)
+        angular_velocity[1, 2] = -10.0
+        world.bodies.angular_velocity.assign(angular_velocity)
+
+        self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
+
+        np.testing.assert_allclose(world.bodies.angular_velocity.numpy()[1, 2], -10.0, rtol=1.0e-5, atol=1.0e-5)
+        np.testing.assert_allclose(world.articulation_device_system.solution_upper.numpy()[5], 0.0, atol=1.0e-6)
 
     def test_device_dvi_pd_limit_row_adds_regularization(self):
         device = wp.get_preferred_device()

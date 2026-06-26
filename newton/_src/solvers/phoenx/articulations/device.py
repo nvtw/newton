@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
+from newton._src.solvers.phoenx.body import BodyContainer, inertia_sym6, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     pd_coefficients,
@@ -45,6 +45,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_LA2_B2,
     _OFF_LA3_B1,
     _OFF_LA3_B2,
+    _OFF_MAX_FORCE_DRIVE,
     _OFF_MAX_VALUE,
     _OFF_MIN_VALUE,
     _OFF_PREVIOUS_QUATERNION_ANGLE,
@@ -97,6 +98,8 @@ class ArticulationDeviceSystem:
     violation: wp.array
     velocity_target: wp.array
     row_regularization: wp.array
+    solution_lower: wp.array
+    solution_upper: wp.array
     matrix: wp.array
     rhs: wp.array
     solution: wp.array
@@ -216,6 +219,8 @@ class ArticulationDeviceSystem:
             violation=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             velocity_target=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             row_regularization=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
+            solution_lower=wp.full(rows_alloc, -1.0e20, dtype=wp.float32, device=device),
+            solution_upper=wp.full(rows_alloc, 1.0e20, dtype=wp.float32, device=device),
             matrix=wp.zeros((rows_alloc, rows_alloc), dtype=wp.float32, device=device),
             rhs=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
             solution=wp.zeros(rows_alloc, dtype=wp.float32, device=device),
@@ -275,7 +280,14 @@ class ArticulationDeviceSystem:
                 wp.float32(dt),
                 wp.int32(self.active_joint_count),
             ],
-            outputs=[self.jacobian, self.violation, self.velocity_target, self.row_regularization],
+            outputs=[
+                self.jacobian,
+                self.violation,
+                self.velocity_target,
+                self.row_regularization,
+                self.solution_lower,
+                self.solution_upper,
+            ],
             device=device,
         )
 
@@ -552,6 +564,8 @@ class ArticulationDeviceSystem:
             inputs=[
                 self.jacobian,
                 self.solution,
+                self.solution_lower,
+                self.solution_upper,
                 self.body1,
                 self.body2,
                 self.row_to_active_block,
@@ -576,6 +590,8 @@ def _populate_adbs_articulation_rows_kernel(
     violation: wp.array[wp.float32],
     velocity_target: wp.array[wp.float32],
     row_regularization: wp.array[wp.float32],
+    solution_lower: wp.array[wp.float32],
+    solution_upper: wp.array[wp.float32],
 ):
     block = wp.tid()
     if block >= active_joint_count:
@@ -584,7 +600,9 @@ def _populate_adbs_articulation_rows_kernel(
     cid = active_joint_indices[block]
     row0 = active_block_offsets[block]
     row_count = active_block_offsets[block + 1] - row0
-    _clear_joint_rows(row0, row_count, jacobian, violation, velocity_target, row_regularization)
+    _clear_joint_rows(
+        row0, row_count, jacobian, violation, velocity_target, row_regularization, solution_lower, solution_upper
+    )
 
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
@@ -655,6 +673,7 @@ def _populate_adbs_articulation_rows_kernel(
         damping_drive = read_float(constraints, _OFF_DAMPING_DRIVE, cid)
         target = read_float(constraints, _OFF_TARGET, cid)
         target_velocity = read_float(constraints, _OFF_TARGET_VELOCITY, cid)
+        max_force_drive = read_float(constraints, _OFF_MAX_FORCE_DRIVE, cid)
         min_value = read_float(constraints, _OFF_MIN_VALUE, cid)
         max_value = read_float(constraints, _OFF_MAX_VALUE, cid)
         hertz_limit = read_float(constraints, _OFF_HERTZ_LIMIT, cid)
@@ -688,6 +707,7 @@ def _populate_adbs_articulation_rows_kernel(
                         drive_mode,
                         stiffness_drive,
                         damping_drive,
+                        max_force_drive,
                         dt,
                         b1,
                         b2,
@@ -696,12 +716,15 @@ def _populate_adbs_articulation_rows_kernel(
                         violation,
                         velocity_target,
                         row_regularization,
+                        solution_lower,
+                        solution_upper,
                     )
                 else:
                     _apply_axial_limit_row_softness(
                         axial_row,
                         mode,
                         axial_error,
+                        clamp,
                         hertz_limit,
                         damping_ratio_limit,
                         stiffness_limit,
@@ -714,6 +737,8 @@ def _populate_adbs_articulation_rows_kernel(
                         violation,
                         velocity_target,
                         row_regularization,
+                        solution_lower,
+                        solution_upper,
                     )
         elif mode == JOINT_MODE_PRISMATIC:
             axis_drive = _safe_normalize(wp.quat_rotate(q1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)), axis_parent)
@@ -732,6 +757,7 @@ def _populate_adbs_articulation_rows_kernel(
                         drive_mode,
                         stiffness_drive,
                         damping_drive,
+                        max_force_drive,
                         dt,
                         b1,
                         b2,
@@ -740,12 +766,15 @@ def _populate_adbs_articulation_rows_kernel(
                         violation,
                         velocity_target,
                         row_regularization,
+                        solution_lower,
+                        solution_upper,
                     )
                 else:
                     _apply_axial_limit_row_softness(
                         axial_row,
                         mode,
                         axial_error,
+                        clamp,
                         hertz_limit,
                         damping_ratio_limit,
                         stiffness_limit,
@@ -758,6 +787,8 @@ def _populate_adbs_articulation_rows_kernel(
                         violation,
                         velocity_target,
                         row_regularization,
+                        solution_lower,
+                        solution_upper,
                     )
 
     d6_row0 = row0 + equality_rows + axial_rows
@@ -773,7 +804,7 @@ def _assemble_dense_articulation_matrix_kernel(
     body2: wp.array[wp.int32],
     row_to_active_block: wp.array[wp.int32],
     inverse_mass: wp.array[wp.float32],
-    inverse_inertia_world: wp.array[wp.mat33f],
+    inverse_inertia_world: wp.array[inertia_sym6],
     row_regularization: wp.array[wp.float32],
     total_rows: wp.int32,
     matrix: wp.array2d[wp.float32],
@@ -807,7 +838,7 @@ def _assemble_block_sparse_articulation_diag_kernel(
     pivot_order: wp.array[wp.int32],
     block_sizes: wp.array[wp.int32],
     inverse_mass: wp.array[wp.float32],
-    inverse_inertia_world: wp.array[wp.mat33f],
+    inverse_inertia_world: wp.array[inertia_sym6],
     row_regularization: wp.array[wp.float32],
     diagonal_regularization: wp.float32,
     block_count: wp.int32,
@@ -854,7 +885,7 @@ def _assemble_block_sparse_articulation_off_kernel(
     n_off_row_idx: wp.array[wp.int32],
     n_off_col_idx: wp.array[wp.int32],
     inverse_mass: wp.array[wp.float32],
-    inverse_inertia_world: wp.array[wp.mat33f],
+    inverse_inertia_world: wp.array[inertia_sym6],
     block_nnz: wp.int32,
     block_off: wp.array3d[wp.float32],
 ):
@@ -1189,11 +1220,13 @@ def _backward_substitute_articulation_level_kernel(
 def _apply_articulation_solution_kernel(
     jacobian: wp.array2d[wp.float32],
     solution: wp.array[wp.float32],
+    solution_lower: wp.array[wp.float32],
+    solution_upper: wp.array[wp.float32],
     body1: wp.array[wp.int32],
     body2: wp.array[wp.int32],
     row_to_active_block: wp.array[wp.int32],
     inverse_mass: wp.array[wp.float32],
-    inverse_inertia_world: wp.array[wp.mat33f],
+    inverse_inertia_world: wp.array[inertia_sym6],
     total_rows: wp.int32,
     velocity: wp.array[wp.vec3f],
     angular_velocity: wp.array[wp.vec3f],
@@ -1203,7 +1236,7 @@ def _apply_articulation_solution_kernel(
         return
 
     block = row_to_active_block[row]
-    lam = solution[row]
+    lam = wp.clamp(solution[row], solution_lower[row], solution_upper[row])
     b1 = body1[block]
     b2 = body2[block]
     if b1 >= 0:
@@ -1221,7 +1254,7 @@ def _articulation_matrix_entry(
     body2: wp.array[wp.int32],
     row_to_active_block: wp.array[wp.int32],
     inverse_mass: wp.array[wp.float32],
-    inverse_inertia_world: wp.array[wp.mat33f],
+    inverse_inertia_world: wp.array[inertia_sym6],
 ) -> wp.float32:
     block_row = row_to_active_block[row]
     block_col = row_to_active_block[col]
@@ -1378,6 +1411,7 @@ def _apply_axial_drive_row_softness(
     drive_mode: wp.int32,
     stiffness_drive: wp.float32,
     damping_drive: wp.float32,
+    max_force_drive: wp.float32,
     dt: wp.float32,
     b1: wp.int32,
     b2: wp.int32,
@@ -1386,7 +1420,14 @@ def _apply_axial_drive_row_softness(
     violation: wp.array[wp.float32],
     velocity_target: wp.array[wp.float32],
     row_regularization: wp.array[wp.float32],
+    solution_lower: wp.array[wp.float32],
+    solution_upper: wp.array[wp.float32],
 ):
+    if max_force_drive > wp.float32(0.0) and dt > wp.float32(0.0):
+        max_impulse = max_force_drive * dt
+        solution_lower[row] = -max_impulse
+        solution_upper[row] = max_impulse
+
     if drive_mode == DRIVE_MODE_OFF:
         return
     if stiffness_drive <= wp.float32(0.0) and damping_drive <= wp.float32(0.0):
@@ -1415,6 +1456,7 @@ def _apply_axial_limit_row_softness(
     row: wp.int32,
     mode: wp.int32,
     limit_error: wp.float32,
+    clamp: wp.int32,
     hertz_limit: wp.float32,
     damping_ratio_limit: wp.float32,
     stiffness_limit: wp.float32,
@@ -1427,7 +1469,14 @@ def _apply_axial_limit_row_softness(
     violation: wp.array[wp.float32],
     velocity_target: wp.array[wp.float32],
     row_regularization: wp.array[wp.float32],
+    solution_lower: wp.array[wp.float32],
+    solution_upper: wp.array[wp.float32],
 ):
+    if clamp == _CLAMP_MAX:
+        solution_upper[row] = wp.float32(0.0)
+    elif clamp == _CLAMP_MIN:
+        solution_lower[row] = wp.float32(0.0)
+
     if dt <= wp.float32(0.0):
         return
 
@@ -1453,7 +1502,7 @@ def _joint_row_effective_inverse(
     b2: wp.int32,
     jacobian: wp.array2d[wp.float32],
     inverse_mass: wp.array[wp.float32],
-    inverse_inertia_world: wp.array[wp.mat33f],
+    inverse_inertia_world: wp.array[inertia_sym6],
 ) -> wp.float32:
     value = wp.float32(0.0)
     if b1 >= wp.int32(0):
@@ -1495,6 +1544,8 @@ def _clear_joint_rows(
     violation: wp.array[wp.float32],
     velocity_target: wp.array[wp.float32],
     row_regularization: wp.array[wp.float32],
+    solution_lower: wp.array[wp.float32],
+    solution_upper: wp.array[wp.float32],
 ):
     local = wp.int32(0)
     while local < row_count:
@@ -1502,6 +1553,8 @@ def _clear_joint_rows(
         violation[row] = wp.float32(0.0)
         velocity_target[row] = wp.float32(0.0)
         row_regularization[row] = wp.float32(0.0)
+        solution_lower[row] = wp.float32(-1.0e20)
+        solution_upper[row] = wp.float32(1.0e20)
         col = wp.int32(0)
         while col < wp.int32(12):
             jacobian[row, col] = wp.float32(0.0)
@@ -1664,7 +1717,7 @@ def _apply_body_delta(
     lam: wp.float32,
     jacobian: wp.array2d[wp.float32],
     inverse_mass: wp.array[wp.float32],
-    inverse_inertia_world: wp.array[wp.mat33f],
+    inverse_inertia_world: wp.array[inertia_sym6],
     velocity: wp.array[wp.vec3f],
     angular_velocity: wp.array[wp.vec3f],
 ):
@@ -1693,7 +1746,7 @@ def _body_metric_dot(
     body: wp.int32,
     jacobian: wp.array2d[wp.float32],
     inverse_mass: wp.array[wp.float32],
-    inverse_inertia_world: wp.array[wp.mat33f],
+    inverse_inertia_world: wp.array[inertia_sym6],
 ) -> wp.float32:
     row_lin = wp.vec3(
         jacobian[row, row_offset + 0],
