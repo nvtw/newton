@@ -169,6 +169,24 @@ def _write_dof_values(model, array, dof_indices, values):
     wp.copy(array, wp.array(arr_np, dtype=float, device=model.device))
 
 
+def _ignore_torchscript_deprecation(test_case):
+    """Tolerate torch's TorchScript-family deprecation notices for one test.
+
+    The neural-controller tests deliberately exercise the TorchScript checkpoint
+    path (``torch.jit.script``/``save``/``load``), which PyTorch now deprecates in
+    favor of ``torch.export``. Ignore just those advisories, scoped to the calling
+    test, so strict-warnings mode still surfaces everything else.
+    """
+    ctx = warnings.catch_warnings()
+    ctx.__enter__()
+    test_case.addCleanup(ctx.__exit__, None, None, None)
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*torch\.jit\..* is deprecated",
+        category=DeprecationWarning,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. Controllers
 # ---------------------------------------------------------------------------
@@ -278,6 +296,19 @@ class TestControllerNeuralMLP(unittest.TestCase):
     """ControllerNeuralMLP - load via model_path, call compute() directly."""
 
     def setUp(self):
+        # Mark the test as skipped if Torch is not installed but required
+        try:
+            import torch
+
+            if wp.get_device().is_cuda and not torch.cuda.is_available():
+                # Ensure torch has CUDA support
+                self.skipTest("Torch not compiled with CUDA support")
+
+        except Exception as e:
+            self.skipTest(f"{e}")
+
+        self.torch = torch
+        _ignore_torchscript_deprecation(self)
         self.device = wp.get_device()
         self._tmp_dir = tempfile.mkdtemp()
 
@@ -439,6 +470,19 @@ class TestControllerNeuralLSTM(unittest.TestCase):
     """ControllerNeuralLSTM - load via model_path, call compute() directly."""
 
     def setUp(self):
+        # Mark the test as skipped if Torch is not installed but required
+        try:
+            import torch
+
+            if wp.get_device().is_cuda and not torch.cuda.is_available():
+                # Ensure torch has CUDA support
+                self.skipTest("Torch not compiled with CUDA support")
+
+        except Exception as e:
+            self.skipTest(f"{e}")
+
+        self.torch = torch
+        _ignore_torchscript_deprecation(self)
         self.device = wp.get_device()
         self._tmp_dir = tempfile.mkdtemp()
 
@@ -1667,6 +1711,19 @@ class TestNeuralActuatorUsdParsing(unittest.TestCase):
     """
 
     def setUp(self):
+        # Mark the test as skipped if Torch is not installed but required
+        try:
+            import torch
+
+            if wp.get_device().is_cuda and not torch.cuda.is_available():
+                # Ensure torch has CUDA support
+                self.skipTest("Torch not compiled with CUDA support")
+
+        except Exception as e:
+            self.skipTest(f"{e}")
+
+        self.torch = torch
+        _ignore_torchscript_deprecation(self)
         self._tmp_dir = tempfile.mkdtemp()
 
     def tearDown(self):
