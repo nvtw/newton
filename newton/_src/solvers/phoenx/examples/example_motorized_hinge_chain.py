@@ -447,15 +447,46 @@ class Example:
             )
         self.viewer.end_frame()
 
+    def _tip_sag(self) -> tuple[float, float]:
+        """Return ``(tip_sag, max_sag)`` of the cantilever in metres.
+
+        The chain extends along world -y with every hinge axis along
+        world +z; gravity is along -z. A revolute hinge cannot rotate in
+        the gravity plane, so the only thing that lets the chain droop is
+        residual constraint error in the anchor-2 swing (axis-alignment)
+        lock. An ideally-converged solver holds every link at ``z = 0``;
+        the downward -z deflection of the links is therefore a direct
+        measure of joint-lock convergence. ``tip_sag`` is the free-end
+        link's drop; ``max_sag`` is the worst drop along the chain.
+        """
+        positions = self.bodies.position.numpy()
+        z = positions[1:NUM_BODIES, 2]
+        tip_sag = float(-z[-1])
+        max_sag = float(-np.min(z))
+        return tip_sag, max_sag
+
     def test_final(self) -> None:
-        """After settling the chain must still be hanging from the
-        world anchor -- no body may have drifted absurdly far
-        (catches solver blow-ups) and no NaNs may have appeared.
+        """After settling the chain must still be a near-rigid cantilever:
+        finite, not blown up, and with bounded free-end droop (catches the
+        block-Gauss-Seidel swing-lock convergence regression).
         """
         positions = self.bodies.position.numpy()
         for i in range(1, NUM_BODIES):
             assert np.isfinite(positions[i]).all(), f"body {i} produced non-finite position"
             assert positions[i, 1] > -10.0 * NUM_CUBES, f"body {i} fell unreasonably far ({positions[i, 1]})"
+
+        tip_sag, max_sag = self._tip_sag()
+        chain_len = NUM_CUBES * _link_layout()[0]
+        print(
+            f"[hinge_chain] tip_sag={tip_sag * 1e3:.1f} mm  max_sag={max_sag * 1e3:.1f} mm "
+            f"({tip_sag / chain_len * 100.0:.2f}% of {chain_len:.1f} m chain)"
+        )
+        # A converged hinge cantilever barely droops (hinge axes are
+        # perpendicular to gravity, so only residual swing-lock error lets
+        # it fall). The decoupled block-Gauss-Seidel swing lock collapsed
+        # the chain (~7.9 m tip drop at solver_iterations=4); the coupled
+        # 3+2 Schur holds the tip to ~0.15 m. Guard well inside that gap.
+        assert tip_sag < 0.4, f"free end drooped {tip_sag * 1e3:.1f} mm -- swing lock under-converged"
 
 
 if __name__ == "__main__":
