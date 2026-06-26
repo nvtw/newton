@@ -18,7 +18,7 @@ from newton._src.geometry.kernels import (
     create_soft_contacts,
     mesh_sdf_with_sign_query,
 )
-from newton._src.sim.collide import _compute_per_world_shape_pairs_max, _estimate_rigid_contact_max
+from newton._src.sim.collide import CollisionPipeline, _compute_per_world_shape_pairs_max, _estimate_rigid_contact_max
 from newton._src.utils.heightfield import HeightfieldData
 from newton.examples import test_body_state
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
@@ -801,7 +801,8 @@ def test_mesh_query_type_tracks_watertight(test, device):
     closed_shape = builder.add_shape_mesh(body=-1, mesh=closed_mesh)
     model = builder.finalize(device=device)
 
-    query_types = model.shape_mesh_query_type.numpy()
+    pipeline = CollisionPipeline(model)
+    query_types = pipeline._shape_mesh_query_type.numpy()
     test.assertEqual(int(query_types[open_shape]), MESH_SIGN_QUERY_NORMAL)
     test.assertEqual(int(query_types[closed_shape]), MESH_SIGN_QUERY_PARITY)
 
@@ -826,7 +827,8 @@ def test_mesh_query_type_skips_visual_only_mesh(test, device):
     shape = builder.add_shape_mesh(body=-1, mesh=mesh, cfg=cfg)
     model = builder.finalize(device=device)
 
-    query_types = model.shape_mesh_query_type.numpy()
+    pipeline = CollisionPipeline(model)
+    query_types = pipeline._shape_mesh_query_type.numpy()
     test.assertEqual(int(query_types[shape]), MESH_SIGN_QUERY_NORMAL)
 
 

@@ -44,7 +44,6 @@ from ..geometry import (
     transform_inertia,
 )
 from ..geometry.inertia import validate_and_correct_inertia_kernel, verify_and_correct_inertia
-from ..geometry.kernels import MESH_SIGN_QUERY_NORMAL, MESH_SIGN_QUERY_PARITY
 from ..geometry.types import Heightfield
 from ..geometry.utils import RemeshingMethod, compute_inertia_obb, remesh_mesh
 from ..math import quat_between_vectors_robust
@@ -10554,8 +10553,6 @@ class ModelBuilder:
 
             # build list of ids for geometry sources (meshes, sdfs, heightfields)
             geo_sources = []
-            shape_mesh_query_type = []
-            mesh_query_type_by_geo_hash: dict[int, int] = {}
             finalized_geos = {}  # do not duplicate geometry
             gaussians = []
             heightfield_meshes = []
@@ -10590,21 +10587,8 @@ class ModelBuilder:
                 else:
                     geo_sources.append(0)
 
-                mesh_query_type = MESH_SIGN_QUERY_NORMAL
-                if (
-                    shape_flags & (ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)
-                    and shape_type in (GeoType.MESH, GeoType.CONVEX_MESH)
-                    and isinstance(geo, Mesh)
-                ):
-                    mesh_query_type = mesh_query_type_by_geo_hash.get(geo_hash)
-                    if mesh_query_type is None:
-                        mesh_query_type = MESH_SIGN_QUERY_PARITY if geo.is_watertight else MESH_SIGN_QUERY_NORMAL
-                        mesh_query_type_by_geo_hash[geo_hash] = mesh_query_type
-                shape_mesh_query_type.append(mesh_query_type)
-
             m.shape_type = wp.array(self.shape_type, dtype=wp.int32)
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)
-            m.shape_mesh_query_type = wp.array(shape_mesh_query_type, dtype=wp.int32)
             m.heightfield_meshes = heightfield_meshes
             m.gaussians_count = len(gaussians)
             m.gaussians_data = wp.array(gaussians, dtype=Gaussian.Data)
