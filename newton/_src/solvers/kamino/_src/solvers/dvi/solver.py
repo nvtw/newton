@@ -174,12 +174,14 @@ class DVISolver:
         self._data.bilateral_operator = operator
         # The factorization and the single-RHS solve tile the same dense factor
         # independently. A larger factorization block size cuts the panel count and
-        # measurably speeds up the once-per-step factorization; the solve is left at
-        # the default smaller block size, which is faster for its single-column RHS.
+        # measurably speeds up the once-per-step factorization. The solve keeps the
+        # smaller default tile for its single-column RHS, but uses more tile threads
+        # to better hide latency across DVI's repeated bilateral solves.
         self._bilateral_solver = LLTBlockedSolver(
             operator=operator,
             device=self._device,
             factorize_block_size=64,
+            solve_block_dim=256,
         )
 
     @staticmethod
