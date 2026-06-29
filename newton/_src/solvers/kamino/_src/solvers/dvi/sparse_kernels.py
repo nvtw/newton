@@ -350,23 +350,35 @@ def _apply_contact_offset_update(
 
     matrix_end = nzb_start[wid] + num_nzb[wid]
     nzb_offset = contacts_nzb_offsets[contact_id]
-    for k in range(6):
+    for k in range(3):
         nzb_idx = nzb_offset + k
-        if nzb_idx < matrix_end:
-            block_coord = nzb_coords[nzb_idx]
-            row = block_coord[0]
-            if row == row_0 or row == row_1 or row == row_2:
-                block = nzb_values[nzb_idx]
-                x_idx_base = col_start[wid] + block_coord[1]
-                acc = float32(0.0)
-                for j in range(6):
-                    acc += block[j] * body_space[x_idx_base + j]
-                if row == row_0:
-                    value_0 += acc
-                elif row == row_1:
-                    value_1 += acc
-                else:
-                    value_2 += acc
+        block = nzb_values[nzb_idx]
+        x_idx_base = col_start[wid] + nzb_coords[nzb_idx, 1]
+        acc = float32(0.0)
+        for j in range(6):
+            acc += block[j] * body_space[x_idx_base + j]
+        if k == 0:
+            value_0 += acc
+        elif k == 1:
+            value_1 += acc
+        else:
+            value_2 += acc
+
+    second_body_offset = nzb_offset + 3
+    if second_body_offset < matrix_end and nzb_coords[second_body_offset, 0] == row_0:
+        for k in range(3):
+            nzb_idx = second_body_offset + k
+            block = nzb_values[nzb_idx]
+            x_idx_base = col_start[wid] + nzb_coords[nzb_idx, 1]
+            acc = float32(0.0)
+            for j in range(6):
+                acc += block[j] * body_space[x_idx_base + j]
+            if k == 0:
+                value_0 += acc
+            elif k == 1:
+                value_1 += acc
+            else:
+                value_2 += acc
 
     mu_c = problem_mu[problem_cio[wid] + cid]
     v_t0 = value_0 + problem_v_f[ccio_v + 0]
