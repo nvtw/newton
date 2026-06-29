@@ -127,13 +127,16 @@ class SimplePhoenXDispatcher:
             wp.launch(
                 solve_scalar_rows_jacobi_kernel,
                 dim=self._row_count,
+                # Weighted Jacobi needs reciprocal color relaxation on dense
+                # contact graphs. The same factor scales both bodies, so each
+                # row still applies an equal-and-opposite momentum change.
                 inputs=[
                     self.rows,
                     w.bodies,
                     self._velocity_snapshot,
                     self._angular_velocity_snapshot,
                     self._multiplier_snapshot,
-                    wp.float32(w.sor_boost),
+                    wp.float32(w.sor_boost / w.jacobi_max_colors),
                 ],
                 outputs=[self._delta_velocity, self._delta_angular_velocity],
                 block_dim=self.block_dim,

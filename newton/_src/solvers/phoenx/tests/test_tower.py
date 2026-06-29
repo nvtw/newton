@@ -155,6 +155,38 @@ class TestTowerNothingDrops(unittest.TestCase):
                 f"plank {body} flew outside tower envelope (r_xy={r_xy:.2f}, tol={envelope:.2f})",
             )
 
+    def test_jacobi_tower_stays_finite(self) -> None:
+        scene = _PhoenXScene(
+            fps=self.FPS,
+            substeps=5,
+            solver_iterations=5,
+            velocity_iterations=1,
+            friction=0.5,
+            solver_flavor="simple",
+            jacobi_max_colors=10,
+        )
+        scene.add_ground_plane()
+
+        plank_ids = []
+        for pos, quat in _spawn_tower_plank_transforms():
+            plank_ids.append(
+                scene.add_box(
+                    position=pos,
+                    half_extents=(_PLANK_HX, _PLANK_HY, _PLANK_HZ),
+                    orientation=quat,
+                    density=_PLANK_DENSITY,
+                )
+            )
+        scene.finalize()
+
+        for _ in range(self.SETTLE_FRAMES):
+            scene.step()
+
+        positions = scene.bodies.position.numpy()[np.asarray(plank_ids) + 1]
+        self.assertTrue(np.isfinite(positions).all())
+        radii = np.linalg.norm(positions[:, :2], axis=1)
+        self.assertLess(float(radii.max()), _RING_RADIUS * 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

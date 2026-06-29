@@ -244,6 +244,8 @@ class PortedExample:
         self.viewer = viewer
         self.args = args
         self.device = wp.get_device()
+        self.solver_mode = str(getattr(args, "solver", "classic"))
+        self.max_colors = int(getattr(args, "max_colors", 10))
 
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -382,6 +384,8 @@ class PortedExample:
             max_thread_blocks=self.max_thread_blocks,
             enable_warm_start_coloring=self.enable_warm_start_coloring,
             enable_column_timers=self.enable_column_timers,
+            solver_flavor="simple" if self.solver_mode == "jacobi" else "standard",
+            jacobi_max_colors=self.max_colors,
             device=self.device,
         )
 
@@ -544,7 +548,23 @@ def run_ported_example(example_factory: Callable[[object, object], PortedExample
     """Standard ``__main__`` entry point: ``newton.examples.init`` ->
     factory -> ``newton.examples.run``. Subclasses use this to keep the
     entry-point boilerplate one line."""
-    viewer, args = newton.examples.init()
+    parser = newton.examples.create_parser()
+    parser.add_argument(
+        "--solver",
+        choices=("classic", "jacobi"),
+        default="classic",
+        help="Select graph-colored PGS or the uncolored scalar-row Jacobi solver.",
+    )
+    parser.add_argument(
+        "--max-colors",
+        type=int,
+        default=10,
+        help=(
+            "Estimated classic color count used by Jacobi: effective substeps "
+            "equal max-colors times the configured substeps (default: 10)."
+        ),
+    )
+    viewer, args = newton.examples.init(parser)
     example = example_factory(viewer, args)
     if example.start_paused:
         # Same convention as example_kapla_tower / example_basic_joints:
