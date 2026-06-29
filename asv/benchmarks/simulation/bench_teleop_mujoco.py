@@ -57,21 +57,29 @@ def _make_args(mode: _TeleopMode, num_frames: int):
     args.benchmark = False
     args.print_metrics = False
     args.mujoco_backend = mode.mujoco_backend
-    args.metrics_interval = 15
+    # Latency runs must not include diagnostic device-to-host readbacks.
+    args.metrics_interval = 0
     args.metrics_warmup_frames = 0
     args.sync_latency = True
+    args.collect_stage_metrics = False
     args.render_shadows = False
     return args
 
 
-class FastTeleopMuJoCo:
-    """Benchmark the FR3 scripted teleop loop with MuJoCo solver backends.
+class _TeleopMuJoCoBenchmark:
+    """Benchmark the FR3 scripted control loop with MuJoCo solver backends.
 
     The scene reuses ``example_robot_teleop_mujoco``: a Franka FR3/Panda
-    tracks a moving end-effector target over a table-top manipulation scene.
-    Each frame includes scripted input, IK, joint-target writes, and physics.
-    GPU runs synchronize timed sections to report completion latency instead
-    of host enqueue latency.
+    tracks a moving six-DoF end-effector target over a table-top manipulation
+    scene while periodically actuating its gripper. Each measured frame covers
+    scripted command generation, IK, joint-target writes, and a completed
+    physics step. Rendering and physical input-device latency are intentionally
+    excluded.
+
+    GPU runs synchronize once at the control-loop boundary. This reports the
+    latency visible to a synchronous 60 Hz controller without inserting
+    artificial barriers between the stages being measured. Tracking readbacks
+    are enabled only by the quality metrics so they do not perturb latency.
     """
 
     params = (tuple(_TELEOP_MODES.keys()),)
@@ -79,9 +87,10 @@ class FastTeleopMuJoCo:
     repeat = 3
     number = 1
     rounds = 2
+    timeout = 600
 
-    num_frames = 60
-    warmup_frames = 15
+    num_frames = 300
+    warmup_frames = 60
 
     def setup(self, mode: str) -> None:
         self.mode = _TELEOP_MODES[mode]
@@ -91,13 +100,12 @@ class FastTeleopMuJoCo:
             args = _make_args(self.mode, self.num_frames)
             self.example = TeleopExample(ViewerNull(num_frames=self.num_frames), args)
             self._step_frames(self.warmup_frames)
-            wp.synchronize_device()
+            wp.synchronize_device(self.example.device)
             self._clear_measurements()
 
     def time_teleop_loop(self, mode: str) -> None:
         with wp.ScopedDevice(self.mode.device):
             self._step_frames(self.num_frames)
-            wp.synchronize_device()
 
     def track_mean_loop_ms(self, mode: str) -> float:
         elapsed = self._measure_frames()
@@ -121,10 +129,16 @@ class FastTeleopMuJoCo:
     track_frame_overrun_pct.unit = "%"
 
     def track_mean_target_error_m(self, mode: str) -> float:
-        self._measure_frames()
+        self._measure_frames(collect_tracking=True)
         return self._summary("target_error_m")[0]
 
     track_mean_target_error_m.unit = "m"
+
+    def track_mean_target_rotation_error_rad(self, mode: str) -> float:
+        self._measure_frames(collect_tracking=True)
+        return self._summary("target_rotation_error_rad")[0]
+
+    track_mean_target_rotation_error_rad.unit = "rad"
 
     def teardown(self, mode: str) -> None:
         example = getattr(self, "example", None)
@@ -136,25 +150,39 @@ class FastTeleopMuJoCo:
         for _ in range(frame_count):
             self.example.step()
 
-    def _measure_frames(self) -> float:
+    def _measure_frames(self, *, collect_tracking: bool = False) -> float:
         with wp.ScopedDevice(self.mode.device):
             self._clear_measurements()
+            previous_interval = self.example.metrics_interval
+            self.example.metrics_interval = 1 if collect_tracking else 0
             start = time.perf_counter()
-            self._step_frames(self.num_frames)
-            wp.synchronize_device()
-            return time.perf_counter() - start
+            try:
+                self._step_frames(self.num_frames)
+                return time.perf_counter() - start
+            finally:
+                self.example.metrics_interval = previous_interval
 
     def _clear_measurements(self) -> None:
-        self.example.stats.values.clear()
-        self.example.settle_samples_ms.clear()
-        self.example._pending_settle_started = None
-        self.example._pending_settle_target = None
+        self.example.clear_metrics()
 
     def _summary(self, name: str) -> tuple[float, float, float]:
         summary = self.example.stats.summary(name)
         if summary is None:
             raise RuntimeError(f"No teleop samples collected for {name!r}")
         return summary
+
+
+class FastTeleopMuJoCo(_TeleopMuJoCoBenchmark):
+    """Pull-request smoke benchmark for the CUDA graph teleop path."""
+
+    params = (("mjwarp_cuda_graph",),)
+    repeat = 2
+    num_frames = 120
+    warmup_frames = 30
+
+
+class TeleopMuJoCo(_TeleopMuJoCoBenchmark):
+    """Nightly teleop benchmark covering GPU and CPU solver backends."""
 
 
 if __name__ == "__main__":
@@ -164,6 +192,7 @@ if __name__ == "__main__":
 
     benchmark_list = {
         "FastTeleopMuJoCo": FastTeleopMuJoCo,
+        "TeleopMuJoCo": TeleopMuJoCo,
     }
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)

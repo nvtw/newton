@@ -37,6 +37,10 @@ def _quat_to_vec4(q: wp.quat) -> wp.vec4:
     return wp.vec4(float(q[0]), float(q[1]), float(q[2]), float(q[3]))
 
 
+def _quat_to_np(q: wp.quat) -> np.ndarray:
+    return np.array([float(q[0]), float(q[1]), float(q[2]), float(q[3])], dtype=np.float32)
+
+
 def _vec3_to_np(v: wp.vec3) -> np.ndarray:
     return np.array([float(v[0]), float(v[1]), float(v[2])], dtype=np.float32)
 
@@ -90,6 +94,9 @@ class WindowStats:
     def latest(self, name: str) -> float | None:
         values = self.values.get(name)
         return values[-1] if values else None
+
+    def clear(self) -> None:
+        self.values.clear()
 
 
 @dataclass
@@ -190,6 +197,8 @@ class GamepadInput:
 
 class Example:
     def __init__(self, viewer, args):
+        self._previous_coord_layout_targets = newton.use_coord_layout_targets
+        self._closed = False
         newton.use_coord_layout_targets = True
 
         self.fps = 60
@@ -201,7 +210,6 @@ class Example:
 
         self.viewer = viewer
         self.device = wp.get_device()
-        self.test_mode = args.test
         self.input_mode = "scripted" if args.test or args.viewer == "null" else args.input
         self.linear_speed = args.linear_speed
         self.angular_speed = args.angular_speed
@@ -218,15 +226,22 @@ class Example:
         self.metrics_interval = max(0, args.metrics_interval)
         self.metrics_warmup_frames = max(0, int(args.metrics_warmup_frames))
         self.sync_latency = args.sync_latency
+        self.collect_stage_metrics = args.collect_stage_metrics
         self.use_mujoco_cpu = args.mujoco_backend == "cpu"
         self.render_shadows = bool(args.render_shadows)
         self.print_metrics_on_close = bool(args.print_metrics) or args.benchmark is not False
         self._printed_metrics = False
 
         self.stats = WindowStats(maxlen=max(60, int(args.stats_window)))
-        self.settle_samples_ms: list[float] = []
-        self._pending_settle_started: float | None = None
-        self._pending_settle_target: np.ndarray | None = None
+        self._stage_events: dict[str, tuple[wp.Event, wp.Event]] = {}
+        if self.collect_stage_metrics and self.sync_latency and self.device.is_cuda:
+            self._stage_events = {
+                name: (
+                    wp.Event(device=self.device, enable_timing=True),
+                    wp.Event(device=self.device, enable_timing=True),
+                )
+                for name in ("ik", "target_write", "sim")
+            }
 
         self.workspace_min = np.array([0.20, -0.45, 0.12], dtype=np.float32)
         self.workspace_max = np.array([0.75, 0.45, 0.90], dtype=np.float32)
@@ -472,12 +487,23 @@ class Example:
         current_pos = _vec3_to_np(wp.transform_get_translation(self.target_tf))
         delta = (target_pos - current_pos) / max(self.frame_dt * self.linear_speed, 1.0e-6)
         delta = np.minimum(np.maximum(delta, -1.0), 1.0)
+        rotation = np.array(
+            [
+                0.30 * math.sin(0.6 * phase),
+                0.25 * math.sin(0.9 * phase),
+                0.20 * math.sin(1.1 * phase),
+            ],
+            dtype=np.float32,
+        )
+        gripper_delta = -1.0 if math.sin(0.5 * phase) >= 0.0 else 1.0
 
-        if self.frame_index >= self.metrics_warmup_frames and self.frame_index % max(1, int(0.5 / self.frame_dt)) == 0:
-            self._pending_settle_started = time.perf_counter()
-            self._pending_settle_target = target_pos.copy()
-
-        return TeleopCommand(delta.astype(np.float32), np.zeros(3, dtype=np.float32), active=True, source="scripted")
+        return TeleopCommand(
+            delta.astype(np.float32),
+            rotation,
+            gripper_delta=gripper_delta,
+            active=True,
+            source="scripted",
+        )
 
     def _read_command(self) -> TeleopCommand:
         if self.input_mode == "scripted":
@@ -561,10 +587,19 @@ class Example:
         )
 
     def _time_section(self, name: str, fn) -> None:
+        if not self.collect_stage_metrics:
+            fn()
+            return
+
+        events = self._stage_events.get(name)
+        if events is not None:
+            wp.record_event(events[0])
+            fn()
+            wp.record_event(events[1])
+            return
+
         start = time.perf_counter()
         fn()
-        if self.sync_latency:
-            wp.synchronize()
         if self.frame_index >= self.metrics_warmup_frames:
             self.stats.add(f"{name}_ms", (time.perf_counter() - start) * 1000.0)
 
@@ -595,14 +630,10 @@ class Example:
         pos_error = float(np.linalg.norm(target_pos - ee_pos))
         self.stats.add("target_error_m", pos_error)
 
-        if self._pending_settle_started is not None and self._pending_settle_target is not None:
-            pending_error = float(np.linalg.norm(self._pending_settle_target - ee_pos))
-            if pending_error < 0.025:
-                latency_ms = (time.perf_counter() - self._pending_settle_started) * 1000.0
-                self.settle_samples_ms.append(latency_ms)
-                self.stats.add("settle_latency_ms", latency_ms)
-                self._pending_settle_started = None
-                self._pending_settle_target = None
+        ee_rot = np.asarray(body_q[self.ee_index][3:7], dtype=np.float32)
+        target_rot = _quat_to_np(wp.transform_get_rotation(self.target_tf))
+        quat_dot = min(1.0, abs(float(np.dot(ee_rot, target_rot))))
+        self.stats.add("target_rotation_error_rad", 2.0 * math.acos(quat_dot))
 
     def step(self) -> None:
         frame_start = time.perf_counter()
@@ -616,7 +647,11 @@ class Example:
         self._time_section("ik", self.solve_ik)
         self._time_section("target_write", self._write_robot_targets)
         self._time_section("sim", (lambda: wp.capture_launch(self.graph)) if self.graph else self.simulate)
+        if self.sync_latency:
+            wp.synchronize_device(self.device)
         if self.frame_index >= self.metrics_warmup_frames:
+            for name, (start_event, end_event) in self._stage_events.items():
+                self.stats.add(f"{name}_ms", wp.get_event_elapsed_time(start_event, end_event))
             self.stats.add("local_loop_ms", (time.perf_counter() - frame_start) * 1000.0)
 
         self.sim_time += self.frame_dt
@@ -651,13 +686,13 @@ class Example:
             ("IK", "ik_ms"),
             ("Sim", "sim_ms"),
             ("Target error", "target_error_m"),
-            ("Settle", "settle_latency_ms"),
+            ("Rotation error", "target_rotation_error_rad"),
         ):
             summary = self.stats.summary(key)
             if summary is None:
                 continue
             mean, p95, _ = summary
-            unit = "m" if key.endswith("_m") else "ms"
+            unit = "m" if key.endswith("_m") else "rad" if key.endswith("_rad") else "ms"
             imgui.text(f"{label}: mean {mean:.3f} {unit}, p95 {p95:.3f} {unit}")
 
     def test_final(self) -> None:
@@ -669,7 +704,20 @@ class Example:
             raise AssertionError(f"Mean target tracking error too large: {mean_error:.4f} m")
         if not math.isfinite(max_error) or max_error > 0.45:
             raise AssertionError(f"Max target tracking error too large: {max_error:.4f} m")
+
+        rotation_summary = self.stats.summary("target_rotation_error_rad")
+        if rotation_summary is None:
+            raise AssertionError("No target rotation tracking samples were collected")
+        mean_rotation_error, _, max_rotation_error = rotation_summary
+        if not math.isfinite(mean_rotation_error) or mean_rotation_error > 0.35:
+            raise AssertionError(f"Mean target rotation error too large: {mean_rotation_error:.4f} rad")
+        if not math.isfinite(max_rotation_error) or max_rotation_error > 0.70:
+            raise AssertionError(f"Max target rotation error too large: {max_rotation_error:.4f} rad")
         self.print_latency_summary()
+
+    def clear_metrics(self) -> None:
+        """Clear accumulated latency and tracking measurements."""
+        self.stats.clear()
 
     def print_latency_summary(self) -> None:
         if self._printed_metrics:
@@ -683,21 +731,28 @@ class Example:
             ("target write", "target_write_ms"),
             ("simulation", "sim_ms"),
             ("target error", "target_error_m"),
-            ("settle latency", "settle_latency_ms"),
+            ("rotation error", "target_rotation_error_rad"),
         ):
             summary = self.stats.summary(key)
             if summary is None:
                 continue
             mean, p95, max_value = summary
-            unit = "m" if key.endswith("_m") else "ms"
+            unit = "m" if key.endswith("_m") else "rad" if key.endswith("_rad") else "ms"
             print(f"  {label}: mean={mean:.3f} {unit}, p95={p95:.3f} {unit}, max={max_value:.3f} {unit}")
-        if self.device.is_cuda and not self.sync_latency:
-            print("  timing note: GPU timings are host enqueue timings; pass --sync-latency for completion timing.")
+        if self.device.is_cuda:
+            if self.sync_latency:
+                print("  timing note: loop latency includes one device synchronization at the control boundary.")
+            else:
+                print("  timing note: GPU timings are host enqueue timings; pass --sync-latency for completion timing.")
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         if self.print_metrics_on_close and self.stats.summary("local_loop_ms") is not None:
             self.print_latency_summary()
         self.gamepad.close()
+        newton.use_coord_layout_targets = self._previous_coord_layout_targets
 
     @staticmethod
     def create_parser():
@@ -768,7 +823,13 @@ class Example:
             "--sync-latency",
             action=argparse.BooleanOptionalAction,
             default=False,
-            help="Synchronize after timed sections so GPU timings include completion latency.",
+            help="Synchronize once per frame so loop timing includes GPU completion latency.",
+        )
+        parser.add_argument(
+            "--collect-stage-metrics",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Collect per-stage timings in addition to end-to-end loop latency.",
         )
         parser.add_argument(
             "--render-shadows",

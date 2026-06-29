@@ -480,7 +480,7 @@ add_example_test(
     TestRobotExamples,
     name="robot.example_robot_teleop_mujoco",
     devices=test_devices,
-    test_options={"num_frames": 8},
+    test_options={"num-frames": 20, "metrics-interval": 1},
     use_viewer=True,
 )
 add_example_test(
