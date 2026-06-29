@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add `SolverPhoenX(solver_flavor="simple")`, an experimental rigid-body flavor that replaces graph-colored block PGS with fixed-capacity, one-thread-per-scalar-equation Jacobi rows and atomic body-delta accumulation and copy-free mass splitting that normalizes arbitrary row fan-in while conserving momentum. `jacobi_max_colors` defaults to 10 and scales the effective Jacobi substep count without constructing a constraint graph.
+- Add `SolverPhoenX(solver_flavor="simple")`, an experimental rigid-body flavor that replaces graph-colored block PGS with fixed-capacity, one-thread-per-scalar-equation Jacobi rows and atomic body-delta accumulation and copy-free mass splitting that normalizes arbitrary row fan-in while conserving momentum. `jacobi_max_colors` defaults to 10 and scales the effective Jacobi substep count without constructing a constraint graph. Matched normal and tangent contact multipliers, together with stable joint-row multipliers, persist as Jacobi initial guesses.
 - Add `example_motorized_cable_chain` as a one-for-one cable-joint counterpart to the PhoenX motorized hinge-chain example.
 - Add pure-Warp Muon optimizer support to `newton.rl` PPO trainers so experimental G1 runs can match nanoG1 optimizer settings without PyTorch.
 - Add `ConfigEnvG1PhoenX` scheduler knobs for `threads_per_world`, `multi_world_scheduler`, and `prepare_refresh_stride` so experimental G1 RL runs can benchmark PhoenX solver schedules without monkeypatching.

@@ -206,6 +206,48 @@ class TestSimplePhoenX(unittest.TestCase):
                 self.assertAlmostEqual(float(scene.body_position(body)[2]), 0.5, delta=0.08)
                 self.assertLess(abs(float(scene.body_velocity(body)[2])), 0.15)
 
+    def test_contact_cache_seeds_rows_in_capture(self):
+        scene = _PhoenXScene(
+            substeps=2,
+            solver_iterations=1,
+            velocity_iterations=0,
+            solver_flavor="simple",
+            jacobi_max_colors=1,
+        )
+        scene.add_ground_plane()
+        body = scene.add_box((0.0, 0.0, 0.45), (0.5, 0.5, 0.5))
+        scene.finalize()
+        scene.step()
+
+        world = scene.world
+        dispatcher = world._dispatcher
+        contact_count = int(scene.contacts.rigid_contact_count.numpy()[0])
+        self.assertGreater(contact_count, 0)
+        impulses = np.zeros(world._contact_container.impulses.shape, dtype=np.float32)
+        cached_lambdas = np.asarray((0.25, 0.1, -0.05), dtype=np.float32)
+        impulses[:, :contact_count] = cached_lambdas[:, None]
+        world._contact_container.impulses.assign(impulses)
+        dispatcher.rows.multiplier.zero_()
+        world.bodies.velocity.zero_()
+        world.bodies.angular_velocity.zero_()
+        world.solver_iterations = 0
+        world._current_substep_index = 0
+        idt = wp.float32(1.0 / world.substep_dt)
+
+        with wp.ScopedCapture(device=world.device) as capture:
+            dispatcher.solve(idt)
+        wp.capture_launch(capture.graph)
+
+        contact_rows = dispatcher._contact_row_offset + np.arange(contact_count)[:, None] * CONTACT_ROW_STRIDE
+        contact_rows = contact_rows + np.arange(CONTACT_ROW_STRIDE)[None, :]
+        row_lambdas = dispatcher.rows.multiplier.numpy()[contact_rows]
+        expected_lambdas = np.broadcast_to(cached_lambdas, (contact_count, CONTACT_ROW_STRIDE))
+        np.testing.assert_allclose(row_lambdas, expected_lambdas, atol=1.0e-7)
+        np.testing.assert_allclose(
+            world._contact_container.impulses.numpy()[:, :contact_count], expected_lambdas.T, atol=1.0e-7
+        )
+        np.testing.assert_allclose(scene.body_velocity(body), np.zeros(3), atol=1.0e-7)
+
     def test_joint_and_contact_rows_share_one_fixed_launch_domain(self):
         scene = _PhoenXScene(
             substeps=2,

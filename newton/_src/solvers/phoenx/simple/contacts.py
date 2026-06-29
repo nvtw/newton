@@ -18,7 +18,10 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_local_p0,
     cc_get_local_p1,
     cc_get_normal,
+    cc_get_normal_lambda,
     cc_get_tangent1,
+    cc_get_tangent1_lambda,
+    cc_get_tangent2_lambda,
     cc_set_normal_lambda,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
@@ -28,25 +31,11 @@ from newton._src.solvers.phoenx.simple.rows import ScalarRowContainer
 __all__ = [
     "CONTACT_ROW_STRIDE",
     "assemble_contact_scalar_rows_kernel",
-    "clear_contact_lambdas_kernel",
     "writeback_contact_lambdas_kernel",
 ]
 
 
 CONTACT_ROW_STRIDE = 3
-
-
-@wp.kernel(enable_backward=False)
-def clear_contact_lambdas_kernel(
-    contact_count: wp.array[wp.int32],
-    cc: ContactContainer,
-):
-    contact = wp.tid()
-    if contact >= contact_count[0]:
-        return
-    cc_set_normal_lambda(cc, contact, wp.float32(0.0))
-    cc_set_tangent1_lambda(cc, contact, wp.float32(0.0))
-    cc_set_tangent2_lambda(cc, contact, wp.float32(0.0))
 
 
 @wp.kernel(enable_backward=False)
@@ -106,6 +95,7 @@ def assemble_contact_scalar_rows_kernel(
     rows.jacobian_linear_b[row] = direction
     rows.jacobian_angular_b[row] = wp.cross(arm_b, direction)
     rows.softness[row] = wp.float32(0.0)
+    rows.multiplier[row] = cc_get_normal_lambda(cc, contact)
     rows.bound_row[row] = row
     rows.bound_scale[row] = wp.float32(0.0)
 
@@ -115,6 +105,10 @@ def assemble_contact_scalar_rows_kernel(
         rows.lower[row] = wp.float32(0.0)
         rows.upper[row] = wp.float32(1.0e30)
     else:
+        if axis_index == wp.int32(1):
+            rows.multiplier[row] = cc_get_tangent1_lambda(cc, contact)
+        else:
+            rows.multiplier[row] = cc_get_tangent2_lambda(cc, contact)
         rows.bias[row] = wp.float32(0.0)
         rows.lower[row] = wp.float32(0.0)
         rows.upper[row] = wp.float32(0.0)

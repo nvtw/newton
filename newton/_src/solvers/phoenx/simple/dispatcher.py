@@ -12,14 +12,12 @@ import warp as wp
 from .contacts import (
     CONTACT_ROW_STRIDE,
     assemble_contact_scalar_rows_kernel,
-    clear_contact_lambdas_kernel,
     writeback_contact_lambdas_kernel,
 )
 from .joints import JOINT_ROW_STRIDE, assemble_joint_scalar_rows_kernel
 from .rows import (
     apply_body_velocity_deltas_kernel,
     clear_body_split_counts_kernel,
-    clear_row_multipliers_kernel,
     scalar_row_container_zeros,
     snapshot_body_velocities_kernel,
     snapshot_row_multipliers_kernel,
@@ -52,25 +50,9 @@ class SimplePhoenXDispatcher:
         self._body_split_count = wp.zeros(world.num_bodies, dtype=wp.int32, device=world.device)
 
     def begin_step(self) -> None:
-        if self._contact_row_count == 0:
-            return
-        w = self._world
-        wp.launch(
-            clear_row_multipliers_kernel,
-            dim=self._contact_row_count,
-            inputs=[self.rows, wp.int32(self._contact_row_offset)],
-            block_dim=self.block_dim,
-            device=w.device,
-        )
-        if w._contact_views is not None:
-            wp.launch(
-                clear_contact_lambdas_kernel,
-                dim=w.rigid_contact_max,
-                inputs=[w._contact_views.rigid_contact_count],
-                outputs=[w._contact_container],
-                block_dim=self.block_dim,
-                device=w.device,
-            )
+        # Joint lambdas persist in their stable rows; matched contact lambdas
+        # are seeded from the contact cache during row assembly.
+        pass
 
     def solve(self, idt: wp.float32) -> None:
         if self._joint_row_count == 0 and self._contact_row_count == 0:

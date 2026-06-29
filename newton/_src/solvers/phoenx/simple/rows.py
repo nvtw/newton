@@ -110,11 +110,6 @@ def snapshot_row_multipliers_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def clear_row_multipliers_kernel(rows: ScalarRowContainer, begin: wp.int32):
-    rows.multiplier[begin + wp.tid()] = wp.float32(0.0)
-
-
-@wp.kernel(enable_backward=False)
 def solve_scalar_rows_jacobi_kernel(
     rows: ScalarRowContainer,
     bodies: BodyContainer,
