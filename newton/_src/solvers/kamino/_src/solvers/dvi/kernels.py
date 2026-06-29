@@ -781,8 +781,10 @@ def _solve_dvi_contacts_colored_gs(
                     solution_lambdas[ccio_v + 1] = lambda_new.y
                     solution_lambdas[ccio_v + 2] = lambda_new.z
 
-                    row = int32(0)
-                    while row < ncts:
+                    # Only contact velocities are read before all velocities are rebuilt.
+                    row = ccgo
+                    contact_end = ccgo + int32(3) * nc
+                    while row < contact_end:
                         row_mio = mio + ncts * row
                         dv = (
                             problem_D[row_mio + ccio + 0] * delta.x
