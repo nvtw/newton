@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""CUDA graph tests for the experimental PhoenX coarse path correction."""
+"""CUDA graph tests for the PhoenX coarse path correction."""
 
 import unittest
 
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.articulations.coarse_path import CoarsePathSolver
 from newton._src.solvers.phoenx.articulations.device import ArticulationDeviceSystem
 from newton._src.solvers.phoenx.articulations.symbolic import compute_block_sparse_symbolic
-from newton._src.solvers.phoenx.benchmarks.experimental.coarse_path_solve import CoarsePathSolver
 from newton._src.solvers.phoenx.constraints.constraint_joint import JOINT_MODE_REVOLUTE
 from newton._src.solvers.phoenx.tests.test_articulation_dvi import _make_adbs_world
 

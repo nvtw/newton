@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add opt-in `SolverPhoenX(articulation_coarse_mode="auto")` multilevel correction for bilateral articulation rows. It selects GPU-local path, rooted-tree, or general-graph Galerkin coarse spaces, supplements normal contact and constraint PGS, supports mixed joint row counts, and remains compatible with CUDA graph capture.
 - Add `SolverPhoenX(solver_flavor="simple")`, an experimental rigid-body flavor that replaces graph-colored block PGS with fixed-capacity, one-thread-per-scalar-equation Jacobi rows and atomic body-delta accumulation and copy-free mass splitting that normalizes arbitrary row fan-in while conserving momentum. `jacobi_max_colors` defaults to 10 and scales the effective Jacobi substep count without constructing a constraint graph. Matched normal and tangent contact multipliers, together with stable Cartesian joint-row multipliers, persist as Jacobi initial guesses.
 - Add `example_motorized_cable_chain` as a one-for-one cable-joint counterpart to the PhoenX motorized hinge-chain example.
 - Add pure-Warp Muon optimizer support to `newton.rl` PPO trainers so experimental G1 runs can match nanoG1 optimizer settings without PyTorch.

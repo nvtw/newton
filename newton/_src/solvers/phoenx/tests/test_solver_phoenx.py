@@ -161,6 +161,48 @@ def _make_pendulum_model(*, target_angle: float = 0.0) -> newton.Model:
     return mb.finalize()
 
 
+def _make_contact_chain_model(link_count: int = 4) -> newton.Model:
+    """Short revolute box chain resting on a ground plane."""
+    mb = newton.ModelBuilder()
+    mb.add_ground_plane()
+    bodies: list[int] = []
+    joints: list[int] = []
+    for link in range(link_count):
+        body = mb.add_link(
+            xform=wp.transform(p=wp.vec3(0.2 * link, 0.0, 0.1), q=wp.quat_identity()),
+            mass=1.0,
+            inertia=((0.01, 0.0, 0.0), (0.0, 0.01, 0.0), (0.0, 0.0, 0.01)),
+        )
+        mb.add_shape_box(
+            body,
+            hx=0.1,
+            hy=0.05,
+            hz=0.1,
+            cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.6),
+        )
+        parent = -1 if link == 0 else bodies[-1]
+        parent_xform = (
+            wp.transform(p=wp.vec3(0.0, 0.0, 0.1), q=wp.quat_identity())
+            if link == 0
+            else wp.transform(p=wp.vec3(0.1, 0.0, 0.0), q=wp.quat_identity())
+        )
+        child_xform = (
+            wp.transform_identity() if link == 0 else wp.transform(p=wp.vec3(-0.1, 0.0, 0.0), q=wp.quat_identity())
+        )
+        joint = mb.add_joint_revolute(
+            parent=parent,
+            child=body,
+            axis=(0.0, 1.0, 0.0),
+            parent_xform=parent_xform,
+            child_xform=child_xform,
+        )
+        bodies.append(body)
+        joints.append(joint)
+    mb.add_articulation(joints)
+    mb.gravity = -GRAVITY
+    return mb.finalize()
+
+
 def _make_welded_cube_model() -> newton.Model:
     """Single body welded to the world. Under gravity the cube must
     not move."""
@@ -248,6 +290,38 @@ class TestSolverPhoenX(unittest.TestCase):
             msg=f"cube COM z = {com_z:.3f} m, expected ~0.1",
         )
         self.assertLess(speed, 0.1, msg=f"cube still moving: |v|={speed:.3f}")
+
+    def test_articulation_coarse_path_coexists_with_contacts(self) -> None:
+        """The bilateral coarse level supplements captured contact PGS."""
+        model = _make_contact_chain_model()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=4,
+            solver_iterations=2,
+            velocity_iterations=1,
+            articulation_coarse_mode="auto",
+            articulation_coarse_stride=2,
+        )
+        self.assertEqual(solver.world.articulation_coarse_setup.mode, "path")
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        collision_pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        contacts = model.contacts(collision_pipeline=collision_pipeline)
+
+        state_0, _ = _run_frames(
+            solver,
+            state_0,
+            state_1,
+            control,
+            contacts,
+            model,
+            n=120,
+            dt=1.0 / 120.0,
+        )
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+        self.assertTrue(np.isfinite(state_0.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state_0.body_qd.numpy()).all())
 
     def test_contact_gap_is_detection_only(self) -> None:
         heights: dict[float, float] = {}

@@ -1,20 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""CUDA graph tests for the experimental branched aggregate correction."""
+"""CUDA graph tests for the PhoenX branched aggregate correction."""
 
 import unittest
 
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.articulations.device import ArticulationDeviceSystem
-from newton._src.solvers.phoenx.articulations.symbolic import compute_block_sparse_symbolic
-from newton._src.solvers.phoenx.benchmarks.experimental.analyze_pgs_branched_tree import _tree_edges
-from newton._src.solvers.phoenx.benchmarks.experimental.coarse_aggregate_solve import (
+from newton._src.solvers.phoenx.articulations.coarse_aggregate import (
     CoarseAggregateSolver,
     parent_aggregate_mapping,
 )
+from newton._src.solvers.phoenx.articulations.device import ArticulationDeviceSystem
+from newton._src.solvers.phoenx.articulations.symbolic import compute_block_sparse_symbolic
+from newton._src.solvers.phoenx.benchmarks.experimental.analyze_pgs_branched_tree import _tree_edges
 from newton._src.solvers.phoenx.constraints.constraint_joint import JOINT_MODE_BALL_SOCKET
 from newton._src.solvers.phoenx.tests.test_articulation_dvi import _make_adbs_world
 

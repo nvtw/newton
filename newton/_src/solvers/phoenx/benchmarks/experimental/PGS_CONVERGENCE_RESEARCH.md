@@ -295,6 +295,35 @@ The earlier co-located point-mass tree is retained only as a topology probe;
 it was too well-conditioned physically for a coarse correction to help. The
 realistic revolute tree is the acceptance benchmark.
 
+## Core integration and general-graph fallback
+
+The path and parent-aggregate solvers now run through the normal PhoenX
+constructor instead of benchmark monkeypatches. articulation_coarse_mode
+selects auto, path, tree, or graph; auto recognizes path forests and rooted
+trees before falling back to deterministic adjacent aggregation. The runtime
+remains three fixed CUDA kernels: Galerkin assembly, colored local block solve,
+and prolongation. Contacts and other constraint families remain on fine PGS.
+
+Mixed articulation types use the common leading row prefix. For PhoenX's
+supported joints this includes the three point-attachment translation rows,
+while revolute/fixed angular rows continue through fine PGS. CUDA graph tests
+cover mixed revolute/ball-socket paths, rooted trees, cyclic graphs, paired
+impulse momentum, and an articulated box chain with active ground contacts.
+
+After promotion, the 96-link path runs at 8.34 ms/frame with 100 substeps, two
+symmetric PGS iterations, 16 coarse color sweeps, and correction stride two.
+At 60 frames it has 0.673 m tip sag, 0.101 mm RMS position violation, and
+0.00239 rad RMS angular violation. The realistic 104-joint tree with stride
+four runs at 8.29 ms/frame, with 0.600 m sag and 0.146 mm RMS position
+violation. These measurements include the public integration path.
+
+A 96-joint cyclic ball-socket matrix (condition about 8.0e3) tests the generic
+fallback. After 12 outer cycles, block SGS leaves relative residual 0.167;
+adjacent aggregation with 16 coarse color sweeps leaves 0.115. A topology-only
+independent-set interpolation prototype improves this to 0.095, identifying a
+promising follow-up for general graphs, but the simpler one-hot fallback is the
+currently verified GPU implementation.
+
 ## Key sources
 
 - Wang, *A Chebyshev Semi-Iterative Approach for Accelerating Projective and
@@ -322,7 +351,7 @@ realistic revolute tree is the acceptance benchmark.
 
 ## Next implementation gate
 
-Promote the verified path/tree aggregate infrastructure toward PhoenX behind
-an opt-in bilateral-articulation mode, including topology eligibility and
-fallback rules. In parallel, determine whether projected unilateral contacts
-admit a safe coarse correction or must remain fine-level PGS only.
+Measure longer contact-heavy and multi-world runs, then evaluate sparse
+multi-weight interpolation for general cyclic graphs. Projected unilateral
+contacts remain fine-level PGS until a coarse active-set treatment demonstrates
+both complementarity safety and an equal-time benefit.

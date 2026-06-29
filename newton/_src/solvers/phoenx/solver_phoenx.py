@@ -15,6 +15,11 @@ from newton._src.solvers.phoenx.articulations import (
     ArticulationTopology,
     PrefactorizedArticulationSystem,
 )
+from newton._src.solvers.phoenx.articulations.coarse_setup import (
+    ArticulationCoarseSetup,
+    build_articulation_coarse_setup,
+    normalize_articulation_coarse_mode,
+)
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -615,6 +620,10 @@ class PhoenXWorld:
         articulation_dvi_host_solver: str = "block_sparse",
         articulation_dvi_stride: int = 1,
         articulation_dvi_relaxation: float = 1.0,
+        articulation_coarse_mode: str | None = None,
+        articulation_coarse_stride: int = 2,
+        articulation_coarse_color_sweeps: int = 16,
+        articulation_coarse_regularization: float = 1.0e-3,
         cache_articulation_topology: bool = True,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
@@ -648,6 +657,17 @@ class PhoenXWorld:
             articulation_dvi_stride: Run the DVI correction every N substeps.
                 Defaults to every substep.
             articulation_dvi_relaxation: Scale applied DVI impulses in ``(0, 1]``.
+            articulation_coarse_mode: Optional bilateral PGS coarse correction.
+                ``"auto"`` selects depth-linear path interpolation, one-hot
+                parent aggregation for a rooted tree, or deterministic adjacent
+                aggregation for a general graph. Explicit ``"path"``, ``"tree"``,
+                and ``"graph"`` modes are also available. Defaults to disabled.
+            articulation_coarse_stride: Apply the coarse correction every N
+                substeps. Defaults to 2.
+            articulation_coarse_color_sweeps: Fixed coarse block-color sweeps.
+                Defaults to 16.
+            articulation_coarse_regularization: Coarse-system diagonal
+                regularization. Defaults to 0.001.
             cache_articulation_topology: Build and store DVI articulation
                 topology during joint initialization. Disable this for normal
                 PGS-only SolverPhoenX worlds to avoid DVI setup work.
@@ -709,6 +729,26 @@ class PhoenXWorld:
         if solver_flavor not in valid_solver_flavors:
             raise ValueError(f"solver_flavor must be one of {valid_solver_flavors}, got {solver_flavor!r}")
         self.solver_flavor = solver_flavor
+        self.articulation_coarse_mode = normalize_articulation_coarse_mode(articulation_coarse_mode)
+        self.articulation_coarse_stride = int(articulation_coarse_stride)
+        self.articulation_coarse_color_sweeps = int(articulation_coarse_color_sweeps)
+        self.articulation_coarse_regularization = float(articulation_coarse_regularization)
+        if self.articulation_coarse_mode is not None:
+            if self.solver_flavor != "standard":
+                raise ValueError("articulation coarse correction requires solver_flavor=standard")
+            if articulation_dvi_replaces_joint_pgs:
+                raise ValueError("articulation coarse correction supplements rather than replaces joint PGS")
+            if self.articulation_coarse_stride < 1:
+                raise ValueError("articulation_coarse_stride must be at least 1")
+            if self.articulation_coarse_color_sweeps < 1:
+                raise ValueError("articulation_coarse_color_sweeps must be at least 1")
+            if self.articulation_coarse_regularization < 0.0:
+                raise ValueError("articulation_coarse_regularization must be nonnegative")
+            articulation_dvi_host = True
+            articulation_dvi_replaces_joint_pgs = False
+            articulation_dvi_host_solver = "device_block_sparse"
+            articulation_dvi_stride = self.articulation_coarse_stride
+            cache_articulation_topology = True
 
         #: Opt-in per-column wall-clock profiler. When ``True``, PGS
         #: dispatches atomic-add their elapsed us into the column's
@@ -919,6 +959,7 @@ class PhoenXWorld:
         self.articulation_topology: ArticulationTopology | None = None
         self.articulation_system: PrefactorizedArticulationSystem | None = None
         self.articulation_device_system: ArticulationDeviceSystem | None = None
+        self.articulation_coarse_setup: ArticulationCoarseSetup | None = None
         self.articulation_dvi_joint_mask: np.ndarray | None = None
         self._joint_pgs_enabled: wp.array[wp.int32] = wp.ones(
             max(1, self.num_joints), dtype=wp.int32, device=self.device
@@ -1966,6 +2007,7 @@ class PhoenXWorld:
         self.articulation_topology = None
         self.articulation_system = None
         self.articulation_device_system = None
+        self.articulation_coarse_setup = None
         self.articulation_dvi_joint_mask = None
         try:
             body1_np = body1.numpy()
@@ -2022,10 +2064,25 @@ class PhoenXWorld:
             d6_limit_count=d6_limit_count_np,
         )
         self.articulation_topology = topology
-        self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)
-        self.articulation_device_system = ArticulationDeviceSystem.from_topology(
-            topology, self.device, self.articulation_system.symbolic
-        )
+        if self.articulation_coarse_mode is None:
+            self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)
+            symbolic = self.articulation_system.symbolic
+        else:
+            setup = build_articulation_coarse_setup(
+                topology,
+                mode=self.articulation_coarse_mode,
+                color_sweeps=self.articulation_coarse_color_sweeps,
+                device=self.device,
+            )
+            self.articulation_coarse_setup = setup
+            symbolic = setup.symbolic
+            self.articulation_coarse_mode = setup.mode
+            self.articulation_system = PrefactorizedArticulationSystem(
+                topology=topology,
+                symbolic=symbolic,
+                diagonal_regularization=self.articulation_coarse_regularization,
+            )
+        self.articulation_device_system = ArticulationDeviceSystem.from_topology(topology, self.device, symbolic)
 
     @staticmethod
     def _normalize_articulation_dvi_host_solver(value: str) -> str:
@@ -2088,7 +2145,10 @@ class PhoenXWorld:
                 diagonal_regularization=self.articulation_system.diagonal_regularization,
                 device=self.device,
             )
-            device_system.solve_block_sparse_matrix(device=self.device)
+            if self.articulation_coarse_setup is None:
+                device_system.solve_block_sparse_matrix(device=self.device)
+            else:
+                self.articulation_coarse_setup.solver.solve(device_system, device=self.device)
         else:
             device_system.assemble_dense_matrix(
                 self.bodies.inverse_mass, self.bodies.inverse_inertia_world, device=self.device

@@ -165,6 +165,10 @@ class SolverPhoenX(SolverBase):
         articulation_dvi: bool = False,
         articulation_dvi_replaces_joint_pgs: bool | None = None,
         articulation_dvi_solver: str = "block_sparse",
+        articulation_coarse_mode: str | None = None,
+        articulation_coarse_stride: int = 2,
+        articulation_coarse_color_sweeps: int = 16,
+        articulation_coarse_regularization: float = 1.0e-3,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -224,6 +228,12 @@ class SolverPhoenX(SolverBase):
                 :class:`PhoenXWorld`. ``"block_sparse"`` is the robust
                 validation path for cyclic full-coordinate mechanisms;
                 ``"device_block_sparse"`` is the graph-friendly device path.
+            articulation_coarse_mode: Optional bilateral PGS coarse
+                correction: ``"auto"``, ``"path"``, ``"tree"``, or ``"graph"``.
+            articulation_coarse_stride: Coarse-correction substep cadence.
+            articulation_coarse_color_sweeps: Fixed coarse block-color sweeps.
+            articulation_coarse_regularization: Coarse-system diagonal
+                regularization.
         """
         super().__init__(model)
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -391,7 +401,11 @@ class SolverPhoenX(SolverBase):
             articulation_dvi_host=bool(articulation_dvi),
             articulation_dvi_replaces_joint_pgs=articulation_dvi_replaces_joint_pgs,
             articulation_dvi_host_solver=articulation_dvi_solver,
-            cache_articulation_topology=bool(articulation_dvi),
+            articulation_coarse_mode=articulation_coarse_mode,
+            articulation_coarse_stride=articulation_coarse_stride,
+            articulation_coarse_color_sweeps=articulation_coarse_color_sweeps,
+            articulation_coarse_regularization=articulation_coarse_regularization,
+            cache_articulation_topology=bool(articulation_dvi or articulation_coarse_mode),
             device=self.device,
         )
 

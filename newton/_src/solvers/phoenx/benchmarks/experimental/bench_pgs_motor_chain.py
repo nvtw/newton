@@ -24,7 +24,6 @@ from newton._src.solvers.phoenx.benchmarks.experimental.balanced_sparse_solve im
     solve_balanced_sparse_matrix,
 )
 from newton._src.solvers.phoenx.benchmarks.experimental.block_path_solve import solve_block_path_matrix
-from newton._src.solvers.phoenx.benchmarks.experimental.coarse_path_solve import CoarsePathSolver
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.examples import example_motorized_hinge_chain as scene
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
@@ -73,6 +72,10 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
         articulation_dvi_host_solver="device_block_sparse",
         articulation_dvi_stride=args.dvi_stride,
         articulation_dvi_relaxation=args.dvi_relaxation,
+        articulation_coarse_mode="path" if args.dvi_coarse_sgs else None,
+        articulation_coarse_stride=args.dvi_stride,
+        articulation_coarse_color_sweeps=args.dvi_coarse_color_sweeps,
+        articulation_coarse_regularization=args.dvi_regularization,
         device=device,
     )
     joint_arrays = scene._build_joint_arrays(device)
@@ -90,7 +93,7 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
             replicated[name] = wp.array(values, dtype=array.dtype, device=device)
         joint_arrays = replicated
     world.initialize_actuated_double_ball_socket_joints(**joint_arrays)
-    if args.global_corrections > 0 or args.dvi_every_substep:
+    if (args.global_corrections > 0 or args.dvi_every_substep) and not args.dvi_coarse_sgs:
         topology = world.articulation_topology
         if topology is None:
             raise RuntimeError("failed to cache articulation topology")
@@ -105,15 +108,6 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
         system = world.articulation_device_system
         if args.dvi_path_megakernel:
             system.solve_block_sparse_matrix = lambda *, device=None: solve_block_path_matrix(system, device=device)
-        elif args.dvi_coarse_sgs:
-            coarse_solver = CoarsePathSolver(
-                system.block_count,
-                int(topology.active_row_counts[0]),
-                args.dvi_coarse_color_sweeps,
-                device,
-                path_count=args.num_worlds,
-            )
-            system.solve_block_sparse_matrix = lambda *, device=None: coarse_solver.solve(system, device=device)
         elif args.dvi_fused_balanced:
             system.solve_block_sparse_matrix = lambda *, device=None: solve_balanced_sparse_matrix(
                 system, device=device
@@ -122,7 +116,7 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
             raise RuntimeError("failed to cache articulation system")
         world.articulation_system.diagonal_regularization = args.dvi_regularization
         if args.dvi_factor_refresh > 1:
-            if args.dvi_path_megakernel or args.dvi_coarse_sgs:
+            if args.dvi_path_megakernel:
                 raise ValueError("factor reuse does not support natural-path experimental solvers")
 
             def solve_with_reused_factors(

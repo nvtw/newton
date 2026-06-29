@@ -12,15 +12,9 @@ import time
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.articulations.device import ArticulationDeviceSystem
-from newton._src.solvers.phoenx.articulations.symbolic import compute_block_sparse_symbolic
 from newton._src.solvers.phoenx.benchmarks.experimental.analyze_pgs_branched_tree import _tree_edges
 from newton._src.solvers.phoenx.benchmarks.experimental.bench_pgs_motor_chain import (
     _initialize_static_partition,
-)
-from newton._src.solvers.phoenx.benchmarks.experimental.coarse_aggregate_solve import (
-    CoarseAggregateSolver,
-    parent_aggregate_mapping,
 )
 from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_STATIC, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import JOINT_MODE_BALL_SOCKET
@@ -68,6 +62,10 @@ def _make_realistic_world(args: argparse.Namespace, device, body1, body2, depth)
         articulation_dvi_replaces_joint_pgs=False,
         articulation_dvi_host_solver="device_block_sparse",
         articulation_dvi_stride=args.coarse_stride,
+        articulation_coarse_mode="tree" if args.coarse else None,
+        articulation_coarse_stride=args.coarse_stride,
+        articulation_coarse_color_sweeps=args.coarse_color_sweeps,
+        articulation_coarse_regularization=args.coarse_regularization,
         device=device,
     )
     anchor_offset = motor_scene._CAPSULE_RADIUS
@@ -116,31 +114,12 @@ def _build_world(args: argparse.Namespace, device):
                 "articulation_dvi_replaces_joint_pgs": False,
                 "articulation_dvi_host_solver": "device_block_sparse",
                 "articulation_dvi_stride": args.coarse_stride,
+                "articulation_coarse_mode": "tree" if args.coarse else None,
+                "articulation_coarse_stride": args.coarse_stride,
+                "articulation_coarse_color_sweeps": args.coarse_color_sweeps,
+                "articulation_coarse_regularization": args.coarse_regularization,
             },
         )
-    if args.coarse:
-        topology = world.articulation_topology
-        symbolic = compute_block_sparse_symbolic(
-            topology.active_body1,
-            topology.active_body2,
-            topology.active_row_counts,
-            use_meca=False,
-        )
-        system = ArticulationDeviceSystem.from_topology(topology, device, symbolic)
-        world.articulation_device_system = system
-        if world.articulation_system is None:
-            raise RuntimeError("branched benchmark requires an articulation system")
-        world.articulation_system.diagonal_regularization = args.coarse_regularization
-        mapping = parent_aggregate_mapping(body1, body2, depth)
-        aggregate = CoarseAggregateSolver(
-            mapping,
-            symbolic.n_off_row_idx[: symbolic.nnz_n],
-            symbolic.n_off_col_idx[: symbolic.nnz_n],
-            rows=int(topology.active_row_counts[0]),
-            color_sweeps=args.coarse_color_sweeps,
-            device=device,
-        )
-        system.solve_block_sparse_matrix = lambda *, device=None: aggregate.solve(system, device=device)
     return world
 
 
