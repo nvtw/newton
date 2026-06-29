@@ -553,9 +553,10 @@ class ArticulationDeviceSystem:
         inverse_mass: wp.array,
         inverse_inertia_world: wp.array,
         *,
+        solution_scale: float = 1.0,
         device=None,
     ) -> None:
-        """Apply ``M^-1 J^T solution`` to body velocities."""
+        """Apply scaled ``M^-1 J^T solution`` to body velocities."""
         if self.total_rows <= 0:
             return
         wp.launch(
@@ -571,6 +572,7 @@ class ArticulationDeviceSystem:
                 self.row_to_active_block,
                 inverse_mass,
                 inverse_inertia_world,
+                wp.float32(solution_scale),
                 wp.int32(self.total_rows),
             ],
             outputs=[bodies.velocity, bodies.angular_velocity],
@@ -1245,6 +1247,7 @@ def _apply_articulation_solution_kernel(
     row_to_active_block: wp.array[wp.int32],
     inverse_mass: wp.array[wp.float32],
     inverse_inertia_world: wp.array[inertia_sym6],
+    solution_scale: wp.float32,
     total_rows: wp.int32,
     velocity: wp.array[wp.vec3f],
     angular_velocity: wp.array[wp.vec3f],
@@ -1254,7 +1257,7 @@ def _apply_articulation_solution_kernel(
         return
 
     block = row_to_active_block[row]
-    lam = wp.clamp(solution[row], solution_lower[row], solution_upper[row])
+    lam = solution_scale * wp.clamp(solution[row], solution_lower[row], solution_upper[row])
     b1 = body1[block]
     b2 = body2[block]
     if b1 >= 0:

@@ -161,12 +161,66 @@ def _natural_ordering(graph: ConstraintGraph) -> tuple[list[int], list[set[tuple
     return order, fill_per_pivot
 
 
+def _parallel_path_ordering(graph: ConstraintGraph) -> tuple[list[int], list[set[tuple[int, int]]]]:
+    """Order disjoint paths by repeated odd-node elimination."""
+    unvisited = set(range(graph.num_nodes))
+    paths: list[list[int]] = []
+    while unvisited:
+        component: set[int] = set()
+        pending = [min(unvisited)]
+        while pending:
+            node = pending.pop()
+            if node in component:
+                continue
+            component.add(node)
+            pending.extend(graph.neighbors(node) - component)
+        unvisited -= component
+        if len(component) > 1 and all(len(graph.neighbors(node) & component) == 2 for node in component):
+            return _meca_ordering(graph)
+        if any(len(graph.neighbors(node) & component) > 2 for node in component):
+            return _meca_ordering(graph)
+        endpoints = sorted(node for node in component if len(graph.neighbors(node) & component) <= 1)
+        start = endpoints[0]
+        path: list[int] = []
+        previous = -1
+        node = start
+        while node >= 0:
+            path.append(node)
+            candidates = sorted((graph.neighbors(node) & component) - {previous})
+            previous, node = node, candidates[0] if candidates else -1
+        paths.append(path)
+
+    order: list[int] = []
+    while any(len(path) > 1 for path in paths):
+        for path in paths:
+            order.extend(path[1::2])
+        paths = [path[::2] for path in paths]
+    order.extend(path[0] for path in paths if path)
+
+    fill_per_pivot: list[set[tuple[int, int]]] = []
+    remaining = set(range(graph.num_nodes))
+    work_graph = graph.copy()
+    for pivot in order:
+        neighbors = sorted(work_graph.neighbors(pivot) & remaining)
+        fill_edges: set[tuple[int, int]] = set()
+        for i, n1 in enumerate(neighbors):
+            for n2 in neighbors[i + 1 :]:
+                if n2 not in work_graph.neighbors(n1):
+                    edge = (min(n1, n2), max(n1, n2))
+                    fill_edges.add(edge)
+                    work_graph.add_edge(*edge)
+        fill_per_pivot.append(fill_edges)
+        remaining.remove(pivot)
+    return order, fill_per_pivot
+
+
 def compute_block_sparse_symbolic(
     body1: np.ndarray,
     body2: np.ndarray,
     block_row_counts: np.ndarray,
     *,
     use_meca: bool = True,
+    use_parallel_path_ordering: bool = False,
 ) -> BlockSparseSymbolic:
     """Compute symbolic factorization for active articulation blocks.
 
@@ -175,6 +229,8 @@ def compute_block_sparse_symbolic(
         body2: Child body index per active block, ``-1`` for static.
         block_row_counts: Live equality row count per active block.
         use_meca: Use MECA ordering instead of natural block order.
+        use_parallel_path_ordering: Use logarithmic-depth ordering for disjoint
+            path graphs, falling back to MECA for other graph topologies.
 
     Returns:
         Symbolic factorization data in pivot order.
@@ -196,7 +252,10 @@ def compute_block_sparse_symbolic(
     b2_active = b2[active]
     row_counts_active = row_counts[active]
     graph = build_constraint_graph(b1_active, b2_active)
-    order, fill_per_pivot = _meca_ordering(graph) if use_meca else _natural_ordering(graph)
+    if use_parallel_path_ordering:
+        order, fill_per_pivot = _parallel_path_ordering(graph)
+    else:
+        order, fill_per_pivot = _meca_ordering(graph) if use_meca else _natural_ordering(graph)
     pivot_local = np.asarray(order, dtype=np.int32)
     pivot_order = active[pivot_local].astype(np.int32)
 

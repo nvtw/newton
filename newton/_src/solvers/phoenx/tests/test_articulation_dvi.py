@@ -336,6 +336,19 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertEqual(symbolic.num_levels, 3)
         np.testing.assert_array_equal(symbolic.parent, np.array([1, 2, -1], dtype=np.int32))
 
+    def test_symbolic_parallel_path_ordering_has_logarithmic_depth(self):
+        block_count = 8
+        symbolic = compute_block_sparse_symbolic(
+            np.array([-1, *range(1, block_count)], dtype=np.int32),
+            np.arange(1, block_count + 1, dtype=np.int32),
+            np.full(block_count, 5, dtype=np.int32),
+            use_parallel_path_ordering=True,
+        )
+
+        np.testing.assert_array_equal(symbolic.pivot_order, np.array([1, 3, 5, 7, 2, 6, 4, 0]))
+        self.assertEqual(symbolic.num_levels, 4)
+        self.assertEqual(symbolic.nnz_l, 11)
+
     def test_device_block_sparse_solve_uses_fill_blocks(self):
         topology = ArticulationTopology.from_host(
             np.array([0, 1, 2, 3], dtype=np.int32),

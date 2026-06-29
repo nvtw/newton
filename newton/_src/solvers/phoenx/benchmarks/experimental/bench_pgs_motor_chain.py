@@ -17,6 +17,13 @@ import time
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.articulations.device import ArticulationDeviceSystem
+from newton._src.solvers.phoenx.articulations.symbolic import compute_block_sparse_symbolic
+from newton._src.solvers.phoenx.benchmarks.experimental.balanced_sparse_solve import (
+    solve_balanced_sparse_factors,
+    solve_balanced_sparse_matrix,
+)
+from newton._src.solvers.phoenx.benchmarks.experimental.block_path_solve import solve_block_path_matrix
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.examples import example_motorized_hinge_chain as scene
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
@@ -41,10 +48,82 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
         mass_splitting=args.mass_splitting,
         max_colored_partitions=args.max_colored_partitions,
         prepare_refresh_stride=args.prepare_refresh_stride,
-        cache_articulation_topology=False,
+        cache_articulation_topology=args.global_corrections > 0 or args.dvi_every_substep,
+        articulation_dvi_host=args.dvi_every_substep,
+        articulation_dvi_replaces_joint_pgs=False,
+        articulation_dvi_host_solver="device_block_sparse",
+        articulation_dvi_stride=args.dvi_stride,
+        articulation_dvi_relaxation=args.dvi_relaxation,
         device=device,
     )
     world.initialize_actuated_double_ball_socket_joints(**scene._build_joint_arrays(device))
+    if args.global_corrections > 0 or args.dvi_every_substep:
+        topology = world.articulation_topology
+        if topology is None:
+            raise RuntimeError("failed to cache articulation topology")
+        symbolic = compute_block_sparse_symbolic(
+            topology.active_body1,
+            topology.active_body2,
+            topology.active_row_counts,
+            use_meca=not args.dvi_path_megakernel,
+            use_parallel_path_ordering=not args.dvi_path_megakernel,
+        )
+        world.articulation_device_system = ArticulationDeviceSystem.from_topology(topology, device, symbolic)
+        system = world.articulation_device_system
+        if args.dvi_path_megakernel:
+            system.solve_block_sparse_matrix = lambda *, device=None: solve_block_path_matrix(system, device=device)
+        elif args.dvi_fused_balanced:
+            system.solve_block_sparse_matrix = lambda *, device=None: solve_balanced_sparse_matrix(
+                system, device=device
+            )
+        if world.articulation_system is None:
+            raise RuntimeError("failed to cache articulation system")
+        world.articulation_system.diagonal_regularization = args.dvi_regularization
+        if args.dvi_factor_refresh > 1:
+            if args.dvi_path_megakernel:
+                raise ValueError("factor reuse does not support the natural-path megakernel")
+
+            def solve_with_reused_factors(
+                dt=None,
+                *,
+                alpha=0.0,
+                recovery_speed=-1.0,
+                solver=None,
+            ):
+                del solver
+                solve_dt = world.substep_dt if dt is None else float(dt)
+                system.populate_from_adbs_constraints(world.constraints, world.bodies, dt=solve_dt, device=device)
+                system.compute_residual(
+                    world.bodies,
+                    dt=solve_dt,
+                    alpha=float(alpha),
+                    recovery_speed=float(recovery_speed),
+                    device=device,
+                )
+                if world._current_substep_index % args.dvi_factor_refresh == 0:
+                    system.assemble_block_sparse_matrix(
+                        world.bodies.inverse_mass,
+                        world.bodies.inverse_inertia_world,
+                        diagonal_regularization=args.dvi_regularization,
+                        device=device,
+                    )
+                    system.factor_block_sparse_matrix(device=device)
+                if args.dvi_fused_balanced:
+                    solve_balanced_sparse_factors(system, device=device)
+                else:
+                    system.gather_block_rhs(device=device)
+                    system.solve_block_sparse_factors(device=device)
+                    system.scatter_block_solution(device=device)
+                system.apply_solution(
+                    world.bodies,
+                    world.bodies.inverse_mass,
+                    world.bodies.inverse_inertia_world,
+                    solution_scale=args.dvi_relaxation,
+                    device=device,
+                )
+                return True
+
+            world.solve_articulations_dvi_host = solve_with_reused_factors
     return world
 
 
@@ -106,7 +185,32 @@ def run(args: argparse.Namespace) -> dict[str, float | int | str | bool]:
     world = _build_world(args, device)
     _initialize_static_partition(world, args.ordering, args.stripe_width)
 
+    correction_dt = args.dt / args.substeps
     with wp.ScopedCapture(device=device) as capture:
+        for _ in range(args.global_corrections):
+            system = world.articulation_device_system
+            if system is None:
+                raise RuntimeError("global correction system is unavailable")
+            system.populate_from_adbs_constraints(world.constraints, world.bodies, dt=correction_dt, device=device)
+            system.compute_residual(
+                world.bodies,
+                dt=correction_dt,
+                recovery_speed=0.0,
+                device=device,
+            )
+            system.assemble_block_sparse_matrix(
+                world.bodies.inverse_mass,
+                world.bodies.inverse_inertia_world,
+                diagonal_regularization=args.global_regularization,
+                device=device,
+            )
+            system.solve_block_sparse_matrix(device=device)
+            system.apply_solution(
+                world.bodies,
+                world.bodies.inverse_mass,
+                world.bodies.inverse_inertia_world,
+                device=device,
+            )
         world.step(args.dt, reuse_partition=True)
     wp.capture_launch(capture.graph)
     wp.synchronize_device(device)
@@ -132,6 +236,15 @@ def run(args: argparse.Namespace) -> dict[str, float | int | str | bool]:
             "step_layout": args.step_layout,
             "ordering": args.ordering,
             "stripe_width": args.stripe_width,
+            "global_corrections": args.global_corrections,
+            "global_regularization": args.global_regularization,
+            "dvi_every_substep": args.dvi_every_substep,
+            "dvi_stride": args.dvi_stride,
+            "dvi_regularization": args.dvi_regularization,
+            "dvi_relaxation": args.dvi_relaxation,
+            "dvi_path_megakernel": args.dvi_path_megakernel,
+            "dvi_fused_balanced": args.dvi_fused_balanced,
+            "dvi_factor_refresh": args.dvi_factor_refresh,
             "elapsed_s": elapsed,
             "frame_time_ms": 1000.0 * elapsed / args.frames,
         }
@@ -155,6 +268,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mass-splitting", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-colored-partitions", type=int, default=12)
     parser.add_argument("--prepare-refresh-stride", type=int, default=1)
+    parser.add_argument("--global-corrections", type=int, default=0)
+    parser.add_argument("--global-regularization", type=float, default=0.1)
+    parser.add_argument("--dvi-every-substep", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--dvi-stride", type=int, default=1)
+    parser.add_argument("--dvi-regularization", type=float, default=1.0e-4)
+    parser.add_argument("--dvi-relaxation", type=float, default=1.0)
+    parser.add_argument("--dvi-path-megakernel", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--dvi-fused-balanced", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--dvi-factor-refresh", type=int, default=1)
     return parser.parse_args()
 
 

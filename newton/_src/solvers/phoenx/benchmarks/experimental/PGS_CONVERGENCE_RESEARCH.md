@@ -132,6 +132,54 @@ parallelism across islands/worlds while keeping the dependent short-chain solve
 inside one launch. More local coarse smoothing is work-inefficient and does not
 remove the measured long-wavelength mode.
 
+## Balanced direct-correction experiments
+
+The existing device block Cholesky uses MECA tie-breaking that peels this path
+from one end. The 96-block chain therefore has 96 dependency levels and a
+captured factor/solve replay costs 3.09 ms. Repeated odd-node elimination adds
+89 fill blocks (184 versus 95 strict-lower blocks) but reduces the elimination
+tree to eight levels with widths `[1, 1, 2, 4, 8, 16, 32, 32]`. The same replay
+then costs 0.502 ms, a 6.2x speedup, and its float32 residual is substantially
+better than the one-ended ordering.
+
+Used inside PhoenX small steps, this is a strong convergence oracle:
+
+| Correction schedule (100 substeps, one PGS sweep) | 30-frame result | Time |
+|---|---:|---:|
+| no global correction | about 1.85 m sag | about 3.25 ms/frame |
+| correction every two substeps, regularization 0.001 | 0.059 m sag, low speed | 30.8 ms/frame |
+| correction every ten, regularization 0.01, relaxation 0.1 | 1.79 m sag | 8.74 ms/frame |
+| correction every five, regularization 0.01, relaxation 0.1 | 1.74 m sag | 14.4 ms/frame |
+
+Full intermittent corrections are unstable because the native-float operator
+is still extremely ill-conditioned. Regularization and impulse relaxation
+bound them, but also make sparse corrections too weak to beat extra small
+steps at equal wall time. A once-per-frame bias-free correction likewise gives
+only a few percent sag improvement once regularized enough to remain physical.
+
+Two megakernel layouts were also measured. A one-thread natural-path block
+solve is exact but costs 76.2 ms/frame at stride two; warp-cooperative block
+algebra reduces this to 46.8 ms. A warp-fused balanced sparse solve retains
+pivot parallelism and reaches 27.7 ms, only 10% faster than the eight-level
+launch sequence. General sparse fusion inside the monolithic articulation
+module was rejected after module compilation exceeded three minutes.
+
+The direct correction proves that eliminating the long spatial mode solves the
+physical failure, but refactorization on every correction is too expensive.
+Modified-Newton factor reuse was also tested. Full stale-factor corrections
+produce NaNs after even one reuse interval. With regularization 0.01,
+relaxation 0.1, solves every two substeps, and refactorization every ten, the
+method is stable and reduces sag to 1.61 m, but costs 15.4 ms/frame. Fusing the
+reused forward/back substitutions lowers that to 13.7 ms/frame, still far
+worse than extra small steps at equal time. Reused direct factors are therefore
+not the production answer.
+
+Every correction remains a paired `J^T lambda` body impulse, so the direct
+experiments preserve internal linear/angular momentum by construction. The
+next implementation candidate should obtain the global-mode benefit without a
+full articulation factorization: a matrix-free factor-2 coarse correction with
+fixed local work and explicit momentum tests.
+
 ## Key sources
 
 - Wang, *A Chebyshev Semi-Iterative Approach for Accelerating Projective and
@@ -159,9 +207,7 @@ remove the measured long-wavelength mode.
 
 ## Next implementation gate
 
-Prototype a graph-captured coarse block-Thomas megakernel per articulation
-island, with depth-linear restriction/prolongation and colored PGS as the fine
-smoother. Measure native-float stability and equal-wall-time behavior across
-many independent chains, then verify impulse/body-state consistency before
-generalizing the coarse solve to branched bilateral islands and projected
-contact constraints.
+Prototype a graph-captured matrix-free factor-2 coarse correction that uses
+local Galerkin blocks and fixed work instead of a full articulation
+factorization. Measure equal-wall-time behavior, momentum conservation, and
+multi-world scaling before extending beyond bilateral path islands.

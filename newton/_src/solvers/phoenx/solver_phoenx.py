@@ -613,6 +613,8 @@ class PhoenXWorld:
         articulation_dvi_host: bool = False,
         articulation_dvi_replaces_joint_pgs: bool | None = None,
         articulation_dvi_host_solver: str = "block_sparse",
+        articulation_dvi_stride: int = 1,
+        articulation_dvi_relaxation: float = 1.0,
         cache_articulation_topology: bool = True,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
@@ -643,6 +645,9 @@ class PhoenXWorld:
                 validation path and is the most robust option for cyclic
                 full-coordinate mechanisms, while ``"dense"`` uses the dense
                 host LDLT fallback.
+            articulation_dvi_stride: Run the DVI correction every N substeps.
+                Defaults to every substep.
+            articulation_dvi_relaxation: Scale applied DVI impulses in ``(0, 1]``.
             cache_articulation_topology: Build and store DVI articulation
                 topology during joint initialization. Disable this for normal
                 PGS-only SolverPhoenX worlds to avoid DVI setup work.
@@ -901,6 +906,12 @@ class PhoenXWorld:
         self.articulation_dvi_host_solver: str = self._normalize_articulation_dvi_host_solver(
             articulation_dvi_host_solver
         )
+        self.articulation_dvi_stride = int(articulation_dvi_stride)
+        if self.articulation_dvi_stride < 1:
+            raise ValueError("articulation_dvi_stride must be at least 1")
+        self.articulation_dvi_relaxation = float(articulation_dvi_relaxation)
+        if not (0.0 < self.articulation_dvi_relaxation <= 1.0):
+            raise ValueError("articulation_dvi_relaxation must be in (0, 1]")
         self.cache_articulation_topology: bool = bool(cache_articulation_topology)
         # Topology-only full-coordinate articulation system. Built at joint
         # initialization and reused by the DVI articulation path as it is
@@ -2093,6 +2104,7 @@ class PhoenXWorld:
             self.bodies,
             self.bodies.inverse_mass,
             self.bodies.inverse_inertia_world,
+            solution_scale=self.articulation_dvi_relaxation,
             device=self.device,
         )
         return True
@@ -3030,10 +3042,11 @@ class PhoenXWorld:
             # integrate_positions stays in step() -- identical for every
             # dispatcher.
             idt = wp.float32(1.0 / self.substep_dt)
-            if self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs:
+            run_articulation_dvi = k % self.articulation_dvi_stride == 0
+            if run_articulation_dvi and self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs:
                 self._solve_articulations_dvi_host_for_step()
             self._dispatcher.solve(idt)
-            if self.articulation_dvi_host and not self.articulation_dvi_replaces_joint_pgs:
+            if run_articulation_dvi and self.articulation_dvi_host and not self.articulation_dvi_replaces_joint_pgs:
                 self._solve_articulations_dvi_host_for_step()
             self._integrate_positions()
             self._dispatcher.relax(idt)
