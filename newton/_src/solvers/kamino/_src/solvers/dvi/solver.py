@@ -29,6 +29,7 @@ from .kernels import (
     _color_dvi_contacts,
     _compute_dvi_contact_block_inverse,
     _compute_dvi_contact_jacobi_delta,
+    _compute_dvi_contact_velocities,
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
     _compute_dvi_status_residuals,
@@ -512,18 +513,18 @@ class DVISolver:
 
             if self._size.max_of_max_contacts > 0:
                 wp.launch(
-                    kernel=_compute_dvi_solution_vectors,
-                    dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+                    kernel=_compute_dvi_contact_velocities,
+                    dim=(self._size.num_worlds, 3 * self._size.max_of_max_contacts),
                     inputs=[
                         problem.data.dim,
                         problem.data.mio,
                         problem.data.vio,
+                        problem.data.nc,
+                        problem.data.ccgo,
                         problem.data.D,
                         problem.data.v_f,
-                        self._data.state.s,
-                        self._data.state.v_aug,
                         self._data.solution.lambdas,
-                        self._data.solution.v_plus,
+                        self._data.state.v_aug,
                     ],
                     device=self.device,
                 )

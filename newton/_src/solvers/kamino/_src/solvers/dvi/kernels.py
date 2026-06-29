@@ -927,6 +927,32 @@ def _apply_dvi_contact_jacobi_delta(
 
 
 @wp.kernel
+def _compute_dvi_contact_velocities(
+    # Inputs:
+    problem_dim: wp.array[int32],
+    problem_mio: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_D: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+    # Outputs:
+    state_v_aug: wp.array[float32],
+):
+    wid, tid = wp.tid()
+
+    if tid >= int32(3) * problem_nc[wid]:
+        return
+
+    ncts = problem_dim[wid]
+    mio = problem_mio[wid]
+    vio = problem_vio[wid]
+    row = problem_ccgo[wid] + tid
+    state_v_aug[vio + row] = _compute_row_velocity(ncts, mio, vio, row, problem_D, problem_v_f, solution_lambdas)
+
+
+@wp.kernel
 def _compute_dvi_solution_vectors(
     # Inputs:
     problem_dim: wp.array[int32],
