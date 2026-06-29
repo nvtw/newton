@@ -579,7 +579,7 @@ class DVISolver:
                         )
                         wp.launch(
                             kernel=_apply_dvi_contact_jacobi_delta,
-                            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+                            dim=(self._size.num_worlds, 3 * self._size.max_of_max_contacts),
                             inputs=[
                                 problem.data.dim,
                                 problem.data.mio,

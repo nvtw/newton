@@ -897,23 +897,21 @@ def _apply_dvi_contact_jacobi_delta(
     # Outputs:
     state_v_aug: wp.array[float32],
 ):
-    wid, row = wp.tid()
-
-    ncts = problem_dim[wid]
-    if row >= ncts:
-        return
+    wid, tid = wp.tid()
 
     cfg = solver_config[wid]
     if block_iteration >= cfg.block_iterations or contact_iteration >= cfg.contact_iterations:
         return
 
     nc = problem_nc[wid]
-    if nc == 0:
+    if tid >= int32(3) * nc:
         return
 
+    ncts = problem_dim[wid]
     vio = problem_vio[wid]
     mio = problem_mio[wid]
     ccgo = problem_ccgo[wid]
+    row = ccgo + tid
     row_mio = mio + ncts * row
 
     dv = float32(0.0)
