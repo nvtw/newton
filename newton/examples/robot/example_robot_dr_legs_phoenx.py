@@ -198,6 +198,7 @@ class Example:
 
         self.viewer = viewer
         self._articulation_dvi = bool(args.articulation_dvi)
+        self._articulation_coarse_mode = args.articulation_coarse_mode
 
         dr_legs = newton.ModelBuilder(up_axis=newton.Axis.Z)
         # Mirror the kamino DR Legs reference example: ``armature``
@@ -284,6 +285,10 @@ class Example:
             articulation_dvi=args.articulation_dvi,
             articulation_dvi_replaces_joint_pgs=args.articulation_dvi_replaces_joint_pgs,
             articulation_dvi_solver=args.articulation_dvi_solver,
+            articulation_coarse_mode=args.articulation_coarse_mode,
+            articulation_coarse_stride=args.articulation_coarse_stride,
+            articulation_coarse_color_sweeps=args.articulation_coarse_color_sweeps,
+            articulation_coarse_regularization=args.articulation_coarse_regularization,
         )
 
         self.state_0 = self.model.state()
@@ -491,6 +496,10 @@ class Example:
             dvi_mask = getattr(self.solver.world, "articulation_dvi_joint_mask", None)
             if dvi_mask is None or not bool(np.any(dvi_mask)):
                 raise AssertionError("PhoenX DVI articulation owns no joints")
+        if self._articulation_coarse_mode is not None:
+            setup = getattr(self.solver.world, "articulation_coarse_setup", None)
+            if setup is None:
+                raise AssertionError("PhoenX articulation coarse correction was not initialized")
 
     @staticmethod
     def create_parser():
@@ -596,6 +605,30 @@ class Example:
             default="block_sparse",
             choices=("device_block_sparse", "block_sparse", "dense"),
             help="DVI articulation numeric solver.",
+        )
+        parser.add_argument(
+            "--articulation-coarse-mode",
+            choices=("auto", "path", "tree", "graph"),
+            default=None,
+            help="Supplement joint PGS with a captured bilateral coarse correction.",
+        )
+        parser.add_argument(
+            "--articulation-coarse-stride",
+            type=int,
+            default=2,
+            help="Apply the articulation coarse correction every N substeps.",
+        )
+        parser.add_argument(
+            "--articulation-coarse-color-sweeps",
+            type=int,
+            default=16,
+            help="Fixed local block-color sweeps per coarse correction.",
+        )
+        parser.add_argument(
+            "--articulation-coarse-regularization",
+            type=float,
+            default=0.001,
+            help="Diagonal regularization for the articulation coarse system.",
         )
         parser.add_argument(
             "--armature",

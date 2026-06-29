@@ -349,6 +349,17 @@ PGS plus four-sweep graph correction has 0.0528 mm error and 0.204 m/s speed.
 Thus the bilateral coarse level coexists with warm-started unilateral fine PGS,
 while reducing both error and residual motion by more than 2.3x.
 
+## Heterogeneous robot smoke test
+
+The public DR Legs PhoenX example now exposes the coarse controls. This asset
+contains 31 bodies, 37 mixed joints, six closed loops, light parallel rods,
+stiff motors, mesh/plane contacts, and graph-captured animation updates. Auto
+mode resolves to graph interpolation and passes the 60-frame headless example
+test at 40 substeps, two PGS iterations, and four coarse sweeps. Single-world
+throughput is 259 FPS versus 293 FPS for the existing eight-iteration PGS
+configuration. This is a stability and integration result only; the example
+does not yet report row-error metrics suitable for an equal-quality claim.
+
 ## Key sources
 
 - Wang, *A Chebyshev Semi-Iterative Approach for Accelerating Projective and
