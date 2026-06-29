@@ -553,6 +553,8 @@ class LLTBlockedSolver(DirectSolver):
         block_size: int = 32,
         solve_block_dim: int = 128,
         factortize_block_dim: int = 128,
+        factorize_block_size: int | None = None,
+        solve_block_size: int | None = None,
         atol: float | None = None,
         rtol: float | None = None,
         ftol: float | None = None,
@@ -566,15 +568,21 @@ class LLTBlockedSolver(DirectSolver):
         self._y: wp.array | None = None
         """A flat array containing the intermediate results for the solve operation."""
 
-        # Cache the fixed block size
+        # The factorization and triangular-solve kernels operate on the same dense
+        # ``L`` matrix and only differ in how they tile the computation, so their
+        # block sizes are independent. Larger blocks favor the factorization (fewer
+        # sequential panel steps); the single-RHS solve favors smaller blocks. Both
+        # default to ``block_size`` for backward compatibility.
         self._block_size: int = block_size
+        self._factorize_block_size: int = factorize_block_size if factorize_block_size is not None else block_size
+        self._solve_block_size: int = solve_block_size if solve_block_size is not None else block_size
         self._solve_block_dim: int = solve_block_dim
         self._factortize_block_dim: int = factortize_block_dim
 
         # Create the factorization and solve kernels
-        self._factorize_kernel = factorize.make_llt_blocked_factorize_kernel(block_size)
-        self._solve_kernel = factorize.make_llt_blocked_solve_kernel(block_size)
-        self._solve_inplace_kernel = factorize.make_llt_blocked_solve_inplace_kernel(block_size)
+        self._factorize_kernel = factorize.make_llt_blocked_factorize_kernel(self._factorize_block_size)
+        self._solve_kernel = factorize.make_llt_blocked_solve_kernel(self._solve_block_size)
+        self._solve_inplace_kernel = factorize.make_llt_blocked_solve_inplace_kernel(self._solve_block_size)
 
         # Initialize base class members
         super().__init__(

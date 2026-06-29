@@ -1248,6 +1248,10 @@ class TestUSDKaminoSceneAPIImport(unittest.TestCase):
             hasattr(kamino_attr, "constraints_gamma")
             and isinstance(kamino_attr.constraints_gamma.numpy()[0], np.floating)
         )
+        self.assertTrue(
+            hasattr(kamino_attr, "constraints_contact_recovery_speed")
+            and isinstance(kamino_attr.constraints_contact_recovery_speed.numpy()[0], np.floating)
+        )
 
         self.assertTrue(
             hasattr(kamino_attr, "padmm_primal_tolerance")
@@ -1275,6 +1279,7 @@ class TestUSDKaminoSceneAPIImport(unittest.TestCase):
         self.assertAlmostEqual(kamino_attr.constraints_alpha.numpy()[0], 0.01)
         self.assertAlmostEqual(kamino_attr.constraints_beta.numpy()[0], 0.01)
         self.assertAlmostEqual(kamino_attr.constraints_gamma.numpy()[0], 0.01)
+        self.assertAlmostEqual(kamino_attr.constraints_contact_recovery_speed.numpy()[0], -1.0)
 
         self.assertAlmostEqual(kamino_attr.padmm_primal_tolerance.numpy()[0], 1e-6)
         self.assertAlmostEqual(kamino_attr.padmm_dual_tolerance.numpy()[0], 1e-6)
@@ -1300,6 +1305,7 @@ def PhysicsScene "PhysicsScene" (
     uniform float newton:kamino:constraints:alpha = 0.4
     uniform float newton:kamino:constraints:beta = 0.5
     uniform float newton:kamino:constraints:gamma = 0.6
+    uniform float newton:kamino:constraints:contactRecoverySpeed = 0.7
     uniform token newton:kamino:jointCorrection = "continuous"
 }
 """)
@@ -1314,6 +1320,7 @@ def PhysicsScene "PhysicsScene" (
         self.assertAlmostEqual(kamino_attr.constraints_alpha.numpy()[0], 0.4)
         self.assertAlmostEqual(kamino_attr.constraints_beta.numpy()[0], 0.5)
         self.assertAlmostEqual(kamino_attr.constraints_gamma.numpy()[0], 0.6)
+        self.assertAlmostEqual(kamino_attr.constraints_contact_recovery_speed.numpy()[0], 0.7)
 
         self.assertAlmostEqual(kamino_attr.padmm_primal_tolerance.numpy()[0], 0.1)
         self.assertAlmostEqual(kamino_attr.padmm_dual_tolerance.numpy()[0], 0.2)
@@ -1363,6 +1370,7 @@ def PhysicsScene "PhysicsScene" (
     uniform float newton:kamino:constraints:alpha = 0.4
     uniform float newton:kamino:constraints:beta = 0.5
     uniform float newton:kamino:constraints:gamma = 0.6
+    uniform float newton:kamino:constraints:contactRecoverySpeed = 0.7
     uniform token newton:kamino:jointCorrection = "continuous"
 }
 """)
@@ -1375,6 +1383,7 @@ def PhysicsScene "PhysicsScene" (
         self.assertAlmostEqual(config.constraints.alpha, 0.4)
         self.assertAlmostEqual(config.constraints.beta, 0.5)
         self.assertAlmostEqual(config.constraints.gamma, 0.6)
+        self.assertAlmostEqual(config.constraints.contact_recovery_speed, 0.7)
 
         self.assertEqual(config.padmm.max_iterations, 10)
         self.assertAlmostEqual(config.padmm.primal_tolerance, 0.1)
@@ -1402,6 +1411,7 @@ def PhysicsScene "PhysicsScene" (
     uniform float newton:kamino:constraints:alpha = 0.4
     uniform float newton:kamino:constraints:beta = 0.5
     uniform float newton:kamino:constraints:gamma = 0.6
+    uniform float newton:kamino:constraints:contactRecoverySpeed = 0.7
     uniform token newton:kamino:jointCorrection = "continuous"
 }
 """)
@@ -1414,6 +1424,7 @@ def PhysicsScene "PhysicsScene" (
         self.assertAlmostEqual(config.constraints.alpha, 0.4)
         self.assertAlmostEqual(config.constraints.beta, 0.5)
         self.assertAlmostEqual(config.constraints.gamma, 0.6)
+        self.assertAlmostEqual(config.constraints.contact_recovery_speed, 0.7)
 
         self.assertEqual(config.dynamics.preconditioning, False)
 

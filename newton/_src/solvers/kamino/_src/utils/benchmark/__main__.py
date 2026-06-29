@@ -273,12 +273,14 @@ def benchmark_run(args: argparse.Namespace):
     # Generate a set of solver configurations to benchmark over
     configs_set = make_benchmark_configs(include_default=False)
     msg.notif(f"config_names: {list(configs_set.keys())}")
-    render_solver_configs_table(configs=configs_set, groups=["sparse", "linear", "padmm"], to_console=True)
+    render_solver_configs_table(
+        configs=configs_set, groups=["solver", "sparse", "linear", "padmm", "dvi"], to_console=True
+    )
     if args.output == "full":
         render_solver_configs_table(
             configs=configs_set,
             path=os.path.join(RUN_OUTPUT_PATH, "solver_configs.txt"),
-            groups=["cts", "sparse", "linear", "padmm", "warmstart"],
+            groups=["solver", "cts", "sparse", "linear", "padmm", "dvi", "warmstart"],
             to_console=False,
         )
 

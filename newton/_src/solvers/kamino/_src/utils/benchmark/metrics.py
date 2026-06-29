@@ -257,6 +257,7 @@ class SolverMetrics:
         self.padmm_r_p: np.ndarray = np.zeros((num_problems, num_configs, num_steps), dtype=np.float32)
         self.padmm_r_d: np.ndarray = np.zeros((num_problems, num_configs, num_steps), dtype=np.float32)
         self.padmm_r_c: np.ndarray = np.zeros((num_problems, num_configs, num_steps), dtype=np.float32)
+        self.padmm_r_b: np.ndarray = np.zeros((num_problems, num_configs, num_steps), dtype=np.float32)
 
         # Linear solver metrics (placeholders for now)
         self.linear_solver_iters: np.ndarray = np.zeros((num_problems, num_configs, num_steps), dtype=np.float32)
@@ -268,6 +269,7 @@ class SolverMetrics:
         self.padmm_r_p_stats: StatsFloat | None = None
         self.padmm_r_d_stats: StatsFloat | None = None
         self.padmm_r_c_stats: StatsFloat | None = None
+        self.padmm_r_b_stats: StatsFloat | None = None
         self.linear_solver_iters_stats: StatsInteger | None = None
         self.linear_solver_r_error_stats: StatsFloat | None = None
 
@@ -277,6 +279,7 @@ class SolverMetrics:
         self.padmm_r_p_stats = StatsFloat(self.padmm_r_p, name="padmm_r_p")
         self.padmm_r_d_stats = StatsFloat(self.padmm_r_d, name="padmm_r_d")
         self.padmm_r_c_stats = StatsFloat(self.padmm_r_c, name="padmm_r_c")
+        self.padmm_r_b_stats = StatsFloat(self.padmm_r_b, name="padmm_r_b")
         # TODO: self.linear_solver_iters_stats = StatsInteger(self.linear_solver_iters, name="linear_solver_iters")
         # TODO: self.linear_solver_r_error_stats = StatsFloat(self.linear_solver_r_error, name="linear_solver_r_error")
 
@@ -454,6 +457,7 @@ class BenchmarkMetrics:
             self.solver_metrics.padmm_r_p[problem_idx, config_idx, step_idx] = solver_status_np["r_p"]
             self.solver_metrics.padmm_r_d[problem_idx, config_idx, step_idx] = solver_status_np["r_d"]
             self.solver_metrics.padmm_r_c[problem_idx, config_idx, step_idx] = solver_status_np["r_c"]
+            self.solver_metrics.padmm_r_b[problem_idx, config_idx, step_idx] = solver_status_np.get("r_b", 0.0)
         if self.physics_metrics is not None and solver is not None and solver.metrics is not None:
             r_eom_np = solver.metrics.data.r_eom.numpy().max(axis=0)
             r_kinematics_np = solver.metrics.data.r_kinematics.numpy().max(axis=0)
@@ -550,6 +554,7 @@ class BenchmarkMetrics:
                 datafile["Data/perstep/padmm/r_p"] = self.solver_metrics.padmm_r_p
                 datafile["Data/perstep/padmm/r_d"] = self.solver_metrics.padmm_r_d
                 datafile["Data/perstep/padmm/r_c"] = self.solver_metrics.padmm_r_c
+                datafile["Data/perstep/padmm/r_b"] = self.solver_metrics.padmm_r_b
             if self.physics_metrics is not None:
                 datafile["Data/perstep/physics/r_eom"] = self.physics_metrics.r_eom
                 datafile["Data/perstep/physics/r_kinematics"] = self.physics_metrics.r_kinematics
@@ -609,6 +614,11 @@ class BenchmarkMetrics:
                 self.solver_metrics.padmm_r_p = datafile[f"{solv_ns}r_p"][:, :, :].astype(np.float32)
                 self.solver_metrics.padmm_r_d = datafile[f"{solv_ns}r_d"][:, :, :].astype(np.float32)
                 self.solver_metrics.padmm_r_c = datafile[f"{solv_ns}r_c"][:, :, :].astype(np.float32)
+                r_b_path = f"{solv_ns}r_b"
+                if r_b_path in datafile:
+                    self.solver_metrics.padmm_r_b = datafile[r_b_path][:, :, :].astype(np.float32)
+                else:
+                    self.solver_metrics.padmm_r_b = np.zeros_like(self.solver_metrics.padmm_r_c)
             if has_physics_metrics:
                 phys_ns = "Data/perstep/physics/"
                 self.physics_metrics = PhysicsMetrics(1, 1, 1)  # Placeholder initialization to create the object
@@ -718,8 +728,8 @@ class BenchmarkMetrics:
 
     def render_padmm_metrics_table(self, path: str | None = None):
         """
-        Outputs a formatted table for each problem summarizing the PADMM
-        solver metrics (convergence, iterations, residuals) for each solver
+        Outputs a formatted table for each problem summarizing solver
+        metrics (convergence, iterations, residuals) for each solver
         configuration and problem, and optionally saves the table to a text
         file at the specified path.
 
@@ -728,12 +738,12 @@ class BenchmarkMetrics:
                 File path to save the table as a text file.
 
         Raises:
-            ValueError: If the PADMM solver metrics are not available.
+            ValueError: If the solver metrics are not available.
         """
         if self.solver_metrics is None:
-            raise ValueError("PADMM solver metrics are not available in this BenchmarkMetrics instance.")
+            raise ValueError("Solver metrics are not available in this BenchmarkMetrics instance.")
 
-        # For each problem, generate the table string for the PADMM solver metrics summary and print it to the console;
+        # For each problem, generate the table string for the solver metrics summary and print it to the console;
         for prob_idx, prob_name in enumerate(self._problem_names):
             problem_table_path = f"{path}_{prob_name}.txt" if path is not None else None
 
@@ -791,6 +801,15 @@ class BenchmarkMetrics:
                     color="green",
                 )
             )
+            cols.append(
+                ColumnGroup(
+                    header="Bilateral Residual (r_b)",
+                    subheaders=["median", "mean", "max", "min"],
+                    subfmt=[".3e", ".3e", ".3e", ".3e"],
+                    justify="left",
+                    color="yellow",
+                )
+            )
             rows: list[list[Any]] = []
             for config_idx, config_name in enumerate(self._config_names):
                 success_count = self.solver_metrics.padmm_success_stats.count_ones[prob_idx, config_idx]
@@ -825,14 +844,21 @@ class BenchmarkMetrics:
                             self.solver_metrics.padmm_r_c_stats.max[prob_idx, config_idx],
                             self.solver_metrics.padmm_r_c_stats.min[prob_idx, config_idx],
                         ],
+                        [
+                            self.solver_metrics.padmm_r_b_stats.median[prob_idx, config_idx],
+                            self.solver_metrics.padmm_r_b_stats.mean[prob_idx, config_idx],
+                            self.solver_metrics.padmm_r_b_stats.max[prob_idx, config_idx],
+                            self.solver_metrics.padmm_r_b_stats.min[prob_idx, config_idx],
+                        ],
                     ],
                 )
             render_subcolumn_table(
-                title=f"Solver Benchmark: PADMM Convergence - {prob_name}",
+                title=f"Solver Benchmark: Convergence - {prob_name}",
                 cols=cols,
                 rows=rows,
                 max_width=300,
                 path=problem_table_path,
+                to_console=True,
             )
 
     def render_physics_metrics_table(self, path: str | None = None):
@@ -1056,11 +1082,12 @@ class BenchmarkMetrics:
                 rows=rows,
                 max_width=650,
                 path=problem_table_path,
+                to_console=True,
             )
 
     def render_padmm_metrics_plots(self, path: str):
         """
-        Generates time-series plots of the PADMM solver metrics
+        Generates time-series plots of the solver metrics
         (convergence, iterations, residuals) across the simulation
         steps for each solver configuration and problem, and
         optionally saves the plots to a file at the specified path.
@@ -1070,39 +1097,38 @@ class BenchmarkMetrics:
                 Target file path of the generated plot image.\n
 
         Raises:
-            ValueError: If the PADMM solver metrics are not available.
+            ValueError: If the solver metrics are not available.
         """
-        # Ensure that the PADMM solver metrics are available before attempting to render the plots
+        # Ensure that solver metrics are available before attempting to render the plots
         if self.solver_metrics is None:
-            raise ValueError("PADMM solver metrics are not available in this BenchmarkMetrics instance.")
+            raise ValueError("Solver metrics are not available in this BenchmarkMetrics instance.")
 
         # Attempt to import matplotlib for plotting, and raise an informative error if it's not installed
         try:
             import matplotlib.pyplot as plt
         except Exception as e:
             raise ImportError(
-                "matplotlib is required to render PADMM metrics plots. Please install matplotlib and try again."
+                "matplotlib is required to render solver metrics plots. Please install matplotlib and try again."
             ) from e
 
-        # Generate time-series plots of the PADMM solver metrics across the simulation steps of each problem:
-        # - For each problem we create a figure
-        # - Each figure has a subplot for each PADMM metric in (iterations, r_p, r_d, r_c)
-        # - Within each subplot we plot a metric curve for each solver configuration
+        # Generate time-series plots of solver metrics across simulation steps.
         for prob_idx, prob_name in enumerate(self._problem_names):
-            fig, axs = plt.subplots(2, 2, figsize=(16, 12))
-            fig.suptitle(f"PADMM Metrics vs Simulation Steps - {prob_name}", fontsize=16)
+            fig, axs = plt.subplots(3, 2, figsize=(16, 16))
+            fig.suptitle(f"Solver Metrics vs Simulation Steps - {prob_name}", fontsize=16)
             titles = [
-                "PADMM Iterations",
-                "PADMM Primal Residual",
-                "PADMM Dual Residual",
-                "PADMM Complementary Residual",
+                "Solver Iterations",
+                "Primal Residual",
+                "Dual Residual",
+                "Complementary Residual",
+                "Bilateral Residual",
             ]
-            names = ["iterations", "r_p", "r_d", "r_c"]
+            names = ["iterations", "r_p", "r_d", "r_c", "r_b"]
             data = [
                 self.solver_metrics.padmm_iters[prob_idx, :, :],
                 self.solver_metrics.padmm_r_p[prob_idx, :, :],
                 self.solver_metrics.padmm_r_d[prob_idx, :, :],
                 self.solver_metrics.padmm_r_c[prob_idx, :, :],
+                self.solver_metrics.padmm_r_b[prob_idx, :, :],
             ]
             for metric_idx, (title, name, array) in enumerate(zip(titles, names, data, strict=True)):
                 ax = axs[metric_idx // 2, metric_idx % 2]
@@ -1118,6 +1144,7 @@ class BenchmarkMetrics:
                 ax.set_xlabel("Simulation Step")
                 ax.set_ylabel(name)
                 ax.grid()
+            axs[2, 1].axis("off")
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
             # Get handles/labels from any one subplot (since they are identical)

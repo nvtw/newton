@@ -1,0 +1,701 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""DVI-style projected solver for Kamino's dual dynamics system."""
+
+from __future__ import annotations
+
+import warp as wp
+
+from ....config import DVISolverConfig
+from ...core.data import DataKamino
+from ...core.model import ModelKamino
+from ...core.size import SizeKamino
+from ...core.types import float32, to_warp_int32_array
+from ...dynamics.dual import DualProblem
+from ...geometry.contacts import ContactsKamino
+from ...kinematics.limits import LimitsKamino
+from ...linalg import DenseLinearOperatorData, DenseSquareMultiLinearInfo, LLTBlockedSolver
+from ..padmm.kernels import (
+    _apply_dual_preconditioner_to_solution,
+    _warmstart_contact_constraints,
+    _warmstart_joint_constraints,
+    _warmstart_limit_constraints,
+)
+from ..padmm.types import PADMMWarmStartMode
+from .kernels import (
+    _apply_dvi_contact_jacobi_delta,
+    _build_bilateral_rhs,
+    _color_dvi_contacts,
+    _compute_dvi_contact_block_inverse,
+    _compute_dvi_contact_jacobi_delta,
+    _compute_dvi_contact_velocities,
+    _compute_dvi_desaxce_corrections,
+    _compute_dvi_solution_vectors,
+    _compute_dvi_status_residuals,
+    _copy_bilateral_block,
+    _initialize_dvi_status,
+    _reset_dvi_solver_data,
+    _reset_dvi_status,
+    _scatter_bilateral_solution,
+    _set_dvi_bilateral_active_dim,
+    _set_dvi_direct_status_iterations,
+    _solve_dvi_contacts_colored_gs,
+    _solve_dvi_limits_pgs,
+    _solve_dvi_pgs,
+    _unprecondition_dvi_solution,
+)
+from .sparse import solve_sparse
+from .types import DVIConfigStruct, DVIData, convert_config_to_struct
+
+wp.set_module_options({"enable_backward": False})
+
+
+class DVISolver:
+    """Projected Gauss-Seidel DVI solver for Kamino ``DualProblem`` systems."""
+
+    Config = DVISolverConfig
+
+    def __init__(
+        self,
+        model: ModelKamino | None = None,
+        config: list[DVISolver.Config] | DVISolver.Config | None = None,
+        warmstart: PADMMWarmStartMode = PADMMWarmStartMode.NONE,
+        collect_info: bool = False,
+    ):
+        self._config: list[DVISolver.Config] = []
+        self._warmstart: PADMMWarmStartMode = PADMMWarmStartMode.NONE
+        self._collect_info: bool = False
+        self._size: SizeKamino | None = None
+        self._data: DVIData | None = None
+        self._bilateral_solver: LLTBlockedSolver | None = None
+        self._max_block_iterations: int = 1
+        self._max_contact_iterations: int = 1
+        self._max_iterations: int = 1
+        self._bilateral_solve_after_block: tuple[bool, ...] = ()
+        self._has_contact_block_preconditioner: bool = False
+        self._has_unilateral_constraints: bool = False
+        self._contact_bid_AB: wp.array | None = None
+        self._bilateral_nzb_pairs: tuple[wp.array, wp.array, wp.array, wp.array, wp.array, wp.array] | None = None
+        self._device: wp.DeviceLike = None
+
+        if model is not None:
+            self.finalize(model=model, config=config, warmstart=warmstart, collect_info=collect_info)
+
+    @property
+    def config(self) -> list[DVISolver.Config]:
+        """Host-side per-world DVI configs."""
+        return self._config
+
+    @property
+    def size(self) -> SizeKamino:
+        """Model size cache."""
+        return self._size
+
+    @property
+    def data(self) -> DVIData:
+        """Solver data arrays."""
+        if self._data is None:
+            raise RuntimeError("Solver data has not been allocated yet. Call `finalize()` first.")
+        return self._data
+
+    @property
+    def device(self) -> wp.DeviceLike:
+        """Device on which solver data is allocated."""
+        return self._device
+
+    def finalize(
+        self,
+        model: ModelKamino,
+        config: list[DVISolver.Config] | DVISolver.Config | None = None,
+        warmstart: PADMMWarmStartMode = PADMMWarmStartMode.NONE,
+        collect_info: bool = False,
+    ):
+        """Allocate DVI solver data for ``model``."""
+        if model is None or not isinstance(model, ModelKamino):
+            raise ValueError("A model of type `ModelKamino` must be provided.")
+
+        self._size = model.size
+        self._device = model.device
+        self._config = self._check_config(model, config)
+        self._warmstart = warmstart
+        self._collect_info = collect_info
+        self._max_iterations = max(c.max_iterations for c in self._config)
+        self._max_block_iterations = max(c.block_iterations for c in self._config)
+        self._max_contact_iterations = max(c.contact_iterations for c in self._config)
+        self._bilateral_solve_after_block = self._make_bilateral_solve_schedule(self._config)
+        self._has_contact_block_preconditioner = any(c.contact_block_preconditioner for c in self._config)
+        self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
+        self._bilateral_nzb_pairs = None
+        self._data = DVIData(size=self._size, device=self._device)
+        self._allocate_bilateral_solver(model)
+
+        configs = [convert_config_to_struct(c) for c in self._config]
+        with wp.ScopedDevice(self._device):
+            self._data.config = wp.array(configs, dtype=DVIConfigStruct)
+
+    def _make_bilateral_solve_schedule(self, configs: list[DVISolver.Config]) -> tuple[bool, ...]:
+        """Return host-side repeated bilateral solve points for direct-block DVI."""
+        return tuple(
+            any(next_block < c.block_iterations and next_block % c.bilateral_solve_period == 0 for c in configs)
+            for next_block in range(1, self._max_block_iterations)
+        )
+
+    def _should_solve_bilateral_after_block(self, block_iteration: int) -> bool:
+        """Whether the direct bilateral block should be re-solved after this block."""
+        if block_iteration < 0 or block_iteration >= len(self._bilateral_solve_after_block):
+            return False
+        return self._bilateral_solve_after_block[block_iteration]
+
+    def _allocate_bilateral_solver(self, model: ModelKamino):
+        """Allocate the reduced dense operator used for bilateral DVI solves."""
+        self._bilateral_solver = None
+        self._data.bilateral_operator = None
+        if model.size.sum_of_num_joint_cts == 0:
+            return
+
+        joint_cts_per_world = model.info.num_joint_cts.numpy().astype(int).tolist()
+        if any(njc <= 0 for njc in joint_cts_per_world):
+            return
+
+        mat_sizes = [njc * njc for njc in joint_cts_per_world]
+        mat_offsets = [0]
+        for size in mat_sizes[:-1]:
+            mat_offsets.append(mat_offsets[-1] + size)
+
+        operator = DenseLinearOperatorData()
+        operator.info = DenseSquareMultiLinearInfo()
+        operator.info.assign(
+            maxdim=model.info.num_joint_cts,
+            dim=model.info.num_joint_cts,
+            mio=to_warp_int32_array(mat_offsets, device=self._device),
+            vio=model.info.joint_cts_offset,
+            dtype=float32,
+            device=self._device,
+        )
+        operator.mat = wp.zeros(shape=(operator.info.total_mat_size,), dtype=float32, device=self._device)
+        self._data.bilateral_operator = operator
+        # The factorization and the single-RHS solve tile the same dense factor
+        # independently. A larger factorization block size cuts the panel count and
+        # measurably speeds up the once-per-step factorization. The solve keeps the
+        # smaller default tile for its single-column RHS, but uses more tile threads
+        # to better hide latency across DVI's repeated bilateral solves.
+        self._bilateral_solver = LLTBlockedSolver(
+            operator=operator,
+            device=self._device,
+            factorize_block_size=64,
+            solve_block_dim=256,
+        )
+
+    @staticmethod
+    def _check_config(
+        model: ModelKamino | None = None, config: list[DVISolver.Config] | DVISolver.Config | None = None
+    ) -> list[DVISolver.Config]:
+        if config is None:
+            config = [DVISolver.Config()] * (model.info.num_worlds if model else 1)
+        elif isinstance(config, DVISolver.Config):
+            config = [config] * (model.info.num_worlds if model else 1)
+        elif isinstance(config, list):
+            if model is not None and len(config) != model.info.num_worlds:
+                raise ValueError(f"Expected {model.info.num_worlds} configs, got {len(config)}")
+            if not all(isinstance(c, DVISolver.Config) for c in config):
+                raise TypeError("All configs must be instances of DVISolver.Config")
+        else:
+            raise TypeError(f"Expected a single object or list of `DVISolver.Config`, got {type(config)}")
+        return config
+
+    def set_contacts(self, contacts: ContactsKamino | None):
+        """Cache contact topology for graph-colored contact solves."""
+        if contacts is not None and contacts.model_max_contacts_host > 0:
+            self._contact_bid_AB = contacts.bid_AB
+        else:
+            self._contact_bid_AB = None
+
+    def reset(self, problem: DualProblem | None = None, world_mask: wp.array | None = None):
+        """Reset scratch state and cached solution data."""
+        self._data.state.reset()
+        if world_mask is None:
+            self._data.solution.zero()
+        else:
+            if problem is None:
+                raise ValueError("A `DualProblem` instance must be provided when a world mask is used.")
+            wp.launch(
+                kernel=_reset_dvi_solver_data,
+                dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+                inputs=[
+                    world_mask,
+                    problem.data.vio,
+                    problem.data.maxdim,
+                    self._data.solution.lambdas,
+                    self._data.solution.v_plus,
+                ],
+                device=self.device,
+            )
+
+    def coldstart(self):
+        """Prepare a cold-start solve."""
+        self._data.state.reset()
+        self._data.solution.zero()
+
+    def warmstart(
+        self,
+        problem: DualProblem,
+        model: ModelKamino,
+        data: DataKamino,
+        limits: LimitsKamino | None = None,
+        contacts: ContactsKamino | None = None,
+    ):
+        """Prepare a warm-start solve."""
+        self._data.state.reset()
+        self.set_contacts(contacts)
+
+        match self._warmstart:
+            case PADMMWarmStartMode.NONE:
+                self._data.solution.zero()
+            case PADMMWarmStartMode.INTERNAL:
+                self._warmstart_from_solution(problem)
+            case PADMMWarmStartMode.CONTAINERS:
+                self._warmstart_from_containers(problem, model, data, limits, contacts)
+            case _:
+                raise ValueError(f"Invalid warmstart mode: {self._warmstart}")
+
+    def solve(self, problem: DualProblem):
+        """Solve ``problem`` using a DVI-style projected method on Kamino's dual system."""
+        wp.launch(
+            kernel=_reset_dvi_status,
+            dim=self._size.num_worlds,
+            inputs=[self._data.status],
+            device=self.device,
+        )
+
+        if problem.sparse:
+            solve_sparse(self, problem)
+        elif self._has_contact_block_preconditioner and self._size.max_of_max_contacts > 0:
+            wp.launch(
+                kernel=_compute_dvi_contact_block_inverse,
+                dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+                inputs=[
+                    problem.data.dim,
+                    problem.data.mio,
+                    problem.data.nc,
+                    problem.data.ccgo,
+                    problem.data.cio,
+                    problem.data.D,
+                    self._data.config,
+                    self._data.state.contact_block_inv,
+                ],
+                device=self.device,
+            )
+
+        if not problem.sparse:
+            if self._bilateral_solver is not None and self._data.bilateral_operator is not None:
+                self._solve_with_bilateral_direct_block(problem)
+            else:
+                wp.launch(
+                    kernel=_solve_dvi_pgs,
+                    dim=self._size.num_worlds,
+                    inputs=[
+                        problem.data.dim,
+                        problem.data.mio,
+                        problem.data.vio,
+                        problem.data.njc,
+                        problem.data.nl,
+                        problem.data.nc,
+                        problem.data.lcgo,
+                        problem.data.ccgo,
+                        problem.data.cio,
+                        problem.data.mu,
+                        problem.data.D,
+                        problem.data.v_f,
+                        self._data.state.contact_block_inv,
+                        self._data.config,
+                        self._data.status,
+                        self._data.solution.lambdas,
+                    ],
+                    device=self.device,
+                )
+
+            wp.launch(
+                kernel=_compute_dvi_solution_vectors,
+                dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+                inputs=[
+                    problem.data.dim,
+                    problem.data.mio,
+                    problem.data.vio,
+                    problem.data.D,
+                    problem.data.v_f,
+                    self._data.state.s,
+                    self._data.state.v_aug,
+                    self._data.solution.lambdas,
+                    self._data.solution.v_plus,
+                ],
+                device=self.device,
+            )
+
+        if self._size.max_of_max_contacts > 0:
+            wp.launch(
+                kernel=_compute_dvi_desaxce_corrections,
+                dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+                inputs=[
+                    problem.data.nc,
+                    problem.data.ccgo,
+                    problem.data.cio,
+                    problem.data.vio,
+                    problem.data.mu,
+                    self._data.state.s,
+                    self._data.state.v_aug,
+                    self._data.solution.v_plus,
+                ],
+                device=self.device,
+            )
+
+        wp.launch(
+            kernel=_compute_dvi_status_residuals,
+            dim=self._size.num_worlds,
+            inputs=[
+                problem.data.dim,
+                problem.data.vio,
+                problem.data.njc,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.lcgo,
+                problem.data.ccgo,
+                problem.data.cio,
+                problem.data.mu,
+                self._data.config,
+                self._data.state.v_aug,
+                self._data.solution.lambdas,
+                self._data.status,
+            ],
+            device=self.device,
+        )
+
+        wp.launch(
+            kernel=_unprecondition_dvi_solution,
+            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+            inputs=[
+                problem.data.dim,
+                problem.data.vio,
+                problem.data.P,
+                self._data.state.s,
+                self._data.state.v_aug,
+                self._data.solution.lambdas,
+                self._data.solution.v_plus,
+            ],
+            device=self.device,
+        )
+
+    def _solve_bilateral_block(self, problem: DualProblem, active_dim: wp.array | None = None):
+        operator = self._data.bilateral_operator
+        state = self._data.state
+        wp.launch(
+            kernel=_build_bilateral_rhs,
+            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
+            inputs=[
+                problem.data.dim,
+                problem.data.mio,
+                problem.data.vio,
+                problem.data.njc,
+                problem.data.D,
+                problem.data.v_f,
+                operator.info.vio,
+                state.bilateral_preconditioner,
+                self._data.solution.lambdas,
+                state.bilateral_rhs,
+            ],
+            device=self.device,
+        )
+        full_dim = operator.info.dim
+        if active_dim is not None:
+            operator.info.dim = active_dim
+        try:
+            self._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
+        finally:
+            operator.info.dim = full_dim
+        wp.launch(
+            kernel=_scatter_bilateral_solution,
+            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
+            inputs=[
+                problem.data.vio,
+                problem.data.njc,
+                operator.info.vio,
+                state.bilateral_preconditioner,
+                state.bilateral_solution,
+                self._data.solution.lambdas,
+            ],
+            device=self.device,
+        )
+
+    def _factor_bilateral_block(self, problem: DualProblem):
+        operator = self._data.bilateral_operator
+        operator.info.dim = operator.info.maxdim
+        wp.launch(
+            kernel=_copy_bilateral_block,
+            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts * self._size.max_of_num_joint_cts),
+            inputs=[
+                problem.data.dim,
+                problem.data.mio,
+                problem.data.njc,
+                problem.data.D,
+                operator.info.mio,
+                operator.info.vio,
+                operator.mat,
+                self._data.state.bilateral_preconditioner,
+            ],
+            device=self.device,
+        )
+        self._bilateral_solver.compute(A=operator.mat)
+
+    def _solve_with_bilateral_direct_block(self, problem: DualProblem):
+        self._factor_bilateral_block(problem)
+        self._solve_bilateral_block(problem)
+        if not self._has_unilateral_constraints:
+            return
+
+        wp.launch(
+            kernel=_initialize_dvi_status,
+            dim=self._size.num_worlds,
+            inputs=[
+                self._data.config,
+                self._data.status,
+            ],
+            device=self.device,
+        )
+
+        wp.launch(
+            kernel=_set_dvi_bilateral_active_dim,
+            dim=self._size.num_worlds,
+            inputs=[
+                problem.data.njc,
+                problem.data.nl,
+                problem.data.nc,
+                self._data.state.bilateral_active_dim,
+            ],
+            device=self.device,
+        )
+
+        use_colored_contacts = (
+            self._size.max_of_max_contacts > 0 and self.device.is_cuda and self._contact_bid_AB is not None
+        )
+        if use_colored_contacts:
+            wp.launch(
+                kernel=_color_dvi_contacts,
+                dim=self._size.num_worlds,
+                inputs=[
+                    problem.data.nc,
+                    problem.data.cio,
+                    self._contact_bid_AB,
+                    self._data.state.contact_colors,
+                    self._data.state.contact_num_colors,
+                ],
+                device=self.device,
+            )
+
+        for block_iteration in range(self._max_block_iterations):
+            if self._size.max_of_max_limits > 0:
+                wp.launch(
+                    kernel=_solve_dvi_limits_pgs,
+                    dim=self._size.num_worlds,
+                    inputs=[
+                        problem.data.dim,
+                        problem.data.mio,
+                        problem.data.vio,
+                        problem.data.nl,
+                        problem.data.lcgo,
+                        problem.data.D,
+                        problem.data.v_f,
+                        block_iteration,
+                        self._data.config,
+                        self._data.status,
+                        self._data.solution.lambdas,
+                    ],
+                    device=self.device,
+                )
+
+            if self._size.max_of_max_contacts > 0:
+                wp.launch(
+                    kernel=_compute_dvi_contact_velocities,
+                    dim=(self._size.num_worlds, 3 * self._size.max_of_max_contacts),
+                    inputs=[
+                        problem.data.dim,
+                        problem.data.mio,
+                        problem.data.vio,
+                        problem.data.nc,
+                        problem.data.ccgo,
+                        problem.data.D,
+                        problem.data.v_f,
+                        self._data.solution.lambdas,
+                        self._data.state.v_aug,
+                    ],
+                    device=self.device,
+                )
+
+                if use_colored_contacts:
+                    wp.launch(
+                        kernel=_solve_dvi_contacts_colored_gs,
+                        dim=self._size.num_worlds * 64,
+                        inputs=[
+                            problem.data.dim,
+                            problem.data.mio,
+                            problem.data.vio,
+                            problem.data.nc,
+                            problem.data.ccgo,
+                            problem.data.cio,
+                            problem.data.mu,
+                            problem.data.D,
+                            block_iteration,
+                            self._data.state.contact_block_inv,
+                            self._data.state.contact_colors,
+                            self._data.state.contact_num_colors,
+                            self._data.config,
+                            self._data.state.v_aug,
+                            self._data.solution.lambdas,
+                        ],
+                        device=self.device,
+                        block_dim=64,
+                    )
+                else:
+                    for contact_iteration in range(self._max_contact_iterations):
+                        wp.launch(
+                            kernel=_compute_dvi_contact_jacobi_delta,
+                            dim=(self._size.num_worlds, self._size.max_of_max_contacts),
+                            inputs=[
+                                problem.data.dim,
+                                problem.data.mio,
+                                problem.data.vio,
+                                problem.data.nc,
+                                problem.data.ccgo,
+                                problem.data.cio,
+                                problem.data.mu,
+                                problem.data.D,
+                                block_iteration,
+                                contact_iteration,
+                                self._data.config,
+                                self._data.state.contact_block_inv,
+                                self._data.state.v_aug,
+                                self._data.solution.lambdas,
+                                self._data.state.scratch,
+                            ],
+                            device=self.device,
+                        )
+                        wp.launch(
+                            kernel=_apply_dvi_contact_jacobi_delta,
+                            dim=(self._size.num_worlds, 3 * self._size.max_of_max_contacts),
+                            inputs=[
+                                problem.data.dim,
+                                problem.data.mio,
+                                problem.data.vio,
+                                problem.data.nc,
+                                problem.data.ccgo,
+                                problem.data.D,
+                                block_iteration,
+                                contact_iteration,
+                                self._data.config,
+                                self._data.state.scratch,
+                                self._data.state.v_aug,
+                            ],
+                            device=self.device,
+                        )
+
+            if self._should_solve_bilateral_after_block(block_iteration):
+                self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
+
+        self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
+
+        wp.launch(
+            kernel=_set_dvi_direct_status_iterations,
+            dim=self._size.num_worlds,
+            inputs=[
+                problem.data.nl,
+                problem.data.nc,
+                self._data.config,
+                self._data.status,
+            ],
+            device=self.device,
+        )
+
+    def _warmstart_from_solution(self, problem: DualProblem):
+        wp.launch(
+            kernel=_apply_dual_preconditioner_to_solution,
+            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+            inputs=[
+                problem.data.dim,
+                problem.data.vio,
+                problem.data.P,
+                self._data.solution.lambdas,
+                self._data.solution.v_plus,
+            ],
+            device=self.device,
+        )
+
+    def _warmstart_from_containers(
+        self,
+        problem: DualProblem,
+        model: ModelKamino,
+        data: DataKamino,
+        limits: LimitsKamino | None = None,
+        contacts: ContactsKamino | None = None,
+    ):
+        self._data.solution.zero()
+        if model.size.sum_of_num_joints > 0:
+            wp.launch(
+                kernel=_warmstart_joint_constraints,
+                dim=model.size.sum_of_num_joints,
+                inputs=[
+                    model.time.dt,
+                    model.joints.wid,
+                    model.joints.num_dynamic_cts,
+                    model.joints.num_kinematic_cts,
+                    model.joints.dynamic_cts_offset_joint_cts,
+                    model.joints.kinematic_cts_offset_joint_cts,
+                    model.joints.dynamic_cts_offset_total_cts,
+                    model.joints.kinematic_cts_offset_total_cts,
+                    data.joints.lambda_j,
+                    problem.data.P,
+                    self._data.solution.lambdas,
+                    self._data.solution.lambdas,
+                    self._data.solution.v_plus,
+                ],
+                device=self.device,
+            )
+        if limits is not None and limits.model_max_limits_host > 0:
+            wp.launch(
+                kernel=_warmstart_limit_constraints,
+                dim=limits.model_max_limits_host,
+                inputs=[
+                    model.time.dt,
+                    model.info.total_cts_offset,
+                    data.info.limit_cts_group_offset,
+                    limits.model_active_limits,
+                    limits.wid,
+                    limits.lid,
+                    limits.reaction,
+                    limits.velocity,
+                    problem.data.P,
+                    self._data.solution.lambdas,
+                    self._data.solution.lambdas,
+                    self._data.solution.v_plus,
+                ],
+                device=self.device,
+            )
+        if contacts is not None and contacts.model_max_contacts_host > 0:
+            wp.launch(
+                kernel=_warmstart_contact_constraints,
+                dim=contacts.model_max_contacts_host,
+                inputs=[
+                    model.time.dt,
+                    model.info.total_cts_offset,
+                    data.info.contact_cts_group_offset,
+                    contacts.model_active_contacts,
+                    contacts.wid,
+                    contacts.cid,
+                    contacts.material,
+                    contacts.reaction,
+                    contacts.velocity,
+                    problem.data.P,
+                    self._data.solution.lambdas,
+                    self._data.solution.lambdas,
+                    self._data.solution.v_plus,
+                ],
+                device=self.device,
+            )
