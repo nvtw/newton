@@ -53,21 +53,35 @@ def box_face_seed(p: wp.vec3, half_extents: wp.vec3) -> tuple[wp.vec3, bool]:
     a component-wise clamp would instead bias the seed toward the edge and flip
     the normal sideways.
 
-    The seed is only *used* (second return value) when the partner lies outside the
-    box AND the blended seed is itself a valid interior point of the box. This is a
-    self-validating guard, not an aspect-ratio threshold:
+    The seed is only *used* (second return value) when all of the following hold,
+    a self-validating guard rather than an aspect-ratio threshold:
 
-    - Partner over a thin table's broad face (within or just past the footprint):
-      the kept in-plane coordinates are inside the large footprint, so the seed is
-      valid -> reseed, fixing the sideways-ray problem.
-    - Partner above a near-cube box, or far past a box edge: the kept in-plane
-      coordinate lies outside the (small) footprint, so the seed would be an
-      invalid exterior point -> keep the box center. This leaves ordinary boxes'
-      contact manifolds untouched (reseeding them would perturb stable stacks) and
-      avoids feeding MPR an exterior ``v0``.
+    1. The partner lies outside the box.
+    2. The partner is genuinely off to the *side* of the faced face: its in-plane
+       offset exceeds its distance along the face normal (the center-to-partner
+       ray is more than 45 deg off the face normal). This is precisely the regime
+       where the center ray points sideways and MPR/GJK can pick the wrong face.
+       A partner roughly *above* a face -- e.g. a box resting squarely on a stack
+       -- keeps the box center, so aligned/near-aligned box stacks are not
+       perturbed (reseeding them would shift the contact manifold and let stacks
+       drift).
+    3. The blended seed is itself a valid interior point of the box. A partner far
+       past a box edge would otherwise yield an exterior ``v0``; keeping the center
+       there avoids feeding MPR an invalid interior point.
 
-    The 1% blend doubles as the footprint margin: a partner up to ~1% past the
-    face edge still yields a valid (just-inside) seed, covering shallow overhangs.
+    So a partner over a thin table's broad face, off-center, reseeds (fixing the
+    sideways-ray problem); a partner above a near-cube box, squarely stacked, or
+    far past an edge keeps the box center. The 1% blend doubles as the footprint
+    margin: a partner up to ~1% past the face edge still yields a valid (just
+    inside) seed, covering shallow overhangs.
+
+    No aspect-ratio constant is needed because conditions 2 and 3 are self-scaling
+    and *jointly* restrict reseeding to flat boxes: ``sideways`` compares the
+    in-plane offset against ``|p[axis]|`` -- the box's own reach toward the contact
+    -- so for a compact box a partner must be more lateral than that reach to
+    qualify, which simultaneously pushes it past the footprint and makes the seed
+    invalid (condition 3). ``sideways and valid`` is therefore easy to satisfy for
+    a thin face and nearly impossible for a compact one, with no threshold.
 
     Args:
         p: Partner center in the box's local frame.
@@ -80,19 +94,26 @@ def box_face_seed(p: wp.vec3, half_extents: wp.vec3) -> tuple[wp.vec3, bool]:
     ry = wp.abs(p[1]) / half_extents[1]
     rz = wp.abs(p[2]) / half_extents[2]
     out = p
+    axis = int(0)
     if rx >= ry and rx >= rz:
+        axis = 0
         out[0] = wp.where(p[0] >= 0.0, half_extents[0], -half_extents[0])
     elif ry >= rz:
+        axis = 1
         out[1] = wp.where(p[1] >= 0.0, half_extents[1], -half_extents[1])
     else:
+        axis = 2
         out[2] = wp.where(p[2] >= 0.0, half_extents[2], -half_extents[2])
 
     seed = 0.99 * out  # blend toward the box center to stay strictly interior
     outside = rx > 1.0 or ry > 1.0 or rz > 1.0
+    # Off-center: in-plane offset exceeds the distance along the faced axis.
+    in_plane_sq = wp.length_sq(p) - p[axis] * p[axis]
+    sideways = in_plane_sq > p[axis] * p[axis]
     valid = (
         wp.abs(seed[0]) <= half_extents[0] and wp.abs(seed[1]) <= half_extents[1] and wp.abs(seed[2]) <= half_extents[2]
     )
-    return seed, outside and valid
+    return seed, outside and sideways and valid
 
 
 @wp.struct
