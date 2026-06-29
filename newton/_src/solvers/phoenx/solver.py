@@ -231,7 +231,9 @@ class SolverPhoenX(SolverBase):
             articulation_coarse_mode: Optional bilateral PGS coarse
                 correction: ``"auto"``, ``"path"``, ``"tree"``, or ``"graph"``.
             articulation_coarse_stride: Coarse-correction substep cadence.
+                Keep this at 2 for driven ill-conditioned mechanisms.
             articulation_coarse_color_sweeps: Fixed coarse block-color sweeps.
+                Use 16 for paths/trees and 4 for general graphs as starting points.
             articulation_coarse_regularization: Coarse-system diagonal
                 regularization.
         """

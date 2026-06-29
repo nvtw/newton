@@ -391,3 +391,21 @@ Measure longer contact-heavy and multi-world runs, then evaluate physical
 closed-loop mechanisms using sparse graph interpolation. Projected unilateral
 contacts remain fine-level PGS until a coarse active-set treatment demonstrates
 both complementarity safety and an equal-time benefit.
+## Recommended production recipe
+
+Start with articulation_coarse_mode=auto, correction stride two, diagonal
+regularization 0.001, and two ordinary symmetric PGS iterations. Use 16 coarse
+color sweeps for long paths and rooted trees. General cyclic graphs usually
+need only four sweeps; the 32-link closed-loop equal-time result uses four.
+
+The correction supplements rather than replaces PGS. Fine PGS continues to
+solve angular rows outside a mixed topology's common prefix, unilateral
+contacts, friction, limits, deformables, and all non-articulation constraints.
+Do not increase correction stride beyond two on a driven mechanism without a
+scene-specific stability run: stride three regressed the motor chain and stride
+four diverged on the closed loop.
+
+Current coarse kernels use one fixed CUDA block per packed path or one fixed
+block for a tree/general graph. Paths support 128 joints per island; aggregate
+spaces support at most 256 coarse blocks. Larger or unusually dense mechanisms
+need another packing level before this should become a universal default.
