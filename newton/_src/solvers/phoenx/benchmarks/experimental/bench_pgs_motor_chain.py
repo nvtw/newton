@@ -68,28 +68,34 @@ def _metrics(world: PhoenXWorld) -> dict[str, float | int | str | bool]:
     }
 
 
-def _initialize_static_partition(world: PhoenXWorld, ordering: str) -> None:
+def _initialize_static_partition(world: PhoenXWorld, ordering: str, stripe_width: int) -> None:
     """Build the fixed joint graph once and optionally install chain order."""
     world._rebuild_elements()
     world._partitioner.reset(world._elements, world._num_active_constraints)
     if world.step_layout == "single_world":
         if ordering != "greedy":
-            raise ValueError("chain ordering currently requires step_layout=multi_world")
+            raise ValueError("custom ordering currently requires step_layout=multi_world")
         world._partitioner.build_csr_greedy_with_jp_fallback(
             compute_family_starts=world._singleworld_needs_family_starts()
         )
     else:
         world._build_per_world_coloring()
-    if ordering == "chain":
+    if ordering != "greedy":
         count = world.num_joints
+        width = count if ordering == "chain" else stripe_width
+        if width < 2 or width > count:
+            raise ValueError(f"stripe width must be in [2, {count}], got {width}")
+        color = np.arange(count, dtype=np.int32) % width
+        permutation = np.argsort(color, kind="stable").astype(np.int32)
         ids = world._world_element_ids_by_color.numpy()
-        ids[:count] = np.arange(count, dtype=np.int32)
+        ids[:count] = permutation
         world._world_element_ids_by_color.assign(ids)
         starts = world._world_color_starts.numpy()
-        starts[0, : count + 1] = np.arange(count + 1, dtype=np.int32)
-        starts[0, count + 1 :] = count
+        color_count = np.bincount(color, minlength=width)
+        starts[0, : width + 1] = np.concatenate(([0], np.cumsum(color_count))).astype(np.int32)
+        starts[0, width + 1 :] = count
         world._world_color_starts.assign(starts)
-        world._world_num_colors.assign(np.array([count], dtype=np.int32))
+        world._world_num_colors.assign(np.array([width], dtype=np.int32))
     world._dispatcher.begin_step()
 
 
@@ -98,7 +104,7 @@ def run(args: argparse.Namespace) -> dict[str, float | int | str | bool]:
     if not device.is_cuda:
         raise RuntimeError("bench_pgs_motor_chain requires CUDA graph capture")
     world = _build_world(args, device)
-    _initialize_static_partition(world, args.ordering)
+    _initialize_static_partition(world, args.ordering, args.stripe_width)
 
     with wp.ScopedCapture(device=device) as capture:
         world.step(args.dt, reuse_partition=True)
@@ -125,6 +131,7 @@ def run(args: argparse.Namespace) -> dict[str, float | int | str | bool]:
             "max_colored_partitions": args.max_colored_partitions,
             "step_layout": args.step_layout,
             "ordering": args.ordering,
+            "stripe_width": args.stripe_width,
             "elapsed_s": elapsed,
             "frame_time_ms": 1000.0 * elapsed / args.frames,
         }
@@ -142,7 +149,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--velocity-iterations", type=int, default=1)
     parser.add_argument("--sor", type=float, default=1.0)
     parser.add_argument("--step-layout", choices=("single_world", "multi_world"), default="multi_world")
-    parser.add_argument("--ordering", choices=("greedy", "chain"), default="greedy")
+    parser.add_argument("--ordering", choices=("greedy", "striped", "chain"), default="greedy")
+    parser.add_argument("--stripe-width", type=int, default=8)
     parser.add_argument("--symmetric-sweep", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mass-splitting", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-colored-partitions", type=int, default=12)

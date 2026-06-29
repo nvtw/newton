@@ -33,6 +33,8 @@ The original 250-link, 500-substep, four-sweep example drooped 9.92 m after
 | 100 substeps x 4 sweeps | 4.52 m sag, 4.50 ms/frame | baseline |
 | 200 substeps x 2 sweeps | 1.51 m sag, 7.33 ms/frame | effective, costly |
 | mass splitting, one regular color | 4.06 m sag, 36.57 ms/frame and high residual speed | reject for chains |
+| cross-substep impulse prediction, beta 0.8 | 0.05% sag gain at one sweep, 6% slower | reject |
+| balanced 3-color, 8 sweeps | 4.13 m sag at 4.06 ms vs greedy 4-sweep 4.52 m at 4.39 ms | retain as scheduler candidate |
 | one topology level per joint | 4.35 m sag, 61.63 ms/frame | reject naive serialization |
 
 At 100 substeps, increasing PGS sweeps from 1 to 16 only reduced 30-frame sag
@@ -59,9 +61,11 @@ is the signature of a slow global mode, not a local row-solve deficiency.
    local/high-frequency error and solve an aggregated articulation/tree
    correction between sweep groups. Parallel prefix/tree contraction or a
    small block-tridiagonal coarse solve is preferable to one color per depth.
-4. **Batched bidirectional wavefronts.** Root-to-leaf and leaf-to-root levels
-   can propagate load, but only when many branches/worlds keep lanes occupied.
-   The naive single-chain version was 14x slower and is rejected.
+4. **Balanced cyclic/wavefront coloring.** Three equally sized colors on the
+   96-link chain are substantially cheaper than the imbalanced greedy layout,
+   allowing twice the sweeps at lower wall time. Generalization must preserve
+   independence and work on arbitrary graphs. Fully serial depth coloring is
+   still rejected.
 
 ### Secondary experiments
 
@@ -85,6 +89,8 @@ is the signature of a slow global mode, not a local row-solve deficiency.
 - naive sequential topology coloring destroys GPU utilization;
 - mass splitting targets parallel consistency/jitter and did not resolve this
   chain's global mode.
+- extrapolating converged warm-start impulses across tiny substeps was stable
+  but did not target the slow spatial mode.
 
 ## Key sources
 
