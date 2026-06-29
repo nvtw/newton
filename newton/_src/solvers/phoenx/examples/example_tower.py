@@ -132,6 +132,8 @@ class Example:
         self.sim_time = 0.0
         self.sim_substeps = 5
         self.solver_iterations = 5
+        self.solver_mode = str(getattr(args, "solver", "classic"))
+        self.max_colors = int(getattr(args, "max_colors", 10))
 
         self._build_scene()
 
@@ -305,7 +307,8 @@ class Example:
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
         self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
-        # Build the solver.
+        # Jacobi replaces one colored sweep with ``max_colors`` tiny steps.
+        solver_flavor = "simple" if self.solver_mode == "jacobi" else "standard"
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self.constraints,
@@ -315,7 +318,13 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
+            solver_flavor=solver_flavor,
+            jacobi_max_colors=self.max_colors,
             device=self.device,
+        )
+        print(
+            f"[PhoenX Tower] solver={self.solver_mode} "
+            f"base_substeps={self.world.base_substeps} effective_substeps={self.world.substeps}"
         )
 
         # Viewer set-up: single fixed camera outside the tower aiming
@@ -473,6 +482,21 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
+    parser.add_argument(
+        "--solver",
+        choices=("classic", "jacobi"),
+        default="classic",
+        help="Select graph-colored PGS or the uncolored scalar-row Jacobi solver.",
+    )
+    parser.add_argument(
+        "--max-colors",
+        type=int,
+        default=10,
+        help=(
+            "Estimated classic color count used by Jacobi: effective substeps "
+            "equal max-colors times the configured substeps (default: 10)."
+        ),
+    )
     parser.add_argument(
         "--grid-side",
         type=int,

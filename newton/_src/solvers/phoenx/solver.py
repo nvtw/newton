@@ -160,6 +160,8 @@ class SolverPhoenX(SolverBase):
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
+        solver_flavor: str = "standard",
+        jacobi_max_colors: int = 10,
         articulation_dvi: bool = False,
         articulation_dvi_replaces_joint_pgs: bool | None = None,
         articulation_dvi_solver: str = "block_sparse",
@@ -178,6 +180,11 @@ class SolverPhoenX(SolverBase):
                 conservative stride from the substep count and falls back
                 to ``1`` when cached prepare is unsupported. Pass ``1``
                 to force exact per-substep rebuilds.
+            solver_flavor: ``"standard"`` uses coloured PGS. ``"simple"``
+                uses uncoloured, one-thread-per-equation Jacobi.
+            jacobi_max_colors: Estimated maximum number of colors the classic
+                solver would require. The simple Jacobi flavor uses
+                ``substeps * jacobi_max_colors`` substeps. Defaults to 10.
             default_friction: Fallback when Contacts/shapes carry no material.
             step_layout: ``"multi_world"`` (many small worlds) or
                 ``"single_world"`` (a few big worlds).
@@ -346,6 +353,8 @@ class SolverPhoenX(SolverBase):
                 counts = np.bincount(sb, minlength=int(model.body_count))
                 has_compound_bodies = bool((counts > 1).any())
 
+        if solver_flavor not in ("standard", "simple"):
+            raise ValueError(f"solver_flavor must be 'standard' or 'simple', got {solver_flavor!r}")
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self._constraints,
@@ -368,6 +377,8 @@ class SolverPhoenX(SolverBase):
             enable_body_pair_grouping=has_compound_bodies and (step_layout == "single_world" or num_worlds == 1),
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
+            solver_flavor=solver_flavor,
+            jacobi_max_colors=jacobi_max_colors,
             mass_splitting_batch_size=mass_splitting_batch_size,
             partitioner_algorithm=partitioner_algorithm,
             enable_warm_start_coloring=enable_warm_start_coloring,

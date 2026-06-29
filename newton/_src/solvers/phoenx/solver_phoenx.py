@@ -140,6 +140,7 @@ from newton._src.solvers.phoenx.mass_splitting import (
 )
 from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
+from newton._src.solvers.phoenx.simple import SimplePhoenXDispatcher
 from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_apply_island_wake_kernel,
     _phoenx_apply_wake_flag_kernel,
@@ -615,6 +616,8 @@ class PhoenXWorld:
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
+        solver_flavor: str = "standard",
+        jacobi_max_colors: int = 10,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -650,6 +653,11 @@ class PhoenXWorld:
                 Pass ``1`` to force exact per-substep rebuilds. Contact
                 worlds currently support up to ``3``; joint-only worlds
                 may use larger values.
+            solver_flavor: ``"standard"`` selects coloured PGS;
+                ``"simple"`` selects uncoloured scalar-row Jacobi.
+            jacobi_max_colors: Estimated number of colored PGS partitions
+                replaced by each Jacobi step. The simple solver uses
+                ``substeps * jacobi_max_colors`` substeps. Defaults to 10.
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
             rigid_contact_max: Sizes per-contact state. ``0`` disables
                 contacts.
@@ -688,6 +696,11 @@ class PhoenXWorld:
             self.device = bodies.position.device
         else:
             self.device = wp.get_device(device)
+
+        valid_solver_flavors = ("standard", "simple")
+        if solver_flavor not in valid_solver_flavors:
+            raise ValueError(f"solver_flavor must be one of {valid_solver_flavors}, got {solver_flavor!r}")
+        self.solver_flavor = solver_flavor
 
         #: Opt-in per-column wall-clock profiler. When ``True``, PGS
         #: dispatches atomic-add their elapsed us into the column's
@@ -743,6 +756,18 @@ class PhoenXWorld:
         self.num_soft_hexahedra: int = int(num_soft_hexahedra)
         if self.num_soft_hexahedra < 0:
             raise ValueError(f"num_soft_hexahedra must be >= 0 (got {self.num_soft_hexahedra})")
+        if self.solver_flavor == "simple" and (
+            self.num_particles > 0
+            or self.num_cloth_triangles > 0
+            or self.num_cloth_bending > 0
+            or self.num_soft_tetrahedra > 0
+            or self.num_soft_hexahedra > 0
+        ):
+            raise NotImplementedError("solver_flavor='simple' currently supports rigid bodies only")
+        if self.solver_flavor == "simple" and float(sleeping_velocity_threshold) > 0.0:
+            raise NotImplementedError("solver_flavor='simple' does not yet support sleeping")
+        if self.solver_flavor == "simple" and articulation_dvi_host:
+            raise ValueError("solver_flavor='simple' cannot be combined with articulation_dvi_host")
         # Stamp the scene-wide ``has_position_level_writers`` flag on the
         # body container so :func:`body_set_access_mode` can warp-uniform
         # short-circuit in rigid-only scenes. Re-stamped by
@@ -790,9 +815,15 @@ class PhoenXWorld:
         # so distinct cloth tris don't collapse into one filter group.
         self._shape_filter_id: wp.array | None = None
 
-        self.substeps = int(substeps)
-        if self.substeps <= 0:
-            raise ValueError(f"substeps must be >= 1 (got {self.substeps})")
+        self.base_substeps = int(substeps)
+        if self.base_substeps <= 0:
+            raise ValueError(f"substeps must be >= 1 (got {self.base_substeps})")
+        self.jacobi_max_colors = int(jacobi_max_colors)
+        if self.jacobi_max_colors < 1:
+            raise ValueError(f"jacobi_max_colors must be >= 1 (got {self.jacobi_max_colors})")
+        self.substeps = self.base_substeps
+        if self.solver_flavor == "simple":
+            self.substeps *= self.jacobi_max_colors
         self.solver_iterations = int(solver_iterations)
         if self.solver_iterations < 1:
             raise ValueError(f"solver_iterations must be >= 1 (got {self.solver_iterations})")
@@ -1050,7 +1081,9 @@ class PhoenXWorld:
         # the per-world multi-world path uses a different kernel that
         # never reads the cache. Skip the allocation in that case.
         _warm_start_active: bool = bool(enable_warm_start_coloring) and step_layout == "single_world"
-        if self.partitioner_algorithm == "greedy":
+        if self.solver_flavor == "simple":
+            self._partitioner = None
+        elif self.partitioner_algorithm == "greedy":
             self._partitioner = IncrementalContactPartitioner(
                 max_num_interactions=self._constraint_capacity,
                 max_num_nodes=max(1, self.num_bodies + self.num_particles),
@@ -1335,7 +1368,11 @@ class PhoenXWorld:
         # Step-time dispatcher. Each (step_layout, mass_splitting)
         # combination has a dedicated class under :mod:`phoenx.dispatch`
         # so the hot path is straight-line with no capability checks.
-        if self.step_layout == "single_world":
+        if self.solver_flavor == "simple":
+            if self.mass_splitting_enabled:
+                raise ValueError("solver_flavor='simple' does not use mass splitting")
+            self._dispatcher = SimplePhoenXDispatcher(self)
+        elif self.step_layout == "single_world":
             if self.mass_splitting_enabled:
                 if self.mass_splitting_unrolled:
                     self._dispatcher = SingleWorldMassSplittingUnrolledDispatcher(self)
@@ -1350,7 +1387,8 @@ class PhoenXWorld:
 
         self._assert_invariants()
 
-        self._pre_compile_dispatch_kernels()
+        if self.solver_flavor == "standard":
+            self._pre_compile_dispatch_kernels()
 
     def _fast_tail_fixed_tpw(self) -> int:
         """Static kernel axis for fixed-tpw launches; 0 keeps dynamic lookup."""
@@ -2916,7 +2954,7 @@ class PhoenXWorld:
         # reused columns are exactly the prior substep's converged values.
         if not reuse_partition:
             self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
-            if self._ingest_scratch is not None:
+            if self.solver_flavor == "standard" and self._ingest_scratch is not None:
                 # Contacts begin after the joint + cloth-tri + cloth-bending
                 # + soft-tet blocks in the cid space. Contact cids are compacted
                 # every step, so use the stable shape-pair key for contact
@@ -2931,7 +2969,8 @@ class PhoenXWorld:
                     self._ingest_scratch.pair_shape_b,
                 )
 
-            self._rebuild_elements()
+            if self.solver_flavor == "standard":
+                self._rebuild_elements()
         # Kinematic prepare BEFORE the sleeping pass: the per-island
         # score kernel reads ``bodies.velocity`` and must see the
         # pose-target-derived velocity for kinematic movers, otherwise a
@@ -2940,7 +2979,9 @@ class PhoenXWorld:
         self._kinematic_prepare_step()
         if self._sleeping_enabled:
             self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
-        if self._constraint_capacity > 0:
+        if self.solver_flavor == "simple":
+            self._dispatcher.begin_step()
+        elif self._constraint_capacity > 0:
             if not reuse_partition:
                 self._partitioner.reset(self._elements, self._num_active_constraints)
                 if self.step_layout == "single_world":
@@ -4701,6 +4742,8 @@ class PhoenXWorld:
 
     def num_colors_used(self) -> int:
         """Number of graph colours from the last PGS. Triggers D2H copy."""
+        if self.solver_flavor == "simple":
+            return 0
         if self.step_layout == "single_world":
             return int(self._partitioner.num_colors.numpy()[0])
         return int(self._world_num_colors.numpy().max(initial=0))
@@ -4722,6 +4765,24 @@ class PhoenXWorld:
             timer_kwargs = self._gather_column_timers(num_contact_columns)
         else:
             timer_kwargs = {}
+
+        if self.solver_flavor == "simple":
+            per_world_num_colors = None
+            per_world_color_sizes = None
+            if self.step_layout != "single_world":
+                per_world_num_colors = [0] * self.num_worlds
+                per_world_color_sizes = [[] for _ in range(self.num_worlds)]
+            return self.StepReport(
+                num_colors=0,
+                color_sizes=[],
+                per_world_num_colors=per_world_num_colors,
+                per_world_color_sizes=per_world_color_sizes,
+                num_contact_columns=num_contact_columns,
+                num_joints=self.num_joints,
+                num_active_constraints=num_active,
+                max_body_degree=0,
+                **timer_kwargs,
+            )
 
         # Unified-node degree from the partitioner's adjacency CSR end array.
         # Rigid bodies occupy [0, num_bodies); particles follow after that.
