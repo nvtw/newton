@@ -40,23 +40,41 @@ from .types import GeoType
 
 
 @wp.func
-def project_point_to_box_face(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
-    """Project ``p`` onto the box face it points toward, keeping its other coords.
+def box_face_seed(p: wp.vec3, half_extents: wp.vec3) -> tuple[wp.vec3, bool]:
+    """MPR/GJK ``v0`` seed for a box, with a guard for when it is valid to use.
 
-    Used to seed MPR/GJK's ``v0`` for a box: the face is the one the ray from the
-    box center toward ``p`` exits through, i.e. ``argmax_i |p_i| / half_extents_i``.
-    Only that axis is snapped to the face; the in-plane coordinates of ``p`` are
-    kept, so the seed stays directly "under" the partner. That lateral alignment
-    is what keeps the initial ray ~normal to the contacting face even when the
-    partner overhangs the face edge (a flat face still rests against the partner
-    there), which a component-wise clamp to the box would lose.
+    The seed projects the partner center ``p`` onto the box face it points toward
+    (``argmax_i |p_i| / half_extents_i``, the face the ray from the box center
+    toward ``p`` exits through), snapping only that axis to the face and keeping
+    ``p``'s other two coordinates, then blending 1% toward the box center. Keeping
+    the in-plane coordinates leaves the seed directly "under" the partner, so the
+    initial ray stays ~normal to the contacting face even when the partner
+    overhangs the face edge (a flat face still rests against the partner there) —
+    a component-wise clamp would instead bias the seed toward the edge and flip
+    the normal sideways.
+
+    The seed is only *used* (second return value) when the partner lies outside the
+    box AND the blended seed is itself a valid interior point of the box. This is a
+    self-validating guard, not an aspect-ratio threshold:
+
+    - Partner over a thin table's broad face (within or just past the footprint):
+      the kept in-plane coordinates are inside the large footprint, so the seed is
+      valid -> reseed, fixing the sideways-ray problem.
+    - Partner above a near-cube box, or far past a box edge: the kept in-plane
+      coordinate lies outside the (small) footprint, so the seed would be an
+      invalid exterior point -> keep the box center. This leaves ordinary boxes'
+      contact manifolds untouched (reseeding them would perturb stable stacks) and
+      avoids feeding MPR an exterior ``v0``.
+
+    The 1% blend doubles as the footprint margin: a partner up to ~1% past the
+    face edge still yields a valid (just-inside) seed, covering shallow overhangs.
 
     Args:
-        p: Query point in the box's local frame (assumed outside the box).
+        p: Partner center in the box's local frame.
         half_extents: Box half-extents along each axis.
 
     Returns:
-        Point on the selected face plane, in the box's local frame.
+        Tuple of (blended seed point, whether it is valid to use).
     """
     rx = wp.abs(p[0]) / half_extents[0]
     ry = wp.abs(p[1]) / half_extents[1]
@@ -68,7 +86,13 @@ def project_point_to_box_face(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
         out[1] = wp.where(p[1] >= 0.0, half_extents[1], -half_extents[1])
     else:
         out[2] = wp.where(p[2] >= 0.0, half_extents[2], -half_extents[2])
-    return out
+
+    seed = 0.99 * out  # blend toward the box center to stay strictly interior
+    outside = rx > 1.0 or ry > 1.0 or rz > 1.0
+    valid = (
+        wp.abs(seed[0]) <= half_extents[0] and wp.abs(seed[1]) <= half_extents[1] and wp.abs(seed[2]) <= half_extents[2]
+    )
+    return seed, outside and valid
 
 
 @wp.struct
@@ -287,19 +311,15 @@ def create_support_map_function(support_func: Any):
         center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
 
         # BOX initial-direction improvement (the box analogue of the triangle
-        # projection below, and like it, always active rather than gated on
-        # aspect ratio). A box's geometric center can be far from the contact
-        # region when a partner rests on a large or non-uniform face (e.g. a
-        # thin "table" box). The center-to-center ray then points sideways and
-        # MPR/GJK can lock onto a side face, reporting a flipped normal and
-        # spuriously deep penetration. Seeding the box's v0 contribution from
-        # the projection of the partner center onto the faced box face keeps v0
-        # laterally aligned with the partner, so the initial ray is ~normal to
-        # the contacting face. Applied only when the partner center lies outside
-        # the box; an interior partner means deep overlap, where the center is
-        # fine. The 1% blend toward the box center keeps v0 strictly interior,
-        # avoiding a degenerate (zero-area) initial portal.
-        box_center = wp.vec3(0.0, 0.0, 0.0)
+        # projection below). A box's geometric center can be far from the contact
+        # region when a partner rests on a large or non-uniform face (e.g. a thin
+        # "table" box). The center-to-center ray then points sideways and MPR/GJK
+        # can lock onto a side face, reporting a flipped normal and spuriously deep
+        # penetration. Seeding the box's v0 contribution from the projection of the
+        # partner center onto the faced box face (see :func:`box_face_seed`) keeps
+        # v0 laterally aligned with the partner, so the initial ray is ~normal to
+        # the contacting face. The seed is used only when it is a valid interior
+        # point, which leaves ordinary (near-cube) boxes on their center.
         geom_a_is_triangle = geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(
             GeoTypeEx.TRIANGLE_PRISM
         )
@@ -309,17 +329,16 @@ def create_support_map_function(support_func: Any):
         if geom_a.shape_type == int(GeoType.BOX) and not geom_b_is_triangle:
             h_a = geom_a.scale
             # A is at the origin with identity orientation in this frame.
-            p_a = center_b_world
-            if wp.abs(p_a[0]) > h_a[0] or wp.abs(p_a[1]) > h_a[1] or wp.abs(p_a[2]) > h_a[2]:
-                surf_a = project_point_to_box_face(p_a, h_a)
-                center_a = surf_a + 0.01 * (box_center - surf_a)
+            seed_a, use_a = box_face_seed(center_b_world, h_a)
+            if use_a:
+                center_a = seed_a
 
         if geom_b.shape_type == int(GeoType.BOX) and not geom_a_is_triangle:
             h_b = geom_b.scale
             p_b = wp.quat_rotate_inv(orientation_b, center_a - position_b)
-            if wp.abs(p_b[0]) > h_b[0] or wp.abs(p_b[1]) > h_b[1] or wp.abs(p_b[2]) > h_b[2]:
-                surf_b = project_point_to_box_face(p_b, h_b)
-                center_b_local = surf_b + 0.01 * (box_center - surf_b)
+            seed_b, use_b = box_face_seed(p_b, h_b)
+            if use_b:
+                center_b_local = seed_b
                 center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
 
         if geom_a_is_triangle:
