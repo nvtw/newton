@@ -60,6 +60,7 @@
 
 ### Fixed
 
+- Fix PhoenX DVI angular and axial limits to preserve unilateral separation and apply configured frequency-based softness.
 - Fix PhoenX PGS iteration ordering so every solve and relaxation iteration traverses all constraint colors before processing any constraint again.
 - Fix PhoenX primitive stack contacts so dense Kapla tower examples remain stable while preserving SDF speculative-contact safeguards.
 - Fix `SolverVBD` rigid contact injecting kinetic energy for yawed finite-radius contacts (e.g. small-radius cables blowing up). The normal response now acts at the geometric skeleton point rather than the rotating surface anchor, which was non-conservative under reorientation; friction still uses the surface anchor to preserve finite-radius slip. (#3125)

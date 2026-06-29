@@ -794,7 +794,25 @@ def _populate_adbs_articulation_rows_kernel(
     d6_row0 = row0 + equality_rows + axial_rows
     d6_row_count = row_count - equality_rows - axial_rows
     if d6_row_count > wp.int32(0) and (mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL):
-        _fill_d6_angular_limit_rows(d6_row0, d6_row_count, mode, q1, q2, constraints, cid, jacobian, violation)
+        _fill_d6_angular_limit_rows(
+            d6_row0,
+            d6_row_count,
+            mode,
+            q1,
+            q2,
+            b1,
+            b2,
+            dt,
+            constraints,
+            cid,
+            bodies,
+            jacobian,
+            violation,
+            velocity_target,
+            row_regularization,
+            solution_lower,
+            solution_upper,
+        )
 
 
 @wp.kernel
@@ -1305,9 +1323,9 @@ def _fill_d6_angular_limit_row(
     q1: wp.quatf,
     jacobian: wp.array2d[wp.float32],
     violation: wp.array[wp.float32],
-):
+) -> wp.int32:
     if lower > upper:
-        return
+        return _CLAMP_NONE
 
     axis = _safe_normalize(wp.quat_rotate(q1, axis_local), wp.vec3f(1.0, 0.0, 0.0))
     angle = extract_rotation_angle(diff, axis)
@@ -1322,6 +1340,10 @@ def _fill_d6_angular_limit_row(
 
     if active:
         _fill_angular_row(row, axis, error, jacobian, violation)
+        if error > wp.float32(0.0):
+            return _CLAMP_MAX
+        return _CLAMP_MIN
+    return _CLAMP_NONE
 
 
 @wp.func
@@ -1331,19 +1353,29 @@ def _fill_d6_angular_limit_rows(
     mode: wp.int32,
     q1: wp.quatf,
     q2: wp.quatf,
+    b1: wp.int32,
+    b2: wp.int32,
+    dt: wp.float32,
     constraints: ConstraintContainer,
     cid: wp.int32,
+    bodies: BodyContainer,
     jacobian: wp.array2d[wp.float32],
     violation: wp.array[wp.float32],
+    velocity_target: wp.array[wp.float32],
+    row_regularization: wp.array[wp.float32],
+    solution_lower: wp.array[wp.float32],
+    solution_upper: wp.array[wp.float32],
 ):
     count = read_int(constraints, _OFF_D6_LIMIT_COUNT, cid)
     lower = read_vec3(constraints, _OFF_D6_LIMIT_LOWER, cid)
     upper = read_vec3(constraints, _OFF_D6_LIMIT_UPPER, cid)
     inv_init = read_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid)
     diff = q2 * inv_init * wp.quat_inverse(q1)
+    hertz_limit = read_float(constraints, _OFF_HERTZ_LIMIT, cid)
+    damping_ratio_limit = read_float(constraints, _OFF_DAMPING_RATIO_LIMIT, cid)
 
     if row_count > wp.int32(0) and count > wp.int32(0):
-        _fill_d6_angular_limit_row(
+        clamp = _fill_d6_angular_limit_row(
             row0,
             _d6_limit_axis_local(constraints, cid, mode, wp.int32(0)),
             lower[0],
@@ -1353,8 +1385,24 @@ def _fill_d6_angular_limit_rows(
             jacobian,
             violation,
         )
+        _apply_frequency_limit_row_softness(
+            row0,
+            clamp,
+            hertz_limit,
+            damping_ratio_limit,
+            dt,
+            b1,
+            b2,
+            jacobian,
+            bodies,
+            violation,
+            velocity_target,
+            row_regularization,
+            solution_lower,
+            solution_upper,
+        )
     if row_count > wp.int32(1) and count > wp.int32(1):
-        _fill_d6_angular_limit_row(
+        clamp = _fill_d6_angular_limit_row(
             row0 + wp.int32(1),
             _d6_limit_axis_local(constraints, cid, mode, wp.int32(1)),
             lower[1],
@@ -1364,8 +1412,24 @@ def _fill_d6_angular_limit_rows(
             jacobian,
             violation,
         )
+        _apply_frequency_limit_row_softness(
+            row0 + wp.int32(1),
+            clamp,
+            hertz_limit,
+            damping_ratio_limit,
+            dt,
+            b1,
+            b2,
+            jacobian,
+            bodies,
+            violation,
+            velocity_target,
+            row_regularization,
+            solution_lower,
+            solution_upper,
+        )
     if row_count > wp.int32(2) and count > wp.int32(2):
-        _fill_d6_angular_limit_row(
+        clamp = _fill_d6_angular_limit_row(
             row0 + wp.int32(2),
             _d6_limit_axis_local(constraints, cid, mode, wp.int32(2)),
             lower[2],
@@ -1374,6 +1438,22 @@ def _fill_d6_angular_limit_rows(
             q1,
             jacobian,
             violation,
+        )
+        _apply_frequency_limit_row_softness(
+            row0 + wp.int32(2),
+            clamp,
+            hertz_limit,
+            damping_ratio_limit,
+            dt,
+            b1,
+            b2,
+            jacobian,
+            bodies,
+            violation,
+            velocity_target,
+            row_regularization,
+            solution_lower,
+            solution_upper,
         )
 
 
@@ -1452,6 +1532,42 @@ def _apply_axial_drive_row_softness(
 
 
 @wp.func
+def _apply_frequency_limit_row_softness(
+    row: wp.int32,
+    clamp: wp.int32,
+    hertz_limit: wp.float32,
+    damping_ratio_limit: wp.float32,
+    dt: wp.float32,
+    b1: wp.int32,
+    b2: wp.int32,
+    jacobian: wp.array2d[wp.float32],
+    bodies: BodyContainer,
+    violation: wp.array[wp.float32],
+    velocity_target: wp.array[wp.float32],
+    row_regularization: wp.array[wp.float32],
+    solution_lower: wp.array[wp.float32],
+    solution_upper: wp.array[wp.float32],
+):
+    if clamp == _CLAMP_NONE:
+        return
+    if clamp == _CLAMP_MAX:
+        solution_upper[row] = wp.float32(0.0)
+    else:
+        solution_lower[row] = wp.float32(0.0)
+
+    if dt <= wp.float32(0.0):
+        return
+
+    limit_error = violation[row]
+    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
+    velocity_target[row] = -limit_error * bias_rate
+    if mass_coeff > wp.float32(1.0e-8):
+        eff_inv = _joint_row_effective_inverse(row, b1, b2, jacobian, bodies.inverse_mass, bodies.inverse_inertia_world)
+        row_regularization[row] = eff_inv * impulse_coeff / mass_coeff
+    violation[row] = wp.float32(0.0)
+
+
+@wp.func
 def _apply_axial_limit_row_softness(
     row: wp.int32,
     mode: wp.int32,
@@ -1489,8 +1605,23 @@ def _apply_axial_limit_row_softness(
         row_regularization[row] = gamma
         velocity_target[row] = -bias
     else:
-        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
-        velocity_target[row] = -limit_error * bias_rate
+        _apply_frequency_limit_row_softness(
+            row,
+            clamp,
+            hertz_limit,
+            damping_ratio_limit,
+            dt,
+            b1,
+            b2,
+            jacobian,
+            bodies,
+            violation,
+            velocity_target,
+            row_regularization,
+            solution_lower,
+            solution_upper,
+        )
+        return
 
     violation[row] = wp.float32(0.0)
 

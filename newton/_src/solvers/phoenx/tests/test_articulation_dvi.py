@@ -556,8 +556,8 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
 
     def test_device_populates_rows_from_initialized_adbs_constraints(self):
         device = wp.get_preferred_device()
-        body1 = np.array([0, 1, 2, 3, 4], dtype=np.int32)
-        body2 = np.array([1, 2, 3, 4, 5], dtype=np.int32)
+        body1 = np.array([0, 1, 2, 3, 4, 5, 6], dtype=np.int32)
+        body2 = np.array([1, 2, 3, 4, 5, 6, 7], dtype=np.int32)
         mode = np.array(
             [
                 int(JOINT_MODE_BALL_SOCKET),
@@ -565,6 +565,8 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
                 int(JOINT_MODE_PRISMATIC),
                 int(JOINT_MODE_FIXED),
                 int(JOINT_MODE_CYLINDRICAL),
+                int(JOINT_MODE_UNIVERSAL),
+                int(JOINT_MODE_PLANAR),
             ],
             dtype=np.int32,
         )
@@ -577,8 +579,8 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         jac = device_system.jacobian.numpy()[: device_system.total_rows]
         violation = device_system.violation.numpy()[: device_system.total_rows]
 
-        self.assertEqual(device_system.total_rows, 23)
-        np.testing.assert_allclose(violation, np.zeros(23, dtype=np.float32), atol=1.0e-6)
+        self.assertEqual(device_system.total_rows, 30)
+        np.testing.assert_allclose(violation, np.zeros(30, dtype=np.float32), atol=1.0e-6)
         np.testing.assert_allclose(jac[:3, :3], -np.eye(3, dtype=np.float32), atol=1.0e-6)
         np.testing.assert_allclose(jac[:3, 6:9], np.eye(3, dtype=np.float32), atol=1.0e-6)
 
@@ -708,6 +710,35 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=3.0e-5)
         np.testing.assert_allclose(world.bodies.velocity.numpy()[1], expected_velocity, rtol=2.0e-4, atol=1.0e-5)
 
+    def test_device_dvi_step_is_cuda_graph_capturable(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("CUDA graph capture requires a CUDA device")
+
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+            world_kwargs={
+                "articulation_dvi_host": True,
+                "articulation_dvi_host_solver": "device_block_sparse",
+                "velocity_iterations": 0,
+                "gravity": (0.0, 0.0, 0.0),
+            },
+        )
+        displaced = np.array([[0.0, 0.0, 0.0], [0.2, -0.1, 0.05]], dtype=np.float32)
+        world.bodies.position.assign(displaced)
+        world.step(0.1)
+        world.bodies.position.assign(displaced)
+        world.bodies.velocity.zero_()
+
+        with wp.ScopedCapture(device=device) as capture:
+            world.step(0.1)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(world.bodies.position.numpy()[1], np.zeros(3, dtype=np.float32), atol=3.0e-5)
+
     def test_device_dvi_velocity_drive_row_sets_angular_velocity(self):
         device = wp.get_preferred_device()
         world = _make_adbs_world(
@@ -813,7 +844,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
 
         self.assertLess(world.bodies.angular_velocity.numpy()[1, 2], -2.0)
-        np.testing.assert_allclose(world.articulation_device_system.row_regularization.numpy()[5], 0.0, atol=1.0e-6)
+        self.assertGreater(world.articulation_device_system.row_regularization.numpy()[5], 0.0)
 
     def test_device_dvi_inactive_limit_row_does_not_lock_free_axis(self):
         device = wp.get_preferred_device()
@@ -921,6 +952,8 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
             np.array([1], dtype=np.int32),
             np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
             world_kwargs={"articulation_dvi_host": True, "gravity": (0.0, 0.0, 0.0)},
+            hertz_limit_np=np.array([float(DEFAULT_HERTZ_LIMIT)], dtype=np.float32),
+            damping_ratio_limit_np=np.array([float(DEFAULT_DAMPING_RATIO)], dtype=np.float32),
             d6_limit_axis0_np=np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
             d6_limit_lower_np=np.array([[-1.0, 0.0, 0.0]], dtype=np.float32),
             d6_limit_upper_np=np.array([[0.1, 0.0, 0.0]], dtype=np.float32),
@@ -933,7 +966,7 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertEqual(world.articulation_topology.total_rows, 4)
         np.testing.assert_array_equal(world.articulation_topology.d6_limit_row_counts, np.array([1], dtype=np.int32))
         self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
-        self.assertLess(world.bodies.angular_velocity.numpy()[1, 0], -3.5)
+        self.assertLess(world.bodies.angular_velocity.numpy()[1, 0], -2.0)
 
     def test_device_dvi_inactive_ball_socket_d6_limit_row_does_not_lock_axis(self):
         device = wp.get_preferred_device()
@@ -955,6 +988,57 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertEqual(world.articulation_topology.total_rows, 4)
         self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
         np.testing.assert_allclose(world.bodies.angular_velocity.numpy()[1, 0], 1.25, rtol=1.0e-5, atol=1.0e-5)
+
+    def test_device_dvi_active_d6_limit_does_not_pull_when_separating(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+            world_kwargs={"articulation_dvi_host": True, "gravity": (0.0, 0.0, 0.0)},
+            hertz_limit_np=np.array([float(DEFAULT_HERTZ_LIMIT)], dtype=np.float32),
+            damping_ratio_limit_np=np.array([float(DEFAULT_DAMPING_RATIO)], dtype=np.float32),
+            d6_limit_axis0_np=np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
+            d6_limit_lower_np=np.array([[-1.0, 0.0, 0.0]], dtype=np.float32),
+            d6_limit_upper_np=np.array([[0.1, 0.0, 0.0]], dtype=np.float32),
+            d6_limit_count_np=np.array([1], dtype=np.int32),
+        )
+        world.bodies.orientation.assign(
+            np.array([[0.0, 0.0, 0.0, 1.0], [0.24740396, 0.0, 0.0, 0.9689124]], dtype=np.float32)
+        )
+        angular_velocity = np.zeros((2, 3), dtype=np.float32)
+        angular_velocity[1, 0] = -10.0
+        world.bodies.angular_velocity.assign(angular_velocity)
+
+        self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
+
+        np.testing.assert_allclose(world.bodies.angular_velocity.numpy()[1, 0], -10.0, rtol=1.0e-5, atol=1.0e-5)
+        self.assertEqual(world.articulation_device_system.solution_upper.numpy()[3], 0.0)
+
+    def test_device_dvi_d6_limit_frequency_adds_regularization(self):
+        device = wp.get_preferred_device()
+        world = _make_adbs_world(
+            device,
+            np.array([0], dtype=np.int32),
+            np.array([1], dtype=np.int32),
+            np.array([int(JOINT_MODE_BALL_SOCKET)], dtype=np.int32),
+            world_kwargs={"articulation_dvi_host": True, "gravity": (0.0, 0.0, 0.0)},
+            hertz_limit_np=np.array([1.0], dtype=np.float32),
+            damping_ratio_limit_np=np.array([1.0], dtype=np.float32),
+            d6_limit_axis0_np=np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
+            d6_limit_lower_np=np.array([[-1.0, 0.0, 0.0]], dtype=np.float32),
+            d6_limit_upper_np=np.array([[0.1, 0.0, 0.0]], dtype=np.float32),
+            d6_limit_count_np=np.array([1], dtype=np.int32),
+        )
+        world.bodies.orientation.assign(
+            np.array([[0.0, 0.0, 0.0, 1.0], [0.24740396, 0.0, 0.0, 0.9689124]], dtype=np.float32)
+        )
+
+        self.assertTrue(world.solve_articulations_dvi_host(dt=0.1, solver="device_block_sparse"))
+
+        self.assertGreater(world.articulation_device_system.row_regularization.numpy()[3], 0.0)
+        self.assertEqual(world.articulation_device_system.solution_upper.numpy()[3], 0.0)
 
     def test_device_dvi_universal_d6_rows_do_not_duplicate_axial_lock(self):
         device = wp.get_preferred_device()
@@ -1063,6 +1147,32 @@ class TestPhoenXArticulationDVI(unittest.TestCase):
         self.assertEqual(solver.world.articulation_dvi_host_solver, "device_block_sparse")
         self.assertTrue(solver.world.articulation_dvi_replaces_joint_pgs)
         self.assertEqual(int(solver.world.articulation_topology.active_joint_count), 1)
+
+    def test_solver_phoenx_device_dvi_steps_articulation(self):
+        model = _make_solver_pendulum_model()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=2,
+            solver_iterations=1,
+            velocity_iterations=0,
+            articulation_dvi=True,
+            articulation_dvi_solver="device_block_sparse",
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        state_0.body_qd.assign(np.array([[2.0, 0.0, 0.0, 0.0, 0.0, 2.0]], dtype=np.float32))
+
+        solver.step(state_0, state_1, model.control(), None, 0.05)
+
+        body_q = state_1.body_q.numpy()
+        self.assertTrue(np.isfinite(body_q).all())
+        self.assertAlmostEqual(float(np.linalg.norm(body_q[0, :3])), 1.0, delta=2.0e-3)
+        joint_q = wp.zeros(model.joint_coord_count, dtype=wp.float32, device=model.device)
+        joint_qd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=model.device)
+        newton.eval_ik(model, state_1, joint_q, joint_qd)
+        self.assertGreater(abs(float(joint_q.numpy()[0])), 0.05)
+        self.assertTrue(np.isfinite(joint_qd.numpy()).all())
 
     def test_solver_phoenx_keeps_cable_joints_in_pgs(self):
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
