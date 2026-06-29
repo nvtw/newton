@@ -234,6 +234,35 @@ speeds. The coarse method spends 32% more time there but roughly halves sag and
 reduces position violation 5.9x. Identical-world sag spread is also lower than
 the classic baseline (0.056 m versus 0.111 m after 60 frames).
 
+## Branched-tree coarse-space evidence
+
+A 104-joint trunk with three 24-joint arms was extracted as a 312-row physical
+ball-socket operator. Its condition number is 1.52e4. Alternating-depth
+interpolation that averages a fine branch joint across its parent and children
+fails even with an exact coarse solve (12-cycle residual 1.22--1.35 versus
+0.327 for SGS). The successful basis is simpler: retain odd-depth and leaf
+joints, and assign every omitted even-depth joint wholly to its retained parent
+aggregate. That factor-2 parent basis reaches residual 0.00605 with an exact
+coarse solve.
+
+The 55-block parent coarse graph has 169 nonzero blocks and needs four colors.
+Fixed local coarse work gives:
+
+| Coarse method | 12-cycle residual |
+|---|---:|
+| 8 color sweeps | 0.252 |
+| 16 color sweeps | 0.224 |
+| 32 color sweeps | 0.202 |
+| depth-2 Anderson, 8 symmetric cycles | 0.158 |
+
+Anderson improves the endpoint but oscillates strongly, while the fixed colored
+method is monotone after its initial load-spreading transient. Depth-stride 4
+and 8 parent aggregates regress even with exact solves, so recursive coarse
+aggregation is not automatically beneficial. The next GPU implementation
+should use the factor-2 one-hot parent aggregate, deterministic coarse graph
+coloring, and local block sweeps; it must not reuse the failed multi-child
+"smooth" interpolation.
+
 ## Key sources
 
 - Wang, *A Chebyshev Semi-Iterative Approach for Accelerating Projective and
@@ -261,7 +290,8 @@ the classic baseline (0.056 m versus 0.111 m after 60 frames).
 
 ## Next implementation gate
 
-Generalize the verified local Galerkin idea from paths to branched bilateral
-articulation graphs. Build a deterministic aggregation/coarse coloring for a
-challenging branched motor scene, retain fixed graph-captured launch bounds,
-and compare against path decomposition before considering projected contacts.
+Implement the verified factor-2 parent aggregate on the GPU for branched
+bilateral articulation graphs: precompute one-hot fine-to-coarse mapping,
+coarse sparse edges and deterministic colors, then assemble/solve with fixed
+captured bounds. Validate on a physical branched scene before projected
+contacts.
