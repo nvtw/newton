@@ -208,6 +208,35 @@ class TestDVISolver(unittest.TestCase):
         self.device = wp.get_device(test_context.device)
 
     def test_00_config_selection(self):
+        default_config = SolverKamino.Config(dynamics_solver="dvi")
+        self.assertTrue(default_config.sparse_dynamics)
+        self.assertTrue(default_config.sparse_jacobian)
+        self.assertEqual(default_config.integrator, "moreau")
+        self.assertEqual(default_config.dynamics.linear_solver_type, "CR")
+        self.assertEqual(default_config.dynamics.linear_solver_kwargs, {"maxiter": 9})
+        self.assertEqual(default_config.dvi.omega, 0.3)
+        self.assertEqual(default_config.dvi.block_iterations, 16)
+        self.assertEqual(default_config.dvi.contact_iterations, 2)
+        self.assertEqual(default_config.dvi.bilateral_solve_period, 2)
+        self.assertEqual(default_config.dvi.contact_jacobi_omega, 0.25)
+        self.assertEqual(default_config.dvi.contact_jacobi_relaxation, 0.9)
+
+        dense_config = SolverKamino.Config(
+            dynamics_solver="dvi",
+            sparse_dynamics=False,
+            sparse_jacobian=False,
+        )
+        self.assertFalse(dense_config.sparse_dynamics)
+        self.assertFalse(dense_config.sparse_jacobian)
+        self.assertEqual(dense_config.integrator, "moreau")
+        self.assertEqual(dense_config.dynamics.linear_solver_type, "LLTB")
+        self.assertEqual(dense_config.dvi.block_iterations, 32)
+
+        padmm_config = SolverKamino.Config()
+        self.assertFalse(padmm_config.sparse_dynamics)
+        self.assertFalse(padmm_config.sparse_jacobian)
+        self.assertEqual(padmm_config.integrator, "euler")
+
         config = SolverKamino.Config(
             dynamics_solver="dvi",
             dvi=kamino_config.DVISolverConfig(max_iterations=32, tolerance=1e-4),

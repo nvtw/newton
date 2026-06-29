@@ -103,14 +103,16 @@ class SolverKamino(SolverBase):
         A container to hold all configurations of the :class:`SolverKamino` solver.
         """
 
-        sparse_jacobian: bool = False
+        sparse_jacobian: bool | None = None
         """
-        Flag to indicate whether the solver should use sparse data representations for the Jacobian.
+        Whether to use a sparse Jacobian representation. When unspecified, defaults to `True` for DVI and `False`
+        for PADMM.
         """
 
-        sparse_dynamics: bool = False
+        sparse_dynamics: bool | None = None
         """
-        Flag to indicate whether the solver should use sparse data representations for the dynamics.
+        Whether to use a sparse dynamics representation. When unspecified, defaults to `True` for DVI and `False`
+        for PADMM.
         """
 
         use_collision_detector: bool = False
@@ -180,11 +182,11 @@ class SolverKamino(SolverBase):
         Defaults to `twopi`.
         """
 
-        integrator: Literal["euler", "moreau"] = "euler"
+        integrator: Literal["euler", "moreau"] | None = None
         """
         The time-integrator to use for state integration.\n
         See available options in the `integrators` module.\n
-        Defaults to `"euler"`.
+        When unspecified, defaults to `"moreau"` for DVI and `"euler"` for PADMM.
         """
 
         dynamics_solver: Literal["padmm", "dvi"] = "padmm"
@@ -293,7 +295,12 @@ class SolverKamino(SolverBase):
             }
             for attr_name, config_cls in subconfigs.items():
                 nested_config = kwargs.get(attr_name, None)
-                nested_kwargs = nested_config.__dict__ if nested_config is not None else {}
+                if nested_config is not None:
+                    nested_kwargs = nested_config.__dict__
+                elif cfg.dynamics_solver == "dvi" and attr_name in {"dynamics", "dvi"}:
+                    nested_kwargs = getattr(cfg, attr_name).__dict__
+                else:
+                    nested_kwargs = {}
                 setattr(cfg, attr_name, config_cls.from_model(model, **nested_kwargs))
 
             if cfg.dynamics_solver == "dvi" and "dynamics" not in kwargs:
@@ -376,6 +383,13 @@ class SolverKamino(SolverBase):
             # Import here to avoid module-level imports and circular dependencies
             from . import config  # noqa: PLC0415
 
+            if self.sparse_jacobian is None:
+                self.sparse_jacobian = self.dynamics_solver == "dvi"
+            if self.sparse_dynamics is None:
+                self.sparse_dynamics = self.dynamics_solver == "dvi"
+            if self.integrator is None:
+                self.integrator = "moreau" if self.dynamics_solver == "dvi" else "euler"
+
             # Default-initialize any sub-configurations that were not explicitly provided by the user
             if self.collision_detector is None and self.use_collision_detector:
                 self.collision_detector = config.CollisionDetectorConfig()
@@ -384,11 +398,28 @@ class SolverKamino(SolverBase):
             if self.constraints is None:
                 self.constraints = config.ConstraintStabilizationConfig()
             if self.dynamics is None:
-                self.dynamics = config.ConstrainedDynamicsConfig(preconditioning=self.dynamics_solver != "dvi")
+                if self.dynamics_solver == "dvi" and self.sparse_dynamics:
+                    self.dynamics = config.ConstrainedDynamicsConfig(
+                        preconditioning=False,
+                        linear_solver_type="CR",
+                        linear_solver_kwargs={"maxiter": 9},
+                    )
+                else:
+                    self.dynamics = config.ConstrainedDynamicsConfig(preconditioning=self.dynamics_solver != "dvi")
             if self.padmm is None:
                 self.padmm = config.PADMMSolverConfig()
             if self.dvi is None:
-                self.dvi = config.DVISolverConfig()
+                if self.dynamics_solver == "dvi" and self.sparse_dynamics:
+                    self.dvi = config.DVISolverConfig(
+                        omega=0.3,
+                        block_iterations=16,
+                        contact_iterations=2,
+                        bilateral_solve_period=2,
+                        contact_jacobi_omega=0.25,
+                        contact_jacobi_relaxation=0.9,
+                    )
+                else:
+                    self.dvi = config.DVISolverConfig()
 
             # Validate the config values after all default-initialization is done
             # to ensure that any inter-dependent parameters are properly checked.
