@@ -66,6 +66,7 @@ def eval_body_contact_kernel(
     contact_body_pos: wp.array[wp.vec3],
     contact_body_vel: wp.array[wp.vec3],
     contact_normal: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
     # outputs: particle force and hessian
     forces: wp.array[wp.vec3],
     hessians: wp.array[wp.mat33],
@@ -96,6 +97,7 @@ def eval_body_contact_kernel(
             contact_body_pos,
             contact_body_vel,
             contact_normal,
+            shape_margin,
             dt,
         )
         wp.atomic_add(forces, particle_idx, body_contact_force)
