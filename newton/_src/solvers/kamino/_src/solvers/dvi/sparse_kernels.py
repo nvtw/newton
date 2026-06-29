@@ -591,13 +591,11 @@ def _build_sparse_bilateral_block(
     jacobian_cts_nzb_coords: wp.array2d[int32],
     jacobian_cts_nzb_values: wp.array[vec6f],
     problem_njc: wp.array[int32],
-    problem_vio: wp.array[int32],
     bilateral_mio: wp.array[int32],
     bilateral_vio: wp.array[int32],
-    problem_diag: wp.array[float32],
-    # Outputs:
-    bilateral_D: wp.array[float32],
     bilateral_P: wp.array[float32],
+    # Output:
+    bilateral_D: wp.array[float32],
 ):
     wid, tid = wp.tid()
 
@@ -625,7 +623,7 @@ def _build_sparse_bilateral_block(
 
     row = block_coords_i[0]
     col = block_coords_j[0]
-    if row > col or row >= njc or col >= njc:
+    if row >= col or row >= njc or col >= njc:
         return
 
     block_i = jacobian_cts_nzb_values[global_block_id_i]
@@ -640,18 +638,14 @@ def _build_sparse_bilateral_block(
     inv_I_k = data_bodies_inv_I_i[bid_k]
     D_ij = inv_m_k * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, inv_I_k @ Jw_j)
 
-    pvio = problem_vio[wid]
     bvio = bilateral_vio[wid]
-    p_row = wp.sqrt(1.0 / (wp.abs(problem_diag[pvio + row]) + FLOAT32_EPS))
-    p_col = wp.sqrt(1.0 / (wp.abs(problem_diag[pvio + col]) + FLOAT32_EPS))
+    p_row = bilateral_P[bvio + row]
+    p_col = bilateral_P[bvio + col]
     val = p_row * D_ij * p_col
 
     bmio = bilateral_mio[wid]
     wp.atomic_add(bilateral_D, bmio + njc * row + col, val)
-    if row != col:
-        wp.atomic_add(bilateral_D, bmio + njc * col + row, val)
-    else:
-        bilateral_P[bvio + row] = p_row
+    wp.atomic_add(bilateral_D, bmio + njc * col + row, val)
 
 
 @wp.kernel

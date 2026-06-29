@@ -437,16 +437,9 @@ def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
             max_joint_nzb = jacobian.max_of_num_nzb
         solver._max_of_num_joint_nzb = max_joint_nzb
     wp.launch(
-        kernel=_build_sparse_bilateral_block,
-        dim=(solver._size.num_worlds, max_joint_nzb * max_joint_nzb),
+        kernel=_set_sparse_bilateral_diagonal,
+        dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),
         inputs=[
-            problem.delassus.model.info.bodies_offset,
-            problem.delassus.model.bodies.inv_m_i,
-            problem.delassus.data.bodies.inv_I_i,
-            problem.delassus.joint_constraint_nzb_count,
-            jacobian.nzb_start,
-            jacobian.nzb_coords,
-            jacobian.nzb_values,
             problem.data.njc,
             problem.data.vio,
             operator.info.mio,
@@ -458,16 +451,21 @@ def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
         device=solver.device,
     )
     wp.launch(
-        kernel=_set_sparse_bilateral_diagonal,
-        dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),
+        kernel=_build_sparse_bilateral_block,
+        dim=(solver._size.num_worlds, max_joint_nzb * max_joint_nzb),
         inputs=[
+            problem.delassus.model.info.bodies_offset,
+            problem.delassus.model.bodies.inv_m_i,
+            problem.delassus.data.bodies.inv_I_i,
+            problem.delassus.joint_constraint_nzb_count,
+            jacobian.nzb_start,
+            jacobian.nzb_coords,
+            jacobian.nzb_values,
             problem.data.njc,
-            problem.data.vio,
             operator.info.mio,
             operator.info.vio,
-            state.scratch,
-            operator.mat,
             state.bilateral_preconditioner,
+            operator.mat,
         ],
         device=solver.device,
     )
