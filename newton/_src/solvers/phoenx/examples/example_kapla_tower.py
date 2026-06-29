@@ -134,6 +134,8 @@ class Example:
         self.viewer = viewer
         self.args = args
         self.device = wp.get_device()
+        self.solver_mode = str(getattr(args, "solver", "classic"))
+        self.max_colors = int(getattr(args, "max_colors", 10))
 
         # Physics ticks at 120 Hz; rendering runs at 60 fps so each
         # render frame advances physics by two ticks (see
@@ -153,7 +155,7 @@ class Example:
         # propagation, not friction convergence (where cone clipping
         # would eat the boost). Validated by 1000-frame stability:
         # max brick velocity 0.66 m/s vs 0.73 m/s vanilla.
-        self.solver_iterations = 10 if ENABLE_MASS_SPLITTING else 6
+        self.solver_iterations = 1 if self.solver_mode == "jacobi" else (10 if ENABLE_MASS_SPLITTING else 6)
         self.velocity_iterations = 1
 
         self._build_scene()
@@ -345,6 +347,7 @@ class Example:
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
         self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
+        solver_flavor = "simple" if self.solver_mode == "jacobi" else "standard"
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self.constraints,
@@ -358,11 +361,13 @@ class Example:
             # ``sm_count * 4`` blocks. The old hard pin of 256 under-filled
             # large GPUs (e.g. 188-SM Blackwell -> 256 vs 752 blocks, ~2%
             # achieved occupancy on the iterate); auto-sizing is ~+5% FPS.
-            mass_splitting=ENABLE_MASS_SPLITTING,
+            mass_splitting=ENABLE_MASS_SPLITTING and solver_flavor == "standard",
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
             mass_splitting_batch_size=1,
             sor_boost=1.0,
+            solver_flavor=solver_flavor,
+            jacobi_max_colors=self.max_colors,
             device=self.device,
         )
 
@@ -636,6 +641,21 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
+    parser.add_argument(
+        "--solver",
+        choices=("classic", "jacobi"),
+        default="classic",
+        help="Select graph-colored PGS or the uncolored scalar-row Jacobi solver.",
+    )
+    parser.add_argument(
+        "--max-colors",
+        type=int,
+        default=10,
+        help=(
+            "Estimated classic color count used by Jacobi: effective substeps "
+            "equal max-colors times the configured substeps (default: 10)."
+        ),
+    )
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
     # Start paused so the initial (potentially inter-penetrating)

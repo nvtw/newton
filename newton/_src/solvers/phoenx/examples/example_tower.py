@@ -77,26 +77,25 @@ STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 # component becomes the long radial length Z, and the third (Jitter's
 # radial thickness) becomes Newton's Y.
 #
-# We keep the C# shape ratio but drop the explicit scaling: Newton's
-# half-extents are already in meters, and the resulting tower is about
-# 20 m tall and 19.5 m in radius.
+# We keep the C# shape ratio at a practical metric scale. The resulting
+# tower is about 4 m tall and 1.95 m in radius; this deliberately avoids
+# oversized bodies whose contact geometry is unusually easy to resolve.
 TOWER_HEIGHT_LAYERS = 40
 BOXES_PER_RING = 32
 # Half-extents, +Z-up remap of the C# (3, 1, 0.2) full extents.
-PLANK_HX = 1.5  # tangential (wraps the ring)
-PLANK_HY = 0.1  # radial wall thickness (was Jitter Z)
-PLANK_HZ = 0.5  # vertical height (was Jitter Y)
+PLANK_HX = 0.15  # tangential (wraps the ring)
+PLANK_HY = 0.01  # radial wall thickness (was Jitter Z)
+PLANK_HZ = 0.05  # vertical height (was Jitter Y)
 # Ring radius matches ``19.5f`` from the C# local offset.
-RING_RADIUS = 19.5
+RING_RADIUS = 1.95
 # ``2 * PI / 64`` per C#. The full per-plank step is twice this.
 HALF_ROTATION_STEP = 2.0 * math.pi / 64.0
 FULL_ROTATION_STEP = 2.0 * HALF_ROTATION_STEP
 
 # Plank density -- the C# ``blockMass = 1.0f`` at plank volume
 # ``scaling^3 * 0.6 ≈ 2.2e-5`` implies a density of ~45 000 kg/m^3.
-# Newton uses +Z-up with dimensions in meters and no scaling, so a
-# plank's volume is 0.6 m^3; we go with the common-rock density
-# 1000 kg/m^3 which gives a 600 kg plank. The absolute mass only
+# Newton uses +Z-up with metric dimensions, so we use the common-rock
+# density 1000 kg/m^3. The absolute mass only
 # sets time scale; what matters for stability is uniform density
 # across all planks.
 PLANK_DENSITY = 1000.0
@@ -184,7 +183,7 @@ class Example:
                         # Z_Jitter (radius) -> Y_Newton.
                         local_x = 0.0
                         local_y = RING_RADIUS
-                        local_z = 0.5 + e
+                        local_z = PLANK_HZ + e * (2.0 * PLANK_HZ)
                         world_x = cos_o * local_x - sin_o * local_y + center_x
                         world_y = sin_o * local_x + cos_o * local_y + center_y
                         world_z = local_z
@@ -331,7 +330,7 @@ class Example:
         # roughly at mid-height.
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
-            pos=wp.vec3(55.0, 0.0, 22.0),
+            pos=wp.vec3(5.5, 0.0, 2.2),
             pitch=-10.0,
             yaw=180.0,
         )
@@ -500,7 +499,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--grid-side",
         type=int,
-        default=6,
+        default=1,
         help=(
             "Tile the tower into a ``grid-side x grid-side`` 2D grid in one "
             "world (default 1, i.e. a single tower). Useful for stress-testing "
