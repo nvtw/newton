@@ -76,7 +76,7 @@ class DVISolver:
         self._has_contact_block_preconditioner: bool = False
         self._has_unilateral_constraints: bool = False
         self._contact_bid_AB: wp.array | None = None
-        self._max_of_num_joint_nzb: int | None = None
+        self._bilateral_nzb_pairs: tuple[wp.array, wp.array, wp.array, wp.array, wp.array, wp.array] | None = None
         self._device: wp.DeviceLike = None
 
         if model is not None:
@@ -126,6 +126,7 @@ class DVISolver:
         self._bilateral_solve_after_block = self._make_bilateral_solve_schedule(self._config)
         self._has_contact_block_preconditioner = any(c.contact_block_preconditioner for c in self._config)
         self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
+        self._bilateral_nzb_pairs = None
         self._data = DVIData(size=self._size, device=self._device)
         self._allocate_bilateral_solver(model)
 

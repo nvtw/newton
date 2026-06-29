@@ -425,17 +425,8 @@ def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
     problem.delassus.diagonal(state.scratch)
 
     jacobian = problem.delassus.constraint_jacobian
-    # The assembly only iterates the *joint* constraint nonzeros, so launching
-    # over the total nonzero count (joints + limits + contacts) wastes threads
-    # that immediately return. Size the grid to the joint nonzero count instead.
-    max_joint_nzb = solver._max_of_num_joint_nzb
-    if max_joint_nzb is None:
-        joint_nzb_count = getattr(problem.delassus, "joint_constraint_nzb_count", None)
-        if joint_nzb_count is not None:
-            max_joint_nzb = int(joint_nzb_count.numpy().max())
-        else:
-            max_joint_nzb = jacobian.max_of_num_nzb
-        solver._max_of_num_joint_nzb = max_joint_nzb
+    if solver._bilateral_nzb_pairs is None:
+        _build_sparse_bilateral_pairs(solver, problem)
     wp.launch(
         kernel=_set_sparse_bilateral_diagonal,
         dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),
@@ -450,26 +441,71 @@ def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
         ],
         device=solver.device,
     )
-    wp.launch(
-        kernel=_build_sparse_bilateral_block,
-        dim=(solver._size.num_worlds, max_joint_nzb * max_joint_nzb),
-        inputs=[
-            problem.delassus.model.info.bodies_offset,
-            problem.delassus.model.bodies.inv_m_i,
-            problem.delassus.data.bodies.inv_I_i,
-            problem.delassus.joint_constraint_nzb_count,
-            jacobian.nzb_start,
-            jacobian.nzb_coords,
-            jacobian.nzb_values,
-            problem.data.njc,
-            operator.info.mio,
-            operator.info.vio,
-            state.bilateral_preconditioner,
-            operator.mat,
-        ],
-        device=solver.device,
-    )
+    pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j = solver._bilateral_nzb_pairs
+    if pair_wid.size > 0:
+        wp.launch(
+            kernel=_build_sparse_bilateral_block,
+            dim=pair_wid.size,
+            inputs=[
+                problem.delassus.model.bodies.inv_m_i,
+                problem.delassus.data.bodies.inv_I_i,
+                pair_wid,
+                pair_row,
+                pair_col,
+                pair_bid,
+                pair_i,
+                pair_j,
+                jacobian.nzb_values,
+                problem.data.njc,
+                operator.info.mio,
+                operator.info.vio,
+                state.bilateral_preconditioner,
+                operator.mat,
+            ],
+            device=solver.device,
+        )
     solver._bilateral_solver.compute(A=operator.mat)
+
+
+def _build_sparse_bilateral_pairs(solver, problem: DualProblem) -> None:
+    """Cache joint Jacobian block pairs that contribute to the bilateral matrix."""
+    jacobian = problem.delassus.constraint_jacobian
+    counts = problem.delassus.joint_constraint_nzb_count.numpy().tolist()
+    starts = jacobian.nzb_start.numpy().tolist()
+    coords = jacobian.nzb_coords.numpy()
+    joint_counts = problem.data.njc.numpy().tolist()
+    body_offsets = problem.delassus.model.info.bodies_offset.numpy().tolist()
+
+    pair_wid: list[int] = []
+    pair_row: list[int] = []
+    pair_col: list[int] = []
+    pair_bid: list[int] = []
+    pair_i: list[int] = []
+    pair_j: list[int] = []
+    for wid, count in enumerate(counts):
+        start = starts[wid]
+        njc = joint_counts[wid]
+        for local_i in range(count):
+            nzb_i = start + local_i
+            row = int(coords[nzb_i, 0])
+            body_col = int(coords[nzb_i, 1])
+            if row >= njc:
+                continue
+            for local_j in range(count):
+                nzb_j = start + local_j
+                col = int(coords[nzb_j, 0])
+                if row < col < njc and body_col == int(coords[nzb_j, 1]):
+                    pair_wid.append(wid)
+                    pair_row.append(row)
+                    pair_col.append(col)
+                    pair_bid.append(body_offsets[wid] + body_col // 6)
+                    pair_i.append(nzb_i)
+                    pair_j.append(nzb_j)
+
+    solver._bilateral_nzb_pairs = tuple(
+        wp.array(values, dtype=int32, device=solver.device)
+        for values in (pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j)
+    )
 
 
 def _solve_sparse_bilateral_block(solver, problem: DualProblem, active_dim: wp.array[int32] | None = None) -> None:

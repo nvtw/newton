@@ -583,12 +583,14 @@ def _solve_dvi_sparse_unilateral_offset_update(
 @wp.kernel
 def _build_sparse_bilateral_block(
     # Inputs:
-    model_info_bodies_offset: wp.array[int32],
     model_bodies_inv_m_i: wp.array[float32],
     data_bodies_inv_I_i: wp.array[mat33f],
-    jacobian_cts_num_joint_nzb: wp.array[int32],
-    jacobian_cts_nzb_start: wp.array[int32],
-    jacobian_cts_nzb_coords: wp.array2d[int32],
+    pair_wid: wp.array[int32],
+    pair_row: wp.array[int32],
+    pair_col: wp.array[int32],
+    pair_bid: wp.array[int32],
+    pair_i: wp.array[int32],
+    pair_j: wp.array[int32],
     jacobian_cts_nzb_values: wp.array[vec6f],
     problem_njc: wp.array[int32],
     bilateral_mio: wp.array[int32],
@@ -597,43 +599,19 @@ def _build_sparse_bilateral_block(
     # Output:
     bilateral_D: wp.array[float32],
 ):
-    wid, tid = wp.tid()
-
+    pair_id = wp.tid()
+    wid = pair_wid[pair_id]
     njc = problem_njc[wid]
-    if njc == 0:
-        return
-
-    num_nzb = jacobian_cts_num_joint_nzb[wid]
-    if num_nzb == 0:
-        return
-
-    block_id_i = tid // num_nzb
-    block_id_j = tid % num_nzb
-    if block_id_i >= num_nzb:
-        return
-
-    nzb_start = jacobian_cts_nzb_start[wid]
-    global_block_id_i = nzb_start + block_id_i
-    global_block_id_j = nzb_start + block_id_j
-
-    block_coords_i = jacobian_cts_nzb_coords[global_block_id_i]
-    block_coords_j = jacobian_cts_nzb_coords[global_block_id_j]
-    if block_coords_i[1] != block_coords_j[1]:
-        return
-
-    row = block_coords_i[0]
-    col = block_coords_j[0]
-    if row >= col or row >= njc or col >= njc:
-        return
-
-    block_i = jacobian_cts_nzb_values[global_block_id_i]
-    block_j = jacobian_cts_nzb_values[global_block_id_j]
+    row = pair_row[pair_id]
+    col = pair_col[pair_id]
+    block_i = jacobian_cts_nzb_values[pair_i[pair_id]]
+    block_j = jacobian_cts_nzb_values[pair_j[pair_id]]
     Jv_i = vec3f(block_i[0], block_i[1], block_i[2])
     Jv_j = vec3f(block_j[0], block_j[1], block_j[2])
     Jw_i = vec3f(block_i[3], block_i[4], block_i[5])
     Jw_j = vec3f(block_j[3], block_j[4], block_j[5])
 
-    bid_k = model_info_bodies_offset[wid] + block_coords_i[1] // int32(6)
+    bid_k = pair_bid[pair_id]
     inv_m_k = model_bodies_inv_m_i[bid_k]
     inv_I_k = data_bodies_inv_I_i[bid_k]
     D_ij = inv_m_k * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, inv_I_k @ Jw_j)
