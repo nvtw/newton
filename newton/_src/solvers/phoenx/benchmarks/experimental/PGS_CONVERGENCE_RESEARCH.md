@@ -46,7 +46,8 @@ is the signature of a slow global mode, not a local row-solve deficiency.
 ### Highest priority
 
 1. **Factor-2 articulation multilevel correction.** The measured 96-joint
-   Delassus operator has symmetric block-GS spectral radius 0.99999994. A
+   Delassus operator has symmetric block-GS spectral radius 0.99999994 and
+   condition number 9.8e7. A
    depth-linear factor-2 coarse space with an exact half-size solve reduces
    the 12-cycle residual to 0.0019, versus 2.78 for SGS. A recursive V-cycle
    with two pre/post smooths reaches 0.56 and supplies an O(N) starting point.
@@ -77,8 +78,8 @@ is the signature of a slow global mode, not a local row-solve deficiency.
 - shock-propagation and gravity/topology priority orderings;
 - block grouping across neighboring joints, with exact small block solves;
 - two-level additive/multiplicative Schwarz and aggregation AMG;
-- PGS-preconditioned projected CG/MINRES for bilateral islands, falling back
-  to PGS at active-set changes;
+- flexible GMRES on multilevel-preconditioned bilateral islands, falling
+  back to PGS at active-set changes;
 - augmented-Lagrangian/ADMM outer correction with PGS local projections;
 - mixed precision only after convergence behavior is solved.
 
@@ -94,7 +95,9 @@ is the signature of a slow global mode, not a local row-solve deficiency.
   but did not target the slow spatial mode;
 - the existing exact device articulation LDLT is graph-capturable for tiny
   systems but expands a long chain into hundreds of level launches, making it
-  unsuitable as a per-substep correction in its current form.
+  unsuitable as a per-substep correction in its current form;
+- CG with no preconditioner, block Jacobi, symmetric PGS, or the practical
+  recursive V-cycle does not reduce the residual in a 12-iteration budget.
 
 ## Key sources
 
@@ -114,6 +117,10 @@ is the signature of a slow global mode, not a local row-solve deficiency.
 - Mazhar et al., comparison of PGS, projected Jacobi, APGD, and Newton methods
   for frictional multibody DVI (2017):
   https://doi.org/10.1016/j.cma.2016.12.023
+- Miyamoto et al., accelerated modulus-based GS for sparse rigid-body LCPs:
+  https://arxiv.org/abs/1910.09873
+- Kamino, GPU proximal-ADMM for coupled multibody systems in Newton/Warp:
+  https://arxiv.org/abs/2603.16536
 - NVIDIA AmgX, GPU aggregation AMG and preconditioned iterative methods:
   https://research.nvidia.com/publication/2015-10_amgx-library-gpu-accelerated-algebraic-multigrid-and-preconditioned-iterative
 

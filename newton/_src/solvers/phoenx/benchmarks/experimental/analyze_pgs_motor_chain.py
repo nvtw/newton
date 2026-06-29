@@ -156,6 +156,54 @@ def _anderson(sgs: BlockSGS, depth: int, iterations: int) -> dict[str, object]:
     }
 
 
+def _pcg(
+    sgs: BlockSGS,
+    preconditioner: str,
+    iterations: int,
+    apply_override=None,
+) -> dict[str, object]:
+    matrix = sgs.matrix
+    rhs = sgs.rhs
+    diagonal = sgs.lower + sgs.upper - matrix
+
+    def apply_preconditioner(residual: np.ndarray) -> np.ndarray:
+        if apply_override is not None:
+            return apply_override(residual)
+        if preconditioner == "none":
+            return residual.copy()
+        if preconditioner == "block_jacobi":
+            return np.linalg.solve(diagonal, residual)
+        forward = np.linalg.solve(sgs.lower, residual)
+        return np.linalg.solve(sgs.upper, diagonal @ forward)
+
+    x = np.zeros_like(rhs)
+    residual = rhs.copy()
+    z = apply_preconditioner(residual)
+    direction = z.copy()
+    rz = float(residual @ z)
+    residuals = [_relative_residual(matrix, rhs, x)]
+    for _ in range(iterations):
+        matrix_direction = matrix @ direction
+        denominator = float(direction @ matrix_direction)
+        if denominator <= np.finfo(np.float64).eps:
+            break
+        alpha = rz / denominator
+        x = x + alpha * direction
+        residual = residual - alpha * matrix_direction
+        residuals.append(_relative_residual(matrix, rhs, x))
+        z = apply_preconditioner(residual)
+        rz_next = float(residual @ z)
+        if rz <= np.finfo(np.float64).eps:
+            break
+        direction = z + (rz_next / rz) * direction
+        rz = rz_next
+    return {
+        "method": f"pcg_{preconditioner}",
+        "residuals": residuals,
+        "final": residuals[-1],
+    }
+
+
 def _coarse_sgs(sgs: BlockSGS, offsets: np.ndarray, aggregate: int):
     rows_per_joint = int(offsets[1] - offsets[0])
     joints = len(offsets) - 1
@@ -220,6 +268,7 @@ def _multilevel_sgs(
     *,
     coarse_cycles: int = 1,
     smooth_sweeps: int = 1,
+    as_preconditioner: bool = False,
 ):
     rows_per_joint = int(offsets[1] - offsets[0])
     matrices = [matrix]
@@ -252,6 +301,8 @@ def _multilevel_sgs(
             x = x + np.linalg.solve(uppers[level], level_rhs - level_matrix @ x)
         return x
 
+    if as_preconditioner:
+        return lambda residual: cycle(0, np.zeros_like(residual), residual)
     return lambda x: cycle(0, x, rhs)
 
 
@@ -265,6 +316,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         _chebyshev(sgs, min(rho, 0.999999), args.iterations),
         _anderson(sgs, 2, args.iterations),
         _anderson(sgs, 4, args.iterations),
+        _pcg(sgs, "none", args.iterations),
+        _pcg(sgs, "block_jacobi", args.iterations),
+        _pcg(sgs, "sgs", args.iterations),
+        _pcg(
+            sgs,
+            "multilevel_smooth2",
+            args.iterations,
+            _multilevel_sgs(matrix, rhs, offsets, smooth_sweeps=2, as_preconditioner=True),
+        ),
         _iterate("multilevel_v", _multilevel_sgs(matrix, rhs, offsets), matrix, rhs, args.iterations),
         _iterate(
             "multilevel_w2",
