@@ -164,9 +164,6 @@ def _pair_contacts(contacts, model, state, ts, os):
 def test_thin_box_contact_normals(test, device):
     """Every shape on an extreme thin box near its edge must report a +Z top-face
     contact whose distance tracks the placed separation -- never a side-face flip."""
-    # NOTE: box-box overhanging the edge at penetration remains a known MPR
-    # limitation (handled by the analytical box-box path, not the v0 seed); the
-    # near-edge, on-footprint box case validated here is unaffected.
     shapes = ["sphere", "box", "ellipsoid", "capsule", "cylinder", "cone", "convex"]
     with test.subTest(device=str(device)):
         failures = []
@@ -190,8 +187,10 @@ def test_thin_box_contact_normals(test, device):
 
 def test_box_box_overhang(test, device):
     """A box overhanging the thin table's edge while penetrating must still report a
-    +Z top-face contact. This is the corner-contact case the analytical box-box path
-    handles (the v0 seed alone resolves an edge contact ambiguously -> side flip)."""
+    +Z top-face contact. A box's flat bottom keeps face contact even when its center
+    overhangs the edge, so the v0 seed projects the partner center onto the faced box
+    face while keeping its lateral coordinate (a component-wise clamp to the box edge
+    would instead bias the seed sideways and flip the normal)."""
     overhang_x = TABLE_HALF[0] * 1.01  # box center just past the +X edge
     with test.subTest(device=str(device)):
         failures = []

@@ -40,58 +40,34 @@ from .types import GeoType
 
 
 @wp.func
-def closest_point_on_box_surface(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
-    """Closest point on an axis-aligned box (centered at the origin) to ``p``.
+def project_point_to_box_face(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
+    """Project ``p`` onto the box face it points toward, keeping its other coords.
 
-    Only used for points ``p`` that lie OUTSIDE the box, where the result is the
-    component-wise clamp of ``p`` to the box — i.e. the nearest surface point,
-    which stays laterally aligned with ``p``. (For interior points the clamp
-    returns ``p`` unchanged; callers guard against that case.)
+    Used to seed MPR/GJK's ``v0`` for a box: the face is the one the ray from the
+    box center toward ``p`` exits through, i.e. ``argmax_i |p_i| / half_extents_i``.
+    Only that axis is snapped to the face; the in-plane coordinates of ``p`` are
+    kept, so the seed stays directly "under" the partner. That lateral alignment
+    is what keeps the initial ray ~normal to the contacting face even when the
+    partner overhangs the face edge (a flat face still rests against the partner
+    there), which a component-wise clamp to the box would lose.
 
     Args:
-        p: Query point in the box's local frame.
+        p: Query point in the box's local frame (assumed outside the box).
         half_extents: Box half-extents along each axis.
 
     Returns:
-        Nearest point on/in the box to ``p`` in the box's local frame.
+        Point on the selected face plane, in the box's local frame.
     """
-    return wp.vec3(
-        wp.clamp(p[0], -half_extents[0], half_extents[0]),
-        wp.clamp(p[1], -half_extents[1], half_extents[1]),
-        wp.clamp(p[2], -half_extents[2], half_extents[2]),
-    )
-
-
-@wp.func
-def box_thin_axis(half_extents: wp.vec3) -> int:
-    ti = int(0)
-    if half_extents[1] < half_extents[ti]:
-        ti = 1
-    if half_extents[2] < half_extents[ti]:
-        ti = 2
-    return ti
-
-
-@wp.func
-def box_is_extreme_slab(half_extents: wp.vec3) -> bool:
-    min_h = wp.min(half_extents[0], wp.min(half_extents[1], half_extents[2]))
-    max_h = wp.max(half_extents[0], wp.max(half_extents[1], half_extents[2]))
-    return min_h < 0.02 * max_h
-
-
-@wp.func
-def box_v0_seed(p: wp.vec3, half_extents: wp.vec3) -> wp.vec3:
-    """Face-aligned MPR/GJK ``v0`` seed for an extreme slab.
-
-    This is only used when the partner center is outside the slab through its
-    thin axis. Keeping the partner's in-plane coordinates preserves a top/bottom
-    face initial direction for edge overhangs, where clamping to the finite box
-    footprint would bias the initial ray toward the side edge.
-    """
-    ti = box_thin_axis(half_extents)
-    face = wp.where(p[ti] >= 0.0, half_extents[ti], -half_extents[ti])
+    rx = wp.abs(p[0]) / half_extents[0]
+    ry = wp.abs(p[1]) / half_extents[1]
+    rz = wp.abs(p[2]) / half_extents[2]
     out = p
-    out[ti] = face
+    if rx >= ry and rx >= rz:
+        out[0] = wp.where(p[0] >= 0.0, half_extents[0], -half_extents[0])
+    elif ry >= rz:
+        out[1] = wp.where(p[1] >= 0.0, half_extents[1], -half_extents[1])
+    else:
+        out[2] = wp.where(p[2] >= 0.0, half_extents[2], -half_extents[2])
     return out
 
 
@@ -218,26 +194,49 @@ def create_support_map_function(support_func: Any):
         Compute geometric center of Minkowski difference.
 
         Used by MPR and GJK as the initial interior point ``v0`` of the
-        Minkowski difference.  A poor ``v0`` — far outside one of the
-        shapes — is a known cause of MPR portal degeneracy when the
-        partner is a thin/flat primitive (e.g. a single mesh triangle),
-        because the chosen ray direction can produce supports that all
-        collapse onto a single vertex of the partner.
+        Minkowski difference.  ``v0`` couples two things that cannot be
+        chosen independently: it must be a genuine *interior* point of
+        ``A - B`` (so MPR can ray-cast from it), and its negation is the
+        initial search *direction*.  A poor ``v0`` — based on a shape
+        center that lies far from the contact region — produces a
+        sideways ray, which makes MPR lock onto the wrong feature (e.g. a
+        side face of a large flat box, reported with a flipped normal and
+        spuriously deep penetration) and can collapse the portal when the
+        partner is a thin/flat primitive.
 
-        For most primitives the local origin is already a sensible
-        interior point, but for ``CONVEX_MESH`` (an arbitrary convex
-        hull) the authoring origin is not guaranteed to lie inside the
-        hull — many assets place hulls far from their body frame.  For
-        those shapes we compute the AABB of the (scaled) hull vertices
-        on the fly and use the AABB center, which is always inside the
-        hull's bounding box and typically very close to the hull
-        interior.
+        The unifying fix is to seed each shape's contribution to ``v0``
+        by projecting the partner's center onto the surface region of
+        that shape facing the partner, rather than using the shape's own
+        center.  The seed then stays laterally aligned with the partner,
+        so the ray is ~normal to the contacting face.  For two primitives
+        this projection has a cheap O(1) closed form and is applied
+        unconditionally (no aspect-ratio thresholds):
 
-        For triangles (and triangle prisms) on shape A the center on
-        shape A is replaced by the closest point on the triangle to
-        shape B's center (using the freshly computed B center), giving
-        MPR and GJK a much better starting point when the triangle is
-        large relative to the convex.
+        - ``BOX``: project the partner center onto the box face it points
+          toward (``argmax_i |p_i| / half_extent_i``), keeping the
+          partner's other two coordinates — see :func:`project_point_to_box_face`
+          and the box block below.  Keeping the in-plane coordinates means
+          the seed stays under the partner even when it overhangs the face
+          edge, where a flat face still rests against the partner.
+        - ``TRIANGLE`` / ``TRIANGLE_PRISM`` on shape A: the closest point
+          on the triangle to shape B's center.
+
+        Both blend 1% back toward the shape center to stay strictly
+        interior (avoiding a zero-area initial portal).  Compact, curved
+        primitives (sphere/capsule/cylinder/cone/ellipsoid) keep their
+        center: their geometry is tight around it, so the center is
+        already close to any contact and no projection is needed.  A
+        general iterative closest-point seed (point-vs-shape GJK) was
+        evaluated and is both slower and, unless made fully robust, lower
+        quality than these closed forms, while a loose AABB-projection
+        proxy degrades curved/hull shapes — so the closed-form-where-
+        available approach is used.
+
+        ``CONVEX_MESH`` (an arbitrary convex hull) is a special interior
+        point case: the authoring origin is not guaranteed to lie inside
+        the hull (many assets place hulls far from their body frame), so
+        the AABB center of the (scaled) hull vertices is computed on the
+        fly and used as the interior point.
 
         Args:
             geom_a: Shape A geometry data
@@ -287,12 +286,19 @@ def create_support_map_function(support_func: Any):
 
         center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
 
-        # BOX initial-direction improvement (mirrors the triangle treatment below).
-        # This is deliberately limited to extreme slabs and partners outside through
-        # the slab's thin axis. In that case the true contact is on the broad face,
-        # but a center-to-center ray points sideways and can make MPR/GJK select an
-        # edge/side normal. Side-face cases and ordinary boxes keep their centers.
-        # The 1% blend toward the box center avoids leaving v0 exactly on the face.
+        # BOX initial-direction improvement (the box analogue of the triangle
+        # projection below, and like it, always active rather than gated on
+        # aspect ratio). A box's geometric center can be far from the contact
+        # region when a partner rests on a large or non-uniform face (e.g. a
+        # thin "table" box). The center-to-center ray then points sideways and
+        # MPR/GJK can lock onto a side face, reporting a flipped normal and
+        # spuriously deep penetration. Seeding the box's v0 contribution from
+        # the projection of the partner center onto the faced box face keeps v0
+        # laterally aligned with the partner, so the initial ray is ~normal to
+        # the contacting face. Applied only when the partner center lies outside
+        # the box; an interior partner means deep overlap, where the center is
+        # fine. The 1% blend toward the box center keeps v0 strictly interior,
+        # avoiding a degenerate (zero-area) initial portal.
         box_center = wp.vec3(0.0, 0.0, 0.0)
         geom_a_is_triangle = geom_a.shape_type == int(GeoTypeEx.TRIANGLE) or geom_a.shape_type == int(
             GeoTypeEx.TRIANGLE_PRISM
@@ -300,19 +306,19 @@ def create_support_map_function(support_func: Any):
         geom_b_is_triangle = geom_b.shape_type == int(GeoTypeEx.TRIANGLE) or geom_b.shape_type == int(
             GeoTypeEx.TRIANGLE_PRISM
         )
-        if geom_a.shape_type == int(GeoType.BOX):
+        if geom_a.shape_type == int(GeoType.BOX) and not geom_b_is_triangle:
             h_a = geom_a.scale
-            ti_a = box_thin_axis(h_a)
-            if box_is_extreme_slab(h_a) and not geom_b_is_triangle and wp.abs(center_b_world[ti_a]) > h_a[ti_a]:
-                surf_a = box_v0_seed(center_b_world, h_a)
+            # A is at the origin with identity orientation in this frame.
+            p_a = center_b_world
+            if wp.abs(p_a[0]) > h_a[0] or wp.abs(p_a[1]) > h_a[1] or wp.abs(p_a[2]) > h_a[2]:
+                surf_a = project_point_to_box_face(p_a, h_a)
                 center_a = surf_a + 0.01 * (box_center - surf_a)
 
-        if geom_b.shape_type == int(GeoType.BOX):
+        if geom_b.shape_type == int(GeoType.BOX) and not geom_a_is_triangle:
             h_b = geom_b.scale
-            ti_b = box_thin_axis(h_b)
-            center_a_in_b = wp.quat_rotate_inv(orientation_b, center_a - position_b)
-            if box_is_extreme_slab(h_b) and not geom_a_is_triangle and wp.abs(center_a_in_b[ti_b]) > h_b[ti_b]:
-                surf_b = box_v0_seed(center_a_in_b, h_b)
+            p_b = wp.quat_rotate_inv(orientation_b, center_a - position_b)
+            if wp.abs(p_b[0]) > h_b[0] or wp.abs(p_b[1]) > h_b[1] or wp.abs(p_b[2]) > h_b[2]:
+                surf_b = project_point_to_box_face(p_b, h_b)
                 center_b_local = surf_b + 0.01 * (box_center - surf_b)
                 center_b_world = position_b + wp.quat_rotate(orientation_b, center_b_local)
 
