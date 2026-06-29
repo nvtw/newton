@@ -11744,10 +11744,7 @@ class ModelBuilder:
         shape_world = self.shape_world
         shape_collision_group = self.shape_collision_group
 
-        kinematic_flag = int(BodyFlags.KINEMATIC)
-        shape_is_immovable = [
-            body < 0 or (int(self.body_flags[body]) & kinematic_flag) != 0 for body in self.shape_body
-        ]
+        shape_is_static = [body < 0 for body in self.shape_body]
 
         # Keep only colliding shapes (those with COLLIDE_SHAPES flag) and sort by world for optimization
         colliding_indices = [i for i, flag in enumerate(self.shape_flags) if flag & ShapeFlags.COLLIDE_SHAPES]
@@ -11787,7 +11784,7 @@ class ModelBuilder:
                 else:
                     shape_a, shape_b = s1, s2
 
-                if shape_is_immovable[shape_a] and shape_is_immovable[shape_b]:
+                if shape_is_static[shape_a] and shape_is_static[shape_b]:
                     continue
 
                 # Skip if explicitly filtered

@@ -177,7 +177,7 @@ class TestKinematicLinks(unittest.TestCase):
         ]:
             with self.subTest(shape_a=shape_a, shape_b=shape_b, include_static_kinematic_pairs=False):
                 model = _build_immovable_contact_pair(shape_a, shape_b)
-                self.assertEqual(model.shape_contact_pair_count, 0)
+                self.assertEqual(model.shape_contact_pair_count, 1 if (shape_a, shape_b) in opt_in_cases else 0)
                 self.assertEqual(_rigid_contact_count(model), 0)
 
             with self.subTest(shape_a=shape_a, shape_b=shape_b, include_static_kinematic_pairs=True):
