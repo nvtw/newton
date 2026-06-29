@@ -125,17 +125,15 @@ def _read_body_velocity_with_slot(
 
 
 @wp.func
-def _articulation_pair_response(
+def _articulation_pair_wrench_response(
     bodies: BodyContainer,
     body_slot0: wp.int32,
-    point0: wp.vec3f,
-    impulse0: wp.vec3f,
+    wrench0: wp.spatial_vector,
     body_slot1: wp.int32,
-    point1: wp.vec3f,
-    impulse1: wp.vec3f,
+    wrench1: wp.spatial_vector,
     apply: wp.bool,
 ) -> wp.float32:
-    """Solve one articulation response to one or two point impulses."""
+    """Solve one articulation response to one or two world-origin wrenches."""
     data = bodies.reduced
     articulation = data.body_articulation[body_slot0]
     if articulation < wp.int32(0):
@@ -150,15 +148,12 @@ def _articulation_pair_response(
 
     for side in range(2):
         body_slot = body_slot0
-        point = point0
-        impulse = impulse0
+        wrench = wrench0
         if side == 1:
             body_slot = body_slot1
-            point = point1
-            impulse = impulse1
+            wrench = wrench1
         if body_slot >= wp.int32(0):
             target_body = body_slot - wp.int32(1)
-            wrench = wp.spatial_vector(impulse, wp.cross(point, impulse))
             data.body_work[target_body] = data.body_work[target_body] - wrench
 
     for reverse in range(end - start):
@@ -248,6 +243,28 @@ def _articulation_pair_response(
             bodies.velocity[slot] = wp.spatial_top(twist) + wp.cross(omega, bodies.position[slot])
 
     return effective_inverse_mass
+
+
+@wp.func
+def _articulation_pair_response(
+    bodies: BodyContainer,
+    body_slot0: wp.int32,
+    point0: wp.vec3f,
+    impulse0: wp.vec3f,
+    body_slot1: wp.int32,
+    point1: wp.vec3f,
+    impulse1: wp.vec3f,
+    apply: wp.bool,
+) -> wp.float32:
+    """Solve one articulation response to one or two point impulses."""
+    return _articulation_pair_wrench_response(
+        bodies,
+        body_slot0,
+        wp.spatial_vector(impulse0, wp.cross(point0, impulse0)),
+        body_slot1,
+        wp.spatial_vector(impulse1, wp.cross(point1, impulse1)),
+        apply,
+    )
 
 
 @wp.func

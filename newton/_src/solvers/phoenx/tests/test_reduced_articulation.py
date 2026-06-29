@@ -10,6 +10,8 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.articulations.reduced import ReducedArticulationSystem
+from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_wrench_response
 
 
 def _make_mixed_tree_builder():
@@ -110,6 +112,23 @@ def _make_self_contact_model(device):
 
 
 @wp.kernel
+def _apply_internal_wrench_pair(
+    bodies: BodyContainer,
+    body_slot0: wp.int32,
+    body_slot1: wp.int32,
+    torque: wp.vec3,
+):
+    _articulation_pair_wrench_response(
+        bodies,
+        body_slot0,
+        wp.spatial_vector(wp.vec3(0.0), torque),
+        body_slot1,
+        wp.spatial_vector(wp.vec3(0.0), -torque),
+        wp.bool(True),
+    )
+
+
+@wp.kernel
 def _compute_body_momentum(
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
@@ -168,6 +187,41 @@ class TestReducedArticulation(unittest.TestCase):
         h += np.diag(model.joint_armature.numpy())
         expected = np.linalg.solve(h.astype(np.float64), tau_np.astype(np.float64))
         np.testing.assert_allclose(result.numpy(), expected, rtol=2.0e-4, atol=2.0e-5)
+
+    def test_spatial_wrench_pair_conserves_momentum_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_floating_tree(device)
+        state = model.state()
+        control = model.control()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+        )
+        bridge = solver._reduced_articulation
+        self.assertIsNotNone(bridge)
+        momentum_before = _total_momentum(model, state)
+
+        with wp.ScopedCapture(device=device) as capture:
+            bridge.import_step(state, control)
+            bridge.begin_substep(0.0, split_dynamics=False)
+            wp.launch(
+                _apply_internal_wrench_pair,
+                dim=1,
+                inputs=[solver.bodies, wp.int32(1), wp.int32(2), wp.vec3(0.3, -0.2, 0.4)],
+                device=device,
+            )
+            bridge.end_substep(0.0, split_dynamics=False)
+        wp.capture_launch(capture.graph)
+
+        momentum_after = _total_momentum(model, bridge.state)
+        np.testing.assert_allclose(momentum_after, momentum_before, rtol=0.0, atol=1.0e-5)
+        self.assertGreater(float(np.linalg.norm(bridge.state.joint_qd.numpy())), 1.0e-4)
 
     def test_common_solver_api_matches_featherstone_under_graph_capture(self):
         device = wp.get_preferred_device()
