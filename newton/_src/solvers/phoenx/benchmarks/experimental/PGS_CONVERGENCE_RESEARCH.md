@@ -45,22 +45,23 @@ is the signature of a slow global mode, not a local row-solve deficiency.
 
 ### Highest priority
 
-1. **Symmetric-PGS Chebyshev acceleration.** A forward/backward pair has a
+1. **Factor-2 articulation multilevel correction.** The measured 96-joint
+   Delassus operator has symmetric block-GS spectral radius 0.99999994. A
+   depth-linear factor-2 coarse space with an exact half-size solve reduces
+   the 12-cycle residual to 0.0019, versus 2.78 for SGS. A recursive V-cycle
+   with two pre/post smooths reaches 0.56 and supplies an O(N) starting point.
+2. **Safeguarded Anderson acceleration.** Depth 2--4 reaches residual 0.61
+   after 60 symmetric pairs versus 1.55 for SGS, without scene-specific
+   tuning. It is also a candidate coarse-level solver.
+3. **Symmetric-PGS Chebyshev acceleration.** A forward/backward pair has a
    real spectrum suitable for the low-storage Chebyshev recurrence. It needs
    no dot-product reductions and therefore maps well to CUDA. Huamin Wang's
    analysis reports order-of-magnitude gains and specifically notes that a
    forward plus backward GS pair avoids the complex-spectrum failure of a
    single GS sweep.
-2. **Safeguarded Anderson acceleration.** Treat one projected symmetric-PGS
-   pair as a nonlinear fixed-point map. Recent multibody work reports PSOR
-   accelerated to first-order/Krylov-class performance. A small history
-   (2--5) is plausible on GPU, but reductions, projection consistency, restart
-   rules, and multiplier/body-state consistency must be measured.
-3. **Topology-aware coarse correction.** Minimal coloring is a good smoother
-   but poor at propagating low-frequency load through long chains. Use PGS for
-   local/high-frequency error and solve an aggregated articulation/tree
-   correction between sweep groups. Parallel prefix/tree contraction or a
-   small block-tridiagonal coarse solve is preferable to one color per depth.
+   Direct application is rejected on this chain: the nearly-unit spectral
+   radius causes persistent oscillation rather than acceleration. It may remain
+   useful after multilevel preconditioning narrows the spectrum.
 4. **Balanced cyclic/wavefront coloring.** Three equally sized colors on the
    96-link chain are substantially cheaper than the imbalanced greedy layout,
    allowing twice the sweeps at lower wall time. Generalization must preserve
@@ -90,7 +91,10 @@ is the signature of a slow global mode, not a local row-solve deficiency.
 - mass splitting targets parallel consistency/jitter and did not resolve this
   chain's global mode.
 - extrapolating converged warm-start impulses across tiny substeps was stable
-  but did not target the slow spatial mode.
+  but did not target the slow spatial mode;
+- the existing exact device articulation LDLT is graph-capturable for tiny
+  systems but expands a long chain into hundreds of level launches, making it
+  unsuitable as a per-substep correction in its current form.
 
 ## Key sources
 
@@ -115,9 +119,8 @@ is the signature of a slow global mode, not a local row-solve deficiency.
 
 ## Next implementation gate
 
-Prototype symmetric-PGS Chebyshev with complete state consistency: body
-velocities and every accumulated constraint multiplier must represent the same
-accelerated iterate. Start with bilateral joint-only islands, estimate the
-spectral radius from unaccelerated residual ratios, and add divergence/restart
-guards before enabling contacts. Compare at equal wall time, not only equal
-sweep count.
+Prototype a GPU factor-2 articulation hierarchy with depth-linear
+prolongation and Galerkin coarse operators. Use colored PGS as the fine smoother
+and compare recursive V-cycles, fixed-count coarse CG, and depth-2 Anderson on
+the coarse equations. Preserve exact impulse/body-state consistency and test at
+equal wall time before extending the correction beyond bilateral joint islands.
