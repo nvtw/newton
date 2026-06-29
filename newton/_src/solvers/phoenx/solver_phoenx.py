@@ -915,6 +915,8 @@ class PhoenXWorld:
         self._reduced_articulation = None
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
+        self._reduced_constraints_active_this_step = False
+        self._has_reduced_loops = False
         self._partition_active_this_step = True
         self._has_maximal_dynamic_bodies = True
         self._joint_pgs_ownership_active = False
@@ -2121,6 +2123,7 @@ class PhoenXWorld:
         self._joint_pgs_ownership_active = True
         self._joint_pgs_all_disabled = not bool(enabled.any())
         self._reduced_articulation = articulation
+        self._has_reduced_loops = articulation.loop_system.count > 0
         self._has_maximal_dynamic_bodies = bool(np.any(self.bodies.motion_type.numpy() == int(MOTION_DYNAMIC)))
 
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
@@ -2982,6 +2985,9 @@ class PhoenXWorld:
         has_enabled_joint_rows = self.num_joints > 0 and not self._skip_all_joint_pgs()
         has_contact_input = contacts is not None
         self._reduced_contacts_active_this_step = self._reduced_articulation is not None and has_contact_input
+        self._reduced_constraints_active_this_step = self._reduced_articulation is not None and (
+            has_contact_input or self._has_reduced_loops
+        )
         self._regular_pgs_active_this_step = bool(
             has_deformable_rows or has_enabled_joint_rows or (has_contact_input and self._reduced_articulation is None)
         )
@@ -3056,7 +3062,7 @@ class PhoenXWorld:
             if self._reduced_articulation is not None:
                 self._reduced_articulation.begin_substep(
                     self.substep_dt,
-                    split_dynamics=self._reduced_contacts_active_this_step,
+                    split_dynamics=self._reduced_constraints_active_this_step,
                 )
             self._integrate_forces_and_gravity()
             # TGS-soft (Box2D-v3) substep order: solve-with-bias ->
@@ -3077,7 +3083,7 @@ class PhoenXWorld:
             if self._reduced_articulation is not None:
                 self._reduced_articulation.end_substep(
                     self.substep_dt,
-                    split_dynamics=self._reduced_contacts_active_this_step,
+                    split_dynamics=self._reduced_constraints_active_this_step,
                 )
             self._dispatcher.relax(idt)
             # Flip cloth particles' POSITION_LEVEL writes back to

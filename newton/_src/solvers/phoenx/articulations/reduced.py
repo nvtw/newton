@@ -23,6 +23,7 @@ from newton._src.solvers.featherstone.kernels import (
     transform_spatial_inertia,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact import reduced_contact_iterate, reduced_contact_prepare
+from newton._src.solvers.phoenx.articulations.reduced_loop import ReducedLoopSystem
 from newton._src.solvers.phoenx.body import (
     MOTION_ARTICULATED,
     BodyContainer,
@@ -1335,6 +1336,9 @@ class ReducedPhoenXArticulation:
         self.tree_joint_mask = tree_joint_mask
         self.body_is_reduced_np = body_is_reduced_np.astype(bool)
         self.tree_joint_mask_np = tree_joint_mask_np.astype(bool)
+        self.loop_system = ReducedLoopSystem(model, self.body_is_reduced_np)
+        self.owned_joint_mask_np = self.tree_joint_mask_np.copy()
+        self.owned_joint_mask_np[self.loop_system.joint_indices_np] = True
 
         wp.launch(
             _mark_articulated_bodies_kernel,
@@ -1432,12 +1436,21 @@ class ReducedPhoenXArticulation:
             device=self.model.device,
         )
 
-    def solve_contacts(self, world, idt: wp.float32, *, relax: bool) -> None:
-        """Solve contact columns through the reduced inverse-mass operator."""
-        if world.max_contact_columns <= 0:
-            return
+    def solve_constraints(self, world, idt: wp.float32, *, relax: bool) -> None:
+        """Solve loop and contact blocks through the reduced inverse-mass operator."""
         iterations = world.velocity_iterations if relax else world.solver_iterations
         if iterations <= 0:
+            return
+        self.loop_system.solve(
+            self.model,
+            self.bodies,
+            idt,
+            world.sor_boost,
+            iterations,
+            use_bias=not relax,
+            warmstart=not relax,
+        )
+        if world.max_contact_columns <= 0 or not world._reduced_contacts_active_this_step:
             return
         contact_views = world._active_contact_views()
         common_inputs = [

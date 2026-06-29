@@ -38,8 +38,8 @@ class MultiWorldDispatcher:
                 self._world._solve_main_block_world()
             else:
                 self._world._solve_main()
-        if self._world._reduced_contacts_active_this_step:
-            self._world._reduced_articulation.solve_contacts(self._world, idt, relax=False)
+        if self._world._reduced_constraints_active_this_step:
+            self._world._reduced_articulation.solve_constraints(self._world, idt, relax=False)
 
     def relax(self, idt: wp.float32) -> None:
         if self._world._regular_pgs_active_this_step:
@@ -47,8 +47,8 @@ class MultiWorldDispatcher:
                 self._world._relax_velocities_block_world()
             else:
                 self._world._relax_velocities()
-        if self._world._reduced_contacts_active_this_step:
-            self._world._reduced_articulation.solve_contacts(self._world, idt, relax=True)
+        if self._world._reduced_constraints_active_this_step:
+            self._world._reduced_articulation.solve_constraints(self._world, idt, relax=True)
 
 
 __all__ = ["MultiWorldDispatcher"]

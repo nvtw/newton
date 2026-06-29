@@ -478,7 +478,7 @@ class SolverPhoenX(SolverBase):
             self._reduced_articulation = ReducedPhoenXArticulation(model, self.bodies)
             joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
             joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
-            for joint, owned in enumerate(self._reduced_articulation.tree_joint_mask_np):
+            for joint, owned in enumerate(self._reduced_articulation.owned_joint_mask_np):
                 cid = int(joint_idx_to_cid[joint])
                 if owned and cid >= 0:
                     joint_pgs_enabled[cid] = 0
