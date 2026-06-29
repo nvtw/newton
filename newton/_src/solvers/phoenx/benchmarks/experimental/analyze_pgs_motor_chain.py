@@ -73,9 +73,11 @@ class BlockSGS:
     def forward(self, x: np.ndarray) -> np.ndarray:
         return x + np.linalg.solve(self.lower, self.rhs - self.matrix @ x)
 
-    def __call__(self, x: np.ndarray) -> np.ndarray:
-        x = self.forward(x)
+    def backward(self, x: np.ndarray) -> np.ndarray:
         return x + np.linalg.solve(self.upper, self.rhs - self.matrix @ x)
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        return self.backward(self.forward(x))
 
     def iteration_matrix(self) -> np.ndarray:
         identity = np.eye(self.matrix.shape[0])
@@ -234,7 +236,7 @@ def _coarse_sgs(sgs: BlockSGS, offsets: np.ndarray, aggregate: int):
         x = sgs.forward(x)
         residual = sgs.rhs - sgs.matrix @ x
         x = x + prolongation @ np.linalg.solve(coarse_matrix, prolongation.T @ residual)
-        return sgs(x)
+        return sgs.backward(x)
 
     return update
 
@@ -259,6 +261,143 @@ def _linear_prolongation(joints: int, rows_per_joint: int) -> tuple[np.ndarray, 
             for coarse, weight in weights:
                 prolongation[joint * rows_per_joint + row, coarse * rows_per_joint + row] = weight
     return prolongation, coarse_joints
+
+
+def _anderson_fixed_point(update, matrix: np.ndarray, rhs: np.ndarray, iterations: int, depth: int) -> np.ndarray:
+    x = np.zeros_like(rhs)
+    xs: list[np.ndarray] = []
+    gs: list[np.ndarray] = []
+    for _ in range(iterations):
+        g = update(x)
+        xs.append(x.copy())
+        gs.append(g.copy())
+        xs = xs[-(depth + 1) :]
+        gs = gs[-(depth + 1) :]
+        candidate = g
+        if len(gs) > 1:
+            fixed_residuals = np.column_stack([gi - xi for gi, xi in zip(gs, xs, strict=True)])
+            gram = fixed_residuals.T @ fixed_residuals
+            ones = np.ones(len(gs))
+            kkt = np.block([[gram + 1.0e-12 * np.eye(len(gs)), ones[:, None]], [ones[None, :], np.zeros((1, 1))]])
+            alpha = np.linalg.solve(kkt, np.append(np.zeros(len(gs)), 1.0))[:-1]
+            accelerated = np.column_stack(gs) @ alpha
+            raw_norm = np.linalg.norm(rhs - matrix @ g)
+            accelerated_norm = np.linalg.norm(rhs - matrix @ accelerated)
+            if np.isfinite(accelerated_norm) and accelerated_norm <= 1.2 * raw_norm:
+                candidate = accelerated
+            else:
+                xs = [x.copy()]
+                gs = [g.copy()]
+        x = candidate
+    return x
+
+
+def _block_tridiagonal_solve(matrix: np.ndarray, rhs: np.ndarray, block_size: int) -> np.ndarray:
+    blocks = matrix.shape[0] // block_size
+    diagonal = [
+        matrix[i * block_size : (i + 1) * block_size, i * block_size : (i + 1) * block_size].copy()
+        for i in range(blocks)
+    ]
+    upper = [
+        matrix[i * block_size : (i + 1) * block_size, (i + 1) * block_size : (i + 2) * block_size]
+        for i in range(blocks - 1)
+    ]
+    lower = [
+        matrix[(i + 1) * block_size : (i + 2) * block_size, i * block_size : (i + 1) * block_size]
+        for i in range(blocks - 1)
+    ]
+    reduced_rhs = [rhs[i * block_size : (i + 1) * block_size].copy() for i in range(blocks)]
+    for i in range(1, blocks):
+        factor = np.linalg.solve(diagonal[i - 1].T, lower[i - 1].T).T
+        diagonal[i] -= factor @ upper[i - 1]
+        reduced_rhs[i] -= factor @ reduced_rhs[i - 1]
+    result = np.zeros_like(rhs)
+    result[-block_size:] = np.linalg.solve(diagonal[-1], reduced_rhs[-1])
+    for i in range(blocks - 2, -1, -1):
+        row = slice(i * block_size, (i + 1) * block_size)
+        next_row = slice((i + 1) * block_size, (i + 2) * block_size)
+        result[row] = np.linalg.solve(diagonal[i], reduced_rhs[i] - upper[i] @ result[next_row])
+    return result
+
+
+def _block_pcr_solve(matrix: np.ndarray, rhs: np.ndarray, block_size: int) -> np.ndarray:
+    blocks = matrix.shape[0] // block_size
+    lower = np.zeros((blocks, block_size, block_size), dtype=matrix.dtype)
+    diagonal = np.zeros_like(lower)
+    upper = np.zeros_like(lower)
+    reduced_rhs = rhs.reshape(blocks, block_size).copy()
+    for i in range(blocks):
+        row = slice(i * block_size, (i + 1) * block_size)
+        diagonal[i] = matrix[row, row]
+        if i > 0:
+            lower[i] = matrix[row, slice((i - 1) * block_size, i * block_size)]
+        if i + 1 < blocks:
+            upper[i] = matrix[row, slice((i + 1) * block_size, (i + 2) * block_size)]
+
+    stride = 1
+    while stride < blocks:
+        next_lower = np.zeros_like(lower)
+        next_diagonal = diagonal.copy()
+        next_upper = np.zeros_like(upper)
+        next_rhs = reduced_rhs.copy()
+        for i in range(blocks):
+            if i >= stride:
+                factor = -np.linalg.solve(diagonal[i - stride].T, lower[i].T).T
+                next_lower[i] = factor @ lower[i - stride]
+                next_diagonal[i] += factor @ upper[i - stride]
+                next_rhs[i] += factor @ reduced_rhs[i - stride]
+            if i + stride < blocks:
+                factor = -np.linalg.solve(diagonal[i + stride].T, upper[i].T).T
+                next_upper[i] = factor @ upper[i + stride]
+                next_diagonal[i] += factor @ lower[i + stride]
+                next_rhs[i] += factor @ reduced_rhs[i + stride]
+        lower, diagonal, upper, reduced_rhs = next_lower, next_diagonal, next_upper, next_rhs
+        stride *= 2
+
+    result = np.empty_like(reduced_rhs)
+    for i in range(blocks):
+        result[i] = np.linalg.solve(diagonal[i], reduced_rhs[i])
+    return result.reshape(-1)
+
+
+def _two_level_iterative_sgs(
+    sgs: BlockSGS,
+    offsets: np.ndarray,
+    *,
+    coarse_iterations: int,
+    coarse_method: str,
+):
+    rows_per_joint = int(offsets[1] - offsets[0])
+    joints = len(offsets) - 1
+    prolongation, coarse_joints = _linear_prolongation(joints, rows_per_joint)
+    coarse_matrix = prolongation.T @ sgs.matrix @ prolongation
+    coarse_offsets = np.arange(coarse_joints + 1, dtype=np.int32) * rows_per_joint
+
+    def update(x: np.ndarray) -> np.ndarray:
+        x = sgs.forward(x)
+        coarse_rhs = prolongation.T @ (sgs.rhs - sgs.matrix @ x)
+        coarse_sgs = BlockSGS(coarse_matrix, coarse_rhs, coarse_offsets)
+        if coarse_method == "block_thomas":
+            coarse_error = _block_tridiagonal_solve(coarse_matrix, coarse_rhs, rows_per_joint)
+        elif coarse_method == "block_pcr":
+            coarse_error = _block_pcr_solve(coarse_matrix, coarse_rhs, rows_per_joint)
+        elif coarse_method == "sgs":
+            coarse_error = np.zeros_like(coarse_rhs)
+            for _ in range(coarse_iterations):
+                coarse_error = coarse_sgs(coarse_error)
+        elif coarse_method == "anderson2":
+            coarse_error = _anderson_fixed_point(
+                coarse_sgs,
+                coarse_matrix,
+                coarse_rhs,
+                coarse_iterations,
+                depth=2,
+            )
+        else:
+            raise ValueError(f"unknown coarse method: {coarse_method}")
+        return sgs.backward(x + prolongation @ coarse_error)
+
+    return update
 
 
 def _multilevel_sgs(
@@ -346,6 +485,64 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             _iterate(
                 f"two_level_{aggregate}",
                 _coarse_sgs(sgs, offsets, aggregate),
+                matrix,
+                rhs,
+                args.iterations,
+            )
+        )
+    for coarse_iterations in (1, 2, 4, 8):
+        results.append(
+            _iterate(
+                f"two_level_iterative_sgs_{coarse_iterations}",
+                _two_level_iterative_sgs(
+                    sgs,
+                    offsets,
+                    coarse_iterations=coarse_iterations,
+                    coarse_method="sgs",
+                ),
+                matrix,
+                rhs,
+                args.iterations,
+            )
+        )
+    results.append(
+        _iterate(
+            "two_level_block_thomas",
+            _two_level_iterative_sgs(
+                sgs,
+                offsets,
+                coarse_iterations=1,
+                coarse_method="block_thomas",
+            ),
+            matrix,
+            rhs,
+            args.iterations,
+        )
+    )
+    results.append(
+        _iterate(
+            "two_level_block_pcr",
+            _two_level_iterative_sgs(
+                sgs,
+                offsets,
+                coarse_iterations=1,
+                coarse_method="block_pcr",
+            ),
+            matrix,
+            rhs,
+            args.iterations,
+        )
+    )
+    for coarse_iterations in (2, 4, 8):
+        results.append(
+            _iterate(
+                f"two_level_iterative_anderson2_{coarse_iterations}",
+                _two_level_iterative_sgs(
+                    sgs,
+                    offsets,
+                    coarse_iterations=coarse_iterations,
+                    coarse_method="anderson2",
+                ),
                 matrix,
                 rhs,
                 args.iterations,

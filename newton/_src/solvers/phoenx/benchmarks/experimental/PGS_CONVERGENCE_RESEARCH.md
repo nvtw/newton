@@ -49,8 +49,10 @@ is the signature of a slow global mode, not a local row-solve deficiency.
    Delassus operator has symmetric block-GS spectral radius 0.99999994 and
    condition number 9.8e7. A
    depth-linear factor-2 coarse space with an exact half-size solve reduces
-   the 12-cycle residual to 0.0019, versus 2.78 for SGS. A recursive V-cycle
-   with two pre/post smooths reaches 0.56 and supplies an O(N) starting point.
+   the 12-cycle residual to 0.059, versus 2.78 for SGS. The earlier 0.0019
+   measurement included an accidental extra fine forward sweep and is
+   superseded. A recursive V-cycle with two pre/post smooths reaches 0.56 and
+   supplies an O(N) starting point.
 2. **Safeguarded Anderson acceleration.** Depth 2--4 reaches residual 0.61
    after 60 symmetric pairs versus 1.55 for SGS, without scene-specific
    tuning. It is also a candidate coarse-level solver.
@@ -99,6 +101,37 @@ is the signature of a slow global mode, not a local row-solve deficiency.
 - CG with no preconditioner, block Jacobi, symmetric PGS, or the practical
   recursive V-cycle does not reduce the residual in a 12-iteration budget.
 
+## Half-resolution coarse-solve evidence
+
+The factor-2 depth-linear Galerkin operator on the 96-joint chain contains 49
+5-by-5 blocks. It is exactly block tridiagonal (145 nonzero blocks, maximum
+block distance one) and remains ill-conditioned at 2.1e7. A block Thomas solve
+matches the dense solve to 7.8e-12 relative solution error and produces the
+same 0.0594 outer residual after 12 one-pre/one-post cycles.
+
+Replacing that exact coarse solve with local work leaves much of the global
+mode unresolved:
+
+| Half-resolution solver per outer cycle | Final relative residual |
+|---|---:|
+| one block-SGS pair | 1.399 |
+| two block-SGS pairs | 1.225 |
+| four block-SGS pairs | 1.055 |
+| eight block-SGS pairs | 0.916 |
+| Anderson depth 2, four updates | 0.643 |
+| Anderson depth 2, eight updates | 0.421 |
+| exact block-tridiagonal solve | 0.0594 |
+
+A parallel cyclic-reduction prototype matches the dense solution to 1.3e-11
+in float64, but native float32 is numerically unacceptable: its relative coarse
+residual is 1.4e3, and diagonal scaling plus fixed iterative refinement is
+erratic. Sequential block Thomas is substantially more stable in float32
+(0.0136 coarse residual and 3.3% solution error). The next GPU prototype should
+therefore use a coarse block-Thomas megakernel per articulation island, exposing
+parallelism across islands/worlds while keeping the dependent short-chain solve
+inside one launch. More local coarse smoothing is work-inefficient and does not
+remove the measured long-wavelength mode.
+
 ## Key sources
 
 - Wang, *A Chebyshev Semi-Iterative Approach for Accelerating Projective and
@@ -126,8 +159,9 @@ is the signature of a slow global mode, not a local row-solve deficiency.
 
 ## Next implementation gate
 
-Prototype a GPU factor-2 articulation hierarchy with depth-linear
-prolongation and Galerkin coarse operators. Use colored PGS as the fine smoother
-and compare recursive V-cycles, fixed-count coarse CG, and depth-2 Anderson on
-the coarse equations. Preserve exact impulse/body-state consistency and test at
-equal wall time before extending the correction beyond bilateral joint islands.
+Prototype a graph-captured coarse block-Thomas megakernel per articulation
+island, with depth-linear restriction/prolongation and colored PGS as the fine
+smoother. Measure native-float stability and equal-wall-time behavior across
+many independent chains, then verify impulse/body-state consistency before
+generalizing the coarse solve to branched bilateral islands and projected
+contact constraints.
