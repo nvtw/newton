@@ -16,6 +16,7 @@ import warp as wp
 import newton
 from newton._src.sim import BodyFlags, Contacts, Control, Model, State
 from newton._src.solvers.flags import SolverNotifyFlags
+from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation
 from newton._src.solvers.phoenx.body import (
     BodyContainer,
     body_container_zeros,
@@ -162,6 +163,7 @@ class SolverPhoenX(SolverBase):
         prepare_refresh_stride: int | str = "auto",
         solver_flavor: str = "standard",
         jacobi_max_colors: int = 10,
+        articulation_mode: str = "maximal",
         articulation_dvi: bool = False,
         articulation_dvi_replaces_joint_pgs: bool | None = None,
         articulation_dvi_solver: str = "block_sparse",
@@ -215,6 +217,9 @@ class SolverPhoenX(SolverBase):
                 threshold before being flagged sleeping. Default 30
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
+            articulation_mode: "maximal" keeps tree joints in classic
+                PhoenX PGS. "reduced" uses Newton generalized coordinates
+                and linear-time articulated-body dynamics for articulation trees.
             articulation_dvi: Enable the experimental full-coordinate DVI
                 articulation solve for every supported PhoenX joint column.
             articulation_dvi_replaces_joint_pgs: When ``True``, DVI-owned
@@ -226,6 +231,22 @@ class SolverPhoenX(SolverBase):
                 ``"device_block_sparse"`` is the graph-friendly device path.
         """
         super().__init__(model)
+        if articulation_mode not in ("maximal", "reduced"):
+            raise ValueError(f"articulation_mode must be 'maximal' or 'reduced', got {articulation_mode!r}")
+        if articulation_mode == "reduced" and solver_flavor != "standard":
+            raise ValueError("reduced articulations currently require solver_flavor='standard'")
+        if articulation_mode == "reduced" and articulation_dvi:
+            raise ValueError("articulation_mode='reduced' cannot be combined with articulation_dvi")
+        if articulation_mode == "reduced" and mass_splitting:
+            raise ValueError("articulation_mode='reduced' currently requires mass_splitting=False")
+        if articulation_mode == "reduced" and multi_world_scheduler.startswith("block_world"):
+            raise ValueError("articulation_mode='reduced' requires the fast-tail multi-world scheduler")
+        if articulation_mode == "reduced" and multi_world_scheduler == "auto":
+            multi_world_scheduler = "fast_tail"
+        if articulation_mode == "reduced":
+            prepare_refresh_stride = 1
+        self.articulation_mode = articulation_mode
+        self._reduced_articulation: ReducedPhoenXArticulation | None = None
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
         if velocity_readout not in valid_readouts:
             raise ValueError(f"velocity_readout must be one of {valid_readouts}, got {velocity_readout!r}")
@@ -260,7 +281,8 @@ class SolverPhoenX(SolverBase):
             # PhoenX is maximal-coordinate; bake reduced-coord armature into both
             # bodies' inertia along the joint axis so eff_inv = J M^-1 J^T sees
             # the augmented mass. Skinny links (<0.1 kg) need this for stable PD.
-            self._bake_joint_armature_into_body_inertia(model)
+            if self.articulation_mode != "reduced":
+                self._bake_joint_armature_into_body_inertia(model)
 
         # FK so model.body_q reflects model.joint_q (URDF rigs may set joint_q
         # before finalize without running FK).
@@ -451,6 +473,16 @@ class SolverPhoenX(SolverBase):
             adbs_kwargs = self._adbs.to_initialize_kwargs()
             adbs_kwargs["articulation_joint_mask"] = self._adbs_articulation_joint_mask
             self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
+
+        if self.articulation_mode == "reduced" and int(model.articulation_count) > 0:
+            self._reduced_articulation = ReducedPhoenXArticulation(model, self.bodies)
+            joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+            joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
+            for joint, owned in enumerate(self._reduced_articulation.tree_joint_mask_np):
+                cid = int(joint_idx_to_cid[joint])
+                if owned and cid >= 0:
+                    joint_pgs_enabled[cid] = 0
+            self.world.set_reduced_articulation(self._reduced_articulation, joint_pgs_enabled)
 
         if num_cloth_triangles > 0:
             self.world.populate_cloth_triangles_from_model(model)
@@ -962,9 +994,12 @@ class SolverPhoenX(SolverBase):
             control = self.model.control(clone_variables=False)
 
         self._apply_joint_control(control)
-        self._accumulate_joint_forces(state_in, control, dt)
+        if self._reduced_articulation is None:
+            self._accumulate_joint_forces(state_in, control, dt)
         self._import_body_state(state_in)
         self._import_particle_state(state_in)
+        if self._reduced_articulation is not None:
+            self._reduced_articulation.import_step(state_in, control)
 
         # FD readout snapshots the imported (state_in-aligned) pose so the
         # post-step delta covers the full outer dt.
@@ -1022,8 +1057,10 @@ class SolverPhoenX(SolverBase):
         self._particle_state_imported = None
         if want_body_qdd:
             self._export_body_qdd(state_out, dt=float(dt))
-        # Sync joint_q/joint_qd via eval_ik for policies that read them.
-        if state_out.joint_q is not None and state_out.joint_qd is not None and int(self.model.joint_count) > 0:
+        # Reduced coordinates are authoritative; maximal mode reconstructs them by IK.
+        if self._reduced_articulation is not None:
+            self._reduced_articulation.export_step(state_out)
+        elif state_out.joint_q is not None and state_out.joint_qd is not None and int(self.model.joint_count) > 0:
             newton.eval_ik(self.model, state_out, state_out.joint_q, state_out.joint_qd)
 
     @staticmethod

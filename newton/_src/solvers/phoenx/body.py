@@ -14,10 +14,12 @@ from newton._src.solvers.phoenx.access_mode import (
 )
 
 __all__ = [
+    "MOTION_ARTICULATED",
     "MOTION_DYNAMIC",
     "MOTION_KINEMATIC",
     "MOTION_STATIC",
     "BodyContainer",
+    "ReducedArticulationData",
     "body_container_zeros",
     "body_set_access_mode",
     "inertia_sym6",
@@ -32,6 +34,7 @@ __all__ = [
 MOTION_STATIC = wp.constant(0)
 MOTION_KINEMATIC = wp.constant(1)
 MOTION_DYNAMIC = wp.constant(2)
+MOTION_ARTICULATED = wp.constant(3)
 
 
 # Symmetric 3x3 packed as 6 floats: [I00, I11, I22, I01, I02, I12].
@@ -80,6 +83,48 @@ def inertia_sym6_unpack_np(s: np.ndarray) -> np.ndarray:
 
 
 @wp.struct
+class ReducedArticulationData:
+    """Device view of a cached reduced-coordinate inverse-mass operator."""
+
+    enabled: wp.array[wp.int32]
+    body_articulation: wp.array[wp.int32]
+    articulation_start: wp.array[wp.int32]
+    articulation_end: wp.array[wp.int32]
+    joint_parent: wp.array[wp.int32]
+    joint_child: wp.array[wp.int32]
+    joint_qd_start: wp.array[wp.int32]
+    joint_s: wp.array[wp.spatial_vector]
+    joint_u: wp.array[wp.spatial_vector]
+    joint_d_inv: wp.array3d[wp.float32]
+    joint_qd: wp.array[wp.float32]
+    body_work: wp.array[wp.spatial_vector]
+    joint_work: wp.array[wp.float32]
+    body_acceleration: wp.array[wp.spatial_vector]
+    generalized_response: wp.array[wp.float32]
+
+
+def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArticulationData:
+    """Allocate a disabled placeholder accepted by graph-specialized kernels."""
+    data = ReducedArticulationData()
+    data.enabled = wp.zeros(1, dtype=wp.int32, device=device)
+    data.body_articulation = wp.full(1, value=-1, dtype=wp.int32, device=device)
+    data.articulation_start = wp.zeros(1, dtype=wp.int32, device=device)
+    data.articulation_end = wp.zeros(1, dtype=wp.int32, device=device)
+    data.joint_parent = wp.full(1, value=-1, dtype=wp.int32, device=device)
+    data.joint_child = wp.zeros(1, dtype=wp.int32, device=device)
+    data.joint_qd_start = wp.zeros(2, dtype=wp.int32, device=device)
+    data.joint_s = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+    data.joint_u = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+    data.joint_d_inv = wp.zeros((1, 6, 6), dtype=wp.float32, device=device)
+    data.joint_qd = wp.zeros(1, dtype=wp.float32, device=device)
+    data.body_work = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+    data.joint_work = wp.zeros(1, dtype=wp.float32, device=device)
+    data.body_acceleration = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+    data.generalized_response = wp.zeros(1, dtype=wp.float32, device=device)
+    return data
+
+
+@wp.struct
 class BodyContainer:
     """SoA storage for a batch of rigid bodies. All arrays length ``num_bodies``."""
 
@@ -110,6 +155,11 @@ class BodyContainer:
     affected_by_gravity: wp.array[wp.int32]
     motion_type: wp.array[wp.int32]
     world_id: wp.array[wp.int32]
+    #: Graph-coloring ownership node. Articulation links share their root
+    #: node so no two constraints can update one generalized velocity
+    #: vector concurrently.
+    constraint_node: wp.array[wp.int32]
+    reduced: ReducedArticulationData
 
     # Kinematic-body pose scripting: prev = lerp/slerp origin, target = endpoint.
     # If kinematic_target_valid == 0 the prepare kernel synthesises target from
@@ -194,6 +244,8 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.affected_by_gravity = wp.full(num_bodies, value=1, dtype=wp.int32, device=device)
     c.motion_type = wp.full(num_bodies, value=int(MOTION_STATIC), dtype=wp.int32, device=device)
     c.world_id = wp.zeros(num_bodies, dtype=wp.int32, device=device)
+    c.constraint_node = wp.array(np.arange(num_bodies, dtype=np.int32), device=device)
+    c.reduced = reduced_articulation_data_zeros(device)
     c.position_prev = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.orientation_prev = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.kinematic_target_pos = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)

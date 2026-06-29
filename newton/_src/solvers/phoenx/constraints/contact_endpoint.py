@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
+from newton._src.solvers.phoenx.body import MOTION_ARTICULATED, BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
@@ -84,6 +84,9 @@ from newton._src.solvers.phoenx.mass_splitting.access import (
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
+
+_vec6 = wp.types.vector(length=6, dtype=wp.float32)
+
 
 __all__ = [
     "contact_endpoint_apply_impulse",
@@ -119,6 +122,153 @@ def _read_body_velocity_with_slot(
     if slot < wp.int32(0):
         return bodies.velocity[body_id]
     return copy_state.velocity[slot]
+
+
+@wp.func
+def _articulation_pair_response(
+    bodies: BodyContainer,
+    body_slot0: wp.int32,
+    point0: wp.vec3f,
+    impulse0: wp.vec3f,
+    body_slot1: wp.int32,
+    point1: wp.vec3f,
+    impulse1: wp.vec3f,
+    apply: wp.bool,
+) -> wp.float32:
+    """Solve one articulation response to one or two point impulses."""
+    data = bodies.reduced
+    articulation = data.body_articulation[body_slot0]
+    if articulation < wp.int32(0):
+        return wp.float32(0.0)
+
+    start = data.articulation_start[articulation]
+    end = data.articulation_end[articulation]
+    for joint in range(start, end):
+        child = data.joint_child[joint]
+        data.body_work[child] = wp.spatial_vector()
+        data.body_acceleration[child] = wp.spatial_vector()
+
+    for side in range(2):
+        body_slot = body_slot0
+        point = point0
+        impulse = impulse0
+        if side == 1:
+            body_slot = body_slot1
+            point = point1
+            impulse = impulse1
+        if body_slot >= wp.int32(0):
+            target_body = body_slot - wp.int32(1)
+            wrench = wp.spatial_vector(impulse, wp.cross(point, impulse))
+            data.body_work[target_body] = data.body_work[target_body] - wrench
+
+    for reverse in range(end - start):
+        joint = end - wp.int32(1) - reverse
+        parent = data.joint_parent[joint]
+        child = data.joint_child[joint]
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        p = data.body_work[child]
+        reduced_force = _vec6(0.0)
+        d_inv_u = _vec6(0.0)
+
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                reduced_force[row] = -wp.dot(data.joint_s[dof], p)
+                data.joint_work[dof] = reduced_force[row]
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                for column in range(6):
+                    if wp.int32(column) < dof_count:
+                        d_inv_u[row] += data.joint_d_inv[joint, row, column] * reduced_force[column]
+
+        propagated = p
+        for column in range(6):
+            if wp.int32(column) < dof_count:
+                propagated += data.joint_u[dof_start + wp.int32(column)] * d_inv_u[column]
+        if parent >= wp.int32(0):
+            data.body_work[parent] = data.body_work[parent] + propagated
+
+    effective_inverse_mass = wp.float32(0.0)
+    for joint in range(start, end):
+        parent = data.joint_parent[joint]
+        child = data.joint_child[joint]
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        parent_acceleration = wp.spatial_vector()
+        if parent >= wp.int32(0):
+            parent_acceleration = data.body_acceleration[parent]
+
+        rhs = _vec6(0.0)
+        response = _vec6(0.0)
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                rhs[row] = data.joint_work[dof] - wp.dot(data.joint_u[dof], parent_acceleration)
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                for column in range(6):
+                    if wp.int32(column) < dof_count:
+                        response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
+
+        child_acceleration = parent_acceleration
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                data.generalized_response[dof] = response[row]
+                effective_inverse_mass += data.joint_work[dof] * response[row]
+                child_acceleration += data.joint_s[dof] * response[row]
+        data.body_acceleration[child] = child_acceleration
+
+    if apply:
+        for joint in range(start, end):
+            dof_start = data.joint_qd_start[joint]
+            dof_end = data.joint_qd_start[joint + wp.int32(1)]
+            for dof in range(dof_start, dof_end):
+                data.joint_qd[dof] += data.generalized_response[dof]
+
+        # Reconstruct every link twist because one impulse generally changes
+        # all descendants and ancestors in the articulation.
+        for joint in range(start, end):
+            parent = data.joint_parent[joint]
+            child = data.joint_child[joint]
+            twist = wp.spatial_vector()
+            if parent >= wp.int32(0):
+                twist = data.body_acceleration[parent]
+            dof_start = data.joint_qd_start[joint]
+            dof_end = data.joint_qd_start[joint + wp.int32(1)]
+            for dof in range(dof_start, dof_end):
+                twist += data.joint_s[dof] * data.joint_qd[dof]
+            data.body_acceleration[child] = twist
+            slot = child + wp.int32(1)
+            omega = wp.spatial_bottom(twist)
+            bodies.angular_velocity[slot] = omega
+            bodies.velocity[slot] = wp.spatial_top(twist) + wp.cross(omega, bodies.position[slot])
+
+    return effective_inverse_mass
+
+
+@wp.func
+def _articulation_point_response(
+    bodies: BodyContainer,
+    body_slot: wp.int32,
+    point: wp.vec3f,
+    impulse: wp.vec3f,
+    apply: wp.bool,
+) -> wp.float32:
+    """Return point-impulse inverse mass and optionally update generalized speed."""
+    return _articulation_pair_response(
+        bodies,
+        body_slot,
+        point,
+        impulse,
+        wp.int32(-1),
+        wp.vec3f(0.0),
+        wp.vec3f(0.0),
+        apply,
+    )
 
 
 @wp.func
@@ -220,6 +370,8 @@ def contact_endpoint_inv_mass_along_cached(
     b = nodes[0]
     if b < 0:
         return wp.float32(0.0)
+    if bodies.motion_type[b] == MOTION_ARTICULATED:
+        return _articulation_point_response(bodies, b, contact_point_world, direction, wp.bool(False))
     inv_m = bodies.inverse_mass[b]
     if inv_m == wp.float32(0.0):
         return wp.float32(0.0)
@@ -305,6 +457,9 @@ def contact_endpoint_apply_impulse_cached(
         return
     b = nodes[0]
     if b < 0:
+        return
+    if bodies.motion_type[b] == MOTION_ARTICULATED:
+        _articulation_point_response(bodies, b, contact_point_world, impulse, wp.bool(True))
         return
     inv_m_raw = bodies.inverse_mass[b]
     if inv_m_raw == wp.float32(0.0):

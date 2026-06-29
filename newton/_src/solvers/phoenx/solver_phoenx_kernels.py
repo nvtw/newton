@@ -13,6 +13,7 @@ from newton._src.solvers.phoenx.access_mode import (
     ACCESS_MODE_VELOCITY_LEVEL,
 )
 from newton._src.solvers.phoenx.body import (
+    MOTION_ARTICULATED,
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
     MOTION_STATIC,
@@ -2284,8 +2285,11 @@ def _contact_soft_tet_active_nodes(
 
 @wp.func
 def _rigid_graph_node(node: wp.int32, bodies: BodyContainer):
-    if node >= 0 and bodies.inverse_mass[node] == 0.0:
-        node = -1
+    if node >= 0:
+        if bodies.inverse_mass[node] == 0.0:
+            node = -1
+        else:
+            node = bodies.constraint_node[node]
     return node
 
 
@@ -2311,6 +2315,8 @@ def _contact_primary_graph_node(
         elif side_kind == wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
             if bodies.inverse_mass[node] == 0.0 and bodies.motion_type[node] != MOTION_KINEMATIC:
                 node = -1
+            elif bodies.motion_type[node] != MOTION_KINEMATIC:
+                node = bodies.constraint_node[node]
         else:
             if particles.inverse_mass[node - num_bodies] == 0.0:
                 node = -1
@@ -2710,7 +2716,7 @@ def _integrate_velocities_kernel(
     lerp/slerp in :func:`_kinematic_interpolate_substep_kernel`."""
     i = wp.tid()
     mt = bodies.motion_type[i]
-    if mt == MOTION_STATIC or mt == MOTION_KINEMATIC:
+    if mt != MOTION_DYNAMIC:
         return
     # Sleeping bodies must not drift. They may carry a small residual
     # velocity (anywhere below the per-island sleep threshold) at the
@@ -3293,21 +3299,14 @@ def _make_singleworld_dispatch_func(
             if wp.static(cloth_support):
                 side0_kind = contact_get_side0_kind(contact_cols, local_cid)
                 side1_kind = contact_get_side1_kind(contact_cols, local_cid)
-                if side0_kind == wp.int32(0) and side1_kind == wp.int32(0):
-                    _dispatch_rigid_contact(
-                        contact_cols,
-                        bodies,
-                        particles,
-                        cc,
-                        contacts,
-                        copy_state,
-                        num_bodies,
-                        idt,
-                        sor_boost,
-                        local_cid,
-                        parallel_id,
+                use_endpoint_path = side0_kind != wp.int32(0) or side1_kind != wp.int32(0)
+                if not use_endpoint_path:
+                    b1 = contact_get_body1(contact_cols, local_cid)
+                    b2 = contact_get_body2(contact_cols, local_cid)
+                    use_endpoint_path = (
+                        bodies.motion_type[b1] == MOTION_ARTICULATED or bodies.motion_type[b2] == MOTION_ARTICULATED
                     )
-                else:
+                if use_endpoint_path:
                     if wp.static(is_prepare):
                         contact_prepare_for_iteration_cloth_aware(
                             contact_cols,
@@ -3336,6 +3335,20 @@ def _make_singleworld_dispatch_func(
                             parallel_id,
                             sor_boost,
                         )
+                else:
+                    _dispatch_rigid_contact(
+                        contact_cols,
+                        bodies,
+                        particles,
+                        cc,
+                        contacts,
+                        copy_state,
+                        num_bodies,
+                        idt,
+                        sor_boost,
+                        local_cid,
+                        parallel_id,
+                    )
             else:
                 _dispatch_rigid_contact(
                     contact_cols,

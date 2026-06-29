@@ -912,6 +912,13 @@ class PhoenXWorld:
         self._joint_pgs_enabled: wp.array[wp.int32] = wp.ones(
             max(1, self.num_joints), dtype=wp.int32, device=self.device
         )
+        self._reduced_articulation = None
+        self._regular_pgs_active_this_step = True
+        self._reduced_contacts_active_this_step = False
+        self._partition_active_this_step = True
+        self._has_maximal_dynamic_bodies = True
+        self._joint_pgs_ownership_active = False
+        self._joint_pgs_all_disabled = False
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -2105,6 +2112,17 @@ class PhoenXWorld:
                 "articulation_dvi_host=True requires initialized PhoenX ADBS joint topology before step()"
             )
 
+    def set_reduced_articulation(self, articulation, joint_pgs_enabled: np.ndarray) -> None:
+        """Bind a reduced backend and transfer ownership of selected joint columns."""
+        enabled = np.asarray(joint_pgs_enabled, dtype=np.int32)
+        if enabled.shape != (self.num_joints,):
+            raise ValueError(f"joint_pgs_enabled must have shape ({self.num_joints},), got {enabled.shape}")
+        self._joint_pgs_enabled.assign(enabled)
+        self._joint_pgs_ownership_active = True
+        self._joint_pgs_all_disabled = not bool(enabled.any())
+        self._reduced_articulation = articulation
+        self._has_maximal_dynamic_bodies = bool(np.any(self.bodies.motion_type.numpy() == int(MOTION_DYNAMIC)))
+
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
         """Replace the body-pair contact filter (canonical (min, max), deduped)."""
         self._set_collision_filter_pairs_impl(pairs)
@@ -2958,6 +2976,17 @@ class PhoenXWorld:
         if self.enable_column_timers:
             self._zero_column_timers()
 
+        has_deformable_rows = bool(
+            self.num_cloth_triangles or self.num_cloth_bending or self.num_soft_tetrahedra or self.num_soft_hexahedra
+        )
+        has_enabled_joint_rows = self.num_joints > 0 and not self._skip_all_joint_pgs()
+        has_contact_input = contacts is not None
+        self._reduced_contacts_active_this_step = self._reduced_articulation is not None and has_contact_input
+        self._regular_pgs_active_this_step = bool(
+            has_deformable_rows or has_enabled_joint_rows or (has_contact_input and self._reduced_articulation is None)
+        )
+        self._partition_active_this_step = self._regular_pgs_active_this_step or self._reduced_contacts_active_this_step
+
         # Contact ingest + element rebuild + graph colouring all depend only
         # on the (unchanged) contact graph when ``reuse_partition`` is set, so
         # skip them and reuse the previous step's columns / elements / CSR. The
@@ -2965,7 +2994,11 @@ class PhoenXWorld:
         # reused columns are exactly the prior substep's converged values.
         if not reuse_partition:
             self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
-            if self.solver_flavor == "standard" and self._ingest_scratch is not None:
+            if (
+                self._partition_active_this_step
+                and self.solver_flavor == "standard"
+                and self._ingest_scratch is not None
+            ):
                 # Contacts begin after the joint + cloth-tri + cloth-bending
                 # + soft-tet blocks in the cid space. Contact cids are compacted
                 # every step, so use the stable shape-pair key for contact
@@ -2980,7 +3013,7 @@ class PhoenXWorld:
                     self._ingest_scratch.pair_shape_b,
                 )
 
-            if self.solver_flavor == "standard":
+            if self._partition_active_this_step and self.solver_flavor == "standard":
                 self._rebuild_elements()
         # Kinematic prepare BEFORE the sleeping pass: the per-island
         # score kernel reads ``bodies.velocity`` and must see the
@@ -2992,7 +3025,7 @@ class PhoenXWorld:
             self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
         if self.solver_flavor == "simple":
             self._dispatcher.begin_step()
-        elif self._constraint_capacity > 0:
+        elif self._constraint_capacity > 0 and self._partition_active_this_step:
             if not reuse_partition:
                 self._partitioner.reset(self._elements, self._num_active_constraints)
                 if self.step_layout == "single_world":
@@ -3020,6 +3053,11 @@ class PhoenXWorld:
             self._current_substep_index = k
             if picking is not None:
                 picking.apply_force()
+            if self._reduced_articulation is not None:
+                self._reduced_articulation.begin_substep(
+                    self.substep_dt,
+                    split_dynamics=self._reduced_contacts_active_this_step,
+                )
             self._integrate_forces_and_gravity()
             # TGS-soft (Box2D-v3) substep order: solve-with-bias ->
             # integrate -> relax (bias=False). Reversing regresses
@@ -3036,6 +3074,11 @@ class PhoenXWorld:
             if self.articulation_dvi_host and not self.articulation_dvi_replaces_joint_pgs:
                 self._solve_articulations_dvi_host_for_step()
             self._integrate_positions()
+            if self._reduced_articulation is not None:
+                self._reduced_articulation.end_substep(
+                    self.substep_dt,
+                    split_dynamics=self._reduced_contacts_active_this_step,
+                )
             self._dispatcher.relax(idt)
             # Flip cloth particles' POSITION_LEVEL writes back to
             # VELOCITY_LEVEL. No-op for STATIC particles and rigid-only
@@ -3813,7 +3856,7 @@ class PhoenXWorld:
         apply gravity. The two launches are independent and can fuse
         in CUDA-graph capture.
         """
-        if self.num_bodies > 0:
+        if self.num_bodies > 0 and self._has_maximal_dynamic_bodies:
             wp.launch(
                 _phoenx_apply_forces_and_gravity_kernel,
                 dim=self.num_bodies,
@@ -4239,7 +4282,9 @@ class PhoenXWorld:
                 self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
 
     def _selective_joint_pgs_enabled(self) -> bool:
-        """Return whether PGS should skip only DVI-owned joint columns."""
+        """Return whether PGS should skip only externally owned joint columns."""
+        if self._joint_pgs_ownership_active:
+            return self.num_joints > 0 and not self._joint_pgs_all_disabled
         if not (self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs):
             return False
         if self.articulation_dvi_joint_mask is None:
@@ -4248,6 +4293,8 @@ class PhoenXWorld:
 
     def _skip_all_joint_pgs(self) -> bool:
         """Return whether every joint column is owned by DVI."""
+        if self._joint_pgs_ownership_active:
+            return self._joint_pgs_all_disabled
         return bool(
             self.articulation_dvi_host
             and self.articulation_dvi_replaces_joint_pgs
@@ -4279,7 +4326,7 @@ class PhoenXWorld:
         joint_sweeps, contact_sweeps, outer_chunk = _choose_fast_tail_solve_schedule(substeps=self.substeps)
         kw: dict[str, object] = {
             **self._dispatch_specialization_flags(),
-            "has_contacts": self.max_contact_columns > 0,
+            "has_contacts": self.max_contact_columns > 0 and self._reduced_articulation is None,
             "fixed_tpw": int(fixed_tpw),
             "guard_tpw": self._tpw_auto,
             "family_split": self._fast_tail_family_split(),
@@ -4317,7 +4364,7 @@ class PhoenXWorld:
         scene-wide soft-tet variant."""
         kw = {
             **self._dispatch_specialization_flags(),
-            "has_contacts": self.max_contact_columns > 0,
+            "has_contacts": self.max_contact_columns > 0 and self._reduced_articulation is None,
             "has_mass_splitting": self.mass_splitting_enabled,
             "rigid_direct": self._singleworld_rigid_direct(),
         }
@@ -4369,7 +4416,7 @@ class PhoenXWorld:
 
     def _singleworld_rigid_direct(self) -> bool:
         """Use typed rigid loops in single-world PGS kernels."""
-        if self.step_layout != "single_world" or self.mass_splitting_enabled:
+        if self.step_layout != "single_world" or self.mass_splitting_enabled or self._reduced_articulation is not None:
             return False
         if (
             self.num_cloth_triangles > 0
@@ -4492,7 +4539,7 @@ class PhoenXWorld:
     def _integrate_positions(self) -> None:
         """x += v*dt; q = dq(w*dt) * q for dynamic bodies. Kinematic poses
         advance via :meth:`_kinematic_interpolate_substep`."""
-        if self.num_bodies == 0:
+        if self.num_bodies == 0 or not self._has_maximal_dynamic_bodies:
             return
         wp.launch(
             _integrate_velocities_kernel,
@@ -4527,7 +4574,7 @@ class PhoenXWorld:
     def _refresh_world_inertia(self) -> None:
         """Per-substep refresh of inverse_inertia_world (R * I^-1 * R^T) after
         :meth:`_integrate_positions`."""
-        if self.num_bodies == 0:
+        if self.num_bodies == 0 or not self._has_maximal_dynamic_bodies:
             return
         wp.launch(
             _phoenx_refresh_world_inertia_kernel,
@@ -4639,7 +4686,7 @@ class PhoenXWorld:
 
     def _update_inertia_and_clear_forces(self) -> None:
         """End-of-step: damping + inertia rebuild + force/torque zeroing (fused)."""
-        if self.num_bodies == 0:
+        if self.num_bodies == 0 or not self._has_maximal_dynamic_bodies:
             return
         wp.launch(
             _phoenx_update_inertia_and_clear_forces_kernel,

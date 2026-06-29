@@ -26,6 +26,7 @@ from newton._src.solvers.phoenx.body import (
     BodyContainer,
     inertia_sym6,
     inertia_sym6_pack_np,
+    reduced_articulation_data_zeros,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -1063,6 +1064,8 @@ class WorldBuilder:
         c.affected_by_gravity = wp.array(affected_by_gravity, dtype=wp.int32, device=device)
         c.motion_type = wp.array(motion_type, dtype=wp.int32, device=device)
         c.world_id = wp.array(world_id_arr, dtype=wp.int32, device=device)
+        c.constraint_node = wp.array(np.arange(n, dtype=np.int32), device=device)
+        c.reduced = reduced_articulation_data_zeros(device)
         # Seed prev=target=initial pose so the first step infers zero delta
         # for un-scripted kinematic bodies.
         c.position_prev = wp.array(positions, dtype=wp.vec3f, device=device)
