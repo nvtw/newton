@@ -107,7 +107,7 @@ BODY_SHAPE = BodyShape.CAPSULE
 # ``CAPSULE_LENGTH + CAPSULE_DIAMETER``. Defaults: 10 cm line-segment
 # with 5 cm diameter -> 15 cm total length per capsule.
 CAPSULE_LENGTH = 0.10
-CAPSULE_DIAMETER = 0.05
+CAPSULE_DIAMETER = 0.1
 _CAPSULE_RADIUS = 0.5 * CAPSULE_DIAMETER
 _CAPSULE_HALF_HEIGHT = 0.5 * CAPSULE_LENGTH
 
@@ -118,7 +118,7 @@ _CAPSULE_HALF_HEIGHT = 0.5 * CAPSULE_LENGTH
 #     ``TARGET_ANGLE`` [rad] with a critically-damped soft spring.
 DRIVE_MODE = DriveMode.VELOCITY
 
-NUM_CUBES = 250
+NUM_CUBES = 96
 HALF_EXTENT = 0.05
 NUM_BODIES = NUM_CUBES + 1  # +1 for the static world anchor body at slot 0
 NUM_HINGES = NUM_CUBES  # 1 world->cube0 + (N-1) cube_{k-1}->cube_k
@@ -136,14 +136,48 @@ _DIAGONAL_QUAT = (0.0, 0.0, math.sin(_HALF_ANGLE), math.cos(_HALF_ANGLE))
 # Used for capsule bodies so the capsule axis runs along the chain.
 _CAPSULE_QUAT = (math.sin(math.pi / 4.0), 0.0, 0.0, math.cos(math.pi / 4.0))
 
-# Solid-body inverse inertia [kg^-1 m^-2] for the displayed 1 kg link.
-# The capsule's body-local z axis is rotated onto world -y initially.
-if BODY_SHAPE is BodyShape.CAPSULE:
-    _INV_INERTIA = ((600.938967, 0.0, 0.0), (0.0, 600.938967, 0.0), (0.0, 0.0, 3368.421053))
-    _INV_INERTIA_WORLD = ((600.938967, 0.0, 0.0), (0.0, 3368.421053, 0.0), (0.0, 0.0, 600.938967))
-else:
-    _INV_INERTIA = ((600.0, 0.0, 0.0), (0.0, 600.0, 0.0), (0.0, 0.0, 600.0))
-    _INV_INERTIA_WORLD = _INV_INERTIA
+LINK_MASS = 1.0
+
+
+def _link_inverse_inertia() -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float],
+    tuple[float, float, float],
+]:
+    """Return solid-body inverse inertia for the displayed link geometry."""
+    if BODY_SHAPE is BodyShape.CUBE:
+        side = 2.0 * HALF_EXTENT
+        inertia = (1.0 / 6.0) * LINK_MASS * side * side
+        inv = 1.0 / inertia
+        return ((inv, 0.0, 0.0), (0.0, inv, 0.0), (0.0, 0.0, inv))
+
+    if BODY_SHAPE is BodyShape.CAPSULE:
+        radius = _CAPSULE_RADIUS
+        cylinder_height = 2.0 * _CAPSULE_HALF_HEIGHT
+        sphere_volume = (4.0 / 3.0) * math.pi * radius**3
+        cylinder_volume = math.pi * radius**2 * cylinder_height
+        density = LINK_MASS / (sphere_volume + cylinder_volume)
+        sphere_mass = density * sphere_volume
+        cylinder_mass = density * cylinder_volume
+        transverse = cylinder_mass * (
+            0.25 * radius * radius + (1.0 / 12.0) * cylinder_height * cylinder_height
+        ) + sphere_mass * (
+            0.4 * radius * radius + 0.375 * radius * cylinder_height + 0.25 * cylinder_height * cylinder_height
+        )
+        axial = (0.5 * cylinder_mass + 0.4 * sphere_mass) * radius * radius
+        return (
+            (1.0 / transverse, 0.0, 0.0),
+            (0.0, 1.0 / transverse, 0.0),
+            (0.0, 0.0, 1.0 / axial),
+        )
+
+    raise ValueError(f"unsupported BODY_SHAPE: {BODY_SHAPE!r}")
+
+
+_LINK_INVERSE_INERTIA = _link_inverse_inertia()
+# The hinge's world +z axis maps to a transverse capsule axis. Cube inertia
+# is isotropic, so the same component applies to either displayed shape.
+_MOTOR_AXIS_INERTIA = 1.0 / _LINK_INVERSE_INERTIA[1][1]
 
 # Motor torque cap [N*m] -- generous so the PD drive can hold its
 # target against PGS jitter even on the top joint (which carries the
@@ -151,9 +185,9 @@ else:
 _MOTOR_MAX_FORCE = 50.0
 
 # Position-drive soft-spring knobs: 4 Hz critically-damped angular
-# spring (``omega = 2*pi*hertz``, ``zeta = 1``).
+# spring on unit-inertia cubes (``omega = 2*pi*hertz``, ``zeta = 1``).
 #   kp = I * omega^2
-#   kd = 2 * I * zeta * omega
+#   kd = 2*I*zeta*omega
 _HERTZ_DRIVE = 4.0
 _DAMPING_RATIO_DRIVE = 1.0
 _STIFFNESS_DRIVE = (2.0 * math.pi * _HERTZ_DRIVE) ** 2
@@ -196,7 +230,7 @@ def _populate_chain_bodies(
     Slot 0: static world anchor (default-initialised -- mass / inertia
     already zero, motion type already :data:`MOTION_STATIC`).
     Slots 1..NUM_BODIES: dynamic links in a column along world -y.
-    Each link has unit mass and solid-geometry body-frame inertia. For
+    Each link has unit mass and identity body-frame inertia. For
     cubes the rotation is ``_DIAGONAL_QUAT`` (corners on the y axis);
     for capsules it is ``_CAPSULE_QUAT`` so the body-local +z capsule
     axis aligns with world -y.
@@ -213,15 +247,18 @@ def _populate_chain_bodies(
     bodies.orientation.assign(orientations)
 
     inv_mass_np = np.zeros(NUM_BODIES, dtype=np.float32)
-    inv_mass_np[1:] = 1.0  # unit mass on every dynamic link
+    inv_mass_np[1:] = 1.0 / LINK_MASS
     bodies.inverse_mass.assign(inv_mass_np)
 
+    # Body-frame inertia: identity -> inverse identity.
     inv_inertia_np = np.zeros((NUM_BODIES, 3, 3), dtype=np.float32)
-    inv_inertia_world_np = np.zeros_like(inv_inertia_np)
-    inv_inertia_np[1:] = _INV_INERTIA
-    inv_inertia_world_np[1:] = _INV_INERTIA_WORLD
+    eye = np.array(_LINK_INVERSE_INERTIA, dtype=np.float32)
+    for j in range(1, NUM_BODIES):
+        inv_inertia_np[j] = eye
     bodies.inverse_inertia.assign(inv_inertia_np)
-    bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(inv_inertia_world_np))
+    # World-space inertia starts at the same value because every cube
+    # is rotated purely about +z and ``eye`` is rotation-invariant.
+    bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(inv_inertia_np))
 
     motion = np.full(NUM_BODIES, int(MOTION_STATIC), dtype=np.int32)
     motion[1:] = int(MOTION_DYNAMIC)
@@ -317,7 +354,7 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 50
+        self.sim_substeps = 500
         self.solver_iterations = 4
 
         self.viewer = viewer
@@ -362,6 +399,7 @@ class Example:
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
             velocity_iterations=1,
+            sor_boost=1.0,
             gravity=(0.0, 0.0, -9.81),  # match the jitter variant's -y gravity
             rigid_contact_max=0,
             num_joints=NUM_HINGES,
