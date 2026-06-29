@@ -210,6 +210,30 @@ with float32 roundoff. This follows from applying every coarse correction as a
 paired `J^T lambda` impulse. Correction stride three is not robust without
 weakening the solve, so stride two is the current stability boundary.
 
+## Packed multi-world path scaling
+
+The coarse kernels now pack equal-length independent path islands with one
+fixed 128-thread CUDA block per path. A two-path CUDA graph test checks the
+full block-diagonal Galerkin operator and global momentum, so interpolation
+and sparse-edge indexing cannot cross path boundaries.
+
+For 96-link worlds with 16 coarse color sweeps and stride two, 60-frame replay
+scales as follows:
+
+| Worlds | Frame time | Mean tip sag | RMS position violation |
+|---:|---:|---:|---:|
+| 1 | 7.76 ms | 0.757 m | 0.096 mm |
+| 2 | 8.86 ms | 0.769 m | 0.119 mm |
+| 4 | 10.38 ms | 0.804 m | 0.106 mm |
+| 8 | 10.94 ms | 0.791 m | 0.112 mm |
+
+Eight chains therefore provide about 5.7x the one-chain throughput. For
+comparison, classic 200-substep x 2-sweep PGS at eight worlds costs 8.29 ms but
+has 1.556 m mean sag, 0.665 mm RMS position violation, and far larger residual
+speeds. The coarse method spends 32% more time there but roughly halves sag and
+reduces position violation 5.9x. Identical-world sag spread is also lower than
+the classic baseline (0.056 m versus 0.111 m after 60 frames).
+
 ## Key sources
 
 - Wang, *A Chebyshev Semi-Iterative Approach for Accelerating Projective and
@@ -237,7 +261,7 @@ weakening the solve, so stride two is the current stability boundary.
 
 ## Next implementation gate
 
-Generalize the factor-2 local Galerkin correction from one path to packed
-independent path islands/worlds, preserving one fixed graph-captured launch
-shape. Measure scaling and add branched-articulation coverage, then determine
-whether a related aggregation is safe for projected contact islands.
+Generalize the verified local Galerkin idea from paths to branched bilateral
+articulation graphs. Build a deterministic aggregation/coarse coloring for a
+challenging branched motor scene, retain fixed graph-captured launch bounds,
+and compare against path decomposition before considering projected contacts.

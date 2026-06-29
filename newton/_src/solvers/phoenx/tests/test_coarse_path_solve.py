@@ -21,11 +21,15 @@ class TestPhoenXCoarsePathSolve(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("coarse path tests require CUDA graph capture")
 
-        joint_count = 8
-        body1 = np.arange(1, joint_count + 1, dtype=np.int32)
-        body2 = np.arange(2, joint_count + 2, dtype=np.int32)
-        positions = np.zeros((joint_count + 2, 3), dtype=np.float32)
-        positions[1:, 0] = np.arange(joint_count + 1)
+        path_count = 2
+        blocks_per_path = 8
+        joint_count = path_count * blocks_per_path
+        body1 = np.concatenate([np.arange(1, 9, dtype=np.int32), np.arange(10, 18, dtype=np.int32)])
+        body2 = body1 + 1
+        positions = np.zeros((19, 3), dtype=np.float32)
+        positions[1:10, 0] = np.arange(9)
+        positions[10:19, 0] = np.arange(9)
+        positions[10:19, 1] = 2.0
         world = _make_adbs_world(
             device,
             body1,
@@ -38,8 +42,8 @@ class TestPhoenXCoarsePathSolve(unittest.TestCase):
         rng = np.random.default_rng(17)
         velocity = np.zeros_like(positions)
         angular_velocity = np.zeros_like(positions)
-        velocity[1:] = rng.normal(size=(joint_count + 1, 3))
-        angular_velocity[1:] = rng.normal(size=(joint_count + 1, 3))
+        velocity[1:] = rng.normal(size=(18, 3))
+        angular_velocity[1:] = rng.normal(size=(18, 3))
         world.bodies.velocity.assign(velocity)
         world.bodies.angular_velocity.assign(angular_velocity)
 
@@ -52,7 +56,13 @@ class TestPhoenXCoarsePathSolve(unittest.TestCase):
             use_meca=False,
         )
         system = ArticulationDeviceSystem.from_topology(topology, device, symbolic)
-        coarse = CoarsePathSolver(joint_count, rows=5, color_sweeps=16, device=device)
+        coarse = CoarsePathSolver(
+            joint_count,
+            rows=5,
+            color_sweeps=16,
+            device=device,
+            path_count=path_count,
+        )
 
         linear_before = velocity[1:].sum(axis=0)
         angular_before = (angular_velocity[1:] + np.cross(positions[1:], velocity[1:])).sum(axis=0)
@@ -95,28 +105,35 @@ class TestPhoenXCoarsePathSolve(unittest.TestCase):
         for block in range(joint_count):
             row = slice(block * rows, (block + 1) * rows)
             fine_matrix[row, row] = fine_diag[block]
-        for block in range(joint_count - 1):
-            row = slice((block + 1) * rows, (block + 2) * rows)
-            col = slice(block * rows, (block + 1) * rows)
-            fine_matrix[row, col] = fine_off[block]
-            fine_matrix[col, row] = fine_off[block].T
+        for path in range(path_count):
+            for local in range(blocks_per_path - 1):
+                block = path * blocks_per_path + local
+                edge = path * (blocks_per_path - 1) + local
+                row = slice((block + 1) * rows, (block + 2) * rows)
+                col = slice(block * rows, (block + 1) * rows)
+                fine_matrix[row, col] = fine_off[edge]
+                fine_matrix[col, row] = fine_off[edge].T
 
-        coarse_blocks = (joint_count + 2) // 2
+        coarse_blocks_per_path = (blocks_per_path + 2) // 2
+        coarse_blocks = path_count * coarse_blocks_per_path
         prolongation = np.zeros((joint_count * rows, coarse_blocks * rows))
-        coarse_nodes = list(range(0, joint_count, 2))
-        if coarse_nodes[-1] != joint_count - 1:
-            coarse_nodes.append(joint_count - 1)
-        for fine in range(joint_count):
-            upper = int(np.searchsorted(coarse_nodes, fine, side="left"))
-            if coarse_nodes[upper] == fine:
-                weights = ((upper, 1.0),)
-            else:
-                lower = upper - 1
-                weight = (fine - coarse_nodes[lower]) / (coarse_nodes[upper] - coarse_nodes[lower])
-                weights = ((lower, 1.0 - weight), (upper, weight))
-            for row in range(rows):
-                for block, weight in weights:
-                    prolongation[fine * rows + row, block * rows + row] = weight
+        coarse_nodes = list(range(0, blocks_per_path, 2))
+        if coarse_nodes[-1] != blocks_per_path - 1:
+            coarse_nodes.append(blocks_per_path - 1)
+        for path in range(path_count):
+            for local_fine in range(blocks_per_path):
+                upper = int(np.searchsorted(coarse_nodes, local_fine, side="left"))
+                if coarse_nodes[upper] == local_fine:
+                    weights = ((upper, 1.0),)
+                else:
+                    lower = upper - 1
+                    weight = (local_fine - coarse_nodes[lower]) / (coarse_nodes[upper] - coarse_nodes[lower])
+                    weights = ((lower, 1.0 - weight), (upper, weight))
+                fine = path * blocks_per_path + local_fine
+                for row in range(rows):
+                    for local_coarse, weight in weights:
+                        block = path * coarse_blocks_per_path + local_coarse
+                        prolongation[fine * rows + row, block * rows + row] = weight
         expected = prolongation.T @ fine_matrix @ prolongation
 
         actual = np.zeros_like(expected)
@@ -125,11 +142,13 @@ class TestPhoenXCoarsePathSolve(unittest.TestCase):
         for block in range(coarse_blocks):
             row = slice(block * rows, (block + 1) * rows)
             actual[row, row] = coarse_diag[block]
-        for block in range(coarse_blocks - 1):
-            row = slice((block + 1) * rows, (block + 2) * rows)
-            col = slice(block * rows, (block + 1) * rows)
-            actual[row, col] = coarse_off[block]
-            actual[col, row] = coarse_off[block].T
+        for path in range(path_count):
+            for local in range(coarse_blocks_per_path - 1):
+                block = path * coarse_blocks_per_path + local
+                row = slice((block + 1) * rows, (block + 2) * rows)
+                col = slice(block * rows, (block + 1) * rows)
+                actual[row, col] = coarse_off[block]
+                actual[col, row] = coarse_off[block].T
         np.testing.assert_allclose(actual, expected, rtol=3.0e-6, atol=3.0e-6)
 
 

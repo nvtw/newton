@@ -56,38 +56,43 @@ def _assemble_coarse_path_kernel(
     fine_diag: wp.array3d[wp.float32],
     fine_off: wp.array3d[wp.float32],
     fine_rhs: wp.array2d[wp.float32],
-    fine_blocks: wp.int32,
-    coarse_blocks: wp.int32,
+    fine_blocks_per_path: wp.int32,
+    coarse_blocks_per_path: wp.int32,
     rows: wp.int32,
     coarse_diag: wp.array3d[wp.float32],
     coarse_off: wp.array3d[wp.float32],
     coarse_rhs: wp.array2d[wp.float32],
     coarse_solution: wp.array2d[wp.float32],
 ):
-    lane = wp.tid()
-    if lane < coarse_blocks:
+    path, lane = wp.tid()
+    fine_base = path * fine_blocks_per_path
+    fine_off_base = path * (fine_blocks_per_path - wp.int32(1))
+    coarse_base = path * coarse_blocks_per_path
+    if lane < coarse_blocks_per_path:
+        coarse = coarse_base + lane
         for r in range(_BLOCK_SIZE):
-            coarse_rhs[lane, r] = wp.float32(0.0)
-            coarse_solution[lane, r] = wp.float32(0.0)
+            coarse_rhs[coarse, r] = wp.float32(0.0)
+            coarse_solution[coarse, r] = wp.float32(0.0)
             for c in range(_BLOCK_SIZE):
-                coarse_diag[lane, r, c] = wp.float32(0.0)
-                if lane + wp.int32(1) < coarse_blocks:
-                    coarse_off[lane, r, c] = wp.float32(0.0)
+                coarse_diag[coarse, r, c] = wp.float32(0.0)
+                if lane + wp.int32(1) < coarse_blocks_per_path:
+                    coarse_off[coarse, r, c] = wp.float32(0.0)
     _sync_threads()
 
-    if lane < fine_blocks:
-        left = _coarse_left(lane, fine_blocks)
-        has_right = lane % wp.int32(2) == wp.int32(1) and lane + wp.int32(1) < fine_blocks
+    if lane < fine_blocks_per_path:
+        fine = fine_base + lane
+        left = coarse_base + _coarse_left(lane, fine_blocks_per_path)
+        has_right = lane % wp.int32(2) == wp.int32(1) and lane + wp.int32(1) < fine_blocks_per_path
         left_weight = wp.float32(0.5) if has_right else wp.float32(1.0)
         right_weight = wp.float32(0.5)
         for r in range(_BLOCK_SIZE):
             if wp.int32(r) < rows:
-                wp.atomic_add(coarse_rhs, left, r, left_weight * fine_rhs[lane, r])
+                wp.atomic_add(coarse_rhs, left, r, left_weight * fine_rhs[fine, r])
                 if has_right:
-                    wp.atomic_add(coarse_rhs, left + wp.int32(1), r, right_weight * fine_rhs[lane, r])
+                    wp.atomic_add(coarse_rhs, left + wp.int32(1), r, right_weight * fine_rhs[fine, r])
                 for c in range(_BLOCK_SIZE):
                     if wp.int32(c) < rows:
-                        value = fine_diag[lane, r, c]
+                        value = fine_diag[fine, r, c]
                         wp.atomic_add(coarse_diag, left, r, c, left_weight * left_weight * value)
                         if has_right:
                             wp.atomic_add(
@@ -99,20 +104,21 @@ def _assemble_coarse_path_kernel(
                             )
                             wp.atomic_add(coarse_off, left, r, c, left_weight * right_weight * value)
 
-    if lane + wp.int32(1) < fine_blocks:
+    if lane + wp.int32(1) < fine_blocks_per_path:
         row = lane + wp.int32(1)
         col = lane
-        row_left = _coarse_left(row, fine_blocks)
-        col_left = _coarse_left(col, fine_blocks)
-        row_has_right = row % wp.int32(2) == wp.int32(1) and row + wp.int32(1) < fine_blocks
-        col_has_right = col % wp.int32(2) == wp.int32(1) and col + wp.int32(1) < fine_blocks
+        row_left = coarse_base + _coarse_left(row, fine_blocks_per_path)
+        col_left = coarse_base + _coarse_left(col, fine_blocks_per_path)
+        row_has_right = row % wp.int32(2) == wp.int32(1) and row + wp.int32(1) < fine_blocks_per_path
+        col_has_right = col % wp.int32(2) == wp.int32(1) and col + wp.int32(1) < fine_blocks_per_path
         row_weight = wp.float32(0.5) if row_has_right else wp.float32(1.0)
         col_weight = wp.float32(0.5) if col_has_right else wp.float32(1.0)
+        fine_edge = fine_off_base + lane
         _accumulate_coarse_edge(
             row_left,
             col_left,
             row_weight * col_weight,
-            lane,
+            fine_edge,
             rows,
             fine_off,
             coarse_diag,
@@ -123,7 +129,7 @@ def _assemble_coarse_path_kernel(
                 row_left,
                 col_left + wp.int32(1),
                 row_weight * wp.float32(0.5),
-                lane,
+                fine_edge,
                 rows,
                 fine_off,
                 coarse_diag,
@@ -134,7 +140,7 @@ def _assemble_coarse_path_kernel(
                 row_left + wp.int32(1),
                 col_left,
                 wp.float32(0.5) * col_weight,
-                lane,
+                fine_edge,
                 rows,
                 fine_off,
                 coarse_diag,
@@ -145,7 +151,7 @@ def _assemble_coarse_path_kernel(
                 row_left + wp.int32(1),
                 col_left + wp.int32(1),
                 wp.float32(0.25),
-                lane,
+                fine_edge,
                 rows,
                 fine_off,
                 coarse_diag,
@@ -158,15 +164,17 @@ def _solve_coarse_path_kernel(
     coarse_diag: wp.array3d[wp.float32],
     coarse_off: wp.array3d[wp.float32],
     coarse_rhs: wp.array2d[wp.float32],
-    coarse_blocks: wp.int32,
+    coarse_blocks_per_path: wp.int32,
     rows: wp.int32,
     color_sweeps: wp.int32,
     factor_diag: wp.array3d[wp.float32],
     work: wp.array2d[wp.float32],
     solution: wp.array2d[wp.float32],
 ):
-    node = wp.tid()
-    if node < coarse_blocks:
+    path, local_node = wp.tid()
+    coarse_base = path * coarse_blocks_per_path
+    node = coarse_base + local_node
+    if local_node < coarse_blocks_per_path:
         for i in range(_BLOCK_SIZE):
             for j in range(_BLOCK_SIZE):
                 value = wp.float32(0.0)
@@ -193,15 +201,15 @@ def _solve_coarse_path_kernel(
     sweep = wp.int32(0)
     while sweep < color_sweeps:
         color = sweep % wp.int32(2)
-        if node < coarse_blocks and node % wp.int32(2) == color:
+        if local_node < coarse_blocks_per_path and local_node % wp.int32(2) == color:
             for r in range(_BLOCK_SIZE):
                 if wp.int32(r) < rows:
                     value = coarse_rhs[node, r]
-                    if node > wp.int32(0):
+                    if local_node > wp.int32(0):
                         for c in range(_BLOCK_SIZE):
                             if wp.int32(c) < rows:
                                 value -= coarse_off[node - wp.int32(1), r, c] * solution[node - wp.int32(1), c]
-                    if node + wp.int32(1) < coarse_blocks:
+                    if local_node + wp.int32(1) < coarse_blocks_per_path:
                         for c in range(_BLOCK_SIZE):
                             if wp.int32(c) < rows:
                                 value -= coarse_off[node, c, r] * solution[node + wp.int32(1), c]
@@ -224,29 +232,45 @@ def _solve_coarse_path_kernel(
 @wp.kernel
 def _prolongate_coarse_path_kernel(
     coarse_solution: wp.array2d[wp.float32],
-    fine_blocks: wp.int32,
+    fine_blocks_per_path: wp.int32,
+    coarse_blocks_per_path: wp.int32,
     rows: wp.int32,
     fine_solution: wp.array[wp.float32],
 ):
-    fine_row = wp.tid()
+    path, fine_row = wp.tid()
     fine = fine_row / rows
     row = fine_row - fine * rows
-    if fine >= fine_blocks:
+    if fine >= fine_blocks_per_path:
         return
-    left = _coarse_left(fine, fine_blocks)
-    has_right = fine % wp.int32(2) == wp.int32(1) and fine + wp.int32(1) < fine_blocks
+    fine_global = path * fine_blocks_per_path + fine
+    coarse_base = path * coarse_blocks_per_path
+    left = coarse_base + _coarse_left(fine, fine_blocks_per_path)
+    has_right = fine % wp.int32(2) == wp.int32(1) and fine + wp.int32(1) < fine_blocks_per_path
     value = coarse_solution[left, row]
     if has_right:
         value = wp.float32(0.5) * (value + coarse_solution[left + wp.int32(1), row])
-    fine_solution[fine_row] = value
+    fine_solution[fine_global * rows + row] = value
 
 
 class CoarsePathSolver:
-    """Reusable buffers for an experimental factor-2 path correction."""
+    """Reusable buffers for packed experimental factor-2 path corrections."""
 
-    def __init__(self, fine_blocks: int, rows: int, color_sweeps: int, device):
+    def __init__(
+        self,
+        fine_blocks: int,
+        rows: int,
+        color_sweeps: int,
+        device,
+        *,
+        path_count: int = 1,
+    ):
+        if fine_blocks % path_count != 0:
+            raise ValueError("fine block count must be divisible by path count")
+        self.path_count = path_count
         self.fine_blocks = fine_blocks
-        self.coarse_blocks = (fine_blocks + 2) // 2
+        self.fine_blocks_per_path = fine_blocks // path_count
+        self.coarse_blocks_per_path = (self.fine_blocks_per_path + 2) // 2
+        self.coarse_blocks = path_count * self.coarse_blocks_per_path
         self.rows = rows
         self.color_sweeps = color_sweeps
         shape3 = (self.coarse_blocks, _BLOCK_SIZE, _BLOCK_SIZE)
@@ -261,14 +285,14 @@ class CoarsePathSolver:
         system.gather_block_rhs(device=device)
         wp.launch(
             _assemble_coarse_path_kernel,
-            dim=_BLOCK_DIM,
+            dim=(self.path_count, _BLOCK_DIM),
             block_dim=_BLOCK_DIM,
             inputs=[
                 system.block_diag,
                 system.block_off,
                 system.block_rhs,
-                wp.int32(self.fine_blocks),
-                wp.int32(self.coarse_blocks),
+                wp.int32(self.fine_blocks_per_path),
+                wp.int32(self.coarse_blocks_per_path),
                 wp.int32(self.rows),
             ],
             outputs=[self.diag, self.off, self.rhs, self.solution],
@@ -276,13 +300,13 @@ class CoarsePathSolver:
         )
         wp.launch(
             _solve_coarse_path_kernel,
-            dim=_BLOCK_DIM,
+            dim=(self.path_count, _BLOCK_DIM),
             block_dim=_BLOCK_DIM,
             inputs=[
                 self.diag,
                 self.off,
                 self.rhs,
-                wp.int32(self.coarse_blocks),
+                wp.int32(self.coarse_blocks_per_path),
                 wp.int32(self.rows),
                 wp.int32(self.color_sweeps),
             ],
@@ -291,8 +315,13 @@ class CoarsePathSolver:
         )
         wp.launch(
             _prolongate_coarse_path_kernel,
-            dim=self.fine_blocks * self.rows,
-            inputs=[self.solution, wp.int32(self.fine_blocks), wp.int32(self.rows)],
+            dim=(self.path_count, self.fine_blocks_per_path * self.rows),
+            inputs=[
+                self.solution,
+                wp.int32(self.fine_blocks_per_path),
+                wp.int32(self.coarse_blocks_per_path),
+                wp.int32(self.rows),
+            ],
             outputs=[system.solution],
             device=device,
         )

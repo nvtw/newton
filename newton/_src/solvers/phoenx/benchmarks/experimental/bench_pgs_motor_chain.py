@@ -31,9 +31,26 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXWorld:
-    bodies = body_container_zeros(scene.NUM_BODIES, device=device)
-    scene._populate_chain_bodies(bodies, device)
-    constraints = PhoenXWorld.make_constraint_container(num_joints=scene.NUM_HINGES, device=device)
+    single_bodies = body_container_zeros(scene.NUM_BODIES, device=device)
+    scene._populate_chain_bodies(single_bodies, device)
+    if args.num_worlds == 1:
+        bodies = single_bodies
+    else:
+        bodies = body_container_zeros(args.num_worlds * scene.NUM_BODIES, device=device)
+        for name in (
+            "position",
+            "orientation",
+            "inverse_mass",
+            "inverse_inertia",
+            "inverse_inertia_world",
+            "motion_type",
+        ):
+            source = getattr(single_bodies, name).numpy()
+            getattr(bodies, name).assign(np.concatenate([source] * args.num_worlds, axis=0))
+        bodies.world_id.assign(np.repeat(np.arange(args.num_worlds, dtype=np.int32), scene.NUM_BODIES))
+
+    num_joints = args.num_worlds * scene.NUM_HINGES
+    constraints = PhoenXWorld.make_constraint_container(num_joints=num_joints, device=device)
     world = PhoenXWorld(
         bodies=bodies,
         constraints=constraints,
@@ -43,7 +60,8 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
         sor_boost=args.sor,
         gravity=(0.0, 0.0, -9.81),
         rigid_contact_max=0,
-        num_joints=scene.NUM_HINGES,
+        num_joints=num_joints,
+        num_worlds=args.num_worlds,
         step_layout=args.step_layout,
         symmetric_color_sweep=args.symmetric_sweep,
         mass_splitting=args.mass_splitting,
@@ -57,7 +75,21 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
         articulation_dvi_relaxation=args.dvi_relaxation,
         device=device,
     )
-    world.initialize_actuated_double_ball_socket_joints(**scene._build_joint_arrays(device))
+    joint_arrays = scene._build_joint_arrays(device)
+    if args.num_worlds > 1:
+        replicated = {}
+        body_offset = np.repeat(
+            np.arange(args.num_worlds, dtype=np.int32) * scene.NUM_BODIES,
+            scene.NUM_HINGES,
+        )
+        for name, array in joint_arrays.items():
+            source = array.numpy()
+            values = np.concatenate([source] * args.num_worlds, axis=0)
+            if name in ("body1", "body2"):
+                values = values + body_offset
+            replicated[name] = wp.array(values, dtype=array.dtype, device=device)
+        joint_arrays = replicated
+    world.initialize_actuated_double_ball_socket_joints(**joint_arrays)
     if args.global_corrections > 0 or args.dvi_every_substep:
         topology = world.articulation_topology
         if topology is None:
@@ -79,6 +111,7 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
                 int(topology.active_row_counts[0]),
                 args.dvi_coarse_color_sweeps,
                 device,
+                path_count=args.num_worlds,
             )
             system.solve_block_sparse_matrix = lambda *, device=None: coarse_solver.solve(system, device=device)
         elif args.dvi_fused_balanced:
@@ -137,14 +170,15 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
 
 
 def _metrics(world: PhoenXWorld) -> dict[str, float | int | str | bool]:
-    position = world.bodies.position.numpy()[1:]
-    velocity = world.bodies.velocity.numpy()[1:]
-    angular_velocity = world.bodies.angular_velocity.numpy()[1:]
+    position = world.bodies.position.numpy().reshape(world.num_worlds, scene.NUM_BODIES, 3)[:, 1:]
+    velocity = world.bodies.velocity.numpy().reshape(world.num_worlds, scene.NUM_BODIES, 3)[:, 1:]
+    angular_velocity = world.bodies.angular_velocity.numpy().reshape(world.num_worlds, scene.NUM_BODIES, 3)[:, 1:]
     pitch, _ = scene._link_layout()
-    segment = np.diff(np.vstack((np.zeros((1, 3), dtype=np.float32), position)), axis=0)
-    expected_length = np.full(position.shape[0], pitch, dtype=np.float32)
-    expected_length[0] = 0.5 * pitch
-    segment_error = np.linalg.norm(segment, axis=1) - expected_length
+    anchors = np.zeros((world.num_worlds, 1, 3), dtype=np.float32)
+    segment = np.diff(np.concatenate((anchors, position), axis=1), axis=1)
+    expected_length = np.full(position.shape[:2], pitch, dtype=np.float32)
+    expected_length[:, 0] = 0.5 * pitch
+    segment_error = np.linalg.norm(segment, axis=2) - expected_length
     system = world.articulation_device_system
     if system is None:
         raise RuntimeError("motor-chain metrics require cached articulation rows")
@@ -154,20 +188,23 @@ def _metrics(world: PhoenXWorld) -> dict[str, float | int | str | bool]:
         dt=world.substep_dt,
         device=world.device,
     )
-    violation = system.violation.numpy()[: system.total_rows].reshape(scene.NUM_HINGES, 5)
-    position_violation = np.linalg.norm(violation[:, :3], axis=1)
-    angular_violation = np.linalg.norm(violation[:, 3:], axis=1)
+    violation = system.violation.numpy()[: system.total_rows].reshape(world.num_worlds, scene.NUM_HINGES, 5)
+    position_violation = np.linalg.norm(violation[:, :, :3], axis=2)
+    angular_violation = np.linalg.norm(violation[:, :, 3:], axis=2)
+    tip_sag = -position[:, -1, 2]
     return {
-        "tip_sag_m": float(-position[-1, 2]),
-        "max_abs_z_m": float(np.max(np.abs(position[:, 2]))),
+        "tip_sag_m": float(np.mean(tip_sag)),
+        "max_tip_sag_m": float(np.max(tip_sag)),
+        "tip_sag_spread_m": float(np.max(tip_sag) - np.min(tip_sag)),
+        "max_abs_z_m": float(np.max(np.abs(position[:, :, 2]))),
         "rms_segment_error_m": float(np.sqrt(np.mean(segment_error * segment_error))),
         "max_segment_error_m": float(np.max(np.abs(segment_error))),
         "rms_joint_position_violation_m": float(np.sqrt(np.mean(position_violation * position_violation))),
         "max_joint_position_violation_m": float(np.max(position_violation)),
         "rms_joint_angular_violation_rad": float(np.sqrt(np.mean(angular_violation * angular_violation))),
         "max_joint_angular_violation_rad": float(np.max(angular_violation)),
-        "rms_speed_m_s": float(np.sqrt(np.mean(np.sum(velocity * velocity, axis=1)))),
-        "rms_angular_speed_rad_s": float(np.sqrt(np.mean(np.sum(angular_velocity * angular_velocity, axis=1)))),
+        "rms_speed_m_s": float(np.sqrt(np.mean(np.sum(velocity * velocity, axis=2)))),
+        "rms_angular_speed_rad_s": float(np.sqrt(np.mean(np.sum(angular_velocity * angular_velocity, axis=2)))),
         "num_colors": int(world.step_report().num_colors),
     }
 
@@ -185,6 +222,8 @@ def _initialize_static_partition(world: PhoenXWorld, ordering: str, stripe_width
     else:
         world._build_per_world_coloring()
     if ordering != "greedy":
+        if world.num_worlds != 1:
+            raise ValueError("custom motor-chain ordering currently requires one world")
         count = world.num_joints
         width = count if ordering == "chain" else stripe_width
         if width < 2 or width > count:
@@ -250,6 +289,7 @@ def run(args: argparse.Namespace) -> dict[str, float | int | str | bool]:
     result.update(
         {
             "frames": args.frames,
+            "num_worlds": args.num_worlds,
             "dt_s": args.dt,
             "substeps": args.substeps,
             "solver_iterations": args.iterations,
@@ -283,6 +323,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--frames", type=int, default=100)
+    parser.add_argument("--num-worlds", type=int, default=1)
     parser.add_argument("--dt", type=float, default=1.0 / 60.0)
     parser.add_argument("--substeps", type=int, default=500)
     parser.add_argument("--iterations", type=int, default=4)
