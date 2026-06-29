@@ -1000,6 +1000,31 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(state_in.body_qd.numpy())))
         self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
 
+    def test_08b_dr_legs_contact_capacity_scales_with_world_count(self):
+        if not self.device.is_cuda:
+            self.skipTest("Dr Legs multi-world capacity regression uses the CUDA graph path")
+
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from newton.examples.kamino.example_kamino_robot_dr_legs import Example  # noqa: PLC0415
+        from newton.viewer import ViewerNull  # noqa: PLC0415
+
+        world_count = 3
+        args = SimpleNamespace(
+            world_count=world_count,
+            use_kamino_contacts=False,
+            dynamics_solver="dvi",
+            dvi_contact_block_preconditioner=False,
+            dvi_contact_jacobi_omega=0.25,
+            dvi_contact_jacobi_relaxation=0.9,
+        )
+        example = Example(ViewerNull(num_frames=1), args)
+
+        expected_capacity = 72 * world_count
+        self.assertEqual(example.model.rigid_contact_max, expected_capacity)
+        self.assertEqual(example.contacts.rigid_contact_max, expected_capacity)
+        self.assertEqual(example.collision_pipeline.rigid_contact_max, expected_capacity)
+
     def test_09_dr_legs_dvi_first_contact_remains_finite(self):
         if not self.device.is_cuda:
             self.skipTest("Dr Legs DVI first-contact regression uses the CUDA graph path")

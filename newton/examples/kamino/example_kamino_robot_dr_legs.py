@@ -70,7 +70,7 @@ class Example:
 
         # Create the model from the builder
         self.model = builder.finalize(skip_validation_joints=True)
-        self.model.rigid_contact_max = 72
+        self.model.rigid_contact_max = 72 * self.world_count
 
         # Create the Kamino solver for the given model
         self.config = newton.solvers.SolverKamino.Config.from_model(self.model)
