@@ -10,6 +10,7 @@ from itertools import pairwise
 import numpy as np
 
 from .coarse_aggregate import CoarseAggregateSolver, parent_aggregate_mapping
+from .coarse_interpolate import CoarseInterpolationSolver
 from .coarse_path import CoarsePathSolver
 from .symbolic import BlockSparseSymbolic, build_constraint_graph, compute_block_sparse_symbolic
 from .topology import ArticulationTopology
@@ -21,7 +22,7 @@ class ArticulationCoarseSetup:
 
     mode: str
     symbolic: BlockSparseSymbolic
-    solver: CoarsePathSolver | CoarseAggregateSolver
+    solver: CoarsePathSolver | CoarseAggregateSolver | CoarseInterpolationSolver
 
 
 def normalize_articulation_coarse_mode(value: str | None) -> str | None:
@@ -107,21 +108,26 @@ def _rooted_joint_depths(body1: np.ndarray, body2: np.ndarray) -> np.ndarray:
     return depth
 
 
-def _graph_aggregate_mapping(topology: ArticulationTopology) -> np.ndarray:
-    """Build deterministic one-hot aggregates for a general constraint graph."""
+def _graph_interpolation(topology: ArticulationTopology) -> tuple[tuple[tuple[int, float], ...], ...]:
+    """Build deterministic independent-set interpolation for a general graph."""
     graph = build_constraint_graph(topology.active_body1, topology.active_body2)
-    mapping = np.full(graph.num_nodes, -1, dtype=np.int32)
-    coarse = 0
+    coarse_nodes: list[int] = []
+    covered: set[int] = set()
     for node in range(graph.num_nodes):
-        if mapping[node] >= 0:
+        if node not in covered:
+            coarse_nodes.append(node)
+            covered.add(node)
+            covered.update(graph.neighbors(node))
+    coarse_index = {node: index for index, node in enumerate(coarse_nodes)}
+    interpolation: list[tuple[tuple[int, float], ...]] = []
+    for fine in range(graph.num_nodes):
+        if fine in coarse_index:
+            interpolation.append(((coarse_index[fine], 1.0),))
             continue
-        mapping[node] = coarse
-        for neighbor in sorted(graph.neighbors(node)):
-            if mapping[neighbor] < 0:
-                mapping[neighbor] = coarse
-                break
-        coarse += 1
-    return mapping
+        neighbors = [coarse_index[node] for node in sorted(graph.neighbors(fine)) if node in coarse_index]
+        weight = 1.0 / len(neighbors)
+        interpolation.append(tuple((coarse, weight) for coarse in neighbors))
+    return tuple(interpolation)
 
 
 def build_articulation_coarse_setup(
@@ -173,8 +179,16 @@ def build_articulation_coarse_setup(
             mapping = parent_aggregate_mapping(body1, body2, depth)
             aggregate_mode = "tree"
     if mapping is None:
-        mapping = _graph_aggregate_mapping(topology)
-        aggregate_mode = "graph"
+        interpolation = _graph_interpolation(topology)
+        solver = CoarseInterpolationSolver(
+            interpolation,
+            symbolic.n_off_row_idx[: symbolic.nnz_n],
+            symbolic.n_off_col_idx[: symbolic.nnz_n],
+            rows,
+            color_sweeps,
+            device,
+        )
+        return ArticulationCoarseSetup("graph", symbolic, solver)
     solver = CoarseAggregateSolver(
         mapping,
         symbolic.n_off_row_idx[: symbolic.nnz_n],

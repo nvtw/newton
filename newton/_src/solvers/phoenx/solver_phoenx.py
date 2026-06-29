@@ -659,8 +659,8 @@ class PhoenXWorld:
             articulation_dvi_relaxation: Scale applied DVI impulses in ``(0, 1]``.
             articulation_coarse_mode: Optional bilateral PGS coarse correction.
                 ``"auto"`` selects depth-linear path interpolation, one-hot
-                parent aggregation for a rooted tree, or deterministic adjacent
-                aggregation for a general graph. Explicit ``"path"``, ``"tree"``,
+                parent aggregation for a rooted tree, or deterministic sparse
+                interpolation for a general graph. Explicit ``"path"``, ``"tree"``,
                 and ``"graph"`` modes are also available. Defaults to disabled.
             articulation_coarse_stride: Apply the coarse correction every N
                 substeps. Defaults to 2.

@@ -300,7 +300,7 @@ realistic revolute tree is the acceptance benchmark.
 The path and parent-aggregate solvers now run through the normal PhoenX
 constructor instead of benchmark monkeypatches. articulation_coarse_mode
 selects auto, path, tree, or graph; auto recognizes path forests and rooted
-trees before falling back to deterministic adjacent aggregation. The runtime
+trees before falling back to deterministic independent-set interpolation. The runtime
 remains three fixed CUDA kernels: Galerkin assembly, colored local block solve,
 and prolongation. Contacts and other constraint families remain on fine PGS.
 
@@ -320,9 +320,34 @@ violation. These measurements include the public integration path.
 A 96-joint cyclic ball-socket matrix (condition about 8.0e3) tests the generic
 fallback. After 12 outer cycles, block SGS leaves relative residual 0.167;
 adjacent aggregation with 16 coarse color sweeps leaves 0.115. A topology-only
-independent-set interpolation prototype improves this to 0.095, identifying a
-promising follow-up for general graphs, but the simpler one-hot fallback is the
-currently verified GPU implementation.
+independent-set interpolation improves this to 0.095. Its three-kernel GPU
+implementation matches the explicit Galerkin operator and preserves momentum
+under captured replay, so it is now the general-graph fallback.
+
+## Motorized closed-loop acceptance scene
+
+A public-Solver benchmark now builds a 32-link polygonal revolute loop with
+realistic box inertia, a world motor, and an excluded closure joint. Auto mode
+correctly selects the sparse graph interpolation path. At 120 frames, plain
+100-substep PGS with two iterations becomes unstable, while the coarse method
+remains finite. The equal-time comparison is more informative:
+
+| Method | Time | RMS position violation | RMS speed |
+|---|---:|---:|---:|
+| plain PGS, 100 x 16 | 6.33 ms | 0.090 mm | 0.477 m/s |
+| graph coarse, 100 x 2, 4 sweeps, stride 2 | 6.35 ms | 0.064 mm | 0.230 m/s |
+
+At 300 frames the times remain 6.29 and 6.31 ms respectively. Plain PGS has
+0.072 mm RMS position violation, while graph interpolation has 0.025 mm, a
+2.8x reduction. Correction stride four diverges in this driven loop, confirming
+that stride two is a stability requirement rather than only a quality setting.
+
+The contact-heavy variant rests all 32 links on a frictional plane and retains
+about 410 active contact points. At equal 13.1 ms/frame cost, plain 100 x 4 PGS
+has 0.131 mm RMS bilateral position error and 0.475 m/s RMS speed. The 100 x 2
+PGS plus four-sweep graph correction has 0.0528 mm error and 0.204 m/s speed.
+Thus the bilateral coarse level coexists with warm-started unilateral fine PGS,
+while reducing both error and residual motion by more than 2.3x.
 
 ## Key sources
 
@@ -351,7 +376,7 @@ currently verified GPU implementation.
 
 ## Next implementation gate
 
-Measure longer contact-heavy and multi-world runs, then evaluate sparse
-multi-weight interpolation for general cyclic graphs. Projected unilateral
+Measure longer contact-heavy and multi-world runs, then evaluate physical
+closed-loop mechanisms using sparse graph interpolation. Projected unilateral
 contacts remain fine-level PGS until a coarse active-set treatment demonstrates
 both complementarity safety and an equal-time benefit.
