@@ -112,6 +112,7 @@ def assemble_joint_scalar_rows_kernel(
     joint_count: wp.int32,
     idt: wp.float32,
     rows: ScalarRowContainer,
+    body_split_count: wp.array[wp.int32],
 ):
     """Assemble one independent equation per thread from packed joint data."""
     row = wp.tid()
@@ -121,8 +122,15 @@ def assemble_joint_scalar_rows_kernel(
         return
 
     rows.active[row] = wp.int32(0)
+    rows.split_anchor[row] = wp.int32(0)
+    if local_row == wp.int32(0):
+        rows.split_anchor[row] = wp.int32(1)
     body_a = read_int(constraints, _OFF_BODY1, cid)
     body_b = read_int(constraints, _OFF_BODY2, cid)
+    if local_row == wp.int32(0):
+        wp.atomic_add(body_split_count, body_a, wp.int32(1))
+        if body_b != body_a:
+            wp.atomic_add(body_split_count, body_b, wp.int32(1))
     mode = read_int(constraints, _OFF_JOINT_MODE, cid)
     orientation_a = bodies.orientation[body_a]
     orientation_b = bodies.orientation[body_b]

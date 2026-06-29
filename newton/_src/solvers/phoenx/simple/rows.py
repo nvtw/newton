@@ -15,11 +15,13 @@ class ScalarRowContainer:
     """Structure-of-arrays storage for independent scalar equations.
 
     Every active row represents ``J v + bias + softness * lambda = 0``.
-    Bounds apply to the accumulated multiplier. The solver deliberately stores
-    no dense blocks, Schur complements, adjacency, or colour metadata.
+    Bounds apply to the accumulated multiplier. ``split_anchor`` marks one
+    representative row per contact point or joint column for copy-free Tonge
+    mass splitting. The solver deliberately stores no dense blocks, Schur complements, adjacency, or colour metadata.
     """
 
     active: wp.array[wp.int32]
+    split_anchor: wp.array[wp.int32]
     body_a: wp.array[wp.int32]
     body_b: wp.array[wp.int32]
     jacobian_linear_a: wp.array[wp.vec3f]
@@ -39,6 +41,7 @@ def scalar_row_container_zeros(count: int, device: wp.DeviceLike = None) -> Scal
     """Allocate ``count`` unified scalar rows."""
     rows = ScalarRowContainer()
     rows.active = wp.zeros(count, dtype=wp.int32, device=device)
+    rows.split_anchor = wp.zeros(count, dtype=wp.int32, device=device)
     rows.body_a = wp.zeros(count, dtype=wp.int32, device=device)
     rows.body_b = wp.zeros(count, dtype=wp.int32, device=device)
     rows.jacobian_linear_a = wp.zeros(count, dtype=wp.vec3f, device=device)
@@ -76,6 +79,28 @@ def snapshot_body_velocities_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def clear_body_split_counts_kernel(body_split_count: wp.array[wp.int32]):
+    """Clear per-body Tonge partition counts before row assembly."""
+    body_split_count[wp.tid()] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def count_body_split_incidence_kernel(
+    rows: ScalarRowContainer,
+    body_split_count: wp.array[wp.int32],
+):
+    """Count one split partition per active contact point or joint."""
+    row = wp.tid()
+    if rows.active[row] == wp.int32(0) or rows.split_anchor[row] == wp.int32(0):
+        return
+    body_a = rows.body_a[row]
+    body_b = rows.body_b[row]
+    wp.atomic_add(body_split_count, body_a, wp.int32(1))
+    if body_b != body_a:
+        wp.atomic_add(body_split_count, body_b, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
 def snapshot_row_multipliers_kernel(
     rows: ScalarRowContainer,
     multiplier_snapshot: wp.array[wp.float32],
@@ -96,6 +121,7 @@ def solve_scalar_rows_jacobi_kernel(
     velocity_snapshot: wp.array[wp.vec3f],
     angular_velocity_snapshot: wp.array[wp.vec3f],
     multiplier_snapshot: wp.array[wp.float32],
+    body_split_count: wp.array[wp.int32],
     relaxation: wp.float32,
     delta_velocity: wp.array[wp.vec3f],
     delta_angular_velocity: wp.array[wp.vec3f],
@@ -111,10 +137,14 @@ def solve_scalar_rows_jacobi_kernel(
     jvb = rows.jacobian_linear_b[row]
     jwb = rows.jacobian_angular_b[row]
 
-    inv_mass_a = bodies.inverse_mass[a]
-    inv_mass_b = bodies.inverse_mass[b]
-    inv_inertia_a = mat33_from_sym6(bodies.inverse_inertia_world[a])
-    inv_inertia_b = mat33_from_sym6(bodies.inverse_inertia_world[b])
+    # Each partition uses split mass M/N (inverse mass N/M). The
+    # post-atomic average below divides its provisional velocity by N.
+    split_a = wp.float32(wp.max(body_split_count[a], wp.int32(1)))
+    split_b = wp.float32(wp.max(body_split_count[b], wp.int32(1)))
+    inv_mass_a = bodies.inverse_mass[a] * split_a
+    inv_mass_b = bodies.inverse_mass[b] * split_b
+    inv_inertia_a = mat33_from_sym6(bodies.inverse_inertia_world[a]) * split_a
+    inv_inertia_b = mat33_from_sym6(bodies.inverse_inertia_world[b]) * split_b
     angular_response_a = inv_inertia_a @ jwa
     angular_response_b = inv_inertia_b @ jwb
     diagonal = (
@@ -157,9 +187,13 @@ def solve_scalar_rows_jacobi_kernel(
 @wp.kernel(enable_backward=False)
 def apply_body_velocity_deltas_kernel(
     bodies: BodyContainer,
+    body_split_count: wp.array[wp.int32],
     delta_velocity: wp.array[wp.vec3f],
     delta_angular_velocity: wp.array[wp.vec3f],
 ):
+    # Averaging the implicit partition copies recovers one physical body
+    # state and preserves each row's equal-and-opposite impulse.
     body = wp.tid()
-    bodies.velocity[body] = bodies.velocity[body] + delta_velocity[body]
-    bodies.angular_velocity[body] = bodies.angular_velocity[body] + delta_angular_velocity[body]
+    inv_split = wp.float32(1.0) / wp.float32(wp.max(body_split_count[body], wp.int32(1)))
+    bodies.velocity[body] = bodies.velocity[body] + inv_split * delta_velocity[body]
+    bodies.angular_velocity[body] = bodies.angular_velocity[body] + inv_split * delta_angular_velocity[body]

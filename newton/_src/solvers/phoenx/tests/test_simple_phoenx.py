@@ -9,8 +9,18 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.simple.contacts import CONTACT_ROW_STRIDE
 from newton._src.solvers.phoenx.simple.joints import JOINT_ROW_STRIDE
+from newton._src.solvers.phoenx.simple.rows import (
+    apply_body_velocity_deltas_kernel,
+    clear_body_split_counts_kernel,
+    count_body_split_incidence_kernel,
+    scalar_row_container_zeros,
+    snapshot_body_velocities_kernel,
+    snapshot_row_multipliers_kernel,
+    solve_scalar_rows_jacobi_kernel,
+)
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 from newton._src.solvers.phoenx.world_builder import DriveMode, JointMode, WorldBuilder
 
@@ -233,10 +243,122 @@ class TestSimplePhoenX(unittest.TestCase):
         self.assertTrue(np.any(active[: dispatcher._contact_row_offset]))
         contact_row = dispatcher._contact_row_offset
         np.testing.assert_array_equal(active[contact_row : contact_row + CONTACT_ROW_STRIDE], np.ones(3))
+        split_anchors = rows.split_anchor.numpy()
+        np.testing.assert_array_equal(
+            split_anchors[contact_row : contact_row + CONTACT_ROW_STRIDE], np.asarray((1, 0, 0))
+        )
         bound_rows = rows.bound_row.numpy()
         self.assertEqual(int(bound_rows[contact_row]), contact_row)
         self.assertEqual(int(bound_rows[contact_row + 1]), contact_row)
         self.assertEqual(int(bound_rows[contact_row + 2]), contact_row)
+
+    def test_duplicate_rows_have_contact_count_independent_response(self):
+        device = wp.get_preferred_device()
+        for row_count in (1, 8, 128):
+            with self.subTest(row_count=row_count):
+                bodies = body_container_zeros(2, device=device)
+                bodies.inverse_mass.assign(np.ones(2, dtype=np.float32))
+                rows = scalar_row_container_zeros(row_count, device=device)
+                rows.active.assign(np.ones(row_count, dtype=np.int32))
+                rows.split_anchor.assign(np.ones(row_count, dtype=np.int32))
+                rows.body_a.assign(np.zeros(row_count, dtype=np.int32))
+                rows.body_b.assign(np.ones(row_count, dtype=np.int32))
+                rows.jacobian_linear_a.assign(np.tile(np.asarray((-1.0, 0.0, 0.0), dtype=np.float32), (row_count, 1)))
+                rows.jacobian_linear_b.assign(np.tile(np.asarray((1.0, 0.0, 0.0), dtype=np.float32), (row_count, 1)))
+                rows.bound_row.assign(np.arange(row_count, dtype=np.int32))
+
+                velocity_snapshot = wp.zeros(2, dtype=wp.vec3f, device=device)
+                angular_velocity_snapshot = wp.zeros(2, dtype=wp.vec3f, device=device)
+                delta_velocity = wp.zeros(2, dtype=wp.vec3f, device=device)
+                delta_angular_velocity = wp.zeros(2, dtype=wp.vec3f, device=device)
+                multiplier_snapshot = wp.zeros(row_count, dtype=wp.float32, device=device)
+                body_split_count = wp.zeros(2, dtype=wp.int32, device=device)
+
+                sweep_state = (
+                    row_count,
+                    bodies,
+                    rows,
+                    velocity_snapshot,
+                    angular_velocity_snapshot,
+                    delta_velocity,
+                    delta_angular_velocity,
+                    multiplier_snapshot,
+                    body_split_count,
+                )
+
+                def sweep(sweep_state=sweep_state):
+                    (
+                        row_count,
+                        bodies,
+                        rows,
+                        velocity_snapshot,
+                        angular_velocity_snapshot,
+                        delta_velocity,
+                        delta_angular_velocity,
+                        multiplier_snapshot,
+                        body_split_count,
+                    ) = sweep_state
+                    wp.launch(clear_body_split_counts_kernel, dim=2, inputs=[body_split_count], device=device)
+                    wp.launch(
+                        count_body_split_incidence_kernel,
+                        dim=row_count,
+                        inputs=[rows],
+                        outputs=[body_split_count],
+                        device=device,
+                    )
+                    wp.launch(
+                        snapshot_body_velocities_kernel,
+                        dim=2,
+                        inputs=[bodies],
+                        outputs=[
+                            velocity_snapshot,
+                            angular_velocity_snapshot,
+                            delta_velocity,
+                            delta_angular_velocity,
+                        ],
+                        device=device,
+                    )
+                    wp.launch(
+                        snapshot_row_multipliers_kernel,
+                        dim=row_count,
+                        inputs=[rows],
+                        outputs=[multiplier_snapshot],
+                        device=device,
+                    )
+                    wp.launch(
+                        solve_scalar_rows_jacobi_kernel,
+                        dim=row_count,
+                        inputs=[
+                            rows,
+                            bodies,
+                            velocity_snapshot,
+                            angular_velocity_snapshot,
+                            multiplier_snapshot,
+                            body_split_count,
+                            wp.float32(1.0),
+                        ],
+                        outputs=[delta_velocity, delta_angular_velocity],
+                        device=device,
+                    )
+                    wp.launch(
+                        apply_body_velocity_deltas_kernel,
+                        dim=2,
+                        inputs=[bodies, body_split_count, delta_velocity, delta_angular_velocity],
+                        device=device,
+                    )
+
+                bodies.velocity.assign(np.asarray(((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)), dtype=np.float32))
+                sweep()
+                bodies.velocity.assign(np.asarray(((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)), dtype=np.float32))
+                rows.multiplier.zero_()
+                with wp.ScopedCapture(device=device) as capture:
+                    sweep()
+                wp.capture_launch(capture.graph)
+
+                np.testing.assert_array_equal(body_split_count.numpy(), row_count)
+                velocities = bodies.velocity.numpy()
+                np.testing.assert_allclose(velocities.sum(axis=0), np.zeros(3), atol=2.0e-6)
+                np.testing.assert_allclose(velocities, np.zeros((2, 3)), atol=2.0e-6)
 
     def test_internal_atomic_fanin_conserves_momentum(self):
         for step_layout in ("single_world", "multi_world"):
@@ -248,6 +370,8 @@ class TestSimplePhoenX(unittest.TestCase):
                     world.step(1.0 / 240.0)
                 for _ in range(120):
                     wp.capture_launch(capture.graph)
+                row_counts = world._dispatcher._body_split_count.numpy()[1:]
+                self.assertGreater(int(row_counts[1]), int(row_counts[0]))
                 linear_after, angular_after = _momentum(world)
                 np.testing.assert_allclose(linear_after, linear_before, rtol=2.0e-5, atol=2.0e-5)
                 np.testing.assert_allclose(angular_after, angular_before, rtol=2.0e-4, atol=2.0e-4)

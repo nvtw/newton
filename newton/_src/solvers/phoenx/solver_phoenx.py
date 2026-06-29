@@ -654,7 +654,8 @@ class PhoenXWorld:
                 worlds currently support up to ``3``; joint-only worlds
                 may use larger values.
             solver_flavor: ``"standard"`` selects coloured PGS;
-                ``"simple"`` selects uncoloured scalar-row Jacobi.
+                ``"simple"`` selects uncoloured scalar-row Jacobi with
+                copy-free atomic mass splitting.
             jacobi_max_colors: Estimated number of colored PGS partitions
                 replaced by each Jacobi step. The simple solver uses
                 ``substeps * jacobi_max_colors`` substeps. Defaults to 10.
@@ -1370,7 +1371,9 @@ class PhoenXWorld:
         # so the hot path is straight-line with no capability checks.
         if self.solver_flavor == "simple":
             if self.mass_splitting_enabled:
-                raise ValueError("solver_flavor='simple' does not use mass splitting")
+                raise ValueError(
+                    "solver_flavor='simple' uses built-in atomic mass splitting and cannot use the copy-state mass_splitting path"
+                )
             self._dispatcher = SimplePhoenXDispatcher(self)
         elif self.step_layout == "single_world":
             if self.mass_splitting_enabled:

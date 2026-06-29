@@ -18,6 +18,7 @@ from .contacts import (
 from .joints import JOINT_ROW_STRIDE, assemble_joint_scalar_rows_kernel
 from .rows import (
     apply_body_velocity_deltas_kernel,
+    clear_body_split_counts_kernel,
     clear_row_multipliers_kernel,
     scalar_row_container_zeros,
     snapshot_body_velocities_kernel,
@@ -48,6 +49,7 @@ class SimplePhoenXDispatcher:
         self._angular_velocity_snapshot = wp.zeros(world.num_bodies, dtype=wp.vec3f, device=world.device)
         self._delta_velocity = wp.zeros(world.num_bodies, dtype=wp.vec3f, device=world.device)
         self._delta_angular_velocity = wp.zeros(world.num_bodies, dtype=wp.vec3f, device=world.device)
+        self._body_split_count = wp.zeros(world.num_bodies, dtype=wp.int32, device=world.device)
 
     def begin_step(self) -> None:
         if self._contact_row_count == 0:
@@ -74,12 +76,19 @@ class SimplePhoenXDispatcher:
         if self._joint_row_count == 0 and self._contact_row_count == 0:
             return
         w = self._world
+        wp.launch(
+            clear_body_split_counts_kernel,
+            dim=w.num_bodies,
+            inputs=[self._body_split_count],
+            block_dim=self.block_dim,
+            device=w.device,
+        )
         if self._joint_row_count > 0:
             wp.launch(
                 assemble_joint_scalar_rows_kernel,
                 dim=self._joint_row_count,
                 inputs=[w.constraints, w.bodies, wp.int32(w.num_joints), idt],
-                outputs=[self.rows],
+                outputs=[self.rows, self._body_split_count],
                 block_dim=self.block_dim,
                 device=w.device,
             )
@@ -97,7 +106,7 @@ class SimplePhoenXDispatcher:
                     wp.int32(self._contact_row_offset),
                     idt,
                 ],
-                outputs=[self.rows],
+                outputs=[self.rows, self._body_split_count],
                 block_dim=self.block_dim,
                 device=w.device,
             )
@@ -127,16 +136,16 @@ class SimplePhoenXDispatcher:
             wp.launch(
                 solve_scalar_rows_jacobi_kernel,
                 dim=self._row_count,
-                # Weighted Jacobi needs reciprocal color relaxation on dense
-                # contact graphs. The same factor scales both bodies, so each
-                # row still applies an equal-and-opposite momentum change.
+                # Atomic mass splitting handles arbitrary fan-in without
+                # changing the unified per-row solve.
                 inputs=[
                     self.rows,
                     w.bodies,
                     self._velocity_snapshot,
                     self._angular_velocity_snapshot,
                     self._multiplier_snapshot,
-                    wp.float32(w.sor_boost / w.jacobi_max_colors),
+                    self._body_split_count,
+                    wp.float32(w.sor_boost),
                 ],
                 outputs=[self._delta_velocity, self._delta_angular_velocity],
                 block_dim=self.block_dim,
@@ -145,7 +154,7 @@ class SimplePhoenXDispatcher:
             wp.launch(
                 apply_body_velocity_deltas_kernel,
                 dim=w.num_bodies,
-                inputs=[w.bodies, self._delta_velocity, self._delta_angular_velocity],
+                inputs=[w.bodies, self._body_split_count, self._delta_velocity, self._delta_angular_velocity],
                 block_dim=self.block_dim,
                 device=w.device,
             )

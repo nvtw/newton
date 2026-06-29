@@ -181,7 +181,8 @@ class SolverPhoenX(SolverBase):
                 to ``1`` when cached prepare is unsupported. Pass ``1``
                 to force exact per-substep rebuilds.
             solver_flavor: ``"standard"`` uses coloured PGS. ``"simple"``
-                uses uncoloured, one-thread-per-equation Jacobi.
+                uses uncoloured, one-thread-per-equation Jacobi with
+                copy-free atomic mass splitting.
             jacobi_max_colors: Estimated maximum number of colors the classic
                 solver would require. The simple Jacobi flavor uses
                 ``substeps * jacobi_max_colors`` substeps. Defaults to 10.

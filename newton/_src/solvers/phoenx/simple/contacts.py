@@ -60,6 +60,7 @@ def assemble_contact_scalar_rows_kernel(
     row_offset: wp.int32,
     idt: wp.float32,
     rows: ScalarRowContainer,
+    body_split_count: wp.array[wp.int32],
 ):
     """Assemble one normal or tangent equation per thread."""
     local_row = wp.tid()
@@ -67,6 +68,9 @@ def assemble_contact_scalar_rows_kernel(
     axis_index = local_row - contact * wp.int32(CONTACT_ROW_STRIDE)
     row = row_offset + local_row
     rows.active[row] = wp.int32(0)
+    rows.split_anchor[row] = wp.int32(0)
+    if axis_index == wp.int32(0):
+        rows.split_anchor[row] = wp.int32(1)
     if contact >= contacts.rigid_contact_count[0]:
         return
 
@@ -75,6 +79,10 @@ def assemble_contact_scalar_rows_kernel(
         return
     body_a = contact_get_body1(columns, column)
     body_b = contact_get_body2(columns, column)
+    if axis_index == wp.int32(0):
+        wp.atomic_add(body_split_count, body_a, wp.int32(1))
+        if body_b != body_a:
+            wp.atomic_add(body_split_count, body_b, wp.int32(1))
     normal = cc_get_normal(cc, contact)
     tangent1 = cc_get_tangent1(cc, contact)
     direction = normal

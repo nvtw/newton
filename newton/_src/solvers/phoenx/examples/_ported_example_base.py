@@ -370,7 +370,7 @@ class PortedExample:
             bodies=self.bodies,
             constraints=self.constraints,
             substeps=self.sim_substeps,
-            solver_iterations=self.solver_iterations,
+            solver_iterations=1 if self.solver_mode == "jacobi" else self.solver_iterations,
             velocity_iterations=self.velocity_iterations,
             gravity=self.gravity,
             rigid_contact_max=rigid_contact_max,
