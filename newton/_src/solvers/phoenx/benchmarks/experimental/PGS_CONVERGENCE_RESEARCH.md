@@ -263,6 +263,38 @@ should use the factor-2 one-hot parent aggregate, deterministic coarse graph
 coloring, and local block sweeps; it must not reuse the failed multi-child
 "smooth" interpolation.
 
+## Generic parent-aggregate GPU correction
+
+The one-hot parent aggregate is now implemented for arbitrary sparse bilateral
+joint graphs. Topology setup precomputes fine-to-coarse mapping, canonical
+coarse edges, CSR adjacency, and deterministic coarse colors. Runtime uses
+three fixed graph-captured kernels for local Galerkin assembly, colored block
+solve, and prolongation. On a 26-joint test tree, the GPU coarse operator
+matches `P^T A P` to 1.2e-8 relative error and the RHS exactly. A free-tree CUDA
+graph test verifies linear and angular momentum preservation within float32
+tolerance.
+
+A realistic 104-joint revolute scene uses the original capsule inertia: a
+32-link trunk with three overlapping 24-link arms attached to the dynamic
+branch body. Sixty-frame results are:
+
+| Method | Time | Max sag | RMS position violation | RMS angular violation | RMS speed |
+|---|---:|---:|---:|---:|---:|
+| classic 100 x 4 PGS | 4.97 ms | 1.275 m | 0.285 mm | 0.00570 rad | 1.79 m/s |
+| classic 200 x 2 PGS | 8.14 ms | 1.804 m | 3.292 mm | 0.0609 rad | 59.3 m/s |
+| aggregate, stride 4, 16 colors | 6.90 ms | 0.999 m | 0.250 mm | 0.00499 rad | 2.14 m/s |
+| aggregate, stride 3, 16 colors | 8.16 ms | 0.726 m | 0.279 mm | 0.00521 rad | 2.11 m/s |
+| aggregate, stride 2, 16 colors | 10.31 ms | 0.419 m | 0.101 mm | 0.00235 rad | 1.39 m/s |
+
+At identical time to the 200-substep baseline, stride three cuts sag 2.5x,
+position violation 11.8x, and RMS speed 28x. Stride four is 15% faster than that
+baseline while improving every constraint metric. It remains finite through
+300 frames (6.94 ms/frame, 1.077 m sag, 0.267 mm RMS position violation).
+
+The earlier co-located point-mass tree is retained only as a topology probe;
+it was too well-conditioned physically for a coarse correction to help. The
+realistic revolute tree is the acceptance benchmark.
+
 ## Key sources
 
 - Wang, *A Chebyshev Semi-Iterative Approach for Accelerating Projective and
@@ -290,8 +322,7 @@ coloring, and local block sweeps; it must not reuse the failed multi-child
 
 ## Next implementation gate
 
-Implement the verified factor-2 parent aggregate on the GPU for branched
-bilateral articulation graphs: precompute one-hot fine-to-coarse mapping,
-coarse sparse edges and deterministic colors, then assemble/solve with fixed
-captured bounds. Validate on a physical branched scene before projected
-contacts.
+Promote the verified path/tree aggregate infrastructure toward PhoenX behind
+an opt-in bilateral-articulation mode, including topology eligibility and
+fallback rules. In parallel, determine whether projected unilateral contacts
+admit a safe coarse correction or must remain fine-level PGS only.
