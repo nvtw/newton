@@ -180,6 +180,36 @@ next implementation candidate should obtain the global-mode benefit without a
 full articulation factorization: a matrix-free factor-2 coarse correction with
 fixed local work and explicit momentum tests.
 
+## Factor-2 local Galerkin correction breakthrough
+
+The first competitive physical method is a factor-2 path correction built from
+local fine 5-by-5 blocks. It assembles the 49-block depth-linear Galerkin
+operator, performs fixed red/black coarse block-GS sweeps in one captured
+kernel, prolongates the impulse, and applies it through the original joint
+Jacobians. The corrected GPU operator matches `P^T A P` to 7.1e-8 relative
+error and the restricted RHS exactly. An earlier terminal-node mapping bug was
+found by this comparison and removed before physical conclusions were drawn.
+
+Equal-time 60-frame results are:
+
+| Method | Time | Tip sag | RMS position row violation | RMS angular row violation |
+|---|---:|---:|---:|---:|
+| classic PGS, 200 substeps x 2 sweeps | 7.27 ms | 1.507 m | 0.831 mm | 0.0155 rad |
+| coarse correction, 12 color sweeps, stride 2 | 7.47 ms | 1.291 m | 0.254 mm | 0.00535 rad |
+| coarse correction, 16 color sweeps, stride 2 | 7.76 ms | 0.757 m | 0.096 mm | 0.00206 rad |
+
+The 16-sweep method is only 6.7% slower than the equal-time baseline but halves
+sag, reduces position violation 8.6x, reduces angular violation 7.5x, and has
+far lower residual speed. It remains finite for 300 frames at 7.78 ms/frame.
+The older center-spacing metric is not a constraint error for bent hinged
+capsules; the row-level articulation violations above are authoritative.
+
+A free-chain CUDA graph test measures absolute momentum changes of 2.38e-7
+linear (initial scale 3.06) and 9.61e-7 angular (initial scale 11.74), consistent
+with float32 roundoff. This follows from applying every coarse correction as a
+paired `J^T lambda` impulse. Correction stride three is not robust without
+weakening the solve, so stride two is the current stability boundary.
+
 ## Key sources
 
 - Wang, *A Chebyshev Semi-Iterative Approach for Accelerating Projective and
@@ -207,7 +237,7 @@ fixed local work and explicit momentum tests.
 
 ## Next implementation gate
 
-Prototype a graph-captured matrix-free factor-2 coarse correction that uses
-local Galerkin blocks and fixed work instead of a full articulation
-factorization. Measure equal-wall-time behavior, momentum conservation, and
-multi-world scaling before extending beyond bilateral path islands.
+Generalize the factor-2 local Galerkin correction from one path to packed
+independent path islands/worlds, preserving one fixed graph-captured launch
+shape. Measure scaling and add branched-articulation coverage, then determine
+whether a related aggregation is safe for projected contact islands.

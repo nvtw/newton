@@ -24,6 +24,7 @@ from newton._src.solvers.phoenx.benchmarks.experimental.balanced_sparse_solve im
     solve_balanced_sparse_matrix,
 )
 from newton._src.solvers.phoenx.benchmarks.experimental.block_path_solve import solve_block_path_matrix
+from newton._src.solvers.phoenx.benchmarks.experimental.coarse_path_solve import CoarsePathSolver
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.examples import example_motorized_hinge_chain as scene
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
@@ -48,7 +49,7 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
         mass_splitting=args.mass_splitting,
         max_colored_partitions=args.max_colored_partitions,
         prepare_refresh_stride=args.prepare_refresh_stride,
-        cache_articulation_topology=args.global_corrections > 0 or args.dvi_every_substep,
+        cache_articulation_topology=True,
         articulation_dvi_host=args.dvi_every_substep,
         articulation_dvi_replaces_joint_pgs=False,
         articulation_dvi_host_solver="device_block_sparse",
@@ -65,13 +66,21 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
             topology.active_body1,
             topology.active_body2,
             topology.active_row_counts,
-            use_meca=not args.dvi_path_megakernel,
-            use_parallel_path_ordering=not args.dvi_path_megakernel,
+            use_meca=not (args.dvi_path_megakernel or args.dvi_coarse_sgs),
+            use_parallel_path_ordering=not (args.dvi_path_megakernel or args.dvi_coarse_sgs),
         )
         world.articulation_device_system = ArticulationDeviceSystem.from_topology(topology, device, symbolic)
         system = world.articulation_device_system
         if args.dvi_path_megakernel:
             system.solve_block_sparse_matrix = lambda *, device=None: solve_block_path_matrix(system, device=device)
+        elif args.dvi_coarse_sgs:
+            coarse_solver = CoarsePathSolver(
+                system.block_count,
+                int(topology.active_row_counts[0]),
+                args.dvi_coarse_color_sweeps,
+                device,
+            )
+            system.solve_block_sparse_matrix = lambda *, device=None: coarse_solver.solve(system, device=device)
         elif args.dvi_fused_balanced:
             system.solve_block_sparse_matrix = lambda *, device=None: solve_balanced_sparse_matrix(
                 system, device=device
@@ -80,8 +89,8 @@ def _build_world(args: argparse.Namespace, device: wp.context.Device) -> PhoenXW
             raise RuntimeError("failed to cache articulation system")
         world.articulation_system.diagonal_regularization = args.dvi_regularization
         if args.dvi_factor_refresh > 1:
-            if args.dvi_path_megakernel:
-                raise ValueError("factor reuse does not support the natural-path megakernel")
+            if args.dvi_path_megakernel or args.dvi_coarse_sgs:
+                raise ValueError("factor reuse does not support natural-path experimental solvers")
 
             def solve_with_reused_factors(
                 dt=None,
@@ -136,11 +145,27 @@ def _metrics(world: PhoenXWorld) -> dict[str, float | int | str | bool]:
     expected_length = np.full(position.shape[0], pitch, dtype=np.float32)
     expected_length[0] = 0.5 * pitch
     segment_error = np.linalg.norm(segment, axis=1) - expected_length
+    system = world.articulation_device_system
+    if system is None:
+        raise RuntimeError("motor-chain metrics require cached articulation rows")
+    system.populate_from_adbs_constraints(
+        world.constraints,
+        world.bodies,
+        dt=world.substep_dt,
+        device=world.device,
+    )
+    violation = system.violation.numpy()[: system.total_rows].reshape(scene.NUM_HINGES, 5)
+    position_violation = np.linalg.norm(violation[:, :3], axis=1)
+    angular_violation = np.linalg.norm(violation[:, 3:], axis=1)
     return {
         "tip_sag_m": float(-position[-1, 2]),
         "max_abs_z_m": float(np.max(np.abs(position[:, 2]))),
         "rms_segment_error_m": float(np.sqrt(np.mean(segment_error * segment_error))),
         "max_segment_error_m": float(np.max(np.abs(segment_error))),
+        "rms_joint_position_violation_m": float(np.sqrt(np.mean(position_violation * position_violation))),
+        "max_joint_position_violation_m": float(np.max(position_violation)),
+        "rms_joint_angular_violation_rad": float(np.sqrt(np.mean(angular_violation * angular_violation))),
+        "max_joint_angular_violation_rad": float(np.max(angular_violation)),
         "rms_speed_m_s": float(np.sqrt(np.mean(np.sum(velocity * velocity, axis=1)))),
         "rms_angular_speed_rad_s": float(np.sqrt(np.mean(np.sum(angular_velocity * angular_velocity, axis=1)))),
         "num_colors": int(world.step_report().num_colors),
@@ -245,6 +270,8 @@ def run(args: argparse.Namespace) -> dict[str, float | int | str | bool]:
             "dvi_path_megakernel": args.dvi_path_megakernel,
             "dvi_fused_balanced": args.dvi_fused_balanced,
             "dvi_factor_refresh": args.dvi_factor_refresh,
+            "dvi_coarse_sgs": args.dvi_coarse_sgs,
+            "dvi_coarse_color_sweeps": args.dvi_coarse_color_sweeps,
             "elapsed_s": elapsed,
             "frame_time_ms": 1000.0 * elapsed / args.frames,
         }
@@ -277,6 +304,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dvi-path-megakernel", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--dvi-fused-balanced", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--dvi-factor-refresh", type=int, default=1)
+    parser.add_argument("--dvi-coarse-sgs", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--dvi-coarse-color-sweeps", type=int, default=8)
     return parser.parse_args()
 
 
