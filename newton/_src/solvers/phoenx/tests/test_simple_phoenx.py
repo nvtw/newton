@@ -14,7 +14,7 @@ from newton._src.solvers.phoenx.simple.contacts import CONTACT_ROW_STRIDE
 from newton._src.solvers.phoenx.simple.joints import JOINT_ROW_STRIDE
 from newton._src.solvers.phoenx.simple.rows import (
     apply_body_velocity_deltas_kernel,
-    clear_body_split_counts_kernel,
+    clear_body_split_state_kernel,
     count_body_split_incidence_kernel,
     scalar_row_container_zeros,
     snapshot_body_velocities_kernel,
@@ -164,6 +164,26 @@ class TestSimplePhoenX(unittest.TestCase):
             solver.step(state_in, state_out, control, None, 1.0 / 60.0)
         wp.capture_launch(capture.graph)
 
+    def test_rejects_cable_softness_instead_of_solving_rigid_rows(self):
+        builder = WorldBuilder()
+        body = builder.add_dynamic_body(
+            position=(0.0, 0.0, 0.0),
+            inverse_mass=1.0,
+            inverse_inertia=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+            affected_by_gravity=False,
+        )
+        builder.add_joint(
+            body1=builder.world_body,
+            body2=body,
+            anchor1=(0.0, 0.0, 0.0),
+            anchor2=(1.0, 0.0, 0.0),
+            mode=JointMode.CABLE,
+            bend_stiffness=100.0,
+            twist_stiffness=100.0,
+        )
+        with self.assertRaisesRegex(NotImplementedError, "cable joint bend and twist softness"):
+            builder.finalize(solver_flavor="simple", device=wp.get_preferred_device())
+
     def test_full_step_capture_replay_for_both_flavors_and_layouts(self):
         for solver_flavor in ("standard", "simple"):
             for step_layout in ("single_world", "multi_world"):
@@ -206,7 +226,7 @@ class TestSimplePhoenX(unittest.TestCase):
                 self.assertAlmostEqual(float(scene.body_position(body)[2]), 0.5, delta=0.08)
                 self.assertLess(abs(float(scene.body_velocity(body)[2])), 0.15)
 
-    def test_contact_cache_seeds_rows_in_capture(self):
+    def test_contact_cache_seeds_and_scatters_rows_in_capture(self):
         scene = _PhoenXScene(
             substeps=2,
             solver_iterations=1,
@@ -246,7 +266,66 @@ class TestSimplePhoenX(unittest.TestCase):
         np.testing.assert_allclose(
             world._contact_container.impulses.numpy()[:, :contact_count], expected_lambdas.T, atol=1.0e-7
         )
+        self.assertGreater(float(np.linalg.norm(scene.body_velocity(body))), 1.0e-4)
+
+        positions = world.bodies.position.numpy()
+        positions[body + 1, 2] += 1.0
+        world.bodies.position.assign(positions)
+        world.bodies.velocity.zero_()
+        dispatcher.rows.multiplier.zero_()
+        world._contact_container.impulses.assign(impulses)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(dispatcher.rows.multiplier.numpy()[contact_rows], 0.0, atol=1.0e-7)
         np.testing.assert_allclose(scene.body_velocity(body), np.zeros(3), atol=1.0e-7)
+
+        world._contact_views = None
+        dispatcher.rows.active.fill_(1)
+        dispatcher.rows.multiplier.fill_(1.0)
+        with wp.ScopedCapture(device=world.device) as empty_capture:
+            dispatcher.solve(idt)
+        wp.capture_launch(empty_capture.graph)
+
+        contact_slice = slice(dispatcher._contact_row_offset, dispatcher._row_count)
+        np.testing.assert_array_equal(dispatcher.rows.active.numpy()[contact_slice], 0)
+        np.testing.assert_allclose(scene.body_velocity(body), np.zeros(3), atol=1.0e-7)
+
+    def test_reactivated_joint_row_discards_stale_multiplier(self):
+        world = _make_driven_world()
+        dispatcher = world._dispatcher
+        multipliers = np.zeros(dispatcher._row_count, dtype=np.float32)
+        multipliers[6] = 3.0
+        dispatcher.rows.multiplier.assign(multipliers)
+        world.bodies.velocity.zero_()
+        world.bodies.angular_velocity.zero_()
+        world.solver_iterations = 0
+        idt = wp.float32(120.0 * world.substeps)
+
+        with wp.ScopedCapture(device=world.device) as capture:
+            dispatcher.solve(idt)
+        wp.capture_launch(capture.graph)
+
+        self.assertEqual(float(dispatcher.rows.multiplier.numpy()[6]), 0.0)
+        np.testing.assert_allclose(world.bodies.angular_velocity.numpy(), 0.0, atol=1.0e-7)
+
+    def test_stable_joint_point_row_warmstarts(self):
+        world = _make_welded_world("single_world", "simple")
+        world.step(1.0 / 60.0)
+        dispatcher = world._dispatcher
+        multipliers = np.zeros(dispatcher._row_count, dtype=np.float32)
+        multipliers[0] = 0.25
+        dispatcher.rows.multiplier.assign(multipliers)
+        world.bodies.velocity.zero_()
+        world.bodies.angular_velocity.zero_()
+        world.solver_iterations = 0
+        idt = wp.float32(1.0 / world.substep_dt)
+
+        with wp.ScopedCapture(device=world.device) as capture:
+            dispatcher.solve(idt)
+        wp.capture_launch(capture.graph)
+
+        self.assertEqual(float(dispatcher.rows.multiplier.numpy()[0]), 0.25)
+        self.assertGreater(abs(float(world.bodies.velocity.numpy()[1, 0])), 1.0e-5)
 
     def test_joint_and_contact_rows_share_one_fixed_launch_domain(self):
         scene = _PhoenXScene(
@@ -275,6 +354,7 @@ class TestSimplePhoenX(unittest.TestCase):
         contact_count = int(scene.contacts.rigid_contact_count.numpy()[0])
         self.assertGreater(contact_count, 0)
         self.assertEqual(dispatcher.block_dim, 256)
+        self.assertGreater(scene.world.step_report().max_body_degree, 0)
         self.assertEqual(dispatcher._contact_row_offset, scene.world.num_joints * JOINT_ROW_STRIDE)
         self.assertEqual(
             dispatcher._row_count,
@@ -340,7 +420,12 @@ class TestSimplePhoenX(unittest.TestCase):
                         multiplier_snapshot,
                         body_split_count,
                     ) = sweep_state
-                    wp.launch(clear_body_split_counts_kernel, dim=2, inputs=[body_split_count], device=device)
+                    wp.launch(
+                        clear_body_split_state_kernel,
+                        dim=2,
+                        outputs=[body_split_count, delta_velocity, delta_angular_velocity],
+                        device=device,
+                    )
                     wp.launch(
                         count_body_split_incidence_kernel,
                         dim=row_count,
@@ -378,6 +463,7 @@ class TestSimplePhoenX(unittest.TestCase):
                             multiplier_snapshot,
                             body_split_count,
                             wp.float32(1.0),
+                            wp.float32(0.0),
                         ],
                         outputs=[delta_velocity, delta_angular_velocity],
                         device=device,
@@ -402,6 +488,31 @@ class TestSimplePhoenX(unittest.TestCase):
                 np.testing.assert_allclose(velocities.sum(axis=0), np.zeros(3), atol=2.0e-6)
                 np.testing.assert_allclose(velocities, np.zeros((2, 3)), atol=2.0e-6)
 
+    def test_contact_warmstart_conserves_pair_momentum(self):
+        scene = _PhoenXScene(
+            fps=240,
+            substeps=2,
+            solver_iterations=2,
+            velocity_iterations=1,
+            friction=0.0,
+            solver_flavor="simple",
+            jacobi_max_colors=2,
+        )
+        body_a = scene.add_box((-0.48, 0.0, 1.0), (0.5, 0.5, 0.5), mass=1.0)
+        body_b = scene.add_box((0.48, 0.0, 1.0), (0.5, 0.5, 0.5), mass=1.0)
+        scene.finalize()
+        scene.set_body_velocity(body_a, (1.0, 0.0, 0.0))
+        scene.set_body_velocity(body_b, (-1.0, 0.0, 0.0))
+
+        for _ in range(20):
+            scene.step()
+
+        velocity_a = scene.body_velocity(body_a)
+        velocity_b = scene.body_velocity(body_b)
+        self.assertTrue(np.isfinite(velocity_a).all())
+        self.assertTrue(np.isfinite(velocity_b).all())
+        self.assertAlmostEqual(float(velocity_a[0] + velocity_b[0]), 0.0, delta=2.0e-5)
+
     def test_internal_atomic_fanin_conserves_momentum(self):
         for step_layout in ("single_world", "multi_world"):
             with self.subTest(step_layout=step_layout):
@@ -417,6 +528,61 @@ class TestSimplePhoenX(unittest.TestCase):
                 linear_after, angular_after = _momentum(world)
                 np.testing.assert_allclose(linear_after, linear_before, rtol=2.0e-5, atol=2.0e-5)
                 np.testing.assert_allclose(angular_after, angular_before, rtol=2.0e-4, atol=2.0e-4)
+
+    def test_prismatic_rows_lock_only_transverse_motion(self):
+        builder = WorldBuilder()
+        body = builder.add_dynamic_body(
+            position=(0.0, 0.0, 0.0),
+            velocity=(1.0, 0.5, -0.25),
+            angular_velocity=(0.4, -0.3, 0.2),
+            inverse_mass=1.0,
+            inverse_inertia=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+            affected_by_gravity=False,
+        )
+        builder.add_joint(
+            body1=builder.world_body,
+            body2=body,
+            anchor1=(0.0, 0.0, 0.0),
+            anchor2=(1.0, 0.0, 0.0),
+            mode=JointMode.PRISMATIC,
+        )
+        world = builder.finalize(
+            substeps=4,
+            solver_iterations=2,
+            velocity_iterations=1,
+            gravity=(0.0, 0.0, 0.0),
+            solver_flavor="simple",
+            jacobi_max_colors=2,
+            device=wp.get_preferred_device(),
+        )
+        world.step(1.0 / 240.0)
+        with wp.ScopedCapture(device=world.device) as capture:
+            world.step(1.0 / 240.0)
+        for _ in range(30):
+            wp.capture_launch(capture.graph)
+
+        velocity = world.bodies.velocity.numpy()[1]
+        angular_velocity = world.bodies.angular_velocity.numpy()[1]
+        self.assertAlmostEqual(float(velocity[0]), 1.0, delta=5.0e-2)
+        np.testing.assert_allclose(velocity[1:], 0.0, atol=5.0e-2)
+        np.testing.assert_allclose(angular_velocity, 0.0, atol=5.0e-2)
+
+    def test_velocity_relaxation_runs_as_captured_bias_off_sweep(self):
+        world = _make_welded_world("single_world", "simple")
+        world.velocity_iterations = 1
+        world.step(1.0 / 60.0)
+        velocity = world.bodies.velocity.numpy()
+        velocity[1, 0] = 1.0
+        world.bodies.velocity.assign(velocity)
+        before = abs(float(world.bodies.velocity.numpy()[1, 0]))
+        idt = wp.float32(1.0 / world.substep_dt)
+
+        with wp.ScopedCapture(device=world.device) as capture:
+            world._dispatcher.relax(idt)
+        wp.capture_launch(capture.graph)
+
+        after = abs(float(world.bodies.velocity.numpy()[1, 0]))
+        self.assertLess(after, before * 0.5)
 
     def test_axial_drive_is_an_independent_captured_row(self):
         world = _make_driven_world()

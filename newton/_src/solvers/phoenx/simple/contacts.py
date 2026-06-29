@@ -95,20 +95,33 @@ def assemble_contact_scalar_rows_kernel(
     rows.jacobian_linear_b[row] = direction
     rows.jacobian_angular_b[row] = wp.cross(arm_b, direction)
     rows.softness[row] = wp.float32(0.0)
-    rows.multiplier[row] = cc_get_normal_lambda(cc, contact)
+    rows.relax_bias[row] = wp.float32(0.0)
     rows.bound_row[row] = row
     rows.bound_scale[row] = wp.float32(0.0)
 
+    gap = wp.dot(point_b - point_a, normal)
+    normal_lambda = cc_get_normal_lambda(cc, contact)
+    tangent1_lambda = cc_get_tangent1_lambda(cc, contact)
+    tangent2_lambda = cc_get_tangent2_lambda(cc, contact)
+    if gap > wp.float32(0.002):
+        normal_lambda = wp.float32(0.0)
+        tangent1_lambda = wp.float32(0.0)
+        tangent2_lambda = wp.float32(0.0)
+
     if axis_index == wp.int32(0):
-        gap = wp.dot(point_b - point_a, normal)
-        rows.bias[row] = wp.float32(0.2) * idt * gap
+        rows.multiplier[row] = normal_lambda
+        rows.bias[row] = wp.clamp(
+            wp.float32(0.2) * idt * gap,
+            wp.float32(-2.0),
+            wp.float32(10.0),
+        )
         rows.lower[row] = wp.float32(0.0)
         rows.upper[row] = wp.float32(1.0e30)
     else:
         if axis_index == wp.int32(1):
-            rows.multiplier[row] = cc_get_tangent1_lambda(cc, contact)
+            rows.multiplier[row] = tangent1_lambda
         else:
-            rows.multiplier[row] = cc_get_tangent2_lambda(cc, contact)
+            rows.multiplier[row] = tangent2_lambda
         rows.bias[row] = wp.float32(0.0)
         rows.lower[row] = wp.float32(0.0)
         rows.upper[row] = wp.float32(0.0)

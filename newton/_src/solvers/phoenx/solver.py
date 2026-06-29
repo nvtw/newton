@@ -182,7 +182,8 @@ class SolverPhoenX(SolverBase):
                 to force exact per-substep rebuilds.
             solver_flavor: ``"standard"`` uses coloured PGS. ``"simple"``
                 uses uncoloured, one-thread-per-equation Jacobi with
-                copy-free atomic mass splitting.
+                copy-free atomic mass splitting. Cable joints and D6 angular limits
+                currently require the standard flavor.
             jacobi_max_colors: Estimated maximum number of colors the classic
                 solver would require. The simple Jacobi flavor uses
                 ``substeps * jacobi_max_colors`` substeps. Defaults to 10.

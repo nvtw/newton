@@ -64,6 +64,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     ADBS_DWORDS,
     ADBS_TIME_US_OFFSET,
+    JOINT_MODE_CABLE,
     JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
 )
@@ -655,7 +656,8 @@ class PhoenXWorld:
                 may use larger values.
             solver_flavor: ``"standard"`` selects coloured PGS;
                 ``"simple"`` selects uncoloured scalar-row Jacobi with
-                copy-free atomic mass splitting.
+                copy-free atomic mass splitting. Cable joints and D6 angular limits
+                currently require the standard flavor.
             jacobi_max_colors: Estimated number of colored PGS partitions
                 replaced by each Jacobi step. The simple solver uses
                 ``substeps * jacobi_max_colors`` substeps. Defaults to 10.
@@ -1872,6 +1874,12 @@ class PhoenXWorld:
             mode_np = None
         if mode_np is not None and mode_np.size > 0:
             self._use_revolute_specialization = bool((mode_np == int(JOINT_MODE_REVOLUTE)).all())
+            if self.solver_flavor == "simple" and (mode_np == int(JOINT_MODE_CABLE)).any():
+                raise NotImplementedError(
+                    "solver_flavor='simple' does not yet support cable joint bend and twist softness"
+                )
+        if self.solver_flavor == "simple" and np.any(d6_limit_count.numpy() > 0):
+            raise NotImplementedError("solver_flavor='simple' does not yet support D6 angular limit rows")
         if self.cache_articulation_topology:
             self._cache_prefactorized_articulation_topology(
                 body1,
@@ -4783,7 +4791,7 @@ class PhoenXWorld:
                 num_contact_columns=num_contact_columns,
                 num_joints=self.num_joints,
                 num_active_constraints=num_active,
-                max_body_degree=0,
+                max_body_degree=int(self._dispatcher._body_split_count.numpy().max(initial=0)),
                 **timer_kwargs,
             )
 

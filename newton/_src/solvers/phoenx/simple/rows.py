@@ -15,6 +15,7 @@ class ScalarRowContainer:
     """Structure-of-arrays storage for independent scalar equations.
 
     Every active row represents ``J v + bias + softness * lambda = 0``.
+    ``relax_bias`` replaces ``bias`` during the post-integration velocity pass.
     Bounds apply to the accumulated multiplier. ``split_anchor`` marks one
     representative row per contact point or joint column for copy-free Tonge
     mass splitting. The solver deliberately stores no dense blocks, Schur complements, adjacency, or colour metadata.
@@ -29,6 +30,7 @@ class ScalarRowContainer:
     jacobian_linear_b: wp.array[wp.vec3f]
     jacobian_angular_b: wp.array[wp.vec3f]
     bias: wp.array[wp.float32]
+    relax_bias: wp.array[wp.float32]
     softness: wp.array[wp.float32]
     lower: wp.array[wp.float32]
     upper: wp.array[wp.float32]
@@ -49,6 +51,7 @@ def scalar_row_container_zeros(count: int, device: wp.DeviceLike = None) -> Scal
     rows.jacobian_linear_b = wp.zeros(count, dtype=wp.vec3f, device=device)
     rows.jacobian_angular_b = wp.zeros(count, dtype=wp.vec3f, device=device)
     rows.bias = wp.zeros(count, dtype=wp.float32, device=device)
+    rows.relax_bias = wp.zeros(count, dtype=wp.float32, device=device)
     rows.softness = wp.zeros(count, dtype=wp.float32, device=device)
     rows.lower = wp.full(count, -1.0e30, dtype=wp.float32, device=device)
     rows.upper = wp.full(count, 1.0e30, dtype=wp.float32, device=device)
@@ -79,9 +82,16 @@ def snapshot_body_velocities_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def clear_body_split_counts_kernel(body_split_count: wp.array[wp.int32]):
-    """Clear per-body Tonge partition counts before row assembly."""
-    body_split_count[wp.tid()] = wp.int32(0)
+def clear_body_split_state_kernel(
+    body_split_count: wp.array[wp.int32],
+    delta_velocity: wp.array[wp.vec3f],
+    delta_angular_velocity: wp.array[wp.vec3f],
+):
+    """Clear per-body split counts and impulse accumulation buffers."""
+    body = wp.tid()
+    body_split_count[body] = wp.int32(0)
+    delta_velocity[body] = wp.vec3f(0.0)
+    delta_angular_velocity[body] = wp.vec3f(0.0)
 
 
 @wp.kernel(enable_backward=False)
@@ -110,6 +120,38 @@ def snapshot_row_multipliers_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def apply_row_warmstart_kernel(
+    rows: ScalarRowContainer,
+    bodies: BodyContainer,
+    body_split_count: wp.array[wp.int32],
+    delta_velocity: wp.array[wp.vec3f],
+    delta_angular_velocity: wp.array[wp.vec3f],
+):
+    """Scatter cached scalar impulses through copy-free split states."""
+    row = wp.tid()
+    if rows.active[row] == wp.int32(0):
+        rows.multiplier[row] = wp.float32(0.0)
+        return
+    multiplier = rows.multiplier[row]
+    if multiplier == wp.float32(0.0):
+        return
+
+    body_a = rows.body_a[row]
+    body_b = rows.body_b[row]
+    split_a = wp.float32(wp.max(body_split_count[body_a], wp.int32(1)))
+    split_b = wp.float32(wp.max(body_split_count[body_b], wp.int32(1)))
+    inv_mass_a = bodies.inverse_mass[body_a] * split_a
+    inv_mass_b = bodies.inverse_mass[body_b] * split_b
+    inv_inertia_a = mat33_from_sym6(bodies.inverse_inertia_world[body_a]) * split_a
+    inv_inertia_b = mat33_from_sym6(bodies.inverse_inertia_world[body_b]) * split_b
+
+    wp.atomic_add(delta_velocity, body_a, inv_mass_a * rows.jacobian_linear_a[row] * multiplier)
+    wp.atomic_add(delta_angular_velocity, body_a, (inv_inertia_a @ rows.jacobian_angular_a[row]) * multiplier)
+    wp.atomic_add(delta_velocity, body_b, inv_mass_b * rows.jacobian_linear_b[row] * multiplier)
+    wp.atomic_add(delta_angular_velocity, body_b, (inv_inertia_b @ rows.jacobian_angular_b[row]) * multiplier)
+
+
+@wp.kernel(enable_backward=False)
 def solve_scalar_rows_jacobi_kernel(
     rows: ScalarRowContainer,
     bodies: BodyContainer,
@@ -118,6 +160,7 @@ def solve_scalar_rows_jacobi_kernel(
     multiplier_snapshot: wp.array[wp.float32],
     body_split_count: wp.array[wp.int32],
     relaxation: wp.float32,
+    relax_pass: wp.float32,
     delta_velocity: wp.array[wp.vec3f],
     delta_angular_velocity: wp.array[wp.vec3f],
 ):
@@ -162,7 +205,8 @@ def solve_scalar_rows_jacobi_kernel(
     bound = rows.bound_scale[row] * wp.max(multiplier_snapshot[rows.bound_row[row]], wp.float32(0.0))
     lower = rows.lower[row] - bound
     upper = rows.upper[row] + bound
-    delta_multiplier = -(jv + rows.bias[row] + rows.softness[row] * old_multiplier) / diagonal
+    bias = rows.bias[row] + relax_pass * (rows.relax_bias[row] - rows.bias[row])
+    delta_multiplier = -(jv + bias + rows.softness[row] * old_multiplier) / diagonal
     new_multiplier = wp.clamp(
         old_multiplier + relaxation * delta_multiplier,
         lower,

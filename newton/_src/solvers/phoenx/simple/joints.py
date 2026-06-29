@@ -121,7 +121,11 @@ def assemble_joint_scalar_rows_kernel(
     if cid >= joint_count:
         return
 
+    was_active = rows.active[row]
     rows.active[row] = wp.int32(0)
+    if was_active == wp.int32(0):
+        rows.multiplier[row] = wp.float32(0.0)
+    rows.relax_bias[row] = wp.float32(0.0)
     rows.split_anchor[row] = wp.int32(0)
     if local_row == wp.int32(0):
         rows.split_anchor[row] = wp.int32(1)
@@ -132,6 +136,13 @@ def assemble_joint_scalar_rows_kernel(
         if body_b != body_a:
             wp.atomic_add(body_split_count, body_b, wp.int32(1))
     mode = read_int(constraints, _OFF_JOINT_MODE, cid)
+    if (
+        local_row >= wp.int32(3)
+        or mode == JOINT_MODE_PRISMATIC
+        or mode == JOINT_MODE_CYLINDRICAL
+        or mode == JOINT_MODE_PLANAR
+    ):
+        rows.multiplier[row] = wp.float32(0.0)
     orientation_a = bodies.orientation[body_a]
     orientation_b = bodies.orientation[body_b]
 
@@ -267,6 +278,7 @@ def assemble_joint_scalar_rows_kernel(
             max_impulse = max_force / idt
         rows.active[row] = wp.int32(1)
         rows.bias[row] = -spring_bias + target_velocity
+        rows.relax_bias[row] = rows.bias[row]
         rows.softness[row] = gamma
         rows.lower[row] = -max_impulse
         rows.upper[row] = max_impulse
@@ -278,6 +290,7 @@ def assemble_joint_scalar_rows_kernel(
         error = coordinate - wp.clamp(coordinate, minimum, maximum)
         rows.active[row] = wp.int32(1)
         rows.bias[row] = wp.float32(0.2) * idt * error
+        rows.relax_bias[row] = rows.bias[row]
         rows.softness[row] = wp.float32(0.0)
         if coordinate > maximum:
             rows.lower[row] = wp.float32(-1.0e30)

@@ -17,7 +17,8 @@ from .contacts import (
 from .joints import JOINT_ROW_STRIDE, assemble_joint_scalar_rows_kernel
 from .rows import (
     apply_body_velocity_deltas_kernel,
-    clear_body_split_counts_kernel,
+    apply_row_warmstart_kernel,
+    clear_body_split_state_kernel,
     scalar_row_container_zeros,
     snapshot_body_velocities_kernel,
     snapshot_row_multipliers_kernel,
@@ -59,9 +60,9 @@ class SimplePhoenXDispatcher:
             return
         w = self._world
         wp.launch(
-            clear_body_split_counts_kernel,
+            clear_body_split_state_kernel,
             dim=w.num_bodies,
-            inputs=[self._body_split_count],
+            outputs=[self._body_split_count, self._delta_velocity, self._delta_angular_velocity],
             block_dim=self.block_dim,
             device=w.device,
         )
@@ -74,13 +75,14 @@ class SimplePhoenXDispatcher:
                 block_dim=self.block_dim,
                 device=w.device,
             )
-        if self._contact_row_count > 0 and w._contact_views is not None:
+        contact_views = w._active_contact_views()
+        if self._contact_row_count > 0:
             wp.launch(
                 assemble_contact_scalar_rows_kernel,
                 dim=self._contact_row_count,
                 inputs=[
                     w._contact_cols,
-                    w._contact_views,
+                    contact_views,
                     w._contact_container,
                     w._cid_of_contact_cur,
                     wp.int32(w._contact_offset),
@@ -92,6 +94,22 @@ class SimplePhoenXDispatcher:
                 block_dim=self.block_dim,
                 device=w.device,
             )
+
+        wp.launch(
+            apply_row_warmstart_kernel,
+            dim=self._row_count,
+            inputs=[self.rows, w.bodies, self._body_split_count],
+            outputs=[self._delta_velocity, self._delta_angular_velocity],
+            block_dim=self.block_dim,
+            device=w.device,
+        )
+        wp.launch(
+            apply_body_velocity_deltas_kernel,
+            dim=w.num_bodies,
+            inputs=[w.bodies, self._body_split_count, self._delta_velocity, self._delta_angular_velocity],
+            block_dim=self.block_dim,
+            device=w.device,
+        )
 
         for _ in range(w.solver_iterations):
             wp.launch(
@@ -128,6 +146,7 @@ class SimplePhoenXDispatcher:
                     self._multiplier_snapshot,
                     self._body_split_count,
                     wp.float32(w.sor_boost),
+                    wp.float32(0.0),
                 ],
                 outputs=[self._delta_velocity, self._delta_angular_velocity],
                 block_dim=self.block_dim,
@@ -140,12 +159,65 @@ class SimplePhoenXDispatcher:
                 block_dim=self.block_dim,
                 device=w.device,
             )
-        if self._contact_row_count > 0 and w._contact_views is not None:
+
+    def relax(self, idt: wp.float32) -> None:
+        if self._joint_row_count == 0 and self._contact_row_count == 0:
+            return
+        w = self._world
+        for _ in range(w.velocity_iterations):
+            wp.launch(
+                snapshot_body_velocities_kernel,
+                dim=w.num_bodies,
+                inputs=[w.bodies],
+                outputs=[
+                    self._velocity_snapshot,
+                    self._angular_velocity_snapshot,
+                    self._delta_velocity,
+                    self._delta_angular_velocity,
+                ],
+                block_dim=self.block_dim,
+                device=w.device,
+            )
+            wp.launch(
+                snapshot_row_multipliers_kernel,
+                dim=self._row_count,
+                inputs=[self.rows],
+                outputs=[self._multiplier_snapshot],
+                block_dim=self.block_dim,
+                device=w.device,
+            )
+            wp.launch(
+                solve_scalar_rows_jacobi_kernel,
+                dim=self._row_count,
+                inputs=[
+                    self.rows,
+                    w.bodies,
+                    self._velocity_snapshot,
+                    self._angular_velocity_snapshot,
+                    self._multiplier_snapshot,
+                    self._body_split_count,
+                    wp.float32(w.sor_boost),
+                    wp.float32(1.0),
+                ],
+                outputs=[self._delta_velocity, self._delta_angular_velocity],
+                block_dim=self.block_dim,
+                device=w.device,
+            )
+            wp.launch(
+                apply_body_velocity_deltas_kernel,
+                dim=w.num_bodies,
+                inputs=[w.bodies, self._body_split_count, self._delta_velocity, self._delta_angular_velocity],
+                block_dim=self.block_dim,
+                device=w.device,
+            )
+
+        if self._contact_row_count > 0:
+            contact_views = w._active_contact_views()
             wp.launch(
                 writeback_contact_lambdas_kernel,
                 dim=w.rigid_contact_max,
                 inputs=[
-                    w._contact_views.rigid_contact_count,
+                    contact_views.rigid_contact_count,
                     wp.int32(self._contact_row_offset),
                     self.rows,
                 ],
@@ -153,10 +225,6 @@ class SimplePhoenXDispatcher:
                 block_dim=self.block_dim,
                 device=w.device,
             )
-
-    def relax(self, idt: wp.float32) -> None:
-        # Small Jacobi substeps replace the separate TGS velocity-relax pass.
-        pass
 
 
 __all__ = ["SimplePhoenXDispatcher"]

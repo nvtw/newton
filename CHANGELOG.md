@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add `SolverPhoenX(solver_flavor="simple")`, an experimental rigid-body flavor that replaces graph-colored block PGS with fixed-capacity, one-thread-per-scalar-equation Jacobi rows and atomic body-delta accumulation and copy-free mass splitting that normalizes arbitrary row fan-in while conserving momentum. `jacobi_max_colors` defaults to 10 and scales the effective Jacobi substep count without constructing a constraint graph. Matched normal and tangent contact multipliers, together with stable joint-row multipliers, persist as Jacobi initial guesses.
+- Add `SolverPhoenX(solver_flavor="simple")`, an experimental rigid-body flavor that replaces graph-colored block PGS with fixed-capacity, one-thread-per-scalar-equation Jacobi rows and atomic body-delta accumulation and copy-free mass splitting that normalizes arbitrary row fan-in while conserving momentum. `jacobi_max_colors` defaults to 10 and scales the effective Jacobi substep count without constructing a constraint graph. Matched normal and tangent contact multipliers, together with stable Cartesian joint-row multipliers, persist as Jacobi initial guesses.
 - Add `example_motorized_cable_chain` as a one-for-one cable-joint counterpart to the PhoenX motorized hinge-chain example.
 - Add pure-Warp Muon optimizer support to `newton.rl` PPO trainers so experimental G1 runs can match nanoG1 optimizer settings without PyTorch.
 - Add `ConfigEnvG1PhoenX` scheduler knobs for `threads_per_world`, `multi_world_scheduler`, and `prepare_refresh_stride` so experimental G1 RL runs can benchmark PhoenX solver schedules without monkeypatching.
@@ -44,6 +44,7 @@
 
 ### Changed
 
+- Reject cable joints and D6 angular limits in experimental simple PhoenX instead of solving different equations; use `solver_flavor="standard"` for these constraints.
 - Alternate PhoenX PGS color traversal direction between iterations to reduce ordering bias without changing constraint equations or CUDA graph capture.
 - Change PhoenX cable bend constraints to a physically damped angular Schur block coupled with the point attachment, so high stiffness approaches the revolute lock without SOR or additional constraint storage.
 - Change experimental PhoenX G1 RL actuation to explicit clamped PD torques matching nanoG1/MuJoCo; pass `actuation_model="constraint_drive"` or `--actuation-model constraint_drive` to use the previous implicit PhoenX drive-row formulation.
@@ -61,6 +62,7 @@
 
 ### Fixed
 
+- Fix experimental simple PhoenX warm starting and velocity relaxation so separated or removed contacts and stale conditional joint rows cannot affect bodies.
 - Fix PhoenX DVI angular and axial limits to preserve unilateral separation and apply configured frequency-based softness.
 - Fix PhoenX PGS iteration ordering so every solve and relaxation iteration traverses all constraint colors before processing any constraint again.
 - Fix PhoenX primitive stack contacts so dense Kapla tower examples remain stable while preserving SDF speculative-contact safeguards.
