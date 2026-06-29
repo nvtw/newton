@@ -9,8 +9,8 @@ static world body. The joint axes are chosen perpendicular to the gravity
 bending plane, so gravity exerts no torque/force on any joint's *free*
 DoF -- the chain is held straight purely by each joint's *locked* rows:
 
-* REVOLUTE: hinge axis +z; the chain hangs from the anchor-2 swing
-  (axis-alignment) lock.
+* REVOLUTE / infinite-stiffness CABLE: hinge axis +z; the chain hangs
+  from the anchor-2 swing (axis-alignment) lock.
 * PRISMATIC: slide axis +x; the chain hangs from the locked transverse +
   rotational rows.
 
@@ -24,6 +24,7 @@ low iteration counts used here -- this test fails loudly if that
 decoupling ever returns.
 """
 
+import math
 import unittest
 
 import numpy as np
@@ -69,18 +70,25 @@ def _build_cantilever(device, mode: JointMode, *, step_layout: str = "multi_worl
 
     for k in range(NUM_LINKS):
         y = -k * PITCH  # boundary between link k-1 and link k
-        if mode is JointMode.REVOLUTE:
+        if mode in (JointMode.REVOLUTE, JointMode.CABLE):
             anchor1 = (0.0, y, -HALF_EXTENT)
             anchor2 = (0.0, y, HALF_EXTENT)
         else:  # PRISMATIC
             anchor1 = (-HALF_EXTENT, y, 0.0)
             anchor2 = (HALF_EXTENT, y, 0.0)
+        joint_kwargs = {}
+        if mode is JointMode.CABLE:
+            joint_kwargs = {
+                "bend_stiffness": math.inf,
+                "twist_stiffness": 0.0,
+            }
         b.add_joint(
             body1=bodies[k],
             body2=bodies[k + 1],
             anchor1=anchor1,
             anchor2=anchor2,
             mode=mode,
+            **joint_kwargs,
         )
 
     return b.finalize(
@@ -119,6 +127,23 @@ class TestJointChainConvergence(unittest.TestCase):
                     _MAX_TIP_SAG,
                     msg=f"revolute cantilever drooped {sag * 1e3:.1f} mm "
                     f"(limit {_MAX_TIP_SAG * 1e3:.1f} mm) -- swing lock under-converged",
+                )
+
+    def test_infinite_cable_bend_matches_revolute(self):
+        device = wp.get_preferred_device()
+        for layout in STEP_LAYOUTS:
+            with self.subTest(step_layout=layout):
+                revolute = _build_cantilever(device, JointMode.REVOLUTE, step_layout=layout)
+                cable = _build_cantilever(device, JointMode.CABLE, step_layout=layout)
+                run_settle_loop(revolute, SETTLE_FRAMES, dt=1.0 / FPS)
+                run_settle_loop(cable, SETTLE_FRAMES, dt=1.0 / FPS)
+
+                cable_positions = cable.bodies.position.numpy()[1:]
+                self.assertTrue(np.isfinite(cable_positions).all(), "non-finite cable body position")
+                self.assertLessEqual(
+                    _tip_sag(cable),
+                    1.05 * _tip_sag(revolute),
+                    "zero-compliance cable bend must be at least as stiff as the revolute swing lock",
                 )
 
     def test_prismatic_cantilever_holds(self):

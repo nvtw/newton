@@ -1,29 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Behavioural tests for :class:`JointMode.CABLE` -- soft fixed joint
-with bend / twist PD softness on a positional 3+2+1 anchor split:
+r"""Behavioural tests for :class:`JointMode.CABLE`.
 
-* anchor-1 3-row Box2D-soft point lock (rigid ball-socket);
-* anchor-2 tangent 2-row PD-soft block driven by ``bend_stiffness``,
-  ``bend_damping``;
-* anchor-3 scalar 1-row PD-soft block driven by ``twist_stiffness``,
-  ``twist_damping``.
+Cable bend uses a coupled local 3+2 system: a rigid three-row point
+attachment and two compliant angular rows. Twist uses a compliant scalar
+angular row. Bend stiffness and damping therefore use rotational SI units
+directly, and zero bend compliance is the same Schur operator as a
+revolute swing lock.
 
-User gains are rotational (``N*m/rad``, ``N*m*s/rad``) and rescaled by
-``1 / rest_length^2`` to obtain the equivalent positional spring at
-the lever-armed anchors. The lever-arm amplification gives the correct
-rotational stiffness without an angular Jacobian / log-map, and the
-well-conditioned positional rows match REVOLUTE / PRISMATIC
-convergence behaviour.
-
-The physical response in the linear regime matches the textbook damped
-harmonic oscillator :math:`I \\ddot\\theta + c \\dot\\theta + k \\theta
-= 0`: natural frequency :math:`\\omega_n = \\sqrt{k/I}`, damping ratio
-:math:`\\zeta = c / (2\\sqrt{kI})`. Tests validate oscillation
-(undamped), exponential settling (over- / under-damped), stiffness /
-damping ordering, gain conversion across ``rest_length``, and
-multi-segment chain behaviour.
+The linear response follows :math:`I \ddot\theta + c \dot\theta +
+k \theta = 0`: natural frequency :math:`\omega_n = \sqrt{k/I}` and
+damping ratio :math:`\zeta = c / (2\sqrt{kI})`. Tests validate period,
+log decrement, overdamped settling, stiffness and damping ordering,
+rest-length invariance, static cantilever response, and multi-segment
+chain behaviour.
 """
 
 from __future__ import annotations
@@ -1093,8 +1084,8 @@ class TestCableDegenerate(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Gain conversion: ``k_pos = k_user / rest_length^2`` rescale must
-# leave the rotational restoring torque invariant under rest_length.
+# Direct angular gains must leave the response invariant under the helper
+# axis length used to define the cable rest frame.
 # ---------------------------------------------------------------------------
 
 
@@ -1103,19 +1094,7 @@ class TestCableDegenerate(unittest.TestCase):
     "PhoenX cable tests run on CUDA only.",
 )
 class TestCableGainConversion(unittest.TestCase):
-    """Pin the cable prepare's rotational -> positional rescale.
-
-    cable stores the user gain as ``k_pos = k_user / rest_length^2``
-    (see ``_cable_prepare_at`` L2371-L2380); the lever-arm-amplified
-    anchor-2 / anchor-3 rows multiply by ``rest_length^2`` again so
-    the *rotational* restoring torque is invariant under
-    ``rest_length``. A regression that flipped the sign of the
-    exponent (``rest_length^2`` instead of ``1 / rest_length^2``) or
-    forgot the rescale entirely would change the apparent stiffness
-    -- and therefore the period -- by a factor of ``rest_length^2``.
-    Sweeping ``rest_length`` and asserting the measured period stays
-    inside ~5 % of the small-angle theory pins this conversion.
-    """
+    """Direct angular bend gains are invariant under rest-frame axis length."""
 
     def _measure_period(self, rest_length: float, k: float) -> tuple[float, float]:
         """Build a cable rod with the given ``rest_length`` and ``k``,
@@ -1150,9 +1129,7 @@ class TestCableGainConversion(unittest.TestCase):
         ``k_user`` and assert measured period stays within 10 % of
         the small-angle theory ``T = 2 pi / sqrt(k/I)``. The wider
         band vs the single-rod 5 % bound covers numerical noise from
-        the very-short-anchor (rest_length = 0.1) regime where the
-        positional rows ride on a 0.1 m lever arm and amplify
-        substep error by ~10x."""
+        the very-short-axis (rest_length = 0.1) error reconstruction."""
         k = 80.0
         rest_lengths = [0.1, 0.5, 1.0, 2.0]
         for rl in rest_lengths:
@@ -1165,7 +1142,7 @@ class TestCableGainConversion(unittest.TestCase):
                     msg=(
                         f"rest_length={rl:.3g}: period drift {rel * 100:.2f}% > 10%; "
                         f"T_theory={T_theory * 1000:.2f} ms, T_meas={T_meas * 1000:.2f} ms. "
-                        f"This pins cable's k_pos = k_user / rest_length^2 rescale."
+                        f"Direct angular gain changed with rest-frame axis length."
                     ),
                 )
 

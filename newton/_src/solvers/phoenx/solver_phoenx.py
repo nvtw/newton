@@ -372,17 +372,9 @@ def _choose_multi_world_scheduler(
 
 
 def _choose_fast_tail_solve_schedule(*, substeps: int) -> tuple[int, int, int]:
-    """Select the fast-tail register reuse schedule.
-
-    Returns ``(joint_inner_sweeps, contact_inner_sweeps, outer_iteration_chunk)``.
-    """
-    # High-substep robot fleets use the old two-by-two schedule: fewer outer
-    # visits, but matching inner sweeps, so default even iteration counts keep
-    # the same total row sweeps. Low-substep humanoid stiffness keeps the
-    # conservative full outer cadence.
-    if substeps >= 64:
-        return 2, 2, 2
-    return 3, 3, 1
+    """Return the full-color PGS schedule used by the fast-tail solver."""
+    _ = substeps
+    return 1, 1, 1
 
 
 def _choose_fast_tail_worlds_per_block_for_scene(
@@ -603,7 +595,7 @@ class PhoenXWorld:
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
-        symmetric_color_sweep: bool = False,
+        symmetric_color_sweep: bool = True,
         # Defaults tuned for contact-heavy rigid scenes (Kapla, stacks).
         # cache-stir knobs break the warm-start colouring lock-in;
         # capture_while + speculative are perf wins with no quality

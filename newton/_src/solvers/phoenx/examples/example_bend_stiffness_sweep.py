@@ -18,8 +18,8 @@
 #   * Very low bend_stiffness   -> strand drapes straight down from the
 #                                  anchor (collapses onto the +z axis).
 #
-# Twist stiffness / damping and bend damping are held constant across
-# strands so the visual comparison isolates bend stiffness.
+# Twist stiffness / damping and the bend damping time scale are held
+# constant across strands so the visual comparison isolates bend stiffness.
 #
 # Run:
 #   python -m newton._src.solvers.phoenx.examples.example_bend_stiffness_sweep
@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import argparse
 import colorsys
 import math
 
@@ -64,22 +65,17 @@ SEGMENT_MASS = 0.005
 #
 # so to hold the strand within e.g. 5 deg of horizontal you need a
 # bend stiffness on the order of M_grav / 0.087 ~= 14 N*m/rad. The
-# sweep therefore spans 4 decades centred on that scale: 1e-2 (limp
-# rope) -> 1e2 (effectively rigid). Damping is scaled with the same
-# range so each strand stays critically damped enough to settle in
-# under a second.
+# sweep extends from a limp rope at 1e-2 to the zero-compliance limit.
+# The time-step schedule matches ``example_motorized_hinge_chain`` so
+# throughput and residual constraint error can be compared directly.
 NUM_STRANDS = 6
 BEND_STIFFNESS_MIN = 1.0e-2
-BEND_STIFFNESS_MAX = 1.0e2
+BEND_STIFFNESS_MAX = math.inf
 # Per-strand bend damping is derived from the strand's bend stiffness
-# as ``damping = BEND_DAMPING_RATIO * stiffness``. 0.3 keeps every
-# strand slightly sub-critical (one overshoot, settle within ~1 s)
-# instead of the long over-damped crawl you get when damping is
-# large relative to ``stiffness * dt``. Raise this toward 1.0+ for a
-# calmer settle; lower it (e.g. 0.05) to see pronounced ringing. The
-# ratio is unitless: damping has units N*m*s/rad and stiffness has
-# units N*m/rad, so the ratio carries an implicit ``[s]`` time scale.
-BEND_DAMPING_RATIO = 0.3
+# as ``damping = BEND_DAMPING_TIME * stiffness``. This specifies the
+# physical damping time scale ``c / k`` [s], not a modal damping ratio;
+# the latter also depends on each segment's effective inertia.
+BEND_DAMPING_TIME = 0.3
 
 # Twist stiffness / damping are held constant across strands so the
 # user can stare at a single variable. Twist doesn't have anything to
@@ -99,16 +95,23 @@ GRAVITY = 9.81
 
 # Time stepping. Same ``SIM_FPS / RENDER_FPS / SUBSTEPS`` idiom as
 # ``example_twisted_thread`` and ``example_phoenx_scale``: outer ticks
-# at 240 Hz, ``SIM_FPS / RENDER_FPS`` ticks per rendered frame,
+# at 60 Hz, ``SIM_FPS / RENDER_FPS`` ticks per rendered frame,
 # ``SUBSTEPS`` solver substeps per outer tick.
-SIM_FPS = 240
+SIM_FPS = 60
 RENDER_FPS = 60
-SUBSTEPS = 20
-SOLVER_ITERATIONS = 6
+SUBSTEPS = 50
+SOLVER_ITERATIONS = 4
 VELOCITY_ITERATIONS = 1
-STEP_LAYOUT = "single_world"
+STEP_LAYOUT = "multi_world"
 
 _ANCHOR_COLOR = (0.85, 0.85, 0.85)
+
+
+def _configure_render_fps_arg(parser: argparse.ArgumentParser) -> None:
+    render_fps_action = parser._option_string_actions["--render-fps"]
+    render_fps_action.type = int
+    render_fps_action.default = RENDER_FPS
+    render_fps_action.help = "Rendered frames per second; sim runs (sim-fps / render-fps) ticks per rendered frame."
 
 
 def _quat_from_z_axis(direction: tuple[float, float, float]) -> tuple[float, float, float, float]:
@@ -185,6 +188,8 @@ def _log_ramp(num_strands: int, vmin: float, vmax: float, name: str) -> list[flo
         raise ValueError(f"{name}-min and {name}-max must both be > 0")
     if num_strands == 1:
         return [vmax]
+    if math.isinf(vmax):
+        return [vmin * 10.0**i for i in range(num_strands - 1)] + [math.inf]
     log_min = math.log(vmin)
     log_max = math.log(vmax)
     return [math.exp(log_min + (log_max - log_min) * i / (num_strands - 1)) for i in range(num_strands)]
@@ -259,10 +264,10 @@ class Example:
             float(self.args.bend_stiffness_max),
             "bend-stiffness",
         )
-        damping_ratio = float(self.args.bend_damping_ratio)
-        if damping_ratio < 0.0:
-            raise ValueError("bend-damping-ratio must be >= 0")
-        bend_dampings = [damping_ratio * k for k in bend_stiffnesses]
+        damping_time = float(self.args.bend_damping_time)
+        if damping_time < 0.0:
+            raise ValueError("bend-damping-time must be >= 0")
+        bend_dampings = [damping_time * k if math.isfinite(k) else 0.0 for k in bend_stiffnesses]
         palette = _bend_stiffness_palette(num_strands)
 
         builder = WorldBuilder()
@@ -380,11 +385,11 @@ class Example:
             f"substep_dt={substep_dt * 1000.0:.3f}ms"
         )
         for s, (k_bend, d_bend, color) in enumerate(zip(bend_stiffnesses, bend_dampings, palette, strict=False)):
+            damping_label = f"c/k={damping_time:.3f}s" if math.isfinite(k_bend) else "zero-compliance lock"
             print(
                 f"  strand[{s}] bend_stiffness={k_bend:.4g} N*m/rad "
                 f"bend_damping={d_bend:.4g} N*m*s/rad "
-                f"(ratio={damping_ratio:.3f}) "
-                f"color=({color[0]:.2f}, {color[1]:.2f}, {color[2]:.2f})"
+                f"({damping_label}) color=({color[0]:.2f}, {color[1]:.2f}, {color[2]:.2f})"
             )
 
         # Camera framing: look along -y at the centred stack. The
@@ -432,6 +437,13 @@ class Example:
         positions = self.world.bodies.position.numpy()
         assert np.isfinite(positions).all(), "non-finite body position in bend-stiffness sweep"
         capsule_z = positions[1 : 1 + self._num_capsules, 2]
+        capsule_positions = positions[1 : 1 + self._num_capsules].reshape(
+            self._num_strands, self._capsules_per_strand, 3
+        )
+        root_drops = self._anchor_height - capsule_positions[:, 1, 2]
+        tip_drops = self._anchor_height - capsule_positions[:, -1, 2]
+        print("  final root drops [m]: " + ", ".join(f"{drop:.5f}" for drop in root_drops))
+        print("  final tip drops [m]: " + ", ".join(f"{drop:.5f}" for drop in tip_drops))
         # ``rigid_contact_max=0`` means the strand passes through the
         # plane visually if it falls too far, so we only check that
         # nothing has shot off to infinity laterally and that the
@@ -480,13 +492,10 @@ if __name__ == "__main__":
         help="Bend stiffness at the rigid end of the sweep [N*m/rad].",
     )
     parser.add_argument(
-        "--bend-damping-ratio",
+        "--bend-damping-time",
         type=float,
-        default=BEND_DAMPING_RATIO,
-        help=(
-            "Per-strand bend damping = bend-damping-ratio * bend-stiffness. ~0.3 settles "
-            "with one overshoot; ~1+ is over-damped; <0.1 rings."
-        ),
+        default=BEND_DAMPING_TIME,
+        help="Physical bend damping time c/k [s]; bend damping equals this value times bend stiffness.",
     )
     parser.add_argument(
         "--twist-stiffness",
@@ -515,12 +524,7 @@ if __name__ == "__main__":
         default=SIM_FPS,
         help="Outer simulation tick rate [Hz]; one PhoenX world.step per tick. Must be a multiple of --render-fps.",
     )
-    parser.add_argument(
-        "--render-fps",
-        type=int,
-        default=RENDER_FPS,
-        help="Rendered frames per second; sim runs (sim-fps / render-fps) ticks per rendered frame.",
-    )
+    _configure_render_fps_arg(parser)
     parser.add_argument(
         "--substeps",
         type=int,

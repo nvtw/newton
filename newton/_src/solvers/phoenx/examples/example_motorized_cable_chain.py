@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ###########################################################################
-# Example PhoenX Motorized Hinge Chain
+# Example PhoenX Motorized Cable Chain
 #
-# PhoenX variant of :mod:`example_motorized_hinge_chain`. Identical
-# geometry -- ``NUM_CUBES`` unit cubes rotated 45 degrees about +z
-# so they hang in a diamond column along -y -- but every joint is an
-# :data:`~newton._src.solvers.phoenx.world_builder.JointMode.REVOLUTE`
-# actuated double-ball-socket solved by :class:`PhoenXWorld`.
+# One-for-one cable counterpart of :mod:`example_motorized_hinge_chain`.
+# Geometry, bodies, masses, inertia, gravity, anchors, solver schedule,
+# rendering, and test are identical. Only the joint configuration changes:
+# every revolute joint is replaced by a zero-compliance CABLE bend lock
+# whose reference axis follows the strand tangent.
 #
 # The shared unified-joint schema lets the PhoenX solver reuse the
 # jitter solver's fast-path dispatcher and graph-colouring machinery
@@ -23,15 +23,15 @@
 #   * Populate the body container directly (no ``WorldBuilder`` --
 #     PhoenX takes raw containers).
 #
-# The chain is driven by the module-level ``DRIVE_MODE`` + its
-# companion target, same knobs as the jitter version. Default is a
-# zero-velocity motor so the chain hangs in equilibrium.
+# CABLE repurposes the drive/limit storage as bend/twist material
+# parameters. Infinite bend stiffness locks both transverse rotations;
+# zero twist stiffness leaves rotation about the strand tangent free.
 #
 # Picking is wired through :class:`Picking`, which binds to the
 # body container directly and therefore works unchanged against
 # :class:`PhoenXWorld`.
 #
-# Run:  python -m newton._src.solvers.phoenx.examples.example_motorized_hinge_chain
+# Run:  python -m newton._src.solvers.phoenx.examples.example_motorized_cable_chain
 ###########################################################################
 
 from __future__ import annotations
@@ -70,9 +70,8 @@ class JointKind(enum.Enum):
 
     :class:`PhoenXWorld` only supports the actuated double-ball-socket
     joint (see :mod:`solver_phoenx`), so unlike the jitter version
-    we stop at a single revolute mode -- the three
-    :data:`JointMode.REVOLUTE` / :data:`PRISMATIC` / :data:`BALL_SOCKET`
-    values of that joint are the only choices.
+    this example selects CABLE mode while retaining the same unified
+    joint storage and solver dispatch as the revolute reference.
     """
 
     ACTUATED_DOUBLE_BALL_SOCKET = "actuated_double_ball_socket"
@@ -111,29 +110,26 @@ CAPSULE_DIAMETER = 0.05
 _CAPSULE_RADIUS = 0.5 * CAPSULE_DIAMETER
 _CAPSULE_HALF_HEIGHT = 0.5 * CAPSULE_LENGTH
 
-# How the motor drives the free axial spin.
-#   * :attr:`DriveMode.OFF`      -- free-spin axis, no motor.
-#   * :attr:`DriveMode.VELOCITY` -- tracks ``TARGET_VELOCITY`` [rad/s].
-#   * :attr:`DriveMode.POSITION` -- pulls the axial angle towards
-#     ``TARGET_ANGLE`` [rad] with a critically-damped soft spring.
-DRIVE_MODE = DriveMode.VELOCITY
+# Cable material configuration. Infinite bend stiffness is the
+# zero-compliance limit of the same 3+2 Schur system used at finite
+# stiffness. Zero twist stiffness leaves the reference axis free,
+# matching a revolute joint.
+DRIVE_MODE = DriveMode.OFF
+BEND_STIFFNESS = math.inf
+BEND_DAMPING = 0.0
+TWIST_STIFFNESS = 0.0
+TWIST_DAMPING = 0.0
 
 NUM_CUBES = 250
 HALF_EXTENT = 0.05
-NUM_BODIES = NUM_CUBES + 1  # +1 for the static world anchor body at slot 0
-NUM_HINGES = NUM_CUBES  # 1 world->cube0 + (N-1) cube_{k-1}->cube_k
+NUM_BODIES = NUM_CUBES + 1
+NUM_HINGES = NUM_CUBES  # retained name for exact layout parity with the hinge example
 
-# 45-degree rotation about +z (xyzw). Puts diagonal cube corners on the
-# world y axis at distance ``h*sqrt(2)``. The body-frame +z axis stays
-# aligned with world +z, so the four vertical cube edges (the ones
-# parallel to body +z) stay on world +z -- that's the hinge axis the
-# revolute joint uses between two stacked cubes.
 _DIAGONAL_HALF = HALF_EXTENT * math.sqrt(2.0)
-_HALF_ANGLE = math.pi / 8.0  # half of 45 degrees
+_HALF_ANGLE = math.pi / 8.0
 _DIAGONAL_QUAT = (0.0, 0.0, math.sin(_HALF_ANGLE), math.cos(_HALF_ANGLE))
 
 # Body-local +z onto world -y: 90 deg rotation about world +x, xyzw.
-# Used for capsule bodies so the capsule axis runs along the chain.
 _CAPSULE_QUAT = (math.sin(math.pi / 4.0), 0.0, 0.0, math.cos(math.pi / 4.0))
 
 # Solid-body inverse inertia [kg^-1 m^-2] for the displayed 1 kg link.
@@ -145,37 +141,12 @@ else:
     _INV_INERTIA = ((600.0, 0.0, 0.0), (0.0, 600.0, 0.0), (0.0, 0.0, 600.0))
     _INV_INERTIA_WORLD = _INV_INERTIA
 
-# Motor torque cap [N*m] -- generous so the PD drive can hold its
-# target against PGS jitter even on the top joint (which carries the
-# full chain weight).
-_MOTOR_MAX_FORCE = 50.0
-
-# Position-drive soft-spring knobs: 4 Hz critically-damped angular
-# spring (``omega = 2*pi*hertz``, ``zeta = 1``).
-#   kp = I * omega^2
-#   kd = 2 * I * zeta * omega
-_HERTZ_DRIVE = 4.0
-_DAMPING_RATIO_DRIVE = 1.0
-_STIFFNESS_DRIVE = (2.0 * math.pi * _HERTZ_DRIVE) ** 2
-_DAMPING_DRIVE = 2.0 * _DAMPING_RATIO_DRIVE * (2.0 * math.pi * _HERTZ_DRIVE)
-
-# Per-joint velocity-drive setpoint [rad/s].
-#   * 0.0  -> the motor fights any relative spin; chain stays still.
-#   * non-zero -> each hinge spins the two cubes about the chain axis.
-TARGET_VELOCITY = 0.0
-
-# Per-joint position-drive setpoint [rad]. 0.0 matches the rest pose
-# (every cube spawns with ``_DIAGONAL_QUAT``), so a zero target holds
-# the initial orientations. Non-zero values compound down the chain
-# and visibly coil it.
-TARGET_ANGLE = 0.0
-
 
 def _link_layout() -> tuple[float, tuple[float, float, float, float]]:
     """Return ``(pitch, orientation_quat)`` for the active body shape.
 
     ``pitch`` is the centre-to-centre spacing along world -y so
-    consecutive links share the hinge anchor at their boundary. The
+    consecutive links share the joint anchor at their boundary. The
     orientation quaternion is applied to every dynamic body.
     """
     if BODY_SHAPE is BodyShape.CUBE:
@@ -234,17 +205,12 @@ def _build_joint_arrays(
     """Assemble the per-joint descriptor arrays the init kernel needs.
 
     Every joint connects consecutive links on the world y axis with a
-    hinge axis along world +z and the motor set up per ``DRIVE_MODE``.
-    Anchor 1 sits at ``z - anchor_offset`` and anchor 2 at
-    ``z + anchor_offset`` so the implicit hinge axis
-    ``anchor2 - anchor1`` aligns with world +z. The offset uses
-    ``HALF_EXTENT`` for cubes and the capsule radius for capsules.
+    cable reference axis along world +z.
+    Anchor 1 is the shared link boundary. Anchor 2 lies one pitch along
+    world -y, so ``anchor2 - anchor1`` follows the cable tangent. Both
+    physical bend directions are locked; only axial twist remains free.
     """
     pitch, _ = _link_layout()
-    if BODY_SHAPE is BodyShape.CAPSULE:
-        anchor_offset = _CAPSULE_RADIUS
-    else:
-        anchor_offset = HALF_EXTENT
 
     body1 = np.zeros(NUM_HINGES, dtype=np.int32)
     body2 = np.zeros(NUM_HINGES, dtype=np.int32)
@@ -256,20 +222,20 @@ def _build_joint_arrays(
         body1[k] = world_slot if k == 0 else (k)  # link_{k-1} -> slot k
         body2[k] = k + 1  # link_k -> slot k+1
         y = -k * pitch
-        anchor1[k] = (0.0, y, -anchor_offset)
-        anchor2[k] = (0.0, y, anchor_offset)
+        anchor1[k] = (0.0, y, 0.0)
+        anchor2[k] = (0.0, y - pitch, 0.0)
 
-    target = np.full(NUM_HINGES, float(TARGET_ANGLE), dtype=np.float32)
-    target_velocity = np.full(NUM_HINGES, float(TARGET_VELOCITY), dtype=np.float32)
-    max_force_drive = np.full(NUM_HINGES, float(_MOTOR_MAX_FORCE), dtype=np.float32)
-    stiffness_drive = np.full(NUM_HINGES, float(_STIFFNESS_DRIVE), dtype=np.float32)
-    damping_drive = np.full(NUM_HINGES, float(_DAMPING_DRIVE), dtype=np.float32)
+    target = np.zeros(NUM_HINGES, dtype=np.float32)
+    target_velocity = np.zeros(NUM_HINGES, dtype=np.float32)
+    max_force_drive = np.zeros(NUM_HINGES, dtype=np.float32)
+    stiffness_drive = np.full(NUM_HINGES, BEND_STIFFNESS, dtype=np.float32)
+    damping_drive = np.full(NUM_HINGES, BEND_DAMPING, dtype=np.float32)
 
     # No angle limit (min > max disables the limit row).
     min_value = np.full(NUM_HINGES, 1.0, dtype=np.float32)
     max_value = np.full(NUM_HINGES, -1.0, dtype=np.float32)
 
-    joint_mode = np.full(NUM_HINGES, int(JointMode.REVOLUTE), dtype=np.int32)
+    joint_mode = np.full(NUM_HINGES, int(JointMode.CABLE), dtype=np.int32)
     drive_mode = np.full(NUM_HINGES, int(DRIVE_MODE), dtype=np.int32)
 
     # Positional block soft-constraint knobs. The jitter WorldBuilder
@@ -286,8 +252,9 @@ def _build_joint_arrays(
     damping_ratio = np.full(NUM_HINGES, float(DEFAULT_DAMPING_RATIO), dtype=np.float32)
     hertz_limit = np.full(NUM_HINGES, float(DEFAULT_HERTZ_LINEAR), dtype=np.float32)
     damping_ratio_limit = np.full(NUM_HINGES, float(DEFAULT_DAMPING_RATIO), dtype=np.float32)
-    stiffness_limit = np.zeros(NUM_HINGES, dtype=np.float32)
-    damping_limit = np.zeros(NUM_HINGES, dtype=np.float32)
+    # Free axial twist about the cable tangent.
+    stiffness_limit = np.full(NUM_HINGES, TWIST_STIFFNESS, dtype=np.float32)
+    damping_limit = np.full(NUM_HINGES, TWIST_DAMPING, dtype=np.float32)
 
     return {
         "body1": wp.array(body1, dtype=wp.int32, device=device),
@@ -453,11 +420,11 @@ class Example:
     def _tip_sag(self) -> tuple[float, float]:
         """Return ``(tip_sag, max_sag)`` of the cantilever in metres.
 
-        The chain extends along world -y with every hinge axis along
-        world +z; gravity is along -z. A revolute hinge cannot rotate in
-        the gravity plane, so the only thing that lets the chain droop is
-        residual constraint error in the anchor-2 swing (axis-alignment)
-        lock. An ideally-converged solver holds every link at ``z = 0``;
+        The chain and every cable reference axis extend along world -y;
+        gravity is along -z. The zero-compliance bend lock constrains both
+        transverse rotations, including lateral bending about +z. Only axial
+        twist about -y is free. An ideally converged solver keeps every link
+        at ``z = 0``;
         the downward -z deflection of the links is therefore a direct
         measure of joint-lock convergence. ``tip_sag`` is the free-end
         link's drop; ``max_sag`` is the worst drop along the chain.
@@ -469,7 +436,7 @@ class Example:
         return tip_sag, max_sag
 
     def test_final(self) -> None:
-        """After settling the chain must still be a near-rigid cantilever:
+        """After settling the cable chain must still be a near-rigid cantilever:
         finite, not blown up, and with bounded free-end droop (catches the
         block-Gauss-Seidel swing-lock convergence regression).
         """
@@ -481,13 +448,13 @@ class Example:
         tip_sag, max_sag = self._tip_sag()
         chain_len = NUM_CUBES * _link_layout()[0]
         print(
-            f"[hinge_chain] tip_sag={tip_sag * 1e3:.1f} mm  max_sag={max_sag * 1e3:.1f} mm "
+            f"[cable_chain] tip_sag={tip_sag * 1e3:.1f} mm  max_sag={max_sag * 1e3:.1f} mm "
             f"({tip_sag / chain_len * 100.0:.2f}% of {chain_len:.1f} m chain)"
         )
         # The decoupled formulation collapsed by metres. Bound both signs so
         # an upward numerical explosion cannot pass a one-sided sag check.
         max_abs_z = float(np.max(np.abs(positions[1:NUM_BODIES, 2])))
-        assert abs(tip_sag) < 0.6, f"free-end error {tip_sag * 1e3:.1f} mm -- swing lock under-converged"
+        assert abs(tip_sag) < 0.6, f"free-end error {tip_sag * 1e3:.1f} mm -- cable bend lock under-converged"
         assert max_abs_z < 0.6, f"maximum vertical error {max_abs_z * 1e3:.1f} mm"
 
 

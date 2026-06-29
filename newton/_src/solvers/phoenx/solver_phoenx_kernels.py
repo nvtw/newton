@@ -123,20 +123,13 @@ from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContai
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.timer import elapsed_us, read_global_timer_ns
 
-_FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS = 3
-_FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS = 3
+# A PGS iteration is one complete traversal of all colors. Repeating a local
+# row before adjacent colors observe its update wastes propagation and changes
+# the meaning of ``solver_iterations``.
+_FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS = 1
+_FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS = 1
 _FAST_TAIL_SOLVE_OUTER_ITERATION_CHUNK = 1
-
-# Block-world inner-sweep count. Each iterate dispatch solves a constraint
-# ``inner_sweeps`` times back-to-back with its per-cid constants and both
-# bodies' kinematic state held in registers, so the constraint container is
-# read once per ``inner_sweeps`` outer rounds instead of every sweep. The
-# outer loop runs ``num_iterations / inner_sweeps`` rounds plus a single-sweep
-# remainder, keeping the total sweep count identical to ``solver_iterations``
-# (matching the fast-tail (2,2,2) schedule). Trades some cross-colour PGS
-# feedback for register reuse; validated to stay within 1 deg of the
-# single-world reference by test_multi_world_pgs_order.
-_BLOCK_WORLD_SOLVE_INNER_SWEEPS = 2
+_BLOCK_WORLD_SOLVE_INNER_SWEEPS = 1
 
 # Body-N dword offsets in the per-constraint header. Each constraint
 # type stores (type, body1, body2) at dwords 0/1/2 then extra bodies
@@ -1360,12 +1353,15 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         while it_outer < solve_outer_iterations:
             c = wp.int32(0)
             while c < n_colors:
-                start = world_base + world_color_starts[world_id, c]
-                end = world_base + world_color_starts[world_id, c + 1]
+                color = c
+                if (it_outer & wp.int32(1)) != wp.int32(0):
+                    color = n_colors - wp.int32(1) - c
+                start = world_base + world_color_starts[world_id, color]
+                end = world_base + world_color_starts[world_id, color + 1]
                 count = end - start
 
                 if wp.static(family_split):
-                    family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+                    family_base = color * wp.int32(_PER_WORLD_FAST_FAMILIES)
                     if wp.static(cloth_support):
                         family = wp.int32(0)
                         while family < wp.int32(_PER_WORLD_FAST_FAMILIES):
@@ -1635,22 +1631,20 @@ def _make_fast_tail_relax_kernel(
 
         relax_iterations = num_iterations
         sweeps_per_dispatch = wp.int32(1)
-        if wp.static(not cloth_support):
-            # Restore the box3d_5 rigid relax contract: each column runs
-            # velocity_iterations sweeps in its register-cached multi path.
-            relax_iterations = wp.int32(1)
-            sweeps_per_dispatch = num_iterations
 
-        # Deformable rows keep the latest global PGS order: each relax
-        # iteration visits all colors once before any color repeats.
+        # Every relax iteration visits all colors once before any color
+        # repeats, matching the solve-phase PGS ordering.
         it = wp.int32(0)
         while it < relax_iterations:
             c = wp.int32(0)
             while c < n_colors:
-                start = world_base + world_color_starts[world_id, c]
-                end = world_base + world_color_starts[world_id, c + 1]
+                color = c
+                if (it & wp.int32(1)) != wp.int32(0):
+                    color = n_colors - wp.int32(1) - c
+                start = world_base + world_color_starts[world_id, color]
+                end = world_base + world_color_starts[world_id, color + 1]
                 if wp.static(family_split):
-                    family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+                    family_base = color * wp.int32(_PER_WORLD_FAST_FAMILIES)
                     if wp.static(cloth_support):
                         family = wp.int32(0)
                         while family < wp.int32(_PER_WORLD_FAST_FAMILIES):
@@ -1899,8 +1893,11 @@ def _make_block_world_prepare_plus_iterate_kernel(
                 sweeps = num_iterations - done_sweeps
             c = wp.int32(0)
             while c < n_colors:
-                start = world_base + world_color_starts[world_id, c]
-                end = world_base + world_color_starts[world_id, c + wp.int32(1)]
+                color = c
+                if (done_sweeps & wp.int32(1)) != wp.int32(0):
+                    color = n_colors - wp.int32(1) - c
+                start = world_base + world_color_starts[world_id, color]
+                end = world_base + world_color_starts[world_id, color + wp.int32(1)]
 
                 count = end - start
                 base = local_tid
@@ -1994,13 +1991,16 @@ def _make_block_world_relax_kernel(
         n_colors = world_num_colors[world_id]
         world_base = world_csr_offsets[world_id]
 
-        # Preserve global PGS order for multi-color worlds.
+        # Alternate forward and reverse color order between iterations.
         it = wp.int32(0)
         while it < num_iterations:
             c = wp.int32(0)
             while c < n_colors:
-                start = world_base + world_color_starts[world_id, c]
-                end = world_base + world_color_starts[world_id, c + wp.int32(1)]
+                color = c
+                if (it & wp.int32(1)) != wp.int32(0):
+                    color = n_colors - wp.int32(1) - c
+                start = world_base + world_color_starts[world_id, color]
+                end = world_base + world_color_starts[world_id, color + wp.int32(1)]
 
                 count = end - start
                 base = local_tid

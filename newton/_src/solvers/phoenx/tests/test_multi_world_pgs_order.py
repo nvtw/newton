@@ -68,15 +68,31 @@ class TestMultiWorldColoringContract(unittest.TestCase):
 
 
 class TestMultiWorldFastTailSolveContract(unittest.TestCase):
-    def test_solve_schedule_keeps_high_substep_total_work_constant(self) -> None:
-        solver_iterations = 8
-        joint_sweeps, contact_sweeps, outer_chunk = _choose_fast_tail_solve_schedule(substeps=80)
-        outer_iterations = (solver_iterations + outer_chunk - 1) // outer_chunk
+    def test_solve_schedule_traverses_all_colors_per_iteration(self) -> None:
+        self.assertEqual(_choose_fast_tail_solve_schedule(substeps=80), (1, 1, 1))
+        self.assertEqual(_choose_fast_tail_solve_schedule(substeps=20), (1, 1, 1))
 
-        self.assertEqual((joint_sweeps, contact_sweeps, outer_chunk), (2, 2, 2))
-        self.assertEqual(outer_iterations * joint_sweeps, solver_iterations)
-        self.assertEqual(outer_iterations * contact_sweeps, solver_iterations)
-        self.assertEqual(_choose_fast_tail_solve_schedule(substeps=20), (3, 3, 1))
+    def test_relax_schedule_traverses_all_colors_per_iteration(self) -> None:
+        source = inspect.getsource(solver_phoenx_kernels._make_fast_tail_relax_kernel)
+        self.assertIn("relax_iterations = num_iterations", source)
+        self.assertNotIn("sweeps_per_dispatch = num_iterations", source)
+        self.assertEqual(solver_phoenx_kernels._BLOCK_WORLD_SOLVE_INNER_SWEEPS, 1)
+
+    def test_multi_world_kernels_alternate_color_direction(self) -> None:
+        factories = (
+            solver_phoenx_kernels._make_fast_tail_prepare_plus_iterate_kernel,
+            solver_phoenx_kernels._make_fast_tail_relax_kernel,
+            solver_phoenx_kernels._make_block_world_prepare_plus_iterate_kernel,
+            solver_phoenx_kernels._make_block_world_relax_kernel,
+        )
+        reverse_index = "color = n_colors - wp.int32(1) - c"
+        for factory in factories:
+            with self.subTest(factory=factory.__name__):
+                self.assertIn(reverse_index, inspect.getsource(factory))
+
+    def test_single_world_alternating_color_order_is_default(self) -> None:
+        parameter = inspect.signature(solver_phoenx.PhoenXWorld).parameters["symmetric_color_sweep"]
+        self.assertIs(parameter.default, True)
 
     def test_ordered_solve_dispatch_uses_selected_inner_sweeps(self) -> None:
         source = textwrap.dedent(inspect.getsource(solver_phoenx_kernels._make_fast_tail_prepare_plus_iterate_kernel))

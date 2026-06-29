@@ -27,7 +27,6 @@ import warp as wp
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import MOTION_STATIC, BodyContainer, body_set_access_mode, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    _PD_NYQUIST_HEADROOM_MAX,
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
     ConstraintBodies,
     ConstraintContainer,
@@ -1328,25 +1327,29 @@ def _d6_pd_softness(
     dt: wp.float32,
     idt: wp.float32,
     boost: wp.float32,
+    hard_bias_fraction: wp.float32,
 ):
     """Implicit-Euler PD softness used by soft D6 metric rows."""
-    row_boost = wp.clamp(boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
     bias_factor = wp.float32(0.0)
     gamma = wp.float32(0.0)
     m_soft = wp.float32(0.0)
     if (k > wp.float32(0.0)) or (d > wp.float32(0.0)):
-        if eff_inv > wp.float32(0.0):
-            k_max = row_boost / (eff_inv * dt * dt)
-            k_clamped = wp.min(k, k_max)
-        else:
-            k_clamped = k
-        denom = d + dt * k_clamped
-        if denom > wp.float32(0.0):
-            softness = wp.float32(1.0) / denom
-            bias_factor = dt * k_clamped * softness
-            gamma = softness * idt
-            if eff_inv + gamma > wp.float32(0.0):
-                m_soft = wp.float32(1.0) / (eff_inv + gamma)
+        if wp.isinf(k):
+            bias_factor = hard_bias_fraction
+        elif not wp.isinf(d):
+            denom = d + dt * k
+            if denom > wp.float32(0.0):
+                softness = wp.float32(1.0) / denom
+                bias_factor = dt * k * softness
+                gamma = softness * idt
+
+                if eff_inv > wp.float32(0.0):
+                    row_boost = wp.max(boost, wp.float32(1.0))
+                    ratio = k * eff_inv * dt * dt / row_boost
+                    weight = ratio / (wp.float32(1.0) + ratio)
+                    bias_factor = bias_factor * (wp.float32(1.0) + weight * (hard_bias_fraction - wp.float32(1.0)))
+        if eff_inv + gamma > wp.float32(0.0):
+            m_soft = wp.float32(1.0) / (eff_inv + gamma)
     return bias_factor, gamma, m_soft
 
 
@@ -1512,6 +1515,7 @@ def _d6_solve_rigid_swing_coupled_at(
     impulse_coeff: wp.float32,
     sor_boost: wp.float32,
     use_bias: wp.bool,
+    is_cable: wp.bool,
 ):
     """Anchor-1 point lock (3 rows) + anchor-2 swing tangent lock (2 rows)
     solved as one COUPLED 3+2 Schur block (REVOLUTE / FIXED).
@@ -1542,6 +1546,9 @@ def _d6_solve_rigid_swing_coupled_at(
     else:
         bias1 = wp.vec3f(0.0, 0.0, 0.0)
         bias2 = wp.vec3f(0.0, 0.0, 0.0)
+        if is_cable:
+            asymptotic_weight = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_00, cid)
+            bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid) * (wp.float32(1.0) - asymptotic_weight)
     bias2_tan = wp.vec2f(bias2[0], bias2[1])
 
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
@@ -1553,11 +1560,20 @@ def _d6_solve_rigid_swing_coupled_at(
     jv2 = wp.vec2f(wp.dot(t1, jv2_world), wp.dot(t2, jv2_world))
 
     rhs1 = jv1 + bias1
-    rhs2 = jv2 + bias2_tan
+    if is_cable:
+        gamma_bend = read_float(constraints, base_offset + _OFF_CABLE_GAMMA_BEND, cid)
+        rhs2 = jv2 + bias2_tan + gamma_bend * acc2_tan
+    else:
+        rhs2 = jv2 + bias2_tan
 
     ut_ai_rhs1 = wp.vec2f(wp.dot(ut_ai_row0, rhs1), wp.dot(ut_ai_row1, rhs1))
     lam2_us = -(mul_sym2(s_inv_s3, rhs2 - ut_ai_rhs1))
-    lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
+    if is_cable:
+        asymptotic_weight = read_float(constraints, base_offset + _OFF_CABLE_K22_INV_00, cid)
+        lam2_hard = mass_coeff * lam2_us - impulse_coeff * acc2_tan
+        lam2 = lam2_us + asymptotic_weight * (lam2_hard - lam2_us)
+    else:
+        lam2 = mass_coeff * lam2_us - impulse_coeff * acc2_tan
     lam2 = lam2 * sor_boost
 
     lam2_world = lam2[0] * t1 + lam2[1] * t2
@@ -1966,7 +1982,7 @@ def _d6_prepare_rows_at(
     """
     is_cable = mode_cfg == JOINT_MODE_CABLE
     is_prismatic = mode_cfg == JOINT_MODE_PRISMATIC
-    has_swing = mode_cfg == JOINT_MODE_REVOLUTE or mode_cfg == JOINT_MODE_FIXED
+    has_swing = mode_cfg == JOINT_MODE_REVOLUTE or mode_cfg == JOINT_MODE_FIXED or is_cable
     has_twist = mode_cfg == JOINT_MODE_FIXED
     has_axial = mode_cfg == JOINT_MODE_REVOLUTE or mode_cfg == JOINT_MODE_UNIVERSAL
     has_limits = mode_cfg == JOINT_MODE_BALL_SOCKET or mode_cfg == JOINT_MODE_UNIVERSAL
@@ -2081,9 +2097,6 @@ def _d6_prepare_rows_at(
             cid,
             wp.vec3f(wp.dot(t1, drift1) * bias_rate, wp.dot(t2, drift1) * bias_rate, 0.0),
         )
-    elif is_cable:
-        write_mat33(constraints, base_offset + _OFF_A1_INV, cid, wp.inverse(a1))
-        write_vec3(constraints, base_offset + _OFF_BIAS1, cid, (p1_b2 - p1_b1) * bias_rate)
     else:
         write_vec6(constraints, base_offset + _OFF_A1_INV_S6, cid, inv_sym3(sym6_from_mat33_upper(a1)))
         write_vec3(constraints, base_offset + _OFF_BIAS1, cid, (p1_b2 - p1_b1) * bias_rate)
@@ -2171,70 +2184,6 @@ def _d6_prepare_rows_at(
         angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1w + cr2_b1 @ acc2w + cr3_b1 @ acc3w)
         velocity2 = velocity2 + inv_mass2 * total_linear
         angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1w + cr2_b2 @ acc2w + cr3_b2 @ acc3w)
-    elif is_cable:
-        # ---- CABLE: anchor-2 bend PD + anchor-3 twist PD -------------
-        cr2_b1 = wp.skew(r2_b1)
-        cr2_b2 = wp.skew(r2_b2)
-        cr3_b1 = wp.skew(r3_b1)
-        cr3_b2 = wp.skew(r3_b2)
-
-        b22 = _d6_metric_anchor_block(inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, r2_b1, r2_b2, r2_b1, r2_b2)
-        k22 = _d6_project_tangent_block(b22, t1, t2)
-        rest_length = read_float(constraints, base_offset + _OFF_REST_LENGTH, cid)
-        rest_len2 = rest_length * rest_length
-        if rest_len2 > 1.0e-12:
-            inv_rest2 = wp.float32(1.0) / rest_len2
-        else:
-            inv_rest2 = wp.float32(0.0)
-
-        k_bend_user = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
-        d_bend_user = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
-        eff_inv_bend = wp.float32(0.5) * (k22[0] + k22[3])
-        bias_factor_bend, gamma_bend, _m_bend_soft = _d6_pd_softness(
-            k_bend_user * inv_rest2, d_bend_user * inv_rest2, eff_inv_bend, dt, idt, PHOENX_BOOST_CABLE_BEND
-        )
-        k22s_00 = k22[0] + gamma_bend
-        k22s_11 = k22[3] + gamma_bend
-        det_b = k22s_00 * k22s_11 - k22[1] * k22[2]
-        if wp.abs(det_b) > wp.float32(1.0e-20):
-            inv_det_b = wp.float32(1.0) / det_b
-        else:
-            inv_det_b = wp.float32(0.0)
-        write_float(constraints, base_offset + _OFF_CABLE_K22_INV_00, cid, k22s_11 * inv_det_b)
-        write_float(constraints, base_offset + _OFF_CABLE_K22_INV_01, cid, -k22[1] * inv_det_b)
-        write_float(constraints, base_offset + _OFF_CABLE_K22_INV_10, cid, -k22[2] * inv_det_b)
-        write_float(constraints, base_offset + _OFF_CABLE_K22_INV_11, cid, k22s_00 * inv_det_b)
-        write_float(constraints, base_offset + _OFF_CABLE_GAMMA_BEND, cid, gamma_bend)
-
-        drift2 = p2_b2 - p2_b1
-        write_vec3(
-            constraints,
-            base_offset + _OFF_BIAS2,
-            cid,
-            wp.vec3f(wp.dot(t1, drift2) * bias_factor_bend * idt, wp.dot(t2, drift2) * bias_factor_bend * idt, 0.0),
-        )
-
-        b33 = _d6_metric_anchor_block(inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, r3_b1, r3_b2, r3_b1, r3_b2)
-        eff_inv_twist = _d6_project_scalar_block(b33, t2)
-        k_twist_user = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
-        d_twist_user = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
-        bias_factor_twist, gamma_twist, m_twist_soft = _d6_pd_softness(
-            k_twist_user * inv_rest2, d_twist_user * inv_rest2, eff_inv_twist, dt, idt, PHOENX_BOOST_CABLE_TWIST
-        )
-        write_float(constraints, base_offset + _OFF_CABLE_M_TWIST_SOFT, cid, m_twist_soft)
-        write_float(constraints, base_offset + _OFF_CABLE_GAMMA_TWIST, cid, gamma_twist)
-        drift3 = p3_b2 - p3_b1
-        write_float(constraints, base_offset + _OFF_BIAS3, cid, wp.dot(t2, drift3) * bias_factor_twist * idt)
-
-        acc2w = _d6_reproject_tangent_impulse(read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid), t1, t2)
-        acc3w = _d6_reproject_scalar_impulse(read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid), t2)
-        write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2w)
-        write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3w)
-        total_linear = acc1 + acc2w + acc3w
-        velocity1 = velocity1 - inv_mass1 * total_linear
-        angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1 + cr2_b1 @ acc2w + cr3_b1 @ acc3w)
-        velocity2 = velocity2 + inv_mass2 * total_linear
-        angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ acc1 + cr2_b2 @ acc2w + cr3_b2 @ acc3w)
     elif has_swing:
         # ---- RIGID swing (REVOLUTE / FIXED): anchor-1<->anchor-2 COUPLED
         # 3+2 Schur + optional a3 twist. The coupling (vs decoupled
@@ -2261,21 +2210,86 @@ def _d6_prepare_rows_at(
         s00 = wp.dot(t1, a2_t1) - wp.dot(ut_ai_row0, u_col0)
         s01 = wp.dot(t1, a2_t2) - wp.dot(ut_ai_row0, u_col1)
         s11 = wp.dot(t2, a2_t2) - wp.dot(ut_ai_row1, u_col1)
-        write_vec3(constraints, base_offset + _OFF_S_INV_S3, cid, inv_sym2(wp.vec3f(s00, s01, s11)))
+
         drift2 = p2_b2 - p2_b1
-        write_vec3(
-            constraints,
-            base_offset + _OFF_BIAS2,
-            cid,
-            wp.vec3f(wp.dot(t1, drift2) * bias_rate, wp.dot(t2, drift2) * bias_rate, 0.0),
-        )
+        if is_cable:
+            rest_length = read_float(constraints, base_offset + _OFF_REST_LENGTH, cid)
+            rest_len2 = rest_length * rest_length
+            if rest_len2 > 1.0e-12:
+                inv_rest2 = wp.float32(1.0) / rest_len2
+            else:
+                inv_rest2 = wp.float32(0.0)
+            k_bend = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid) * inv_rest2
+            d_bend = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid) * inv_rest2
+            eff_inv_bend = wp.float32(0.5) * (s00 + s11)
+            bias_factor_bend, gamma_bend, _m_bend = _d6_pd_softness(
+                k_bend,
+                d_bend,
+                eff_inv_bend,
+                dt,
+                idt,
+                PHOENX_BOOST_CABLE_BEND,
+                bias_rate / idt,
+            )
+            asymptotic_weight = wp.float32(1.0)
+            if not wp.isinf(k_bend):
+                stiffness_ratio = k_bend * eff_inv_bend * dt * dt / wp.max(PHOENX_BOOST_CABLE_BEND, wp.float32(1.0))
+                asymptotic_weight = stiffness_ratio / (wp.float32(1.0) + stiffness_ratio)
+            write_float(constraints, base_offset + _OFF_CABLE_K22_INV_00, cid, asymptotic_weight)
+            s00 = s00 + gamma_bend
+            s11 = s11 + gamma_bend
+            write_float(constraints, base_offset + _OFF_CABLE_GAMMA_BEND, cid, gamma_bend)
+            write_vec3(
+                constraints,
+                base_offset + _OFF_BIAS2,
+                cid,
+                wp.vec3f(
+                    wp.dot(t1, drift2) * bias_factor_bend * idt,
+                    wp.dot(t2, drift2) * bias_factor_bend * idt,
+                    0.0,
+                ),
+            )
+        else:
+            write_vec3(
+                constraints,
+                base_offset + _OFF_BIAS2,
+                cid,
+                wp.vec3f(wp.dot(t1, drift2) * bias_rate, wp.dot(t2, drift2) * bias_rate, 0.0),
+            )
+        write_vec3(constraints, base_offset + _OFF_S_INV_S3, cid, inv_sym2(wp.vec3f(s00, s01, s11)))
 
         acc2w = _d6_reproject_tangent_impulse(read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid), t1, t2)
         write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2w)
         acc3w = wp.vec3f(0.0, 0.0, 0.0)
         cr3_b1 = wp.skew(r3_b1)
         cr3_b2 = wp.skew(r3_b2)
-        if has_twist:
+        if is_cable:
+            b33 = _d6_metric_anchor_block(inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, r3_b1, r3_b2, r3_b1, r3_b2)
+            d_scalar = _d6_project_scalar_block(b33, t2)
+            rest_length = read_float(constraints, base_offset + _OFF_REST_LENGTH, cid)
+            rest_len2 = rest_length * rest_length
+            if rest_len2 > 1.0e-12:
+                inv_rest2 = wp.float32(1.0) / rest_len2
+            else:
+                inv_rest2 = wp.float32(0.0)
+            k_twist = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid) * inv_rest2
+            d_twist = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid) * inv_rest2
+            bias_factor_twist, gamma_twist, m_twist = _d6_pd_softness(
+                k_twist,
+                d_twist,
+                d_scalar,
+                dt,
+                idt,
+                PHOENX_BOOST_CABLE_TWIST,
+                bias_rate / idt,
+            )
+            write_float(constraints, base_offset + _OFF_CABLE_M_TWIST_SOFT, cid, m_twist)
+            write_float(constraints, base_offset + _OFF_CABLE_GAMMA_TWIST, cid, gamma_twist)
+            drift3 = p3_b2 - p3_b1
+            write_float(constraints, base_offset + _OFF_BIAS3, cid, wp.dot(t2, drift3) * bias_factor_twist * idt)
+            acc3w = _d6_reproject_scalar_impulse(read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid), t2)
+            write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3w)
+        elif has_twist:
             b33 = _d6_metric_anchor_block(inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, r3_b1, r3_b2, r3_b1, r3_b2)
             d_scalar = _d6_project_scalar_block(b33, t2)
             if wp.abs(d_scalar) > 1.0e-20:
@@ -2459,17 +2473,15 @@ def _d6_iterate_rows_at(
     # into one 4+1 Schur (a mat44 inverse); it is now anchor-1 tangent +
     # anchor-2 tangent + anchor-3 twist, the same 2x2/2x2/1x1 shape as the
     # rigid swing family -- no mat44, no cross-anchor coupling matrix.
-    has_swing = mode_cfg == JOINT_MODE_REVOLUTE or mode_cfg == JOINT_MODE_FIXED
     has_twist = mode_cfg == JOINT_MODE_FIXED
     is_cable = mode_cfg == JOINT_MODE_CABLE
+    has_swing = mode_cfg == JOINT_MODE_REVOLUTE or mode_cfg == JOINT_MODE_FIXED or is_cable
     is_prismatic = mode_cfg == JOINT_MODE_PRISMATIC
 
     a1_kind = _D6_ROW_SOLVE_HARD3
     a2_kind = _D6_ROW_SOLVE_SKIP
     a3_kind = _D6_ROW_SOLVE_SKIP
     if is_cable:
-        a1_kind = _D6_ROW_SOLVE_SOFT3
-        a2_kind = _D6_ROW_SOLVE_PD2_TAN
         a3_kind = _D6_ROW_SOLVE_PD1_SCALAR
     elif is_prismatic:
         # Prismatic solves all 5 positional rows in one coupled 4+1 Schur
@@ -2544,6 +2556,7 @@ def _d6_iterate_rows_at(
             impulse_coeff,
             sor_boost,
             use_bias,
+            is_cable,
         )
     elif is_prismatic:
         (

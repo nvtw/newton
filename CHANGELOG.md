@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add `example_motorized_cable_chain` as a one-for-one cable-joint counterpart to the PhoenX motorized hinge-chain example.
 - Add pure-Warp Muon optimizer support to `newton.rl` PPO trainers so experimental G1 runs can match nanoG1 optimizer settings without PyTorch.
 - Add `ConfigEnvG1PhoenX` scheduler knobs for `threads_per_world`, `multi_world_scheduler`, and `prepare_refresh_stride` so experimental G1 RL runs can benchmark PhoenX solver schedules without monkeypatching.
 - Add opt-in `SolverPhoenX` full-coordinate DVI articulation controls, including block-sparse solve modes and full closed-loop joint ownership for supported joint columns.
@@ -42,6 +43,8 @@
 
 ### Changed
 
+- Alternate PhoenX PGS color traversal direction between iterations to reduce ordering bias without changing constraint equations or CUDA graph capture.
+- Change PhoenX cable bend constraints to a physically damped angular Schur block coupled with the point attachment, so high stiffness approaches the revolute lock without SOR or additional constraint storage.
 - Change experimental PhoenX G1 RL actuation to explicit clamped PD torques matching nanoG1/MuJoCo; pass `actuation_model="constraint_drive"` or `--actuation-model constraint_drive` to use the previous implicit PhoenX drive-row formulation.
 - Change experimental PhoenX G1 RL defaults to `sim_substeps=8` and `solver_iterations=4` to avoid no-reset ground-impact blow-ups seen with the faster `5x2` recipe; pass `--sim-substeps 5 --solver-iterations 2` to reproduce the old fast setting.
 - Change the default CoACD convex decomposition threshold from `0.5` to `0.05` to match CoACD's default; pass `remeshing_kwargs={"threshold": 0.5}` to preserve the previous coarse decomposition.
@@ -57,6 +60,7 @@
 
 ### Fixed
 
+- Fix PhoenX PGS iteration ordering so every solve and relaxation iteration traverses all constraint colors before processing any constraint again.
 - Fix PhoenX primitive stack contacts so dense Kapla tower examples remain stable while preserving SDF speculative-contact safeguards.
 - Fix `SolverVBD` rigid contact injecting kinetic energy for yawed finite-radius contacts (e.g. small-radius cables blowing up). The normal response now acts at the geometric skeleton point rather than the rotating surface anchor, which was non-conservative under reorientation; friction still uses the surface anchor to preserve finite-radius slip. (#3125)
 - Fix `SolverKamino` contact filtering and constraint stabilization so gap/margin contacts are handled consistently, positive-distance contacts can be filtered as configured, and converted contact forces/wrenches populate matching Newton contact slots for `SensorContact`. (#2908)
