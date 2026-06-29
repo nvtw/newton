@@ -1239,40 +1239,6 @@ class ViewerGL(ViewerBase):
             owner.destroy()
         self._wireframe_vbo_owners.clear()
 
-    def _normalize_point_colors(
-        self,
-        colors: wp.array[wp.vec3] | wp.array[wp.float32] | np.ndarray | tuple[float, float, float] | list[float] | None,
-        num_points: int,
-    ) -> wp.array[wp.vec3] | None:
-        if colors is None:
-            return None
-
-        if isinstance(colors, wp.array):
-            if colors.dtype == wp.float32:
-                colors_np = colors.numpy()
-                if colors_np.ndim == 1 and colors_np.shape[0] == 3:
-                    return wp.full(
-                        num_points,
-                        wp.vec3(float(colors_np[0]), float(colors_np[1]), float(colors_np[2])),
-                        dtype=wp.vec3,
-                        device=self.device,
-                    )
-            return colors
-
-        colors_np = np.asarray(colors, dtype=np.float32)
-        if colors_np.ndim == 1 and colors_np.shape[0] == 3:
-            return wp.full(
-                num_points,
-                wp.vec3(float(colors_np[0]), float(colors_np[1]), float(colors_np[2])),
-                dtype=wp.vec3,
-                device=self.device,
-            )
-
-        if colors_np.ndim == 2 and colors_np.shape == (num_points, 3):
-            return wp.array(colors_np, dtype=wp.vec3, device=self.device)
-
-        raise ValueError("Point colors must be an RGB triplet or an array with shape (num_points, 3).")
-
     @override
     def log_points(
         self,
@@ -1326,8 +1292,6 @@ class ViewerGL(ViewerBase):
         # initialize to white to avoid uninitialized instance color buffers.
         if colors is None and object_recreated:
             colors = wp.full(num_points, wp.vec3(1.0, 1.0, 1.0), dtype=wp.vec3, device=self.device)
-        else:
-            colors = self._normalize_point_colors(colors, num_points)
 
         self.objects[name].update_from_points(points, radii, colors)
         self.objects[name].hidden = hidden
