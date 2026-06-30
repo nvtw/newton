@@ -326,6 +326,121 @@ def _factor_single_reduced_articulation(
 
 
 @wp.kernel(enable_backward=False)
+def _initialize_reduced_factor_kernel(
+    factor_joint: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_qd_public: wp.array[wp.float32],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_x_com: wp.array[wp.transform],
+    body_i_m: wp.array[wp.spatial_matrix],
+    joint_qd_internal: wp.array[wp.float32],
+    body_q_com: wp.array[wp.transform],
+    body_i_s: wp.array[wp.spatial_matrix],
+    joint_s: wp.array[wp.spatial_vector],
+):
+    """Initialize independent per-joint quantities for a depth factorization."""
+    joint = factor_joint[wp.tid()]
+    _convert_joint_velocity_to_integrator_basis(
+        joint,
+        joint_type,
+        joint_parent,
+        joint_child,
+        joint_qd_start,
+        joint_x_p,
+        body_q,
+        body_com,
+        joint_qd_public,
+        joint_qd_internal,
+    )
+    child = joint_child[joint]
+    q_com = body_q[child] * body_x_com[child]
+    body_q_com[child] = q_com
+    body_i_s[child] = transform_spatial_inertia(q_com, body_i_m[child])
+
+    x_wpj = joint_x_p[joint]
+    parent = joint_parent[joint]
+    if parent >= wp.int32(0):
+        x_wpj = body_q[parent] * x_wpj
+    jcalc_motion(
+        joint_type[joint],
+        joint_axis,
+        joint_dof_dim[joint, 0],
+        joint_dof_dim[joint, 1],
+        x_wpj,
+        joint_qd_internal,
+        joint_qd_start[joint],
+        joint_s,
+    )
+
+
+@wp.kernel(enable_backward=False)
+def _factor_reduced_depth_kernel(
+    depth_joint: wp.array[wp.int32],
+    depth_offset: wp.int32,
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_armature: wp.array[wp.float32],
+    joint_s: wp.array[wp.spatial_vector],
+    child_start: wp.array[wp.int32],
+    child_joint: wp.array[wp.int32],
+    body_i_s: wp.array[wp.spatial_matrix],
+    reduced_inertia: wp.array[wp.spatial_matrix],
+    articulated_inertia: wp.array[wp.spatial_matrix],
+    joint_u: wp.array[wp.spatial_vector],
+    joint_d_inv: wp.array3d[wp.float32],
+):
+    """Factor one tree depth with stable per-parent child reductions."""
+    joint = depth_joint[depth_offset + wp.tid()]
+    child = joint_child[joint]
+    inertia = body_i_s[child]
+    for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
+        descendant_joint = child_joint[child_index]
+        inertia += reduced_inertia[joint_child[descendant_joint]]
+    articulated_inertia[child] = inertia
+
+    dof_start = joint_qd_start[joint]
+    dof_end = joint_qd_start[joint + wp.int32(1)]
+    dof_count = dof_end - dof_start
+    d = _mat66(0.0)
+    for column in range(_MAX_JOINT_DOF):
+        if wp.int32(column) < dof_count:
+            dof = dof_start + wp.int32(column)
+            u = inertia * joint_s[dof]
+            joint_u[dof] = u
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    d[row, column] = wp.dot(joint_s[dof_start + wp.int32(row)], u)
+            d[column, column] += joint_armature[dof]
+
+    d_inv = _invert_spd(d, dof_count)
+    for row in range(_MAX_JOINT_DOF):
+        for column in range(_MAX_JOINT_DOF):
+            joint_d_inv[joint, row, column] = d_inv[row, column]
+
+    reduced = inertia
+    for row in range(6):
+        for column in range(6):
+            correction = wp.float32(0.0)
+            for a in range(_MAX_JOINT_DOF):
+                if wp.int32(a) < dof_count:
+                    u_a = joint_u[dof_start + wp.int32(a)]
+                    for b in range(_MAX_JOINT_DOF):
+                        if wp.int32(b) < dof_count:
+                            u_b = joint_u[dof_start + wp.int32(b)]
+                            correction += u_a[row] * d_inv[a, b] * u_b[column]
+            reduced[row, column] -= correction
+    reduced_inertia[child] = reduced
+
+
+@wp.kernel(enable_backward=False)
 def _factor_reduced_articulations_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
@@ -1066,6 +1181,48 @@ class ReducedArticulationSystem:
         joint_count = int(model.joint_count)
         dof_count = int(model.joint_dof_count)
 
+        joint_parent_np = model.joint_parent.numpy()
+        joint_child_np = model.joint_child.numpy()
+        articulation_start_np = model.articulation_start.numpy()
+        articulation_end_np = model.articulation_end.numpy()
+        tree_joint_np = np.concatenate(
+            [
+                np.arange(articulation_start_np[articulation], articulation_end_np[articulation], dtype=np.int32)
+                for articulation in range(int(model.articulation_count))
+            ]
+        )
+        body_joint_np = np.full(body_count, -1, dtype=np.int32)
+        for joint in tree_joint_np:
+            body_joint_np[int(joint_child_np[joint])] = joint
+        joint_depth_np = np.zeros(joint_count, dtype=np.int32)
+        child_lists: list[list[int]] = [[] for _ in range(joint_count)]
+        for joint in tree_joint_np:
+            parent = int(joint_parent_np[joint])
+            if parent >= 0:
+                parent_joint = int(body_joint_np[parent])
+                joint_depth_np[joint] = joint_depth_np[parent_joint] + 1
+                child_lists[parent_joint].append(int(joint))
+        tree_depth_np = joint_depth_np[tree_joint_np]
+        depth_order = np.argsort(tree_depth_np, kind="stable")
+        depth_joint_np = tree_joint_np[depth_order]
+        depth_counts = np.bincount(tree_depth_np, minlength=int(tree_depth_np.max()) + 1)
+        self.factor_depth_ranges: list[tuple[int, int]] = []
+        depth_offset = 0
+        for depth_count in depth_counts:
+            count = int(depth_count)
+            self.factor_depth_ranges.append((depth_offset, count))
+            depth_offset += count
+        child_start_np = np.zeros(joint_count + 1, dtype=np.int32)
+        child_joint_list: list[int] = []
+        for joint, children in enumerate(child_lists):
+            child_joint_list.extend(children)
+            child_start_np[joint + 1] = len(child_joint_list)
+        self.factor_joint_count = int(tree_joint_np.shape[0])
+        self.factor_joint = wp.array(tree_joint_np, device=self.device)
+        self.factor_depth_joint = wp.array(depth_joint_np, device=self.device)
+        self.factor_child_start = wp.array(child_start_np, device=self.device)
+        self.factor_child_joint = wp.array(np.asarray(child_joint_list, dtype=np.int32), device=self.device)
+
         self.body_i_m = wp.empty(body_count, dtype=wp.spatial_matrix, device=self.device)
         self.body_x_com = wp.empty(body_count, dtype=wp.transform, device=self.device)
         self.body_q_com = wp.empty(body_count, dtype=wp.transform, device=self.device)
@@ -1073,6 +1230,7 @@ class ReducedArticulationSystem:
         self.joint_s = wp.empty(dof_count, dtype=wp.spatial_vector, device=self.device)
         self.joint_qd_internal = wp.empty(dof_count, dtype=wp.float32, device=self.device)
         self.articulated_inertia = wp.empty(body_count, dtype=wp.spatial_matrix, device=self.device)
+        self.reduced_inertia = wp.empty(body_count, dtype=wp.spatial_matrix, device=self.device)
         self.joint_u_matrix = wp.empty(dof_count, dtype=wp.spatial_vector, device=self.device)
         self.joint_d_inv = wp.zeros((joint_count, 6, 6), dtype=wp.float32, device=self.device)
         self.body_force = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
@@ -1107,11 +1265,10 @@ class ReducedArticulationSystem:
     def factor(self, state: State) -> None:
         """Factor the generalized mass operator at the current joint configuration."""
         wp.launch(
-            _factor_reduced_articulations_kernel,
-            dim=int(self.model.articulation_count),
+            _initialize_reduced_factor_kernel,
+            dim=self.factor_joint_count,
             inputs=[
-                self.model.articulation_start,
-                self.model.articulation_end,
+                self.factor_joint,
                 self.model.joint_type,
                 self.model.joint_parent,
                 self.model.joint_child,
@@ -1119,7 +1276,6 @@ class ReducedArticulationSystem:
                 self.model.joint_X_p,
                 self.model.joint_axis,
                 self.model.joint_dof_dim,
-                self.model.joint_armature,
                 state.joint_qd,
                 state.body_q,
                 self.model.body_com,
@@ -1131,12 +1287,33 @@ class ReducedArticulationSystem:
                 self.body_q_com,
                 self.body_i_s,
                 self.joint_s,
-                self.articulated_inertia,
-                self.joint_u_matrix,
-                self.joint_d_inv,
             ],
             device=self.device,
         )
+        for depth_offset, depth_count in reversed(self.factor_depth_ranges):
+            wp.launch(
+                _factor_reduced_depth_kernel,
+                dim=depth_count,
+                inputs=[
+                    self.factor_depth_joint,
+                    wp.int32(depth_offset),
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.model.joint_qd_start,
+                    self.model.joint_armature,
+                    self.joint_s,
+                    self.factor_child_start,
+                    self.factor_child_joint,
+                    self.body_i_s,
+                    self.reduced_inertia,
+                ],
+                outputs=[
+                    self.articulated_inertia,
+                    self.joint_u_matrix,
+                    self.joint_d_inv,
+                ],
+                device=self.device,
+            )
 
     def forward_dynamics(self, state: State, control: Control) -> wp.array[wp.float32]:
         """Compute generalized acceleration from common Newton state and control."""
