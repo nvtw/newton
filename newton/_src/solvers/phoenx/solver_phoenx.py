@@ -3009,6 +3009,10 @@ class PhoenXWorld:
                 self._reduced_articulation.contact_block_system.build_schedule(
                     self._contact_cols, self.bodies, self._ingest_scratch.num_contact_columns
                 )
+                # Reduced contact scheduling owns every rigid contact column. Keep
+                # regular joints/deformables in classic PGS without dispatching the
+                # same contact a second time through its colored CSR.
+                self._num_active_constraints.fill_(self._contact_offset)
             if (
                 self._partition_active_this_step
                 and self.solver_flavor == "standard"

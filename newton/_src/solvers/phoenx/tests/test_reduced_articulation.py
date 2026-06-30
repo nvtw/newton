@@ -236,7 +236,7 @@ def _make_free_body_loop_cluster(device, joint_type, articulation_count):
     return builder.finalize(device=device)
 
 
-def _make_contact_momentum_model(device):
+def _make_contact_momentum_model(device, *, with_cloth=False):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     root = builder.add_link(mass=1.0)
     child = builder.add_link(mass=0.5)
@@ -252,6 +252,21 @@ def _make_contact_momentum_model(device):
         parent_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()),
     )
     builder.add_articulation([free_joint, hinge_joint])
+    if with_cloth:
+        builder.add_cloth_grid(
+            pos=wp.vec3(10.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0),
+            dim_x=1,
+            dim_y=1,
+            cell_x=0.2,
+            cell_y=0.2,
+            mass=0.05,
+            fix_left=True,
+            tri_ke=1.0e3,
+            tri_ka=1.0e3,
+            particle_radius=0.01,
+        )
     return builder.finalize(device=device), collider
 
 
@@ -1268,6 +1283,53 @@ class TestReducedArticulation(unittest.TestCase):
         np.testing.assert_array_equal(
             block.fallback_partitioner.interaction_id_to_partition.numpy()[:fallback_count], first_colors
         )
+
+    def test_mixed_cloth_does_not_double_solve_reduced_contacts(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        outputs = []
+        solvers = []
+        for with_cloth in (False, True):
+            model, collider = _make_contact_momentum_model(device, with_cloth=with_cloth)
+            state = model.state()
+            output = model.state()
+            q = state.joint_q.numpy()
+            q[0] = -0.19
+            q[6] = 1.0
+            qd = np.zeros(model.joint_dof_count, dtype=np.float32)
+            qd[0] = 0.5
+            state.joint_q.assign(q)
+            state.joint_qd.assign(qd)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+            body_q = state.body_q.numpy()
+            body_q[collider, :3] = np.array([0.19, 0.0, 0.0], dtype=np.float32)
+            body_q[collider, 3:] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+            state.body_q.assign(body_q)
+            body_qd = state.body_qd.numpy()
+            body_qd[collider, 0] = -0.5
+            state.body_qd.assign(body_qd)
+
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                articulation_mode="reduced",
+                substeps=1,
+                solver_iterations=8,
+                velocity_iterations=0,
+            )
+            contacts = model.contacts()
+            with wp.ScopedCapture(device=device) as capture:
+                model.collide(state, contacts)
+                solver.step(state, output, None, contacts, 1.0 / 2000.0)
+            wp.capture_launch(capture.graph)
+            outputs.append((output.joint_qd.numpy()[:7].copy(), output.body_qd.numpy()[:3].copy()))
+            solvers.append(solver)
+
+        self.assertFalse(solvers[0].world._regular_pgs_active_this_step)
+        self.assertTrue(solvers[1].world._regular_pgs_active_this_step)
+        np.testing.assert_allclose(outputs[1][0], outputs[0][0], rtol=0.0, atol=2.0e-6)
+        np.testing.assert_allclose(outputs[1][1], outputs[0][1], rtol=0.0, atol=2.0e-6)
 
     def test_contact_conserves_spatial_momentum_under_graph_capture(self):
         device = wp.get_preferred_device()
