@@ -110,6 +110,33 @@ def _make_four_bar_fleet(device, world_count):
     return model, loop_joints
 
 
+def _make_four_bar_clusters(device, *, worlds, articulations_per_world, loop_copies=1):
+    blueprint, loop_joint = _make_four_bar_builder()
+    for _copy in range(1, loop_copies):
+        duplicate = blueprint.add_joint_revolute(
+            parent=blueprint.joint_parent[loop_joint],
+            child=blueprint.joint_child[loop_joint],
+            axis=newton.Axis.Z,
+            parent_xform=blueprint.joint_X_p[loop_joint],
+            child_xform=blueprint.joint_X_c[loop_joint],
+        )
+        blueprint.joint_articulation[duplicate] = -1
+    cluster = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Y)
+    for articulation in range(articulations_per_world):
+        cluster.add_builder(
+            blueprint,
+            xform=wp.transform(wp.vec3(0.0, 2.0 * articulation, 0.0), wp.quat_identity()),
+        )
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Y)
+    if worlds == 1:
+        builder.add_builder(cluster)
+    else:
+        builder.replicate(cluster, world_count=worlds)
+    model = builder.finalize(device=device)
+    loop_joints = np.flatnonzero(model.joint_articulation.numpy() < 0)
+    return model, loop_joints
+
+
 def _make_floating_tree(device):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     root = builder.add_link(mass=2.0)
@@ -168,7 +195,7 @@ def _make_floating_triangle_loop(device):
     return builder.finalize(device=device), loop_joint
 
 
-def _make_free_body_loop(device, joint_type):
+def _make_free_body_loop_builder(joint_type):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     body = builder.add_link()
     builder.add_shape_box(body, hx=0.2, hy=0.15, hz=0.1)
@@ -181,6 +208,21 @@ def _make_free_body_loop(device, joint_type):
     else:
         loop_joint = builder.add_joint_fixed(parent=-1, child=body)
     builder.joint_articulation[loop_joint] = -1
+    return builder
+
+
+def _make_free_body_loop(device, joint_type):
+    return _make_free_body_loop_builder(joint_type).finalize(device=device)
+
+
+def _make_free_body_loop_cluster(device, joint_type, articulation_count):
+    blueprint = _make_free_body_loop_builder(joint_type)
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    for articulation in range(articulation_count):
+        builder.add_builder(
+            blueprint,
+            xform=wp.transform(wp.vec3(0.0, float(articulation), 0.0), wp.quat_identity()),
+        )
     return builder.finalize(device=device)
 
 
@@ -390,6 +432,42 @@ class TestReducedArticulation(unittest.TestCase):
                 else:
                     self.assertLess(float(np.linalg.norm(velocity)), 5.0e-2)
 
+    def test_tiled_loop_response_handles_six_dof_roots(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        articulation_count = 64
+        model = _make_free_body_loop_cluster(device, newton.JointType.BALL, articulation_count)
+        state = model.state()
+        output = model.state()
+        initial = np.array([0.5, -0.4, 0.3, 0.2, -0.1, 0.35], dtype=np.float32)
+        qd = state.joint_qd.numpy()
+        qd_start = model.joint_qd_start.numpy()
+        articulation_start = model.articulation_start.numpy()
+        for joint in articulation_start[:articulation_count]:
+            start = int(qd_start[joint])
+            qd[start : start + 6] = initial
+        state.joint_qd.assign(qd)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=2,
+            velocity_iterations=0,
+        )
+        self.assertEqual(solver._reduced_articulation.loop_system.color_count, 1)
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(state, output, None, None, 1.0 / 1000.0)
+        wp.capture_launch(capture.graph)
+
+        velocity = output.body_qd.numpy()
+        self.assertLess(float(np.max(np.linalg.norm(velocity[:, :3], axis=1))), 4.5e-2)
+        expected_angular = np.broadcast_to(initial[3:], velocity[:, 3:].shape)
+        np.testing.assert_allclose(velocity[:, 3:], expected_angular, rtol=0.0, atol=5.0e-4)
+
     def test_revolute_four_bar_loop_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -486,6 +564,65 @@ class TestReducedArticulation(unittest.TestCase):
         q = state0.joint_q.numpy()
         angles = np.array([q[int(model.joint_q_start.numpy()[start])] for start in articulation_start[:world_count]])
         self.assertGreater(float(np.ptp(angles)), 0.02)
+
+    def test_many_articulations_per_world_use_parallel_loop_schedule(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        layouts = ((1, 64, 1, 1), (8, 8, 1, 1), (1, 32, 2, 2))
+        for worlds, articulations_per_world, loop_copies, expected_colors in layouts:
+            with self.subTest(
+                worlds=worlds,
+                articulations_per_world=articulations_per_world,
+                loop_copies=loop_copies,
+            ):
+                model, loop_joints = _make_four_bar_clusters(
+                    device,
+                    worlds=worlds,
+                    articulations_per_world=articulations_per_world,
+                    loop_copies=loop_copies,
+                )
+                state0 = model.state()
+                state1 = model.state()
+                qd = state0.joint_qd.numpy()
+                qd_start = model.joint_qd_start.numpy()
+                articulation_start = model.articulation_start.numpy()
+                for articulation, joint in enumerate(articulation_start[: model.articulation_count]):
+                    speed = 0.5 + 0.01 * (articulation % 11)
+                    qd[int(qd_start[joint])] = speed
+                    qd[int(qd_start[joint + 1])] = -speed
+                    qd[int(qd_start[joint + 2])] = speed
+                state0.joint_qd.assign(qd)
+                newton.eval_fk(model, state0.joint_q, state0.joint_qd, state0)
+                state1.joint_q.assign(state0.joint_q)
+                state1.joint_qd.assign(state0.joint_qd)
+                state1.body_q.assign(state0.body_q)
+                state1.body_qd.assign(state0.body_qd)
+                initial_q = state0.joint_q.numpy().copy()
+
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    articulation_mode="reduced",
+                    substeps=1,
+                    solver_iterations=4,
+                    velocity_iterations=1,
+                )
+                loop_system = solver._reduced_articulation.loop_system
+                self.assertEqual(loop_system.count, 64)
+                self.assertEqual(loop_system.color_count, expected_colors)
+
+                control = model.control()
+                with wp.ScopedCapture(device=device) as capture:
+                    solver.step(state0, state1, control, None, 1.0 / 1000.0)
+                    solver.step(state1, state0, control, None, 1.0 / 1000.0)
+                for _ in range(30):
+                    wp.capture_launch(capture.graph)
+
+                errors = np.array([_loop_closure_error(model, state0, int(joint)) for joint in loop_joints])
+                self.assertLess(float(np.max(errors)), 5.0e-4)
+                self.assertTrue(np.all(np.isfinite(state0.joint_q.numpy())))
+                self.assertGreater(float(np.linalg.norm(state0.joint_q.numpy() - initial_q)), 0.05)
 
     def test_spatial_wrench_pair_conserves_momentum_under_graph_capture(self):
         device = wp.get_preferred_device()

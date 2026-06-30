@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dense loop-closure blocks backed by reduced articulation inverse mass."""
+"""Topology-scheduled tiled loop closures backed by reduced articulation inverse mass."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulatio
 from newton._src.solvers.phoenx.helpers.math_helpers import apply_body_spatial_impulse, create_orthonormal
 
 _MAX_ROWS = 6
+_SCHUR_BLOCK_DIM = 32
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 _ivec6 = wp.types.vector(length=6, dtype=wp.int32)
 _mat66 = wp.types.matrix(shape=(6, 6), dtype=wp.float32)
@@ -121,74 +122,41 @@ def _body_origin_twist(bodies: BodyContainer, body: wp.int32) -> wp.spatial_vect
 
 
 @wp.func
-def _rigid_wrench_response(
-    bodies: BodyContainer,
-    body: wp.int32,
-    wrench: wp.spatial_vector,
-) -> wp.spatial_vector:
-    if body <= wp.int32(0) or bodies.inverse_mass[body] == wp.float32(0.0):
-        return wp.spatial_vector()
-    force = wp.spatial_top(wrench)
-    torque_origin = wp.spatial_bottom(wrench)
-    position_com = bodies.position[body]
-    torque_com = torque_origin - wp.cross(position_com, force)
-    velocity_com = bodies.inverse_mass[body] * force
-    omega = mat33_from_sym6(bodies.inverse_inertia_world[body]) * torque_com
-    return wp.spatial_vector(velocity_com - wp.cross(omega, position_com), omega)
+def _tile_spatial_add(a: wp.spatial_vector, b: wp.spatial_vector) -> wp.spatial_vector:
+    return a + b
 
 
 @wp.func
-def _pair_wrench_response(
-    bodies: BodyContainer,
-    body0: wp.int32,
-    wrench0: wp.spatial_vector,
-    body1: wp.int32,
-    wrench1: wp.spatial_vector,
-):
-    articulation0 = bodies.reduced.body_articulation[body0]
-    articulation1 = bodies.reduced.body_articulation[body1]
-    response0 = wp.spatial_vector()
-    response1 = wp.spatial_vector()
+def _tile_spatial_negate(a: wp.spatial_vector) -> wp.spatial_vector:
+    return -a
 
-    if bodies.motion_type[body0] != MOTION_ARTICULATED:
-        response0 = _rigid_wrench_response(bodies, body0, wrench0)
-    if bodies.motion_type[body1] != MOTION_ARTICULATED:
-        response1 = _rigid_wrench_response(bodies, body1, wrench1)
 
-    for group in range(2):
-        articulation = articulation0
-        if group == 1:
-            articulation = articulation1
-        if articulation < wp.int32(0) or (group == 1 and articulation == articulation0):
-            continue
-        slot0 = wp.int32(-1)
-        slot1 = wp.int32(-1)
-        group_wrench0 = wp.spatial_vector()
-        group_wrench1 = wp.spatial_vector()
-        if articulation0 == articulation:
-            slot0 = body0
-            group_wrench0 = wrench0
-        if articulation1 == articulation:
-            if slot0 < wp.int32(0):
-                slot0 = body1
-                group_wrench0 = wrench1
-            else:
-                slot1 = body1
-                group_wrench1 = wrench1
-        _articulation_pair_wrench_response(
-            bodies,
-            slot0,
-            group_wrench0,
-            slot1,
-            group_wrench1,
-            wp.bool(False),
-        )
+@wp.func
+def _tile_spatial_dot(a: wp.spatial_vector, b: wp.spatial_vector) -> wp.float32:
+    return wp.dot(a, b)
 
-    if bodies.motion_type[body0] == MOTION_ARTICULATED:
-        response0 = bodies.reduced.body_acceleration[body0 - wp.int32(1)]
-    if bodies.motion_type[body1] == MOTION_ARTICULATED:
-        response1 = bodies.reduced.body_acceleration[body1 - wp.int32(1)]
-    return response0, response1
+
+@wp.func
+def _tile_spatial_scale_add(
+    a: wp.spatial_vector,
+    scale: wp.float32,
+    direction: wp.spatial_vector,
+) -> wp.spatial_vector:
+    return a + scale * direction
+
+
+@wp.func
+def _tile_rigid_wrench_response(
+    wrench: wp.spatial_vector,
+    position_com: wp.vec3,
+    inverse_mass: wp.float32,
+    inverse_inertia: wp.mat33,
+) -> wp.spatial_vector:
+    force = wp.spatial_top(wrench)
+    torque_com = wp.spatial_bottom(wrench) - wp.cross(position_com, force)
+    velocity_com = inverse_mass * force
+    omega = inverse_inertia * torque_com
+    return wp.spatial_vector(velocity_com - wp.cross(omega, position_com), omega)
 
 
 @wp.func
@@ -468,6 +436,228 @@ def _prepare_loop_rows(
 
 
 @wp.func
+def _accumulate_articulation_schur_tile(
+    bodies: BodyContainer,
+    articulation: wp.int32,
+    body0: wp.int32,
+    body1: wp.int32,
+    loop: wp.int32,
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    schur_matrix: wp.array3d[wp.float32],
+    body_work: wp.array2d[wp.spatial_vector],
+    joint_work: wp.array2d[wp.float32],
+    body_response: wp.array2d[wp.spatial_vector],
+):
+    """Accumulate six Schur columns with one cooperative tiled ABA traversal."""
+    data = bodies.reduced
+    start = data.articulation_start[articulation]
+    end = data.articulation_end[articulation]
+    articulation0 = data.body_articulation[body0]
+    articulation1 = data.body_articulation[body1]
+    zero_spatial = wp.tile_zeros(shape=_MAX_ROWS, dtype=wp.spatial_vector, storage="register")
+
+    for joint in range(start, end):
+        child = data.joint_child[joint]
+        wp.tile_store(body_work[child], zero_spatial)
+        wp.tile_store(body_response[child], zero_spatial)
+
+    if articulation0 == articulation:
+        target = body0 - wp.int32(1)
+        wrench = wp.tile_load(row_wrench0[loop], shape=_MAX_ROWS, storage="register")
+        current = wp.tile_load(body_work[target], shape=_MAX_ROWS, storage="register")
+        wp.tile_store(
+            body_work[target], wp.tile_map(_tile_spatial_add, current, wp.tile_map(_tile_spatial_negate, wrench))
+        )
+    if articulation1 == articulation:
+        target = body1 - wp.int32(1)
+        wrench = wp.tile_load(row_wrench1[loop], shape=_MAX_ROWS, storage="register")
+        current = wp.tile_load(body_work[target], shape=_MAX_ROWS, storage="register")
+        wp.tile_store(
+            body_work[target], wp.tile_map(_tile_spatial_add, current, wp.tile_map(_tile_spatial_negate, wrench))
+        )
+
+    for reverse in range(end - start):
+        joint = end - wp.int32(1) - reverse
+        parent = data.joint_parent[joint]
+        child = data.joint_child[joint]
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        p_tile = wp.tile_load(body_work[child], shape=_MAX_ROWS, storage="register")
+        propagated = p_tile
+        for row in range(_MAX_ROWS):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                reduced_force = -wp.tile_map(_tile_spatial_dot, p_tile, data.joint_s[dof])
+                wp.tile_store(joint_work[dof], reduced_force)
+        for row in range(_MAX_ROWS):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                d_inv_u = wp.tile_zeros(shape=_MAX_ROWS, dtype=wp.float32, storage="register")
+                for column in range(_MAX_ROWS):
+                    if wp.int32(column) < dof_count:
+                        source = wp.tile_load(joint_work[dof_start + wp.int32(column)], shape=_MAX_ROWS)
+                        d_inv_u += data.joint_d_inv[joint, row, column] * source
+                propagated = wp.tile_map(
+                    _tile_spatial_scale_add,
+                    propagated,
+                    d_inv_u,
+                    data.joint_u[dof],
+                )
+        if parent >= wp.int32(0):
+            parent_work = wp.tile_load(body_work[parent], shape=_MAX_ROWS, storage="register")
+            wp.tile_store(body_work[parent], wp.tile_map(_tile_spatial_add, parent_work, propagated))
+
+    for joint in range(start, end):
+        parent = data.joint_parent[joint]
+        child = data.joint_child[joint]
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        parent_response = wp.tile_zeros(shape=_MAX_ROWS, dtype=wp.spatial_vector, storage="register")
+        if parent >= wp.int32(0):
+            parent_response = wp.tile_load(body_response[parent], shape=_MAX_ROWS, storage="register")
+        child_response = parent_response
+        for row in range(_MAX_ROWS):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                response = wp.tile_zeros(shape=_MAX_ROWS, dtype=wp.float32, storage="register")
+                for column in range(_MAX_ROWS):
+                    if wp.int32(column) < dof_count:
+                        source_rhs = wp.tile_load(joint_work[dof_start + wp.int32(column)], shape=_MAX_ROWS)
+                        source_rhs -= wp.tile_map(
+                            _tile_spatial_dot,
+                            parent_response,
+                            data.joint_u[dof_start + wp.int32(column)],
+                        )
+                        response += data.joint_d_inv[joint, row, column] * source_rhs
+                child_response = wp.tile_map(
+                    _tile_spatial_scale_add,
+                    child_response,
+                    response,
+                    data.joint_s[dof],
+                )
+        wp.tile_store(body_response[child], child_response)
+
+    for row in range(_MAX_ROWS):
+        contribution = wp.tile_zeros(shape=_MAX_ROWS, dtype=wp.float32, storage="register")
+        if articulation0 == articulation:
+            response0 = wp.tile_load(body_response[body0 - wp.int32(1)], shape=_MAX_ROWS, storage="register")
+            contribution += wp.tile_map(_tile_spatial_dot, response0, row_wrench0[loop, row])
+        if articulation1 == articulation:
+            response1 = wp.tile_load(body_response[body1 - wp.int32(1)], shape=_MAX_ROWS, storage="register")
+            contribution += wp.tile_map(_tile_spatial_dot, response1, row_wrench1[loop, row])
+        current_schur = wp.tile_load(schur_matrix[loop, row], shape=_MAX_ROWS, storage="register")
+        wp.tile_store(schur_matrix[loop, row], current_schur + contribution)
+
+
+@wp.kernel(enable_backward=False)
+def _prepare_reduced_loop_rows_flat_kernel(
+    loop_joint: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    bodies: BodyContainer,
+    idt: wp.float32,
+    row_count: wp.array[wp.int32],
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    row_bias: wp.array2d[wp.float32],
+):
+    loop = wp.tid()
+    bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+        DEFAULT_HERTZ_LINEAR,
+        DEFAULT_DAMPING_RATIO,
+        wp.float32(1.0) / idt,
+    )
+    row_count[loop] = _prepare_loop_rows(
+        loop,
+        loop_joint[loop],
+        joint_type,
+        joint_parent,
+        joint_child,
+        joint_qd_start,
+        joint_x_p,
+        joint_x_c,
+        joint_axis,
+        bodies,
+        bias_rate,
+        row_wrench0,
+        row_wrench1,
+        row_bias,
+    )
+
+
+@wp.kernel(enable_backward=False, module="reduced_loop_tile")
+def _assemble_reduced_loop_schur_tile_kernel(
+    scheduled_loops: wp.array[wp.int32],
+    schedule_start: wp.int32,
+    loop_joint: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    bodies: BodyContainer,
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    schur_matrix: wp.array3d[wp.float32],
+    body_work: wp.array2d[wp.spatial_vector],
+    joint_work: wp.array2d[wp.float32],
+    body_response: wp.array2d[wp.spatial_vector],
+):
+    loop = scheduled_loops[schedule_start + wp.tid()]
+    joint = loop_joint[loop]
+    body0 = joint_parent[joint] + wp.int32(1)
+    body1 = joint_child[joint] + wp.int32(1)
+    articulation0 = bodies.reduced.body_articulation[body0]
+    articulation1 = bodies.reduced.body_articulation[body1]
+
+    for row in range(_MAX_ROWS):
+        value = wp.tile_zeros(shape=_MAX_ROWS, dtype=wp.float32, storage="register")
+        if bodies.motion_type[body0] != MOTION_ARTICULATED and bodies.inverse_mass[body0] > wp.float32(0.0):
+            wrench0 = wp.tile_load(row_wrench0[loop], shape=_MAX_ROWS, storage="register")
+            response0 = wp.tile_map(
+                _tile_rigid_wrench_response,
+                wrench0,
+                bodies.position[body0],
+                bodies.inverse_mass[body0],
+                mat33_from_sym6(bodies.inverse_inertia_world[body0]),
+            )
+            value += wp.tile_map(_tile_spatial_dot, response0, row_wrench0[loop, row])
+        if bodies.motion_type[body1] != MOTION_ARTICULATED and bodies.inverse_mass[body1] > wp.float32(0.0):
+            wrench1 = wp.tile_load(row_wrench1[loop], shape=_MAX_ROWS, storage="register")
+            response1 = wp.tile_map(
+                _tile_rigid_wrench_response,
+                wrench1,
+                bodies.position[body1],
+                bodies.inverse_mass[body1],
+                mat33_from_sym6(bodies.inverse_inertia_world[body1]),
+            )
+            value += wp.tile_map(_tile_spatial_dot, response1, row_wrench1[loop, row])
+        wp.tile_store(schur_matrix[loop, row], value)
+
+    for group in range(2):
+        articulation = articulation0 if group == 0 else articulation1
+        if articulation >= wp.int32(0) and (group == 0 or articulation != articulation0):
+            _accumulate_articulation_schur_tile(
+                bodies,
+                articulation,
+                body0,
+                body1,
+                loop,
+                row_wrench0,
+                row_wrench1,
+                schur_matrix,
+                body_work,
+                joint_work,
+                body_response,
+            )
+
+
+@wp.func
 def _apply_loop_delta(
     loop: wp.int32,
     count: wp.int32,
@@ -488,22 +678,55 @@ def _apply_loop_delta(
 
 
 @wp.kernel(enable_backward=False)
-def _solve_reduced_loops_kernel(
-    world_loop_start: wp.array[wp.int32],
+def _factor_warmstart_reduced_loops_kernel(
+    scheduled_loops: wp.array[wp.int32],
+    schedule_start: wp.int32,
     loop_joint: wp.array[wp.int32],
-    joint_type: wp.array[wp.int32],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
-    joint_qd_start: wp.array[wp.int32],
-    joint_x_p: wp.array[wp.transform],
-    joint_x_c: wp.array[wp.transform],
-    joint_axis: wp.array[wp.vec3],
+    bodies: BodyContainer,
+    warmstart: wp.bool,
+    row_count: wp.array[wp.int32],
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    inverse_mass: wp.array3d[wp.float32],
+    multiplier: wp.array2d[wp.float32],
+):
+    loop = scheduled_loops[schedule_start + wp.tid()]
+    count = row_count[loop]
+    matrix = _mat66(0.0)
+    for row in range(_MAX_ROWS):
+        for column in range(_MAX_ROWS):
+            matrix[row, column] = inverse_mass[loop, row, column]
+    matrix_inverse = _pseudoinverse_symmetric6(matrix, count)
+    for row in range(_MAX_ROWS):
+        for column in range(_MAX_ROWS):
+            inverse_mass[loop, row, column] = matrix_inverse[row, column]
+        if wp.int32(row) < count and matrix_inverse[row, row] == wp.float32(0.0):
+            multiplier[loop, row] = wp.float32(0.0)
+
+    if warmstart:
+        joint = loop_joint[loop]
+        body0 = joint_parent[joint] + wp.int32(1)
+        body1 = joint_child[joint] + wp.int32(1)
+        accumulated = _vec6(0.0)
+        for row in range(_MAX_ROWS):
+            if wp.int32(row) < count:
+                accumulated[row] = multiplier[loop, row]
+        _apply_loop_delta(loop, count, body0, body1, accumulated, row_wrench0, row_wrench1, bodies)
+
+
+@wp.kernel(enable_backward=False)
+def _iterate_reduced_loops_kernel(
+    scheduled_loops: wp.array[wp.int32],
+    schedule_start: wp.int32,
+    loop_joint: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
     bodies: BodyContainer,
     idt: wp.float32,
     sor_boost: wp.float32,
-    iterations: wp.int32,
     use_bias: wp.bool,
-    warmstart: wp.bool,
     row_count: wp.array[wp.int32],
     row_wrench0: wp.array2d[wp.spatial_vector],
     row_wrench1: wp.array2d[wp.spatial_vector],
@@ -511,94 +734,39 @@ def _solve_reduced_loops_kernel(
     inverse_mass: wp.array3d[wp.float32],
     multiplier: wp.array2d[wp.float32],
 ):
-    world = wp.tid()
-    start = world_loop_start[world]
-    end = world_loop_start[world + wp.int32(1)]
-    bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+    loop = scheduled_loops[schedule_start + wp.tid()]
+    joint = loop_joint[loop]
+    body0 = joint_parent[joint] + wp.int32(1)
+    body1 = joint_child[joint] + wp.int32(1)
+    count = row_count[loop]
+    twist0 = _body_origin_twist(bodies, body0)
+    twist1 = _body_origin_twist(bodies, body1)
+    rhs = _vec6(0.0)
+    old_multiplier = _vec6(0.0)
+    for row in range(_MAX_ROWS):
+        if wp.int32(row) < count:
+            rhs[row] = wp.dot(row_wrench0[loop, row], twist0) + wp.dot(row_wrench1[loop, row], twist1)
+            if use_bias:
+                rhs[row] += row_bias[loop, row]
+            old_multiplier[row] = multiplier[loop, row]
+
+    delta_unsoftened = _vec6(0.0)
+    for row in range(_MAX_ROWS):
+        if wp.int32(row) < count:
+            for column in range(_MAX_ROWS):
+                if wp.int32(column) < count:
+                    delta_unsoftened[row] -= inverse_mass[loop, row, column] * rhs[column]
+    _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
         DEFAULT_HERTZ_LINEAR,
         DEFAULT_DAMPING_RATIO,
         wp.float32(1.0) / idt,
     )
-
-    for loop in range(start, end):
-        joint = loop_joint[loop]
-        body0 = joint_parent[joint] + wp.int32(1)
-        body1 = joint_child[joint] + wp.int32(1)
-        count = _prepare_loop_rows(
-            loop,
-            joint,
-            joint_type,
-            joint_parent,
-            joint_child,
-            joint_qd_start,
-            joint_x_p,
-            joint_x_c,
-            joint_axis,
-            bodies,
-            bias_rate,
-            row_wrench0,
-            row_wrench1,
-            row_bias,
-        )
-        row_count[loop] = count
-        matrix = _mat66(0.0)
-        for column in range(_MAX_ROWS):
-            if wp.int32(column) < count:
-                response0, response1 = _pair_wrench_response(
-                    bodies,
-                    body0,
-                    row_wrench0[loop, column],
-                    body1,
-                    row_wrench1[loop, column],
-                )
-                for row in range(_MAX_ROWS):
-                    if wp.int32(row) < count:
-                        matrix[row, column] = wp.dot(row_wrench0[loop, row], response0) + wp.dot(
-                            row_wrench1[loop, row], response1
-                        )
-        matrix_inverse = _pseudoinverse_symmetric6(matrix, count)
-        for row in range(_MAX_ROWS):
-            for column in range(_MAX_ROWS):
-                inverse_mass[loop, row, column] = matrix_inverse[row, column]
-            if wp.int32(row) < count and matrix_inverse[row, row] == wp.float32(0.0):
-                multiplier[loop, row] = wp.float32(0.0)
-
-        if warmstart:
-            accumulated = _vec6(0.0)
-            for row in range(_MAX_ROWS):
-                if wp.int32(row) < count:
-                    accumulated[row] = multiplier[loop, row]
-            _apply_loop_delta(loop, count, body0, body1, accumulated, row_wrench0, row_wrench1, bodies)
-
-    for _iteration in range(iterations):
-        for loop in range(start, end):
-            joint = loop_joint[loop]
-            body0 = joint_parent[joint] + wp.int32(1)
-            body1 = joint_child[joint] + wp.int32(1)
-            count = row_count[loop]
-            twist0 = _body_origin_twist(bodies, body0)
-            twist1 = _body_origin_twist(bodies, body1)
-            rhs = _vec6(0.0)
-            old_multiplier = _vec6(0.0)
-            for row in range(_MAX_ROWS):
-                if wp.int32(row) < count:
-                    rhs[row] = wp.dot(row_wrench0[loop, row], twist0) + wp.dot(row_wrench1[loop, row], twist1)
-                    if use_bias:
-                        rhs[row] += row_bias[loop, row]
-                    old_multiplier[row] = multiplier[loop, row]
-
-            delta_unsoftened = _vec6(0.0)
-            for row in range(_MAX_ROWS):
-                if wp.int32(row) < count:
-                    for column in range(_MAX_ROWS):
-                        if wp.int32(column) < count:
-                            delta_unsoftened[row] -= inverse_mass[loop, row, column] * rhs[column]
-            delta = _vec6(0.0)
-            for row in range(_MAX_ROWS):
-                if wp.int32(row) < count:
-                    delta[row] = sor_boost * (mass_coeff * delta_unsoftened[row] - impulse_coeff * old_multiplier[row])
-                    multiplier[loop, row] = old_multiplier[row] + delta[row]
-            _apply_loop_delta(loop, count, body0, body1, delta, row_wrench0, row_wrench1, bodies)
+    delta = _vec6(0.0)
+    for row in range(_MAX_ROWS):
+        if wp.int32(row) < count:
+            delta[row] = sor_boost * (mass_coeff * delta_unsoftened[row] - impulse_coeff * old_multiplier[row])
+            multiplier[loop, row] = old_multiplier[row] + delta[row]
+    _apply_loop_delta(loop, count, body0, body1, delta, row_wrench0, row_wrench1, bodies)
 
 
 class ReducedLoopSystem:
@@ -635,13 +803,49 @@ class ReducedLoopSystem:
         loops.sort()
         self.count = len(loops)
         self.device = model.device
-        self.world_count = int(model.world_count)
         self.joint_indices_np = np.asarray([joint for _world, joint in loops], dtype=np.int32)
-        offsets = np.zeros(self.world_count + 1, dtype=np.int32)
-        for world, _joint in loops:
-            offsets[world + 1] += 1
-        np.cumsum(offsets, out=offsets)
-        self.world_loop_start = wp.array(offsets, dtype=wp.int32, device=self.device)
+
+        body_articulation = np.full(int(model.body_count), -1, dtype=np.int32)
+        articulation_start = model.articulation_start.numpy()
+        articulation_end = model.articulation_end.numpy()
+        for articulation in range(int(model.articulation_count)):
+            start = int(articulation_start[articulation])
+            end = int(articulation_end[articulation])
+            body_articulation[child[start:end]] = articulation
+
+        # Loops in one color touch disjoint trees/bodies, so their tiled ABA
+        # scratch and their PGS velocity updates are race-free.
+        dependency_colors: dict[int, set[int]] = {}
+        loop_colors = np.zeros(self.count, dtype=np.int32)
+        color_count = 0
+        dependency_body_offset = int(model.articulation_count)
+        for loop, joint in enumerate(self.joint_indices_np):
+            dependencies: set[int] = set()
+            for body in (int(parent[joint]), int(child[joint])):
+                if body < 0:
+                    continue
+                articulation = int(body_articulation[body])
+                dependency = articulation if articulation >= 0 else dependency_body_offset + body
+                dependencies.add(dependency)
+            forbidden: set[int] = set()
+            for dependency in dependencies:
+                forbidden.update(dependency_colors.get(dependency, ()))
+            color = 0
+            while color in forbidden:
+                color += 1
+            loop_colors[loop] = color
+            color_count = max(color_count, color + 1)
+            for dependency in dependencies:
+                dependency_colors.setdefault(dependency, set()).add(color)
+
+        loops_by_color = [np.flatnonzero(loop_colors == color) for color in range(color_count)]
+        color_starts = np.zeros(color_count + 1, dtype=np.int32)
+        for color, color_loops in enumerate(loops_by_color):
+            color_starts[color + 1] = color_starts[color] + len(color_loops)
+        scheduled_loops = np.concatenate(loops_by_color).astype(np.int32) if loops_by_color else np.empty(0, np.int32)
+        self.color_count = color_count
+        self.color_starts_np = color_starts
+        self.scheduled_loops = wp.array(scheduled_loops, dtype=wp.int32, device=self.device)
         self.loop_joint = wp.array(self.joint_indices_np, dtype=wp.int32, device=self.device)
         capacity = max(1, self.count)
         self.row_count = wp.zeros(capacity, dtype=wp.int32, device=self.device)
@@ -650,6 +854,17 @@ class ReducedLoopSystem:
         self.row_bias = wp.zeros((capacity, _MAX_ROWS), dtype=wp.float32, device=self.device)
         self.inverse_mass = wp.zeros((capacity, _MAX_ROWS, _MAX_ROWS), dtype=wp.float32, device=self.device)
         self.multiplier = wp.zeros((capacity, _MAX_ROWS), dtype=wp.float32, device=self.device)
+        self.tile_body_work = wp.zeros(
+            (max(1, int(model.body_count)), _MAX_ROWS),
+            dtype=wp.spatial_vector,
+            device=self.device,
+        )
+        self.tile_joint_work = wp.zeros(
+            (max(1, int(model.joint_dof_count)), _MAX_ROWS),
+            dtype=wp.float32,
+            device=self.device,
+        )
+        self.tile_body_response = wp.zeros_like(self.tile_body_work)
 
     def solve(
         self,
@@ -665,10 +880,9 @@ class ReducedLoopSystem:
         if self.count == 0 or iterations <= 0:
             return
         wp.launch(
-            _solve_reduced_loops_kernel,
-            dim=self.world_count,
+            _prepare_reduced_loop_rows_flat_kernel,
+            dim=self.count,
             inputs=[
-                self.world_loop_start,
                 self.loop_joint,
                 model.joint_type,
                 model.joint_parent,
@@ -679,21 +893,89 @@ class ReducedLoopSystem:
                 model.joint_axis,
                 bodies,
                 idt,
-                wp.float32(sor_boost),
-                wp.int32(iterations),
-                wp.bool(use_bias),
-                wp.bool(warmstart),
             ],
             outputs=[
                 self.row_count,
                 self.row_wrench0,
                 self.row_wrench1,
                 self.row_bias,
-                self.inverse_mass,
-                self.multiplier,
             ],
             device=self.device,
         )
+        for color in range(self.color_count):
+            color_start = int(self.color_starts_np[color])
+            color_end = int(self.color_starts_np[color + 1])
+            wp.launch_tiled(
+                _assemble_reduced_loop_schur_tile_kernel,
+                dim=[color_end - color_start],
+                inputs=[
+                    self.scheduled_loops,
+                    wp.int32(color_start),
+                    self.loop_joint,
+                    model.joint_parent,
+                    model.joint_child,
+                    bodies,
+                    self.row_wrench0,
+                    self.row_wrench1,
+                ],
+                outputs=[
+                    self.inverse_mass,
+                    self.tile_body_work,
+                    self.tile_joint_work,
+                    self.tile_body_response,
+                ],
+                block_dim=_SCHUR_BLOCK_DIM,
+                device=self.device,
+            )
+        for color in range(self.color_count):
+            color_start = int(self.color_starts_np[color])
+            color_end = int(self.color_starts_np[color + 1])
+            wp.launch(
+                _factor_warmstart_reduced_loops_kernel,
+                dim=color_end - color_start,
+                inputs=[
+                    self.scheduled_loops,
+                    wp.int32(color_start),
+                    self.loop_joint,
+                    model.joint_parent,
+                    model.joint_child,
+                    bodies,
+                    wp.bool(warmstart),
+                    self.row_count,
+                    self.row_wrench0,
+                    self.row_wrench1,
+                    self.inverse_mass,
+                    self.multiplier,
+                ],
+                device=self.device,
+            )
+        for iteration in range(iterations):
+            for color_offset in range(self.color_count):
+                color = color_offset if (iteration & 1) == 0 else self.color_count - 1 - color_offset
+                color_start = int(self.color_starts_np[color])
+                color_end = int(self.color_starts_np[color + 1])
+                wp.launch(
+                    _iterate_reduced_loops_kernel,
+                    dim=color_end - color_start,
+                    inputs=[
+                        self.scheduled_loops,
+                        wp.int32(color_start),
+                        self.loop_joint,
+                        model.joint_parent,
+                        model.joint_child,
+                        bodies,
+                        idt,
+                        wp.float32(sor_boost),
+                        wp.bool(use_bias),
+                        self.row_count,
+                        self.row_wrench0,
+                        self.row_wrench1,
+                        self.row_bias,
+                        self.inverse_mass,
+                        self.multiplier,
+                    ],
+                    device=self.device,
+                )
 
 
 __all__ = ["ReducedLoopSystem"]
