@@ -1967,6 +1967,70 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertGreaterEqual(int(block.max_page_count.numpy()[0]), 2)
         self.assertEqual(int(block.multi_page_active.numpy()[0]), 1)
 
+    def test_fused_contact_apply_matches_separate_path_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_contact_overflow_model(device)
+        state_separate = model.state()
+        state_fused = model.state()
+        output_separate = model.state()
+        output_fused = model.state()
+        qd = state_separate.joint_qd.numpy()
+        qd[2] = -0.2
+        for state in (state_separate, state_fused):
+            state.joint_qd.assign(qd)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        separate = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=8,
+            velocity_iterations=1,
+        )
+        fused = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=8,
+            velocity_iterations=1,
+        )
+        separate._reduced_articulation.contact_block_system.fuse_apply = False
+        contacts_separate = model.contacts()
+        contacts_fused = model.contacts()
+        dt = 1.0 / 2000.0
+
+        with wp.ScopedCapture(device=device) as separate_capture:
+            model.collide(state_separate, contacts_separate)
+            separate.step(state_separate, output_separate, None, contacts_separate, dt)
+        with wp.ScopedCapture(device=device) as fused_capture:
+            model.collide(state_fused, contacts_fused)
+            fused.step(state_fused, output_fused, None, contacts_fused, dt)
+        wp.capture_launch(separate_capture.graph)
+        wp.capture_launch(fused_capture.graph)
+
+        self.assertGreater(int(contacts_fused.rigid_contact_count.numpy()[0]), _POINTS_PER_PAGE)
+        np.testing.assert_allclose(
+            output_fused.joint_qd.numpy(),
+            output_separate.joint_qd.numpy(),
+            rtol=2.0e-6,
+            atol=2.0e-6,
+        )
+        np.testing.assert_allclose(
+            output_fused.body_qd.numpy(),
+            output_separate.body_qd.numpy(),
+            rtol=2.0e-6,
+            atol=2.0e-6,
+        )
+        np.testing.assert_allclose(
+            output_fused.joint_q.numpy(),
+            output_separate.joint_q.numpy(),
+            rtol=2.0e-6,
+            atol=2.0e-6,
+        )
+
     def test_dense_articulation_contacts_are_deterministic_and_conserve_momentum(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

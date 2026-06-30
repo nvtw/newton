@@ -573,6 +573,16 @@ def _build_generalized_contact_rows_kernel(
         body_response[articulation, row, local_joint] = parent_delta
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    __syncwarp();
+#endif
+"""
+)
+def _sync_contact_warp(): ...
+
+
 @wp.kernel(enable_backward=False, module="reduced_contact_generalized_solve")
 def _solve_generalized_contact_tile_kernel(
     columns: ContactColumnContainer,
@@ -591,7 +601,13 @@ def _solve_generalized_contact_tile_kernel(
     row_velocity: wp.array2d[wp.float32],
     jacobian: wp.array3d[wp.float32],
     response: wp.array3d[wp.float32],
+    bodies: BodyContainer,
+    fuse_apply: wp.bool,
+    max_depth: wp.int32,
+    articulation_depth_start: wp.array2d[wp.int32],
+    articulation_depth_joint: wp.array[wp.int32],
     generalized_delta_out: wp.array2d[wp.float32],
+    body_delta: wp.array2d[wp.spatial_vector],
 ):
     articulation, lane = wp.tid()
     if enabled[articulation] == wp.int32(0):
@@ -710,6 +726,36 @@ def _solve_generalized_contact_tile_kernel(
                 generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
 
     wp.tile_store(generalized_delta_out[articulation], generalized_delta)
+    if not fuse_apply:
+        return
+    _sync_contact_warp()
+
+    data = bodies.reduced
+    start = data.articulation_start[articulation]
+    dof_start_articulation = data.joint_qd_start[start]
+    for depth in range(max_depth + wp.int32(1)):
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            local_joint = joint - start
+            parent = data.joint_parent[joint]
+            delta = wp.spatial_vector()
+            if parent >= wp.int32(0):
+                delta = body_delta[articulation, data.body_joint[parent] - start]
+            for dof in range(data.joint_qd_start[joint], data.joint_qd_start[joint + wp.int32(1)]):
+                dof_delta = generalized_delta_out[articulation, dof - dof_start_articulation]
+                data.joint_qd[dof] += dof_delta
+                delta += data.joint_s[dof] * dof_delta
+            body_delta[articulation, local_joint] = delta
+            child = data.joint_child[joint]
+            slot = child + wp.int32(1)
+            delta_omega = wp.spatial_bottom(delta)
+            bodies.angular_velocity[slot] += delta_omega
+            local_com_position = wp.transform_get_translation(data.body_q_com[child])
+            bodies.velocity[slot] += wp.spatial_top(delta) + wp.cross(delta_omega, local_com_position)
+            index += wp.int32(_BLOCK_DIM)
+        _sync_contact_warp()
 
 
 @wp.kernel(enable_backward=False)
@@ -748,8 +794,19 @@ def _apply_generalized_contact_delta_kernel(
 class ReducedContactBlockSystem:
     """Graph-stable generalized contact blocks with selectively colored fallback."""
 
-    def __init__(self, model: Model):
+    def __init__(
+        self,
+        model: Model,
+        *,
+        articulation_depth_start: wp.array2d[wp.int32],
+        articulation_depth_joint: wp.array[wp.int32],
+        max_depth: int,
+    ):
         self.device = model.device
+        self.articulation_depth_start = articulation_depth_start
+        self.articulation_depth_joint = articulation_depth_joint
+        self.max_depth = int(max_depth)
+        self.fuse_apply = bool(self.device.is_cuda)
         articulation_count = max(1, int(model.articulation_count))
         articulation_start = model.articulation_start.numpy()
         articulation_end = model.articulation_end.numpy()
@@ -1118,22 +1175,28 @@ class ReducedContactBlockSystem:
                     self.row_velocity,
                     self.jacobian,
                     self.generalized_response,
+                    bodies,
+                    wp.bool(self.fuse_apply),
+                    wp.int32(self.max_depth),
+                    self.articulation_depth_start,
+                    self.articulation_depth_joint,
                 ],
-                outputs=[self.generalized_delta],
+                outputs=[self.generalized_delta, self.generalized_body_delta],
                 block_dim=_BLOCK_DIM,
                 device=self.device,
             )
-            wp.launch(
-                _apply_generalized_contact_delta_kernel,
-                dim=self.articulation_count,
-                inputs=[
-                    bodies,
-                    self.enabled,
-                    self.generalized_delta,
-                ],
-                outputs=[self.generalized_body_delta],
-                device=self.device,
-            )
+            if not self.fuse_apply:
+                wp.launch(
+                    _apply_generalized_contact_delta_kernel,
+                    dim=self.articulation_count,
+                    inputs=[
+                        bodies,
+                        self.enabled,
+                        self.generalized_delta,
+                    ],
+                    outputs=[self.generalized_body_delta],
+                    device=self.device,
+                )
 
         def run_page_loop() -> None:
             wp.launch(

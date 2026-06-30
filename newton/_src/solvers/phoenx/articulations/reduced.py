@@ -2482,7 +2482,12 @@ class ReducedPhoenXArticulation:
         self.body_is_reduced_np = body_is_reduced_np.astype(bool)
         self.tree_joint_mask_np = tree_joint_mask_np.astype(bool)
         self.loop_system = ReducedLoopSystem(model, self.body_is_reduced_np)
-        self.contact_block_system = ReducedContactBlockSystem(model)
+        self.contact_block_system = ReducedContactBlockSystem(
+            model,
+            articulation_depth_start=self.system.advance_articulation_depth_start,
+            articulation_depth_joint=self.system.advance_articulation_depth_joint,
+            max_depth=self.system.advance_max_depth,
+        )
         self.owned_joint_mask_np = self.tree_joint_mask_np.copy()
         self.owned_joint_mask_np[self.loop_system.joint_indices_np] = True
 
