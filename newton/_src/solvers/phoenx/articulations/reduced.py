@@ -1279,6 +1279,209 @@ def _advance_reduced_articulations_kernel(
         bodies.angular_velocity[slot] = omega
 
 
+@wp.kernel(enable_backward=False, module="reduced_advance")
+def _advance_reduced_articulations_warp_kernel(
+    max_depth: wp.int32,
+    articulation_depth_start: wp.array2d[wp.int32],
+    articulation_depth_joint: wp.array[wp.int32],
+    child_start: wp.array[wp.int32],
+    child_joint: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_qd: wp.array[wp.float32],
+    joint_s: wp.array[wp.spatial_vector],
+    joint_u_matrix: wp.array[wp.spatial_vector],
+    joint_d_inv: wp.array3d[wp.float32],
+    joint_f: wp.array[wp.float32],
+    joint_implicit_force: wp.array[wp.float32],
+    body_mass: wp.array[wp.float32],
+    body_world: wp.array[wp.int32],
+    gravity: wp.array[wp.vec3],
+    body_q_com: wp.array[wp.transform],
+    body_inertia: wp.array[wp.spatial_matrix],
+    external_force_com: wp.array[wp.spatial_vector],
+    dt: wp.float32,
+    include_external: wp.bool,
+    include_coriolis: wp.bool,
+    body_velocity: wp.array[wp.spatial_vector],
+    body_coriolis: wp.array[wp.spatial_vector],
+    body_bias: wp.array[wp.spatial_vector],
+    generalized_rhs: wp.array[wp.float32],
+    body_work: wp.array[wp.spatial_vector],
+    joint_work: wp.array[wp.float32],
+    body_acceleration: wp.array[wp.spatial_vector],
+    generalized_acceleration: wp.array[wp.float32],
+    public_body_qd: wp.array[wp.spatial_vector],
+    bodies: BodyContainer,
+):
+    thread = wp.tid()
+    articulation = thread // wp.int32(32)
+    lane = thread - articulation * wp.int32(32)
+
+    for depth in range(max_depth + wp.int32(1)):
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            parent = joint_parent[joint]
+            child = joint_child[joint]
+            dof_start = joint_qd_start[joint]
+            dof_end = joint_qd_start[joint + wp.int32(1)]
+            parent_velocity = wp.spatial_vector()
+            parent_coriolis = wp.spatial_vector()
+            if parent >= wp.int32(0):
+                parent_velocity = body_velocity[parent]
+                parent_coriolis = body_coriolis[parent]
+            joint_velocity = wp.spatial_vector()
+            for dof in range(dof_start, dof_end):
+                joint_velocity += joint_s[dof] * joint_qd[dof]
+            velocity = parent_velocity + joint_velocity
+            coriolis = parent_coriolis + spatial_cross(velocity, joint_velocity)
+            inertia = body_inertia[child]
+            x_com = wp.transform_get_translation(body_q_com[child])
+            bias = wp.spatial_vector()
+            if include_coriolis:
+                bias += inertia * coriolis + spatial_cross_dual(velocity, inertia * velocity)
+            if include_external:
+                gravity_force = body_mass[child] * gravity[wp.max(body_world[child], wp.int32(0))]
+                gravity_wrench = wp.spatial_vector(gravity_force, wp.cross(x_com, gravity_force))
+                force_com = external_force_com[child]
+                force = wp.spatial_top(force_com)
+                torque = wp.spatial_bottom(force_com) + wp.cross(x_com, force)
+                bias -= gravity_wrench + wp.spatial_vector(force, torque)
+
+                joint_kind = joint_type[joint]
+                if joint_kind == JointType.FREE or joint_kind == JointType.DISTANCE:
+                    control_force = wp.vec3(
+                        joint_f[dof_start],
+                        joint_f[dof_start + wp.int32(1)],
+                        joint_f[dof_start + wp.int32(2)],
+                    )
+                    control_torque = wp.vec3(
+                        joint_f[dof_start + wp.int32(3)],
+                        joint_f[dof_start + wp.int32(4)],
+                        joint_f[dof_start + wp.int32(5)],
+                    )
+                    bias -= wp.spatial_vector(
+                        control_force,
+                        control_torque + wp.cross(x_com, control_force),
+                    )
+            body_velocity[child] = velocity
+            body_coriolis[child] = coriolis
+            body_bias[child] = bias
+            index += wp.int32(32)
+        _sync_reduced_warp()
+
+    for reverse_depth in range(max_depth + wp.int32(1)):
+        depth = max_depth - reverse_depth
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            child = joint_child[joint]
+            subtree_bias = body_bias[child]
+            for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
+                descendant_joint = child_joint[child_index]
+                subtree_bias += body_bias[joint_child[descendant_joint]]
+            dof_start = joint_qd_start[joint]
+            dof_end = joint_qd_start[joint + wp.int32(1)]
+            joint_kind = joint_type[joint]
+            for dof in range(dof_start, dof_end):
+                applied = wp.float32(0.0)
+                if include_external and joint_kind != JointType.FREE and joint_kind != JointType.DISTANCE:
+                    applied = joint_f[dof]
+                if include_external and (
+                    joint_kind == JointType.REVOLUTE or joint_kind == JointType.PRISMATIC or joint_kind == JointType.D6
+                ):
+                    applied += joint_implicit_force[dof]
+                generalized_rhs[dof] = applied - wp.dot(joint_s[dof], subtree_bias)
+            body_bias[child] = subtree_bias
+            index += wp.int32(32)
+        _sync_reduced_warp()
+
+    for reverse_depth in range(max_depth + wp.int32(1)):
+        depth = max_depth - reverse_depth
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            child = joint_child[joint]
+            p = wp.spatial_vector()
+            for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
+                descendant_joint = child_joint[child_index]
+                p += body_work[joint_child[descendant_joint]]
+            dof_start = joint_qd_start[joint]
+            dof_end = joint_qd_start[joint + wp.int32(1)]
+            dof_count = dof_end - dof_start
+            reduced_force = _vec6(0.0)
+            d_inv_u = _vec6(0.0)
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    dof = dof_start + wp.int32(row)
+                    reduced_force[row] = generalized_rhs[dof] - wp.dot(joint_s[dof], p)
+                    joint_work[dof] = reduced_force[row]
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    for column in range(_MAX_JOINT_DOF):
+                        if wp.int32(column) < dof_count:
+                            d_inv_u[row] += joint_d_inv[joint, row, column] * reduced_force[column]
+            propagated = p
+            for column in range(_MAX_JOINT_DOF):
+                if wp.int32(column) < dof_count:
+                    propagated += joint_u_matrix[dof_start + wp.int32(column)] * d_inv_u[column]
+            body_work[child] = propagated
+            index += wp.int32(32)
+        _sync_reduced_warp()
+
+    for depth in range(max_depth + wp.int32(1)):
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            parent = joint_parent[joint]
+            child = joint_child[joint]
+            dof_start = joint_qd_start[joint]
+            dof_end = joint_qd_start[joint + wp.int32(1)]
+            dof_count = dof_end - dof_start
+            parent_acceleration = wp.spatial_vector()
+            twist = wp.spatial_vector()
+            if parent >= wp.int32(0):
+                parent_acceleration = body_acceleration[parent]
+                twist = body_velocity[parent]
+            rhs = _vec6(0.0)
+            qdd = _vec6(0.0)
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    dof = dof_start + wp.int32(row)
+                    rhs[row] = joint_work[dof] - wp.dot(joint_u_matrix[dof], parent_acceleration)
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    for column in range(_MAX_JOINT_DOF):
+                        if wp.int32(column) < dof_count:
+                            qdd[row] += joint_d_inv[joint, row, column] * rhs[column]
+            child_acceleration = parent_acceleration
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    dof = dof_start + wp.int32(row)
+                    generalized_acceleration[dof] = qdd[row]
+                    joint_qd[dof] += qdd[row] * dt
+                    child_acceleration += joint_s[dof] * qdd[row]
+                    twist += joint_s[dof] * joint_qd[dof]
+            body_acceleration[child] = child_acceleration
+            body_velocity[child] = twist
+            omega = wp.spatial_bottom(twist)
+            x_com = wp.transform_get_translation(body_q_com[child])
+            velocity_com = wp.spatial_top(twist) + wp.cross(omega, x_com)
+            public_body_qd[child] = wp.spatial_vector(velocity_com, omega)
+            slot = child + wp.int32(1)
+            bodies.velocity[slot] = velocity_com
+            bodies.angular_velocity[slot] = omega
+            index += wp.int32(32)
+        _sync_reduced_warp()
+
+
 @wp.func
 def _flush_deferred_articulation(bodies: BodyContainer, articulation: wp.int32):
     data = bodies.reduced
@@ -1380,9 +1583,11 @@ class ReducedArticulationSystem:
             raise ValueError("reduced articulation system requires at least one articulation")
         self.model = model
         self.device = model.device
+        self.use_warp_advance = bool(self.device.is_cuda)
         body_count = int(model.body_count)
         joint_count = int(model.joint_count)
         dof_count = int(model.joint_dof_count)
+        articulation_count = int(model.articulation_count)
 
         joint_parent_np = model.joint_parent.numpy()
         joint_child_np = model.joint_child.numpy()
@@ -1415,6 +1620,23 @@ class ReducedArticulationSystem:
             count = int(depth_count)
             self.factor_depth_ranges.append((depth_offset, count))
             depth_offset += count
+
+        self.advance_max_depth = len(self.factor_depth_ranges) - 1
+        articulation_depth_start_np = np.empty(
+            (articulation_count, self.advance_max_depth + 2),
+            dtype=np.int32,
+        )
+        articulation_depth_joint_list: list[int] = []
+        for articulation in range(articulation_count):
+            joint_start = int(articulation_start_np[articulation])
+            joint_end = int(articulation_end_np[articulation])
+            for depth in range(self.advance_max_depth + 1):
+                articulation_depth_start_np[articulation, depth] = len(articulation_depth_joint_list)
+                for joint in range(joint_start, joint_end):
+                    if int(joint_depth_np[joint]) == depth:
+                        articulation_depth_joint_list.append(joint)
+            articulation_depth_start_np[articulation, self.advance_max_depth + 1] = len(articulation_depth_joint_list)
+
         child_start_np = np.zeros(joint_count + 1, dtype=np.int32)
         child_joint_list: list[int] = []
         for joint, children in enumerate(child_lists):
@@ -1423,6 +1645,11 @@ class ReducedArticulationSystem:
         self.factor_joint_count = int(tree_joint_np.shape[0])
         self.factor_joint = wp.array(tree_joint_np, device=self.device)
         self.factor_depth_joint = wp.array(depth_joint_np, device=self.device)
+        self.advance_articulation_depth_start = wp.array(articulation_depth_start_np, device=self.device)
+        self.advance_articulation_depth_joint = wp.array(
+            np.asarray(articulation_depth_joint_list, dtype=np.int32),
+            device=self.device,
+        )
         self.factor_child_start = wp.array(child_start_np, device=self.device)
         self.factor_child_joint = wp.array(np.asarray(child_joint_list, dtype=np.int32), device=self.device)
 
@@ -1647,46 +1874,67 @@ class ReducedArticulationSystem:
         include_coriolis: bool,
     ) -> None:
         """Apply one split ABA velocity update and publish link twists."""
-        wp.launch(
-            _advance_reduced_articulations_kernel,
-            dim=int(self.model.articulation_count),
-            inputs=[
-                self.model.articulation_start,
-                self.model.articulation_end,
-                self.model.joint_type,
-                self.model.joint_parent,
-                self.model.joint_child,
-                self.model.joint_qd_start,
-                self.joint_qd_internal,
-                self.joint_s,
-                self.joint_u_matrix,
-                self.joint_d_inv,
-                control.joint_f,
-                self.joint_implicit_force,
-                self.model.body_mass,
-                self.model.body_world,
-                self.model.gravity,
-                self.body_q_com,
-                self.body_i_s,
-                state.body_f,
-                wp.float32(dt),
-                wp.bool(include_external),
-                wp.bool(include_coriolis),
-            ],
-            outputs=[
-                self.body_velocity,
-                self.body_coriolis,
-                self.body_bias,
-                self.generalized_rhs,
-                self.body_work,
-                self.joint_work,
-                self.body_acceleration,
-                self.generalized_acceleration,
-                state.body_qd,
-                bodies,
-            ],
-            device=self.device,
-        )
+        advance_inputs = [
+            self.model.joint_type,
+            self.model.joint_parent,
+            self.model.joint_child,
+            self.model.joint_qd_start,
+            self.joint_qd_internal,
+            self.joint_s,
+            self.joint_u_matrix,
+            self.joint_d_inv,
+            control.joint_f,
+            self.joint_implicit_force,
+            self.model.body_mass,
+            self.model.body_world,
+            self.model.gravity,
+            self.body_q_com,
+            self.body_i_s,
+            state.body_f,
+            wp.float32(dt),
+            wp.bool(include_external),
+            wp.bool(include_coriolis),
+        ]
+        advance_outputs = [
+            self.body_velocity,
+            self.body_coriolis,
+            self.body_bias,
+            self.generalized_rhs,
+            self.body_work,
+            self.joint_work,
+            self.body_acceleration,
+            self.generalized_acceleration,
+            state.body_qd,
+            bodies,
+        ]
+        if self.use_warp_advance:
+            wp.launch(
+                _advance_reduced_articulations_warp_kernel,
+                dim=int(self.model.articulation_count) * 32,
+                block_dim=32,
+                inputs=[
+                    wp.int32(self.advance_max_depth),
+                    self.advance_articulation_depth_start,
+                    self.advance_articulation_depth_joint,
+                    self.factor_child_start,
+                    self.factor_child_joint,
+                    *advance_inputs,
+                ],
+                outputs=advance_outputs,
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                _advance_reduced_articulations_kernel,
+                dim=int(self.model.articulation_count),
+                inputs=[
+                    self.model.articulation_start,
+                    self.model.articulation_end,
+                    *advance_inputs,
+                ],
+                outputs=advance_outputs,
+                device=self.device,
+            )
 
     def solve_forces(
         self,
