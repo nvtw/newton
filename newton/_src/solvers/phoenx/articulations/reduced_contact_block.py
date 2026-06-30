@@ -472,22 +472,21 @@ def _finalize_reduced_contact_rows_kernel(
     tangent0: wp.array2d[wp.vec3],
     row_velocity: wp.array2d[wp.float32],
 ):
-    articulation = wp.tid()
-    if enabled[articulation] == wp.int32(0):
+    articulation, point = wp.tid()
+    if enabled[articulation] == wp.int32(0) or point >= point_count[articulation]:
         return
-    for point in range(point_count[articulation]):
-        column = point_column[articulation, point]
-        body0 = contact_get_body1(columns, column)
-        body1 = contact_get_body2(columns, column)
-        p0 = point0[articulation, point]
-        p1 = point1[articulation, point]
-        relative = _deferred_point_velocity(bodies, body1, p1) - _deferred_point_velocity(bodies, body0, p0)
-        n = normal[articulation, point]
-        t0 = tangent0[articulation, point]
-        row = wp.int32(3) * point
-        row_velocity[articulation, row] = wp.dot(relative, n)
-        row_velocity[articulation, row + wp.int32(1)] = wp.dot(relative, t0)
-        row_velocity[articulation, row + wp.int32(2)] = wp.dot(relative, wp.cross(n, t0))
+    column = point_column[articulation, point]
+    body0 = contact_get_body1(columns, column)
+    body1 = contact_get_body2(columns, column)
+    p0 = point0[articulation, point]
+    p1 = point1[articulation, point]
+    relative = _deferred_point_velocity(bodies, body1, p1) - _deferred_point_velocity(bodies, body0, p0)
+    n = normal[articulation, point]
+    t0 = tangent0[articulation, point]
+    row = wp.int32(3) * point
+    row_velocity[articulation, row] = wp.dot(relative, n)
+    row_velocity[articulation, row + wp.int32(1)] = wp.dot(relative, t0)
+    row_velocity[articulation, row + wp.int32(2)] = wp.dot(relative, wp.cross(n, t0))
 
 
 @wp.kernel(enable_backward=False, module="reduced_contact_rows")
@@ -1121,7 +1120,8 @@ class ReducedContactBlockSystem:
             if not build_rows:
                 wp.launch(
                     _finalize_reduced_contact_rows_kernel,
-                    dim=self.articulation_count,
+                    dim=(self.articulation_count, _POINTS_PER_PAGE),
+                    block_dim=_BLOCK_DIM,
                     inputs=[
                         columns,
                         bodies,
