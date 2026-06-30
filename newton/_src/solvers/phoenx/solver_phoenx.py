@@ -2123,6 +2123,7 @@ class PhoenXWorld:
         self._joint_pgs_ownership_active = True
         self._joint_pgs_all_disabled = not bool(enabled.any())
         self._reduced_articulation = articulation
+        articulation.contact_block_system.configure_schedule(self.max_contact_columns, self.num_worlds)
         self._has_reduced_loops = articulation.loop_system.count > 0
         self._has_maximal_dynamic_bodies = bool(np.any(self.bodies.motion_type.numpy() == int(MOTION_DYNAMIC)))
 
@@ -2991,7 +2992,7 @@ class PhoenXWorld:
         self._regular_pgs_active_this_step = bool(
             has_deformable_rows or has_enabled_joint_rows or (has_contact_input and self._reduced_articulation is None)
         )
-        self._partition_active_this_step = self._regular_pgs_active_this_step or self._reduced_contacts_active_this_step
+        self._partition_active_this_step = self._regular_pgs_active_this_step
 
         # Contact ingest + element rebuild + graph colouring all depend only
         # on the (unchanged) contact graph when ``reuse_partition`` is set, so
@@ -3000,6 +3001,14 @@ class PhoenXWorld:
         # reused columns are exactly the prior substep's converged values.
         if not reuse_partition:
             self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
+            if (
+                self._reduced_contacts_active_this_step
+                and self._ingest_scratch is not None
+                and self.max_contact_columns > 0
+            ):
+                self._reduced_articulation.contact_block_system.build_schedule(
+                    self._contact_cols, self.bodies, self._ingest_scratch.num_contact_columns
+                )
             if (
                 self._partition_active_this_step
                 and self.solver_flavor == "standard"

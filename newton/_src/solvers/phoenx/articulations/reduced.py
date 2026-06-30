@@ -23,10 +23,10 @@ from newton._src.solvers.featherstone.kernels import (
     transform_spatial_inertia,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
-    reduced_contact_deferred_owner,
     reduced_contact_iterate,
     reduced_contact_prepare,
 )
+from newton._src.solvers.phoenx.articulations.reduced_contact_block import ReducedContactBlockSystem
 from newton._src.solvers.phoenx.articulations.reduced_loop import ReducedLoopSystem
 from newton._src.solvers.phoenx.body import (
     MOTION_ARTICULATED,
@@ -1039,14 +1039,13 @@ def _flush_deferred_articulation(bodies: BodyContainer, articulation: wp.int32):
 
 @wp.kernel(enable_backward=False)
 def _solve_reduced_deferred_contacts_kernel(
-    articulation_constraint_node: wp.array[wp.int32],
-    adjacency_section_end: wp.array[wp.int32],
-    adjacent_element: wp.array[wp.int32],
+    schedule_section_end: wp.array[wp.int32],
+    scheduled_column: wp.array[wp.int32],
+    block_enabled: wp.array[wp.int32],
     contact_cols: ContactColumnContainer,
     bodies: BodyContainer,
     idt: wp.float32,
     sor_boost: wp.float32,
-    contact_start: wp.int32,
     cc: ContactContainer,
     contacts: ContactViews,
     iterations: wp.int32,
@@ -1054,169 +1053,39 @@ def _solve_reduced_deferred_contacts_kernel(
     prepare: wp.bool,
 ):
     articulation = wp.tid()
-    node = articulation_constraint_node[articulation]
     start = wp.int32(0)
-    if node > wp.int32(0):
-        start = adjacency_section_end[node - wp.int32(1)]
-    end = adjacency_section_end[node]
+    if articulation > wp.int32(0):
+        start = schedule_section_end[articulation - wp.int32(1)]
+    end = schedule_section_end[articulation]
+
+    if block_enabled[articulation] != wp.int32(0):
+        _flush_deferred_articulation(bodies, articulation)
+        return
 
     if prepare:
         for index in range(start, end):
-            cid = adjacent_element[index]
-            if cid >= contact_start:
-                column = cid - contact_start
-                if reduced_contact_deferred_owner(contact_cols, column, bodies) == articulation:
-                    reduced_contact_prepare(contact_cols, column, bodies, idt, cc, contacts, wp.bool(True))
+            column = scheduled_column[index]
+            reduced_contact_prepare(contact_cols, column, bodies, idt, cc, contacts, wp.bool(True))
 
     for iteration in range(iterations):
         for offset in range(end - start):
             index = start + offset
             if (iteration & wp.int32(1)) != wp.int32(0):
                 index = end - wp.int32(1) - offset
-            cid = adjacent_element[index]
-            if cid >= contact_start:
-                column = cid - contact_start
-                if reduced_contact_deferred_owner(contact_cols, column, bodies) == articulation:
-                    reduced_contact_iterate(
-                        contact_cols,
-                        column,
-                        bodies,
-                        idt,
-                        sor_boost,
-                        cc,
-                        contacts,
-                        use_bias,
-                        wp.bool(True),
-                    )
+            column = scheduled_column[index]
+            reduced_contact_iterate(
+                contact_cols,
+                column,
+                bodies,
+                idt,
+                sor_boost,
+                cc,
+                contacts,
+                use_bias,
+                wp.bool(True),
+            )
 
     _flush_deferred_articulation(bodies, articulation)
-
-
-@wp.kernel(enable_backward=False)
-def _solve_reduced_contacts_multi_world_kernel(
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array2d[wp.int32],
-    world_csr_offsets: wp.array[wp.int32],
-    world_num_colors: wp.array[wp.int32],
-    contact_start: wp.int32,
-    cc: ContactContainer,
-    contacts: ContactViews,
-    iterations: wp.int32,
-    use_bias: wp.bool,
-    prepare: wp.bool,
-):
-    world = wp.tid()
-    world_base = world_csr_offsets[world]
-    num_colors = world_num_colors[world]
-
-    if prepare:
-        for color in range(num_colors):
-            start = world_base + color_starts[world, color]
-            end = world_base + color_starts[world, color + wp.int32(1)]
-            for index in range(start, end):
-                cid = element_ids_by_color[index]
-                if cid >= contact_start:
-                    column = cid - contact_start
-                    if reduced_contact_deferred_owner(contact_cols, column, bodies) < wp.int32(0):
-                        reduced_contact_prepare(
-                            contact_cols,
-                            column,
-                            bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            wp.bool(False),
-                        )
-
-    for iteration in range(iterations):
-        for color_offset in range(num_colors):
-            color = color_offset
-            if (iteration & wp.int32(1)) != wp.int32(0):
-                color = num_colors - wp.int32(1) - color_offset
-            start = world_base + color_starts[world, color]
-            end = world_base + color_starts[world, color + wp.int32(1)]
-            for index in range(start, end):
-                cid = element_ids_by_color[index]
-                if cid >= contact_start:
-                    column = cid - contact_start
-                    if reduced_contact_deferred_owner(contact_cols, column, bodies) < wp.int32(0):
-                        reduced_contact_iterate(
-                            contact_cols,
-                            column,
-                            bodies,
-                            idt,
-                            sor_boost,
-                            cc,
-                            contacts,
-                            use_bias,
-                            wp.bool(False),
-                        )
-
-
-@wp.kernel(enable_backward=False)
-def _solve_reduced_contacts_single_world_kernel(
-    contact_cols: ContactColumnContainer,
-    bodies: BodyContainer,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_colors_buffer: wp.array[wp.int32],
-    contact_start: wp.int32,
-    cc: ContactContainer,
-    contacts: ContactViews,
-    iterations: wp.int32,
-    use_bias: wp.bool,
-    prepare: wp.bool,
-):
-    num_colors = num_colors_buffer[0]
-
-    if prepare:
-        for color in range(num_colors):
-            start = color_starts[color]
-            end = color_starts[color + wp.int32(1)]
-            for index in range(start, end):
-                cid = element_ids_by_color[index]
-                if cid >= contact_start:
-                    column = cid - contact_start
-                    if reduced_contact_deferred_owner(contact_cols, column, bodies) < wp.int32(0):
-                        reduced_contact_prepare(
-                            contact_cols,
-                            column,
-                            bodies,
-                            idt,
-                            cc,
-                            contacts,
-                            wp.bool(False),
-                        )
-
-    for iteration in range(iterations):
-        for color_offset in range(num_colors):
-            color = color_offset
-            if (iteration & wp.int32(1)) != wp.int32(0):
-                color = num_colors - wp.int32(1) - color_offset
-            start = color_starts[color]
-            end = color_starts[color + wp.int32(1)]
-            for index in range(start, end):
-                cid = element_ids_by_color[index]
-                if cid >= contact_start:
-                    column = cid - contact_start
-                    if reduced_contact_deferred_owner(contact_cols, column, bodies) < wp.int32(0):
-                        reduced_contact_iterate(
-                            contact_cols,
-                            column,
-                            bodies,
-                            idt,
-                            sor_boost,
-                            cc,
-                            contacts,
-                            use_bias,
-                            wp.bool(False),
-                        )
 
 
 class ReducedArticulationSystem:
@@ -1555,6 +1424,7 @@ class ReducedPhoenXArticulation:
         self.body_is_reduced_np = body_is_reduced_np.astype(bool)
         self.tree_joint_mask_np = tree_joint_mask_np.astype(bool)
         self.loop_system = ReducedLoopSystem(model, self.body_is_reduced_np)
+        self.contact_block_system = ReducedContactBlockSystem(model)
         self.owned_joint_mask_np = self.tree_joint_mask_np.copy()
         self.owned_joint_mask_np[self.loop_system.joint_indices_np] = True
 
@@ -1684,52 +1554,46 @@ class ReducedPhoenXArticulation:
             wp.float32(world.sor_boost),
         ]
         common_tail = [
-            wp.int32(world._contact_offset),
             world._contact_container,
             contact_views,
             wp.int32(iterations),
             wp.bool(not relax),
             wp.bool(not relax),
         ]
+        self.contact_block_system.solve(
+            world._contact_cols,
+            world.bodies,
+            idt,
+            world.sor_boost,
+            world._contact_container,
+            contact_views,
+            iterations,
+            use_bias=not relax,
+            prepare=not relax,
+        )
         wp.launch(
             _solve_reduced_deferred_contacts_kernel,
             dim=int(self.model.articulation_count),
             inputs=[
-                self.articulation_constraint_node,
-                world._partitioner._adjacency_section_end_indices,
-                world._partitioner._vertex_to_adjacent_elements,
+                self.contact_block_system.schedule_section_end,
+                self.contact_block_system.schedule_columns,
+                self.contact_block_system.enabled,
                 *common_inputs,
                 *common_tail,
             ],
             device=self.model.device,
         )
-        if world.step_layout == "single_world":
-            wp.launch(
-                _solve_reduced_contacts_single_world_kernel,
-                dim=1,
-                inputs=[
-                    *common_inputs,
-                    world._partitioner.element_ids_by_color,
-                    world._partitioner.color_starts,
-                    world._partitioner.num_colors,
-                    *common_tail,
-                ],
-                device=self.model.device,
-            )
-        else:
-            wp.launch(
-                _solve_reduced_contacts_multi_world_kernel,
-                dim=world.num_worlds,
-                inputs=[
-                    *common_inputs,
-                    world._world_element_ids_by_color,
-                    world._world_color_starts,
-                    world._world_csr_offsets,
-                    world._world_num_colors,
-                    *common_tail,
-                ],
-                device=self.model.device,
-            )
+        self.contact_block_system.solve_fallback(
+            world._contact_cols,
+            world.bodies,
+            idt,
+            world.sor_boost,
+            world._contact_container,
+            contact_views,
+            iterations,
+            use_bias=not relax,
+            prepare=not relax,
+        )
 
     def export_step(self, state: State) -> None:
         """Export authoritative generalized coordinates to common Newton state."""

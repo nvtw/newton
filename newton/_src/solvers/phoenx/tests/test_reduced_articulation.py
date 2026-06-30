@@ -17,6 +17,9 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _apply_deferred_impulse,
     _deferred_link_delta_twist,
 )
+from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
+    _build_generalized_contact_rows_kernel,
+)
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_wrench_response
 
@@ -252,6 +255,39 @@ def _make_contact_momentum_model(device):
     return builder.finalize(device=device), collider
 
 
+def _make_dense_articulation_contact_chain(device, articulation_count=48):
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, restitution=0.0)
+    for index in range(articulation_count):
+        body = builder.add_link(mass=1.0)
+        builder.add_shape_sphere(body, radius=0.21, cfg=shape_cfg)
+        joint = builder.add_joint_free(parent=-1, child=body)
+        builder.add_articulation([joint])
+        builder.joint_q[-7:] = [0.40 * index, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    return builder.finalize(device=device)
+
+
+def _make_contact_overflow_model(device, contact_count=24):
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    body = builder.add_link(mass=2.0)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.6, restitution=0.0)
+    width = 6
+    for index in range(contact_count):
+        x = 0.12 * float(index % width)
+        y = 0.12 * float(index // width)
+        builder.add_shape_sphere(
+            body,
+            radius=0.055,
+            xform=wp.transform(wp.vec3(x, y, 0.0), wp.quat_identity()),
+            cfg=shape_cfg,
+        )
+    joint = builder.add_joint_free(parent=-1, child=body)
+    builder.add_articulation([joint])
+    builder.joint_q[-7:] = [-0.3, -0.18, 0.05, 0.0, 0.0, 0.0, 1.0]
+    builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1))
+    return builder.finalize(device=device)
+
+
 def _make_self_contact_model(device):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     root = builder.add_link(mass=2.0)
@@ -359,6 +395,50 @@ def _compare_deferred_contact_response(
     )
     deferred_twist[0] = _deferred_link_delta_twist(bodies, body_slot)
     _flush_deferred_articulation(bodies, articulation)
+
+
+@wp.kernel
+def _compare_generalized_contact_row(
+    bodies: BodyContainer,
+    body_slot: wp.int32,
+    wrench: wp.spatial_vector,
+    jacobian: wp.array3d[wp.float32],
+    probe: wp.array[wp.float32],
+    exact_response: wp.array[wp.float32],
+    virtual_work: wp.array[wp.float32],
+):
+    _articulation_pair_wrench_response(
+        bodies,
+        body_slot,
+        wrench,
+        wp.int32(-1),
+        wp.spatial_vector(),
+        wp.bool(False),
+    )
+    articulation = bodies.reduced.body_articulation[body_slot]
+    start = bodies.reduced.articulation_start[articulation]
+    end = bodies.reduced.articulation_end[articulation]
+    dof_start = bodies.reduced.joint_qd_start[start]
+    dof_end = bodies.reduced.joint_qd_start[end]
+    for dof in range(dof_start, dof_end):
+        exact_response[dof - dof_start] = bodies.reduced.generalized_response[dof]
+
+    body = body_slot - wp.int32(1)
+    twist = wp.spatial_vector()
+    path_start = bodies.reduced.body_path_start[body]
+    path_end = bodies.reduced.body_path_start[body + wp.int32(1)]
+    for path_index in range(path_start, path_end):
+        joint = bodies.reduced.body_path_joint[path_index]
+        for dof in range(
+            bodies.reduced.joint_qd_start[joint],
+            bodies.reduced.joint_qd_start[joint + wp.int32(1)],
+        ):
+            twist += bodies.reduced.joint_s[dof] * probe[dof - dof_start]
+    jacobian_work = wp.float32(0.0)
+    for local_dof in range(dof_end - dof_start):
+        jacobian_work += jacobian[articulation, 0, local_dof] * probe[local_dof]
+    virtual_work[0] = wp.dot(wrench, twist)
+    virtual_work[1] = jacobian_work
 
 
 @wp.kernel
@@ -739,6 +819,83 @@ class TestReducedArticulation(unittest.TestCase):
         np.testing.assert_allclose(responses[[1, 3]], responses[[0, 2]], rtol=2.0e-5, atol=2.0e-6)
         np.testing.assert_allclose(values[[1, 3]], values[[0, 2]], rtol=2.0e-5, atol=2.0e-6)
 
+    def test_generalized_contact_rows_match_aba_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_floating_tree(device)
+        state = model.state()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+        )
+        bridge = solver._reduced_articulation
+        block = bridge.contact_block_system
+        dof_count = int(model.joint_dof_count)
+        wrench = wp.spatial_vector(0.7, -0.2, 0.4, -0.3, 0.6, 0.1)
+        row_body = np.zeros(block.row_body.shape, dtype=np.int32)
+        row_body[0, :3] = 1
+        row_wrench = np.zeros((*block.row_wrench.shape, 6), dtype=np.float32)
+        row_wrench[0, 0] = np.asarray(wrench, dtype=np.float32)
+        block.enabled.assign(np.ones(block.enabled.shape, dtype=np.int32))
+        block.point_count.assign(np.ones(block.point_count.shape, dtype=np.int32))
+        block.row_body.assign(row_body)
+        block.row_wrench.assign(row_wrench)
+        probe_np = np.linspace(-0.35, 0.45, dof_count, dtype=np.float32)
+        probe = wp.array(probe_np, device=device)
+        exact_response = wp.zeros(dof_count, dtype=wp.float32, device=device)
+        virtual_work = wp.zeros(2, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            bridge.import_step(state, model.control())
+            bridge.begin_substep(0.0, split_dynamics=False)
+            wp.launch(
+                _build_generalized_contact_rows_kernel,
+                dim=(1, 48),
+                inputs=[
+                    solver.bodies,
+                    block.enabled,
+                    block.point_count,
+                    block.row_body,
+                    block.row_wrench,
+                ],
+                outputs=[
+                    block.jacobian,
+                    block.generalized_response,
+                    block.aba_body_work,
+                    block.aba_joint_work,
+                    block.aba_body_response,
+                ],
+                device=device,
+            )
+            wp.launch(
+                _compare_generalized_contact_row,
+                dim=1,
+                inputs=[
+                    solver.bodies,
+                    wp.int32(2),
+                    wrench,
+                    block.jacobian,
+                    probe,
+                    exact_response,
+                    virtual_work,
+                ],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(
+            block.generalized_response.numpy()[0, 0, :dof_count],
+            exact_response.numpy(),
+            rtol=2.0e-5,
+            atol=2.0e-6,
+        )
+        np.testing.assert_allclose(virtual_work.numpy()[1], virtual_work.numpy()[0], rtol=2.0e-5, atol=2.0e-6)
+
     def test_deferred_contact_response_matches_aba_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -1026,6 +1183,91 @@ class TestReducedArticulation(unittest.TestCase):
         fk_state = model.state()
         newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
         np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
+
+    def test_contact_block_overflow_uses_exact_graph_captured_fallback(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_contact_overflow_model(device)
+        state = model.state()
+        output = model.state()
+        qd = state.joint_qd.numpy()
+        qd[2] = -0.2
+        state.joint_qd.assign(qd)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=8,
+            velocity_iterations=0,
+        )
+        contacts = model.contacts()
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state, contacts)
+            solver.step(state, output, None, contacts, 1.0 / 2000.0)
+        wp.capture_launch(capture.graph)
+
+        block = solver._reduced_articulation.contact_block_system
+        column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        self.assertGreaterEqual(column_count, 1)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 16)
+        self.assertEqual(int(block.enabled.numpy()[0]), 0)
+        self.assertEqual(int(block.fallback_count.numpy()[0]), 0)
+        self.assertTrue(np.isfinite(output.joint_q.numpy()).all())
+        self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
+        self.assertGreater(float(output.joint_qd.numpy()[2]), -0.2)
+
+        fk_state = model.state()
+        newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
+        np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=3.0e-5)
+
+    def test_dense_articulation_contacts_are_deterministic_and_conserve_momentum(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        articulation_count = 48
+        model = _make_dense_articulation_contact_chain(device, articulation_count)
+        state = model.state()
+        output = model.state()
+        qd = state.joint_qd.numpy().reshape(articulation_count, 6)
+        qd[:, 0] = np.where(np.arange(articulation_count) % 2 == 0, 0.15, -0.15)
+        state.joint_qd.assign(qd.reshape(-1))
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=6,
+            velocity_iterations=0,
+        )
+        contacts = model.contacts()
+        momentum_before = _total_momentum(model, state)
+        dt = 1.0 / 2000.0
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state, contacts)
+            solver.step(state, output, None, contacts, dt)
+        wp.capture_launch(capture.graph)
+
+        block = solver._reduced_articulation.contact_block_system
+        fallback_count = int(block.fallback_count.numpy()[0])
+        self.assertGreaterEqual(fallback_count, articulation_count - 1)
+        first_columns = block.fallback_column.numpy()[:fallback_count].copy()
+        first_colors = block.fallback_partitioner.interaction_id_to_partition.numpy()[:fallback_count].copy()
+        momentum_after = _total_momentum(model, output)
+        np.testing.assert_allclose(momentum_after, momentum_before, rtol=0.0, atol=1.0e-4)
+        self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
+
+        wp.capture_launch(capture.graph)
+        np.testing.assert_array_equal(block.fallback_column.numpy()[:fallback_count], first_columns)
+        np.testing.assert_array_equal(
+            block.fallback_partitioner.interaction_id_to_partition.numpy()[:fallback_count], first_colors
+        )
 
     def test_contact_conserves_spatial_momentum_under_graph_capture(self):
         device = wp.get_preferred_device()
