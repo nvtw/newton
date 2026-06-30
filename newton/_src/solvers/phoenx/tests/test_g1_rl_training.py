@@ -1646,6 +1646,9 @@ class TestG1PhoenXRL(unittest.TestCase):
         standard = collect_with_layout(puffer_layout=False)
         puffer = collect_with_layout(puffer_layout=True)
 
+        for field in ("obs", "actions", "old_log_probs", "values"):
+            np.testing.assert_array_equal(getattr(puffer, field).numpy(), getattr(standard, field).numpy())
+
         np.testing.assert_allclose(
             standard.rewards.numpy().reshape(num_steps, num_envs),
             np.asarray([[10.0, 11.0], [20.0, 21.0]], dtype=np.float32),

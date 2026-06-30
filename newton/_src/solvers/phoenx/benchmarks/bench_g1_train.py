@@ -193,6 +193,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
+        articulation_mode=str(args.articulation_mode),
         actuation_model=str(args.actuation_model),
         controlled_action_count=int(args.controlled_action_count),
         reward_mode=str(args.reward_mode),
@@ -329,6 +330,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "solver_internal_substeps": int(world.substeps),
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
+        "articulation_mode": str(args.articulation_mode),
         "actuation_model": str(args.actuation_model),
         "reward_mode": str(args.reward_mode),
         "w_alive": float(args.w_alive),
@@ -358,7 +360,10 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "effective_threads_per_world": effective_tpw,
         "threads_per_world_auto_active": bool(world._tpw_auto),
         "multi_world_scheduler": str(args.multi_world_scheduler),
+        "effective_multi_world_scheduler": str(world._multi_world_scheduler),
+        "effective_multi_world_block_dim": int(world._multi_world_block_dim),
         "prepare_refresh_stride": args.prepare_refresh_stride,
+        "effective_prepare_refresh_stride": int(world.prepare_refresh_stride),
         "env_samples_per_s": env_sps,
         "physics_steps_per_s": physics_sps,
         "mean_rollout_seconds": float(np.mean(warm_rollout)),
@@ -448,6 +453,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    parser.add_argument(
+        "--articulation-mode",
+        choices=("maximal", "hybrid", "reduced"),
+        default="reduced",
+        help="PhoenX articulation mode used by the training benchmark.",
+    )
     parser.add_argument(
         "--reward-mode", choices=("nanog1_dense", "sparse_command", "sparse_target"), default=g1_recipe.REWARD_MODE
     )

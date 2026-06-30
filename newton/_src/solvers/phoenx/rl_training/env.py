@@ -56,6 +56,42 @@ def rollout_store_pre_step_kernel(
 
 
 @wp.kernel
+def rollout_store_puffer_step_kernel(
+    step: wp.int32,
+    num_envs: wp.int32,
+    obs_dim: wp.int32,
+    action_dim: wp.int32,
+    obs_src: wp.array2d[wp.float32],
+    actions_src: wp.array2d[wp.float32],
+    log_probs_src: wp.array[wp.float32],
+    values_src: wp.array2d[wp.float32],
+    value_col: wp.int32,
+    rewards_src: wp.array[wp.float32],
+    dones_src: wp.array[wp.float32],
+    successes_src: wp.array[wp.float32],
+    obs_dst: wp.array2d[wp.float32],
+    actions_dst: wp.array2d[wp.float32],
+    log_probs_dst: wp.array[wp.float32],
+    values_dst: wp.array[wp.float32],
+    rewards_dst: wp.array[wp.float32],
+    dones_dst: wp.array[wp.float32],
+    successes_dst: wp.array[wp.float32],
+):
+    env, col = wp.tid()
+    row = step * num_envs + env
+    if col < obs_dim:
+        obs_dst[row, col] = obs_src[env, col]
+    if col < action_dim:
+        actions_dst[row, col] = actions_src[env, col]
+    if col == 0:
+        log_probs_dst[row] = log_probs_src[env]
+        values_dst[row] = values_src[env, value_col]
+        rewards_dst[row] = rewards_src[env]
+        dones_dst[row] = dones_src[env]
+        successes_dst[row] = successes_src[env]
+
+
+@wp.kernel
 def rollout_store_post_step_kernel(
     step: wp.int32,
     num_envs: wp.int32,
@@ -204,29 +240,51 @@ def _collect_ppo_rollout_impl(
             actions, log_probs, values = trainer.act_reuse_seed_counter(
                 obs, seed_counter=seed_counter, seed_offset=step
             )
-        wp.launch(
-            rollout_store_pre_step_kernel,
-            dim=(env.world_count, max_cols),
-            inputs=[
-                step,
-                env.world_count,
-                env.obs_dim,
-                env.action_dim,
-                obs,
-                actions,
-                log_probs,
-                values,
-                value_col,
-            ],
-            outputs=[buffer.obs, buffer.actions, buffer.old_log_probs, buffer.values],
-            device=env.device,
-        )
         if puffer_layout:
             wp.launch(
-                rollout_store_post_step_kernel,
-                dim=env.world_count,
-                inputs=[step, env.world_count, env.step_rewards, env.step_dones, env.step_successes],
-                outputs=[buffer.rewards, buffer.dones, buffer.successes],
+                rollout_store_puffer_step_kernel,
+                dim=(env.world_count, max_cols),
+                inputs=[
+                    step,
+                    env.world_count,
+                    env.obs_dim,
+                    env.action_dim,
+                    obs,
+                    actions,
+                    log_probs,
+                    values,
+                    value_col,
+                    env.step_rewards,
+                    env.step_dones,
+                    env.step_successes,
+                ],
+                outputs=[
+                    buffer.obs,
+                    buffer.actions,
+                    buffer.old_log_probs,
+                    buffer.values,
+                    buffer.rewards,
+                    buffer.dones,
+                    buffer.successes,
+                ],
+                device=env.device,
+            )
+        else:
+            wp.launch(
+                rollout_store_pre_step_kernel,
+                dim=(env.world_count, max_cols),
+                inputs=[
+                    step,
+                    env.world_count,
+                    env.obs_dim,
+                    env.action_dim,
+                    obs,
+                    actions,
+                    log_probs,
+                    values,
+                    value_col,
+                ],
+                outputs=[buffer.obs, buffer.actions, buffer.old_log_probs, buffer.values],
                 device=env.device,
             )
         next_obs, rewards, dones = env.step(actions)
