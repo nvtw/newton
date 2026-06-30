@@ -1059,13 +1059,12 @@ def _solve_reduced_deferred_contacts_kernel(
     end = schedule_section_end[articulation]
 
     if block_enabled[articulation] != wp.int32(0):
-        _flush_deferred_articulation(bodies, articulation)
         return
 
     if prepare:
         for index in range(start, end):
             column = scheduled_column[index]
-            reduced_contact_prepare(contact_cols, column, bodies, idt, cc, contacts, wp.bool(True))
+            reduced_contact_prepare(contact_cols, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(True))
 
     for iteration in range(iterations):
         for offset in range(end - start):
@@ -1571,18 +1570,22 @@ class ReducedPhoenXArticulation:
             use_bias=not relax,
             prepare=not relax,
         )
-        wp.launch(
-            _solve_reduced_deferred_contacts_kernel,
-            dim=int(self.model.articulation_count),
-            inputs=[
-                self.contact_block_system.schedule_section_end,
-                self.contact_block_system.schedule_columns,
-                self.contact_block_system.enabled,
-                *common_inputs,
-                *common_tail,
-            ],
-            device=self.model.device,
-        )
+
+        def solve_deferred_contacts() -> None:
+            wp.launch(
+                _solve_reduced_deferred_contacts_kernel,
+                dim=int(self.model.articulation_count),
+                inputs=[
+                    self.contact_block_system.schedule_section_end,
+                    self.contact_block_system.schedule_columns,
+                    self.contact_block_system.enabled,
+                    *common_inputs,
+                    *common_tail,
+                ],
+                device=self.model.device,
+            )
+
+        wp.capture_if(self.contact_block_system.deferred_active, on_true=solve_deferred_contacts)
         self.contact_block_system.solve_fallback(
             world._contact_cols,
             world.bodies,

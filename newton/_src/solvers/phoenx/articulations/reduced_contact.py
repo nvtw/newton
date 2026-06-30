@@ -398,6 +398,7 @@ def reduced_contact_prepare(
     contacts_state: ContactContainer,
     contacts: ContactViews,
     use_deferred: wp.bool,
+    apply_warmstart: wp.bool,
 ):
     """Prepare effective masses, TGS biases, and warm-start impulses."""
     body0 = contact_get_body1(columns, column)
@@ -467,15 +468,16 @@ def reduced_contact_prepare(
         cc_set_r0(contacts_state, contact, contact_point - bodies.position[body0])
         cc_set_r1(contacts_state, contact, contact_point - bodies.position[body1])
 
-        impulse = (
-            cc_get_normal_lambda(contacts_state, contact) * normal
-            + cc_get_tangent1_lambda(contacts_state, contact) * tangent0
-            + cc_get_tangent2_lambda(contacts_state, contact) * tangent1
-        )
-        if use_deferred:
-            _apply_deferred_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
-        else:
-            _apply_pair_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
+        if apply_warmstart:
+            impulse = (
+                cc_get_normal_lambda(contacts_state, contact) * normal
+                + cc_get_tangent1_lambda(contacts_state, contact) * tangent0
+                + cc_get_tangent2_lambda(contacts_state, contact) * tangent1
+            )
+            if use_deferred:
+                _apply_deferred_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
+            else:
+                _apply_pair_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
 
 
 @wp.func

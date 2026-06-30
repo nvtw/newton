@@ -45,7 +45,10 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_local_p0,
     cc_get_local_p1,
     cc_get_normal,
+    cc_get_normal_lambda,
     cc_get_tangent1,
+    cc_get_tangent1_lambda,
+    cc_get_tangent2_lambda,
 )
 from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_velocity_update_no_soft_pd
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
@@ -55,7 +58,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import IncrementalContactPartitioner
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 
-_MAX_POINTS = 16
+_MAX_POINTS = 32
 _MAX_ROWS = 3 * _MAX_POINTS
 _BLOCK_DIM = 32
 _MAX_DOFS = 64
@@ -231,7 +234,7 @@ def _solve_fallback_contact_column(
     use_bias: wp.bool,
 ):
     if phase == wp.int32(0):
-        reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(False))
+        reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(False), wp.bool(True))
     else:
         reduced_contact_iterate(columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, wp.bool(False))
 
@@ -308,6 +311,7 @@ def _gather_reduced_contact_blocks_kernel(
     row_wrench: wp.array2d[wp.spatial_vector],
     row_velocity: wp.array2d[wp.float32],
     delta_lambda: wp.array2d[wp.float32],
+    deferred_active: wp.array[wp.int32],
 ):
     articulation = wp.tid()
     start = wp.int32(0)
@@ -327,6 +331,8 @@ def _gather_reduced_contact_blocks_kernel(
     )
     use_block = count > wp.int32(0) and count <= wp.int32(_MAX_POINTS) and articulation_dofs <= wp.int32(_MAX_DOFS)
     enabled[articulation] = wp.int32(1) if use_block else wp.int32(0)
+    if count > wp.int32(0) and not use_block:
+        wp.atomic_max(deferred_active, wp.int32(0), wp.int32(1))
     point_count[articulation] = count if use_block else wp.int32(0)
     for row in range(_MAX_ROWS):
         row_velocity[articulation, row] = wp.float32(0.0)
@@ -334,13 +340,13 @@ def _gather_reduced_contact_blocks_kernel(
     if not use_block:
         return
 
-    # The warm start is accumulated first; row velocities are evaluated in a
-    # second kernel from one clean, common articulation state.
+    # Generalized blocks seed warm-start impulses in contact space, so all row
+    # velocities remain based on one clean articulation state.
     point_offset = wp.int32(0)
     for index in range(start, end):
         column = scheduled_column[index]
         if prepare:
-            reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(True))
+            reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(False))
         body0 = contact_get_body1(columns, column)
         body1 = contact_get_body2(columns, column)
         first = contact_get_contact_first(columns, column)
@@ -535,6 +541,7 @@ def _solve_generalized_contact_tile_kernel(
     cc: ContactContainer,
     iterations: wp.int32,
     use_bias: wp.bool,
+    warmstart: wp.bool,
     enabled: wp.array[wp.int32],
     point_count: wp.array[wp.int32],
     point_contact: wp.array2d[wp.int32],
@@ -550,6 +557,27 @@ def _solve_generalized_contact_tile_kernel(
     if enabled[articulation] == wp.int32(0):
         return
     generalized_delta = wp.tile_zeros(shape=_MAX_DOFS, dtype=wp.float32, storage="shared")
+    if warmstart:
+        for point_offset in range(_MAX_POINTS):
+            point = wp.int32(point_offset)
+            active = point < point_count[articulation]
+            lambda0 = wp.float32(0.0)
+            lambda1 = wp.float32(0.0)
+            lambda2 = wp.float32(0.0)
+            if lane == wp.int32(0) and active:
+                contact = point_contact[articulation, point]
+                lambda0 = cc_get_normal_lambda(cc, contact)
+                lambda1 = cc_get_tangent1_lambda(cc, contact)
+                lambda2 = cc_get_tangent2_lambda(cc, contact)
+            broadcast0 = wp.tile_from_thread(shape=_MAX_DOFS, value=lambda0, thread_idx=0, storage="shared")
+            broadcast1 = wp.tile_from_thread(shape=_MAX_DOFS, value=lambda1, thread_idx=0, storage="shared")
+            broadcast2 = wp.tile_from_thread(shape=_MAX_DOFS, value=lambda2, thread_idx=0, storage="shared")
+            if active:
+                row = wp.int32(3) * point
+                response0 = wp.tile_load(response[articulation, row], shape=_MAX_DOFS, storage="register")
+                response1 = wp.tile_load(response[articulation, row + wp.int32(1)], shape=_MAX_DOFS, storage="register")
+                response2 = wp.tile_load(response[articulation, row + wp.int32(2)], shape=_MAX_DOFS, storage="register")
+                generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
     mass_coeff = wp.float32(1.0)
     impulse_coeff = wp.float32(0.0)
     if use_bias:
@@ -718,6 +746,7 @@ class ReducedContactBlockSystem:
         self.row_wrench = wp.zeros((articulation_count, _MAX_ROWS), dtype=wp.spatial_vector, device=self.device)
         self.row_velocity = wp.zeros((articulation_count, _MAX_ROWS), dtype=wp.float32, device=self.device)
         self.delta_lambda = wp.zeros_like(self.row_velocity)
+        self.deferred_active = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.jacobian = wp.zeros((articulation_count, _MAX_ROWS, _MAX_DOFS), dtype=wp.float32, device=self.device)
         self.generalized_response = wp.zeros_like(self.jacobian)
         self.generalized_delta = wp.zeros((articulation_count, _MAX_DOFS), dtype=wp.float32, device=self.device)
@@ -965,6 +994,7 @@ class ReducedContactBlockSystem:
         prepare: bool,
     ) -> None:
         if prepare:
+            self.deferred_active.zero_()
             wp.launch(
                 _gather_reduced_contact_blocks_kernel,
                 dim=self.articulation_count,
@@ -991,6 +1021,7 @@ class ReducedContactBlockSystem:
                     self.row_wrench,
                     self.row_velocity,
                     self.delta_lambda,
+                    self.deferred_active,
                 ],
                 device=self.device,
             )
@@ -1049,6 +1080,7 @@ class ReducedContactBlockSystem:
                 cc,
                 wp.int32(iterations),
                 wp.bool(use_bias),
+                wp.bool(prepare),
                 self.enabled,
                 self.point_count,
                 self.point_contact,

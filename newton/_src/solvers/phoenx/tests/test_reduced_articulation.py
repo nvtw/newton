@@ -18,6 +18,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_link_delta_twist,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
+    _MAX_POINTS,
     _build_generalized_contact_rows_kernel,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
@@ -302,7 +303,7 @@ def _make_high_degree_articulation_star(device, satellite_count=72):
     return builder.finalize(device=device)
 
 
-def _make_contact_overflow_model(device, contact_count=24):
+def _make_contact_overflow_model(device, contact_count=_MAX_POINTS + 8):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     body = builder.add_link(mass=2.0)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.6, restitution=0.0)
@@ -1223,6 +1224,39 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
         np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
 
+    def test_contact_block_skips_deferred_fallback_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_contact_overflow_model(device, contact_count=8)
+        state = model.state()
+        output = model.state()
+        qd = state.joint_qd.numpy()
+        qd[2] = -0.2
+        state.joint_qd.assign(qd)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=8,
+            velocity_iterations=0,
+        )
+        contacts = model.contacts()
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state, contacts)
+            solver.step(state, output, None, contacts, 1.0 / 2000.0)
+        wp.capture_launch(capture.graph)
+
+        block = solver._reduced_articulation.contact_block_system
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+        self.assertEqual(int(block.enabled.numpy()[0]), 1)
+        self.assertEqual(int(block.deferred_active.numpy()[0]), 0)
+        self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
+        self.assertGreater(float(output.joint_qd.numpy()[2]), -0.2)
+
     def test_contact_block_overflow_uses_exact_graph_captured_fallback(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -1252,8 +1286,9 @@ class TestReducedArticulation(unittest.TestCase):
         block = solver._reduced_articulation.contact_block_system
         column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
         self.assertGreaterEqual(column_count, 1)
-        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 16)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), _MAX_POINTS)
         self.assertEqual(int(block.enabled.numpy()[0]), 0)
+        self.assertEqual(int(block.deferred_active.numpy()[0]), 1)
         self.assertEqual(int(block.fallback_count.numpy()[0]), 0)
         self.assertTrue(np.isfinite(output.joint_q.numpy()).all())
         self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
