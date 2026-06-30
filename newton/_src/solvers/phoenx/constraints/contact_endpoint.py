@@ -185,7 +185,6 @@ def _articulation_pair_wrench_response(
         if parent >= wp.int32(0):
             data.body_work[parent] = data.body_work[parent] + propagated
 
-    effective_inverse_mass = wp.float32(0.0)
     for joint in range(start, end):
         parent = data.joint_parent[joint]
         child = data.joint_child[joint]
@@ -213,9 +212,14 @@ def _articulation_pair_wrench_response(
             if wp.int32(row) < dof_count:
                 dof = dof_start + wp.int32(row)
                 data.generalized_response[dof] = response[row]
-                effective_inverse_mass += data.joint_work[dof] * response[row]
                 child_acceleration += data.joint_s[dof] * response[row]
         data.body_acceleration[child] = child_acceleration
+
+    effective_inverse_mass = wp.float32(0.0)
+    if body_slot0 >= wp.int32(0):
+        effective_inverse_mass += wp.dot(wrench0, data.body_acceleration[body_slot0 - wp.int32(1)])
+    if body_slot1 >= wp.int32(0):
+        effective_inverse_mass += wp.dot(wrench1, data.body_acceleration[body_slot1 - wp.int32(1)])
 
     if apply:
         for joint in range(start, end):

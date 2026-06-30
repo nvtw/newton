@@ -99,7 +99,8 @@ def _build_model(
     else:
         raise ValueError(f"unknown layout {layout!r}")
     if contacts:
-        builder.add_ground_plane()
+        ground_cfg = newton.ModelBuilder.ShapeConfig(collision_group=-1)
+        builder.add_ground_plane(cfg=ground_cfg)
     return builder.finalize(device=device)
 
 

@@ -53,6 +53,8 @@ from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulatio
 from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_velocity_update_no_soft_pd
 from newton._src.solvers.phoenx.helpers.math_helpers import apply_body_spatial_impulse
 
+_vec6 = wp.types.vector(length=6, dtype=wp.float32)
+
 
 @wp.func
 def _point_velocity(bodies: BodyContainer, body: wp.int32, point: wp.vec3f) -> wp.vec3f:
@@ -219,6 +221,152 @@ def _apply_pair_impulse(
 
 
 @wp.func
+def reduced_contact_deferred_owner(
+    columns: ContactColumnContainer,
+    column: wp.int32,
+    bodies: BodyContainer,
+) -> wp.int32:
+    """Return the articulation for an articulation-immutable contact."""
+    body0 = contact_get_body1(columns, column)
+    body1 = contact_get_body2(columns, column)
+    articulation0 = bodies.reduced.body_articulation[body0]
+    articulation1 = bodies.reduced.body_articulation[body1]
+    if articulation0 >= wp.int32(0) and articulation1 < wp.int32(0):
+        if bodies.inverse_mass[body1] == wp.float32(0.0):
+            return articulation0
+    if articulation1 >= wp.int32(0) and articulation0 < wp.int32(0):
+        if bodies.inverse_mass[body0] == wp.float32(0.0):
+            return articulation1
+    return wp.int32(-1)
+
+
+@wp.func
+def _response_matrix_multiply(
+    bodies: BodyContainer,
+    body: wp.int32,
+    wrench: wp.spatial_vector,
+) -> wp.spatial_vector:
+    result = wp.spatial_vector()
+    data = bodies.reduced
+    for column in range(6):
+        result += data.impulse_response[body, column] * wrench[column]
+    return result
+
+
+@wp.func
+def _deferred_inverse_mass(
+    bodies: BodyContainer,
+    body0: wp.int32,
+    point0: wp.vec3f,
+    body1: wp.int32,
+    point1: wp.vec3f,
+    direction: wp.vec3f,
+) -> wp.float32:
+    body = body0
+    point = point0
+    impulse = -direction
+    if bodies.reduced.body_articulation[body] < wp.int32(0):
+        body = body1
+        point = point1
+        impulse = direction
+    link = body - wp.int32(1)
+    wrench = wp.spatial_vector(impulse, wp.cross(point, impulse))
+    return wp.dot(wrench, _response_matrix_multiply(bodies, link, wrench))
+
+
+@wp.func
+def _apply_deferred_impulse(
+    bodies: BodyContainer,
+    body0: wp.int32,
+    point0: wp.vec3f,
+    body1: wp.int32,
+    point1: wp.vec3f,
+    impulse_on_body1: wp.vec3f,
+):
+    body = body0
+    point = point0
+    impulse = -impulse_on_body1
+    if bodies.reduced.body_articulation[body] < wp.int32(0):
+        body = body1
+        point = point1
+        impulse = impulse_on_body1
+
+    data = bodies.reduced
+    link = body - wp.int32(1)
+    wrench = wp.spatial_vector(impulse, wp.cross(point, impulse))
+    joint = data.body_joint[link]
+    while joint >= wp.int32(0):
+        data.deferred_wrench[link] = data.deferred_wrench[link] + wrench
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        projected = _vec6(0.0)
+        reduced = _vec6(0.0)
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                projected[row] = wp.dot(data.joint_s[dof_start + wp.int32(row)], wrench)
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                for column in range(6):
+                    if wp.int32(column) < dof_count:
+                        reduced[row] += data.joint_d_inv[joint, row, column] * projected[column]
+        propagated = wrench
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                propagated -= data.joint_u[dof_start + wp.int32(row)] * reduced[row]
+        link = data.joint_parent[joint]
+        wrench = propagated
+        if link >= wp.int32(0):
+            joint = data.body_joint[link]
+        else:
+            joint = wp.int32(-1)
+
+
+@wp.func
+def _deferred_link_delta_twist(bodies: BodyContainer, body_slot: wp.int32) -> wp.spatial_vector:
+    data = bodies.reduced
+    body = body_slot - wp.int32(1)
+    delta = wp.spatial_vector()
+    start = data.body_path_start[body]
+    end = data.body_path_start[body + wp.int32(1)]
+    for path_index in range(start, end):
+        joint = data.body_path_joint[path_index]
+        child = data.joint_child[joint]
+        wrench = data.deferred_wrench[child]
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        rhs = _vec6(0.0)
+        response = _vec6(0.0)
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                rhs[row] = wp.dot(data.joint_s[dof], wrench) - wp.dot(data.joint_u[dof], delta)
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                for column in range(6):
+                    if wp.int32(column) < dof_count:
+                        response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                delta += data.joint_s[dof_start + wp.int32(row)] * response[row]
+    return delta
+
+
+@wp.func
+def _deferred_point_velocity(
+    bodies: BodyContainer,
+    body: wp.int32,
+    point: wp.vec3f,
+) -> wp.vec3f:
+    velocity = _point_velocity(bodies, body, point)
+    if bodies.reduced.body_articulation[body] >= wp.int32(0):
+        delta = _deferred_link_delta_twist(bodies, body)
+        velocity += wp.spatial_top(delta) + wp.cross(wp.spatial_bottom(delta), point)
+    return velocity
+
+
+@wp.func
 def _uses_start_gap(contacts: ContactViews, contact: wp.int32) -> wp.bool:
     shape0 = contacts.rigid_contact_shape0[contact]
     shape1 = contacts.rigid_contact_shape1[contact]
@@ -249,6 +397,7 @@ def reduced_contact_prepare(
     idt: wp.float32,
     contacts_state: ContactContainer,
     contacts: ContactViews,
+    use_deferred: wp.bool,
 ):
     """Prepare effective masses, TGS biases, and warm-start impulses."""
     body0 = contact_get_body1(columns, column)
@@ -285,7 +434,11 @@ def reduced_contact_prepare(
                 direction = tangent0
             elif row == 2:
                 direction = tangent1
-            inverse_mass = _pair_inverse_mass(bodies, body0, point0, body1, point1, direction)
+            inverse_mass = wp.float32(0.0)
+            if use_deferred:
+                inverse_mass = _deferred_inverse_mass(bodies, body0, point0, body1, point1, direction)
+            else:
+                inverse_mass = _pair_inverse_mass(bodies, body0, point0, body1, point1, direction)
             if inverse_mass > wp.float32(1.0e-12):
                 effective_mass[row] = wp.float32(1.0) / inverse_mass
 
@@ -318,7 +471,10 @@ def reduced_contact_prepare(
             + cc_get_tangent1_lambda(contacts_state, contact) * tangent0
             + cc_get_tangent2_lambda(contacts_state, contact) * tangent1
         )
-        _apply_pair_impulse(bodies, body0, point0, body1, point1, impulse)
+        if use_deferred:
+            _apply_deferred_impulse(bodies, body0, point0, body1, point1, impulse)
+        else:
+            _apply_pair_impulse(bodies, body0, point0, body1, point1, impulse)
 
 
 @wp.func
@@ -331,6 +487,7 @@ def reduced_contact_iterate(
     contacts_state: ContactContainer,
     contacts: ContactViews,
     use_bias: wp.bool,
+    use_deferred: wp.bool,
 ):
     """Run one sequential contact-manifold PGS sweep."""
     body0 = contact_get_body1(columns, column)
@@ -363,7 +520,12 @@ def reduced_contact_iterate(
             + wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
             - contacts.rigid_contact_margin1[contact] * normal
         )
-        relative_velocity = _point_velocity(bodies, body1, point1) - _point_velocity(bodies, body0, point0)
+        if use_deferred:
+            relative_velocity = _deferred_point_velocity(bodies, body1, point1) - _deferred_point_velocity(
+                bodies, body0, point0
+            )
+        else:
+            relative_velocity = _point_velocity(bodies, body1, point1) - _point_velocity(bodies, body0, point0)
         bias = cc_get_bias(contacts_state, contact)
         speculative = bias > wp.float32(0.0)
         if speculative and not use_bias:
@@ -408,7 +570,10 @@ def reduced_contact_iterate(
             wp.float32(0.0),
             wp.float32(0.0),
         )
-        _apply_pair_impulse(bodies, body0, point0, body1, point1, impulse)
+        if use_deferred:
+            _apply_deferred_impulse(bodies, body0, point0, body1, point1, impulse)
+        else:
+            _apply_pair_impulse(bodies, body0, point0, body1, point1, impulse)
 
 
-__all__ = ["reduced_contact_iterate", "reduced_contact_prepare"]
+__all__ = ["reduced_contact_deferred_owner", "reduced_contact_iterate", "reduced_contact_prepare"]

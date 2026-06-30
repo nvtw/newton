@@ -9,7 +9,14 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.articulations.reduced import ReducedArticulationSystem
+from newton._src.solvers.phoenx.articulations.reduced import (
+    ReducedArticulationSystem,
+    _flush_deferred_articulation,
+)
+from newton._src.solvers.phoenx.articulations.reduced_contact import (
+    _apply_deferred_impulse,
+    _deferred_link_delta_twist,
+)
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_wrench_response
 
@@ -285,6 +292,73 @@ def _apply_internal_wrench_pair(
         wp.spatial_vector(wp.vec3(0.0), -torque),
         wp.bool(True),
     )
+
+
+@wp.kernel
+def _compare_cached_impulse_response(
+    bodies: BodyContainer,
+    body_slot: wp.int32,
+    wrench: wp.spatial_vector,
+    result: wp.array[wp.float32],
+    response_result: wp.array[wp.spatial_vector],
+    result_index: wp.int32,
+):
+    exact = _articulation_pair_wrench_response(
+        bodies,
+        body_slot,
+        wrench,
+        wp.int32(-1),
+        wp.spatial_vector(),
+        wp.bool(False),
+    )
+    body = body_slot - wp.int32(1)
+    response = wp.spatial_vector()
+    for column in range(6):
+        response += bodies.reduced.impulse_response[body, column] * wrench[column]
+    result[result_index] = exact
+    result[result_index + wp.int32(1)] = wp.dot(wrench, response)
+    response_result[result_index] = bodies.reduced.body_acceleration[body]
+    response_result[result_index + wp.int32(1)] = response
+
+
+@wp.kernel
+def _compare_deferred_contact_response(
+    bodies: BodyContainer,
+    body_slot: wp.int32,
+    point: wp.vec3,
+    impulse_on_static: wp.vec3,
+    exact_twist: wp.array[wp.spatial_vector],
+    deferred_twist: wp.array[wp.spatial_vector],
+    exact_qd: wp.array[wp.float32],
+):
+    link = body_slot - wp.int32(1)
+    _articulation_pair_wrench_response(
+        bodies,
+        body_slot,
+        wp.spatial_vector(-impulse_on_static, wp.cross(point, -impulse_on_static)),
+        wp.int32(-1),
+        wp.spatial_vector(),
+        wp.bool(False),
+    )
+    exact_twist[0] = bodies.reduced.body_acceleration[link]
+    articulation = bodies.reduced.body_articulation[body_slot]
+    start = bodies.reduced.articulation_start[articulation]
+    end = bodies.reduced.articulation_end[articulation]
+    dof_start = bodies.reduced.joint_qd_start[start]
+    dof_end = bodies.reduced.joint_qd_start[end]
+    for dof in range(dof_start, dof_end):
+        exact_qd[dof] = bodies.reduced.generalized_response[dof]
+
+    _apply_deferred_impulse(
+        bodies,
+        body_slot,
+        point,
+        wp.int32(0),
+        point,
+        impulse_on_static,
+    )
+    deferred_twist[0] = _deferred_link_delta_twist(bodies, body_slot)
+    _flush_deferred_articulation(bodies, articulation)
 
 
 @wp.kernel
@@ -623,6 +697,95 @@ class TestReducedArticulation(unittest.TestCase):
                 self.assertLess(float(np.max(errors)), 5.0e-4)
                 self.assertTrue(np.all(np.isfinite(state0.joint_q.numpy())))
                 self.assertGreater(float(np.linalg.norm(state0.joint_q.numpy() - initial_q)), 0.05)
+
+    def test_cached_impulse_response_matches_aba_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_floating_tree(device)
+        state = model.state()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+        )
+        bridge = solver._reduced_articulation
+        result = wp.zeros(4, dtype=wp.float32, device=device)
+        response_result = wp.zeros(4, dtype=wp.spatial_vector, device=device)
+        wrench0 = wp.spatial_vector(0.7, -0.2, 0.4, -0.3, 0.6, 0.1)
+        wrench1 = wp.spatial_vector(-0.1, 0.8, -0.5, 0.2, -0.4, 0.9)
+        with wp.ScopedCapture(device=device) as capture:
+            bridge.import_step(state, model.control())
+            bridge.begin_substep(0.0, split_dynamics=False)
+            wp.launch(
+                _compare_cached_impulse_response,
+                dim=1,
+                inputs=[solver.bodies, wp.int32(1), wrench0, result, response_result, wp.int32(0)],
+                device=device,
+            )
+            wp.launch(
+                _compare_cached_impulse_response,
+                dim=1,
+                inputs=[solver.bodies, wp.int32(2), wrench1, result, response_result, wp.int32(2)],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        values = result.numpy()
+        responses = response_result.numpy()
+        np.testing.assert_allclose(responses[[1, 3]], responses[[0, 2]], rtol=2.0e-5, atol=2.0e-6)
+        np.testing.assert_allclose(values[[1, 3]], values[[0, 2]], rtol=2.0e-5, atol=2.0e-6)
+
+    def test_deferred_contact_response_matches_aba_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_floating_tree(device)
+        state = model.state()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+        )
+        bridge = solver._reduced_articulation
+        exact_twist = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+        deferred_twist = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+        exact_qd = wp.zeros(model.joint_dof_count, dtype=wp.float32, device=device)
+        initial_qd = bridge.system.joint_qd_internal.numpy().copy()
+        point = wp.vec3(0.45, -0.2, 0.35)
+        impulse = wp.vec3(-0.7, 0.4, -0.3)
+        with wp.ScopedCapture(device=device) as capture:
+            bridge.import_step(state, model.control())
+            bridge.begin_substep(0.0, split_dynamics=False)
+            wp.launch(
+                _compare_deferred_contact_response,
+                dim=1,
+                inputs=[
+                    solver.bodies,
+                    wp.int32(2),
+                    point,
+                    impulse,
+                    exact_twist,
+                    deferred_twist,
+                    exact_qd,
+                ],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(deferred_twist.numpy(), exact_twist.numpy(), rtol=2.0e-5, atol=2.0e-6)
+        np.testing.assert_allclose(
+            bridge.system.joint_qd_internal.numpy() - initial_qd,
+            exact_qd.numpy(),
+            rtol=2.0e-5,
+            atol=2.0e-6,
+        )
 
     def test_spatial_wrench_pair_conserves_momentum_under_graph_capture(self):
         device = wp.get_preferred_device()

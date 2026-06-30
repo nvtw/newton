@@ -22,7 +22,11 @@ from newton._src.solvers.featherstone.kernels import (
     spatial_cross_dual,
     transform_spatial_inertia,
 )
-from newton._src.solvers.phoenx.articulations.reduced_contact import reduced_contact_iterate, reduced_contact_prepare
+from newton._src.solvers.phoenx.articulations.reduced_contact import (
+    reduced_contact_deferred_owner,
+    reduced_contact_iterate,
+    reduced_contact_prepare,
+)
 from newton._src.solvers.phoenx.articulations.reduced_loop import ReducedLoopSystem
 from newton._src.solvers.phoenx.body import (
     MOTION_ARTICULATED,
@@ -386,6 +390,82 @@ def _factor_reduced_articulations_kernel(
         joint_u,
         joint_d_inv,
     )
+
+
+@wp.func
+def _multiply_impulse_response(
+    impulse_response: wp.array2d[wp.spatial_vector],
+    body: wp.int32,
+    wrench: wp.spatial_vector,
+) -> wp.spatial_vector:
+    result = wp.spatial_vector()
+    for column in range(6):
+        result += impulse_response[body, column] * wrench[column]
+    return result
+
+
+@wp.kernel(enable_backward=False)
+def _compute_reduced_impulse_response_kernel(
+    bodies: BodyContainer,
+):
+    """Build each link's exact frozen-configuration 6x6 impulse response."""
+    articulation = wp.tid()
+    data = bodies.reduced
+    start = data.articulation_start[articulation]
+    end = data.articulation_end[articulation]
+    for joint in range(start, end):
+        parent = data.joint_parent[joint]
+        child = data.joint_child[joint]
+        data.deferred_wrench[child] = wp.spatial_vector()
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        for basis in range(6):
+            wrench = wp.spatial_vector()
+            wrench[basis] = wp.float32(1.0)
+            negative_force = -wrench
+            reduced_force = _vec6(0.0)
+            d_inv_u = _vec6(0.0)
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    dof = dof_start + wp.int32(row)
+                    reduced_force[row] = -wp.dot(data.joint_s[dof], negative_force)
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    for column in range(_MAX_JOINT_DOF):
+                        if wp.int32(column) < dof_count:
+                            d_inv_u[row] += data.joint_d_inv[joint, row, column] * reduced_force[column]
+
+            propagated_negative_force = negative_force
+            for column in range(_MAX_JOINT_DOF):
+                if wp.int32(column) < dof_count:
+                    propagated_negative_force += data.joint_u[dof_start + wp.int32(column)] * d_inv_u[column]
+
+            parent_response = wp.spatial_vector()
+            if parent >= wp.int32(0):
+                parent_response = _multiply_impulse_response(
+                    data.impulse_response,
+                    parent,
+                    -propagated_negative_force,
+                )
+
+            rhs = _vec6(0.0)
+            response = _vec6(0.0)
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    dof = dof_start + wp.int32(row)
+                    rhs[row] = reduced_force[row] - wp.dot(data.joint_u[dof], parent_response)
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    for column in range(_MAX_JOINT_DOF):
+                        if wp.int32(column) < dof_count:
+                            response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
+
+            child_response = parent_response
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    child_response += data.joint_s[dof_start + wp.int32(row)] * response[row]
+            data.impulse_response[child, basis] = child_response
 
 
 @wp.func
@@ -915,6 +995,103 @@ def _advance_reduced_articulations_kernel(
         bodies.angular_velocity[slot] = omega
 
 
+@wp.func
+def _flush_deferred_articulation(bodies: BodyContainer, articulation: wp.int32):
+    data = bodies.reduced
+    start = data.articulation_start[articulation]
+    end = data.articulation_end[articulation]
+    for joint in range(start, end):
+        parent = data.joint_parent[joint]
+        child = data.joint_child[joint]
+        parent_delta = wp.spatial_vector()
+        if parent >= wp.int32(0):
+            parent_delta = data.body_acceleration[parent]
+        wrench = data.deferred_wrench[child]
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        rhs = _vec6(0.0)
+        response = _vec6(0.0)
+        for row in range(_MAX_JOINT_DOF):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                rhs[row] = wp.dot(data.joint_s[dof], wrench) - wp.dot(data.joint_u[dof], parent_delta)
+        for row in range(_MAX_JOINT_DOF):
+            if wp.int32(row) < dof_count:
+                for column in range(_MAX_JOINT_DOF):
+                    if wp.int32(column) < dof_count:
+                        response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
+        child_delta = parent_delta
+        for row in range(_MAX_JOINT_DOF):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                data.joint_qd[dof] += response[row]
+                child_delta += data.joint_s[dof] * response[row]
+        data.body_acceleration[child] = child_delta
+        slot = child + wp.int32(1)
+        delta_omega = wp.spatial_bottom(child_delta)
+        bodies.angular_velocity[slot] = bodies.angular_velocity[slot] + delta_omega
+        bodies.velocity[slot] = (
+            bodies.velocity[slot] + wp.spatial_top(child_delta) + wp.cross(delta_omega, bodies.position[slot])
+        )
+        data.deferred_wrench[child] = wp.spatial_vector()
+
+
+@wp.kernel(enable_backward=False)
+def _solve_reduced_deferred_contacts_kernel(
+    articulation_constraint_node: wp.array[wp.int32],
+    adjacency_section_end: wp.array[wp.int32],
+    adjacent_element: wp.array[wp.int32],
+    contact_cols: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    contact_start: wp.int32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    iterations: wp.int32,
+    use_bias: wp.bool,
+    prepare: wp.bool,
+):
+    articulation = wp.tid()
+    node = articulation_constraint_node[articulation]
+    start = wp.int32(0)
+    if node > wp.int32(0):
+        start = adjacency_section_end[node - wp.int32(1)]
+    end = adjacency_section_end[node]
+
+    if prepare:
+        for index in range(start, end):
+            cid = adjacent_element[index]
+            if cid >= contact_start:
+                column = cid - contact_start
+                if reduced_contact_deferred_owner(contact_cols, column, bodies) == articulation:
+                    reduced_contact_prepare(contact_cols, column, bodies, idt, cc, contacts, wp.bool(True))
+
+    for iteration in range(iterations):
+        for offset in range(end - start):
+            index = start + offset
+            if (iteration & wp.int32(1)) != wp.int32(0):
+                index = end - wp.int32(1) - offset
+            cid = adjacent_element[index]
+            if cid >= contact_start:
+                column = cid - contact_start
+                if reduced_contact_deferred_owner(contact_cols, column, bodies) == articulation:
+                    reduced_contact_iterate(
+                        contact_cols,
+                        column,
+                        bodies,
+                        idt,
+                        sor_boost,
+                        cc,
+                        contacts,
+                        use_bias,
+                        wp.bool(True),
+                    )
+
+    _flush_deferred_articulation(bodies, articulation)
+
+
 @wp.kernel(enable_backward=False)
 def _solve_reduced_contacts_multi_world_kernel(
     contact_cols: ContactColumnContainer,
@@ -943,14 +1120,17 @@ def _solve_reduced_contacts_multi_world_kernel(
             for index in range(start, end):
                 cid = element_ids_by_color[index]
                 if cid >= contact_start:
-                    reduced_contact_prepare(
-                        contact_cols,
-                        cid - contact_start,
-                        bodies,
-                        idt,
-                        cc,
-                        contacts,
-                    )
+                    column = cid - contact_start
+                    if reduced_contact_deferred_owner(contact_cols, column, bodies) < wp.int32(0):
+                        reduced_contact_prepare(
+                            contact_cols,
+                            column,
+                            bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            wp.bool(False),
+                        )
 
     for iteration in range(iterations):
         for color_offset in range(num_colors):
@@ -962,16 +1142,19 @@ def _solve_reduced_contacts_multi_world_kernel(
             for index in range(start, end):
                 cid = element_ids_by_color[index]
                 if cid >= contact_start:
-                    reduced_contact_iterate(
-                        contact_cols,
-                        cid - contact_start,
-                        bodies,
-                        idt,
-                        sor_boost,
-                        cc,
-                        contacts,
-                        use_bias,
-                    )
+                    column = cid - contact_start
+                    if reduced_contact_deferred_owner(contact_cols, column, bodies) < wp.int32(0):
+                        reduced_contact_iterate(
+                            contact_cols,
+                            column,
+                            bodies,
+                            idt,
+                            sor_boost,
+                            cc,
+                            contacts,
+                            use_bias,
+                            wp.bool(False),
+                        )
 
 
 @wp.kernel(enable_backward=False)
@@ -999,14 +1182,17 @@ def _solve_reduced_contacts_single_world_kernel(
             for index in range(start, end):
                 cid = element_ids_by_color[index]
                 if cid >= contact_start:
-                    reduced_contact_prepare(
-                        contact_cols,
-                        cid - contact_start,
-                        bodies,
-                        idt,
-                        cc,
-                        contacts,
-                    )
+                    column = cid - contact_start
+                    if reduced_contact_deferred_owner(contact_cols, column, bodies) < wp.int32(0):
+                        reduced_contact_prepare(
+                            contact_cols,
+                            column,
+                            bodies,
+                            idt,
+                            cc,
+                            contacts,
+                            wp.bool(False),
+                        )
 
     for iteration in range(iterations):
         for color_offset in range(num_colors):
@@ -1018,16 +1204,19 @@ def _solve_reduced_contacts_single_world_kernel(
             for index in range(start, end):
                 cid = element_ids_by_color[index]
                 if cid >= contact_start:
-                    reduced_contact_iterate(
-                        contact_cols,
-                        cid - contact_start,
-                        bodies,
-                        idt,
-                        sor_boost,
-                        cc,
-                        contacts,
-                        use_bias,
-                    )
+                    column = cid - contact_start
+                    if reduced_contact_deferred_owner(contact_cols, column, bodies) < wp.int32(0):
+                        reduced_contact_iterate(
+                            contact_cols,
+                            column,
+                            bodies,
+                            idt,
+                            sor_boost,
+                            cc,
+                            contacts,
+                            use_bias,
+                            wp.bool(False),
+                        )
 
 
 class ReducedArticulationSystem:
@@ -1062,6 +1251,8 @@ class ReducedArticulationSystem:
         self.generalized_acceleration = wp.empty(dof_count, dtype=wp.float32, device=self.device)
         self.zero_generalized_force = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
         self.generalized_rhs = wp.empty(dof_count, dtype=wp.float32, device=self.device)
+        self.impulse_response = wp.zeros((body_count, 6), dtype=wp.spatial_vector, device=self.device)
+        self.deferred_wrench = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
 
         wp.launch(
             compute_spatial_inertia,
@@ -1303,15 +1494,34 @@ class ReducedPhoenXArticulation:
         tree_joint_mask_np = tree_joint_mask.numpy()
         constraint_node_np = bodies.constraint_node.numpy()
         body_articulation_np = np.full(int(model.body_count) + 1, -1, dtype=np.int32)
+        articulation_constraint_node_np = np.empty(int(model.articulation_count), dtype=np.int32)
+        body_joint_np = np.full(int(model.body_count), -1, dtype=np.int32)
+        for joint, child in enumerate(joint_child):
+            body_joint_np[int(child)] = joint
+        body_path_start_np = np.zeros(int(model.body_count) + 1, dtype=np.int32)
+        body_path_joint_list: list[int] = []
+        joint_parent_np = model.joint_parent.numpy()
+        for body in range(int(model.body_count)):
+            path: list[int] = []
+            joint = int(body_joint_np[body])
+            while joint >= 0:
+                path.append(joint)
+                parent = int(joint_parent_np[joint])
+                joint = int(body_joint_np[parent]) if parent >= 0 else -1
+            body_path_joint_list.extend(reversed(path))
+            body_path_start_np[body + 1] = len(body_path_joint_list)
         for articulation in range(int(model.articulation_count)):
             start = int(articulation_start[articulation])
             end = int(articulation_end[articulation])
             children = joint_child[start:end]
             tree_joint_mask_np[start:end] = 1
             body_is_reduced_np[children] = 1
-            constraint_node_np[children + 1] = int(children[0]) + 1
+            constraint_node = int(children[0]) + 1
+            constraint_node_np[children + 1] = constraint_node
+            articulation_constraint_node_np[articulation] = constraint_node
             body_articulation_np[children + 1] = articulation
         bodies.constraint_node.assign(constraint_node_np)
+        self.articulation_constraint_node = wp.array(articulation_constraint_node_np, device=model.device)
 
         reduced = ReducedArticulationData()
         reduced.enabled = wp.ones(1, dtype=wp.int32, device=model.device)
@@ -1329,6 +1539,14 @@ class ReducedPhoenXArticulation:
         reduced.joint_work = self.system.joint_work
         reduced.body_acceleration = self.system.body_acceleration
         reduced.generalized_response = self.system.generalized_acceleration
+        reduced.impulse_response = self.system.impulse_response
+        reduced.deferred_wrench = self.system.deferred_wrench
+        reduced.body_joint = wp.array(body_joint_np, device=model.device)
+        reduced.body_path_start = wp.array(body_path_start_np, device=model.device)
+        reduced.body_path_joint = wp.array(
+            np.asarray(body_path_joint_list, dtype=np.int32),
+            device=model.device,
+        )
         bodies.reduced = reduced
         body_is_reduced.assign(body_is_reduced_np)
         tree_joint_mask.assign(tree_joint_mask_np)
@@ -1369,6 +1587,12 @@ class ReducedPhoenXArticulation:
             dt,
             include_external=True,
             include_coriolis=not split_dynamics,
+        )
+        wp.launch(
+            _compute_reduced_impulse_response_kernel,
+            dim=int(self.model.articulation_count),
+            inputs=[self.bodies],
+            device=self.model.device,
         )
 
     def end_substep(self, dt: float, *, split_dynamics: bool) -> None:
@@ -1467,6 +1691,18 @@ class ReducedPhoenXArticulation:
             wp.bool(not relax),
             wp.bool(not relax),
         ]
+        wp.launch(
+            _solve_reduced_deferred_contacts_kernel,
+            dim=int(self.model.articulation_count),
+            inputs=[
+                self.articulation_constraint_node,
+                world._partitioner._adjacency_section_end_indices,
+                world._partitioner._vertex_to_adjacent_elements,
+                *common_inputs,
+                *common_tail,
+            ],
+            device=self.model.device,
+        )
         if world.step_layout == "single_world":
             wp.launch(
                 _solve_reduced_contacts_single_world_kernel,

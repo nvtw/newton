@@ -101,6 +101,11 @@ class ReducedArticulationData:
     joint_work: wp.array[wp.float32]
     body_acceleration: wp.array[wp.spatial_vector]
     generalized_response: wp.array[wp.float32]
+    impulse_response: wp.array2d[wp.spatial_vector]
+    deferred_wrench: wp.array[wp.spatial_vector]
+    body_joint: wp.array[wp.int32]
+    body_path_start: wp.array[wp.int32]
+    body_path_joint: wp.array[wp.int32]
 
 
 def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArticulationData:
@@ -121,6 +126,11 @@ def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArti
     data.joint_work = wp.zeros(1, dtype=wp.float32, device=device)
     data.body_acceleration = wp.zeros(1, dtype=wp.spatial_vector, device=device)
     data.generalized_response = wp.zeros(1, dtype=wp.float32, device=device)
+    data.impulse_response = wp.zeros((1, 6), dtype=wp.spatial_vector, device=device)
+    data.deferred_wrench = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+    data.body_joint = wp.full(1, value=-1, dtype=wp.int32, device=device)
+    data.body_path_start = wp.zeros(2, dtype=wp.int32, device=device)
+    data.body_path_joint = wp.zeros(1, dtype=wp.int32, device=device)
     return data
 
 
