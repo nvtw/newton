@@ -531,13 +531,14 @@ class BroadPhaseSAP:
         # Outputs
         candidate_pair: wp.array[wp.vec2i],  # Array to store overlapping shape pairs
         candidate_pair_count: wp.array[int],
-        shape_body: wp.array[int] | None = None,
-        body_flags: wp.array[int] | None = None,
-        include_static_kinematic_pairs: bool = True,
         device: Devicelike | None = None,  # Device to launch on
         filter_pairs: wp.array[wp.vec2i] | None = None,  # Sorted excluded pairs
         num_filter_pairs: int | None = None,
         skip_count_zero: bool = False,  # Skip candidate_pair_count.zero_() if already zeroed by the caller
+        *,
+        shape_body: wp.array[int] | None = None,
+        body_flags: wp.array[int] | None = None,
+        include_static_kinematic_pairs: bool = True,
     ) -> None:
         """Launch the sweep and prune broad phase collision detection with per-world segmented sort.
 
@@ -558,12 +559,6 @@ class BroadPhaseSAP:
             shape_count: Number of active bounding boxes to check (not used in world-based approach)
             candidate_pair: Output array to store overlapping shape pairs
             candidate_pair_count: Output array to store number of overlapping pairs found
-            shape_body: Optional array mapping each shape to its body index. Negative body indices are static shapes.
-                Omitting this array disables immovable-pair filtering for expert callers.
-            body_flags: Optional body flag array used to identify kinematic bodies. An empty array is valid for
-                an all-static model when ``shape_body`` is provided.
-            include_static_kinematic_pairs: Whether to include pairs where both shapes are immovable. Set to
-                ``False`` to filter static-static, static-kinematic, and kinematic-kinematic pairs.
             device: Device to launch on. If None, uses the device of the input arrays.
             filter_pairs: Optional sorted shape pairs to exclude.
             num_filter_pairs: Number of valid entries in ``filter_pairs``. If None, uses ``filter_pairs.shape[0]``.
@@ -571,6 +566,12 @@ class BroadPhaseSAP:
                 The caller guarantees ``candidate_pair_count[0] == 0`` on entry (e.g. when
                 the counter was zeroed by a preceding fused kernel).  Defaults to False so
                 the launch remains self-contained.
+            shape_body: Optional array mapping each shape to its body index. Negative body indices are static shapes.
+                Omitting this array disables immovable-pair filtering for expert callers.
+            body_flags: Optional body flag array used to identify kinematic bodies. An empty array is valid for
+                an all-static model when ``shape_body`` is provided.
+            include_static_kinematic_pairs: Whether to include pairs where both shapes are immovable. Set to
+                ``False`` to filter static-static, static-kinematic, and kinematic-kinematic pairs.
 
         The method will populate candidate_pair with the indices of shape pairs whose AABBs overlap
         (with optional margin expansion), whose collision groups allow interaction, and whose worlds are
