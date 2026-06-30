@@ -583,24 +583,15 @@ def _finish_reduced_articulations_kernel(
     joint_x_c: wp.array[wp.transform],
     joint_axis: wp.array[wp.vec3],
     joint_dof_dim: wp.array2d[wp.int32],
-    joint_armature: wp.array[wp.float32],
     body_com: wp.array[wp.vec3],
-    body_x_com: wp.array[wp.transform],
-    body_i_m: wp.array[wp.spatial_matrix],
     zero_generalized_acceleration: wp.array[wp.float32],
     dt: wp.float32,
     joint_qd_public: wp.array[wp.float32],
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
-    body_q_com: wp.array[wp.transform],
-    body_i_s: wp.array[wp.spatial_matrix],
-    joint_s: wp.array[wp.spatial_vector],
-    articulated_inertia: wp.array[wp.spatial_matrix],
-    joint_u: wp.array[wp.spatial_vector],
-    joint_d_inv: wp.array3d[wp.float32],
     bodies: BodyContainer,
 ):
-    """Integrate, evaluate FK, refactor, and publish one articulation."""
+    """Integrate, evaluate FK, and publish one articulation."""
     articulation = wp.tid()
     start = articulation_start[articulation]
     end = articulation_end[articulation]
@@ -655,30 +646,6 @@ def _finish_reduced_articulations_kernel(
             joint_qd_internal,
             joint_qd_public,
         )
-
-    _factor_single_reduced_articulation(
-        start,
-        end,
-        joint_type,
-        joint_parent,
-        joint_child,
-        joint_qd_start,
-        joint_x_p,
-        joint_axis,
-        joint_dof_dim,
-        joint_armature,
-        joint_qd_internal,
-        body_q,
-        body_com,
-        body_x_com,
-        body_i_m,
-        body_q_com,
-        body_i_s,
-        joint_s,
-        articulated_inertia,
-        joint_u,
-        joint_d_inv,
-    )
 
     for joint in range(start, end):
         child = joint_child[joint]
@@ -1492,10 +1459,7 @@ class ReducedPhoenXArticulation:
                 self.model.joint_X_c,
                 self.model.joint_axis,
                 self.model.joint_dof_dim,
-                self.model.joint_armature,
                 self.model.body_com,
-                self.system.body_x_com,
-                self.system.body_i_m,
                 self.system.zero_generalized_force,
                 wp.float32(dt),
             ],
@@ -1503,12 +1467,6 @@ class ReducedPhoenXArticulation:
                 self.state.joint_qd,
                 self.state.body_q,
                 self.state.body_qd,
-                self.system.body_q_com,
-                self.system.body_i_s,
-                self.system.joint_s,
-                self.system.articulated_inertia,
-                self.system.joint_u_matrix,
-                self.system.joint_d_inv,
                 self.bodies,
             ],
             device=self.model.device,
