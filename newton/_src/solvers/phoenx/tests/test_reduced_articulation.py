@@ -282,6 +282,25 @@ def _make_dense_articulation_contact_chain(device, articulation_count=48):
     return builder.finalize(device=device)
 
 
+def _make_high_degree_articulation_star(device, satellite_count=72):
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.0, restitution=0.0)
+    center = builder.add_link(mass=2.0)
+    builder.add_shape_sphere(center, radius=1.0, cfg=shape_cfg)
+    center_joint = builder.add_joint_free(parent=-1, child=center)
+    builder.add_articulation([center_joint])
+    builder.joint_q[-7:] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    for index in range(satellite_count):
+        angle = 2.0 * np.pi * float(index) / float(satellite_count)
+        position = 1.039 * np.array([np.cos(angle), np.sin(angle), 0.0], dtype=np.float32)
+        body = builder.add_link(mass=0.1)
+        builder.add_shape_sphere(body, radius=0.04, cfg=shape_cfg)
+        joint = builder.add_joint_free(parent=-1, child=body)
+        builder.add_articulation([joint])
+        builder.joint_q[-7:] = [*position, 0.0, 0.0, 0.0, 1.0]
+    return builder.finalize(device=device)
+
+
 def _make_contact_overflow_model(device, contact_count=24):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     body = builder.add_link(mass=2.0)
@@ -476,7 +495,7 @@ def _compute_body_momentum(
     momentum[body] = wp.spatial_vector(linear, angular)
 
 
-def _total_momentum(model, state):
+def _body_momenta(model, state):
     momentum = wp.empty(model.body_count, dtype=wp.spatial_vector, device=model.device)
     wp.launch(
         _compute_body_momentum,
@@ -485,7 +504,11 @@ def _total_momentum(model, state):
         outputs=[momentum],
         device=model.device,
     )
-    return np.sum(momentum.numpy(), axis=0)
+    return momentum.numpy().astype(np.float64)
+
+
+def _total_momentum(model, state):
+    return np.sum(_body_momenta(model, state), axis=0, dtype=np.float64)
 
 
 def _loop_closure_error(model, state, loop_joint):
@@ -1330,6 +1353,47 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertTrue(solvers[1].world._regular_pgs_active_this_step)
         np.testing.assert_allclose(outputs[1][0], outputs[0][0], rtol=0.0, atol=2.0e-6)
         np.testing.assert_allclose(outputs[1][1], outputs[0][1], rtol=0.0, atol=2.0e-6)
+
+    def test_high_degree_fallback_overflow_is_finite_and_conserves_momentum(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        satellite_count = 72
+        model = _make_high_degree_articulation_star(device, satellite_count)
+        state = model.state()
+        output = model.state()
+        qd = state.joint_qd.numpy().reshape(satellite_count + 1, 6)
+        for index in range(satellite_count):
+            angle = 2.0 * np.pi * float(index) / float(satellite_count)
+            qd[index + 1, :2] = -0.005 * np.array([np.cos(angle), np.sin(angle)], dtype=np.float32)
+        state.joint_qd.assign(qd.reshape(-1))
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=3,
+            velocity_iterations=0,
+        )
+        contacts = model.contacts()
+        momentum_before = _total_momentum(model, state)
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state, contacts)
+            solver.step(state, output, None, contacts, 1.0 / 2000.0)
+        wp.capture_launch(capture.graph)
+
+        block = solver._reduced_articulation.contact_block_system
+        self.assertGreaterEqual(int(block.fallback_count.numpy()[0]), satellite_count)
+        self.assertGreater(int(block.fallback_partitioner.num_colors.numpy()[0]), 63)
+        self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
+        body_momenta = _body_momenta(model, output)
+        momentum_after = np.sum(body_momenta, axis=0, dtype=np.float64)
+        residual = momentum_after - momentum_before
+        exchanged_momentum = np.linalg.norm(body_momenta[:, :3], axis=1).sum()
+        exchanged_momentum += np.linalg.norm(body_momenta[:, 3:], axis=1).sum()
+        self.assertLess(np.linalg.norm(residual), 1.0e-3 * exchanged_momentum + 1.0e-6)
 
     def test_contact_conserves_spatial_momentum_under_graph_capture(self):
         device = wp.get_preferred_device()

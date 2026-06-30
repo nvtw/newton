@@ -55,6 +55,7 @@ _MAX_POINTS = 16
 _MAX_ROWS = 3 * _MAX_POINTS
 _BLOCK_DIM = 32
 _MAX_DOFS = 64
+_FALLBACK_MAX_COLORED_PARTITIONS = 63
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 
 _INT64_MAX = 9223372036854775807
@@ -132,6 +133,24 @@ def _compact_fallback_contact_elements_kernel(
     )
 
 
+@wp.func
+def _solve_fallback_contact_column(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    column: wp.int32,
+    phase: wp.int32,
+    use_bias: wp.bool,
+):
+    if phase == wp.int32(0):
+        reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(False))
+    else:
+        reduced_contact_iterate(columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, wp.bool(False))
+
+
 @wp.kernel(enable_backward=False)
 def _solve_fallback_contact_color_kernel(
     columns: ContactColumnContainer,
@@ -146,6 +165,7 @@ def _solve_fallback_contact_color_kernel(
     num_colors: wp.array[wp.int32],
     color_cursor: wp.array[wp.int32],
     sweep_direction: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
     phase: wp.int32,
     use_bias: wp.bool,
 ):
@@ -156,17 +176,27 @@ def _solve_fallback_contact_color_kernel(
     color_count = num_colors[0]
     step = color_count - cursor
     color = step
+    has_overflow = color_count > max_colored_partitions
     if sweep_direction[0] != wp.int32(0):
-        color = color_count - wp.int32(1) - step
+        if has_overflow and step == max_colored_partitions:
+            color = max_colored_partitions
+        else:
+            regular_count = wp.min(color_count, max_colored_partitions)
+            color = regular_count - wp.int32(1) - step
     start = color_starts[color]
     end = color_starts[color + wp.int32(1)]
-    if tid < end - start:
+    if has_overflow and color == max_colored_partitions:
+        if tid == wp.int32(0):
+            for index in range(start, end):
+                fallback = element_ids_by_color[index]
+                _solve_fallback_contact_column(
+                    columns, bodies, idt, sor_boost, cc, contacts, fallback_column[fallback], phase, use_bias
+                )
+    elif tid < end - start:
         fallback = element_ids_by_color[start + tid]
-        column = fallback_column[fallback]
-        if phase == wp.int32(0):
-            reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(False))
-        else:
-            reduced_contact_iterate(columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, wp.bool(False))
+        _solve_fallback_contact_column(
+            columns, bodies, idt, sor_boost, cc, contacts, fallback_column[fallback], phase, use_bias
+        )
     if tid == wp.int32(0):
         color_cursor[0] = cursor - wp.int32(1)
 
@@ -634,6 +664,7 @@ class ReducedContactBlockSystem:
             max_num_nodes=self.body_count,
             device=self.device,
             seed=0,
+            max_colored_partitions=_FALLBACK_MAX_COLORED_PARTITIONS,
             enable_warm_start=True,
         )
         self.fallback_partitioner.set_symmetric_sweep(True)
@@ -758,6 +789,7 @@ class ReducedContactBlockSystem:
                         partitioner.num_colors,
                         partitioner.color_cursor,
                         partitioner.sweep_direction,
+                        wp.int32(_FALLBACK_MAX_COLORED_PARTITIONS),
                         wp.int32(phase),
                         wp.bool(use_bias),
                     ],

@@ -426,6 +426,7 @@ def reduced_contact_prepare(
             + wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
             - contacts.rigid_contact_margin1[contact] * normal
         )
+        contact_point = wp.float32(0.5) * (point0 + point1)
 
         effective_mass = wp.vec3f(0.0)
         for row in range(3):
@@ -436,9 +437,9 @@ def reduced_contact_prepare(
                 direction = tangent1
             inverse_mass = wp.float32(0.0)
             if use_deferred:
-                inverse_mass = _deferred_inverse_mass(bodies, body0, point0, body1, point1, direction)
+                inverse_mass = _deferred_inverse_mass(bodies, body0, contact_point, body1, contact_point, direction)
             else:
-                inverse_mass = _pair_inverse_mass(bodies, body0, point0, body1, point1, direction)
+                inverse_mass = _pair_inverse_mass(bodies, body0, contact_point, body1, contact_point, direction)
             if inverse_mass > wp.float32(1.0e-12):
                 effective_mass[row] = wp.float32(1.0) / inverse_mass
 
@@ -463,8 +464,8 @@ def reduced_contact_prepare(
         cc_set_bias(contacts_state, contact, bias)
         cc_set_bias_t1(contacts_state, contact, bias_t0)
         cc_set_bias_t2(contacts_state, contact, bias_t1)
-        cc_set_r0(contacts_state, contact, point0 - bodies.position[body0])
-        cc_set_r1(contacts_state, contact, point1 - bodies.position[body1])
+        cc_set_r0(contacts_state, contact, contact_point - bodies.position[body0])
+        cc_set_r1(contacts_state, contact, contact_point - bodies.position[body1])
 
         impulse = (
             cc_get_normal_lambda(contacts_state, contact) * normal
@@ -472,9 +473,9 @@ def reduced_contact_prepare(
             + cc_get_tangent2_lambda(contacts_state, contact) * tangent1
         )
         if use_deferred:
-            _apply_deferred_impulse(bodies, body0, point0, body1, point1, impulse)
+            _apply_deferred_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
         else:
-            _apply_pair_impulse(bodies, body0, point0, body1, point1, impulse)
+            _apply_pair_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
 
 
 @wp.func
@@ -520,12 +521,15 @@ def reduced_contact_iterate(
             + wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
             - contacts.rigid_contact_margin1[contact] * normal
         )
+        contact_point = wp.float32(0.5) * (point0 + point1)
         if use_deferred:
-            relative_velocity = _deferred_point_velocity(bodies, body1, point1) - _deferred_point_velocity(
-                bodies, body0, point0
+            relative_velocity = _deferred_point_velocity(bodies, body1, contact_point) - _deferred_point_velocity(
+                bodies, body0, contact_point
             )
         else:
-            relative_velocity = _point_velocity(bodies, body1, point1) - _point_velocity(bodies, body0, point0)
+            relative_velocity = _point_velocity(bodies, body1, contact_point) - _point_velocity(
+                bodies, body0, contact_point
+            )
         bias = cc_get_bias(contacts_state, contact)
         speculative = bias > wp.float32(0.0)
         if speculative and not use_bias:
@@ -571,9 +575,9 @@ def reduced_contact_iterate(
             wp.float32(0.0),
         )
         if use_deferred:
-            _apply_deferred_impulse(bodies, body0, point0, body1, point1, impulse)
+            _apply_deferred_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
         else:
-            _apply_pair_impulse(bodies, body0, point0, body1, point1, impulse)
+            _apply_pair_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
 
 
 __all__ = ["reduced_contact_deferred_owner", "reduced_contact_iterate", "reduced_contact_prepare"]
