@@ -73,14 +73,15 @@ class Example:
         use_mujoco_contacts = args.use_mujoco_contacts if args else False
 
         if solver_name == "phoenx":
-            # PhoenX runs its own contacts (sticky CollisionPipeline
-            # auto-attached). 6 substeps matches the outer cadence
-            # G1 uses; the higher joint_target_ke (500) benefits from
-            # the extra substepping relative to H1 at 150.
+            # Let PhoenX own the temporal schedule. Fine temporal steps
+            # converge this contact-rich maximal-coordinate chain more
+            # reliably than multiple PGS sweeps over a frozen linearization.
+            self.sim_substeps = 1
+            self.sim_dt = self.frame_dt
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
-                substeps=2 * self.sim_substeps,
-                solver_iterations=6,
+                substeps=16,
+                solver_iterations=1,
                 velocity_iterations=1,
             )
         else:

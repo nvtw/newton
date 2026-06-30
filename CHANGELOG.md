@@ -69,6 +69,7 @@
 
 ### Fixed
 
+- Stabilize the full-coordinate PhoenX `robot_g1` example with a fine temporal schedule.
 - Fix reduced-coordinate PhoenX motion-subspace evaluation after the common Featherstone API gained configuration-dependent D6 angular axes.
 - Fix reduced-coordinate PhoenX FREE and DISTANCE descendants to preserve child-COM velocity under rotated anchors and accelerating parents, and accept tree DISTANCE joints through `articulation_mode="reduced"`.
 - Fix reduced-coordinate PhoenX direct forward dynamics to evaluate body wrenches in articulation-local coordinates and refresh cached ABA inertia after live body-property changes.
