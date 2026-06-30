@@ -1364,10 +1364,13 @@ def g1_observe_reward_kernel(
         reward = wp.float32(0.0)
         success_metric = track_lin_upright
         if reward_mode == wp.int32(0):
+            # nanoG1 keeps tracking active during recovery; the upright gate only
+            # delays torso-stability penalties until the policy is competent.
+            success_metric = track_lin
             shaped_reward = (
-                w_track_lin * track_lin_upright
-                + w_track_ang * track_ang_upright
-                + w_command_progress * command_progress_upright
+                w_track_lin * track_lin
+                + w_track_ang * track_ang
+                + w_command_progress * command_progress
                 + w_lin_vel_z * lin_vel_z_penalty
                 + w_ang_vel_xy * ang_vel_xy_penalty * upright_gate
                 + w_orientation * orientation_penalty * upright_gate
@@ -2133,6 +2136,7 @@ class ConfigEnvG1PhoenX:
     threads_per_world: int | str = g1_recipe.THREADS_PER_WORLD
     multi_world_scheduler: str = g1_recipe.MULTI_WORLD_SCHEDULER
     prepare_refresh_stride: int | str = g1_recipe.PREPARE_REFRESH_STRIDE
+    articulation_mode: str = "maximal"
 
 
 class EnvG1PhoenX:
@@ -2427,6 +2431,7 @@ class EnvG1PhoenX:
             threads_per_world=self.config.threads_per_world,
             multi_world_scheduler=self.config.multi_world_scheduler,
             prepare_refresh_stride=self.config.prepare_refresh_stride,
+            articulation_mode=str(self.config.articulation_mode),
         )
 
     def _resolve_foot_body_local(self, side: str) -> int:

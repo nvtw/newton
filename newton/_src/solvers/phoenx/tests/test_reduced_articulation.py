@@ -1054,6 +1054,51 @@ class TestReducedArticulation(unittest.TestCase):
         np.testing.assert_allclose(state0.body_q.numpy(), fk_state.body_q.numpy(), atol=2.0e-5)
         np.testing.assert_allclose(state0.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
 
+    def test_hybrid_maximal_floating_tree_conserves_momentum_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("hybrid articulation tests require CUDA graph capture")
+
+        model = _make_floating_tree(device)
+        state0 = model.state()
+        state1 = model.state()
+        q = state0.joint_q.numpy()
+        q[:3] = np.array([0.2, -0.1, 0.4], dtype=np.float32)
+        q[3:7] = np.asarray(wp.quat_rpy(0.2, -0.1, 0.3), dtype=np.float32)
+        q[7] = 0.45
+        qd = np.array([0.4, -0.2, 0.15, 0.3, -0.25, 0.2, 1.1], dtype=np.float32)
+        for state in (state0, state1):
+            state.joint_q.assign(q)
+            state.joint_qd.assign(qd)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        momentum_before = _total_momentum(model, state0)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="hybrid",
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        np.testing.assert_array_equal(
+            solver.world._joint_pgs_enabled.numpy(),
+            np.ones(solver._adbs.num_joint_columns, dtype=np.int32),
+        )
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(state0, state1, None, None, 1.0 / 1000.0)
+            solver.step(state1, state0, None, None, 1.0 / 1000.0)
+        for _ in range(128):
+            wp.capture_launch(capture.graph)
+
+        momentum_after = _total_momentum(model, state0)
+        momentum_error = momentum_after - momentum_before
+        linear_relative_error = np.linalg.norm(momentum_error[:3]) / np.linalg.norm(momentum_before[:3])
+        angular_relative_error = np.linalg.norm(momentum_error[3:]) / np.linalg.norm(momentum_before[3:])
+        self.assertLess(linear_relative_error, 2.0e-4)
+        self.assertLess(angular_relative_error, 2.0e-4)
+        self.assertTrue(np.isfinite(state0.joint_q.numpy()).all())
+        self.assertTrue(np.isfinite(state0.joint_qd.numpy()).all())
+
     def test_floating_internal_loop_conserves_momentum_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

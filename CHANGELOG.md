@@ -9,6 +9,7 @@
 - Add pure-Warp Muon optimizer support to `newton.rl` PPO trainers so experimental G1 runs can match nanoG1 optimizer settings without PyTorch.
 - Add `ConfigEnvG1PhoenX` scheduler knobs for `threads_per_world`, `multi_world_scheduler`, and `prepare_refresh_stride` so experimental G1 RL runs can benchmark PhoenX solver schedules without monkeypatching.
 - Add experimental `SolverPhoenX(articulation_mode="reduced")` support for linear-time reduced-coordinate articulation dynamics and rigid contacts through the common Newton `State` and `Control` API, including CUDA graph capture and multi-world execution.
+- Add experimental `SolverPhoenX(articulation_mode="hybrid")` support, keeping maximal PGS joint rows active while using the exact armature-aware articulated-body response as their preconditioner. This improves stiff robot training stability while preserving CUDA graph capture and multi-world execution.
 - Add experimental pure-Warp `newton.rl` PPO and SAC training utilities, including a PhoenX Anymal sparse-target locomotion environment, deterministic evaluation metrics, and PPO checkpoint resume helpers.
 - Add manual critic-backward PPO controls for the experimental PhoenX G1 RL training path, including `ConfigPPO.manual_critic_backward` and `newton.rl train-g1-ppo --no-manual-critic-backward`.
 - Add strict walking validation metrics and configurable upright termination for the experimental PhoenX Anymal RL environment.

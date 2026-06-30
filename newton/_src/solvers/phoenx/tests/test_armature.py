@@ -3,9 +3,9 @@
 
 """Joint armature unit tests for ``SolverPhoenX``.
 
-PhoenX bakes reduced-coordinate armature into maximal-coordinate body
-inertia. These tests cover analytical period checks, MuJoCo parity,
-zero-armature no-op behaviour, and a skinny-chain stability regression.
+PhoenX represents reduced-coordinate armature with an auxiliary inertial
+row in maximal coordinates. These tests cover analytical period checks,
+MuJoCo parity, chain composition, zero-armature behavior, and stability.
 """
 
 from __future__ import annotations
@@ -236,25 +236,12 @@ def _cuda_with_graph_capture() -> bool:
     "PhoenX armature tests run on CUDA with graph-capture only.",
 )
 class TestSymmetricTwoBodyPeriod(unittest.TestCase):
-    """Two equal-inertia bodies, single revolute joint, torsion PD
-    spring, no gravity. The reduced-coord effective inertia at the
-    joint is ``M_chain = I*I/(I+I) = I/2``; MuJoCo / MjWarp /
-    Featherstone armature adds ``a`` to that diagonal:
+    """Check full relative-coordinate armature for two symmetric bodies.
 
-        T = 2*pi * sqrt((M_chain + a) / k)
-
-    A maximal-coord bake that adds ``a`` to BOTH bodies' axial
-    inertia turns ``M_chain = I/2`` into ``(I + a) / 2 = I/2 + a/2``
-    -- only HALF the armature contribution that MuJoCo would see.
-    The 5 % tolerance below catches that 2x discrepancy at every
-    armature value in the sweep.
-
-    The bake in
-    :meth:`SolverPhoenX._bake_joint_armature_into_body_inertia` solves
-    a per-joint quadratic for the per-body inflation alpha so that the
-    post-bake effective inertia at the joint equals ``M_chain + a``
-    for every mass ratio. This test pins the symmetric case where
-    the naive ``alpha = a`` approximation under-counts by 2x.
+    The reduced-coordinate inertia is M_chain = I / 2 and armature adds a,
+    giving T = 2*pi*sqrt((M_chain + a) / k). The auxiliary inertial row must
+    add the full value; distributing armature across body inertias would
+    under-count it by a factor of two.
     """
 
     def test_period_scaling_with_armature(self) -> None:
@@ -469,46 +456,14 @@ def _run_three_body_chain(
     "PhoenX armature tests run on CUDA with graph-capture only.",
 )
 class TestThreeBodyChain(unittest.TestCase):
-    """Anchored three-body revolute chain ``world -- A -- B -- C``,
-    all three joints armatured + PD-driven. Verifies that armatures
-    on multiple joints in series compose into the right reduced-coord
-    mass matrix.
+    """Check armature composition in an anchored three-body chain.
 
-    Reduced-coord layout (joint angles ``q1, q2, q3``):
-        body A absolute angle  = q1
-        body B absolute angle  = q1 + q2
-        body C absolute angle  = q1 + q2 + q3
-        kinetic energy 2T = sum_i I * (sum_{j<=i} q_dot_j)^2
-        => M_q[i,j] = I * (3 - max(i, j))   (3x3 banded)
-        + diag(a, a, a) from armature.
-
-    PD potential: 2V = k * (q1^2 + q2^2 + q3^2) -> K = k * I.
-
-    Three eigen-frequencies ``omega = sqrt(eig(M_aug^-1 K))``. We
-    isolate ONE mode at a time by initialising joint angles to the
-    corresponding eigenvector (so only that mode is excited) and
-    asserting the simulated zero-crossing period matches the
-    analytical mode period to 5 %.
-
-    Currently EXPECTED TO FAIL on every armature > 0 case (passes
-    only at ``armature == 0``): the body-inertia bake is exact for
-    isolated joint pairs but fundamentally cannot reproduce
-    MuJoCo's ``M_q + a*I`` augmentation on a chain. For joint k =
-    (i, j) the relative-coord armature term is
-    ``0.5 * a_k * (q_j_dot - q_i_dot)^2`` which expands to
-    ``0.5*a_k*q_i_dot^2 + 0.5*a_k*q_j_dot^2 - a_k*q_i_dot*q_j_dot``.
-    Adding ``a_k`` to bodies i and j's axial inertia recovers the
-    diagonal terms but drops the off-diagonal cross term, so the
-    chain's reduced-coord mass matrix gets wrong off-diagonals and
-    the modes drift. Exact match requires either constraint-side
-    armature with a corrected impulse-application (non-trivial:
-    naive ``eff_inv := eff_inv / (1 + a * eff_inv)`` is unstable
-    when ``a * eff_inv_raw > 1``) or a modal solver, neither of
-    which is in scope here. Tracked so any future revisit of the
-    bake is forced to consider the chain composition error.
+    The three relative joint coordinates produce a dense reduced mass matrix.
+    Auxiliary inertial rows retain the off-diagonal coupling induced by shared
+    bodies, so every analytical eigenmode must match. This distinguishes exact
+    chain composition from per-body inertia inflation.
     """
 
-    @unittest.expectedFailure
     def test_armature_composition(self) -> None:
         inertia = 1.0
         mass = 1.0
@@ -620,7 +575,7 @@ class TestArmatureMatchesMuJoCo(unittest.TestCase):
     Pendulum only (anchored). The two-body torsion case requires an
     explicit FREE base joint for MuJoCo (not for PhoenX), which would
     diverge the joint_q layouts; the pendulum/skinny-chain coverage
-    is enough to pin the per-body ``alpha`` math in the bake.
+    is enough to pin the inertial-row response.
     """
 
     def test_pendulum_period_matches_mujoco(self) -> None:

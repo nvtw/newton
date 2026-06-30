@@ -1,41 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Live ``joint_armature`` update tests for :class:`SolverPhoenX`.
+"""Live joint_armature update tests for SolverPhoenX.
 
-PhoenX bakes joint armature into both attached bodies' inertia at
-construction (see
-:meth:`SolverPhoenX._bake_joint_armature_into_body_inertia`). Domain
-randomization for sim-to-real transfer requires this bake to be
-re-applied whenever the user mutates ``model.joint_armature`` between
-episodes; the regression this guards is the bake stamping the very
-first armature value into ``bodies.inverse_inertia`` and never
-refreshing it.
-
-The fix routes ``notify_model_changed(JOINT_DOF_PROPERTIES)`` through
-``_launch_init_phoenx_bodies`` (which resets the inertia back to
-``Model.body_inv_inertia``) followed by
-``_bake_joint_armature_into_body_inertia`` (which adds the new
-armature). Both passes are non-graph-capture-safe by design --
-``notify_model_changed`` is documented as a host-side reconfigure.
-
-Two layers of coverage, all CUDA + graph-capture only (PhoenX is
-GPU-only; graph capture is the shipping execution mode for the
-``step`` loop -- ``notify_model_changed`` is called *between*
-captures):
-
-* :class:`TestArmatureLiveUpdate` -- direct readback of
-  ``solver.bodies.inverse_inertia`` before and after the notify.
-  Pins the wiring without any physics: a regression that forgets to
-  refresh would leave the post-notify inertia bit-identical to the
-  pre-notify inertia.
-
-* :class:`TestArmaturePeriodAfterLiveUpdate` -- end-to-end pendulum
-  with graph-captured step loop. Measures period T0 with armature=0,
-  bumps armature to 2.0 via ``model.joint_armature.assign(...)`` +
-  notify, recaptures the graph, measures T1, and verifies
-  ``T1/T0 == sqrt((I + a)/I)`` to within 5 %. Both periods are
-  measured under graph capture (n_frames ~ 1000).
+Maximal PhoenX stores armature in an auxiliary inertial row. Domain
+randomization therefore rebuilds the joint-row data when joint DOF properties
+change, without mutating body inertia. Coverage includes direct row readback and
+graph-captured period measurements before and after a host-side model update.
 """
 
 from __future__ import annotations
@@ -47,6 +18,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.flags import SolverNotifyFlags
+from newton._src.solvers.phoenx.constraints.constraint_joint import _OFF_ARMATURE
 
 
 def _build_anchored_revolute(*, mass: float, length: float, armature: float) -> newton.Model:
@@ -91,133 +63,45 @@ def _measure_period_zero_crossings(signal: np.ndarray, dt: float) -> float:
     return float(np.mean(np.diff(rising)) * dt)
 
 
-@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX armature tests run on CUDA only")
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda and wp.is_mempool_enabled(wp.get_preferred_device()),
+    "PhoenX armature tests run on CUDA with graph capture only",
+)
 class TestArmatureLiveUpdate(unittest.TestCase):
-    """Direct readback of ``bodies.inverse_inertia`` before and after a
-    ``notify_model_changed(JOINT_DOF_PROPERTIES)`` armature update."""
+    """Live updates rewrite the joint row without mutating body inertia."""
 
-    def test_bake_refreshes_on_joint_dof_properties_notify(self) -> None:
-        """Bumping ``model.joint_armature`` and notifying
-        ``JOINT_DOF_PROPERTIES`` must propagate into the inertia bake.
+    @staticmethod
+    def _row_armature(solver: newton.solvers.SolverPhoenX) -> float:
+        return float(solver.world.constraints.data.numpy()[int(_OFF_ARMATURE), 0])
 
-        For a fixed-anchor revolute about ``+y`` the bake adds
-        ``alpha * (axis_in_child) (axis_in_child)^T`` to the child's
-        inertia along the joint axis (``alpha == armature`` when the
-        parent is the world). The body's axial inverse-inertia
-        therefore shifts as ``1 / (I_body + a)`` -- a regression that
-        skips the refresh would leave ``1 / (I_body + a_initial)``.
-        """
-        mass = 1.0
-        length = 1.0
-        I_body_axial = 1.0e-4  # diagonal Y-component from the fixture
-
-        model = _build_anchored_revolute(mass=mass, length=length, armature=0.0)
-        solver = newton.solvers.SolverPhoenX(model, substeps=1)
-
-        # Baseline: armature 0. PhoenX slot 1 is the bob (slot 0 is the
-        # static world anchor).
-        inv_I_before = solver.bodies.inverse_inertia.numpy()[1]
-        # The joint axis (+y) -> diagonal[1] is the axial component.
-        axial_inv_before = float(inv_I_before[1, 1])
-        # Without armature the inverse along the joint axis is 1 / I_body.
-        # Tolerance is loose because the bake's ``invI -> I -> invI``
-        # round-trip with single precision drifts at the 1e-5 level.
-        self.assertAlmostEqual(
-            axial_inv_before,
-            1.0 / I_body_axial,
-            delta=1.0,
-            msg=f"baseline axial inv-inertia should be 1/I_body, got {axial_inv_before}",
-        )
-
-        # Live update: bump armature to 2.0 and notify.
-        new_armature = 2.0
-        model.joint_armature.assign(np.array([new_armature], dtype=np.float32))
-        solver.notify_model_changed(int(SolverNotifyFlags.JOINT_DOF_PROPERTIES))
-
-        inv_I_after = solver.bodies.inverse_inertia.numpy()[1]
-        axial_inv_after = float(inv_I_after[1, 1])
-        # After bake: axial inverse-inertia should be 1 / (I_body + a).
-        expected_after = 1.0 / (I_body_axial + new_armature)
-        self.assertAlmostEqual(
-            axial_inv_after,
-            expected_after,
-            delta=1.0e-2 * expected_after,
-            msg=(
-                f"after live armature update to {new_armature}, axial inv-inertia "
-                f"should be {expected_after:.6f}, got {axial_inv_after:.6f}"
-            ),
-        )
-
-        # Off-axis components must be unchanged (bake only touches the
-        # axial outer product).
-        np.testing.assert_allclose(
-            inv_I_after[0, 0],
-            inv_I_before[0, 0],
-            rtol=1.0e-4,
-            err_msg="off-axis (X) inv-inertia should be unchanged after axial-armature bake",
-        )
-        np.testing.assert_allclose(
-            inv_I_after[2, 2],
-            inv_I_before[2, 2],
-            rtol=1.0e-4,
-            err_msg="off-axis (Z) inv-inertia should be unchanged after axial-armature bake",
-        )
-
-    def test_repeated_notify_does_not_drift(self) -> None:
-        """Calling ``notify_model_changed`` twice with the same armature
-        must be idempotent: the bake resets inertia from
-        ``Model.body_inv_inertia`` before each apply, so repeated
-        notifications cannot accumulate. A regression that adds
-        without first resetting would inflate the inertia by
-        ``2*a*(axis ⊗ axis)`` after the second notify."""
+    def test_joint_dof_properties_notify_updates_row(self) -> None:
         model = _build_anchored_revolute(mass=1.0, length=1.0, armature=0.0)
         solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        inertia_before = solver.bodies.inverse_inertia.numpy().copy()
 
+        model.joint_armature.assign(np.array([2.0], dtype=np.float32))
+        solver.notify_model_changed(int(SolverNotifyFlags.JOINT_DOF_PROPERTIES))
+
+        self.assertAlmostEqual(self._row_armature(solver), 2.0)
+        np.testing.assert_array_equal(solver.bodies.inverse_inertia.numpy(), inertia_before)
+
+    def test_repeated_notify_is_idempotent(self) -> None:
+        model = _build_anchored_revolute(mass=1.0, length=1.0, armature=0.0)
+        solver = newton.solvers.SolverPhoenX(model, substeps=1)
         model.joint_armature.assign(np.array([1.5], dtype=np.float32))
         solver.notify_model_changed(int(SolverNotifyFlags.JOINT_DOF_PROPERTIES))
-        inv_I_first = solver.bodies.inverse_inertia.numpy()[1].copy()
-
-        # Notify again without changing armature.
+        first = solver.world.constraints.data.numpy().copy()
         solver.notify_model_changed(int(SolverNotifyFlags.JOINT_DOF_PROPERTIES))
-        inv_I_second = solver.bodies.inverse_inertia.numpy()[1]
+        second = solver.world.constraints.data.numpy()
+        np.testing.assert_array_equal(second, first)
 
-        np.testing.assert_allclose(
-            inv_I_second,
-            inv_I_first,
-            rtol=1.0e-5,
-            err_msg=(
-                "repeated notify_model_changed with the same armature must be "
-                "idempotent; second call drifted from first by "
-                f"{np.max(np.abs(inv_I_second - inv_I_first)):.6f}"
-            ),
-        )
-
-    def test_revert_to_zero_armature_restores_inertia(self) -> None:
-        """Setting ``armature == 0`` after a non-zero live update must
-        restore the original (no-armature) body inertia bit-for-bit
-        (modulo single-precision round-trip noise). Catches a
-        regression that "remembers" armature once applied."""
-        model = _build_anchored_revolute(mass=1.0, length=1.0, armature=0.0)
+    def test_revert_to_zero_updates_row(self) -> None:
+        model = _build_anchored_revolute(mass=1.0, length=1.0, armature=5.0)
         solver = newton.solvers.SolverPhoenX(model, substeps=1)
-
-        inv_I_zero_initial = solver.bodies.inverse_inertia.numpy()[1].copy()
-
-        # Bump, then revert.
-        model.joint_armature.assign(np.array([5.0], dtype=np.float32))
-        solver.notify_model_changed(int(SolverNotifyFlags.JOINT_DOF_PROPERTIES))
+        self.assertAlmostEqual(self._row_armature(solver), 5.0)
         model.joint_armature.assign(np.array([0.0], dtype=np.float32))
         solver.notify_model_changed(int(SolverNotifyFlags.JOINT_DOF_PROPERTIES))
-
-        inv_I_zero_after = solver.bodies.inverse_inertia.numpy()[1]
-        np.testing.assert_allclose(
-            inv_I_zero_after,
-            inv_I_zero_initial,
-            rtol=1.0e-4,
-            err_msg=(
-                "reverting armature to 0 must restore the original inv-inertia; "
-                f"residual {np.max(np.abs(inv_I_zero_after - inv_I_zero_initial)):.6f}"
-            ),
-        )
+        self.assertEqual(self._row_armature(solver), 0.0)
 
 
 def _run_pendulum_graph(
@@ -325,7 +209,7 @@ class TestArmaturePeriodAfterLiveUpdate(unittest.TestCase):
             (
                 f"post-update armature={new_armature}: T_sim={T1:.4f} s vs "
                 f"T_expected={T_expected_1:.4f} s (a regression that skips the "
-                "live re-bake would still report ~T_expected_0)"
+                "live row refresh would still report ~T_expected_0)"
             ),
         )
 
@@ -342,7 +226,7 @@ class TestArmaturePeriodAfterLiveUpdate(unittest.TestCase):
             (
                 f"period ratio T1/T0 = {ratio:.4f} vs expected sqrt((I+a)/I) = "
                 f"{expected_ratio:.4f} (rel err {rel_err_ratio:.2%}). A regression "
-                "that skips the live re-bake would yield ratio ~1.0."
+                "that skips the live row refresh would yield ratio ~1.0."
             ),
         )
 

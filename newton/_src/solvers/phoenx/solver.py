@@ -16,12 +16,7 @@ import warp as wp
 import newton
 from newton._src.sim import BodyFlags, Contacts, Control, Model, ModelFlags, State
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation
-from newton._src.solvers.phoenx.body import (
-    BodyContainer,
-    body_container_zeros,
-    inertia_sym6_pack_np,
-    inertia_sym6_unpack_np,
-)
+from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_DAMPING_DRIVE,
     _OFF_DRIVE_MODE,
@@ -52,43 +47,6 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.solver import SolverBase
 
 __all__ = ["SolverPhoenX"]
-
-
-# Host-side quaternion / rotation helpers (used by the armature bake).
-
-
-def _quat_rotate_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    """Rotate ``v`` by quaternion ``q = (x, y, z, w)`` (numpy, host)."""
-    qx, qy, qz, qw = (float(x) for x in q)
-    vx, vy, vz = (float(x) for x in v)
-    tx = 2.0 * (qy * vz - qz * vy)
-    ty = 2.0 * (qz * vx - qx * vz)
-    tz = 2.0 * (qx * vy - qy * vx)
-    return np.array(
-        [
-            vx + qw * tx + (qy * tz - qz * ty),
-            vy + qw * ty + (qz * tx - qx * tz),
-            vz + qw * tz + (qx * ty - qy * tx),
-        ],
-        dtype=np.float64,
-    )
-
-
-def _quat_to_rot_np(q: np.ndarray) -> np.ndarray:
-    """3x3 rotation matrix from quaternion ``q = (x, y, z, w)``."""
-    qx, qy, qz, qw = (float(x) for x in q)
-    n = qx * qx + qy * qy + qz * qz + qw * qw
-    if n < 1e-20:
-        return np.eye(3, dtype=np.float64)
-    s = 2.0 / n
-    return np.array(
-        [
-            [1.0 - s * (qy * qy + qz * qz), s * (qx * qy - qz * qw), s * (qx * qz + qy * qw)],
-            [s * (qx * qy + qz * qw), 1.0 - s * (qx * qx + qz * qz), s * (qy * qz - qx * qw)],
-            [s * (qx * qz - qy * qw), s * (qy * qz + qx * qw), 1.0 - s * (qx * qx + qy * qy)],
-        ],
-        dtype=np.float64,
-    )
 
 
 def _estimate_rigid_contact_max_phoenx(model) -> int | None:
@@ -212,22 +170,24 @@ class SolverPhoenX(SolverBase):
                 threshold before being flagged sleeping. Default 30
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
-            articulation_mode: "maximal" keeps tree joints in classic
-                PhoenX PGS. "reduced" uses Newton generalized coordinates
-                and linear-time articulated-body dynamics for articulation trees.
+            articulation_mode: "maximal" keeps independent-body tree
+                dynamics and classic PhoenX PGS. "hybrid" keeps the maximal
+                joint rows active while using the exact articulated-body response
+                as their preconditioner. "reduced" lets generalized coordinates
+                own tree joints.
         """
         super().__init__(model)
-        if articulation_mode not in ("maximal", "reduced"):
-            raise ValueError(f"articulation_mode must be 'maximal' or 'reduced', got {articulation_mode!r}")
-        if articulation_mode == "reduced" and solver_flavor != "standard":
-            raise ValueError("reduced articulations currently require solver_flavor='standard'")
-        if articulation_mode == "reduced" and mass_splitting:
-            raise ValueError("articulation_mode='reduced' currently requires mass_splitting=False")
-        if articulation_mode == "reduced" and multi_world_scheduler.startswith("block_world"):
-            raise ValueError("articulation_mode='reduced' requires the fast-tail multi-world scheduler")
-        if articulation_mode == "reduced" and multi_world_scheduler == "auto":
+        if articulation_mode not in ("maximal", "hybrid", "reduced"):
+            raise ValueError(f"articulation_mode must be 'maximal', 'hybrid', or 'reduced', got {articulation_mode!r}")
+        if articulation_mode in ("hybrid", "reduced") and solver_flavor != "standard":
+            raise ValueError("hybrid/reduced articulations currently require solver_flavor='standard'")
+        if articulation_mode in ("hybrid", "reduced") and mass_splitting:
+            raise ValueError("hybrid/reduced articulation modes require mass_splitting=False")
+        if articulation_mode in ("hybrid", "reduced") and multi_world_scheduler.startswith("block_world"):
+            raise ValueError("hybrid/reduced articulation modes require the fast-tail multi-world scheduler")
+        if articulation_mode in ("hybrid", "reduced") and multi_world_scheduler == "auto":
             multi_world_scheduler = "fast_tail"
-        if articulation_mode == "reduced":
+        if articulation_mode in ("hybrid", "reduced"):
             prepare_refresh_stride = 1
         self.articulation_mode = articulation_mode
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
@@ -262,11 +222,6 @@ class SolverPhoenX(SolverBase):
 
         if model.body_count:
             self._launch_init_phoenx_bodies(model)
-            # PhoenX is maximal-coordinate; bake reduced-coord armature into both
-            # bodies' inertia along the joint axis so eff_inv = J M^-1 J^T sees
-            # the augmented mass. Skinny links (<0.1 kg) need this for stable PD.
-            if self.articulation_mode != "reduced":
-                self._bake_joint_armature_into_body_inertia(model)
 
         # FK so model.body_q reflects model.joint_q (URDF rigs may set joint_q
         # before finalize without running FK).
@@ -279,6 +234,10 @@ class SolverPhoenX(SolverBase):
             joint_friction_model=self._joint_friction_model,
             reduced_articulations=self.articulation_mode == "reduced",
         )
+        if self.articulation_mode == "hybrid":
+            # The articulated-body factorization already contains exact joint
+            # armature; the maximal PGS rows must not add it a second time.
+            self._adbs.armature.zero_()
         num_joints = self._adbs.num_joint_columns
         num_particles = int(getattr(model, "particle_count", 0) or 0)
         num_cloth_triangles = int(getattr(model, "tri_count", 0) or 0)
@@ -453,14 +412,15 @@ class SolverPhoenX(SolverBase):
             adbs_kwargs = self._adbs.to_initialize_kwargs()
             self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
 
-        if self.articulation_mode == "reduced" and int(model.articulation_count) > 0:
+        if self.articulation_mode in ("hybrid", "reduced") and int(model.articulation_count) > 0:
             self._reduced_articulation = ReducedPhoenXArticulation(model, self.bodies)
             joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
             joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
-            for joint, owned in enumerate(self._reduced_articulation.owned_joint_mask_np):
-                cid = int(joint_idx_to_cid[joint])
-                if owned and cid >= 0:
-                    joint_pgs_enabled[cid] = 0
+            if self.articulation_mode == "reduced":
+                for joint, owned in enumerate(self._reduced_articulation.owned_joint_mask_np):
+                    cid = int(joint_idx_to_cid[joint])
+                    if owned and cid >= 0:
+                        joint_pgs_enabled[cid] = 0
             self.world.set_reduced_articulation(self._reduced_articulation, joint_pgs_enabled)
 
         if num_cloth_triangles > 0:
@@ -492,152 +452,6 @@ class SolverPhoenX(SolverBase):
         # Placeholder for _contact_impulse_to_force_wrapper_kernel when grouping
         # is off (has_perm=0 makes the kernel ignore it).
         self._sort_perm_placeholder = wp.zeros(1, dtype=wp.int32, device=self.device)
-
-    def _bake_joint_armature_into_body_inertia(self, model: Model) -> None:
-        """Add per-joint axial armature into both attached bodies' inertia so the
-        constraint solve sees ``M_chain + armature`` along the joint axis.
-
-        Bake amount per body (``alpha``):
-        * Fixed-anchor: ``alpha = a`` on child only.
-        * Two-body: solve ``alpha^2 + alpha*(S - 2a - 2*M_chain) - a*S = 0`` for
-          the positive root (S = I_A + I_B, M_chain = I_A*I_B/S). Yields
-          ``(I_A + alpha)*(I_B + alpha) / (I_A + I_B + 2*alpha) == M_chain + a``,
-          giving exact-MuJoCo equivalence for any mass ratio.
-        """
-        if model.joint_count == 0 or model.joint_armature is None:
-            return
-
-        joint_type = model.joint_type.numpy()
-        joint_parent = model.joint_parent.numpy()
-        joint_child = model.joint_child.numpy()
-        joint_qd_start = model.joint_qd_start.numpy()
-        joint_axis = model.joint_axis.numpy()
-        joint_X_p = model.joint_X_p.numpy()
-        joint_X_c = model.joint_X_c.numpy()
-        armature = model.joint_armature.numpy()
-
-        body_inv_mass = self.bodies.inverse_mass.numpy().copy()
-        body_inv_inertia = self.bodies.inverse_inertia.numpy().copy()
-        body_inv_inertia_world = inertia_sym6_unpack_np(self.bodies.inverse_inertia_world.numpy())
-        body_orientation = self.bodies.orientation.numpy()
-
-        n_phoenx = body_inv_inertia.shape[0]
-        body_inertia = np.zeros_like(body_inv_inertia)
-        body_mass = np.zeros(n_phoenx, dtype=np.float32)
-        for i in range(n_phoenx):
-            invI = body_inv_inertia[i]
-            if abs(np.linalg.det(invI)) > 1e-30:
-                body_inertia[i] = np.linalg.inv(invI)
-            body_mass[i] = (1.0 / body_inv_mass[i]) if body_inv_mass[i] > 0.0 else 0.0
-
-        rev_t = int(newton.JointType.REVOLUTE)
-        pri_t = int(newton.JointType.PRISMATIC)
-
-        any_baked = False
-        for j in range(model.joint_count):
-            jt = int(joint_type[j])
-            if jt != rev_t and jt != pri_t:
-                continue
-            qd = int(joint_qd_start[j])
-            if qd >= len(armature):
-                continue
-            a = float(armature[qd])
-            if a <= 0.0:
-                continue
-            any_baked = True
-
-            # Newton body indices; PhoenX slots are body+1 with -1->0 (world).
-            n_p = int(joint_parent[j])
-            n_c = int(joint_child[j])
-            slot_p = 0 if n_p < 0 else n_p + 1
-            slot_c = 0 if n_c < 0 else n_c + 1
-
-            if jt == rev_t:
-                axis_jf = joint_axis[qd] if qd < len(joint_axis) else np.array([1.0, 0.0, 0.0])
-                # Rotate joint axis into each body's local frame.
-                Xp_q = joint_X_p[j][3:7]
-                Xc_q = joint_X_c[j][3:7]
-                axis_in_p = _quat_rotate_np(Xp_q, axis_jf)
-                axis_in_c = _quat_rotate_np(Xc_q, axis_jf)
-                np_p = float(np.linalg.norm(axis_in_p))
-                np_c = float(np.linalg.norm(axis_in_c))
-                if np_p > 1e-12:
-                    axis_in_p = axis_in_p / np_p
-                if np_c > 1e-12:
-                    axis_in_c = axis_in_c / np_c
-
-                if slot_p == 0:
-                    alpha_p = 0.0
-                    alpha_c = a
-                elif slot_c == 0:
-                    alpha_p = a
-                    alpha_c = 0.0
-                else:
-                    i_a = float(axis_in_p @ body_inertia[slot_p] @ axis_in_p)
-                    i_b = float(axis_in_c @ body_inertia[slot_c] @ axis_in_c)
-                    if i_a > 0.0 and i_b > 0.0:
-                        s_sum = i_a + i_b
-                        m_chain = i_a * i_b / s_sum
-                        b_coef = s_sum - 2.0 * a - 2.0 * m_chain
-                        c_coef = -a * s_sum
-                        disc = b_coef * b_coef - 4.0 * c_coef
-                        # c_coef <= 0 so disc >= b_coef^2 (positive root real).
-                        alpha = 0.5 * (-b_coef + float(np.sqrt(max(disc, 0.0))))
-                    else:
-                        alpha = a
-                    alpha_p = alpha
-                    alpha_c = alpha
-
-                if slot_p > 0 and alpha_p > 0.0:
-                    body_inertia[slot_p] = body_inertia[slot_p] + alpha_p * np.outer(axis_in_p, axis_in_p)
-                if slot_c > 0 and alpha_c > 0.0:
-                    body_inertia[slot_c] = body_inertia[slot_c] + alpha_c * np.outer(axis_in_c, axis_in_c)
-            else:  # PRISMATIC: scalar add to mass (same quadratic as REVOLUTE).
-                if slot_p == 0:
-                    alpha_p = 0.0
-                    alpha_c = a
-                elif slot_c == 0:
-                    alpha_p = a
-                    alpha_c = 0.0
-                else:
-                    m_a = body_mass[slot_p]
-                    m_b = body_mass[slot_c]
-                    if m_a > 0.0 and m_b > 0.0:
-                        s_sum = m_a + m_b
-                        m_chain = m_a * m_b / s_sum
-                        b_coef = s_sum - 2.0 * a - 2.0 * m_chain
-                        c_coef = -a * s_sum
-                        disc = b_coef * b_coef - 4.0 * c_coef
-                        alpha = 0.5 * (-b_coef + float(np.sqrt(max(disc, 0.0))))
-                    else:
-                        alpha = a
-                    alpha_p = alpha
-                    alpha_c = alpha
-
-                if slot_p > 0 and alpha_p > 0.0:
-                    body_mass[slot_p] = body_mass[slot_p] + alpha_p
-                if slot_c > 0 and alpha_c > 0.0:
-                    body_mass[slot_c] = body_mass[slot_c] + alpha_c
-
-        if not any_baked:
-            return
-
-        # Recompute inverses, then rotate to world for the rest pose.
-        for i in range(1, n_phoenx):
-            I = body_inertia[i]
-            if abs(np.linalg.det(I)) > 1e-30:
-                body_inv_inertia[i] = np.linalg.inv(I).astype(np.float32)
-            m = body_mass[i]
-            body_inv_mass[i] = (1.0 / m) if m > 0.0 else 0.0
-
-            # Rotate to world. Quaternion is (x, y, z, w).
-            q = body_orientation[i]
-            R = _quat_to_rot_np(q)
-            body_inv_inertia_world[i] = (R @ body_inv_inertia[i] @ R.T).astype(np.float32)
-
-        self.bodies.inverse_mass.assign(body_inv_mass)
-        self.bodies.inverse_inertia.assign(body_inv_inertia)
-        self.bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(body_inv_inertia_world))
 
     def _install_shape_materials(self) -> None:
         """Stream Model's per-shape (mu_static, mu_dynamic, restitution) into
@@ -1081,27 +895,23 @@ class SolverPhoenX(SolverBase):
                 joint_friction_model=self._joint_friction_model,
                 reduced_articulations=self.articulation_mode == "reduced",
             )
+            if self.articulation_mode == "hybrid":
+                self._adbs.armature.zero_()
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
         if flags & int(ModelFlags.MODEL_PROPERTIES):
             self.world.gravity = wp.array(self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device)
-        # Single body refresh kernel covers both BODY_PROPERTIES and BODY_INERTIAL_PROPERTIES.
-        # Joint-DOF changes also force a refresh: armature is baked into body
-        # inertia at construction, so any change to model.joint_armature
-        # requires resetting the inertia back to Model.body_inv_inertia and
-        # re-baking with the new armature. Without this path, domain
-        # randomization of armature silently keeps the original values.
+        # Single body refresh kernel covers both BODY_PROPERTIES and
+        # BODY_INERTIAL_PROPERTIES. Maximal-coordinate armature lives in the
+        # rebuilt joint rows above and does not mutate body inertia.
         body_refresh_mask = int(ModelFlags.BODY_INERTIAL_PROPERTIES | ModelFlags.BODY_PROPERTIES)
         body_properties_changed = bool(flags & body_refresh_mask)
-        if body_properties_changed or (joint_props_changed and self.articulation_mode != "reduced"):
+        reduced_joint_properties_changed = joint_props_changed and self.articulation_mode in ("hybrid", "reduced")
+        if body_properties_changed or reduced_joint_properties_changed:
             if self.model.body_count > 0:
                 self._launch_init_phoenx_bodies(self.model)
-                if self.articulation_mode == "reduced":
-                    if self._reduced_articulation is not None:
-                        self._reduced_articulation.system.refresh_inertial_properties()
-                else:
-                    # Re-bake armature: the kernel just overwrote inertia.
-                    self._bake_joint_armature_into_body_inertia(self.model)
+                if self.articulation_mode in ("hybrid", "reduced") and self._reduced_articulation is not None:
+                    self._reduced_articulation.system.refresh_inertial_properties()
         if flags & int(ModelFlags.SHAPE_PROPERTIES):
             if self.model.shape_material_mu is not None and self.model.shape_count > 0:
                 self._install_shape_materials()

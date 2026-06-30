@@ -3,36 +3,19 @@
 
 """Train a Unitree G1 walking policy with the nanoG1 recipe in PhoenX.
 
-A minimal port of the nanoG1 sub-60-second walk recipe to PhoenX.  The key
-differences from the existing curriculum scripts are:
-
-* **Fixed command** — (0.8 m/s, 0, 0) by default, matching nanoG1's COMMAND.
-  No command randomization in the default run; the robot must learn to walk at
-  a fixed speed, exactly as nanoG1 trains it.
-* **Exact nanoG1 reward** — only the 9 terms from nanoG1 (tracking + penalties),
-  with no gait clock, foot-height, or joint-deviation extras.
-* **CUDA-graph leapfrog execution** — default ``execution_mode="graph_leapfrog"``
-  for maximum throughput.
-* **Muon optimizer at LR 0.02** — matching nanoG1's swept winner.
-* **Mirror symmetry loss at 0.25** — the N1 breakthrough that cut nanoG1's
-  samples-to-walk by 26%.
+A direct port of the frozen nanoG1 v3 task to PhoenX. It matches the
+randomized velocity-command distribution, 98-value observation layout, leg-only
+action mask, phase-based gait shaping, reward weights, Muon optimizer, replay
+schedule, and mirror-symmetry loss from the pinned nanoG1 PufferLib build.
 
 Run:
 
     uv run --extra dev -m newton._src.solvers.phoenx.rl_training.examples.train_g1_nanog1 \\
         --device cuda:0 --output-dir /tmp/g1_nanog1
 
-Typical convergence: the walk-gate (tracking_perf > 0.3 at 0.8 m/s) passes
-somewhere around 75–150M samples.  With 4096 worlds on an H100 this takes
-roughly 2–5 minutes; on older cards expect proportionally longer.
-
 Checkpoints are written to --output-dir every --checkpoint-interval iterations
-and after the final iteration.  The final summary line prints the elapsed time
-and an estimated T_walk based on achieved SPS.
-
-Pass ``--randomize-commands`` to add uniform command randomization over the
-default ranges — useful for comparison but typically harder to get walking than
-the fixed-command baseline.
+and after the final iteration. Pass --no-randomize-commands to run the easier
+fixed forward-command ablation instead of the matched nanoG1 task.
 """
 
 from __future__ import annotations
@@ -55,6 +38,7 @@ def _nanog1_env_config(
     command_x: float,
     sim_substeps: int,
     solver_iterations: int,
+    articulation_mode: str,
     ground_friction: float,
     randomize_commands: bool,
     command_x_range: tuple[float, float],
@@ -67,6 +51,7 @@ def _nanog1_env_config(
         command=(float(command_x), 0.0, 0.0),
         sim_substeps=sim_substeps,
         solver_iterations=solver_iterations,
+        articulation_mode=articulation_mode,
         ground_friction=ground_friction,
         # nanoG1 reward weights
         reward_mode="nanog1_dense",
@@ -79,13 +64,13 @@ def _nanog1_env_config(
         w_orientation=g1_recipe.W_ORIENTATION,
         w_torque=g1_recipe.W_TORQUE,
         w_action_rate=g1_recipe.W_ACTION_RATE,
-        # All extras off — nanoG1 does not use these
+        # nanoG1 v3 gait shaping compiled by G1_TASK_V3
         w_command_progress=0.0,
-        w_gait_contact=0.0,
-        w_gait_swing=0.0,
-        w_gait_swing_contact=0.0,
-        w_gait_hip=0.0,
-        w_base_height=0.0,
+        w_gait_contact=g1_recipe.W_GAIT_CONTACT,
+        w_gait_swing=g1_recipe.W_GAIT_SWING,
+        w_gait_swing_contact=g1_recipe.W_GAIT_SWING_CONTACT,
+        w_gait_hip=g1_recipe.W_GAIT_HIP,
+        w_base_height=g1_recipe.W_BASE_HEIGHT,
         w_feet_air_time=0.0,
         w_feet_slide=0.0,
         w_joint_deviation_hip=0.0,
@@ -142,9 +127,7 @@ def _nanog1_ppo_config() -> rl.ConfigPPO:
 
 
 def _make_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--device", default=None, help="Warp device, e.g. 'cuda:0'")
     parser.add_argument("--output-dir", default="/tmp/g1_nanog1", help="Checkpoint output directory")
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)
@@ -166,7 +149,7 @@ def _make_parser() -> argparse.ArgumentParser:
         default=573,
         help=(
             "Training iterations.  Default 573 ≈ 150M samples at "
-            f"{g1_recipe.WORLD_COUNT} worlds × {g1_recipe.ROLLOUT_STEPS} steps."
+            f"{g1_recipe.WORLD_COUNT} worlds x {g1_recipe.ROLLOUT_STEPS} steps."
         ),
     )
     parser.add_argument(
@@ -183,10 +166,15 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--resume-checkpoint", default=None, help="Resume from this .npz checkpoint")
     parser.add_argument(
+        "--resume-policy-only",
+        action="store_true",
+        help="Load network weights but initialize fresh optimizer state",
+    )
+    parser.add_argument(
         "--execution-mode",
         choices=("eager", "graph_leapfrog"),
         default="graph_leapfrog",
-        help="CUDA execution mode — graph_leapfrog gives ~2-4× throughput (default: %(default)s)",
+        help="CUDA execution mode — graph_leapfrog gives ~2-4x throughput (default: %(default)s)",
     )
     parser.add_argument(
         "--command-x",
@@ -196,11 +184,10 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--randomize-commands",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "Sample commands uniformly instead of using the fixed --command-x.  "
-            "Activates episode-level randomization over --command-x-range etc."
+            "Sample nanoG1 commands per episode; pass --no-randomize-commands to train only on the fixed --command-x."
         ),
     )
     parser.add_argument("--command-x-min", type=float, default=g1_recipe.COMMAND_X_RANGE[0])
@@ -215,9 +202,39 @@ def _make_parser() -> argparse.ArgumentParser:
         default=g1_recipe.COMMAND_ZERO_PROBABILITY,
         help="Fraction of episodes assigned zero command when randomizing (default: %(default)s)",
     )
+    parser.add_argument(
+        "--command-curriculum-start",
+        type=float,
+        default=1.0,
+        help="Initial multiplier for randomized command ranges (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--command-curriculum-samples",
+        type=int,
+        default=0,
+        help="Samples over which command ranges grow to full scale; 0 disables it (default: %(default)s)",
+    )
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
+    parser.add_argument(
+        "--articulation-mode",
+        choices=("maximal", "hybrid", "reduced"),
+        default="reduced",
+        help="PhoenX articulation dynamics mode (default: %(default)s)",
+    )
     parser.add_argument("--ground-friction", type=float, default=g1_recipe.GROUND_FRICTION)
+    parser.add_argument(
+        "--log-std-init",
+        type=float,
+        default=g1_recipe.LOG_STD_INIT,
+        help="Initial policy log-standard-deviation (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--mirror-loss-coeff",
+        type=float,
+        default=g1_recipe.MIRROR_LOSS_COEFF,
+        help="Left/right policy symmetry coefficient (default: %(default)s)",
+    )
     parser.add_argument(
         "--no-readback-diagnostics",
         action="store_true",
@@ -244,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         f"  walk_gate_at_iter≈{walk_gate_iter}  "
         f"({_WALK_GATE_SAMPLES / 1e6:.0f}M samples)\n"
         f"  execution={args.execution_mode}  "
+        f"articulation={args.articulation_mode}  "
         f"command_x={args.command_x:.2f}  "
         f"randomize_commands={args.randomize_commands}\n"
         f"  output_dir={output_dir}"
@@ -254,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         command_x=float(args.command_x),
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
+        articulation_mode=str(args.articulation_mode),
         ground_friction=float(args.ground_friction),
         randomize_commands=bool(args.randomize_commands),
         command_x_range=(float(args.command_x_min), float(args.command_x_max)),
@@ -262,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
         command_zero_probability=float(args.command_zero_probability),
     )
     ppo_config = _nanog1_ppo_config()
+    ppo_config.mirror_loss_coeff = float(args.mirror_loss_coeff)
     checkpoint_pattern = str(output_dir / "g1_nanog1_{iteration:06d}.npz")
 
     t_start = time.perf_counter()
@@ -269,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
         rl.ConfigTrainG1PPO(
             iterations=int(args.iterations),
             rollout_steps=int(args.rollout_steps),
+            log_std_init=float(args.log_std_init),
             env_config=env_config,
             ppo_config=ppo_config,
             device=args.device,
@@ -280,8 +301,11 @@ def main(argv: list[str] | None = None) -> int:
             command_y_range=(float(args.command_y_min), float(args.command_y_max)),
             command_yaw_range=(float(args.command_yaw_min), float(args.command_yaw_max)),
             command_zero_probability=float(args.command_zero_probability),
+            command_curriculum_start=float(args.command_curriculum_start),
+            command_curriculum_samples=int(args.command_curriculum_samples),
             reset_recurrent_state_on_rollout_start=g1_recipe.RESET_RECURRENT_STATE_ON_ROLLOUT_START,
             resume_checkpoint=args.resume_checkpoint,
+            resume_policy_only=bool(args.resume_policy_only),
             checkpoint_path=checkpoint_pattern,
             checkpoint_interval=int(args.checkpoint_interval),
             readback_diagnostics=not bool(args.no_readback_diagnostics),
@@ -309,8 +333,13 @@ def main(argv: list[str] | None = None) -> int:
             f"final_done={final_stats.mean_done:.4f}"
         )
         walk_fraction = final_samples / _WALK_GATE_SAMPLES
-        status = "WALKED" if final_stats.mean_tracking_perf >= _WALK_GATE_TRACKING_PERF else "not yet walking"
-        print(f"  walk_gate={status}  samples_vs_gate={walk_fraction:.2f}×")
+        status = (
+            "tracking threshold reached"
+            if final_stats.mean_tracking_perf >= _WALK_GATE_TRACKING_PERF
+            else "tracking threshold not reached"
+        )
+        print(f"  training_signal={status}  samples_vs_75M={walk_fraction:.2f}x")
+        print("  Run the deterministic quality gate before claiming the policy walks.")
 
     final_path = str(output_dir / f"g1_nanog1_{final_iter:06d}.npz")
     result.trainer.save_checkpoint(final_path, iteration=final_iter)

@@ -2852,16 +2852,22 @@ def _phoenx_apply_forces_and_gravity_kernel(
     i = wp.tid()
     bodies.position_prev_substep[i] = bodies.position[i]
     bodies.orientation_prev_substep[i] = bodies.orientation[i]
+    bodies.velocity_prev_substep[i] = bodies.velocity[i]
+    bodies.angular_velocity_prev_substep[i] = bodies.angular_velocity[i]
     if bodies.motion_type[i] != MOTION_DYNAMIC:
         bodies.access_mode[i] = ACCESS_MODE_STATIC
         if bodies.motion_type[i] == MOTION_STATIC:
             bodies.velocity[i] = wp.vec3f(0.0, 0.0, 0.0)
             bodies.angular_velocity[i] = wp.vec3f(0.0, 0.0, 0.0)
+            bodies.velocity_prev_substep[i] = wp.vec3f(0.0, 0.0, 0.0)
+            bodies.angular_velocity_prev_substep[i] = wp.vec3f(0.0, 0.0, 0.0)
         return
     if bodies.inverse_mass[i] == 0.0:
         bodies.access_mode[i] = ACCESS_MODE_STATIC
         bodies.velocity[i] = wp.vec3f(0.0, 0.0, 0.0)
         bodies.angular_velocity[i] = wp.vec3f(0.0, 0.0, 0.0)
+        bodies.velocity_prev_substep[i] = wp.vec3f(0.0, 0.0, 0.0)
+        bodies.angular_velocity_prev_substep[i] = wp.vec3f(0.0, 0.0, 0.0)
         return
     # Sleeping bodies: skip gravity + force application and present as
     # STATIC to the constraint solve so body_set_access_mode early-outs
