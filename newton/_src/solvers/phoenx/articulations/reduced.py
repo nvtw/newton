@@ -1140,6 +1140,244 @@ def _publish_reduced_local_velocities_kernel(
         bodies.angular_velocity[slot] = omega
 
 
+@wp.kernel(enable_backward=False, module="reduced_publish")
+def _finish_and_publish_reduced_warp_kernel(
+    max_depth: wp.int32,
+    articulation_depth_start: wp.array2d[wp.int32],
+    articulation_depth_joint: wp.array[wp.int32],
+    joint_q: wp.array[wp.float32],
+    joint_qd_local: wp.array[wp.float32],
+    joint_qd_integrator: wp.array[wp.float32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_dof_dim: wp.array2d[wp.int32],
+    body_com: wp.array[wp.vec3],
+    body_x_com: wp.array[wp.transform],
+    zero_generalized_acceleration: wp.array[wp.float32],
+    dt: wp.float32,
+    joint_qd_public: wp.array[wp.float32],
+    body_q: wp.array[wp.transform],
+    bodies: BodyContainer,
+    articulation_origin: wp.array[wp.vec3],
+    body_q_local: wp.array[wp.transform],
+    body_q_com: wp.array[wp.transform],
+    joint_anchor_local: wp.array[wp.transform],
+    joint_s_publish: wp.array[wp.spatial_vector],
+    body_qd: wp.array[wp.spatial_vector],
+):
+    thread = wp.tid()
+    articulation = thread // wp.int32(32)
+    lane = thread - articulation * wp.int32(32)
+    data = bodies.reduced
+
+    for depth in range(max_depth + wp.int32(1)):
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            parent = joint_parent[joint]
+            child = joint_child[joint]
+            kind = joint_type[joint]
+            if kind == JointType.FREE or kind == JointType.DISTANCE:
+                slot = child + wp.int32(1)
+                child_twist = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
+                new_body_q = integrate_body_pose_from_com_twist(body_q[child], body_com[child], child_twist, dt)
+                parent_anchor = joint_x_p[joint]
+                if parent >= wp.int32(0):
+                    parent_anchor = body_q[parent] * parent_anchor
+                joint_transform = wp.transform_inverse(parent_anchor) * new_body_q * joint_x_c[joint]
+                coord_start = joint_q_start[joint]
+                position = wp.transform_get_translation(joint_transform)
+                rotation = wp.transform_get_rotation(joint_transform)
+                joint_q[coord_start] = position[0]
+                joint_q[coord_start + wp.int32(1)] = position[1]
+                joint_q[coord_start + wp.int32(2)] = position[2]
+                joint_q[coord_start + wp.int32(3)] = rotation[0]
+                joint_q[coord_start + wp.int32(4)] = rotation[1]
+                joint_q[coord_start + wp.int32(5)] = rotation[2]
+                joint_q[coord_start + wp.int32(6)] = rotation[3]
+            else:
+                jcalc_integrate(
+                    parent,
+                    joint_x_c[joint],
+                    body_com[child],
+                    kind,
+                    joint_q,
+                    joint_qd_integrator,
+                    zero_generalized_acceleration,
+                    joint_q_start[joint],
+                    joint_qd_start[joint],
+                    joint_dof_dim[joint, 0],
+                    joint_dof_dim[joint, 1],
+                    dt,
+                    joint_q,
+                    joint_qd_integrator,
+                )
+                joint_transform = jcalc_transform(
+                    kind,
+                    joint_axis,
+                    joint_qd_start[joint],
+                    joint_dof_dim[joint, 0],
+                    joint_dof_dim[joint, 1],
+                    joint_q,
+                    joint_q_start[joint],
+                )
+                parent_anchor = joint_x_p[joint]
+                if parent >= wp.int32(0):
+                    parent_anchor = body_q[parent] * parent_anchor
+                new_body_q = parent_anchor * joint_transform * wp.transform_inverse(joint_x_c[joint])
+            body_q[child] = new_body_q
+            index += wp.int32(32)
+        _sync_reduced_warp()
+
+    for depth in range(max_depth + wp.int32(1)):
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            kind = joint_type[joint]
+            dof_start = joint_qd_start[joint]
+            dof_end = joint_qd_start[joint + wp.int32(1)]
+            if kind != JointType.FREE and kind != JointType.DISTANCE:
+                for dof in range(dof_start, dof_end):
+                    joint_qd_public[dof] = joint_qd_local[dof]
+            elif joint_parent[joint] < wp.int32(0):
+                root_twist = wp.spatial_vector()
+                for dof in range(dof_start, dof_end):
+                    root_twist += data.joint_s[dof] * joint_qd_local[dof]
+                parent_rotation = wp.transform_get_rotation(joint_x_p[joint])
+                velocity_parent = wp.quat_rotate_inv(parent_rotation, wp.spatial_top(root_twist))
+                omega_parent = wp.quat_rotate_inv(parent_rotation, wp.spatial_bottom(root_twist))
+                joint_qd_public[dof_start] = velocity_parent[0]
+                joint_qd_public[dof_start + wp.int32(1)] = velocity_parent[1]
+                joint_qd_public[dof_start + wp.int32(2)] = velocity_parent[2]
+                joint_qd_public[dof_start + wp.int32(3)] = omega_parent[0]
+                joint_qd_public[dof_start + wp.int32(4)] = omega_parent[1]
+                joint_qd_public[dof_start + wp.int32(5)] = omega_parent[2]
+            else:
+                joint_transform = jcalc_transform(
+                    kind,
+                    joint_axis,
+                    dof_start,
+                    joint_dof_dim[joint, 0],
+                    joint_dof_dim[joint, 1],
+                    joint_q,
+                    joint_q_start[joint],
+                )
+                child_from_parent_anchor = joint_transform * wp.transform_inverse(joint_x_c[joint])
+                child_com_parent = wp.transform_point(child_from_parent_anchor, body_com[joint_child[joint]])
+                velocity_origin = wp.vec3(
+                    joint_qd_integrator[dof_start],
+                    joint_qd_integrator[dof_start + wp.int32(1)],
+                    joint_qd_integrator[dof_start + wp.int32(2)],
+                )
+                omega_parent = wp.vec3(
+                    joint_qd_integrator[dof_start + wp.int32(3)],
+                    joint_qd_integrator[dof_start + wp.int32(4)],
+                    joint_qd_integrator[dof_start + wp.int32(5)],
+                )
+                velocity_com = velocity_origin + wp.cross(omega_parent, child_com_parent)
+                joint_qd_public[dof_start] = velocity_com[0]
+                joint_qd_public[dof_start + wp.int32(1)] = velocity_com[1]
+                joint_qd_public[dof_start + wp.int32(2)] = velocity_com[2]
+                joint_qd_public[dof_start + wp.int32(3)] = omega_parent[0]
+                joint_qd_public[dof_start + wp.int32(4)] = omega_parent[1]
+                joint_qd_public[dof_start + wp.int32(5)] = omega_parent[2]
+
+            child = joint_child[joint]
+            transform = body_q[child]
+            rotation = wp.transform_get_rotation(transform)
+            origin = wp.transform_get_translation(transform)
+            slot = child + wp.int32(1)
+            bodies.position[slot] = origin + wp.quat_rotate(rotation, body_com[child])
+            bodies.orientation[slot] = rotation
+            index += wp.int32(32)
+        _sync_reduced_warp()
+
+    if lane == wp.int32(0):
+        root_joint = articulation_depth_joint[articulation_depth_start[articulation, 0]]
+        root = joint_child[root_joint]
+        articulation_origin[articulation] = wp.transform_point(body_q[root], body_com[root])
+
+    for depth in range(max_depth + wp.int32(1)):
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            parent = joint_parent[joint]
+            child = joint_child[joint]
+            joint_transform = jcalc_transform(
+                joint_type[joint],
+                joint_axis,
+                joint_qd_start[joint],
+                joint_dof_dim[joint, 0],
+                joint_dof_dim[joint, 1],
+                joint_q,
+                joint_q_start[joint],
+            )
+            if parent < wp.int32(0):
+                rotation = wp.transform_get_rotation(body_q[child])
+                child_transform = wp.transform(-wp.quat_rotate(rotation, body_com[child]), rotation)
+                child_anchor = child_transform * joint_x_c[joint]
+                root_joint_transform = joint_transform
+                if joint_type[joint] == JointType.FREE or joint_type[joint] == JointType.DISTANCE:
+                    root_joint_transform = wp.transform(wp.vec3(0.0), wp.transform_get_rotation(joint_transform))
+                parent_anchor = child_anchor * wp.transform_inverse(root_joint_transform)
+            else:
+                parent_anchor = body_q_local[parent] * joint_x_p[joint]
+                child_anchor = parent_anchor * joint_transform
+                child_transform = child_anchor * wp.transform_inverse(joint_x_c[joint])
+            joint_anchor_local[joint] = parent_anchor
+            body_q_local[child] = child_transform
+            body_q_com[child] = child_transform * body_x_com[child]
+            index += wp.int32(32)
+        _sync_reduced_warp()
+
+    for depth in range(max_depth + wp.int32(1)):
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            parent = joint_parent[joint]
+            child = joint_child[joint]
+            jcalc_motion(
+                joint_type[joint],
+                joint_axis,
+                joint_dof_dim[joint, 0],
+                joint_dof_dim[joint, 1],
+                joint_anchor_local[joint],
+                joint_qd_local,
+                joint_qd_start[joint],
+                joint_s_publish,
+            )
+            twist = wp.spatial_vector()
+            if parent >= wp.int32(0):
+                parent_com_twist = body_qd[parent]
+                parent_omega = wp.spatial_bottom(parent_com_twist)
+                parent_com_position = wp.transform_get_translation(body_q_com[parent])
+                twist = wp.spatial_vector(
+                    wp.spatial_top(parent_com_twist) - wp.cross(parent_omega, parent_com_position),
+                    parent_omega,
+                )
+            for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
+                twist += joint_s_publish[dof] * joint_qd_local[dof]
+            omega = wp.spatial_bottom(twist)
+            com_position = wp.transform_get_translation(body_q_com[child])
+            com_twist = wp.spatial_vector(wp.spatial_top(twist) + wp.cross(omega, com_position), omega)
+            body_qd[child] = com_twist
+            slot = child + wp.int32(1)
+            bodies.velocity[slot] = wp.spatial_top(com_twist)
+            bodies.angular_velocity[slot] = omega
+            index += wp.int32(32)
+        _sync_reduced_warp()
+
+
 @wp.kernel(enable_backward=False)
 def _solve_articulated_system_kernel(
     articulation_start: wp.array[wp.int32],
@@ -1723,6 +1961,7 @@ class ReducedArticulationSystem:
         self.use_warp_advance = bool(self.device.is_cuda)
         self.use_warp_factor = bool(self.device.is_cuda and model.articulation_count >= _WARP_FACTOR_MIN_ARTICULATIONS)
         self.use_warp_kinematics = bool(self.device.is_cuda)
+        self.use_warp_publish = bool(self.device.is_cuda)
         body_count = int(model.body_count)
         joint_count = int(model.joint_count)
         dof_count = int(model.joint_dof_count)
@@ -2302,56 +2541,96 @@ class ReducedPhoenXArticulation:
 
     def _publish_state(self, dt: float) -> None:
         wp.copy(self.system.joint_qd_integrator, self.system.joint_qd_internal)
-        wp.launch(
-            _finish_reduced_articulations_kernel,
-            dim=int(self.model.articulation_count),
-            inputs=[
-                self.model.articulation_start,
-                self.model.articulation_end,
-                self.state.joint_q,
-                self.system.joint_qd_internal,
-                self.system.joint_qd_integrator,
-                self.model.joint_q_start,
-                self.model.joint_qd_start,
-                self.model.joint_type,
-                self.model.joint_parent,
-                self.model.joint_child,
-                self.model.joint_X_p,
-                self.model.joint_X_c,
-                self.model.joint_axis,
-                self.model.joint_dof_dim,
-                self.model.body_com,
-                self.system.zero_generalized_force,
-                wp.float32(dt),
-            ],
-            outputs=[
-                self.state.joint_qd,
-                self.state.body_q,
-                self.bodies,
-            ],
-            device=self.model.device,
-        )
-        self.system.update_local_kinematics(self.state)
-        wp.launch(
-            _publish_reduced_local_velocities_kernel,
-            dim=int(self.model.articulation_count),
-            inputs=[
-                self.model.articulation_start,
-                self.model.articulation_end,
-                self.model.joint_type,
-                self.model.joint_parent,
-                self.model.joint_child,
-                self.model.joint_qd_start,
-                self.model.joint_axis,
-                self.model.joint_dof_dim,
-                self.system.joint_anchor_local,
-                self.system.body_q_com,
-                self.system.joint_qd_internal,
-                self.bodies,
-            ],
-            outputs=[self.system.joint_s_publish, self.state.body_qd],
-            device=self.model.device,
-        )
+        if self.system.use_warp_publish:
+            wp.launch(
+                _finish_and_publish_reduced_warp_kernel,
+                dim=int(self.model.articulation_count) * 32,
+                block_dim=32,
+                inputs=[
+                    wp.int32(self.system.advance_max_depth),
+                    self.system.advance_articulation_depth_start,
+                    self.system.advance_articulation_depth_joint,
+                    self.state.joint_q,
+                    self.system.joint_qd_internal,
+                    self.system.joint_qd_integrator,
+                    self.model.joint_q_start,
+                    self.model.joint_qd_start,
+                    self.model.joint_type,
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.model.joint_X_p,
+                    self.model.joint_X_c,
+                    self.model.joint_axis,
+                    self.model.joint_dof_dim,
+                    self.model.body_com,
+                    self.system.body_x_com,
+                    self.system.zero_generalized_force,
+                    wp.float32(dt),
+                ],
+                outputs=[
+                    self.state.joint_qd,
+                    self.state.body_q,
+                    self.bodies,
+                    self.system.articulation_origin,
+                    self.system.body_q_local,
+                    self.system.body_q_com,
+                    self.system.joint_anchor_local,
+                    self.system.joint_s_publish,
+                    self.state.body_qd,
+                ],
+                device=self.model.device,
+            )
+        else:
+            wp.launch(
+                _finish_reduced_articulations_kernel,
+                dim=int(self.model.articulation_count),
+                inputs=[
+                    self.model.articulation_start,
+                    self.model.articulation_end,
+                    self.state.joint_q,
+                    self.system.joint_qd_internal,
+                    self.system.joint_qd_integrator,
+                    self.model.joint_q_start,
+                    self.model.joint_qd_start,
+                    self.model.joint_type,
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.model.joint_X_p,
+                    self.model.joint_X_c,
+                    self.model.joint_axis,
+                    self.model.joint_dof_dim,
+                    self.model.body_com,
+                    self.system.zero_generalized_force,
+                    wp.float32(dt),
+                ],
+                outputs=[
+                    self.state.joint_qd,
+                    self.state.body_q,
+                    self.bodies,
+                ],
+                device=self.model.device,
+            )
+            self.system.update_local_kinematics(self.state)
+            wp.launch(
+                _publish_reduced_local_velocities_kernel,
+                dim=int(self.model.articulation_count),
+                inputs=[
+                    self.model.articulation_start,
+                    self.model.articulation_end,
+                    self.model.joint_type,
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.model.joint_qd_start,
+                    self.model.joint_axis,
+                    self.model.joint_dof_dim,
+                    self.system.joint_anchor_local,
+                    self.system.body_q_com,
+                    self.system.joint_qd_internal,
+                    self.bodies,
+                ],
+                outputs=[self.system.joint_s_publish, self.state.body_qd],
+                device=self.model.device,
+            )
 
     def finish_relax(self) -> None:
         """Publish bias-free velocity corrections without advancing configuration."""
