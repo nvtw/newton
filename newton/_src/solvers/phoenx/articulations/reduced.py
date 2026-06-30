@@ -1793,7 +1793,13 @@ class ReducedPhoenXArticulation:
         eval_fk(self.model, self.state.joint_q, self.state.joint_qd, self.state)
         self.sync_bodies()
 
-    def begin_substep(self, dt: float, *, split_dynamics: bool) -> None:
+    def begin_substep(
+        self,
+        dt: float,
+        *,
+        split_dynamics: bool,
+        compute_impulse_response: bool = True,
+    ) -> None:
         """Apply pre-PGS reduced dynamics at the current configuration."""
         self.system.factor(self.state, self.control, dt)
         self.system.advance(
@@ -1804,12 +1810,13 @@ class ReducedPhoenXArticulation:
             include_external=True,
             include_coriolis=not split_dynamics,
         )
-        wp.launch(
-            _compute_reduced_impulse_response_kernel,
-            dim=int(self.model.articulation_count),
-            inputs=[self.bodies],
-            device=self.model.device,
-        )
+        if compute_impulse_response:
+            wp.launch(
+                _compute_reduced_impulse_response_kernel,
+                dim=int(self.model.articulation_count),
+                inputs=[self.bodies],
+                device=self.model.device,
+            )
 
     def _publish_state(self, dt: float) -> None:
         wp.copy(self.system.joint_qd_integrator, self.system.joint_qd_internal)
