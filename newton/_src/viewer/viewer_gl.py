@@ -309,22 +309,10 @@ class ViewerGL(ViewerBase):
         self._wp_pbo = None
         self._pbo_host_buffer = None
 
-    @override
-    def _init_extra_layer_state(self, layer):
-        super()._init_extra_layer_state(layer)
-        layer._packed_groups = []
-        layer._capsule_keys = set()
-        layer._packed_write_indices = None
-        layer._packed_world_xforms = None
-        layer._packed_vbo_xforms = None
-        layer._packed_vbo_xforms_host = None
-        layer.picking = None
-        layer.wind = None
-
         # Optional live MP4 recording (driven from the sidebar "Recording" panel).
         self._recorder = LiveMp4Recorder()
         self._recorder.set_filename_prefix("gl_recording")
-        self._record_frame_gpu: wp.array | None = None
+        self._record_frame_gpu: wp.array[wp.uint8] | None = None
         # Capture is driven by simulation time so the MP4's wall-clock
         # duration matches sim time regardless of how fast the renderer
         # produces frames. ``_record_next_sim_t`` is the next sim time at
@@ -337,6 +325,19 @@ class ViewerGL(ViewerBase):
         self._record_sim_fps: float | None = None
         self._record_next_sim_t: float | None = None
         self._record_last_frame_bytes: bytes | None = None
+        self._record_error: str | None = None
+
+    @override
+    def _init_extra_layer_state(self, layer):
+        super()._init_extra_layer_state(layer)
+        layer._packed_groups = []
+        layer._capsule_keys = set()
+        layer._packed_write_indices = None
+        layer._packed_world_xforms = None
+        layer._packed_vbo_xforms = None
+        layer._packed_vbo_xforms_host = None
+        layer.picking = None
+        layer.wind = None
 
     @property
     def ui(self):
@@ -1824,6 +1825,7 @@ class ViewerGL(ViewerBase):
             ``True`` if recording started successfully.
         """
         if not self._sync_record_fps_from_text():
+            self._record_error = f"Invalid recording FPS: {self._record_fps_text!r}"
             logger.warning("Cannot start MP4 recording: invalid recording FPS %r.", self._record_fps_text)
             return False
 
@@ -1847,6 +1849,9 @@ class ViewerGL(ViewerBase):
             )
             self._record_next_sim_t = float(self.time)
             self._record_last_frame_bytes = None
+            self._record_error = None
+        else:
+            self._record_error = "Could not start recording. Install imageio-ffmpeg or a system ffmpeg; see the log."
         return started
 
     def _stop_recording(self) -> Path | None:
@@ -1891,21 +1896,29 @@ class ViewerGL(ViewerBase):
             self._stop_recording()
             return
 
-        # Read the current framebuffer once, then emit it as many times as
-        # needed to catch up to sim time. Reuse the previous frame's bytes
-        # if the sim didn't advance enough to warrant a fresh readback.
+        # Read the current framebuffer once. Hold the previous frame for
+        # catch-up slots before the current simulation time, then use the new
+        # frame for the slot nearest the current time.
         frame_gpu = self.get_frame(target_image=self._record_frame_gpu, render_ui=False)
-        self._record_last_frame_bytes = frame_gpu.numpy().tobytes()
+        current_frame_bytes = frame_gpu.numpy().tobytes()
+        previous_frame_bytes = self._record_last_frame_bytes or current_frame_bytes
 
-        # Emit at least one frame; if the sim leapt forward, emit duplicates
-        # to keep playback wall-clock-accurate. Cap to avoid runaway loops
-        # if the sim time jumps unexpectedly (e.g. after a long pause).
+        # Cap catch-up work so an unexpected simulation-time jump does not
+        # monopolize the render thread.
         max_emit = max(1, int(math.ceil(4.0 * record_fps)))  # at most ~4 s worth of catch-up
         emitted = 0
-        while self.time + 0.5 * record_dt >= self._record_next_sim_t and emitted < max_emit:
-            self._recorder.write_frame_bytes(self._record_last_frame_bytes, w, h)
+        while self._record_next_sim_t + 0.5 * record_dt < self.time and emitted < max_emit:
+            self._recorder.write_frame_bytes(previous_frame_bytes, w, h)
             self._record_next_sim_t += record_dt
             emitted += 1
+        while self.time + 0.5 * record_dt >= self._record_next_sim_t and emitted < max_emit:
+            self._recorder.write_frame_bytes(current_frame_bytes, w, h)
+            self._record_next_sim_t += record_dt
+            emitted += 1
+        self._record_last_frame_bytes = current_frame_bytes
+        if emitted == max_emit and self.time + 0.5 * record_dt >= self._record_next_sim_t:
+            skipped = int(math.floor((self.time + 0.5 * record_dt - self._record_next_sim_t) / record_dt)) + 1
+            self._record_next_sim_t += skipped * record_dt
 
     def get_frame(self, target_image: wp.array | None = None, render_ui: bool = False) -> wp.array:
         """
@@ -2439,6 +2452,8 @@ class ViewerGL(ViewerBase):
             imgui.text("(default)")
 
             imgui.text("Status: idle")
+            if self._record_error is not None:
+                imgui.text_wrapped(self._record_error)
             imgui.text_wrapped(str(self._recorder.suggested_output_path()))
             if imgui.button("Start Recording"):
                 self._start_recording()

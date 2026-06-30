@@ -30,6 +30,7 @@ itself (``start()`` returns ``False``).
 from __future__ import annotations
 
 import logging
+import math
 import queue
 import shutil
 import subprocess
@@ -67,11 +68,9 @@ class LiveMp4Recorder:
     """
 
     #: Maximum number of pending frames buffered between the renderer and the
-    #: ffmpeg writer thread. Large enough to absorb the multi-second hiccups
-    #: that occur when the encoder primes its rate-control look-ahead or when
-    #: the OS briefly preempts the writer thread, while still bounded so a
-    #: stalled ffmpeg cannot exhaust memory.
-    _QUEUE_MAXSIZE = 256
+    #: ffmpeg writer thread. Raw RGB frames are large (about 6 MiB at 1080p),
+    #: so keep this small and drop frames rather than consuming unbounded RAM.
+    _QUEUE_MAXSIZE = 8
 
     #: Minimum interval (seconds) between successive "dropped frame" warnings
     #: so a sustained slow-encoder stall doesn't flood the log.
@@ -125,22 +124,57 @@ class LiveMp4Recorder:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return self.default_output_directory() / f"{self._filename_prefix}_{stamp}.mp4"
 
-    def _pick_encoder(self, ffmpeg_exe: str) -> str:
-        preferred = ("h264_nvenc", "h264_qsv", "h264_amf", "libx264")
+    @staticmethod
+    def _probe_encoder(ffmpeg_exe: str, codec: str) -> bool:
+        """Return whether an encoder can initialize on this machine."""
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg_exe,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=16x16:r=1",
+                    "-frames:v",
+                    "1",
+                    "-an",
+                    "-c:v",
+                    codec,
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
+    def _pick_encoder(self, ffmpeg_exe: str) -> str | None:
+        preferred_hardware = ("h264_nvenc", "h264_qsv", "h264_amf")
         try:
             result = subprocess.run(
                 [ffmpeg_exe, "-hide_banner", "-encoders"],
                 check=False,
                 capture_output=True,
                 text=True,
+                timeout=5.0,
             )
             out = result.stdout or ""
-            for codec in preferred:
-                if codec in out:
+            for codec in preferred_hardware:
+                if codec in out and self._probe_encoder(ffmpeg_exe, codec):
                     return codec
-        except Exception:
-            pass
-        return "libx264"
+            if "libx264" in out:
+                return "libx264"
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return None
 
     def _stderr_reader_loop(self):
         """Drain ffmpeg's stderr and keep the most recent lines around.
@@ -179,7 +213,7 @@ class LiveMp4Recorder:
                     break
                 try:
                     self._proc.stdin.write(item)
-                except BrokenPipeError:
+                except (BrokenPipeError, OSError, ValueError):
                     unexpected_exit = True
                     break
         finally:
@@ -234,7 +268,7 @@ class LiveMp4Recorder:
         output_path: str | Path | None = None,
         flip_vertical: bool = False,
     ) -> bool:
-        """Start recording. Returns False when ``ffmpeg`` is unavailable.
+        """Start recording.
 
         Args:
             width: Frame width in pixels.
@@ -246,6 +280,9 @@ class LiveMp4Recorder:
                 this when feeding raw OpenGL bottom-left-origin pixels;
                 leave ``False`` when frames are already top-left-origin
                 (e.g. from the Newton PBO readback kernel).
+
+        Returns:
+            ``True`` when the encoder process started, otherwise ``False``.
         """
         if self.is_recording:
             return True
@@ -260,15 +297,25 @@ class LiveMp4Recorder:
         if self._width <= 0 or self._height <= 0:
             logger.warning("Recording requires positive frame dimensions, got %dx%d.", self._width, self._height)
             return False
-        fps = max(1.0, float(fps))
+        fps = float(fps)
+        if not math.isfinite(fps) or fps <= 0.0:
+            logger.warning("Recording requires a positive finite FPS, got %r.", fps)
+            return False
 
         if output_path is None:
             output_path = self.suggested_output_path()
         else:
             output_path = Path(output_path)
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.exception("Failed to create recording directory %s.", output_path.parent)
+            return False
         codec = self._pick_encoder(ffmpeg_exe)
+        if codec is None:
+            logger.warning("ffmpeg has no usable H.264 encoder; recording disabled.")
+            return False
         quality = float(np.clip(self._quality, 0.0, 100.0))
         # Keyframe interval of ~1 s. Forcing IDR at frame 0 and a short GOP
         # makes lightweight players and inline previews start decoding
@@ -308,12 +355,6 @@ class LiveMp4Recorder:
             # Lower CQ means higher quality; map quality in [0,100] -> CQ in [34,14].
             cq = int(round(34.0 - (quality / 100.0) * 20.0))
             cmd += [
-                "-preset",
-                "p7",
-                "-tune",
-                "hq",
-                "-rc",
-                "vbr",
                 "-cq",
                 str(max(14, min(34, cq))),
                 "-b:v",
@@ -353,15 +394,17 @@ class LiveMp4Recorder:
                 "-force_key_frames",
                 "expr:eq(n,0)",
             ]
+        filters = []
         if flip_vertical:
-            cmd += ["-vf", "vflip"]
-        # Broad-compatibility output: H.264 High profile, level 4.2,
-        # yuv420p, faststart so the moov atom is at the front of the file.
+            filters.append("vflip")
+        if self._width % 2 or self._height % 2:
+            filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
+        if filters:
+            cmd += ["-vf", ",".join(filters)]
+        # Use yuv420p and move the MP4 metadata to the front of the file for
+        # broad player compatibility. Let the encoder select the H.264 level
+        # so high-resolution/high-FPS recordings are not constrained to 4.2.
         cmd += [
-            "-profile:v",
-            "high",
-            "-level",
-            "4.2",
             "-pix_fmt",
             "yuv420p",
             "-movflags",
@@ -384,12 +427,12 @@ class LiveMp4Recorder:
         self._stderr_lines = []
         self._dropped_frames = 0
         self._last_drop_warn_t = 0.0
+        self._output_path = output_path
         self._queue = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
         self._worker = threading.Thread(target=self._writer_loop, name="newton-mp4-writer", daemon=True)
         self._worker.start()
         self._stderr_reader = threading.Thread(target=self._stderr_reader_loop, name="newton-mp4-stderr", daemon=True)
         self._stderr_reader.start()
-        self._output_path = output_path
         logger.info("Started recording to %s using encoder %s.", output_path, codec)
         return True
 
@@ -438,19 +481,21 @@ class LiveMp4Recorder:
 
         if self._queue is not None:
             try:
-                self._queue.put_nowait(None)
+                self._queue.put(None, timeout=5.0)
             except queue.Full:
-                # Drain one slot to make room for the sentinel.
+                # The encoder is stalled. Discard pending frames so the writer
+                # can close stdin and ffmpeg can finalize or be terminated.
                 try:
-                    self._queue.get_nowait()
+                    while True:
+                        self._queue.get_nowait()
                 except queue.Empty:
                     pass
-                try:
-                    self._queue.put_nowait(None)
-                except queue.Full:
-                    pass
+                self._queue.put_nowait(None)
         if self._worker is not None:
             self._worker.join(timeout=5.0)
+            if self._worker.is_alive():
+                self._proc.kill()
+                self._worker.join(timeout=2.0)
             self._worker = None
 
         try:

@@ -1,28 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the viewer-agnostic live MP4 recorder.
+"""Tests for ViewerGL live MP4 recording.
 
-These tests exercise :class:`newton._src.viewer.recording.LiveMp4Recorder`
-directly without instantiating any viewer. Tests that require an actual
-``ffmpeg`` binary are skipped when neither ``imageio-ffmpeg`` nor a system
-``ffmpeg`` is available.
+Tests that require an actual ``ffmpeg`` binary are skipped when neither
+``imageio-ffmpeg`` nor a system ``ffmpeg`` is available.
 """
 
 from __future__ import annotations
 
 import logging
 import queue as _queue
-import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 
 import newton._src.viewer.recording as recording_mod
 from newton._src.viewer.recording import LiveMp4Recorder, _resolve_ffmpeg_executable
+from newton._src.viewer.viewer import ViewerBase
+from newton._src.viewer.viewer_gl import ViewerGL
 
 
 def _ffmpeg_available() -> bool:
@@ -62,6 +63,102 @@ class TestWriteFrameWithoutStart(unittest.TestCase):
         rec.write_frame(np.zeros((8, 8, 3), dtype=np.uint8))
         self.assertFalse(rec.is_recording)
         self.assertIsNone(rec.stop())
+
+
+class TestEncoderSelection(unittest.TestCase):
+    def test_unavailable_hardware_encoder_falls_back(self):
+        rec = LiveMp4Recorder()
+        listing = Mock(stdout="h264_nvenc h264_qsv libx264", returncode=0)
+        with (
+            patch.object(recording_mod.subprocess, "run", return_value=listing),
+            patch.object(rec, "_probe_encoder", side_effect=[False, True]) as probe,
+        ):
+            self.assertEqual(rec._pick_encoder("ffmpeg"), "h264_qsv")
+        self.assertEqual([call.args[1] for call in probe.call_args_list], ["h264_nvenc", "h264_qsv"])
+
+    def test_no_usable_h264_encoder(self):
+        rec = LiveMp4Recorder()
+        listing = Mock(stdout="h264_nvenc", returncode=0)
+        with (
+            patch.object(recording_mod.subprocess, "run", return_value=listing),
+            patch.object(rec, "_probe_encoder", return_value=False),
+        ):
+            self.assertIsNone(rec._pick_encoder("ffmpeg"))
+
+    def test_encoder_probe_timeout(self):
+        with patch.object(
+            recording_mod.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="ffmpeg", timeout=5.0),
+        ):
+            self.assertFalse(LiveMp4Recorder._probe_encoder("ffmpeg", "h264_nvenc"))
+
+
+class TestViewerGLRecordingTiming(unittest.TestCase):
+    def _make_viewer(self):
+        recorder = SimpleNamespace(is_recording=True, frames=[])
+        recorder.write_frame_bytes = lambda data, width, height: recorder.frames.append((data, width, height))
+        frame = SimpleNamespace(shape=(2, 3, 3), numpy=lambda: np.zeros((2, 3, 3), dtype=np.uint8))
+
+        viewer = ViewerGL.__new__(ViewerGL)
+        viewer._recorder = recorder
+        viewer._record_next_sim_t = 0.0
+        viewer._record_fps = 2.0
+        viewer._record_frame_gpu = frame
+        viewer._record_last_frame_bytes = None
+        viewer.renderer = SimpleNamespace(_screen_width=3, _screen_height=2)
+        viewer.get_frame = Mock(return_value=frame)
+        viewer.time = 0.0
+        return viewer, recorder
+
+    def test_capture_is_paced_by_simulation_time(self):
+        viewer, recorder = self._make_viewer()
+
+        viewer._record_frame_if_needed()
+        self.assertEqual(len(recorder.frames), 1)
+        self.assertEqual(viewer.get_frame.call_count, 1)
+
+        viewer.time = 0.2
+        viewer._record_frame_if_needed()
+        self.assertEqual(len(recorder.frames), 1)
+        self.assertEqual(viewer.get_frame.call_count, 1)
+
+        viewer.time = 0.5
+        viewer._record_frame_if_needed()
+        self.assertEqual(len(recorder.frames), 2)
+        self.assertEqual(viewer.get_frame.call_count, 2)
+
+    def test_large_time_jump_drops_excess_backlog(self):
+        viewer, recorder = self._make_viewer()
+        viewer.time = 10.0
+
+        viewer._record_frame_if_needed()
+
+        self.assertEqual(len(recorder.frames), 8)
+        self.assertGreater(viewer._record_next_sim_t, viewer.time)
+
+    def test_catch_up_holds_previous_frame_until_current_time(self):
+        viewer, recorder = self._make_viewer()
+        old_frame = SimpleNamespace(shape=(2, 3, 3), numpy=lambda: np.zeros((2, 3, 3), dtype=np.uint8))
+        new_frame = SimpleNamespace(shape=(2, 3, 3), numpy=lambda: np.ones((2, 3, 3), dtype=np.uint8))
+        viewer.get_frame.side_effect = [old_frame, new_frame]
+
+        viewer._record_frame_if_needed()
+        viewer.time = 1.0
+        viewer._record_frame_if_needed()
+
+        self.assertEqual([frame[0][0] for frame in recorder.frames], [0, 0, 1])
+
+    def test_initializing_layer_does_not_replace_recorder(self):
+        viewer = ViewerGL.__new__(ViewerGL)
+        recorder = object()
+        viewer._recorder = recorder
+        layer = SimpleNamespace()
+
+        with patch.object(ViewerBase, "_init_extra_layer_state"):
+            viewer._init_extra_layer_state(layer)
+
+        self.assertIs(viewer._recorder, recorder)
 
 
 @unittest.skipUnless(_ffmpeg_available(), "ffmpeg not available (install imageio-ffmpeg or system ffmpeg)")
@@ -121,6 +218,20 @@ class TestLiveMp4Recording(unittest.TestCase):
             finally:
                 rec.stop()
             self.assertTrue(out.exists())
+
+    def test_odd_frame_dimensions_are_padded(self):
+        width, height = 255, 257
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "odd_dimensions.mp4"
+            rec = LiveMp4Recorder()
+            self.assertTrue(rec.start(width, height, fps=15.0, output_path=out))
+            try:
+                for _ in range(4):
+                    rec.write_frame(np.zeros((height, width, 3), dtype=np.uint8))
+            finally:
+                rec.stop()
+            self.assertTrue(out.exists())
+            self.assertGreater(out.stat().st_size, 0)
 
 
 class TestQueueDropping(unittest.TestCase):
@@ -186,24 +297,9 @@ class TestFfmpegFallback(unittest.TestCase):
     def test_start_returns_false_when_ffmpeg_missing(self):
         rec = LiveMp4Recorder()
 
-        # Force both resolution paths to fail.
-        original_which = shutil.which
-        original_resolve = recording_mod._resolve_ffmpeg_executable
-
-        def _no_ffmpeg(_cmd: str) -> str | None:
-            return None
-
-        def _no_resolve() -> str | None:
-            return None
-
-        shutil.which = _no_ffmpeg  # type: ignore[assignment]
-        recording_mod._resolve_ffmpeg_executable = _no_resolve  # type: ignore[assignment]
-        try:
+        with patch.object(recording_mod, "_resolve_ffmpeg_executable", return_value=None):
             self.assertFalse(rec.start(width=16, height=16, fps=30.0))
             self.assertFalse(rec.is_recording)
-        finally:
-            shutil.which = original_which  # type: ignore[assignment]
-            recording_mod._resolve_ffmpeg_executable = original_resolve  # type: ignore[assignment]
         # Ensure no lingering subprocess handle.
         self.assertIsNone(rec.stop())
 
