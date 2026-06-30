@@ -290,7 +290,10 @@ class SolverPhoenX(SolverBase):
             newton.eval_fk(model, model.joint_q, model.joint_qd, model)
 
         self._adbs: AdbsInitArrays = build_adbs_init_arrays(
-            model, device=self.device, joint_friction_model=self._joint_friction_model
+            model,
+            device=self.device,
+            joint_friction_model=self._joint_friction_model,
+            reduced_articulations=self.articulation_mode == "reduced",
         )
         num_joints = self._adbs.num_joint_columns
         self._adbs_articulation_joint_mask = self._build_adbs_articulation_joint_mask(model)
@@ -1110,7 +1113,10 @@ class SolverPhoenX(SolverBase):
         )
         if joint_props_changed:
             self._adbs = build_adbs_init_arrays(
-                self.model, device=self.device, joint_friction_model=self._joint_friction_model
+                self.model,
+                device=self.device,
+                joint_friction_model=self._joint_friction_model,
+                reduced_articulations=self.articulation_mode == "reduced",
             )
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())

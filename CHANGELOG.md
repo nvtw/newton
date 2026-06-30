@@ -63,6 +63,7 @@
 
 ### Fixed
 
+- Fix reduced-coordinate PhoenX FREE and DISTANCE descendants to preserve child-COM velocity under rotated anchors and accelerating parents, and accept tree DISTANCE joints through `articulation_mode="reduced"`.
 - Fix experimental simple PhoenX warm starting and velocity relaxation so separated or removed contacts and stale conditional joint rows cannot affect bodies.
 - Fix PhoenX DVI angular and axial limits to preserve unilateral separation and apply configured frequency-based softness.
 - Fix PhoenX PGS iteration ordering so every solve and relaxation iteration traverses all constraint colors before processing any constraint again.

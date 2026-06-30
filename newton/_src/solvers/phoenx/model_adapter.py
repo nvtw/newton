@@ -337,6 +337,7 @@ def build_adbs_init_arrays(
     device: wp.context.Devicelike | None = None,
     *,
     joint_friction_model: Literal["hard", "mujoco"] = "hard",
+    reduced_articulations: bool = False,
 ) -> AdbsInitArrays:
     """Convert ``model``'s joints to ADBS init arrays on ``device``.
 
@@ -345,10 +346,12 @@ def build_adbs_init_arrays(
         device: Device for the generated Warp arrays.
         joint_friction_model: ``"hard"`` keeps PhoenX Coulomb friction;
             ``"mujoco"`` maps MuJoCo solref/solimp friction metadata.
+        reduced_articulations: Whether tree joints are owned by the reduced
+            articulation solver instead of maximal-coordinate ADBS columns.
 
     Raises:
-        NotImplementedError: If any joint is DISTANCE or a D6 configuration
-            that cannot be reduced to the restored ADBS mode set.
+        NotImplementedError: If a non-reduced joint is DISTANCE or a D6
+            configuration cannot be reduced to the restored ADBS mode set.
     """
     if device is None:
         device = model.device
@@ -404,6 +407,7 @@ def build_adbs_init_arrays(
 
     # ---- Pull every relevant joint array back to host ----------------
     joint_type = model.joint_type.numpy()
+    joint_articulation = model.joint_articulation.numpy()
     joint_parent = model.joint_parent.numpy()
     joint_child = model.joint_child.numpy()
     joint_X_p = model.joint_X_p.numpy()  # (N, 7) float32
@@ -455,9 +459,11 @@ def build_adbs_init_arrays(
         if jtype is newton.JointType.FREE:
             continue
         if jtype is newton.JointType.DISTANCE:
+            if reduced_articulations and int(joint_articulation[j]) >= 0:
+                continue
             raise NotImplementedError(
-                f"PhoenX does not support JointType.{jtype.name} (joint {j}). "
-                "Supported: REVOLUTE, PRISMATIC, BALL, FIXED, CABLE, reducible D6, FREE (no column)."
+                f"PhoenX does not support maximal-coordinate JointType.{jtype.name} (joint {j}). "
+                'Use articulation_mode="reduced" for tree DISTANCE joints.'
             )
 
         parent_idx = int(joint_parent[j])
