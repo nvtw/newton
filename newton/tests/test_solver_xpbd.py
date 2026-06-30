@@ -1405,11 +1405,98 @@ def test_xpbd_parent_f_newton_second_law_zero_g(test, device):
             )
 
 
+def test_position_based_fluids(test, device):
+    fluid_flags = int(newton.ParticleFlags.ACTIVE | newton.ParticleFlags.FLUID)
+
+    contact_builder = newton.ModelBuilder()
+    contact_builder.add_particles(
+        pos=[wp.vec3(0.0), wp.vec3(0.1, 0.0, 0.0)],
+        vel=[wp.vec3(0.0)] * 2,
+        mass=[1.0] * 2,
+        radius=[0.1] * 2,
+        flags=[fluid_flags] * 2,
+    )
+    contact_model = contact_builder.finalize(device=device)
+    contact_model.set_gravity((0.0, 0.0, 0.0))
+    contact_solver = newton.solvers.SolverXPBD(contact_model, iterations=2)
+    contact_state_0 = contact_model.state()
+    contact_state_1 = contact_model.state()
+    contact_solver.step(
+        contact_state_0,
+        contact_state_1,
+        contact_model.control(),
+        contact_model.contacts(),
+        0.01,
+    )
+    contact_positions = contact_state_1.particle_q.numpy()
+    test.assertGreater(np.linalg.norm(contact_positions[1] - contact_positions[0]), 0.1)
+
+    spacing = 0.04
+    positions = [wp.vec3(x * spacing, y * spacing, z * spacing) for z in range(4) for y in range(4) for x in range(4)]
+    particle_count = len(positions)
+    builder = newton.ModelBuilder()
+    builder.add_particles(
+        pos=positions,
+        vel=[wp.vec3(0.0)] * particle_count,
+        mass=[1.0] * particle_count,
+        radius=[0.015] * particle_count,
+        flags=[fluid_flags] * particle_count,
+    )
+    model = builder.finalize(device=device)
+    model.set_gravity((0.0, 0.0, 0.0))
+
+    with test.assertRaisesRegex(ValueError, "contact_distance must be positive"):
+        newton.solvers.SolverXPBD(model, pbf_particle_contact_distance=0.0)
+    with test.assertRaisesRegex(ValueError, "fluid_rest_distance"):
+        newton.solvers.SolverXPBD(
+            model,
+            pbf_particle_contact_distance=0.12,
+            pbf_fluid_rest_distance=0.13,
+        )
+
+    solver = newton.solvers.SolverXPBD(
+        model,
+        iterations=3,
+        pbf_particle_contact_distance=0.12,
+        pbf_fluid_rest_distance=0.07,
+        pbf_damping=10.0,
+    )
+    state_0 = model.state()
+    state_1 = model.state()
+    initial_positions = state_0.particle_q.numpy().copy()
+    initial_center = np.mean(initial_positions, axis=0)
+    initial_extent = np.mean(np.linalg.norm(initial_positions - initial_center, axis=1))
+
+    dt = 0.005
+    solver.step(state_0, state_1, model.control(), model.contacts(), dt)
+
+    final_positions = state_1.particle_q.numpy()
+    final_velocities = state_1.particle_qd.numpy()
+    final_center = np.mean(final_positions, axis=0)
+    final_extent = np.mean(np.linalg.norm(final_positions - final_center, axis=1))
+
+    test.assertTrue(np.isfinite(final_positions).all())
+    test.assertTrue(np.isfinite(final_velocities).all())
+    test.assertGreater(final_extent, initial_extent * 1.05)
+    np.testing.assert_allclose(final_center, initial_center, atol=1.0e-5)
+    inferred_velocities = (final_positions - initial_positions) / dt
+    np.testing.assert_allclose(final_velocities, inferred_velocities * (1.0 - 10.0 * dt), rtol=1.0e-5, atol=1.0e-5)
+
+
 devices = get_test_devices()
 
 
 class TestSolverXPBD(unittest.TestCase):
     pass
+
+
+add_function_test(
+    TestSolverXPBD,
+    "test_position_based_fluids",
+    test_position_based_fluids,
+    devices=devices,
+    check_output=False,
+)
 
 
 add_function_test(

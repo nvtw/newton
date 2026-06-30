@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
 ###########################################################################
@@ -100,27 +100,39 @@ class Example:
 
         # back wall (-X)
         builder.add_shape_box(
-            body=-1, cfg=wall_cfg,
+            body=-1,
+            cfg=wall_cfg,
             xform=wp.transform(wp.vec3(-container_hx - wall_thickness, 0.0, container_hz * 0.5), wp.quat_identity()),
-            hx=wall_thickness, hy=container_hy + wall_thickness, hz=container_hz * 0.5,
+            hx=wall_thickness,
+            hy=container_hy + wall_thickness,
+            hz=container_hz * 0.5,
         )
         # front wall (+X)
         builder.add_shape_box(
-            body=-1, cfg=wall_cfg,
+            body=-1,
+            cfg=wall_cfg,
             xform=wp.transform(wp.vec3(container_hx + wall_thickness, 0.0, container_hz * 0.5), wp.quat_identity()),
-            hx=wall_thickness, hy=container_hy + wall_thickness, hz=container_hz * 0.5,
+            hx=wall_thickness,
+            hy=container_hy + wall_thickness,
+            hz=container_hz * 0.5,
         )
         # left wall (-Y)
         builder.add_shape_box(
-            body=-1, cfg=wall_cfg,
+            body=-1,
+            cfg=wall_cfg,
             xform=wp.transform(wp.vec3(0.0, -container_hy - wall_thickness, container_hz * 0.5), wp.quat_identity()),
-            hx=container_hx + wall_thickness, hy=wall_thickness, hz=container_hz * 0.5,
+            hx=container_hx + wall_thickness,
+            hy=wall_thickness,
+            hz=container_hz * 0.5,
         )
         # right wall (+Y)
         builder.add_shape_box(
-            body=-1, cfg=wall_cfg,
+            body=-1,
+            cfg=wall_cfg,
             xform=wp.transform(wp.vec3(0.0, container_hy + wall_thickness, container_hz * 0.5), wp.quat_identity()),
-            hx=container_hx + wall_thickness, hy=wall_thickness, hz=container_hz * 0.5,
+            hx=container_hx + wall_thickness,
+            hy=wall_thickness,
+            hz=container_hz * 0.5,
         )
 
         # --- Dynamic rigid bodies ---
@@ -144,9 +156,8 @@ class Example:
 
         # PhysX offset derivation (same as createPBDParticleSystem):
         rest_offset = particle_spacing * 0.9
-        solid_rest_offset = rest_offset
         fluid_rest_offset = rest_offset * 0.6
-        particle_contact_offset = max(solid_rest_offset + 0.001, fluid_rest_offset / 0.6)
+        particle_contact_offset = fluid_rest_offset / 0.6
         pbf_contact_distance = 2.0 * particle_contact_offset
         fluid_rest_distance = 2.0 * fluid_rest_offset
 
@@ -163,8 +174,6 @@ class Example:
             pbf_cohesion=args.cohesion,
             pbf_surface_tension=args.surface_tension,
             pbf_vorticity_confinement=args.vorticity,
-            pbf_friction=args.pbf_friction,
-            pbf_solid_rest_distance=2.0 * solid_rest_offset,
             pbf_cfl_coefficient=args.cfl,
         )
 
@@ -178,6 +187,7 @@ class Example:
 
         self.viewer.set_model(self.model)
         self.viewer.show_particles = True
+        self.viewer.set_camera(wp.vec3(1.6, -1.6, 1.2), -20.0, 135.0)
 
     def simulate(self):
         for _ in range(self.sim_substeps):
@@ -230,14 +240,16 @@ class Example:
         parser.add_argument("--dim-x", type=int, default=46, help="Fluid grid X dimension")
         parser.add_argument("--dim-y", type=int, default=46, help="Fluid grid Y dimension")
         parser.add_argument("--dim-z", type=int, default=46, help="Fluid grid Z dimension")
-        # PhysX default PBD material: friction=0.05, viscosity=0.0001,
-        # vorticityConfinement=5.0, surfaceTension=0.005, cohesion=0.005
+        # Reference PBD material values for the supported fluid properties.
         parser.add_argument("--relaxation", type=float, default=1.0, help="PBF SOR relaxation (PhysX=1.0)")
         parser.add_argument("--viscosity", type=float, default=0.0001, help="PBF viscosity (PhysX default=0.0001)")
         parser.add_argument("--cohesion", type=float, default=0.005, help="PBF cohesion (PhysX default=0.005)")
-        parser.add_argument("--surface-tension", type=float, default=0.005, help="PBF surface tension (PhysX default=0.005)")
-        parser.add_argument("--vorticity", type=float, default=5.0, help="PBF vorticity confinement (PhysX default=5.0)")
-        parser.add_argument("--pbf-friction", type=float, default=0.05, help="PBF particle friction (PhysX default=0.05)")
+        parser.add_argument(
+            "--surface-tension", type=float, default=0.005, help="PBF surface tension (PhysX default=0.005)"
+        )
+        parser.add_argument(
+            "--vorticity", type=float, default=5.0, help="PBF vorticity confinement (PhysX default=5.0)"
+        )
         parser.add_argument("--cfl", type=float, default=1.0, help="PBF CFL coefficient (PhysX default=1.0)")
         parser.add_argument("--iterations", type=int, default=4, help="XPBD/PBF iterations")
         parser.add_argument("--substeps", type=int, default=8, help="Substeps per frame")

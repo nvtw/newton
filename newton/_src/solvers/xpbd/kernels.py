@@ -241,6 +241,7 @@ def solve_particle_particle_contacts(
     max_radius: float,
     dt: float,
     relaxation: float,
+    skip_fluid_fluid: bool,
     # outputs
     deltas: wp.array[wp.vec3],
 ):
@@ -270,7 +271,7 @@ def solve_particle_particle_contacts(
     while wp.hash_grid_query_next(query, index):
         if (particle_flags[index] & ParticleFlags.ACTIVE) != 0 and index != i:
             # Skip fluid-fluid pairs — handled by PBF density constraint
-            if is_fluid_i and (particle_flags[index] & ParticleFlags.FLUID) != 0:
+            if skip_fluid_fluid and is_fluid_i and (particle_flags[index] & ParticleFlags.FLUID) != 0:
                 continue
 
             # compute distance to point

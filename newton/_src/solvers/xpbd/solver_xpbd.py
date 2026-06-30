@@ -109,6 +109,12 @@ class SolverXPBD(SolverBase):
     may be used to advance the simulation state forward in time.
 
     Limitations:
+        **Position-based fluids** -- The fluid solve currently supports one
+        global fluid material. Multiphase fluids, diffuse particles, anisotropy,
+        smoothing, and fluid-particle adhesion are not supported. Fluid-shape
+        interaction uses the existing XPBD particle-shape contact model.
+        Differentiable simulation is not supported for fluid particles.
+
         **Momentum conservation** -- When ``rigid_contact_con_weighting`` is
         enabled (the default), each body's positional correction is divided by
         its number of active contacts.  This improves convergence for stacking
@@ -178,7 +184,6 @@ class SolverXPBD(SolverBase):
         rigid_contact_con_weighting: bool = True,
         angular_damping: float = 0.0,
         enable_restitution: bool = False,
-        # Position-Based Fluids parameters (set pbf_particle_contact_distance to enable)
         pbf_particle_contact_distance: float | None = None,
         pbf_fluid_rest_distance: float | None = None,
         pbf_relaxation: float = 1.0,
@@ -186,15 +191,44 @@ class SolverXPBD(SolverBase):
         pbf_cohesion: float = 0.0,
         pbf_surface_tension: float = 0.0,
         pbf_vorticity_confinement: float = 0.0,
-        pbf_friction: float = 0.0,
-        pbf_particle_friction_scale: float = 1.0,
-        pbf_solid_rest_distance: float = 0.0,
         pbf_cfl_coefficient: float = 1.0,
-        pbf_adhesion: float = 0.0,
-        pbf_particle_adhesion_scale: float = 1.0,
-        pbf_adhesion_radius_scale: float = 0.0,
         pbf_damping: float = 0.0,
     ):
+        """Construct the XPBD solver.
+
+        Position-based fluids are enabled when ``pbf_particle_contact_distance``
+        is provided. Particles carrying :attr:`~newton.ParticleFlags.FLUID`
+        then use the density constraint; other particles retain the standard
+        XPBD particle-contact path.
+
+        Args:
+            model: Model to simulate.
+            iterations: Number of constraint iterations per step.
+            soft_body_relaxation: Relaxation for particle constraints.
+            soft_contact_relaxation: Relaxation for particle-shape contacts.
+            joint_linear_relaxation: Relaxation for linear joint constraints.
+            joint_angular_relaxation: Relaxation for angular joint constraints.
+            joint_linear_compliance: Compliance of linear joint constraints.
+            joint_angular_compliance: Compliance of angular joint constraints.
+            rigid_contact_relaxation: Relaxation for rigid contacts.
+            rigid_contact_con_weighting: Whether to average each body's rigid
+                contact corrections.
+            angular_damping: Rigid-body angular damping coefficient.
+            enable_restitution: Whether to apply restitution after the
+                positional solve.
+            pbf_particle_contact_distance: Fluid neighbor radius [m]. ``None``
+                disables position-based fluids.
+            pbf_fluid_rest_distance: Fluid rest spacing [m]. Defaults to 60%
+                of ``pbf_particle_contact_distance``.
+            pbf_relaxation: Fluid Jacobi relaxation factor.
+            pbf_viscosity: Fluid viscosity coefficient.
+            pbf_cohesion: Fluid cohesion coefficient.
+            pbf_surface_tension: Fluid surface-tension coefficient.
+            pbf_vorticity_confinement: Fluid vorticity-confinement coefficient.
+            pbf_cfl_coefficient: Maximum relative normal displacement as a
+                fraction of the fluid neighbor radius.
+            pbf_damping: Fluid velocity damping coefficient.
+        """
         super().__init__(model=model)
         self.iterations = iterations
 
@@ -226,27 +260,47 @@ class SolverXPBD(SolverBase):
             with wp.ScopedDevice(model.device):
                 model.particle_grid.reserve(model.particle_count)
 
-        # --- PBF setup ---
         self.pbf_enabled = pbf_particle_contact_distance is not None
         if self.pbf_enabled:
             h = pbf_particle_contact_distance
+            if h <= 0.0:
+                raise ValueError("pbf_particle_contact_distance must be positive")
+            if model.particle_count > 1 and model.particle_grid is None:
+                raise ValueError("Position-based fluids require a particle hash grid")
+
+            fluid_rest_dist = pbf_fluid_rest_distance if pbf_fluid_rest_distance is not None else h * 0.6
+            if fluid_rest_dist <= 0.0 or fluid_rest_dist >= h:
+                raise ValueError("pbf_fluid_rest_distance must be positive and less than the contact distance")
+            if pbf_relaxation <= 0.0:
+                raise ValueError("pbf_relaxation must be positive")
+            if (
+                min(
+                    pbf_viscosity,
+                    pbf_cohesion,
+                    pbf_surface_tension,
+                    pbf_vorticity_confinement,
+                    pbf_cfl_coefficient,
+                    pbf_damping,
+                )
+                < 0.0
+            ):
+                raise ValueError("Position-based fluid coefficients must be nonnegative")
+
             self.pbf_contact_distance_sq = h * h
             self.pbf_inv_radius = 1.0 / h
             self.pbf_spiky1 = 15.0 / (math.pi * h * h * h)
             self.pbf_spiky2 = 30.0 / (math.pi * h * h * h * h)
 
-            fluid_rest_dist = pbf_fluid_rest_distance if pbf_fluid_rest_distance is not None else h * 0.6
             rest_density, density_constraint_scale, surface_constraint_scale = _calculate_rest_density(
                 fluid_rest_dist, h
             )
+            if rest_density <= 0.0 or density_constraint_scale <= 0.0:
+                raise ValueError("Fluid rest spacing does not produce a valid density constraint")
             self.pbf_rest_density = rest_density
             self.pbf_lambda_scale = 1.0 / density_constraint_scale
 
             self.pbf_relaxation = pbf_relaxation
             self.pbf_viscosity = pbf_viscosity
-            self.pbf_friction = pbf_friction
-            self.pbf_particle_friction_scale = pbf_particle_friction_scale
-            self.pbf_solid_rest_distance = pbf_solid_rest_distance
             self.pbf_cfl_coefficient = pbf_cfl_coefficient
             self.pbf_particle_contact_distance = h
             self.pbf_damping = pbf_damping
@@ -262,16 +316,6 @@ class SolverXPBD(SolverBase):
             else:
                 self.pbf_surface_tension = pbf_surface_tension
             self.pbf_cohesion = pbf_cohesion * h
-
-            # Adhesion parameters (following PhysX PBDMaterial)
-            self.pbf_adhesion = pbf_adhesion * pbf_particle_adhesion_scale
-            self.pbf_adhesion_radius_scale = pbf_adhesion_radius_scale
-            srd = pbf_solid_rest_distance
-            self.pbf_cohesion_radius = srd * pbf_adhesion_radius_scale if pbf_adhesion_radius_scale > 0.0 else 0.0
-            if self.pbf_cohesion_radius > srd and srd > 0.0:
-                self.pbf_inv_aura = 1.0 / (self.pbf_cohesion_radius - srd)
-            else:
-                self.pbf_inv_aura = 0.0
 
             # Cohesion kernel coefficients from PhysX:
             # W_cohesion(d) = c1*(d/h)^3 + c2*(d/h)^2 - 1
@@ -293,9 +337,8 @@ class SolverXPBD(SolverBase):
             self._pbf_deltas = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_weights = wp.zeros(n, dtype=float, device=model.device)
             self._pbf_accum_delta = wp.zeros(n, dtype=wp.vec3, device=model.device)
-            if pbf_vorticity_confinement > 0.0:
-                self._pbf_curl = wp.zeros(n, dtype=wp.vec3, device=model.device)
-                self._pbf_curl_mag = wp.zeros(n, dtype=float, device=model.device)
+            self._pbf_curl = wp.zeros(n, dtype=wp.vec3, device=model.device)
+            self._pbf_curl_mag = wp.zeros(n, dtype=float, device=model.device)
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
@@ -418,6 +461,8 @@ class SolverXPBD(SolverBase):
     @override
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float) -> None:
         requires_grad = state_in.requires_grad
+        if self.pbf_enabled and requires_grad:
+            raise RuntimeError("Position-based fluids do not support differentiable simulation")
         self._particle_delta_counter = 0
         self._body_delta_counter = 0
 
@@ -476,8 +521,6 @@ class SolverXPBD(SolverBase):
                     grid_search_radius = model.particle_max_radius * 2.0 + model.particle_cohesion
                     if self.pbf_enabled:
                         grid_search_radius = max(grid_search_radius, self.pbf_particle_contact_distance)
-                        if self.pbf_cohesion_radius > 0.0:
-                            grid_search_radius = max(grid_search_radius, self.pbf_cohesion_radius)
                     with wp.ScopedDevice(model.device):
                         model.particle_grid.build(state_out.particle_q, radius=grid_search_radius)
 
@@ -605,9 +648,6 @@ class SolverXPBD(SolverBase):
                                     self.pbf_inv_radius,
                                     self.pbf_spiky1,
                                     self.pbf_spiky2,
-                                    self.pbf_solid_rest_distance,
-                                    self.pbf_friction,
-                                    self.pbf_particle_friction_scale,
                                     self.pbf_viscosity,
                                     1.0 / self.pbf_rest_density,
                                     self.pbf_cohesion,
@@ -615,9 +655,6 @@ class SolverXPBD(SolverBase):
                                     self.pbf_cohesion2,
                                     self.pbf_surface_tension,
                                     self.pbf_cfl_coefficient,
-                                    self.pbf_adhesion,
-                                    self.pbf_cohesion_radius,
-                                    self.pbf_inv_aura,
                                     1.0,  # coefficient
                                     dt,
                                 ],
@@ -629,13 +666,12 @@ class SolverXPBD(SolverBase):
                                 kernel=apply_pbf_deltas,
                                 dim=model.particle_count,
                                 inputs=[
-                                    particle_q,
                                     model.particle_flags,
                                     self._pbf_deltas,
                                     self._pbf_weights,
                                     self.pbf_relaxation,
                                 ],
-                                outputs=[self._pbf_accum_delta],
+                                outputs=[particle_q, self._pbf_accum_delta],
                                 device=model.device,
                             )
 
@@ -692,6 +728,7 @@ class SolverXPBD(SolverBase):
                                     model.particle_max_radius,
                                     dt,
                                     self.soft_contact_relaxation,
+                                    self.pbf_enabled,
                                 ],
                                 outputs=[particle_deltas],
                                 device=model.device,
@@ -893,6 +930,22 @@ class SolverXPBD(SolverBase):
                 with wp.ScopedDevice(model.device):
                     model.particle_grid.build(particle_q, radius=grid_search_radius)
 
+                # Fluid forces below modify the velocity inferred from the
+                # completed positional solve, so initialize that velocity first.
+                wp.launch(
+                    kernel=finalize_pbf_velocities,
+                    dim=model.particle_count,
+                    inputs=[
+                        particle_q,
+                        self.particle_q_init,
+                        model.particle_flags,
+                        dt,
+                        model.particle_max_velocity,
+                    ],
+                    outputs=[particle_qd],
+                    device=model.device,
+                )
+
                 # Vorticity confinement (optional)
                 if self.pbf_vorticity_confinement > 0.0:
                     self._pbf_curl.zero_()
@@ -939,28 +992,13 @@ class SolverXPBD(SolverBase):
                         kernel=apply_damping,
                         dim=model.particle_count,
                         inputs=[
-                            particle_qd,
                             model.particle_flags,
                             self.pbf_damping,
                             dt,
                         ],
+                        outputs=[particle_qd],
                         device=model.device,
                     )
-
-                # Recompute fluid particle velocities from position change
-                wp.launch(
-                    kernel=finalize_pbf_velocities,
-                    dim=model.particle_count,
-                    inputs=[
-                        particle_q,
-                        self.particle_q_init,
-                        model.particle_flags,
-                        dt,
-                        model.particle_max_velocity,
-                    ],
-                    outputs=[particle_qd],
-                    device=model.device,
-                )
 
             self._contact_impulse = contact_impulse
             self._contact_impulse_capacity = contacts.rigid_contact_max if contacts is not None else 0

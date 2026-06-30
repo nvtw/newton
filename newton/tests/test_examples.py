@@ -719,6 +719,19 @@ class TestMPMExamples(unittest.TestCase):
     pass
 
 
+class TestPBFExamples(unittest.TestCase):
+    pass
+
+
+add_example_test(
+    TestPBFExamples,
+    name="pbf.example_pbf_dam_break",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 5, "dim-x": 8, "dim-y": 8, "dim-z": 8, "substeps": 2},
+    use_viewer=True,
+)
+
+
 add_example_test(
     TestMPMExamples,
     name="mpm.example_mpm_granular",
