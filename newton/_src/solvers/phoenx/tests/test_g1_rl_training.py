@@ -591,6 +591,14 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(g1_recipe.CONTROLLED_ACTION_COUNT, 12)
         self.assertIn("-DG1_TASK_V3", reference.TASK_FLAGS)
         self.assertIn("-DG1_PD_UNITREE", reference.TASK_FLAGS)
+        self.assertNotIn("-DG1_CURRICULUM", reference.TASK_FLAGS)
+
+        native_config_path = _PUFFERLIB_G1_ROOT / "config" / "g1gpu.ini"
+        if native_config_path.is_file():
+            native_config = native_config_path.read_text()
+            world_count_match = re.search(r"^total_agents\s*=\s*([0-9]+)", native_config, re.MULTILINE)
+            self.assertIsNotNone(world_count_match)
+            self.assertEqual(g1_recipe.WORLD_COUNT, int(world_count_match.group(1)))
 
         g1_gpu_path = _PUFFERLIB_G1_ROOT / "ocean" / "g1gpu" / "g1_gpu.cu"
         if g1_gpu_path.is_file():
@@ -622,8 +630,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(g1_recipe.COMMAND_Y_RANGE, (-0.6, 0.6))
         self.assertEqual(g1_recipe.COMMAND_YAW_RANGE, (-1.0, 1.0))
         self.assertAlmostEqual(g1_recipe.COMMAND_ZERO_PROBABILITY, 0.1)
-        self.assertAlmostEqual(g1_recipe.COMMAND_CURRICULUM_START, 0.4)
-        self.assertEqual(g1_recipe.COMMAND_CURRICULUM_SAMPLES, 40_000_000)
+        self.assertAlmostEqual(g1_recipe.COMMAND_CURRICULUM_START, 1.0)
+        self.assertEqual(g1_recipe.COMMAND_CURRICULUM_SAMPLES, 0)
         self.assertAlmostEqual(g1_recipe.ACTION_SCALE, float(recipe["env.action_scale"]))
         self.assertEqual(g1_recipe.MAX_EPISODE_STEPS, int(recipe["env.max_episode_len"]))
         self.assertAlmostEqual(g1_recipe.W_TRACK_LIN, float(recipe["env.w_track_lin"]))

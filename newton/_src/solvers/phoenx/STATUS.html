@@ -58,10 +58,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>1 July 2026 · throughput profile</strong></div>
+      <div class="stamp">Last updated<br><strong>1 July 2026 · first full gate pass</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">FULL G1 GATE PASS</span><time>1 Jul · latest</time></div>
+      <h2>Reduced-coordinate PhoenX has now passed the unchanged frozen walking gate</h2>
+      <p>A checkpoint trained entirely in PhoenX was saved, reloaded in a fresh process, and reproduced the same full gate pass: 0 falls, 0.9120 battery tracking, 0.1503 action jerk, 0.2012 roll/pitch rate, 0.1969 yaw rate, and 1.017 leg-joint speed.</p>
+      <ul>
+        <li>The decisive recipe defect was a false parity assumption: pinned nanoG1 uses 8192 worlds and does not compile its optional command curriculum. PhoenX used 4096 worlds and spent its first 40M samples below the evaluation command range.</li>
+        <li>With 8192 worlds, full-range commands from sample zero, and the native 5×2 reduced schedule, the first 75.5M run reached 0 falls and 0.9296 tracking at 224.9k samples/s. It missed only torso angular limits.</li>
+        <li>A staged angular-objective continuation produced the first pass at 147.85M samples. The independent reload was bit-for-bit identical on all reported metrics.</li>
+        <li>Native C and PhoenX CUDA recurrent policy outputs agree within 1.53e-5 maximum and 1.03e-6 mean absolute error over a 32-step sequence. Contact-free PhoenX/nanoG1 trajectories are also close, ruling out importer and basic articulation errors.</li>
+        <li>The passing checkpoint is <code>/tmp/g1_reduced_gate_candidate2/g1_reduced_000282.npz</code>. This proves feasibility, but the exploratory multi-stage continuation is not yet accepted as the clean repeatable recipe.</li>
+      </ul>
+      <p><strong>Next:</strong> reproduce the pass from scratch with a distilled fixed or smooth reward schedule, then profile that successful configuration and return the validated recipe to full-coordinate PhoenX.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag warn">THROUGHPUT PROFILED</span><time>1 Jul · latest</time></div>
