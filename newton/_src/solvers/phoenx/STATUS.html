@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PhoenX Development Status</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #ecf4ff;
+      --muted: #91a5bb;
+      --panel: rgba(14, 25, 39, .84);
+      --line: rgba(148, 184, 218, .17);
+      --cyan: #5eead4;
+      --amber: #fbbf24;
+      --rose: #fb7185;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font: clamp(17px, 1.05vw, 19px)/1.62 Inter, ui-sans-serif, system-ui, sans-serif;
+      background:
+        radial-gradient(circle at 18% 0%, rgba(14, 165, 233, .18), transparent 34rem),
+        radial-gradient(circle at 90% 12%, rgba(45, 212, 191, .11), transparent 28rem),
+        #07101b;
+    }
+    main { width: min(1080px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0 72px; }
+    header { display: flex; justify-content: space-between; gap: 28px; align-items: end; margin-bottom: 30px; }
+    h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.7rem); letter-spacing: -.055em; line-height: .95; }
+    .eyebrow { color: var(--cyan); font-size: .74rem; font-weight: 800; letter-spacing: .17em; text-transform: uppercase; }
+    .stamp { color: var(--muted); text-align: right; white-space: nowrap; }
+    .goal, article {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, .22);
+      backdrop-filter: blur(12px);
+    }
+    .goal { padding: 20px 22px; border-radius: 18px; margin-bottom: 18px; }
+    .goal strong { color: var(--cyan); }
+    article { padding: 24px; border-radius: 18px; margin-top: 14px; }
+    article:nth-of-type(2) { opacity: .77; }
+    article:nth-of-type(n+3) { opacity: .53; }
+    .meta { display: flex; justify-content: space-between; gap: 16px; color: var(--muted); font-size: .9rem; }
+    h2 { margin: 8px 0 10px; font-size: 1.35rem; letter-spacing: -.02em; }
+    p { margin: 8px 0; }
+    ul { margin: 10px 0 0; padding-left: 20px; }
+    li + li { margin-top: 6px; }
+    .tag { display: inline-flex; padding: 3px 9px; border-radius: 999px; font-weight: 750; color: #06241f; background: var(--cyan); }
+    .tag.warn { color: #2c1b00; background: var(--amber); }
+    .tag.block { color: #310711; background: var(--rose); }
+    code { color: #b6f6ec; background: rgba(94, 234, 212, .08); padding: 2px 5px; border-radius: 5px; }
+    @media (max-width: 650px) { header { display: block; } .stamp { text-align: left; margin-top: 12px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
+      <div class="stamp">Last updated<br><strong>30 June 2026 · current checkpoint</strong></div>
+    </header>
+
+    <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag block">ROOT CAUSE ISOLATED</span><time>30 Jun</time></div>
+      <h2>Pure-maximal G1 armature is not yet reliable</h2>
+      <p>A controlled free-space, zero-action sweep isolates the failure to the maximal-coordinate armature path rather than contacts, friction, policy actions, or an insufficient iteration count.</p>
+      <ul>
+        <li>With armature disabled, the full 29-joint G1 remains at its home pose to numerical precision over the test horizon.</li>
+        <li>With physical armature enabled, the same chain diverges. Raising the schedule as far as 10 substeps × 64 PGS iterations does not fix it and convergence is non-monotonic.</li>
+        <li>The current pendulum and three-link armature tests are therefore insufficient. The fix must add a deep spatial-chain, CUDA-graph regression and preserve momentum and the exact configured armature.</li>
+        <li>The equal-work substep-versus-iteration claim cannot be judged honestly until this defect is removed.</li>
+      </ul>
+      <p>Existing Nsight traces also identify the first performance targets. In classic contact-rich G1, radix sorting consumes 21.1% of GPU kernel time, block-world prepare/iterate 20.8%, greedy coloring 8.0%, and scans 5.9%. In the articulated contact-rich path, generalized contact construction/solve/gather/finalize dominates roughly 55% before factorization and momentum passes. Correctness remains first; these measurements define the subsequent optimization work.</p>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag block">NOT YET COMPETITIVE</span><time>30 Jun · 22:20</time></div>
+      <h2>Hybrid versus FeatherPGS</h2>
+      <p>There is no valid same-scene, same-GPU result proving hybrid competitive with FeatherPGS. Claiming otherwise would be misleading.</p>
+      <ul>
+        <li>FeatherPGS is articulation-specialized and designed around high-throughput parallel articulation solves.</li>
+        <li>Hybrid currently pays for both ABA response and retained maximal rows, so it likely loses raw articulation throughput.</li>
+        <li>Hybrid has demonstrated stable integration with general PhoenX contacts and constraints; it has not demonstrated world-class speed.</li>
+        <li>A direct Anymal/G1 benchmark against FeatherPGS is now an explicit performance requirement, after the pure-maximal schedule/stability sweep.</li>
+      </ul>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag warn">COURSE CORRECTION</span><time>30 Jun · 22:15</time></div>
+      <h2>Hybrid is not pure full-coordinate PhoenX</h2>
+      <p>The concern is correct: hybrid uses an ABA/articulated-body factorization for impulse response. Maximal PGS rows remain visible, but reduced-coordinate machinery and duplicated work explain part of the throughput gap.</p>
+      <ul>
+        <li>The best 75M hybrid checkpoint did not pass the strict gate: 7 falls, 0.761 aggregate tracking, with failures concentrated in fast forward motion. Hybrid training learns, but success is not yet sufficient.</li>
+        <li>A physically clean pure-maximal route exists: exact armature plus implicit torque-limited PD joint rows and locally coupled maximal effective-mass blocks. This addresses stiff explicit damping without a global reduced-coordinate solve.</li>
+        <li>Next priority: validate that path on the full 29-joint G1 response, momentum/energy invariants, graph capture, contact-rich scenes, and a short learning curve before any long training run.</li>
+        <li>No artificial mass scaling, interaction-count division, or stability hack will be accepted.</li>
+      </ul>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag warn">HYBRID EXPLAINED</span><time>30 Jun · 22:08</time></div>
+      <h2>Is hybrid the perfect full/reduced-coordinate solution?</h2>
+      <p><strong>No, but it is a clean and useful middle ground.</strong> Hybrid keeps every full-coordinate PhoenX joint, loop, limit, motor, and contact row in deterministic PGS. Instead of applying each row through independent rigid-body inverse masses, it applies impulses through an exact linear-time articulated-body response for each tree.</p>
+      <ul>
+        <li><strong>What it gains:</strong> exact tree inertia coupling and armature response, much better conditioning for stiff humanoid drives, momentum conservation, and reduced-like robot stability while retaining maximal PGS constraints and contacts.</li>
+        <li><strong>What remains maximal:</strong> loop closures, contacts, friction, limits, and joint-row residuals are still iterated by PGS. Their convergence and accuracy are not automatically identical to a direct reduced-coordinate solve.</li>
+        <li><strong>Applicability:</strong> it supports multiple articulations per world and many worlds, plus ordinary contacts and maximal constraints. The accelerated path currently requires standard PhoenX, the fast-tail schedule, and no mass splitting; unsupported scene features need broader engineering.</li>
+        <li><strong>Performance:</strong> it is not free. Hybrid evaluates articulated dynamics while also retaining maximal rows, so it cannot honestly be called full speed of the pure full-coordinate solver. Earlier matched measurements showed meaningful overhead; Nsight profiling is still pending.</li>
+        <li><strong>Verdict:</strong> excellent for stiff tree robots embedded in contact-rich maximal scenes, but not yet a universal final solver. A world-class endpoint would preserve its conditioning while eliminating redundant work and proving quality/performance across loops, many articulations, dense contacts, and diverse robots.</li>
+      </ul>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag warn">SHORT ANSWER</span><time>30 Jun · 22:00</time></div>
+      <h2>Does PhoenX G1 training finally work?</h2>
+      <ul>
+        <li><strong>Learning works:</strong> a clean from-scratch run reached 75M samples without physics instability and showed a strong improving learning curve through 10.5M. Final walking quality is not claimed yet; post-curriculum checkpoint screening is running now, followed by the strict long-horizon gate.</li>
+        <li><strong>Solver:</strong> this uses <code>articulation_mode="hybrid"</code>. All full-coordinate PhoenX joint and contact PGS rows remain active, but their body response is preconditioned by exact articulated-body dynamics. It is not the unstable pure independent-body <code>maximal</code> mode.</li>
+        <li><strong>PhoenX throughput:</strong> 67.5k samples/s end-to-end for the warm 64.5M continuation, with individual iterations peaking near 74.5k/s on this RTX PRO 6000.</li>
+        <li><strong>Versus nanoG1:</strong> nanoG1 reports about 75M samples in 59 seconds, or 1.27M samples/s. That makes current PhoenX roughly 17–19× slower than the published highly specialized nanoG1 run. The published result uses the same RTX PRO 6000 GPU model, but this is not yet a fresh same-machine comparison; a pinned local measurement is still required.</li>
+      </ul>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag warn">EVALUATING</span><time>30 Jun · 21:10</time></div>
+      <h2>Corrected adaptation peaks early</h2>
+      <p>The 2.6M-sample hybrid run completed. Rollout tracking peaked at 0.875 on iteration 1, then declined to 0.734 by iteration 10; dense checkpoints are now being screened with the deterministic command gate.</p>
+      <ul>
+        <li>The exact nanoG1 learning rate of 0.02 is appropriate from scratch but appears too aggressive for transfer from a trained policy.</li>
+        <li>Warm steady-state throughput was roughly 46–60k samples/s; cold compilation dominated total time.</li>
+        <li>Next: retain the best gate checkpoint, then test matched from-scratch convergence and a conservative transfer control.</li>
+      </ul>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag">FIXED + TESTED</span><time>30 Jun · 21:02</time></div>
+      <h2>Training recipe parity restored</h2>
+      <p>PhoenX now matches the pinned nanoG1 PPO settings and command curriculum. The source-parity regression failed before the correction and passes afterward; CLI defaults are covered to prevent another silent drift.</p>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag">PHYSICS SOUND</span><time>30 Jun · 20:50</time></div>
+      <h2>Hybrid armature matches reduced dynamics</h2>
+      <p>The shipped policy produces essentially identical deterministic gate behavior under hybrid and reduced PhoenX: 38 falls and tracking performance 0.797 versus 0.795.</p>
+      <ul>
+        <li>Exact armature response, live updates, all 29 G1 joints, CUDA graphs, and momentum conservation have regression coverage.</li>
+        <li>Remaining failures are concentrated in 0.8 m/s forward and lateral commands, pointing to adaptation rather than corrupt dynamics.</li>
+      </ul>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag block">REJECTED RUN</span><time>30 Jun · 20:47</time></div>
+      <h2>First 10.5M adaptation used drifted settings</h2>
+      <p>That run improved forward tracking from 0.59 to 0.71 but degraded backward, yaw, and idle skills. Its recipe had silently diverged from pinned nanoG1, so it is retained only as diagnostic evidence.</p>
+      <p>Measured hybrid throughput was 40–44k samples/s steady state and 26.5k/s including startup. A same-GPU nanoG1 measurement and Nsight kernel ranking remain pending.</p>
+    </article>
+  </main>
+</body>
+</html>

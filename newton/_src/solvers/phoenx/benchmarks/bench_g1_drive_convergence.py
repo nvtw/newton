@@ -64,6 +64,16 @@ _SETTINGS: dict[str, SolverSetting] = {
     "phoenx_10x4": SolverSetting("phoenx_10x4", 10, 4, 1),
     "phoenx_10x8": SolverSetting("phoenx_10x8", 10, 8, 2),
     "phoenx_20x8": SolverSetting("phoenx_20x8", 20, 8, 2),
+    "work_5x8_v1": SolverSetting("work_5x8_v1", 5, 8, 1),
+    "work_10x4_v1": SolverSetting("work_10x4_v1", 10, 4, 1),
+    "work_20x2_v1": SolverSetting("work_20x2_v1", 20, 2, 1),
+    "work_40x1_v1": SolverSetting("work_40x1_v1", 40, 1, 1),
+    "phoenx_10x16_v1": SolverSetting("phoenx_10x16_v1", 10, 16, 1),
+    "phoenx_10x32_v1": SolverSetting("phoenx_10x32_v1", 10, 32, 1),
+    "phoenx_10x64_v1": SolverSetting("phoenx_10x64_v1", 10, 64, 1),
+    "velocity_10x4_v0": SolverSetting("velocity_10x4_v0", 10, 4, 0),
+    "velocity_10x4_v1": SolverSetting("velocity_10x4_v1", 10, 4, 1),
+    "velocity_10x4_v2": SolverSetting("velocity_10x4_v2", 10, 4, 2),
 }
 
 
@@ -76,6 +86,15 @@ def _parse_csv(value: str) -> tuple[str, ...]:
         known = ", ".join(sorted(_SETTINGS))
         raise argparse.ArgumentTypeError(f"unknown settings {unknown}; known settings: {known}")
     return names
+
+
+def _parse_int_or_auto(value: str) -> int | str:
+    if value == "auto":
+        return value
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("expected an integer >= 1 or auto")
+    return parsed
 
 
 def _leg_action_pattern(name: str, amplitude: float) -> np.ndarray:
@@ -103,6 +122,8 @@ def _make_env(setting: SolverSetting, args: argparse.Namespace, *, device: wp.co
         sim_substeps=int(setting.sim_substeps),
         solver_iterations=int(setting.solver_iterations),
         velocity_iterations=int(setting.velocity_iterations),
+        actuation_model=str(args.actuation_model),
+        articulation_mode=str(args.articulation_mode),
         command=(0.0, 0.0, 0.0),
         max_episode_steps=0,
         auto_reset=False,
@@ -116,7 +137,11 @@ def _make_env(setting: SolverSetting, args: argparse.Namespace, *, device: wp.co
         multi_world_scheduler=str(args.multi_world_scheduler),
         prepare_refresh_stride=args.prepare_refresh_stride,
     )
-    return rl.EnvG1PhoenX(config, device=device)
+    env = rl.EnvG1PhoenX(config, device=device)
+    if float(args.armature_scale) != 1.0:
+        env.model.joint_armature.assign(env.model.joint_armature.numpy() * np.float32(args.armature_scale))
+        env.solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+    return env
 
 
 # This mirrors EnvG1PhoenX.step(auto_reset=False) so support impulses can
@@ -491,6 +516,9 @@ def benchmark_g1_drive_convergence(args: argparse.Namespace) -> dict[str, Any]:
         "contact_geometry": str(args.contact_geometry),
         "joint_friction_model": str(args.joint_friction_model),
         "joint_friction_scale": float(args.joint_friction_scale),
+        "actuation_model": str(args.actuation_model),
+        "articulation_mode": str(args.articulation_mode),
+        "armature_scale": float(args.armature_scale),
         "initial_base_z": None if args.initial_base_z is None else float(args.initial_base_z),
         "reference_setting": reference_name,
         "nanog1_production_reference": {
@@ -527,12 +555,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-base-z", type=float, default=None)
     parser.add_argument("--joint-friction-model", choices=("hard", "mujoco"), default=g1_recipe.JOINT_FRICTION_MODEL)
     parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
+    parser.add_argument(
+        "--actuation-model", choices=("explicit_torque", "constraint_drive"), default="constraint_drive"
+    )
+    parser.add_argument("--articulation-mode", choices=("maximal", "hybrid", "reduced"), default="maximal")
+    parser.add_argument("--armature-scale", type=float, default=1.0)
     parser.add_argument("--parse-meshes", action="store_true")
     parser.add_argument("--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY)
     parser.add_argument("--rigid-contact-max-per-world", type=int, default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
     parser.add_argument("--threads-per-world", default=g1_recipe.THREADS_PER_WORLD)
     parser.add_argument("--multi-world-scheduler", default=g1_recipe.MULTI_WORLD_SCHEDULER)
-    parser.add_argument("--prepare-refresh-stride", default=g1_recipe.PREPARE_REFRESH_STRIDE)
+    parser.add_argument("--prepare-refresh-stride", type=_parse_int_or_auto, default=g1_recipe.PREPARE_REFRESH_STRIDE)
     parser.add_argument("--device", default=None)
     parser.add_argument("--json-indent", type=int, default=2)
     return parser.parse_args()
