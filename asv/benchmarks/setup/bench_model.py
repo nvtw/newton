@@ -11,7 +11,7 @@ os.environ["PYGLET_HEADLESS"] = "1"
 import warp as wp
 
 wp.config.enable_backward = False
-wp.config.quiet = True
+wp.config.log_level = wp.LOG_WARNING
 
 from asv_runner.benchmarks.mark import skip_benchmark_if
 
@@ -34,7 +34,12 @@ class KpiInitializeModel:
     timeout = 3600
 
     def setup(self, robot, world_count):
-        wp.init()
+        # Finalize a small model first so the asset download and one-time kernel
+        # compilation stay out of the timed build. Use the default (benchmark)
+        # device so the kernels warmed here are the ones the timed call reuses.
+        builder = Example.create_model_builder(robot, 1, randomize=False, seed=123)
+        _model = builder.finalize()
+        wp.synchronize_device()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_initialize_model(self, robot, world_count):
@@ -111,12 +116,17 @@ class FastInitializeModel:
     min_run_count = 1
 
     def setup_cache(self):
-        # Load a small model to cache the kernels
+        # Finalize small models first so the asset download and one-time kernel
+        # compilation stay out of the timed builds. Warp compiles per device
+        # target, so warm both the default device (for time_initialize_model)
+        # and CPU (for peakmem_initialize_model_cpu). Fresh builder per
+        # finalize: finalize() mutates builder state in place.
         for robot in self.params[0]:
-            builder = Example.create_model_builder(robot, 1, randomize=False, seed=123)
-            model = builder.finalize(device="cpu")
-            del model
-            del builder
+            for device in (None, "cpu"):
+                builder = Example.create_model_builder(robot, 1, randomize=False, seed=123)
+                model = builder.finalize(device=device)
+                del model
+                del builder
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_initialize_model(self, robot, world_count):
@@ -209,7 +219,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
-        "-b", "--bench", default=None, action="append", choices=benchmark_list.keys(), help="Run a single benchmark."
+        "-b",
+        "--bench",
+        default=None,
+        action="append",
+        choices=benchmark_list.keys(),
+        help="Run a specific benchmark; may be repeated to run multiple (e.g., --bench A --bench B).",
     )
     args = parser.parse_known_args()[0]
 

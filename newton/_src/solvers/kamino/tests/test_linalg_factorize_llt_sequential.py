@@ -52,8 +52,8 @@ class TestLinAlgLLTSequential(unittest.TestCase):
         Test the sequential LLT solver on a single small problem.
         """
         # Constants
-        # N = 12  # Use this for visual debugging with small matrices
-        N = 2000  # Use this for performance testing with large matrices
+        N = 12  # Use this for unit testing with small matrices
+        # N = 2000  # Use this for performance testing with large matrices
 
         # Create a single-instance problem
         problem = RandomProblemLLT(
@@ -99,7 +99,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             mio=operator.info.mio,
             A=problem.A_wp,
             L=L_wp,
-            device=self.default_device,
         )
 
         # Convert the warp array to numpy for verification
@@ -140,7 +139,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             b=problem.b_wp,
             y=y_wp,
             x=x_wp,
-            device=self.default_device,
         )
 
         # Convert the warp array to numpy for verification
@@ -179,7 +177,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             vio=operator.info.vio,
             L=L_wp,
             x=x_wp,
-            device=self.default_device,
         )
 
         # Convert the warp array to numpy for verification
@@ -205,10 +202,10 @@ class TestLinAlgLLTSequential(unittest.TestCase):
         Test the sequential LLT solver on a single small problem.
         """
         # Constants
-        # N_max = 16  # Use this for visual debugging with small matrices
-        # N_act = 11
-        N_max = 2000  # Use this for performance testing with large matrices
-        N_act = 1537
+        N_max = 16  # Use this for unit testing with small matrices
+        N_act = 11
+        # N_max = 2000  # Use this for performance testing with large matrices
+        # N_act = 1537
 
         # Create a single-instance problem
         problem = RandomProblemLLT(
@@ -258,7 +255,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             mio=operator.info.mio,
             A=problem.A_wp,
             L=L_wp,
-            device=self.default_device,
         )
 
         # Convert the warp array to numpy for verification
@@ -299,7 +295,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             b=problem.b_wp,
             y=y_wp,
             x=x_wp,
-            device=self.default_device,
         )
 
         # Convert the warp array to numpy for verification
@@ -336,7 +331,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             vio=operator.info.vio,
             L=L_wp,
             x=x_wp,
-            device=self.default_device,
         )
 
         # Convert the warp array to numpy for verification
@@ -362,8 +356,8 @@ class TestLinAlgLLTSequential(unittest.TestCase):
         Test the sequential LLT solver on multiple small problems.
         """
         # Constants
-        N = [7, 8, 9, 10, 11]
-        # N = [16, 64, 128, 512, 1024]
+        N = [7, 8, 9, 10, 11]  # Use this for unit testing with small matrices
+        # N = [16, 64, 128, 512, 1024]  # Use this for performance testing with large matrices
 
         # Create a single-instance problem
         problem = RandomProblemLLT(
@@ -412,7 +406,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             mio=operator.info.mio,
             A=problem.A_wp,
             L=L_wp,
-            device=self.default_device,
         )
 
         # Iterate over all problems for verification
@@ -456,7 +449,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             b=problem.b_wp,
             y=y_wp,
             x=x_wp,
-            device=self.default_device,
         )
 
         # Iterate over all problems for verification
@@ -497,7 +489,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             vio=operator.info.vio,
             L=L_wp,
             x=x_wp,
-            device=self.default_device,
         )
 
         # Iterate over all problems for verification
@@ -527,10 +518,10 @@ class TestLinAlgLLTSequential(unittest.TestCase):
         Test the sequential LLT solver on multiple small problems.
         """
         # Constants
-        # N_max = [7, 8, 9, 14, 21]  # Use this for visual debugging with small matrices
-        # N_act = [5, 6, 4, 11, 17]
-        N_max = [16, 64, 128, 512, 1024]  # Use this for performance testing with large matrices
-        N_act = [11, 51, 101, 376, 999]
+        N_max = [7, 8, 9, 14, 21]  # Use this for unit testing with small matrices
+        N_act = [5, 6, 4, 11, 17]
+        # N_max = [16, 64, 128, 512, 1024]  # Use this for performance testing with large matrices
+        # N_act = [11, 51, 101, 376, 999]
 
         # Create a single-instance problem
         problem = RandomProblemLLT(
@@ -583,7 +574,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             mio=operator.info.mio,
             A=problem.A_wp,
             L=L_wp,
-            device=self.default_device,
         )
 
         # Iterate over all problems for verification
@@ -627,7 +617,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             b=problem.b_wp,
             y=y_wp,
             x=x_wp,
-            device=self.default_device,
         )
 
         # Iterate over all problems for verification
@@ -668,7 +657,6 @@ class TestLinAlgLLTSequential(unittest.TestCase):
             vio=operator.info.vio,
             L=L_wp,
             x=x_wp,
-            device=self.default_device,
         )
 
         # Iterate over all problems for verification

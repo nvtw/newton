@@ -26,10 +26,13 @@ import newton.utils
 from newton.math import quat_between_vectors_robust
 from newton.solvers import SolverVBD
 
+CONTACT_KE = 1.0e5
+CONTACT_KD = 0.0
+
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
-    mu=0.1,
-    ke=1.0e6,
-    kd=1.0e3,
+    mu=0.0,
+    ke=CONTACT_KE,
+    kd=CONTACT_KD,
     gap=0.002,
     density=1.0e6,
     mu_torsional=0.0,
@@ -45,16 +48,14 @@ CABLE_RADIUS = 0.00325
 CABLE_KINEMATIC_COUNT = 4  # first N rod bodies are inside the plug and follow it
 
 # Contact parameters for cable and ground plane (tuned for VBD).
-CABLE_KE = 1.0e8
-CABLE_KD = 1.0e-3
 CABLE_MU = 2.0
 
 # Latch revolute-joint tuning.
 LATCH_LIMIT_LOWER = -0.2  # max inward deflection [rad]
 LATCH_LIMIT_UPPER = 0.3  # max outward deflection [rad]
 LATCH_SPRING_KE = 0.15  # angular return-spring stiffness [N*m/rad]
-LATCH_SPRING_KD = 0.2  # dimensionless damping ratio (VBD: D = kd * ke)
-LATCH_LIMIT_KD = 1.0e-4  # dimensionless limit damping (VBD: D = kd * limit_ke)
+LATCH_SPRING_KD = 0.03  # angular return-spring damping [N*m*s/rad]
+LATCH_LIMIT_KD = 1.0e-4  # angular limit damping [N*m*s/rad]
 
 
 @wp.kernel
@@ -142,12 +143,12 @@ def _align_cable_orientations(
     body_q: wp.array[wp.transform],
     cable_body_idx: wp.array[int],
     cable_next_idx: wp.array[int],
+    cable_next_start_offsets: wp.array[wp.vec3],
 ):
     """Swing-correct each dynamic cable capsule to its deformed segment direction.
 
-    Keeps the body origin (capsule start point) fixed and only updates
-    the rotation so the capsule's +Z axis points toward the next body's
-    origin.  This preserves chain connectivity at the start-point side.
+    Keeps the body origin (capsule midpoint/COM) fixed and only updates
+    the rotation so +Z points toward the next capsule's start endpoint.
     """
     tid = wp.tid()
     bi = cable_body_idx[tid]
@@ -157,8 +158,10 @@ def _align_cable_orientations(
     pos = wp.transform_get_translation(tf)
     rot = wp.transform_get_rotation(tf)
 
-    next_pos = wp.transform_get_translation(body_q[bi_next])
-    seg = next_pos - pos
+    next_tf = body_q[bi_next]
+    next_pos = wp.transform_get_translation(next_tf)
+    next_rot = wp.transform_get_rotation(next_tf)
+    seg = next_pos + wp.quat_rotate(next_rot, cable_next_start_offsets[tid]) - pos
     seg_len = wp.length(seg)
     if seg_len < 1.0e-10:
         return
@@ -219,7 +222,7 @@ def _load_cable_centerline(stage) -> tuple[wp.vec3, ...]:
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args=None):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -238,6 +241,7 @@ class Example:
         latch_mesh, lc = _load_mesh(stage, "/World/Latch")
 
         builder = newton.ModelBuilder(gravity=-9.81)
+        SolverVBD.register_custom_attributes(builder, dahl_defaults_enabled=False)
         builder.rigid_gap = 0.005
 
         builder.add_ground_plane()
@@ -289,6 +293,7 @@ class Example:
             angular_axes=None,
             parent_xform=wp.transform(plug_pos, wp.quat_identity()),
             child_xform=wp.transform_identity(),
+            custom_attributes={"vbd:joint_is_hard": 0},
         )
 
         # Revolute joint: plug -> latch (hinge along -X axis)
@@ -304,12 +309,14 @@ class Example:
             limit_upper=LATCH_LIMIT_UPPER,
             limit_kd=LATCH_LIMIT_KD,
             collision_filter_parent=True,
+            custom_attributes={"vbd:joint_is_hard": 0},
         )
 
         builder.add_articulation([d6_joint, rev_joint])
 
         cable_points = _load_cable_centerline(stage)
         cable_quats = newton.utils.create_parallel_transport_cable_quaternions(cable_points)
+        bend_stiffness = 1.0e1
 
         rod_bodies, _ = builder.add_rod(
             positions=cable_points,
@@ -317,15 +324,14 @@ class Example:
             radius=CABLE_RADIUS,
             cfg=dataclasses.replace(
                 builder.default_shape_cfg,
-                ke=CABLE_KE,
-                kd=CABLE_KD,
+                ke=CONTACT_KE,
+                kd=CONTACT_KD,
                 mu=CABLE_MU,
             ),
-            bend_stiffness=1.0e-1,
-            bend_damping=1.0e-1,
-            stretch_stiffness=1.0e9,
-            stretch_damping=1.0e-1,
+            bend_stiffness=bend_stiffness,
+            bend_damping=1.0e0,
             label="cable",
+            body_frame_origin="com",
         )
 
         # Collision-filter cable segments that overlap the plug at rest.
@@ -342,7 +348,9 @@ class Example:
             builder.body_inv_inertia[idx] = wp.mat33(0.0)
 
         anchor_body_ids = tuple(rod_bodies[:CABLE_KINEMATIC_COUNT])
-        anchor_offsets = tuple(cable_points[i] - plug_pos for i in range(CABLE_KINEMATIC_COUNT))
+        anchor_offsets = tuple(
+            0.5 * (cable_points[i] + cable_points[i + 1]) - plug_pos for i in range(CABLE_KINEMATIC_COUNT)
+        )
         anchor_rots = tuple(cable_quats[i] for i in range(CABLE_KINEMATIC_COUNT))
 
         builder.color()
@@ -352,15 +360,22 @@ class Example:
         self._cable_anchor_offsets = wp.array(anchor_offsets, dtype=wp.vec3, device=self.model.device)
         self._cable_anchor_rotations = wp.array(anchor_rots, dtype=wp.quat, device=self.model.device)
 
-        # Chord alignment: include the last kinematic body so it visually
-        # aims toward the first dynamic body after deformation.  The solver
-        # always sees the rest-relative rotation (set by _sync_cable_anchors
-        # before each step); this post-solve correction is purely cosmetic.
+        # Endpoint alignment: include the last kinematic body so it aims toward
+        # the first dynamic body's start endpoint after deformation. The
+        # kinematic prefix is reset by _sync_cable_anchors before each solve;
+        # dynamic body rotations carry into the next collision pass.
         align_start = max(CABLE_KINEMATIC_COUNT - 1, 0)
         align_bodies = tuple(rod_bodies[align_start:-1])
         align_next = tuple(rod_bodies[align_start + 1 :])
+        align_next_start_offsets = tuple(
+            wp.vec3(0.0, 0.0, -0.5 * float(wp.length(cable_points[i + 2] - cable_points[i + 1])))
+            for i in range(align_start, len(rod_bodies) - 1)
+        )
         self._cable_align_indices = wp.array(align_bodies, dtype=int, device=self.model.device)
         self._cable_align_next = wp.array(align_next, dtype=int, device=self.model.device)
+        self._cable_align_next_start_offsets = wp.array(
+            align_next_start_offsets, dtype=wp.vec3, device=self.model.device
+        )
         self._cable_align_count = len(align_bodies)
 
         self.viewer.set_model(self.model)
@@ -384,8 +399,7 @@ class Example:
         self.solver = SolverVBD(
             self.model,
             iterations=12,
-            friction_epsilon=0.1,
-            rigid_contact_k_start=1.0e5,
+            rigid_contact_hard=False,
             rigid_body_contact_buffer_size=256,
         )
 
@@ -448,10 +462,8 @@ class Example:
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
-            # Snap each capsule's +Z to the chord toward the next node so the
-            # rendered chain follows the deformed centerline.  Purely cosmetic;
-            # the solver doesn't see these rotations until _sync_cable_anchors
-            # resets the kinematic prefix on the next substep.
+            # Snap each capsule's +Z to the next capsule's start endpoint so
+            # collision/render geometry follows the deformed centerline.
             wp.launch(
                 kernel=_align_cable_orientations,
                 dim=self._cable_align_count,
@@ -459,6 +471,7 @@ class Example:
                     self.state_0.body_q,
                     self._cable_align_indices,
                     self._cable_align_next,
+                    self._cable_align_next_start_offsets,
                 ),
                 device=self.model.device,
             )
@@ -514,5 +527,4 @@ class Example:
 
 if __name__ == "__main__":
     viewer, args = newton.examples.init()
-    example = Example(viewer)
-    newton.examples.run(example, args)
+    newton.examples.run(Example(viewer, args), args)

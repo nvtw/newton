@@ -116,16 +116,13 @@ class Example:
         self.model.soft_contact_radius = 0.2e-2
         self.model.soft_contact_margin = 0.35e-2
         self.model.soft_contact_ke = 1.0e1
-        self.model.soft_contact_kd = 1.0e-6
+        self.model.soft_contact_kd = 1.0e-5
         self.model.soft_contact_mu = 0.2
         self.model.set_gravity((0.0, 0.0, -9.81))
 
         self.solver = newton.solvers.SolverStyle3D(
             model=self.model,
             iterations=self.iterations,
-        )
-        self.solver._precompute(
-            builder,
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -186,6 +183,4 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init()
 
     # Create example and run
-    example = Example(viewer, args)
-
-    newton.examples.run(example, args)
+    newton.examples.run(Example(viewer, args), args)

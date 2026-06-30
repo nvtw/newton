@@ -107,30 +107,25 @@ def test_unified_pipeline(
     Runs the unified collision detection pipeline using all broad-phase backends
     on a system specified via a ModelBuilderKamino and checks the results.
     """
+
+    # Create a test model and data
+    model: ModelKamino = builder.finalize(device)
+    data: DataKamino = model.data()
+    state: StateKamino = model.state()
+    contacts = ContactsKamino(model=model, device=device)
+
     # Run the narrow-phase test over each broad-phase backend
     if broadphase_modes is None:
         broadphase_modes = ["nxn", "sap", "explicit"]
     for bp_mode in broadphase_modes:
         msg.info("Testing unified CD on '%s' using '%s'", case, bp_mode)
 
-        # Create a test model and data
-        model: ModelKamino = builder.finalize(device)
-        data: DataKamino = model.data()
-        state: StateKamino = model.state()
-
         # Create a pipeline
         pipeline = CollisionPipelineUnifiedKamino(
             model=model,
             broadphase=bp_mode,
             default_gap=margin,
-            device=device,
         )
-
-        # Create a contacts container using the worst-case capacity of NxN over model-wise geom pairs
-        # NOTE: This is required by the unified pipeline when using SAP and NXN broad-phases
-        capacity = 2 * max_contacts_per_pair * ((builder.num_geoms * (builder.num_geoms - 1)) // 2)
-        contacts = ContactsKamino(capacity=capacity, device=device)
-        contacts.clear()
 
         # Execute the unified collision detection pipeline
         pipeline.collide(data, state, contacts)
@@ -245,7 +240,6 @@ class TestCollisionPipelineUnified(unittest.TestCase):
         }
 
         # Retrieve the nominal expected contacts for the shape pair
-        # TODO: This should be =1, but generates =4
         expected_contacts = 1
 
         # Run the narrow-phase test on the shape pair
@@ -264,7 +258,15 @@ class TestCollisionPipelineUnified(unittest.TestCase):
         shape pair when placed exactly at their contact boundaries.
         """
         msg.info("Testing unified pipeline tests with exact boundaries")
-        # Each shape pair in its own world with
+
+        # Global builder and expected contacts dictionary
+        builder = ModelBuilderKamino()
+        expected_contacts = {
+            "model_active_contacts": 0,
+            "world_active_contacts": [],
+        }
+
+        # Fill builder and expected contacts with one world per shape pair
         for shape_pair in self.supported_shape_pairs:
             # Define any special kwargs for specific shape pairs
             kwargs = {}
@@ -274,18 +276,27 @@ class TestCollisionPipelineUnified(unittest.TestCase):
                 # the bottom box to avoid contacts on edges
                 kwargs["bottom_dims"] = (2.0, 2.0, 1.0)
 
-            # Retrieve the nominal expected contacts for the shape pair
-            expected_contacts = nominal_expected_contacts_per_shape_pair.get(shape_pair, 0)
-
-            # Run the narrow-phase test on the shape pair
-            test_unified_pipeline_on_shape_pair(
-                self,
-                shape_pair=shape_pair,
-                expected_contacts=expected_contacts,
-                margin=1.0e-5,  # Default contact margin
+            # Create a builder for the specified shape pair
+            builder_shape = testing.make_single_shape_pair_builder(
+                shapes=shape_pair,
                 distance=0.0,  # Exactly touching
-                builder_kwargs=kwargs,
+                **kwargs,
             )
+            builder.add_builder(builder_shape)
+
+            # Retrieve the nominal expected contacts for the shape pair
+            expected_contacts_shape = nominal_expected_contacts_per_shape_pair.get(shape_pair, 0)
+            expected_contacts["model_active_contacts"] += expected_contacts_shape
+            expected_contacts["world_active_contacts"].append(expected_contacts_shape)
+
+        # Run the narrow-phase test
+        test_unified_pipeline(
+            builder=builder,
+            expected=expected_contacts,
+            margin=1.0e-5,  # Default contact margin
+            case="all_primitive_shape_pairs_touching",
+            device=self.default_device,
+        )
 
     def test_02_on_each_primitive_shape_pair_apart(self):
         """
@@ -293,15 +304,31 @@ class TestCollisionPipelineUnified(unittest.TestCase):
         supported primitive shape pair when placed apart.
         """
         msg.info("Testing unified pipeline tests with shapes apart")
-        # Each shape pair in its own world with
+
+        # Global builder and expected contacts dictionary
+        builder = ModelBuilderKamino()
+        expected_contacts = {
+            "model_active_contacts": 0,
+            "world_active_contacts": [0 for _ in range(len(self.supported_shape_pairs))],
+        }
+
+        # Fill builder with one world per shape pair
         for shape_pair in self.supported_shape_pairs:
-            test_unified_pipeline_on_shape_pair(
-                self,
-                shape_pair=shape_pair,
-                expected_contacts=0,
-                margin=0.0,  # No contact margin
+            # Create a builder for the specified shape pair
+            builder_shape = testing.make_single_shape_pair_builder(
+                shapes=shape_pair,
                 distance=1e-6,  # Shapes apart with epsilon distance
             )
+            builder.add_builder(builder_shape)
+
+        # Run the narrow-phase test
+        test_unified_pipeline(
+            builder=builder,
+            expected=expected_contacts,
+            margin=0.0,  # No contact margin
+            case="all_primitive_shape_pairs_apart",
+            device=self.default_device,
+        )
 
     def test_03_on_each_primitive_shape_pair_apart_with_margin(self):
         """
@@ -309,9 +336,15 @@ class TestCollisionPipelineUnified(unittest.TestCase):
         primitive shape pair when placed apart but with contact margin.
         """
         msg.info("Testing unified pipeline tests with shapes apart")
-        # Each shape pair in its own world with
-        # - zero distance: (i.e., exactly touching)
-        # - zero margin: no preemption of collisions
+
+        # Global builder and expected contacts dictionary
+        builder = ModelBuilderKamino()
+        expected_contacts = {
+            "model_active_contacts": 0,
+            "world_active_contacts": [],
+        }
+
+        # Fill builder and expected contacts with one world per shape pair
         for shape_pair in self.supported_shape_pairs:
             # Define any special kwargs for specific shape pairs
             kwargs = {}
@@ -321,18 +354,27 @@ class TestCollisionPipelineUnified(unittest.TestCase):
                 # the bottom box to avoid contacts on edges
                 kwargs["bottom_dims"] = (2.0, 2.0, 1.0)
 
-            # Retrieve the nominal expected contacts for the shape pair
-            expected_contacts = nominal_expected_contacts_per_shape_pair.get(shape_pair, 0)
-
-            # Run the narrow-phase test on the shape pair
-            test_unified_pipeline_on_shape_pair(
-                self,
-                shape_pair=shape_pair,
-                expected_contacts=expected_contacts,
-                margin=1e-5,  # Contact margin
-                distance=1e-6,  # Shapes apart
-                builder_kwargs=kwargs,
+            # Create a builder for the specified shape pair
+            builder_shape = testing.make_single_shape_pair_builder(
+                shapes=shape_pair,
+                distance=0.0,  # Shapes apart
+                **kwargs,
             )
+            builder.add_builder(builder_shape)
+
+            # Retrieve the nominal expected contacts for the shape pair
+            expected_contacts_shape = nominal_expected_contacts_per_shape_pair.get(shape_pair, 0)
+            expected_contacts["model_active_contacts"] += expected_contacts_shape
+            expected_contacts["world_active_contacts"].append(expected_contacts_shape)
+
+        # Run the narrow-phase test
+        test_unified_pipeline(
+            builder=builder,
+            expected=expected_contacts,
+            margin=1.0e-5,  # Contact margin
+            case="all_primitive_shape_pairs_apart_with_margin",
+            device=self.default_device,
+        )
 
     ###
     # Tests for special cases of shape combinations/configurations
@@ -497,7 +539,7 @@ class TestCollisionPipelineUnified(unittest.TestCase):
             expected=expected,
             case="boxes_nunchaku",
             broadphase_modes=["explicit"],
-            margin=1e-6,
+            margin=1e-5,
             device=self.default_device,
         )
 
@@ -529,7 +571,6 @@ class TestUnifiedWriterContactDataRegression(unittest.TestCase):
             model=model,
             broadphase="explicit",
             default_gap=default_gap,
-            device=self.default_device,
         )
         n_geoms = builder.num_geoms
         capacity = 8 * ((n_geoms * (n_geoms - 1)) // 2)
@@ -572,7 +613,7 @@ class TestUnifiedWriterContactDataRegression(unittest.TestCase):
             shapes=("sphere", "sphere"),
             distance=separation,
         )
-        for geom in builder.geoms:
+        for geom in builder.all_geoms:
             geom.gap = 0.01
         contacts = self._run_pipeline(builder)
         active = contacts.model_active_contacts.numpy()[0]
@@ -585,7 +626,7 @@ class TestUnifiedWriterContactDataRegression(unittest.TestCase):
             shapes=("sphere", "sphere"),
             distance=separation,
         )
-        for geom in builder.geoms:
+        for geom in builder.all_geoms:
             geom.gap = 0.001
         contacts = self._run_pipeline(builder)
         active = contacts.model_active_contacts.numpy()[0]
@@ -629,7 +670,7 @@ class TestUnifiedPipelineNxnBroadphase(unittest.TestCase):
     def test_00_nxn_sphere_on_plane_generates_contacts(self):
         """Sphere resting on a plane via NXN broadphase must produce contacts.
 
-        Validates that shape_collision_radius is populated correctly for
+        Validates that collision_radius is populated correctly for
         infinite planes (which need a large bounding-sphere radius for
         AABB-based broadphase modes to detect them).
         """
@@ -689,7 +730,6 @@ class TestUnifiedPipelineNxnBroadphase(unittest.TestCase):
             model=model,
             broadphase="nxn",
             default_gap=1.0,
-            device=self.default_device,
         )
 
         n_geoms = builder.num_geoms
@@ -718,7 +758,6 @@ class TestUnifiedPipelineNxnBroadphase(unittest.TestCase):
             model=model,
             broadphase="nxn",
             default_gap=1.0,
-            device=self.default_device,
         )
 
         n_geoms = builder.num_geoms

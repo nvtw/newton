@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
+from collections.abc import Iterable
+
 import numpy as np
 import warp as wp
 
@@ -24,7 +28,8 @@ class Picking:
         model: newton.Model,
         pick_stiffness: float = 50.0,
         pick_damping: float = 5.0,
-        world_offsets: wp.array | None = None,
+        pick_max_acceleration: float = 5.0,
+        world_offsets: wp.array[wp.vec3] | None = None,
     ) -> None:
         """
         Initializes the picking system.
@@ -33,13 +38,16 @@ class Picking:
             model: The model to pick from.
             pick_stiffness: The stiffness that will be used to compute the force applied to the picked body.
             pick_damping: The damping that will be used to compute the force applied to the picked body.
+            pick_max_acceleration: Maximum picking acceleration in multiples of g [9.81 m/s^2].
+                Clamps the picking force to prevent runaway divergence on light objects
+                near stiff contacts.
             world_offsets: Optional warp array of world offsets (dtype=wp.vec3) for multi-world picking support.
         """
         self.model = model
         self.pick_stiffness = pick_stiffness
         self.pick_damping = pick_damping
         self.world_offsets = world_offsets
-        self.visible_worlds_mask: wp.array | None = None
+        self.visible_worlds_mask: wp.array[int] | None = None
 
         self.min_dist = None
         self.min_index = None
@@ -58,12 +66,23 @@ class Picking:
         pick_state_np = np.empty(1, dtype=PickingState.numpy_dtype())
         pick_state_np[0]["pick_stiffness"] = pick_stiffness
         pick_state_np[0]["pick_damping"] = pick_damping
+        pick_state_np[0]["pick_max_acceleration"] = pick_max_acceleration
         self.pick_state = wp.array(pick_state_np, dtype=PickingState, device=model.device if model else "cpu", ndim=1)
 
         self.pick_dist = 0.0
         self.picking_active = False
 
         self._default_on_mouse_drag = None
+
+        body_count = model.body_count if model else 0
+        device = model.device if model else "cpu"
+        self._linear_only_body_mask = wp.zeros(body_count, dtype=wp.int32, device=device)
+
+        # Pre-compute effective mass per body for picking force clamping.
+        # For articulated bodies, use the total articulation mass so that
+        # picking a light link (e.g. fingertip) still allows enough force
+        # to move the whole chain. Free bodies use their own mass.
+        self._pick_effective_mass = self._compute_effective_mass(model)
 
     def _apply_picking_force(self, state: newton.State) -> None:
         """
@@ -88,9 +107,95 @@ class Picking:
                 self.model.body_flags,
                 self.model.body_com,
                 self.model.body_mass,
+                self._pick_effective_mass,
+                self._linear_only_body_mask,
             ],
             device=self.model.device,
         )
+
+    def set_linear_only_bodies(self, body_ids: Iterable[int] | None) -> None:
+        """Configure bodies that should receive no torque from mouse picking.
+
+        Mouse picking normally applies an offset-induced torque whenever the
+        click point is off-center relative to the body's COM. Bodies listed
+        here only receive the linear (translation) component, which is useful
+        for cables and other low-inertia articulated chains where spurious
+        picking torques would destabilize the solver.
+
+        Args:
+            body_ids: Iterable of body indices into ``model.body_q``. Pass
+                ``None`` (or call :meth:`clear_linear_only_bodies`) to
+                restore normal picking torque for every body.
+
+        Raises:
+            ValueError: If any ``body_id`` falls outside
+                ``[0, model.body_count)``.
+        """
+        if self.model is None:
+            return
+        if body_ids is None:
+            self.clear_linear_only_bodies()
+            return
+
+        mask = np.zeros(self.model.body_count, dtype=np.int32)
+        for raw_body_id in body_ids:
+            body_id = int(raw_body_id)
+            if body_id < 0 or body_id >= self.model.body_count:
+                raise ValueError(f"Body id {body_id} is outside the model body range [0, {self.model.body_count}).")
+            mask[body_id] = 1
+
+        self._linear_only_body_mask.assign(mask)
+
+    def clear_linear_only_bodies(self) -> None:
+        """Restore normal mouse picking torque for all bodies.
+
+        Reverts any previous :meth:`set_linear_only_bodies` configuration so
+        every picked body once again receives both linear force and the
+        offset-induced torque.
+        """
+        if self.model is None:
+            return
+        self._linear_only_body_mask.fill_(0)
+
+    @staticmethod
+    def _compute_effective_mass(model: newton.Model) -> wp.array[float]:
+        """Compute per-body effective mass for picking force clamping.
+
+        For bodies in an articulation, returns the total mass of that
+        articulation so that picking a light link still allows enough
+        force to move the whole chain.  Free bodies get their own mass.
+        """
+        if model is None:
+            return wp.zeros(1, dtype=float)
+
+        body_mass_np = model.body_mass.numpy()
+        effective = body_mass_np.copy()
+
+        if model.joint_count > 0:
+            joint_child_np = model.joint_child.numpy()
+            joint_art_np = model.joint_articulation.numpy()
+
+            # Map each body to its articulation index (-1 if free)
+            body_art = np.full(model.body_count, -1, dtype=np.int32)
+            for j in range(model.joint_count):
+                child = joint_child_np[j]
+                if child >= 0:
+                    body_art[child] = joint_art_np[j]
+
+            # Sum mass per articulation
+            art_mass = {}
+            for b in range(model.body_count):
+                a = body_art[b]
+                if a >= 0:
+                    art_mass[a] = art_mass.get(a, 0.0) + body_mass_np[b]
+
+            # Assign total articulation mass to each body in that articulation
+            for b in range(model.body_count):
+                a = body_art[b]
+                if a >= 0:
+                    effective[b] = art_mass[a]
+
+        return wp.array(effective, dtype=float, device=model.device)
 
     def is_picking(self) -> bool:
         """Checks if picking is active.

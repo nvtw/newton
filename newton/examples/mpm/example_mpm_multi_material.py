@@ -57,7 +57,7 @@ class Example:
         mpm_options.max_iterations = args.max_iterations
 
         # Initialize MPM solver
-        self.solver = SolverImplicitMPM(self.model, mpm_options)
+        self.solver = SolverImplicitMPM(self.model, config=mpm_options)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -193,6 +193,4 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init(parser)
 
     # Create example and run
-    example = Example(viewer, args)
-
-    newton.examples.run(example, args)
+    newton.examples.run(Example(viewer, args), args)

@@ -97,6 +97,31 @@ class TestHeightfield(unittest.TestCase):
         self.assertEqual(builder.shape_type[shape_id], newton.GeoType.HFIELD)
         self.assertIs(builder.shape_source[shape_id], hfield)
 
+    def test_model_heightfield_count_and_deprecated_alias(self):
+        """Model exposes heightfield_count and warns for the legacy boolean."""
+        builder = newton.ModelBuilder()
+        hfield = Heightfield(data=np.zeros((3, 3), dtype=np.float32), nrow=3, ncol=3, hx=1.0, hy=1.0)
+        builder.add_shape_heightfield(heightfield=hfield)
+
+        model = builder.finalize(device="cpu")
+
+        self.assertEqual(model.heightfield_count, 1)
+        with self.assertWarns(DeprecationWarning):
+            self.assertTrue(model.has_heightfields)
+
+        empty_model = newton.Model(device="cpu")
+        self.assertEqual(empty_model.heightfield_count, 0)
+        with self.assertWarns(DeprecationWarning):
+            self.assertFalse(empty_model.has_heightfields)
+
+        with self.assertWarns(DeprecationWarning):
+            empty_model.has_heightfields = True
+        self.assertEqual(empty_model.heightfield_count, 1)
+
+        with self.assertWarns(DeprecationWarning):
+            empty_model.has_heightfields = False
+        self.assertEqual(empty_model.heightfield_count, 0)
+
     def test_mjcf_hfield_parsing(self):
         """Test parsing MJCF file with hfield asset."""
         mjcf = """
@@ -341,6 +366,36 @@ class TestHeightfield(unittest.TestCase):
         # Should detect at least one contact (sphere is within contact margin of heightfield)
         contact_count = int(contacts.rigid_contact_count.numpy()[0])
         self.assertGreater(contact_count, 0, "No contacts detected between sphere and heightfield")
+
+    def test_heightfield_native_collision_scaled(self):
+        """Per-instance ``scale`` on ``add_shape_heightfield`` is honored by narrow-phase.
+
+        The sphere sits at XY=(1.5, 0) -- inside the scaled extent ``[-2, 2]`` but
+        outside the unscaled asset extent ``[-1, 1]``. A pre-fix build (narrow-phase
+        ignoring ``scale``) would treat the sphere as outside the heightfield
+        footprint and generate no contacts.
+        """
+        builder = newton.ModelBuilder()
+
+        nrow, ncol = 10, 10
+        elevation = np.zeros((nrow, ncol), dtype=np.float32)
+        # Small heightfield (hx=hy=1) scaled 2x in XY; baked extent becomes [-2, 2].
+        hfield = Heightfield(data=elevation, nrow=nrow, ncol=ncol, hx=1.0, hy=1.0, min_z=0.0, max_z=1.0)
+        builder.add_shape_heightfield(heightfield=hfield, scale=(2.0, 2.0, 1.0))
+
+        # Sphere straddling the scaled surface at XY=(1.5, 0).
+        sphere_body = builder.add_body(xform=wp.transform((1.5, 0.0, 0.05), wp.quat_identity()))
+        builder.add_shape_sphere(body=sphere_body, radius=0.1)
+
+        model = builder.finalize()
+        state = model.state()
+
+        pipeline = newton.CollisionPipeline(model)
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+
+        contact_count = int(contacts.rigid_contact_count.numpy()[0])
+        self.assertGreater(contact_count, 0, "No contacts detected between sphere and scaled heightfield")
 
     def test_heightfield_native_collision_no_contact(self):
         """Test that no contacts are generated when sphere is far above heightfield."""

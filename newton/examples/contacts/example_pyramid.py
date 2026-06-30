@@ -50,7 +50,7 @@ class Example:
         pyramid_size = args.pyramid_size
 
         builder = newton.ModelBuilder()
-        builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+        builder.add_shape_plane(xform=wp.transform_identity(), width=0.0, length=0.0)
 
         box_count = 0
         top_body_indices = []
@@ -216,5 +216,4 @@ class Example:
 if __name__ == "__main__":
     parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
-    example = Example(viewer, args)
-    newton.examples.run(example, args)
+    newton.examples.run(Example(viewer, args), args)

@@ -67,7 +67,7 @@ def _run_primitive_pipeline(builder: ModelBuilderKamino, device, max_contacts_pe
     _, world_req = builder.compute_required_contact_capacity(max_contacts_per_pair=max_contacts_per_pair)
     contacts = ContactsKamino(capacity=world_req, device=device)
     contacts.clear()
-    pipeline = CollisionPipelinePrimitive(model=model, bvtype="aabb", default_gap=0.0, device=device)
+    pipeline = CollisionPipelinePrimitive(model=model, bvtype="aabb", default_gap=0.0)
     pipeline.collide(data, state, contacts)
     return contacts, model
 
@@ -305,7 +305,7 @@ def _build_sphere_on_ground(
         bid_F=bid,
         B_r_Bj=vec3f(0.0, 0.0, sphere_z),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=I_3,
+        X_Bj=I_3,
     )
     builder.add_geometry(
         name="sphere",

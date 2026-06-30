@@ -21,6 +21,7 @@ class PickingState:
     picking_target_world: wp.vec3
     pick_stiffness: float
     pick_damping: float
+    pick_max_acceleration: float
 
 
 @wp.kernel
@@ -71,6 +72,8 @@ def apply_picking_force_kernel(
     body_flags: wp.array[int],
     body_com: wp.array[wp.vec3],
     body_mass: wp.array[float],
+    pick_effective_mass: wp.array[float],
+    linear_only_body_mask: wp.array[wp.int32],
 ):
     pick_body = pick_body_arr[0]
     if pick_body < 0:
@@ -107,8 +110,24 @@ def apply_picking_force_kernel(
         pick_state[0].pick_stiffness * (pick_target_world - pick_pos_world)
         - (pick_state[0].pick_damping * vel_at_offset)
     )
+
+    # Clamp force magnitude to prevent runaway divergence on light objects (#2361).
+    # Uses the effective mass (total articulation mass for linked bodies,
+    # own mass for free bodies) so picking a light robot link still allows
+    # enough force to move the whole chain.
+    max_force = pick_state[0].pick_max_acceleration * 9.81 * pick_effective_mass[pick_body]
+    force_mag = wp.length(force_at_offset)
+    if force_mag > max_force:
+        force_at_offset = force_at_offset * (max_force / force_mag)
+
     # Compute the resulting torque given the offset from COM to the picked point.
-    torque_at_offset = wp.cross(offset, force_at_offset)
+    # Bodies registered for linear-only picking receive force only,
+    # which keeps mouse picking from injecting destabilizing torques into cables
+    # and other low-inertia articulated chains.
+    if linear_only_body_mask[pick_body] != 0:
+        torque_at_offset = wp.vec3(0.0)
+    else:
+        torque_at_offset = wp.cross(offset, force_at_offset)
 
     wp.atomic_add(body_f, pick_body, wp.spatial_vector(force_at_offset, torque_at_offset))
 
@@ -147,6 +166,7 @@ def update_shape_xforms(
     body_q: wp.array[wp.transform],
     shape_worlds: wp.array[int],
     world_offsets: wp.array[wp.vec3],
+    layer_xform: wp.transform,
     world_xforms: wp.array[wp.transform],
 ):
     tid = wp.tid()
@@ -165,7 +185,7 @@ def update_shape_xforms(
             offset = world_offsets[shape_world]
             world_xform = wp.transform(world_xform.p + offset, world_xform.q)
 
-    world_xforms[tid] = world_xform
+    world_xforms[tid] = wp.transform_multiply(layer_xform, world_xform)
 
 
 @wp.kernel
@@ -243,6 +263,7 @@ def compute_contact_lines(
     shape_body: wp.array[int],
     shape_world: wp.array[int],
     world_offsets: wp.array[wp.vec3],
+    layer_xform: wp.transform,
     visible_worlds_mask: wp.array[int],
     contact_count: wp.array[int],
     contact_shape0: wp.array[int],
@@ -296,9 +317,12 @@ def compute_contact_lines(
     if world_a >= 0 or world_b >= 0:
         contact_center += world_offsets[world_a if world_a >= 0 else world_b]
 
+    # Apply layer transform (rotates + translates contact point and rotates the normal)
+    contact_center = wp.transform_point(layer_xform, contact_center)
+    normal = wp.quat_rotate(wp.transform_get_rotation(layer_xform), contact_normal[tid])
+
     # Create line along normal direction
     # Normal points from shape0 to shape1, draw from center in normal direction
-    normal = contact_normal[tid]
     line_vector = normal * line_scale
 
     line_start[tid] = contact_center
@@ -314,6 +338,7 @@ def compute_joint_basis_lines(
     body_q: wp.array[wp.transform],
     body_world: wp.array[int],
     world_offsets: wp.array[wp.vec3],
+    layer_xform: wp.transform,
     visible_worlds_mask: wp.array[int],
     shape_collision_radius: wp.array[float],
     shape_body: wp.array[int],
@@ -389,6 +414,10 @@ def compute_joint_basis_lines(
         world_pos = joint_pos
         world_rot = joint_rot
 
+    # Apply layer transform
+    world_pos = wp.transform_point(layer_xform, world_pos)
+    world_rot = wp.mul(wp.transform_get_rotation(layer_xform), world_rot)
+
     # Determine scale based on child body shapes
     scale_factor = line_scale
 
@@ -415,6 +444,7 @@ def compute_com_positions(
     body_com: wp.array[wp.vec3],
     body_world: wp.array[int],
     world_offsets: wp.array[wp.vec3],
+    layer_xform: wp.transform,
     visible_worlds_mask: wp.array[int],
     com_positions: wp.array[wp.vec3],
 ):
@@ -432,7 +462,7 @@ def compute_com_positions(
     world_com = wp.transform_point(body_tf, body_com[tid])
     if world_offsets and world_idx >= 0 and world_idx < world_offsets.shape[0]:
         world_com = world_com + world_offsets[world_idx]
-    com_positions[tid] = world_com
+    com_positions[tid] = wp.transform_point(layer_xform, world_com)
 
 
 @wp.kernel
@@ -443,6 +473,7 @@ def compute_inertia_box_lines(
     body_inv_mass: wp.array[float],
     body_world: wp.array[int],
     world_offsets: wp.array[wp.vec3],
+    layer_xform: wp.transform,
     visible_worlds_mask: wp.array[int],
     color: wp.vec3,
     # outputs: 12 lines per body
@@ -648,6 +679,10 @@ def compute_inertia_box_lines(
         world0 = world0 + offset
         world1 = world1 + offset
 
+    # Apply layer transform
+    world0 = wp.transform_point(layer_xform, world0)
+    world1 = wp.transform_point(layer_xform, world1)
+
     line_starts[tid] = world0
     line_ends[tid] = world1
     line_colors[tid] = color
@@ -680,6 +715,7 @@ def compute_hydro_contact_surface_lines(
     face_shape_pairs: wp.array[wp.vec2i],
     shape_world: wp.array[int],
     world_offsets: wp.array[wp.vec3],
+    layer_xform: wp.transform,
     visible_worlds_mask: wp.array[int],
     num_faces: int,
     min_depth: float,
@@ -745,9 +781,9 @@ def compute_hydro_contact_surface_lines(
         if world_a >= 0 or world_b >= 0:
             offset = world_offsets[world_a if world_a >= 0 else world_b]
 
-    v0 = v0 + offset
-    v1 = v1 + offset
-    v2 = v2 + offset
+    v0 = wp.transform_point(layer_xform, v0 + offset)
+    v1 = wp.transform_point(layer_xform, v1 + offset)
+    v2 = wp.transform_point(layer_xform, v2 + offset)
 
     # Use penetration magnitude (negated depth) for color - deeper = more red
     if depth < 0.0:
@@ -772,16 +808,13 @@ def compute_hydro_contact_surface_lines(
     line_colors[tid * 3 + 2] = color
 
 
-PARTICLE_ACTIVE = wp.constant(wp.int32(newton.ParticleFlags.ACTIVE))
-
-
 @wp.kernel
 def build_active_particle_mask(
     flags: wp.array[wp.int32],
     mask: wp.array[wp.int32],
 ):
     i = wp.tid()
-    if (flags[i] & PARTICLE_ACTIVE) != wp.int32(0):
+    if (flags[i] & newton.ParticleFlags.ACTIVE) != wp.int32(0):
         mask[i] = wp.int32(1)
     else:
         mask[i] = wp.int32(0)
@@ -797,3 +830,13 @@ def compact(
     i = wp.tid()
     if mask[i] == wp.int32(1):
         dst[offsets[i]] = src[i]
+
+
+@wp.kernel
+def transform_points(
+    points: wp.array[wp.vec3],
+    xform: wp.transform,
+    transformed_points: wp.array[wp.vec3],
+):
+    i = wp.tid()
+    transformed_points[i] = wp.transform_point(xform, points[i])

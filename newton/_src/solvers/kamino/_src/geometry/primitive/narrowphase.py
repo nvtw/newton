@@ -137,8 +137,12 @@ class Cylinder:
 class Plane:
     gid: int32
     bid: int32
-    normal: vec3f
     pos: vec3f
+    rot: mat33f
+    normal: vec3f
+    distance: float32
+    width: float32
+    length: float32
 
 
 @wp.struct
@@ -151,7 +155,7 @@ class Ellipsoid:
 
 
 @wp.func
-def make_box(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Box:
+def make_box(pose: transformf, params: vec3f, gid: int32, bid: int32) -> Box:
     box = Box()
     box.gid = gid
     box.bid = bid
@@ -162,7 +166,7 @@ def make_box(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Box:
 
 
 @wp.func
-def make_sphere(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Sphere:
+def make_sphere(pose: transformf, params: vec3f, gid: int32, bid: int32) -> Sphere:
     sphere = Sphere()
     sphere.gid = gid
     sphere.bid = bid
@@ -173,7 +177,7 @@ def make_sphere(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Sphe
 
 
 @wp.func
-def make_capsule(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Capsule:
+def make_capsule(pose: transformf, params: vec3f, gid: int32, bid: int32) -> Capsule:
     capsule = Capsule()
     capsule.gid = gid
     capsule.bid = bid
@@ -188,7 +192,7 @@ def make_capsule(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Cap
 
 
 @wp.func
-def make_cylinder(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Cylinder:
+def make_cylinder(pose: transformf, params: vec3f, gid: int32, bid: int32) -> Cylinder:
     cylinder = Cylinder()
     cylinder.gid = gid
     cylinder.bid = bid
@@ -203,19 +207,24 @@ def make_cylinder(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Cy
 
 
 @wp.func
-def make_plane(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Plane:
+def make_plane(pose: transformf, params: vec3f, gid: int32, bid: int32) -> Plane:
     plane = Plane()
     plane.gid = gid
     plane.bid = bid
-    # Plane normal is stored in params[0:3]
-    plane.normal = vec3f(params[0], params[1], params[2])
-    # Plane position is the transform translation
     plane.pos = wp.transform_get_translation(pose)
+    plane.rot = wp.quat_to_matrix(wp.transform_get_rotation(pose))
+    # Plane normal is extracted from the rotation matrix (assuming the plane's local Z-axis is the normal)
+    plane.normal = vec3f(plane.rot[0, 2], plane.rot[1, 2], plane.rot[2, 2])
+    # Plane distance is extracted from the position along the normal direction
+    plane.distance = -(plane.pos.x * plane.normal.x + plane.pos.y * plane.normal.y + plane.pos.z * plane.normal.z)
+    # Plane dimensions (width and length) stored in params[0:2]
+    plane.width = params[0]
+    plane.length = params[1]
     return plane
 
 
 @wp.func
-def make_ellipsoid(pose: transformf, params: vec4f, gid: int32, bid: int32) -> Ellipsoid:
+def make_ellipsoid(pose: transformf, params: vec3f, gid: int32, bid: int32) -> Ellipsoid:
     ellipsoid = Ellipsoid()
     ellipsoid.gid = gid
     ellipsoid.bid = bid
@@ -249,74 +258,74 @@ def add_single_contact(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Skip if the contact distance exceeds the detection threshold
     if (distance - margin_plus_gap) > 0.0:
         return
 
-    # Increment the active contact counters
-    mcid = wp.atomic_add(contact_model_num, 0, 1)
+    # Safely increment the active contact counters (see notes in _write_contact_unified_kamino in unified.py)
     wcid = wp.atomic_add(contact_world_num, wid, 1)
-
-    # If within max allocated contacts, write the new contact data
-    if mcid < model_max_contacts and wcid < world_max_contacts:
-        # Perform A/B geom and body assignment
-        # NOTE: We want the normal to always point from A to B,
-        # and hence body B to be the "effected" body in the contact
-        # so we have to ensure that bid_B is always non-negative
-        if bid_2 < 0:
-            gid_AB = vec2i(gid_2, gid_1)
-            bid_AB = vec2i(bid_2, bid_1)
-            normal = -normal
-        else:
-            gid_AB = vec2i(gid_1, gid_2)
-            bid_AB = vec2i(bid_1, bid_2)
-
-        # Compute absolute penetration distance
-        distance_abs = wp.abs(distance)
-
-        # The colliders compute the contact point in the middle, and thus to get the
-        # per-geom contact points we need to offset by the penetration depth along the normal
-        position_A = position + 0.5 * distance_abs * normal
-        position_B = position - 0.5 * distance_abs * normal
-
-        # Store margin-shifted distance in gapfunc.w: negative means penetration
-        # past the resting separation, zero means at rest, positive means within
-        # the detection gap but not yet at rest.
-        d = distance - margin
-        gapfunc = vec4f(normal.x, normal.y, normal.z, d)
-        q_frame = wp.quat_from_matrix(make_contact_frame_znorm(normal))
-        material = vec2f(friction, restitution)
-        key = build_pair_key2(uint32(gid_AB[0]), uint32(gid_AB[1]))
-
-        # Store the active contact output data
-        contact_wid[mcid] = wid
-        contact_cid[mcid] = wcid
-        contact_gid_AB[mcid] = gid_AB
-        contact_bid_AB[mcid] = bid_AB
-        contact_position_A[mcid] = position_A
-        contact_position_B[mcid] = position_B
-        contact_gapfunc[mcid] = gapfunc
-        contact_frame[mcid] = q_frame
-        contact_material[mcid] = material
-        contact_key[mcid] = key
-
-    # Otherwise roll-back the atomic add if we exceeded limits
-    else:
+    if wcid >= world_max_contacts:
+        wp.atomic_sub(contact_world_num, wid, 1)
+        return
+    mcid = wp.atomic_add(contact_model_num, 0, 1)
+    if mcid >= model_max_contacts:
         wp.atomic_sub(contact_model_num, 0, 1)
         wp.atomic_sub(contact_world_num, wid, 1)
+        return
+
+    # Perform A/B geom and body assignment
+    # NOTE: We want the normal to always point from A to B,
+    # and hence body B to be the "effected" body in the contact
+    # so we have to ensure that bid_B is always non-negative
+    if bid_2 < 0:
+        gid_AB = vec2i(gid_2, gid_1)
+        bid_AB = vec2i(bid_2, bid_1)
+        normal = -normal
+    else:
+        gid_AB = vec2i(gid_1, gid_2)
+        bid_AB = vec2i(bid_1, bid_2)
+
+    # Compute absolute penetration distance
+    distance_abs = wp.abs(distance)
+
+    # The colliders compute the contact point in the middle, and thus to get the
+    # per-geom contact points we need to offset by the penetration depth along the normal
+    position_A = position + 0.5 * distance_abs * normal
+    position_B = position - 0.5 * distance_abs * normal
+
+    # Store margin-shifted distance in gapfunc.w: negative means penetration
+    # past the resting separation, zero means at rest, positive means within
+    # the detection gap but not yet at rest.
+    d = distance - margin
+    gapfunc = vec4f(normal.x, normal.y, normal.z, d)
+    q_frame = wp.quat_from_matrix(make_contact_frame_znorm(normal))
+    material = vec2f(friction, restitution)
+    key = build_pair_key2(uint32(gid_AB[0]), uint32(gid_AB[1]))
+
+    # Store the active contact output data
+    contact_wid[mcid] = wid
+    contact_cid[mcid] = wcid
+    contact_gid_AB[mcid] = gid_AB
+    contact_bid_AB[mcid] = bid_AB
+    contact_position_A[mcid] = position_A
+    contact_position_B[mcid] = position_B
+    contact_gapfunc[mcid] = gapfunc
+    contact_frame[mcid] = q_frame
+    contact_material[mcid] = material
+    contact_key[mcid] = key
 
 
 def make_add_multiple_contacts(MAX_CONTACTS: int, SHARED_NORMAL: bool):
@@ -339,18 +348,18 @@ def make_add_multiple_contacts(MAX_CONTACTS: int, SHARED_NORMAL: bool):
         positions: wp.types.matrix((MAX_CONTACTS, 3), wp.float32),
         normals: Any,
         # Outputs:
-        contact_model_num: wp.array(dtype=int32),
-        contact_world_num: wp.array(dtype=int32),
-        contact_wid: wp.array(dtype=int32),
-        contact_cid: wp.array(dtype=int32),
-        contact_gid_AB: wp.array(dtype=vec2i),
-        contact_bid_AB: wp.array(dtype=vec2i),
-        contact_position_A: wp.array(dtype=vec3f),
-        contact_position_B: wp.array(dtype=vec3f),
-        contact_gapfunc: wp.array(dtype=vec4f),
-        contact_frame: wp.array(dtype=quatf),
-        contact_material: wp.array(dtype=vec2f),
-        contact_key: wp.array(dtype=uint64),
+        contact_model_num: wp.array[int32],
+        contact_world_num: wp.array[int32],
+        contact_wid: wp.array[int32],
+        contact_cid: wp.array[int32],
+        contact_gid_AB: wp.array[vec2i],
+        contact_bid_AB: wp.array[vec2i],
+        contact_position_A: wp.array[vec3f],
+        contact_position_B: wp.array[vec3f],
+        contact_gapfunc: wp.array[vec4f],
+        contact_frame: wp.array[quatf],
+        contact_material: wp.array[vec2f],
+        contact_key: wp.array[uint64],
     ):
         # Count valid contacts (those within the detection threshold)
         num_contacts = wp.int32(0)
@@ -373,12 +382,30 @@ def make_add_multiple_contacts(MAX_CONTACTS: int, SHARED_NORMAL: bool):
             gid_AB = vec2i(gid_1, gid_2)
             bid_AB = vec2i(bid_1, bid_2)
 
-        # Increment the active contact counter
-        mcio = wp.atomic_add(contact_model_num, 0, num_contacts)
+        # Safely increment the per-world active contact counter (see notes in _write_contact_unified_kamino in unified.py)
         wcio = wp.atomic_add(contact_world_num, wid, num_contacts)
+        if wcio >= world_max_contacts:
+            wp.atomic_sub(contact_world_num, wid, num_contacts)
+            return
 
-        # Retrieve the maximum number of contacts that can be stored for this geom pair
-        max_num_contacts = wp.min(wp.min(model_max_contacts - mcio, world_max_contacts - wcio), num_contacts)
+        # Handle case where this thread saturated the counter and only partial contacts can be written
+        max_num_contacts = wp.min(world_max_contacts - wcio, num_contacts)
+        if max_num_contacts < num_contacts:
+            wp.atomic_sub(contact_world_num, wid, num_contacts - max_num_contacts)
+
+        # Safely increment the model active contact counter
+        mcio = wp.atomic_add(contact_model_num, 0, max_num_contacts)
+        if mcio >= model_max_contacts:
+            wp.atomic_sub(contact_model_num, 0, max_num_contacts)
+            wp.atomic_sub(contact_world_num, wid, max_num_contacts)
+            return
+
+        # Handle case where this thread saturated the counter and only partial contacts can be written
+        max_num_contacts_prev = max_num_contacts
+        max_num_contacts = wp.min(model_max_contacts - mcio, max_num_contacts_prev)
+        if max_num_contacts < max_num_contacts_prev:
+            wp.atomic_sub(contact_model_num, 0, max_num_contacts_prev - max_num_contacts)
+            wp.atomic_sub(contact_world_num, wid, max_num_contacts_prev - max_num_contacts)
 
         # Create the common material for this contact set
         material = vec2f(friction, restitution)
@@ -438,11 +465,6 @@ def make_add_multiple_contacts(MAX_CONTACTS: int, SHARED_NORMAL: bool):
                 # Increment active contact index
                 active_contact_idx += 1
 
-        # Roll-back the atomic add if we exceeded limits
-        if active_contact_idx < num_contacts:
-            wp.atomic_sub(contact_model_num, 0, num_contacts - active_contact_idx)
-            wp.atomic_sub(contact_world_num, wid, num_contacts - active_contact_idx)
-
     # Return the generated function
     return add_multiple_contacts
 
@@ -465,18 +487,18 @@ def sphere_sphere(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Run the respective collider function to detect sphere-sphere contacts
     distance, position, normal = collide_sphere_sphere(sphere1.pos, sphere1.radius, sphere2.pos, sphere2.radius)
@@ -525,18 +547,18 @@ def sphere_cylinder(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     distance, position, normal = collide_sphere_cylinder(
@@ -597,18 +619,18 @@ def sphere_capsule(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     distance, position, normal = collide_sphere_capsule(
@@ -664,18 +686,18 @@ def sphere_box(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     distance, position, normal = collide_sphere_box(sphere1.pos, sphere1.radius, box2.pos, box2.rot, box2.size)
@@ -774,18 +796,18 @@ def capsule_capsule(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     distance, position, normal = collide_capsule_capsule(
@@ -845,18 +867,18 @@ def capsule_box(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     distances, positions, normals = collide_capsule_box(
@@ -918,18 +940,18 @@ def box_box(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     distances, positions, normals = collide_box_box(
@@ -990,18 +1012,18 @@ def plane_sphere(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     # Note: collide_plane_sphere returns (distance, position) without normal
@@ -1054,18 +1076,18 @@ def plane_box(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     distances, positions, normal = collide_plane_box(
@@ -1116,18 +1138,18 @@ def plane_ellipsoid(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     distance, position, normal = collide_plane_ellipsoid(
@@ -1178,18 +1200,18 @@ def plane_capsule(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     # Note: collide_plane_capsule returns a contact frame, not individual normals
@@ -1288,18 +1310,18 @@ def plane_cylinder(
     friction: float32,
     restitution: float32,
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Use the tested collision calculation from collision_primitive.py
     distances, positions, normal = collide_plane_cylinder(
@@ -1346,37 +1368,37 @@ def plane_cylinder(
 def _primitive_narrowphase(
     # Inputs
     default_gap: float32,
-    geom_bid: wp.array(dtype=int32),
-    geom_sid: wp.array(dtype=int32),
-    geom_mid: wp.array(dtype=int32),
-    geom_params: wp.array(dtype=vec4f),
-    geom_gap: wp.array(dtype=float32),
-    geom_margin: wp.array(dtype=float32),
-    geom_pose: wp.array(dtype=transformf),
-    candidate_model_num_pairs: wp.array(dtype=int32),
-    candidate_wid: wp.array(dtype=int32),
-    candidate_geom_pair: wp.array(dtype=vec2i),
-    contact_model_max_num: wp.array(dtype=int32),
-    contact_world_max_num: wp.array(dtype=int32),
-    material_restitution: wp.array(dtype=float32),
-    material_static_friction: wp.array(dtype=float32),
-    material_dynamic_friction: wp.array(dtype=float32),
-    material_pair_restitution: wp.array(dtype=float32),
-    material_pair_static_friction: wp.array(dtype=float32),
-    material_pair_dynamic_friction: wp.array(dtype=float32),
+    geom_bid: wp.array[int32],
+    geom_sid: wp.array[int32],
+    geom_mid: wp.array[int32],
+    geom_params: wp.array[vec3f],
+    geom_gap: wp.array[float32],
+    geom_margin: wp.array[float32],
+    geom_pose: wp.array[transformf],
+    candidate_model_num_pairs: wp.array[int32],
+    candidate_wid: wp.array[int32],
+    candidate_geom_pair: wp.array[vec2i],
+    contact_model_max_num: wp.array[int32],
+    contact_world_max_num: wp.array[int32],
+    material_restitution: wp.array[float32],
+    material_static_friction: wp.array[float32],
+    material_dynamic_friction: wp.array[float32],
+    material_pair_restitution: wp.array[float32],
+    material_pair_static_friction: wp.array[float32],
+    material_pair_dynamic_friction: wp.array[float32],
     # Outputs:
-    contact_model_num: wp.array(dtype=int32),
-    contact_world_num: wp.array(dtype=int32),
-    contact_wid: wp.array(dtype=int32),
-    contact_cid: wp.array(dtype=int32),
-    contact_gid_AB: wp.array(dtype=vec2i),
-    contact_bid_AB: wp.array(dtype=vec2i),
-    contact_position_A: wp.array(dtype=vec3f),
-    contact_position_B: wp.array(dtype=vec3f),
-    contact_gapfunc: wp.array(dtype=vec4f),
-    contact_frame: wp.array(dtype=quatf),
-    contact_material: wp.array(dtype=vec2f),
-    contact_key: wp.array(dtype=uint64),
+    contact_model_num: wp.array[int32],
+    contact_world_num: wp.array[int32],
+    contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
+    contact_gid_AB: wp.array[vec2i],
+    contact_bid_AB: wp.array[vec2i],
+    contact_position_A: wp.array[vec3f],
+    contact_position_B: wp.array[vec3f],
+    contact_gapfunc: wp.array[vec4f],
+    contact_frame: wp.array[quatf],
+    contact_material: wp.array[vec2f],
+    contact_key: wp.array[uint64],
 ):
     # Retrieve the geom-pair index (gpid) from the thread grid
     gpid = wp.tid()

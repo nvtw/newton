@@ -21,8 +21,8 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton import ModelFlags
 from newton.selection import ArticulationView
-from newton.solvers import SolverNotifyFlags
 
 USE_TORCH = False
 COLLAPSE_FIXED_JOINTS = False
@@ -225,7 +225,7 @@ class Example:
         # print(self.model.shape_material_mu)
 
         # !!! Notify solver of material changes !!!
-        self.solver.notify_model_changed(SolverNotifyFlags.SHAPE_PROPERTIES)
+        self.solver.notify_model_changed(ModelFlags.SHAPE_PROPERTIES)
 
         # ================================
         # reset transforms and velocities
@@ -271,6 +271,4 @@ if __name__ == "__main__":
 
         torch.set_default_device(args.device)
 
-    example = Example(viewer, args)
-
-    newton.examples.run(example, args)
+    newton.examples.run(Example(viewer, args), args)

@@ -21,6 +21,7 @@ from newton._src.solvers.kamino._src.utils.io.usd import USDImporter
 from newton._src.solvers.kamino._src.utils.sim import ViewerKamino
 from newton._src.solvers.kamino._src.utils.sim.simulator import Simulator
 from newton._src.solvers.kamino.examples import get_examples_output_path, run_headless
+from newton._src.solvers.kamino.solver_kamino import SolverKamino
 
 ###
 # Kernels
@@ -29,11 +30,11 @@ from newton._src.solvers.kamino.examples import get_examples_output_path, run_he
 
 @wp.kernel
 def _test_control_callback(
-    sim_has_started_resets: wp.array(dtype=wp.bool),
-    sim_reset_index: wp.array(dtype=wp.int32),
-    actuated_joint_idx: wp.array(dtype=int32),
-    state_t: wp.array(dtype=float32),
-    control_tau_j: wp.array(dtype=float32),
+    sim_has_started_resets: wp.array[wp.bool],
+    sim_reset_index: wp.array[wp.int32],
+    actuated_joint_idx: wp.array[int32],
+    state_t: wp.array[float32],
+    control_tau_j: wp.array[float32],
 ):
     """
     An example control callback kernel.
@@ -45,7 +46,7 @@ def _test_control_callback(
     # Hack to handle negative reset index
     joint_reset_index = sim_reset_index[0]
     if joint_reset_index < 0:
-        joint_reset_index = actuated_joint_idx.size - 1
+        joint_reset_index = actuated_joint_idx.shape[0] - 1
 
     # Define the time window for the active external force profile
     t_start = float32(0.0)
@@ -90,10 +91,11 @@ class Example:
         async_save: bool = False,
     ):
         # Initialize target frames per second and corresponding time-steps
-        self.fps = 60
-        self.sim_dt = 0.001
+        self.fps = 50
         self.frame_dt = 1.0 / self.fps
-        self.sim_substeps = max(1, round(self.frame_dt / self.sim_dt))
+        self.sim_substeps = max(1, round(self.frame_dt / 0.001))
+        self.sim_dt = self.frame_dt / self.sim_substeps
+        msg.info(f"Using sim_dt = {self.sim_dt} ({self.sim_substeps} substeps per frame)")
         self.max_steps = max_steps
 
         # Define internal counters
@@ -156,7 +158,7 @@ class Example:
         # Create a list of actuated joint indices from the model and builder
         self.actuated_joint_idx_np = np.zeros(shape=(self.sim.model.size.sum_of_num_actuated_joints,), dtype=np.int32)
         jidx = 0
-        for j, joint in enumerate(self.builder.joints):
+        for j, joint in enumerate(self.builder.all_joints):
             if joint.is_actuated:
                 self.actuated_joint_idx_np[jidx] = j
                 jidx += 1
@@ -187,6 +189,7 @@ class Example:
                     sim.solver.data.time.time,
                     sim.data.control.tau_j,
                 ],
+                device=sim._device,
             )
 
         # Set the test control callback into the simulator
@@ -218,14 +221,14 @@ class Example:
         self.step_graph = None
         self.simulate_graph = None
 
-        # Capture CUDA graph if requested and available
-        self.capture()
-
         # Warm-start the simulator before rendering
         # NOTE: This compiles and loads the warp kernels prior to execution
         msg.notif("Warming up simulator...")
         self.step_once()
         self.reset()
+
+        # Capture CUDA graph if requested and available
+        self.capture()
 
     def capture(self):
         """Capture CUDA graph if requested and available."""
@@ -273,7 +276,7 @@ class Example:
         joint_reset_index = (joint_reset_index + 1) % num_actuated_joints
         # If all joints have been cycled through, proceed to the next reset mode
         if joint_reset_index == num_actuated_joints - 1:
-            self.sim_reset_mode = (self.sim_reset_mode + 1) % 6
+            self.sim_reset_mode = (self.sim_reset_mode + 1) % 5
             joint_reset_index = -1
         self.sim_reset_index.fill_(joint_reset_index)
         msg.warning(f"Next joint_reset_index: {joint_reset_index}")
@@ -301,7 +304,8 @@ class Example:
             q_b = R_b.as_quat()  # x, y, z, w
             q_base = wp.transformf((0.1, 0.1, 0.3), q_b)
             self.base_q.assign([q_base] * self.sim.model.size.num_worlds)
-            self.sim.reset(base_q=self.base_q)
+            reset_config = SolverKamino.ResetConfig(base_pose=SolverKamino.ResetConfig.FromBaseQ(self.base_q))
+            self.sim.reset(config=reset_config)
 
         # Demo of resetting the base pose and twist
         if self.sim_steps >= self.max_steps and self.sim_reset_mode == 2:
@@ -313,26 +317,15 @@ class Example:
             u_base = vec6f(0.0, 0.0, 0.05, 0.0, 0.0, 0.3)
             self.base_q.assign([q_base] * self.sim.model.size.num_worlds)
             self.base_u.assign([u_base] * self.sim.model.size.num_worlds)
-            self.sim.reset(base_q=self.base_q, base_u=self.base_u)
-
-        # Demo of resetting the base state and joint configurations
-        # NOTE: This will invoke the FK solver to update body poses
-        if self.sim_steps >= self.max_steps and self.sim_reset_mode == 3:
-            msg.notif("Resetting with base pose and joint configurations...")
-            self.update_reset_config()
-            R_b = Rotation.from_rotvec(np.pi / 4 * np.array([0, 0, 1]))
-            q_b = R_b.as_quat()  # x, y, z, w
-            q_base = wp.transformf((0.1, 0.1, 0.3), q_b)
-            u_base = vec6f(0.0, 0.0, 0.05, 0.0, 0.0, -0.3)
-            self.base_q.assign([q_base] * self.sim.model.size.num_worlds)
-            self.base_u.assign([u_base] * self.sim.model.size.num_worlds)
-            joint_q_np = np.zeros(self.sim.model.size.sum_of_num_joint_coords, dtype=np.float32)
-            self.joint_q.assign(joint_q_np)
-            self.sim.reset(base_q=self.base_q, base_u=self.base_u, joint_q=self.joint_q, joint_u=self.joint_u)
+            reset_config = SolverKamino.ResetConfig(
+                base_pose=SolverKamino.ResetConfig.FromBaseQ(self.base_q),
+                base_velocity=SolverKamino.ResetConfig.FromBaseU(self.base_u),
+            )
+            self.sim.reset(config=reset_config)
 
         # Demo of resetting the base state and joint configurations to specific poses
         # NOTE: This will invoke the FK solver to update body poses
-        if self.sim_steps >= self.max_steps and self.sim_reset_mode == 4:
+        if self.sim_steps >= self.max_steps and self.sim_reset_mode == 3:
             msg.notif("Resetting with base pose and specific joint configurations...")
             self.update_reset_config()
             joint_reset_index = self.sim_reset_index.numpy()[0]
@@ -363,11 +356,17 @@ class Example:
             joint_q_np = np.zeros(self.sim.model.size.sum_of_num_joint_coords, dtype=np.float32)
             joint_q_np[self.actuated_joint_idx_np[joint_reset_index]] = actuated_joint_config[joint_reset_index]
             self.joint_q.assign(joint_q_np)
-            self.sim.reset(base_q=self.base_q, base_u=self.base_u, joint_q=self.joint_q, joint_u=self.joint_u)
+            reset_config = SolverKamino.ResetConfig(
+                body_poses=SolverKamino.ResetConfig.FromJointQ(self.joint_q),
+                body_velocities=SolverKamino.ResetConfig.FromJointU(self.joint_u),
+                base_pose=SolverKamino.ResetConfig.FromBaseQ(self.base_q),
+                base_velocity=SolverKamino.ResetConfig.FromBaseU(self.base_u),
+            )
+            self.sim.reset(config=reset_config)
 
-        # Demo of resetting the base state and joint configurations to specific poses
+        # Demo of resetting the base state and actuator configurations to specific poses
         # NOTE: This will invoke the FK solver to update body poses
-        if self.sim_steps >= self.max_steps and self.sim_reset_mode == 5:
+        if self.sim_steps >= self.max_steps and self.sim_reset_mode == 4:
             msg.notif("Resetting with base pose and specific actuator configurations...")
             self.update_reset_config()
             joint_reset_index = self.sim_reset_index.numpy()[0]
@@ -398,9 +397,13 @@ class Example:
             actuator_q_np = np.zeros(self.sim.model.size.sum_of_num_actuated_joint_coords, dtype=np.float32)
             actuator_q_np[joint_reset_index] = actuated_joint_config[joint_reset_index]
             self.actuator_q.assign(actuator_q_np)
-            self.sim.reset(
-                base_q=self.base_q, base_u=self.base_u, actuator_q=self.actuator_q, actuator_u=self.actuator_u
+            reset_config = SolverKamino.ResetConfig(
+                body_poses=SolverKamino.ResetConfig.FromActuatorQ(self.actuator_q),
+                body_velocities=SolverKamino.ResetConfig.FromActuatorU(self.actuator_u),
+                base_pose=SolverKamino.ResetConfig.FromBaseQ(self.base_q),
+                base_velocity=SolverKamino.ResetConfig.FromBaseU(self.base_u),
             )
+            self.sim.reset(config=reset_config)
 
     def render(self):
         """Render the current frame."""

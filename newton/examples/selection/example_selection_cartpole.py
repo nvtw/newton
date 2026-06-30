@@ -102,7 +102,9 @@ class Example:
         if not isinstance(self.solver, newton.solvers.SolverMuJoCo):
             self.cartpoles.eval_fk(self.state_0)
 
-        self.viewer.set_model(self.model, max_worlds=max_worlds)
+        self.viewer.set_model(self.model)
+        if max_worlds is not None:
+            self.viewer.set_visible_worlds(range(max_worlds))
         self.viewer.set_world_offsets((1.0, 0.0, 0.0))
 
         # Set camera to view the scene
@@ -154,7 +156,7 @@ class Example:
             joint_f = self.cartpoles.get_attribute("joint_f", self.control)
             wp.launch(
                 apply_forces_kernel,
-                dim=joint_f.shape,
+                dim=joint_f.shape[0],
                 inputs=[joint_q, joint_f],
             )
 
@@ -182,6 +184,7 @@ class Example:
             lambda q, qd: q[2] == 0.0 and newton.math.vec_allclose(q.q, wp.quat_identity()),
             indices=[i * num_bodies_per_world for i in range(self.world_count)],
         )
+        # fmt: off
         newton.examples.test_body_state(
             self.model,
             self.state_0,
@@ -216,6 +219,7 @@ class Example:
             and qd[5] == 0.0,
             indices=[i * num_bodies_per_world + 2 for i in range(self.world_count)],
         )
+        # fmt: on
 
     @staticmethod
     def create_parser():
@@ -236,6 +240,4 @@ if __name__ == "__main__":
 
         torch.set_default_device(args.device)
 
-    example = Example(viewer, args)
-
-    newton.examples.run(example, args)
+    newton.examples.run(Example(viewer, args), args)

@@ -224,10 +224,10 @@ def extract_delassus_sparse(
     def _set_unit_entry(
         # Inputs:
         index: int,
-        world_dim: wp.array(dtype=wp.int32),
-        entry_start: wp.array(dtype=wp.int32),
+        world_dim: wp.array[wp.int32],
+        entry_start: wp.array[wp.int32],
         # Output:
-        x: wp.array(dtype=wp.float32),
+        x: wp.array[wp.float32],
     ):
         world_id = wp.tid()
 
@@ -238,7 +238,7 @@ def extract_delassus_sparse(
 
     entry_start_np = delassus.bsm.row_start.numpy()
 
-    world_mask = wp.ones((num_worlds,), dtype=wp.int32, device=delassus._device)
+    world_mask = wp.ones((num_worlds,), dtype=wp.bool, device=delassus._device)
 
     for dim in range(max_dim):
         # Query the operator by computing the product with a vector where only entry `dim` is set to 1.
@@ -254,6 +254,7 @@ def extract_delassus_sparse(
                 # Outputs:
                 vec_query,
             ],
+            device=delassus._device,
         )
         delassus.matvec(vec_query, vec_response, world_mask)
         vec_response_np = vec_response.numpy()

@@ -375,12 +375,12 @@ def transform_body_inertial_properties(
 @wp.kernel
 def _update_body_inertias(
     # Inputs:
-    model_bodies_i_I_i_in: wp.array(dtype=mat33f),
-    model_bodies_inv_i_I_i_in: wp.array(dtype=mat33f),
-    state_bodies_q_i_in: wp.array(dtype=transformf),
+    model_bodies_i_I_i_in: wp.array[mat33f],
+    model_bodies_inv_i_I_i_in: wp.array[mat33f],
+    state_bodies_q_i_in: wp.array[transformf],
     # Outputs:
-    state_bodies_I_i_out: wp.array(dtype=mat33f),
-    state_bodies_inv_I_i_out: wp.array(dtype=mat33f),
+    state_bodies_I_i_out: wp.array[mat33f],
+    state_bodies_inv_I_i_out: wp.array[mat33f],
 ):
     # Retrieve the thread index as the body index
     bid = wp.tid()
@@ -401,13 +401,13 @@ def _update_body_inertias(
 @wp.kernel
 def _update_body_wrenches(
     # Inputs
-    state_bodies_w_a_i_in: wp.array(dtype=vec6f),
-    state_bodies_w_j_i_in: wp.array(dtype=vec6f),
-    state_bodies_w_l_i_in: wp.array(dtype=vec6f),
-    state_bodies_w_c_i_in: wp.array(dtype=vec6f),
-    state_bodies_w_e_i_in: wp.array(dtype=vec6f),
+    state_bodies_w_a_i_in: wp.array[vec6f],
+    state_bodies_w_j_i_in: wp.array[vec6f],
+    state_bodies_w_l_i_in: wp.array[vec6f],
+    state_bodies_w_c_i_in: wp.array[vec6f],
+    state_bodies_w_e_i_in: wp.array[vec6f],
     # Outputs
-    state_bodies_w_i_out: wp.array(dtype=vec6f),
+    state_bodies_w_i_out: wp.array[vec6f],
 ):
     # Retrieve the thread index as the body index
     bid = wp.tid()
@@ -429,12 +429,12 @@ def _update_body_wrenches(
 @wp.kernel
 def _convert_body_origin_to_com(
     # Inputs
-    world_mask: wp.array(dtype=int32),
-    body_wid: wp.array(dtype=int32),
-    body_com: wp.array(dtype=vec3f),
-    body_q: wp.array(dtype=transformf),
+    world_mask: wp.array[bool],
+    body_wid: wp.array[int32],
+    body_com: wp.array[vec3f],
+    body_q: wp.array[transformf],
     # Outputs
-    body_q_com: wp.array(dtype=transformf),
+    body_q_com: wp.array[transformf],
 ):
     bid = wp.tid()
 
@@ -456,12 +456,12 @@ def _convert_body_origin_to_com(
 @wp.kernel
 def _convert_body_com_to_origin(
     # Inputs
-    world_mask: wp.array(dtype=int32),
-    body_wid: wp.array(dtype=int32),
-    body_com: wp.array(dtype=vec3f),
-    body_q_com: wp.array(dtype=transformf),
+    world_mask: wp.array[bool],
+    body_wid: wp.array[int32],
+    body_com: wp.array[vec3f],
+    body_q_com: wp.array[transformf],
     # Outputs
-    body_q: wp.array(dtype=transformf),
+    body_q: wp.array[transformf],
 ):
     bid = wp.tid()
 
@@ -483,31 +483,36 @@ def _convert_body_com_to_origin(
 @wp.kernel
 def _convert_base_origin_to_com(
     # Inputs
-    base_body_index: wp.array(dtype=int32),
-    body_com: wp.array(dtype=vec3f),
-    base_q: wp.array(dtype=transformf),
+    base_joint_index: wp.array[int32],
+    base_body_index: wp.array[int32],
+    body_com: wp.array[vec3f],
+    base_q: wp.array[transformf],
     # Outputs
-    base_q_com: wp.array(dtype=transformf),
+    base_q_com: wp.array[transformf],
 ):
     wid = wp.tid()
+    base_jid = base_joint_index[wid]
     base_bid = base_body_index[wid]
     if base_bid < 0:
         return
-    com = body_com[base_bid]
     q = base_q[wid]
-    rot = wp.transform_get_rotation(q)
-    r_com = wp.quat_rotate(rot, com)
-    base_q_com[wid] = transformf(wp.transform_get_translation(q) + r_com, rot)
+    if base_jid >= 0:  # Base joint case: base_q is in joint frame, just copy it
+        base_q_com[wid] = q
+    else:  # Base body case: base_q is the base body pose, convert it to a CoM-based pose
+        com = body_com[base_bid]
+        rot = wp.transform_get_rotation(q)
+        r_com = wp.quat_rotate(rot, com)
+        base_q_com[wid] = transformf(wp.transform_get_translation(q) + r_com, rot)
 
 
 @wp.kernel
 def _convert_geom_offset_origin_to_com(
     # Inputs
-    body_com: wp.array(dtype=vec3f),
-    geom_bid: wp.array(dtype=int32),
-    geom_offset: wp.array(dtype=transformf),
+    body_com: wp.array[vec3f],
+    geom_bid: wp.array[int32],
+    geom_offset: wp.array[transformf],
     # Outputs
-    geom_offset_com: wp.array(dtype=transformf),
+    geom_offset_com: wp.array[transformf],
 ):
     gid = wp.tid()
     bid = geom_bid[gid]
@@ -554,6 +559,7 @@ def update_body_inertias(model: RigidBodiesModel, data: RigidBodiesData):
             data.I_i,
             data.inv_I_i,
         ],
+        device=model.i_I_i.device,
     )
 
 
@@ -571,6 +577,7 @@ def update_body_wrenches(model: RigidBodiesModel, data: RigidBodiesData):
             # Outputs:
             data.w_i,
         ],
+        device=data.w_i.device,
     )
 
 
@@ -607,6 +614,7 @@ def convert_body_com_to_origin(
 
 
 def convert_base_origin_to_com(
+    base_joint_index: wp.array,
     base_body_index: wp.array,
     body_com: wp.array,
     base_q: wp.array,
@@ -615,6 +623,7 @@ def convert_base_origin_to_com(
     wp.launch(
         _convert_base_origin_to_com,
         dim=base_body_index.shape[0],
-        inputs=[base_body_index, body_com, base_q],
+        inputs=[base_joint_index, base_body_index, body_com, base_q],
         outputs=[base_q_com],
+        device=base_q_com.device,
     )

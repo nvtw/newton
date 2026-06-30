@@ -10,7 +10,11 @@ import warp.examples
 
 import newton
 from newton import GeoType
-from newton._src.sim.collide import _estimate_rigid_contact_max
+from newton._src.geometry import create_mesh_terrain
+from newton._src.geometry.flags import ParticleFlags, ShapeFlags
+from newton._src.geometry.kernels import create_soft_contacts, mesh_sdf
+from newton._src.sim.collide import _compute_per_world_shape_pairs_max, _estimate_rigid_contact_max
+from newton._src.utils.heightfield import HeightfieldData
 from newton.examples import test_body_state
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
@@ -100,7 +104,7 @@ class CollisionSetup:
 
         self.graph = None
         if wp.get_device(device).is_cuda:
-            with wp.ScopedCapture() as capture:
+            with wp.ScopedCapture(device=device) as capture:
                 self.simulate()
             self.graph = capture.graph
 
@@ -140,8 +144,8 @@ class CollisionSetup:
             raise NotImplementedError(f"Shape type {shape_type} not implemented")
 
     def capture(self):
-        if wp.get_device().is_cuda:
-            with wp.ScopedCapture() as capture:
+        if wp.get_device(self._device).is_cuda:
+            with wp.ScopedCapture(device=self._device) as capture:
                 self.simulate()
             self.graph = capture.graph
         else:
@@ -206,6 +210,8 @@ class CollisionSetup:
             )
 
 
+# The exhaustive shape/broad-phase matrix is one of the heaviest GPU suites.
+# Keep it on one CUDA device; targeted deterministic tests below use all selected CUDA devices.
 devices = get_cuda_test_devices(mode="basic")
 
 
@@ -238,7 +244,9 @@ collision_pipeline_contact_tests = [
         TestLevel.VELOCITY_YZ,
         TestLevel.VELOCITY_LINEAR,
     ),
-    (GeoType.MESH, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
+    # Mesh-vs-convex-hull likewise accumulates small lateral drift from
+    # triangulated mesh faces (same root cause as box-vs-mesh above).
+    (GeoType.MESH, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.VELOCITY_LINEAR, 0.02),
     (GeoType.CONVEX_MESH, GeoType.CONVEX_MESH, TestLevel.VELOCITY_YZ, TestLevel.STRICT),
 ]
 
@@ -444,6 +452,335 @@ for mode_name, test_func in mesh_mesh_sdf_tests:
             broad_phase=broad_phase,
             check_output=False,  # Disable output checking due to Warp module loading messages
         )
+
+
+# ============================================================================
+# Mesh sign query regressions
+# ============================================================================
+
+
+class TestMeshSignQueries(unittest.TestCase):
+    pass
+
+
+@wp.kernel
+def _query_mesh_signs(
+    mesh: wp.uint64,
+    points: wp.array[wp.vec3],
+    max_dist: float,
+    parity_sign: wp.array[float],
+    normal_sign: wp.array[float],
+):
+    i = wp.tid()
+    p = points[i]
+
+    parity = wp.mesh_query_point_sign_parity(mesh, p, max_dist)
+    parity_sign[i] = parity.sign if parity.result else 0.0
+
+    sign = float(0.0)
+    face = int(0)
+    u = float(0.0)
+    v = float(0.0)
+    normal_hit = wp.mesh_query_point_sign_normal(mesh, p, max_dist, sign, face, u, v)
+    normal_sign[i] = sign if normal_hit else 0.0
+
+
+@wp.kernel
+def _query_mesh_sdf(
+    mesh: wp.uint64,
+    points: wp.array[wp.vec3],
+    max_dist: float,
+    distances: wp.array[float],
+):
+    i = wp.tid()
+    distances[i] = mesh_sdf(mesh, points[i], max_dist)
+
+
+@wp.func
+def _solid_angle(point: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3) -> float:
+    pa = a - point
+    pb = b - point
+    pc = c - point
+    la = wp.length(pa)
+    lb = wp.length(pb)
+    lc = wp.length(pc)
+    numerator = wp.dot(pa, wp.cross(pb, pc))
+    denominator = la * lb * lc + wp.dot(pa, pb) * lc + wp.dot(pb, pc) * la + wp.dot(pc, pa) * lb
+    return 2.0 * wp.atan2(numerator, denominator)
+
+
+@wp.kernel
+def _query_brute_force_winding_signs(
+    vertices: wp.array[wp.vec3],
+    indices: wp.array[int],
+    face_count: int,
+    points: wp.array[wp.vec3],
+    signs: wp.array[float],
+):
+    i = wp.tid()
+    point = points[i]
+    angle_sum = float(0.0)
+
+    for face_index in range(face_count):
+        offset = face_index * 3
+        a = vertices[indices[offset + 0]]
+        b = vertices[indices[offset + 1]]
+        c = vertices[indices[offset + 2]]
+        angle_sum += _solid_angle(point, a, b, c)
+
+    winding_number = angle_sum / 12.566370614359172
+    if wp.abs(winding_number) > 0.5:
+        signs[i] = -1.0
+    else:
+        signs[i] = 1.0
+
+
+def _make_warp_mesh(vertices: np.ndarray, faces: np.ndarray, device) -> wp.Mesh:
+    return wp.Mesh(
+        points=wp.array(vertices.astype(np.float32), dtype=wp.vec3, device=device),
+        indices=wp.array(faces.astype(np.int32).reshape(-1), dtype=wp.int32, device=device),
+    )
+
+
+def _make_mixed_winding_convex_pile_proxy() -> tuple[np.ndarray, np.ndarray]:
+    hx, hy, hz = 0.12, 0.07, 0.05
+    vertices = np.array(
+        [
+            [-hx, -hy, -hz],
+            [hx, -hy, -hz],
+            [hx, hy, -hz],
+            [-hx, hy, -hz],
+            [-hx, -hy, hz],
+            [hx, -hy, hz],
+            [hx, hy, hz],
+            [-hx, hy, hz],
+        ],
+        dtype=np.float32,
+    )
+
+    faces = np.array(
+        [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            # Intentionally mixed winding on the +X face. This reproduces the
+            # failure mode from compacted convex hulls whose triangle winding
+            # is not consistently outward.
+            [1, 6, 2],
+            [1, 5, 6],
+        ],
+        dtype=np.int32,
+    )
+    return vertices, faces
+
+
+def _make_watertight_box(
+    center: tuple[float, float, float],
+    half_extents: tuple[float, float, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    cx, cy, cz = center
+    hx, hy, hz = half_extents
+    vertices = np.array(
+        [
+            [cx - hx, cy - hy, cz - hz],
+            [cx + hx, cy - hy, cz - hz],
+            [cx + hx, cy + hy, cz - hz],
+            [cx - hx, cy + hy, cz - hz],
+            [cx - hx, cy - hy, cz + hz],
+            [cx + hx, cy - hy, cz + hz],
+            [cx + hx, cy + hy, cz + hz],
+            [cx - hx, cy + hy, cz + hz],
+        ],
+        dtype=np.float32,
+    )
+    faces = np.array(
+        [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ],
+        dtype=np.int32,
+    )
+    return vertices, faces
+
+
+def _make_thin_gap_box_pair() -> tuple[np.ndarray, np.ndarray]:
+    gap = 2.0e-4
+    hx, hy, hz = 0.75, 0.55, 0.45
+    left_vertices, left_faces = _make_watertight_box((-hx - 0.5 * gap, 0.0, 0.0), (hx, hy, hz))
+    right_vertices, right_faces = _make_watertight_box((hx + 0.5 * gap, 0.0, 0.0), (hx, hy, hz))
+    vertices = np.vstack([left_vertices, right_vertices]).astype(np.float32)
+    faces = np.vstack([left_faces, right_faces + left_vertices.shape[0]]).astype(np.int32)
+    return vertices, faces
+
+
+def _sample_thin_gap_points(sample_count: int = 8192) -> np.ndarray:
+    rng = np.random.default_rng(23)
+    gap = 2.0e-4
+    hy, hz = 0.55, 0.45
+    points = np.empty((sample_count, 3), dtype=np.float32)
+    points[:, 0] = rng.uniform(-0.45 * gap, 0.45 * gap, sample_count)
+    points[:, 1] = rng.uniform(-0.8 * hy, 0.8 * hy, sample_count)
+    points[:, 2] = rng.uniform(-0.8 * hz, 0.8 * hz, sample_count)
+    return points
+
+
+def test_mixed_winding_convex_pile_contact_normal(test, device):
+    vertices, faces = _make_mixed_winding_convex_pile_proxy()
+    mesh = _make_warp_mesh(vertices, faces, device)
+
+    query_point = np.array([[0.13, 0.018, 0.012]], dtype=np.float32)
+    points = wp.array(query_point, dtype=wp.vec3, device=device)
+    parity_sign = wp.zeros(1, dtype=wp.float32, device=device)
+    normal_sign = wp.zeros(1, dtype=wp.float32, device=device)
+
+    wp.launch(_query_mesh_signs, dim=1, inputs=[mesh.id, points, 0.1, parity_sign, normal_sign], device=device)
+
+    test.assertGreater(float(parity_sign.numpy()[0]), 0.0)
+    test.assertLess(float(normal_sign.numpy()[0]), 0.0)
+
+    soft_contact_count = wp.zeros(1, dtype=wp.int32, device=device)
+    soft_contact_particle = wp.empty(1, dtype=wp.int32, device=device)
+    soft_contact_shape = wp.empty(1, dtype=wp.int32, device=device)
+    soft_contact_body_pos = wp.empty(1, dtype=wp.vec3, device=device)
+    soft_contact_body_vel = wp.empty(1, dtype=wp.vec3, device=device)
+    soft_contact_normal = wp.empty(1, dtype=wp.vec3, device=device)
+    soft_contact_tids = wp.empty(1, dtype=wp.int32, device=device)
+
+    wp.launch(
+        create_soft_contacts,
+        dim=1,
+        inputs=[
+            points,
+            wp.array([0.05], dtype=wp.float32, device=device),
+            wp.array([int(ParticleFlags.ACTIVE)], dtype=wp.int32, device=device),
+            wp.array([-1], dtype=wp.int32, device=device),
+            wp.empty(0, dtype=wp.transform, device=device),
+            wp.array([wp.transform()], dtype=wp.transform, device=device),
+            wp.array([-1], dtype=wp.int32, device=device),
+            wp.array([int(GeoType.CONVEX_MESH)], dtype=wp.int32, device=device),
+            wp.array([wp.vec3(1.0, 1.0, 1.0)], dtype=wp.vec3, device=device),
+            wp.array([mesh.id], dtype=wp.uint64, device=device),
+            wp.array([-1], dtype=wp.int32, device=device),
+            0.0,
+            wp.array([0.0], dtype=wp.float32, device=device),
+            1,
+            1,
+            wp.array([int(ShapeFlags.COLLIDE_PARTICLES)], dtype=wp.int32, device=device),
+            wp.array([0], dtype=wp.int32, device=device),
+            wp.empty(0, dtype=HeightfieldData, device=device),
+            wp.empty(0, dtype=wp.float32, device=device),
+        ],
+        outputs=[
+            soft_contact_count,
+            soft_contact_particle,
+            soft_contact_shape,
+            soft_contact_body_pos,
+            soft_contact_body_vel,
+            soft_contact_normal,
+            soft_contact_tids,
+        ],
+        device=device,
+    )
+
+    test.assertEqual(int(soft_contact_count.numpy()[0]), 1)
+    normal = np.asarray(soft_contact_normal.numpy()[0], dtype=np.float32)
+    test.assertGreater(float(np.dot(normal, np.array([1.0, 0.0, 0.0], dtype=np.float32))), 0.99)
+
+
+def test_parity_sign_accuracy_exceeds_normal_query(test, device):
+    vertices, faces = _make_thin_gap_box_pair()
+    points_np = _sample_thin_gap_points()
+    vertices_wp = wp.array(vertices, dtype=wp.vec3, device=device)
+    indices_wp = wp.array(faces.reshape(-1), dtype=wp.int32, device=device)
+    points_wp = wp.array(points_np, dtype=wp.vec3, device=device)
+    mesh = wp.Mesh(points=vertices_wp, indices=indices_wp)
+
+    expected_signs_wp = wp.zeros(points_np.shape[0], dtype=wp.float32, device=device)
+    wp.launch(
+        _query_brute_force_winding_signs,
+        dim=points_np.shape[0],
+        inputs=[vertices_wp, indices_wp, faces.shape[0], points_wp, expected_signs_wp],
+        device=device,
+    )
+
+    parity_signs = wp.zeros(points_np.shape[0], dtype=wp.float32, device=device)
+    normal_signs = wp.zeros(points_np.shape[0], dtype=wp.float32, device=device)
+    wp.launch(
+        _query_mesh_signs,
+        dim=points_np.shape[0],
+        inputs=[mesh.id, points_wp, 10.0, parity_signs, normal_signs],
+        device=device,
+    )
+
+    distances = wp.zeros(points_np.shape[0], dtype=wp.float32, device=device)
+    wp.launch(
+        _query_mesh_sdf,
+        dim=points_np.shape[0],
+        inputs=[mesh.id, points_wp, 10.0, distances],
+        device=device,
+    )
+
+    expected_signs = expected_signs_wp.numpy()
+    production_signs = np.where(distances.numpy() < 0.0, -1.0, 1.0).astype(np.float32)
+    parity_accuracy = float(np.mean(parity_signs.numpy() == expected_signs))
+    production_accuracy = float(np.mean(production_signs == expected_signs))
+    normal_accuracy = float(np.mean(normal_signs.numpy() == expected_signs))
+
+    test.assertTrue(np.all(expected_signs > 0.0))
+    test.assertGreaterEqual(
+        parity_accuracy,
+        0.99,
+        f"Parity query accuracy was {parity_accuracy:.3f} against brute-force winding",
+    )
+    test.assertGreaterEqual(
+        production_accuracy,
+        0.99,
+        f"mesh_sdf accuracy was {production_accuracy:.3f} against brute-force winding",
+    )
+    test.assertLessEqual(
+        normal_accuracy,
+        0.05,
+        f"Expected the old normal query to fail in the thin gap, got accuracy {normal_accuracy:.3f}",
+    )
+    test.assertGreater(
+        production_accuracy,
+        normal_accuracy + 0.9,
+        f"Expected parity-backed mesh_sdf accuracy ({production_accuracy:.3f}) to exceed "
+        f"normal-query accuracy ({normal_accuracy:.3f})",
+    )
+
+
+add_function_test(
+    TestMeshSignQueries,
+    "test_mixed_winding_convex_pile_contact_normal",
+    test_mixed_winding_convex_pile_contact_normal,
+    devices=devices,
+    check_output=False,
+)
+add_function_test(
+    TestMeshSignQueries,
+    "test_parity_sign_accuracy_exceeds_normal_query",
+    test_parity_sign_accuracy_exceeds_normal_query,
+    devices=devices,
+    check_output=False,
+)
 
 
 # ============================================================================
@@ -715,6 +1052,71 @@ for bp_name in ("explicit", "nxn", "sap"):
     )
 
 
+def test_box_box_quaternion_perturbation(test, device, broad_phase: str):
+    """Verify box-box contacts are correct under tiny quaternion perturbation.
+
+    Two identical cubes are placed face-to-face with a non-trivial base
+    rotation (30 deg around X) and a tiny quaternion perturbation (~1e-14)
+    in the second box only. Without the support-map deadband fix this
+    produces 1 invalid contact instead of 4 face-corner contacts, with an
+    out-of-bounds body-frame point and a wrong world-frame normal.
+
+    Regression test for issue #2024 / #2430.
+    """
+    with wp.ScopedDevice(device):
+        half = 0.495
+        q_clean = wp.quat(0.2588233343021173, 0.0, 0.0, 0.9659246769912934)
+        q_noisy = wp.quat(0.2588233343021173, -2.27e-14, 9.25e-15, 0.9659246769912934)
+
+        y, z = 6.680443286895752, 4.4285125732421875
+
+        builder = newton.ModelBuilder()
+        b0 = builder.add_body(xform=wp.transform(p=wp.vec3(half, y, z), q=q_clean))
+        builder.add_shape_box(body=b0, hx=half, hy=half, hz=half)
+
+        b1 = builder.add_body(xform=wp.transform(p=wp.vec3(-half, y, z), q=q_noisy))
+        builder.add_shape_box(body=b1, hx=half, hy=half, hz=half)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        pipeline = newton.CollisionPipeline(model, broad_phase=broad_phase)
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+
+        cc = int(contacts.rigid_contact_count.numpy()[0])
+        points0 = contacts.rigid_contact_point0.numpy()[:cc]
+        normals = contacts.rigid_contact_normal.numpy()[:cc]
+
+        test.assertEqual(cc, 4, f"Expected 4 face-corner contacts, got {cc}")
+
+        for i in range(cc):
+            pt = points0[i]
+            n = normals[i]
+            for j in range(3):
+                test.assertLessEqual(
+                    abs(pt[j]),
+                    half * 1.01,
+                    f"Contact {i} body-frame point[{j}] = {pt[j]:.4f} outside half-extent {half}",
+                )
+            test.assertAlmostEqual(
+                abs(n[0]),
+                1.0,
+                places=2,
+                msg=f"Contact {i} normal = [{n[0]:.4f}, {n[1]:.4f}, {n[2]:.4f}], expected [+-1, 0, 0]",
+            )
+
+
+for bp_name in ("explicit", "nxn", "sap"):
+    add_function_test(
+        TestRigidContactNormal,
+        f"test_box_box_quaternion_perturbation_{bp_name}",
+        test_box_box_quaternion_perturbation,
+        devices=devices,
+        broad_phase=bp_name,
+    )
+
+
 # ============================================================================
 # Particle-Shape (Soft) Contact Tests
 # ============================================================================
@@ -795,6 +1197,118 @@ class TestContactEstimator(unittest.TestCase):
 
         estimate = _estimate_rigid_contact_max(model)
         self.assertEqual(estimate, 1500)
+
+
+class TestShapePairsMaxScaling(unittest.TestCase):
+    """Verify that shape_pairs_max scales linearly with world count, not quadratically."""
+
+    @staticmethod
+    def _make_model(num_worlds, shapes_per_world, num_global=0, shape_flags_value=None):
+        """Build a minimal Model with the given world/shape layout."""
+        total = num_worlds * shapes_per_world + num_global
+        world_ids = np.repeat(np.arange(num_worlds, dtype=np.int32), shapes_per_world)
+        if num_global > 0:
+            world_ids = np.concatenate([world_ids, np.full(num_global, -1, dtype=np.int32)])
+
+        model = newton.Model()
+        model.shape_count = total
+        model.shape_world = wp.array(world_ids, dtype=wp.int32)
+
+        if shape_flags_value is not None:
+            flags = np.full(total, shape_flags_value, dtype=np.int32)
+        else:
+            flags = np.full(total, int(ShapeFlags.COLLIDE_SHAPES), dtype=np.int32)
+        model.shape_flags = wp.array(flags, dtype=wp.int32)
+        return model
+
+    def test_single_world_matches_global_formula(self):
+        """Single world should give the same result as the naive N*(N-1)/2."""
+        model = self._make_model(num_worlds=1, shapes_per_world=20)
+        result = _compute_per_world_shape_pairs_max(model)
+        self.assertEqual(result, 20 * 19 // 2)
+
+    def test_multi_world_scales_linearly(self):
+        """Doubling worlds should roughly double shape_pairs_max, not quadruple it."""
+        model_w1 = self._make_model(num_worlds=1, shapes_per_world=20)
+        model_w2 = self._make_model(num_worlds=2, shapes_per_world=20)
+        model_w4 = self._make_model(num_worlds=4, shapes_per_world=20)
+
+        pairs_w1 = _compute_per_world_shape_pairs_max(model_w1)
+        pairs_w2 = _compute_per_world_shape_pairs_max(model_w2)
+        pairs_w4 = _compute_per_world_shape_pairs_max(model_w4)
+
+        self.assertEqual(pairs_w1, 190)
+        self.assertEqual(pairs_w2, 2 * 190)
+        self.assertEqual(pairs_w4, 4 * 190)
+
+    def test_many_worlds_no_quadratic_blowup(self):
+        """At 256 worlds the per-world sum must be far below the global N^2 formula."""
+        num_worlds = 256
+        spw = 10
+        model = self._make_model(num_worlds=num_worlds, shapes_per_world=spw)
+        result = _compute_per_world_shape_pairs_max(model)
+
+        per_world_expected = num_worlds * (spw * (spw - 1) // 2)
+        global_n = num_worlds * spw
+        global_quadratic = global_n * (global_n - 1) // 2
+
+        self.assertEqual(result, per_world_expected)
+        self.assertLess(result, global_quadratic / 100, "shape_pairs_max must not scale quadratically with world count")
+
+    def test_global_shapes_included_per_world(self):
+        """Global shapes (world=-1) are added to each world's segment."""
+        model = self._make_model(num_worlds=2, shapes_per_world=3, num_global=1)
+        result = _compute_per_world_shape_pairs_max(model)
+        # Each world: 3 local + 1 global = 4 shapes -> 6 pairs
+        # Dedicated -1 segment: 1 shape -> 0 pairs
+        self.assertEqual(result, 2 * 6)
+
+    def test_global_shapes_dedicated_segment(self):
+        """Multiple global shapes get their own dedicated segment."""
+        model = self._make_model(num_worlds=2, shapes_per_world=3, num_global=2)
+        result = _compute_per_world_shape_pairs_max(model)
+        # Each world: 3 + 2 = 5 -> 10 pairs. Dedicated: 2 -> 1 pair.
+        self.assertEqual(result, 2 * 10 + 1)
+
+    def test_no_shapes(self):
+        model = newton.Model()
+        model.shape_count = 0
+        model.shape_world = None
+        self.assertEqual(_compute_per_world_shape_pairs_max(model), 0)
+
+    def test_pipeline_buffer_size_scales_linearly(self):
+        """End-to-end: CollisionPipeline buffers must not explode with many worlds."""
+        num_worlds = 64
+        spw = 5
+
+        robot_builder = newton.ModelBuilder()
+        for _ in range(spw):
+            b = robot_builder.add_body()
+            robot_builder.add_shape_box(body=b, hx=0.1, hy=0.1, hz=0.1)
+
+        builder = newton.ModelBuilder()
+        for _ in range(num_worlds):
+            builder.add_world(robot_builder)
+
+        model = builder.finalize()
+
+        for bp_mode in ("nxn", "sap"):
+            pipeline = newton.CollisionPipeline(model, broad_phase=bp_mode)
+
+            global_n = model.shape_count
+            global_quadratic = global_n * (global_n - 1) // 2
+            per_world_linear = num_worlds * (spw * (spw - 1) // 2)
+
+            self.assertEqual(
+                pipeline.shape_pairs_max,
+                per_world_linear,
+                f"broad_phase={bp_mode}: shape_pairs_max should scale linearly",
+            )
+            self.assertLess(
+                pipeline.shape_pairs_max,
+                global_quadratic / 10,
+                f"broad_phase={bp_mode}: shape_pairs_max must not be quadratic",
+            )
 
 
 def test_particle_shape_contacts(test, device, shape_type: GeoType):
@@ -913,6 +1427,519 @@ for shape_type in particle_shape_tests:
         devices=devices,
         shape_type=shape_type,
     )
+
+
+# ============================================================================
+# Full-scene deterministic contact pipeline test
+# ============================================================================
+
+
+class TestDeterministicPipeline(unittest.TestCase):
+    """Test that deterministic=True yields bit-identical contacts across collide calls."""
+
+    pass
+
+
+class TestMeshConvexMidphase(unittest.TestCase):
+    """Test mesh-vs-convex triangle candidate generation."""
+
+    pass
+
+
+class TestHeightfieldConvexMidphase(unittest.TestCase):
+    """Test heightfield-vs-convex triangle candidate generation."""
+
+    pass
+
+
+def test_mesh_convex_midphase_queries_margin_shell(test, device):
+    margin = 0.02
+    gap = 0.005
+    radius = 0.1
+    surface_separation = 0.03
+
+    cfg = newton.ModelBuilder.ShapeConfig(margin=margin, gap=gap)
+    builder = newton.ModelBuilder()
+
+    vertices = np.array(
+        [
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    indices = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+    builder.add_shape_mesh(body=-1, mesh=newton.Mesh(vertices, indices), cfg=cfg)
+
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, radius + surface_separation), wp.quat_identity()))
+    builder.add_joint_free(child=body)
+    builder.add_shape_sphere(body=body, radius=radius, cfg=cfg)
+
+    model = builder.finalize(device=device)
+    state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+
+    contact_count = int(contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(contact_count, 0)
+
+
+def test_heightfield_convex_midphase_queries_margin_shell_at_lateral_edge(test, device):
+    margin = 0.02
+    gap = 0.005
+    radius = 0.1
+    surface_separation = 0.03
+
+    cfg = newton.ModelBuilder.ShapeConfig(margin=margin, gap=gap)
+    builder = newton.ModelBuilder()
+
+    heightfield = newton.Heightfield(
+        data=np.zeros((3, 3), dtype=np.float32),
+        nrow=3,
+        ncol=3,
+        hx=1.0,
+        hy=1.0,
+        min_z=0.0,
+        max_z=0.0,
+    )
+    builder.add_shape_heightfield(heightfield=heightfield, cfg=cfg)
+
+    body = builder.add_body(
+        xform=wp.transform(wp.vec3(1.0 + radius + surface_separation, 0.0, 0.0), wp.quat_identity())
+    )
+    builder.add_joint_free(child=body)
+    builder.add_shape_sphere(body=body, radius=radius, cfg=cfg)
+
+    model = builder.finalize(device=device)
+    state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+
+    contact_count = int(contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(contact_count, 0)
+
+
+def _build_deterministic_scene(device):
+    """Build the mixed-shape scene from example_basic_shapes6_determinism."""
+    builder = newton.ModelBuilder()
+
+    # Procedural mesh terrain ground
+    terrain_vertices, terrain_indices = create_mesh_terrain(
+        grid_size=(6, 6),
+        block_size=(5.0, 5.0),
+        terrain_types=["pyramid_stairs"],
+        terrain_params={
+            "pyramid_stairs": {"step_width": 0.4, "step_height": 0.05, "platform_width": 0.8},
+        },
+        seed=42,
+    )
+    terrain_mesh = newton.Mesh(terrain_vertices, terrain_indices)
+    terrain_mesh.build_sdf(max_resolution=512)
+    builder.add_shape_mesh(body=-1, mesh=terrain_mesh, xform=wp.transform(p=wp.vec3(-15.0, -15.0, -0.5)))
+
+    # Icosahedron mesh
+    phi = (1.0 + np.sqrt(5.0)) / 2.0
+    ico_radius = 0.35
+    ico_base_vertices = np.array(
+        [
+            [-1, phi, 0],
+            [1, phi, 0],
+            [-1, -phi, 0],
+            [1, -phi, 0],
+            [0, -1, phi],
+            [0, 1, phi],
+            [0, -1, -phi],
+            [0, 1, -phi],
+            [phi, 0, -1],
+            [phi, 0, 1],
+            [-phi, 0, -1],
+            [-phi, 0, 1],
+        ],
+        dtype=np.float32,
+    )
+    for i in range(len(ico_base_vertices)):
+        ico_base_vertices[i] = ico_base_vertices[i] / np.linalg.norm(ico_base_vertices[i]) * ico_radius
+    ico_face_indices = [
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ]
+    ico_vertices, ico_normals, ico_indices = [], [], []
+    for face_idx, face in enumerate(ico_face_indices):
+        v0, v1, v2 = ico_base_vertices[face[0]], ico_base_vertices[face[1]], ico_base_vertices[face[2]]
+        normal = np.cross(v1 - v0, v2 - v0)
+        normal = normal / np.linalg.norm(normal)
+        ico_vertices.extend([v0, v1, v2])
+        ico_normals.extend([normal, normal, normal])
+        base = face_idx * 3
+        ico_indices.extend([base, base + 1, base + 2])
+    ico_mesh = newton.Mesh(
+        np.array(ico_vertices, dtype=np.float32),
+        np.array(ico_indices, dtype=np.int32),
+        normals=np.array(ico_normals, dtype=np.float32),
+    )
+
+    # Cube mesh with SDF
+    hs = 0.3
+    cube_verts = np.array(
+        [
+            [-hs, -hs, -hs],
+            [hs, -hs, -hs],
+            [hs, hs, -hs],
+            [-hs, hs, -hs],
+            [-hs, -hs, hs],
+            [hs, -hs, hs],
+            [hs, hs, hs],
+            [-hs, hs, hs],
+        ],
+        dtype=np.float32,
+    )
+    cube_tris = np.array(
+        [0, 3, 2, 0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5],
+        dtype=np.int32,
+    )
+    cube_mesh = newton.Mesh(cube_verts, cube_tris)
+    cube_mesh.build_sdf(max_resolution=64)
+
+    # 4x4x4 grid of mixed shapes
+    shape_types = ["sphere", "box", "capsule", "mesh_cube", "cylinder", "cone", "icosahedron"]
+    grid_offset = wp.vec3(-5.0, -5.0, 0.5)
+    rng = np.random.default_rng(42)
+    shape_index = 0
+    for ix in range(4):
+        for iy in range(4):
+            for iz in range(4):
+                pos = wp.vec3(
+                    float(grid_offset[0]) + ix * 1.5 + (rng.random() - 0.5) * 0.4,
+                    float(grid_offset[1]) + iy * 1.5 + (rng.random() - 0.5) * 0.4,
+                    float(grid_offset[2]) + iz * 1.5 + (rng.random() - 0.5) * 0.4,
+                )
+                shape_type = shape_types[shape_index % len(shape_types)]
+                shape_index += 1
+                body = builder.add_body(xform=wp.transform(p=pos, q=wp.quat_identity()))
+                if shape_type == "sphere":
+                    builder.add_shape_sphere(body, radius=0.3)
+                elif shape_type == "box":
+                    builder.add_shape_box(body, hx=0.3, hy=0.3, hz=0.3)
+                elif shape_type == "capsule":
+                    builder.add_shape_capsule(body, radius=0.2, half_height=0.4)
+                elif shape_type == "cylinder":
+                    builder.add_shape_cylinder(body, radius=0.25, half_height=0.35)
+                elif shape_type == "cone":
+                    builder.add_shape_cone(body, radius=0.3, half_height=0.4)
+                elif shape_type == "mesh_cube":
+                    builder.add_shape_mesh(body, mesh=cube_mesh)
+                elif shape_type == "icosahedron":
+                    builder.add_shape_convex_hull(body, mesh=ico_mesh)
+                joint = builder.add_joint_free(body)
+                builder.add_articulation([joint])
+
+    model = builder.finalize(device=device)
+    return model
+
+
+def test_deterministic_pipeline_500_steps(test, device):
+    """Run 500 frames of the mixed-shape scene and assert bit-identical contacts on every frame.
+
+    GPU-only by construction (registered with ``get_cuda_test_devices``).
+    All per-frame GPU work -- ``sim_substeps`` iterations of
+    ``clear_forces`` / ``collide`` (both pipelines) / ``solver.step`` /
+    Python state swap -- is captured into a single CUDA graph and
+    replayed via ``wp.capture_launch``.  ``sim_substeps`` is even, so
+    after one full frame the Python ``state_0``/``state_1`` references
+    end up in their original orientation and the captured kernels
+    reference the correct buffers on every replay.
+
+    The contact arrays are checked at the frame boundary (rather than
+    every substep) because graph capture serialises the substep loop
+    into one launch; reading contacts mid-graph would require splitting
+    or breaking out of capture.
+    """
+    test.assertTrue(wp.get_device(device).is_cuda, "Deterministic pipeline test requires a CUDA device")
+    with wp.ScopedDevice(device):
+        model = _build_deterministic_scene(device)
+
+        pipeline_a = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            deterministic=True,
+            reduce_contacts=True,
+            rigid_contact_max=50000,
+        )
+        pipeline_b = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            deterministic=True,
+            reduce_contacts=True,
+            rigid_contact_max=50000,
+        )
+        contacts_a = pipeline_a.contacts()
+        contacts_b = pipeline_b.contacts()
+
+        solver = newton.solvers.SolverXPBD(model, iterations=2, rigid_contact_relaxation=0.8)
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+
+        fps = 100
+        sim_substeps = 10
+        sim_dt = 1.0 / fps / sim_substeps
+        assert sim_substeps % 2 == 0, (
+            "Even sim_substeps required so state ref parity is preserved across the captured graph"
+        )
+
+        checked_arrays = [
+            "rigid_contact_shape0",
+            "rigid_contact_shape1",
+            "rigid_contact_point0",
+            "rigid_contact_point1",
+            "rigid_contact_normal",
+            "rigid_contact_offset0",
+            "rigid_contact_offset1",
+            "rigid_contact_margin0",
+            "rigid_contact_margin1",
+        ]
+
+        # Capture the per-frame substep loop.  ``state_0``/``state_1``
+        # are local Python names that get rebound by the swap inside the
+        # loop; because ``sim_substeps`` is even, the names end up in
+        # their original orientation by the time the graph closes, so
+        # replays operate on the same buffers in the same order.
+        def _frame():
+            nonlocal state_0, state_1
+            for _ in range(sim_substeps):
+                state_0.clear_forces()
+                pipeline_a.collide(state_0, contacts_a)
+                pipeline_b.collide(state_0, contacts_b)
+                solver.step(state_0, state_1, control, contacts_a, sim_dt)
+                state_0, state_1 = state_1, state_0
+
+        # Warm-up frame outside capture so lazy module loads / JIT
+        # finish before recording.  This advances the simulation by one
+        # frame; that's harmless for a determinism check (both pipelines
+        # see the same warm-up state) and is the standard Newton
+        # graph-capture pattern (see ``test_rigid_contact``,
+        # ``example_basic_pendulum``).
+        _frame()
+
+        with wp.ScopedCapture(device=device) as capture:
+            _frame()
+        graph = capture.graph
+
+        for _frame_idx in range(500):
+            wp.capture_launch(graph)
+
+            count_a = int(contacts_a.rigid_contact_count.numpy()[0])
+            count_b = int(contacts_b.rigid_contact_count.numpy()[0])
+            test.assertEqual(
+                count_a,
+                count_b,
+                f"Contact count mismatch at frame {_frame_idx}: {count_a} vs {count_b}",
+            )
+            if count_a > 0:
+                # Also compare sort keys to distinguish ordering vs value issues
+                keys_a = pipeline_a._sort_key_array.numpy()[:count_a]
+                keys_b = pipeline_b._sort_key_array.numpy()[:count_a]
+                keys_match = np.array_equal(keys_a, keys_b)
+
+                for name in checked_arrays:
+                    a = getattr(contacts_a, name).numpy()[:count_a]
+                    b = getattr(contacts_b, name).numpy()[:count_a]
+                    if not np.array_equal(a, b):
+                        diff_mask = a != b
+                        diff_indices = np.argwhere(diff_mask)
+                        msg = (
+                            f"Determinism failure in {name} at frame {_frame_idx} "
+                            f"({int(np.count_nonzero(diff_mask))} elements differ, {count_a} contacts)\n"
+                            f"  sort_keys_match={keys_match}\n"
+                        )
+                        for raw_idx in diff_indices[:5]:
+                            tidx = tuple(raw_idx)
+                            msg += f"  [{tidx}]: a={a[tidx]!r}  b={b[tidx]!r}  diff={float(a[tidx]) - float(b[tidx]):.18e}\n"
+                        if not keys_match:
+                            key_diff = np.argwhere(keys_a != keys_b)
+                            msg += f"  sort_key diffs at indices: {key_diff[:10].flatten().tolist()}\n"
+                            for ki in key_diff[:5].flatten():
+                                msg += f"    key[{ki}]: a=0x{keys_a[ki]:016x}  b=0x{keys_b[ki]:016x}\n"
+                        # Show shape pairs for differing contacts
+                        s0_a = contacts_a.rigid_contact_shape0.numpy()[:count_a]
+                        s1_a = contacts_a.rigid_contact_shape1.numpy()[:count_a]
+                        for idx in diff_indices[:5]:
+                            ci = idx[0] if len(idx) > 1 else int(idx)
+                            msg += f"  contact[{ci}]: shapes=({s0_a[ci]}, {s1_a[ci]}), key_a=0x{keys_a[ci]:016x}\n"
+                        test.assertTrue(False, msg)
+
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_deterministic_pipeline_500_steps",
+    test_deterministic_pipeline_500_steps,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+
+def test_deterministic_pipeline_sticky_500_steps(test, device):
+    """Same scene as ``test_deterministic_pipeline_500_steps`` but with sticky
+    contact matching enabled.
+
+    Sticky mode runs the matcher (which carries cross-frame state) and then
+    overwrites matched rows with the previous frame's body-frame contact
+    geometry via ``replay_matched``.  Two parallel pipelines starting from
+    the same state and stepping the same input must therefore evolve
+    identical match indices and identical replayed contact geometry every
+    frame -- this is the regression test for the sticky-mode tie-break
+    determinism fix in the contact matcher.
+
+    GPU-only and graph-captured (see
+    ``test_deterministic_pipeline_500_steps`` for the rationale).
+    """
+    test.assertTrue(wp.get_device(device).is_cuda, "Sticky deterministic pipeline test requires a CUDA device")
+    with wp.ScopedDevice(device):
+        model = _build_deterministic_scene(device)
+
+        common_kwargs = {
+            "broad_phase": "nxn",
+            "reduce_contacts": True,
+            "rigid_contact_max": 50000,
+            # contact_matching="sticky" implies deterministic=True.
+            "contact_matching": "sticky",
+        }
+        pipeline_a = newton.CollisionPipeline(model, **common_kwargs)
+        pipeline_b = newton.CollisionPipeline(model, **common_kwargs)
+        contacts_a = pipeline_a.contacts()
+        contacts_b = pipeline_b.contacts()
+
+        solver = newton.solvers.SolverXPBD(model, iterations=2, rigid_contact_relaxation=0.8)
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+
+        fps = 100
+        sim_substeps = 10
+        sim_dt = 1.0 / fps / sim_substeps
+        assert sim_substeps % 2 == 0, (
+            "Even sim_substeps required so state ref parity is preserved across the captured graph"
+        )
+
+        checked_arrays = [
+            "rigid_contact_shape0",
+            "rigid_contact_shape1",
+            "rigid_contact_point0",
+            "rigid_contact_point1",
+            "rigid_contact_normal",
+            "rigid_contact_offset0",
+            "rigid_contact_offset1",
+            "rigid_contact_margin0",
+            "rigid_contact_margin1",
+            "rigid_contact_match_index",
+        ]
+
+        def _frame():
+            nonlocal state_0, state_1
+            for _ in range(sim_substeps):
+                state_0.clear_forces()
+                pipeline_a.collide(state_0, contacts_a)
+                pipeline_b.collide(state_0, contacts_b)
+                solver.step(state_0, state_1, control, contacts_a, sim_dt)
+                state_0, state_1 = state_1, state_0
+
+        # Warm-up frame outside capture so lazy module loads / JIT
+        # finish before recording.  This advances the simulation by one
+        # frame; harmless for a determinism check (both pipelines see
+        # the same warm-up state).
+        _frame()
+
+        with wp.ScopedCapture(device=device) as capture:
+            _frame()
+        graph = capture.graph
+
+        # Sticky adds per-step work; 100 frames * 10 substeps = 1000
+        # collide calls is enough to let cross-frame state accumulate
+        # and exercise the resolve/replay paths thoroughly.
+        num_frames = 100
+        for _frame_idx in range(num_frames):
+            wp.capture_launch(graph)
+
+            count_a = int(contacts_a.rigid_contact_count.numpy()[0])
+            count_b = int(contacts_b.rigid_contact_count.numpy()[0])
+            test.assertEqual(
+                count_a,
+                count_b,
+                f"Sticky contact count mismatch at frame {_frame_idx}: {count_a} vs {count_b}",
+            )
+            if count_a > 0:
+                keys_a = pipeline_a._sort_key_array.numpy()[:count_a]
+                keys_b = pipeline_b._sort_key_array.numpy()[:count_a]
+                keys_match = np.array_equal(keys_a, keys_b)
+
+                for name in checked_arrays:
+                    a = getattr(contacts_a, name).numpy()[:count_a]
+                    b = getattr(contacts_b, name).numpy()[:count_a]
+                    if not np.array_equal(a, b):
+                        diff_mask = a != b
+                        diff_indices = np.argwhere(diff_mask)
+                        msg = (
+                            f"Sticky determinism failure in {name} at frame {_frame_idx} "
+                            f"({int(np.count_nonzero(diff_mask))} elements differ, {count_a} contacts)\n"
+                            f"  sort_keys_match={keys_match}\n"
+                        )
+                        for raw_idx in diff_indices[:5]:
+                            tidx = tuple(raw_idx)
+                            msg += f"  [{tidx}]: a={a[tidx]!r}  b={b[tidx]!r}\n"
+                        test.assertTrue(False, msg)
+
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_deterministic_pipeline_sticky_500_steps",
+    test_deterministic_pipeline_sticky_500_steps,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestMeshConvexMidphase,
+    "test_mesh_convex_midphase_queries_margin_shell",
+    test_mesh_convex_midphase_queries_margin_shell,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestHeightfieldConvexMidphase,
+    "test_heightfield_convex_midphase_queries_margin_shell_at_lateral_edge",
+    test_heightfield_convex_midphase_queries_margin_shell_at_lateral_edge,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
 
 
 if __name__ == "__main__":

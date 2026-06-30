@@ -44,17 +44,18 @@ class Example:
 
         # Cable parameters.
         cable_radius = 0.01
+        contact_gap = 0.002
         num_segments_per_branch = 20
         segment_length = 0.03
 
-        bend_stiffness = 1.0e0
-        bend_damping = 1.0e-1
-        stretch_stiffness = 1.0e9
-        stretch_damping = 0.0
+        stretch_stiffness = 1.0e7
+        bend_stiffness = 1.0e4
+        bend_damping = 1.0e3
 
         builder = newton.ModelBuilder()
+        builder.rigid_gap = contact_gap
         builder.default_shape_cfg.ke = 1.0e4
-        builder.default_shape_cfg.kd = 1.0e-1
+        builder.default_shape_cfg.kd = 0.0
         builder.default_shape_cfg.mu = 1.0
 
         cable_cfg = builder.default_shape_cfg.copy()
@@ -83,11 +84,11 @@ class Example:
             radius=cable_radius,
             cfg=cable_cfg,
             stretch_stiffness=stretch_stiffness,
-            stretch_damping=stretch_damping,
             bend_stiffness=bend_stiffness,
             bend_damping=bend_damping,
             label="y_graph",
             wrap_in_articulation=True,
+            body_frame_origin="com",
         )
 
         # Pin one tip capsule (end of the first branch).
@@ -111,7 +112,6 @@ class Example:
         self.solver = newton.solvers.SolverVBD(
             self.model,
             iterations=self.sim_iterations,
-            friction_epsilon=float(getattr(args, "friction_epsilon", 0.1)),
         )
 
         self.state_0 = self.model.state()
@@ -124,10 +124,17 @@ class Example:
         self.pinned_body_q0 = self.state_0.body_q.numpy()[self.pinned_body].copy()
 
         self.viewer.set_model(self.model)
+        self.viewer.set_picking_linear_only_bodies(self.graph_bodies)
 
-        # Set camera to be closer to the cable
+        picking = getattr(self.viewer, "picking", None)
+        if picking is not None:
+            pick_state = picking.pick_state.numpy()
+            pick_state[0]["pick_stiffness"] = 2.0
+            pick_state[0]["pick_damping"] = 0.0
+            picking.pick_state.assign(pick_state)
+
         self.viewer.set_camera(
-            pos=wp.vec3(6.0, 0.0, 1.5),
+            pos=wp.vec3(2.10, 0.0, z0 - 0.15),
             pitch=0.0,
             yaw=-180.0,
         )
@@ -219,5 +226,4 @@ class Example:
 
 if __name__ == "__main__":
     viewer, args = newton.examples.init()
-    example = Example(viewer, args)
-    newton.examples.run(example, args)
+    newton.examples.run(Example(viewer, args), args)

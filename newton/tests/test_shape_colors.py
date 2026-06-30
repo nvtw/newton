@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import unittest
-import warnings
 
 import numpy as np
 import warp as wp
@@ -46,8 +45,8 @@ class TestShapeColors(unittest.TestCase):
         indices = np.array([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3], dtype=np.int32)
         return newton.Mesh(vertices, indices, color=color)
 
-    def test_collision_shape_without_explicit_color_uses_default_palette(self):
-        """Verify collision shapes fall back to the default viewer palette."""
+    def test_collision_shape_without_explicit_color_uses_palette_by_default(self):
+        """Verify collision shapes use the per-shape palette sequence by default."""
         builder = newton.ModelBuilder()
         body = builder.add_body(mass=1.0)
         shape = builder.add_shape_box(body=body, hx=0.1, hy=0.2, hz=0.3)
@@ -191,29 +190,6 @@ class TestShapeColors(unittest.TestCase):
 
         expected_colors = model.shape_color.numpy()[slot_to_shape]
         np.testing.assert_allclose(packed_shape_colors.numpy(), expected_colors, atol=1e-6, rtol=1e-6)
-
-    def test_update_shape_colors_warns_and_writes_model_shape_color(self):
-        """Verify deprecated viewer color updates warn and write through to the model."""
-        builder = newton.ModelBuilder()
-        body = builder.add_body(mass=1.0)
-        shape = builder.add_shape_box(body=body, hx=0.1, hy=0.2, hz=0.3)
-        model = builder.finalize(device=self.device)
-        state = model.state()
-
-        viewer = _ShapeColorProbe()
-        viewer.set_model(model)
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            viewer.update_shape_colors({shape: (0.7, 0.2, 0.9)})
-
-        self.assertTrue(any(item.category is DeprecationWarning for item in caught))
-        np.testing.assert_allclose(model.shape_color.numpy()[shape], [0.7, 0.2, 0.9], atol=1e-6, rtol=1e-6)
-
-        viewer.last_colors = None
-        viewer.log_state(state)
-        self.assertIsNotNone(viewer.last_colors)
-        np.testing.assert_allclose(viewer.last_colors[0], [0.7, 0.2, 0.9], atol=1e-6, rtol=1e-6)
 
 
 if __name__ == "__main__":

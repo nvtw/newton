@@ -43,13 +43,14 @@ Q_X_J_MAX = 0.25 * math.pi
 
 @wp.kernel
 def _set_joint_follower_body_state(
-    model_joint_bid_B: wp.array(dtype=int32),
-    model_joint_bid_F: wp.array(dtype=int32),
-    model_joint_B_r_Bj: wp.array(dtype=vec3f),
-    model_joint_F_r_Fj: wp.array(dtype=vec3f),
-    model_joint_X_j: wp.array(dtype=mat33f),
-    state_body_q_i: wp.array(dtype=transformf),
-    state_body_u_i: wp.array(dtype=vec6f),
+    model_joint_bid_B: wp.array[int32],
+    model_joint_bid_F: wp.array[int32],
+    model_joint_B_r_Bj: wp.array[vec3f],
+    model_joint_F_r_Fj: wp.array[vec3f],
+    model_joint_X_Bj: wp.array[mat33f],
+    model_joint_X_Fj: wp.array[mat33f],
+    state_body_q_i: wp.array[transformf],
+    state_body_u_i: wp.array[vec6f],
 ):
     """
     Set the state of the bodies to a certain values in order to check computations of joint states.
@@ -62,7 +63,8 @@ def _set_joint_follower_body_state(
     bid_F = model_joint_bid_F[jid]
     B_r_Bj = model_joint_B_r_Bj[jid]
     F_r_Fj = model_joint_F_r_Fj[jid]
-    X_j = model_joint_X_j[jid]
+    X_Bj = model_joint_X_Bj[jid]
+    X_Fj = model_joint_X_Fj[jid]
 
     # Retrieve the current state of the Base body
     p_B = state_body_q_i[bid_B]
@@ -78,8 +80,6 @@ def _set_joint_follower_body_state(
     omega_B = screw_angular(u_B)
 
     # Define the joint rotation offset
-    # NOTE: X_j projects quantities into the joint frame
-    # NOTE: X_j^T projects quantities into the outer frame (world or body)
     q_x_j = Q_X_J
     theta_y_j = 0.0
     theta_z_j = 0.0
@@ -95,8 +95,8 @@ def _set_joint_follower_body_state(
     j_domega_j = vec3f(0.0)
 
     # Follower body rotation via the Base and joint frames
-    R_B_X_j = R_B @ X_j
-    R_F_new = R_B_X_j @ R_jq @ wp.transpose(X_j)
+    R_B_X_j = R_B @ X_Bj
+    R_F_new = R_B_X_j @ R_jq @ wp.transpose(X_Fj)
     q_F_new = wp.quat_from_matrix(R_F_new)
 
     # Follower body position via the Base and joint frames
@@ -128,10 +128,12 @@ def set_joint_follower_body_state(model: ModelKamino, data: DataKamino):
             model.joints.bid_F,
             model.joints.B_r_Bj,
             model.joints.F_r_Fj,
-            model.joints.X_j,
+            model.joints.X_Bj,
+            model.joints.X_Fj,
             data.bodies.q_i,
             data.bodies.u_i,
         ],
+        device=model.device,
     )
 
 
@@ -164,7 +166,7 @@ class TestKinematicsLimits(unittest.TestCase):
         Tests the creation of an empty LimitsKamino container (for deferred allocation).
         """
         # Create a LimitsKamino container
-        limits = LimitsKamino(device=self.default_device)
+        limits = LimitsKamino()
 
         # Check the initial state of the limits
         self.assertEqual(limits._data.model_max_limits_host, 0)
@@ -179,7 +181,7 @@ class TestKinematicsLimits(unittest.TestCase):
         model = builder.finalize(device=self.default_device)
 
         # Create a LimitsKamino container
-        limits = LimitsKamino(model=model, device=self.default_device)
+        limits = LimitsKamino(model=model)
 
         # Check the initial state of the limits
         self.assertIsNotNone(limits.model_max_limits)
@@ -252,7 +254,7 @@ class TestKinematicsLimits(unittest.TestCase):
         msg.info("data.joints.dq_j: %s\n\n", data.joints.dq_j)
 
         # Create a LimitsKamino container
-        limits = LimitsKamino(model=model, device=self.default_device)
+        limits = LimitsKamino(model=model)
 
         # Optional verbose output
         msg.info("[before]: limits.model_max_limits_host: %s", limits.model_max_limits_host)
@@ -273,7 +275,7 @@ class TestKinematicsLimits(unittest.TestCase):
         msg.info("[before]: limits.velocity: %s", limits.velocity)
 
         # Check for active joint limits
-        limits.detect(model, data)
+        limits.detect(q_j=data.joints.q_j)
 
         # Optional verbose output
         msg.info("[after]: limits.model_max_limits_host: %s", limits.model_max_limits_host)
@@ -309,7 +311,7 @@ class TestKinematicsLimits(unittest.TestCase):
                 self.assertEqual(limits_wid_np[i], i)
                 self.assertEqual(limits_lid_np[i], j)
                 self.assertEqual(limits_jid_np[i], i * limits_num_np[i] + j)
-                self.assertEqual(limits_dof_np[i], j)
+                self.assertEqual(limits_dof_np[i], i + j)  # global DoF index (1 DoF per world)
                 self.assertEqual(limits_side_np[i], -1)
                 self.assertAlmostEqual(limits_r_q_np[i * limits_num_np[i] + j], Q_X_J_MAX - Q_X_J, places=6)
 

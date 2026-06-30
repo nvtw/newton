@@ -11,8 +11,6 @@ See the :mod:`newton._src.solvers.kamino.solvers.padmm` module for a detailed de
 
 from __future__ import annotations
 
-import math
-
 import warp as wp
 
 from ....config import PADMMSolverConfig
@@ -22,6 +20,7 @@ from ...core.size import SizeKamino
 from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
+from ...utils.tile import get_block_dim, get_tile_size
 from .kernels import (
     _apply_dual_preconditioner_to_solution,
     _apply_dual_preconditioner_to_state,
@@ -31,19 +30,19 @@ from .kernels import (
     _compute_projection_argument,
     _compute_solution_vectors,
     _compute_velocity_bias,
-    _make_compute_infnorm_residuals_accel_kernel,
     _make_compute_infnorm_residuals_kernel,
+    _make_project_dual_convergence_accel_kernel,
     _project_to_feasible_cone,
     _reset_solver_data,
     _update_delassus_proximal_regularization,
     _update_delassus_proximal_regularization_sparse,
-    _update_state_with_acceleration,
     _warmstart_contact_constraints,
     _warmstart_desaxce_correction,
     _warmstart_joint_constraints,
     _warmstart_limit_constraints,
     make_collect_solver_info_kernel,
     make_collect_solver_info_kernel_sparse,
+    make_desaxce_correction_and_velocity_bias_kernel,
     make_initialize_solver_kernel,
     make_update_dual_variables_and_compute_primal_dual_residuals,
 )
@@ -105,7 +104,6 @@ class PADMMSolver:
         use_acceleration: bool = True,
         use_graph_conditionals: bool = True,
         collect_info: bool = False,
-        device: wp.DeviceLike = None,
     ):
         """
         Initializes a PADMM solver.
@@ -125,7 +123,6 @@ class PADMMSolver:
             collect_info (bool): Set to `True` to enable collection of solver convergence info.\n
                 This setting is intended only for analysis and debugging purposes, as it
                 will increase memory consumption and reduce wall-clock time.
-            device (wp.DeviceLike | None): The target device on which to allocate the solver data.
         """
 
         # Declare the internal solver config cache
@@ -154,7 +151,6 @@ class PADMMSolver:
                 use_acceleration=use_acceleration,
                 use_graph_conditionals=use_graph_conditionals,
                 collect_info=collect_info,
-                device=device,
             )
 
     ###
@@ -204,7 +200,6 @@ class PADMMSolver:
         use_acceleration: bool = True,
         use_graph_conditionals: bool = True,
         collect_info: bool = False,
-        device: wp.DeviceLike = None,
     ):
         """
         Allocates the solver data structures on the specified device.
@@ -221,7 +216,6 @@ class PADMMSolver:
             collect_info (bool): Set to `True` to enable collection of solver convergence info.\n
                 This setting is intended only for analysis and debugging purposes, as it
                 will increase memory consumption and reduce wall-clock time.
-            device (wp.DeviceLike | None): The target device on which to allocate the solver data.
         """
 
         # Ensure the model is valid
@@ -233,8 +227,8 @@ class PADMMSolver:
         # Cache a reference to the model size meta-data container
         self._size = model.size
 
-        # Set the target device if specified, otherwise use the model device
-        self._device = device if device is not None else model.device
+        # Use the model's device
+        self._device = model.device
 
         # Cache solver configs and validate them against the model size
         # NOTE: These are configurations which could potentially be different across
@@ -282,6 +276,9 @@ class PADMMSolver:
         self._update_dual_variables_and_compute_primal_dual_residuals_kernel = (
             make_update_dual_variables_and_compute_primal_dual_residuals(self._use_acceleration)
         )
+        tile_size = get_tile_size(self._size.max_of_max_total_cts)
+        block_dim = get_block_dim(tile_size, ratio=2, min_size=1)
+        self._project_dual_convergence_accel_kernel = _make_project_dual_convergence_accel_kernel(block_dim)
 
     def reset(self, problem: DualProblem | None = None, world_mask: wp.array | None = None):
         """
@@ -309,6 +306,7 @@ class PADMMSolver:
                     self._data.solution.lambdas,
                     self._data.solution.v_plus,
                 ],
+                device=self.device,
             )
 
     def coldstart(self):
@@ -456,6 +454,7 @@ class PADMMSolver:
                 self._data.state.a_p,
                 self._data.linear_solver_atol,
             ],
+            device=self.device,
         )
 
         # Initialize the global while condition flag
@@ -477,6 +476,7 @@ class PADMMSolver:
                 self._data.status,
                 problem.delassus._eta,
             ],
+            device=self.device,
         )
         problem.delassus.set_needs_update()
 
@@ -505,6 +505,7 @@ class PADMMSolver:
                     # Outputs:
                     problem.data.D,
                 ],
+                device=self.device,
             )
 
             # Compute Cholesky/LDLT factorization of the Delassus matrix
@@ -517,11 +518,8 @@ class PADMMSolver:
         Args:
             problem (DualProblem): The dual forward dynamics problem to be solved.
         """
-        # Compute De Saxce correction from the previous dual variables
-        self._update_desaxce_correction(problem, self._data.state.z_p)
-
-        # Compute the total velocity bias, i.e. rhs vector of the unconstrained linear system
-        self._update_velocity_bias(problem, self._data.state.y_p, self._data.state.z_p)
+        # Compute De Saxce correction and velocity bias in one launch.
+        self._update_desaxce_and_velocity_bias(problem, self._data.state.y_p, self._data.state.z_p)
 
         # Compute the unconstrained solution and store in the primal variables
         self._update_unconstrained_solution(problem)
@@ -553,43 +551,32 @@ class PADMMSolver:
         """
         Performs a single PADMM solver iteration with Nesterov acceleration.
 
+        Uses multi-stage kernels to reduce kernel launch overhead:
+        - _compute_desaxce_correction_and_velocity_bias computes De Saxce correction and velocity bias
+        - _project_dual_convergence_accel_kernel advances projection, dual update,
+          residual reduction, convergence, acceleration, and previous-state caching
+
         Args:
             problem (DualProblem): The dual forward dynamics problem to be solved.
         """
-        # Compute De Saxce correction from the previous dual variables
-        self._update_desaxce_correction(problem, self._data.state.z_hat)
-
-        # Compute the total velocity bias, i.e. rhs vector of the unconstrained linear system
-        self._update_velocity_bias(problem, self._data.state.y_hat, self._data.state.z_hat)
+        # Compute De Saxce correction and velocity bias in one launch.
+        self._update_desaxce_and_velocity_bias(problem, self._data.state.y_hat, self._data.state.z_hat)
 
         # Compute the unconstrained solution and store in the primal variables
         self._update_unconstrained_solution(problem)
 
-        # Project the over-relaxed primal variables to the feasible set
-        self._update_projection_argument(problem, self._data.state.z_hat)
-
-        # Project the over-relaxed primal variables to the feasible set
-        self._update_projection_to_feasible_set(problem)
-
-        # Update the dual variables and compute residuals from the current state
-        self._update_dual_variables_and_residuals_accel(problem)
-
-        # Compute infinity-norm of all residuals and check for convergence
-        self._update_convergence_check_accel(problem)
+        # Advance projection, dual update, residual status, and acceleration state.
+        self._update_projection_dual_convergence_accel(problem)
 
         # Update sparse Delassus regularization if penalty was updated adaptively
         if problem.sparse and self._use_adaptive_penalty:
             self._update_sparse_regularization(problem)
 
-        # Optionally update Nesterov acceleration states from the current iteration
-        self._update_acceleration(problem)
-
-        # Optionally record internal solver info
+        # Optionally record internal solver info from the fused status/state.
         if self._collect_info:
             self._update_solver_info(problem)
 
-        # Update caches of previous state variables
-        self._update_previous_state_accel()
+        # Nesterov acceleration and previous-state caching are handled above.
 
     ###
     # Internals - Warm-starting
@@ -618,6 +605,7 @@ class PADMMSolver:
                 # Outputs:
                 z,
             ],
+            device=self.device,
         )
 
     def _warmstart_joint_constraints(
@@ -647,15 +635,13 @@ class PADMMSolver:
             inputs=[
                 # Inputs:
                 model.time.dt,
-                model.info.joint_cts_offset,
-                model.info.total_cts_offset,
-                model.info.joint_dynamic_cts_group_offset,
-                model.info.joint_kinematic_cts_group_offset,
                 model.joints.wid,
                 model.joints.num_dynamic_cts,
                 model.joints.num_kinematic_cts,
-                model.joints.dynamic_cts_offset,
-                model.joints.kinematic_cts_offset,
+                model.joints.dynamic_cts_offset_joint_cts,
+                model.joints.kinematic_cts_offset_joint_cts,
+                model.joints.dynamic_cts_offset_total_cts,
+                model.joints.kinematic_cts_offset_total_cts,
                 data.joints.lambda_j,
                 problem.data.P,
                 # Outputs:
@@ -663,6 +649,7 @@ class PADMMSolver:
                 y_0,
                 z_0,
             ],
+            device=self.device,
         )
 
     def _warmstart_limit_constraints(
@@ -707,6 +694,7 @@ class PADMMSolver:
                 y_0,
                 z_0,
             ],
+            device=self.device,
         )
 
     def _warmstart_contact_constraints(
@@ -752,6 +740,7 @@ class PADMMSolver:
                 y_0,
                 z_0,
             ],
+            device=self.device,
         )
 
     def _warmstart_from_solution(self, problem: DualProblem):
@@ -776,6 +765,7 @@ class PADMMSolver:
                 self._data.solution.lambdas,
                 self._data.solution.v_plus,
             ],
+            device=self.device,
         )
 
         # Capture references to the warm-start variables
@@ -861,6 +851,7 @@ class PADMMSolver:
                 # Outputs:
                 self._data.state.s,
             ],
+            device=self.device,
         )
 
     def _update_velocity_bias(self, problem: DualProblem, y: wp.array, z: wp.array):
@@ -893,6 +884,47 @@ class PADMMSolver:
                 # Outputs:
                 self._data.state.v,
             ],
+            device=self.device,
+        )
+
+    def _update_desaxce_and_velocity_bias(self, problem: DualProblem, y: wp.array, z: wp.array):
+        """Fused De Saxce correction + velocity bias in a single kernel launch.
+
+        Computes the De Saxce correction inline for contact constraints and the velocity
+        bias for all constraints.  Uses compile-time specialization: when no contacts
+        are present, the De Saxce branch is eliminated entirely.  When ``collect_info``
+        is disabled the intermediate De Saxce vector is kept as a register-only local;
+        when enabled it is also persisted to ``solver_s`` so that the info kernel can
+        read the original value.
+
+        Args:
+            problem (DualProblem): The dual forward dynamics problem to be solved.
+            y (wp.array): The primal variable array from the previous iteration.
+            z (wp.array): The dual variable array from the previous iteration.
+        """
+        has_contacts = self._size.max_of_max_contacts > 0
+        kernel = make_desaxce_correction_and_velocity_bias_kernel(has_contacts, self._collect_info)
+        wp.launch(
+            kernel=kernel,
+            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+            inputs=[
+                problem.data.dim,
+                problem.data.nc,
+                problem.data.cio,
+                problem.data.ccgo,
+                problem.data.vio,
+                problem.data.mu,
+                problem.data.v_f,
+                self._data.config,
+                self._data.penalty,
+                self._data.status,
+                self._data.state.x_p,
+                y,
+                z,
+                self._data.state.v,
+                self._data.state.s,
+            ],
+            device=self.device,
         )
 
     def _update_unconstrained_solution(self, problem: DualProblem):
@@ -936,6 +968,7 @@ class PADMMSolver:
                 # Outputs:
                 self._data.state.y,
             ],
+            device=self.device,
         )
 
     def _update_projection_to_feasible_set(self, problem: DualProblem):
@@ -966,6 +999,7 @@ class PADMMSolver:
                 # Outputs:
                 self._data.state.y,
             ],
+            device=self.device,
         )
 
     def _update_complementarity_residuals(self, problem: DualProblem):
@@ -994,6 +1028,7 @@ class PADMMSolver:
                 # Outputs:
                 self._data.residuals.r_compl,
             ],
+            device=self.device,
         )
 
     def _update_dual_variables_and_residuals(self, problem: DualProblem):
@@ -1032,51 +1067,58 @@ class PADMMSolver:
                 self._data.residuals.r_dy,
                 self._data.residuals.r_dz,
             ],
+            device=self.device,
         )
 
         # Compute complementarity residual from the current state
         self._update_complementarity_residuals(problem)
 
-    def _update_dual_variables_and_residuals_accel(self, problem: DualProblem):
-        """
-        Launches a kernel to update the dual variables and compute the
-        PADMM residuals from the current and accelerated state variables.
-
-        The kernel is parallelized over the number of worlds and the maximum number of total constraints.
-
-        Args:
-            problem (DualProblem): The dual forward dynamics problem to be solved.
-        """
-        # Update the dual variables and compute primal-dual residuals from the current state
-        # NOTE: These are combined into a single kernel to reduce kernel launch overhead
-        wp.launch(
-            kernel=self._update_dual_variables_and_compute_primal_dual_residuals_kernel,
-            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+    def _update_projection_dual_convergence_accel(self, problem: DualProblem):
+        """Advance accelerated PADMM projection, residual status, and state cache."""
+        tile_size = get_tile_size(self._size.max_of_max_total_cts)
+        block_dim = get_block_dim(tile_size, ratio=2, min_size=1)
+        wp.launch_tiled(
+            kernel=self._project_dual_convergence_accel_kernel,
+            dim=self._size.num_worlds,
+            block_dim=block_dim,
             inputs=[
                 # Inputs:
                 problem.data.dim,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.cio,
+                problem.data.lcgo,
+                problem.data.ccgo,
                 problem.data.vio,
+                problem.data.uio,
+                problem.data.mu,
                 problem.data.P,
                 self._data.config,
                 self._data.penalty,
-                self._data.status,
+                self._data.state.a_p,
                 self._data.state.x,
-                self._data.state.y,
                 self._data.state.x_p,
                 self._data.state.y_hat,
                 self._data.state.z_hat,
+                self._data.state.y_p,
+                self._data.state.z_p,
                 # Outputs:
+                self._data.state.y,
                 self._data.state.z,
-                self._data.residuals.r_primal,
-                self._data.residuals.r_dual,
-                self._data.residuals.r_dx,
-                self._data.residuals.r_dy,
-                self._data.residuals.r_dz,
+                self._data.state.done,
+                self._data.state.a,
+                self._data.state.a_factor,
+                self._data.status,
+                self._data.penalty,
+                self._data.state.y_hat,
+                self._data.state.z_hat,
+                self._data.state.x_p,
+                self._data.state.y_p,
+                self._data.state.z_p,
+                self._data.state.a_p,
             ],
+            device=self.device,
         )
-
-        # Compute complementarity residual from the current state
-        self._update_complementarity_residuals(problem)
 
     def _update_convergence_check(self, problem: DualProblem):
         """
@@ -1089,8 +1131,8 @@ class PADMMSolver:
             problem (DualProblem): The dual forward dynamics problem to be solved.
         """
         # Compute infinity-norm of all residuals and check for convergence
-        tile_size = min(2048, 2 ** math.ceil(math.log(self._size.max_of_max_total_cts, 2)))
-        block_dim = min(256, tile_size // 8)
+        tile_size = get_tile_size(self._size.max_of_max_total_cts)
+        block_dim = get_block_dim(tile_size, min_size=1)
         wp.launch_tiled(
             kernel=_make_compute_infnorm_residuals_kernel(
                 tile_size,
@@ -1116,80 +1158,7 @@ class PADMMSolver:
                 self._data.penalty,
                 self._data.linear_solver_atol,
             ],
-        )
-
-    def _update_convergence_check_accel(self, problem: DualProblem):
-        """
-        Launches a kernel to compute the infinity-norm of the PADMM residuals
-        using the current and accelerated state variables and check for convergence.
-
-        The kernel is parallelized over the number of worlds.
-
-        Args:
-            problem (DualProblem): The dual forward dynamics problem to be solved.
-        """
-        # Compute infinity-norm of all residuals and check for convergence
-        tile_size = min(2048, 2 ** math.ceil(math.log(self._size.max_of_max_total_cts, 2)))
-        block_dim = min(256, tile_size // 8)
-        wp.launch_tiled(
-            kernel=_make_compute_infnorm_residuals_accel_kernel(
-                tile_size,
-                self._size.max_of_max_total_cts,
-                self._size.max_of_max_limits + 3 * self._size.max_of_max_contacts,
-            ),
-            dim=self._size.num_worlds,
-            block_dim=block_dim,
-            inputs=[
-                # Inputs:
-                problem.data.nl,
-                problem.data.nc,
-                problem.data.uio,
-                problem.data.dim,
-                problem.data.vio,
-                self._data.config,
-                self._data.residuals.r_primal,
-                self._data.residuals.r_dual,
-                self._data.residuals.r_compl,
-                self._data.residuals.r_dx,
-                self._data.residuals.r_dy,
-                self._data.residuals.r_dz,
-                self._data.state.a_p,
-                # Outputs:
-                self._data.state.done,
-                self._data.state.a,
-                self._data.status,
-                self._data.penalty,
-                self._data.linear_solver_atol,
-            ],
-        )
-
-    def _update_acceleration(self, problem: DualProblem):
-        """
-        Launches a kernel to update gradient acceleration and the accelerated state variables.
-
-        The kernel is parallelized over the number of worlds and the maximum number of total constraints.
-
-        Args:
-            problem (DualProblem): The dual forward dynamics problem to be solved.
-        """
-        wp.launch(
-            kernel=_update_state_with_acceleration,
-            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
-            inputs=[
-                # Inputs:
-                problem.data.dim,
-                problem.data.vio,
-                self._data.status,
-                self._data.state.a,
-                self._data.state.y,
-                self._data.state.z,
-                self._data.state.a_p,
-                self._data.state.y_p,
-                self._data.state.z_p,
-                # Outputs:
-                self._data.state.y_hat,
-                self._data.state.z_hat,
-            ],
+            device=self.device,
         )
 
     def _update_solver_info(self, problem: DualProblem):
@@ -1276,6 +1245,7 @@ class PADMMSolver:
                     self._data.info.r_ncp_compl,
                     self._data.info.r_ncp_natmap,
                 ],
+                device=self.device,
             )
         else:
             wp.launch(
@@ -1336,6 +1306,7 @@ class PADMMSolver:
                     self._data.info.r_ncp_compl,
                     self._data.info.r_ncp_natmap,
                 ],
+                device=self.device,
             )
 
     def _update_previous_state(self):
@@ -1346,16 +1317,6 @@ class PADMMSolver:
         wp.copy(self._data.state.x_p, self._data.state.x)
         wp.copy(self._data.state.y_p, self._data.state.y)
         wp.copy(self._data.state.z_p, self._data.state.z)
-
-    def _update_previous_state_accel(self):
-        """
-        Updates the cached previous acceleration and state variable with the current.
-        This function uses on-device memory copy operations.
-        """
-        wp.copy(self._data.state.a_p, self._data.state.a)
-
-        # Cache previous state variables
-        self._update_previous_state()
 
     ###
     # Internals - Post-Solve Operations
@@ -1383,6 +1344,7 @@ class PADMMSolver:
                 self._data.state.y,
                 self._data.state.z,
             ],
+            device=self.device,
         )
 
         # Update the De Saxce correction from terminal PADMM dual variables
@@ -1400,6 +1362,7 @@ class PADMMSolver:
                 # Outputs:
                 self._data.state.s,
             ],
+            device=self.device,
         )
 
         # Update solution vectors from the terminal PADMM state
@@ -1417,4 +1380,5 @@ class PADMMSolver:
                 self._data.solution.v_plus,
                 self._data.solution.lambdas,
             ],
+            device=self.device,
         )
