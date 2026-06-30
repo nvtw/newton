@@ -490,7 +490,7 @@ def _finalize_reduced_contact_rows_kernel(
         row_velocity[articulation, row + wp.int32(2)] = wp.dot(relative, wp.cross(n, t0))
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="reduced_contact_rows")
 def _build_generalized_contact_rows_kernel(
     bodies: BodyContainer,
     enabled: wp.array[wp.int32],
@@ -516,7 +516,7 @@ def _build_generalized_contact_rows_kernel(
     for local_dof in range(dof_count_articulation):
         jacobian[articulation, row, local_dof] = wp.float32(0.0)
         response[articulation, row, local_dof] = wp.float32(0.0)
-        joint_work[articulation, row, local_dof] = wp.float32(0.0)
+        joint_work[articulation, local_dof, row] = wp.float32(0.0)
 
     source_body = row_body[articulation, row]
     source_wrench = row_wrench[articulation, row]
@@ -536,7 +536,7 @@ def _build_generalized_contact_rows_kernel(
             if wp.int32(dof_row) < dof_count:
                 dof = dof_start + wp.int32(dof_row)
                 projected[dof_row] = wp.dot(data.joint_s[dof], propagated_wrench)
-                joint_work[articulation, row, dof - dof_start_articulation] = projected[dof_row]
+                joint_work[articulation, dof - dof_start_articulation, row] = projected[dof_row]
                 jacobian[articulation, row, dof - dof_start_articulation] = wp.dot(data.joint_s[dof], source_wrench)
         for dof_row in range(6):
             if wp.int32(dof_row) < dof_count:
@@ -550,7 +550,7 @@ def _build_generalized_contact_rows_kernel(
         parent = data.joint_parent[joint]
         parent_delta = wp.spatial_vector()
         if parent >= wp.int32(0):
-            parent_delta = body_response[articulation, row, data.body_joint[parent] - start]
+            parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
         dof_start = data.joint_qd_start[joint]
         dof_end = data.joint_qd_start[joint + wp.int32(1)]
         dof_count = dof_end - dof_start
@@ -559,7 +559,7 @@ def _build_generalized_contact_rows_kernel(
         for dof_row in range(6):
             if wp.int32(dof_row) < dof_count:
                 dof = dof_start + wp.int32(dof_row)
-                rhs[dof_row] = joint_work[articulation, row, dof - dof_start_articulation] - wp.dot(
+                rhs[dof_row] = joint_work[articulation, dof - dof_start_articulation, row] - wp.dot(
                     data.joint_u[dof], parent_delta
                 )
         for dof_row in range(6):
@@ -570,7 +570,7 @@ def _build_generalized_contact_rows_kernel(
                 dof = dof_start + wp.int32(dof_row)
                 response[articulation, row, dof - dof_start_articulation] = generalized_delta[dof_row]
                 parent_delta += data.joint_s[dof] * generalized_delta[dof_row]
-        body_response[articulation, row, local_joint] = parent_delta
+        body_response[articulation, local_joint, row] = parent_delta
 
 
 @wp.func_native(
@@ -852,9 +852,9 @@ class ReducedContactBlockSystem:
         self.jacobian = wp.zeros((articulation_count, _MAX_ROWS, _MAX_DOFS), dtype=wp.float32, device=self.device)
         self.generalized_response = wp.zeros_like(self.jacobian)
         self.generalized_delta = wp.zeros((articulation_count, _MAX_DOFS), dtype=wp.float32, device=self.device)
-        self.aba_joint_work = wp.zeros((articulation_count, _MAX_ROWS, _MAX_DOFS), dtype=wp.float32, device=self.device)
+        self.aba_joint_work = wp.zeros((articulation_count, _MAX_DOFS, _MAX_ROWS), dtype=wp.float32, device=self.device)
         self.aba_body_response = wp.zeros(
-            (articulation_count, _MAX_ROWS, max_body_count),
+            (articulation_count, max_body_count, _MAX_ROWS),
             dtype=wp.spatial_vector,
             device=self.device,
         )
