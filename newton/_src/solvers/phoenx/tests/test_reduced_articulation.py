@@ -713,6 +713,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
 
         system = ReducedArticulationSystem(model)
+        system.use_warp_factor = True
         tau_np = np.array([0.7, -0.4, 0.2, -0.3, 0.5], dtype=np.float32)
         tau = wp.array(tau_np, dtype=wp.float32, device=device)
         with wp.ScopedCapture(device=device) as capture:

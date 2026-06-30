@@ -37,6 +37,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import ContactCont
 from newton._src.solvers.semi_implicit.kernels_body import joint_force
 
 _MAX_JOINT_DOF = 6
+_WARP_FACTOR_MIN_ARTICULATIONS = 32
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 _mat66 = wp.types.matrix(shape=(6, 6), dtype=wp.float32)
 
@@ -614,6 +615,76 @@ def _compute_reduced_impulse_response_warp_kernel(
             data.deferred_wrench[child] = wp.spatial_vector()
         if lane < wp.int32(6):
             _compute_reduced_impulse_response_basis(bodies, joint, parent, child, lane)
+        _sync_reduced_warp()
+
+
+@wp.kernel(enable_backward=False, module="reduced_factor")
+def _factor_reduced_warp_kernel(
+    max_depth: wp.int32,
+    articulation_depth_start: wp.array2d[wp.int32],
+    articulation_depth_joint: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    factor_diagonal: wp.array[wp.float32],
+    joint_s: wp.array[wp.spatial_vector],
+    child_start: wp.array[wp.int32],
+    child_joint: wp.array[wp.int32],
+    body_i_s: wp.array[wp.spatial_matrix],
+    reduced_inertia: wp.array[wp.spatial_matrix],
+    articulated_inertia: wp.array[wp.spatial_matrix],
+    joint_u: wp.array[wp.spatial_vector],
+    joint_d_inv: wp.array3d[wp.float32],
+):
+    thread = wp.tid()
+    articulation = thread // wp.int32(32)
+    lane = thread - articulation * wp.int32(32)
+
+    for reverse_depth in range(max_depth + wp.int32(1)):
+        depth = max_depth - reverse_depth
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            child = joint_child[joint]
+            inertia = body_i_s[child]
+            for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
+                descendant_joint = child_joint[child_index]
+                inertia += reduced_inertia[joint_child[descendant_joint]]
+            articulated_inertia[child] = inertia
+
+            dof_start = joint_qd_start[joint]
+            dof_end = joint_qd_start[joint + wp.int32(1)]
+            dof_count = dof_end - dof_start
+            d = _mat66(0.0)
+            for column in range(_MAX_JOINT_DOF):
+                if wp.int32(column) < dof_count:
+                    dof = dof_start + wp.int32(column)
+                    u = inertia * joint_s[dof]
+                    joint_u[dof] = u
+                    for row in range(_MAX_JOINT_DOF):
+                        if wp.int32(row) < dof_count:
+                            d[row, column] = wp.dot(joint_s[dof_start + wp.int32(row)], u)
+                    d[column, column] += factor_diagonal[dof]
+
+            d_inv = _invert_spd(d, dof_count)
+            for row in range(_MAX_JOINT_DOF):
+                for column in range(_MAX_JOINT_DOF):
+                    joint_d_inv[joint, row, column] = d_inv[row, column]
+
+            reduced = inertia
+            for row in range(6):
+                for column in range(6):
+                    correction = wp.float32(0.0)
+                    for a in range(_MAX_JOINT_DOF):
+                        if wp.int32(a) < dof_count:
+                            u_a = joint_u[dof_start + wp.int32(a)]
+                            for b in range(_MAX_JOINT_DOF):
+                                if wp.int32(b) < dof_count:
+                                    u_b = joint_u[dof_start + wp.int32(b)]
+                                    correction += u_a[row] * d_inv[a, b] * u_b[column]
+                    reduced[row, column] -= correction
+            reduced_inertia[child] = reduced
+            index += wp.int32(32)
         _sync_reduced_warp()
 
 
@@ -1584,6 +1655,7 @@ class ReducedArticulationSystem:
         self.model = model
         self.device = model.device
         self.use_warp_advance = bool(self.device.is_cuda)
+        self.use_warp_factor = bool(self.device.is_cuda and model.articulation_count >= _WARP_FACTOR_MIN_ARTICULATIONS)
         body_count = int(model.body_count)
         joint_count = int(model.joint_count)
         dof_count = int(model.joint_dof_count)
@@ -1792,14 +1864,15 @@ class ReducedArticulationSystem:
             ],
             device=self.device,
         )
-        for depth_offset, depth_count in reversed(self.factor_depth_ranges):
+        if self.use_warp_factor:
             wp.launch(
-                _factor_reduced_depth_kernel,
-                dim=depth_count,
+                _factor_reduced_warp_kernel,
+                dim=int(self.model.articulation_count) * 32,
+                block_dim=32,
                 inputs=[
-                    self.factor_depth_joint,
-                    wp.int32(depth_offset),
-                    self.model.joint_parent,
+                    wp.int32(self.advance_max_depth),
+                    self.advance_articulation_depth_start,
+                    self.advance_articulation_depth_joint,
                     self.model.joint_child,
                     self.model.joint_qd_start,
                     self.joint_factor_diagonal,
@@ -1816,6 +1889,31 @@ class ReducedArticulationSystem:
                 ],
                 device=self.device,
             )
+        else:
+            for depth_offset, depth_count in reversed(self.factor_depth_ranges):
+                wp.launch(
+                    _factor_reduced_depth_kernel,
+                    dim=depth_count,
+                    inputs=[
+                        self.factor_depth_joint,
+                        wp.int32(depth_offset),
+                        self.model.joint_parent,
+                        self.model.joint_child,
+                        self.model.joint_qd_start,
+                        self.joint_factor_diagonal,
+                        self.joint_s,
+                        self.factor_child_start,
+                        self.factor_child_joint,
+                        self.body_i_s,
+                        self.reduced_inertia,
+                    ],
+                    outputs=[
+                        self.articulated_inertia,
+                        self.joint_u_matrix,
+                        self.joint_d_inv,
+                    ],
+                    device=self.device,
+                )
 
     def forward_dynamics(self, state: State, control: Control) -> wp.array[wp.float32]:
         """Compute generalized acceleration from common Newton state and control."""
