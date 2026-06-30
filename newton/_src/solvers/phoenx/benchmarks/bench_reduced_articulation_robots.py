@@ -158,6 +158,7 @@ def _build_handle(
     state1 = model.state()
     control = model.control()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state0)
+    state1.assign(state0)
     if solver_name == "reduced":
         solver = newton.solvers.SolverPhoenX(
             model,
@@ -253,10 +254,19 @@ def main() -> None:
                     result["layout"] = layout
                     joint_q = state_box[0].joint_q.numpy()
                     joint_qd = state_box[0].joint_qd.numpy()
-                    if not np.isfinite(joint_q).all() or not np.isfinite(joint_qd).all():
+                    body_q = state_box[0].body_q.numpy()
+                    body_qd = state_box[0].body_qd.numpy()
+                    if (
+                        not np.isfinite(joint_q).all()
+                        or not np.isfinite(joint_qd).all()
+                        or not np.isfinite(body_q).all()
+                        or not np.isfinite(body_qd).all()
+                    ):
                         raise RuntimeError(f"{handle.name}/{solver_name} produced non-finite articulation state")
                     result["max_abs_joint_q"] = float(np.abs(joint_q).max(initial=0.0))
                     result["max_abs_joint_qd"] = float(np.abs(joint_qd).max(initial=0.0))
+                    result["max_abs_body_q"] = float(np.abs(body_q).max(initial=0.0))
+                    result["max_abs_body_qd"] = float(np.abs(body_qd).max(initial=0.0))
                     print(json.dumps(result, sort_keys=True))
 
 
