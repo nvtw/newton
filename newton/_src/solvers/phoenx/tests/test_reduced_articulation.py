@@ -1407,7 +1407,6 @@ class TestReducedArticulation(unittest.TestCase):
                 outputs=[
                     block.jacobian,
                     block.generalized_response,
-                    block.aba_body_work,
                     block.aba_joint_work,
                     block.aba_body_response,
                 ],
