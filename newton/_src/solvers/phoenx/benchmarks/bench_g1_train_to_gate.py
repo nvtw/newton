@@ -40,7 +40,7 @@ _NANOG1_REFERENCE = "nanoG1 RESULTS.md time-to-walk table"
 
 
 def _format_checkpoint_template(path: str, iteration: int) -> Path:
-    if "{iteration}" in path:
+    if "{iteration" in path:
         return Path(path.format(iteration=int(iteration)))
     return Path(path)
 

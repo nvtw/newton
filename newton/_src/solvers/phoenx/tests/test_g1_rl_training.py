@@ -5156,7 +5156,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         device = require_cuda_graph_capture("PhoenX G1 train-to-gate benchmark tests")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            checkpoint_template = f"{tmpdir}/gate_{{iteration}}.npz"
+            checkpoint_template = f"{tmpdir}/gate_{{iteration:06d}}.npz"
             args = argparse.Namespace(
                 world_count=2,
                 rollout_steps=1,

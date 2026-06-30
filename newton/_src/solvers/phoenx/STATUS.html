@@ -58,10 +58,51 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>30 June 2026 · current checkpoint</strong></div>
+      <div class="stamp">Last updated<br><strong>1 July 2026 · throughput profile</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag warn">THROUGHPUT PROFILED</span><time>1 Jul · latest</time></div>
+      <h2>Training is now the performance benchmark; safe tuning helps, but no large solver win is proven yet</h2>
+      <p>A complete Nsight Systems trace covers a real PPO iteration, and every candidate is measured end to end with the G1 training workload rather than an isolated microbenchmark.</p>
+      <ul>
+        <li>The best measured full-coordinate baseline uses 8192 worlds and sustains about 202k samples/s. The pinned nanoG1 result is 1.276M samples/s, so the remaining gap is about 6.3×.</li>
+        <li>8192 worlds beats 4096 and 16384. A 32-thread block per world beats 64/128-thread blocks and the fast-tail scheduler by 27–29% on this scene.</li>
+        <li>BF16 and reducing PGS work produce only a small additional throughput gain. More aggressive reductions are not accepted because the full-coordinate policy still misses the frozen quality gate.</li>
+        <li>Nsight attributes 19.3% of GPU time to block-world prepare/PGS, 6.6% to multi-world coloring, about 6.0% to physics radix sorts, and 3.6% to narrow phase. Neural-network forward and gradient kernels account for roughly 41%.</li>
+        <li>The next code experiments target reusable/static joint topology, cheaper dynamic-contact coloring/sorting, and solve-kernel traffic. Each must preserve CUDA graph capture, determinism, physical regressions, and frozen-policy quality.</li>
+      </ul>
+      <p><strong>Verdict:</strong> profiling and training-based A/B measurement are in place; configuration tuning is proven, but a major general-purpose PhoenX optimization has not yet landed.</p>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag warn">MAXIMAL GAP MEASURED</span><time>30 Jun · latest</time></div>
+      <h2>75M maximal training is stable, but maximal tree coupling still blocks the gate</h2>
+      <p>Two independent full-coordinate runs completed at the pinned 75M-sample budget. Neither passed: the best final run reached 0.570 aggregate performance with 11 falls, and fast-forward tracking remained only 0.137. Reward curricula and adapting a proven nanoG1 oracle did not remove the gap.</p>
+      <ul>
+        <li>An equivalent-physics comparison gives reduced PhoenX the same rotor-side body tensors and zero generalized armature. The first-frame maximal/reduced joint-velocity RMS gap is still about 0.58 rad/s; waist roll is −2.05 versus −0.06 rad/s.</li>
+        <li>This isolates the remaining quality issue to maximal PGS tree coupling/convergence, not armature semantics, PPO initialization, or reward shaping.</li>
+        <li>A complete node-level Nsight trace of real PPO training shows block-world prepare/PGS at 19.3% of GPU time, multi-world coloring at 6.6%, physics radix sorts at about 6.0%, and narrow phase at about 3.6%. Dense forward and weight-gradient kernels cost 18.3% and 12.7%.</li>
+        <li>8192 worlds is the measured batching optimum. It sustains about 202k training samples/s on the conservative 10×8×2 schedule—about 6.3× below nanoG1. 16384 worlds is slower.</li>
+        <li>Two PGS iterations and BF16 provide only a small additional gain; 32-thread block-per-world remains 27–29% faster than 64/128-thread blocks or fast-tail on G1.</li>
+      </ul>
+      <p><strong>Next:</strong> secure a passing policy with the articulation-preconditioned maximal rows, then optimize the measured solve/color/sort costs without weakening the frozen gate.</p>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag warn">MAXIMAL G1 TRAINING</span><time>30 Jun · live run</time></div>
+      <h2>Full-coordinate G1 is stable and learning, but has not passed yet</h2>
+      <p>The physically reflected armature fixed the maximal chain, and replacing explicitly integrated derivative torque with PhoenX’s implicit torque-limited motor row removed the remaining waist-pitch explosion. The first real maximal PPO run is now finite and improving.</p>
+      <ul>
+        <li>At 2.62M samples: 0.528 aggregate tracking, 86 battery falls.</li>
+        <li>At 26.2M samples: 0.590 aggregate tracking, 33 battery falls. This is progress, but still a gate failure.</li>
+        <li>The run is continuing to the pinned 75M-sample nanoG1 budget. Success is not claimed until a frozen checkpoint passes the robust walking gate.</li>
+        <li>Training throughput is about 161k samples/s, 7.9× slower than nanoG1’s pinned 1.276M/s. Including periodic evaluations gives about 131k/s, 9.7× slower.</li>
+      </ul>
+      <p><strong>Current priority:</strong> finish the 75M run and diagnose quality if it still misses. Only a successful policy becomes the baseline for Nsight-guided speed work.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">ARMATURE VALIDATED</span><time>30 Jun · latest</time></div>
