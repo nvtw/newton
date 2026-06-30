@@ -52,6 +52,7 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
+        articulation_mode=str(getattr(args, "articulation_mode", "reduced")),
         actuation_model=str(getattr(args, "actuation_model", g1_recipe.ACTUATION_MODEL)),
         action_scale=float(args.action_scale),
         controlled_action_count=int(args.controlled_action_count),
@@ -135,6 +136,34 @@ def _samples_for_iteration(args: argparse.Namespace, iteration: int) -> int:
     return int(iteration) * int(args.world_count) * int(args.rollout_steps)
 
 
+def _evaluate_checkpoint(
+    checkpoint_path: str | Path,
+    args: argparse.Namespace,
+    *,
+    device: wp.context.Device,
+) -> rl.ResultEvaluateG1GatePPO:
+    reloaded = rl.load_ppo_checkpoint(checkpoint_path, device=device)
+    return rl.evaluate_g1_gate_ppo(
+        reloaded,
+        rl.ConfigEvaluateG1GatePPO(
+            env_config=_make_env_config(args),
+            battery_steps=int(args.battery_steps),
+            seeds_per_command=int(args.seeds_per_command),
+            diagnostic_steps=int(args.diagnostic_steps),
+            diagnostic_world_count=int(args.diagnostic_world_count),
+            device=device,
+            deterministic=not bool(args.stochastic_gate),
+            seed=int(args.gate_seed),
+            max_battery_falls=int(args.max_battery_falls),
+            min_battery_perf=float(args.min_battery_perf),
+            max_action_jerk_rms=float(args.max_action_jerk_rms),
+            max_ang_vel_xy_rms=float(args.max_ang_vel_xy_rms),
+            max_yaw_rate_rms=float(args.max_yaw_rate_rms),
+            max_leg_qvel_rms=float(args.max_leg_qvel_rms),
+        ),
+    )
+
+
 def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     device = wp.get_device(args.device)
     if not device.is_cuda or not wp.is_mempool_enabled(device):
@@ -162,8 +191,10 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         completed_iterations = int(
             rl.load_ppo_checkpoint(resume_checkpoint, config=ppo_config, device=device).iteration
         )
-        if completed_iterations >= int(args.max_iterations):
+        if not bool(args.evaluate_only) and completed_iterations >= int(args.max_iterations):
             raise ValueError("max_iterations must exceed the resumed checkpoint iteration")
+    if bool(args.evaluate_only) and resume_checkpoint is None:
+        raise ValueError("evaluate_only requires resume_checkpoint")
     start_iterations = int(completed_iterations)
     start_samples = _samples_for_iteration(args, start_iterations)
     gate_history: list[dict[str, Any]] = []
@@ -171,7 +202,21 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     first_pass: dict[str, Any] | None = None
     total_t0 = time.perf_counter()
 
-    while completed_iterations < int(args.max_iterations):
+    if bool(args.evaluate_only):
+        gate_t0 = time.perf_counter()
+        gate_result = _evaluate_checkpoint(resume_checkpoint, args, device=device)
+        gate_seconds += time.perf_counter() - gate_t0
+        gate_entry = {
+            "iteration": int(completed_iterations),
+            "samples": int(_samples_for_iteration(args, completed_iterations)),
+            "checkpoint": str(resume_checkpoint),
+            "stats": asdict(gate_result.stats),
+        }
+        gate_history.append(gate_entry)
+        if gate_result.stats.pass_gate:
+            first_pass = gate_entry
+
+    while not bool(args.evaluate_only) and completed_iterations < int(args.max_iterations):
         chunk_iterations = min(int(args.chunk_iterations), int(args.max_iterations) - completed_iterations)
         chunk_t0 = time.perf_counter()
         result = rl.train_g1_ppo(
@@ -216,26 +261,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         train_history.extend(asdict(item) for item in result.history)
 
         gate_t0 = time.perf_counter()
-        reloaded = rl.load_ppo_checkpoint(checkpoint_path, device=device)
-        gate_result = rl.evaluate_g1_gate_ppo(
-            reloaded,
-            rl.ConfigEvaluateG1GatePPO(
-                env_config=_make_env_config(args),
-                battery_steps=int(args.battery_steps),
-                seeds_per_command=int(args.seeds_per_command),
-                diagnostic_steps=int(args.diagnostic_steps),
-                diagnostic_world_count=int(args.diagnostic_world_count),
-                device=device,
-                deterministic=not bool(args.stochastic_gate),
-                seed=int(args.gate_seed),
-                max_battery_falls=int(args.max_battery_falls),
-                min_battery_perf=float(args.min_battery_perf),
-                max_action_jerk_rms=float(args.max_action_jerk_rms),
-                max_ang_vel_xy_rms=float(args.max_ang_vel_xy_rms),
-                max_yaw_rate_rms=float(args.max_yaw_rate_rms),
-                max_leg_qvel_rms=float(args.max_leg_qvel_rms),
-            ),
-        )
+        gate_result = _evaluate_checkpoint(checkpoint_path, args, device=device)
         gate_seconds += time.perf_counter() - gate_t0
         samples = _samples_for_iteration(args, completed_iterations)
         gate_entry = {
@@ -255,8 +281,12 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     new_trained_samples = max(0, int(trained_samples) - int(start_samples))
     train_sps = float(new_trained_samples) / max(train_seconds, 1.0e-12)
     total_sps = float(new_trained_samples) / total_seconds
-    estimated_target_train_seconds = float(args.target_samples) / max(train_sps, 1.0e-12)
-    estimated_target_total_seconds = float(args.target_samples) / max(total_sps, 1.0e-12)
+    estimated_target_train_seconds = (
+        None if bool(args.evaluate_only) else float(args.target_samples) / max(train_sps, 1.0e-12)
+    )
+    estimated_target_total_seconds = (
+        None if bool(args.evaluate_only) else float(args.target_samples) / max(total_sps, 1.0e-12)
+    )
     pass_gate = first_pass is not None
 
     result = {
@@ -265,6 +295,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "device": device.name,
         "execution_mode": str(args.execution_mode),
         "readback_diagnostics": bool(args.readback_diagnostics),
+        "evaluate_only": bool(args.evaluate_only),
         "world_count": int(args.world_count),
         "rollout_steps": int(args.rollout_steps),
         "squash_actions": bool(args.squash_actions),
@@ -313,6 +344,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "w_joint_pos_limit_ankle": float(args.w_joint_pos_limit_ankle),
         "ground_friction": float(args.ground_friction),
         "foot_box_xy_scale": float(args.foot_box_xy_scale),
+        "articulation_mode": str(getattr(args, "articulation_mode", "reduced")),
         "command_curriculum_start": float(command_curriculum_start),
         "command_curriculum_samples": int(command_curriculum_samples),
         "command_zero_probability": float(args.command_zero_probability),
@@ -341,8 +373,8 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "total_wall_seconds": float(total_seconds),
         "train_env_samples_per_s": float(train_sps),
         "total_env_samples_per_s": float(total_sps),
-        "estimated_target_train_seconds": float(estimated_target_train_seconds),
-        "estimated_target_total_seconds": float(estimated_target_total_seconds),
+        "estimated_target_train_seconds": estimated_target_train_seconds,
+        "estimated_target_total_seconds": estimated_target_total_seconds,
         "checkpoint_path": str(resume_checkpoint) if resume_checkpoint is not None else None,
         "pass_gate": bool(pass_gate),
         "first_pass": first_pass,
@@ -352,7 +384,9 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "nanog1_walk_samples": _NANOG1_WALK_SAMPLES,
         "nanog1_walk_seconds": _NANOG1_WALK_SECONDS,
         "nanog1_walk_env_samples_per_s": _NANOG1_WALK_SPS,
-        "phoenx_estimated_target_slowdown_vs_nanog1": estimated_target_train_seconds / _NANOG1_WALK_SECONDS,
+        "phoenx_estimated_target_slowdown_vs_nanog1": (
+            None if estimated_target_train_seconds is None else estimated_target_train_seconds / _NANOG1_WALK_SECONDS
+        ),
         "phoenx_train_sps_over_nanog1": train_sps / _NANOG1_WALK_SPS,
     }
     if args.fail_on_miss and not pass_gate:
@@ -365,7 +399,7 @@ def _default_max_iterations(world_count: int, rollout_steps: int, target_samples
     return max(1, int(math.ceil(float(target_samples) / float(samples_per_iteration))))
 
 
-def _parse_args() -> argparse.Namespace:
+def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--world-count", type=int, default=g1_recipe.WORLD_COUNT)
     parser.add_argument("--rollout-steps", type=int, default=g1_recipe.ROLLOUT_STEPS)
@@ -444,6 +478,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
+    parser.add_argument(
+        "--articulation-mode",
+        choices=("maximal", "hybrid", "reduced"),
+        default="reduced",
+        help="PhoenX articulation mode used by both training and the frozen quality gate.",
+    )
     parser.add_argument(
         "--reward-mode",
         choices=("nanog1_dense", "sparse_command", "sparse_target", "dense_sparse_command"),
@@ -536,6 +576,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--readback-diagnostics", action="store_true")
     parser.add_argument("--resume-checkpoint", default=None)
+    parser.add_argument("--evaluate-only", action="store_true")
     parser.add_argument("--checkpoint-path", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)
@@ -555,7 +596,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fail-on-miss", action="store_true")
     parser.add_argument("--include-train-history", action="store_true")
     parser.add_argument("--json-indent", type=int, default=2)
-    args = parser.parse_args()
+    return parser
+
+
+def _parse_args() -> argparse.Namespace:
+    args = _make_parser().parse_args()
     if args.max_iterations is None:
         args.max_iterations = _default_max_iterations(args.world_count, args.rollout_steps, args.target_samples)
     return args
