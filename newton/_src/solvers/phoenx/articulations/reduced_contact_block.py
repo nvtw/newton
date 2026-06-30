@@ -15,7 +15,9 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_prepare,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.cloth_collision import SHAPE_ENDPOINT_KIND_RIGID
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    CONTACT_DWORDS,
     ContactColumnContainer,
     ContactViews,
     contact_get_body1,
@@ -24,6 +26,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_contact_first,
     contact_get_friction,
     contact_get_friction_dynamic,
+    contact_get_side0_kind,
+    contact_get_side1_kind,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -67,6 +71,81 @@ def _clear_contact_schedule_counts_kernel(section_end: wp.array[wp.int32]):
 
 
 @wp.kernel(enable_backward=False)
+def _clear_contact_ownership_counts_kernel(
+    classic_count: wp.array[wp.int32],
+    reduced_count: wp.array[wp.int32],
+):
+    classic_count[0] = wp.int32(0)
+    reduced_count[0] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def _classify_contact_ownership_kernel(
+    columns: ContactColumnContainer,
+    num_columns: wp.array[wp.int32],
+    key_stride: wp.int64,
+    keys: wp.array[wp.int64],
+    values: wp.array[wp.int32],
+    classic_count: wp.array[wp.int32],
+    reduced_count: wp.array[wp.int32],
+):
+    column = wp.tid()
+    values[column] = column
+    if column >= num_columns[0]:
+        keys[column] = wp.int64(_INT64_MAX)
+        return
+    is_rigid = contact_get_side0_kind(columns, column) == wp.int32(
+        SHAPE_ENDPOINT_KIND_RIGID
+    ) and contact_get_side1_kind(columns, column) == wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
+    ownership = wp.int32(1) if is_rigid else wp.int32(0)
+    keys[column] = wp.int64(ownership) * key_stride + wp.int64(column)
+    if is_rigid:
+        wp.atomic_add(reduced_count, 0, wp.int32(1))
+    else:
+        wp.atomic_add(classic_count, 0, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _reorder_contact_columns_kernel(
+    source_data: wp.array2d[wp.float32],
+    source_pair: wp.array[wp.int32],
+    num_columns: wp.array[wp.int32],
+    permutation: wp.array[wp.int32],
+    destination_data: wp.array2d[wp.float32],
+    destination_pair: wp.array[wp.int32],
+):
+    column = wp.tid()
+    if column >= num_columns[0]:
+        return
+    source = permutation[column]
+    for row in range(source_data.shape[0]):
+        destination_data[row, column] = source_data[row, source]
+    destination_pair[column] = source_pair[source]
+
+
+@wp.kernel(enable_backward=False)
+def _set_rigid_only_ownership_kernel(
+    num_columns: wp.array[wp.int32],
+    contact_offset: wp.int32,
+    classic_count: wp.array[wp.int32],
+    reduced_count: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+):
+    classic_count[0] = wp.int32(0)
+    reduced_count[0] = num_columns[0]
+    num_active_constraints[0] = contact_offset
+
+
+@wp.kernel(enable_backward=False)
+def _set_regular_constraint_count_kernel(
+    contact_offset: wp.int32,
+    classic_contact_count: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+):
+    num_active_constraints[0] = contact_offset + classic_contact_count[0]
+
+
+@wp.kernel(enable_backward=False)
 def _classify_reduced_contact_columns_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,
@@ -84,6 +163,12 @@ def _classify_reduced_contact_columns_kernel(
         keys[column] = wp.int64(_INT64_MAX)
         return
 
+    if contact_get_side0_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID) or contact_get_side1_kind(
+        columns, column
+    ) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
+        keys[column] = wp.int64(_INT64_MAX)
+        return
+
     owner = reduced_contact_deferred_owner(columns, column, bodies)
     group = owner
     if owner < wp.int32(0):
@@ -98,7 +183,7 @@ def _classify_reduced_contact_columns_kernel(
 def _compact_fallback_contact_elements_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,
-    num_columns: wp.array[wp.int32],
+    reduced_column_count: wp.array[wp.int32],
     articulation_count: wp.int32,
     schedule_section_end: wp.array[wp.int32],
     scheduled_column: wp.array[wp.int32],
@@ -108,7 +193,7 @@ def _compact_fallback_contact_elements_kernel(
 ):
     fallback = wp.tid()
     start = schedule_section_end[articulation_count - wp.int32(1)]
-    count = num_columns[0] - start
+    count = reduced_column_count[0] - start
     if fallback == wp.int32(0):
         fallback_count[0] = count
     if fallback >= count:
@@ -613,6 +698,10 @@ class ReducedContactBlockSystem:
         self.schedule_keys: wp.array[wp.int64] | None = None
         self.schedule_columns: wp.array[wp.int32] | None = None
         self.schedule_section_end: wp.array[wp.int32] | None = None
+        self.classic_column_count: wp.array[wp.int32] | None = None
+        self.reduced_column_count: wp.array[wp.int32] | None = None
+        self.reorder_data: wp.array2d[wp.float32] | None = None
+        self.reorder_pair_source: wp.array[wp.int32] | None = None
         self.fallback_count: wp.array[wp.int32] | None = None
         self.fallback_column: wp.array[wp.int32] | None = None
         self.fallback_element: wp.array[ElementInteractionData] | None = None
@@ -656,6 +745,10 @@ class ReducedContactBlockSystem:
         self.schedule_keys = wp.empty(2 * capacity, dtype=wp.int64, device=self.device)
         self.schedule_columns = wp.empty(2 * capacity, dtype=wp.int32, device=self.device)
         self.schedule_section_end = wp.zeros(self.articulation_count + world_count, dtype=wp.int32, device=self.device)
+        self.classic_column_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.reduced_column_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.reorder_data = wp.empty((CONTACT_DWORDS, capacity), dtype=wp.float32, device=self.device)
+        self.reorder_pair_source = wp.empty(capacity, dtype=wp.int32, device=self.device)
         self.fallback_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.fallback_column = wp.empty(capacity, dtype=wp.int32, device=self.device)
         self.fallback_element = wp.empty(capacity, dtype=ElementInteractionData, device=self.device)
@@ -673,11 +766,66 @@ class ReducedContactBlockSystem:
         self,
         columns: ContactColumnContainer,
         bodies: BodyContainer,
+        pair_source: wp.array[wp.int32],
         num_columns: wp.array[wp.int32],
+        num_active_constraints: wp.array[wp.int32],
+        contact_offset: int,
+        *,
+        partition_ownership: bool,
     ) -> None:
-        """Build stable articulation runs and color only conflicting fallback columns."""
+        """Partition classic/reduced ownership, then build reduced contact runs."""
         if self.schedule_keys is None or self.schedule_columns is None or self.schedule_section_end is None:
             raise RuntimeError("Reduced contact schedule has not been configured")
+        assert self.classic_column_count is not None
+        assert self.reduced_column_count is not None
+        assert self.reorder_data is not None
+        assert self.reorder_pair_source is not None
+
+        if partition_ownership:
+            wp.copy(self.reorder_data, columns.data)
+            wp.launch(
+                _clear_contact_ownership_counts_kernel,
+                dim=1,
+                outputs=[self.classic_column_count, self.reduced_column_count],
+                device=self.device,
+            )
+            wp.launch(
+                _classify_contact_ownership_kernel,
+                dim=self.schedule_capacity,
+                inputs=[columns, num_columns, wp.int64(self.schedule_capacity + 1)],
+                outputs=[
+                    self.schedule_keys,
+                    self.schedule_columns,
+                    self.classic_column_count,
+                    self.reduced_column_count,
+                ],
+                device=self.device,
+            )
+            sort_variable_length_int64(self.schedule_keys, self.schedule_columns, num_columns)
+            wp.launch(
+                _reorder_contact_columns_kernel,
+                dim=self.schedule_capacity,
+                inputs=[self.reorder_data, pair_source, num_columns, self.schedule_columns],
+                outputs=[columns.data, self.reorder_pair_source],
+                device=self.device,
+            )
+            wp.copy(pair_source, self.reorder_pair_source, count=self.schedule_capacity)
+            wp.launch(
+                _set_regular_constraint_count_kernel,
+                dim=1,
+                inputs=[wp.int32(contact_offset), self.classic_column_count],
+                outputs=[num_active_constraints],
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                _set_rigid_only_ownership_kernel,
+                dim=1,
+                inputs=[num_columns, wp.int32(contact_offset)],
+                outputs=[self.classic_column_count, self.reduced_column_count, num_active_constraints],
+                device=self.device,
+            )
+
         wp.launch(
             _clear_contact_schedule_counts_kernel,
             dim=self.schedule_section_end.shape[0],
@@ -708,7 +856,7 @@ class ReducedContactBlockSystem:
             inputs=[
                 columns,
                 bodies,
-                num_columns,
+                self.reduced_column_count,
                 wp.int32(self.articulation_count),
                 self.schedule_section_end,
                 self.schedule_columns,

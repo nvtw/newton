@@ -3007,12 +3007,24 @@ class PhoenXWorld:
                 and self.max_contact_columns > 0
             ):
                 self._reduced_articulation.contact_block_system.build_schedule(
-                    self._contact_cols, self.bodies, self._ingest_scratch.num_contact_columns
+                    self._contact_cols,
+                    self.bodies,
+                    self._ingest_scratch.pair_source_idx,
+                    self._ingest_scratch.num_contact_columns,
+                    self._num_active_constraints,
+                    self._contact_offset,
+                    partition_ownership=self._shape_endpoints is not None,
                 )
-                # Reduced contact scheduling owns every rigid contact column. Keep
-                # regular joints/deformables in classic PGS without dispatching the
-                # same contact a second time through its colored CSR.
-                self._num_active_constraints.fill_(self._contact_offset)
+                # Column ownership is now stable-partitioned: classic deformable
+                # contacts form the prefix consumed by regular PGS; reduced rigid
+                # contacts form the suffix consumed by the articulation scheduler.
+                if self._shape_endpoints is not None:
+                    stamp_forward_contact_map(
+                        cid_base=self._contact_offset,
+                        scratch=self._ingest_scratch,
+                        cid_of_contact=self._cid_of_contact_cur,
+                        device=self.device,
+                    )
             if (
                 self._partition_active_this_step
                 and self.solver_flavor == "standard"

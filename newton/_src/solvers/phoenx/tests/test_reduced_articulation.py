@@ -236,7 +236,7 @@ def _make_free_body_loop_cluster(device, joint_type, articulation_count):
     return builder.finalize(device=device)
 
 
-def _make_contact_momentum_model(device, *, with_cloth=False):
+def _make_contact_momentum_model(device, *, with_cloth=False, cloth_contact=False):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     root = builder.add_link(mass=1.0)
     child = builder.add_link(mass=0.5)
@@ -253,8 +253,9 @@ def _make_contact_momentum_model(device, *, with_cloth=False):
     )
     builder.add_articulation([free_joint, hinge_joint])
     if with_cloth:
+        cloth_position = wp.vec3(-0.3, -0.1, 0.19) if cloth_contact else wp.vec3(10.0, 0.0, 0.0)
         builder.add_cloth_grid(
-            pos=wp.vec3(10.0, 0.0, 0.0),
+            pos=cloth_position,
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0),
             dim_x=1,
@@ -1306,6 +1307,49 @@ class TestReducedArticulation(unittest.TestCase):
         np.testing.assert_array_equal(
             block.fallback_partitioner.interaction_id_to_partition.numpy()[:fallback_count], first_colors
         )
+
+    def test_actual_cloth_contact_keeps_classic_and_reduced_ownership_disjoint(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model, collider = _make_contact_momentum_model(device, with_cloth=True, cloth_contact=True)
+        state = model.state()
+        output = model.state()
+        q = state.joint_q.numpy()
+        q[0] = -0.19
+        q[6] = 1.0
+        state.joint_q.assign(q)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        body_q = state.body_q.numpy()
+        body_q[collider, :3] = np.array([0.19, 0.0, 0.0], dtype=np.float32)
+        body_q[collider, 3:] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        state.body_q.assign(body_q)
+
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=0,
+        )
+        contacts = model.contacts()
+        with wp.ScopedCapture(device=device) as capture:
+            solver.collide(state, contacts)
+            solver.step(state, output, None, contacts, 1.0 / 2000.0)
+        wp.capture_launch(capture.graph)
+
+        block = solver._reduced_articulation.contact_block_system
+        total = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        classic = int(block.classic_column_count.numpy()[0])
+        reduced = int(block.reduced_column_count.numpy()[0])
+        self.assertGreater(classic, 0)
+        self.assertGreater(reduced, 0)
+        self.assertEqual(classic + reduced, total)
+        self.assertEqual(int(solver.world._num_active_constraints.numpy()[0]), solver.world._contact_offset + classic)
+        self.assertTrue(np.isfinite(output.body_qd.numpy()).all())
+        self.assertTrue(np.isfinite(output.particle_q.numpy()).all())
+        self.assertTrue(np.isfinite(output.particle_qd.numpy()).all())
 
     def test_mixed_cloth_does_not_double_solve_reduced_contacts(self):
         device = wp.get_preferred_device()
