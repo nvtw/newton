@@ -512,11 +512,69 @@ def _multiply_impulse_response(
     return result
 
 
+@wp.func
+def _compute_reduced_impulse_response_basis(
+    bodies: BodyContainer,
+    joint: wp.int32,
+    parent: wp.int32,
+    child: wp.int32,
+    basis: wp.int32,
+):
+    data = bodies.reduced
+    dof_start = data.joint_qd_start[joint]
+    dof_end = data.joint_qd_start[joint + wp.int32(1)]
+    dof_count = dof_end - dof_start
+    wrench = wp.spatial_vector()
+    wrench[basis] = wp.float32(1.0)
+    negative_force = -wrench
+    reduced_force = _vec6(0.0)
+    d_inv_u = _vec6(0.0)
+    for row in range(_MAX_JOINT_DOF):
+        if wp.int32(row) < dof_count:
+            dof = dof_start + wp.int32(row)
+            reduced_force[row] = -wp.dot(data.joint_s[dof], negative_force)
+    for row in range(_MAX_JOINT_DOF):
+        if wp.int32(row) < dof_count:
+            for column in range(_MAX_JOINT_DOF):
+                if wp.int32(column) < dof_count:
+                    d_inv_u[row] += data.joint_d_inv[joint, row, column] * reduced_force[column]
+
+    propagated_negative_force = negative_force
+    for column in range(_MAX_JOINT_DOF):
+        if wp.int32(column) < dof_count:
+            propagated_negative_force += data.joint_u[dof_start + wp.int32(column)] * d_inv_u[column]
+
+    parent_response = wp.spatial_vector()
+    if parent >= wp.int32(0):
+        parent_response = _multiply_impulse_response(
+            data.impulse_response,
+            parent,
+            -propagated_negative_force,
+        )
+
+    rhs = _vec6(0.0)
+    response = _vec6(0.0)
+    for row in range(_MAX_JOINT_DOF):
+        if wp.int32(row) < dof_count:
+            dof = dof_start + wp.int32(row)
+            rhs[row] = reduced_force[row] - wp.dot(data.joint_u[dof], parent_response)
+    for row in range(_MAX_JOINT_DOF):
+        if wp.int32(row) < dof_count:
+            for column in range(_MAX_JOINT_DOF):
+                if wp.int32(column) < dof_count:
+                    response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
+
+    child_response = parent_response
+    for row in range(_MAX_JOINT_DOF):
+        if wp.int32(row) < dof_count:
+            child_response += data.joint_s[dof_start + wp.int32(row)] * response[row]
+    data.impulse_response[child, basis] = child_response
+
+
 @wp.kernel(enable_backward=False)
 def _compute_reduced_impulse_response_kernel(
     bodies: BodyContainer,
 ):
-    """Build each link's exact frozen-configuration 6x6 impulse response."""
     articulation = wp.tid()
     data = bodies.reduced
     start = data.articulation_start[articulation]
@@ -525,55 +583,38 @@ def _compute_reduced_impulse_response_kernel(
         parent = data.joint_parent[joint]
         child = data.joint_child[joint]
         data.deferred_wrench[child] = wp.spatial_vector()
-        dof_start = data.joint_qd_start[joint]
-        dof_end = data.joint_qd_start[joint + wp.int32(1)]
-        dof_count = dof_end - dof_start
         for basis in range(6):
-            wrench = wp.spatial_vector()
-            wrench[basis] = wp.float32(1.0)
-            negative_force = -wrench
-            reduced_force = _vec6(0.0)
-            d_inv_u = _vec6(0.0)
-            for row in range(_MAX_JOINT_DOF):
-                if wp.int32(row) < dof_count:
-                    dof = dof_start + wp.int32(row)
-                    reduced_force[row] = -wp.dot(data.joint_s[dof], negative_force)
-            for row in range(_MAX_JOINT_DOF):
-                if wp.int32(row) < dof_count:
-                    for column in range(_MAX_JOINT_DOF):
-                        if wp.int32(column) < dof_count:
-                            d_inv_u[row] += data.joint_d_inv[joint, row, column] * reduced_force[column]
+            _compute_reduced_impulse_response_basis(bodies, joint, parent, child, wp.int32(basis))
 
-            propagated_negative_force = negative_force
-            for column in range(_MAX_JOINT_DOF):
-                if wp.int32(column) < dof_count:
-                    propagated_negative_force += data.joint_u[dof_start + wp.int32(column)] * d_inv_u[column]
 
-            parent_response = wp.spatial_vector()
-            if parent >= wp.int32(0):
-                parent_response = _multiply_impulse_response(
-                    data.impulse_response,
-                    parent,
-                    -propagated_negative_force,
-                )
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    __syncwarp();
+#endif
+"""
+)
+def _sync_reduced_warp(): ...
 
-            rhs = _vec6(0.0)
-            response = _vec6(0.0)
-            for row in range(_MAX_JOINT_DOF):
-                if wp.int32(row) < dof_count:
-                    dof = dof_start + wp.int32(row)
-                    rhs[row] = reduced_force[row] - wp.dot(data.joint_u[dof], parent_response)
-            for row in range(_MAX_JOINT_DOF):
-                if wp.int32(row) < dof_count:
-                    for column in range(_MAX_JOINT_DOF):
-                        if wp.int32(column) < dof_count:
-                            response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
 
-            child_response = parent_response
-            for row in range(_MAX_JOINT_DOF):
-                if wp.int32(row) < dof_count:
-                    child_response += data.joint_s[dof_start + wp.int32(row)] * response[row]
-            data.impulse_response[child, basis] = child_response
+@wp.kernel(enable_backward=False, module="reduced_impulse_response")
+def _compute_reduced_impulse_response_warp_kernel(
+    bodies: BodyContainer,
+):
+    thread = wp.tid()
+    articulation = thread // wp.int32(32)
+    lane = thread - articulation * wp.int32(32)
+    data = bodies.reduced
+    start = data.articulation_start[articulation]
+    end = data.articulation_end[articulation]
+    for joint in range(start, end):
+        parent = data.joint_parent[joint]
+        child = data.joint_child[joint]
+        if lane == wp.int32(0):
+            data.deferred_wrench[child] = wp.spatial_vector()
+        if lane < wp.int32(6):
+            _compute_reduced_impulse_response_basis(bodies, joint, parent, child, lane)
+        _sync_reduced_warp()
 
 
 @wp.func
@@ -1811,12 +1852,21 @@ class ReducedPhoenXArticulation:
             include_coriolis=not split_dynamics,
         )
         if compute_impulse_response:
-            wp.launch(
-                _compute_reduced_impulse_response_kernel,
-                dim=int(self.model.articulation_count),
-                inputs=[self.bodies],
-                device=self.model.device,
-            )
+            if self.model.device.is_cuda:
+                wp.launch(
+                    _compute_reduced_impulse_response_warp_kernel,
+                    dim=int(self.model.articulation_count) * 32,
+                    block_dim=32,
+                    inputs=[self.bodies],
+                    device=self.model.device,
+                )
+            else:
+                wp.launch(
+                    _compute_reduced_impulse_response_kernel,
+                    dim=int(self.model.articulation_count),
+                    inputs=[self.bodies],
+                    device=self.model.device,
+                )
 
     def _publish_state(self, dt: float) -> None:
         wp.copy(self.system.joint_qd_integrator, self.system.joint_qd_internal)
