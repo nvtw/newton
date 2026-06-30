@@ -749,6 +749,104 @@ class TestReducedArticulation(unittest.TestCase):
         )
         np.testing.assert_allclose(state0.body_qd.numpy()[2:], state0.body_qd.numpy()[:2], rtol=3.0e-5, atol=3.0e-6)
 
+    def test_forward_dynamics_body_forces_are_translation_invariant_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_translated_floating_pair(device)
+        state = model.state()
+        q = state.joint_q.numpy()
+        qd = state.joint_qd.numpy()
+        articulation_start = model.articulation_start.numpy()
+        articulation_end = model.articulation_end.numpy()
+        q_start = model.joint_q_start.numpy()
+        qd_start = model.joint_qd_start.numpy()
+        reference_qd = np.array([0.25, -0.15, 0.1, 0.2, -0.3, 0.35, -0.45], dtype=np.float32)
+        for articulation in range(2):
+            start = int(articulation_start[articulation])
+            end = int(articulation_end[articulation])
+            q[int(q_start[start]) + 3 : int(q_start[start]) + 7] = np.asarray(
+                wp.quat_rpy(0.2, -0.15, 0.3), dtype=np.float32
+            )
+            q[int(q_start[start + 1])] = 0.35
+            qd[int(qd_start[start]) : int(qd_start[end])] = reference_qd
+        state.joint_q.assign(q)
+        state.joint_qd.assign(qd)
+        body_force_pair = np.array(
+            [
+                [0.4, -0.2, 0.3, -0.1, 0.25, 0.15],
+                [-0.3, 0.35, -0.2, 0.2, -0.15, 0.1],
+            ],
+            dtype=np.float32,
+        )
+        state.body_f.assign(np.tile(body_force_pair, (2, 1)))
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        control = model.control()
+        reference_force = np.array([0.2, -0.1, 0.15, -0.2, 0.1, 0.25, -0.3], dtype=np.float32)
+        control.joint_f.assign(np.tile(reference_force, 2))
+        system = ReducedArticulationSystem(model)
+
+        with wp.ScopedCapture(device=device) as capture:
+            acceleration = system.forward_dynamics(state, control)
+        wp.capture_launch(capture.graph)
+
+        result = acceleration.numpy()
+        start0 = int(articulation_start[0])
+        end0 = int(articulation_end[0])
+        start1 = int(articulation_start[1])
+        end1 = int(articulation_end[1])
+        np.testing.assert_allclose(
+            result[int(qd_start[start1]) : int(qd_start[end1])],
+            result[int(qd_start[start0]) : int(qd_start[end0])],
+            rtol=2.0e-5,
+            atol=2.0e-5,
+        )
+
+    def test_live_body_mass_update_refreshes_reduced_inertia_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+        body = builder.add_link(mass=1.0, inertia=wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+        joint = builder.add_joint_free(parent=-1, child=body)
+        builder.add_articulation([joint])
+        model = builder.finalize(device=device)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+        )
+        dt = 1.0e-3
+
+        def run_captured_step():
+            state = model.state()
+            output = model.state()
+            body_force = np.zeros((model.body_count, 6), dtype=np.float32)
+            body_force[body, 0] = 1.0
+            state.body_f.assign(body_force)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+            with wp.ScopedCapture(device=device) as capture:
+                solver.step(state, output, None, None, dt)
+            wp.capture_launch(capture.graph)
+            return output.joint_qd.numpy().copy()
+
+        velocity_before = run_captured_step()
+        mass = model.body_mass.numpy()
+        inverse_mass = model.body_inv_mass.numpy()
+        mass[body] *= 2.0
+        inverse_mass[body] *= 0.5
+        model.body_mass.assign(mass)
+        model.body_inv_mass.assign(inverse_mass)
+        solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
+        velocity_after = run_captured_step()
+
+        self.assertGreater(abs(float(velocity_before[0])), 1.0e-6)
+        np.testing.assert_allclose(velocity_after[0], 0.5 * velocity_before[0], rtol=2.0e-4, atol=1.0e-7)
+
     def test_descendant_free_distance_preserves_com_velocity_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

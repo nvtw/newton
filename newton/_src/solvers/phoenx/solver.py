@@ -14,8 +14,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.sim import BodyFlags, Contacts, Control, Model, State
-from newton._src.solvers.flags import SolverNotifyFlags
+from newton._src.sim import BodyFlags, Contacts, Control, Model, ModelFlags, State
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation
 from newton._src.solvers.phoenx.body import (
     BodyContainer,
@@ -1108,9 +1107,7 @@ class SolverPhoenX(SolverBase):
     def notify_model_changed(self, flags: int) -> None:
         """Refresh state on Model edits. Joint-property changes rebuild the ADBS
         init arrays from scratch; gravity is reread from ``model.gravity``."""
-        joint_props_changed = bool(
-            flags & (int(SolverNotifyFlags.JOINT_PROPERTIES) | int(SolverNotifyFlags.JOINT_DOF_PROPERTIES))
-        )
+        joint_props_changed = bool(flags & (int(ModelFlags.JOINT_PROPERTIES) | int(ModelFlags.JOINT_DOF_PROPERTIES)))
         if joint_props_changed:
             self._adbs = build_adbs_init_arrays(
                 self.model,
@@ -1120,7 +1117,7 @@ class SolverPhoenX(SolverBase):
             )
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
-        if flags & int(SolverNotifyFlags.MODEL_PROPERTIES):
+        if flags & int(ModelFlags.MODEL_PROPERTIES):
             self.world.gravity = wp.array(self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device)
         # Single body refresh kernel covers both BODY_PROPERTIES and BODY_INERTIAL_PROPERTIES.
         # Joint-DOF changes also force a refresh: armature is baked into body
@@ -1128,13 +1125,18 @@ class SolverPhoenX(SolverBase):
         # requires resetting the inertia back to Model.body_inv_inertia and
         # re-baking with the new armature. Without this path, domain
         # randomization of armature silently keeps the original values.
-        body_refresh_mask = int(SolverNotifyFlags.BODY_INERTIAL_PROPERTIES | SolverNotifyFlags.BODY_PROPERTIES)
-        if (flags & body_refresh_mask) or joint_props_changed:
+        body_refresh_mask = int(ModelFlags.BODY_INERTIAL_PROPERTIES | ModelFlags.BODY_PROPERTIES)
+        body_properties_changed = bool(flags & body_refresh_mask)
+        if body_properties_changed or (joint_props_changed and self.articulation_mode != "reduced"):
             if self.model.body_count > 0:
                 self._launch_init_phoenx_bodies(self.model)
-                # Re-bake armature: the kernel just overwrote inertia.
-                self._bake_joint_armature_into_body_inertia(self.model)
-        if flags & int(SolverNotifyFlags.SHAPE_PROPERTIES):
+                if self.articulation_mode == "reduced":
+                    if self._reduced_articulation is not None:
+                        self._reduced_articulation.system.refresh_inertial_properties()
+                else:
+                    # Re-bake armature: the kernel just overwrote inertia.
+                    self._bake_joint_armature_into_body_inertia(self.model)
+        if flags & int(ModelFlags.SHAPE_PROPERTIES):
             if self.model.shape_material_mu is not None and self.model.shape_count > 0:
                 self._install_shape_materials()
 

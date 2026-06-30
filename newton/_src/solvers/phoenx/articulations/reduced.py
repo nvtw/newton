@@ -11,10 +11,8 @@ import warp as wp
 from newton._src.sim import Control, JointType, Model, State
 from newton._src.sim.articulation import eval_fk
 from newton._src.solvers.featherstone.kernels import (
-    accumulate_free_distance_joint_f_to_body_force,
     compute_com_transforms,
     compute_spatial_inertia,
-    convert_body_force_com_to_origin,
     integrate_body_pose_from_com_twist,
     jcalc_integrate,
     jcalc_motion,
@@ -260,10 +258,29 @@ def _compute_forward_dynamics_rhs_kernel(
         gravity_force = body_mass[child] * gravity[wp.max(body_world[child], wp.int32(0))]
         x_com = wp.transform_get_translation(body_q_com[child])
         gravity_wrench = wp.spatial_vector(gravity_force, wp.cross(x_com, gravity_force))
+        force_com = body_force[child]
+        force = wp.spatial_top(force_com)
+        external_wrench = wp.spatial_vector(force, wp.spatial_bottom(force_com) + wp.cross(x_com, force))
+        joint_kind = joint_type[joint]
+        if joint_kind == JointType.FREE or joint_kind == JointType.DISTANCE:
+            control_force = wp.vec3(
+                joint_f[dof_start],
+                joint_f[dof_start + wp.int32(1)],
+                joint_f[dof_start + wp.int32(2)],
+            )
+            control_torque = wp.vec3(
+                joint_f[dof_start + wp.int32(3)],
+                joint_f[dof_start + wp.int32(4)],
+                joint_f[dof_start + wp.int32(5)],
+            )
+            external_wrench += wp.spatial_vector(
+                control_force,
+                control_torque + wp.cross(x_com, control_force),
+            )
         body_velocity[child] = velocity
         body_coriolis[child] = coriolis
         body_bias[child] = (
-            inertia * coriolis + spatial_cross_dual(velocity, inertia * velocity) - gravity_wrench + body_force[child]
+            inertia * coriolis + spatial_cross_dual(velocity, inertia * velocity) - gravity_wrench - external_wrench
         )
 
     for reverse in range(end - start):
@@ -1386,7 +1403,6 @@ class ReducedArticulationSystem:
         self.joint_u_matrix = wp.empty(dof_count, dtype=wp.spatial_vector, device=self.device)
         self.joint_d_inv = wp.zeros((joint_count, 6, 6), dtype=wp.float32, device=self.device)
         self.body_force = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
-        self.external_body_force = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
         self.body_velocity = wp.empty(body_count, dtype=wp.spatial_vector, device=self.device)
         self.body_coriolis = wp.empty(body_count, dtype=wp.spatial_vector, device=self.device)
         self.body_bias = wp.empty(body_count, dtype=wp.spatial_vector, device=self.device)
@@ -1404,17 +1420,21 @@ class ReducedArticulationSystem:
             device=self.device,
         )
 
+        self.refresh_inertial_properties()
+
+    def refresh_inertial_properties(self) -> None:
+        """Refresh graph-stable body inertia and COM transforms from the model."""
         wp.launch(
             compute_spatial_inertia,
-            dim=body_count,
-            inputs=[model.body_inertia, model.body_mass],
+            dim=int(self.model.body_count),
+            inputs=[self.model.body_inertia, self.model.body_mass],
             outputs=[self.body_i_m],
             device=self.device,
         )
         wp.launch(
             compute_com_transforms,
-            dim=body_count,
-            inputs=[model.body_com],
+            dim=int(self.model.body_count),
+            inputs=[self.model.body_com],
             outputs=[self.body_x_com],
             device=self.device,
         )
@@ -1532,28 +1552,6 @@ class ReducedArticulationSystem:
     def forward_dynamics(self, state: State, control: Control) -> wp.array[wp.float32]:
         """Compute generalized acceleration from common Newton state and control."""
         self.factor(state)
-        wp.copy(self.external_body_force, state.body_f)
-        wp.launch(
-            convert_body_force_com_to_origin,
-            dim=int(self.model.body_count),
-            inputs=[state.body_q, self.body_x_com],
-            outputs=[self.external_body_force],
-            device=self.device,
-        )
-        wp.launch(
-            accumulate_free_distance_joint_f_to_body_force,
-            dim=int(self.model.joint_count),
-            inputs=[
-                self.model.joint_type,
-                self.model.joint_child,
-                self.model.joint_qd_start,
-                state.body_q,
-                self.body_x_com,
-                control.joint_f,
-            ],
-            outputs=[self.external_body_force],
-            device=self.device,
-        )
         wp.launch(
             _compute_forward_dynamics_rhs_kernel,
             dim=int(self.model.articulation_count),
@@ -1585,7 +1583,7 @@ class ReducedArticulationSystem:
                 self.model.gravity,
                 self.body_q_com,
                 self.body_i_s,
-                self.external_body_force,
+                state.body_f,
             ],
             outputs=[
                 self.body_velocity,
