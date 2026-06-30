@@ -202,9 +202,9 @@ Whether an actuator supports differentiability and CUDA graph capture depends on
 its controller.  :class:`ControllerPD` and :class:`ControllerPID` are fully
 graphable.  Neural-network controllers (:class:`ControllerNeuralMLP`,
 :class:`ControllerNeuralLSTM`) load ONNX checkpoints through Warp-NN's
-Warp-backed runtime and are graphable.  Deprecated TorchScript checkpoints are
-still accepted during the deprecation window, but that legacy path requires
-PyTorch and is not graphable due to framework interop overhead.
+Warp-backed runtime and are graphable.  TorchScript checkpoints (``.pt`` /
+``.pth``) use the Torch backend, require PyTorch, and are not graphable due to
+framework interop overhead.
 
 :meth:`Actuator.is_graphable` returns ``True`` when all components can be
 captured in a CUDA graph.

@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import typing
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import warp as wp
 
-from ..utils import _parse_metadata_scale, _runtime_shape, _TorchModuleAdapter, load_checkpoint, load_metadata
+from ..utils import _looks_like_torch_checkpoint, _parse_metadata_scale, _runtime_shape, load_checkpoint, load_metadata
 from .base import Controller
+
+if typing.TYPE_CHECKING:
+    import torch
 
 
 @wp.kernel
@@ -111,16 +115,17 @@ def _zero_masked_2d_kernel(buf: wp.array2d[float], mask: wp.array[wp.bool]):
 
 
 class ControllerNeuralMLP(Controller):
-    """MLP-based neural network controller, ONNX-backed.
+    """MLP-based neural network controller.
 
-    Uses a pre-trained MLP loaded from an ``.onnx`` file to compute joint
-    effort from concatenated, scaled position-error and velocity-error
-    history. The output is multiplied by ``effort_scale`` to convert from
-    network units to physical effort [N or N*m].
+    Uses a pre-trained MLP to compute joint effort from concatenated, scaled
+    position-error and velocity-error history. The output is multiplied by
+    ``effort_scale`` to convert from network units to physical effort
+    [N or N*m].
 
     Configuration parameters (``input_order``, ``input_idx``,
-    ``pos_scale``, ``vel_scale``, ``effort_scale``) are read from the ONNX
-    model's metadata properties, falling back to defaults when absent.
+    ``pos_scale``, ``vel_scale``, ``effort_scale``) are read from checkpoint
+    metadata, falling back to defaults when absent. ``.onnx`` checkpoints run
+    through Warp-NN. ``.pt`` and ``.pth`` checkpoints keep the Torch backend.
     """
 
     SHARED_PARAMS: ClassVar[set[str]] = {"model_path"}
@@ -129,15 +134,19 @@ class ControllerNeuralMLP(Controller):
     class State(Controller.State):
         """History buffers for MLP controller."""
 
-        pos_error_history: wp.array2d[float] | None = None
+        pos_error_history: torch.Tensor | wp.array2d[float] | None = None
         """Position error history, shape [history_length, actuator_count]."""
-        vel_error_history: wp.array2d[float] | None = None
+        vel_error_history: torch.Tensor | wp.array2d[float] | None = None
         """Velocity error history, shape [history_length, actuator_count]."""
 
         def reset(self, mask: wp.array[wp.bool] | None = None) -> None:
             if mask is None:
                 self.pos_error_history.zero_()
                 self.vel_error_history.zero_()
+            elif type(self.pos_error_history).__module__.startswith("torch"):
+                t = wp.to_torch(mask).bool()
+                self.pos_error_history[:, t] = 0.0
+                self.vel_error_history[:, t] = 0.0
             else:
                 wp.launch(
                     _zero_masked_2d_kernel,
@@ -165,12 +174,20 @@ class ControllerNeuralMLP(Controller):
         """Initialize MLP controller from a checkpoint file.
 
         Args:
-            model_path: Path to the ``.onnx`` checkpoint. Legacy ``.pt`` and
-                ``.pth`` checkpoints are accepted during the deprecation window.
+            model_path: Path to the ``.onnx``, ``.pt``, or ``.pth`` checkpoint.
         """
         self.model_path = model_path
+        self._is_torch_checkpoint = _looks_like_torch_checkpoint(model_path)
 
-        metadata = load_metadata(model_path)
+        if self._is_torch_checkpoint:
+            import torch
+
+            self._torch_device = torch.device("cpu")
+            self.network, metadata = load_checkpoint(model_path)
+        else:
+            metadata = load_metadata(model_path)
+            self.network = None
+            self._torch_device = None
 
         self.input_order = metadata.get("input_order", "pos_vel")
         if self.input_order not in ("pos_vel", "vel_pos"):
@@ -181,13 +198,23 @@ class ControllerNeuralMLP(Controller):
             raise ValueError(f"input_idx must contain non-negative integers; got {self.input_idx}")
         self.history_length = max(self.input_idx) + 1
 
-        self.pos_scale = _parse_metadata_scale(metadata, "pos_scale", model_path)
-        self.vel_scale = _parse_metadata_scale(metadata, "vel_scale", model_path)
-        self.effort_scale = _parse_metadata_scale(metadata, "effort_scale", model_path, fallback_key="torque_scale")
+        if self._is_torch_checkpoint:
+            self.pos_scale = metadata.get("pos_scale", 1.0)
+            self.vel_scale = metadata.get("vel_scale", 1.0)
+            self.effort_scale = metadata.get("effort_scale", metadata.get("torque_scale", 1.0))
+        else:
+            self.pos_scale = _parse_metadata_scale(metadata, "pos_scale", model_path)
+            self.vel_scale = _parse_metadata_scale(metadata, "vel_scale", model_path)
+            self.effort_scale = _parse_metadata_scale(metadata, "effort_scale", model_path, fallback_key="torque_scale")
 
         self._network = None
         self._device: wp.Device | None = None
         self._num_actuators = 0
+        self._torch_input_indices: torch.Tensor | None = None
+        self._torch_vel_indices: torch.Tensor | None = None
+        self._torch_sequential_indices: torch.Tensor | None = None
+        self._current_pos_error: torch.Tensor | None = None
+        self._current_vel_error: torch.Tensor | None = None
 
         self._pos_error: wp.array[float] | None = None
         self._vel_error: wp.array[float] | None = None
@@ -200,6 +227,14 @@ class ControllerNeuralMLP(Controller):
         self._device = device
         self._num_actuators = num_actuators
 
+        if self._is_torch_checkpoint:
+            import torch
+
+            self._torch_device = torch.device(f"cuda:{device.ordinal}" if device.is_cuda else "cpu")
+            self.network = self.network.to(self._torch_device)
+            self._torch_sequential_indices = torch.arange(num_actuators, dtype=torch.long, device=self._torch_device)
+            return
+
         runtime, _ = load_checkpoint(
             self.model_path,
             device=device,
@@ -207,6 +242,7 @@ class ControllerNeuralMLP(Controller):
             input_batch_axes=0,
         )
         self._network = runtime
+        self.network = runtime
         self._net_input_name = runtime.input_names[0]
         self._net_output_name = runtime.output_names[0]
 
@@ -231,9 +267,16 @@ class ControllerNeuralMLP(Controller):
         return True
 
     def is_graphable(self) -> bool:
-        return not isinstance(self._network, _TorchModuleAdapter)
+        return not self._is_torch_checkpoint
 
     def state(self, num_actuators: int, device: wp.Device) -> ControllerNeuralMLP.State:
+        if self._is_torch_checkpoint:
+            import torch
+
+            return ControllerNeuralMLP.State(
+                pos_error_history=torch.zeros(self.history_length, num_actuators, device=self._torch_device),
+                vel_error_history=torch.zeros(self.history_length, num_actuators, device=self._torch_device),
+            )
         return ControllerNeuralMLP.State(
             pos_error_history=wp.zeros((self.history_length, num_actuators), dtype=wp.float32, device=device),
             vel_error_history=wp.zeros((self.history_length, num_actuators), dtype=wp.float32, device=device),
@@ -257,6 +300,21 @@ class ControllerNeuralMLP(Controller):
     ) -> None:
         device = device or self._device
         n = self._num_actuators
+
+        if self._is_torch_checkpoint:
+            self._compute_torch(
+                positions,
+                velocities,
+                target_pos,
+                target_vel,
+                pos_indices,
+                vel_indices,
+                target_pos_indices,
+                target_vel_indices,
+                forces,
+                state,
+            )
+            return
 
         wp.launch(
             _compute_errors_kernel,
@@ -315,6 +373,12 @@ class ControllerNeuralMLP(Controller):
     ) -> None:
         if next_state is None:
             return
+        if self._is_torch_checkpoint:
+            next_state.pos_error_history = current_state.pos_error_history.roll(1, 0)
+            next_state.vel_error_history = current_state.vel_error_history.roll(1, 0)
+            next_state.pos_error_history[0] = self._current_pos_error
+            next_state.vel_error_history[0] = self._current_vel_error
+            return
         h, n = current_state.pos_error_history.shape
         wp.launch(
             _roll_history_kernel,
@@ -330,3 +394,59 @@ class ControllerNeuralMLP(Controller):
             ],
             device=self._device,
         )
+
+    def _compute_torch(
+        self,
+        positions: wp.array[float],
+        velocities: wp.array[float],
+        target_pos: wp.array[float],
+        target_vel: wp.array[float],
+        pos_indices: wp.array[wp.uint32],
+        vel_indices: wp.array[wp.uint32],
+        target_pos_indices: wp.array[wp.uint32],
+        target_vel_indices: wp.array[wp.uint32],
+        forces: wp.array[float],
+        state: ControllerNeuralMLP.State,
+    ) -> None:
+        import torch
+
+        if self._torch_input_indices is None:
+            self._torch_input_indices = torch.tensor(pos_indices.numpy(), dtype=torch.long, device=self._torch_device)
+            self._torch_vel_indices = torch.tensor(vel_indices.numpy(), dtype=torch.long, device=self._torch_device)
+
+        current_pos = wp.to_torch(positions)
+        current_vel = wp.to_torch(velocities)
+        target_p = wp.to_torch(target_pos)
+        target_v = wp.to_torch(target_vel)
+
+        torch_target_pos_idx = (
+            self._torch_input_indices if target_pos_indices is pos_indices else self._torch_sequential_indices
+        )
+        torch_target_vel_idx = (
+            self._torch_vel_indices if target_vel_indices is vel_indices else self._torch_sequential_indices
+        )
+
+        pos_error = target_p[torch_target_pos_idx] - current_pos[self._torch_input_indices]
+        vel_error = target_v[torch_target_vel_idx] - current_vel[self._torch_vel_indices]
+
+        self._current_pos_error = pos_error
+        self._current_vel_error = vel_error
+
+        pos_input = torch.stack(
+            [pos_error if i == 0 else state.pos_error_history[i - 1] for i in self.input_idx], dim=1
+        )
+        vel_input = torch.stack(
+            [vel_error if i == 0 else state.vel_error_history[i - 1] for i in self.input_idx], dim=1
+        )
+
+        if self.input_order == "pos_vel":
+            net_input = torch.cat([pos_input * self.pos_scale, vel_input * self.vel_scale], dim=1)
+        else:
+            net_input = torch.cat([vel_input * self.vel_scale, pos_input * self.pos_scale], dim=1)
+
+        with torch.inference_mode():
+            effort = self.network(net_input)
+
+        effort = effort.reshape(len(forces)) * self.effort_scale
+        effort_wp = wp.from_torch(effort.contiguous(), dtype=wp.float32)
+        wp.copy(forces, effort_wp)

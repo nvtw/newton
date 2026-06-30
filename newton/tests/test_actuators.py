@@ -555,17 +555,18 @@ class TestControllerNeuralLSTM(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class TestControllerNeuralMLPLegacyTorchScript(unittest.TestCase):
-    """Regression tests for the deprecated .pt MLP checkpoint path."""
+    """Regression tests for the supported .pt MLP checkpoint path."""
 
     def setUp(self):
         self.device = wp.get_device()
         self._tmp_dir = tempfile.mkdtemp()
+        _ignore_torchscript_deprecation(self)
 
     def tearDown(self):
         shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
     def test_finalize_legacy_torchscript_checkpoint(self):
-        """Legacy .pt checkpoints remain loadable during the deprecation window."""
+        """.pt checkpoints keep the Torch backend and state interface."""
         import torch
 
         n = 1
@@ -588,16 +589,16 @@ class TestControllerNeuralMLPLegacyTorchScript(unittest.TestCase):
         scripted.save(path, _extra_files={"metadata.json": json.dumps({"effort_scale": 1.0})})
 
         ctrl = ControllerNeuralMLP(model_path=path)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            ctrl.finalize(self.device, n)
+        ctrl.finalize(self.device, n)
 
-        self.assertEqual(ctrl._net_output_name, "action")
-        self.assertEqual(ctrl._network._shapes["action"], (n, 1))
+        self.assertFalse(ctrl.is_graphable())
+        self.assertIsNotNone(ctrl.network)
+        self.assertIsNone(ctrl._network)
 
         indices = wp.array([0], dtype=wp.uint32, device=self.device)
         forces = wp.zeros(n, dtype=wp.float32, device=self.device)
         state_a = ctrl.state(n, self.device)
+        self.assertTrue(type(state_a.pos_error_history).__module__.startswith("torch"))
         ctrl.compute(
             wp.zeros(n, dtype=wp.float32, device=self.device),
             wp.zeros(n, dtype=wp.float32, device=self.device),
@@ -618,11 +619,12 @@ class TestControllerNeuralMLPLegacyTorchScript(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_TORCH, "torch not installed")
 class TestControllerNeuralLSTMLegacyTorchScript(unittest.TestCase):
-    """Regression tests for the deprecated .pt LSTM checkpoint path."""
+    """Regression tests for the supported .pt LSTM checkpoint path."""
 
     def setUp(self):
         self.device = wp.get_device()
         self._tmp_dir = tempfile.mkdtemp()
+        _ignore_torchscript_deprecation(self)
 
     def tearDown(self):
         shutil.rmtree(self._tmp_dir, ignore_errors=True)
@@ -661,9 +663,7 @@ class TestControllerNeuralLSTMLegacyTorchScript(unittest.TestCase):
         hidden = 6
         self._build_legacy_lstm_checkpoint(path, hidden_size=hidden, metadata={"effort_scale": 2.5})
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            ctrl = ControllerNeuralLSTM(model_path=path)
+        ctrl = ControllerNeuralLSTM(model_path=path)
 
         self.assertEqual(ctrl._num_layers, 1)
         self.assertEqual(ctrl._hidden_size, hidden)
@@ -673,9 +673,7 @@ class TestControllerNeuralLSTMLegacyTorchScript(unittest.TestCase):
         path = os.path.join(self._tmp_dir, "legacy_lstm.pt")
         self._build_legacy_lstm_checkpoint(path, hidden_size=4)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            ctrl = ControllerNeuralLSTM(model_path=path)
+        ctrl = ControllerNeuralLSTM(model_path=path)
 
         n = 1
         ctrl.finalize(self.device, n)
@@ -683,7 +681,8 @@ class TestControllerNeuralLSTMLegacyTorchScript(unittest.TestCase):
 
         state_a = ctrl.state(n, self.device)
         state_b = ctrl.state(n, self.device)
-        np.testing.assert_array_equal(state_a.hidden.numpy(), 0.0)
+        self.assertTrue(type(state_a.hidden).__module__.startswith("torch"))
+        np.testing.assert_array_equal(state_a.hidden.detach().cpu().numpy(), 0.0)
 
         indices = wp.array([0], dtype=wp.uint32, device=self.device)
         positions = wp.zeros(n, dtype=wp.float32, device=self.device)
@@ -710,7 +709,7 @@ class TestControllerNeuralLSTMLegacyTorchScript(unittest.TestCase):
         ctrl.update_state(state_a, state_b)
 
         self.assertNotAlmostEqual(float(forces.numpy()[0]), 0.0, places=6)
-        self.assertTrue(np.any(state_b.hidden.numpy() != 0.0))
+        self.assertTrue(np.any(state_b.hidden.detach().cpu().numpy() != 0.0))
 
 
 # ---------------------------------------------------------------------------
