@@ -307,19 +307,6 @@ class ActuatedDoubleBallSocketData:
     # storage avoided to keep the constraint footprint compact.
     stiffness_drive: wp.float32
     damping_drive: wp.float32
-    # Joint-axis armature (rotor / leadscrew inertia) [kg*m^2 for revolute,
-    # kg for prismatic]. Increases the *axial* effective inertia seen by
-    # the drive and limit rows, but not the rigid 5-row positional lock.
-    # Equivalent to MuJoCo's ``mjOption.armature`` / ``joint armature`` in
-    # reduced coordinates: ``M_eff_axial = M_chain_axial + armature``.
-    # Critical for stability of high-stiffness PD drives on chains where
-    # an intermediate link has near-zero inertia about the joint axis
-    # (e.g. humanoid waist-yaw / waist-roll links). ``0`` disables.
-    armature: wp.float32
-    # Per-substep inertial-row impulse. This is reset by prepare rather than
-    # warm-started: armature resists the current substep velocity increment,
-    # not absolute joint velocity.
-    accumulated_impulse_armature: wp.float32
     # Joint-axis Coulomb friction limit [N*m for revolute, N for
     # prismatic]. Implemented as a saturated soft row on the same axial
     # Jacobian as the drive / limit rows.
@@ -474,8 +461,6 @@ _OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData,
 _OFF_MAX_FORCE_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_force_drive"))
 _OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_drive"))
 _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_drive"))
-_OFF_ARMATURE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "armature"))
-_OFF_ACC_ARMATURE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_armature"))
 _OFF_FRICTION_COEFFICIENT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "friction_coefficient"))
 _OFF_FRICTION_SLIP_SCALE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "friction_slip_scale"))
 _OFF_MIN_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "min_value"))
@@ -538,7 +523,6 @@ def actuated_double_ball_socket_initialize_kernel(
     damping_ratio_limit: wp.array[wp.float32],
     stiffness_limit: wp.array[wp.float32],
     damping_limit: wp.array[wp.float32],
-    armature: wp.array[wp.float32],
     friction_coefficient: wp.array[wp.float32],
     friction_slip_scale: wp.array[wp.float32],
     d6_limit_axis0: wp.array[wp.vec3f],
@@ -582,9 +566,6 @@ def actuated_double_ball_socket_initialize_kernel(
             If either > 0 the limit uses the Jitter2 spring-damper
             path and the Box2D knobs are ignored. CABLE mode reuses
             these slots for ``twist_stiffness`` / ``twist_damping``.
-        armature: Joint-axis armature [kg*m^2 for revolute, kg for
-            prismatic]. Adds to the axial effective inertia for the
-            drive and limit rows; ``0`` disables.
     """
     tid = wp.tid()
     cid = cid_offset + tid
@@ -701,8 +682,6 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_MAX_FORCE_DRIVE, cid, max_force_drive[tid])
     write_float(constraints, _OFF_STIFFNESS_DRIVE, cid, stiffness_drive[tid])
     write_float(constraints, _OFF_DAMPING_DRIVE, cid, damping_drive[tid])
-    write_float(constraints, _OFF_ARMATURE, cid, armature[tid])
-    write_float(constraints, _OFF_ACC_ARMATURE, cid, 0.0)
     write_float(constraints, _OFF_FRICTION_COEFFICIENT, cid, friction_coefficient[tid])
     write_float(constraints, _OFF_FRICTION_SLIP_SCALE, cid, friction_slip_scale[tid])
     write_float(constraints, _OFF_MIN_VALUE, cid, min_value[tid])
@@ -824,7 +803,6 @@ def _adbs_clear_reset_worlds_kernel(
     write_float(constraints, _OFF_ACC_DRIVE, cid, wp.float32(0.0))
     write_float(constraints, _OFF_ACC_LIMIT, cid, wp.float32(0.0))
     write_float(constraints, _OFF_ACC_FRICTION, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_ACC_ARMATURE, cid, wp.float32(0.0))
 
 
 def actuated_double_ball_socket_clear_reset_worlds(
@@ -952,88 +930,6 @@ def _ms_store_body_pair(
     write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
     write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
     write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
-
-
-# ---------------------------------------------------------------------------
-# Joint-axis armature inertial row
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _armature_iterate(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    bodies: BodyContainer,
-    b1: wp.int32,
-    b2: wp.int32,
-    axial_kind: wp.int32,
-    n_hat: wp.vec3f,
-    r1_b1: wp.vec3f,
-    r1_b2: wp.vec3f,
-    velocity1: wp.vec3f,
-    angular_velocity1: wp.vec3f,
-    velocity2: wp.vec3f,
-    angular_velocity2: wp.vec3f,
-    inv_mass1: wp.float32,
-    inv_mass2: wp.float32,
-    inv_inertia1: wp.mat33f,
-    inv_inertia2: wp.mat33f,
-):
-    """Apply one PGS iteration of M + J.T * armature * J.
-
-    The auxiliary impulse is referenced to the substep-entry velocity. This
-    makes armature added inertia; referencing absolute velocity would instead
-    create non-physical joint damping. The equal-and-opposite body impulse
-    conserves total linear and angular momentum.
-    """
-    armature = read_float(constraints, base_offset + _OFF_ARMATURE, cid)
-    if armature <= wp.float32(0.0) or axial_kind == _D6_AXIAL_NONE:
-        return velocity1, angular_velocity1, velocity2, angular_velocity2
-
-    velocity1_0 = bodies.velocity_prev_substep[b1]
-    angular_velocity1_0 = bodies.angular_velocity_prev_substep[b1]
-    velocity2_0 = bodies.velocity_prev_substep[b2]
-    angular_velocity2_0 = bodies.angular_velocity_prev_substep[b2]
-
-    qd = wp.float32(0.0)
-    qd0 = wp.float32(0.0)
-    eff_inv = wp.float32(0.0)
-    if axial_kind == _D6_AXIAL_LINEAR:
-        qd = wp.dot(
-            n_hat,
-            velocity1 + wp.cross(angular_velocity1, r1_b1) - velocity2 - wp.cross(angular_velocity2, r1_b2),
-        )
-        qd0 = wp.dot(
-            n_hat,
-            velocity1_0 + wp.cross(angular_velocity1_0, r1_b1) - velocity2_0 - wp.cross(angular_velocity2_0, r1_b2),
-        )
-        j1_angular = wp.cross(r1_b1, n_hat)
-        j2_angular = wp.cross(r1_b2, n_hat)
-        eff_inv = inv_mass1 + inv_mass2
-        eff_inv = eff_inv + wp.dot(j1_angular, inv_inertia1 @ j1_angular)
-        eff_inv = eff_inv + wp.dot(j2_angular, inv_inertia2 @ j2_angular)
-    else:
-        qd = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-        qd0 = wp.dot(n_hat, angular_velocity1_0 - angular_velocity2_0)
-        eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
-
-    accumulated = read_float(constraints, base_offset + _OFF_ACC_ARMATURE, cid)
-    residual = qd - qd0 + accumulated / armature
-    lam = -residual / (eff_inv + wp.float32(1.0) / armature)
-    write_float(constraints, base_offset + _OFF_ACC_ARMATURE, cid, accumulated + lam)
-
-    if axial_kind == _D6_AXIAL_LINEAR:
-        impulse = n_hat * lam
-        velocity1 = velocity1 + inv_mass1 * impulse
-        angular_velocity1 = angular_velocity1 + inv_inertia1 @ wp.cross(r1_b1, impulse)
-        velocity2 = velocity2 - inv_mass2 * impulse
-        angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, impulse)
-    else:
-        angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * lam)
-        angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * lam)
-
-    return velocity1, angular_velocity1, velocity2, angular_velocity2
 
 
 # ---------------------------------------------------------------------------
@@ -2069,8 +1965,6 @@ def _d6_prepare_rows_at(
     rigid swing family rather than a coupled 4+1 Schur. Math is identical
     to the proven per-mode prepares -- only the dispatch is gone.
     """
-    write_float(constraints, base_offset + _OFF_ACC_ARMATURE, cid, 0.0)
-
     is_cable = mode_cfg == JOINT_MODE_CABLE
     is_prismatic = mode_cfg == JOINT_MODE_PRISMATIC
     has_swing = mode_cfg == JOINT_MODE_REVOLUTE or mode_cfg == JOINT_MODE_FIXED or is_cable
@@ -2788,28 +2682,6 @@ def _d6_iterate_rows_at(
                 sor_boost,
             )
 
-    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    velocity1, angular_velocity1, velocity2, angular_velocity2 = _armature_iterate(
-        constraints,
-        cid,
-        base_offset,
-        bodies,
-        b1,
-        b2,
-        axial_kind,
-        n_hat,
-        r1_b1,
-        r1_b2,
-        velocity1,
-        angular_velocity1,
-        velocity2,
-        angular_velocity2,
-        inv_mass1,
-        inv_mass2,
-        inv_inertia1,
-        inv_inertia2,
-    )
-
     _ms_store_body_pair(
         bodies,
         particles,
@@ -3044,13 +2916,6 @@ def _revolute_iterate_at_multi(
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
     clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
 
-    # Armature state remains register-resident across the local sweeps.
-    armature = read_float(constraints, base_offset + _OFF_ARMATURE, cid)
-    armature_active = armature > wp.float32(0.0)
-    acc_armature = read_float(constraints, base_offset + _OFF_ACC_ARMATURE, cid)
-    qd0_armature = wp.dot(n_hat, bodies.angular_velocity_prev_substep[b1] - bodies.angular_velocity_prev_substep[b2])
-    eff_inv_armature = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
-
     # ---- Axial drive + limit constants -------------------------------
     drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
     max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
@@ -3201,14 +3066,6 @@ def _revolute_iterate_at_multi(
         angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
         angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
-        if armature_active:
-            qd_armature = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
-            residual_armature = qd_armature - qd0_armature + acc_armature / armature
-            lam_armature = -residual_armature / (eff_inv_armature + wp.float32(1.0) / armature)
-            acc_armature = acc_armature + lam_armature
-            angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * lam_armature)
-            angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * lam_armature)
-
         it += 1
 
     # ---- Writeback ---------------------------------------------------
@@ -3237,8 +3094,6 @@ def _revolute_iterate_at_multi(
         write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
     elif friction <= wp.float32(0.0):
         write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
-    if armature_active:
-        write_float(constraints, base_offset + _OFF_ACC_ARMATURE, cid, acc_armature)
 
 
 @wp.func

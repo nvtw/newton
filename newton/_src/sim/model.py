@@ -554,7 +554,12 @@ class Model:
         self.joint_axis: wp.array[wp.vec3] | None = None
         """Joint axis in child frame, shape [joint_dof_count, 3], float."""
         self.joint_armature: wp.array[wp.float32] | None = None
-        """Armature [kg·m² (rotational) or kg (translational)] for each joint axis (used by :class:`~newton.solvers.SolverMuJoCo` and :class:`~newton.solvers.SolverFeatherstone`), shape [joint_dof_count], float."""
+        """Armature [kg·m² (rotational) or kg (translational)] for each joint axis, shape [joint_dof_count], float.
+
+        :class:`~newton.solvers.SolverPhoenX` maximal mode supports rotational
+        armature on revolute joints as output-reflected rotor-side body inertia.
+        The parent body inertia must include the motor stator and housing.
+        """
         self.joint_target_mode: wp.array[wp.int32] | None = None
         """Joint target mode per DOF, see :class:`newton.JointTargetMode`. Shape [joint_dof_count], dtype int32."""
         self.joint_target_ke: wp.array[wp.float32] | None = None

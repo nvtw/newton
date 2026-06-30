@@ -64,6 +64,20 @@
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
 
     <article>
+      <div class="meta"><span class="tag">ARMATURE VALIDATED</span><time>30 Jun · latest</time></div>
+      <h2>Full-coordinate PhoenX now uses physical reflected rotor inertia</h2>
+      <p>The unstable auxiliary armature constraint row has been removed entirely. Rotational motor armature is instead reflected through the gearbox and added as a rank-one inertia tensor to the rotor-side child body, in the child body frame. The authored parent inertia contains the stator/link inertia.</p>
+      <ul>
+        <li>The previously failing full 29-joint G1 free-space CUDA-graph regression now passes instead of diverging beyond 6 rad.</li>
+        <li>Analytical pendulum tests pass across an armature sweep, and gear tests pass the expected <code>gear² × rotor inertia</code> period scaling, including a 100:1 ratio.</li>
+        <li>Off-axis tensor placement, free-floating angular-momentum conservation, and live domain-randomization updates have direct regressions; zero armature remains a no-op.</li>
+        <li>The model is deterministic and uses ordinary body inertia and gyroscopic dynamics—no relaxation, interaction-count scaling, or solver tuning.</li>
+        <li>Scope is deliberately physical: maximal mode currently accepts rotational armature on revolute joints. Translational and multi-axis armature are rejected instead of approximated inaccurately.</li>
+      </ul>
+      <p><strong>Current verdict:</strong> validated for the revolute robot-motor case. All 18 focused CUDA-graph tests pass, including the formerly divergent G1 chain. Removing the obsolete row also removes two fields, its solve branches, and two per-body substep velocity snapshots from the full-coordinate hot path. Next: prove successful maximal-coordinate G1 policy training, then optimize measured throughput without weakening the gate.</p>
+    </article>
+
+    <article>
       <div class="meta"><span class="tag block">ROOT CAUSE ISOLATED</span><time>30 Jun</time></div>
       <h2>Pure-maximal G1 armature is not yet reliable</h2>
       <p>A controlled free-space, zero-action sweep isolates the failure to the maximal-coordinate armature path rather than contacts, friction, policy actions, or an insufficient iteration count.</p>
@@ -72,6 +86,9 @@
         <li>With physical armature enabled, the same chain diverges. Raising the schedule as far as 10 substeps × 64 PGS iterations does not fix it and convergence is non-monotonic.</li>
         <li>The current pendulum and three-link armature tests are therefore insufficient. The fix must add a deep spatial-chain, CUDA-graph regression and preserve momentum and the exact configured armature.</li>
         <li>The equal-work substep-versus-iteration claim cannot be judged honestly until this defect is removed.</li>
+        <li>An exact local 2×2 drive/armature block did not improve the failure, proving the problematic coupling spans the tree joint-lock rows rather than just the motor row.</li>
+        <li>Armature-row relaxation at 0.1 passes the G1 stability check but destroys physical accuracy: pendulum period errors reach 67% and three-link modal errors reach 47%. It is rejected, not retained.</li>
+        <li>The clean next implementation is an exact tree-coupled maximal mass operator for <code>M_body + Jᵀ A J</code> (tree LDL/Woodbury), while keeping maximal joint and contact rows. This has the correct fixed-time-step physics and avoids tuning parameters.</li>
       </ul>
       <p>Existing Nsight traces also identify the first performance targets. In classic contact-rich G1, radix sorting consumes 21.1% of GPU kernel time, block-world prepare/iterate 20.8%, greedy coloring 8.0%, and scans 5.9%. In the articulated contact-rich path, generalized contact construction/solve/gather/finalize dominates roughly 55% before factorization and momentum passes. Correctness remains first; these measurements define the subsequent optimization work.</p>
     </article>

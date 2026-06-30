@@ -3,9 +3,9 @@
 
 """Joint armature unit tests for ``SolverPhoenX``.
 
-PhoenX represents reduced-coordinate armature with an auxiliary inertial
-row in maximal coordinates. These tests cover analytical period checks,
-MuJoCo parity, chain composition, zero-armature behavior, and stability.
+Maximal PhoenX represents motor armature as gearbox-reflected rotor-side body
+inertia. These tests cover physical periods, chain composition, zero-armature
+behavior, MuJoCo parity for anchored joints, and stability.
 """
 
 from __future__ import annotations
@@ -236,12 +236,11 @@ def _cuda_with_graph_capture() -> bool:
     "PhoenX armature tests run on CUDA with graph-capture only.",
 )
 class TestSymmetricTwoBodyPeriod(unittest.TestCase):
-    """Check full relative-coordinate armature for two symmetric bodies.
+    """Check physical rotor-side inertia for two free symmetric bodies.
 
-    The reduced-coordinate inertia is M_chain = I / 2 and armature adds a,
-    giving T = 2*pi*sqrt((M_chain + a) / k). The auxiliary inertial row must
-    add the full value; distributing armature across body inertias would
-    under-count it by a factor of two.
+    The stator-side inertia is ``I`` and the rotor-side inertia is ``I + a``.
+    Eliminating the free global rotation gives the relative-coordinate inertia
+    ``I * (I + a) / (2 * I + a)``.
     """
 
     def test_period_scaling_with_armature(self) -> None:
@@ -255,8 +254,6 @@ class TestSymmetricTwoBodyPeriod(unittest.TestCase):
         dt = 1.0 / 400.0
         frames = 1600
 
-        m_chain = inertia * inertia / (inertia + inertia)  # = I / 2
-
         for armature in (0.0, 0.5, 2.0, 8.0):
             with self.subTest(armature=armature):
                 model = _build_two_body_torsion_chain(
@@ -268,17 +265,16 @@ class TestSymmetricTwoBodyPeriod(unittest.TestCase):
                 history = _run_torsion_chain(model, frames=frames, dt=dt)
                 T_sim = _measure_period_zero_crossings(history, dt)
 
-                T_expected = 2.0 * np.pi * np.sqrt((m_chain + armature) / target_ke)
+                rotor_side_inertia = inertia + armature
+                effective_inertia = inertia * rotor_side_inertia / (inertia + rotor_side_inertia)
+                T_expected = 2.0 * np.pi * np.sqrt(effective_inertia / target_ke)
                 rel_err = abs(T_sim - T_expected) / T_expected
                 self.assertLess(
                     rel_err,
                     0.05,
                     f"armature={armature}: T_sim={T_sim:.4f} s vs "
                     f"T_expected={T_expected:.4f} s "
-                    f"(M_chain + a = {m_chain + armature:.4f}, k = {target_ke}). "
-                    "If this fails with rel_err ~ 0.13 - 0.27 the bake is only "
-                    "contributing a/2 of effective armature; see the docstring "
-                    "for context.",
+                    f"(reflected-body effective inertia={effective_inertia:.4f}).",
                 )
 
 
@@ -335,40 +331,12 @@ def _run_prismatic_slide(model: newton.Model, frames: int, dt: float, init_slide
     "PhoenX armature tests run on CUDA with graph-capture only.",
 )
 class TestPrismaticTwoBodyPeriod(unittest.TestCase):
-    """Prismatic equivalent of :class:`TestSymmetricTwoBodyPeriod`.
+    """Reject armature that cannot be represented by rigid-body inertia."""
 
-    Two equal-mass free bodies on a single prismatic slide with a
-    linear PD spring; armature has units of mass for prismatic
-    joints. Reduced-coord chain mass is ``m*m/(m+m) = m/2``; MuJoCo
-    armature gives ``T = 2*pi * sqrt((m/2 + a) / k)``.
-
-    Same correctness property as the revolute case: the per-body
-    bake's ``alpha = a`` approximation under-counts by ~2x for
-    symmetric masses; the per-joint quadratic alpha gets it right.
-    """
-
-    def test_period_scaling_with_armature(self) -> None:
-        mass = 1.0
-        target_ke = 100.0
-        dt = 1.0 / 400.0
-        frames = 1600
-        m_chain = mass * mass / (mass + mass)  # = mass / 2
-
-        for armature in (0.0, 0.5, 2.0, 8.0):
-            with self.subTest(armature=armature):
-                model = _build_two_body_prismatic_slide(mass=mass, target_ke=target_ke, armature=armature)
-                history = _run_prismatic_slide(model, frames=frames, dt=dt)
-                T_sim = _measure_period_zero_crossings(history, dt)
-
-                T_expected = 2.0 * np.pi * np.sqrt((m_chain + armature) / target_ke)
-                rel_err = abs(T_sim - T_expected) / T_expected
-                self.assertLess(
-                    rel_err,
-                    0.05,
-                    f"prismatic armature={armature}: T_sim={T_sim:.4f} s "
-                    f"vs T_expected={T_expected:.4f} s "
-                    f"(M_chain + a = {m_chain + armature:.4f}, k = {target_ke})",
-                )
+    def test_nonzero_prismatic_armature_is_rejected(self) -> None:
+        model = _build_two_body_prismatic_slide(mass=1.0, target_ke=100.0, armature=0.5)
+        with self.assertRaisesRegex(NotImplementedError, "rotational motor rotors only"):
+            newton.solvers.SolverPhoenX(model)
 
 
 def _build_anchored_three_body_chain(
@@ -456,12 +424,10 @@ def _run_three_body_chain(
     "PhoenX armature tests run on CUDA with graph-capture only.",
 )
 class TestThreeBodyChain(unittest.TestCase):
-    """Check armature composition in an anchored three-body chain.
+    """Check reflected rotor-body inertia in an anchored chain.
 
-    The three relative joint coordinates produce a dense reduced mass matrix.
-    Auxiliary inertial rows retain the off-diagonal coupling induced by shared
-    bodies, so every analytical eigenmode must match. This distinguishes exact
-    chain composition from per-body inertia inflation.
+    Each revolute motor adds axial inertia to its child body. With equal link and
+    rotor inertias, the entire dense reduced mass matrix scales by ``I + a``.
     """
 
     def test_armature_composition(self) -> None:
@@ -484,9 +450,9 @@ class TestThreeBodyChain(unittest.TestCase):
                 dtype=np.float64,
             )
             K = target_ke * np.eye(3, dtype=np.float64)
-            M_aug = Mq + armature * np.eye(3, dtype=np.float64)
-            # Generalised eigenproblem: K v = omega^2 M_aug v.
-            w_sq, V = np.linalg.eig(np.linalg.solve(M_aug, K))
+            M_reflected = ((inertia + armature) / inertia) * Mq
+            # Generalised eigenproblem: K v = omega^2 M_reflected v.
+            w_sq, V = np.linalg.eig(np.linalg.solve(M_reflected, K))
             sort_idx = np.argsort(w_sq)
             w_sq = w_sq[sort_idx]
             V = V[:, sort_idx]

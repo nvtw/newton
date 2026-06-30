@@ -45,6 +45,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_STATIC,
     body_container_zeros,
+    inertia_sym6_pack_np,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -635,7 +636,7 @@ class TestPhoenXChainConvergence(unittest.TestCase):
         bodies.orientation.assign(ori)
         bodies.inverse_mass.assign(inv_m)
         bodies.inverse_inertia.assign(inv_I)
-        bodies.inverse_inertia_world.assign(inv_I)
+        bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(inv_I))
         bodies.motion_type.assign(motion)
 
         num_joints = num_cubes

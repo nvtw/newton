@@ -218,7 +218,6 @@ class AdbsInitArrays:
         damping_ratio_limit: wp.array,
         stiffness_limit: wp.array,
         damping_limit: wp.array,
-        armature: wp.array,
         friction_coefficient: wp.array,
         friction_slip_scale: wp.array,
         d6_limit_axis0: wp.array,
@@ -256,7 +255,6 @@ class AdbsInitArrays:
         self.damping_ratio_limit = damping_ratio_limit
         self.stiffness_limit = stiffness_limit
         self.damping_limit = damping_limit
-        self.armature = armature
         self.friction_coefficient = friction_coefficient
         self.friction_slip_scale = friction_slip_scale
         self.d6_limit_axis0 = d6_limit_axis0
@@ -301,7 +299,6 @@ class AdbsInitArrays:
             "damping_ratio_limit": self.damping_ratio_limit,
             "stiffness_limit": self.stiffness_limit,
             "damping_limit": self.damping_limit,
-            "armature": self.armature,
             "friction_coefficient": self.friction_coefficient,
             "friction_slip_scale": self.friction_slip_scale,
             "d6_limit_axis0": self.d6_limit_axis0,
@@ -385,7 +382,6 @@ def build_adbs_init_arrays(
             damping_ratio_limit=empty_f,
             stiffness_limit=empty_f,
             damping_limit=empty_f,
-            armature=empty_f,
             friction_coefficient=empty_f,
             friction_slip_scale=empty_f,
             d6_limit_axis0=empty_v,
@@ -434,7 +430,6 @@ def build_adbs_init_arrays(
     target_vel = _pull_dof_f(model.joint_target_qd)
     target_ke = _pull_dof_f(model.joint_target_ke)
     target_kd = _pull_dof_f(model.joint_target_kd)
-    joint_armature = _pull_dof_f(model.joint_armature)
     joint_friction = _pull_dof_f(model.joint_friction)
     mujoco_attrs = getattr(model, "mujoco", None) if joint_friction_model == "mujoco" else None
     friction_solref = _pull_dof_f(getattr(mujoco_attrs, "solreffriction", None)) if mujoco_attrs is not None else None
@@ -544,7 +539,6 @@ def build_adbs_init_arrays(
         hertz_limit_val = float(DEFAULT_HERTZ_LIMIT)
         damping_ratio_limit_val = float(DEFAULT_DAMPING_RATIO)
         # Armature only applies to REVOLUTE/PRISMATIC axial rows; 0 elsewhere.
-        armature_val = 0.0
         friction_val = 0.0
         friction_slip_scale_val = -1.0
         d6_limit_axes = [np.zeros(3, dtype=np.float32) for _ in range(3)]
@@ -693,8 +687,6 @@ def build_adbs_init_arrays(
                 if lo <= hi:
                     min_val = lo
                     max_val = hi
-            if joint_armature is not None and effective_qd < len(joint_armature):
-                armature_val = float(joint_armature[effective_qd])
             if joint_friction is not None and effective_qd < len(joint_friction):
                 friction_val = float(joint_friction[effective_qd])
             if friction_solref is not None and friction_solimp is not None and effective_qd < len(friction_solref):
@@ -744,7 +736,6 @@ def build_adbs_init_arrays(
                 "damping_ratio_limit": damping_ratio_limit_val,
                 "stiffness_limit": stiff_limit,
                 "damping_limit": damp_limit,
-                "armature": armature_val,
                 "friction_coefficient": friction_val,
                 "friction_slip_scale": friction_slip_scale_val,
                 "d6_limit_axis0": d6_limit_axes[0],
@@ -807,7 +798,6 @@ def build_adbs_init_arrays(
         damping_ratio_limit=_stack_f("damping_ratio_limit"),
         stiffness_limit=_stack_f("stiffness_limit"),
         damping_limit=_stack_f("damping_limit"),
-        armature=_stack_f("armature"),
         friction_coefficient=_stack_f("friction_coefficient"),
         friction_slip_scale=_stack_f("friction_slip_scale"),
         d6_limit_axis0=_stack_v("d6_limit_axis0"),

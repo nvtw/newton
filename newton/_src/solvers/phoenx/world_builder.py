@@ -1081,8 +1081,6 @@ class WorldBuilder:
         # substep).
         c.position_prev_substep = wp.array(positions, dtype=wp.vec3f, device=device)
         c.orientation_prev_substep = wp.array(orientations, dtype=wp.quatf, device=device)
-        c.velocity_prev_substep = wp.array(velocities, dtype=wp.vec3f, device=device)
-        c.angular_velocity_prev_substep = wp.array(angular_velocities, dtype=wp.vec3f, device=device)
         c.access_mode = wp.full(n, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
         c.has_position_level_writers = wp.zeros(1, dtype=wp.int32, device=device)
         c.island_root = wp.full(n, value=-1, dtype=wp.int32, device=device)

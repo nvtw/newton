@@ -16,7 +16,12 @@ import warp as wp
 
 import newton
 import newton.rl as rl
-from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import benchmark_train_to_gate
+from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
+    _make_parser as make_g1_train_to_gate_parser,
+)
+from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
+    benchmark_train_to_gate,
+)
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
@@ -3577,11 +3582,6 @@ class TestG1PhoenXRL(unittest.TestCase):
             np.ones(env.solver._adbs.num_joint_columns, dtype=np.int32),
         )
         self.assertGreater(float(np.max(env.model.joint_armature.numpy())), 0.0)
-        np.testing.assert_array_equal(
-            env.solver._adbs.armature.numpy(),
-            np.zeros(env.solver._adbs.num_joint_columns, dtype=np.float32),
-        )
-
         q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
         qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
         q[:, :] = env.model.joint_q.numpy().reshape(env.world_count, env.coord_stride)
@@ -3610,6 +3610,42 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertGreater(float(np.min(response_ratio)), 0.90)
         self.assertLess(float(np.max(response_ratio)), 1.05)
         self.assertTrue(np.all(np.isfinite(joint_q)))
+
+    def test_maximal_g1_armature_chain_remains_stable_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX maximal G1 armature stability tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=10,
+                solver_iterations=16,
+                velocity_iterations=1,
+                max_episode_steps=0,
+                auto_reset=False,
+                randomize_commands_on_reset=False,
+                reset_noise=0.0,
+                actuation_model="constraint_drive",
+                articulation_mode="maximal",
+                joint_friction_scale=0.0,
+            ),
+            device=device,
+        )
+        q = env.model.joint_q.numpy().reshape(1, env.coord_stride).copy()
+        qd = np.zeros((1, env.dof_stride), dtype=np.float32)
+        q[:, 2] = 3.0
+        q[:, 7 : 7 + rl.ACTION_DIM_G1] = env.default_joint_pos.numpy()
+        env.state_0.joint_q.assign(q.reshape(-1))
+        env.state_0.joint_qd.assign(qd.reshape(-1))
+        newton.eval_fk(env.model, env.state_0.joint_q, env.state_0.joint_qd, env.state_0)
+
+        actions = wp.zeros((1, env.action_dim), dtype=wp.float32, device=device)
+        graph = rl.capture_env_steps(env, actions, steps_per_graph=30, warmup_steps=0)
+        wp.capture_launch(graph)
+
+        joint_q = env.state_0.joint_q.numpy().reshape(1, env.coord_stride)[:, 7 : 7 + rl.ACTION_DIM_G1]
+        tracking_error = np.abs(joint_q - env.default_joint_pos.numpy()[None, :])
+        self.assertTrue(np.all(np.isfinite(joint_q)))
+        self.assertLess(float(np.max(tracking_error)), 0.02)
+        self.assertEqual(float(env.dones.numpy()[0]), 0.0)
 
     def test_constraint_drive_softness_matches_implicit_pd_coefficients_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 implicit-drive coefficient tests")
@@ -5231,11 +5267,20 @@ class TestG1PhoenXRL(unittest.TestCase):
                 fail_on_miss=False,
                 include_train_history=True,
             )
+            defaults = vars(make_g1_train_to_gate_parser().parse_args([]))
+            defaults.update(vars(args))
+            defaults["articulation_mode"] = "reduced"
+            args = argparse.Namespace(**defaults)
             result = benchmark_train_to_gate(args)
             checkpoint_path = Path(checkpoint_template.format(iteration=1))
             restored = rl.load_ppo_checkpoint(checkpoint_path, device=device)
+            eval_args = argparse.Namespace(**vars(args))
+            eval_args.evaluate_only = True
+            eval_args.resume_checkpoint = str(checkpoint_path)
+            eval_result = benchmark_train_to_gate(eval_args)
 
             self.assertEqual(result["execution_mode"], "graph_leapfrog")
+            self.assertEqual(result["articulation_mode"], "reduced")
             self.assertFalse(result["readback_diagnostics"])
             self.assertEqual(result["squash_actions"], g1_recipe.SQUASH_ACTIONS)
             self.assertEqual(result["log_std_init"], g1_recipe.LOG_STD_INIT)
@@ -5280,6 +5325,10 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(len(result["gate_history"]), 1)
             self.assertEqual(len(result["train_history"]), 1)
             self.assertFalse(result["pass_gate"])
+            self.assertTrue(eval_result["evaluate_only"])
+            self.assertEqual(eval_result["articulation_mode"], "reduced")
+            self.assertEqual(eval_result["new_trained_samples"], 0)
+            self.assertEqual(len(eval_result["gate_history"]), 1)
             self.assertGreater(result["train_env_samples_per_s"], 0.0)
             self.assertTrue(math.isfinite(result["gate_history"][0]["stats"]["battery_perf"]))
 

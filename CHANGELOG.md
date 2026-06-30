@@ -71,6 +71,7 @@
 ### Fixed
 
 - Restore the experimental PhoenX G1 trainer PPO settings and command curriculum to the pinned nanoG1 recipe.
+- Fix maximal-coordinate PhoenX revolute armature by reflecting motor rotor inertia through the gear ratio into the rotor-side child body inertia, preserving rigid-body momentum and gyroscopic dynamics while removing the unstable auxiliary constraint row.
 - Stabilize the full-coordinate PhoenX `robot_g1` example with a fine temporal schedule.
 - Fix reduced-coordinate PhoenX motion-subspace evaluation after the common Featherstone API gained configuration-dependent D6 angular axes.
 - Fix reduced-coordinate PhoenX FREE and DISTANCE descendants to preserve child-COM velocity under rotated anchors and accelerating parents, and accept tree DISTANCE joints through `articulation_mode="reduced"`.

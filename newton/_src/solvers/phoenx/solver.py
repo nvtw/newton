@@ -14,7 +14,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.sim import BodyFlags, Contacts, Control, Model, ModelFlags, State
+from newton._src.sim import BodyFlags, Contacts, Control, JointType, Model, ModelFlags, State
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation
 from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
@@ -61,6 +61,69 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     PRIMITIVE_CPP = 5
     SAFETY = 2
     return max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
+
+
+def _build_maximal_rotor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
+    """Build output-reflected rotor-side inertia for maximal coordinates.
+
+    Each revolute DoF contributes ``gear**2 * armature * axis * axis.T``
+    to its child body inertia. The parent body inertia is expected to already
+    include the motor stator and housing. This is a rigid reflected-rotor model,
+    so internal motor and constraint impulses retain ordinary body momentum.
+    """
+    body_inv = np.asarray(model.body_inv_inertia.numpy(), dtype=np.float64)
+    body_inertia = np.zeros_like(body_inv)
+    dynamic = np.asarray(model.body_inv_mass.numpy()) > 0.0
+    for body in np.flatnonzero(dynamic):
+        body_inertia[body] = np.linalg.inv(body_inv[body])
+
+    joint_child = model.joint_child.numpy()
+    joint_type = model.joint_type.numpy()
+    joint_xform_child = model.joint_X_c.numpy()
+    joint_qd_start = model.joint_qd_start.numpy()
+    joint_dof_dim = model.joint_dof_dim.numpy()
+    joint_axis = model.joint_axis.numpy()
+    armature = model.joint_armature.numpy()
+    gear = model.joint_gear.numpy() if model.joint_gear is not None else np.ones_like(armature)
+
+    for joint in range(int(model.joint_count)):
+        qd_start = int(joint_qd_start[joint])
+        linear_count = int(joint_dof_dim[joint, 0])
+        angular_count = int(joint_dof_dim[joint, 1])
+        child = int(joint_child[joint])
+        if np.any(armature[qd_start : qd_start + linear_count + angular_count] < 0.0):
+            raise ValueError("joint_armature must be nonnegative")
+        for offset in range(linear_count):
+            dof = qd_start + offset
+            if float(armature[dof]) > 0.0:
+                raise NotImplementedError(
+                    "Maximal PhoenX body-space armature currently supports rotational motor rotors only"
+                )
+        for offset in range(angular_count):
+            dof = qd_start + linear_count + offset
+            rotor_inertia = float(armature[dof])
+            if rotor_inertia == 0.0:
+                continue
+            if int(joint_type[joint]) != int(JointType.REVOLUTE):
+                raise NotImplementedError("Maximal PhoenX rotor-side armature currently supports revolute joints only")
+            ratio = float(gear[dof])
+            if not np.isfinite(ratio) or ratio <= 0.0:
+                raise ValueError(f"joint_gear[{dof}] must be finite and positive")
+            if child < 0 or not dynamic[child]:
+                continue
+            axis_joint = np.asarray(joint_axis[dof], dtype=np.float64)
+            axis_norm = float(np.linalg.norm(axis_joint))
+            if axis_norm <= 1.0e-12:
+                raise ValueError(f"joint_axis[{dof}] must be non-zero for motor armature")
+            axis_joint /= axis_norm
+            q_child_joint = np.asarray(joint_xform_child[joint, 3:7], dtype=np.float64)
+            q_xyz = q_child_joint[:3]
+            axis_child = axis_joint + 2.0 * np.cross(q_xyz, np.cross(q_xyz, axis_joint) + q_child_joint[3] * axis_joint)
+            body_inertia[child] += (ratio * ratio * rotor_inertia) * np.outer(axis_child, axis_child)
+
+    for body in np.flatnonzero(dynamic):
+        body_inv[body] = np.linalg.inv(body_inertia[body])
+    return wp.array(body_inv.astype(np.float32), dtype=wp.mat33f, device=model.device)
 
 
 class _PhoenXCollisionPipelineAdapter:
@@ -171,7 +234,10 @@ class SolverPhoenX(SolverBase):
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
             articulation_mode: "maximal" keeps independent-body tree
-                dynamics and classic PhoenX PGS. "hybrid" keeps the maximal
+                dynamics and classic PhoenX PGS. Revolute ``joint_armature`` is
+                reflected through ``joint_gear`` and added to the rotor-side
+                child body inertia; authored parent inertia must include the
+                stator and housing. "hybrid" keeps the maximal
                 joint rows active while using the exact articulated-body response
                 as their preconditioner. "reduced" lets generalized coordinates
                 own tree joints.
@@ -191,6 +257,9 @@ class SolverPhoenX(SolverBase):
             prepare_refresh_stride = 1
         self.articulation_mode = articulation_mode
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
+        self._phoenx_body_inv_inertia = (
+            _build_maximal_rotor_body_inv_inertia(model) if articulation_mode == "maximal" else model.body_inv_inertia
+        )
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
         if velocity_readout not in valid_readouts:
             raise ValueError(f"velocity_readout must be one of {valid_readouts}, got {velocity_readout!r}")
@@ -234,10 +303,6 @@ class SolverPhoenX(SolverBase):
             joint_friction_model=self._joint_friction_model,
             reduced_articulations=self.articulation_mode == "reduced",
         )
-        if self.articulation_mode == "hybrid":
-            # The articulated-body factorization already contains exact joint
-            # armature; the maximal PGS rows must not add it a second time.
-            self._adbs.armature.zero_()
         num_joints = self._adbs.num_joint_columns
         num_particles = int(getattr(model, "particle_count", 0) or 0)
         num_cloth_triangles = int(getattr(model, "tri_count", 0) or 0)
@@ -537,6 +602,8 @@ class SolverPhoenX(SolverBase):
         )
 
     def _joint_gear_array(self) -> wp.array[wp.float32]:
+        if self.model.joint_gear is not None:
+            return self.model.joint_gear
         n = max(1, int(self.model.joint_dof_count))
         if self._default_joint_gear.shape[0] != n:
             self._default_joint_gear = wp.ones(n, dtype=wp.float32, device=self.device)
@@ -864,7 +931,7 @@ class SolverPhoenX(SolverBase):
             dim=int(model.body_count) + 1,
             inputs=[
                 model.body_inv_mass,
-                model.body_inv_inertia,
+                self._phoenx_body_inv_inertia,
                 model.body_com,
                 model.body_flags,
                 model.body_world,
@@ -895,8 +962,6 @@ class SolverPhoenX(SolverBase):
                 joint_friction_model=self._joint_friction_model,
                 reduced_articulations=self.articulation_mode == "reduced",
             )
-            if self.articulation_mode == "hybrid":
-                self._adbs.armature.zero_()
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
         if flags & int(ModelFlags.MODEL_PROPERTIES):
@@ -906,8 +971,11 @@ class SolverPhoenX(SolverBase):
         # rebuilt joint rows above and does not mutate body inertia.
         body_refresh_mask = int(ModelFlags.BODY_INERTIAL_PROPERTIES | ModelFlags.BODY_PROPERTIES)
         body_properties_changed = bool(flags & body_refresh_mask)
+        maximal_joint_properties_changed = joint_props_changed and self.articulation_mode == "maximal"
         reduced_joint_properties_changed = joint_props_changed and self.articulation_mode in ("hybrid", "reduced")
-        if body_properties_changed or reduced_joint_properties_changed:
+        if self.articulation_mode == "maximal" and (body_properties_changed or joint_props_changed):
+            self._phoenx_body_inv_inertia = _build_maximal_rotor_body_inv_inertia(self.model)
+        if body_properties_changed or maximal_joint_properties_changed or reduced_joint_properties_changed:
             if self.model.body_count > 0:
                 self._launch_init_phoenx_bodies(self.model)
                 if self.articulation_mode in ("hybrid", "reduced") and self._reduced_articulation is not None:
