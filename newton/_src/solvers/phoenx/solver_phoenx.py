@@ -10,11 +10,6 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.articulations import (
-    ArticulationDeviceSystem,
-    ArticulationTopology,
-    PrefactorizedArticulationSystem,
-)
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -128,7 +123,6 @@ from newton._src.solvers.phoenx.islands.island_builder import (
 from newton._src.solvers.phoenx.mass_splitting import (
     CopyStateContainer,
     InteractionGraphScratch,
-    build_constraint_slot_cache,
     build_interaction_graph,
     copy_state_container_zeros,
     interaction_graph_scratch_zeros,
@@ -139,6 +133,7 @@ from newton._src.solvers.phoenx.mass_splitting import (
     launch_copy_state_into_rigids,
     record_all_interactions_kernel,
 )
+from newton._src.solvers.phoenx.mass_splitting.slot_cache import build_constraint_slot_cache
 from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
 from newton._src.solvers.phoenx.simple import SimplePhoenXDispatcher
@@ -610,10 +605,6 @@ class PhoenXWorld:
         speculative_coloring: bool = True,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
-        articulation_dvi_host: bool = False,
-        articulation_dvi_replaces_joint_pgs: bool | None = None,
-        articulation_dvi_host_solver: str = "block_sparse",
-        cache_articulation_topology: bool = True,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
@@ -629,23 +620,6 @@ class PhoenXWorld:
             substeps, solver_iterations, velocity_iterations: PGS
                 schedule. ``velocity_iterations=1`` enables TGS-soft
                 relax (recommended for tall stacks).
-            articulation_dvi_host: Run the host-validation full-coordinate
-                DVI articulation solve inside each substep. Defaults to
-                ``False`` because this path performs host/device transfers
-                and is not CUDA-graph capturable.
-            articulation_dvi_replaces_joint_pgs: When ``True``, PhoenX keeps
-                joint CIDs in the coloring/contact layout but skips joint PGS
-                dispatches so the DVI articulation solve owns those rows.
-                Defaults to the value of ``articulation_dvi_host``.
-            articulation_dvi_host_solver: DVI numeric solve method.
-                ``"device_block_sparse"`` uses the Warp block-sparse solve.
-                ``"block_sparse"`` uses the host prefactorized block LDLT
-                validation path and is the most robust option for cyclic
-                full-coordinate mechanisms, while ``"dense"`` uses the dense
-                host LDLT fallback.
-            cache_articulation_topology: Build and store DVI articulation
-                topology during joint initialization. Disable this for normal
-                PGS-only SolverPhoenX worlds to avoid DVI setup work.
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``"auto"``
@@ -769,8 +743,6 @@ class PhoenXWorld:
             raise NotImplementedError("solver_flavor='simple' currently supports rigid bodies only")
         if self.solver_flavor == "simple" and float(sleeping_velocity_threshold) > 0.0:
             raise NotImplementedError("solver_flavor='simple' does not yet support sleeping")
-        if self.solver_flavor == "simple" and articulation_dvi_host:
-            raise ValueError("solver_flavor='simple' cannot be combined with articulation_dvi_host")
         # Stamp the scene-wide ``has_position_level_writers`` flag on the
         # body container so :func:`body_set_access_mode` can warp-uniform
         # short-circuit in rigid-only scenes. Re-stamped by
@@ -892,23 +864,6 @@ class PhoenXWorld:
         # observes any non-revolute mode. Must be stable before
         # ``wp.ScopedCapture`` records the step.
         self._use_revolute_specialization: bool = True
-        self.articulation_dvi_host: bool = bool(articulation_dvi_host)
-        if articulation_dvi_replaces_joint_pgs is None:
-            articulation_dvi_replaces_joint_pgs = self.articulation_dvi_host
-        self.articulation_dvi_replaces_joint_pgs: bool = bool(articulation_dvi_replaces_joint_pgs)
-        if self.articulation_dvi_replaces_joint_pgs and not self.articulation_dvi_host:
-            raise ValueError("articulation_dvi_replaces_joint_pgs requires articulation_dvi_host=True")
-        self.articulation_dvi_host_solver: str = self._normalize_articulation_dvi_host_solver(
-            articulation_dvi_host_solver
-        )
-        self.cache_articulation_topology: bool = bool(cache_articulation_topology)
-        # Topology-only full-coordinate articulation system. Built at joint
-        # initialization and reused by the DVI articulation path as it is
-        # brought online.
-        self.articulation_topology: ArticulationTopology | None = None
-        self.articulation_system: PrefactorizedArticulationSystem | None = None
-        self.articulation_device_system: ArticulationDeviceSystem | None = None
-        self.articulation_dvi_joint_mask: np.ndarray | None = None
         self._joint_pgs_enabled: wp.array[wp.int32] = wp.ones(
             max(1, self.num_joints), dtype=wp.int32, device=self.device
         )
@@ -1802,7 +1757,6 @@ class PhoenXWorld:
         d6_limit_lower: wp.array | None = None,
         d6_limit_upper: wp.array | None = None,
         d6_limit_count: wp.array | None = None,
-        articulation_joint_mask: wp.array | None = None,
     ) -> None:
         """Pack ``num_joints`` actuated-DBS joint columns. Call once after
         :meth:`__init__`, before the first :meth:`step`. All input arrays must
@@ -1848,9 +1802,6 @@ class PhoenXWorld:
             d6_limit_lower, d6_limit_upper: Optional per-axis limit
                 windows [rad].
             d6_limit_count: Optional number of D6 angular limit axes.
-            articulation_joint_mask: Optional per-column mask selecting
-                joints owned by the DVI articulation solve. Use this to
-                exclude loop-closure joints from the direct tree solve.
         """
         if self.num_joints <= 0:
             return
@@ -1889,19 +1840,6 @@ class PhoenXWorld:
                 )
         if self.solver_flavor == "simple" and np.any(d6_limit_count.numpy() > 0):
             raise NotImplementedError("solver_flavor='simple' does not yet support D6 angular limit rows")
-        if self.cache_articulation_topology:
-            self._cache_prefactorized_articulation_topology(
-                body1,
-                body2,
-                joint_mode,
-                drive_mode=drive_mode,
-                stiffness_drive=stiffness_drive,
-                damping_drive=damping_drive,
-                min_value=min_value,
-                max_value=max_value,
-                d6_limit_count=d6_limit_count,
-                articulation_joint_mask=articulation_joint_mask,
-            )
         wp.launch(
             actuated_double_ball_socket_initialize_kernel,
             dim=self.num_joints,
@@ -1940,179 +1878,6 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
-
-    def _cache_prefactorized_articulation_topology(
-        self,
-        body1: wp.array,
-        body2: wp.array,
-        joint_mode: wp.array,
-        *,
-        drive_mode: wp.array | None = None,
-        stiffness_drive: wp.array | None = None,
-        damping_drive: wp.array | None = None,
-        min_value: wp.array | None = None,
-        max_value: wp.array | None = None,
-        d6_limit_count: wp.array | None = None,
-        articulation_joint_mask: wp.array | None = None,
-    ) -> None:
-        """Cache topology-only DVI articulation data from joint init arrays.
-
-        The symbolic phase is topology-only and intentionally runs outside graph
-        capture. Runtime DVI kernels will consume this metadata once the numeric
-        path is connected.
-        """
-        self.articulation_topology = None
-        self.articulation_system = None
-        self.articulation_device_system = None
-        self.articulation_dvi_joint_mask = None
-        try:
-            body1_np = body1.numpy()
-            body2_np = body2.numpy()
-            joint_mode_np = joint_mode.numpy()
-            inverse_mass_np = self.bodies.inverse_mass.numpy()
-            joint_mask_np = articulation_joint_mask.numpy() if articulation_joint_mask is not None else None
-            drive_mode_np = drive_mode.numpy() if drive_mode is not None else None
-            stiffness_drive_np = stiffness_drive.numpy() if stiffness_drive is not None else None
-            damping_drive_np = damping_drive.numpy() if damping_drive is not None else None
-            min_value_np = min_value.numpy() if min_value is not None else None
-            max_value_np = max_value.numpy() if max_value is not None else None
-            d6_limit_count_np = d6_limit_count.numpy() if d6_limit_count is not None else None
-        except Exception:
-            return
-
-        if joint_mask_np is not None:
-            joint_mask_np = np.asarray(joint_mask_np, dtype=bool)
-            if joint_mask_np.shape != joint_mode_np.shape:
-                raise ValueError(
-                    f"articulation_joint_mask must have shape {joint_mode_np.shape}, got {joint_mask_np.shape}"
-                )
-            self.articulation_dvi_joint_mask = joint_mask_np.copy()
-
-        if self.num_joints > 0:
-            if self.articulation_dvi_replaces_joint_pgs and joint_mask_np is not None:
-                pgs_enabled = np.where(joint_mask_np, 0, 1).astype(np.int32)
-            elif self.articulation_dvi_replaces_joint_pgs:
-                pgs_enabled = np.zeros(self.num_joints, dtype=np.int32)
-            else:
-                pgs_enabled = np.ones(self.num_joints, dtype=np.int32)
-            self._joint_pgs_enabled.assign(pgs_enabled)
-
-        static_body_indices = np.nonzero(inverse_mass_np <= 0.0)[0].astype(np.int32)
-        if not self.articulation_dvi_replaces_joint_pgs:
-            drive_mode_np = None
-            stiffness_drive_np = None
-            damping_drive_np = None
-            min_value_np = None
-            max_value_np = None
-            d6_limit_count_np = None
-
-        topology = ArticulationTopology.from_host(
-            body1_np,
-            body2_np,
-            joint_mode_np,
-            static_body_indices=static_body_indices,
-            enabled_joint_mask=joint_mask_np,
-            drive_mode=drive_mode_np,
-            stiffness_drive=stiffness_drive_np,
-            damping_drive=damping_drive_np,
-            min_value=min_value_np,
-            max_value=max_value_np,
-            d6_limit_count=d6_limit_count_np,
-        )
-        self.articulation_topology = topology
-        self.articulation_system = PrefactorizedArticulationSystem.from_topology(topology)
-        self.articulation_device_system = ArticulationDeviceSystem.from_topology(
-            topology, self.device, self.articulation_system.symbolic
-        )
-
-    @staticmethod
-    def _normalize_articulation_dvi_host_solver(value: str) -> str:
-        normalized = str(value).strip().lower().replace("-", "_")
-        if normalized in {"device_block_sparse", "device_sparse_ldl", "device_sparse_ldlt", "gpu_block_sparse"}:
-            return "device_block_sparse"
-        if normalized in {"block_sparse", "block_sparse_ldlt", "sparse_ldl", "sparse_ldlt"}:
-            return "block_sparse"
-        if normalized in {"dense", "dense_ldlt"}:
-            return "dense"
-        raise ValueError(
-            f"articulation_dvi_host_solver must be 'device_block_sparse', 'block_sparse', or 'dense' (got {value!r})"
-        )
-
-    def solve_articulations_dvi_host(
-        self,
-        dt: float | None = None,
-        *,
-        alpha: float = 0.0,
-        recovery_speed: float = -1.0,
-        solver: str | None = None,
-    ) -> bool:
-        """Apply one DVI solve for cached articulation rows.
-
-        This is the integration checkpoint for the full-coordinate articulation
-        path: row population, matrix assembly, RHS construction, factorization,
-        solve, and velocity application all run against PhoenX buffers.
-        ``solver="device_block_sparse"`` stays on the device after row
-        assembly; the host modes remain as validation fallbacks.
-        """
-        if (
-            self.articulation_device_system is None
-            or self.articulation_system is None
-            or self.articulation_device_system.total_rows <= 0
-        ):
-            return False
-
-        solve_dt = float(self.substep_dt if dt is None else dt)
-        if solve_dt <= 0.0:
-            raise ValueError(f"dt must be positive, got {solve_dt}")
-
-        device_system = self.articulation_device_system
-        solve_method = self._normalize_articulation_dvi_host_solver(
-            self.articulation_dvi_host_solver if solver is None else solver
-        )
-
-        device_system.populate_from_adbs_constraints(self.constraints, self.bodies, dt=solve_dt, device=self.device)
-        device_system.compute_residual(
-            self.bodies,
-            dt=solve_dt,
-            alpha=float(alpha),
-            recovery_speed=float(recovery_speed),
-            device=self.device,
-        )
-
-        if solve_method == "device_block_sparse":
-            device_system.assemble_block_sparse_matrix(
-                self.bodies.inverse_mass,
-                self.bodies.inverse_inertia_world,
-                diagonal_regularization=self.articulation_system.diagonal_regularization,
-                device=self.device,
-            )
-            device_system.solve_block_sparse_matrix(device=self.device)
-        else:
-            device_system.assemble_dense_matrix(
-                self.bodies.inverse_mass, self.bodies.inverse_inertia_world, device=self.device
-            )
-            total_rows = device_system.total_rows
-            matrix = device_system.matrix.numpy()[:total_rows, :total_rows]
-            rhs = device_system.rhs.numpy()[:total_rows]
-            self.articulation_system.factorize_dense_matrix(matrix)
-            solution = self.articulation_system.solve_prefactorized(rhs, method=solve_method).astype(np.float32)
-            device_system.solution.assign(solution)
-
-        device_system.apply_solution(
-            self.bodies,
-            self.bodies.inverse_mass,
-            self.bodies.inverse_inertia_world,
-            device=self.device,
-        )
-        return True
-
-    def _solve_articulations_dvi_host_for_step(self) -> None:
-        if self.solve_articulations_dvi_host(dt=self.substep_dt):
-            return
-        if self.num_joints > 0:
-            raise RuntimeError(
-                "articulation_dvi_host=True requires initialized PhoenX ADBS joint topology before step()"
-            )
 
     def set_reduced_articulation(self, articulation, joint_pgs_enabled: np.ndarray) -> None:
         """Bind a reduced backend and transfer ownership of selected joint columns."""
@@ -3100,11 +2865,7 @@ class PhoenXWorld:
             # integrate_positions stays in step() -- identical for every
             # dispatcher.
             idt = wp.float32(1.0 / self.substep_dt)
-            if self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs:
-                self._solve_articulations_dvi_host_for_step()
             self._dispatcher.solve(idt)
-            if self.articulation_dvi_host and not self.articulation_dvi_replaces_joint_pgs:
-                self._solve_articulations_dvi_host_for_step()
             self._integrate_positions()
             if self._reduced_articulation is not None:
                 self._reduced_articulation.end_substep(
@@ -4320,24 +4081,12 @@ class PhoenXWorld:
                 self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
 
     def _selective_joint_pgs_enabled(self) -> bool:
-        """Return whether PGS should skip only externally owned joint columns."""
-        if self._joint_pgs_ownership_active:
-            return self.num_joints > 0 and not self._joint_pgs_all_disabled
-        if not (self.articulation_dvi_host and self.articulation_dvi_replaces_joint_pgs):
-            return False
-        if self.articulation_dvi_joint_mask is None:
-            return False
-        return self.num_joints > 0 and not bool(self.articulation_dvi_joint_mask.all())
+        """Return whether PGS should skip only reduced-coordinate joint columns."""
+        return self._joint_pgs_ownership_active and self.num_joints > 0 and not self._joint_pgs_all_disabled
 
     def _skip_all_joint_pgs(self) -> bool:
-        """Return whether every joint column is owned by DVI."""
-        if self._joint_pgs_ownership_active:
-            return self._joint_pgs_all_disabled
-        return bool(
-            self.articulation_dvi_host
-            and self.articulation_dvi_replaces_joint_pgs
-            and not self._selective_joint_pgs_enabled()
-        )
+        """Return whether reduced coordinates own every joint column."""
+        return self._joint_pgs_ownership_active and self._joint_pgs_all_disabled
 
     def _dispatch_specialization_flags(self) -> dict[str, bool]:
         """Static dispatch axes shared by single-world and fast-tail kernels."""

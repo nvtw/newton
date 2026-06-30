@@ -2427,8 +2427,6 @@ class EnvG1PhoenX:
             threads_per_world=self.config.threads_per_world,
             multi_world_scheduler=self.config.multi_world_scheduler,
             prepare_refresh_stride=self.config.prepare_refresh_stride,
-            articulation_dvi=False,
-            articulation_dvi_replaces_joint_pgs=False,
         )
 
     def _resolve_foot_body_local(self, side: str) -> int:

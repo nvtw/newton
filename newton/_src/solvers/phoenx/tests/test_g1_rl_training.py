@@ -3418,9 +3418,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         graph = rl.capture_env_steps(env, actions, steps_per_graph=2, warmup_steps=1)
         wp.capture_launch(graph)
 
-        self.assertFalse(env.solver.world.articulation_dvi_host)
-        self.assertFalse(env.solver.world.articulation_dvi_replaces_joint_pgs)
-        self.assertIsNone(env.solver.world.articulation_topology)
         self.assertEqual(env.solver.world.rigid_contact_max, env.world_count * g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env.contacts.rigid_contact_max, env.world_count * g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env.obs.shape, (2, rl.OBS_DIM_G1))

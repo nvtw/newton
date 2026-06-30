@@ -45,9 +45,6 @@
 # ``--fps`` controls how often the broad/narrow-phase collision
 # detection runs.
 #
-# Pass ``--articulation-dvi`` to replace supported joint PGS rows with
-# PhoenX's full-coordinate DVI articulation solve.
-#
 # Command: python -m newton.examples robot_dr_legs_phoenx --world-count 4
 #
 ###########################################################################
@@ -197,8 +194,6 @@ class Example:
         self.world_count = args.world_count
 
         self.viewer = viewer
-        self._articulation_dvi = bool(args.articulation_dvi)
-
         dr_legs = newton.ModelBuilder(up_axis=newton.Axis.Z)
         # Mirror the kamino DR Legs reference example: ``armature``
         # = 0.011 kg.m^2 is the Dynamixel XH540-V150 reflected rotor
@@ -281,9 +276,6 @@ class Example:
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
             prepare_refresh_stride=args.prepare_refresh_stride,
-            articulation_dvi=args.articulation_dvi,
-            articulation_dvi_replaces_joint_pgs=args.articulation_dvi_replaces_joint_pgs,
-            articulation_dvi_solver=args.articulation_dvi_solver,
         )
 
         self.state_0 = self.model.state()
@@ -413,9 +405,7 @@ class Example:
 
     def capture(self):
         self.graph = None
-        dvi_solver = getattr(self.solver.world, "articulation_dvi_host_solver", "")
-        uses_host_dvi = self._articulation_dvi and dvi_solver != "device_block_sparse"
-        if wp.get_device().is_cuda and not uses_host_dvi:
+        if wp.get_device().is_cuda:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
@@ -483,14 +473,6 @@ class Example:
             raise AssertionError("joint_qd contains non-finite values")
         if float(np.min(body_q[:, 2])) < -0.10:
             raise AssertionError("DR Legs fell below the ground tolerance")
-
-        if self._articulation_dvi:
-            topology = getattr(self.solver.world, "articulation_topology", None)
-            if topology is None or int(topology.total_rows) <= 0:
-                raise AssertionError("PhoenX DVI articulation topology was not initialized")
-            dvi_mask = getattr(self.solver.world, "articulation_dvi_joint_mask", None)
-            if dvi_mask is None or not bool(np.any(dvi_mask)):
-                raise AssertionError("PhoenX DVI articulation owns no joints")
 
     @staticmethod
     def create_parser():
@@ -577,25 +559,6 @@ class Example:
                 " rigid contact worlds at a refresh stride of at most 3 and"
                 " is the validated Dr Legs default."
             ),
-        )
-        parser.add_argument(
-            "--articulation-dvi",
-            action=argparse.BooleanOptionalAction,
-            default=False,
-            help=("Use PhoenX's full-coordinate DVI articulation solve for supported joint columns."),
-        )
-        parser.add_argument(
-            "--articulation-dvi-replaces-joint-pgs",
-            action=argparse.BooleanOptionalAction,
-            default=None,
-            help=("Whether DVI-owned joints skip PhoenX joint PGS. Defaults to following --articulation-dvi."),
-        )
-        parser.add_argument(
-            "--articulation-dvi-solver",
-            type=str,
-            default="block_sparse",
-            choices=("device_block_sparse", "block_sparse", "dense"),
-            help="DVI articulation numeric solver.",
         )
         parser.add_argument(
             "--armature",

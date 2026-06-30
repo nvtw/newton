@@ -8,12 +8,10 @@
 - Add `example_motorized_cable_chain` as a one-for-one cable-joint counterpart to the PhoenX motorized hinge-chain example.
 - Add pure-Warp Muon optimizer support to `newton.rl` PPO trainers so experimental G1 runs can match nanoG1 optimizer settings without PyTorch.
 - Add `ConfigEnvG1PhoenX` scheduler knobs for `threads_per_world`, `multi_world_scheduler`, and `prepare_refresh_stride` so experimental G1 RL runs can benchmark PhoenX solver schedules without monkeypatching.
-- Add opt-in `SolverPhoenX` full-coordinate DVI articulation controls, including block-sparse solve modes and full closed-loop joint ownership for supported joint columns.
 - Add experimental `SolverPhoenX(articulation_mode="reduced")` support for linear-time reduced-coordinate articulation dynamics and rigid contacts through the common Newton `State` and `Control` API, including CUDA graph capture and multi-world execution.
 - Add experimental pure-Warp `newton.rl` PPO and SAC training utilities, including a PhoenX Anymal sparse-target locomotion environment, deterministic evaluation metrics, and PPO checkpoint resume helpers.
 - Add manual critic-backward PPO controls for the experimental PhoenX G1 RL training path, including `ConfigPPO.manual_critic_backward` and `newton.rl train-g1-ppo --no-manual-critic-backward`.
 - Add strict walking validation metrics and configurable upright termination for the experimental PhoenX Anymal RL environment.
-- Add a `robot_dr_legs_phoenx_dvi` example and matching `robot_dr_legs_phoenx --articulation-dvi` option for running DR Legs with PhoenX's DVI articulation solve.
 - Add public `SolverPhoenX` construction for model particles, cloth triangles and bending edges, and soft tetrahedra; deformable contacts use the same `model.contacts()` / `model.collide()` flow as rigid PhoenX scenes.
 - Add `body_qdd` extended state attribute support to `SolverPhoenX`, populated as a finite difference of pre-step and post-step COM-frame velocity over the outer `dt`. Enables `newton.sensors.SensorIMU` on top of PhoenX (accelerometer reports specific force; gyroscope reports body angular velocity)
 - Add `prepare_refresh_stride="auto"` to `SolverPhoenX` for graph-capture-safe reuse of cached rigid contact/joint prepare data in high-substep rigid scenes. Fixed integer strides remain available; the default `1` still rebuilds prepare data every substep, while `"auto"` falls back to `1` for unsupported deformable, mass-splitting, or sleeping scenes.
@@ -71,10 +69,10 @@
 
 ### Fixed
 
+- Fix reduced-coordinate PhoenX motion-subspace evaluation after the common Featherstone API gained configuration-dependent D6 angular axes.
 - Fix reduced-coordinate PhoenX FREE and DISTANCE descendants to preserve child-COM velocity under rotated anchors and accelerating parents, and accept tree DISTANCE joints through `articulation_mode="reduced"`.
 - Fix reduced-coordinate PhoenX direct forward dynamics to evaluate body wrenches in articulation-local coordinates and refresh cached ABA inertia after live body-property changes.
 - Fix experimental simple PhoenX warm starting and velocity relaxation so separated or removed contacts and stale conditional joint rows cannot affect bodies.
-- Fix PhoenX DVI angular and axial limits to preserve unilateral separation and apply configured frequency-based softness.
 - Fix PhoenX PGS iteration ordering so every solve and relaxation iteration traverses all constraint colors before processing any constraint again.
 - Fix PhoenX primitive stack contacts so dense Kapla tower examples remain stable while preserving SDF speculative-contact safeguards.
 - Fix `ViewerFile.is_running()` to return `False` after `ViewerFile.close()` so headless recording loops can terminate like interactive viewers. (#3094)

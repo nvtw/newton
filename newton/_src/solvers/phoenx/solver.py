@@ -29,7 +29,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_STIFFNESS_DRIVE,
     _OFF_TARGET,
     _OFF_TARGET_VELOCITY,
-    JOINT_MODE_CABLE,
 )
 from newton._src.solvers.phoenx.model_adapter import (
     AdbsInitArrays,
@@ -163,9 +162,6 @@ class SolverPhoenX(SolverBase):
         solver_flavor: str = "standard",
         jacobi_max_colors: int = 10,
         articulation_mode: str = "maximal",
-        articulation_dvi: bool = False,
-        articulation_dvi_replaces_joint_pgs: bool | None = None,
-        articulation_dvi_solver: str = "block_sparse",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -219,23 +215,12 @@ class SolverPhoenX(SolverBase):
             articulation_mode: "maximal" keeps tree joints in classic
                 PhoenX PGS. "reduced" uses Newton generalized coordinates
                 and linear-time articulated-body dynamics for articulation trees.
-            articulation_dvi: Enable the experimental full-coordinate DVI
-                articulation solve for every supported PhoenX joint column.
-            articulation_dvi_replaces_joint_pgs: When ``True``, DVI-owned
-                joints replace PhoenX joint PGS rows. Unsupported columns,
-                such as cable joints, continue to run through PGS.
-            articulation_dvi_solver: DVI numeric solver, forwarded to
-                :class:`PhoenXWorld`. ``"block_sparse"`` is the robust
-                validation path for cyclic full-coordinate mechanisms;
-                ``"device_block_sparse"`` is the graph-friendly device path.
         """
         super().__init__(model)
         if articulation_mode not in ("maximal", "reduced"):
             raise ValueError(f"articulation_mode must be 'maximal' or 'reduced', got {articulation_mode!r}")
         if articulation_mode == "reduced" and solver_flavor != "standard":
             raise ValueError("reduced articulations currently require solver_flavor='standard'")
-        if articulation_mode == "reduced" and articulation_dvi:
-            raise ValueError("articulation_mode='reduced' cannot be combined with articulation_dvi")
         if articulation_mode == "reduced" and mass_splitting:
             raise ValueError("articulation_mode='reduced' currently requires mass_splitting=False")
         if articulation_mode == "reduced" and multi_world_scheduler.startswith("block_world"):
@@ -295,9 +280,6 @@ class SolverPhoenX(SolverBase):
             reduced_articulations=self.articulation_mode == "reduced",
         )
         num_joints = self._adbs.num_joint_columns
-        self._adbs_articulation_joint_mask = self._build_adbs_articulation_joint_mask(model)
-        if articulation_dvi_replaces_joint_pgs is None:
-            articulation_dvi_replaces_joint_pgs = bool(articulation_dvi)
         num_particles = int(getattr(model, "particle_count", 0) or 0)
         num_cloth_triangles = int(getattr(model, "tri_count", 0) or 0)
         num_cloth_bending = int(getattr(model, "edge_count", 0) or 0)
@@ -412,10 +394,6 @@ class SolverPhoenX(SolverBase):
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
             sleeping_frames_required=int(sleeping_frames_required),
             prepare_refresh_stride=prepare_refresh_stride,
-            articulation_dvi_host=bool(articulation_dvi),
-            articulation_dvi_replaces_joint_pgs=articulation_dvi_replaces_joint_pgs,
-            articulation_dvi_host_solver=articulation_dvi_solver,
-            cache_articulation_topology=bool(articulation_dvi),
             device=self.device,
         )
 
@@ -473,7 +451,6 @@ class SolverPhoenX(SolverBase):
 
         if num_joints > 0:
             adbs_kwargs = self._adbs.to_initialize_kwargs()
-            adbs_kwargs["articulation_joint_mask"] = self._adbs_articulation_joint_mask
             self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
 
         if self.articulation_mode == "reduced" and int(model.articulation_count) > 0:
@@ -515,17 +492,6 @@ class SolverPhoenX(SolverBase):
         # Placeholder for _contact_impulse_to_force_wrapper_kernel when grouping
         # is off (has_perm=0 makes the kernel ignore it).
         self._sort_perm_placeholder = wp.zeros(1, dtype=wp.int32, device=self.device)
-
-    def _build_adbs_articulation_joint_mask(self, model: Model) -> wp.array:
-        """Return per-ADBS-column mask selecting supported DVI-owned joints."""
-        num_columns = int(self._adbs.num_joint_columns)
-        if num_columns <= 0:
-            return wp.zeros(0, dtype=wp.int32, device=self.device)
-
-        mask = np.ones(num_columns, dtype=np.int32)
-        joint_mode_np = self._adbs.joint_mode.numpy()
-        mask[joint_mode_np == int(JOINT_MODE_CABLE)] = 0
-        return wp.array(mask, dtype=wp.int32, device=self.device)
 
     def _bake_joint_armature_into_body_inertia(self, model: Model) -> None:
         """Add per-joint axial armature into both attached bodies' inertia so the
