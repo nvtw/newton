@@ -161,38 +161,59 @@ class TestKinematicLinks(unittest.TestCase):
             "Dynamic body should move on the first step after a kinematic toggle.",
         )
 
-    def test_immovable_contact_pairs_are_opt_in(self):
-        """Kinematic/static contacts require opt-in; static/static remains filtered."""
-        opt_in_cases = {
-            ("kinematic", "kinematic"),
-            ("static", "kinematic"),
-            ("kinematic", "static"),
-        }
-
+    def test_immovable_contact_pair_filtering(self):
         for shape_a, shape_b in [
             ("kinematic", "kinematic"),
             ("static", "kinematic"),
             ("kinematic", "static"),
             ("static", "static"),
         ]:
-            with self.subTest(shape_a=shape_a, shape_b=shape_b, include_static_kinematic_pairs=False):
-                model = _build_immovable_contact_pair(shape_a, shape_b)
-                self.assertEqual(model.shape_contact_pair_count, 1 if (shape_a, shape_b) in opt_in_cases else 0)
-                self.assertEqual(_rigid_contact_count(model), 0)
+            model = _build_contact_pair(shape_a, shape_b)
+            with self.subTest(shape_a=shape_a, shape_b=shape_b, model_pair_superset=True):
+                self.assertEqual(model.shape_contact_pair_count, 1)
+            for broad_phase in ("explicit", "nxn", "sap"):
+                with self.subTest(
+                    shape_a=shape_a,
+                    shape_b=shape_b,
+                    broad_phase=broad_phase,
+                    include_static_kinematic_pairs=False,
+                ):
+                    count = _rigid_contact_count(
+                        model,
+                        broad_phase=broad_phase,
+                        include_static_kinematic_pairs=False,
+                    )
+                    self.assertEqual(count, 0)
 
-            with self.subTest(shape_a=shape_a, shape_b=shape_b, include_static_kinematic_pairs=True):
-                model = _build_immovable_contact_pair(shape_a, shape_b)
-                expected_has_contacts = (shape_a, shape_b) in opt_in_cases
-                for broad_phase in ("explicit", "nxn", "sap"):
+                with self.subTest(
+                    shape_a=shape_a,
+                    shape_b=shape_b,
+                    broad_phase=broad_phase,
+                    include_static_kinematic_pairs=True,
+                ):
                     count = _rigid_contact_count(
                         model,
                         broad_phase=broad_phase,
                         include_static_kinematic_pairs=True,
                     )
-                    if expected_has_contacts:
-                        self.assertGreater(count, 0)
-                    else:
-                        self.assertEqual(count, 0)
+                    self.assertGreater(count, 0)
+
+    def test_immovable_filter_does_not_remove_dynamic_pairs(self):
+        for shape_a, shape_b in [
+            ("dynamic", "static"),
+            ("static", "dynamic"),
+            ("dynamic", "kinematic"),
+            ("kinematic", "dynamic"),
+        ]:
+            model = _build_contact_pair(shape_a, shape_b)
+            for broad_phase in ("explicit", "nxn", "sap"):
+                with self.subTest(shape_a=shape_a, shape_b=shape_b, broad_phase=broad_phase):
+                    count = _rigid_contact_count(
+                        model,
+                        broad_phase=broad_phase,
+                        include_static_kinematic_pairs=False,
+                    )
+                    self.assertGreater(count, 0)
 
 
 class TestKinematicLinksCanonical(unittest.TestCase):
@@ -235,7 +256,7 @@ def _configure_contact_defaults(builder: ModelBuilder) -> None:
     builder.default_shape_cfg.kf = 0.5
 
 
-def _build_immovable_contact_pair(shape_a: str, shape_b: str) -> newton.Model:
+def _build_contact_pair(shape_a: str, shape_b: str) -> newton.Model:
     builder = ModelBuilder(gravity=0.0)
     _configure_contact_defaults(builder)
 
@@ -246,11 +267,18 @@ def _build_immovable_contact_pair(shape_a: str, shape_b: str) -> newton.Model:
         elif kind == "kinematic":
             body = builder.add_body(xform=xform, mass=1.0, is_kinematic=True)
             builder.add_shape_sphere(body, radius=0.5)
+        elif kind == "dynamic":
+            body = builder.add_body(xform=xform, mass=1.0)
+            builder.add_shape_sphere(body, radius=0.5)
         else:
-            raise ValueError(f"Unsupported immovable shape kind: {kind}")
+            raise ValueError(f"Unsupported shape kind: {kind}")
 
     add_sphere(shape_a, -0.25)
     add_sphere(shape_b, 0.25)
+    # Static shapes share the world body and are filtered as a same-body pair
+    # by default. Clear that independent filter so this test isolates the
+    # broad phase's immovable-pair option.
+    builder.shape_collision_filter_pairs.clear()
     return builder.finalize(requires_grad=False)
 
 
@@ -258,7 +286,7 @@ def _rigid_contact_count(
     model: newton.Model,
     *,
     broad_phase: str = "explicit",
-    include_static_kinematic_pairs: bool = False,
+    include_static_kinematic_pairs: bool = True,
 ) -> int:
     pipeline = newton.CollisionPipeline(
         model,

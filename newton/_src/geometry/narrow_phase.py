@@ -305,10 +305,13 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Existing mesh-mesh pairs keep their legacy SDF/BVH fallback
             # behavior. New planar SDF cases require both shapes to have
             # texture SDF data and edges; otherwise the old routing is cheaper.
-            # Box-box stays on the primitive multi-contact path even when SDFs
-            # are present.
+            # Keep box-box on its existing GJK/MPR path even when SDFs are
+            # present. The output buffer must exist for the SDF edge route.
             if (is_mesh_a and is_mesh_b) or (
-                shape_pairs_mesh_mesh and has_sdf_edges_a and has_sdf_edges_b and not (is_box_a and is_box_b)
+                shape_pairs_mesh_mesh.shape[0] > 0
+                and has_sdf_edges_a
+                and has_sdf_edges_b
+                and not (is_box_a and is_box_b)
             ):
                 idx = wp.atomic_add(shape_pairs_mesh_mesh_count, 0, 1)
                 if idx < shape_pairs_mesh_mesh.shape[0]:
@@ -1826,6 +1829,8 @@ class NarrowPhase:
         """
         if device is None:
             device = self.device if self.device is not None else candidate_pair.device
+        if shape_edge_range is None:
+            shape_edge_range = self._empty_edge_range
 
         # Clear all counters with a single kernel launch (consolidated counter array)
         self._counter_array.zero_()
@@ -2062,9 +2067,6 @@ class NarrowPhase:
                 texture_sdf_data = wp.zeros(0, dtype=TextureSDFData, device=device)
             if mesh_edge_indices is None:
                 mesh_edge_indices = self._empty_edge_indices
-            if shape_edge_range is None:
-                shape_edge_range = self._empty_edge_range
-
             if self.mesh_mesh_contacts_kernel is not None:
                 if self.reduce_contacts and self.mesh_mesh_block_offsets is not None:
                     # Mesh-mesh contacts → buffer + inline hashtable registration

@@ -10594,22 +10594,12 @@ class ModelBuilder:
                             compute_uvs=False,
                             compute_inertia=False,
                         )
-                        unit_box_edge_mesh._collision_edges = np.array(
-                            [
-                                (0, 1),
-                                (1, 2),
-                                (2, 3),
-                                (3, 0),
-                                (4, 5),
-                                (5, 6),
-                                (6, 7),
-                                (7, 4),
-                                (0, 4),
-                                (1, 5),
-                                (2, 6),
-                                (3, 7),
-                            ],
-                            dtype=np.int32,
+                        unit_box_edge_mesh._build_collision_edges(
+                            lower_angle_threshold_rad=1.0e-6,
+                            upper_angle_threshold_rad=math.pi,
+                            enable_box_absorption=False,
+                            half_normal=0.0,
+                            half_lateral=0.0,
                         )
                         generated_sdf_edge_meshes.append(unit_box_edge_mesh)
                     generated_shape_sources[shape_idx] = unit_box_edge_mesh
@@ -11698,27 +11688,6 @@ class ModelBuilder:
         # If same world or at least one is global (-1), check collision groups
         return self._test_group_pair(collision_group_a, collision_group_b)
 
-    def _shape_pair_has_movable_body(
-        self,
-        shape_a: int,
-        shape_b: int,
-        *,
-        include_static_kinematic_pairs: bool = False,
-    ) -> bool:
-        body_a = int(self.shape_body[shape_a])
-        body_b = int(self.shape_body[shape_b])
-        static_a = body_a < 0
-        static_b = body_b < 0
-
-        if static_a and static_b:
-            return False
-
-        kinematic_a = (not static_a) and (int(self.body_flags[body_a]) & int(BodyFlags.KINEMATIC)) != 0
-        kinematic_b = (not static_b) and (int(self.body_flags[body_b]) & int(BodyFlags.KINEMATIC)) != 0
-        immovable_a = static_a or kinematic_a
-        immovable_b = static_b or kinematic_b
-        return include_static_kinematic_pairs or not (immovable_a and immovable_b)
-
     def find_shape_contact_pairs(self, model: Model):
         """
         Identifies and stores all potential shape contact pairs for collision detection.
@@ -11744,8 +11713,6 @@ class ModelBuilder:
         shape_world = self.shape_world
         shape_collision_group = self.shape_collision_group
 
-        shape_is_static = [body < 0 for body in self.shape_body]
-
         # Keep only colliding shapes (those with COLLIDE_SHAPES flag) and sort by world for optimization
         colliding_indices = [i for i, flag in enumerate(self.shape_flags) if flag & ShapeFlags.COLLIDE_SHAPES]
         sorted_indices = sorted(colliding_indices, key=shape_world.__getitem__)
@@ -11767,25 +11734,13 @@ class ModelBuilder:
                 if world1 != -1 and world2 != -1 and world1 != world2:
                     break
 
-                # Apply the exact same filtering logic as test_world_and_group_pair kernel.
-                if collision_group1 == 0 or collision_group2 == 0:
-                    continue
-                if collision_group1 > 0:
-                    if collision_group1 != collision_group2 and collision_group2 >= 0:
-                        continue
-                elif collision_group1 < 0:
-                    if collision_group1 == collision_group2:
-                        continue
-                else:
+                if not self._test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
                     continue
 
                 if s1 > s2:
                     shape_a, shape_b = s2, s1
                 else:
                     shape_a, shape_b = s1, s2
-
-                if shape_is_static[shape_a] and shape_is_static[shape_b]:
-                    continue
 
                 # Skip if explicitly filtered
                 if (shape_a, shape_b) not in filters:

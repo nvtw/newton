@@ -26,7 +26,6 @@ from ..geometry.support_function import (
 )
 from ..geometry.types import GeoType
 from ..sim.contacts import Contacts
-from ..sim.enums import BodyFlags
 from ..sim.model import Model
 from ..sim.state import State
 
@@ -42,97 +41,6 @@ def _shape_collide_mask(model: Model, shape_count: int | None = None) -> np.ndar
     if shape_count is not None and len(flags) != shape_count:
         raise ValueError("model.shape_flags and model.shape_type must have the same length")
     return (flags & int(ShapeFlags.COLLIDE_SHAPES)) != 0
-
-
-def _shape_pair_has_movable_body(
-    shape_body: np.ndarray,
-    body_flags: np.ndarray,
-    shape_a: int,
-    shape_b: int,
-    include_static_kinematic_pairs: bool = False,
-) -> bool:
-    body_a = int(shape_body[shape_a])
-    body_b = int(shape_body[shape_b])
-    static_a = body_a < 0
-    static_b = body_b < 0
-
-    if static_a and static_b:
-        return False
-
-    kinematic_a = (not static_a) and (int(body_flags[body_a]) & int(BodyFlags.KINEMATIC)) != 0
-    kinematic_b = (not static_b) and (int(body_flags[body_b]) & int(BodyFlags.KINEMATIC)) != 0
-    immovable_a = static_a or kinematic_a
-    immovable_b = static_b or kinematic_b
-    return include_static_kinematic_pairs or not (immovable_a and immovable_b)
-
-
-def _build_shape_contact_pairs(
-    model: Model,
-    *,
-    include_static_kinematic_pairs: bool = False,
-) -> wp.array[wp.vec2i]:
-    shape_count = model.shape_count
-    if shape_count <= 1:
-        return wp.array(np.empty((0, 2), dtype=np.int32), dtype=wp.vec2i, device=model.device)
-
-    shape_flags = getattr(model, "shape_flags", None)
-    shape_world = model.shape_world.numpy()
-    shape_collision_group = model.shape_collision_group.numpy()
-    shape_body = model.shape_body.numpy()
-    body_flags = model.body_flags.numpy() if model.body_flags is not None else np.empty(0, dtype=np.int32)
-    filters: set[tuple[int, int]] = getattr(model, "shape_collision_filter_pairs", set())
-
-    colliding_mask = (
-        _shape_collide_mask(model, shape_count) if shape_flags is not None else np.ones(shape_count, dtype=bool)
-    )
-    colliding_indices = [int(i) for i in np.where(colliding_mask)[0]]
-    sorted_indices = sorted(colliding_indices, key=lambda i: int(shape_world[i]))
-
-    contact_pairs: list[tuple[int, int]] = []
-    for i1, s1 in enumerate(sorted_indices):
-        world1 = int(shape_world[s1])
-        collision_group1 = int(shape_collision_group[s1])
-
-        for s2 in sorted_indices[i1 + 1 :]:
-            world2 = int(shape_world[s2])
-            collision_group2 = int(shape_collision_group[s2])
-
-            if world1 != -1 and world2 != -1 and world1 != world2:
-                break
-            if not _test_world_and_group_pair_host(world1, world2, collision_group1, collision_group2):
-                continue
-
-            shape_a, shape_b = (s1, s2) if s1 < s2 else (s2, s1)
-            if (shape_a, shape_b) in filters:
-                continue
-            if not _shape_pair_has_movable_body(
-                shape_body,
-                body_flags,
-                shape_a,
-                shape_b,
-                include_static_kinematic_pairs=include_static_kinematic_pairs,
-            ):
-                continue
-            contact_pairs.append((shape_a, shape_b))
-
-    pairs_np = np.array(contact_pairs, dtype=np.int32).reshape((-1, 2))
-    return wp.array(pairs_np, dtype=wp.vec2i, device=model.device)
-
-
-def _test_group_pair_host(group_a: int, group_b: int) -> bool:
-    if group_a == 0 or group_b == 0:
-        return False
-    if group_a > 0:
-        return group_a == group_b or group_b < 0
-    if group_a < 0:
-        return group_a != group_b
-    return False
-
-
-def _test_world_and_group_pair_host(world_a: int, world_b: int, collision_group_a: int, collision_group_b: int) -> bool:
-    if world_a != -1 and world_b != -1 and world_a != world_b:
-        return False
-    return _test_group_pair_host(collision_group_a, collision_group_b)
 
 
 @wp.struct
@@ -596,7 +504,7 @@ class CollisionPipeline:
         rigid_contact_max: int | None = None,
         max_triangle_pairs: int = 1000000,
         shape_pairs_filtered: wp.array[wp.vec2i] | None = None,
-        include_static_kinematic_pairs: bool = False,
+        include_static_kinematic_pairs: bool = True,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         requires_grad: bool | None = None,
@@ -649,9 +557,10 @@ class CollisionPipeline:
                 When broad_phase is "explicit", uses model.shape_contact_pairs if not provided. For
                 "nxn"/"sap" modes, ignored.
             include_static_kinematic_pairs: Whether to generate contacts for
-                pairs where both shapes are immovable and at least one shape is
-                attached to a kinematic body. Defaults to ``False``. Static vs.
-                static shape pairs are always filtered.
+                pairs where both shapes are immovable. Set to ``False`` to
+                filter static-static, static-kinematic, and
+                kinematic-kinematic pairs. Defaults to ``True`` for backward
+                compatibility.
             sdf_hydroelastic_config: Configuration for hydroelastic collision
                 handling. Defaults to None.
             shape_pairs_max: Override for the broad-phase candidate-pair
@@ -742,15 +651,6 @@ class CollisionPipeline:
         particle_count = model.particle_count
         device = model.device
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
-        explicit_mode_requested = isinstance(broad_phase_instance, BroadPhaseExplicit) or (
-            not using_expert_components and (mode_from_broad_phase is None or mode_from_broad_phase == "explicit")
-        )
-
-        if shape_pairs_filtered is None and include_static_kinematic_pairs and explicit_mode_requested:
-            shape_pairs_filtered = _build_shape_contact_pairs(
-                model,
-                include_static_kinematic_pairs=True,
-            )
 
         # Resolve rigid contact capacity with explicit > model > estimated precedence.
         if rigid_contact_max is None:

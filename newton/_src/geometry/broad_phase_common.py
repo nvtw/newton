@@ -124,7 +124,9 @@ def is_shape_pair_immovable_filtered(
     include_static_kinematic_pairs: bool,
 ) -> bool:
     """Return whether a shape pair should be skipped by immovable-body filtering."""
-    if shape_body.shape[0] == 0 or body_flags.shape[0] == 0:
+    # Empty shape metadata is the expert-call opt-out. An empty body array,
+    # however, is valid for an all-static model and must still filter the pair.
+    if include_static_kinematic_pairs or shape_body.shape[0] == 0:
         return False
 
     body_a = shape_body[shape_a]
@@ -133,9 +135,12 @@ def is_shape_pair_immovable_filtered(
     static_a = body_a < 0
     static_b = body_b < 0
 
-    # Static-static pairs are never useful to contact solvers or reports.
     if static_a and static_b:
         return True
+
+    # Without body metadata we cannot distinguish dynamic from kinematic.
+    if body_flags.shape[0] == 0:
+        return False
 
     kinematic_a = False
     kinematic_b = False
@@ -146,7 +151,7 @@ def is_shape_pair_immovable_filtered(
 
     immovable_a = static_a or kinematic_a
     immovable_b = static_b or kinematic_b
-    return immovable_a and immovable_b and not include_static_kinematic_pairs
+    return immovable_a and immovable_b
 
 
 @wp.func
