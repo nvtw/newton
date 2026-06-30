@@ -1023,7 +1023,7 @@ def verify_and_correct_inertia(
 
     # Compute eigenvalues (principal moments) for validation
     try:
-        eigenvalues = np.linalg.eigvals(corrected_inertia)
+        eigenvalues = np.linalg.eigvalsh(corrected_inertia)
 
         # Check for negative or near-zero eigenvalues (ensure positive-definite).
         # The threshold is relative to the largest eigenvalue so that small but
@@ -1038,7 +1038,7 @@ def verify_and_correct_inertia(
             # Make positive definite by adjusting eigenvalues
             min_eig = np.min(eigenvalues)
             adjustment = eig_threshold - min_eig + _INERTIA_ABS_ADJUSTMENT
-            corrected_inertia += np.eye(3) * adjustment
+            corrected_inertia += np.eye(3, dtype=corrected_inertia.dtype) * adjustment
             eigenvalues += adjustment
             was_corrected = True
 
@@ -1050,7 +1050,7 @@ def verify_and_correct_inertia(
                     f"Minimum eigenvalue {min_eig} is below bound {bound_inertia}{body_id}, adjusting", stacklevel=2
                 )
                 adjustment = bound_inertia - min_eig
-                corrected_inertia += np.eye(3) * adjustment
+                corrected_inertia += np.eye(3, dtype=corrected_inertia.dtype) * adjustment
                 eigenvalues += adjustment
                 was_corrected = True
 
@@ -1094,7 +1094,7 @@ def verify_and_correct_inertia(
                 adjustment = deficit + _INERTIA_ABS_ADJUSTMENT
 
                 # Add scalar*I to shift all eigenvalues equally
-                corrected_inertia = corrected_inertia + np.eye(3) * adjustment
+                corrected_inertia = corrected_inertia + np.eye(3, dtype=corrected_inertia.dtype) * adjustment
                 was_corrected = True
 
                 # Update principal moments
@@ -1112,7 +1112,7 @@ def verify_and_correct_inertia(
     if has_violations and balance_inertia:
         # Need to recompute after balancing since we modified the matrix
         try:
-            eigenvalues = np.linalg.eigvals(corrected_inertia)
+            eigenvalues = np.linalg.eigvalsh(corrected_inertia)
         except np.linalg.LinAlgError:
             warnings.warn(f"Failed to compute eigenvalues of inertia matrix{body_id}", stacklevel=2)
             eigenvalues = np.array([0.0, 0.0, 0.0])
