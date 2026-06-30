@@ -3087,7 +3087,7 @@ class PhoenXWorld:
             if self._reduced_articulation is not None:
                 self._reduced_articulation.begin_substep(
                     self.substep_dt,
-                    split_dynamics=self._reduced_constraints_active_this_step,
+                    split_dynamics=True,
                 )
             self._integrate_forces_and_gravity()
             # TGS-soft (Box2D-v3) substep order: solve-with-bias ->
@@ -3108,10 +3108,10 @@ class PhoenXWorld:
             if self._reduced_articulation is not None:
                 self._reduced_articulation.end_substep(
                     self.substep_dt,
-                    split_dynamics=self._reduced_constraints_active_this_step,
+                    split_dynamics=True,
                 )
             self._dispatcher.relax(idt)
-            if self._reduced_articulation is not None:
+            if self._reduced_articulation is not None and self.velocity_iterations > 0:
                 self._reduced_articulation.finish_relax()
             # Flip cloth particles' POSITION_LEVEL writes back to
             # VELOCITY_LEVEL. No-op for STATIC particles and rigid-only
