@@ -245,6 +245,7 @@ def apply_vorticity(
     query = wp.hash_grid_query(grid, xi, 1.0 / inv_radius)
     j = int(0)
     gradient = wp.vec3(0.0)
+    weight = float(0.0)
 
     while wp.hash_grid_query_next(query, j):
         if j == i or not _is_active_fluid(particle_flags[j]):
@@ -255,9 +256,11 @@ def apply_vorticity(
             continue
         distance = wp.sqrt(distance_sq)
         gradient += curl_magnitude[j] * _kernel_dw(distance, spiky2, inv_radius) * xij / distance
+        weight += 1.0
 
     direction = wp.normalize(gradient)
-    particle_qd[i] += dt * inv_rest_density * confinement * wp.cross(direction, curl[i])
+    impulse = dt * inv_rest_density * confinement * wp.cross(direction, curl[i])
+    particle_qd[i] += impulse / wp.max(weight, 1.0)
 
 
 @wp.kernel

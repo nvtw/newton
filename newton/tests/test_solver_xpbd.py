@@ -14,6 +14,14 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton._src.solvers.xpbd.pbf_kernels import (
+    apply_pbf_deltas,
+    apply_vorticity,
+    calculate_density,
+    solve_density,
+    vorticity_confinement,
+)
+from newton._src.solvers.xpbd.solver_xpbd import _calculate_rest_density
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -1483,6 +1491,256 @@ def test_position_based_fluids(test, device):
     np.testing.assert_allclose(final_velocities, inferred_velocities * (1.0 - 10.0 * dt), rtol=1.0e-5, atol=1.0e-5)
 
 
+def test_position_based_fluids_reference_stages(test, device):
+    positions = np.array(
+        [
+            [0.00, 0.00, 0.00],
+            [0.08, 0.00, 0.00],
+            [0.00, 0.09, 0.00],
+            [0.00, 0.00, 0.10],
+            [0.07, 0.06, 0.04],
+        ],
+        dtype=np.float32,
+    )
+    velocities = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.2],
+            [-0.8, 0.0, 0.1],
+            [0.3, -0.2, 0.0],
+            [-0.1, 0.4, -0.3],
+        ],
+        dtype=np.float32,
+    )
+    particle_count = len(positions)
+    fluid_flags = int(newton.ParticleFlags.ACTIVE | newton.ParticleFlags.FLUID)
+    builder = newton.ModelBuilder()
+    builder.add_particles(
+        pos=[wp.vec3(*position) for position in positions],
+        vel=[wp.vec3(*velocity) for velocity in velocities],
+        mass=[1.0] * particle_count,
+        radius=[0.02] * particle_count,
+        flags=[fluid_flags] * particle_count,
+    )
+    model = builder.finalize(device=device)
+    state = model.state()
+
+    radius = 0.2
+    inv_radius = 1.0 / radius
+    contact_distance_sq = radius * radius
+    spiky1 = 15.0 / (np.pi * radius**3)
+    spiky2 = 30.0 / (np.pi * radius**4)
+    rest_density, lambda_denominator, _ = _calculate_rest_density(0.11, radius)
+    lambda_scale = 1.0 / lambda_denominator
+    surface_tension = 0.003
+    model.particle_grid.build(state.particle_q, radius=radius)
+
+    densities = wp.zeros(particle_count, dtype=float, device=device)
+    normals = wp.zeros(particle_count, dtype=wp.vec3, device=device)
+    wp.launch(
+        calculate_density,
+        dim=particle_count,
+        inputs=[
+            model.particle_grid.id,
+            state.particle_q,
+            model.particle_flags,
+            contact_distance_sq,
+            inv_radius,
+            spiky1,
+            spiky2,
+            rest_density,
+            lambda_scale,
+            surface_tension,
+        ],
+        outputs=[densities, normals],
+        device=device,
+    )
+
+    expected_densities = np.zeros(particle_count, dtype=np.float64)
+    expected_normals = np.zeros((particle_count, 3), dtype=np.float64)
+    for i in range(particle_count):
+        density = 0.0
+        normal = np.zeros(3)
+        for j in range(particle_count):
+            displacement = positions[i].astype(np.float64) - positions[j]
+            distance = np.linalg.norm(displacement)
+            if i == j or distance <= 1.0e-6 or distance >= radius:
+                continue
+            density += spiky1 * (1.0 - distance * inv_radius) ** 2
+            normal += -spiky2 * (1.0 - distance * inv_radius) * displacement / distance
+        expected_densities[i] = max(density - rest_density, -0.005 * rest_density) * lambda_scale
+        expected_normals[i] = normal * surface_tension
+
+    np.testing.assert_allclose(densities.numpy(), expected_densities, rtol=2.0e-5, atol=2.0e-5)
+    np.testing.assert_allclose(normals.numpy(), expected_normals, rtol=2.0e-5, atol=2.0e-5)
+
+    curl = wp.zeros(particle_count, dtype=wp.vec3, device=device)
+    curl_magnitude = wp.zeros(particle_count, dtype=float, device=device)
+    wp.launch(
+        vorticity_confinement,
+        dim=particle_count,
+        inputs=[
+            model.particle_grid.id,
+            state.particle_q,
+            state.particle_qd,
+            model.particle_flags,
+            contact_distance_sq,
+            inv_radius,
+            spiky2,
+        ],
+        outputs=[curl, curl_magnitude],
+        device=device,
+    )
+
+    expected_curl = np.zeros((particle_count, 3), dtype=np.float64)
+    for i in range(particle_count):
+        for j in range(particle_count):
+            displacement = positions[i].astype(np.float64) - positions[j]
+            distance = np.linalg.norm(displacement)
+            if i == j or distance <= 1.0e-6 or distance >= radius:
+                continue
+            gradient = -spiky2 * (1.0 - distance * inv_radius) * displacement / distance
+            expected_curl[i] += np.cross(velocities[j] - velocities[i], gradient)
+
+    np.testing.assert_allclose(curl.numpy(), expected_curl, rtol=2.0e-5, atol=2.0e-5)
+
+    confinement = 2.5
+    inv_rest_density = 1.0 / rest_density
+    dt = 0.01
+    expected_velocities = velocities.astype(np.float64).copy()
+    curl_norms = np.linalg.norm(expected_curl, axis=1)
+    for i in range(particle_count):
+        gradient = np.zeros(3)
+        neighbor_count = 0
+        for j in range(particle_count):
+            displacement = positions[i].astype(np.float64) - positions[j]
+            distance = np.linalg.norm(displacement)
+            if i == j or distance <= 1.0e-6 or distance >= radius:
+                continue
+            gradient += curl_norms[j] * -spiky2 * (1.0 - distance * inv_radius) * displacement / distance
+            neighbor_count += 1
+        gradient_norm = np.linalg.norm(gradient)
+        direction = gradient / gradient_norm if gradient_norm > 0.0 else gradient
+        impulse = dt * inv_rest_density * confinement * np.cross(direction, expected_curl[i])
+        expected_velocities[i] += impulse / max(neighbor_count, 1)
+
+    wp.launch(
+        apply_vorticity,
+        dim=particle_count,
+        inputs=[
+            model.particle_grid.id,
+            state.particle_q,
+            model.particle_flags,
+            curl,
+            curl_magnitude,
+            contact_distance_sq,
+            inv_radius,
+            spiky2,
+            confinement,
+            inv_rest_density,
+            dt,
+        ],
+        outputs=[state.particle_qd],
+        device=device,
+    )
+    np.testing.assert_allclose(state.particle_qd.numpy(), expected_velocities, rtol=3.0e-5, atol=3.0e-5)
+
+    accumulated_values = np.array(
+        [
+            [0.003, -0.001, 0.000],
+            [-0.002, 0.002, 0.001],
+            [0.001, -0.003, 0.002],
+            [-0.001, 0.001, -0.002],
+            [0.002, 0.000, -0.001],
+        ],
+        dtype=np.float32,
+    )
+    accumulated_delta = wp.array(accumulated_values, dtype=wp.vec3, device=device)
+    deltas = wp.zeros(particle_count, dtype=wp.vec3, device=device)
+    weights = wp.zeros(particle_count, dtype=float, device=device)
+    viscosity = 0.002
+    cohesion = 0.001
+    rest_ratio = 0.11 / radius
+    cohesion1 = -(1.0 + rest_ratio) / rest_ratio**2
+    cohesion2 = (rest_ratio**2 + rest_ratio + 1.0) / rest_ratio**2
+    cfl_coefficient = 0.01
+    coefficient = 0.8
+    wp.launch(
+        solve_density,
+        dim=particle_count,
+        inputs=[
+            model.particle_grid.id,
+            state.particle_q,
+            model.particle_flags,
+            model.particle_inv_mass,
+            densities,
+            normals,
+            accumulated_delta,
+            contact_distance_sq,
+            inv_radius,
+            spiky1,
+            spiky2,
+            viscosity,
+            inv_rest_density,
+            cohesion,
+            cohesion1,
+            cohesion2,
+            surface_tension,
+            cfl_coefficient,
+            coefficient,
+            dt,
+        ],
+        outputs=[deltas, weights],
+        device=device,
+    )
+
+    expected_deltas = np.zeros((particle_count, 3), dtype=np.float64)
+    expected_weights = np.zeros(particle_count, dtype=np.float64)
+    for i in range(particle_count):
+        for j in range(particle_count):
+            displacement = positions[i].astype(np.float64) - positions[j]
+            distance = np.linalg.norm(displacement)
+            if i == j or distance <= 1.0e-6 or distance >= radius:
+                continue
+            direction = displacement / distance
+            density_correction = (
+                0.5 * (expected_densities[i] + expected_densities[j]) * -spiky2 * (1.0 - distance * inv_radius)
+            )
+            q = distance * inv_radius
+            cohesion_w = cohesion1 * q**3 + cohesion2 * q**2 - 1.0
+            expected_deltas[i] -= direction * (density_correction + cohesion * dt * cohesion_w)
+
+            relative_delta = accumulated_values[i].astype(np.float64) - accumulated_values[j]
+            kernel_w = spiky1 * (1.0 - distance * inv_radius) ** 2
+            viscosity_amount = viscosity * dt * inv_rest_density * kernel_w
+            expected_deltas[i] -= (1.0 - 1.0 / (1.0 + viscosity_amount)) * relative_delta
+
+            relative_normal_delta = np.dot(direction, relative_delta)
+            cfl_radius = radius * cfl_coefficient
+            if relative_normal_delta < -cfl_radius:
+                expected_deltas[i] -= 0.5 * direction * (relative_normal_delta + cfl_radius)
+            expected_deltas[i] -= (expected_normals[i] - expected_normals[j]) * dt
+            expected_weights[i] += 1.0
+        expected_deltas[i] *= coefficient
+
+    np.testing.assert_allclose(deltas.numpy(), expected_deltas, rtol=3.0e-5, atol=3.0e-5)
+    np.testing.assert_allclose(weights.numpy(), expected_weights, rtol=0.0, atol=0.0)
+
+    relaxation = 1.0
+    expected_corrections = expected_deltas / np.maximum(expected_weights[:, None] * relaxation, 1.0)
+    expected_positions = positions + expected_corrections
+    expected_accumulated = accumulated_values + expected_corrections
+    wp.launch(
+        apply_pbf_deltas,
+        dim=particle_count,
+        inputs=[model.particle_flags, deltas, weights, relaxation],
+        outputs=[state.particle_q, accumulated_delta],
+        device=device,
+    )
+    np.testing.assert_allclose(state.particle_q.numpy(), expected_positions, rtol=3.0e-5, atol=3.0e-5)
+    np.testing.assert_allclose(accumulated_delta.numpy(), expected_accumulated, rtol=3.0e-5, atol=3.0e-5)
+
+
 devices = get_test_devices()
 
 
@@ -1494,6 +1752,15 @@ add_function_test(
     TestSolverXPBD,
     "test_position_based_fluids",
     test_position_based_fluids,
+    devices=devices,
+    check_output=False,
+)
+
+
+add_function_test(
+    TestSolverXPBD,
+    "test_position_based_fluids_reference_stages",
+    test_position_based_fluids_reference_stages,
     devices=devices,
     check_output=False,
 )
