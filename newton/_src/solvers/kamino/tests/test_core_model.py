@@ -522,14 +522,18 @@ class TestModelConversions(unittest.TestCase):
         # Conversion must succeed (previously raised ValueError)
         kamino_model: ModelKamino = ModelKamino.from_newton(model)
 
-        # Verify X_j first column is aligned with the expected axis direction
-        X_j = kamino_model.joints.X_j.numpy()
-        # X_j has shape (num_joints, 3, 3); the revolute joint is the second one (index 1)
-        R = X_j[1]  # 3x3 rotation matrix
-        ax_col = R[:, 0]  # first column = joint axis direction
+        # Verify that X_Bj's and X_Fj's first column is aligned with the expected axis direction
+        X_Bj = kamino_model.joints.X_Bj.numpy()
+        X_Fj = kamino_model.joints.X_Fj.numpy()
+        # X_Bj has shape (num_joints, 3, 3); the revolute joint is the second one (index 1)
+        R_B = X_Bj[1]  # 3x3 rotation matrix
+        R_F = X_Fj[1]
+        ax_col_B = R_B[:, 0]  # first column = joint axis direction
+        ax_col_F = R_F[:, 0]  # first column = joint axis direction
         expected_ax = np.array([1.0, 1.0, 0.0])
         expected_ax = expected_ax / np.linalg.norm(expected_ax)
-        np.testing.assert_allclose(ax_col, expected_ax, atol=1e-6)
+        np.testing.assert_allclose(ax_col_B, expected_ax, atol=1e-6)
+        np.testing.assert_allclose(ax_col_F, expected_ax, atol=1e-6)
 
     def test_06_model_conversions_q_i_0_com_frame(self):
         """
@@ -625,7 +629,7 @@ class TestModelConversions(unittest.TestCase):
         np.testing.assert_allclose(q_i_0_np[2, :3], [1.1, -0.3, 0.2], atol=1e-6)
         np.testing.assert_allclose(q_i_0_np[2, 3:7], body_q_np[2, 3:7], atol=1e-6)
 
-    def _build_com_offset_model(self):
+    def _build_com_offset_model(self, with_base_joint: bool = True):
         """Build a 3-body chain with non-zero COM offsets for reset tests."""
         builder: ModelBuilder = ModelBuilder()
         SolverKamino.register_custom_attributes(builder)
@@ -667,13 +671,14 @@ class TestModelConversions(unittest.TestCase):
         builder.add_shape_box(label="box2", body=bid2, hx=0.05, hy=0.05, hz=0.05)
 
         # Fix body 0 to world
-        builder.add_joint_fixed(
-            label="world_to_body0",
-            parent=-1,
-            child=bid0,
-            parent_xform=wp.transform_identity(dtype=wp.float32),
-            child_xform=wp.transform_identity(dtype=wp.float32),
-        )
+        if with_base_joint:
+            builder.add_joint_fixed(
+                label="world_to_body0",
+                parent=-1,
+                child=bid0,
+                parent_xform=wp.transform_identity(dtype=wp.float32),
+                child_xform=wp.transform_identity(dtype=wp.float32),
+            )
 
         # Revolute joint: body 0 -> body 1
         builder.add_joint_revolute(
@@ -705,32 +710,33 @@ class TestModelConversions(unittest.TestCase):
         into ``state.body_q``, not COM-frame poses, for bodies with non-zero
         COM offsets.
         """
-        model = self._build_com_offset_model()
-        body_q_expected = model.body_q.numpy().copy()
+        for with_base_joint in [False, True]:  # Test both the base joint and base body case
+            model = self._build_com_offset_model(with_base_joint=with_base_joint)
+            body_q_expected = model.body_q.numpy().copy()
 
-        solver = SolverKamino(model)
+            solver = SolverKamino(model)
 
-        # Default reset (no args) should restore body-origin poses
-        state_out: State = model.state()
-        solver.reset(state_out=state_out)
-        body_q_after = state_out.body_q.numpy()
+            # Default reset (no args) should restore body-origin poses
+            state_out: State = model.state()
+            solver.reset(state=state_out)
+            body_q_after = state_out.body_q.numpy()
 
-        for i in range(model.body_count):
+            for i in range(model.body_count):
+                np.testing.assert_allclose(
+                    body_q_after[i],
+                    body_q_expected[i],
+                    atol=1e-6,
+                    err_msg=f"Default reset: body {i} pose is not in body-origin frame",
+                )
+
+            # Velocities should be zero after default reset
+            body_qd_after = state_out.body_qd.numpy()
             np.testing.assert_allclose(
-                body_q_after[i],
-                body_q_expected[i],
+                body_qd_after,
+                0.0,
                 atol=1e-6,
-                err_msg=f"Default reset: body {i} pose is not in body-origin frame",
+                err_msg="Default reset: body velocities should be zero",
             )
-
-        # Velocities should be zero after default reset
-        body_qd_after = state_out.body_qd.numpy()
-        np.testing.assert_allclose(
-            body_qd_after,
-            0.0,
-            atol=1e-6,
-            err_msg="Default reset: body velocities should be zero",
-        )
 
     def test_08_base_reset_produces_body_origin_frame(self):
         """
@@ -738,60 +744,69 @@ class TestModelConversions(unittest.TestCase):
         body-origin frame poses and velocities into ``state.body_q`` and
         ``state.body_qd`` for bodies with non-zero COM offsets.
         """
-        model = self._build_com_offset_model()
-        body_q_expected = model.body_q.numpy().copy()
+        for with_base_joint in [False, True]:  # Test both the base joint and base body case
+            model = self._build_com_offset_model(with_base_joint=with_base_joint)
+            body_q_expected = model.body_q.numpy().copy()
 
-        solver = SolverKamino(model)
+            solver = SolverKamino(model)
 
-        # --- Base reset with identity base pose should restore body-origin poses ---
-        state_out: State = model.state()
-        base_q = wp.array(
-            [wp.transformf(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity(dtype=wp.float32))],
-            dtype=wp.transformf,
-        )
-        base_u = wp.zeros(1, dtype=wp.spatial_vectorf)
-        solver.reset(state_out=state_out, base_q=base_q, base_u=base_u)
-        body_q_after = state_out.body_q.numpy()
+            # --- Base reset with identity base pose should restore body-origin poses ---
+            state_out: State = model.state()
+            base_q = wp.array(
+                [wp.transformf(wp.vec3f(0.0, 0.0, 0.0), wp.quat_identity(dtype=wp.float32))],
+                dtype=wp.transformf,
+            )
+            base_u = wp.zeros(1, dtype=wp.spatial_vectorf)
+            reset_config = SolverKamino.ResetConfig(
+                base_pose=SolverKamino.ResetConfig.FromBaseQ(base_q),
+                base_velocity=SolverKamino.ResetConfig.FromBaseU(base_u),
+            )
+            solver.reset(state=state_out, config=reset_config)
+            body_q_after = state_out.body_q.numpy()
 
-        for i in range(model.body_count):
+            for i in range(model.body_count):
+                np.testing.assert_allclose(
+                    body_q_after[i],
+                    body_q_expected[i],
+                    atol=1e-6,
+                    err_msg=f"Base reset (identity): body {i} pose is not in body-origin frame",
+                )
+
+            # Velocities should be zero with zero base twist
+            body_qd_after = state_out.body_qd.numpy()
             np.testing.assert_allclose(
-                body_q_after[i],
-                body_q_expected[i],
+                body_qd_after,
+                0.0,
                 atol=1e-6,
-                err_msg=f"Base reset (identity): body {i} pose is not in body-origin frame",
+                err_msg="Base reset (identity): body velocities should be zero",
             )
 
-        # Velocities should be zero with zero base twist
-        body_qd_after = state_out.body_qd.numpy()
-        np.testing.assert_allclose(
-            body_qd_after,
-            0.0,
-            atol=1e-6,
-            err_msg="Base reset (identity): body velocities should be zero",
-        )
-
-        # --- Base reset with a translated base pose ---
-        offset = np.array([2.0, 3.0, 5.0])
-        base_q_shifted = wp.array(
-            [wp.transformf(wp.vec3f(*offset), wp.quat_identity(dtype=wp.float32))],
-            dtype=wp.transformf,
-        )
-        solver.reset(state_out=state_out, base_q=base_q_shifted, base_u=base_u)
-        body_q_shifted = state_out.body_q.numpy()
-
-        for i in range(model.body_count):
-            np.testing.assert_allclose(
-                body_q_shifted[i, :3],
-                body_q_expected[i, :3] + offset,
-                atol=1e-6,
-                err_msg=f"Base reset (translated): body {i} position mismatch",
+            # --- Base reset with a translated base pose ---
+            offset = np.array([2.0, 3.0, 5.0])
+            base_q_shifted = wp.array(
+                [wp.transformf(wp.vec3f(*offset), wp.quat_identity(dtype=wp.float32))],
+                dtype=wp.transformf,
             )
-            np.testing.assert_allclose(
-                body_q_shifted[i, 3:7],
-                body_q_expected[i, 3:7],
-                atol=1e-6,
-                err_msg=f"Base reset (translated): body {i} rotation mismatch",
+            reset_config = SolverKamino.ResetConfig(
+                base_pose=SolverKamino.ResetConfig.FromBaseQ(base_q_shifted),
+                base_velocity=SolverKamino.ResetConfig.FromBaseU(base_u),
             )
+            solver.reset(state=state_out, config=reset_config)
+            body_q_shifted = state_out.body_q.numpy()
+
+            for i in range(model.body_count):
+                np.testing.assert_allclose(
+                    body_q_shifted[i, :3],
+                    body_q_expected[i, :3] + offset,
+                    atol=1e-6,
+                    err_msg=f"Base reset (translated): body {i} position mismatch",
+                )
+                np.testing.assert_allclose(
+                    body_q_shifted[i, 3:7],
+                    body_q_expected[i, 3:7],
+                    atol=1e-6,
+                    err_msg=f"Base reset (translated): body {i} rotation mismatch",
+                )
 
     def test_09_model_conversions_shape_offset_com_relative(self):
         """

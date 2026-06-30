@@ -115,7 +115,7 @@ def build_free_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=I_3,
+        X_Bj=I_3,
         q_j_min=[-2.0, -2.0, -2.0, -0.6 * math.pi, -0.6 * math.pi, -0.6 * math.pi] if limits else None,
         q_j_max=[2.0, 2.0, 2.0, 0.6 * math.pi, 0.6 * math.pi, 0.6 * math.pi] if limits else None,
         tau_j_max=[100.0, 100.0, 100.0, 100.0, 100.0, 100.0] if limits else None,
@@ -197,7 +197,7 @@ def build_unary_revolute_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.0, -0.15, z_offset),
         F_r_Fj=vec3f(-0.5, 0.1, 0.0),
-        X_j=Axis.Y.to_mat33(),
+        X_Bj=Axis.Y.to_mat33(),
         q_j_min=[-0.25 * math.pi] if limits else None,
         q_j_max=[0.25 * math.pi] if limits else None,
         a_j=0.1 if dynamic else None,
@@ -298,7 +298,7 @@ def build_binary_revolute_joint_test(
         bid_F=bid_B,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Y.to_mat33(),
+        X_Bj=Axis.Y.to_mat33(),
         world_index=world_index,
     )
     _builder.add_joint(
@@ -309,7 +309,7 @@ def build_binary_revolute_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.0, -0.15, z_offset),
         F_r_Fj=vec3f(-0.5, 0.1, 0.0),
-        X_j=Axis.Y.to_mat33(),
+        X_Bj=Axis.Y.to_mat33(),
         q_j_min=[-0.25 * math.pi] if limits else None,
         q_j_max=[0.25 * math.pi] if limits else None,
         a_j=0.1 if dynamic else None,
@@ -398,7 +398,7 @@ def build_unary_prismatic_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Z.to_mat33(),
+        X_Bj=Axis.Z.to_mat33(),
         q_j_min=[-0.5] if limits else None,
         q_j_max=[0.5] if limits else None,
         a_j=0.1 if dynamic else None,
@@ -497,7 +497,7 @@ def build_binary_prismatic_joint_test(
         bid_F=bid_B,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Y.to_mat33(),
+        X_Bj=Axis.Y.to_mat33(),
         world_index=world_index,
     )
     _builder.add_joint(
@@ -508,7 +508,7 @@ def build_binary_prismatic_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Z.to_mat33(),
+        X_Bj=Axis.Z.to_mat33(),
         q_j_min=[-0.5] if limits else None,
         q_j_max=[0.5] if limits else None,
         a_j=0.1 if dynamic else None,
@@ -601,7 +601,7 @@ def build_unary_cylindrical_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Z.to_mat33(),
+        X_Bj=Axis.Z.to_mat33(),
         q_j_min=[-0.5, -0.6 * math.pi] if limits else None,
         q_j_max=[0.5, 0.6 * math.pi] if limits else None,
         a_j=[0.1, 0.2] if dynamic else None,
@@ -702,7 +702,7 @@ def build_binary_cylindrical_joint_test(
         bid_F=bid_B,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Y.to_mat33(),
+        X_Bj=Axis.Y.to_mat33(),
         world_index=world_index,
     )
     _builder.add_joint(
@@ -713,7 +713,7 @@ def build_binary_cylindrical_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Z.to_mat33(),
+        X_Bj=Axis.Z.to_mat33(),
         q_j_min=[-0.5, -0.6 * math.pi] if limits else None,
         q_j_max=[0.5, 0.6 * math.pi] if limits else None,
         a_j=[0.1, 0.2] if dynamic else None,
@@ -800,7 +800,7 @@ def build_unary_universal_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.25, -0.25, -0.25),
         F_r_Fj=vec3f(-0.25, -0.25, -0.25),
-        X_j=Axis.X.to_mat33(),
+        X_Bj=Axis.X.to_mat33(),
         q_j_min=[-0.6 * math.pi, -0.6 * math.pi] if limits else None,
         q_j_max=[0.6 * math.pi, 0.6 * math.pi] if limits else None,
         world_index=world_index,
@@ -893,7 +893,7 @@ def build_binary_universal_joint_test(
         bid_F=bid_B,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Y.to_mat33(),
+        X_Bj=Axis.Y.to_mat33(),
         world_index=world_index,
     )
     _builder.add_joint(
@@ -904,7 +904,7 @@ def build_binary_universal_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.25, -0.25, -0.25),
         F_r_Fj=vec3f(-0.25, -0.25, -0.25),
-        X_j=Axis.X.to_mat33(),
+        X_Bj=Axis.X.to_mat33(),
         q_j_min=[-0.6 * math.pi, -0.6 * math.pi] if limits else None,
         q_j_max=[0.6 * math.pi, 0.6 * math.pi] if limits else None,
         world_index=world_index,
@@ -987,7 +987,7 @@ def build_unary_spherical_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.25, -0.25, -0.25),
         F_r_Fj=vec3f(-0.25, -0.25, -0.25),
-        X_j=Axis.X.to_mat33(),
+        X_Bj=Axis.X.to_mat33(),
         q_j_min=[-0.6 * math.pi, -0.6 * math.pi, -0.6 * math.pi] if limits else None,
         q_j_max=[0.6 * math.pi, 0.6 * math.pi, 0.6 * math.pi] if limits else None,
         world_index=world_index,
@@ -1080,7 +1080,7 @@ def build_binary_spherical_joint_test(
         bid_F=bid_B,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Y.to_mat33(),
+        X_Bj=Axis.Y.to_mat33(),
         world_index=world_index,
     )
     _builder.add_joint(
@@ -1091,7 +1091,7 @@ def build_binary_spherical_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.25, -0.25, -0.25),
         F_r_Fj=vec3f(-0.25, -0.25, -0.25),
-        X_j=Axis.X.to_mat33(),
+        X_Bj=Axis.X.to_mat33(),
         q_j_min=[-0.6 * math.pi, -0.6 * math.pi, -0.6 * math.pi] if limits else None,
         q_j_max=[0.6 * math.pi, 0.6 * math.pi, 0.6 * math.pi] if limits else None,
         world_index=world_index,
@@ -1178,7 +1178,7 @@ def build_unary_cartesian_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.25, -0.25, -0.25),
         F_r_Fj=vec3f(-0.25, -0.25, -0.25),
-        X_j=Axis.X.to_mat33(),
+        X_Bj=Axis.X.to_mat33(),
         q_j_min=[-1.0, -1.0, -1.0] if limits else None,
         q_j_max=[1.0, 1.0, 1.0] if limits else None,
         a_j=[0.1, 0.2, 0.3] if dynamic else None,
@@ -1279,7 +1279,7 @@ def build_binary_cartesian_joint_test(
         bid_F=bid_B,
         B_r_Bj=vec3f(0.0, 0.0, z_offset),
         F_r_Fj=vec3f(0.0, 0.0, 0.0),
-        X_j=Axis.Y.to_mat33(),
+        X_Bj=Axis.Y.to_mat33(),
         world_index=world_index,
     )
     _builder.add_joint(
@@ -1290,7 +1290,7 @@ def build_binary_cartesian_joint_test(
         bid_F=bid_F,
         B_r_Bj=vec3f(0.25, -0.25, -0.25),
         F_r_Fj=vec3f(-0.25, -0.25, -0.25),
-        X_j=Axis.X.to_mat33(),
+        X_Bj=Axis.X.to_mat33(),
         q_j_min=[-1.0, -1.0, -1.0] if limits else None,
         q_j_max=[1.0, 1.0, 1.0] if limits else None,
         a_j=[0.1, 0.2, 0.3] if dynamic else None,
@@ -1328,6 +1328,10 @@ def build_binary_cartesian_joint_test(
 def build_all_joints_test_model(
     unary_joints: bool = True,
     binary_joints: bool = True,
+    actuated: bool = False,
+    damped: bool = True,
+    floating_base: bool = False,
+    exclude_universal: bool = False,
 ) -> ModelBuilderKamino:
     """
     Constructs a model builder containing a world for each joint type.
@@ -1335,26 +1339,44 @@ def build_all_joints_test_model(
     Args:
         unary_joints (bool): Whether to include unary joints.
         binary_joints (bool): Whether to include binary joints.
+        actuated (bool): Whether to make the joints actuated (passive otherwise).
+        damped (bool): Whether to add slight damping to the joints to increase realism.
+        floating_base (bool): Whether to replace the fixed with a free base joint for binary examples.
+        exclude_universal (bool): Whether to skip universal joints.
 
     Returns:
         ModelBuilderKamino: The populated model builder.
     """
 
-    def make_damped(builder: ModelBuilderKamino) -> ModelBuilderKamino:
-        """Returns a version of the single-joint example with added joint damping"""
+    def alter_binary_joint(
+        builder: ModelBuilderKamino,
+        make_actuated: bool,
+        make_damped: bool,
+        make_floating_base: bool,
+    ) -> ModelBuilderKamino:
+        """
+        Returns an altered version of a single-joint example, optionally turned into an actuator,
+        and with optional added joint damping.
+        """
         assert builder.num_worlds == 1 and builder.num_bodies == 2 and builder.num_joints == 2
-        builder_damped = ModelBuilderKamino(default_world=True)
-        builder_damped.add_rigid_body_descriptor(copy.deepcopy(builder.bodies[0][0]))
-        builder_damped.add_rigid_body_descriptor(copy.deepcopy(builder.bodies[0][1]))
-        builder_damped.add_joint_descriptor(copy.deepcopy(builder.joints[0][0]))
+        builder_alt = ModelBuilderKamino(default_world=True)
+        builder_alt.add_rigid_body_descriptor(copy.deepcopy(builder.bodies[0][0]))
+        builder_alt.add_rigid_body_descriptor(copy.deepcopy(builder.bodies[0][1]))
+        base_joint = copy.deepcopy(builder.joints[0][0])
+        if make_floating_base:
+            base_joint.dof_type = JointDoFType.FREE
+        builder_alt.add_joint_descriptor(base_joint)
         joint = copy.deepcopy(builder.joints[0][1])
-        joint.b_j = joint.num_dofs * [5e-5]
-        builder_damped.add_joint_descriptor(joint)
+        if make_actuated:
+            joint.act_type = JointActuationType.FORCE
+        if make_damped:
+            joint.b_j = joint.num_dofs * [5e-5]
+        builder_alt.add_joint_descriptor(joint)
         for geom in builder.all_geoms:
             geom_ = copy.deepcopy(geom)
             geom_.shape = builder.shapes[geom.uid]
-            builder_damped.add_geometry_descriptor(geom_)
-        return builder_damped
+            builder_alt.add_geometry_descriptor(geom_)
+        return builder_alt
 
     def make_unary(builder: ModelBuilderKamino) -> ModelBuilderKamino:
         """Returns a unary version of a single-joint, single-world example"""
@@ -1384,10 +1406,15 @@ def build_all_joints_test_model(
 
     # Add a new world for each joint type
     folder_path = os.path.join(utils.get_testing_usd_assets_path(), "joints")
-    joint_names = ["cartesian", "cylindrical", "fixed", "prismatic", "revolute", "spherical", "universal"]
+    joint_names = ["cartesian", "cylindrical", "fixed", "prismatic", "revolute", "spherical"]
+    if not exclude_universal:
+        joint_names.append("universal")
+    need_alteration = actuated or damped or floating_base
     for name in joint_names:
         builder_in = USDImporter().import_from(source=os.path.join(folder_path, f"test_{name}/test_{name}.usda"))
-        builder_binary = make_damped(builder_in)  # Add slight damping to the joint to increase realism
+        builder_binary = (
+            builder_in if not need_alteration else alter_binary_joint(builder_in, actuated, damped, floating_base)
+        )
         if unary_joints:
             _builder.add_builder(make_unary(builder_binary))
         if binary_joints:

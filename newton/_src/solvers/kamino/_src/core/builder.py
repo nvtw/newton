@@ -387,7 +387,8 @@ class ModelBuilderKamino:
         bid_F: int,
         B_r_Bj: vec3f,
         F_r_Fj: vec3f,
-        X_j: mat33f,
+        X_Bj: mat33f,
+        X_Fj: mat33f | None = None,
         q_j_min: list[float] | float | None = None,
         q_j_max: list[float] | float | None = None,
         dq_j_max: list[float] | float | None = None,
@@ -410,7 +411,8 @@ class ModelBuilderKamino:
             bid_F (int): The index of the body on the "follower" side of the joint.
             B_r_Bj (vec3f): The position of the joint in the base body frame.
             F_r_Fj (vec3f): The position of the joint in the follower body frame.
-            X_j (mat33f): The orientation of the joint frame relative to the base body frame.
+            X_Bj: The orientation of the joint frame relative to the base body frame.
+            X_Fj: The orientation of the joint frame relative to the follower body frame.
             q_j_min (list[float] | float | None): The minimum joint coordinate limits.
             q_j_max (list[float] | float | None): The maximum joint coordinate limits.
             dq_j_max (list[float] | float | None): The maximum joint velocity limits.
@@ -421,7 +423,7 @@ class ModelBuilderKamino:
             k_d_j (list[float] | float | None): The joint derivative gain along each DoF.
             name (str | None): The name of the joint.
             uid (str | None): The unique identifier of the joint.
-            world_index (int): The index of the world to which the joint will be added.\n
+            world_index (int): The index of the world to which the joint will be added.
                 Defaults to the first world with index `0`.
 
         Returns:
@@ -448,7 +450,8 @@ class ModelBuilderKamino:
             bid_F=bid_F,
             B_r_Bj=B_r_Bj,
             F_r_Fj=F_r_Fj,
-            X_j=X_j,
+            X_Bj=X_Bj,
+            X_Fj=X_Fj,
             q_j_min=q_j_min,
             q_j_max=q_j_max,
             dq_j_max=dq_j_max,
@@ -932,12 +935,17 @@ class ModelBuilderKamino:
                 else:  # Set base body to be the follower of the base joint
                     world.set_base_body(follower_idx)
             elif not world.has_base_body and base_auto:
-                world.set_base_body(0)  # Set the base body as the first body
+                # Look for a non-universal unary joint connecting the world to a follower body
                 for jt_idx, joint in enumerate(self._joints[w]):
-                    if joint.wid == w and joint.is_unary and joint.is_connected_to_body(world.base_body_idx):
-                        # If we find a unary joint connecting the base body to the world, we set this as the base joint
+                    if joint.bid_B == -1 and joint.dof_type != JointDoFType.UNIVERSAL:
                         world.set_base_joint(jt_idx)
+                        world.set_base_body(joint.bid_F)
                         break
+                # As a last fallback, set body 0 in that world as base body (no base joint)
+                if not world.has_base_body:
+                    if world.num_bodies == 0:
+                        raise RuntimeError(f"Zero bodies in world {w}, cannot set base body.")
+                    world.set_base_body(0)
 
         ###
         # ModelKamino data collection
@@ -1008,7 +1016,8 @@ class ModelBuilderKamino:
         joints_bid_F = []
         joints_B_r_Bj = []
         joints_F_r_Fj = []
-        joints_X_j = []
+        joints_X_Bj = []
+        joints_X_Fj = []
         joints_q_j_min = []
         joints_q_j_max = []
         joints_qd_j_max = []
@@ -1134,7 +1143,8 @@ class ModelBuilderKamino:
                 joints_actid.append(joint.act_type.value)
                 joints_B_r_Bj.append(joint.B_r_Bj)
                 joints_F_r_Fj.append(joint.F_r_Fj)
-                joints_X_j.append(joint.X_j)
+                joints_X_Bj.append(joint.X_Bj)
+                joints_X_Fj.append(joint.X_Fj)
                 joints_q_j_0.extend(joint.dof_type.reference_coords)
                 joints_dq_j_0.extend(joint.dof_type.num_dofs * [0.0])
                 joints_q_j_min.extend(joint.q_j_min)
@@ -1381,7 +1391,8 @@ class ModelBuilderKamino:
                 bid_F=to_warp_int32_array(joints_bid_F),
                 B_r_Bj=wp.array(joints_B_r_Bj, dtype=vec3f, requires_grad=requires_grad),
                 F_r_Fj=wp.array(joints_F_r_Fj, dtype=vec3f, requires_grad=requires_grad),
-                X_j=wp.array(joints_X_j, dtype=mat33f, requires_grad=requires_grad),
+                X_Bj=wp.array(joints_X_Bj, dtype=mat33f, requires_grad=requires_grad),
+                X_Fj=wp.array(joints_X_Fj, dtype=mat33f, requires_grad=requires_grad),
                 q_j_min=wp.array(joints_q_j_min, dtype=float32, requires_grad=requires_grad),
                 q_j_max=wp.array(joints_q_j_max, dtype=float32, requires_grad=requires_grad),
                 dq_j_max=wp.array(joints_qd_j_max, dtype=float32, requires_grad=requires_grad),

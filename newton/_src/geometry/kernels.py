@@ -867,15 +867,11 @@ def closest_edge_coordinate_cylinder(
 
 @wp.func
 def mesh_sdf(mesh: wp.uint64, point: wp.vec3, max_dist: float):
-    face_index = int(0)
-    face_u = float(0.0)
-    face_v = float(0.0)
-    sign = float(0.0)
-    res = wp.mesh_query_point_sign_normal(mesh, point, max_dist, sign, face_index, face_u, face_v)
+    res = wp.mesh_query_point_sign_parity(mesh, point, max_dist)
 
-    if res:
-        closest = wp.mesh_eval_position(mesh, face_index, face_u, face_v)
-        return wp.length(point - closest) * sign
+    if res.result:
+        closest = wp.mesh_eval_position(mesh, res.face, res.u, res.v)
+        return wp.length(point - closest) * res.sign
     return max_dist
 
 
@@ -896,14 +892,10 @@ def sdf_mesh(mesh: wp.uint64, point: wp.vec3, max_dist: float):
 
 @wp.func
 def closest_point_mesh(mesh: wp.uint64, point: wp.vec3, max_dist: float):
-    face_index = int(0)
-    face_u = float(0.0)
-    face_v = float(0.0)
-    sign = float(0.0)
-    res = wp.mesh_query_point_sign_normal(mesh, point, max_dist, sign, face_index, face_u, face_v)
+    res = wp.mesh_query_point_sign_parity(mesh, point, max_dist)
 
-    if res:
-        return wp.mesh_eval_position(mesh, face_index, face_u, face_v)
+    if res.result:
+        return wp.mesh_eval_position(mesh, res.face, res.u, res.v)
     # return arbitrary point from mesh
     return wp.mesh_eval_position(mesh, 0, 0.0, 0.0)
 
@@ -1011,6 +1003,7 @@ def create_soft_contacts(
     shape_source_ptr: wp.array[wp.uint64],
     shape_world: wp.array[int],  # World indices for shapes
     margin: float,
+    shape_margin: wp.array[float],
     soft_contact_max: int,
     shape_count: int,
     shape_flags: wp.array[wp.int32],
@@ -1061,6 +1054,7 @@ def create_soft_contacts(
     # geo description
     geo_type = shape_type[shape_index]
     geo_scale = shape_scale[shape_index]
+    s_margin = shape_margin[shape_index] if shape_margin.shape[0] > 0 else 0.0
 
     # evaluate shape sdf
     d = 1.0e6
@@ -1102,9 +1096,15 @@ def create_soft_contacts(
         # Use magnitude of components: the search radius must always be positive
         # regardless of mirror parity.
         min_scale = wp.min(wp.min(wp.abs(geo_scale[0]), wp.abs(geo_scale[1])), wp.abs(geo_scale[2]))
-        if wp.mesh_query_point_sign_normal(
-            mesh, wp.cw_div(x_local, geo_scale), margin + radius / min_scale, sign, face_index, face_u, face_v
-        ):
+        query = wp.mesh_query_point_sign_parity(
+            mesh, wp.cw_div(x_local, geo_scale), margin + s_margin / min_scale + radius / min_scale
+        )
+        if query.result:
+            sign = query.sign
+            face_index = query.face
+            face_u = query.u
+            face_v = query.v
+
             shape_p = wp.mesh_eval_position(mesh, face_index, face_u, face_v)
             shape_v = wp.mesh_eval_velocity(mesh, face_index, face_u, face_v)
 
@@ -1125,11 +1125,13 @@ def create_soft_contacts(
         hfd = heightfield_data[shape_heightfield_index[shape_index]]
         d, n = sample_sdf_grad_heightfield(hfd, heightfield_elevations, x_local)
 
-    if d < margin + radius:
+    if d < margin + s_margin + radius:
         index = counter_increment(soft_contact_count, 0, soft_contact_tids, tid)
 
         if index < soft_contact_max:
-            # compute contact point in body local space
+            # body_pos is the raw closest-surface point; per-shape margin is applied
+            # analytically at force eval. Inflation is just (SDF - margin), so n is
+            # unchanged and the closest point only slides out by margin along n
             body_pos = wp.transform_point(X_bs, x_local - n * d)
             body_vel = wp.transform_vector(X_bs, v)
 
@@ -1286,23 +1288,23 @@ def vertex_triangle_collision_detection_kernel(
         and vertex_colliding_triangles_count.
 
     Args:
-        bvh_id (int): the bvh id you want to collide with
-        max_query_radius (float): the upper bound of collision distance.
-        min_query_radius (float): the lower bound of collision distance. This distance is evaluated based on min_distance_filtering_ref_pos
-        pos (array): positions of all the vertices that make up triangles
-        vertex_colliding_triangles_offsets (array): where each vertex' collision buffer starts
-        vertex_colliding_triangles_buffer_sizes (array): size of each vertex' collision buffer, will be modified if resizing is needed
-        vertex_colliding_triangles_min_dist (array): each vertex' min distance to all (non-neighbor) triangles
-        triangle_colliding_vertices_offsets (array): where each triangle's collision buffer starts
-        triangle_colliding_vertices_buffer_sizes (array): size of each triangle's collision buffer, will be modified if resizing is needed
-        min_distance_filtering_ref_pos (array): the position that minimal collision distance evaluation uses.
-        vertex_colliding_triangles (array): flattened buffer of vertices' collision triangles
-        vertex_colliding_triangles_count (array): number of triangles each vertex collides with
-        triangle_colliding_vertices (array): positions of all the triangles' collision vertices, every two elements
+        bvh_id: the bvh id you want to collide with
+        max_query_radius: the upper bound of collision distance.
+        min_query_radius: the lower bound of collision distance. This distance is evaluated based on min_distance_filtering_ref_pos
+        pos: positions of all the vertices that make up triangles
+        vertex_colliding_triangles_offsets: where each vertex' collision buffer starts
+        vertex_colliding_triangles_buffer_sizes: size of each vertex' collision buffer, will be modified if resizing is needed
+        vertex_colliding_triangles_min_dist: each vertex' min distance to all (non-neighbor) triangles
+        triangle_colliding_vertices_offsets: where each triangle's collision buffer starts
+        triangle_colliding_vertices_buffer_sizes: size of each triangle's collision buffer, will be modified if resizing is needed
+        min_distance_filtering_ref_pos: the position that minimal collision distance evaluation uses.
+        vertex_colliding_triangles: flattened buffer of vertices' collision triangles
+        vertex_colliding_triangles_count: number of triangles each vertex collides with
+        triangle_colliding_vertices: positions of all the triangles' collision vertices, every two elements
             records the vertex index and a triangle index it collides to
-        triangle_colliding_vertices_count (array): number of triangles each vertex collides with
-        triangle_colliding_vertices_min_dist (array): each triangle's min distance to all (non-self) vertices
-        resized_flag (array): size == 3, (vertex_buffer_resize_required, triangle_buffer_resize_required, edge_buffer_resize_required)
+        triangle_colliding_vertices_count: number of triangles each vertex collides with
+        triangle_colliding_vertices_min_dist: each triangle's min distance to all (non-self) vertices
+        resized_flag: size == 3, (vertex_buffer_resize_required, triangle_buffer_resize_required, edge_buffer_resize_required)
     """
 
     v_index = wp.tid()
@@ -1407,16 +1409,21 @@ def edge_colliding_edges_detection_kernel(
     resize_flags: wp.array[wp.int32],
 ):
     """
-    bvh_id (int): the bvh id you want to do collision detection on
-    max_query_radius (float): the upper bound of collision distance.
-    min_query_radius (float): the lower bound of collision distance. This distance is evaluated based on min_distance_filtering_ref_pos
-    pos (array): positions of all the vertices that make up edges
-    edge_colliding_triangles (array): flattened buffer of edges' collision edges
-    edge_colliding_edges_count (array): number of edges each edge collides
-    edge_colliding_triangles_offsets (array): where each edge's collision buffer starts
-    edge_colliding_triangles_buffer_size (array): size of each edge's collision buffer, will be modified if resizing is needed
-    edge_min_dis_to_triangles (array): each vertex' min distance to all (non-neighbor) triangles
-    resized_flag (array): size == 3, (vertex_buffer_resize_required, triangle_buffer_resize_required, edge_buffer_resize_required)
+    bvh_id: the bvh id you want to do collision detection on
+    max_query_radius: the upper bound of collision distance.
+    min_query_radius: the lower bound of collision distance. This distance is evaluated based on min_distance_filtering_ref_pos
+    pos: positions of all the vertices that make up edges
+    edge_indices: vertex index buffer for each edge
+    edge_colliding_edges_offsets: where each edge's collision buffer starts
+    edge_colliding_edges_buffer_sizes: size of each edge's collision buffer, will be modified if resizing is needed
+    edge_edge_parallel_epsilon: threshold for treating edge directions as parallel
+    edge_filtering_list: edge indices to exclude from collision checks
+    edge_filtering_list_offsets: offsets into the edge filtering list
+    min_distance_filtering_ref_pos: reference positions used for minimum-distance filtering
+    edge_colliding_edges: flattened buffer of colliding edge indices
+    edge_colliding_edges_count: number of edges each edge collides
+    edge_colliding_edges_min_dist: each edge's minimum distance to all non-filtered edges
+    resize_flags: global collision resize flags; this kernel sets the edge-buffer overflow entry
     """
     e_index = wp.tid()
 
