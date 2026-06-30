@@ -2906,13 +2906,20 @@ def _phoenx_update_inertia_and_clear_forces_kernel(
 def _phoenx_refresh_world_inertia_kernel(
     bodies: BodyContainer,
 ):
-    """Per-substep refresh of inverse_inertia_world (R * I^-1 * R^T) so the
-    next substep's solve sees the rotated inertia. Anisotropic bodies drift in
-    angular momentum without this when running multiple substeps."""
+    """Rotate world inertia and transport angular momentum to the new pose.
+
+    Constraint impulses update angular velocity using the inertia at substep
+    entry. After pose integration, preserving that world angular momentum while
+    rotating the inertia tensor supplies the torque-free gyroscopic dynamics.
+    """
     i = wp.tid()
     if bodies.motion_type[i] == MOTION_DYNAMIC:
+        inv_inertia_old = mat33_from_sym6(bodies.inverse_inertia_world[i])
+        angular_momentum = wp.inverse(inv_inertia_old) * bodies.angular_velocity[i]
         r = wp.quat_to_matrix(bodies.orientation[i])
-        bodies.inverse_inertia_world[i] = sym6_from_mat33(rotate_inertia(r, bodies.inverse_inertia[i]))
+        inv_inertia_new = rotate_inertia(r, bodies.inverse_inertia[i])
+        bodies.inverse_inertia_world[i] = sym6_from_mat33(inv_inertia_new)
+        bodies.angular_velocity[i] = inv_inertia_new * angular_momentum
 
 
 @wp.kernel(enable_backward=False)

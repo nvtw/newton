@@ -182,6 +182,51 @@ class TestEnergyConservation(unittest.TestCase):
                     f"peak_omega={peak_omega:.4f} -- spurious damping",
                 )
 
+    def test_torque_free_asymmetric_body_conserves_angular_momentum(self) -> None:
+        """Rotating world inertia must transport, not create, angular momentum."""
+        device = wp.get_preferred_device()
+        inverse_inertia = ((1.0, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.25))
+        inertia_body = np.diag((1.0, 2.0, 4.0))
+        omega_initial = np.asarray((1.1, -0.7, 0.9), dtype=np.float64)
+
+        builder = WorldBuilder()
+        body = builder.add_dynamic_body(
+            inverse_mass=1.0,
+            inverse_inertia=inverse_inertia,
+            affected_by_gravity=False,
+            angular_velocity=tuple(omega_initial),
+        )
+        world = builder.finalize(substeps=8, solver_iterations=1, device=device)
+
+        angular_momentum_initial = inertia_body @ omega_initial
+        energy_initial = 0.5 * float(omega_initial @ angular_momentum_initial)
+        dt = 1.0 / 240.0
+        world.step(dt)
+        with wp.ScopedCapture(device=device) as capture:
+            world.step(dt)
+        for _ in range(958):
+            wp.capture_launch(capture.graph)
+
+        q = world.bodies.orientation.numpy()[body].astype(np.float64)
+        x, y, z, w = q
+        rotation = np.asarray(
+            (
+                (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
+                (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)),
+                (2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)),
+            ),
+            dtype=np.float64,
+        )
+        omega_final = world.bodies.angular_velocity.numpy()[body].astype(np.float64)
+        inertia_world_final = rotation @ inertia_body @ rotation.T
+        angular_momentum_final = inertia_world_final @ omega_final
+        momentum_error = np.linalg.norm(angular_momentum_final - angular_momentum_initial)
+        momentum_scale = np.linalg.norm(angular_momentum_initial)
+        self.assertLess(momentum_error / momentum_scale, 2.0e-4)
+
+        energy_final = 0.5 * float(omega_final @ angular_momentum_final)
+        self.assertLess(abs(energy_final - energy_initial) / energy_initial, 0.03)
+
 
 if __name__ == "__main__":
     wp.init()
