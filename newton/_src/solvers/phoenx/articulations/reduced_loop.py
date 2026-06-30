@@ -132,6 +132,12 @@ def _tile_spatial_negate(a: wp.spatial_vector) -> wp.spatial_vector:
 
 
 @wp.func
+def _tile_wrench_about_origin(wrench: wp.spatial_vector, origin: wp.vec3) -> wp.spatial_vector:
+    force = wp.spatial_top(wrench)
+    return wp.spatial_vector(force, wp.spatial_bottom(wrench) - wp.cross(origin, force))
+
+
+@wp.func
 def _tile_spatial_dot(a: wp.spatial_vector, b: wp.spatial_vector) -> wp.float32:
     return wp.dot(a, b)
 
@@ -465,6 +471,7 @@ def _accumulate_articulation_schur_tile(
     if articulation0 == articulation:
         target = body0 - wp.int32(1)
         wrench = wp.tile_load(row_wrench0[loop], shape=_MAX_ROWS, storage="register")
+        wrench = wp.tile_map(_tile_wrench_about_origin, wrench, data.articulation_origin[articulation])
         current = wp.tile_load(body_work[target], shape=_MAX_ROWS, storage="register")
         wp.tile_store(
             body_work[target], wp.tile_map(_tile_spatial_add, current, wp.tile_map(_tile_spatial_negate, wrench))
@@ -472,6 +479,7 @@ def _accumulate_articulation_schur_tile(
     if articulation1 == articulation:
         target = body1 - wp.int32(1)
         wrench = wp.tile_load(row_wrench1[loop], shape=_MAX_ROWS, storage="register")
+        wrench = wp.tile_map(_tile_wrench_about_origin, wrench, data.articulation_origin[articulation])
         current = wp.tile_load(body_work[target], shape=_MAX_ROWS, storage="register")
         wp.tile_store(
             body_work[target], wp.tile_map(_tile_spatial_add, current, wp.tile_map(_tile_spatial_negate, wrench))
@@ -544,10 +552,12 @@ def _accumulate_articulation_schur_tile(
         contribution = wp.tile_zeros(shape=_MAX_ROWS, dtype=wp.float32, storage="register")
         if articulation0 == articulation:
             response0 = wp.tile_load(body_response[body0 - wp.int32(1)], shape=_MAX_ROWS, storage="register")
-            contribution += wp.tile_map(_tile_spatial_dot, response0, row_wrench0[loop, row])
+            local_wrench0 = _tile_wrench_about_origin(row_wrench0[loop, row], data.articulation_origin[articulation])
+            contribution += wp.tile_map(_tile_spatial_dot, response0, local_wrench0)
         if articulation1 == articulation:
             response1 = wp.tile_load(body_response[body1 - wp.int32(1)], shape=_MAX_ROWS, storage="register")
-            contribution += wp.tile_map(_tile_spatial_dot, response1, row_wrench1[loop, row])
+            local_wrench1 = _tile_wrench_about_origin(row_wrench1[loop, row], data.articulation_origin[articulation])
+            contribution += wp.tile_map(_tile_spatial_dot, response1, local_wrench1)
         current_schur = wp.tile_load(schur_matrix[loop, row], shape=_MAX_ROWS, storage="register")
         wp.tile_store(schur_matrix[loop, row], current_schur + contribution)
 

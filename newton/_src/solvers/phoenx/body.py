@@ -88,6 +88,8 @@ class ReducedArticulationData:
 
     enabled: wp.array[wp.int32]
     body_articulation: wp.array[wp.int32]
+    articulation_origin: wp.array[wp.vec3]
+    body_q_com: wp.array[wp.transform]
     articulation_start: wp.array[wp.int32]
     articulation_end: wp.array[wp.int32]
     joint_parent: wp.array[wp.int32]
@@ -113,6 +115,8 @@ def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArti
     data = ReducedArticulationData()
     data.enabled = wp.zeros(1, dtype=wp.int32, device=device)
     data.body_articulation = wp.full(1, value=-1, dtype=wp.int32, device=device)
+    data.articulation_origin = wp.zeros(1, dtype=wp.vec3, device=device)
+    data.body_q_com = wp.zeros(1, dtype=wp.transform, device=device)
     data.articulation_start = wp.zeros(1, dtype=wp.int32, device=device)
     data.articulation_end = wp.zeros(1, dtype=wp.int32, device=device)
     data.joint_parent = wp.full(1, value=-1, dtype=wp.int32, device=device)

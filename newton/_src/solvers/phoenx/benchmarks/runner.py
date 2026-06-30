@@ -38,6 +38,8 @@ class SceneHandle:
     substeps: int
     solver_iterations: int
     simulate_one_frame: Callable[[], None]
+    graph_period_frames: int = 2
+    """Frames required for captured state buffers to return to their initial slot layout."""
     #: Bytes of GPU memory the scene allocated during setup. Computed
     #: by :func:`run_one` using ``wp.get_device().total_memory -
     #: wp.get_device().free_memory`` bookends; approximate (other
@@ -85,14 +87,18 @@ def run_one(
         handle.simulate_one_frame()
     wp.synchronize_device()
 
-    # Capture one frame into a CUDA graph so the measurement loop is
-    # a tight ``capture_launch`` without Python overhead per step.
-    # Fall back to eager stepping on CPU (where ScopedCapture is a
-    # no-op) but warn -- CPU timings are noisy.
+    graph_period_frames = int(handle.graph_period_frames)
+    if graph_period_frames < 1:
+        raise ValueError("graph_period_frames must be at least 1")
+
+    # Capture a complete state-buffer period. Replaying an A-to-B frame cannot
+    # execute the Python reference swap and would repeatedly overwrite B from
+    # stale A instead of advancing the simulation.
     graph = None
     if device.is_cuda:
         with wp.ScopedCapture() as capture:
-            handle.simulate_one_frame()
+            for _ in range(graph_period_frames):
+                handle.simulate_one_frame()
         graph = capture.graph
         wp.synchronize_device()
 
@@ -109,8 +115,11 @@ def run_one(
     # kernel's completion and is enough.
     t0 = time.perf_counter()
     if graph is not None:
-        for _ in range(measure_frames):
+        graph_replays, remainder_frames = divmod(measure_frames, graph_period_frames)
+        for _ in range(graph_replays):
             wp.capture_launch(graph)
+        for _ in range(remainder_frames):
+            handle.simulate_one_frame()
     else:
         for _ in range(measure_frames):
             handle.simulate_one_frame()

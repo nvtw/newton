@@ -182,6 +182,7 @@ def _build_handle(
             substeps=substeps,
             solver_iterations=solver_iterations,
             simulate_one_frame=simulate_one_frame,
+            graph_period_frames=2,
         ),
         state_box,
     )

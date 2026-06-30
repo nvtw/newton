@@ -241,6 +241,13 @@ def reduced_contact_deferred_owner(
 
 
 @wp.func
+def _reduced_point_local(bodies: BodyContainer, body: wp.int32, point: wp.vec3f) -> wp.vec3f:
+    link = body - wp.int32(1)
+    local_com = wp.transform_get_translation(bodies.reduced.body_q_com[link])
+    return local_com + point - bodies.position[body]
+
+
+@wp.func
 def _response_matrix_multiply(
     bodies: BodyContainer,
     body: wp.int32,
@@ -270,7 +277,8 @@ def _deferred_inverse_mass(
         point = point1
         impulse = direction
     link = body - wp.int32(1)
-    wrench = wp.spatial_vector(impulse, wp.cross(point, impulse))
+    point_local = _reduced_point_local(bodies, body, point)
+    wrench = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
     return wp.dot(wrench, _response_matrix_multiply(bodies, link, wrench))
 
 
@@ -293,7 +301,8 @@ def _apply_deferred_impulse(
 
     data = bodies.reduced
     link = body - wp.int32(1)
-    wrench = wp.spatial_vector(impulse, wp.cross(point, impulse))
+    point_local = _reduced_point_local(bodies, body, point)
+    wrench = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
     joint = data.body_joint[link]
     while joint >= wp.int32(0):
         data.deferred_wrench[link] = data.deferred_wrench[link] + wrench
@@ -362,7 +371,9 @@ def _deferred_point_velocity(
     velocity = _point_velocity(bodies, body, point)
     if bodies.reduced.body_articulation[body] >= wp.int32(0):
         delta = _deferred_link_delta_twist(bodies, body)
-        velocity += wp.spatial_top(delta) + wp.cross(wp.spatial_bottom(delta), point)
+        velocity += wp.spatial_top(delta) + wp.cross(
+            wp.spatial_bottom(delta), _reduced_point_local(bodies, body, point)
+        )
     return velocity
 
 

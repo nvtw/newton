@@ -125,6 +125,12 @@ def _read_body_velocity_with_slot(
 
 
 @wp.func
+def _wrench_about_origin(wrench: wp.spatial_vector, origin: wp.vec3f) -> wp.spatial_vector:
+    force = wp.spatial_top(wrench)
+    return wp.spatial_vector(force, wp.spatial_bottom(wrench) - wp.cross(origin, force))
+
+
+@wp.func
 def _articulation_pair_wrench_response(
     bodies: BodyContainer,
     body_slot0: wp.int32,
@@ -139,6 +145,9 @@ def _articulation_pair_wrench_response(
     if articulation < wp.int32(0):
         return wp.float32(0.0)
 
+    origin = data.articulation_origin[articulation]
+    local_wrench0 = _wrench_about_origin(wrench0, origin)
+    local_wrench1 = _wrench_about_origin(wrench1, origin)
     start = data.articulation_start[articulation]
     end = data.articulation_end[articulation]
     for joint in range(start, end):
@@ -148,10 +157,10 @@ def _articulation_pair_wrench_response(
 
     for side in range(2):
         body_slot = body_slot0
-        wrench = wrench0
+        wrench = local_wrench0
         if side == 1:
             body_slot = body_slot1
-            wrench = wrench1
+            wrench = local_wrench1
         if body_slot >= wp.int32(0):
             target_body = body_slot - wp.int32(1)
             data.body_work[target_body] = data.body_work[target_body] - wrench
@@ -217,9 +226,9 @@ def _articulation_pair_wrench_response(
 
     effective_inverse_mass = wp.float32(0.0)
     if body_slot0 >= wp.int32(0):
-        effective_inverse_mass += wp.dot(wrench0, data.body_acceleration[body_slot0 - wp.int32(1)])
+        effective_inverse_mass += wp.dot(local_wrench0, data.body_acceleration[body_slot0 - wp.int32(1)])
     if body_slot1 >= wp.int32(0):
-        effective_inverse_mass += wp.dot(wrench1, data.body_acceleration[body_slot1 - wp.int32(1)])
+        effective_inverse_mass += wp.dot(local_wrench1, data.body_acceleration[body_slot1 - wp.int32(1)])
 
     if apply:
         for joint in range(start, end):
@@ -244,7 +253,8 @@ def _articulation_pair_wrench_response(
             slot = child + wp.int32(1)
             omega = wp.spatial_bottom(twist)
             bodies.angular_velocity[slot] = omega
-            bodies.velocity[slot] = wp.spatial_top(twist) + wp.cross(omega, bodies.position[slot])
+            local_com_position = wp.transform_get_translation(data.body_q_com[child])
+            bodies.velocity[slot] = wp.spatial_top(twist) + wp.cross(omega, local_com_position)
 
     return effective_inverse_mass
 

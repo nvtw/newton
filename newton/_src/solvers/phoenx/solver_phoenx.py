@@ -3111,6 +3111,8 @@ class PhoenXWorld:
                     split_dynamics=self._reduced_constraints_active_this_step,
                 )
             self._dispatcher.relax(idt)
+            if self._reduced_articulation is not None:
+                self._reduced_articulation.finish_relax()
             # Flip cloth particles' POSITION_LEVEL writes back to
             # VELOCITY_LEVEL. No-op for STATIC particles and rigid-only
             # scenes (num_particles == 0).

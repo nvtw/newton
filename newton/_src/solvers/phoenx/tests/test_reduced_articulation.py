@@ -18,7 +18,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_link_delta_twist,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
-    _MAX_POINTS,
+    _POINTS_PER_PAGE,
     _build_generalized_contact_rows_kernel,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
@@ -303,7 +303,7 @@ def _make_high_degree_articulation_star(device, satellite_count=72):
     return builder.finalize(device=device)
 
 
-def _make_contact_overflow_model(device, contact_count=_MAX_POINTS + 8):
+def _make_contact_overflow_model(device, contact_count=_POINTS_PER_PAGE + 8):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     body = builder.add_link(mass=2.0)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.6, restitution=0.0)
@@ -1113,8 +1113,12 @@ class TestReducedArticulation(unittest.TestCase):
             featherstone.step(state_featherstone, output_featherstone, control, None, dt)
         wp.capture_launch(capture_featherstone.graph)
 
+        # PhoenX projects the floating-base rigid-motion coordinates after
+        # configuration drift to preserve world momentum. Featherstone uses
+        # an unprojected semi-implicit update, so generalized velocities are
+        # expected to differ slightly while poses remain much closer.
         np.testing.assert_allclose(
-            output_phoenx.joint_qd.numpy(), output_featherstone.joint_qd.numpy(), rtol=6.0e-4, atol=6.0e-5
+            output_phoenx.joint_qd.numpy(), output_featherstone.joint_qd.numpy(), rtol=2.5e-3, atol=8.0e-5
         )
         np.testing.assert_allclose(
             output_phoenx.joint_q.numpy(), output_featherstone.joint_q.numpy(), rtol=6.0e-4, atol=6.0e-5
@@ -1257,7 +1261,7 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
         self.assertGreater(float(output.joint_qd.numpy()[2]), -0.2)
 
-    def test_contact_block_overflow_uses_exact_graph_captured_fallback(self):
+    def test_contact_block_pages_arbitrary_contact_count_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")
@@ -1274,7 +1278,7 @@ class TestReducedArticulation(unittest.TestCase):
             articulation_mode="reduced",
             substeps=1,
             solver_iterations=8,
-            velocity_iterations=0,
+            velocity_iterations=1,
         )
         contacts = model.contacts()
 
@@ -1286,9 +1290,10 @@ class TestReducedArticulation(unittest.TestCase):
         block = solver._reduced_articulation.contact_block_system
         column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
         self.assertGreaterEqual(column_count, 1)
-        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), _MAX_POINTS)
-        self.assertEqual(int(block.enabled.numpy()[0]), 0)
-        self.assertEqual(int(block.deferred_active.numpy()[0]), 1)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), _POINTS_PER_PAGE)
+        self.assertEqual(int(block.enabled.numpy()[0]), 1)
+        self.assertEqual(int(block.deferred_active.numpy()[0]), 0)
+        self.assertGreaterEqual(int(block.max_page_count.numpy()[0]), 2)
         self.assertEqual(int(block.fallback_count.numpy()[0]), 0)
         self.assertTrue(np.isfinite(output.joint_q.numpy()).all())
         self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
@@ -1297,6 +1302,25 @@ class TestReducedArticulation(unittest.TestCase):
         fk_state = model.state()
         newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
         np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=3.0e-5)
+
+        # The same graph must adapt its conditional page loop to changing
+        # device-side contact counts without resizing or recapture.
+        contact_q = state.joint_q.numpy()
+        separated_q = contact_q.copy()
+        separated_q[2] = 2.0
+        state.joint_q.assign(separated_q)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        wp.capture_launch(capture.graph)
+        self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 0)
+        self.assertEqual(int(block.max_page_count.numpy()[0]), 0)
+        self.assertEqual(int(block.multi_page_active.numpy()[0]), 0)
+
+        state.joint_q.assign(contact_q)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        wp.capture_launch(capture.graph)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), _POINTS_PER_PAGE)
+        self.assertGreaterEqual(int(block.max_page_count.numpy()[0]), 2)
+        self.assertEqual(int(block.multi_page_active.numpy()[0]), 1)
 
     def test_dense_articulation_contacts_are_deterministic_and_conserve_momentum(self):
         device = wp.get_preferred_device()
