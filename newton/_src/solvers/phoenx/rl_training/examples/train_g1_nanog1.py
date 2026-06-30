@@ -205,13 +205,13 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--command-curriculum-start",
         type=float,
-        default=1.0,
+        default=g1_recipe.COMMAND_CURRICULUM_START,
         help="Initial multiplier for randomized command ranges (default: %(default)s)",
     )
     parser.add_argument(
         "--command-curriculum-samples",
         type=int,
-        default=0,
+        default=g1_recipe.COMMAND_CURRICULUM_SAMPLES,
         help="Samples over which command ranges grow to full scale; 0 disables it (default: %(default)s)",
     )
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
