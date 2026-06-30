@@ -470,34 +470,44 @@ def _factor_reduced_depth_kernel(
     dof_start = joint_qd_start[joint]
     dof_end = joint_qd_start[joint + wp.int32(1)]
     dof_count = dof_end - dof_start
-    d = _mat66(0.0)
-    for column in range(_MAX_JOINT_DOF):
-        if wp.int32(column) < dof_count:
-            dof = dof_start + wp.int32(column)
-            u = inertia * joint_s[dof]
-            joint_u[dof] = u
-            for row in range(_MAX_JOINT_DOF):
-                if wp.int32(row) < dof_count:
-                    d[row, column] = wp.dot(joint_s[dof_start + wp.int32(row)], u)
-            d[column, column] += factor_diagonal[dof]
-
-    d_inv = _invert_spd(d, dof_count)
-    for row in range(_MAX_JOINT_DOF):
-        for column in range(_MAX_JOINT_DOF):
-            joint_d_inv[joint, row, column] = d_inv[row, column]
-
     reduced = inertia
-    for row in range(6):
-        for column in range(6):
-            correction = wp.float32(0.0)
-            for a in range(_MAX_JOINT_DOF):
-                if wp.int32(a) < dof_count:
-                    u_a = joint_u[dof_start + wp.int32(a)]
-                    for b in range(_MAX_JOINT_DOF):
-                        if wp.int32(b) < dof_count:
-                            u_b = joint_u[dof_start + wp.int32(b)]
-                            correction += u_a[row] * d_inv[a, b] * u_b[column]
-            reduced[row, column] -= correction
+    if dof_count == wp.int32(1):
+        dof = dof_start
+        u = inertia * joint_s[dof]
+        joint_u[dof] = u
+        d_inv_scalar = wp.float32(1.0) / wp.max(wp.dot(joint_s[dof], u) + factor_diagonal[dof], wp.float32(1.0e-20))
+        joint_d_inv[joint, 0, 0] = d_inv_scalar
+        for row in range(6):
+            for column in range(6):
+                reduced[row, column] -= u[row] * d_inv_scalar * u[column]
+    elif dof_count > wp.int32(1):
+        d = _mat66(0.0)
+        for column in range(_MAX_JOINT_DOF):
+            if wp.int32(column) < dof_count:
+                dof = dof_start + wp.int32(column)
+                u = inertia * joint_s[dof]
+                joint_u[dof] = u
+                for row in range(_MAX_JOINT_DOF):
+                    if wp.int32(row) < dof_count:
+                        d[row, column] = wp.dot(joint_s[dof_start + wp.int32(row)], u)
+                d[column, column] += factor_diagonal[dof]
+
+        d_inv = _invert_spd(d, dof_count)
+        for row in range(_MAX_JOINT_DOF):
+            for column in range(_MAX_JOINT_DOF):
+                joint_d_inv[joint, row, column] = d_inv[row, column]
+
+        for row in range(6):
+            for column in range(6):
+                correction = wp.float32(0.0)
+                for a in range(_MAX_JOINT_DOF):
+                    if wp.int32(a) < dof_count:
+                        u_a = joint_u[dof_start + wp.int32(a)]
+                        for b in range(_MAX_JOINT_DOF):
+                            if wp.int32(b) < dof_count:
+                                u_b = joint_u[dof_start + wp.int32(b)]
+                                correction += u_a[row] * d_inv[a, b] * u_b[column]
+                reduced[row, column] -= correction
     reduced_inertia[child] = reduced
 
 
@@ -721,34 +731,46 @@ def _factor_reduced_warp_kernel(
             dof_start = joint_qd_start[joint]
             dof_end = joint_qd_start[joint + wp.int32(1)]
             dof_count = dof_end - dof_start
-            d = _mat66(0.0)
-            for column in range(_MAX_JOINT_DOF):
-                if wp.int32(column) < dof_count:
-                    dof = dof_start + wp.int32(column)
-                    u = inertia * joint_s[dof]
-                    joint_u[dof] = u
-                    for row in range(_MAX_JOINT_DOF):
-                        if wp.int32(row) < dof_count:
-                            d[row, column] = wp.dot(joint_s[dof_start + wp.int32(row)], u)
-                    d[column, column] += factor_diagonal[dof]
-
-            d_inv = _invert_spd(d, dof_count)
-            for row in range(_MAX_JOINT_DOF):
-                for column in range(_MAX_JOINT_DOF):
-                    joint_d_inv[joint, row, column] = d_inv[row, column]
-
             reduced = inertia
-            for row in range(6):
-                for column in range(6):
-                    correction = wp.float32(0.0)
-                    for a in range(_MAX_JOINT_DOF):
-                        if wp.int32(a) < dof_count:
-                            u_a = joint_u[dof_start + wp.int32(a)]
-                            for b in range(_MAX_JOINT_DOF):
-                                if wp.int32(b) < dof_count:
-                                    u_b = joint_u[dof_start + wp.int32(b)]
-                                    correction += u_a[row] * d_inv[a, b] * u_b[column]
-                    reduced[row, column] -= correction
+            if dof_count == wp.int32(1):
+                dof = dof_start
+                u = inertia * joint_s[dof]
+                joint_u[dof] = u
+                d_inv_scalar = wp.float32(1.0) / wp.max(
+                    wp.dot(joint_s[dof], u) + factor_diagonal[dof], wp.float32(1.0e-20)
+                )
+                joint_d_inv[joint, 0, 0] = d_inv_scalar
+                for row in range(6):
+                    for column in range(6):
+                        reduced[row, column] -= u[row] * d_inv_scalar * u[column]
+            elif dof_count > wp.int32(1):
+                d = _mat66(0.0)
+                for column in range(_MAX_JOINT_DOF):
+                    if wp.int32(column) < dof_count:
+                        dof = dof_start + wp.int32(column)
+                        u = inertia * joint_s[dof]
+                        joint_u[dof] = u
+                        for row in range(_MAX_JOINT_DOF):
+                            if wp.int32(row) < dof_count:
+                                d[row, column] = wp.dot(joint_s[dof_start + wp.int32(row)], u)
+                        d[column, column] += factor_diagonal[dof]
+
+                d_inv = _invert_spd(d, dof_count)
+                for row in range(_MAX_JOINT_DOF):
+                    for column in range(_MAX_JOINT_DOF):
+                        joint_d_inv[joint, row, column] = d_inv[row, column]
+
+                for row in range(6):
+                    for column in range(6):
+                        correction = wp.float32(0.0)
+                        for a in range(_MAX_JOINT_DOF):
+                            if wp.int32(a) < dof_count:
+                                u_a = joint_u[dof_start + wp.int32(a)]
+                                for b in range(_MAX_JOINT_DOF):
+                                    if wp.int32(b) < dof_count:
+                                        u_b = joint_u[dof_start + wp.int32(b)]
+                                        correction += u_a[row] * d_inv[a, b] * u_b[column]
+                        reduced[row, column] -= correction
             reduced_inertia[child] = reduced
             index += wp.int32(32)
         _sync_reduced_warp()
