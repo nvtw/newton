@@ -1598,6 +1598,8 @@ class TestReducedArticulation(unittest.TestCase):
             velocity_iterations=0,
         )
         serial._reduced_articulation.system.use_warp_advance = False
+        serial._reduced_articulation.system.use_warp_kinematics = False
+        warp._reduced_articulation.system.use_warp_kinematics = True
         dt = 1.0 / 240.0
 
         with wp.ScopedCapture(device=device) as serial_capture:

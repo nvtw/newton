@@ -618,6 +618,72 @@ def _compute_reduced_impulse_response_warp_kernel(
         _sync_reduced_warp()
 
 
+@wp.kernel(enable_backward=False, module="reduced_kinematics")
+def _compute_reduced_local_kinematics_warp_kernel(
+    max_depth: wp.int32,
+    articulation_depth_start: wp.array2d[wp.int32],
+    articulation_depth_joint: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_q: wp.array[wp.float32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_dof_dim: wp.array2d[wp.int32],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_x_com: wp.array[wp.transform],
+    articulation_origin: wp.array[wp.vec3],
+    body_q_local: wp.array[wp.transform],
+    body_q_com: wp.array[wp.transform],
+    joint_anchor_local: wp.array[wp.transform],
+):
+    thread = wp.tid()
+    articulation = thread // wp.int32(32)
+    lane = thread - articulation * wp.int32(32)
+    if lane == wp.int32(0):
+        root_joint = articulation_depth_joint[articulation_depth_start[articulation, 0]]
+        root = joint_child[root_joint]
+        articulation_origin[articulation] = wp.transform_point(body_q[root], body_com[root])
+
+    for depth in range(max_depth + wp.int32(1)):
+        index = articulation_depth_start[articulation, depth] + lane
+        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+        while index < depth_end:
+            joint = articulation_depth_joint[index]
+            parent = joint_parent[joint]
+            child = joint_child[joint]
+            joint_transform = jcalc_transform(
+                joint_type[joint],
+                joint_axis,
+                joint_qd_start[joint],
+                joint_dof_dim[joint, 0],
+                joint_dof_dim[joint, 1],
+                joint_q,
+                joint_q_start[joint],
+            )
+            if parent < wp.int32(0):
+                rotation = wp.transform_get_rotation(body_q[child])
+                child_transform = wp.transform(-wp.quat_rotate(rotation, body_com[child]), rotation)
+                child_anchor = child_transform * joint_x_c[joint]
+                root_joint_transform = joint_transform
+                if joint_type[joint] == JointType.FREE or joint_type[joint] == JointType.DISTANCE:
+                    root_joint_transform = wp.transform(wp.vec3(0.0), wp.transform_get_rotation(joint_transform))
+                parent_anchor = child_anchor * wp.transform_inverse(root_joint_transform)
+            else:
+                parent_anchor = body_q_local[parent] * joint_x_p[joint]
+                child_anchor = parent_anchor * joint_transform
+                child_transform = child_anchor * wp.transform_inverse(joint_x_c[joint])
+            joint_anchor_local[joint] = parent_anchor
+            body_q_local[child] = child_transform
+            body_q_com[child] = child_transform * body_x_com[child]
+            index += wp.int32(32)
+        _sync_reduced_warp()
+
+
 @wp.kernel(enable_backward=False, module="reduced_factor")
 def _factor_reduced_warp_kernel(
     max_depth: wp.int32,
@@ -1656,6 +1722,7 @@ class ReducedArticulationSystem:
         self.device = model.device
         self.use_warp_advance = bool(self.device.is_cuda)
         self.use_warp_factor = bool(self.device.is_cuda and model.articulation_count >= _WARP_FACTOR_MIN_ARTICULATIONS)
+        self.use_warp_kinematics = bool(self.device.is_cuda)
         body_count = int(model.body_count)
         joint_count = int(model.joint_count)
         dof_count = int(model.joint_dof_count)
@@ -1781,34 +1848,53 @@ class ReducedArticulationSystem:
 
     def update_local_kinematics(self, state: State) -> None:
         """Reconstruct translation-invariant link and COM frames."""
-        wp.launch(
-            _compute_reduced_local_kinematics_kernel,
-            dim=int(self.model.articulation_count),
-            inputs=[
-                self.model.articulation_start,
-                self.model.articulation_end,
-                self.model.joint_type,
-                self.model.joint_parent,
-                self.model.joint_child,
-                self.model.joint_q_start,
-                self.model.joint_qd_start,
-                state.joint_q,
-                self.model.joint_X_p,
-                self.model.joint_X_c,
-                self.model.joint_axis,
-                self.model.joint_dof_dim,
-                state.body_q,
-                self.model.body_com,
-                self.body_x_com,
-            ],
-            outputs=[
-                self.articulation_origin,
-                self.body_q_local,
-                self.body_q_com,
-                self.joint_anchor_local,
-            ],
-            device=self.device,
-        )
+        kinematics_inputs = [
+            self.model.joint_type,
+            self.model.joint_parent,
+            self.model.joint_child,
+            self.model.joint_q_start,
+            self.model.joint_qd_start,
+            state.joint_q,
+            self.model.joint_X_p,
+            self.model.joint_X_c,
+            self.model.joint_axis,
+            self.model.joint_dof_dim,
+            state.body_q,
+            self.model.body_com,
+            self.body_x_com,
+        ]
+        kinematics_outputs = [
+            self.articulation_origin,
+            self.body_q_local,
+            self.body_q_com,
+            self.joint_anchor_local,
+        ]
+        if self.use_warp_kinematics:
+            wp.launch(
+                _compute_reduced_local_kinematics_warp_kernel,
+                dim=int(self.model.articulation_count) * 32,
+                block_dim=32,
+                inputs=[
+                    wp.int32(self.advance_max_depth),
+                    self.advance_articulation_depth_start,
+                    self.advance_articulation_depth_joint,
+                    *kinematics_inputs,
+                ],
+                outputs=kinematics_outputs,
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                _compute_reduced_local_kinematics_kernel,
+                dim=int(self.model.articulation_count),
+                inputs=[
+                    self.model.articulation_start,
+                    self.model.articulation_end,
+                    *kinematics_inputs,
+                ],
+                outputs=kinematics_outputs,
+                device=self.device,
+            )
 
     def factor(self, state: State, control: Control | None = None, dt: float = 0.0) -> None:
         """Factor the generalized mass and optional implicit joint operator."""
