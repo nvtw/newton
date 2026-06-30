@@ -59,6 +59,25 @@ def _robot_builder(name: str) -> newton.ModelBuilder:
             enable_self_collisions=False,
         )
         builder.approximate_meshes("bounding_box")
+    elif name == "g1_usd":
+        builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(limit_ke=0.0, limit_kd=0.0, friction=0.0)
+        builder.default_shape_cfg.ke = 5.0e4
+        builder.default_shape_cfg.kd = 5.0e2
+        builder.default_shape_cfg.kf = 1.0e3
+        builder.default_shape_cfg.mu = 0.75
+        asset = newton.utils.download_asset("unitree_g1")
+        builder.add_usd(
+            str(asset / "usd" / "g1_isaac.usd"),
+            xform=wp.transform(wp.vec3(0.0, 0.0, 0.8)),
+            collapse_fixed_joints=True,
+            enable_self_collisions=False,
+            hide_collision_shapes=True,
+            skip_mesh_approximation=True,
+        )
+        for dof in range(6, builder.joint_dof_count):
+            builder.joint_target_ke[dof] = 1000.0
+            builder.joint_target_kd[dof] = 5.0
+        builder.approximate_meshes("bounding_box")
     elif name == "g1":
         asset = newton.utils.download_asset("unitree_g1")
         builder.add_mjcf(
@@ -79,7 +98,7 @@ def _robot_builder(name: str) -> newton.ModelBuilder:
     else:
         raise ValueError(f"unknown robot {name!r}")
 
-    if name == "g1":
+    if name in ("g1", "g1_usd"):
         return builder
 
     for joint in range(builder.joint_count):
@@ -131,6 +150,7 @@ def _build_handle(
     substeps: int,
     solver_iterations: int,
     velocity_iterations: int,
+    frame_dt: float,
     device: wp.context.Device,
 ) -> tuple[SceneHandle, list[newton.State]]:
     model = _build_model(robot, robot_count, layout, contacts_enabled, device)
@@ -163,7 +183,6 @@ def _build_handle(
 
     contacts = model.contacts() if contacts_enabled else None
     state_box = [state0, state1]
-    frame_dt = 1.0 / 200.0
 
     def simulate_one_frame() -> None:
         if contacts is not None:
@@ -190,7 +209,7 @@ def _build_handle(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--robots", nargs="+", choices=("anymal", "h1", "g1"), default=("anymal", "h1", "g1"))
+    parser.add_argument("--robots", nargs="+", choices=("anymal", "h1", "g1", "g1_usd"), default=("anymal", "h1", "g1"))
     parser.add_argument("--robot-counts", nargs="+", type=int, default=(1, 64, 512))
     parser.add_argument("--layouts", nargs="+", choices=("single_world", "multi_world"), default=("multi_world",))
     parser.add_argument(
@@ -200,6 +219,7 @@ def main() -> None:
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--solver-iterations", type=int, default=4)
     parser.add_argument("--velocity-iterations", type=int, default=1)
+    parser.add_argument("--frame-dt", type=float, default=1.0 / 200.0)
     parser.add_argument("--warmup-frames", type=int, default=16)
     parser.add_argument("--measure-frames", type=int, default=64)
     args = parser.parse_args()
@@ -221,6 +241,7 @@ def main() -> None:
                         args.substeps,
                         args.solver_iterations,
                         args.velocity_iterations,
+                        args.frame_dt,
                         device,
                     )
                     result = run_one(
