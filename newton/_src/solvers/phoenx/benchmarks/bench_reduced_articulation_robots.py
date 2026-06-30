@@ -24,6 +24,10 @@ import warp as wp
 import newton
 import newton.utils
 from newton._src.solvers.phoenx.benchmarks.runner import SceneHandle, run_one
+from newton._src.solvers.phoenx.rl_training.g1 import (
+    _DEFAULT_JOINT_POS_G1,
+    _apply_nanog1_body_inertials,
+)
 
 
 def _robot_builder(name: str) -> newton.ModelBuilder:
@@ -57,22 +61,36 @@ def _robot_builder(name: str) -> newton.ModelBuilder:
         builder.approximate_meshes("bounding_box")
     elif name == "g1":
         asset = newton.utils.download_asset("unitree_g1")
-        builder.add_usd(
-            str(asset / "usd_structured" / "g1_29dof_with_hand_rev_1_0.usda"),
-            xform=wp.transform(wp.vec3(0.0, 0.0, 0.2)),
-            collapse_fixed_joints=True,
+        builder.add_mjcf(
+            str(asset / "mjcf" / "g1_29dof.xml"),
+            floating=None,
             enable_self_collisions=False,
-            hide_collision_shapes=True,
-            skip_mesh_approximation=True,
+            ignore_names=("floor", "ground"),
+            parse_visuals=False,
+            parse_meshes=True,
+            ignore_inertial_definitions=False,
         )
         builder.approximate_meshes("bounding_box")
+        _apply_nanog1_body_inertials(builder)
+        builder.joint_q[:3] = [0.0, 0.0, 0.785]
+        builder.joint_q[3:7] = [0.0, 0.0, 0.0, 1.0]
+        builder.joint_q[7 : 7 + len(_DEFAULT_JOINT_POS_G1)] = list(_DEFAULT_JOINT_POS_G1)
+        builder.joint_target_q[:] = builder.joint_q
     else:
         raise ValueError(f"unknown robot {name!r}")
 
-    for dof in range(builder.joint_dof_count):
-        builder.joint_target_ke[dof] = 150.0
-        builder.joint_target_kd[dof] = 5.0
-        builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+    if name == "g1":
+        return builder
+
+    for joint in range(builder.joint_count):
+        if int(builder.joint_type[joint]) in (int(newton.JointType.FREE), int(newton.JointType.FIXED)):
+            continue
+        dof_start = int(builder.joint_qd_start[joint])
+        dof_end = int(builder.joint_qd_start[joint + 1]) if joint + 1 < builder.joint_count else builder.joint_dof_count
+        for dof in range(dof_start, dof_end):
+            builder.joint_target_ke[dof] = 150.0
+            builder.joint_target_kd[dof] = 5.0
+            builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
     return builder
 
 
