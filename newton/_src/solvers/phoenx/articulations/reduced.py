@@ -962,6 +962,182 @@ def _restore_reduced_momentum_kernel(
     joint_qd_public[dof_start + wp.int32(5)] += delta_omega_joint[2]
 
 
+@wp.kernel(enable_backward=False, module="reduced_momentum")
+def _restore_reduced_momentum_warp_kernel(
+    articulation_start: wp.array[wp.int32],
+    articulation_end: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    body_mass: wp.array[wp.float32],
+    body_inertia: wp.array[wp.mat33],
+    target_momentum: wp.array[wp.spatial_vector],
+    joint_s_projection: wp.array[wp.spatial_vector],
+    bodies: BodyContainer,
+    joint_qd_internal: wp.array[wp.float32],
+    joint_qd_public: wp.array[wp.float32],
+    body_qd_public: wp.array[wp.spatial_vector],
+):
+    # Restore floating-base momentum with one deterministic warp per tree.
+    articulation, lane = wp.tid()
+    start = articulation_start[articulation]
+    end = articulation_end[articulation]
+    root_type = joint_type[start]
+    if root_type != JointType.FREE and root_type != JointType.DISTANCE:
+        return
+
+    body_q_com = bodies.reduced.body_q_com
+    local_mass = wp.float32(0.0)
+    local_weighted_x = wp.float32(0.0)
+    local_weighted_y = wp.float32(0.0)
+    local_weighted_z = wp.float32(0.0)
+    joint = start + lane
+    while joint < end:
+        body = joint_child[joint]
+        mass = body_mass[body]
+        position = wp.transform_get_translation(body_q_com[body])
+        local_mass += mass
+        local_weighted_x += mass * position[0]
+        local_weighted_y += mass * position[1]
+        local_weighted_z += mass * position[2]
+        joint += wp.int32(32)
+
+    total_mass = wp.tile_sum(wp.tile(local_mass))[0]
+    origin = wp.vec3(
+        wp.tile_sum(wp.tile(local_weighted_x))[0] / total_mass,
+        wp.tile_sum(wp.tile(local_weighted_y))[0] / total_mass,
+        wp.tile_sum(wp.tile(local_weighted_z))[0] / total_mass,
+    )
+
+    local_linear_x = wp.float32(0.0)
+    local_linear_y = wp.float32(0.0)
+    local_linear_z = wp.float32(0.0)
+    local_angular_x = wp.float32(0.0)
+    local_angular_y = wp.float32(0.0)
+    local_angular_z = wp.float32(0.0)
+    local_inertia_xx = wp.float32(0.0)
+    local_inertia_xy = wp.float32(0.0)
+    local_inertia_xz = wp.float32(0.0)
+    local_inertia_yy = wp.float32(0.0)
+    local_inertia_yz = wp.float32(0.0)
+    local_inertia_zz = wp.float32(0.0)
+    identity = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+
+    joint = start + lane
+    while joint < end:
+        body = joint_child[joint]
+        slot = body + wp.int32(1)
+        mass = body_mass[body]
+        velocity = bodies.velocity[slot]
+        omega = bodies.angular_velocity[slot]
+        q_com = body_q_com[body]
+        position = wp.transform_get_translation(q_com)
+        rotation_quat = wp.transform_get_rotation(q_com)
+        body_omega = wp.quat_rotate_inv(rotation_quat, omega)
+        spin = wp.quat_rotate(rotation_quat, body_inertia[body] * body_omega)
+        momentum = mass * velocity
+        angular = spin + wp.cross(position - origin, momentum)
+        local_linear_x += momentum[0]
+        local_linear_y += momentum[1]
+        local_linear_z += momentum[2]
+        local_angular_x += angular[0]
+        local_angular_y += angular[1]
+        local_angular_z += angular[2]
+
+        rotation = wp.quat_to_matrix(rotation_quat)
+        offset = position - origin
+        inertia = rotation * body_inertia[body] * wp.transpose(rotation)
+        inertia += mass * (wp.dot(offset, offset) * identity - wp.outer(offset, offset))
+        local_inertia_xx += inertia[0, 0]
+        local_inertia_xy += inertia[0, 1]
+        local_inertia_xz += inertia[0, 2]
+        local_inertia_yy += inertia[1, 1]
+        local_inertia_yz += inertia[1, 2]
+        local_inertia_zz += inertia[2, 2]
+        joint += wp.int32(32)
+
+    current = wp.spatial_vector(
+        wp.tile_sum(wp.tile(local_linear_x))[0],
+        wp.tile_sum(wp.tile(local_linear_y))[0],
+        wp.tile_sum(wp.tile(local_linear_z))[0],
+        wp.tile_sum(wp.tile(local_angular_x))[0],
+        wp.tile_sum(wp.tile(local_angular_y))[0],
+        wp.tile_sum(wp.tile(local_angular_z))[0],
+    )
+    residual = target_momentum[articulation] - current
+    inertia_xx = wp.tile_sum(wp.tile(local_inertia_xx))[0]
+    inertia_xy = wp.tile_sum(wp.tile(local_inertia_xy))[0]
+    inertia_xz = wp.tile_sum(wp.tile(local_inertia_xz))[0]
+    inertia_yy = wp.tile_sum(wp.tile(local_inertia_yy))[0]
+    inertia_yz = wp.tile_sum(wp.tile(local_inertia_yz))[0]
+    inertia_zz = wp.tile_sum(wp.tile(local_inertia_zz))[0]
+    inertia_com = wp.mat33(
+        inertia_xx,
+        inertia_xy,
+        inertia_xz,
+        inertia_xy,
+        inertia_yy,
+        inertia_yz,
+        inertia_xz,
+        inertia_yz,
+        inertia_zz,
+    )
+    delta_v_origin = wp.spatial_top(residual) / total_mass
+    delta_omega = wp.inverse(inertia_com) * wp.spatial_bottom(residual)
+
+    joint = start + lane
+    while joint < end:
+        body = joint_child[joint]
+        slot = body + wp.int32(1)
+        position = wp.transform_get_translation(body_q_com[body])
+        delta_v = delta_v_origin + wp.cross(delta_omega, position - origin)
+        bodies.velocity[slot] += delta_v
+        bodies.angular_velocity[slot] += delta_omega
+        body_qd_public[body] = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
+        joint += wp.int32(32)
+    _sync_reduced_warp()
+
+    if lane == wp.int32(0):
+        root = joint_child[start]
+        dof_start = joint_qd_start[start]
+        dof_end = joint_qd_start[start + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        current_root_twist = wp.spatial_vector()
+        for dof in range(dof_start, dof_end):
+            current_root_twist += joint_s_projection[dof] * joint_qd_internal[dof]
+        root_slot = root + wp.int32(1)
+        corrected_root_twist = wp.spatial_vector(bodies.velocity[root_slot], bodies.angular_velocity[root_slot])
+        root_twist_delta = corrected_root_twist - current_root_twist
+        gram = _mat66(0.0)
+        projected = _vec6(0.0)
+        for row in range(_MAX_JOINT_DOF):
+            if wp.int32(row) < dof_count:
+                s_row = joint_s_projection[dof_start + wp.int32(row)]
+                projected[row] = wp.dot(s_row, root_twist_delta)
+                for column in range(_MAX_JOINT_DOF):
+                    if wp.int32(column) < dof_count:
+                        gram[row, column] = wp.dot(s_row, joint_s_projection[dof_start + wp.int32(column)])
+        inverse_gram = _invert_spd(gram, dof_count)
+        for row in range(_MAX_JOINT_DOF):
+            if wp.int32(row) < dof_count:
+                delta_qd = wp.float32(0.0)
+                for column in range(_MAX_JOINT_DOF):
+                    if wp.int32(column) < dof_count:
+                        delta_qd += inverse_gram[row, column] * projected[column]
+                joint_qd_internal[dof_start + wp.int32(row)] += delta_qd
+
+        q_parent = wp.transform_get_rotation(joint_x_p[start])
+        delta_v_joint = wp.quat_rotate_inv(q_parent, wp.spatial_top(root_twist_delta))
+        delta_omega_joint = wp.quat_rotate_inv(q_parent, wp.spatial_bottom(root_twist_delta))
+        joint_qd_public[dof_start] += delta_v_joint[0]
+        joint_qd_public[dof_start + wp.int32(1)] += delta_v_joint[1]
+        joint_qd_public[dof_start + wp.int32(2)] += delta_v_joint[2]
+        joint_qd_public[dof_start + wp.int32(3)] += delta_omega_joint[0]
+        joint_qd_public[dof_start + wp.int32(4)] += delta_omega_joint[1]
+        joint_qd_public[dof_start + wp.int32(5)] += delta_omega_joint[2]
+
+
 @wp.kernel(enable_backward=False)
 def _finish_reduced_articulations_kernel(
     articulation_start: wp.array[wp.int32],
@@ -2690,25 +2866,37 @@ class ReducedPhoenXArticulation:
             )
 
         self._publish_state(dt)
-        wp.launch(
-            _restore_reduced_momentum_kernel,
-            dim=int(self.model.articulation_count),
-            inputs=[
-                self.model.articulation_start,
-                self.model.articulation_end,
-                self.model.joint_type,
-                self.model.joint_child,
-                self.model.joint_qd_start,
-                self.model.joint_X_p,
-                self.model.body_mass,
-                self.model.body_inertia,
-                self.system.target_world_momentum,
-                self.system.joint_s_publish,
-                self.bodies,
-            ],
-            outputs=[self.system.joint_qd_internal, self.state.joint_qd, self.state.body_qd],
-            device=self.model.device,
-        )
+        restore_inputs = [
+            self.model.articulation_start,
+            self.model.articulation_end,
+            self.model.joint_type,
+            self.model.joint_child,
+            self.model.joint_qd_start,
+            self.model.joint_X_p,
+            self.model.body_mass,
+            self.model.body_inertia,
+            self.system.target_world_momentum,
+            self.system.joint_s_publish,
+            self.bodies,
+        ]
+        restore_outputs = [self.system.joint_qd_internal, self.state.joint_qd, self.state.body_qd]
+        if self.model.device.is_cuda:
+            wp.launch_tiled(
+                _restore_reduced_momentum_warp_kernel,
+                dim=[int(self.model.articulation_count)],
+                inputs=restore_inputs,
+                outputs=restore_outputs,
+                block_dim=32,
+                device=self.model.device,
+            )
+        else:
+            wp.launch(
+                _restore_reduced_momentum_kernel,
+                dim=int(self.model.articulation_count),
+                inputs=restore_inputs,
+                outputs=restore_outputs,
+                device=self.model.device,
+            )
 
     def sync_bodies(self) -> None:
         """Write reduced link pose and COM twist into PhoenX body storage."""
