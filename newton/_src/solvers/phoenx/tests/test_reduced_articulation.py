@@ -18,6 +18,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_link_delta_twist,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
+    _CACHED_PAGE_COUNT,
     _POINTS_PER_PAGE,
     _build_generalized_contact_rows_kernel,
     _build_packed_generalized_contact_rows_kernel,
@@ -2093,7 +2094,7 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")
 
-        model = _make_contact_overflow_model(device)
+        model = _make_contact_overflow_model(device, contact_count=2 * _POINTS_PER_PAGE + 8)
         state = model.state()
         output = model.state()
         qd = state.joint_qd.numpy()
@@ -2117,10 +2118,11 @@ class TestReducedArticulation(unittest.TestCase):
         block = solver._reduced_articulation.contact_block_system
         column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
         self.assertGreaterEqual(column_count, 1)
-        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), _POINTS_PER_PAGE)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 2 * _POINTS_PER_PAGE)
         self.assertEqual(int(block.enabled.numpy()[0]), 1)
         self.assertEqual(int(block.deferred_active.numpy()[0]), 0)
-        self.assertGreaterEqual(int(block.max_page_count.numpy()[0]), 2)
+        self.assertGreater(int(block.max_page_count.numpy()[0]), _CACHED_PAGE_COUNT)
+        self.assertEqual(int(block.overflow_page_active.numpy()[0]), 1)
         self.assertEqual(int(block.fallback_count.numpy()[0]), 0)
         self.assertTrue(np.isfinite(output.joint_q.numpy()).all())
         self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
@@ -2141,12 +2143,14 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(int(block.max_page_count.numpy()[0]), 0)
         self.assertEqual(int(block.multi_page_active.numpy()[0]), 0)
+        self.assertEqual(int(block.overflow_page_active.numpy()[0]), 0)
 
         state.joint_q.assign(contact_q)
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         wp.capture_launch(capture.graph)
-        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), _POINTS_PER_PAGE)
-        self.assertGreaterEqual(int(block.max_page_count.numpy()[0]), 2)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 2 * _POINTS_PER_PAGE)
+        self.assertGreater(int(block.max_page_count.numpy()[0]), _CACHED_PAGE_COUNT)
+        self.assertEqual(int(block.overflow_page_active.numpy()[0]), 1)
         self.assertEqual(int(block.multi_page_active.numpy()[0]), 1)
 
     def test_fused_contact_apply_matches_separate_path_under_graph_capture(self):
@@ -2194,6 +2198,9 @@ class TestReducedArticulation(unittest.TestCase):
         wp.capture_launch(fused_capture.graph)
 
         self.assertGreater(int(contacts_fused.rigid_contact_count.numpy()[0]), _POINTS_PER_PAGE)
+        fused_block = fused._reduced_articulation.contact_block_system
+        self.assertEqual(int(fused_block.max_page_count.numpy()[0]), _CACHED_PAGE_COUNT)
+        self.assertEqual(int(fused_block.overflow_page_active.numpy()[0]), 0)
         np.testing.assert_allclose(
             output_fused.joint_qd.numpy(),
             output_separate.joint_qd.numpy(),

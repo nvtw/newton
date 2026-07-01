@@ -58,10 +58,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>1 July 2026 · hard-Hertz contact path accelerated</strong></div>
+      <div class="stamp">Last updated<br><strong>1 July 2026 · redundant contact gathering removed</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">CONTACT STAGING</span><time>1 Jul - latest</time></div>
+      <h2>Two-page geometry reuse adds another exact contact-rich gain</h2>
+      <p>The bounded response cache now retains the matching contact IDs, frames, points, and generalized row metadata. Velocity relaxation recomputes only velocity-dependent row terms; body poses do not change during the solve. Hard-Hertz damping, friction projection, warm starting, and ABA response are unchanged.</p>
+      <ul>
+        <li>The shared 8192-world G1 scene reaches 1.177M physics steps/s versus 1.107-1.120M at the previous milestone and 0.864-0.878M originally. The cumulative gain is about 36%, and the same-scene gap to the local 2.084M MJWarp result is now about 1.77x.</li>
+        <li>Nsight confirms gather launches fell from 40 to 20 per ten physics steps and gather GPU share fell from 15.3% to 9.6%. Exact generalized-row builds are now 20 launches rather than 40 graph-fixed launches.</li>
+        <li>The simpler one-page G1 training graph is neutral in an exact commit A/B: 537.2k env steps/s baseline versus 534.6-539.4k candidate. This is a contact-density gain rather than a hidden cost elsewhere.</li>
+        <li>The unchanged 26k-step frozen walker again has zero battery and diagnostic falls, 0.9448 tracking, 0.2620 action jerk, 0.2138 roll/pitch rate, 0.1394 yaw rate, and 0.7666 leg speed.</li>
+        <li>All 34 reduced-articulation CUDA graph tests pass. Paging now explicitly tests both cached two-page relaxation and a three-page overflow that rebuilds exactly; contact-enabled Anymal, H1, and G1 remain finite in single- and multi-world layouts at one and 64 articulations.</li>
+      </ul>
+      <p><strong>Next:</strong> generalized row construction remains 33.1% of the shared trace. Investigate path-sparse or matrix-free articulated response application and topology-cooperative RHS solves, retaining exact hard-Hertz behavior and rejecting candidates that trade accuracy for throughput.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">HARD-HERTZ SPEEDUP</span><time>1 Jul - latest</time></div>
