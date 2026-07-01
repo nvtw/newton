@@ -58,10 +58,23 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>1 July 2026 · ABA advance 15% faster</strong></div>
+      <div class="stamp">Last updated<br><strong>1 July 2026 · shared contact gap profiled</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag warn">MJWARP PARITY BENCH</span><time>1 Jul - latest</time></div>
+      <h2>PhoenX beats neither current MJWarp nor the contact-richer shared scene yet</h2>
+      <p>A new graph-captured benchmark runs reduced PhoenX on the checked-in MuJoCo Warp G1 collision MJCF after removing visual-only mesh declarations. Bodies, inertias, joints, actuators, collision geometry, 8192-world batch, dt 0.004, two solver iterations, and the 100-replay timing window are held fixed.</p>
+      <ul>
+        <li>The local October 2025 MJWarp checkout reaches 2.084M physics steps/s; reduced PhoenX reaches 0.864-0.878M on that shared scene. PhoenX is currently about 2.4x slower there.</li>
+        <li>The pinned nanoG1 table reports a newer/current MJWarp at 4.0M physics steps/s on nanoG1's exact canonical G1 model. PhoenX's simpler training scene reaches about 2.7M physics steps/s, so it also trails that reference by roughly 1.46x. These are separate protocols and are not conflated.</li>
+        <li>The shared scene has 34 active contact points per articulation. Generalized row construction consumes 46.8% of GPU time, generalized solve 13.2%, and contact gathering 12.5%; ABA advance is only 3.1%.</li>
+        <li>Two 32-point pages are required. Bias and velocity-relax passes rebuild both pages, explaining four row-build launches per physics step. This is a paging/contact-response bottleneck, not a robot-dynamics bottleneck.</li>
+      </ul>
+      <p><strong>Next:</strong> optimize the physically exact generalized contact response, beginning with solving the normal/two-tangent RHS triad together so each contact shares topology and articulated-factor loads. Gate it on both the simpler training scene and this contact-richer shared scene.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">TOPOLOGY-GENERAL SPEEDUP</span><time>1 Jul - latest</time></div>
