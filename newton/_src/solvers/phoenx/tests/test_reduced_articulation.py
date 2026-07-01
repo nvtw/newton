@@ -104,6 +104,31 @@ def _make_branched_tree(device):
     return builder.finalize(device=device)
 
 
+def _make_wide_tree(device, child_count):
+    cfg = newton.ModelBuilder.ShapeConfig(density=500.0, collision_group=0)
+    builder = newton.ModelBuilder(gravity=-9.2, up_axis=newton.Axis.Z)
+    root = builder.add_link()
+    builder.add_shape_box(root, hx=0.12, hy=0.1, hz=0.08, cfg=cfg)
+    joints = [builder.add_joint_revolute(parent=-1, child=root, axis=newton.Axis.Z)]
+    for child_index in range(child_count):
+        child = builder.add_link()
+        builder.add_shape_box(child, hx=0.08, hy=0.04, hz=0.04, cfg=cfg)
+        angle = 2.0 * np.pi * child_index / child_count
+        joints.append(
+            builder.add_joint_revolute(
+                parent=root,
+                child=child,
+                axis=newton.Axis.Y,
+                parent_xform=wp.transform(
+                    wp.vec3(0.2 * np.cos(angle), 0.2 * np.sin(angle), 0.0),
+                    wp.quat_identity(),
+                ),
+            )
+        )
+    builder.add_articulation(joints)
+    return builder.finalize(device=device)
+
+
 def _make_four_bar_builder():
     crank_length = 0.5
     coupler_length = 1.0
@@ -1662,6 +1687,76 @@ class TestReducedArticulation(unittest.TestCase):
         np.testing.assert_allclose(state_warp.joint_qd.numpy(), state_serial.joint_qd.numpy(), rtol=2.0e-6, atol=2.0e-6)
         np.testing.assert_allclose(state_warp.joint_q.numpy(), state_serial.joint_q.numpy(), rtol=2.0e-6, atol=2.0e-6)
         np.testing.assert_allclose(state_warp.body_qd.numpy(), state_serial.body_qd.numpy(), rtol=2.0e-6, atol=2.0e-6)
+
+    def test_subwarp_advance_matches_serial_for_all_topology_widths(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        for child_count, expected_tile_width in ((7, 8), (9, 16), (17, 32)):
+            with self.subTest(tile_width=expected_tile_width):
+                model = _make_wide_tree(device, child_count)
+                state_serial = model.state()
+                state_warp = model.state()
+                output_serial = model.state()
+                output_warp = model.state()
+                qd = np.linspace(-0.35, 0.45, int(model.joint_dof_count), dtype=np.float32)
+                body_f = np.linspace(-0.5, 0.7, int(model.body_count) * 6, dtype=np.float32).reshape(-1, 6)
+                for state in (state_serial, state_warp):
+                    state.joint_qd.assign(qd)
+                    state.body_f.assign(body_f)
+                    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+                control = model.control()
+                control.joint_f.assign(np.linspace(0.4, -0.3, int(model.joint_dof_count), dtype=np.float32))
+                serial = newton.solvers.SolverPhoenX(
+                    model,
+                    articulation_mode="reduced",
+                    substeps=1,
+                    solver_iterations=1,
+                    velocity_iterations=0,
+                )
+                warp = newton.solvers.SolverPhoenX(
+                    model,
+                    articulation_mode="reduced",
+                    substeps=1,
+                    solver_iterations=1,
+                    velocity_iterations=0,
+                )
+                serial._reduced_articulation.system.use_warp_advance = False
+                serial._reduced_articulation.system.use_warp_kinematics = False
+                serial._reduced_articulation.system.use_warp_publish = False
+                self.assertEqual(warp._reduced_articulation.system.advance_tile_width, expected_tile_width)
+                dt = 1.0 / 240.0
+
+                with wp.ScopedCapture(device=device) as serial_capture:
+                    serial.step(state_serial, output_serial, control, None, dt)
+                    serial.step(output_serial, state_serial, control, None, dt)
+                with wp.ScopedCapture(device=device) as warp_capture:
+                    warp.step(state_warp, output_warp, control, None, dt)
+                    warp.step(output_warp, state_warp, control, None, dt)
+                for _ in range(4):
+                    wp.capture_launch(serial_capture.graph)
+                    wp.capture_launch(warp_capture.graph)
+
+                np.testing.assert_allclose(
+                    state_warp.joint_qd.numpy(),
+                    state_serial.joint_qd.numpy(),
+                    rtol=2.0e-6,
+                    atol=2.0e-6,
+                )
+                np.testing.assert_allclose(
+                    state_warp.joint_q.numpy(),
+                    state_serial.joint_q.numpy(),
+                    rtol=2.0e-6,
+                    atol=2.0e-6,
+                )
+                np.testing.assert_allclose(
+                    state_warp.body_qd.numpy(),
+                    state_serial.body_qd.numpy(),
+                    rtol=2.0e-6,
+                    atol=2.0e-6,
+                )
 
     def test_common_solver_api_matches_featherstone_under_graph_capture(self):
         device = wp.get_preferred_device()

@@ -1880,6 +1880,8 @@ def _advance_reduced_articulations_kernel(
 
 @wp.kernel(enable_backward=False, module="reduced_advance")
 def _advance_reduced_articulations_warp_kernel(
+    articulation_count: wp.int32,
+    tile_width: wp.int32,
     max_depth: wp.int32,
     articulation_depth_start: wp.array2d[wp.int32],
     articulation_depth_joint: wp.array[wp.int32],
@@ -1916,8 +1918,15 @@ def _advance_reduced_articulations_warp_kernel(
     bodies: BodyContainer,
 ):
     thread = wp.tid()
-    articulation = thread // wp.int32(32)
-    lane = thread - articulation * wp.int32(32)
+    articulation = thread // tile_width
+    lane = thread - articulation * tile_width
+    if articulation >= articulation_count:
+        return
+    warp_lane = thread & wp.int32(31)
+    group = warp_lane // tile_width
+    group_mask = wp.uint32(4294967295)
+    if tile_width < wp.int32(32):
+        group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
 
     for depth in range(max_depth + wp.int32(1)):
         index = articulation_depth_start[articulation, depth] + lane
@@ -1970,8 +1979,8 @@ def _advance_reduced_articulations_warp_kernel(
             body_velocity[child] = velocity
             body_coriolis[child] = coriolis
             body_bias[child] = bias
-            index += wp.int32(32)
-        _sync_reduced_warp()
+            index += tile_width
+        _sync_reduced_group(group_mask)
 
     for reverse_depth in range(max_depth + wp.int32(1)):
         depth = max_depth - reverse_depth
@@ -1997,8 +2006,8 @@ def _advance_reduced_articulations_warp_kernel(
                     applied += joint_implicit_force[dof]
                 generalized_rhs[dof] = applied - wp.dot(joint_s[dof], subtree_bias)
             body_bias[child] = subtree_bias
-            index += wp.int32(32)
-        _sync_reduced_warp()
+            index += tile_width
+        _sync_reduced_group(group_mask)
 
     for reverse_depth in range(max_depth + wp.int32(1)):
         depth = max_depth - reverse_depth
@@ -2031,8 +2040,8 @@ def _advance_reduced_articulations_warp_kernel(
                 if wp.int32(column) < dof_count:
                     propagated += joint_u_matrix[dof_start + wp.int32(column)] * d_inv_u[column]
             body_work[child] = propagated
-            index += wp.int32(32)
-        _sync_reduced_warp()
+            index += tile_width
+        _sync_reduced_group(group_mask)
 
     for depth in range(max_depth + wp.int32(1)):
         index = articulation_depth_start[articulation, depth] + lane
@@ -2077,8 +2086,8 @@ def _advance_reduced_articulations_warp_kernel(
             slot = child + wp.int32(1)
             bodies.velocity[slot] = velocity_com
             bodies.angular_velocity[slot] = omega
-            index += wp.int32(32)
-        _sync_reduced_warp()
+            index += tile_width
+        _sync_reduced_group(group_mask)
 
 
 @wp.func
@@ -2252,6 +2261,13 @@ class ReducedArticulationSystem:
             np.asarray(articulation_depth_joint_list, dtype=np.int32),
             device=self.device,
         )
+        max_articulation_breadth = int(np.max(np.diff(articulation_depth_start_np, axis=1)))
+        if max_articulation_breadth <= 8:
+            self.advance_tile_width = 8
+        elif max_articulation_breadth <= 16:
+            self.advance_tile_width = 16
+        else:
+            self.advance_tile_width = 32
         self.factor_child_start = wp.array(child_start_np, device=self.device)
         self.factor_child_joint = wp.array(np.asarray(child_joint_list, dtype=np.int32), device=self.device)
 
@@ -2557,11 +2573,16 @@ class ReducedArticulationSystem:
             bodies,
         ]
         if self.use_warp_advance:
+            articulation_count = int(self.model.articulation_count)
+            tile_width = self.advance_tile_width
+            thread_count = ((articulation_count * tile_width + 31) // 32) * 32
             wp.launch(
                 _advance_reduced_articulations_warp_kernel,
-                dim=int(self.model.articulation_count) * 32,
-                block_dim=32,
+                dim=thread_count,
+                block_dim=128 if tile_width < 32 else 32,
                 inputs=[
+                    wp.int32(articulation_count),
+                    wp.int32(tile_width),
                     wp.int32(self.advance_max_depth),
                     self.advance_articulation_depth_start,
                     self.advance_articulation_depth_joint,

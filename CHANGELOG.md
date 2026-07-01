@@ -47,6 +47,7 @@
 
 ### Changed
 
+- Schedule experimental reduced-coordinate PhoenX ABA advance with topology-sized 8-, 16-, or 32-lane warp groups, increasing parallelism across independent narrow articulations while retaining full-warp execution for wide trees.
 - Reject cable joints and D6 angular limits in experimental simple PhoenX instead of solving different equations; use `solver_flavor="standard"` for these constraints.
 - Alternate PhoenX PGS color traversal direction between iterations to reduce ordering bias without changing constraint equations or CUDA graph capture.
 - Change PhoenX cable bend constraints to a physically damped angular Schur block coupled with the point attachment, so high stiffness approaches the revolute lock without SOR or additional constraint storage.

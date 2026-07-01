@@ -58,10 +58,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>1 July 2026 · reduced path 308k samples/s</strong></div>
+      <div class="stamp">Last updated<br><strong>1 July 2026 · ABA advance 15% faster</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">TOPOLOGY-GENERAL SPEEDUP</span><time>1 Jul - latest</time></div>
+      <h2>Reduced ABA advance now packs independent narrow trees into each warp</h2>
+      <p>The post-milestone trace showed advance, publish, generalized contact build/solve, and factorization as the remaining physics hot path. Reduced advance now chooses 8, 16, or 32 lanes per articulation from the model's actual maximum tree breadth, allowing up to four independent articulations per warp without changing the ABA equations.</p>
+      <ul>
+        <li>On the bounded 8192-world G1 trace, advance fell from about 163 to 138 us per substep (roughly 15%). Physics-only graph replay measured 539-549k env-steps/s; the previous retained milestone was about 546k, so the isolated kernel gain is clear while the small whole-graph change remains close to run-to-run noise.</li>
+        <li>The tempting publication-loop fusion was measured and rejected: fewer tree traversals increased register pressure and slowed that kernel from about 153 to 182-203 us. It was fully reverted.</li>
+        <li>The complete reduced-articulation CUDA graph suite passes 34/34. A new serial-equivalence regression exercises narrow, medium, and wide trees and verifies every 8/16/32-lane dispatch.</li>
+        <li>Seven G1 graph/training regressions pass. The unchanged 26k-step frozen walker still has zero battery and diagnostic falls, 0.938 tracking, 0.261 action jerk, 0.221 roll/pitch rate, 0.156 yaw rate, and 0.761 leg speed.</li>
+        <li>Contact-enabled Anymal, H1, and G1 all remain finite in both single- and multi-world layouts at one and 64 articulations. This optimization is topology-selected and has no robot-name or G1-specific branch.</li>
+      </ul>
+      <p><strong>Next:</strong> continue accumulating profile-backed general gains in contact build/solve, factor, and publication. Establish a local apples-to-apples MJWarp G1 throughput baseline before claiming relative performance; nanoG1 remains the separate 1.276-1.28M samples/s reference.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">REDUCED SPEED MILESTONE</span><time>1 Jul - latest</time></div>
