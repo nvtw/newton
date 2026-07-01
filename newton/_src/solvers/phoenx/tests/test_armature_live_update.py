@@ -61,7 +61,7 @@ def _measure_period_zero_crossings(signal: np.ndarray, dt: float) -> float:
     "PhoenX armature tests run on CUDA with graph capture only",
 )
 class TestArmatureLiveUpdate(unittest.TestCase):
-    """Live updates rebuild the rotor-side effective body inertia."""
+    """Live updates rebuild stator- and rotor-side effective body inertia."""
 
     @staticmethod
     def _child_inverse_inertia(solver: newton.solvers.SolverPhoenX) -> np.ndarray:
@@ -146,7 +146,8 @@ class TestArmatureLiveUpdate(unittest.TestCase):
             wp.capture_launch(capture.graph)
 
         angular_velocity = state_in.body_qd.numpy()[:, 3:]
-        parent_momentum = 2.0 * float(angular_velocity[parent, 1])
+        # The parent carries motor-side stator inertia 0.5 kg m^2.
+        parent_momentum = 2.5 * float(angular_velocity[parent, 1])
         # The child receives gear^2 * armature = 2 kg m^2 about +Y.
         child_momentum = 3.0 * float(angular_velocity[child, 1])
         momentum_scale = max(abs(parent_momentum), abs(child_momentum))

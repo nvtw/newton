@@ -5064,6 +5064,44 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(math.isfinite(stat.approx_kl))
             self.assertLess(stat.mean_done, 0.95)
 
+    def test_maximal_ankle_damping_is_passive_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 maximal ankle damping passivity tests")
+        env = rl.EnvG1PhoenX(
+            g1_recipe.default_g1_env_config(
+                world_count=1,
+                sim_substeps=10,
+                solver_iterations=8,
+                velocity_iterations=1,
+                articulation_mode="maximal",
+                actuation_model="explicit_torque",
+                reset_noise=0.0,
+                auto_reset=False,
+                max_episode_steps=0,
+            ),
+            device=device,
+        )
+        zeros = np.zeros(env.action_dim, dtype=np.float32)
+        ankle_damping = zeros.copy()
+        ankle_damping[5] = np.float32(2.0)
+        env.actuator_force_kp.assign(zeros)
+        env.actuator_force_kd.assign(ankle_damping)
+        env.passive_damping.assign(zeros)
+
+        q = env.state_0.joint_q.numpy().reshape(1, env.coord_stride)
+        q[:, 2] = np.float32(2.0)
+        env.state_0.joint_q.assign(q.reshape(-1))
+        env.state_0.joint_qd.zero_()
+        newton.eval_fk(env.model, env.state_0.joint_q, env.state_0.joint_qd, env.state_0)
+        actions = wp.zeros((1, env.action_dim), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            env.step(actions)
+        wp.capture_launch(capture.graph)
+
+        joint_qd = env.state_0.joint_qd.numpy()[6 : 6 + env.action_dim]
+        self.assertTrue(np.all(np.isfinite(joint_qd)))
+        self.assertLess(float(np.max(np.abs(joint_qd))), 1.0)
+
     def test_default_stochastic_rollout_graph_stays_nonterminal_without_update(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 default stochastic rollout regression tests")
         env_config = g1_recipe.default_g1_env_config(

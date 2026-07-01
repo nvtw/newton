@@ -3,8 +3,8 @@
 
 """Joint armature unit tests for ``SolverPhoenX``.
 
-Maximal PhoenX represents motor armature as gearbox-reflected rotor-side body
-inertia. These tests cover physical periods, chain composition, zero-armature
+Maximal PhoenX represents motor armature as stator-side parent inertia plus
+gearbox-reflected rotor-side child inertia. These tests cover physical periods, chain composition, zero-armature
 behavior, MuJoCo parity for anchored joints, and stability.
 """
 
@@ -236,11 +236,10 @@ def _cuda_with_graph_capture() -> bool:
     "PhoenX armature tests run on CUDA with graph-capture only.",
 )
 class TestSymmetricTwoBodyPeriod(unittest.TestCase):
-    """Check physical rotor-side inertia for two free symmetric bodies.
+    """Check physical stator/rotor inertia for two free symmetric bodies.
 
-    The stator-side inertia is ``I`` and the rotor-side inertia is ``I + a``.
-    Eliminating the free global rotation gives the relative-coordinate inertia
-    ``I * (I + a) / (2 * I + a)``.
+    With unit gear ratio, both motor sides have inertia I + a. Eliminating
+    free global rotation gives relative-coordinate inertia (I + a) / 2.
     """
 
     def test_period_scaling_with_armature(self) -> None:
@@ -265,8 +264,11 @@ class TestSymmetricTwoBodyPeriod(unittest.TestCase):
                 history = _run_torsion_chain(model, frames=frames, dt=dt)
                 T_sim = _measure_period_zero_crossings(history, dt)
 
+                stator_side_inertia = inertia + armature
                 rotor_side_inertia = inertia + armature
-                effective_inertia = inertia * rotor_side_inertia / (inertia + rotor_side_inertia)
+                effective_inertia = (
+                    stator_side_inertia * rotor_side_inertia / (stator_side_inertia + rotor_side_inertia)
+                )
                 T_expected = 2.0 * np.pi * np.sqrt(effective_inertia / target_ke)
                 rel_err = abs(T_sim - T_expected) / T_expected
                 self.assertLess(
@@ -424,10 +426,10 @@ def _run_three_body_chain(
     "PhoenX armature tests run on CUDA with graph-capture only.",
 )
 class TestThreeBodyChain(unittest.TestCase):
-    """Check reflected rotor-body inertia in an anchored chain.
+    """Check stator/rotor body inertia in an anchored chain.
 
-    Each revolute motor adds axial inertia to its child body. With equal link and
-    rotor inertias, the entire dense reduced mass matrix scales by ``I + a``.
+    Each internal revolute motor contributes stator inertia to its parent and
+    reflected rotor inertia to its child.
     """
 
     def test_armature_composition(self) -> None:
@@ -437,20 +439,18 @@ class TestThreeBodyChain(unittest.TestCase):
         dt = 1.0 / 400.0
 
         for armature in (0.0, 1.0, 8.0):
-            # Analytical reduced-coord mass and stiffness (joint
-            # angles are relative, so M_q[i, j] = I * (3 - max(i, j))
-            # for a 3-link anchored chain with axis-aligned principal
-            # inertia.
-            Mq = inertia * np.array(
-                [
-                    [3.0, 2.0, 1.0],
-                    [2.0, 2.0, 1.0],
-                    [1.0, 1.0, 1.0],
-                ],
+            K = target_ke * np.eye(3, dtype=np.float64)
+            # Every internal motor adds stator inertia to its parent and
+            # rotor inertia to its child. For world--A--B--C at unit gear,
+            # link inertias are [I+2a, I+2a, I+a].
+            link_inertia = np.array(
+                [inertia + 2.0 * armature, inertia + 2.0 * armature, inertia + armature],
                 dtype=np.float64,
             )
-            K = target_ke * np.eye(3, dtype=np.float64)
-            M_reflected = ((inertia + armature) / inertia) * Mq
+            M_reflected = np.empty((3, 3), dtype=np.float64)
+            for row in range(3):
+                for col in range(3):
+                    M_reflected[row, col] = np.sum(link_inertia[max(row, col) :])
             # Generalised eigenproblem: K v = omega^2 M_reflected v.
             w_sq, V = np.linalg.eig(np.linalg.solve(M_reflected, K))
             sort_idx = np.argsort(w_sq)
@@ -690,7 +690,7 @@ class TestSkinnyChainStability(unittest.TestCase):
         sentinels become +inf)."""
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=4,
+            substeps=8,
             solver_iterations=8,
             velocity_iterations=1,
         )

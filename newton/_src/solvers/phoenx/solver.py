@@ -63,13 +63,13 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     return max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
 
 
-def _build_maximal_rotor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
-    """Build output-reflected rotor-side inertia for maximal coordinates.
+def _build_maximal_motor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
+    """Build stator/rotor motor inertia for maximal coordinates.
 
-    Each revolute DoF contributes ``gear**2 * armature * axis * axis.T``
-    to its child body inertia. The parent body inertia is expected to already
-    include the motor stator and housing. This is a rigid reflected-rotor model,
-    so internal motor and constraint impulses retain ordinary body momentum.
+    Each revolute DoF adds motor-side armature to its parent body and
+    gear-reflected armature to its child body, both along the joint axis in
+    the respective body frame. Internal motor forces therefore use the
+    ordinary momentum-conserving rigid-body mass operator.
     """
     body_inv = np.asarray(model.body_inv_inertia.numpy(), dtype=np.float64)
     body_inertia = np.zeros_like(body_inv)
@@ -77,8 +77,10 @@ def _build_maximal_rotor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
     for body in np.flatnonzero(dynamic):
         body_inertia[body] = np.linalg.inv(body_inv[body])
 
+    joint_parent = model.joint_parent.numpy()
     joint_child = model.joint_child.numpy()
     joint_type = model.joint_type.numpy()
+    joint_xform_parent = model.joint_X_p.numpy()
     joint_xform_child = model.joint_X_c.numpy()
     joint_qd_start = model.joint_qd_start.numpy()
     joint_dof_dim = model.joint_dof_dim.numpy()
@@ -109,17 +111,26 @@ def _build_maximal_rotor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
             ratio = float(gear[dof])
             if not np.isfinite(ratio) or ratio <= 0.0:
                 raise ValueError(f"joint_gear[{dof}] must be finite and positive")
-            if child < 0 or not dynamic[child]:
-                continue
             axis_joint = np.asarray(joint_axis[dof], dtype=np.float64)
             axis_norm = float(np.linalg.norm(axis_joint))
             if axis_norm <= 1.0e-12:
                 raise ValueError(f"joint_axis[{dof}] must be non-zero for motor armature")
             axis_joint /= axis_norm
-            q_child_joint = np.asarray(joint_xform_child[joint, 3:7], dtype=np.float64)
-            q_xyz = q_child_joint[:3]
-            axis_child = axis_joint + 2.0 * np.cross(q_xyz, np.cross(q_xyz, axis_joint) + q_child_joint[3] * axis_joint)
-            body_inertia[child] += (ratio * ratio * rotor_inertia) * np.outer(axis_child, axis_child)
+            parent = int(joint_parent[joint])
+            if parent >= 0 and dynamic[parent]:
+                q_parent_joint = np.asarray(joint_xform_parent[joint, 3:7], dtype=np.float64)
+                q_xyz = q_parent_joint[:3]
+                axis_parent = axis_joint + 2.0 * np.cross(
+                    q_xyz, np.cross(q_xyz, axis_joint) + q_parent_joint[3] * axis_joint
+                )
+                body_inertia[parent] += rotor_inertia * np.outer(axis_parent, axis_parent)
+            if child >= 0 and dynamic[child]:
+                q_child_joint = np.asarray(joint_xform_child[joint, 3:7], dtype=np.float64)
+                q_xyz = q_child_joint[:3]
+                axis_child = axis_joint + 2.0 * np.cross(
+                    q_xyz, np.cross(q_xyz, axis_joint) + q_child_joint[3] * axis_joint
+                )
+                body_inertia[child] += (ratio * ratio * rotor_inertia) * np.outer(axis_child, axis_child)
 
     for body in np.flatnonzero(dynamic):
         body_inv[body] = np.linalg.inv(body_inertia[body])
@@ -235,9 +246,8 @@ class SolverPhoenX(SolverBase):
                 ``0`` recovers single-frame sleep.
             articulation_mode: "maximal" keeps independent-body tree
                 dynamics and classic PhoenX PGS. Revolute ``joint_armature`` is
-                reflected through ``joint_gear`` and added to the rotor-side
-                child body inertia; authored parent inertia must include the
-                stator and housing. "hybrid" keeps the maximal
+                added to the stator-side parent body and reflected through
+                joint_gear onto the rotor-side child body. "hybrid" keeps the maximal
                 joint rows active while using the exact articulated-body response
                 as their preconditioner. "reduced" lets generalized coordinates
                 own tree joints.
@@ -258,7 +268,7 @@ class SolverPhoenX(SolverBase):
         self.articulation_mode = articulation_mode
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
         self._phoenx_body_inv_inertia = (
-            _build_maximal_rotor_body_inv_inertia(model) if articulation_mode == "maximal" else model.body_inv_inertia
+            _build_maximal_motor_body_inv_inertia(model) if articulation_mode == "maximal" else model.body_inv_inertia
         )
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
         if velocity_readout not in valid_readouts:
@@ -974,7 +984,7 @@ class SolverPhoenX(SolverBase):
         maximal_joint_properties_changed = joint_props_changed and self.articulation_mode == "maximal"
         reduced_joint_properties_changed = joint_props_changed and self.articulation_mode in ("hybrid", "reduced")
         if self.articulation_mode == "maximal" and (body_properties_changed or joint_props_changed):
-            self._phoenx_body_inv_inertia = _build_maximal_rotor_body_inv_inertia(self.model)
+            self._phoenx_body_inv_inertia = _build_maximal_motor_body_inv_inertia(self.model)
         if body_properties_changed or maximal_joint_properties_changed or reduced_joint_properties_changed:
             if self.model.body_count > 0:
                 self._launch_init_phoenx_bodies(self.model)
