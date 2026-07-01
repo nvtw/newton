@@ -612,13 +612,29 @@ def _compute_reduced_impulse_response_kernel(
 def _sync_reduced_warp(): ...
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    __syncwarp(mask);
+#endif
+"""
+)
+def _sync_reduced_group(mask: wp.uint32): ...
+
+
 @wp.kernel(enable_backward=False, module="reduced_impulse_response")
 def _compute_reduced_impulse_response_warp_kernel(
     bodies: BodyContainer,
+    articulation_count: wp.int32,
 ):
     thread = wp.tid()
-    articulation = thread // wp.int32(32)
-    lane = thread - articulation * wp.int32(32)
+    articulation = thread // wp.int32(8)
+    lane = thread - articulation * wp.int32(8)
+    if articulation >= articulation_count:
+        return
+    warp_lane = thread & wp.int32(31)
+    group = warp_lane // wp.int32(8)
+    group_mask = wp.uint32(255) << wp.uint32(group * wp.int32(8))
     data = bodies.reduced
     start = data.articulation_start[articulation]
     end = data.articulation_end[articulation]
@@ -629,7 +645,7 @@ def _compute_reduced_impulse_response_warp_kernel(
             data.deferred_wrench[child] = wp.spatial_vector()
         if lane < wp.int32(6):
             _compute_reduced_impulse_response_basis(bodies, joint, parent, child, lane)
-        _sync_reduced_warp()
+        _sync_reduced_group(group_mask)
 
 
 @wp.kernel(enable_backward=False, module="reduced_kinematics")
@@ -2739,11 +2755,13 @@ class ReducedPhoenXArticulation:
         )
         if compute_impulse_response:
             if self.model.device.is_cuda:
+                articulation_count = int(self.model.articulation_count)
+                impulse_response_threads = ((articulation_count + 3) // 4) * 32
                 wp.launch(
                     _compute_reduced_impulse_response_warp_kernel,
-                    dim=int(self.model.articulation_count) * 32,
-                    block_dim=32,
-                    inputs=[self.bodies],
+                    dim=impulse_response_threads,
+                    block_dim=128,
+                    inputs=[self.bodies, wp.int32(articulation_count)],
                     device=self.model.device,
                 )
             else:

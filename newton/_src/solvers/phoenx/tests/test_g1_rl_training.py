@@ -3206,6 +3206,14 @@ class TestG1PhoenXRL(unittest.TestCase):
             if "ankle_roll_link_geom_" in label:
                 self.assertEqual(int(shape_flags[shape_index]) & collide_bit, 0)
 
+        filtered_pairs = {tuple(sorted((int(a), int(b)))) for a, b in env.model.shape_collision_filter_pairs}
+        robot_shapes = np.flatnonzero(shape_body >= 0)
+        for foot_label in expected_body_by_label:
+            foot_shape = labels.index(foot_label)
+            for robot_shape in robot_shapes:
+                if int(robot_shape) != foot_shape:
+                    self.assertIn(tuple(sorted((foot_shape, int(robot_shape)))), filtered_pairs)
+
         with wp.ScopedCapture(device=device) as capture:
             env.model.collide(env.state_0, env.contacts)
         wp.capture_launch(capture.graph)

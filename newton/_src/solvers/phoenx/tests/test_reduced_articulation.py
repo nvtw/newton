@@ -1899,6 +1899,7 @@ class TestReducedArticulation(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         block = solver._reduced_articulation.contact_block_system
+        self.assertEqual(block.contact_dof_width, 48)
         self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(int(block.enabled.numpy()[0]), 1)
         self.assertEqual(int(block.deferred_active.numpy()[0]), 0)
@@ -1940,6 +1941,7 @@ class TestReducedArticulation(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         block = solver._reduced_articulation.contact_block_system
+        self.assertEqual(block.contact_dof_width, 64)
         self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(int(block.enabled.numpy()[0]), 0)
         self.assertEqual(int(block.deferred_active.numpy()[0]), 1)
@@ -2097,6 +2099,7 @@ class TestReducedArticulation(unittest.TestCase):
             solver_iterations=6,
             velocity_iterations=0,
         )
+        solver._reduced_articulation.contact_block_system.fallback_worker_count = 1
         contacts = model.contacts()
         momentum_before = _total_momentum(model, state)
         dt = 1.0 / 2000.0

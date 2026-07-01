@@ -70,6 +70,7 @@
 
 ### Fixed
 
+- Fix experimental PhoenX G1 replacement foot boxes bypassing the MJCF no-self-collision filters, preventing unintended robot self-contacts during policy exploration.
 - Fix the experimental PhoenX G1 recipe to match nanoG1's 8192-world batch and full-range command distribution; the pinned build does not enable its optional command curriculum.
 - Fix maximal-coordinate PhoenX revolute armature by adding motor-side stator inertia to the parent and gear-reflected rotor inertia to the child, preserving rigid-body momentum and gyroscopic dynamics without auxiliary constraint rows.
 - Stabilize the full-coordinate PhoenX `robot_g1` example with a fine temporal schedule.

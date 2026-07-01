@@ -2384,7 +2384,8 @@ class EnvG1PhoenX:
         hx *= xy_scale
         hy *= xy_scale
         xform = wp.transform(p=wp.vec3(*_NANOG1_FOOT_BOX_LOCAL_POS), q=wp.quat_identity())
-        builder.add_shape_box(
+        imported_shape_count = len(builder.shape_type)
+        left_shape = builder.add_shape_box(
             body=left_body,
             xform=xform,
             hx=hx,
@@ -2393,7 +2394,7 @@ class EnvG1PhoenX:
             cfg=cfg,
             label="left_nanog1_foot_box",
         )
-        builder.add_shape_box(
+        right_shape = builder.add_shape_box(
             body=right_body,
             xform=xform,
             hx=hx,
@@ -2402,6 +2403,10 @@ class EnvG1PhoenX:
             cfg=cfg,
             label="right_nanog1_foot_box",
         )
+        for foot_shape in (left_shape, right_shape):
+            for shape in range(imported_shape_count):
+                builder.add_shape_collision_filter_pair(foot_shape, shape)
+        builder.add_shape_collision_filter_pair(left_shape, right_shape)
 
     @staticmethod
     def _disable_ankle_point_contacts(builder: newton.ModelBuilder, side: str) -> int:
