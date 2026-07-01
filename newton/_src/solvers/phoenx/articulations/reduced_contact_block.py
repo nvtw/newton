@@ -60,6 +60,7 @@ from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_lengt
 
 _POINTS_PER_PAGE = 32
 _MAX_ROWS = 3 * _POINTS_PER_PAGE
+_CACHED_PAGE_COUNT = 2
 _BLOCK_DIM = 32
 _MAX_DOFS = 64
 _FALLBACK_MAX_COLORED_PARTITIONS = 63
@@ -577,6 +578,104 @@ def _build_generalized_contact_rows_kernel(
         body_response[articulation, local_joint, row] = parent_delta
 
 
+@wp.kernel(enable_backward=False, module="reduced_contact_rows_packed")
+def _build_packed_generalized_contact_rows_kernel(
+    bodies: BodyContainer,
+    enabled: wp.array[wp.int32],
+    point_count: wp.array[wp.int32],
+    row_body: wp.array2d[wp.int32],
+    row_wrench: wp.array2d[wp.spatial_vector],
+    max_page_count: wp.array[wp.int32],
+    page_index: wp.array[wp.int32],
+    prepare: wp.bool,
+    packed_jacobian: wp.array2d[wp.float32],
+    packed_response: wp.array2d[wp.float32],
+    joint_work: wp.array3d[wp.float32],
+    body_response: wp.array3d[wp.spatial_vector],
+):
+    articulation, row = wp.tid()
+    data = bodies.reduced
+    start = data.articulation_start[articulation]
+    end = data.articulation_end[articulation]
+    dof_start_articulation = data.joint_qd_start[start]
+    dof_end_articulation = data.joint_qd_start[end]
+    dof_count_articulation = dof_end_articulation - dof_start_articulation
+    row_count = wp.int32(3) * point_count[articulation]
+    if (
+        enabled[articulation] == wp.int32(0)
+        or row >= row_count
+        or dof_count_articulation > wp.int32(packed_jacobian.shape[1])
+    ):
+        return
+
+    page = page_index[0]
+    if not prepare and (
+        page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
+    ):
+        return
+    storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
+    packed_row = (articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page) * wp.int32(_MAX_ROWS) + row
+
+    # Response overwrites every topology-owned DOF below; its zero-allocated tile tail is immutable.
+    for local_dof in range(dof_count_articulation):
+        packed_jacobian[packed_row, local_dof] = wp.float32(0.0)
+        joint_work[articulation, local_dof, row] = wp.float32(0.0)
+
+    source_body = row_body[articulation, row]
+    source_wrench = row_wrench[articulation, row]
+    path_start = data.body_path_start[source_body]
+    path_end = data.body_path_start[source_body + wp.int32(1)]
+
+    propagated_wrench = source_wrench
+    for reverse in range(path_end - path_start):
+        path_index = path_end - wp.int32(1) - reverse
+        joint = data.body_path_joint[path_index]
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        projected = _vec6(0.0)
+        reduced = _vec6(0.0)
+        for dof_row in range(6):
+            if wp.int32(dof_row) < dof_count:
+                dof = dof_start + wp.int32(dof_row)
+                projected[dof_row] = wp.dot(data.joint_s[dof], propagated_wrench)
+                joint_work[articulation, dof - dof_start_articulation, row] = projected[dof_row]
+                packed_jacobian[packed_row, dof - dof_start_articulation] = wp.dot(data.joint_s[dof], source_wrench)
+        for dof_row in range(6):
+            if wp.int32(dof_row) < dof_count:
+                for dof_column in range(6):
+                    if wp.int32(dof_column) < dof_count:
+                        reduced[dof_row] += data.joint_d_inv[joint, dof_row, dof_column] * projected[dof_column]
+                propagated_wrench -= data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
+
+    for joint in range(start, end):
+        local_joint = joint - start
+        parent = data.joint_parent[joint]
+        parent_delta = wp.spatial_vector()
+        if parent >= wp.int32(0):
+            parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        rhs = _vec6(0.0)
+        generalized_delta = _vec6(0.0)
+        for dof_row in range(6):
+            if wp.int32(dof_row) < dof_count:
+                dof = dof_start + wp.int32(dof_row)
+                rhs[dof_row] = joint_work[articulation, dof - dof_start_articulation, row] - wp.dot(
+                    data.joint_u[dof], parent_delta
+                )
+        for dof_row in range(6):
+            if wp.int32(dof_row) < dof_count:
+                for dof_column in range(6):
+                    if wp.int32(dof_column) < dof_count:
+                        generalized_delta[dof_row] += data.joint_d_inv[joint, dof_row, dof_column] * rhs[dof_column]
+                dof = dof_start + wp.int32(dof_row)
+                packed_response[packed_row, dof - dof_start_articulation] = generalized_delta[dof_row]
+                parent_delta += data.joint_s[dof] * generalized_delta[dof_row]
+        body_response[articulation, local_joint, row] = parent_delta
+
+
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
@@ -606,8 +705,9 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
         normal: wp.array2d[wp.vec3],
         tangent0: wp.array2d[wp.vec3],
         row_velocity: wp.array2d[wp.float32],
-        jacobian: wp.array3d[wp.float32],
-        response: wp.array3d[wp.float32],
+        page_index: wp.array[wp.int32],
+        packed_jacobian: wp.array2d[wp.float32],
+        packed_response: wp.array2d[wp.float32],
         bodies: BodyContainer,
         fuse_apply: wp.bool,
         max_depth: wp.int32,
@@ -637,12 +737,16 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
                 broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
                 if active:
                     row = wp.int32(3) * point
-                    response0 = wp.tile_load(response[articulation, row], shape=max_dofs, storage="register")
+                    storage_page = wp.min(page_index[0], wp.int32(_CACHED_PAGE_COUNT - 1))
+                    packed_row = (articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page) * wp.int32(
+                        _MAX_ROWS
+                    ) + row
+                    response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
                     response1 = wp.tile_load(
-                        response[articulation, row + wp.int32(1)], shape=max_dofs, storage="register"
+                        packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
                     )
                     response2 = wp.tile_load(
-                        response[articulation, row + wp.int32(2)], shape=max_dofs, storage="register"
+                        packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
                     )
                     generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
         mass_coeff = wp.float32(1.0)
@@ -662,16 +766,18 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
                 delta1 = wp.float32(0.0)
                 delta2 = wp.float32(0.0)
                 row = wp.int32(3) * wp.max(point, wp.int32(0))
+                storage_page = wp.min(page_index[0], wp.int32(_CACHED_PAGE_COUNT - 1))
+                packed_row = (articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page) * wp.int32(_MAX_ROWS) + row
                 jv0 = wp.float32(0.0)
                 jv1 = wp.float32(0.0)
                 jv2 = wp.float32(0.0)
                 if active:
-                    jacobian0 = wp.tile_load(jacobian[articulation, row], shape=max_dofs, storage="register")
+                    jacobian0 = wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register")
                     jacobian1 = wp.tile_load(
-                        jacobian[articulation, row + wp.int32(1)], shape=max_dofs, storage="register"
+                        packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
                     )
                     jacobian2 = wp.tile_load(
-                        jacobian[articulation, row + wp.int32(2)], shape=max_dofs, storage="register"
+                        packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
                     )
                     jv0 = row_velocity[articulation, row] + wp.tile_extract(
                         wp.tile_sum(jacobian0 * generalized_delta), 0
@@ -737,12 +843,12 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
                 broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
                 broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
                 if active:
-                    response0 = wp.tile_load(response[articulation, row], shape=max_dofs, storage="register")
+                    response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
                     response1 = wp.tile_load(
-                        response[articulation, row + wp.int32(1)], shape=max_dofs, storage="register"
+                        packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
                     )
                     response2 = wp.tile_load(
-                        response[articulation, row + wp.int32(2)], shape=max_dofs, storage="register"
+                        packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
                     )
                     generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
 
@@ -873,6 +979,8 @@ class ReducedContactBlockSystem:
         self.fallback_column: wp.array[wp.int32] | None = None
         self.fallback_element: wp.array[ElementInteractionData] | None = None
         self.fallback_partitioner: IncrementalContactPartitioner | None = None
+        self.packed_jacobian: wp.array2d[wp.float32] | None = None
+        self.packed_response: wp.array2d[wp.float32] | None = None
         self.enabled = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.total_point_count = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.max_page_count = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -890,10 +998,6 @@ class ReducedContactBlockSystem:
         self.row_wrench = wp.zeros((articulation_count, _MAX_ROWS), dtype=wp.spatial_vector, device=self.device)
         self.row_velocity = wp.zeros((articulation_count, _MAX_ROWS), dtype=wp.float32, device=self.device)
         self.deferred_active = wp.zeros(1, dtype=wp.int32, device=self.device)
-        self.jacobian = wp.zeros(
-            (articulation_count, _MAX_ROWS, self.contact_dof_width), dtype=wp.float32, device=self.device
-        )
-        self.generalized_response = wp.zeros_like(self.jacobian)
         self.generalized_delta = wp.zeros(
             (articulation_count, self.contact_dof_width), dtype=wp.float32, device=self.device
         )
@@ -910,7 +1014,7 @@ class ReducedContactBlockSystem:
         )
 
     def configure_schedule(self, capacity: int, world_count: int) -> None:
-        """Allocate the fixed contact schedule before graph capture."""
+        """Allocate the fixed contact schedule and bounded two-page response cache."""
         capacity = max(1, int(capacity))
         world_count = max(1, int(world_count))
         if self.schedule_keys is not None:
@@ -919,6 +1023,13 @@ class ReducedContactBlockSystem:
             return
         self.schedule_capacity = capacity
         self.schedule_world_count = world_count
+        packed_row_capacity = self.articulation_count * _CACHED_PAGE_COUNT * _MAX_ROWS
+        self.packed_jacobian = wp.zeros(
+            (packed_row_capacity, self.contact_dof_width),
+            dtype=wp.float32,
+            device=self.device,
+        )
+        self.packed_response = wp.zeros_like(self.packed_jacobian)
         worker_blocks = max(1, int(getattr(self.device, "sm_count", 1)))
         self.fallback_worker_count = min(capacity, worker_blocks * _FALLBACK_BLOCK_DIM)
         self.schedule_keys = wp.empty(2 * capacity, dtype=wp.int64, device=self.device)
@@ -1168,8 +1279,10 @@ class ReducedContactBlockSystem:
                 device=self.device,
             )
 
-        def solve_resident_page(*, build_rows: bool) -> None:
-            if not build_rows:
+        def solve_resident_page(*, gathered: bool = False) -> None:
+            assert self.packed_jacobian is not None
+            assert self.packed_response is not None
+            if not gathered:
                 wp.launch(
                     _finalize_reduced_contact_rows_kernel,
                     dim=(self.articulation_count, _POINTS_PER_PAGE),
@@ -1188,25 +1301,27 @@ class ReducedContactBlockSystem:
                     outputs=[self.row_velocity],
                     device=self.device,
                 )
-            if build_rows:
-                wp.launch(
-                    _build_generalized_contact_rows_kernel,
-                    dim=(self.articulation_count, _MAX_ROWS),
-                    inputs=[
-                        bodies,
-                        self.enabled,
-                        self.point_count,
-                        self.row_body,
-                        self.row_wrench,
-                    ],
-                    outputs=[
-                        self.jacobian,
-                        self.generalized_response,
-                        self.aba_joint_work,
-                        self.aba_body_response,
-                    ],
-                    device=self.device,
-                )
+            wp.launch(
+                _build_packed_generalized_contact_rows_kernel,
+                dim=(self.articulation_count, _MAX_ROWS),
+                inputs=[
+                    bodies,
+                    self.enabled,
+                    self.point_count,
+                    self.row_body,
+                    self.row_wrench,
+                    self.max_page_count,
+                    self.page_index,
+                    wp.bool(prepare),
+                ],
+                outputs=[
+                    self.packed_jacobian,
+                    self.packed_response,
+                    self.aba_joint_work,
+                    self.aba_body_response,
+                ],
+                device=self.device,
+            )
             wp.launch_tiled(
                 self.solve_kernel,
                 dim=[self.articulation_count],
@@ -1225,8 +1340,9 @@ class ReducedContactBlockSystem:
                     self.normal,
                     self.tangent0,
                     self.row_velocity,
-                    self.jacobian,
-                    self.generalized_response,
+                    self.page_index,
+                    self.packed_jacobian,
+                    self.packed_response,
                     bodies,
                     wp.bool(self.fuse_apply),
                     wp.int32(self.max_depth),
@@ -1291,7 +1407,7 @@ class ReducedContactBlockSystem:
                     ],
                     device=self.device,
                 )
-                solve_resident_page(build_rows=True)
+                solve_resident_page(gathered=True)
                 wp.launch(
                     _advance_reduced_contact_page_cursor_kernel,
                     dim=1,
@@ -1304,10 +1420,19 @@ class ReducedContactBlockSystem:
         if prepare:
             run_page_loop()
         else:
+            # Prepare leaves the cursor one past the last page. Reset it so the
+            # resident single-page relaxation reads page zero from the packed cache.
+            wp.launch(
+                _reset_reduced_contact_page_cursor_kernel,
+                dim=1,
+                inputs=[self.max_page_count],
+                outputs=[self.page_cursor, self.page_index],
+                device=self.device,
+            )
             wp.capture_if(
                 self.multi_page_active,
                 on_true=run_page_loop,
-                on_false=lambda: solve_resident_page(build_rows=False),
+                on_false=solve_resident_page,
             )
 
 

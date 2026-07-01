@@ -20,6 +20,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _POINTS_PER_PAGE,
     _build_generalized_contact_rows_kernel,
+    _build_packed_generalized_contact_rows_kernel,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_wrench_response
@@ -1505,6 +1506,14 @@ class TestReducedArticulation(unittest.TestCase):
         probe = wp.array(probe_np, device=device)
         exact_response = wp.zeros(dof_count, dtype=wp.float32, device=device)
         virtual_work = wp.zeros(2, dtype=wp.float32, device=device)
+        reference_jacobian = wp.zeros(
+            (1, block.row_wrench.shape[1], block.contact_dof_width),
+            dtype=wp.float32,
+            device=device,
+        )
+        reference_response = wp.zeros_like(reference_jacobian)
+        assert block.packed_jacobian is not None
+        assert block.packed_response is not None
 
         with wp.ScopedCapture(device=device) as capture:
             bridge.import_step(state, model.control())
@@ -1520,8 +1529,29 @@ class TestReducedArticulation(unittest.TestCase):
                     block.row_wrench,
                 ],
                 outputs=[
-                    block.jacobian,
-                    block.generalized_response,
+                    reference_jacobian,
+                    reference_response,
+                    block.aba_joint_work,
+                    block.aba_body_response,
+                ],
+                device=device,
+            )
+            wp.launch(
+                _build_packed_generalized_contact_rows_kernel,
+                dim=(1, 48),
+                inputs=[
+                    solver.bodies,
+                    block.enabled,
+                    block.point_count,
+                    block.row_body,
+                    block.row_wrench,
+                    block.max_page_count,
+                    block.page_index,
+                    wp.bool(True),
+                ],
+                outputs=[
+                    block.packed_jacobian,
+                    block.packed_response,
                     block.aba_joint_work,
                     block.aba_body_response,
                 ],
@@ -1534,7 +1564,7 @@ class TestReducedArticulation(unittest.TestCase):
                     solver.bodies,
                     wp.int32(2),
                     wrench,
-                    block.jacobian,
+                    reference_jacobian,
                     probe,
                     exact_response,
                     virtual_work,
@@ -1544,10 +1574,18 @@ class TestReducedArticulation(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         np.testing.assert_allclose(
-            block.generalized_response.numpy()[0, 0, :dof_count],
+            reference_response.numpy()[0, 0, :dof_count],
             exact_response.numpy(),
             rtol=2.0e-5,
             atol=2.0e-6,
+        )
+        np.testing.assert_array_equal(
+            block.packed_jacobian.numpy()[0, :dof_count],
+            reference_jacobian.numpy()[0, 0, :dof_count],
+        )
+        np.testing.assert_array_equal(
+            block.packed_response.numpy()[0, :dof_count],
+            reference_response.numpy()[0, 0, :dof_count],
         )
         np.testing.assert_allclose(virtual_work.numpy()[1], virtual_work.numpy()[0], rtol=2.0e-5, atol=2.0e-6)
 
@@ -1984,7 +2022,7 @@ class TestReducedArticulation(unittest.TestCase):
             articulation_mode="reduced",
             substeps=1,
             solver_iterations=8,
-            velocity_iterations=0,
+            velocity_iterations=1,
         )
         contacts = model.contacts()
 
@@ -1998,6 +2036,8 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(int(block.enabled.numpy()[0]), 1)
         self.assertEqual(int(block.deferred_active.numpy()[0]), 0)
+        self.assertEqual(int(block.max_page_count.numpy()[0]), 1)
+        self.assertEqual(int(block.page_index.numpy()[0]), 0)
         self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
         self.assertGreater(float(output.joint_qd.numpy()[2]), -0.2)
 

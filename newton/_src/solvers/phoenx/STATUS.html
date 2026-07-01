@@ -58,10 +58,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>1 July 2026 · shared contact gap profiled</strong></div>
+      <div class="stamp">Last updated<br><strong>1 July 2026 · hard-Hertz contact path accelerated</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">HARD-HERTZ SPEEDUP</span><time>1 Jul - latest</time></div>
+      <h2>Exact contact-response reuse closes part of the MJWarp gap</h2>
+      <p>The hard-Hertz damping law, friction projection, and articulated-body equations are unchanged. PhoenX now builds each contact page's exact generalized Jacobian and ABA response during the bias pass and reuses it during velocity relaxation when the same fixed-topology page remains valid.</p>
+      <ul>
+        <li>The contact-rich shared G1 benchmark improved from 0.864-0.878M to 1.120M physics steps/s, a measured 28-30% gain. The local October 2025 MJWarp result remains 2.084M on the same model and settings, shrinking this particular gap from about 2.4x to 1.86x.</li>
+        <li>Response-build launches fall from four to two per physics step for the common two-page scene. This applies to any reduced articulation; there is no robot-specific branch or changed contact approximation.</li>
+        <li>The cache is bounded to two 32-contact pages per articulation instead of scaling with the conservative global contact capacity. On 8192 G1 worlds, reported GPU use fell from 9.65 GiB for the first capacity-scaled prototype to 7.30 GiB while retaining the speedup.</li>
+        <li>Arbitrary larger contact counts remain exact and graph-safe: page zero stays cached and overflow pages are rebuilt, never truncated. Users do not configure a maximum contact count.</li>
+        <li>All 34 reduced-articulation CUDA tests pass through the canonical package runner, including exact ABA row equality, arbitrary paging, dense-contact determinism, fused/separate equality, high-degree overflow, closed loops, and spatial momentum conservation.</li>
+      </ul>
+      <p><strong>Next:</strong> use MJWarp's staging and topology specialization as design guidance while retaining PhoenX hard-Hertz contact semantics. The largest remaining opportunity is a matrix-free or path-sparse articulated contact operator that avoids materializing a dense generalized response for every normal and tangent row.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag warn">MJWARP PARITY BENCH</span><time>1 Jul - latest</time></div>

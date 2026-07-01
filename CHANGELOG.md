@@ -47,6 +47,7 @@
 
 ### Changed
 
+- Reuse exact reduced-coordinate PhoenX articulated contact responses across bias and velocity-relaxation passes with a bounded graph-capture-safe cache, accelerating contact-rich scenes without changing hard-Hertz contact projection.
 - Schedule experimental reduced-coordinate PhoenX ABA advance with topology-sized 8-, 16-, or 32-lane warp groups, increasing parallelism across independent narrow articulations while retaining full-warp execution for wide trees.
 - Reject cable joints and D6 angular limits in experimental simple PhoenX instead of solving different equations; use `solver_flavor="standard"` for these constraints.
 - Alternate PhoenX PGS color traversal direction between iterations to reduce ordering bias without changing constraint equations or CUDA graph capture.

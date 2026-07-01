@@ -152,6 +152,7 @@ def main() -> int:
     if cudart is not None and cudart.cudaProfilerStop() != 0:
         raise RuntimeError("cudaProfilerStop failed")
     physics_steps = args.world_count * args.measure_replays
+    gpu_used_gb = float(device.total_memory - device.free_memory) / float(1024**3)
 
     body_q = state.body_q.numpy()
     body_qd = state.body_qd.numpy()
@@ -174,9 +175,11 @@ def main() -> int:
                 "articulation_contact_points_max": reduced_contact_points_max,
                 "articulation_contact_points_mean": reduced_contact_points_mean,
                 "body_count_per_world": int(model.body_count) // args.world_count,
+                "contact_capacity": int(contacts.rigid_contact_max),
                 "dt": args.dt,
                 "elapsed_s": elapsed,
                 "engine": "phoenx",
+                "gpu_used_gb": gpu_used_gb,
                 "measure_replays": args.measure_replays,
                 "physics_steps": physics_steps,
                 "physics_steps_per_s": physics_steps / elapsed,
