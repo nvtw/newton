@@ -50,6 +50,12 @@
     .tag { display: inline-flex; padding: 3px 9px; border-radius: 999px; font-weight: 750; color: #06241f; background: var(--cyan); }
     .tag.warn { color: #2c1b00; background: var(--amber); }
     .tag.block { color: #310711; background: var(--rose); }
+    .action-required {
+      margin: 20px 0; padding: 24px; border: 3px solid var(--amber); border-radius: 18px;
+      background: rgba(251, 191, 36, .14); box-shadow: 0 0 0 6px rgba(251, 191, 36, .06);
+    }
+    .action-required h2 { margin-top: 0; color: var(--amber); font-size: 1.6rem; }
+    .action-required pre { overflow-x: auto; padding: 16px; border-radius: 10px; background: #02070d; color: #fff; }
     code { color: #b6f6ec; background: rgba(94, 234, 212, .08); padding: 2px 5px; border-radius: 5px; }
     @media (max-width: 650px) { header { display: block; } .stamp { text-align: left; margin-top: 12px; } }
   </style>
@@ -58,10 +64,58 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · full gate + NCU handoff</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · contact-solve NCU requested</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <section class="action-required">
+      <h2>ACTION REQUIRED · run one focused Nsight Compute script</h2>
+      <p>This profiles exactly one graph-captured generalized contact-solve launch and normally takes a few minutes. Run:</p>
+      <pre><code>sudo bash /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_contact_solve.sh</code></pre>
+      <p>Expected report: <code>/tmp/phoenx_g1_contact_solve_latest.ncu-rep</code>. No other command or manual configuration is needed.</p>
+    </section>
+
+    <article>
+      <div class="meta"><span class="tag">SYSTEMS-GUIDED MEGAKERNEL</span><time>2 Jul - latest</time></div>
+      <h2>The contact producer/consumer boundary spans 30% of physics time</h2>
+      <p>A fresh bounded five-replay Nsight Systems trace reflects all retained optimizations. Exact contact-row construction is still the largest kernel at 19.0%; generalized contact PGS is 11.1%. Reduced advance is 12.5%, publication 10.0%, factorization 8.5%, and reset FK 7.2%.</p>
+      <ul>
+        <li>A one-block-per-articulation megakernel can build rows, synchronize, then consume on-chip Jacobian/response data. This targets global materialization and the producer/consumer boundary while retaining hard-Hertz projection and exact ABA responses.</li>
+        <li>The existing row-builder NCU report says its serial topology traversal is latency-bound, so launch fusion alone is not enough. The requested contact-solve NCU report will determine shared-memory, occupancy, and consumer-layout constraints before implementation.</li>
+        <li>The combined 30% share makes a 10-20% end-to-end physics improvement plausible if the on-chip design succeeds. It cannot by itself erase the full training-throughput gap; advance, publish, factor, FK, and learner work remain independent targets.</li>
+        <li>The shipped nanoG1 policy passes its native gate but not PhoenX. Native-versus-imported first-step inference agrees within 1.3e-6, and contact-free open-loop dynamics closely agree. Supported motion exposes the expected hard-Hertz-versus-MuJoCo contact-response difference, so PhoenX requires its own policy rather than assuming direct transfer.</li>
+        <li>PhoenX's 125.8M policy is fall-free and passes tracking plus angular/leg-speed thresholds. Action-rate fine-tuning improved jerk from 0.269 to 0.232, but the strongest point traded torso stability and is not retained.</li>
+      </ul>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag warn">G1 QUALITY: ONE METRIC LEFT</span><time>2 Jul - latest</time></div>
+      <h2>The full 150M schedule walks reliably; action smoothness is the remaining gate</h2>
+      <p>The parity-correct 12-leg reduced-coordinate run was continued from 75.5M through nanoG1's complete 150M learning-rate schedule. This directly resolves the earlier ambiguity: the policy was undertrained at 75M and continued to improve without solver or reward changes.</p>
+      <ul>
+        <li>At 125.8M samples the frozen battery reaches 0.906 tracking with zero battery and diagnostic falls, 0.197 roll/pitch angular RMS, 0.163 yaw RMS, and 0.772 leg-speed RMS. All of those pass the nanoG1 thresholds.</li>
+        <li>The 150.5M checkpoint remains fall-free and scores 0.903 tracking. The sole failed criterion is action jerk: 0.270 versus the frozen 0.21 threshold.</li>
+        <li>Forward-command tracking improved from 0.513 at 75.5M to 0.818 at 150.5M. The unchanged 125.8M checkpoint has the best aggregate score and is the controlled fine-tuning baseline.</li>
+        <li>Training the final 24.6M-sample chunk sustained 382.7k samples/s; the pinned nanoG1 reference is 1.276M, a current 3.33x end-to-end gap for that measured chunk.</li>
+        <li>The next experiment changes only the action-rate weight from a common checkpoint. It must lower jerk without losing the already-passing fall, tracking, angular-stability, and leg-speed metrics.</li>
+      </ul>
+      <p><strong>No user action is currently required.</strong> When a privileged profile is needed, a high-contrast ACTION REQUIRED box will appear above the status entries with exactly one command, its output path, and the expected runtime.</p>
+    </article>
+
+    <article>
+      <div class="meta"><span class="tag">NCU-GUIDED NEXT STEP</span><time>2 Jul - latest</time></div>
+      <h2>Contact rows need an algorithmic change, not another block-size tweak</h2>
+      <p>The focused Nsight Compute report identifies the exact reduced contact-row builder as latency and dependency bound: only 8.35% of scheduler cycles have an eligible warp, achieved occupancy is 37.4%, while compute utilization is 10.5% and DRAM utilization is 35.7%. There are no local/shared spills. The long serial ABA topology traversal is the limiting chain.</p>
+      <ul>
+        <li>The production block-size sweep confirms 96 threads is best for this workload; 32, 64, and 128 all regress end-to-end throughput.</li>
+        <li>Cross-articulation warp packing, a split backward/forward traversal, and scalar six-wrench response-basis synthesis were tested and rejected. Each preserved exact equations but lost performance through cache loss, extra boundaries, or synthesis cost.</li>
+        <li>A megakernel is technically viable because one block already owns one articulation page: build rows, synchronize the block, then consume the on-chip Jacobian/response in contact PGS. Any native helper will remain a tiny CUDA-scoped <code>__syncthreads()</code> wrapper.</li>
+        <li>The experiment must first beat the isolated row-build-plus-solve pipeline and preserve bitwise response, hard-Hertz projection, warm starting, determinism, paging, and momentum tests. Merely removing launches is insufficient; the useful version must also avoid materializing/reloading response tiles.</li>
+        <li>nanoG1 V3 emits a 29-value policy vector but explicitly masks actions 12-28 and holds waist/arms at home. PhoenX's 12 controlled leg actions are correct parity. A speculative 29-actuator continuation was stopped and will not be retained.</li>
+      </ul>
+      <p><strong>Current measured state:</strong> retained reduced PhoenX training is about 487k samples/s, approximately 2.63x behind the pinned 1.276M nanoG1 result. The iteration-144 walker is fall-free but still misses tracking and smoothness gates, so training quality remains unfinished alongside performance.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">GENERAL CONTACT-SOLVE GAIN</span><time>2 Jul - latest</time></div>
