@@ -2389,6 +2389,50 @@ class TestReducedArticulation(unittest.TestCase):
             atol=2.0e-6,
         )
 
+    def test_velocity_only_relax_publish_matches_full_publish_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_grounded_articulation_cluster(device, worlds=3, articulations_per_world=2)
+        state_reference = model.state()
+        state_optimized = model.state()
+        output_reference = model.state()
+        output_optimized = model.state()
+        newton.eval_fk(model, state_reference.joint_q, state_reference.joint_qd, state_reference)
+        state_optimized.joint_q.assign(state_reference.joint_q)
+        state_optimized.joint_qd.assign(state_reference.joint_qd)
+        state_optimized.body_q.assign(state_reference.body_q)
+        state_optimized.body_qd.assign(state_reference.body_qd)
+        reference = newton.solvers.SolverPhoenX(
+            model, articulation_mode="reduced", substeps=2, solver_iterations=2, velocity_iterations=1
+        )
+        optimized = newton.solvers.SolverPhoenX(
+            model, articulation_mode="reduced", substeps=2, solver_iterations=2, velocity_iterations=1
+        )
+        reference_reduced = reference._reduced_articulation
+        reference_reduced.finish_relax = lambda: reference_reduced._publish_state(0.0)
+        contacts_reference = model.contacts()
+        contacts_optimized = model.contacts()
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state_reference, contacts_reference)
+            reference.step(state_reference, output_reference, None, contacts_reference, 1.0 / 240.0)
+            model.collide(state_optimized, contacts_optimized)
+            optimized.step(state_optimized, output_optimized, None, contacts_optimized, 1.0 / 240.0)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(
+            output_optimized.joint_q.numpy(), output_reference.joint_q.numpy(), rtol=0.0, atol=0.0
+        )
+        np.testing.assert_allclose(
+            output_optimized.joint_qd.numpy(), output_reference.joint_qd.numpy(), rtol=0.0, atol=0.0
+        )
+        np.testing.assert_allclose(output_optimized.body_q.numpy(), output_reference.body_q.numpy(), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            output_optimized.body_qd.numpy(), output_reference.body_qd.numpy(), rtol=0.0, atol=0.0
+        )
+
     def test_dense_articulation_contacts_are_deterministic_and_conserve_momentum(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

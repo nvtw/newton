@@ -1394,6 +1394,7 @@ def _finish_and_publish_reduced_warp_kernel(
     body_x_com: wp.array[wp.transform],
     zero_generalized_acceleration: wp.array[wp.float32],
     dt: wp.float32,
+    update_configuration: wp.bool,
     joint_qd_public: wp.array[wp.float32],
     body_q: wp.array[wp.transform],
     bodies: BodyContainer,
@@ -1416,65 +1417,66 @@ def _finish_and_publish_reduced_warp_kernel(
         group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
     data = bodies.reduced
 
-    for depth in range(max_depth + wp.int32(1)):
-        index = articulation_depth_start[articulation, depth] + lane
-        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
-        while index < depth_end:
-            joint = articulation_depth_joint[index]
-            parent = joint_parent[joint]
-            child = joint_child[joint]
-            kind = joint_type[joint]
-            if kind == JointType.FREE or kind == JointType.DISTANCE:
-                slot = child + wp.int32(1)
-                child_twist = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
-                new_body_q = integrate_body_pose_from_com_twist(body_q[child], body_com[child], child_twist, dt)
-                parent_anchor = joint_x_p[joint]
-                if parent >= wp.int32(0):
-                    parent_anchor = body_q[parent] * parent_anchor
-                joint_transform = wp.transform_inverse(parent_anchor) * new_body_q * joint_x_c[joint]
-                coord_start = joint_q_start[joint]
-                position = wp.transform_get_translation(joint_transform)
-                rotation = wp.transform_get_rotation(joint_transform)
-                joint_q[coord_start] = position[0]
-                joint_q[coord_start + wp.int32(1)] = position[1]
-                joint_q[coord_start + wp.int32(2)] = position[2]
-                joint_q[coord_start + wp.int32(3)] = rotation[0]
-                joint_q[coord_start + wp.int32(4)] = rotation[1]
-                joint_q[coord_start + wp.int32(5)] = rotation[2]
-                joint_q[coord_start + wp.int32(6)] = rotation[3]
-            else:
-                jcalc_integrate(
-                    parent,
-                    joint_x_c[joint],
-                    body_com[child],
-                    kind,
-                    joint_q,
-                    joint_qd_integrator,
-                    zero_generalized_acceleration,
-                    joint_q_start[joint],
-                    joint_qd_start[joint],
-                    joint_dof_dim[joint, 0],
-                    joint_dof_dim[joint, 1],
-                    dt,
-                    joint_q,
-                    joint_qd_integrator,
-                )
-                joint_transform = jcalc_transform(
-                    kind,
-                    joint_axis,
-                    joint_qd_start[joint],
-                    joint_dof_dim[joint, 0],
-                    joint_dof_dim[joint, 1],
-                    joint_q,
-                    joint_q_start[joint],
-                )
-                parent_anchor = joint_x_p[joint]
-                if parent >= wp.int32(0):
-                    parent_anchor = body_q[parent] * parent_anchor
-                new_body_q = parent_anchor * joint_transform * wp.transform_inverse(joint_x_c[joint])
-            body_q[child] = new_body_q
-            index += tile_width
-        _sync_reduced_group(group_mask)
+    if update_configuration:
+        for depth in range(max_depth + wp.int32(1)):
+            index = articulation_depth_start[articulation, depth] + lane
+            depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+            while index < depth_end:
+                joint = articulation_depth_joint[index]
+                parent = joint_parent[joint]
+                child = joint_child[joint]
+                kind = joint_type[joint]
+                if kind == JointType.FREE or kind == JointType.DISTANCE:
+                    slot = child + wp.int32(1)
+                    child_twist = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
+                    new_body_q = integrate_body_pose_from_com_twist(body_q[child], body_com[child], child_twist, dt)
+                    parent_anchor = joint_x_p[joint]
+                    if parent >= wp.int32(0):
+                        parent_anchor = body_q[parent] * parent_anchor
+                    joint_transform = wp.transform_inverse(parent_anchor) * new_body_q * joint_x_c[joint]
+                    coord_start = joint_q_start[joint]
+                    position = wp.transform_get_translation(joint_transform)
+                    rotation = wp.transform_get_rotation(joint_transform)
+                    joint_q[coord_start] = position[0]
+                    joint_q[coord_start + wp.int32(1)] = position[1]
+                    joint_q[coord_start + wp.int32(2)] = position[2]
+                    joint_q[coord_start + wp.int32(3)] = rotation[0]
+                    joint_q[coord_start + wp.int32(4)] = rotation[1]
+                    joint_q[coord_start + wp.int32(5)] = rotation[2]
+                    joint_q[coord_start + wp.int32(6)] = rotation[3]
+                else:
+                    jcalc_integrate(
+                        parent,
+                        joint_x_c[joint],
+                        body_com[child],
+                        kind,
+                        joint_q,
+                        joint_qd_integrator,
+                        zero_generalized_acceleration,
+                        joint_q_start[joint],
+                        joint_qd_start[joint],
+                        joint_dof_dim[joint, 0],
+                        joint_dof_dim[joint, 1],
+                        dt,
+                        joint_q,
+                        joint_qd_integrator,
+                    )
+                    joint_transform = jcalc_transform(
+                        kind,
+                        joint_axis,
+                        joint_qd_start[joint],
+                        joint_dof_dim[joint, 0],
+                        joint_dof_dim[joint, 1],
+                        joint_q,
+                        joint_q_start[joint],
+                    )
+                    parent_anchor = joint_x_p[joint]
+                    if parent >= wp.int32(0):
+                        parent_anchor = body_q[parent] * parent_anchor
+                    new_body_q = parent_anchor * joint_transform * wp.transform_inverse(joint_x_c[joint])
+                body_q[child] = new_body_q
+                index += tile_width
+            _sync_reduced_group(group_mask)
 
     for depth in range(max_depth + wp.int32(1)):
         index = articulation_depth_start[articulation, depth] + lane
@@ -1522,6 +1524,17 @@ def _finish_and_publish_reduced_warp_kernel(
                     joint_qd_integrator[dof_start + wp.int32(4)],
                     joint_qd_integrator[dof_start + wp.int32(5)],
                 )
+                if not update_configuration:
+                    velocity_origin = wp.vec3(
+                        joint_qd_local[dof_start],
+                        joint_qd_local[dof_start + wp.int32(1)],
+                        joint_qd_local[dof_start + wp.int32(2)],
+                    )
+                    omega_parent = wp.vec3(
+                        joint_qd_local[dof_start + wp.int32(3)],
+                        joint_qd_local[dof_start + wp.int32(4)],
+                        joint_qd_local[dof_start + wp.int32(5)],
+                    )
                 velocity_com = velocity_origin + wp.cross(omega_parent, child_com_parent)
                 joint_qd_public[dof_start] = velocity_com[0]
                 joint_qd_public[dof_start + wp.int32(1)] = velocity_com[1]
@@ -1531,19 +1544,55 @@ def _finish_and_publish_reduced_warp_kernel(
                 joint_qd_public[dof_start + wp.int32(5)] = omega_parent[2]
 
             child = joint_child[joint]
-            transform = body_q[child]
-            rotation = wp.transform_get_rotation(transform)
-            origin = wp.transform_get_translation(transform)
-            slot = child + wp.int32(1)
-            bodies.position[slot] = origin + wp.quat_rotate(rotation, body_com[child])
-            bodies.orientation[slot] = rotation
+            if update_configuration:
+                transform = body_q[child]
+                rotation = wp.transform_get_rotation(transform)
+                origin = wp.transform_get_translation(transform)
+                slot = child + wp.int32(1)
+                bodies.position[slot] = origin + wp.quat_rotate(rotation, body_com[child])
+                bodies.orientation[slot] = rotation
             index += tile_width
         _sync_reduced_group(group_mask)
 
-    if lane == wp.int32(0):
-        root_joint = articulation_depth_joint[articulation_depth_start[articulation, 0]]
-        root = joint_child[root_joint]
-        articulation_origin[articulation] = wp.transform_point(body_q[root], body_com[root])
+    if update_configuration:
+        if lane == wp.int32(0):
+            root_joint = articulation_depth_joint[articulation_depth_start[articulation, 0]]
+            root = joint_child[root_joint]
+            articulation_origin[articulation] = wp.transform_point(body_q[root], body_com[root])
+
+        for depth in range(max_depth + wp.int32(1)):
+            index = articulation_depth_start[articulation, depth] + lane
+            depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+            while index < depth_end:
+                joint = articulation_depth_joint[index]
+                parent = joint_parent[joint]
+                child = joint_child[joint]
+                joint_transform = jcalc_transform(
+                    joint_type[joint],
+                    joint_axis,
+                    joint_qd_start[joint],
+                    joint_dof_dim[joint, 0],
+                    joint_dof_dim[joint, 1],
+                    joint_q,
+                    joint_q_start[joint],
+                )
+                if parent < wp.int32(0):
+                    rotation = wp.transform_get_rotation(body_q[child])
+                    child_transform = wp.transform(-wp.quat_rotate(rotation, body_com[child]), rotation)
+                    child_anchor = child_transform * joint_x_c[joint]
+                    root_joint_transform = joint_transform
+                    if joint_type[joint] == JointType.FREE or joint_type[joint] == JointType.DISTANCE:
+                        root_joint_transform = wp.transform(wp.vec3(0.0), wp.transform_get_rotation(joint_transform))
+                    parent_anchor = child_anchor * wp.transform_inverse(root_joint_transform)
+                else:
+                    parent_anchor = body_q_local[parent] * joint_x_p[joint]
+                    child_anchor = parent_anchor * joint_transform
+                    child_transform = child_anchor * wp.transform_inverse(joint_x_c[joint])
+                joint_anchor_local[joint] = parent_anchor
+                body_q_local[child] = child_transform
+                body_q_com[child] = child_transform * body_x_com[child]
+                index += tile_width
+            _sync_reduced_group(group_mask)
 
     for depth in range(max_depth + wp.int32(1)):
         index = articulation_depth_start[articulation, depth] + lane
@@ -1552,52 +1601,19 @@ def _finish_and_publish_reduced_warp_kernel(
             joint = articulation_depth_joint[index]
             parent = joint_parent[joint]
             child = joint_child[joint]
-            joint_transform = jcalc_transform(
-                joint_type[joint],
-                joint_axis,
-                joint_qd_start[joint],
-                joint_dof_dim[joint, 0],
-                joint_dof_dim[joint, 1],
-                joint_q,
-                joint_q_start[joint],
-            )
-            if parent < wp.int32(0):
-                rotation = wp.transform_get_rotation(body_q[child])
-                child_transform = wp.transform(-wp.quat_rotate(rotation, body_com[child]), rotation)
-                child_anchor = child_transform * joint_x_c[joint]
-                root_joint_transform = joint_transform
-                if joint_type[joint] == JointType.FREE or joint_type[joint] == JointType.DISTANCE:
-                    root_joint_transform = wp.transform(wp.vec3(0.0), wp.transform_get_rotation(joint_transform))
-                parent_anchor = child_anchor * wp.transform_inverse(root_joint_transform)
-            else:
-                parent_anchor = body_q_local[parent] * joint_x_p[joint]
-                child_anchor = parent_anchor * joint_transform
-                child_transform = child_anchor * wp.transform_inverse(joint_x_c[joint])
-            joint_anchor_local[joint] = parent_anchor
-            body_q_local[child] = child_transform
-            body_q_com[child] = child_transform * body_x_com[child]
-            index += tile_width
-        _sync_reduced_group(group_mask)
-
-    for depth in range(max_depth + wp.int32(1)):
-        index = articulation_depth_start[articulation, depth] + lane
-        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
-        while index < depth_end:
-            joint = articulation_depth_joint[index]
-            parent = joint_parent[joint]
-            child = joint_child[joint]
-            jcalc_motion(
-                joint_type[joint],
-                joint_axis,
-                joint_q,
-                joint_dof_dim[joint, 0],
-                joint_dof_dim[joint, 1],
-                joint_anchor_local[joint],
-                joint_qd_local,
-                joint_q_start[joint],
-                joint_qd_start[joint],
-                joint_s_publish,
-            )
+            if update_configuration:
+                jcalc_motion(
+                    joint_type[joint],
+                    joint_axis,
+                    joint_q,
+                    joint_dof_dim[joint, 0],
+                    joint_dof_dim[joint, 1],
+                    joint_anchor_local[joint],
+                    joint_qd_local,
+                    joint_q_start[joint],
+                    joint_qd_start[joint],
+                    joint_s_publish,
+                )
             twist = wp.spatial_vector()
             if parent >= wp.int32(0):
                 parent_com_twist = body_qd[parent]
@@ -2816,8 +2832,9 @@ class ReducedPhoenXArticulation:
                     device=self.model.device,
                 )
 
-    def _publish_state(self, dt: float) -> None:
-        wp.copy(self.system.joint_qd_integrator, self.system.joint_qd_internal)
+    def _publish_state(self, dt: float, *, update_configuration: bool = True) -> None:
+        if update_configuration or not self.system.use_warp_publish:
+            wp.copy(self.system.joint_qd_integrator, self.system.joint_qd_internal)
         if self.system.use_warp_publish:
             articulation_count = int(self.model.articulation_count)
             tile_width = self.system.advance_tile_width
@@ -2848,6 +2865,7 @@ class ReducedPhoenXArticulation:
                     self.system.body_x_com,
                     self.system.zero_generalized_force,
                     wp.float32(dt),
+                    wp.bool(update_configuration),
                 ],
                 outputs=[
                     self.state.joint_qd,
@@ -2918,7 +2936,9 @@ class ReducedPhoenXArticulation:
 
     def finish_relax(self) -> None:
         """Publish bias-free velocity corrections without advancing configuration."""
-        self._publish_state(0.0)
+        # Relax changes only velocities, so the pose-derived buffers from the
+        # preceding full publication remain current.
+        self._publish_state(0.0, update_configuration=False)
 
     def end_substep(self, dt: float, *, split_dynamics: bool) -> None:
         """Apply post-impulse Coriolis dynamics, integrate, and conserve momentum."""

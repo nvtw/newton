@@ -64,7 +64,7 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · physics schedule audit</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · velocity-only publication</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
@@ -81,6 +81,8 @@
         <li>SOR cannot replace the second sweep: one-iteration boosts of 1.2, 1.4, and 1.6 produced 25, 35, and 48 falls respectively in the same bounded battery, with severe torso angular motion. The temporary G1 SOR plumbing was removed.</li>
         <li>Combining external and gyroscopic forces before PGS removes the second ABA advance and raises the physics graph to 665.1k steps/s (+6.4%), but it was rejected: long-horizon and hybrid floating-tree linear momentum drifted 5.6% and 3.9%, and loop momentum exceeded tolerance. The split dynamics and exact momentum correction remain load-bearing.</li>
         <li>A fresh full-training Systems trace is physics dominated: reduced advance 13.6%, contact rows 11.8%, publication 10.9%, factorization 9.9%, and generalized contact solve 7.3%. Policy forward is about 1.4%, so learner-only tuning cannot close the current gap while graph-leapfrog overlap is active.</li>
+        <li><strong>Retained gain:</strong> bias-free relaxation now publishes velocities only, reusing the configuration and motion subspaces produced immediately beforehand. Nsight reduces the second publication from about 116-118 to 31 microseconds; the G1 graph rises from 624.8k to 648.3k steps/s (+3.8%).</li>
+        <li>The gain is not G1-specific. Exact 64-robot A/Bs improve Anymal by 1.6-2.3%, H1 by 2.3-4.0%, and G1 by 3.0-3.9% across single- and multi-world layouts. A direct CUDA-graph oracle finds bitwise-identical generalized coordinates, generalized velocities, body poses, and body velocities versus full publication.</li>
         <li><code>prepare_refresh_stride</code> was silently forced to one for reduced/hybrid articulations, and reduced contact blocks ignored the refresh decision. Both paths are now plumbed correctly for internal SolverPhoenX substeps, including block, deferred, and fallback contacts. A CUDA-graph regression verifies the exact prepare/cache cadence.</li>
         <li>The current G1 environment performs collision plus a one-substep solver call externally, so automatic stride remains one and training physics is unchanged. Reusing rows across those changing collision sets would be physically unsafe.</li>
       </ul>
