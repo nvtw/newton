@@ -793,6 +793,74 @@ class TestReducedArticulation(unittest.TestCase):
         expected = np.linalg.solve(h.astype(np.float64), tau_np.astype(np.float64))
         np.testing.assert_allclose(result.numpy(), expected, rtol=2.0e-4, atol=2.0e-5)
 
+    def test_continued_state_matches_full_import_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_branched_tree(device)
+        full_state = model.state()
+        full_output = model.state()
+        continued_state = model.state()
+        continued_output = model.state()
+        qd = np.linspace(-0.3, 0.4, int(model.joint_dof_count), dtype=np.float32)
+        body_f = np.linspace(-0.2, 0.3, int(model.body_count) * 6, dtype=np.float32).reshape(-1, 6)
+        for state in (full_state, continued_state):
+            state.joint_qd.assign(qd)
+            state.body_f.assign(body_f)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        control = model.control()
+        control.joint_f.assign(np.linspace(0.25, -0.15, int(model.joint_dof_count), dtype=np.float32))
+        full_solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        continued_solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        dt = 1.0 / 1000.0
+        with wp.ScopedCapture(device=device) as full_capture:
+            full_solver.step(full_state, full_output, control, None, dt)
+            full_solver.step(full_output, full_state, control, None, dt)
+        with wp.ScopedCapture(device=device) as continued_capture:
+            continued_solver.step(continued_state, continued_output, control, None, dt)
+            continued_solver.step(
+                continued_output,
+                continued_state,
+                control,
+                None,
+                dt,
+                state_is_continuation=True,
+            )
+        for _ in range(16):
+            wp.capture_launch(full_capture.graph)
+            wp.capture_launch(continued_capture.graph)
+
+        np.testing.assert_allclose(
+            continued_state.joint_q.numpy(), full_state.joint_q.numpy(), rtol=2.0e-5, atol=2.0e-6
+        )
+        np.testing.assert_allclose(
+            continued_state.joint_qd.numpy(),
+            full_state.joint_qd.numpy(),
+            rtol=2.0e-5,
+            atol=2.0e-6,
+        )
+        np.testing.assert_allclose(continued_state.body_q.numpy(), full_state.body_q.numpy(), rtol=2.0e-5, atol=2.0e-6)
+        np.testing.assert_allclose(
+            continued_state.body_qd.numpy(),
+            full_state.body_qd.numpy(),
+            rtol=2.0e-5,
+            atol=2.0e-6,
+        )
+
     def test_far_translated_floating_trees_are_invariant_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -1351,7 +1419,14 @@ class TestReducedArticulation(unittest.TestCase):
             model.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt)
             model.collide(state1, contacts)
-            solver.step(state1, state0, control, contacts, dt)
+            solver.step(
+                state1,
+                state0,
+                control,
+                contacts,
+                dt,
+                state_is_continuation=True,
+            )
         for _ in range(64):
             wp.capture_launch(capture.graph)
 
@@ -2204,6 +2279,15 @@ class TestReducedArticulation(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             model.collide(state, contacts)
             solver.step(state, output, None, contacts, 1.0 / 2000.0)
+            model.collide(output, contacts)
+            solver.step(
+                output,
+                state,
+                None,
+                contacts,
+                1.0 / 2000.0,
+                state_is_continuation=True,
+            )
         wp.capture_launch(capture.graph)
 
         block = solver._reduced_articulation.contact_block_system
@@ -2211,8 +2295,8 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertFalse(block._skip_fallback_coloring)
         self.assertFalse(block._schedule_already_grouped)
         self.assertGreater(int(block.fallback_count.numpy()[0]), 0)
-        self.assertTrue(np.isfinite(output.body_q.numpy()).all())
-        self.assertTrue(np.isfinite(output.body_qd.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
     def test_contact_block_skips_deferred_fallback_under_graph_capture(self):
         device = wp.get_preferred_device()

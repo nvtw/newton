@@ -3136,7 +3136,14 @@ class EnvG1PhoenX:
             self.model.collide(self.state_0, self.contacts)
             if explicit_torque or substep == substeps - 1:
                 self._gather_actuator_force(scatter_joint_f=explicit_torque)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
+            self.solver.step(
+                self.state_0,
+                self.state_1,
+                self.control,
+                self.contacts,
+                sub_dt,
+                state_is_continuation=substep > 0,
+            )
             self.state_0, self.state_1 = self.state_1, self.state_0
 
         wp.launch(

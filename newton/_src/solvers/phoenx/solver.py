@@ -37,6 +37,7 @@ from newton._src.solvers.phoenx.solver_kernels import (
     _export_body_state_avg_kernel,
     _export_body_state_fd_kernel,
     _export_body_state_kernel,
+    _import_body_forces_kernel,
     _import_body_state_kernel,
     _init_phoenx_body_container_kernel,
     _seed_kinematic_initial_pose_kernel,
@@ -843,9 +844,24 @@ class SolverPhoenX(SolverBase):
         control: Control | None,
         contacts: Contacts | None,
         dt: float,
+        *,
+        state_is_continuation: bool = False,
     ) -> None:
-        """Advance ``state_in`` to ``state_out`` by ``dt``: control writeback +
-        effort forces -> import -> PhoenXWorld.step -> export."""
+        """Advance the simulation state by one time step.
+
+        Args:
+            state_in: Input simulation state.
+            state_out: Output simulation state.
+            control: Joint controls, or ``None`` to use model controls.
+            contacts: Active contacts, or ``None``.
+            dt: Step duration [s].
+            state_is_continuation: Whether the pose, velocity, and generalized
+                arrays in ``state_in`` are the unmodified ``state_out`` from
+                the immediately preceding PhoenX step. Reduced-coordinate
+                solvers then preserve their authoritative state while still
+                importing forces and controls. Defaults to ``False``; use
+                ``False`` after changing any kinematic state array.
+        """
         if control is None:
             # Alias Model per-DOF arrays (no clone). Matches XPBD/Featherstone.
             control = self.model.control(clone_variables=False)
@@ -853,10 +869,24 @@ class SolverPhoenX(SolverBase):
         self._apply_joint_control(control)
         if self._reduced_articulation is None:
             self._accumulate_joint_forces(state_in, control, dt)
-        self._import_body_state(state_in)
+        continue_reduced_state = state_is_continuation and self._reduced_articulation is not None
+        if continue_reduced_state:
+            wp.launch(
+                _import_body_forces_kernel,
+                dim=int(self.model.body_count),
+                inputs=[state_in.body_f],
+                outputs=[self.bodies],
+                device=self.device,
+            )
+        else:
+            self._import_body_state(state_in)
         self._import_particle_state(state_in)
         if self._reduced_articulation is not None:
-            self._reduced_articulation.import_step(state_in, control)
+            self._reduced_articulation.import_step(
+                state_in,
+                control,
+                state_is_continuation=continue_reduced_state,
+            )
 
         # FD readout snapshots the imported (state_in-aligned) pose so the
         # post-step delta covers the full outer dt.

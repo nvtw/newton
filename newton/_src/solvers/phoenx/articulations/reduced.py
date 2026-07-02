@@ -2776,16 +2776,23 @@ class ReducedPhoenXArticulation:
             device=model.device,
         )
 
-    def import_step(self, state: State, control: Control) -> None:
+    def import_step(
+        self,
+        state: State,
+        control: Control,
+        *,
+        state_is_continuation: bool = False,
+    ) -> None:
         """Import common generalized state and controls into stable graph buffers."""
-        wp.copy(self.state.joint_q, state.joint_q)
-        wp.copy(self.state.joint_qd, state.joint_qd)
+        if not state_is_continuation:
+            wp.copy(self.state.joint_q, state.joint_q)
+            wp.copy(self.state.joint_qd, state.joint_qd)
+            eval_fk(self.model, self.state.joint_q, self.state.joint_qd, self.state)
+            self.sync_bodies()
         wp.copy(self.state.body_f, state.body_f)
         wp.copy(self.control.joint_f, control.joint_f)
         wp.copy(self.control.joint_target_q, control.joint_target_q)
         wp.copy(self.control.joint_target_qd, control.joint_target_qd)
-        eval_fk(self.model, self.state.joint_q, self.state.joint_qd, self.state)
-        self.sync_bodies()
 
     def begin_substep(
         self,

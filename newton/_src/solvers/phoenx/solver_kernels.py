@@ -151,6 +151,19 @@ def _import_body_state_kernel(
         bodies.angular_velocity[dst] = wp.vec3f(qd[3], qd[4], qd[5])
 
 
+# A continued step already owns pose and velocity; only external wrenches change.
+@wp.kernel(enable_backward=False)
+def _import_body_forces_kernel(
+    body_f: wp.array[wp.spatial_vector],
+    bodies: BodyContainer,
+):
+    body = wp.tid()
+    wrench = body_f[body]
+    slot = body + wp.int32(1)
+    bodies.force[slot] = wp.vec3f(wrench[0], wrench[1], wrench[2])
+    bodies.torque[slot] = wp.vec3f(wrench[3], wrench[4], wrench[5])
+
+
 @wp.kernel(enable_backward=False)
 def _seed_kinematic_initial_pose_kernel(
     bodies: BodyContainer,

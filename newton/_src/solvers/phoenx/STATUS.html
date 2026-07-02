@@ -78,7 +78,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · validated G1 throughput</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · reduced-state continuation</strong></div>
     </header>
 
     <section class="hero">
@@ -88,8 +88,8 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">784k/s</div><div class="label">steady graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.63×</div><div class="label">slower than pinned nanoG1</div></div>
+      <div class="card"><div class="metric">805k/s</div><div class="label">steady graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.59×</div><div class="label">slower than pinned nanoG1</div></div>
       <div class="card"><div class="metric">1.183M/s</div><div class="label">G1 reduced physics steps</div></div>
     </section>
 
@@ -100,13 +100,25 @@
       <p>The retained recipe uses three 6.67 ms physics steps, two PGS sweeps, one velocity relaxation, hard-Hertz contacts, and a final two-step 10 ms phase after 99.6M samples.</p>
       <ul>
         <li>A fresh 157.3M-sample run passes the complete gate at seed 1000 and seed 2000.</li>
-        <li>Seed 1000: tracking 0.9175, jerk 0.1797, roll/pitch rate 0.1639, yaw rate 0.1021, leg speed 0.7143, one allowed battery fall, zero diagnostic falls.</li>
-        <li>Seed 2000: zero falls, tracking 0.9267, jerk 0.1564, with the same passing dynamics diagnostics.</li>
-        <li>Full-schedule training sustains 746.5k samples/s; the short steady-state benchmark reaches 784.3k samples/s.</li>
+        <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
+        <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
+        <li>Full-schedule training measures 744.5k samples/s; the controlled short steady-state benchmark reaches 805.2k samples/s.</li>
       </ul>
     </article>
 
     <div class="section-label">Latest retained gains</div>
+    <article>
+      <div class="meta"><span class="tag">PHYSICS · CONTINUATION</span><time>3 Jul</time></div>
+      <h2>External temporal substeps preserve authoritative reduced state</h2>
+      <p>An explicit continuation contract skips redundant pose, velocity, generalized-state import, and FK when the next input is the unmodified output of the preceding reduced-coordinate step. External forces, controls, and contacts are still refreshed.</p>
+      <ul>
+        <li>The three-step G1 schedule avoids two full state reconstructions per policy step. The controlled steady window rises from 784.3k to 805.2k samples/s (+2.7%); full-schedule throughput is flat within run variance.</li>
+        <li>A new graph oracle matches repeated full import on a branched multi-DOF tree. Contacting closed loops and mixed reduced/maximal contacts exercise the continuation path.</li>
+        <li>A fresh 157.3M-sample policy passes full gates at two seeds with zero falls. All 40 reduced-articulation CUDA graph tests pass.</li>
+        <li>The option is default-off for arbitrary callers and maximal-coordinate modes retain full import. It must be disabled after external state modification.</li>
+      </ul>
+    </article>
+
     <article>
       <div class="meta"><span class="tag">LEARNER · +10.6%</span><time>3 Jul</time></div>
       <h2>BF16 hidden input gradients remove the largest learner bottleneck</h2>
@@ -140,7 +152,7 @@
       <div>
         <h2>Current critical path</h2>
         <p>The refreshed combined trace is led by dense recurrent forward, ABA advance, BF16 weight gradients, factorization, contact-row construction, FK, contact solve, and publication.</p>
-        <p><strong>Next:</strong> pursue fewer exact physics traversals or a materially better dense-forward data path. Keep short A/Bs first and reserve full training gates for meaningful candidates.</p>
+        <p><strong>Next:</strong> refresh the combined profile after state continuation, then target a materially better dense-forward or physics data path. Keep short A/Bs first and reserve full training gates for meaningful candidates.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
