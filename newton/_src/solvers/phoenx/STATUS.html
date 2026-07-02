@@ -58,7 +58,7 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · contact rows aligned by articulation</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · row-builder dependency bottleneck isolated</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
@@ -66,14 +66,15 @@
     <article>
       <div class="meta"><span class="tag">TOPOLOGY-PROVEN FAST PATH</span><time>2 Jul - latest</time></div>
       <h2>Topology proof and aligned row blocks remove redundant GPU work</h2>
-      <p>Nsight exposed a full radix sort and fallback-coloring setup on every substep even when no fallback contact could exist. PhoenX now proves this from the model collision-eligible shape pairs: reduced-versus-static/kinematic contacts take the block path directly, while self-contact, reduced-versus-dynamic, and all unproven cases retain deterministic fallback coloring. Hard-Hertz damping, friction, warm starting, and the contact equations are unchanged.</p>
+      <p>Contact ingestion, reduced scheduling, and fallback coloring already run once per full physics step before the temporal-substep loop; every substep reuses them. Nsight exposed a redundant schedule radix sort at that once-per-contact-ingest boundary. PhoenX now proves from collision-eligible model pairs and the active ingest ordering when columns are already grouped by articulation. Inter-articulation, reduced-versus-dynamic, unrelated maximal-rigid, and all unproven scenes retain deterministic sorting and fallback coloring. Hard-Hertz damping, friction, warm starting, and contact equations are unchanged.</p>
       <ul>
-        <li>The contact-rich shared 8192-world G1 scene now reaches 1.238-1.253M physics steps/s, roughly 43% above the original 0.864-0.878M result. The same-scene gap to local MJWarp is now about 1.66-1.68x.</li>
-        <li>The actual 8192-world, 5-substep training graph improved from 548.2k to 575.6k environment steps/s after the fallback removal. Aligning each fixed 96-row articulation page to one CUDA block reduces the dominant row kernel another 1.8%; an exact A/B measured 579.7k versus 581.0k end to end.</li>
-        <li>All 34 reduced-articulation CUDA graph tests pass, including both specialized and fallback schedules, deterministic dense contacts, fallback overflow, arbitrary paging, closed loops, and spatial-momentum conservation. Contact-enabled Anymal, H1, and G1 remain finite in single- and multi-world layouts at one and 64 robots.</li>
+        <li>The contact-rich shared 8192-world G1 scene now reaches 1.291-1.294M physics steps/s, roughly 49% above the original 0.864-0.878M result. The same-scene gap to local MJWarp is now about 1.61x.</li>
+        <li>The actual 8192-world, 5-substep training graph now reaches 597.1k environment steps/s versus the exact 579.7k pre-schedule baseline, another 3.0% gain. Nsight confirms radix-sort onesweep launches fell from 160 to 80 per ten full physics steps; all temporal substeps already reused the schedule.</li>
+        <li>All 36 reduced-articulation CUDA graph tests pass, including proven direct and conservative sorted schedules, unrelated maximal rigid contacts, multiple articulations per world across multiple worlds, dense-contact determinism, fallback overflow, paging, loops, and spatial-momentum conservation. Contact-enabled Anymal, H1, and G1 remain finite in single- and multi-world layouts at one and 64 robots.</li>
         <li>An exact matrix-free ABA/Jacobi prototype reached 1.77M only while underconverged and changed the G1 manifold from 34 to 17 contacts; converged variants were slower and were rejected. Exact one-DoF and three-row fused ABA builders were also rejected: the former was neutral/slower and the latter lost 8% to register pressure. The retained aligned launch changes no arithmetic.</li>
       </ul>
-      <p><strong>Next:</strong> continue learning from MJWarp staging and operator organization, but retain hard-Hertz and the converged PGS result. Profile the new graph and target remaining general-purpose row-construction and launch overhead rather than weakening contact convergence.</p>
+      <p><strong>Nsight Compute result:</strong> the generalized row builder has no register or shared/local-memory spills and reaches 59.7% occupancy, but issues instructions in only 9.2% of slots; 90.6% of scheduler cycles have no eligible warp. Branch efficiency is 98.8%, while DRAM and compute throughput are only 37.6% and 13.3%. This isolates long dependent topology/global-memory chains rather than arithmetic, divergence, or bandwidth as the primary bottleneck.</p>
+      <p><strong>Next:</strong> prototype a topology-compiled or block-cooperative articulation response that stages dependent intermediates and exposes independent work, retaining identical equations, deterministic ordering, hard-Hertz convergence, and the general fallback for large or irregular articulations.</p>
     </article>
 
     <article>

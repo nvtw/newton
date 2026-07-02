@@ -47,6 +47,7 @@
 
 ### Changed
 
+- Bypass the reduced-coordinate PhoenX schedule radix sort when collision-eligible model pairs and the active contact-ingest ordering prove that rigid contact columns are already grouped by articulation; retain deterministic sorting for inter-articulation and otherwise unproven scenes.
 - Align reduced-coordinate PhoenX generalized contact-row launches to one fixed 96-row articulation page per CUDA block, improving row-builder locality without changing contact arithmetic.
 - Skip reduced-coordinate PhoenX fallback contact coloring when the model's collision-eligible shape pairs prove that every reduced contact is against a static or kinematic body, preserving deterministic fallback for self-contact and dynamic-body interactions.
 - Reuse exact reduced-coordinate PhoenX articulated contact responses across bias and velocity-relaxation passes with a bounded graph-capture-safe cache, accelerating contact-rich scenes without changing hard-Hertz contact projection.
@@ -75,6 +76,7 @@
 
 ### Fixed
 
+- Fix the reduced-coordinate PhoenX fallback fast-path proof to retain deterministic fallback coloring for unrelated maximal rigid-body contacts.
 - Fix experimental PhoenX G1 replacement foot boxes bypassing the MJCF no-self-collision filters, preventing unintended robot self-contacts during policy exploration.
 - Fix the experimental PhoenX G1 recipe to match nanoG1's 8192-world batch and full-range command distribution; the pinned build does not enable its optional command curriculum.
 - Fix maximal-coordinate PhoenX revolute armature by adding motor-side stator inertia to the parent and gear-reflected rotor inertia to the child, preserving rigid-body momentum and gyroscopic dynamics without auxiliary constraint rows.

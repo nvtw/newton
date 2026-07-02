@@ -71,14 +71,14 @@ _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 _INT64_MAX = 9223372036854775807
 
 
-def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool]:
+def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, bool, bool]:
     """Prove whether model-generated rigid pairs can require fallback."""
     pairs_array = getattr(model, "shape_contact_pairs", None)
     if pairs_array is None or model.shape_body is None:
-        return False, False
+        return False, False, False, False
     pairs = pairs_array.numpy()
     if pairs.size == 0:
-        return True, True
+        return True, True, True, True
 
     body_articulation = np.full(int(model.body_count), -1, dtype=np.int32)
     articulation_start = model.articulation_start.numpy()
@@ -100,10 +100,18 @@ def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool]:
     static0 = (body0 < 0) | (inverse_mass[np.maximum(body0, 0)] == 0.0)
     static1 = (body1 < 0) | (inverse_mass[np.maximum(body1, 0)] == 0.0)
     block_owned = (reduced0 & ~reduced1 & static1) | (reduced1 & ~reduced0 & static0)
-    reduced_pair = reduced0 | reduced1
-    partitioned_safe = not bool(np.any(reduced_pair & ~block_owned))
-    rigid_only_safe = not bool(np.any(~block_owned))
-    return partitioned_safe, rigid_only_safe
+    safe = not bool(np.any(~block_owned))
+    owner = np.where(reduced0, articulation0, articulation1)
+    shape_order = np.lexsort((pairs[:, 1], pairs[:, 0]))
+    shape_owner = owner[shape_order]
+    shape_grouped = bool(np.all(shape_owner[1:] >= shape_owner[:-1]))
+    body_lo = np.minimum(body0, body1).astype(np.int64)
+    body_hi = np.maximum(body0, body1).astype(np.int64)
+    body_key = body_lo * np.int64(max(1, int(model.body_count))) + body_hi
+    body_order = np.argsort(body_key, kind="stable")
+    body_owner = owner[body_order]
+    body_grouped = bool(np.all(body_owner[1:] >= body_owner[:-1]))
+    return safe, safe, safe and shape_grouped, safe and body_grouped
 
 
 @wp.kernel(enable_backward=False)
@@ -218,6 +226,29 @@ def _classify_reduced_contact_columns_kernel(
         group = articulation_count + wp.max(bodies.world_id[body0], bodies.world_id[body1])
     keys[column] = wp.int64(group) * key_stride + wp.int64(column)
     wp.atomic_add(section_end, group, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _classify_grouped_reduced_contact_columns_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    num_columns: wp.array[wp.int32],
+    classic_column_count: wp.array[wp.int32],
+    values: wp.array[wp.int32],
+    section_end: wp.array[wp.int32],
+):
+    column = wp.tid()
+    if column >= num_columns[0]:
+        return
+    if contact_get_side0_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID) or contact_get_side1_kind(
+        columns, column
+    ) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
+        return
+    owner = reduced_contact_deferred_owner(columns, column, bodies)
+    if owner < wp.int32(0):
+        return
+    values[column - classic_column_count[0]] = column
+    wp.atomic_add(section_end, owner, wp.int32(1))
 
 
 @wp.kernel(enable_backward=False)
@@ -989,8 +1020,12 @@ class ReducedContactBlockSystem:
         (
             self._fallback_impossible_partitioned,
             self._fallback_impossible_rigid_only,
+            self._shape_schedule_already_grouped,
+            self._body_schedule_already_grouped,
         ) = _fallback_impossible_from_model_pairs(model)
         self._skip_fallback_coloring = False
+        self._schedule_already_grouped = False
+        self._body_pair_grouping = False
         articulation_count = max(1, int(model.articulation_count))
         articulation_start = model.articulation_start.numpy()
         articulation_end = model.articulation_end.numpy()
@@ -1064,16 +1099,20 @@ class ReducedContactBlockSystem:
             (articulation_count, max_body_count), dtype=wp.spatial_vector, device=self.device
         )
 
-    def configure_schedule(self, capacity: int, world_count: int) -> None:
+    def configure_schedule(self, capacity: int, world_count: int, *, body_pair_grouping: bool) -> None:
         """Allocate the fixed schedule and bounded two-page contact cache."""
         capacity = max(1, int(capacity))
         world_count = max(1, int(world_count))
+        body_pair_grouping = bool(body_pair_grouping)
         if self.schedule_keys is not None:
             if capacity != self.schedule_capacity or world_count != self.schedule_world_count:
                 raise RuntimeError("Reduced contact schedule cannot be resized after binding")
+            if body_pair_grouping != self._body_pair_grouping:
+                raise RuntimeError("Reduced contact ordering cannot be changed after binding")
             return
         self.schedule_capacity = capacity
         self.schedule_world_count = world_count
+        self._body_pair_grouping = body_pair_grouping
         packed_row_capacity = self.articulation_count * _CACHED_PAGE_COUNT * _MAX_ROWS
         self.packed_jacobian = wp.zeros(
             (packed_row_capacity, self.contact_dof_width),
@@ -1173,27 +1212,44 @@ class ReducedContactBlockSystem:
             inputs=[self.schedule_section_end],
             device=self.device,
         )
-        wp.launch(
-            _classify_reduced_contact_columns_kernel,
-            dim=self.schedule_capacity,
-            inputs=[
-                columns,
-                bodies,
-                num_columns,
-                wp.int32(self.articulation_count),
-                wp.int64(self.schedule_capacity + 1),
-            ],
-            outputs=[self.schedule_keys, self.schedule_columns, self.schedule_section_end],
-            device=self.device,
+        self._skip_fallback_coloring = (
+            self._fallback_impossible_partitioned if partition_ownership else self._fallback_impossible_rigid_only
         )
-        sort_variable_length_int64(self.schedule_keys, self.schedule_columns, num_columns)
+        self._schedule_already_grouped = (
+            self._body_schedule_already_grouped if self._body_pair_grouping else self._shape_schedule_already_grouped
+        )
+        if self._schedule_already_grouped:
+            wp.launch(
+                _classify_grouped_reduced_contact_columns_kernel,
+                dim=self.schedule_capacity,
+                inputs=[
+                    columns,
+                    bodies,
+                    num_columns,
+                    self.classic_column_count,
+                ],
+                outputs=[self.schedule_columns, self.schedule_section_end],
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                _classify_reduced_contact_columns_kernel,
+                dim=self.schedule_capacity,
+                inputs=[
+                    columns,
+                    bodies,
+                    num_columns,
+                    wp.int32(self.articulation_count),
+                    wp.int64(self.schedule_capacity + 1),
+                ],
+                outputs=[self.schedule_keys, self.schedule_columns, self.schedule_section_end],
+                device=self.device,
+            )
+            sort_variable_length_int64(self.schedule_keys, self.schedule_columns, num_columns)
         wp.utils.array_scan(self.schedule_section_end, self.schedule_section_end, inclusive=True)
         assert self.fallback_count is not None
         assert self.fallback_column is not None
         assert self.fallback_element is not None
-        self._skip_fallback_coloring = (
-            self._fallback_impossible_partitioned if partition_ownership else self._fallback_impossible_rigid_only
-        )
         if self._skip_fallback_coloring:
             self.fallback_count.zero_()
             return

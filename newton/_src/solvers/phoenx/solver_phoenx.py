@@ -1878,7 +1878,11 @@ class PhoenXWorld:
         self._joint_pgs_ownership_active = True
         self._joint_pgs_all_disabled = not bool(enabled.any())
         self._reduced_articulation = articulation
-        articulation.contact_block_system.configure_schedule(self.max_contact_columns, self.num_worlds)
+        articulation.contact_block_system.configure_schedule(
+            self.max_contact_columns,
+            self.num_worlds,
+            body_pair_grouping=self._enable_body_pair_grouping,
+        )
         self._has_reduced_loops = articulation.loop_system.count > 0
         self._has_maximal_dynamic_bodies = bool(np.any(self.bodies.motion_type.numpy() == int(MOTION_DYNAMIC)))
 

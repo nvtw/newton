@@ -490,6 +490,42 @@ def _make_contact_overflow_model(device, contact_count=_POINTS_PER_PAGE + 8):
     return builder.finalize(device=device)
 
 
+def _make_grounded_articulation_cluster(device, *, worlds=3, articulations_per_world=2):
+    cluster = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    for articulation in range(articulations_per_world):
+        body = cluster.add_link(mass=1.0)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(
+            mu=0.0,
+            restitution=0.0,
+            collision_group=articulation + 1,
+        )
+        cluster.add_shape_sphere(body, radius=0.2, cfg=shape_cfg)
+        joint = cluster.add_joint_free(parent=-1, child=body)
+        cluster.add_articulation([joint])
+        cluster.joint_q[-7:] = [float(articulation), 0.0, 0.19, 0.0, 0.0, 0.0, 1.0]
+    cluster.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1))
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder.replicate(cluster, world_count=worlds)
+    return builder.finalize(device=device)
+
+
+def _make_mixed_reduced_maximal_ground_model(device):
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, restitution=0.0)
+    reduced_body = builder.add_link(mass=1.0)
+    maximal_body = builder.add_link(
+        xform=wp.transform(wp.vec3(1.0, 0.0, 0.19), wp.quat_identity()),
+        mass=1.0,
+    )
+    builder.add_shape_sphere(reduced_body, radius=0.2, cfg=shape_cfg)
+    builder.add_shape_sphere(maximal_body, radius=0.2, cfg=shape_cfg)
+    free_joint = builder.add_joint_free(parent=-1, child=reduced_body)
+    builder.add_articulation([free_joint])
+    builder.joint_q[-7:] = [-1.0, 0.0, 0.19, 0.0, 0.0, 0.0, 1.0]
+    builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1))
+    return builder.finalize(device=device)
+
+
 def _make_self_contact_model(device):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     root = builder.add_link(mass=2.0)
@@ -2007,6 +2043,77 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
         np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
 
+    def test_multiple_grounded_articulations_per_world_use_grouped_schedule_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        worlds = 3
+        articulations_per_world = 2
+        model = _make_grounded_articulation_cluster(
+            device,
+            worlds=worlds,
+            articulations_per_world=articulations_per_world,
+        )
+        state = model.state()
+        output = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=2,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        contacts = model.contacts()
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state, contacts)
+            solver.step(state, output, None, contacts, 1.0 / 1000.0)
+        wp.capture_launch(capture.graph)
+
+        block = solver._reduced_articulation.contact_block_system
+        expected = worlds * articulations_per_world
+        self.assertEqual(model.world_count, worlds)
+        self.assertEqual(model.articulation_count, expected)
+        self.assertGreaterEqual(int(contacts.rigid_contact_count.numpy()[0]), expected)
+        self.assertTrue(block._schedule_already_grouped)
+        self.assertTrue(block._skip_fallback_coloring)
+        self.assertEqual(int(np.count_nonzero(block.enabled.numpy())), expected)
+        self.assertTrue(np.isfinite(output.joint_q.numpy()).all())
+        self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
+
+    def test_maximal_rigid_contact_retains_fallback_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_mixed_reduced_maximal_ground_model(device)
+        state = model.state()
+        output = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        contacts = model.contacts()
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state, contacts)
+            solver.step(state, output, None, contacts, 1.0 / 2000.0)
+        wp.capture_launch(capture.graph)
+
+        block = solver._reduced_articulation.contact_block_system
+        self.assertGreaterEqual(int(contacts.rigid_contact_count.numpy()[0]), 2)
+        self.assertFalse(block._skip_fallback_coloring)
+        self.assertFalse(block._schedule_already_grouped)
+        self.assertGreater(int(block.fallback_count.numpy()[0]), 0)
+        self.assertTrue(np.isfinite(output.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(output.body_qd.numpy()).all())
+
     def test_contact_block_skips_deferred_fallback_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -2039,6 +2146,7 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertEqual(int(block.enabled.numpy()[0]), 1)
         self.assertEqual(int(block.deferred_active.numpy()[0]), 0)
         self.assertTrue(block._skip_fallback_coloring)
+        self.assertTrue(block._schedule_already_grouped)
         self.assertEqual(int(block.max_page_count.numpy()[0]), 1)
         self.assertEqual(int(block.page_index.numpy()[0]), 0)
         self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
