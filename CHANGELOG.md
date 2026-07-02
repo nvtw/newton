@@ -47,6 +47,7 @@
 
 ### Changed
 
+- Change experimental PhoenX G1 RL defaults to the validated 6.67 ms schedule (`sim_substeps=3`) and strengthen angular-command tracking to 2.5, increasing graph-leapfrog training throughput while retaining repeatable full walking-gate success. Pass `--sim-substeps 4 --w-track-ang 1.25` to preserve the previous 5 ms recipe.
 - Derive block-owned reduced-coordinate PhoenX contact effective masses from exact generalized response rows and skip the redundant link impulse-response traversal when model collision ownership proves that deferred contacts are impossible.
 - Publish only reduced-coordinate PhoenX velocities after bias-free relaxation, reusing the unchanged configuration and motion subspaces instead of repeating pose integration and kinematic reconstruction.
 - Schedule reduced-coordinate PhoenX local kinematics with topology-sized 8-, 16-, or 32-lane warp groups, increasing parallelism across independent narrow articulations without changing transforms.

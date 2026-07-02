@@ -64,16 +64,25 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · duplicate contact traversal removed</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · 6.67 ms G1 validated</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
 
-    <section class="action-required">
-      <h2>Action required: one current contact-row Compute profile</h2>
-      <p>Please run this prepared command. It profiles exactly one steady-state row-builder launch and writes the report I need to choose the next latency-reduction experiment.</p>
-      <pre>sudo bash /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_contact_rows.sh</pre>
-    </section>
+    <article>
+      <div class="meta"><span class="tag">FASTER RECIPE VALIDATED</span><time>2 Jul - latest</time></div>
+      <h2>6.67 ms G1 passes from scratch; steady training reaches 689k samples/s</h2>
+      <p>PhoenX now uses three 6.67 ms physics steps per 20 ms policy frame. The unchanged hard-Hertz contact model, two position sweeps, one velocity relaxation, graph capture, and reduced-coordinate dynamics remain intact.</p>
+      <ul>
+        <li>A complete from-scratch run passes at 160,432,128 samples. Both seed 1000 and seed 2000 have zero falls, about 0.952 battery tracking, 0.184 action jerk, 0.172 roll/pitch rate, 0.130 yaw rate, and 0.945 leg-speed RMS.</li>
+        <li>The matched graph-leapfrog benchmark improves from 586.5k samples/s at four substeps to 688.5k at three (+17.4%). The pinned nanoG1 throughput gap narrows from 2.18x to 1.86x.</li>
+        <li>The full train-to-gate run sustains 625.9k samples/s over 160.4M samples and finishes training in 256.3 seconds. Its 273.0 second total includes the full 26,000-sample quality gate.</li>
+        <li>Angular-command tracking weight 2.5 is part of the validated recipe. A controlled adaptation showed this is what restores the larger-timestep yaw metric without sacrificing falls, tracking, jerk, or roll/pitch stability.</li>
+        <li>The fresh Compute report confirms the contact-row builder is latency-bound: 75.8% long-scoreboard delay, only 8.75% scheduler cycles with an eligible warp, and 35.3% DRAM utilization.</li>
+        <li>Direct shared-factor staging regresses row construction by 6.6%, and sparse projected-RHS storage gives no end-to-end gain. Both experiments were removed completely; no profiler action is pending.</li>
+      </ul>
+      <p><strong>Assessment:</strong> this is the largest retained throughput gain in the current campaign and it is backed by from-scratch training plus two independent full gates. PhoenX is still 1.86x behind nanoG1 in steady training, so contact producer/consumer fusion and other exact-work elimination remain worthwhile.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">EXACT CONTACT GAIN RETAINED</span><time>2 Jul - latest</time></div>
