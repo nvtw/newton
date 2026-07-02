@@ -47,6 +47,7 @@
 
 ### Changed
 
+- Switch the experimental PhoenX G1 train-to-gate final phase from three 6.67 ms physics steps to two 10 ms steps after 99,614,720 samples, preserving the hard-Hertz contact and PGS schedule while reducing validated total time-to-gate. Pass `--angular-fine-tune-start-samples 0` to disable both final-phase timestep and regularization changes.
 - Change experimental PhoenX G1 RL defaults to the validated 6.67 ms schedule (`sim_substeps=3`) and strengthen angular-command tracking to 2.5, increasing graph-leapfrog training throughput while retaining repeatable full walking-gate success. Pass `--sim-substeps 4 --w-track-ang 1.25` to preserve the previous 5 ms recipe.
 - Derive block-owned reduced-coordinate PhoenX contact effective masses from exact generalized response rows and skip the redundant link impulse-response traversal when model collision ownership proves that deferred contacts are impossible.
 - Publish only reduced-coordinate PhoenX velocities after bias-free relaxation, reusing the unchanged configuration and motion subspaces instead of repeating pose integration and kinematic reconstruction.

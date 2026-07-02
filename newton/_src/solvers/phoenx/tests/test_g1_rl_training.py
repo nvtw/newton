@@ -2781,6 +2781,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         ppo_config = g1_recipe.default_g1_ppo_config()
 
         self.assertEqual(env_config.sim_substeps, g1_recipe.SIM_SUBSTEPS)
+        self.assertLess(g1_recipe.FINAL_PHASE_SIM_SUBSTEPS, g1_recipe.SIM_SUBSTEPS)
         self.assertEqual(env.solver.world.substeps, 1)
         self.assertEqual(env_config.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
         self.assertEqual(g1_recipe.VELOCITY_ITERATIONS, 1)
@@ -5373,8 +5374,8 @@ class TestG1PhoenXRL(unittest.TestCase):
                 world_count=2,
                 rollout_steps=1,
                 target_samples=4,
-                max_iterations=1,
-                chunk_iterations=1,
+                max_iterations=2,
+                chunk_iterations=2,
                 hidden_layers=(8,),
                 train_epochs=1,
                 actor_lr=g1_recipe.ACTOR_LR,
@@ -5482,13 +5483,15 @@ class TestG1PhoenXRL(unittest.TestCase):
             defaults = vars(make_g1_train_to_gate_parser().parse_args([]))
             defaults.update(vars(args))
             defaults["articulation_mode"] = "reduced"
+            defaults["angular_fine_tune_start_samples"] = 2
+            defaults["final_phase_sim_substeps"] = 2
             args = argparse.Namespace(**defaults)
             result = benchmark_train_to_gate(args)
-            checkpoint_path = Path(checkpoint_template.format(iteration=1))
+            checkpoint_path = Path(checkpoint_template.format(iteration=2))
             restored = rl.load_ppo_checkpoint(checkpoint_path, device=device)
             with np.load(checkpoint_path, allow_pickle=False) as checkpoint:
                 self.assertEqual(checkpoint["metadata_g1_schema"].item(), "training_v1")
-                self.assertEqual(checkpoint["metadata_g1_env_sim_substeps"].item(), 1)
+                self.assertEqual(checkpoint["metadata_g1_env_sim_substeps"].item(), 2)
                 self.assertEqual(checkpoint["metadata_g1_env_solver_iterations"].item(), 1)
                 self.assertEqual(checkpoint["metadata_g1_train_execution_mode"].item(), "graph_leapfrog")
             eval_args = argparse.Namespace(**vars(args))
@@ -5499,6 +5502,9 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(result["execution_mode"], "graph_leapfrog")
             self.assertEqual(result["sim_substeps"], 1)
             self.assertEqual(result["physics_timestep"], g1_recipe.FRAME_DT)
+            self.assertEqual(result["final_phase_sim_substeps"], 2)
+            self.assertEqual(result["final_phase_physics_timestep"], g1_recipe.FRAME_DT / 2.0)
+            self.assertEqual(result["angular_fine_tune_iteration"], 1)
             self.assertEqual(result["solver_iterations"], 1)
             self.assertEqual(result["velocity_iterations"], g1_recipe.VELOCITY_ITERATIONS)
             self.assertEqual(result["articulation_mode"], "reduced")
@@ -5538,13 +5544,13 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(result["optimizer_eps"], g1_recipe.OPTIMIZER_EPS)
             self.assertEqual(result["optimizer_weight_decay"], g1_recipe.OPTIMIZER_WEIGHT_DECAY)
             self.assertEqual(result["muon_momentum"], g1_recipe.MUON_MOMENTUM)
-            self.assertEqual(result["completed_iterations"], 1)
-            self.assertEqual(result["trained_samples"], 2)
-            self.assertEqual(restored.iteration, 1)
+            self.assertEqual(result["completed_iterations"], 2)
+            self.assertEqual(result["trained_samples"], 4)
+            self.assertEqual(restored.iteration, 2)
             self.assertTrue(restored.actor_optimizer.matrix_transpose)
             self.assertTrue(checkpoint_path.exists())
             self.assertEqual(len(result["gate_history"]), 1)
-            self.assertEqual(len(result["train_history"]), 1)
+            self.assertEqual(len(result["train_history"]), 2)
             self.assertFalse(result["pass_gate"])
             self.assertTrue(eval_result["evaluate_only"])
             self.assertEqual(eval_result["articulation_mode"], "reduced")

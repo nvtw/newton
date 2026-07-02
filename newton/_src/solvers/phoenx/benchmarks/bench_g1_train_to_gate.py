@@ -5,7 +5,9 @@
 
 This benchmark mirrors nanoG1's user-visible lifecycle: train from scratch,
 write a checkpoint, reload it, and run the frozen G1 walking quality gate. It can
-run a short smoke or continue chunks until the policy passes the gate.
+run a short smoke or continue chunks until the policy passes the gate. The
+default final phase switches from three to two physics substeps together with
+the validated angular regularization.
 
 Examples:
     uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate \
@@ -141,12 +143,13 @@ def _evaluate_checkpoint(
     args: argparse.Namespace,
     *,
     device: wp.context.Device,
+    env_config: rl.ConfigEnvG1PhoenX | None = None,
 ) -> rl.ResultEvaluateG1GatePPO:
     reloaded = rl.load_ppo_checkpoint(checkpoint_path, device=device)
     return rl.evaluate_g1_gate_ppo(
         reloaded,
         rl.ConfigEvaluateG1GatePPO(
-            env_config=_make_env_config(args),
+            env_config=env_config if env_config is not None else _make_env_config(args),
             battery_steps=int(args.battery_steps),
             seeds_per_command=int(args.seeds_per_command),
             diagnostic_steps=int(args.diagnostic_steps),
@@ -176,6 +179,8 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("rollout_steps must be positive")
     if args.target_samples <= 0:
         raise ValueError("target_samples must be positive")
+    if args.final_phase_sim_substeps <= 0:
+        raise ValueError("final_phase_sim_substeps must be positive")
 
     checkpoint_template = args.checkpoint_path or "/tmp/phoenx_g1_gate_{iteration}.npz"
     env_config = _make_env_config(args)
@@ -209,8 +214,15 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     total_t0 = time.perf_counter()
 
     if bool(args.evaluate_only):
+        evaluation_env_config = env_config
+        if angular_fine_tune_iteration > 0 and completed_iterations >= angular_fine_tune_iteration:
+            evaluation_env_config = replace(
+                env_config,
+                sim_substeps=int(args.final_phase_sim_substeps),
+                w_ang_vel_xy=float(args.angular_fine_tune_w_ang_vel_xy),
+            )
         gate_t0 = time.perf_counter()
-        gate_result = _evaluate_checkpoint(resume_checkpoint, args, device=device)
+        gate_result = _evaluate_checkpoint(resume_checkpoint, args, device=device, env_config=evaluation_env_config)
         gate_seconds += time.perf_counter() - gate_t0
         gate_entry = {
             "iteration": int(completed_iterations),
@@ -233,7 +245,11 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         active_env_config = env_config
         active_ppo_config = ppo_config
         if fine_tune_active:
-            active_env_config = replace(env_config, w_ang_vel_xy=float(args.angular_fine_tune_w_ang_vel_xy))
+            active_env_config = replace(
+                env_config,
+                sim_substeps=int(args.final_phase_sim_substeps),
+                w_ang_vel_xy=float(args.angular_fine_tune_w_ang_vel_xy),
+            )
             active_ppo_config = replace(
                 ppo_config,
                 lr_anneal_timesteps=int(args.angular_fine_tune_lr_anneal_timesteps),
@@ -288,7 +304,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
             continue
 
         gate_t0 = time.perf_counter()
-        gate_result = _evaluate_checkpoint(checkpoint_path, args, device=device)
+        gate_result = _evaluate_checkpoint(checkpoint_path, args, device=device, env_config=active_env_config)
         gate_seconds += time.perf_counter() - gate_t0
         samples = _samples_for_iteration(args, completed_iterations)
         gate_entry = {
@@ -327,6 +343,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "rollout_steps": int(args.rollout_steps),
         "sim_substeps": int(args.sim_substeps),
         "physics_timestep": float(g1_recipe.FRAME_DT) / float(args.sim_substeps),
+        "final_phase_physics_timestep": float(g1_recipe.FRAME_DT) / float(args.final_phase_sim_substeps),
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
         "squash_actions": bool(args.squash_actions),
@@ -341,6 +358,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "w_ang_vel_xy": float(args.w_ang_vel_xy),
         "angular_fine_tune_start_samples": int(angular_fine_tune_start_samples),
         "angular_fine_tune_iteration": int(angular_fine_tune_iteration),
+        "final_phase_sim_substeps": int(args.final_phase_sim_substeps),
         "angular_fine_tune_w_ang_vel_xy": float(args.angular_fine_tune_w_ang_vel_xy),
         "angular_fine_tune_lr_anneal_timesteps": int(args.angular_fine_tune_lr_anneal_timesteps),
         "w_orientation": float(args.w_orientation),
@@ -534,7 +552,13 @@ def _make_parser() -> argparse.ArgumentParser:
         "--angular-fine-tune-start-samples",
         type=int,
         default=g1_recipe.ANGULAR_FINE_TUNE_START_SAMPLES,
-        help="Switch to the final roll/pitch regularization phase after this many samples; 0 disables it.",
+        help="Switch to the final faster-timestep and roll/pitch-regularization phase after this many samples; 0 disables it.",
+    )
+    parser.add_argument(
+        "--final-phase-sim-substeps",
+        type=int,
+        default=g1_recipe.FINAL_PHASE_SIM_SUBSTEPS,
+        help="Physics substeps used after the final training-phase transition.",
     )
     parser.add_argument(
         "--angular-fine-tune-w-ang-vel-xy",
