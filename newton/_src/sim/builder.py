@@ -44,6 +44,7 @@ from ..geometry import (
     transform_inertia,
 )
 from ..geometry.inertia import validate_and_correct_inertia_kernel, verify_and_correct_inertia
+from ..geometry.kernels import MeshSignQuery
 from ..geometry.types import Heightfield
 from ..geometry.utils import RemeshingMethod, compute_inertia_obb, remesh_mesh
 from ..math import quat_between_vectors_robust
@@ -10553,6 +10554,8 @@ class ModelBuilder:
 
             # build list of ids for geometry sources (meshes, sdfs, heightfields)
             geo_sources = []
+            shape_mesh_sign_query = []
+            mesh_sign_query_by_source_id: dict[int, int] = {}
             finalized_geos = {}  # do not duplicate geometry
             gaussians = []
             heightfield_meshes = []
@@ -10587,8 +10590,23 @@ class ModelBuilder:
                 else:
                     geo_sources.append(0)
 
+                sign_query = MeshSignQuery.NORMAL
+                if (
+                    shape_flags & (ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)
+                    and shape_type in (GeoType.MESH, GeoType.CONVEX_MESH)
+                    and isinstance(geo, Mesh)
+                ):
+                    source_id = id(geo)
+                    sign_query = mesh_sign_query_by_source_id.get(source_id)
+                    if sign_query is None:
+                        # Open meshes preserve legacy normal-based contacts; winding is used when constructing SDFs.
+                        sign_query = MeshSignQuery.PARITY if geo.is_watertight else MeshSignQuery.NORMAL
+                        mesh_sign_query_by_source_id[source_id] = sign_query
+                shape_mesh_sign_query.append(sign_query)
+
             m.shape_type = wp.array(self.shape_type, dtype=wp.int32)
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)
+            m._shape_mesh_sign_query = wp.array(shape_mesh_sign_query, dtype=wp.int32, device=device)
             m.heightfield_meshes = heightfield_meshes
             m.gaussians_count = len(gaussians)
             m.gaussians_data = wp.array(gaussians, dtype=Gaussian.Data)

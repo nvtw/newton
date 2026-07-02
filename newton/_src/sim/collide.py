@@ -16,7 +16,7 @@ from ..geometry.contact_match import ContactMatcher
 from ..geometry.contact_sort import ContactSorter
 from ..geometry.differentiable_contacts import launch_differentiable_contact_augment
 from ..geometry.flags import ShapeFlags
-from ..geometry.kernels import MESH_SIGN_QUERY_NORMAL, MESH_SIGN_QUERY_PARITY, create_soft_contacts
+from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.support_function import (
@@ -24,7 +24,7 @@ from ..geometry.support_function import (
     SupportMapDataProvider,
     pack_mesh_ptr,
 )
-from ..geometry.types import GeoType, Mesh
+from ..geometry.types import GeoType
 from ..sim.contacts import Contacts
 from ..sim.model import Model
 from ..sim.state import State
@@ -461,42 +461,6 @@ def _infer_broad_phase_mode_from_instance(broad_phase: BroadPhaseAllPairs | Broa
     )
 
 
-def _build_shape_mesh_query_type(model: Model, device: wp.context.Device) -> wp.array[wp.int32]:
-    """Build internal mesh sign-query modes for collision kernels."""
-    shape_count = model.shape_count
-    query_types = np.full(shape_count, MESH_SIGN_QUERY_NORMAL, dtype=np.int32)
-
-    if shape_count == 0 or model.shape_type is None:
-        return wp.array(query_types, dtype=wp.int32, device=device)
-
-    shape_types = model.shape_type.numpy()
-    if model.shape_flags is None:
-        collide_mask = int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)
-        shape_flags = np.full(shape_count, collide_mask, dtype=np.int32)
-    else:
-        shape_flags = model.shape_flags.numpy()
-
-    query_type_by_source_id: dict[int, int] = {}
-    for shape_idx, (shape_type, shape_flag) in enumerate(zip(shape_types, shape_flags, strict=True)):
-        if not (int(shape_flag) & int(ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)):
-            continue
-        if int(shape_type) not in (int(GeoType.MESH), int(GeoType.CONVEX_MESH)):
-            continue
-
-        shape_source = model.shape_source[shape_idx] if shape_idx < len(model.shape_source) else None
-        if not isinstance(shape_source, Mesh):
-            continue
-
-        source_id = id(shape_source)
-        query_type = query_type_by_source_id.get(source_id)
-        if query_type is None:
-            query_type = MESH_SIGN_QUERY_PARITY if shape_source.is_watertight else MESH_SIGN_QUERY_NORMAL
-            query_type_by_source_id[source_id] = query_type
-        query_types[shape_idx] = query_type
-
-    return wp.array(query_types, dtype=wp.int32, device=device)
-
-
 class CollisionPipeline:
     """
     Full-featured collision pipeline with GJK/MPR narrow phase and pluggable broad phase.
@@ -695,7 +659,6 @@ class CollisionPipeline:
         self.reduce_contacts = reduce_contacts
         self.requires_grad = requires_grad
         self.soft_contact_margin = soft_contact_margin
-        self._shape_mesh_query_type = _build_shape_mesh_query_type(model, device)
 
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
         if using_expert_components:
@@ -1119,7 +1082,7 @@ class CollisionPipeline:
             shape_data=self.geom_data,
             shape_transform=self.geom_transform,
             shape_source=model.shape_source_ptr,
-            shape_mesh_query_type=self._shape_mesh_query_type,
+            shape_mesh_query_type=model._shape_mesh_sign_query,
             shape_sdf_index=model._shape_sdf_index,
             texture_sdf_data=model._texture_sdf_data,
             shape_gap=model.shape_gap,
@@ -1265,7 +1228,7 @@ class CollisionPipeline:
                     model.shape_type,
                     model.shape_scale,
                     model.shape_source_ptr,
-                    self._shape_mesh_query_type,
+                    model._shape_mesh_sign_query,
                     model.shape_world,
                     soft_contact_margin,
                     self.soft_contact_max,

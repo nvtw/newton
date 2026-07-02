@@ -16,7 +16,9 @@ from ..geometry.sdf_texture import (
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
 from .contact_reduction_global import GlobalContactReducerData, export_and_reduce_contact_centered
-from .kernels import MESH_SIGN_QUERY_NORMAL, mesh_query_point_sign
+from .kernels import MeshSignQuery, mesh_query_point_sign
+
+_MESH_QUERY_MAX_DIST = 1000.0
 
 # Launch-side block size for the mesh-SDF narrow-phase kernels. Must match
 # the ``block_dim`` used in ``wp.launch_tiled`` for
@@ -112,8 +114,8 @@ def scale_sdf_result_to_world(
 def sample_sdf_using_mesh(
     mesh_id: wp.uint64,
     world_pos: wp.vec3,
-    max_dist: float = 1000.0,
-    sign_query_type: int = MESH_SIGN_QUERY_NORMAL,
+    max_dist: float = _MESH_QUERY_MAX_DIST,
+    sign_query_type: int = MeshSignQuery.NORMAL,
 ) -> float:
     """
     Sample signed distance to mesh surface using mesh query.
@@ -144,8 +146,8 @@ def sample_sdf_using_mesh(
 def sample_sdf_grad_using_mesh(
     mesh_id: wp.uint64,
     world_pos: wp.vec3,
-    max_dist: float = 1000.0,
-    sign_query_type: int = MESH_SIGN_QUERY_NORMAL,
+    max_dist: float = _MESH_QUERY_MAX_DIST,
+    sign_query_type: int = MeshSignQuery.NORMAL,
 ) -> tuple[float, wp.vec3]:
     """
     Sample signed distance and gradient to mesh surface using mesh query.
@@ -535,12 +537,12 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
             if sdf_is_heightfield:
                 return sample_sdf_heightfield(hfd_sdf, elevation_data, pp)
             elif use_bvh_for_sdf:
-                return sample_sdf_using_mesh(sdf_mesh_id, pp, 1000.0, sdf_mesh_query_type)
+                return sample_sdf_using_mesh(sdf_mesh_id, pp, _MESH_QUERY_MAX_DIST, sdf_mesh_query_type)
             else:
                 return texture_sample_sdf(texture_sdf, pp)
         else:
             if use_bvh_for_sdf:
-                return sample_sdf_using_mesh(sdf_mesh_id, pp, 1000.0, sdf_mesh_query_type)
+                return sample_sdf_using_mesh(sdf_mesh_id, pp, _MESH_QUERY_MAX_DIST, sdf_mesh_query_type)
             else:
                 return texture_sample_sdf(texture_sdf, pp)
 
@@ -1129,7 +1131,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_using_mesh(
                                             mesh_id_sdf,
                                             point_unscaled,
-                                            1000.0,
+                                            _MESH_QUERY_MAX_DIST,
                                             sdf_mesh_query_type,
                                         )
                                     else:
@@ -1145,7 +1147,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_using_mesh(
                                             mesh_id_sdf,
                                             point_unscaled,
-                                            1000.0,
+                                            _MESH_QUERY_MAX_DIST,
                                             sdf_mesh_query_type,
                                         )
                                     else:
@@ -1499,7 +1501,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_using_mesh(
                                             mesh_id_sdf,
                                             point_unscaled,
-                                            1000.0,
+                                            _MESH_QUERY_MAX_DIST,
                                             sdf_mesh_query_type,
                                         )
                                     else:
@@ -1515,7 +1517,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_using_mesh(
                                             mesh_id_sdf,
                                             point_unscaled,
-                                            1000.0,
+                                            _MESH_QUERY_MAX_DIST,
                                             sdf_mesh_query_type,
                                         )
                                     else:

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import enum
+
 import warp as wp
 
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield
@@ -11,8 +13,12 @@ from .types import (
     GeoType,
 )
 
-MESH_SIGN_QUERY_NORMAL = 0
-MESH_SIGN_QUERY_PARITY = 1
+
+class MeshSignQuery(enum.IntEnum):
+    """Mesh sign-query strategies used by collision kernels."""
+
+    NORMAL = 0
+    PARITY = 1
 
 
 @wp.func
@@ -870,7 +876,7 @@ def closest_edge_coordinate_cylinder(
 
 @wp.func
 def mesh_query_point_sign(mesh: wp.uint64, point: wp.vec3, max_dist: float, sign_query_type: int):
-    if sign_query_type == MESH_SIGN_QUERY_PARITY:
+    if sign_query_type == MeshSignQuery.PARITY:
         query = wp.mesh_query_point_sign_parity(mesh, point, max_dist)
         if query.result:
             return True, query.sign, query.face, query.u, query.v
@@ -896,7 +902,7 @@ def mesh_sdf_with_sign_query(mesh: wp.uint64, point: wp.vec3, max_dist: float, s
 
 @wp.func
 def mesh_sdf(mesh: wp.uint64, point: wp.vec3, max_dist: float):
-    return mesh_sdf_with_sign_query(mesh, point, max_dist, MESH_SIGN_QUERY_NORMAL)
+    return mesh_sdf_with_sign_query(mesh, point, max_dist, MeshSignQuery.PARITY)
 
 
 @wp.func
