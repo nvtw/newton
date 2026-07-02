@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Benchmark a scripted FR3 teleoperation control loop.
+"""Benchmark a scripted G1 bimanual pushing control loop.
 
-The measured loop covers deterministic six-DoF command generation, IK,
+The measured loop covers deterministic two-hand six-DoF command generation, IK,
 joint-target writes, and two completed MuJoCo physics substeps. Rendering,
 physical input devices, transport, perception, and display latency are outside
 the benchmark scope.
@@ -33,25 +33,21 @@ from newton import JointTargetMode
 @wp.kernel
 def _write_robot_targets(
     joint_q_ik: wp.array2d[wp.float32],
+    nominal_joint_q: wp.array[wp.float32],
     previous_joint_target_q: wp.array[wp.float32],
-    gripper_value: wp.float32,
     dt: wp.float32,
     joint_target_q: wp.array[wp.float32],
     joint_target_qd: wp.array[wp.float32],
 ):
-    for i in range(7):
+    i = wp.tid()
+    q = nominal_joint_q[i]
+    if (i >= 15 and i < 22) or (i >= 29 and i < 36):
         q = joint_q_ik[0, i]
-        qd = 1.5 * (q - previous_joint_target_q[i]) / dt
-        joint_target_q[i] = q
-        joint_target_qd[i] = wp.clamp(qd, -20.0, 20.0)
-        previous_joint_target_q[i] = q
 
-    for i in range(7, 9):
-        q = gripper_value
-        qd = 1.5 * (q - previous_joint_target_q[i]) / dt
-        joint_target_q[i] = q
-        joint_target_qd[i] = wp.clamp(qd, -20.0, 20.0)
-        previous_joint_target_q[i] = q
+    qd = 1.5 * (q - previous_joint_target_q[i]) / dt
+    joint_target_q[i] = q
+    joint_target_qd[i] = wp.clamp(qd, -20.0, 20.0)
+    previous_joint_target_q[i] = q
 
 
 @dataclass(frozen=True)
@@ -123,8 +119,8 @@ class _TeleopLoop:
     physics_hz = 200
     sim_substeps = 2
     linear_speed = 0.5
-    angular_speed = 1.6
-    gripper_speed = 0.12
+    sweep_half_period = 1.6
+    arm_joint_indices = (*range(15, 22), *range(29, 36))
 
     def __init__(self, mode: _TeleopMode, stats_window: int):
         self.device = wp.get_device(mode.device)
@@ -141,7 +137,7 @@ class _TeleopLoop:
 
         scene = newton.ModelBuilder()
         scene.add_builder(robot)
-        self._add_scene(scene)
+        self.object_body_index, self.object_shape_index = self._add_scene(scene)
         self.model = scene.finalize()
 
         self.state_0 = self.model.state()
@@ -151,19 +147,25 @@ class _TeleopLoop:
 
         state_ik = self.model_ik.state()
         newton.eval_fk(self.model_ik, self.model_ik.joint_q, self.model_ik.joint_qd, state_ik)
-        self.ee_index = self._find_body(self.model_ik, "fr3_hand_tcp")
+        self.ee_indices = [
+            self._find_body(self.model_ik, "left_wrist_yaw_link"),
+            self._find_body(self.model_ik, "right_wrist_yaw_link"),
+        ]
         body_q = state_ik.body_q.numpy()
-        self.target_tf = wp.transform(*body_q[self.ee_index])
-        self.target_base = wp.transform(
-            wp.transform_get_translation(self.target_tf),
-            wp.transform_get_rotation(self.target_tf),
-        )
+        self.target_tfs = [wp.transform(*body_q[index]) for index in self.ee_indices]
+        self.target_rotations = [wp.transform_get_rotation(target) for target in self.target_tfs]
+        self.initial_object_position = self.state_0.body_q.numpy()[self.object_body_index, :3].copy()
+        self.hand_shape_indices = {
+            shape_index
+            for shape_index, shape_label in enumerate(self.model.shape_label)
+            if "/left_hand_" in shape_label or "/right_hand_" in shape_label
+        }
 
-        self.gripper_target = 0.04
-        self.previous_joint_target_q = wp.empty(9, dtype=wp.float32, device=self.device)
+        self.nominal_joint_q = wp.clone(self.model.joint_q)
+        self.previous_joint_target_q = wp.empty(self.model.joint_coord_count, dtype=wp.float32, device=self.device)
         self._setup_ik()
-        wp.copy(self.control.joint_target_q[:9], self.model.joint_q[:9])
-        wp.copy(self.previous_joint_target_q, self.control.joint_target_q[:9])
+        wp.copy(self.control.joint_target_q, self.model.joint_q)
+        wp.copy(self.previous_joint_target_q, self.control.joint_target_q)
         self._write_targets()
 
         self.solver = newton.solvers.SolverMuJoCo(
@@ -177,6 +179,10 @@ class _TeleopLoop:
             njmax=200,
             nconmax=100,
         )
+        self.mjc_geom_to_newton_shape = self.solver.mjc_geom_to_newton_shape.numpy()[0]
+        self.contacts = None
+        if mode.mujoco_backend == "warp":
+            self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
 
         self.graph_ik = None
         if self.device.is_cuda:
@@ -193,61 +199,50 @@ class _TeleopLoop:
     def _build_robot(self) -> newton.ModelBuilder:
         robot = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(robot)
-        robot.add_urdf(
-            newton.utils.download_asset("franka_emika_panda") / "urdf/fr3_franka_hand.urdf",
+        robot.default_joint_cfg = newton.ModelBuilder.JointDofConfig(limit_ke=1.0e3, limit_kd=1.0e1, friction=1.0e-5)
+        robot.default_shape_cfg.ke = 1.0e3
+        robot.default_shape_cfg.kd = 2.0e2
+        robot.default_shape_cfg.kf = 1.0e3
+        robot.default_shape_cfg.mu = 0.75
+        robot.add_usd(
+            str(newton.utils.download_asset("unitree_g1") / "usd_structured" / "g1_29dof_with_hand_rev_1_0.usda"),
             floating=False,
+            collapse_fixed_joints=True,
             enable_self_collisions=False,
+            hide_collision_shapes=True,
+            skip_mesh_approximation=True,
         )
+        robot.approximate_meshes("bounding_box")
 
-        initial_q = [
-            -0.0036802115,
-            0.023901723,
-            0.003680411,
-            -2.3683236,
-            -0.00012918962,
-            2.3922248,
-            0.785492,
-            0.04,
-            0.04,
-        ]
-        robot.joint_q[:9] = initial_q
-        robot.joint_target_q[:9] = initial_q
-
-        for i in range(7):
-            robot.joint_target_ke[i] = 3500.0
-            robot.joint_target_kd[i] = 220.0
+        for i in range(robot.joint_dof_count):
+            robot.joint_target_ke[i] = 2500.0 if i in self.arm_joint_indices else 500.0
+            robot.joint_target_kd[i] = 120.0 if i in self.arm_joint_indices else 20.0
             robot.joint_target_mode[i] = int(JointTargetMode.POSITION_VELOCITY)
-            robot.joint_armature[i] = 0.05
-        for i in range(7, 9):
-            robot.joint_target_ke[i] = 900.0
-            robot.joint_target_kd[i] = 80.0
-            robot.joint_target_mode[i] = int(JointTargetMode.POSITION_VELOCITY)
-            robot.joint_armature[i] = 0.2
-
-        robot.joint_effort_limit[:7] = [500.0] * 7
-        robot.joint_effort_limit[7:9] = [60.0] * 2
+        for i in self.arm_joint_indices:
+            robot.joint_effort_limit[i] = 200.0
         return robot
 
     @staticmethod
-    def _add_scene(builder: newton.ModelBuilder) -> None:
+    def _add_scene(builder: newton.ModelBuilder) -> tuple[int, int]:
         builder.add_shape_box(
             body=-1,
-            xform=wp.transform(wp.vec3(0.50, 0.0, 0.02), wp.quat_identity()),
-            hx=0.28,
-            hy=0.24,
-            hz=0.02,
+            xform=wp.transform(wp.vec3(0.48, 0.0, 0.72), wp.quat_identity()),
+            hx=0.34,
+            hy=0.50,
+            hz=0.04,
             cfg=newton.ModelBuilder.ShapeConfig(mu=0.8, kd=50.0),
         )
-        cube_size = 0.045
-        cube_body = builder.add_body(xform=wp.transform(wp.vec3(0.50, 0.0, 0.04 + 0.5 * cube_size), wp.quat_identity()))
-        builder.add_shape_box(
-            body=cube_body,
-            hx=0.5 * cube_size,
-            hy=0.5 * cube_size,
-            hz=0.5 * cube_size,
-            cfg=newton.ModelBuilder.ShapeConfig(mu=1.2, kd=80.0, density=600.0),
+        box_size = wp.vec3(0.10, 0.10, 0.10)
+        box_body = builder.add_body(xform=wp.transform(wp.vec3(0.48, 0.0, 0.81), wp.quat_identity()))
+        box_shape = builder.add_shape_box(
+            body=box_body,
+            hx=0.5 * box_size[0],
+            hy=0.5 * box_size[1],
+            hz=0.5 * box_size[2],
+            cfg=newton.ModelBuilder.ShapeConfig(mu=1.2, kd=80.0, density=12000.0),
         )
         builder.add_ground_plane()
+        return box_body, box_shape
 
     @staticmethod
     def _find_body(model: newton.Model, name: str) -> int:
@@ -257,64 +252,89 @@ class _TeleopLoop:
         raise RuntimeError(f"Body {name!r} was not found in the teleop model")
 
     def _setup_ik(self) -> None:
-        target_pos = wp.transform_get_translation(self.target_tf)
-        target_rot = wp.transform_get_rotation(self.target_tf)
-        self.pos_objective = ik.IKObjectivePosition(
-            link_index=self.ee_index,
-            link_offset=wp.vec3(0.0, 0.0, 0.0),
-            target_positions=wp.array([target_pos], dtype=wp.vec3, device=self.device),
-        )
-        self.rot_objective = ik.IKObjectiveRotation(
-            link_index=self.ee_index,
-            link_offset_rotation=wp.quat_identity(),
-            target_rotations=wp.array([_quat_to_vec4(target_rot)], dtype=wp.vec4, device=self.device),
-        )
+        self.pos_objectives = []
+        self.rot_objectives = []
+        for link_index, target in zip(self.ee_indices, self.target_tfs, strict=True):
+            target_pos = wp.transform_get_translation(target)
+            target_rot = wp.transform_get_rotation(target)
+            self.pos_objectives.append(
+                ik.IKObjectivePosition(
+                    link_index=link_index,
+                    link_offset=wp.vec3(0.0, 0.0, 0.0),
+                    target_positions=wp.array([target_pos], dtype=wp.vec3, device=self.device),
+                )
+            )
+            self.rot_objectives.append(
+                ik.IKObjectiveRotation(
+                    link_index=link_index,
+                    link_offset_rotation=wp.quat_identity(),
+                    target_rotations=wp.array([_quat_to_vec4(target_rot)], dtype=wp.vec4, device=self.device),
+                )
+            )
+
+        nominal_q = self.model_ik.joint_q.numpy()
+        limit_lower = self.model_ik.joint_limit_lower.numpy()
+        limit_upper = self.model_ik.joint_limit_upper.numpy()
+        fixed_joint_indices = set(range(self.model_ik.joint_coord_count)) - set(self.arm_joint_indices)
+        for index in fixed_joint_indices:
+            limit_lower[index] = nominal_q[index] - 1.0e-4
+            limit_upper[index] = nominal_q[index] + 1.0e-4
         joint_limit_objective = ik.IKObjectiveJointLimit(
-            joint_limit_lower=self.model_ik.joint_limit_lower,
-            joint_limit_upper=self.model_ik.joint_limit_upper,
-            weight=10.0,
+            joint_limit_lower=wp.array(limit_lower, device=self.device),
+            joint_limit_upper=wp.array(limit_upper, device=self.device),
+            weight=100.0,
         )
         self.joint_q_ik = wp.array(self.model_ik.joint_q, shape=(1, self.model_ik.joint_coord_count))
         self.ik_solver = ik.IKSolver(
             model=self.model_ik,
             n_problems=1,
-            objectives=[self.pos_objective, self.rot_objective, joint_limit_objective],
+            objectives=[*self.pos_objectives, *self.rot_objectives, joint_limit_objective],
             lambda_initial=0.1,
             jacobian_mode=ik.IKJacobianType.ANALYTIC,
         )
 
     def _update_command(self) -> None:
-        phase = 2.0 * math.pi * 0.25 * self.sim_time
-        base_pos = _vec3_to_np(wp.transform_get_translation(self.target_base))
-        desired_pos = base_pos + np.array(
-            [0.08 * math.sin(phase), 0.06 * math.sin(0.7 * phase), 0.04 * math.sin(1.3 * phase)],
-            dtype=np.float32,
-        )
-        current_pos = _vec3_to_np(wp.transform_get_translation(self.target_tf))
-        delta = (desired_pos - current_pos) / (self.frame_dt * self.linear_speed)
-        current_pos += np.clip(delta, -1.0, 1.0) * (self.linear_speed * self.frame_dt)
+        cycle_position = self.sim_time / self.sweep_half_period
+        active_hand = int(cycle_position) % 2
+        progress = cycle_position % 1.0
+        desired_positions = [
+            np.array([0.24, 0.20, 0.95], dtype=np.float32),
+            np.array([0.24, -0.20, 0.95], dtype=np.float32),
+        ]
 
-        rotation = (
-            0.30 * math.sin(0.6 * phase),
-            0.25 * math.sin(0.9 * phase),
-            0.20 * math.sin(1.1 * phase),
-        )
-        target_rot = wp.transform_get_rotation(self.target_tf)
-        axes = (wp.vec3(1.0, 0.0, 0.0), wp.vec3(0.0, 1.0, 0.0), wp.vec3(0.0, 0.0, 1.0))
-        for axis, value in zip(axes, rotation, strict=True):
-            target_rot = wp.quat_from_axis_angle(axis, value * self.angular_speed * self.frame_dt) * target_rot
+        sweep_start = 0.20 if active_hand == 0 else -0.20
+        sweep_end = -0.20 if active_hand == 0 else 0.20
+        active_position = desired_positions[active_hand]
+        # Advance above the box so the approach does not add a forward impulse.
+        if progress < 0.2:
+            active_position[0] = 0.24 + (0.38 - 0.24) * progress / 0.2
+        elif progress < 0.3:
+            active_position[0] = 0.38
+            active_position[2] = 0.95 + (0.84 - 0.95) * (progress - 0.2) / 0.1
+        elif progress < 0.8:
+            sweep_progress = (progress - 0.3) / 0.5
+            active_position[0] = 0.38
+            active_position[1] = sweep_start + (sweep_end - sweep_start) * sweep_progress
+            active_position[2] = 0.84
+        elif progress < 0.9:
+            active_position[0] = 0.38
+            active_position[1] = sweep_end
+            active_position[2] = 0.84 + (0.95 - 0.84) * (progress - 0.8) / 0.1
+        else:
+            active_position[0] = 0.38 + (0.24 - 0.38) * (progress - 0.9) / 0.1
+            active_position[1] = sweep_end
 
-        self.target_tf = wp.transform(wp.vec3(*current_pos), wp.normalize(target_rot))
-        gripper_delta = -1.0 if math.sin(0.5 * phase) >= 0.0 else 1.0
-        self.gripper_target = float(
-            np.clip(self.gripper_target + gripper_delta * self.gripper_speed * self.frame_dt, 0.0, 0.04)
-        )
+        max_delta = self.linear_speed * self.frame_dt
+        for index, (target, desired_position) in enumerate(zip(self.target_tfs, desired_positions, strict=True)):
+            current_position = _vec3_to_np(wp.transform_get_translation(target))
+            current_position += np.clip(desired_position - current_position, -max_delta, max_delta)
+            self.target_tfs[index] = wp.transform(wp.vec3(*current_position), self.target_rotations[index])
 
     def _write_targets(self) -> None:
         wp.launch(
             _write_robot_targets,
-            dim=1,
-            inputs=[self.joint_q_ik, self.previous_joint_target_q, self.gripper_target, self.frame_dt],
+            dim=self.model_ik.joint_coord_count,
+            inputs=[self.joint_q_ik, self.nominal_joint_q, self.previous_joint_target_q, self.frame_dt],
             outputs=[self.control.joint_target_q, self.control.joint_target_qd],
             device=self.device,
         )
@@ -326,21 +346,55 @@ class _TeleopLoop:
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
-    def _record_tracking_error(self) -> None:
+    def _record_workload_state(self) -> None:
         body_q = self.state_0.body_q.numpy()
-        end_effector = body_q[self.ee_index]
-        target_pos = _vec3_to_np(wp.transform_get_translation(self.target_tf))
-        self.stats.add("target_error_m", float(np.linalg.norm(target_pos - end_effector[:3])))
+        body_qd = self.state_0.body_qd.numpy()
+        if not np.isfinite(body_q).all() or not np.isfinite(body_qd).all():
+            raise RuntimeError("The G1 pushing workload produced non-finite body state")
 
-        target_rot = _quat_to_np(wp.transform_get_rotation(self.target_tf))
-        quat_dot = min(1.0, abs(float(np.dot(end_effector[3:7], target_rot))))
-        self.stats.add("target_rotation_error_rad", 2.0 * math.acos(quat_dot))
+        position_errors = []
+        rotation_errors = []
+        for ee_index, target in zip(self.ee_indices, self.target_tfs, strict=True):
+            end_effector = body_q[ee_index]
+            target_pos = _vec3_to_np(wp.transform_get_translation(target))
+            position_errors.append(float(np.linalg.norm(target_pos - end_effector[:3])))
+            target_rot = _quat_to_np(wp.transform_get_rotation(target))
+            quat_dot = min(1.0, abs(float(np.dot(end_effector[3:7], target_rot))))
+            rotation_errors.append(2.0 * math.acos(quat_dot))
+        self.stats.add("target_error_m", float(np.mean(position_errors)))
+        self.stats.add("target_rotation_error_rad", float(np.mean(rotation_errors)))
 
-    def step(self, *, collect_tracking: bool = False) -> None:
+        object_position = body_q[self.object_body_index, :3]
+        self.stats.add("object_displacement_m", float(np.linalg.norm(object_position - self.initial_object_position)))
+        self.stats.add("hand_object_contact", float(self._has_hand_object_contact()))
+
+    def _has_hand_object_contact(self) -> bool:
+        if self.contacts is not None:
+            self.solver.update_contacts(self.contacts, self.state_0)
+            contact_count = int(self.contacts.rigid_contact_count.numpy()[0])
+            shape0 = self.contacts.rigid_contact_shape0.numpy()[:contact_count]
+            shape1 = self.contacts.rigid_contact_shape1.numpy()[:contact_count]
+        else:
+            contact_count = int(self.solver.mj_data.ncon)
+            geom_pairs = self.solver.mj_data.contact.geom[:contact_count]
+            shape0 = self.mjc_geom_to_newton_shape[geom_pairs[:, 0]]
+            shape1 = self.mjc_geom_to_newton_shape[geom_pairs[:, 1]]
+
+        for first_shape, second_shape in zip(shape0, shape1, strict=True):
+            if (first_shape == self.object_shape_index and second_shape in self.hand_shape_indices) or (
+                second_shape == self.object_shape_index and first_shape in self.hand_shape_indices
+            ):
+                return True
+        return False
+
+    def step(self, *, collect_workload_state: bool = False) -> None:
         frame_start = time.perf_counter()
         self._update_command()
-        self.pos_objective.set_target_position(0, wp.transform_get_translation(self.target_tf))
-        self.rot_objective.set_target_rotation(0, _quat_to_vec4(wp.transform_get_rotation(self.target_tf)))
+        for pos_objective, rot_objective, target in zip(
+            self.pos_objectives, self.rot_objectives, self.target_tfs, strict=True
+        ):
+            pos_objective.set_target_position(0, wp.transform_get_translation(target))
+            rot_objective.set_target_rotation(0, _quat_to_vec4(wp.transform_get_rotation(target)))
         if self.graph_ik is None:
             self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=16)
         else:
@@ -351,8 +405,8 @@ class _TeleopLoop:
         else:
             wp.capture_launch(self.graph_sim)
 
-        if collect_tracking:
-            self._record_tracking_error()
+        if collect_workload_state:
+            self._record_workload_state()
         else:
             wp.synchronize_device(self.device)
             self.stats.add("local_loop_ms", (time.perf_counter() - frame_start) * 1000.0)
@@ -443,31 +497,51 @@ class _TeleopMuJoCoBenchmark:
     track_sustainable_physics_step_hz.unit = "Hz"
 
     def track_mean_target_error_m(self, mode: str) -> float:
-        self._measure_frames(collect_tracking=True)
+        self._measure_frames(collect_workload_state=True)
         return self.loop.stats.summary("target_error_m")[0]
 
     track_mean_target_error_m.unit = "m"
 
     def track_mean_target_rotation_error_rad(self, mode: str) -> float:
-        self._measure_frames(collect_tracking=True)
+        self._measure_frames(collect_workload_state=True)
         return self.loop.stats.summary("target_rotation_error_rad")[0]
 
     track_mean_target_rotation_error_rad.unit = "rad"
 
-    def _step_frames(self, frame_count: int, *, collect_tracking: bool = False) -> None:
+    def track_hand_object_contact_frame_pct(self, mode: str) -> float:
+        self._measure_frames(collect_workload_state=True)
+        self._validate_workload()
+        return 100.0 * self.loop.stats.summary("hand_object_contact")[0]
+
+    track_hand_object_contact_frame_pct.unit = "%"
+
+    def track_object_displacement_m(self, mode: str) -> float:
+        self._measure_frames(collect_workload_state=True)
+        self._validate_workload()
+        return self.loop.stats.summary("object_displacement_m")[2]
+
+    track_object_displacement_m.unit = "m"
+
+    def _step_frames(self, frame_count: int, *, collect_workload_state: bool = False) -> None:
         with wp.ScopedDevice(self.mode.device):
             for _ in range(frame_count):
-                self.loop.step(collect_tracking=collect_tracking)
+                self.loop.step(collect_workload_state=collect_workload_state)
 
-    def _measure_frames(self, *, collect_tracking: bool = False) -> None:
+    def _measure_frames(self, *, collect_workload_state: bool = False) -> None:
         self.loop.clear_metrics()
-        self._step_frames(self.num_frames, collect_tracking=collect_tracking)
+        self._step_frames(self.num_frames, collect_workload_state=collect_workload_state)
+
+    def _validate_workload(self) -> None:
+        if self.loop.stats.summary("hand_object_contact")[2] == 0.0:
+            raise RuntimeError("The G1 pushing workload did not produce hand-object contact")
+        if self.loop.stats.summary("object_displacement_m")[2] < 0.01:
+            raise RuntimeError("The G1 pushing workload did not move the object by at least 0.01 m")
 
 
 class FastTeleopMuJoCo(_TeleopMuJoCoBenchmark):
-    """Pull-request smoke benchmark for the CUDA graph teleop path."""
+    """Pull-request smoke benchmark covering GPU and CPU solver backends."""
 
-    params = (("mjwarp_cuda_graph",),)
+    params = (tuple(_TELEOP_MODES.keys()),)
     repeat = 2
     num_frames = 120
     warmup_frames = 30
