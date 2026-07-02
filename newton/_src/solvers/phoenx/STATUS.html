@@ -75,6 +75,7 @@
       <p>Block-owned reduced contacts now round generalized rows to the next four DOFs from 4 through 64. G1 needs 35 DOFs and therefore uses 36 instead of padding every Jacobian, response, scratch row, tile load, and reduction to 48.</p>
       <ul>
         <li>The matched 8192-world, 1024-replay measurement improves from the committed 40-DOF result of 1.1648M to 1.1827M environment steps/s (+1.54%). Relative to the original 48-DOF layout at 1.1534M, the combined gain is 2.54%.</li>
+        <li>The full graph-leapfrog collect-update loop sustains 707.7k samples/s across the steady five-iteration window, up from the retained 688.5k result (+2.8%). The pinned 1.28M nanoG1 training gap narrows from 1.86x to 1.81x.</li>
         <li>The prior 40-DOF profile already lowered contact-row median from about 472 to 441 microseconds. Width 36 removes another 10% of G1 row, response, scratch, tile-load, and reduction padding; storage is 25% narrower than the original layout.</li>
         <li>Width selection is automatic from the largest articulation in the model. Articulations through 64 DOFs remain supported with no user parameter and no fallback or equation change; larger articulations retain the exact fallback path.</li>
         <li>Selection is exhaustively checked for every DOF count, with representative low, G1-sized, and 64-DOF kernels executed under CUDA graph capture. The complete 39-test reduced-articulation suite passes, including momentum, determinism, contacts, closed loops, multiple articulations per world, and Featherstone comparisons.</li>
