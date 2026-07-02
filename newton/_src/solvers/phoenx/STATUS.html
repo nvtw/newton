@@ -173,6 +173,31 @@
       <p>If privileged counters become decision-relevant, this page will show one prominent command, the expected runtime, and the report path.</p>
     </article>
 
+    <div class="section-label">AI agent handoff</div>
+    <section class="next" aria-label="Guidance for the next AI agent">
+      <div>
+        <h2>Mission and non-negotiables</h2>
+        <ul>
+          <li><strong>Main quest:</strong> maximize end-to-end PhoenX G1 RL training throughput while keeping repeatable successful training. Faster unsuccessful training does not count.</li>
+          <li>Optimize the reduced-coordinate path where training currently succeeds; improving maximal-coordinate training remains valuable, but do not abandon the proven walker.</li>
+          <li>Keep physics clean and physically grounded: conserve momentum, preserve reliable convergence, retain the hard-Hertz contact model where possible, and use no scene-specific hacks.</li>
+          <li>End-to-end CUDA graph capture is mandatory. Classic PhoenX must remain deterministic.</li>
+          <li>Never overfit to G1. Screen Anymal, H1/G1-class robots, contact-rich scenes, closed loops, mixed ordinary joints/constraints, multiple articulations per world, and both single- and multi-world execution.</li>
+        </ul>
+      </div>
+      <div>
+        <h2>How to continue</h2>
+        <ul>
+          <li>Be innovative. New algorithms and data layouts are welcome; the fastest work is work safely eliminated. Megakernels, Warp tile operations, compact shared memory, and reasonably sized <code>wp.func_native</code> helpers are allowed when evidence supports them.</li>
+          <li>Use Nsight Systems to rank end-to-end costs. Ask for Nsight Compute only when counters can change a decision; prepare one bounded script measuring one kernel, then place its single command in a prominent action box on this page.</li>
+          <li>Move quickly with focused mini-benchmarks and CUDA-graph regression tests. Run full from-scratch training and two robust gates only for meaningful survivors.</li>
+          <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
+          <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
+          <li><strong>Immediate next step:</strong> refresh the combined learner/physics Systems trace after commit <code>1560dcc4</code>, then attack the new critical path rather than assuming the prior ranking.</li>
+        </ul>
+      </div>
+    </section>
+
     <footer>Older diary entries were intentionally removed. Git history and benchmark artifacts remain the technical record.</footer>
   </main>
 </body>
