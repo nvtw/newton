@@ -47,6 +47,7 @@
 
 ### Changed
 
+- Schedule reduced-coordinate PhoenX state publication with topology-sized 8-, 16-, or 32-lane warp groups, packing independent narrow articulations without changing integration or velocity reconstruction.
 - Accelerate experimental PhoenX G1 PufferMinGRU training with tiled aligned FP32 projections, linear-time recurrent backpropagation that reuses stored forward states, and deterministic FP32 or BF16 split-K weight gradients.
 - Store dense reduced-coordinate PhoenX generalized contact responses in a coalesced ABA layout and tile-transpose them for PGS consumption, while retaining direct row-major writes for sparse pages.
 - Bypass the reduced-coordinate PhoenX schedule radix sort when collision-eligible model pairs and the active contact-ingest ordering prove that rigid contact columns are already grouped by articulation; retain deterministic sorting for inter-articulation and otherwise unproven scenes.

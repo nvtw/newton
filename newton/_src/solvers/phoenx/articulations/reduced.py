@@ -1364,6 +1364,8 @@ def _publish_reduced_local_velocities_kernel(
 
 @wp.kernel(enable_backward=False, module="reduced_publish")
 def _finish_and_publish_reduced_warp_kernel(
+    articulation_count: wp.int32,
+    tile_width: wp.int32,
     max_depth: wp.int32,
     articulation_depth_start: wp.array2d[wp.int32],
     articulation_depth_joint: wp.array[wp.int32],
@@ -1394,8 +1396,15 @@ def _finish_and_publish_reduced_warp_kernel(
     body_qd: wp.array[wp.spatial_vector],
 ):
     thread = wp.tid()
-    articulation = thread // wp.int32(32)
-    lane = thread - articulation * wp.int32(32)
+    articulation = thread // tile_width
+    lane = thread - articulation * tile_width
+    if articulation >= articulation_count:
+        return
+    warp_lane = thread & wp.int32(31)
+    group = warp_lane // tile_width
+    group_mask = wp.uint32(4294967295)
+    if tile_width < wp.int32(32):
+        group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
     data = bodies.reduced
 
     for depth in range(max_depth + wp.int32(1)):
@@ -1455,8 +1464,8 @@ def _finish_and_publish_reduced_warp_kernel(
                     parent_anchor = body_q[parent] * parent_anchor
                 new_body_q = parent_anchor * joint_transform * wp.transform_inverse(joint_x_c[joint])
             body_q[child] = new_body_q
-            index += wp.int32(32)
-        _sync_reduced_warp()
+            index += tile_width
+        _sync_reduced_group(group_mask)
 
     for depth in range(max_depth + wp.int32(1)):
         index = articulation_depth_start[articulation, depth] + lane
@@ -1519,8 +1528,8 @@ def _finish_and_publish_reduced_warp_kernel(
             slot = child + wp.int32(1)
             bodies.position[slot] = origin + wp.quat_rotate(rotation, body_com[child])
             bodies.orientation[slot] = rotation
-            index += wp.int32(32)
-        _sync_reduced_warp()
+            index += tile_width
+        _sync_reduced_group(group_mask)
 
     if lane == wp.int32(0):
         root_joint = articulation_depth_joint[articulation_depth_start[articulation, 0]]
@@ -1558,8 +1567,8 @@ def _finish_and_publish_reduced_warp_kernel(
             joint_anchor_local[joint] = parent_anchor
             body_q_local[child] = child_transform
             body_q_com[child] = child_transform * body_x_com[child]
-            index += wp.int32(32)
-        _sync_reduced_warp()
+            index += tile_width
+        _sync_reduced_group(group_mask)
 
     for depth in range(max_depth + wp.int32(1)):
         index = articulation_depth_start[articulation, depth] + lane
@@ -1598,8 +1607,8 @@ def _finish_and_publish_reduced_warp_kernel(
             slot = child + wp.int32(1)
             bodies.velocity[slot] = wp.spatial_top(com_twist)
             bodies.angular_velocity[slot] = omega
-            index += wp.int32(32)
-        _sync_reduced_warp()
+            index += tile_width
+        _sync_reduced_group(group_mask)
 
 
 @wp.kernel(enable_backward=False)
@@ -2796,11 +2805,16 @@ class ReducedPhoenXArticulation:
     def _publish_state(self, dt: float) -> None:
         wp.copy(self.system.joint_qd_integrator, self.system.joint_qd_internal)
         if self.system.use_warp_publish:
+            articulation_count = int(self.model.articulation_count)
+            tile_width = self.system.advance_tile_width
+            thread_count = ((articulation_count * tile_width + 31) // 32) * 32
             wp.launch(
                 _finish_and_publish_reduced_warp_kernel,
-                dim=int(self.model.articulation_count) * 32,
-                block_dim=32,
+                dim=thread_count,
+                block_dim=128 if tile_width < 32 else 32,
                 inputs=[
+                    wp.int32(articulation_count),
+                    wp.int32(tile_width),
                     wp.int32(self.system.advance_max_depth),
                     self.system.advance_articulation_depth_start,
                     self.system.advance_articulation_depth_joint,
