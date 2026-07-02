@@ -6,6 +6,30 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Reduced contact-row builder: coalesced zero fill + recomputed path Jacobian (2026-07-02)
+- Nsight Compute (privileged run, user-assisted) on the G1 row builder:
+  Memory 66% vs Compute 25% SOL, **5.1/32 bytes utilized per global-load
+  sector, 5.8/32 per store sector**, 61% of warp stalls on L1TEX
+  scoreboard, occupancy register-limited to 62.5% theoretical (64 regs),
+  4.36 waves. The kernel is a *strided-access* problem, not a latency wall:
+  every `[packed_row, dof]` access puts adjacent row-threads 144 B apart.
+- Retained (bit-identical, all 40 reduced tests pass): block-cooperative
+  coalesced Jacobian zero fill (all 96 block threads stride the flat slab)
+  and effective-mass accumulation recomputing `dot(joint_s, source_wrench)`
+  on the source path instead of reloading the padded Jacobian row per DOF
+  (off-path terms are exact zeros and are skipped). Builder median
+  410.0 -> 399.3 us; physics-only profile runs 1.19 -> 1.22-1.24M env
+  steps/s (profiler-run variance ~2%).
+- **Not retained: always routing responses through joint_work + tile
+  transpose.** Builder median dropped to 312.5 us (-24%) and physics-only
+  improved, but steady leapfrog *training* regressed 2.7% (consistent,
+  bracketed) - the extra 8192x6-tile transpose per substep contends with
+  the overlapped learner stream. Lesson: **validate physics-only wins
+  against `bench_g1_train --execution-mode graph_leapfrog`; the training
+  loop is currently update-stream-bound** (physics +3.9% moved training
+  0%), so rollout-side gains only pay off in physics-bound configs or
+  after the learner stream shortens.
+
 ### Greedy graph coloring (single-world)
 - Replaces round-based JP MIS for the global colouring on the single-world layout. Picks the smallest-free-colour for each MIS commit instead of "round = colour", landing 2-3x fewer colours on dense contact graphs (kapla, box stacks).
 - Implementation: `partitioning_coloring_incremental_greedy_kernel` (`graph_coloring/graph_coloring_common.py`). Forbidden-colour bitmask is `int64`, capped at 64 colours. Overflow falls back to round-based JP within the same captured CUDA graph (`build_csr_greedy_with_jp_fallback`).
