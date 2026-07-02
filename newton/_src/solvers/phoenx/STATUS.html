@@ -64,21 +64,14 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · advance-kernel NCU requested</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · advance-kernel NCU analyzed</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
 
-    <section class="action-required">
-      <h2>ACTION REQUIRED · one bounded Nsight Compute run</h2>
-      <p>Please run this single prepared command. It profiles exactly one steady-state reduced ABA advance launch and writes the report I need; expected runtime is roughly 2-5 minutes.</p>
-      <pre>sudo bash /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_advance.sh</pre>
-      <p>Expected output: <code>/tmp/phoenx_g1_reduced_advance_latest.ncu-rep</code>. No other profiler command is needed.</p>
-    </section>
-
     <article>
       <div class="meta"><span class="tag">LAYOUT + SCHEDULE AUDIT</span><time>2 Jul - latest</time></div>
-      <h2>Two plausible memory layouts were rejected; reduced refresh semantics are fixed</h2>
+      <h2>Advance is dependency-bound; storage and scheduling shortcuts are rejected</h2>
       <p>The retained 8192-world, 5x2x1 reduced G1 graph measures 624.8k environment steps/s under the bounded profiler. Every candidate below preserved the exact ABA and hard-Hertz equations; slower candidates were removed completely.</p>
       <ul>
         <li>A production-shaped adaptive twelve-wrench response basis reached only 598k steps/s, 4.3% below baseline. Its isolated matrix synthesis win did not repay classification, scratch buffers, extra launches, and solve-path branching.</li>
@@ -88,6 +81,9 @@
         <li>SOR cannot replace the second sweep: one-iteration boosts of 1.2, 1.4, and 1.6 produced 25, 35, and 48 falls respectively in the same bounded battery, with severe torso angular motion. The temporary G1 SOR plumbing was removed.</li>
         <li>Combining external and gyroscopic forces before PGS removes the second ABA advance and raises the physics graph to 665.1k steps/s (+6.4%), but it was rejected: long-horizon and hybrid floating-tree linear momentum drifted 5.6% and 3.9%, and loop momentum exceeded tolerance. The split dynamics and exact momentum correction remain load-bearing.</li>
         <li>A fresh full-training Systems trace is physics dominated: reduced advance 13.6%, contact rows 11.8%, publication 10.9%, factorization 9.9%, and generalized contact solve 7.3%. Policy forward is about 1.4%, so learner-only tuning cannot close the current gap while graph-leapfrog overlap is active.</li>
+        <li>The focused advance NCU report shows the real limit: 75.9% of issue delay is long-scoreboard waiting on global/L1TEX dependencies, only 13.5% of scheduler cycles have an eligible warp, achieved occupancy is 22.4%, and only 12.3 lanes are active on average. DRAM is 38.8% utilized, with 75.3% L1 and 84.8% L2 hit rates, so raw bandwidth and read-only cache routing are not the bottleneck.</li>
+        <li>Explicit native shared memory was proven first with a block-isolation, alignment, and repeated CUDA-graph test. The exact three-buffer ABA staging then regressed 3.2%; a 12 KB velocity-only staging still regressed 1.1%. Shared-address/indirection cost and residency outweigh the avoided loads in the current packed layout, so all production code and the now-unused test were removed.</li>
+        <li>Four-lane articulation groups regressed 2.4% by shrinking the grid and serializing wide depths. Moving the sole generalized-RHS consumer beside its producer was neutral/slower. The retained eight-lane global-memory traversal remains best among these exact variants.</li>
         <li>An exact fused initialization/factorization pass was rejected at 1.469M versus 1.511M physics steps/s (-2.8%): it removed a launch but serialized independent transform and motion-subspace work inside the dependency-heavy backward traversal.</li>
         <li>A closed-form COM spatial-inertia transform replaced two generic 6x6 products with the exact rigid-body block formula. It reduced initialization by only about 1-2 microseconds and was end-to-end neutral, so the floating-point reorder was not retained.</li>
         <li><strong>Retained gain:</strong> bias-free relaxation now publishes velocities only, reusing the configuration and motion subspaces produced immediately beforehand. Nsight reduces the second publication from about 116-118 to 31 microseconds; the G1 graph rises from 624.8k to 648.3k steps/s (+3.8%).</li>
@@ -95,7 +91,7 @@
         <li><code>prepare_refresh_stride</code> was silently forced to one for reduced/hybrid articulations, and reduced contact blocks ignored the refresh decision. Both paths are now plumbed correctly for internal SolverPhoenX substeps, including block, deferred, and fallback contacts. A CUDA-graph regression verifies the exact prepare/cache cadence.</li>
         <li>The current G1 environment performs collision plus a one-substep solver call externally, so automatic stride remains one and training physics is unchanged. Reusing rows across those changing collision sets would be physically unsafe.</li>
       </ul>
-      <p><strong>Next:</strong> use the focused advance-kernel NCU report to distinguish dependency latency, occupancy/register pressure, and memory-layout cost before changing the ABA schedule. Candidates must help beyond G1: Anymal/H1, sparse/dense contacts, single/multi world, and multiple articulations per world remain the screening matrix.</p>
+      <p><strong>Next:</strong> target fewer or shorter dependency chains rather than cache hints, shared-memory copies, or lane-width tuning. Candidate algorithms must preserve split gyroscopic dynamics and exact momentum, then pass Anymal/H1/G1, sparse/dense contacts, single/multi world, and multiple-articulations-per-world screening.</p>
     </article>
 
     <article>
