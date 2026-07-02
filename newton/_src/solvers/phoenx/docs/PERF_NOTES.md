@@ -237,6 +237,48 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - **Wall-clock comparable, not faster.** Per-round work is roughly 3x JP-MIS (3 kernels with neighbour scans on both ``color_tags`` and ``tentative_color``), so the fewer-rounds win cancels out. Cold-start Kapla 100-frame nsys: 1.37 ms speculative vs 1.65 ms MIS+capture_while -- 17 % faster on raw kernel time but within noise on end-to-end FPS.
 - Default OFF. Useful as a building block for: dense graphs that exceed ``MAX_GREEDY_OUTER_ITERS`` on MIS, or future tuning (shared-mem ``tentative_color`` caching, warp-level forbidden-mask reductions) that closes the per-round cost gap.
 
+## Designed, not yet implemented
+
+### Multi-stream capture overlap for the reduced pipeline (design, 2026-07-03)
+- **Motivation (counter-backed):** advance/factor/publish/kinematics are
+  depth-synchronized tree kernels that each leave the GPU well under 35%
+  utilized while serialized in the captured graph (~30% of physics time).
+  The collision/ingest chain is memory-heavy and independent of them until
+  the contact row build.
+- **Verified structure** (`solver_phoenx.py step()` + `solver.py`): per
+  solver.step the sequence is import -> ingest_and_warmstart ->
+  build_schedule -> coloring -> [substep loop: begin_substep (kinematics +
+  factor + advance) -> integrate forces -> contact gather/rows/solve ->
+  integrate positions -> relax -> publish]. For the G1 recipe substeps=1,
+  so `begin_substep` (~410 us: kinematics 54 + factor 213 + advance 141)
+  can fork against ingest+schedule+coloring (~200 us) right after import,
+  with a join before the first contact gather (gather reads
+  `reduced.body_q_com` from kinematics; row build reads `joint_d_inv`/
+  `joint_u`/`joint_s` from factor).
+- **Sketch:** persistent side stream + wp.Event fork/join inside step();
+  skip `begin_substep` for substep 0 in the loop. Works eager and under
+  capture (events create parallel graph branches); leapfrog already proves
+  multi-stream capture in this codebase. Same kernels, disjoint arrays,
+  fixed intra-stream order => bit-identical.
+- **Open hazards to audit before coding:**
+  1. `_advance_reduced_articulations_warp_kernel` writes `public_body_qd`
+     and body velocities - confirm ingest/warm-start/coloring never read
+     `bodies.velocity` (classic warm-start and contact prepare do, but they
+     run after the join in-substep; check `_ingest_and_warmstart_contacts`
+     specifically).
+  2. `_kinematic_prepare_step` writes kinematic movers' velocities and
+     currently runs between ingest and the substep loop - it must stay
+     ordered against BOTH streams or be proven disjoint.
+  3. Gate the fork on: reduced articulation present, CUDA, no picking, no
+     sleeping, `reuse_partition=False`, and substep 0 only.
+  4. Multi-substep recipes (substeps>1) only overlap the first substep
+     unless collide/ingest also move inside the loop - fine for the
+     3x(1-substep) G1 recipe, neutral elsewhere.
+- Expected win if overlap is clean: O(100-150 us) of the ~810 us G1
+  solver.step hidden, i.e. up to ~10-15% physics; discount for SM
+  contention. Validate with bit-exact state hashes + the leapfrog trainer
+  (per the tiered-sort lesson, always test the non-default-stream path).
+
 ## Experimental-only code
 
 ### Warp-local no-coloring PGS scheduler

@@ -191,7 +191,7 @@
       <div>
         <h2>Current critical path (solver-only scope)</h2>
         <p>Optimization scope is now the PhoenX solver exclusively (user directive). Fresh physics ranking: contact-row build 18.7%, contact tile solve 12.9%, ABA advance 12.8%, factorization 11.1%, publish 7.0%, gather 5.3%, factor init 4.3%, contact sort 3.5%, FK 3.0%.</p>
-        <p><strong>Next:</strong> pending the requested ncu report on the row builder, examine ABA advance and factorization for the same latency-wall signature, and evaluate a depth-parallel cooperative row builder only if the counters support it.</p>
+        <p><strong>Next:</strong> implement the multi-stream capture overlap designed in PERF_NOTES ("Designed, not yet implemented"): fork <code>begin_substep</code> (kinematics + factor + advance, ~410 µs of &lt;35%-utilization kernels) against ingest + schedule + coloring (~200 µs) with an event join before the contact gather. Structure verified; four listed hazards must be audited first. Expected up to ~10% physics if clean; validate bit-exact hashes AND the leapfrog trainer (non-default-stream path).</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
