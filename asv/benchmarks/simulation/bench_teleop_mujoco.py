@@ -90,6 +90,16 @@ class _WindowStats:
         p95_index = min(len(ordered) - 1, math.ceil(0.95 * len(ordered)) - 1)
         return sum(values) / len(values), ordered[p95_index], ordered[-1]
 
+    def coefficient_of_variation_pct(self, name: str) -> float:
+        values = self.values.get(name)
+        if not values:
+            raise RuntimeError(f"No teleop samples collected for {name!r}")
+        mean = sum(values) / len(values)
+        if mean == 0.0:
+            return 0.0
+        variance = sum((value - mean) ** 2 for value in values) / len(values)
+        return 100.0 * math.sqrt(variance) / mean
+
     def clear(self) -> None:
         self.values.clear()
 
@@ -107,7 +117,10 @@ def _vec3_to_np(v: wp.vec3) -> np.ndarray:
 
 
 class _TeleopLoop:
-    fps = 60
+    # Keep the control loop below the physics rate so every command advances
+    # multiple completed physics steps. Performance targets remain external.
+    control_hz = 100
+    physics_hz = 200
     sim_substeps = 2
     linear_speed = 0.5
     angular_speed = 1.6
@@ -115,8 +128,10 @@ class _TeleopLoop:
 
     def __init__(self, mode: _TeleopMode, stats_window: int):
         self.device = wp.get_device(mode.device)
-        self.frame_dt = 1.0 / self.fps
-        self.sim_dt = self.frame_dt / self.sim_substeps
+        self.frame_dt = 1.0 / self.control_hz
+        self.sim_dt = 1.0 / self.physics_hz
+        if not math.isclose(self.frame_dt, self.sim_substeps * self.sim_dt):
+            raise ValueError("The control period must contain an integer number of physics steps")
         self.sim_time = 0.0
         self.frame_index = 0
         self.stats = _WindowStats(stats_window)
@@ -406,6 +421,26 @@ class _TeleopMuJoCoBenchmark:
         return 100.0 * overruns / len(values)
 
     track_frame_overrun_pct.unit = "%"
+
+    def track_loop_time_cv_pct(self, mode: str) -> float:
+        self._measure_frames()
+        return self.loop.stats.coefficient_of_variation_pct("local_loop_ms")
+
+    track_loop_time_cv_pct.unit = "%"
+
+    def track_real_time_factor(self, mode: str) -> float:
+        self._measure_frames()
+        mean_loop_ms = self.loop.stats.summary("local_loop_ms")[0]
+        return self.loop.frame_dt * 1000.0 / mean_loop_ms
+
+    track_real_time_factor.unit = "x"
+
+    def track_sustainable_physics_step_hz(self, mode: str) -> float:
+        self._measure_frames()
+        mean_loop_ms = self.loop.stats.summary("local_loop_ms")[0]
+        return self.loop.sim_substeps * 1000.0 / mean_loop_ms
+
+    track_sustainable_physics_step_hz.unit = "Hz"
 
     def track_mean_target_error_m(self, mode: str) -> float:
         self._measure_frames(collect_tracking=True)
