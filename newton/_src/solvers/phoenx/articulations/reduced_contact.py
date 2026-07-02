@@ -410,8 +410,16 @@ def reduced_contact_prepare(
     contacts: ContactViews,
     use_deferred: wp.bool,
     apply_warmstart: wp.bool,
+    compute_effective_mass: wp.bool,
 ):
-    """Prepare effective masses, TGS biases, and warm-start impulses."""
+    """Prepare effective masses, TGS biases, and warm-start impulses.
+
+    Pass ``compute_effective_mass=False`` from the block-owned contact
+    gather: the packed row builder derives exact effective masses from the
+    generalized response rows and overwrites the slots before any solve
+    reads them, so the per-direction inverse-mass traversals here are dead
+    work on that path.
+    """
     body0 = contact_get_body1(columns, column)
     body1 = contact_get_body2(columns, column)
     first = contact_get_contact_first(columns, column)
@@ -441,19 +449,22 @@ def reduced_contact_prepare(
         contact_point = wp.float32(0.5) * (point0 + point1)
 
         effective_mass = wp.vec3f(0.0)
-        for row in range(3):
-            direction = normal
-            if row == 1:
-                direction = tangent0
-            elif row == 2:
-                direction = tangent1
-            inverse_mass = wp.float32(0.0)
-            if use_deferred:
-                inverse_mass = _deferred_inverse_mass(bodies, body0, contact_point, body1, contact_point, direction)
-            else:
-                inverse_mass = _pair_inverse_mass(bodies, body0, contact_point, body1, contact_point, direction)
-            if inverse_mass > wp.float32(1.0e-12):
-                effective_mass[row] = wp.float32(1.0) / inverse_mass
+        if compute_effective_mass:
+            for row in range(3):
+                direction = normal
+                if row == 1:
+                    direction = tangent0
+                elif row == 2:
+                    direction = tangent1
+                inverse_mass = wp.float32(0.0)
+                if use_deferred:
+                    inverse_mass = _deferred_inverse_mass(
+                        bodies, body0, contact_point, body1, contact_point, direction
+                    )
+                else:
+                    inverse_mass = _pair_inverse_mass(bodies, body0, contact_point, body1, contact_point, direction)
+                if inverse_mass > wp.float32(1.0e-12):
+                    effective_mass[row] = wp.float32(1.0) / inverse_mass
 
         separation = point1 - point0
         gap = wp.dot(separation, normal)
@@ -470,9 +481,10 @@ def reduced_contact_prepare(
             bias_t0 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent0), -0.001, 0.001) * idt
             bias_t1 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent1), -0.001, 0.001) * idt
 
-        cc_set_eff_n(contacts_state, contact, effective_mass[0])
-        cc_set_eff_t1(contacts_state, contact, effective_mass[1])
-        cc_set_eff_t2(contacts_state, contact, effective_mass[2])
+        if compute_effective_mass:
+            cc_set_eff_n(contacts_state, contact, effective_mass[0])
+            cc_set_eff_t1(contacts_state, contact, effective_mass[1])
+            cc_set_eff_t2(contacts_state, contact, effective_mass[2])
         cc_set_bias(contacts_state, contact, bias)
         cc_set_bias_t1(contacts_state, contact, bias_t0)
         cc_set_bias_t2(contacts_state, contact, bias_t1)

@@ -310,7 +310,7 @@ def _solve_fallback_contact_column(
     use_bias: wp.bool,
 ):
     if phase == wp.int32(0):
-        reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(False), wp.bool(True))
+        reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(False), wp.bool(True), wp.bool(True))
     else:
         reduced_contact_iterate(columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, wp.bool(False))
 
@@ -483,7 +483,9 @@ def _gather_reduced_contact_blocks_kernel(
         column_end = point_offset + column_count
         overlaps_page = point_offset < page_end and column_end > page_start
         if overlaps_page and prepare and (index - start) % wp.int32(_BLOCK_DIM) == lane:
-            reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(False))
+            # Effective masses are derived exactly by the packed row builder
+            # right after this gather; skip the redundant traversals here.
+            reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(False), wp.bool(False))
 
         if global_point >= point_offset and global_point < column_end and global_point < page_end:
             point = lane

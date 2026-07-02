@@ -2185,7 +2185,7 @@ def _solve_reduced_deferred_contacts_kernel(
     if prepare:
         for index in range(start, end):
             column = scheduled_column[index]
-            reduced_contact_prepare(contact_cols, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(True))
+            reduced_contact_prepare(contact_cols, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(True), wp.bool(True))
 
     for iteration in range(iterations):
         for offset in range(end - start):
