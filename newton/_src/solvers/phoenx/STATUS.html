@@ -64,10 +64,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · contact-solve NCU analyzed</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · exact response-basis prototype</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">EXACT BASIS PROTOTYPE</span><time>2 Jul - latest</time></div>
+      <h2>Tile synthesis works; standalone adaptive overhead must be fused away</h2>
+      <p>The response-basis idea is now measured against live G1 ABA factors and contact wrenches, not a projection. Two contacted feet require twelve unit-wrench responses to reconstruct all 24 normal/tangent rows.</p>
+      <ul>
+        <li>A packed 24x12 by 12x96 tile multiply synthesizes Jacobian and response together in 31-34 microseconds for 8192 worlds. It is 2.4-2.8x faster than scalar packed synthesis and bitwise identical to that scalar matrix product.</li>
+        <li>On live ABA data, basis construction plus tile synthesis takes 396 microseconds versus 521 microseconds for direct row construction, a 1.32x isolated speedup. Jacobians are exact; maximum response difference is 3.22e-6 from the changed floating-point summation order.</li>
+        <li>A naive production layout is rejected: separate GPU classification and unpacking raise the adaptive total to 578 microseconds. No slower path has been enabled.</li>
+        <li>The clean route is to classify the bounded body basis inside the existing one-block contact gather and let generalized PGS consume the combined row-major Jacobian/response matrix directly. That removes both measured overhead kernels and stays graph-safe.</li>
+        <li>A six-right-hand-side-per-thread ABA experiment was also rejected immediately: register pressure made it over four times slower at only 64 worlds. Independent basis rows with 16-lane articulation groups remain the viable form.</li>
+      </ul>
+      <p><strong>Expected scope:</strong> this can remove roughly one quarter of row-construction time on pages where several contacts share one or two bodies. The direct exact builder remains necessary for sparse pages and high body diversity, so the dispatch must be automatic and scene-general.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">SYSTEMS-GUIDED MEGAKERNEL</span><time>2 Jul - latest</time></div>
@@ -226,71 +240,9 @@
       <p><strong>Next:</strong> continue accumulating profile-backed general gains in contact build/solve, factor, and publication. Establish a local apples-to-apples MJWarp G1 throughput baseline before claiming relative performance; nanoG1 remains the separate 1.276-1.28M samples/s reference.</p>
     </article>
 
-    <article>
-      <div class="meta"><span class="tag">REDUCED SPEED MILESTONE</span><time>1 Jul - latest</time></div>
-      <h2>Successful G1 training is 28% faster, with general articulation gains</h2>
-      <p>The successful reduced-coordinate path is now the optimization target. Measured 8192-world graph-leapfrog training increased from 240.8k to 308.0k samples/s while the frozen walking checkpoint remains robust. The nanoG1 throughput gap narrowed from 5.32x to 4.16x.</p>
-      <ul>
-        <li>A bounded Nsight driver now profiles only 1-10 steady CUDA-graph replays. It avoids setup/JIT trace inflation and identified contact rows, generalized contact solve, factor/advance/publish, and impulse response as the real reduced hot path.</li>
-        <li>The G1 replacement foot boxes were added after the MJCF importer constructed no-self-collision filters. This violated the configured collision semantics and sent exploratory poses through exact colored self-contact fallback. Filtering the added boxes against every robot shape removes those unintended contacts and raised training to 293.8k samples/s.</li>
-        <li>A general packed kernel now evaluates four independent articulations per warp using 8-lane masked groups instead of assigning 32 lanes to six impulse-response bases. The kernel fell from about 318 to 80 us per substep, physics-only G1 rose from 497k to 546k env-steps/s, and training reached 308k samples/s.</li>
-        <li>Reduced contact tiles select a 48- or 64-DOF compiled width from model topology. G1's contact solve is about 8% faster and compact articulations use 25% less contact scratch, while the 64-wide and exact fallback paths remain covered.</li>
-        <li>The frozen 240-iteration policy still has zero battery and diagnostic falls: tracking 0.9448, action jerk 0.2620, roll/pitch rate 0.2138, yaw rate 0.1394, and leg speed 0.7666. The speed changes did not weaken stability.</li>
-        <li>CUDA graph tests pass for exact ABA response, 48/64 dispatch, contact paging, fallback overflow, deterministic fallback, fused apply, and momentum conservation. Contact-enabled Anymal, H1, and G1 run successfully in both single- and multi-world layouts.</li>
-        <li>BF16 is already active for manual MLP forward and weight-gradient accumulation. Eager timing separates roughly 1.76 s rollout from 0.695 s PPO update before these gains, so learner work remains relevant but is not the largest isolated cost.</li>
-      </ul>
-      <p><strong>Next:</strong> continue with scene-independent reduced factor, advance, publish, and contact-row work, then profile the remaining BF16 neural kernels and overlap contention. Every candidate stays gated by diverse robot/topology tests and the frozen G1 walker.</p>
-    </article>
 
-    <article>
-      <div class="meta"><span class="tag warn">CORRECTED DIAGNOSIS</span><time>1 Jul · latest</time></div>
-      <h2>Maximal bilateral-joint enforcement is the remaining quality gap</h2>
-      <p>The motor and training interfaces are now substantially ruled out. The evidence points to scalar maximal enforcement of the open G1 joint tree: exact articulated response improves learning, and letting that tree own its bilateral joints improves it again.</p>
-      <ul>
-        <li>At the established 75M-sample comparison, reduced reaches about 0.93 tracking, hybrid about 0.76, and pure maximal about 0.60. This monotonic hierarchy is more informative than any single short run.</li>
-        <li>A new 64-world, two-second, graph-captured exploration diagnostic finishes in about five seconds. It uses identical smooth actions and reset noise, records first termination, and scores closure only while each world remains valid.</li>
-        <li>Pure maximal reaches up to 0.153 m locked helper-anchor error before termination at 10×8×1; reduced keeps the corresponding tree closure at numerical precision. More substeps reduce drift but do not restore reduced-like exploration survival.</li>
-        <li>One velocity-relax pass remains best. Zero or two do not improve first termination and are less robust after termination. Exact per-substep prepare and serial bidirectional joint ordering are no-ops for the relevant metrics.</li>
-        <li>Disabling armature diverges immediately, so reflected motor inertia is necessary. The physical parent-stator/child-rotor implementation remains covered by analytical, momentum, passivity, and live-update tests.</li>
-        <li>A direct quaternion/angular-row hinge formulation was derived and tested. It passes the two-body pendulum but improves G1 pre-terminal closure only marginally and worsens post-terminal robustness; it was rejected and fully reverted.</li>
-        <li>A matched 12.6M-sample control shows both reduced and hybrid are still in the standing phase: forward tracking 0.081 and 0.080. Short runs are therefore smoke gates, not quality verdicts; the long run is reserved for candidates that first improve deterministic mini-metrics.</li>
-      </ul>
-      <p><strong>Next solver candidate:</strong> an articulation-sized block solve of the maximal KKT bilateral rows, followed by ordinary deterministic PGS for contacts, limits, and loops. For an open tree, the linear-time factorization is mathematically equivalent to an articulated-body Schur solve; that equivalence is unavoidable, but body poses and velocities can remain the primary maximal state. This is a physical block preconditioner, not compliance, mass scaling, or relaxation.</p>
-      <p><strong>Optimization ladder:</strong> algebraic and two-body invariants; five-second graph exploration/closure; open-loop nanoG1 trajectory parity; 24-iteration smoke; unchanged 75M walking gate; then Nsight end-to-end samples/s. Reduced is currently the successful oracle and is already at least as fast as maximal in matched G1 training, so improving its implementation remains the practical fallback.</p>
-    </article>
 
-    <article>
-      <div class="meta"><span class="tag warn">MAXIMAL ROOT CAUSE</span><time>1 Jul · latest</time></div>
-      <h2>Motor physics is fixed; maximal tree conditioning is now the leading blocker</h2>
-      <p>The maximal-coordinate G1 run is numerically stable and learns a smooth standing policy, but it still does not learn the frozen six-command walking gate. The latest evidence narrows this to schedule-sensitive whole-tree constraint response rather than a reward, action-mask, importer, or isolated motor bug.</p>
-      <ul>
-        <li>The motor-armature defect is fixed physically: stator inertia is added to the parent and gear-reflected rotor inertia to the child. All focused CUDA-graph armature tests pass, including ankle-roll passivity, analytical periods, live updates, and momentum conservation.</li>
-        <li>The exact pinned nanoG1 source confirms that task V3 exposes 29 slots but deliberately masks actions 12–28. PhoenX controlling 12 leg actions is correct; expanding it to 29 would be a false fix.</li>
-        <li>At zero action, PhoenX and nanoG1 both report exactly four contacts per foot. Normal support is close at 329 versus 326 N and pose drift is small, but PhoenX produces about 71 versus 11 N tangential support. This contact mismatch is real.</li>
-        <li>However, reduced PhoenX shows a similar high tangential ratio and already trains successfully. Therefore contact parity should improve, but it cannot by itself explain why only maximal training fails.</li>
-        <li>A 100-control-step strong-action A/B is the clearest discriminator: maximal 5 substeps × 2 iterations diverges after 10 steps, while maximal 10×8 remains finite and approaches the reduced trajectory. Reduced is largely insensitive to 5×2 versus 10×8. Maximal PGS is therefore spending most of its work recovering tree coupling that reduced coordinates enforce exactly.</li>
-        <li>The corrected 10×8×1 maximal run reached 75.5M samples without numerical failure but settled into command-ignoring standing: full-gate performance 0.601 with 32 falls, fast-forward tracking 0.090, and failed backward/yaw batteries. More samples or reward deletion did not fix this basin.</li>
-      </ul>
-      <p><strong>What I am trying next:</strong> first add a graph-captured tree-response regression that measures one-frame maximal/reduced error across randomized G1 states and contacts. Then test the smallest physically grounded solver change: an exact articulation/tree projection for bilateral joint response once per temporal substep, with ordinary deterministic maximal PGS retained for contacts, loops, and other constraints. This is a Schur-complement preconditioner derived from the same constrained equations, not mass scaling or relaxation.</p>
-      <p><strong>Decision:</strong> simply adding more scalar PGS iterations is unlikely to be the right solution. The clean options are (1) tree-projected maximal PGS, which preserves the general full-coordinate contact/loop interface while removing its worst conditioning, or (2) optimize the already successful reduced path. Reduced currently sustains about 241k samples/s versus roughly 225–250k/s for recent maximal runs, so it is already competitive with maximal rather than inherently slower. The main remaining speed gap is to nanoG1, not reduced versus maximal. I will keep pure maximal training as the acceptance target while using reduced as the correctness and throughput oracle.</p>
-    </article>
 
-    <article>
-      <div class="meta"><span class="tag block">MAXIMAL NOT PASSING</span><time>1 Jul · latest</time></div>
-      <h2>Pure full-coordinate G1 remains the acceptance target; a motor-path defect is now isolated</h2>
-      <p>Pure <code>articulation_mode="maximal"</code> at 20 temporal substeps, 2 PGS iterations, and 1 velocity iteration is numerically stable with implicit constraint drives, but it has not learned the frozen six-command walking gate.</p>
-      <ul>
-        <li>A 75.5M-sample run reached 0.575 battery tracking with 48 falls. Continuing the same policy to 151M samples changed this only to 0.577 with 31 falls. More training alone is therefore ruled out.</li>
-        <li>Removing PhoenX-only gait, swing-height, hip, and base-height shaping to reproduce nanoG1's published dense reward exactly also failed: 0.558 tracking and 78 falls at 75.5M samples. Reward-parity drift is not the primary blocker.</li>
-        <li>Frame-derived maximal joint velocities are much quieter and now have a CUDA-graph regression, but cleaner policy observations alone do not recover locomotion.</li>
-        <li>The remaining explicit-torque path is definitively broken in maximal mode: even a contact-free, zero-action G1 grows from 0.00044 rad/s to 5.25 million rad/s within ten 2ms substeps. This is independent of contacts.</li>
-        <li>A per-DoF passivity bisection isolates the failure to the two ankle-roll motors: 27/29 single-motor tests stay below 0.20 rad/s, while ankle roll reaches 556 and 1,163 rad/s in one frame.</li>
-        <li>The live reflected inertia is present, but child-only rotor inertia does not implement generalized armature on a free parent/child pair. The light ankle-pitch parent counter-rotates, leaving measured relative inverse inertia near 2,825 instead of the armature-conditioned value. The fix must represent <code>M + JᵀAJ</code>, including parent reaction, and preserve common rigid rotation.</li>
-        <li>A fixed-forward progress-reward control proves maximal PhoenX can move, improving forward error from 0.75 to 0.50, but the gait becomes fragile and falls. This connects the passivity defect to the standing local optimum without treating reward tuning as the fix.</li>
-        <li>Warm training throughput is about 232–234k samples/s, approximately 5.4× slower than nanoG1's pinned 1.276M/s. Performance optimization remains secondary until a maximal checkpoint passes.</li>
-      </ul>
-      <p><strong>Verdict:</strong> no, maximal G1 training does not work yet. Reduced/hybrid success does not satisfy the goal. Next is a physically correct fix for maximal generalized torque and velocity response, followed by the same graph-captured train-to-gate test.</p>
-    </article>
 
 
 
