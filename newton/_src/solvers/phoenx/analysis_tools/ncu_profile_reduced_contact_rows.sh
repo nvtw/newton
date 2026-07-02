@@ -60,7 +60,7 @@ printf "Profiling one contact-row builder launch\n  ncu: %s\n  python: %s\n  rep
   "$PY" -m newton._src.solvers.phoenx.benchmarks.profile_g1_reduced_kernels \
     --replays 1 \
     --warmup-replays 2 \
-    --sim-substeps 5 \
+    --sim-substeps 4 \
     --solver-iterations 2 \
     --velocity-iterations 1
 NCU_RC=$?
