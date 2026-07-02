@@ -47,6 +47,7 @@
 
 ### Changed
 
+- Align reduced-coordinate PhoenX generalized contact-row launches to one fixed 96-row articulation page per CUDA block, improving row-builder locality without changing contact arithmetic.
 - Skip reduced-coordinate PhoenX fallback contact coloring when the model's collision-eligible shape pairs prove that every reduced contact is against a static or kinematic body, preserving deterministic fallback for self-contact and dynamic-body interactions.
 - Reuse exact reduced-coordinate PhoenX articulated contact responses across bias and velocity-relaxation passes with a bounded graph-capture-safe cache, accelerating contact-rich scenes without changing hard-Hertz contact projection.
 - Reuse bounded reduced-coordinate PhoenX contact geometry during velocity relaxation, recomputing velocity-dependent rows while retaining exact overflow paging and hard-Hertz contact behavior.

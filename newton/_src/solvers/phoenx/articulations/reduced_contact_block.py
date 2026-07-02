@@ -1367,6 +1367,7 @@ class ReducedContactBlockSystem:
                 wp.launch(
                     _build_packed_generalized_contact_rows_kernel,
                     dim=(self.articulation_count, _MAX_ROWS),
+                    block_dim=_MAX_ROWS,
                     inputs=[
                         bodies,
                         self.enabled,
