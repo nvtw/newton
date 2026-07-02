@@ -79,6 +79,7 @@
         <li>The ABA row-reference test now uses a branched articulation whose contact path skips a multi-DOF sibling branch. Packed Jacobians, generalized responses, virtual work, and effective mass agree with the independent reference.</li>
         <li>All 38 reduced-articulation CUDA graph tests pass, including dense and sparse contacts, arbitrary page counts, self-contact, closed loops, multiple articulations per world, deterministic dense contacts, spatial momentum, translation invariance, and Featherstone comparisons.</li>
         <li>A 32-thread sparse row-builder launch was also tested and removed: it measured 1.137M steps/s, slower than the retained baseline.</li>
+        <li>A compact 64-bit Jacobian path mask reduced row-builder median time by 5.4%, but moved work into every PGS <code>Jv</code> evaluation. The long matched pair improved only from 1.1534M to 1.1556M steps/s (+0.19%), so the added buffer and solver complexity were removed completely.</li>
       </ul>
       <p><strong>Assessment:</strong> this is a general dataflow optimization for every block-owned reduced articulation contact. It is graph-stable, deterministic, requires no tuning, and preserves physical results.</p>
     </article>
