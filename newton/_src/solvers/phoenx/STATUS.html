@@ -64,10 +64,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · sparse contact launch removed</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · contact scratch traffic reduced</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">EXACT ROW-BUILDER GAIN</span><time>3 Jul - latest</time></div>
+      <h2>Source-path scratch tracking raises G1 to 1.17M env steps/s</h2>
+      <p>The generalized contact-row builder no longer clears projected ABA scratch for every articulation DOF and every contact row. Its reverse pass already writes every source-path value; the forward pass now follows the existing root-to-leaf topology path and reads only those freshly written entries.</p>
+      <ul>
+        <li>Matched 8192-world, three-substep, 256-replay measurements improve from 1.146M to 1.166M and 1.170M environment steps/s, a repeatable 1.7-2.1% exact physics gain.</li>
+        <li>No equation, response, effective mass, contact model, iteration count, or timestep changes. Non-path joints still receive the exact ABA parent response with a zero local projected impulse.</li>
+        <li>The ABA row-reference test now uses a branched articulation whose contact path skips a multi-DOF sibling branch. Packed Jacobians, generalized responses, virtual work, and effective mass agree with the independent reference.</li>
+        <li>All 38 reduced-articulation CUDA graph tests pass, including dense and sparse contacts, arbitrary page counts, self-contact, closed loops, multiple articulations per world, deterministic dense contacts, spatial momentum, translation invariance, and Featherstone comparisons.</li>
+        <li>A 32-thread sparse row-builder launch was also tested and removed: it measured 1.137M steps/s, slower than the retained baseline.</li>
+      </ul>
+      <p><strong>Assessment:</strong> this is a general dataflow optimization for every block-owned reduced articulation contact. It is graph-stable, deterministic, requires no tuning, and preserves physical results.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">EXACT SPARSE-CONTACT GAIN</span><time>2 Jul - latest</time></div>

@@ -705,10 +705,9 @@ def _build_packed_generalized_contact_rows_kernel(
         return
     packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
 
-    # Response overwrites every topology-owned DOF below; its zero-allocated tile tail is immutable.
+    # The dense Jacobian needs explicit zeros; projected scratch is read only on the source path below.
     for local_dof in range(dof_count_articulation):
         packed_jacobian[packed_row, local_dof] = wp.float32(0.0)
-        joint_work[articulation, local_dof, row] = wp.float32(0.0)
 
     source_body = row_body[packed_articulation, row]
     source_wrench = row_wrench[packed_articulation, row]
@@ -738,8 +737,14 @@ def _build_packed_generalized_contact_rows_kernel(
                 propagated_wrench -= data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
 
     inverse_mass = wp.float32(0.0)
+    # Parent-first joint ordering makes the root-to-leaf path a monotone cursor through this forward pass.
+    path_cursor = path_start
+    next_path_joint = wp.int32(-1)
+    if path_cursor < path_end:
+        next_path_joint = data.body_path_joint[path_cursor]
     for joint in range(start, end):
         local_joint = joint - start
+        on_source_path = joint == next_path_joint
         parent = data.joint_parent[joint]
         parent_delta = wp.spatial_vector()
         if parent >= wp.int32(0):
@@ -752,9 +757,9 @@ def _build_packed_generalized_contact_rows_kernel(
         for dof_row in range(6):
             if wp.int32(dof_row) < dof_count:
                 dof = dof_start + wp.int32(dof_row)
-                rhs[dof_row] = joint_work[articulation, dof - dof_start_articulation, row] - wp.dot(
-                    data.joint_u[dof], parent_delta
-                )
+                rhs[dof_row] = -wp.dot(data.joint_u[dof], parent_delta)
+                if on_source_path:
+                    rhs[dof_row] += joint_work[articulation, dof - dof_start_articulation, row]
         for dof_row in range(6):
             if wp.int32(dof_row) < dof_count:
                 for dof_column in range(6):
@@ -769,6 +774,11 @@ def _build_packed_generalized_contact_rows_kernel(
                 inverse_mass += packed_jacobian[packed_row, dof - dof_start_articulation] * response_value
                 parent_delta += data.joint_s[dof] * response_value
         body_response[articulation, local_joint, row] = parent_delta
+        if on_source_path:
+            path_cursor += wp.int32(1)
+            next_path_joint = wp.int32(-1)
+            if path_cursor < path_end:
+                next_path_joint = data.body_path_joint[path_cursor]
 
     if inverse_mass > wp.float32(1.0e-12):
         effective_mass = wp.float32(1.0) / inverse_mass

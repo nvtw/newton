@@ -1521,7 +1521,7 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")
 
-        model = _make_floating_tree(device)
+        model = _make_branched_tree(device)
         state = model.state()
         solver = newton.solvers.SolverPhoenX(
             model,
@@ -1534,7 +1534,7 @@ class TestReducedArticulation(unittest.TestCase):
         block = bridge.contact_block_system
         dof_count = int(model.joint_dof_count)
         wrench = wp.spatial_vector(0.7, -0.2, 0.4, -0.3, 0.6, 0.1)
-        row_body = np.ones(block.row_body.shape, dtype=np.int32)
+        row_body = np.full(block.row_body.shape, 4, dtype=np.int32)
         rng = np.random.default_rng(20260702)
         row_wrench = rng.uniform(-0.8, 0.8, (*block.row_wrench.shape, 6)).astype(np.float32)
         row_wrench[0, 0] = np.asarray(wrench, dtype=np.float32)
@@ -1622,7 +1622,7 @@ class TestReducedArticulation(unittest.TestCase):
                 dim=1,
                 inputs=[
                     solver.bodies,
-                    wp.int32(2),
+                    wp.int32(5),
                     wrench,
                     reference_jacobian,
                     probe,
