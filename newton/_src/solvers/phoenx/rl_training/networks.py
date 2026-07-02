@@ -657,6 +657,7 @@ class PufferMinGRUNet:
             self.encoder_out: wp.array2d[wp.float32] | None = None
             self.combined: list[wp.array2d[wp.float32]] = []
             self.outputs: list[wp.array2d[wp.float32]] = []
+            self.recurrent: list[wp.array2d[wp.float32]] = []
             self.decoder_out: wp.array2d[wp.float32] | None = None
 
     def __init__(
@@ -716,6 +717,7 @@ class PufferMinGRUNet:
         self._manual_encoder_out: wp.array2d[wp.float32] | None = None
         self._manual_combined: list[wp.array2d[wp.float32]] = []
         self._manual_outputs: list[wp.array2d[wp.float32]] = []
+        self._manual_recurrent: list[wp.array2d[wp.float32]] = []
         self._manual_decoder_out: wp.array2d[wp.float32] | None = None
         self._manual_decoder_input_grad: wp.array2d[wp.float32] | None = None
         self._manual_grad_combined: list[wp.array2d[wp.float32]] = []
@@ -749,8 +751,8 @@ class PufferMinGRUNet:
 
         rows = int(batch_size)
         self.reserve_forward_buffers(rows)
-        self._ensure_forward_scratch(rows, "sequence")
         self._ensure_manual_buffers(rows)
+        self._ensure_forward_scratch(rows, "sequence")
 
     def zero_state(self) -> None:
         """Clear all persistent rollout recurrent state."""
@@ -821,39 +823,21 @@ class PufferMinGRUNet:
         self._manual_input = x
         if self._manual_encoder_out is None or self._manual_decoder_out is None:
             raise RuntimeError("manual buffers were not initialized")
-        wp.launch(
-            dense_layer_kernel,
-            dim=(rows, self.hidden_size),
-            inputs=[x, self.encoder_weight, self._zero_hidden, self.input_dim, ACTIVATION_LINEAR],
-            outputs=[self._manual_encoder_out],
-            device=self.device,
-        )
+        self._linear_forward(x, self.encoder_weight, self._zero_hidden, rows, self._manual_encoder_out)
         h = self._manual_encoder_out
         for layer, weight in enumerate(self.recurrent_weights):
             combined = self._manual_combined[layer]
             out = self._manual_outputs[layer]
-            wp.launch(
-                dense_layer_kernel,
-                dim=(rows, 3 * self.hidden_size),
-                inputs=[h, weight, self._zero_combined, self.hidden_size, ACTIVATION_LINEAR],
-                outputs=[combined],
-                device=self.device,
-            )
+            self._linear_forward(h, weight, self._zero_combined, rows, combined)
             wp.launch(
                 mingru_sequence_forward_kernel,
                 dim=(envs, self.hidden_size),
                 inputs=[combined, h, steps, envs, self.hidden_size],
-                outputs=[out],
+                outputs=[out, self._manual_recurrent[layer]],
                 device=self.device,
             )
             h = out
-        wp.launch(
-            dense_layer_kernel,
-            dim=(rows, self.output_dim),
-            inputs=[h, self.decoder_weight, self._zero_output, self.hidden_size, ACTIVATION_LINEAR],
-            outputs=[self._manual_decoder_out],
-            device=self.device,
-        )
+        self._linear_forward(h, self.decoder_weight, self._zero_output, rows, self._manual_decoder_out)
         return self._manual_decoder_out
 
     def backward_manual(self, output_grad: wp.array2d[wp.float32]) -> None:
@@ -884,7 +868,15 @@ class PufferMinGRUNet:
             wp.launch(
                 mingru_sequence_backward_kernel,
                 dim=(envs, self.hidden_size),
-                inputs=[self._manual_combined[layer], x_in, grad_h, steps, envs, self.hidden_size],
+                inputs=[
+                    self._manual_combined[layer],
+                    x_in,
+                    self._manual_recurrent[layer],
+                    grad_h,
+                    steps,
+                    envs,
+                    self.hidden_size,
+                ],
                 outputs=[grad_combined, grad_highway],
                 device=self.device,
             )
@@ -915,6 +907,40 @@ class PufferMinGRUNet:
         _check_same_shapes(self.parameters(), other.parameters())
         for src, dst in zip(other.parameters(), self.parameters(), strict=True):
             wp.launch(copy_2d_kernel, dim=dst.shape, inputs=[src], outputs=[dst], device=self.device)
+
+    def _linear_forward(
+        self,
+        x: wp.array2d[wp.float32],
+        weight: wp.array2d[wp.float32],
+        zero_bias: wp.array[wp.float32],
+        rows: int,
+        out: wp.array2d[wp.float32],
+    ) -> None:
+        in_dim = int(weight.shape[0])
+        out_dim = int(weight.shape[1])
+        if (
+            self.device.is_cuda
+            and rows >= DENSE_TILE_BATCH
+            and rows % DENSE_TILE_BATCH == 0
+            and in_dim % DENSE_TILE_IN == 0
+            and out_dim % DENSE_TILE_OUT == 0
+        ):
+            wp.launch_tiled(
+                dense_forward_tiled_kernel,
+                dim=(rows // DENSE_TILE_BATCH, out_dim // DENSE_TILE_OUT),
+                inputs=[x, weight, in_dim],
+                outputs=[out],
+                block_dim=DENSE_TILE_BLOCK_DIM,
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                dense_layer_kernel,
+                dim=(rows, out_dim),
+                inputs=[x, weight, zero_bias, in_dim, ACTIVATION_LINEAR],
+                outputs=[out],
+                device=self.device,
+            )
 
     def _check_input(self, x: wp.array2d[wp.float32]) -> int:
         if x.ndim != 2:
@@ -954,6 +980,16 @@ class PufferMinGRUNet:
         scratch.outputs = [
             wp.empty((rows, self.hidden_size), dtype=wp.float32, device=self.device) for _ in range(self.num_layers)
         ]
+        if name == "sequence":
+            if self._manual_capacity >= rows:
+                scratch.recurrent = self._manual_recurrent
+            else:
+                scratch.recurrent = [
+                    wp.empty((rows, self.hidden_size), dtype=wp.float32, device=self.device)
+                    for _ in range(self.num_layers)
+                ]
+        else:
+            scratch.recurrent = []
         scratch.decoder_out = wp.empty((rows, self.output_dim), dtype=wp.float32, device=self.device)
         return scratch
 
@@ -969,6 +1005,9 @@ class PufferMinGRUNet:
             wp.empty((rows, 3 * self.hidden_size), dtype=wp.float32, device=self.device) for _ in range(self.num_layers)
         ]
         self._manual_outputs = [
+            wp.empty((rows, self.hidden_size), dtype=wp.float32, device=self.device) for _ in range(self.num_layers)
+        ]
+        self._manual_recurrent = [
             wp.empty((rows, self.hidden_size), dtype=wp.float32, device=self.device) for _ in range(self.num_layers)
         ]
         self._manual_decoder_out = wp.empty((rows, self.output_dim), dtype=wp.float32, device=self.device)
@@ -995,24 +1034,12 @@ class PufferMinGRUNet:
     ) -> wp.array2d[wp.float32]:
         if scratch.encoder_out is None or scratch.decoder_out is None:
             raise RuntimeError("forward scratch was not initialized")
-        wp.launch(
-            dense_layer_kernel,
-            dim=(rows, self.hidden_size),
-            inputs=[x, self.encoder_weight, self._zero_hidden, self.input_dim, ACTIVATION_LINEAR],
-            outputs=[scratch.encoder_out],
-            device=self.device,
-        )
+        self._linear_forward(x, self.encoder_weight, self._zero_hidden, rows, scratch.encoder_out)
         h = scratch.encoder_out
         for layer, weight in enumerate(self.recurrent_weights):
             combined = scratch.combined[layer]
             out = scratch.outputs[layer]
-            wp.launch(
-                dense_layer_kernel,
-                dim=(rows, 3 * self.hidden_size),
-                inputs=[h, weight, self._zero_combined, self.hidden_size, ACTIVATION_LINEAR],
-                outputs=[combined],
-                device=self.device,
-            )
+            self._linear_forward(h, weight, self._zero_combined, rows, combined)
             wp.launch(
                 mingru_step_kernel,
                 dim=(rows, self.hidden_size),
@@ -1021,13 +1048,7 @@ class PufferMinGRUNet:
                 device=self.device,
             )
             h = out
-        wp.launch(
-            dense_layer_kernel,
-            dim=(rows, self.output_dim),
-            inputs=[h, self.decoder_weight, self._zero_output, self.hidden_size, ACTIVATION_LINEAR],
-            outputs=[scratch.decoder_out],
-            device=self.device,
-        )
+        self._linear_forward(h, self.decoder_weight, self._zero_output, rows, scratch.decoder_out)
         return scratch.decoder_out[:rows]
 
     def _forward_sequence(
@@ -1040,39 +1061,21 @@ class PufferMinGRUNet:
     ) -> wp.array2d[wp.float32]:
         if scratch.encoder_out is None or scratch.decoder_out is None:
             raise RuntimeError("forward scratch was not initialized")
-        wp.launch(
-            dense_layer_kernel,
-            dim=(rows, self.hidden_size),
-            inputs=[x, self.encoder_weight, self._zero_hidden, self.input_dim, ACTIVATION_LINEAR],
-            outputs=[scratch.encoder_out],
-            device=self.device,
-        )
+        self._linear_forward(x, self.encoder_weight, self._zero_hidden, rows, scratch.encoder_out)
         h = scratch.encoder_out
         for layer, weight in enumerate(self.recurrent_weights):
             combined = scratch.combined[layer]
             out = scratch.outputs[layer]
-            wp.launch(
-                dense_layer_kernel,
-                dim=(rows, 3 * self.hidden_size),
-                inputs=[h, weight, self._zero_combined, self.hidden_size, ACTIVATION_LINEAR],
-                outputs=[combined],
-                device=self.device,
-            )
+            self._linear_forward(h, weight, self._zero_combined, rows, combined)
             wp.launch(
                 mingru_sequence_forward_kernel,
                 dim=(envs, self.hidden_size),
                 inputs=[combined, h, steps, envs, self.hidden_size],
-                outputs=[out],
+                outputs=[out, scratch.recurrent[layer]],
                 device=self.device,
             )
             h = out
-        wp.launch(
-            dense_layer_kernel,
-            dim=(rows, self.output_dim),
-            inputs=[h, self.decoder_weight, self._zero_output, self.hidden_size, ACTIVATION_LINEAR],
-            outputs=[scratch.decoder_out],
-            device=self.device,
-        )
+        self._linear_forward(h, self.decoder_weight, self._zero_output, rows, scratch.decoder_out)
         return scratch.decoder_out[:rows]
 
     def _zero_tail(self, x: wp.array2d[wp.float32], rows: int, width: int) -> None:

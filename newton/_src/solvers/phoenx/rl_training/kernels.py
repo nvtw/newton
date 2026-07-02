@@ -226,6 +226,7 @@ def mingru_sequence_forward_kernel(
     num_envs: wp.int32,
     hidden_dim: wp.int32,
     out: wp.array2d[wp.float32],
+    recurrent_out: wp.array2d[wp.float32],
 ):
     env, hidden = wp.tid()
     recurrent = wp.float32(0.0)
@@ -237,6 +238,7 @@ def mingru_sequence_forward_kernel(
         candidate = _mingru_hidden_candidate(hidden_pre)
         gate = _sigmoid(gate_pre)
         recurrent = recurrent + gate * (candidate - recurrent)
+        recurrent_out[row, hidden] = recurrent
         proj = _sigmoid(proj_pre)
         x_val = x[row, hidden]
         out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
@@ -246,6 +248,7 @@ def mingru_sequence_forward_kernel(
 def mingru_sequence_backward_kernel(
     combined: wp.array2d[wp.float32],
     x: wp.array2d[wp.float32],
+    recurrent: wp.array2d[wp.float32],
     grad_out: wp.array2d[wp.float32],
     num_steps: wp.int32,
     num_envs: wp.int32,
@@ -260,25 +263,19 @@ def mingru_sequence_backward_kernel(
         row = step * num_envs + env
         prev_recurrent = wp.float32(0.0)
         if step > wp.int32(0):
-            for prefix in range(step):
-                prev_row = prefix * num_envs + env
-                prev_hidden_pre = combined[prev_row, hidden]
-                prev_gate_pre = combined[prev_row, hidden_dim + hidden]
-                prev_candidate = _mingru_hidden_candidate(prev_hidden_pre)
-                prev_gate = _sigmoid(prev_gate_pre)
-                prev_recurrent = prev_recurrent + prev_gate * (prev_candidate - prev_recurrent)
+            prev_recurrent = recurrent[row - num_envs, hidden]
 
         hidden_pre = combined[row, hidden]
         gate_pre = combined[row, hidden_dim + hidden]
         proj_pre = combined[row, wp.int32(2) * hidden_dim + hidden]
         candidate = _mingru_hidden_candidate(hidden_pre)
         gate = _sigmoid(gate_pre)
-        recurrent = prev_recurrent + gate * (candidate - prev_recurrent)
+        current_recurrent = recurrent[row, hidden]
         proj = _sigmoid(proj_pre)
         x_val = x[row, hidden]
 
         grad_y = grad_out[row, hidden]
-        grad_proj = grad_y * (recurrent - x_val)
+        grad_proj = grad_y * (current_recurrent - x_val)
         grad_recurrent = grad_y * proj + grad_recurrent_next
         grad_highway_input[row, hidden] = grad_y * (wp.float32(1.0) - proj)
 

@@ -58,10 +58,25 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · dense contact responses coalesced</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · recurrent training path accelerated</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">END-TO-END TRAINING SPEEDUP</span><time>2 Jul - latest</time></div>
+      <h2>Linear-time MinGRU backprop and tiled projections deliver a substantial general gain</h2>
+      <p>A full PPO Nsight trace showed that neural kernels consume about 43% of GPU time, core reduced-coordinate physics about 34%, and training diagnostics about 5%. The largest correctness-preserving opportunity was in the learner: MinGRU backprop recomputed every recurrent prefix at every reverse step, making it quadratic in sequence length. Forward now stores the recurrent states that backward needs, reducing this work to linear time.</p>
+      <ul>
+        <li>Aligned CUDA projections now use the existing FP32 tiled matrix-multiply path; irregular dimensions keep the scalar fallback. The dispatch depends only on dimensions and device capability, not on G1 or any scene-specific property.</li>
+        <li>Synchronized eager throughput improved from roughly 285.8k samples/s with a 0.894 s PPO update to 339.5k samples/s with a 0.618 s update. The short graph-leapfrog benchmark reaches about 363k samples/s, approximately 18% above the previous 308k milestone.</li>
+        <li>The remaining gap to nanoG1&#39;s pinned 1.276M samples/s is about 3.52x. Neural dense forward, weight-gradient, and recurrent backward kernels remain major targets, alongside contact solve/publish/advance in physics.</li>
+        <li>Five focused CUDA-graph tests pass: tiled-forward NumPy parity, direct analytical BPTT, finite-difference gradients, rollout/update replay consistency, and PPO train/save/load.</li>
+        <li>The complete 96-test G1 RL module reports 94 passes and two skips, with two failures independently reproduced on the unmodified commit: a tight standing-drift threshold and a gait-penalty expectation. This candidate introduces no newly observed module failure.</li>
+        <li>An exact dense inverse-mass contact-operator prototype was also measured and rejected: although its algebra matched row-wise ABA within 4.77e-7, it slowed the contact-rich G1 physics benchmark by about 10%.</li>
+      </ul>
+      <p><strong>Next:</strong> run the unchanged from-scratch walking-quality gate. If it passes, retain this as the new training baseline and optimize the remaining dense/weight-gradient kernels plus the graph-captured diagnostic reduction. Any further speed candidate must pass the same quality gate and diverse articulation/contact regressions.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">NSIGHT-GUIDED CONTACT ROWS</span><time>2 Jul - latest</time></div>

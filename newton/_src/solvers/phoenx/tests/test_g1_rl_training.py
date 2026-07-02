@@ -77,6 +77,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     compute_puffer_vtrace_returns_kernel,
     gather_trajectory_minibatch_kernel,
     mingru_sequence_backward_kernel,
+    mingru_sequence_forward_kernel,
     ppo_actor_loss_backward_kernel,
     reduce_ppo_log_std_grad_kernel,
     sample_trajectory_env_ids_kernel,
@@ -1931,6 +1932,49 @@ class TestG1PhoenXRL(unittest.TestCase):
         preserved_replay_values = preserved_replay.numpy()[: buffer.num_samples, trainer.value_column].copy()
         self.assertFalse(np.allclose(preserved_values, preserved_replay_values, rtol=1.0e-5, atol=1.0e-5))
 
+    def test_puffer_mingru_aligned_tiled_sequence_matches_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX tiled MinGRU forward tests")
+        batch_size = 128
+        width = 16
+        rng = np.random.default_rng(20260702)
+        obs_np = rng.uniform(-0.4, 0.4, (batch_size, width)).astype(np.float32)
+        encoder_np = rng.uniform(-0.2, 0.2, (width, width)).astype(np.float32)
+        recurrent_np = rng.uniform(-0.2, 0.2, (width, 3 * width)).astype(np.float32)
+        decoder_np = rng.uniform(-0.2, 0.2, (width, width)).astype(np.float32)
+
+        net = rl.PufferMinGRUNet(
+            input_dim=width,
+            hidden_size=width,
+            output_dim=width,
+            num_layers=1,
+            device=device,
+            seed=3,
+        )
+        net.encoder_weight.assign(encoder_np)
+        net.recurrent_weights[0].assign(recurrent_np)
+        net.decoder_weight.assign(decoder_np)
+        net.reserve_buffers(batch_size)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        snapshot = wp.empty((batch_size, width), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            output = net.forward_sequence_reuse(obs, num_steps=1, num_envs=batch_size)
+            wp.copy(snapshot, output)
+        wp.capture_launch(capture.graph)
+
+        hidden = obs_np @ encoder_np
+        combined = hidden @ recurrent_np
+        candidate = np.where(
+            combined[:, :width] >= 0.0,
+            combined[:, :width] + 0.5,
+            1.0 / (1.0 + np.exp(-combined[:, :width])),
+        )
+        gate = 1.0 / (1.0 + np.exp(-combined[:, width : 2 * width]))
+        recurrent = gate * candidate
+        projection = 1.0 / (1.0 + np.exp(-combined[:, 2 * width :]))
+        expected = (projection * recurrent + (1.0 - projection) * hidden) @ decoder_np
+        np.testing.assert_allclose(snapshot.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
+
     def test_puffer_mingru_forward_and_reset_match_numpy_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 MinGRU network tests")
         models_py = _PUFFERLIB_ROOT / "pufferlib" / "models.py"
@@ -2153,12 +2197,21 @@ class TestG1PhoenXRL(unittest.TestCase):
         grad_out = wp.array(grad_out_np, dtype=wp.float32, device=device)
         grad_combined = wp.zeros_like(combined)
         grad_highway = wp.zeros_like(x)
+        output = wp.zeros_like(x)
+        recurrent_device = wp.zeros_like(x)
 
         with wp.ScopedCapture(device=device) as capture:
             wp.launch(
+                mingru_sequence_forward_kernel,
+                dim=(1, 1),
+                inputs=[combined, x, 2, 1, 1],
+                outputs=[output, recurrent_device],
+                device=device,
+            )
+            wp.launch(
                 mingru_sequence_backward_kernel,
                 dim=(1, 1),
-                inputs=[combined, x, grad_out, 2, 1, 1],
+                inputs=[combined, x, recurrent_device, grad_out, 2, 1, 1],
                 outputs=[grad_combined, grad_highway],
                 device=device,
             )
