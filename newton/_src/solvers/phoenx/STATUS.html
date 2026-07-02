@@ -58,24 +58,23 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · recurrent training path accelerated</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · learner speedup quality-audited</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
 
     <article>
-      <div class="meta"><span class="tag">END-TO-END TRAINING SPEEDUP</span><time>2 Jul - latest</time></div>
-      <h2>Linear-time MinGRU backprop and tiled projections deliver a substantial general gain</h2>
-      <p>A full PPO Nsight trace showed that neural kernels consume about 43% of GPU time, core reduced-coordinate physics about 34%, and training diagnostics about 5%. The largest correctness-preserving opportunity was in the learner: MinGRU backprop recomputed every recurrent prefix at every reverse step, making it quadratic in sequence length. Forward now stores the recurrent states that backward needs, reducing this work to linear time.</p>
+      <div class="meta"><span class="tag">LEARNER SPEEDUP AUDITED</span><time>2 Jul - latest</time></div>
+      <h2>Linear-time MinGRU backprop is retained; the strict recipe still needs work</h2>
+      <p>A full PPO Nsight trace attributes about 43% of GPU time to neural kernels, 34% to core reduced-coordinate physics, and 5% to optional diagnostics. MinGRU backward was genuinely quadratic in sequence length because it recomputed every recurrent prefix at every reverse step. Forward now retains the needed recurrent states, making backpropagation linear; aligned projections use the existing tiled FP32 path.</p>
       <ul>
-        <li>Aligned CUDA projections now use the existing FP32 tiled matrix-multiply path; irregular dimensions keep the scalar fallback. The dispatch depends only on dimensions and device capability, not on G1 or any scene-specific property.</li>
-        <li>Synchronized eager throughput improved from roughly 285.8k samples/s with a 0.894 s PPO update to 339.5k samples/s with a 0.618 s update. The short graph-leapfrog benchmark reaches about 363k samples/s, approximately 18% above the previous 308k milestone.</li>
-        <li>The remaining gap to nanoG1&#39;s pinned 1.276M samples/s is about 3.52x. Neural dense forward, weight-gradient, and recurrent backward kernels remain major targets, alongside contact solve/publish/advance in physics.</li>
-        <li>Five focused CUDA-graph tests pass: tiled-forward NumPy parity, direct analytical BPTT, finite-difference gradients, rollout/update replay consistency, and PPO train/save/load.</li>
-        <li>The complete 96-test G1 RL module reports 94 passes and two skips, with two failures independently reproduced on the unmodified commit: a tight standing-drift threshold and a gait-penalty expectation. This candidate introduces no newly observed module failure.</li>
-        <li>An exact dense inverse-mass contact-operator prototype was also measured and rejected: although its algebra matched row-wise ABA within 4.77e-7, it slowed the contact-rich G1 physics benchmark by about 10%.</li>
+        <li>On the established fast reduced schedule (5 temporal substeps, 2 PGS iterations, 1 velocity iteration), the clean graph-leapfrog baseline measures 393.5k samples/s, about 3.25x behind nanoG1&#39;s pinned 1.28M/s. The heavier 10x8x2 stability stress schedule reaches 220.5k/s and must not be confused with the fast training benchmark.</li>
+        <li>Under the deliberately expensive 25-iteration train/save/rebuild/evaluate protocol, optimized training reached 148.7k samples/s versus 137.4k for the parent implementation, an 8.2% gain. Short synchronized eager timing previously showed a larger update-side reduction.</li>
+        <li>A same-seed 75.5M-sample A/B produced zero-fall walking policies in both cases. Parent versus optimized quality was 0.881 versus 0.861 tracking, 0.280 versus 0.261 action jerk, and 0.412 versus 0.348 torso angular RMS. The optimized learner is not a systematic quality regression, but neither fixed recipe passes the unchanged strict gate.</li>
+        <li>Five focused CUDA-graph regressions pass: tiled-forward NumPy parity, analytical BPTT, finite-difference gradients, rollout/update replay consistency, and PPO train/save/load. The full G1 module has two pre-existing failures reproduced on the parent commit.</li>
+        <li>An exact dense inverse-mass contact operator was rejected after slowing contact-rich G1 physics by about 10%. Bounds-checked edge tiling was also rejected after an exact 10-iteration A/B measured 392.3k versus 393.5k/s.</li>
       </ul>
-      <p><strong>Next:</strong> run the unchanged from-scratch walking-quality gate. If it passes, retain this as the new training baseline and optimize the remaining dense/weight-gradient kernels plus the graph-captured diagnostic reduction. Any further speed candidate must pass the same quality gate and diverse articulation/contact regressions.</p>
+      <p><strong>Next:</strong> use short deterministic training segments and mini-batteries to repair repeatability and screen optimizations. Reserve full 75M gates for candidates that first improve those fast signals. Continue with profile-backed dense-gradient/recurrent work and the remaining contact solve/publish/advance path without changing hard-Hertz physics.</p>
     </article>
 
     <article>
@@ -243,158 +242,6 @@
       <p><strong>Next:</strong> reproduce the pass from scratch with a distilled fixed or smooth reward schedule, then profile that successful configuration and return the validated recipe to full-coordinate PhoenX.</p>
     </article>
 
-    <article>
-      <div class="meta"><span class="tag warn">THROUGHPUT PROFILED</span><time>1 Jul · latest</time></div>
-      <h2>Training is now the performance benchmark; safe tuning helps, but no large solver win is proven yet</h2>
-      <p>A complete Nsight Systems trace covers a real PPO iteration, and every candidate is measured end to end with the G1 training workload rather than an isolated microbenchmark.</p>
-      <ul>
-        <li>The best measured full-coordinate baseline uses 8192 worlds and sustains about 202k samples/s. The pinned nanoG1 result is 1.276M samples/s, so the remaining gap is about 6.3×.</li>
-        <li>8192 worlds beats 4096 and 16384. A 32-thread block per world beats 64/128-thread blocks and the fast-tail scheduler by 27–29% on this scene.</li>
-        <li>BF16 and reducing PGS work produce only a small additional throughput gain. More aggressive reductions are not accepted because the full-coordinate policy still misses the frozen quality gate.</li>
-        <li>Nsight attributes 19.3% of GPU time to block-world prepare/PGS, 6.6% to multi-world coloring, about 6.0% to physics radix sorts, and 3.6% to narrow phase. Neural-network forward and gradient kernels account for roughly 41%.</li>
-        <li>The next code experiments target reusable/static joint topology, cheaper dynamic-contact coloring/sorting, and solve-kernel traffic. Each must preserve CUDA graph capture, determinism, physical regressions, and frozen-policy quality.</li>
-      </ul>
-      <p><strong>Verdict:</strong> profiling and training-based A/B measurement are in place; configuration tuning is proven, but a major general-purpose PhoenX optimization has not yet landed.</p>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag warn">MAXIMAL GAP MEASURED</span><time>30 Jun · latest</time></div>
-      <h2>75M maximal training is stable, but maximal tree coupling still blocks the gate</h2>
-      <p>Two independent full-coordinate runs completed at the pinned 75M-sample budget. Neither passed: the best final run reached 0.570 aggregate performance with 11 falls, and fast-forward tracking remained only 0.137. Reward curricula and adapting a proven nanoG1 oracle did not remove the gap.</p>
-      <ul>
-        <li>An equivalent-physics comparison gives reduced PhoenX the same rotor-side body tensors and zero generalized armature. The first-frame maximal/reduced joint-velocity RMS gap is still about 0.58 rad/s; waist roll is −2.05 versus −0.06 rad/s.</li>
-        <li>This isolates the remaining quality issue to maximal PGS tree coupling/convergence, not armature semantics, PPO initialization, or reward shaping.</li>
-        <li>A complete node-level Nsight trace of real PPO training shows block-world prepare/PGS at 19.3% of GPU time, multi-world coloring at 6.6%, physics radix sorts at about 6.0%, and narrow phase at about 3.6%. Dense forward and weight-gradient kernels cost 18.3% and 12.7%.</li>
-        <li>8192 worlds is the measured batching optimum. It sustains about 202k training samples/s on the conservative 10×8×2 schedule—about 6.3× below nanoG1. 16384 worlds is slower.</li>
-        <li>Two PGS iterations and BF16 provide only a small additional gain; 32-thread block-per-world remains 27–29% faster than 64/128-thread blocks or fast-tail on G1.</li>
-      </ul>
-      <p><strong>Next:</strong> secure a passing policy with the articulation-preconditioned maximal rows, then optimize the measured solve/color/sort costs without weakening the frozen gate.</p>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag warn">MAXIMAL G1 TRAINING</span><time>30 Jun · live run</time></div>
-      <h2>Full-coordinate G1 is stable and learning, but has not passed yet</h2>
-      <p>The physically reflected armature fixed the maximal chain, and replacing explicitly integrated derivative torque with PhoenX’s implicit torque-limited motor row removed the remaining waist-pitch explosion. The first real maximal PPO run is now finite and improving.</p>
-      <ul>
-        <li>At 2.62M samples: 0.528 aggregate tracking, 86 battery falls.</li>
-        <li>At 26.2M samples: 0.590 aggregate tracking, 33 battery falls. This is progress, but still a gate failure.</li>
-        <li>The run is continuing to the pinned 75M-sample nanoG1 budget. Success is not claimed until a frozen checkpoint passes the robust walking gate.</li>
-        <li>Training throughput is about 161k samples/s, 7.9× slower than nanoG1’s pinned 1.276M/s. Including periodic evaluations gives about 131k/s, 9.7× slower.</li>
-      </ul>
-      <p><strong>Current priority:</strong> finish the 75M run and diagnose quality if it still misses. Only a successful policy becomes the baseline for Nsight-guided speed work.</p>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag">ARMATURE VALIDATED</span><time>30 Jun · latest</time></div>
-      <h2>Full-coordinate PhoenX now uses physical reflected rotor inertia</h2>
-      <p>The unstable auxiliary armature constraint row has been removed entirely. Rotational motor armature is instead reflected through the gearbox and added as a rank-one inertia tensor to the rotor-side child body, in the child body frame. The authored parent inertia contains the stator/link inertia.</p>
-      <ul>
-        <li>The previously failing full 29-joint G1 free-space CUDA-graph regression now passes instead of diverging beyond 6 rad.</li>
-        <li>Analytical pendulum tests pass across an armature sweep, and gear tests pass the expected <code>gear² × rotor inertia</code> period scaling, including a 100:1 ratio.</li>
-        <li>Off-axis tensor placement, free-floating angular-momentum conservation, and live domain-randomization updates have direct regressions; zero armature remains a no-op.</li>
-        <li>The model is deterministic and uses ordinary body inertia and gyroscopic dynamics—no relaxation, interaction-count scaling, or solver tuning.</li>
-        <li>Scope is deliberately physical: maximal mode currently accepts rotational armature on revolute joints. Translational and multi-axis armature are rejected instead of approximated inaccurately.</li>
-      </ul>
-      <p><strong>Current verdict:</strong> validated for the revolute robot-motor case. All 18 focused CUDA-graph tests pass, including the formerly divergent G1 chain. Removing the obsolete row also removes two fields, its solve branches, and two per-body substep velocity snapshots from the full-coordinate hot path. Next: prove successful maximal-coordinate G1 policy training, then optimize measured throughput without weakening the gate.</p>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag block">ROOT CAUSE ISOLATED</span><time>30 Jun</time></div>
-      <h2>Pure-maximal G1 armature is not yet reliable</h2>
-      <p>A controlled free-space, zero-action sweep isolates the failure to the maximal-coordinate armature path rather than contacts, friction, policy actions, or an insufficient iteration count.</p>
-      <ul>
-        <li>With armature disabled, the full 29-joint G1 remains at its home pose to numerical precision over the test horizon.</li>
-        <li>With physical armature enabled, the same chain diverges. Raising the schedule as far as 10 substeps × 64 PGS iterations does not fix it and convergence is non-monotonic.</li>
-        <li>The current pendulum and three-link armature tests are therefore insufficient. The fix must add a deep spatial-chain, CUDA-graph regression and preserve momentum and the exact configured armature.</li>
-        <li>The equal-work substep-versus-iteration claim cannot be judged honestly until this defect is removed.</li>
-        <li>An exact local 2×2 drive/armature block did not improve the failure, proving the problematic coupling spans the tree joint-lock rows rather than just the motor row.</li>
-        <li>Armature-row relaxation at 0.1 passes the G1 stability check but destroys physical accuracy: pendulum period errors reach 67% and three-link modal errors reach 47%. It is rejected, not retained.</li>
-        <li>The clean next implementation is an exact tree-coupled maximal mass operator for <code>M_body + Jᵀ A J</code> (tree LDL/Woodbury), while keeping maximal joint and contact rows. This has the correct fixed-time-step physics and avoids tuning parameters.</li>
-      </ul>
-      <p>Existing Nsight traces also identify the first performance targets. In classic contact-rich G1, radix sorting consumes 21.1% of GPU kernel time, block-world prepare/iterate 20.8%, greedy coloring 8.0%, and scans 5.9%. In the articulated contact-rich path, generalized contact construction/solve/gather/finalize dominates roughly 55% before factorization and momentum passes. Correctness remains first; these measurements define the subsequent optimization work.</p>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag block">NOT YET COMPETITIVE</span><time>30 Jun · 22:20</time></div>
-      <h2>Hybrid versus FeatherPGS</h2>
-      <p>There is no valid same-scene, same-GPU result proving hybrid competitive with FeatherPGS. Claiming otherwise would be misleading.</p>
-      <ul>
-        <li>FeatherPGS is articulation-specialized and designed around high-throughput parallel articulation solves.</li>
-        <li>Hybrid currently pays for both ABA response and retained maximal rows, so it likely loses raw articulation throughput.</li>
-        <li>Hybrid has demonstrated stable integration with general PhoenX contacts and constraints; it has not demonstrated world-class speed.</li>
-        <li>A direct Anymal/G1 benchmark against FeatherPGS is now an explicit performance requirement, after the pure-maximal schedule/stability sweep.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag warn">COURSE CORRECTION</span><time>30 Jun · 22:15</time></div>
-      <h2>Hybrid is not pure full-coordinate PhoenX</h2>
-      <p>The concern is correct: hybrid uses an ABA/articulated-body factorization for impulse response. Maximal PGS rows remain visible, but reduced-coordinate machinery and duplicated work explain part of the throughput gap.</p>
-      <ul>
-        <li>The best 75M hybrid checkpoint did not pass the strict gate: 7 falls, 0.761 aggregate tracking, with failures concentrated in fast forward motion. Hybrid training learns, but success is not yet sufficient.</li>
-        <li>A physically clean pure-maximal route exists: exact armature plus implicit torque-limited PD joint rows and locally coupled maximal effective-mass blocks. This addresses stiff explicit damping without a global reduced-coordinate solve.</li>
-        <li>Next priority: validate that path on the full 29-joint G1 response, momentum/energy invariants, graph capture, contact-rich scenes, and a short learning curve before any long training run.</li>
-        <li>No artificial mass scaling, interaction-count division, or stability hack will be accepted.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag warn">HYBRID EXPLAINED</span><time>30 Jun · 22:08</time></div>
-      <h2>Is hybrid the perfect full/reduced-coordinate solution?</h2>
-      <p><strong>No, but it is a clean and useful middle ground.</strong> Hybrid keeps every full-coordinate PhoenX joint, loop, limit, motor, and contact row in deterministic PGS. Instead of applying each row through independent rigid-body inverse masses, it applies impulses through an exact linear-time articulated-body response for each tree.</p>
-      <ul>
-        <li><strong>What it gains:</strong> exact tree inertia coupling and armature response, much better conditioning for stiff humanoid drives, momentum conservation, and reduced-like robot stability while retaining maximal PGS constraints and contacts.</li>
-        <li><strong>What remains maximal:</strong> loop closures, contacts, friction, limits, and joint-row residuals are still iterated by PGS. Their convergence and accuracy are not automatically identical to a direct reduced-coordinate solve.</li>
-        <li><strong>Applicability:</strong> it supports multiple articulations per world and many worlds, plus ordinary contacts and maximal constraints. The accelerated path currently requires standard PhoenX, the fast-tail schedule, and no mass splitting; unsupported scene features need broader engineering.</li>
-        <li><strong>Performance:</strong> it is not free. Hybrid evaluates articulated dynamics while also retaining maximal rows, so it cannot honestly be called full speed of the pure full-coordinate solver. Earlier matched measurements showed meaningful overhead; Nsight profiling is still pending.</li>
-        <li><strong>Verdict:</strong> excellent for stiff tree robots embedded in contact-rich maximal scenes, but not yet a universal final solver. A world-class endpoint would preserve its conditioning while eliminating redundant work and proving quality/performance across loops, many articulations, dense contacts, and diverse robots.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag warn">SHORT ANSWER</span><time>30 Jun · 22:00</time></div>
-      <h2>Does PhoenX G1 training finally work?</h2>
-      <ul>
-        <li><strong>Learning works:</strong> a clean from-scratch run reached 75M samples without physics instability and showed a strong improving learning curve through 10.5M. Final walking quality is not claimed yet; post-curriculum checkpoint screening is running now, followed by the strict long-horizon gate.</li>
-        <li><strong>Solver:</strong> this uses <code>articulation_mode="hybrid"</code>. All full-coordinate PhoenX joint and contact PGS rows remain active, but their body response is preconditioned by exact articulated-body dynamics. It is not the unstable pure independent-body <code>maximal</code> mode.</li>
-        <li><strong>PhoenX throughput:</strong> 67.5k samples/s end-to-end for the warm 64.5M continuation, with individual iterations peaking near 74.5k/s on this RTX PRO 6000.</li>
-        <li><strong>Versus nanoG1:</strong> nanoG1 reports about 75M samples in 59 seconds, or 1.27M samples/s. That makes current PhoenX roughly 17–19× slower than the published highly specialized nanoG1 run. The published result uses the same RTX PRO 6000 GPU model, but this is not yet a fresh same-machine comparison; a pinned local measurement is still required.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag warn">EVALUATING</span><time>30 Jun · 21:10</time></div>
-      <h2>Corrected adaptation peaks early</h2>
-      <p>The 2.6M-sample hybrid run completed. Rollout tracking peaked at 0.875 on iteration 1, then declined to 0.734 by iteration 10; dense checkpoints are now being screened with the deterministic command gate.</p>
-      <ul>
-        <li>The exact nanoG1 learning rate of 0.02 is appropriate from scratch but appears too aggressive for transfer from a trained policy.</li>
-        <li>Warm steady-state throughput was roughly 46–60k samples/s; cold compilation dominated total time.</li>
-        <li>Next: retain the best gate checkpoint, then test matched from-scratch convergence and a conservative transfer control.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag">FIXED + TESTED</span><time>30 Jun · 21:02</time></div>
-      <h2>Training recipe parity restored</h2>
-      <p>PhoenX now matches the pinned nanoG1 PPO settings and command curriculum. The source-parity regression failed before the correction and passes afterward; CLI defaults are covered to prevent another silent drift.</p>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag">PHYSICS SOUND</span><time>30 Jun · 20:50</time></div>
-      <h2>Hybrid armature matches reduced dynamics</h2>
-      <p>The shipped policy produces essentially identical deterministic gate behavior under hybrid and reduced PhoenX: 38 falls and tracking performance 0.797 versus 0.795.</p>
-      <ul>
-        <li>Exact armature response, live updates, all 29 G1 joints, CUDA graphs, and momentum conservation have regression coverage.</li>
-        <li>Remaining failures are concentrated in 0.8 m/s forward and lateral commands, pointing to adaptation rather than corrupt dynamics.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag block">REJECTED RUN</span><time>30 Jun · 20:47</time></div>
-      <h2>First 10.5M adaptation used drifted settings</h2>
-      <p>That run improved forward tracking from 0.59 to 0.71 but degraded backward, yaw, and idle skills. Its recipe had silently diverged from pinned nanoG1, so it is retained only as diagnostic evidence.</p>
-      <p>Measured hybrid throughput was 40–44k samples/s steady state and 26.5k/s including startup. A same-GPU nanoG1 measurement and Nsight kernel ranking remain pending.</p>
-    </article>
   </main>
 </body>
 </html>
