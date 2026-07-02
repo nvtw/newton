@@ -296,19 +296,6 @@ class TestControllerNeuralMLP(unittest.TestCase):
     """ControllerNeuralMLP - load via model_path, call compute() directly."""
 
     def setUp(self):
-        # Mark the test as skipped if Torch is not installed but required
-        try:
-            import torch
-
-            if wp.get_device().is_cuda and not torch.cuda.is_available():
-                # Ensure torch has CUDA support
-                self.skipTest("Torch not compiled with CUDA support")
-
-        except Exception as e:
-            self.skipTest(f"{e}")
-
-        self.torch = torch
-        _ignore_torchscript_deprecation(self)
         self.device = wp.get_device()
         self._tmp_dir = tempfile.mkdtemp()
 
@@ -470,19 +457,6 @@ class TestControllerNeuralLSTM(unittest.TestCase):
     """ControllerNeuralLSTM - load via model_path, call compute() directly."""
 
     def setUp(self):
-        # Mark the test as skipped if Torch is not installed but required
-        try:
-            import torch
-
-            if wp.get_device().is_cuda and not torch.cuda.is_available():
-                # Ensure torch has CUDA support
-                self.skipTest("Torch not compiled with CUDA support")
-
-        except Exception as e:
-            self.skipTest(f"{e}")
-
-        self.torch = torch
-        _ignore_torchscript_deprecation(self)
         self.device = wp.get_device()
         self._tmp_dir = tempfile.mkdtemp()
 
@@ -1710,19 +1684,6 @@ class TestNeuralActuatorUsdParsing(unittest.TestCase):
     """
 
     def setUp(self):
-        # Mark the test as skipped if Torch is not installed but required
-        try:
-            import torch
-
-            if wp.get_device().is_cuda and not torch.cuda.is_available():
-                # Ensure torch has CUDA support
-                self.skipTest("Torch not compiled with CUDA support")
-
-        except Exception as e:
-            self.skipTest(f"{e}")
-
-        self.torch = torch
-        _ignore_torchscript_deprecation(self)
         self._tmp_dir = tempfile.mkdtemp()
 
     def tearDown(self):
