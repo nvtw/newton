@@ -380,6 +380,7 @@ def _count_reduced_contact_pages_kernel(
     max_page_count: wp.array[wp.int32],
     multi_page_active: wp.array[wp.int32],
     overflow_page_active: wp.array[wp.int32],
+    transpose_active: wp.array[wp.int32],
     deferred_active: wp.array[wp.int32],
 ):
     articulation = wp.tid()
@@ -407,6 +408,8 @@ def _count_reduced_contact_pages_kernel(
             wp.atomic_max(multi_page_active, wp.int32(0), wp.int32(1))
         if pages > wp.int32(_CACHED_PAGE_COUNT):
             wp.atomic_max(overflow_page_active, wp.int32(0), wp.int32(1))
+        if count * wp.int32(3) > wp.int32(_RESPONSE_TILE):
+            wp.atomic_max(transpose_active, wp.int32(0), wp.int32(1))
     elif count > wp.int32(0):
         wp.atomic_max(deferred_active, wp.int32(0), wp.int32(1))
 
@@ -1134,6 +1137,7 @@ class ReducedContactBlockSystem:
         self.max_page_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.multi_page_active = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.overflow_page_active = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.transpose_active = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.page_cursor = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.page_index = wp.zeros(1, dtype=wp.int32, device=self.device)
         packed_articulation_count = articulation_count * _CACHED_PAGE_COUNT
@@ -1440,6 +1444,7 @@ class ReducedContactBlockSystem:
             self.max_page_count.zero_()
             self.multi_page_active.zero_()
             self.overflow_page_active.zero_()
+            self.transpose_active.zero_()
             wp.launch(
                 _count_reduced_contact_pages_kernel,
                 dim=self.articulation_count,
@@ -1455,6 +1460,7 @@ class ReducedContactBlockSystem:
                     self.max_page_count,
                     self.multi_page_active,
                     self.overflow_page_active,
+                    self.transpose_active,
                     self.deferred_active,
                 ],
                 device=self.device,
@@ -1508,22 +1514,26 @@ class ReducedContactBlockSystem:
                     ],
                     device=self.device,
                 )
-                wp.launch_tiled(
-                    _transpose_generalized_contact_response_kernel,
-                    dim=[self.articulation_count * _RESPONSE_TILES_PER_ARTICULATION],
-                    block_dim=_RESPONSE_TILE,
-                    inputs=[
-                        bodies,
-                        self.enabled,
-                        self.point_count,
-                        self.page_index,
-                        self.max_page_count,
-                        wp.bool(prepare),
-                        self.aba_joint_work,
-                    ],
-                    outputs=[self.packed_response],
-                    device=self.device,
-                )
+
+                def transpose_response() -> None:
+                    wp.launch_tiled(
+                        _transpose_generalized_contact_response_kernel,
+                        dim=[self.articulation_count * _RESPONSE_TILES_PER_ARTICULATION],
+                        block_dim=_RESPONSE_TILE,
+                        inputs=[
+                            bodies,
+                            self.enabled,
+                            self.point_count,
+                            self.page_index,
+                            self.max_page_count,
+                            wp.bool(prepare),
+                            self.aba_joint_work,
+                        ],
+                        outputs=[self.packed_response],
+                        device=self.device,
+                    )
+
+                wp.capture_if(self.transpose_active, on_true=transpose_response)
             wp.launch_tiled(
                 self.solve_kernel,
                 dim=[self.articulation_count],

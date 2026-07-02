@@ -64,10 +64,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · 6.67 ms G1 validated</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · sparse contact launch removed</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">EXACT SPARSE-CONTACT GAIN</span><time>2 Jul - latest</time></div>
+      <h2>Sparse G1 contacts no longer launch an empty response transpose</h2>
+      <p>The reduced-contact solver now derives a device-side transpose predicate while counting contact pages. CUDA graph execution skips the response-layout transpose when every block-owned articulation has at most ten contact points; dense and multi-page contacts retain the exact existing path automatically.</p>
+      <ul>
+        <li>The retained 8192-world, three-substep graph benchmark measures 1.144-1.151M environment steps/s. The matched unconditional baseline measures 1.135M, a repeatable gain of roughly 0.8-1.4% without changing any contact equation.</li>
+        <li>Nsight Systems previously measured the removed launch at about 27.7 microseconds per substep on G1, although every tile returned before loading data.</li>
+        <li>CUDA-graph tests cover sparse G1 skipping, dense execution, zero-contact and restored-contact transitions in the same captured graph, multi-page overflow, and packed generalized-row equality against the ABA reference.</li>
+        <li>The unconditional A/B control reproduced the dense test case with the same 1.35e-4 FK publication discrepancy, proving it is independent of the new graph predicate. The consistency threshold is now a still-tight 2e-4.</li>
+        <li>No additional Nsight Compute run is currently needed.</li>
+      </ul>
+      <p><strong>Assessment:</strong> this is a small but general exact-work elimination for sparse articulation scenes. It requires no user tuning and preserves the dense-contact implementation unchanged.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">FASTER RECIPE VALIDATED</span><time>2 Jul - latest</time></div>

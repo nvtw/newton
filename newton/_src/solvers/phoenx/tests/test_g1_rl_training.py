@@ -5362,6 +5362,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
         graph = rl.capture_env_steps(env, actions, steps_per_graph=1, warmup_steps=0)
         wp.capture_launch(graph)
+        self.assertEqual(int(block.transpose_active.numpy()[0]), 0)
         self.assertTrue(np.isfinite(env.state_0.joint_q.numpy()).all())
         self.assertTrue(np.isfinite(env.state_0.joint_qd.numpy()).all())
 
