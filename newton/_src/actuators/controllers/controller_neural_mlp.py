@@ -120,7 +120,7 @@ class ControllerNeuralMLP(Controller):
     Uses a pre-trained MLP to compute joint effort from concatenated, scaled
     position-error and velocity-error history. The output is multiplied by
     ``effort_scale`` to convert from network units to physical effort
-    [N or N*m].
+    [N or N·m].
 
     Configuration parameters (``input_order``, ``input_idx``,
     ``pos_scale``, ``vel_scale``, ``effort_scale``) are read from checkpoint

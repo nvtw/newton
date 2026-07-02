@@ -196,10 +196,11 @@ class Example:
         yaml_file_path = f"{asset_directory}/{robot_config.yaml_path}"
         with open(yaml_file_path, encoding="utf-8") as f:
             config = yaml.safe_load(f)
-        print(f"[INFO] Loaded config with {config['num_dofs']} DOFs")
+        num_dofs = config["num_dofs"]
+        print(f"[INFO] Loaded config with {num_dofs} DOFs")
 
-        mjc_to_physx = list(range(config["num_dofs"]))
-        physx_to_mjc = list(range(config["num_dofs"]))
+        mjc_to_physx = list(range(num_dofs))
+        physx_to_mjc = list(range(num_dofs))
 
         if args.physx:
             if "physx" not in robot_config.policy_path or "physx_joint_names" not in config:
@@ -211,6 +212,15 @@ class Example:
             mjc_to_physx, physx_to_mjc = find_physx_mjwarp_mapping(
                 config["mjw_joint_names"], config["physx_joint_names"]
             )
+            if len(mjc_to_physx) != num_dofs or len(physx_to_mjc) != num_dofs:
+                missing_mjw = sorted(set(config["physx_joint_names"]) - set(config["mjw_joint_names"]))
+                missing_physx = sorted(set(config["mjw_joint_names"]) - set(config["physx_joint_names"]))
+                raise ValueError(
+                    "PhysX/MJWarp joint mapping is incomplete: "
+                    f"expected {num_dofs} DOFs, got {len(mjc_to_physx)} MJWarp-to-PhysX and "
+                    f"{len(physx_to_mjc)} PhysX-to-MJWarp entries. "
+                    f"Missing from MJWarp: {missing_mjw}; missing from PhysX: {missing_physx}"
+                )
         else:
             policy_path = f"{asset_directory}/{robot_config.policy_path['mjw']}"
 
