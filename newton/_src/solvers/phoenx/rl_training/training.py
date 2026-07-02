@@ -46,14 +46,63 @@ _ANYMAL_TRAIN_STAT_COUNT = 9
 
 
 @wp.kernel
-def _g1_train_stat_sums_kernel(
+def _g1_train_stat_partials_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
     successes: wp.array[wp.float32],
     actions: wp.array2d[wp.float32],
+    num_samples: wp.int32,
+    action_dim: wp.int32,
+    partials: wp.array2d[wp.float32],
+):
+    tile, lane = wp.tid()
+    i = tile * wp.int32(32) + lane
+    reward_sum = wp.float32(0.0)
+    done_sum = wp.float32(0.0)
+    success_sum = wp.float32(0.0)
+    raw_action_sq_sum = wp.float32(0.0)
+    clipped_action_sq_sum = wp.float32(0.0)
+    clip_hit_sum = wp.float32(0.0)
+    clipped_action_abs_sum = wp.float32(0.0)
+    if i < num_samples:
+        reward_sum = rewards[i]
+        done_sum = dones[i]
+        success_sum = successes[i]
+        action = wp.int32(0)
+        while action < action_dim:
+            a = actions[i, action]
+            abs_a = wp.abs(a)
+            clipped = wp.min(abs_a, wp.float32(1.0))
+            raw_action_sq_sum = raw_action_sq_sum + a * a
+            clipped_action_sq_sum = clipped_action_sq_sum + clipped * clipped
+            if abs_a > wp.float32(1.0):
+                clip_hit_sum = clip_hit_sum + wp.float32(1.0)
+            clipped_action_abs_sum = clipped_action_abs_sum + clipped
+            action = action + wp.int32(1)
+
+    reward_tile = wp.tile_sum(wp.tile(reward_sum))
+    done_tile = wp.tile_sum(wp.tile(done_sum))
+    success_tile = wp.tile_sum(wp.tile(success_sum))
+    raw_action_sq_tile = wp.tile_sum(wp.tile(raw_action_sq_sum))
+    clipped_action_sq_tile = wp.tile_sum(wp.tile(clipped_action_sq_sum))
+    clip_hit_tile = wp.tile_sum(wp.tile(clip_hit_sum))
+    clipped_action_abs_tile = wp.tile_sum(wp.tile(clipped_action_abs_sum))
+    if lane == wp.int32(0):
+        partials[tile, 0] = reward_tile[0]
+        partials[tile, 1] = done_tile[0]
+        partials[tile, 2] = success_tile[0]
+        partials[tile, 3] = raw_action_sq_tile[0]
+        partials[tile, 4] = clipped_action_sq_tile[0]
+        partials[tile, 5] = clip_hit_tile[0]
+        partials[tile, 6] = clipped_action_abs_tile[0]
+
+
+@wp.kernel
+def _g1_train_stat_finalize_kernel(
+    partials: wp.array2d[wp.float32],
+    partial_count: wp.int32,
     log_std: wp.array[wp.float32],
     command: wp.array2d[wp.float32],
-    num_samples: wp.int32,
     num_envs: wp.int32,
     action_dim: wp.int32,
     policy_loss: wp.array[wp.float32],
@@ -62,44 +111,78 @@ def _g1_train_stat_sums_kernel(
     clip_fraction: wp.array[wp.float32],
     stats: wp.array[wp.float32],
 ):
-    i = wp.tid()
-    if i < num_samples:
-        wp.atomic_add(stats, 0, rewards[i])
-        wp.atomic_add(stats, 1, dones[i])
-        wp.atomic_add(stats, 2, successes[i])
-    action_total = num_samples * action_dim
-    if i < action_total:
-        row = i // action_dim
-        action = i - row * action_dim
-        a = actions[row, action]
-        abs_a = wp.abs(a)
-        clipped = wp.min(abs_a, wp.float32(1.0))
-        wp.atomic_add(stats, 10, a * a)
-        wp.atomic_add(stats, 11, clipped * clipped)
-        clip_hit = wp.float32(0.0)
-        if abs_a > wp.float32(1.0):
-            clip_hit = wp.float32(1.0)
-        wp.atomic_add(stats, 12, clip_hit)
-        wp.atomic_add(stats, 13, clipped)
-    if i < action_dim:
-        wp.atomic_add(stats, 14, log_std[i])
-    if i < num_envs:
-        wp.atomic_add(stats, 3, command[i, 0])
-        wp.atomic_add(stats, 4, command[i, 1])
-        wp.atomic_add(stats, 5, command[i, 2])
-    if i == 0:
+    lane = wp.tid()
+    reward_sum = wp.float32(0.0)
+    done_sum = wp.float32(0.0)
+    success_sum = wp.float32(0.0)
+    raw_action_sq_sum = wp.float32(0.0)
+    clipped_action_sq_sum = wp.float32(0.0)
+    clip_hit_sum = wp.float32(0.0)
+    clipped_action_abs_sum = wp.float32(0.0)
+    p = lane
+    while p < partial_count:
+        reward_sum = reward_sum + partials[p, 0]
+        done_sum = done_sum + partials[p, 1]
+        success_sum = success_sum + partials[p, 2]
+        raw_action_sq_sum = raw_action_sq_sum + partials[p, 3]
+        clipped_action_sq_sum = clipped_action_sq_sum + partials[p, 4]
+        clip_hit_sum = clip_hit_sum + partials[p, 5]
+        clipped_action_abs_sum = clipped_action_abs_sum + partials[p, 6]
+        p = p + wp.int32(32)
+
+    command_x_sum = wp.float32(0.0)
+    command_y_sum = wp.float32(0.0)
+    command_yaw_sum = wp.float32(0.0)
+    env = lane
+    while env < num_envs:
+        command_x_sum = command_x_sum + command[env, 0]
+        command_y_sum = command_y_sum + command[env, 1]
+        command_yaw_sum = command_yaw_sum + command[env, 2]
+        env = env + wp.int32(32)
+
+    log_std_sum = wp.float32(0.0)
+    action = lane
+    while action < action_dim:
+        log_std_sum = log_std_sum + log_std[action]
+        action = action + wp.int32(32)
+
+    reward_tile = wp.tile_sum(wp.tile(reward_sum))
+    done_tile = wp.tile_sum(wp.tile(done_sum))
+    success_tile = wp.tile_sum(wp.tile(success_sum))
+    command_x_tile = wp.tile_sum(wp.tile(command_x_sum))
+    command_y_tile = wp.tile_sum(wp.tile(command_y_sum))
+    command_yaw_tile = wp.tile_sum(wp.tile(command_yaw_sum))
+    raw_action_sq_tile = wp.tile_sum(wp.tile(raw_action_sq_sum))
+    clipped_action_sq_tile = wp.tile_sum(wp.tile(clipped_action_sq_sum))
+    clip_hit_tile = wp.tile_sum(wp.tile(clip_hit_sum))
+    clipped_action_abs_tile = wp.tile_sum(wp.tile(clipped_action_abs_sum))
+    log_std_tile = wp.tile_sum(wp.tile(log_std_sum))
+    if lane == wp.int32(0):
+        stats[0] = reward_tile[0]
+        stats[1] = done_tile[0]
+        stats[2] = success_tile[0]
+        stats[3] = command_x_tile[0]
+        stats[4] = command_y_tile[0]
+        stats[5] = command_yaw_tile[0]
         stats[6] = policy_loss[0]
         stats[7] = value_loss[0]
         stats[8] = approx_kl[0]
         stats[9] = clip_fraction[0]
+        stats[10] = raw_action_sq_tile[0]
+        stats[11] = clipped_action_sq_tile[0]
+        stats[12] = clip_hit_tile[0]
+        stats[13] = clipped_action_abs_tile[0]
+        stats[14] = log_std_tile[0]
 
 
 class _G1TrainDiagnosticsReadback:
     """Preallocated compact host readback for monitored G1 PPO training."""
 
-    def __init__(self, device: wp.context.Devicelike):
+    def __init__(self, device: wp.context.Devicelike, max_samples: int):
         self.device = wp.get_device(device)
-        self._stats = wp.zeros(_G1_TRAIN_STAT_COUNT, dtype=wp.float32, device=self.device)
+        self._partial_count = max(1, (int(max_samples) + 31) // 32)
+        self._partials = wp.empty((self._partial_count, 7), dtype=wp.float32, device=self.device)
+        self._stats = wp.empty(_G1_TRAIN_STAT_COUNT, dtype=wp.float32, device=self.device)
         self._stats_host = wp.empty(_G1_TRAIN_STAT_COUNT, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
 
     def read(
@@ -107,18 +190,32 @@ class _G1TrainDiagnosticsReadback:
     ) -> tuple[
         tuple[float, float, float, float, float, float], StatsPPOUpdate, tuple[float, float, float, float, float]
     ]:
-        self._stats.zero_()
+        partial_count = max(1, (int(buffer.num_samples) + 31) // 32)
+        if partial_count > self._partial_count:
+            raise RuntimeError("G1 diagnostics partial buffer is too small")
         wp.launch(
-            _g1_train_stat_sums_kernel,
-            dim=max(buffer.num_samples * env.action_dim, env.world_count, env.action_dim),
+            _g1_train_stat_partials_kernel,
+            dim=(partial_count, 32),
+            block_dim=32,
             inputs=[
                 buffer.rewards,
                 buffer.dones,
                 buffer.successes,
                 buffer.actions,
+                buffer.num_samples,
+                env.action_dim,
+            ],
+            outputs=[self._partials],
+            device=self.device,
+        )
+        wp.launch(
+            _g1_train_stat_finalize_kernel,
+            dim=32,
+            inputs=[
+                self._partials,
+                partial_count,
                 trainer.actor.log_std,
                 env.command,
-                buffer.num_samples,
                 env.world_count,
                 env.action_dim,
                 trainer._policy_loss,
@@ -1237,7 +1334,7 @@ def _train_g1_ppo_cycle(
     buffer = result.buffer
     device = env.device
     start_iteration = int(getattr(trainer, "iteration", 0))
-    diagnostics = _G1TrainDiagnosticsReadback(device) if cfg.readback_diagnostics else None
+    diagnostics = _G1TrainDiagnosticsReadback(device, buffer.num_samples) if cfg.readback_diagnostics else None
     command_curriculum_counter = _make_g1_command_curriculum_counter(cfg, env, start_iteration)
     target_curriculum_counter = _make_g1_target_curriculum_counter(cfg, env, start_iteration)
     target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + start_iteration, device=device)
@@ -1428,7 +1525,7 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
 
     history: list[StatsTrainG1PPO] = []
     start_iteration = int(getattr(trainer, "iteration", 0))
-    diagnostics = _G1TrainDiagnosticsReadback(device) if cfg.readback_diagnostics else None
+    diagnostics = _G1TrainDiagnosticsReadback(device, buffer.num_samples) if cfg.readback_diagnostics else None
     command_curriculum_counter = _make_g1_command_curriculum_counter(cfg, env, start_iteration)
     target_curriculum_counter = _make_g1_target_curriculum_counter(cfg, env, start_iteration)
     target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + int(start_iteration), device=device)

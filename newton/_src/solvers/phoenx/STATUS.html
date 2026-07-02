@@ -64,10 +64,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · adaptive contact row widths</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · faster G1 training diagnostics</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">RL WALL-TIME GAIN</span><time>3 Jul - latest</time></div>
+      <h2>G1 training diagnostics are 358x faster</h2>
+      <p>The combined learner-and-physics Systems trace exposed the diagnostics path as the second-largest standalone GPU kernel: one global atomic reduction spent about 80.5 ms per iteration summing only fifteen monitoring values. It launched over every action scalar and issued roughly 60 million heavily contended atomic additions.</p>
+      <ul>
+        <li>A deterministic two-stage 32-lane tile reduction now accumulates per-sample action statistics into compact partials, then finalizes rewards, terminations, successes, commands, losses, action norms, clip rate, and log standard deviation.</li>
+        <li>The new profile measures 46.2 microseconds for partials plus 179.3 microseconds for finalization: 0.225 ms per iteration, about 358x faster than the 80.5 ms atomic baseline.</li>
+        <li>This removes about 80.3 ms of real wall time from every monitored training iteration. The existing graph-leapfrog throughput metric intentionally excludes diagnostics, so its steady result remains 709.1k samples/s and the pinned nanoG1 gap remains 1.81x rather than being artificially inflated.</li>
+        <li>A focused CUDA-graph test checks all fifteen outputs against NumPy and caught an initially missing 32-thread physical block contract before commit. Graph-leapfrog save/resume and finite learning metrics remain passing.</li>
+        <li>The change affects monitoring only: no policy update, reward, physics equation, contact response, timestep, or solver schedule changes.</li>
+      </ul>
+      <p><strong>Assessment:</strong> this is a large, clean end-to-end training wall-time gain for any G1 run with quality diagnostics enabled. The next optimization target returns to kernels on the timed learner/physics critical path.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">GENERAL LAYOUT GAIN</span><time>3 Jul - latest</time></div>

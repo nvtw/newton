@@ -92,6 +92,8 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
 from newton._src.solvers.phoenx.rl_training.networks import _BF16_FORWARD_MIN_BATCH
 from newton._src.solvers.phoenx.rl_training.training import (
     _g1_root_origin_linear_velocity_body_np,
+    _g1_train_stat_finalize_kernel,
+    _g1_train_stat_partials_kernel,
     _quat_rotate_inverse_xyzw_np,
 )
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_REVOLUTE_DRIVE
@@ -1581,6 +1583,80 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(stats_host_a.device, wp.get_device("cpu"))
         self.assertTrue(stats_host_a.pinned)
         self.assertEqual(stats_host_a.shape, (4,))
+
+    def test_g1_train_diagnostics_reduction_matches_numpy_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 diagnostics reduction tests")
+        num_samples = 37
+        num_envs = 7
+        action_dim = 5
+        rng = np.random.default_rng(713)
+        rewards_np = rng.normal(size=num_samples).astype(np.float32)
+        dones_np = rng.integers(0, 2, size=num_samples).astype(np.float32)
+        successes_np = rng.integers(0, 2, size=num_samples).astype(np.float32)
+        actions_np = rng.normal(0.0, 1.7, size=(num_samples, action_dim)).astype(np.float32)
+        log_std_np = rng.normal(size=action_dim).astype(np.float32)
+        command_np = rng.normal(size=(num_envs, 3)).astype(np.float32)
+        losses_np = np.asarray([-0.25, 1.75, 0.013, 0.42], dtype=np.float32)
+
+        rewards = wp.array(rewards_np, device=device)
+        dones = wp.array(dones_np, device=device)
+        successes = wp.array(successes_np, device=device)
+        actions = wp.array(actions_np, device=device)
+        log_std = wp.array(log_std_np, device=device)
+        command = wp.array(command_np, device=device)
+        losses = [wp.array([value], dtype=wp.float32, device=device) for value in losses_np]
+        partial_count = (num_samples + 31) // 32
+        partials = wp.empty((partial_count, 7), dtype=wp.float32, device=device)
+        stats = wp.empty(15, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                _g1_train_stat_partials_kernel,
+                dim=(partial_count, 32),
+                block_dim=32,
+                inputs=[rewards, dones, successes, actions, num_samples, action_dim],
+                outputs=[partials],
+                device=device,
+            )
+            wp.launch(
+                _g1_train_stat_finalize_kernel,
+                dim=32,
+                inputs=[
+                    partials,
+                    partial_count,
+                    log_std,
+                    command,
+                    num_envs,
+                    action_dim,
+                    losses[0],
+                    losses[1],
+                    losses[2],
+                    losses[3],
+                ],
+                outputs=[stats],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        clipped_abs_np = np.minimum(np.abs(actions_np), np.float32(1.0))
+        expected = np.asarray(
+            [
+                np.sum(rewards_np, dtype=np.float32),
+                np.sum(dones_np, dtype=np.float32),
+                np.sum(successes_np, dtype=np.float32),
+                np.sum(command_np[:, 0], dtype=np.float32),
+                np.sum(command_np[:, 1], dtype=np.float32),
+                np.sum(command_np[:, 2], dtype=np.float32),
+                *losses_np,
+                np.sum(actions_np * actions_np, dtype=np.float32),
+                np.sum(clipped_abs_np * clipped_abs_np, dtype=np.float32),
+                np.sum(np.abs(actions_np) > 1.0, dtype=np.float32),
+                np.sum(clipped_abs_np, dtype=np.float32),
+                np.sum(log_std_np, dtype=np.float32),
+            ],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(stats.numpy(), expected, rtol=2.0e-6, atol=2.0e-5)
 
     def test_standard_gae_uses_current_reward_and_done_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX PPO GAE regression tests")
