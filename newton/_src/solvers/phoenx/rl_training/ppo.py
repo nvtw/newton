@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -574,12 +576,19 @@ class TrainerPPO:
             for v in getattr(self.critic_optimizer, "v", []):
                 v.zero_()
 
-    def save_checkpoint(self, path: str | Path, *, iteration: int | None = None) -> None:
+    def save_checkpoint(
+        self,
+        path: str | Path,
+        *,
+        iteration: int | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         """Save network parameters and optimizer state to a NumPy archive.
 
         Args:
             path: Output ``.npz`` path.
             iteration: Optional training iteration stored as metadata.
+            metadata: Optional task metadata stored under ``metadata_`` keys.
         """
 
         data: dict[str, np.ndarray] = {
@@ -595,6 +604,14 @@ class TrainerPPO:
         }
         for key, value in asdict(self.config).items():
             data[f"config_{key}"] = np.asarray(value)
+        if metadata is not None:
+            for key, value in metadata.items():
+                if not key or not key.replace("_", "").isalnum():
+                    raise ValueError(f"Invalid checkpoint metadata key: {key!r}")
+                array = np.asarray(value)
+                if array.dtype.hasobject:
+                    raise TypeError(f"Checkpoint metadata {key!r} must not use object dtype")
+                data[f"metadata_{key}"] = array
         _pack_policy_network(data, "actor", self.actor.net)
         data["actor_log_std"] = self.actor.log_std.numpy()
         _pack_optimizer(data, "actor_optimizer", self.actor_optimizer)
@@ -1656,16 +1673,23 @@ def _normalize_advantages(
     )
 
 
-def save_ppo_checkpoint(trainer: TrainerPPO, path: str | Path, *, iteration: int | None = None) -> None:
+def save_ppo_checkpoint(
+    trainer: TrainerPPO,
+    path: str | Path,
+    *,
+    iteration: int | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
     """Save a PPO trainer checkpoint.
 
     Args:
         trainer: Trainer to save.
         path: Output ``.npz`` path.
         iteration: Optional training iteration stored as metadata.
+        metadata: Optional task metadata stored under ``metadata_`` keys.
     """
 
-    trainer.save_checkpoint(path, iteration=iteration)
+    trainer.save_checkpoint(path, iteration=iteration, metadata=metadata)
 
 
 def load_ppo_checkpoint(

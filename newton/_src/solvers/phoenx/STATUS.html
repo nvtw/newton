@@ -64,10 +64,26 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · repeatable G1 gate passed</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · 5 ms G1 training passes</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">5 MS TRAINING PASSES</span><time>2 Jul - latest</time></div>
+      <h2>A larger PhoenX timestep adds 15.2% training throughput without losing quality</h2>
+      <p>PhoenX now trains the G1 walker with four 5 ms physics steps per 20 ms policy frame. nanoG1 uses five 4 ms steps. This removes one fifth of temporal physics work while retaining hard-Hertz contacts, two position iterations, one velocity iteration, and the same 50 Hz policy interface.</p>
+      <ul>
+        <li>The entirely 5 ms run trains from scratch for 150.0M samples, then uses a 12.6M-sample angular-stability continuation. No 4 ms simulation is used anywhere in this successful policy.</li>
+        <li>Full seed 1000: zero falls over 24,000 battery and 2,000 diagnostic samples, tracking 0.9396, action jerk 0.1635, roll/pitch rate 0.1850, yaw rate 0.1543, and leg-speed RMS 0.8635.</li>
+        <li>Independent seed 2000 repeats zero falls and every dynamics metric, with tracking 0.9377. Both pass the unchanged gate.</li>
+        <li>Graph-leapfrog training rises from 498.6k samples/s at 4 ms to 574.2k at 5 ms, a 15.2% end-to-end gain. The throughput gap to the pinned 1.28M nanoG1 result falls from 2.57x to 2.23x.</li>
+        <li>A direct 150M run was already fall-free with 0.942 tracking and 0.176 jerk; only roll/pitch rate missed at 0.242. Strengthening that physical penalty during the final 12.6M samples reduced it to 0.185 without trading away tracking.</li>
+        <li>A 6.67 ms frozen-policy screen also remained fall-free with 0.916 tracking, but missed jerk and yaw thresholds. It is not promoted.</li>
+        <li>New G1 checkpoints embed the complete environment, physics, reward, curriculum, and execution recipe. The train-to-gate JSON also reports substeps, physics timestep, and solver iteration counts, eliminating the provenance ambiguity of older policy-only archives.</li>
+      </ul>
+      <p><strong>Current assessment:</strong> PhoenX can safely use a larger timestep than nanoG1 for this trained G1 task. That is demonstrated, not assumed. It is not yet a universal claim for arbitrary scenes, and 162.5M samples versus nanoG1's 75M reference means sample efficiency remains a major part of time-to-quality.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">G1 GATE + ABA GAIN</span><time>2 Jul - latest</time></div>

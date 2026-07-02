@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -932,11 +932,44 @@ def _maybe_log_g1_train_stats(cfg: ConfigTrainG1PPO, stats: StatsTrainG1PPO, loc
         )
 
 
-def _maybe_checkpoint_g1(cfg: ConfigTrainG1PPO, trainer: TrainerPPO) -> None:
+def _g1_checkpoint_metadata(cfg: ConfigTrainG1PPO, env: EnvG1PhoenX) -> dict[str, object]:
+    metadata: dict[str, object] = {"g1_schema": "training_v1"}
+    metadata.update({f"g1_env_{key}": value for key, value in asdict(env.config).items()})
+    for key in (
+        "rollout_steps",
+        "seed",
+        "randomize_commands",
+        "command_sampling",
+        "command_x_range",
+        "command_y_range",
+        "command_yaw_range",
+        "command_zero_probability",
+        "command_resample_steps",
+        "command_curriculum_start",
+        "command_curriculum_samples",
+        "use_target_curriculum",
+        "target_distance_start",
+        "target_distance_end",
+        "target_curriculum_samples",
+        "randomize_target_positions",
+        "target_angle_min",
+        "target_angle_max",
+        "reset_recurrent_state_on_rollout_start",
+        "execution_mode",
+    ):
+        metadata[f"g1_train_{key}"] = getattr(cfg, key)
+    return metadata
+
+
+def _maybe_checkpoint_g1(
+    cfg: ConfigTrainG1PPO,
+    trainer: TrainerPPO,
+    metadata: dict[str, object],
+) -> None:
     if cfg.checkpoint_path is not None and cfg.checkpoint_interval > 0:
         if trainer.iteration % int(cfg.checkpoint_interval) == 0:
             checkpoint_path = _format_checkpoint_path(cfg.checkpoint_path, trainer.iteration)
-            trainer.save_checkpoint(checkpoint_path, iteration=trainer.iteration)
+            trainer.save_checkpoint(checkpoint_path, iteration=trainer.iteration, metadata=metadata)
 
 
 def _train_g1_ppo_graph_leapfrog(
@@ -953,6 +986,7 @@ def _train_g1_ppo_graph_leapfrog(
     if not device.is_cuda or not wp.is_mempool_enabled(device):
         raise RuntimeError("G1 graph_leapfrog training requires CUDA with Warp mempool enabled")
 
+    checkpoint_metadata = _g1_checkpoint_metadata(cfg, env)
     rollout_trainer = _make_g1_rollout_trainer(env, trainer)
     buffers = (first_buffer, _make_g1_buffer(env, int(cfg.rollout_steps)))
     for graph_trainer in (trainer, rollout_trainer):
@@ -1043,7 +1077,7 @@ def _train_g1_ppo_graph_leapfrog(
         )
         history.append(stats)
         _maybe_log_g1_train_stats(cfg, stats, local_iteration)
-        _maybe_checkpoint_g1(cfg, trainer)
+        _maybe_checkpoint_g1(cfg, trainer, checkpoint_metadata)
 
         if local_iteration < int(cfg.iterations) - 1:
             prev = 1 - prev
@@ -1052,7 +1086,9 @@ def _train_g1_ppo_graph_leapfrog(
         final_iteration = int(start_iteration) + int(cfg.iterations)
         trainer.iteration = final_iteration
         trainer.save_checkpoint(
-            _format_checkpoint_path(cfg.checkpoint_path, final_iteration), iteration=final_iteration
+            _format_checkpoint_path(cfg.checkpoint_path, final_iteration),
+            iteration=final_iteration,
+            metadata=checkpoint_metadata,
         )
 
     return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffers[prev], history=history)
@@ -1387,6 +1423,7 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
             mirror_map=g1_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,
         )
     buffer = _make_g1_buffer(env, int(cfg.rollout_steps))
+    checkpoint_metadata = _g1_checkpoint_metadata(cfg, env)
     trainer.reserve_update_buffers(buffer)
 
     history: list[StatsTrainG1PPO] = []
@@ -1452,13 +1489,15 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
 
         _maybe_log_g1_train_stats(cfg, stats, local_iteration)
         trainer.iteration = iteration + 1
-        _maybe_checkpoint_g1(cfg, trainer)
+        _maybe_checkpoint_g1(cfg, trainer, checkpoint_metadata)
 
     if cfg.checkpoint_path is not None:
         final_iteration = start_iteration + int(cfg.iterations)
         trainer.iteration = final_iteration
         trainer.save_checkpoint(
-            _format_checkpoint_path(cfg.checkpoint_path, final_iteration), iteration=final_iteration
+            _format_checkpoint_path(cfg.checkpoint_path, final_iteration),
+            iteration=final_iteration,
+            metadata=checkpoint_metadata,
         )
 
     return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffer, history=history)
