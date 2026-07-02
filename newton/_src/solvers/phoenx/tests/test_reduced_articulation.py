@@ -1542,6 +1542,8 @@ class TestReducedArticulation(unittest.TestCase):
         block.point_count.assign(np.full(block.point_count.shape, _POINTS_PER_PAGE, dtype=np.int32))
         block.row_body.assign(row_body)
         block.row_wrench.assign(row_wrench)
+        point_contact = np.arange(block.point_contact.size, dtype=np.int32).reshape(block.point_contact.shape)
+        block.point_contact.assign(point_contact)
         probe_np = np.linspace(-0.35, 0.45, dof_count, dtype=np.float32)
         probe = wp.array(probe_np, device=device)
         exact_response = wp.zeros(dof_count, dtype=wp.float32, device=device)
@@ -1585,6 +1587,8 @@ class TestReducedArticulation(unittest.TestCase):
                     block.point_count,
                     block.row_body,
                     block.row_wrench,
+                    block.point_contact,
+                    solver.world._contact_container,
                     block.max_page_count,
                     block.page_index,
                     wp.bool(True),
@@ -1644,6 +1648,11 @@ class TestReducedArticulation(unittest.TestCase):
             reference_response.numpy()[0, :, :dof_count],
         )
         np.testing.assert_allclose(virtual_work.numpy()[1], virtual_work.numpy()[0], rtol=2.0e-5, atol=2.0e-6)
+        jacobian_row = block.packed_jacobian.numpy()[0, :dof_count]
+        response_row = block.packed_response.numpy()[0, :dof_count]
+        expected_effective_mass = 1.0 / float(np.dot(jacobian_row, response_row))
+        actual_effective_mass = float(solver.world._contact_container.derived.numpy()[0, 0])
+        self.assertAlmostEqual(actual_effective_mass, expected_effective_mass, delta=2.0e-5)
 
     def test_deferred_contact_response_matches_aba_under_graph_capture(self):
         device = wp.get_preferred_device()

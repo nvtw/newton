@@ -583,6 +583,8 @@ def main() -> int:
                 block.point_count,
                 block.row_body,
                 block.row_wrench,
+                block.point_contact,
+                env.solver.world._contact_container,
                 block.max_page_count,
                 block.page_index,
                 wp.bool(True),

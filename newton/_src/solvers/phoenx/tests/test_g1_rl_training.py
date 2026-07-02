@@ -5339,6 +5339,30 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(joint_qd))), 100.0)
         self.assertTrue(np.isfinite(env.step_rewards.numpy()).all())
 
+    def test_block_owned_g1_contacts_skip_redundant_impulse_response(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 block contact response regression tests")
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=2,
+                articulation_mode="reduced",
+                sim_substeps=4,
+                solver_iterations=2,
+                velocity_iterations=1,
+                contact_geometry=g1_recipe.CONTACT_GEOMETRY,
+                randomize_commands_on_reset=False,
+                command_resample_steps=0,
+            ),
+            device=device,
+        )
+        block = env.solver._reduced_articulation.contact_block_system
+        self.assertFalse(block.requires_impulse_response)
+
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+        graph = rl.capture_env_steps(env, actions, steps_per_graph=1, warmup_steps=0)
+        wp.capture_launch(graph)
+        self.assertTrue(np.isfinite(env.state_0.joint_q.numpy()).all())
+        self.assertTrue(np.isfinite(env.state_0.joint_qd.numpy()).all())
+
     def test_train_to_gate_benchmark_smoke_graph_leapfrog(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 train-to-gate benchmark tests")
 

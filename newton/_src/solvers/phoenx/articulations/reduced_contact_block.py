@@ -50,6 +50,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_set_eff_n,
+    cc_set_eff_t1,
+    cc_set_eff_t2,
 )
 from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_velocity_update_no_soft_pd
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
@@ -665,6 +668,8 @@ def _build_packed_generalized_contact_rows_kernel(
     point_count: wp.array[wp.int32],
     row_body: wp.array2d[wp.int32],
     row_wrench: wp.array2d[wp.spatial_vector],
+    point_contact: wp.array2d[wp.int32],
+    cc: ContactContainer,
     max_page_count: wp.array[wp.int32],
     page_index: wp.array[wp.int32],
     prepare: wp.bool,
@@ -729,6 +734,7 @@ def _build_packed_generalized_contact_rows_kernel(
                         reduced[dof_row] += data.joint_d_inv[joint, dof_row, dof_column] * projected[dof_column]
                 propagated_wrench -= data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
 
+    inverse_mass = wp.float32(0.0)
     for joint in range(start, end):
         local_joint = joint - start
         parent = data.joint_parent[joint]
@@ -752,12 +758,26 @@ def _build_packed_generalized_contact_rows_kernel(
                     if wp.int32(dof_column) < dof_count:
                         generalized_delta[dof_row] += data.joint_d_inv[joint, dof_row, dof_column] * rhs[dof_column]
                 dof = dof_start + wp.int32(dof_row)
+                response_value = generalized_delta[dof_row]
                 if row_count > wp.int32(_RESPONSE_TILE):
-                    joint_work[articulation, dof - dof_start_articulation, row] = generalized_delta[dof_row]
+                    joint_work[articulation, dof - dof_start_articulation, row] = response_value
                 else:
-                    packed_response[packed_row, dof - dof_start_articulation] = generalized_delta[dof_row]
-                parent_delta += data.joint_s[dof] * generalized_delta[dof_row]
+                    packed_response[packed_row, dof - dof_start_articulation] = response_value
+                inverse_mass += packed_jacobian[packed_row, dof - dof_start_articulation] * response_value
+                parent_delta += data.joint_s[dof] * response_value
         body_response[articulation, local_joint, row] = parent_delta
+
+    if inverse_mass > wp.float32(1.0e-12):
+        effective_mass = wp.float32(1.0) / inverse_mass
+        point = row // wp.int32(3)
+        axis = row - wp.int32(3) * point
+        contact = point_contact[packed_articulation, point]
+        if axis == wp.int32(0):
+            cc_set_eff_n(cc, contact, effective_mass)
+        elif axis == wp.int32(1):
+            cc_set_eff_t1(cc, contact, effective_mass)
+        else:
+            cc_set_eff_t2(cc, contact, effective_mass)
 
 
 @wp.kernel(enable_backward=False, module="reduced_contact_response_transpose")
@@ -1079,6 +1099,11 @@ class ReducedContactBlockSystem:
         )
         self.contact_dof_width = 48 if max_dof_count <= 48 else 64
         self.solve_kernel = _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS[self.contact_dof_width]
+        self.requires_impulse_response = not (
+            self._fallback_impossible_partitioned
+            and self._fallback_impossible_rigid_only
+            and max_dof_count <= _MAX_DOFS
+        )
         max_body_count = max(
             1,
             *(
@@ -1469,6 +1494,8 @@ class ReducedContactBlockSystem:
                         self.point_count,
                         self.row_body,
                         self.row_wrench,
+                        self.point_contact,
+                        cc,
                         self.max_page_count,
                         self.page_index,
                         wp.bool(prepare),

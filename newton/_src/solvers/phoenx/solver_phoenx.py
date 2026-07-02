@@ -2847,7 +2847,10 @@ class PhoenXWorld:
                 self._reduced_articulation.begin_substep(
                     self.substep_dt,
                     split_dynamics=True,
-                    compute_impulse_response=self._reduced_constraints_active_this_step,
+                    compute_impulse_response=(
+                        self._reduced_contacts_active_this_step
+                        and self._reduced_articulation.contact_block_system.requires_impulse_response
+                    ),
                 )
             self._integrate_forces_and_gravity()
             # TGS-soft (Box2D-v3) substep order: solve-with-bias ->

@@ -64,25 +64,28 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · exact compressed contacts validated</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · duplicate contact traversal removed</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
 
     <article>
-      <div class="meta"><span class="tag">FASTER BASELINE, CONTACT NEXT</span><time>2 Jul - latest</time></div>
-      <h2>G1 passes at 150M samples; the remaining 2.23x gap is now a kernel problem</h2>
-      <p>The retained PhoenX G1 baseline trains at 574.2k samples/s with four 5 ms physics steps per policy frame. That is 15.2% faster than the previous 4 ms schedule, while nanoG1 remains at the pinned 1.28M samples/s reference.</p>
+      <div class="meta"><span class="tag">EXACT CONTACT GAIN RETAINED</span><time>2 Jul - latest</time></div>
+      <h2>One redundant ABA contact traversal is gone; G1 reaches 589k samples/s</h2>
+      <p>The retained PhoenX G1 baseline now trains at 589.4k samples/s with four 5 ms physics steps per policy frame. The pinned nanoG1 reference remains 1.28M samples/s, leaving a 2.17x throughput gap.</p>
       <ul>
         <li>The complete from-scratch 5 ms recipe now passes the unchanged full gate at 149,946,368 samples, 8.4% fewer samples than the previous 162.5M result.</li>
         <li>Seed 1000: zero falls, tracking 0.9268, action jerk 0.1241, roll/pitch rate 0.1892, yaw rate 0.1549, and leg-speed RMS 0.6998. Seed 2000 also passes with zero falls and tracking 0.9225.</li>
         <li>The train-to-gate command automatically switches to the validated angular-stability phase at 137,363,456 samples. Passing <code>--angular-fine-tune-start-samples 0</code> disables it.</li>
         <li>A fresh five-replay 5 ms profile puts exact contact-row construction at 20.0% of GPU time and generalized contact solving at 11.2%. Factorization is 11.5%, advance 10.2%, FK 7.3%, and publication 6.2%.</li>
         <li>An exact adaptive response-basis prototype speeds the isolated G1 row path by about 18%, but the materialized production version lowers end-to-end training to 556.6k samples/s and is removed. At 64 worlds it is also slower, so it is not a general solution.</li>
-        <li><strong>Promising exact prototype:</strong> PGS now operates directly in a twelve-dimensional contacted-body wrench basis, using <code>G = J_basis R_basis^T</code>, instead of materializing 24x29 contact rows. Contact impulses match production within 2.38e-7 and the final generalized velocity delta within 7.08e-7.</li>
-        <li>At 8192 worlds the compressed row-build-plus-solve path measures 540 microseconds versus 643 microseconds for production, a 1.19x contact-path speedup. At 64 worlds it is slower, so production integration must select it automatically only when batch size and repeated contacted-body structure repay the basis work; all other pages retain the direct exact path.</li>
+        <li><strong>Retained:</strong> block-owned reduced contacts derive each effective mass directly from the exact generalized row diagonal <code>J M^-1 J^T</code>. The row builder was already computing both factors, so this removes the separate six-column link impulse-response traversal rather than approximating it.</li>
+        <li>A paired same-process CUDA-graph A/B improves physics from 10.025 ms to 9.751 ms per 8192-world policy step (+2.80%). Exact training reaches 589.4k samples/s in the bounded run, about 2.2% above the 576.5k direct A/B baseline.</li>
+        <li>The full seed-1000 frozen-policy gate still passes. CUDA-graph row/ABA equality, exact effective-mass diagonal, cached prepare, deterministic dense-contact momentum, and G1 finite-state regressions pass.</li>
+        <li>Scenes that can require deferred or fallback contacts retain the link impulse-response traversal automatically. The proof uses model collision ownership and articulation width; there is no user tuning.</li>
+        <li>The exact twelve-dimensional compressed-contact prototype remains useful research, but production integration delivered only a 0.37% paired physics gain after basis/application overhead and was removed completely. The one-thread-per-articulation deferred-wrench path also measured slower at about 540k training samples/s.</li>
       </ul>
-      <p><strong>Assessment:</strong> no, PhoenX has not caught nanoG1 or MJWarp yet. The larger timestep and shorter training schedule are real retained gains, but closing more of the gap requires eliminating contact work and memory boundaries rather than tuning launch sizes or policy precision.</p>
+      <p><strong>Assessment:</strong> no, PhoenX has not caught nanoG1 or MJWarp yet. The larger timestep, shorter training schedule, and removed inverse-mass traversal are retained gains. Further wins must eliminate substantial exact work across contact, factorization, or advance rather than add dispatch-heavy special cases.</p>
     </article>
 
     <article>
