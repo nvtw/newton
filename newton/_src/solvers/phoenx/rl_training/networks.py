@@ -655,8 +655,8 @@ class PufferMinGRUNet:
         num_layers: Number of MinGRU layers.
         device: Warp device.
         seed: Weight initialization seed.
-        manual_weight_grad_dtype: Input dtype for manual CUDA weight-gradient
-            tile contractions. Supports ``"float32"`` and ``"bfloat16"``;
+        manual_weight_grad_dtype: Input dtype for manual CUDA backward tile
+            contractions. Supports ``"float32"`` and ``"bfloat16"``;
             parameters and accumulators remain float32.
     """
 
@@ -744,8 +744,10 @@ class PufferMinGRUNet:
         self._manual_encoder_grad_bf16: wp.array2d[wp.bfloat16] | None = None
         self._manual_decoder_input_bf16: wp.array2d[wp.bfloat16] | None = None
         self._manual_decoder_grad_bf16: wp.array2d[wp.bfloat16] | None = None
+        self._manual_decoder_weight_bf16: wp.array2d[wp.bfloat16] | None = None
         self._manual_recurrent_input_bf16: list[wp.array2d[wp.bfloat16]] = []
         self._manual_recurrent_grad_bf16: list[wp.array2d[wp.bfloat16]] = []
+        self._manual_recurrent_weight_bf16: list[wp.array2d[wp.bfloat16]] = []
 
     def parameters(self) -> list[wp.array]:
         """Return trainable parameter arrays."""
@@ -885,7 +887,15 @@ class PufferMinGRUNet:
             self._manual_decoder_input_bf16,
             self._manual_decoder_grad_bf16,
         )
-        self._input_grad(output_grad, self.decoder_weight, rows, self.output_dim, self._manual_decoder_input_grad)
+        self._input_grad(
+            output_grad,
+            self.decoder_weight,
+            rows,
+            self.output_dim,
+            self._manual_decoder_input_grad,
+            self._manual_decoder_grad_bf16,
+            self._manual_decoder_weight_bf16,
+        )
         grad_h = self._manual_decoder_input_grad
         self._zero_tail(grad_h, rows, self.hidden_size)
 
@@ -926,6 +936,8 @@ class PufferMinGRUNet:
                 rows,
                 3 * self.hidden_size,
                 grad_projected,
+                self._manual_recurrent_grad_bf16[layer] if self._manual_recurrent_grad_bf16 else None,
+                self._manual_recurrent_weight_bf16[layer] if self._manual_recurrent_weight_bf16 else None,
             )
             wp.launch(
                 add_2d_kernel,
@@ -1090,6 +1102,9 @@ class PufferMinGRUNet:
             self._manual_encoder_grad_bf16 = wp.empty((rows, self.hidden_size), dtype=wp.bfloat16, device=self.device)
             self._manual_decoder_input_bf16 = wp.empty((rows, self.hidden_size), dtype=wp.bfloat16, device=self.device)
             self._manual_decoder_grad_bf16 = wp.empty((rows, self.output_dim), dtype=wp.bfloat16, device=self.device)
+            self._manual_decoder_weight_bf16 = wp.empty(
+                self.decoder_weight.shape, dtype=wp.bfloat16, device=self.device
+            )
             self._manual_recurrent_input_bf16 = [
                 wp.empty((rows, self.hidden_size), dtype=wp.bfloat16, device=self.device)
                 for _ in range(self.num_layers)
@@ -1097,6 +1112,9 @@ class PufferMinGRUNet:
             self._manual_recurrent_grad_bf16 = [
                 wp.empty((rows, 3 * self.hidden_size), dtype=wp.bfloat16, device=self.device)
                 for _ in range(self.num_layers)
+            ]
+            self._manual_recurrent_weight_bf16 = [
+                wp.empty(weight.shape, dtype=wp.bfloat16, device=self.device) for weight in self.recurrent_weights
             ]
 
     def _forward_rollout(
@@ -1237,12 +1255,30 @@ class PufferMinGRUNet:
         rows: int,
         out_dim: int,
         grad_x: wp.array2d[wp.float32],
+        grad_pre_bf16: wp.array2d[wp.bfloat16] | None = None,
+        weight_bf16: wp.array2d[wp.bfloat16] | None = None,
     ) -> None:
         if self.device.is_cuda:
+            input_grad_kernel = dense_input_grad_tiled_kernel
+            input_grad_pre = grad_pre
+            input_grad_weight = weight
+            if self.manual_weight_grad_dtype == "bfloat16" and rows % DENSE_TILE_BATCH == 0:
+                if grad_pre_bf16 is None or weight_bf16 is None:
+                    raise RuntimeError("manual MinGRU BF16 input-gradient buffers were not initialized")
+                wp.launch(
+                    cast_2d_float_to_bfloat16_kernel,
+                    dim=weight.shape,
+                    inputs=[weight],
+                    outputs=[weight_bf16],
+                    device=self.device,
+                )
+                input_grad_kernel = dense_input_grad_bf16_tiled_kernel
+                input_grad_pre = grad_pre_bf16
+                input_grad_weight = weight_bf16
             wp.launch_tiled(
-                dense_input_grad_tiled_kernel,
+                input_grad_kernel,
                 dim=(_ceil_div(rows, DENSE_TILE_BATCH), _ceil_div(int(grad_x.shape[1]), DENSE_TILE_IN)),
-                inputs=[grad_pre, weight, out_dim],
+                inputs=[input_grad_pre, input_grad_weight, out_dim],
                 outputs=[grad_x],
                 block_dim=DENSE_TILE_BLOCK_DIM,
                 device=self.device,

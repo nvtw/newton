@@ -64,10 +64,25 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · faster G1 training diagnostics</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · faster MinGRU backpropagation</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">VALIDATED RL GAIN</span><time>3 Jul - latest</time></div>
+      <h2>Complete BF16 backpropagation raises G1 training to 784k samples/s</h2>
+      <p>The G1 recipe requested BF16 backward contractions, but PufferMinGRU previously applied them only to weight gradients. Its four large hidden input-gradient products still ran in FP32 and were the combined profile’s second-largest kernel.</p>
+      <ul>
+        <li>The input-gradient path now reuses the BF16 gradient produced immediately beforehand for the weight contraction, casts only each small current weight matrix, and uses the existing BF16 tile matmul with FP32 output and accumulation. FP32 mode remains unchanged.</li>
+        <li>Nsight reduces input-gradient GPU time from 421.8 to 70.3 ms across the same five-iteration trace, a 6.0x kernel gain. Total cast time remains effectively flat despite the additional small weight casts.</li>
+        <li>Steady graph-leapfrog throughput rises from 709.1k to 784.3k samples/s (+10.6%). The pinned 1.28M nanoG1 gap narrows from 1.81x to 1.63x.</li>
+        <li>A fresh 157.3M-sample run trains from scratch at 746.5k samples/s over the complete mixed-timestep schedule and passes the full frozen-policy gate. Seed 1000 scores 0.9175 tracking, 0.1797 jerk, 0.1639 roll/pitch rate, 0.1021 yaw rate, 0.7143 leg speed, one allowed battery fall, and zero diagnostic falls.</li>
+        <li>Independent seed 2000 repeats the pass with zero falls, 0.9267 tracking, and 0.1564 jerk. No inference, forward-pass, reward, policy-loss, optimizer, or physics equation changes.</li>
+        <li>The graph-captured BF16 oracle compares every recurrent parameter gradient against FP32 and verifies bitwise replay determinism. The optimization applies to any PufferMinGRU shape using the existing BF16 backward option, not only G1.</li>
+      </ul>
+      <p><strong>Assessment:</strong> this is a large general learner gain with full from-scratch quality evidence. Dense recurrent forward is now the largest learner kernel; physics advance, factorization, contact rows, FK, and contact solve remain the major simulation targets.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">RL WALL-TIME GAIN</span><time>3 Jul - latest</time></div>

@@ -2406,7 +2406,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(net.recurrent_weights[0].grad.numpy(), rec_grad, rtol=2.0e-2, atol=2.0e-2)
         np.testing.assert_allclose(net.decoder_weight.grad.numpy(), dec_grad, rtol=2.0e-2, atol=2.0e-2)
 
-    def test_puffer_mingru_bf16_split_k_grad_matches_fp32_in_graph(self) -> None:
+    def test_puffer_mingru_bf16_backward_contractions_match_fp32_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX BF16 MinGRU gradient tests")
         steps = 3
         envs = 512
