@@ -64,17 +64,10 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · contact-solve NCU requested</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · contact-solve NCU analyzed</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
-
-    <section class="action-required">
-      <h2>ACTION REQUIRED · run one focused Nsight Compute script</h2>
-      <p>This profiles exactly one graph-captured generalized contact-solve launch and normally takes a few minutes. Run:</p>
-      <pre><code>sudo bash /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_contact_solve.sh</code></pre>
-      <p>Expected report: <code>/tmp/phoenx_g1_contact_solve_latest.ncu-rep</code>. No other command or manual configuration is needed.</p>
-    </section>
 
     <article>
       <div class="meta"><span class="tag">SYSTEMS-GUIDED MEGAKERNEL</span><time>2 Jul - latest</time></div>
@@ -82,7 +75,8 @@
       <p>A fresh bounded five-replay Nsight Systems trace reflects all retained optimizations. Exact contact-row construction is still the largest kernel at 19.0%; generalized contact PGS is 11.1%. Reduced advance is 12.5%, publication 10.0%, factorization 8.5%, and reset FK 7.2%.</p>
       <ul>
         <li>A one-block-per-articulation megakernel can build rows, synchronize, then consume on-chip Jacobian/response data. This targets global materialization and the producer/consumer boundary while retaining hard-Hertz projection and exact ABA responses.</li>
-        <li>The existing row-builder NCU report says its serial topology traversal is latency-bound, so launch fusion alone is not enough. The requested contact-solve NCU report will determine shared-memory, occupancy, and consumer-layout constraints before implementation.</li>
+        <li>The contact-solve NCU report is now analyzed: 44.6% compute/memory throughput, 44.7% achieved occupancy, no spills, and eligible warps on 38.5% of scheduler cycles. The consumer is reasonably utilized; row construction remains pathological at only 8.35% eligible cycles.</li>
+        <li>A simple build/barrier/solve megakernel is therefore not yet justified: its larger block and shared response storage would reduce the solve's occupancy. The higher-upside experiment is exact six-wrench-per-contacted-body ABA basis construction followed by tile-matrix row synthesis, replacing the rejected scalar synthesis that erased the traversal savings.</li>
         <li>The combined 30% share makes a 10-20% end-to-end physics improvement plausible if the on-chip design succeeds. It cannot by itself erase the full training-throughput gap; advance, publish, factor, FK, and learner work remain independent targets.</li>
         <li>The shipped nanoG1 policy passes its native gate but not PhoenX. Native-versus-imported first-step inference agrees within 1.3e-6, and contact-free open-loop dynamics closely agree. Supported motion exposes the expected hard-Hertz-versus-MuJoCo contact-response difference, so PhoenX requires its own policy rather than assuming direct transfer.</li>
         <li>PhoenX's 125.8M policy is fall-free and passes tracking plus angular/leg-speed thresholds. Action-rate fine-tuning improved jerk from 0.269 to 0.232, but the strongest point traded torso stability and is not retained.</li>
