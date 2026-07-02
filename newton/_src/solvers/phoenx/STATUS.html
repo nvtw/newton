@@ -81,10 +81,12 @@
       <div class="stamp">Last updated<br><strong>2 July 2026 (late) · contact-row builder diagnosis</strong></div>
     </header>
 
-    <section class="hero">
-      <strong>User action</strong>
-      <p><span class="tag good">NONE PENDING</span> — the requested Nsight Compute run was delivered and consumed (thank you); its counters directly produced today's retained builder win. Future script requests will appear in this top box so they are visible without scrolling.</p>
-    </section>
+    <div class="action-required">
+      <div class="meta"><span class="tag warn">USER ACTION REQUESTED</span><time>2 Jul (late)</time></div>
+      <h2>One more Nsight Compute run: the remaining top reduced-pipeline kernels</h2>
+      <p>Your first ncu report converted directly into the retained row-builder win. The same counters are now needed for the true training-trace leaders — ABA advance (8.6% of training GPU), factorization (6.2%), contact tile solve (4.9%), publish (4.5%), and contact gather. One bounded run, about 5 minutes, report at <code>/tmp/phoenx_g1_reduced_pipeline.ncu-rep</code>:</p>
+      <pre>sudo bash newton/_src/solvers/phoenx/benchmarks/profile_g1_reduced_pipeline_ncu.sh</pre>
+    </div>
 
     <section class="hero">
       <strong>Primary goal</strong>
