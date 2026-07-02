@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 from newton._src.sim import Model
@@ -68,6 +69,41 @@ _FALLBACK_BLOCK_DIM = 256
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 
 _INT64_MAX = 9223372036854775807
+
+
+def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool]:
+    """Prove whether model-generated rigid pairs can require fallback."""
+    pairs_array = getattr(model, "shape_contact_pairs", None)
+    if pairs_array is None or model.shape_body is None:
+        return False, False
+    pairs = pairs_array.numpy()
+    if pairs.size == 0:
+        return True, True
+
+    body_articulation = np.full(int(model.body_count), -1, dtype=np.int32)
+    articulation_start = model.articulation_start.numpy()
+    articulation_end = model.articulation_end.numpy()
+    joint_child = model.joint_child.numpy()
+    for articulation in range(int(model.articulation_count)):
+        start = int(articulation_start[articulation])
+        end = int(articulation_end[articulation])
+        body_articulation[joint_child[start:end]] = articulation
+
+    shape_body = model.shape_body.numpy()
+    body0 = shape_body[pairs[:, 0]]
+    body1 = shape_body[pairs[:, 1]]
+    articulation0 = np.where(body0 >= 0, body_articulation[np.maximum(body0, 0)], -1)
+    articulation1 = np.where(body1 >= 0, body_articulation[np.maximum(body1, 0)], -1)
+    reduced0 = articulation0 >= 0
+    reduced1 = articulation1 >= 0
+    inverse_mass = model.body_inv_mass.numpy()
+    static0 = (body0 < 0) | (inverse_mass[np.maximum(body0, 0)] == 0.0)
+    static1 = (body1 < 0) | (inverse_mass[np.maximum(body1, 0)] == 0.0)
+    block_owned = (reduced0 & ~reduced1 & static1) | (reduced1 & ~reduced0 & static0)
+    reduced_pair = reduced0 | reduced1
+    partitioned_safe = not bool(np.any(reduced_pair & ~block_owned))
+    rigid_only_safe = not bool(np.any(~block_owned))
+    return partitioned_safe, rigid_only_safe
 
 
 @wp.kernel(enable_backward=False)
@@ -950,6 +986,11 @@ class ReducedContactBlockSystem:
         self.articulation_depth_joint = articulation_depth_joint
         self.max_depth = int(max_depth)
         self.fuse_apply = bool(self.device.is_cuda)
+        (
+            self._fallback_impossible_partitioned,
+            self._fallback_impossible_rigid_only,
+        ) = _fallback_impossible_from_model_pairs(model)
+        self._skip_fallback_coloring = False
         articulation_count = max(1, int(model.articulation_count))
         articulation_start = model.articulation_start.numpy()
         articulation_end = model.articulation_end.numpy()
@@ -1150,6 +1191,12 @@ class ReducedContactBlockSystem:
         assert self.fallback_count is not None
         assert self.fallback_column is not None
         assert self.fallback_element is not None
+        self._skip_fallback_coloring = (
+            self._fallback_impossible_partitioned if partition_ownership else self._fallback_impossible_rigid_only
+        )
+        if self._skip_fallback_coloring:
+            self.fallback_count.zero_()
+            return
         wp.launch(
             _compact_fallback_contact_elements_kernel,
             dim=self.schedule_capacity,
@@ -1187,6 +1234,8 @@ class ReducedContactBlockSystem:
         prepare: bool,
     ) -> None:
         """Solve only conflicting fallback contacts with deterministic coloring."""
+        if self._skip_fallback_coloring:
+            return
         assert self.fallback_count is not None
         self._solve_fallback_coloring(
             columns=columns,

@@ -1999,6 +1999,7 @@ class TestReducedArticulation(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+        self.assertFalse(solver._reduced_articulation.contact_block_system._skip_fallback_coloring)
         momentum_after = _total_momentum(model, output)
         np.testing.assert_allclose(momentum_after, momentum_before, rtol=0.0, atol=1.0e-5)
 
@@ -2037,6 +2038,7 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(int(block.enabled.numpy()[0]), 1)
         self.assertEqual(int(block.deferred_active.numpy()[0]), 0)
+        self.assertTrue(block._skip_fallback_coloring)
         self.assertEqual(int(block.max_page_count.numpy()[0]), 1)
         self.assertEqual(int(block.page_index.numpy()[0]), 0)
         self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
