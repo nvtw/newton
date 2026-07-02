@@ -39,23 +39,23 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
   physics ranking is advance 8.6% > factor 6.2% > row build 5.9% >
   contact solve 4.9% > publish 4.5% of total GPU.
 
-### Tiered contact sort under graph capture (2026-07-02)
-- `ContactSorter._sort_and_permute` (shared geometry code, runs in every
-  `model.collide`) sorted the full pre-allocated capacity every call. Under
-  CUDA graph capture a `wp.capture_if` chain now sorts the smallest
-  quarter/half/full tier holding the live count. Sorted prefix is
-  bit-identical (stable sort + count-bounded consumers, verified by state
-  hashes over captured G1 rollouts). CUB temp storage is reserved at full
-  capacity in the constructor - conditional graph bodies must not allocate
-  (first capture at a cold size raises "unsupported operation (memory
-  allocation)" otherwise; a fallback-overflow test caught this).
-- G1 8192 worlds (count 65k of 262k capacity): onesweep total 4.30 -> 3.64
-  ms per 60 substeps (-16%). Modest because the 64-bit key forces 8 radix
-  passes regardless of size and small sorts are launch-dominated; the win
-  grows when live counts sit further below capacity. A pass-count cut
-  needs a compact key layout, which conflicts with the top-aligned
-  `make_contact_sort_key` bit layout and the matcher's low-32 tiebreak -
-  judged not worth the shared-code blast radius for ~1% physics.
+### Tiered contact sort under graph capture (2026-07-02) - REVERTED, brittle
+- Attempted: `wp.capture_if` chain in `ContactSorter._sort_and_permute`
+  sorting the smallest quarter/half/full capacity tier holding the live
+  count. Result was bit-identical (verified by state hashes) and cut the
+  onesweep total 4.30 -> 3.64 ms per 60 substeps (-16%, only ~0.5% physics
+  because the 64-bit key forces 8 radix passes regardless of size).
+- **Reverted (commit 3f51b909): warp's CUB radix sort allocates temp
+  storage per stream, and conditional graph bodies must not allocate.**
+  Constructor pre-warm fixes the default stream, but the leapfrog trainer
+  captures on other streams and dies with "Conditional body graph contains
+  an unsupported operation (memory allocation)". Don't re-try until warp
+  offers externally-provided temp storage for `radix_sort_pairs` (or
+  pre-instantiated child graphs per tier are practical); the ~0.5% is not
+  worth the stream-configuration fragility.
+- Also judged not worth it: a pass-count cut via compact sort keys - it
+  conflicts with the top-aligned `make_contact_sort_key` bit layout and
+  the matcher's low-32 tiebreak (shared-code blast radius for ~1%).
 
 ### Block contact gather: skip builder-overwritten effective masses (2026-07-02)
 - `reduced_contact_prepare` computed three per-direction inverse-mass
