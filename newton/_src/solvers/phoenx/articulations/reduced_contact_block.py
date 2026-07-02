@@ -1035,6 +1035,8 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
 
 
 _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS = {
+    32: _make_solve_generalized_contact_tile_kernel(32),
+    40: _make_solve_generalized_contact_tile_kernel(40),
     48: _make_solve_generalized_contact_tile_kernel(48),
     64: _make_solve_generalized_contact_tile_kernel(64),
 }
@@ -1110,7 +1112,14 @@ class ReducedContactBlockSystem:
                 for articulation in range(int(model.articulation_count))
             ),
         )
-        self.contact_dof_width = 48 if max_dof_count <= 48 else 64
+        if max_dof_count <= 32:
+            self.contact_dof_width = 32
+        elif max_dof_count <= 40:
+            self.contact_dof_width = 40
+        elif max_dof_count <= 48:
+            self.contact_dof_width = 48
+        else:
+            self.contact_dof_width = 64
         self.solve_kernel = _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS[self.contact_dof_width]
         self.requires_impulse_response = not (
             self._fallback_impossible_partitioned

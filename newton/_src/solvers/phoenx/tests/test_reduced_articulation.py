@@ -1532,6 +1532,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         bridge = solver._reduced_articulation
         block = bridge.contact_block_system
+        self.assertEqual(block.contact_dof_width, 32)
         dof_count = int(model.joint_dof_count)
         wrench = wp.spatial_vector(0.7, -0.2, 0.4, -0.3, 0.6, 0.1)
         row_body = np.full(block.row_body.shape, 4, dtype=np.int32)
@@ -1653,6 +1654,32 @@ class TestReducedArticulation(unittest.TestCase):
         expected_effective_mass = 1.0 / float(np.dot(jacobian_row, response_row))
         actual_effective_mass = float(solver.world._contact_container.derived.numpy()[0, 0])
         self.assertAlmostEqual(actual_effective_mass, expected_effective_mass, delta=2.0e-5)
+
+    def test_contact_block_selects_smallest_dof_width_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        for child_count, expected_width in ((30, 32), (34, 40), (44, 48), (50, 64)):
+            with self.subTest(expected_width=expected_width):
+                model = _make_wide_tree(device, child_count)
+                state = model.state()
+                output = model.state()
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    articulation_mode="reduced",
+                    substeps=1,
+                    solver_iterations=1,
+                    velocity_iterations=0,
+                )
+                self.assertEqual(solver._reduced_articulation.contact_block_system.contact_dof_width, expected_width)
+                contacts = model.contacts()
+                with wp.ScopedCapture(device=device) as capture:
+                    model.collide(state, contacts)
+                    solver.step(state, output, None, contacts, 1.0 / 1000.0)
+                wp.capture_launch(capture.graph)
+                self.assertTrue(np.isfinite(output.joint_q.numpy()).all())
+                self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
 
     def test_deferred_contact_response_matches_aba_under_graph_capture(self):
         device = wp.get_preferred_device()
@@ -2209,7 +2236,7 @@ class TestReducedArticulation(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         block = solver._reduced_articulation.contact_block_system
-        self.assertEqual(block.contact_dof_width, 48)
+        self.assertEqual(block.contact_dof_width, 32)
         self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(int(block.enabled.numpy()[0]), 1)
         self.assertEqual(int(block.deferred_active.numpy()[0]), 0)

@@ -64,10 +64,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · contact scratch traffic reduced</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · adaptive contact row widths</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">GENERAL LAYOUT GAIN</span><time>3 Jul - latest</time></div>
+      <h2>Adaptive contact widths bring the G1 graph to 1.165M env steps/s</h2>
+      <p>Block-owned reduced contacts now select the smallest supported generalized-row width from 32, 40, 48, and 64 DOFs. G1 needs 35 DOFs and therefore uses 40 instead of padding every Jacobian, response, scratch row, tile load, and reduction to 48.</p>
+      <ul>
+        <li>The matched 8192-world, 1024-replay measurement improves from 1.1534M to 1.1648M environment steps/s (+0.98%). A shorter 512-replay run reaches 1.1756M.</li>
+        <li>Contact-row construction median falls from about 472 to 441 microseconds (-6.6%) because the tighter packed stride improves memory locality. G1 contact-row, response, and generalized-delta storage also shrink by 16.7%.</li>
+        <li>Width selection is automatic from the largest articulation in the model. Articulations through 64 DOFs remain supported with no user parameter and no fallback or equation change.</li>
+        <li>New CUDA graph coverage executes the 32, 40, 48, and 64 boundaries. The complete 39-test reduced-articulation suite passes, including momentum, determinism, contacts, closed loops, multiple articulations per world, and Featherstone comparisons; the G1 graph regression confirms width 40.</li>
+        <li>Fusing factor initialization into the warp factor kernel was tested and removed. Register/cache pressure lowered G1 to 1.151M steps/s, so retaining the separate lightweight initialization kernel is faster.</li>
+      </ul>
+      <p><strong>Assessment:</strong> this is a small general-purpose throughput and memory gain for robots of many sizes. It preserves exact hard-Hertz contact behavior, graph capture, and deterministic reduced-coordinate dynamics.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">EXACT ROW-BUILDER GAIN</span><time>3 Jul - latest</time></div>

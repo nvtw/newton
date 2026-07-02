@@ -5357,6 +5357,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             device=device,
         )
         block = env.solver._reduced_articulation.contact_block_system
+        self.assertEqual(block.contact_dof_width, 40)
         self.assertFalse(block.requires_impulse_response)
 
         actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
