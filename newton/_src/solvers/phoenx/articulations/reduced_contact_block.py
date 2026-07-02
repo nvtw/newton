@@ -692,22 +692,29 @@ def _build_packed_generalized_contact_rows_kernel(
     storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
     packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
     row_count = wp.int32(3) * point_count[packed_articulation]
-    if (
-        enabled[articulation] == wp.int32(0)
-        or row >= row_count
-        or dof_count_articulation > wp.int32(packed_jacobian.shape[1])
-    ):
+    # These exit conditions are uniform across the block, so returning before
+    # the cooperative zero fill and its barrier below is safe.
+    if enabled[articulation] == wp.int32(0) or dof_count_articulation > wp.int32(packed_jacobian.shape[1]):
         return
-
     if not prepare and (
         page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
     ):
         return
-    packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
 
-    # The dense Jacobian needs explicit zeros; projected scratch is read only on the source path below.
-    for local_dof in range(dof_count_articulation):
-        packed_jacobian[packed_row, local_dof] = wp.float32(0.0)
+    # The dense Jacobian needs explicit zeros. All block threads (one block is
+    # one articulation) stride the flat [row, dof] slab so the stores coalesce
+    # instead of each row thread walking its own 144-byte-strided row.
+    first_packed_row = packed_articulation * wp.int32(_MAX_ROWS)
+    zero_total = row_count * dof_count_articulation
+    zero_index = row
+    while zero_index < zero_total:
+        zero_row = zero_index // dof_count_articulation
+        packed_jacobian[first_packed_row + zero_row, zero_index - zero_row * dof_count_articulation] = wp.float32(0.0)
+        zero_index += wp.int32(_MAX_ROWS)
+    _sync_contact_block()
+    if row >= row_count:
+        return
+    packed_row = first_packed_row + row
 
     source_body = row_body[packed_articulation, row]
     source_wrench = row_wrench[packed_articulation, row]
@@ -771,7 +778,11 @@ def _build_packed_generalized_contact_rows_kernel(
                     joint_work[articulation, dof - dof_start_articulation, row] = response_value
                 else:
                     packed_response[packed_row, dof - dof_start_articulation] = response_value
-                inverse_mass += packed_jacobian[packed_row, dof - dof_start_articulation] * response_value
+                if on_source_path:
+                    # The Jacobian row is nonzero only on the source path; the
+                    # recomputed dot matches the stored entry bit-exactly and
+                    # avoids a 144-byte-strided reload per DOF.
+                    inverse_mass += wp.dot(data.joint_s[dof], source_wrench) * response_value
                 parent_delta += data.joint_s[dof] * response_value
         body_response[articulation, local_joint, row] = parent_delta
         if on_source_path:
@@ -852,6 +863,16 @@ def _transpose_generalized_contact_response_kernel(
 """
 )
 def _sync_contact_warp(): ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    __syncthreads();
+#endif
+"""
+)
+def _sync_contact_block(): ...
 
 
 def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
