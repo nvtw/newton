@@ -857,14 +857,14 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
         storage_page = wp.min(page_index[0], wp.int32(_CACHED_PAGE_COUNT - 1))
         packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
         generalized_delta = wp.tile_zeros(shape=max_dofs, dtype=wp.float32, storage="shared")
+        active_point_count = point_count[packed_articulation]
         if warmstart:
-            for point_offset in range(_POINTS_PER_PAGE):
+            for point_offset in range(active_point_count):
                 point = wp.int32(point_offset)
-                active = point < point_count[packed_articulation]
                 lambda0 = wp.float32(0.0)
                 lambda1 = wp.float32(0.0)
                 lambda2 = wp.float32(0.0)
-                if lane == wp.int32(0) and active:
+                if lane == wp.int32(0):
                     contact = point_contact[packed_articulation, point]
                     lambda0 = cc_get_normal_lambda(cc, contact)
                     lambda1 = cc_get_tangent1_lambda(cc, contact)
@@ -872,17 +872,12 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
                 broadcast0 = wp.tile_from_thread(shape=max_dofs, value=lambda0, thread_idx=0, storage="shared")
                 broadcast1 = wp.tile_from_thread(shape=max_dofs, value=lambda1, thread_idx=0, storage="shared")
                 broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
-                if active:
-                    row = wp.int32(3) * point
-                    packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
-                    response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
-                    response1 = wp.tile_load(
-                        packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
-                    )
-                    response2 = wp.tile_load(
-                        packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
-                    )
-                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                row = wp.int32(3) * point
+                packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
+                response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
+                response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
+                response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
@@ -891,37 +886,28 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
             )
 
         for iteration in range(iterations):
-            for point_offset in range(_POINTS_PER_PAGE):
+            for point_offset in range(active_point_count):
                 point = wp.int32(point_offset)
                 if (iteration & wp.int32(1)) != wp.int32(0):
-                    point = point_count[packed_articulation] - wp.int32(1) - wp.int32(point_offset)
-                active = point >= wp.int32(0) and point < point_count[packed_articulation]
+                    point = active_point_count - wp.int32(1) - wp.int32(point_offset)
                 delta0 = wp.float32(0.0)
                 delta1 = wp.float32(0.0)
                 delta2 = wp.float32(0.0)
-                row = wp.int32(3) * wp.max(point, wp.int32(0))
+                row = wp.int32(3) * point
                 packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
-                jv0 = wp.float32(0.0)
-                jv1 = wp.float32(0.0)
-                jv2 = wp.float32(0.0)
-                if active:
-                    jacobian0 = wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register")
-                    jacobian1 = wp.tile_load(
-                        packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
-                    )
-                    jacobian2 = wp.tile_load(
-                        packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
-                    )
-                    jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
-                        wp.tile_sum(jacobian0 * generalized_delta), 0
-                    )
-                    jv1 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
-                        wp.tile_sum(jacobian1 * generalized_delta), 0
-                    )
-                    jv2 = row_velocity[packed_articulation, row + wp.int32(2)] + wp.tile_extract(
-                        wp.tile_sum(jacobian2 * generalized_delta), 0
-                    )
-                if lane == wp.int32(0) and active:
+                jacobian0 = wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register")
+                jacobian1 = wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
+                jacobian2 = wp.tile_load(packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
+                    wp.tile_sum(jacobian0 * generalized_delta), 0
+                )
+                jv1 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
+                    wp.tile_sum(jacobian1 * generalized_delta), 0
+                )
+                jv2 = row_velocity[packed_articulation, row + wp.int32(2)] + wp.tile_extract(
+                    wp.tile_sum(jacobian2 * generalized_delta), 0
+                )
+                if lane == wp.int32(0):
                     contact = point_contact[packed_articulation, point]
                     column = point_column[packed_articulation, point]
                     n = normal[packed_articulation, point]
@@ -975,15 +961,10 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
                 broadcast0 = wp.tile_from_thread(shape=max_dofs, value=delta0, thread_idx=0, storage="shared")
                 broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
                 broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
-                if active:
-                    response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
-                    response1 = wp.tile_load(
-                        packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
-                    )
-                    response2 = wp.tile_load(
-                        packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
-                    )
-                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
+                response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
+                response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
 
         wp.tile_store(generalized_delta_out[articulation], generalized_delta)
         if not fuse_apply:

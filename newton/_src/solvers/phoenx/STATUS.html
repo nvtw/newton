@@ -58,10 +58,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · packed publish milestone</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · active contact loops</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">GENERAL CONTACT-SOLVE GAIN</span><time>2 Jul - latest</time></div>
+      <h2>Actual-count contact loops raise G1 training to 487k samples/s</h2>
+      <p>The graph launch remains fixed, but each reduced articulation page now iterates only over its current device-side contact count instead of executing 32 guarded point slots. Hard-Hertz projection, friction, warm starting, alternating PGS order, ABA responses, and deterministic arithmetic for every active row are unchanged.</p>
+      <ul>
+        <li>The sparse 8192-world G1 training benchmark rises from 463.9k to 486.6k samples/s, a 4.9% end-to-end gain. The pinned nanoG1 gap narrows from 2.76x to 2.63x.</li>
+        <li>Nsight measures the generalized contact-solve median falling from 199.3 to 140.7 microseconds, about 29% lower; mean kernel time falls about 35%.</li>
+        <li>The denser shared MJWarp G1 model, with exactly 34 contacts per articulation spanning a full page plus a sparse second page, reaches 1.459M physics steps/s versus the prior 1.419M milestone. This confirms the gain is not limited to the training collision model.</li>
+        <li>The complete 36-test reduced-articulation CUDA graph suite passes. Coverage includes zero-to-overflow contact-count changes without recapture, exact arbitrary three-page paging, 48/64-DoF paths, closed loops, multiple articulations per world, multi-world scenes, dense contacts, cloth ownership, deterministic fallback, and spatial momentum conservation.</li>
+        <li>A topology-packed factorization experiment was rejected: its matrix-heavy kernel regressed from 213 to 234 microseconds median because register pressure prevented the occupancy gain seen in advance and publication.</li>
+      </ul>
+      <p><strong>Next:</strong> re-profile after this gain. Contact-row construction is now the dominant physics kernel, so prioritize general ways to eliminate or shorten its dependent ABA topology traversal while retaining exact equations across sparse and dense scenes.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">PACKED PUBLISH MILESTONE</span><time>2 Jul - latest</time></div>
@@ -228,19 +242,6 @@
       <p><strong>Verdict:</strong> no, maximal G1 training does not work yet. Reduced/hybrid success does not satisfy the goal. Next is a physically correct fix for maximal generalized torque and velocity response, followed by the same graph-captured train-to-gate test.</p>
     </article>
 
-    <article>
-      <div class="meta"><span class="tag warn">THROUGHPUT A/B</span><time>1 Jul · latest</time></div>
-      <h2>Passing reduced-coordinate training now has a clean steady-state benchmark</h2>
-      <p>The exact successful 8192-world, 5-substep, 2-position/1-velocity-iteration reduced recipe sustains about 241k environment samples/s after warm-up. Against nanoG1's pinned 1.28M/s reference, the remaining steady-state gap is 5.3×.</p>
-      <ul>
-        <li>The benchmark previously selected maximal coordinates implicitly. It now exposes and reports reduced, hybrid, and maximal articulation modes plus the resolved scheduler, block size, prepare stride, and lane width.</li>
-        <li>The measured reduced path resolves to fast-tail, 16 lanes/world, and prepare stride 1. An 8-lane A/B reached 238k/s and was rejected; the current auto lane choice is already correct.</li>
-        <li>PPO update is mostly hidden by graph-leapfrog overlap; rollout is the critical path. Optimizing update-only kernels will not close the end-to-end gap.</li>
-        <li>A semantics-preserving Puffer rollout-store fusion removes one CUDA launch per policy step. It passes exact buffer-layout and CUDA graph train/save/resume regressions and measures about 243k/s, roughly +0.9%; this is useful but not a major win.</li>
-        <li>No solver accuracy, reward, optimizer, or training-quality setting changed. The previously passing checkpoint and frozen gate remain the quality anchor.</li>
-      </ul>
-      <p><strong>Verdict:</strong> yes, optimizations are now tested directly with real training. The first safe fusion is small; the next meaningful work must reduce the rollout's policy/physics/contact path rather than merely shorten PPO update.</p>
-    </article>
 
 
   </main>
