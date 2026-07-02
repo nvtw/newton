@@ -25,10 +25,19 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
   improved, but steady leapfrog *training* regressed 2.7% (consistent,
   bracketed) - the extra 8192x6-tile transpose per substep contends with
   the overlapped learner stream. Lesson: **validate physics-only wins
-  against `bench_g1_train --execution-mode graph_leapfrog`; the training
-  loop is currently update-stream-bound** (physics +3.9% moved training
-  0%), so rollout-side gains only pay off in physics-bound configs or
-  after the learner stream shortens.
+  against `bench_g1_train --execution-mode graph_leapfrog`**.
+- **Stream-balance measurement (nsys, steady leapfrog window):** GPU
+  union-busy is 96%; the rollout stream (~0.45 s/iter: physics + env +
+  policy forward) is the long pole over the update stream (~0.14 s/iter).
+  Training IS rollout-bound - physics wins land on the critical path, but
+  a few-percent physics gain is only ~1-2% end-to-end, inside the ~±1.5%
+  bench noise. Judge small candidates by *rollout-stream busy time* from
+  an nsys trace, not raw samples/s. Also: the row builder averages
+  ~205 us in real training vs ~400 us in the standing-pose physics
+  profile (fewer active contact rows mid-episode), so standing-pose
+  kernel shares overstate the contact path roughly 2x; the training-trace
+  physics ranking is advance 8.6% > factor 6.2% > row build 5.9% >
+  contact solve 4.9% > publish 4.5% of total GPU.
 
 ### Greedy graph coloring (single-world)
 - Replaces round-based JP MIS for the global colouring on the single-world layout. Picks the smallest-free-colour for each MIS commit instead of "round = colour", landing 2-3x fewer colours on dense contact graphs (kapla, box stacks).

@@ -119,7 +119,7 @@
       <ul>
         <li><strong>Retained (commit <code>3acd36f9</code>):</strong> block-cooperative coalesced Jacobian zero-fill plus recomputing the source-path Jacobian dot for the effective mass instead of reloading the padded row per DOF. Bit-identical; all 40 reduced-articulation CUDA graph tests pass; builder 410.0 → 399.3 µs; physics-only runs at 1.22–1.24M env steps/s.</li>
         <li><strong>Measured but not retained:</strong> always routing responses through the tile transpose cuts the builder to 312.5 µs (−24%) and lifts physics-only throughput, but consistently costs 2.7% of steady leapfrog training — the extra per-substep transpose contends with the overlapped learner stream.</li>
-        <li><strong>Strategic insight:</strong> steady leapfrog training is currently <em>update-stream-bound</em>: +3.9% physics moved end-to-end training by zero. Solver/collision gains land fully in physics-bound configurations (evaluation, gates, higher-substep recipes) but the 805k/s training ceiling is set by the learner stream today.</li>
+        <li><strong>Strategic insight (corrected by a stream-balance trace):</strong> steady leapfrog training is <em>rollout-bound</em> — GPU union-busy is 96%, the rollout stream (~0.45 s/iter) dominates the update stream (~0.14 s/iter). Solver/collision wins are on the end-to-end critical path, but a few-percent physics gain is only ~1–2% end-to-end and sits inside bench noise; small candidates must be judged by rollout-stream busy time from nsys, not raw samples/s. The row builder also averages ~205 µs in real training vs ~400 µs in the standing-pose profile (fewer contacts mid-episode).</li>
       </ul>
     </article>
 
