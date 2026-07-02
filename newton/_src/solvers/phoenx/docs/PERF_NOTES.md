@@ -57,6 +57,16 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
   `make_contact_sort_key` bit layout and the matcher's low-32 tiebreak -
   judged not worth the shared-code blast radius for ~1% physics.
 
+### Block contact gather: skip builder-overwritten effective masses (2026-07-02)
+- `reduced_contact_prepare` computed three per-direction inverse-mass
+  traversals per contact, but for block-owned contacts the packed row
+  builder derives exact effective masses from the generalized response
+  rows and overwrites the `eff_*` slots before any solve reads them. A
+  `compute_effective_mass` flag now skips that work on the gather path
+  (fallback + deferred callers still compute it).
+- Gather kernel median 110.8 -> 84.6 us (-24%) at 8192 G1 worlds;
+  bit-identical state hashes; all 40 reduced tests pass.
+
 ### Second ncu digest: factor / gather / solve (2026-07-02)
 - **factor**: 168 regs -> 25% theoretical occupancy (register-limited),
   memory 58% SOL, ~50% sector-utilization headroom on loads/stores.
