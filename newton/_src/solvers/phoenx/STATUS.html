@@ -58,7 +58,7 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · active contact loops</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · active loops + packed kinematics</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
@@ -72,6 +72,7 @@
         <li>Nsight measures the generalized contact-solve median falling from 199.3 to 140.7 microseconds, about 29% lower; mean kernel time falls about 35%.</li>
         <li>The denser shared MJWarp G1 model, with exactly 34 contacts per articulation spanning a full page plus a sparse second page, reaches 1.459M physics steps/s versus the prior 1.419M milestone. This confirms the gain is not limited to the training collision model.</li>
         <li>The complete 36-test reduced-articulation CUDA graph suite passes. Coverage includes zero-to-overflow contact-count changes without recapture, exact arbitrary three-page paging, 48/64-DoF paths, closed loops, multiple articulations per world, multi-world scenes, dense contacts, cloth ownership, deterministic fallback, and spatial momentum conservation.</li>
+        <li>Local kinematics now shares the same topology-selected 8-, 16-, or 32-lane scheduling as advance and publication. Its median falls from 53.0 to 45.6 microseconds (14%); end-to-end impact is small but non-negative, and the exact transform path is covered across all widths.</li>
         <li>A topology-packed factorization experiment was rejected: its matrix-heavy kernel regressed from 213 to 234 microseconds median because register pressure prevented the occupancy gain seen in advance and publication.</li>
       </ul>
       <p><strong>Next:</strong> re-profile after this gain. Contact-row construction is now the dominant physics kernel, so prioritize general ways to eliminate or shorten its dependent ABA topology traversal while retaining exact equations across sparse and dense scenes.</p>

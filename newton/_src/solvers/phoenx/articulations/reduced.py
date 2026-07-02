@@ -650,6 +650,8 @@ def _compute_reduced_impulse_response_warp_kernel(
 
 @wp.kernel(enable_backward=False, module="reduced_kinematics")
 def _compute_reduced_local_kinematics_warp_kernel(
+    articulation_count: wp.int32,
+    tile_width: wp.int32,
     max_depth: wp.int32,
     articulation_depth_start: wp.array2d[wp.int32],
     articulation_depth_joint: wp.array[wp.int32],
@@ -672,8 +674,15 @@ def _compute_reduced_local_kinematics_warp_kernel(
     joint_anchor_local: wp.array[wp.transform],
 ):
     thread = wp.tid()
-    articulation = thread // wp.int32(32)
-    lane = thread - articulation * wp.int32(32)
+    articulation = thread // tile_width
+    lane = thread - articulation * tile_width
+    if articulation >= articulation_count:
+        return
+    warp_lane = thread & wp.int32(31)
+    group = warp_lane // tile_width
+    group_mask = wp.uint32(4294967295)
+    if tile_width < wp.int32(32):
+        group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
     if lane == wp.int32(0):
         root_joint = articulation_depth_joint[articulation_depth_start[articulation, 0]]
         root = joint_child[root_joint]
@@ -710,8 +719,8 @@ def _compute_reduced_local_kinematics_warp_kernel(
             joint_anchor_local[joint] = parent_anchor
             body_q_local[child] = child_transform
             body_q_com[child] = child_transform * body_x_com[child]
-            index += wp.int32(32)
-        _sync_reduced_warp()
+            index += tile_width
+        _sync_reduced_group(group_mask)
 
 
 @wp.kernel(enable_backward=False, module="reduced_factor")
@@ -2358,11 +2367,16 @@ class ReducedArticulationSystem:
             self.joint_anchor_local,
         ]
         if self.use_warp_kinematics:
+            articulation_count = int(self.model.articulation_count)
+            tile_width = self.advance_tile_width
+            thread_count = ((articulation_count * tile_width + 31) // 32) * 32
             wp.launch(
                 _compute_reduced_local_kinematics_warp_kernel,
-                dim=int(self.model.articulation_count) * 32,
-                block_dim=32,
+                dim=thread_count,
+                block_dim=128 if tile_width < 32 else 32,
                 inputs=[
+                    wp.int32(articulation_count),
+                    wp.int32(tile_width),
                     wp.int32(self.advance_max_depth),
                     self.advance_articulation_depth_start,
                     self.advance_articulation_depth_joint,

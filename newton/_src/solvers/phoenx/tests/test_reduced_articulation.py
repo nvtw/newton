@@ -1782,7 +1782,7 @@ class TestReducedArticulation(unittest.TestCase):
         np.testing.assert_allclose(state_warp.joint_q.numpy(), state_serial.joint_q.numpy(), rtol=2.0e-6, atol=2.0e-6)
         np.testing.assert_allclose(state_warp.body_qd.numpy(), state_serial.body_qd.numpy(), rtol=2.0e-6, atol=2.0e-6)
 
-    def test_subwarp_advance_and_publish_match_serial_for_all_topology_widths(self):
+    def test_subwarp_kinematics_advance_and_publish_match_serial_for_all_topology_widths(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")

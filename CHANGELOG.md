@@ -47,6 +47,7 @@
 
 ### Changed
 
+- Schedule reduced-coordinate PhoenX local kinematics with topology-sized 8-, 16-, or 32-lane warp groups, increasing parallelism across independent narrow articulations without changing transforms.
 - Iterate reduced-coordinate PhoenX generalized contact solves over each resident page actual contact count, eliminating graph-captured no-op work while preserving exact hard-Hertz projection and arbitrary contact paging.
 - Schedule reduced-coordinate PhoenX state publication with topology-sized 8-, 16-, or 32-lane warp groups, packing independent narrow articulations without changing integration or velocity reconstruction.
 - Accelerate experimental PhoenX G1 PufferMinGRU training with tiled aligned FP32 projections, linear-time recurrent backpropagation that reuses stored forward states, and deterministic FP32 or BF16 split-K weight gradients.
