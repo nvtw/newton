@@ -39,6 +39,37 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
   physics ranking is advance 8.6% > factor 6.2% > row build 5.9% >
   contact solve 4.9% > publish 4.5% of total GPU.
 
+### Tiered contact sort under graph capture (2026-07-02)
+- `ContactSorter._sort_and_permute` (shared geometry code, runs in every
+  `model.collide`) sorted the full pre-allocated capacity every call. Under
+  CUDA graph capture a `wp.capture_if` chain now sorts the smallest
+  quarter/half/full tier holding the live count. Sorted prefix is
+  bit-identical (stable sort + count-bounded consumers, verified by state
+  hashes over captured G1 rollouts). CUB temp storage is reserved at full
+  capacity in the constructor - conditional graph bodies must not allocate
+  (first capture at a cold size raises "unsupported operation (memory
+  allocation)" otherwise; a fallback-overflow test caught this).
+- G1 8192 worlds (count 65k of 262k capacity): onesweep total 4.30 -> 3.64
+  ms per 60 substeps (-16%). Modest because the 64-bit key forces 8 radix
+  passes regardless of size and small sorts are launch-dominated; the win
+  grows when live counts sit further below capacity. A pass-count cut
+  needs a compact key layout, which conflicts with the top-aligned
+  `make_contact_sort_key` bit layout and the matcher's low-32 tiebreak -
+  judged not worth the shared-code blast radius for ~1% physics.
+
+### Second ncu digest: factor / gather / solve (2026-07-02)
+- **factor**: 168 regs -> 25% theoretical occupancy (register-limited),
+  memory 58% SOL, ~50% sector-utilization headroom on loads/stores.
+- **gather** (`_gather_reduced_contact_blocks_kernel`): 128 regs, 33%
+  occupancy, memory 67% SOL, **~57% estimated coalescing headroom** - the
+  next builder-style strided-access target.
+- **solve tile**: memory 57.5% SOL, ~28% coalescing estimate.
+- Depth-synchronized kernels (advance/factor/publish/kinematics) each run
+  the GPU well under 35% utilized while serialized in the captured graph;
+  the structural lever is overlapping them with independent branches
+  (multi-stream capture: factor/advance are independent of collision
+  gather until the contact solve).
+
 ### Greedy graph coloring (single-world)
 - Replaces round-based JP MIS for the global colouring on the single-world layout. Picks the smallest-free-colour for each MIS commit instead of "round = colour", landing 2-3x fewer colours on dense contact graphs (kapla, box stacks).
 - Implementation: `partitioning_coloring_incremental_greedy_kernel` (`graph_coloring/graph_coloring_common.py`). Forbidden-colour bitmask is `int64`, capped at 64 colours. Overflow falls back to round-based JP within the same captured CUDA graph (`build_csr_greedy_with_jp_fallback`).
@@ -231,6 +262,33 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Use the production benchmark suite and the unified-block proxy benchmark for decisions that affect defaults. Re-enable actual-solve prototype modes only for isolated scheduler debugging with short timeouts.
 
 ## Tried and reverted
+
+### prepare_refresh_stride=3 for the G1 recipe (2026-07-02) - REJECTED, physics-changing
+- +3.1% physics-only throughput (1.226M vs 1.189M env steps/s). Full
+  train-to-gate at stride 3 *passes its own internal gate* (battery_perf
+  0.920, zero falls at 125.8M samples) - but that gate inherits the
+  stride-3 physics. **The same checkpoint collapses under true stride-1
+  physics: 17k falls / battery_perf 0.073 at BOTH gate seeds.** The policy
+  learned to exploit stride-3 contact staleness (worst in the final phase,
+  where stride 3 > substeps 2 leaves anchors stale across policy steps).
+  This is the canonical "faster unsuccessful training" trap and empirically
+  vindicates the auto heuristic choosing stride 1 below 8 substeps.
+- **Methodology lesson:** `bench_g1_train_to_gate` evaluates under the same
+  physics flags it trains with; always re-gate candidates with the
+  standalone `gate-g1-ppo` CLI (recipe-default physics) before believing a
+  pass. The bench-vs-CLI discrepancy is a built-in physics-overfit detector.
+
+### Advance/publish tile-width sweep at 8192 articulations (2026-07-02)
+- The reduced-pipeline ncu report shows the ABA advance at 0.34 waves/SM
+  (512 blocks) with an "81% speedup" small-grid recommendation. Widening
+  `advance_tile_width` does NOT deliver it: tile 8/16/32 give advance
+  141/134/154 us and end-to-end physics 1.23/1.19/1.16M env steps/s -
+  **tile 8 stays best**. The tree's per-depth joint width (~2-6 for G1)
+  bounds true parallelism; wider tiles only add idle lanes and lose the
+  warp-shared joint-data locality. Same conclusion as the factor sub-warp
+  tiling attempt. Don't revisit tile widths; the remaining headroom for the
+  depth-synchronized kernels is overlapping them with independent graph
+  branches (multi-stream capture), not launch-shape tuning.
 
 ### Reduced G1 contact-row builder micro-optimizations (2026-07-02)
 - Fresh physics-only nsys (8192 worlds, 3 substeps, 2 iters, 1 relax, stride 1):
