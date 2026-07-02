@@ -225,6 +225,14 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
   four-DOF-aligned width and the scratch-clear/transpose-skip wins. Not worth
   productionizing at 1.12x given the body-diversity dispatch + gate
   revalidation it needs.
+- **Factor kernel sub-warp tiling also regressed** (same session):
+  `_factor_reduced_warp_kernel` (11.1%, 168 registers, ~12 warps/SM occupancy)
+  was given the advance kernel's `tile_width=8` articulation packing
+  (4 G1 trees per warp, 4x lane utilization, single wave instead of 3.6):
+  **+9% slower** (232 vs 213 us median). Extra concurrency does not help these
+  depth-synchronized reduced kernels either - consistent with a dependent
+  memory-latency wall across the whole reduced pipeline, not an
+  occupancy/utilization shortfall.
 - **Next diagnostic requires privileged counters** (`ERR_NVGPUCTRPERM` blocks
   ncu for non-admin): `benchmarks/profile_g1_contact_rows_ncu.sh` captures a
   full-set report of one builder launch. The stall/occupancy breakdown decides

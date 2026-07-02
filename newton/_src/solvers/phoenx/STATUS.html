@@ -116,6 +116,7 @@
         <li>Replacing the global ancestor-response scratch with a per-thread depth-indexed stack (bit-identical, removes ~280 MB/launch of scratch traffic) <strong>regressed 25%</strong> — that traffic was already L2-absorbed; the local stack frame only added local-memory pressure. Reverted.</li>
         <li><code>ptxas</code> shows 64 registers, zero spills; a block-dim sweep (32–192) is flat — occupancy is not register- or shape-limited. Row-count scaling is strongly sub-linear (12 basis rows: 349 µs vs 24 rows: 462 µs), so the cost is per-thread serial tree-traversal latency.</li>
         <li>The 2026-06 unit-wrench basis compression prototype was re-measured against today's 36-wide packed layout: only <strong>1.12×</strong> on build+solve (down from the recorded ~19%), with FP-tolerance rather than bit-exact impulses. Not worth productionizing; the stale-width benchmark was fixed and the result recorded in PERF_NOTES.</li>
+        <li>The factorization kernel (168 registers, ~12 warps/SM) was given the advance kernel's sub-warp articulation packing — 4 G1 trees per warp, one occupancy wave instead of 3.6: <strong>+9% slower</strong>. Four independent experiments now agree the reduced pipeline sits at a dependent memory-latency wall that added concurrency does not cross.</li>
       </ul>
     </article>
 
@@ -172,6 +173,7 @@
           <li>Row builder scalar 1-DOF fast path: neutral (not ALU-bound).</li>
           <li>Row builder local ancestor-delta stack: −25% (scratch already L2-absorbed).</li>
           <li>Row builder block-dim sweep 32–192: flat.</li>
+          <li>Factor kernel sub-warp tiling (4 trees/warp): +9% slower.</li>
           <li>Unit-wrench basis compression at width 36: only 1.12×, not bit-exact.</li>
           <li>BF16 recurrent forward: only +0.3%, removed.</li>
           <li>Shared-factor staging / factor init fusion: slower.</li>
