@@ -12,6 +12,7 @@ from .kernels import (
     DENSE_TILE_BATCH,
     DENSE_TILE_IN,
     DENSE_TILE_OUT,
+    DENSE_WEIGHT_GRAD_KCHUNKS,
 )
 
 wp.set_module_options({"enable_backward": False})
@@ -46,6 +47,33 @@ def dense_weight_grad_bf16_tiled_kernel(
         )
         wp.tile_matmul(wp.tile_transpose(x_tile), grad_tile, total)
     wp.tile_store(weight_grad, total, offset=(in_tile * DENSE_TILE_IN, out_tile * DENSE_TILE_OUT))
+
+
+@wp.kernel
+def dense_weight_grad_bf16_splitk_tiled_kernel(
+    x: wp.array2d[wp.bfloat16],
+    grad_pre: wp.array2d[wp.bfloat16],
+    batch_size: wp.int32,
+    partials: wp.array3d[wp.float32],
+):
+    in_tile, out_tile, kc = wp.tid()
+    total = wp.tile_zeros(shape=(DENSE_TILE_IN, DENSE_TILE_OUT), dtype=wp.float32)
+    batch_tiles = (batch_size + DENSE_TILE_BATCH - wp.int32(1)) // DENSE_TILE_BATCH
+    tile = kc
+    while tile < batch_tiles:
+        x_tile = wp.tile_load(
+            x,
+            shape=(DENSE_TILE_BATCH, DENSE_TILE_IN),
+            offset=(tile * DENSE_TILE_BATCH, in_tile * DENSE_TILE_IN),
+        )
+        grad_tile = wp.tile_load(
+            grad_pre,
+            shape=(DENSE_TILE_BATCH, DENSE_TILE_OUT),
+            offset=(tile * DENSE_TILE_BATCH, out_tile * DENSE_TILE_OUT),
+        )
+        wp.tile_matmul(wp.tile_transpose(x_tile), grad_tile, total)
+        tile += wp.int32(DENSE_WEIGHT_GRAD_KCHUNKS)
+    wp.tile_store(partials[kc], total, offset=(in_tile * DENSE_TILE_IN, out_tile * DENSE_TILE_OUT))
 
 
 @wp.func

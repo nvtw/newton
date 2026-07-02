@@ -58,24 +58,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · split-K learner milestone</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · BF16 split-K milestone</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
 
     <article>
-      <div class="meta"><span class="tag">SPLIT-K TRAINING MILESTONE</span><time>2 Jul - latest</time></div>
-      <h2>Deterministic MinGRU gradients raise fast G1 training to 441.5k samples/s</h2>
-      <p>The post-linear-BPTT Nsight trace identified MinGRU weight gradients as the largest single GPU cost at 17.2%. They assigned one block to each 16x16 output tile and serially swept the entire rollout batch. PufferMinGRU now uses the existing fixed-order eight-way split-K contraction and reduction already proven by the generic Warp MLP.</p>
+      <div class="meta"><span class="tag">BF16 SPLIT-K MILESTONE</span><time>2 Jul - latest</time></div>
+      <h2>G1 training reaches 454k samples/s with deterministic mixed precision</h2>
+      <p>The post-linear-BPTT trace identified MinGRU weight gradients as the largest single GPU cost at 17.2%. PufferMinGRU now uses the fixed-order eight-way split-K contraction already proven by WarpMLP. It also finally honors the configured BF16 gradient-input mode: parameters, partial sums, final gradients, and optimizer state remain FP32; only matrix-contraction inputs use BF16.</p>
       <ul>
-        <li>On the established reduced 5x2x1 schedule, graph-leapfrog throughput rises from 393.5k to 441.5k samples/s (+12.2%). The remaining gap to nanoG1&#39;s pinned 1.28M/s is 2.90x, down from 3.25x immediately before this change.</li>
-        <li>The change is topology- and task-independent: each weight matrix receives padded split-K scratch, edge dimensions remain bounds-safe, and a fixed reduction order preserves bitwise graph-replay determinism.</li>
-        <li>A 13.1M-sample mini-quality continuation improves tracking from 0.679 to 0.723 with zero falls. Chunk training rises from about 275k to 300k samples/s despite graph reconstruction and checkpoint overhead, so learning remains healthy under the faster gradient path.</li>
-        <li>Six focused CUDA-graph tests pass, including NumPy split-K accuracy, bitwise replay determinism through PufferMinGRU, finite-difference BPTT, rollout/update replay consistency, and PPO train/save/load.</li>
+        <li>On the reduced 5x2x1 schedule, graph-leapfrog throughput rises from 393.5k before split-K to 441.5k with FP32 split-K and 454.0k with configured BF16 inputs. The remaining gap to nanoG1&#39;s pinned 1.28M/s is 2.82x.</li>
+        <li>The method is network- and task-independent. Every weight shape receives bounds-safe padded partial storage, and the fixed reduction order is bitwise deterministic across CUDA graph replays. FP32 remains the default and fallback.</li>
+        <li>Two short quality continuations remain healthy: FP32 split-K improves tracking from 0.679 to 0.723, then BF16 improves it to 0.767 at 65.5M total samples; all three mini-batteries have zero falls.</li>
+        <li>A new graph-captured oracle compares BF16 and FP32 PufferMinGRU gradients and verifies bitwise BF16 replay. Together with NumPy split-K, finite-difference BPTT, rollout/update replay, and PPO checkpoint tests, all focused regressions pass.</li>
         <li>The earlier same-seed 75.5M audit produced zero-fall walkers before and after linear BPTT. Parent versus optimized quality was 0.881 versus 0.861 tracking, 0.280 versus 0.261 action jerk, and 0.412 versus 0.348 torso angular RMS. Neither fixed recipe yet passes the unchanged strict gate.</li>
-        <li>Rejected ideas stay removed: a dense inverse-mass contact operator slowed contact-rich physics by about 10%, and bounds-checked edge tiling measured 392.3k versus 393.5k/s.</li>
+        <li>Rejected ideas stay removed: 16 split-K chunks added only 0.46%, split-output input gradients regressed slightly, edge forward tiles were neutral, and a dense inverse-mass contact operator slowed contact-rich physics by about 10%.</li>
       </ul>
-      <p><strong>Next:</strong> refresh the bounded profile after split-K, then target the remaining dense input-gradient and contact solve/publish/advance costs. Screen with exact numerical tests, a short throughput run, and the mini walking battery; reserve the full 75M gate for candidates that survive all three.</p>
+      <p><strong>Next:</strong> refresh the bounded profile with BF16 split-K, then target the remaining reduced contact solve/publish/advance costs. Continue screening with exact tests, short throughput runs, and mini walking batteries; reserve full 75M gates for candidates that survive all three.</p>
     </article>
 
     <article>

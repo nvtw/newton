@@ -2329,6 +2329,75 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(net.recurrent_weights[0].grad.numpy(), rec_grad, rtol=2.0e-2, atol=2.0e-2)
         np.testing.assert_allclose(net.decoder_weight.grad.numpy(), dec_grad, rtol=2.0e-2, atol=2.0e-2)
 
+    def test_puffer_mingru_bf16_split_k_grad_matches_fp32_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX BF16 MinGRU gradient tests")
+        steps = 3
+        envs = 512
+        rows = steps * envs
+        input_dim = 18
+        hidden_dim = 16
+        output_dim = 13
+        trainer = rl.TrainerPPO(
+            obs_dim=input_dim,
+            action_dim=output_dim - 1,
+            hidden_layers=(hidden_dim,),
+            config=rl.ConfigPPO(
+                policy_network="puffer_mingru",
+                shared_value_network=True,
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+                manual_mlp_weight_grad_dtype="bfloat16",
+                mirror_loss_coeff=0.0,
+            ),
+            device=device,
+            seed=17,
+        )
+        self.assertIsInstance(trainer.actor.net, rl.PufferMinGRUNet)
+        self.assertEqual(trainer.actor.net.manual_weight_grad_dtype, "bfloat16")
+
+        rng = np.random.default_rng(20260702)
+        obs_np = rng.uniform(-0.25, 0.25, (rows, input_dim)).astype(np.float32)
+        grad_np = rng.uniform(-0.2, 0.2, (rows, output_dim)).astype(np.float32)
+
+        fp32 = rl.PufferMinGRUNet(
+            input_dim=input_dim,
+            hidden_size=hidden_dim,
+            output_dim=output_dim,
+            num_layers=1,
+            device=device,
+            seed=17,
+            manual_weight_grad_dtype="float32",
+        )
+        bf16 = rl.PufferMinGRUNet(
+            input_dim=input_dim,
+            hidden_size=hidden_dim,
+            output_dim=output_dim,
+            num_layers=1,
+            device=device,
+            seed=17,
+            manual_weight_grad_dtype="bfloat16",
+        )
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        grad = wp.array(grad_np, dtype=wp.float32, device=device)
+        for net in (fp32, bf16):
+            net.set_sequence_shape(steps, envs)
+            net.reserve_buffers(rows)
+
+        with wp.ScopedCapture(device=device) as capture:
+            fp32.forward_manual(obs)
+            fp32.backward_manual(grad)
+            bf16.forward_manual(obs)
+            bf16.backward_manual(grad)
+        wp.capture_launch(capture.graph)
+        bf16_first = [parameter.grad.numpy().copy() for parameter in bf16.parameters()]
+
+        for expected, actual in zip(fp32.parameters(), bf16.parameters(), strict=True):
+            np.testing.assert_allclose(actual.grad.numpy(), expected.grad.numpy(), rtol=1.0e-2, atol=1.0e-2)
+
+        wp.capture_launch(capture.graph)
+        for parameter, first in zip(bf16.parameters(), bf16_first, strict=True):
+            np.testing.assert_array_equal(parameter.grad.numpy(), first)
+
     def test_puffer_mingru_ppo_train_save_load_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX recurrent PPO tests")
         buffer = rl.BufferRollout(num_steps=2, num_envs=2, obs_dim=4, action_dim=2, device=device)

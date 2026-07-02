@@ -432,6 +432,7 @@ class TrainerPPO:
                     num_layers=num_layers,
                     device=self.device,
                     seed=seed,
+                    manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
                 )
             else:
                 self.actor.net = WarpMLP(
@@ -553,24 +554,24 @@ class TrainerPPO:
     def copy_weights_from(self, other: TrainerPPO) -> None:
         """Copy network weights from *other* and reset optimizer state (GPU-side)."""
         # Copy actor weights
-        for dst, src in zip(self.actor.parameters(), other.actor.parameters()):
+        for dst, src in zip(self.actor.parameters(), other.actor.parameters(), strict=True):
             wp.copy(dst, src)
         wp.copy(self.actor.log_std, other.actor.log_std)
         # Copy critic weights (if separate)
         if self.critic is not None and other.critic is not None:
-            for dst, src in zip(self.critic.parameters(), other.critic.parameters()):
+            for dst, src in zip(self.critic.parameters(), other.critic.parameters(), strict=True):
                 wp.copy(dst, src)
         # Reset optimizer state
         self.actor_optimizer.step_count = 0
         for m in self.actor_optimizer.m:
             m.zero_()
-        for v in getattr(self.actor_optimizer, 'v', []):
+        for v in getattr(self.actor_optimizer, "v", []):
             v.zero_()
         if self.critic_optimizer is not None:
             self.critic_optimizer.step_count = 0
             for m in self.critic_optimizer.m:
                 m.zero_()
-            for v in getattr(self.critic_optimizer, 'v', []):
+            for v in getattr(self.critic_optimizer, "v", []):
                 v.zero_()
 
     def save_checkpoint(self, path: str | Path, *, iteration: int | None = None) -> None:
