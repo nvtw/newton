@@ -19,7 +19,7 @@ import argparse
 import json
 import math
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -182,6 +182,12 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     ppo_config = _make_ppo_config(args)
     command_curriculum_start = float(getattr(args, "command_curriculum_start", g1_recipe.COMMAND_CURRICULUM_START))
     command_curriculum_samples = int(getattr(args, "command_curriculum_samples", g1_recipe.COMMAND_CURRICULUM_SAMPLES))
+    angular_fine_tune_start_samples = int(args.angular_fine_tune_start_samples)
+    angular_fine_tune_iteration = (
+        0
+        if angular_fine_tune_start_samples <= 0
+        else int(math.ceil(angular_fine_tune_start_samples / float(int(args.world_count) * int(args.rollout_steps))))
+    )
 
     train_seconds = 0.0
     gate_seconds = 0.0
@@ -218,6 +224,20 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
 
     while not bool(args.evaluate_only) and completed_iterations < int(args.max_iterations):
         chunk_iterations = min(int(args.chunk_iterations), int(args.max_iterations) - completed_iterations)
+        fine_tune_active = angular_fine_tune_iteration > 0 and completed_iterations >= angular_fine_tune_iteration
+        if (
+            angular_fine_tune_iteration > completed_iterations
+            and completed_iterations + chunk_iterations > angular_fine_tune_iteration
+        ):
+            chunk_iterations = angular_fine_tune_iteration - completed_iterations
+        active_env_config = env_config
+        active_ppo_config = ppo_config
+        if fine_tune_active:
+            active_env_config = replace(env_config, w_ang_vel_xy=float(args.angular_fine_tune_w_ang_vel_xy))
+            active_ppo_config = replace(
+                ppo_config,
+                lr_anneal_timesteps=int(args.angular_fine_tune_lr_anneal_timesteps),
+            )
         chunk_t0 = time.perf_counter()
         result = rl.train_g1_ppo(
             rl.ConfigTrainG1PPO(
@@ -225,8 +245,8 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 rollout_steps=int(args.rollout_steps),
                 hidden_layers=tuple(args.hidden_layers),
                 activation=str(args.activation),
-                env_config=env_config,
-                ppo_config=ppo_config,
+                env_config=active_env_config,
+                ppo_config=active_ppo_config,
                 device=device,
                 seed=int(args.seed),
                 log_interval=0,
@@ -259,6 +279,13 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         checkpoint_path = _format_checkpoint_template(checkpoint_template, completed_iterations)
         resume_checkpoint = str(checkpoint_path)
         train_history.extend(asdict(item) for item in result.history)
+
+        if (
+            angular_fine_tune_iteration > 0
+            and completed_iterations == angular_fine_tune_iteration
+            and completed_iterations < int(args.max_iterations)
+        ):
+            continue
 
         gate_t0 = time.perf_counter()
         gate_result = _evaluate_checkpoint(checkpoint_path, args, device=device)
@@ -312,6 +339,10 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "w_command_progress": float(args.w_command_progress),
         "w_lin_vel_z": float(args.w_lin_vel_z),
         "w_ang_vel_xy": float(args.w_ang_vel_xy),
+        "angular_fine_tune_start_samples": int(angular_fine_tune_start_samples),
+        "angular_fine_tune_iteration": int(angular_fine_tune_iteration),
+        "angular_fine_tune_w_ang_vel_xy": float(args.angular_fine_tune_w_ang_vel_xy),
+        "angular_fine_tune_lr_anneal_timesteps": int(args.angular_fine_tune_lr_anneal_timesteps),
         "w_orientation": float(args.w_orientation),
         "w_torque": float(args.w_torque),
         "w_action_rate": float(args.w_action_rate),
@@ -499,6 +530,22 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--w-command-progress", type=float, default=g1_recipe.W_COMMAND_PROGRESS)
     parser.add_argument("--w-lin-vel-z", type=float, default=g1_recipe.W_LIN_VEL_Z)
     parser.add_argument("--w-ang-vel-xy", type=float, default=g1_recipe.W_ANG_VEL_XY)
+    parser.add_argument(
+        "--angular-fine-tune-start-samples",
+        type=int,
+        default=g1_recipe.ANGULAR_FINE_TUNE_START_SAMPLES,
+        help="Switch to the final roll/pitch regularization phase after this many samples; 0 disables it.",
+    )
+    parser.add_argument(
+        "--angular-fine-tune-w-ang-vel-xy",
+        type=float,
+        default=g1_recipe.ANGULAR_FINE_TUNE_W_ANG_VEL_XY,
+    )
+    parser.add_argument(
+        "--angular-fine-tune-lr-anneal-timesteps",
+        type=int,
+        default=g1_recipe.ANGULAR_FINE_TUNE_LR_ANNEAL_TIMESTEPS,
+    )
     parser.add_argument("--w-orientation", type=float, default=g1_recipe.W_ORIENTATION)
     parser.add_argument("--w-torque", type=float, default=g1_recipe.W_TORQUE)
     parser.add_argument("--w-action-rate", type=float, default=g1_recipe.W_ACTION_RATE)

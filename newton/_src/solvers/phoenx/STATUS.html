@@ -64,25 +64,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · 5 ms G1 training passes</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · contact fusion is next</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
 
     <article>
-      <div class="meta"><span class="tag">5 MS TRAINING PASSES</span><time>2 Jul - latest</time></div>
-      <h2>A larger PhoenX timestep adds 15.2% training throughput without losing quality</h2>
-      <p>PhoenX now trains the G1 walker with four 5 ms physics steps per 20 ms policy frame. nanoG1 uses five 4 ms steps. This removes one fifth of temporal physics work while retaining hard-Hertz contacts, two position iterations, one velocity iteration, and the same 50 Hz policy interface.</p>
+      <div class="meta"><span class="tag">FASTER BASELINE, CONTACT NEXT</span><time>2 Jul - latest</time></div>
+      <h2>G1 passes at 150M samples; the remaining 2.23x gap is now a kernel problem</h2>
+      <p>The retained PhoenX G1 baseline trains at 574.2k samples/s with four 5 ms physics steps per policy frame. That is 15.2% faster than the previous 4 ms schedule, while nanoG1 remains at the pinned 1.28M samples/s reference.</p>
       <ul>
-        <li>The entirely 5 ms run trains from scratch for 150.0M samples, then uses a 12.6M-sample angular-stability continuation. No 4 ms simulation is used anywhere in this successful policy.</li>
-        <li>Full seed 1000: zero falls over 24,000 battery and 2,000 diagnostic samples, tracking 0.9396, action jerk 0.1635, roll/pitch rate 0.1850, yaw rate 0.1543, and leg-speed RMS 0.8635.</li>
-        <li>Independent seed 2000 repeats zero falls and every dynamics metric, with tracking 0.9377. Both pass the unchanged gate.</li>
-        <li>Graph-leapfrog training rises from 498.6k samples/s at 4 ms to 574.2k at 5 ms, a 15.2% end-to-end gain. The throughput gap to the pinned 1.28M nanoG1 result falls from 2.57x to 2.23x.</li>
-        <li>A direct 150M run was already fall-free with 0.942 tracking and 0.176 jerk; only roll/pitch rate missed at 0.242. Strengthening that physical penalty during the final 12.6M samples reduced it to 0.185 without trading away tracking.</li>
-        <li>A 6.67 ms frozen-policy screen also remained fall-free with 0.916 tracking, but missed jerk and yaw thresholds. It is not promoted.</li>
-        <li>New G1 checkpoints embed the complete environment, physics, reward, curriculum, and execution recipe. The train-to-gate JSON also reports substeps, physics timestep, and solver iteration counts, eliminating the provenance ambiguity of older policy-only archives.</li>
+        <li>The complete from-scratch 5 ms recipe now passes the unchanged full gate at 149,946,368 samples, 8.4% fewer samples than the previous 162.5M result.</li>
+        <li>Seed 1000: zero falls, tracking 0.9268, action jerk 0.1241, roll/pitch rate 0.1892, yaw rate 0.1549, and leg-speed RMS 0.6998. Seed 2000 also passes with zero falls and tracking 0.9225.</li>
+        <li>The train-to-gate command automatically switches to the validated angular-stability phase at 137,363,456 samples. Passing <code>--angular-fine-tune-start-samples 0</code> disables it.</li>
+        <li>A fresh five-replay 5 ms profile puts exact contact-row construction at 20.0% of GPU time and generalized contact solving at 11.2%. Factorization is 11.5%, advance 10.2%, FK 7.3%, and publication 6.2%.</li>
+        <li>An exact adaptive response-basis prototype speeds the isolated G1 row path by about 18%, but the materialized production version lowers end-to-end training to 556.6k samples/s and is removed. At 64 worlds it is also slower, so it is not a general solution.</li>
+        <li>The next high-upside experiment is a true producer/consumer contact megakernel: classify repeated contacted bodies, construct exact basis responses, synthesize rows, and consume them in PGS without global coefficient or response materialization. Sparse and diverse pages retain the direct exact path automatically.</li>
       </ul>
-      <p><strong>Current assessment:</strong> PhoenX can safely use a larger timestep than nanoG1 for this trained G1 task. That is demonstrated, not assumed. It is not yet a universal claim for arbitrary scenes, and 162.5M samples versus nanoG1's 75M reference means sample efficiency remains a major part of time-to-quality.</p>
+      <p><strong>Assessment:</strong> no, PhoenX has not caught nanoG1 or MJWarp yet. The larger timestep and shorter training schedule are real retained gains, but closing more of the gap requires eliminating contact work and memory boundaries rather than tuning launch sizes or policy precision.</p>
     </article>
 
     <article>

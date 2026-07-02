@@ -44,7 +44,7 @@ def main() -> int:
     parser.add_argument("--world-count", type=int, default=8192)
     parser.add_argument("--replays", type=int, choices=range(1, 11), default=5)
     parser.add_argument("--warmup-replays", type=int, default=2)
-    parser.add_argument("--sim-substeps", type=int, default=5)
+    parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument("--velocity-iterations", type=int, default=1)
     parser.add_argument("--prepare-refresh-stride", type=int, default=1)
