@@ -58,23 +58,25 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · row-builder dependency bottleneck isolated</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · dense contact responses coalesced</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
 
     <article>
-      <div class="meta"><span class="tag">TOPOLOGY-PROVEN FAST PATH</span><time>2 Jul - latest</time></div>
-      <h2>Topology proof and aligned row blocks remove redundant GPU work</h2>
+      <div class="meta"><span class="tag">NSIGHT-GUIDED CONTACT ROWS</span><time>2 Jul - latest</time></div>
+      <h2>Adaptive response layout accelerates dense contacts without penalizing sparse scenes</h2>
       <p>Contact ingestion, reduced scheduling, and fallback coloring already run once per full physics step before the temporal-substep loop; every substep reuses them. Nsight exposed a redundant schedule radix sort at that once-per-contact-ingest boundary. PhoenX now proves from collision-eligible model pairs and the active ingest ordering when columns are already grouped by articulation. Inter-articulation, reduced-versus-dynamic, unrelated maximal-rigid, and all unproven scenes retain deterministic sorting and fallback coloring. Hard-Hertz damping, friction, warm starting, and contact equations are unchanged.</p>
       <ul>
-        <li>The contact-rich shared 8192-world G1 scene now reaches 1.291-1.294M physics steps/s, roughly 49% above the original 0.864-0.878M result. The same-scene gap to local MJWarp is now about 1.61x.</li>
+        <li>The contact-rich shared 8192-world G1 scene now reaches 1.419M physics steps/s, roughly 63% above the original 0.864-0.878M result. The same-scene gap to the local 2.084M MJWarp result is now about 1.47x.</li>
+        <li>Dense pages write exact generalized responses in the ABA work buffer’s coalesced layout and use a 32x32 tiled transpose for row-major PGS consumption. Pages of one tile or less retain direct writes, and inactive row/DoF tiles return immediately. The current sparse-contact MinGRU training loop is throughput-neutral within short-run variance: 285.8k versus 286.7k env/s for the original layout.</li>
         <li>The actual 8192-world, 5-substep training graph now reaches 597.1k environment steps/s versus the exact 579.7k pre-schedule baseline, another 3.0% gain. Nsight confirms radix-sort onesweep launches fell from 160 to 80 per ten full physics steps; all temporal substeps already reused the schedule.</li>
         <li>All 36 reduced-articulation CUDA graph tests pass, including proven direct and conservative sorted schedules, unrelated maximal rigid contacts, multiple articulations per world across multiple worlds, dense-contact determinism, fallback overflow, paging, loops, and spatial-momentum conservation. Contact-enabled Anymal, H1, and G1 remain finite in single- and multi-world layouts at one and 64 robots.</li>
         <li>An exact matrix-free ABA/Jacobi prototype reached 1.77M only while underconverged and changed the G1 manifold from 34 to 17 contacts; converged variants were slower and were rejected. Exact one-DoF and three-row fused ABA builders were also rejected: the former was neutral/slower and the latter lost 8% to register pressure. The retained aligned launch changes no arithmetic.</li>
       </ul>
       <p><strong>Nsight Compute result:</strong> the generalized row builder has no register or shared/local-memory spills and reaches 59.7% occupancy, but issues instructions in only 9.2% of slots; 90.6% of scheduler cycles have no eligible warp. Branch efficiency is 98.8%, while DRAM and compute throughput are only 37.6% and 13.3%. This isolates long dependent topology/global-memory chains rather than arithmetic, divergence, or bandwidth as the primary bottleneck.</p>
-      <p><strong>Next:</strong> prototype a topology-compiled or block-cooperative articulation response that stages dependent intermediates and exposes independent work, retaining identical equations, deterministic ordering, hard-Hertz convergence, and the general fallback for large or irregular articulations.</p>
+      <p><strong>Validation:</strong> all 36 reduced-articulation CUDA graph tests pass, including a strengthened bitwise oracle over all 96 response rows and adaptive three-page overflow. Contact-enabled Anymal, H1, and G1 pass in single- and multi-world layouts at one and 64 robots. Hard-Hertz projection, response arithmetic, deterministic ordering, momentum, and public behavior are unchanged.</p>
+      <p><strong>Next:</strong> profile the new producer/transpose/PGS boundary and determine whether a persistent coalesced consumer layout or conversion fused into PGS can remove the remaining dense-page transpose cost while preserving the direct sparse path.</p>
     </article>
 
     <article>

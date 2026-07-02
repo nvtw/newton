@@ -47,6 +47,7 @@
 
 ### Changed
 
+- Store dense reduced-coordinate PhoenX generalized contact responses in a coalesced ABA layout and tile-transpose them for PGS consumption, while retaining direct row-major writes for sparse pages.
 - Bypass the reduced-coordinate PhoenX schedule radix sort when collision-eligible model pairs and the active contact-ingest ordering prove that rigid contact columns are already grouped by articulation; retain deterministic sorting for inter-articulation and otherwise unproven scenes.
 - Align reduced-coordinate PhoenX generalized contact-row launches to one fixed 96-row articulation page per CUDA block, improving row-builder locality without changing contact arithmetic.
 - Skip reduced-coordinate PhoenX fallback contact coloring when the model's collision-eligible shape pairs prove that every reduced contact is against a static or kinematic body, preserving deterministic fallback for self-contact and dynamic-body interactions.

@@ -63,6 +63,10 @@ _POINTS_PER_PAGE = 32
 _MAX_ROWS = 3 * _POINTS_PER_PAGE
 _CACHED_PAGE_COUNT = 2
 _BLOCK_DIM = 32
+_RESPONSE_TILE = 32
+_RESPONSE_ROW_TILES = _MAX_ROWS // _RESPONSE_TILE
+_RESPONSE_DOF_TILES = 2
+_RESPONSE_TILES_PER_ARTICULATION = _RESPONSE_ROW_TILES * _RESPONSE_DOF_TILES
 _MAX_DOFS = 64
 _FALLBACK_MAX_COLORED_PARTITIONS = 63
 _FALLBACK_BLOCK_DIM = 256
@@ -748,9 +752,63 @@ def _build_packed_generalized_contact_rows_kernel(
                     if wp.int32(dof_column) < dof_count:
                         generalized_delta[dof_row] += data.joint_d_inv[joint, dof_row, dof_column] * rhs[dof_column]
                 dof = dof_start + wp.int32(dof_row)
-                packed_response[packed_row, dof - dof_start_articulation] = generalized_delta[dof_row]
+                if row_count > wp.int32(_RESPONSE_TILE):
+                    joint_work[articulation, dof - dof_start_articulation, row] = generalized_delta[dof_row]
+                else:
+                    packed_response[packed_row, dof - dof_start_articulation] = generalized_delta[dof_row]
                 parent_delta += data.joint_s[dof] * generalized_delta[dof_row]
         body_response[articulation, local_joint, row] = parent_delta
+
+
+@wp.kernel(enable_backward=False, module="reduced_contact_response_transpose")
+def _transpose_generalized_contact_response_kernel(
+    bodies: BodyContainer,
+    enabled: wp.array[wp.int32],
+    point_count: wp.array[wp.int32],
+    page_index: wp.array[wp.int32],
+    max_page_count: wp.array[wp.int32],
+    prepare: wp.bool,
+    joint_work: wp.array3d[wp.float32],
+    packed_response: wp.array2d[wp.float32],
+):
+    tile, _lane = wp.tid()
+    page = page_index[0]
+    if not prepare and (
+        page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
+    ):
+        return
+    articulation = tile // wp.int32(_RESPONSE_TILES_PER_ARTICULATION)
+    local_tile = tile - articulation * wp.int32(_RESPONSE_TILES_PER_ARTICULATION)
+    dof_tile = local_tile // wp.int32(_RESPONSE_ROW_TILES)
+    row_tile = local_tile - dof_tile * wp.int32(_RESPONSE_ROW_TILES)
+    storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
+    packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
+    data = bodies.reduced
+    start = data.articulation_start[articulation]
+    end = data.articulation_end[articulation]
+    dof_count = data.joint_qd_start[end] - data.joint_qd_start[start]
+    row_count = wp.int32(3) * point_count[packed_articulation]
+    if (
+        enabled[articulation] == wp.int32(0)
+        or row_count <= wp.int32(_RESPONSE_TILE)
+        or dof_tile * wp.int32(_RESPONSE_TILE) >= dof_count
+        or row_tile * wp.int32(_RESPONSE_TILE) >= row_count
+    ):
+        return
+    source = wp.tile_load(
+        joint_work[articulation],
+        shape=(_RESPONSE_TILE, _RESPONSE_TILE),
+        offset=(dof_tile * wp.int32(_RESPONSE_TILE), row_tile * wp.int32(_RESPONSE_TILE)),
+        storage="shared",
+    )
+    wp.tile_store(
+        packed_response,
+        wp.tile_transpose(source),
+        offset=(
+            packed_articulation * wp.int32(_MAX_ROWS) + row_tile * wp.int32(_RESPONSE_TILE),
+            dof_tile * wp.int32(_RESPONSE_TILE),
+        ),
+    )
 
 
 @wp.func_native(
@@ -1440,6 +1498,22 @@ class ReducedContactBlockSystem:
                         self.aba_joint_work,
                         self.aba_body_response,
                     ],
+                    device=self.device,
+                )
+                wp.launch_tiled(
+                    _transpose_generalized_contact_response_kernel,
+                    dim=[self.articulation_count * _RESPONSE_TILES_PER_ARTICULATION],
+                    block_dim=_RESPONSE_TILE,
+                    inputs=[
+                        bodies,
+                        self.enabled,
+                        self.point_count,
+                        self.page_index,
+                        self.max_page_count,
+                        wp.bool(prepare),
+                        self.aba_joint_work,
+                    ],
+                    outputs=[self.packed_response],
                     device=self.device,
                 )
             wp.launch_tiled(

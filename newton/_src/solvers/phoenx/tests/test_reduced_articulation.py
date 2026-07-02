@@ -20,8 +20,11 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _CACHED_PAGE_COUNT,
     _POINTS_PER_PAGE,
+    _RESPONSE_TILE,
+    _RESPONSE_TILES_PER_ARTICULATION,
     _build_generalized_contact_rows_kernel,
     _build_packed_generalized_contact_rows_kernel,
+    _transpose_generalized_contact_response_kernel,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_wrench_response
@@ -1531,12 +1534,12 @@ class TestReducedArticulation(unittest.TestCase):
         block = bridge.contact_block_system
         dof_count = int(model.joint_dof_count)
         wrench = wp.spatial_vector(0.7, -0.2, 0.4, -0.3, 0.6, 0.1)
-        row_body = np.zeros(block.row_body.shape, dtype=np.int32)
-        row_body[0, :3] = 1
-        row_wrench = np.zeros((*block.row_wrench.shape, 6), dtype=np.float32)
+        row_body = np.ones(block.row_body.shape, dtype=np.int32)
+        rng = np.random.default_rng(20260702)
+        row_wrench = rng.uniform(-0.8, 0.8, (*block.row_wrench.shape, 6)).astype(np.float32)
         row_wrench[0, 0] = np.asarray(wrench, dtype=np.float32)
         block.enabled.assign(np.ones(block.enabled.shape, dtype=np.int32))
-        block.point_count.assign(np.ones(block.point_count.shape, dtype=np.int32))
+        block.point_count.assign(np.full(block.point_count.shape, _POINTS_PER_PAGE, dtype=np.int32))
         block.row_body.assign(row_body)
         block.row_wrench.assign(row_wrench)
         probe_np = np.linspace(-0.35, 0.45, dof_count, dtype=np.float32)
@@ -1557,7 +1560,7 @@ class TestReducedArticulation(unittest.TestCase):
             bridge.begin_substep(0.0, split_dynamics=False)
             wp.launch(
                 _build_generalized_contact_rows_kernel,
-                dim=(1, 48),
+                dim=(1, block.row_wrench.shape[1]),
                 inputs=[
                     solver.bodies,
                     block.enabled,
@@ -1575,7 +1578,7 @@ class TestReducedArticulation(unittest.TestCase):
             )
             wp.launch(
                 _build_packed_generalized_contact_rows_kernel,
-                dim=(1, 48),
+                dim=(1, block.row_wrench.shape[1]),
                 inputs=[
                     solver.bodies,
                     block.enabled,
@@ -1592,6 +1595,22 @@ class TestReducedArticulation(unittest.TestCase):
                     block.aba_joint_work,
                     block.aba_body_response,
                 ],
+                device=device,
+            )
+            wp.launch_tiled(
+                _transpose_generalized_contact_response_kernel,
+                dim=[_RESPONSE_TILES_PER_ARTICULATION],
+                block_dim=_RESPONSE_TILE,
+                inputs=[
+                    solver.bodies,
+                    block.enabled,
+                    block.point_count,
+                    block.page_index,
+                    block.max_page_count,
+                    wp.bool(True),
+                    block.aba_joint_work,
+                ],
+                outputs=[block.packed_response],
                 device=device,
             )
             wp.launch(
@@ -1621,8 +1640,8 @@ class TestReducedArticulation(unittest.TestCase):
             reference_jacobian.numpy()[0, 0, :dof_count],
         )
         np.testing.assert_array_equal(
-            block.packed_response.numpy()[0, :dof_count],
-            reference_response.numpy()[0, 0, :dof_count],
+            block.packed_response.numpy()[: block.row_wrench.shape[1], :dof_count],
+            reference_response.numpy()[0, :, :dof_count],
         )
         np.testing.assert_allclose(virtual_work.numpy()[1], virtual_work.numpy()[0], rtol=2.0e-5, atol=2.0e-6)
 
