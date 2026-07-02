@@ -1439,6 +1439,29 @@ def test_position_based_fluids(test, device):
     contact_positions = contact_state_1.particle_q.numpy()
     test.assertGreater(np.linalg.norm(contact_positions[1] - contact_positions[0]), 0.1)
 
+    mixed_builder = newton.ModelBuilder()
+    mixed_builder.add_particles(
+        pos=[wp.vec3(0.0), wp.vec3(0.1, 0.0, 0.0)],
+        vel=[wp.vec3(0.0)] * 2,
+        mass=[1.0] * 2,
+        radius=[0.1] * 2,
+        flags=[fluid_flags, int(newton.ParticleFlags.ACTIVE)],
+    )
+    mixed_model = mixed_builder.finalize(device=device)
+    mixed_model.set_gravity((0.0, 0.0, 0.0))
+    mixed_solver = newton.solvers.SolverXPBD(
+        mixed_model,
+        iterations=2,
+        pbf_particle_contact_distance=0.2,
+        pbf_fluid_rest_distance=0.1,
+    )
+    mixed_state_0 = mixed_model.state()
+    mixed_state_1 = mixed_model.state()
+    mixed_solver.step(mixed_state_0, mixed_state_1, mixed_model.control(), mixed_model.contacts(), 0.01)
+    mixed_positions = mixed_state_1.particle_q.numpy()
+    test.assertGreater(np.linalg.norm(mixed_positions[1] - mixed_positions[0]), 0.1)
+    np.testing.assert_allclose(np.mean(mixed_positions, axis=0), [0.05, 0.0, 0.0], atol=1.0e-6)
+
     spacing = 0.04
     positions = [wp.vec3(x * spacing, y * spacing, z * spacing) for z in range(4) for y in range(4) for x in range(4)]
     particle_count = len(positions)
@@ -1534,7 +1557,6 @@ def test_position_based_fluids_reference_stages(test, device):
     lambda_scale = 1.0 / lambda_denominator
     surface_tension = 0.003
     model.particle_grid.build(state.particle_q, radius=radius)
-
     densities = wp.zeros(particle_count, dtype=float, device=device)
     normals = wp.zeros(particle_count, dtype=wp.vec3, device=device)
     wp.launch(

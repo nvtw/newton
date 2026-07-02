@@ -607,8 +607,6 @@ class SolverXPBD(SolverBase):
                                 with wp.ScopedDevice(model.device):
                                     model.particle_grid.build(particle_q, radius=grid_search_radius)
 
-                            self._pbf_densities.zero_()
-                            self._pbf_surface_normals.zero_()
                             wp.launch(
                                 kernel=calculate_density,
                                 dim=model.particle_count,
@@ -631,8 +629,6 @@ class SolverXPBD(SolverBase):
                             # Compute displacement from predicted position for viscosity/CFL
                             pbf_delta_pos = self._pbf_accum_delta
 
-                            self._pbf_deltas.zero_()
-                            self._pbf_weights.zero_()
                             wp.launch(
                                 kernel=solve_density,
                                 dim=model.particle_count,

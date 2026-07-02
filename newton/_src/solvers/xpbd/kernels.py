@@ -267,13 +267,11 @@ def solve_particle_particle_contacts(
     delta = wp.vec3(0.0)
 
     is_fluid_i = (particle_flags[i] & ParticleFlags.FLUID) != 0
+    if skip_fluid_fluid and is_fluid_i:
+        return
 
     while wp.hash_grid_query_next(query, index):
         if (particle_flags[index] & ParticleFlags.ACTIVE) != 0 and index != i:
-            # Skip fluid-fluid pairs — handled by PBF density constraint
-            if skip_fluid_fluid and is_fluid_i and (particle_flags[index] & ParticleFlags.FLUID) != 0:
-                continue
-
             # compute distance to point
             n = x - particle_x[index]
             d = wp.length(n)
@@ -297,7 +295,13 @@ def solve_particle_particle_contacts(
 
                 lambda_f = wp.max(k_mu * lambda_n, -wp.length(vt) * dt)
                 delta_f = wp.normalize(vt) * lambda_f
-                delta += (delta_f - delta_n) / denom
+                pair_delta = (delta_f - delta_n) / denom
+                delta += pair_delta
+
+                # Fluid threads skip this kernel because PBF resolves their
+                # mutual contacts. Apply the opposite side of a mixed pair here.
+                if skip_fluid_fluid and (particle_flags[index] & ParticleFlags.FLUID) != 0:
+                    wp.atomic_sub(deltas, index, pair_delta * w2 * relaxation)
 
     wp.atomic_add(deltas, i, delta * w1 * relaxation)
 

@@ -99,7 +99,11 @@ def solve_density(
     weights: wp.array[float],
 ):
     i = wp.hash_grid_point_id(grid, wp.tid())
-    if i < 0 or not _is_active_fluid(particle_flags[i]) or particle_inv_mass[i] == 0.0:
+    if i < 0 or not _is_active_fluid(particle_flags[i]):
+        return
+    if particle_inv_mass[i] == 0.0:
+        deltas[i] = wp.vec3(0.0)
+        weights[i] = 0.0
         return
 
     xi = particle_q[i]

@@ -727,7 +727,7 @@ add_example_test(
     TestPBFExamples,
     name="pbf.example_pbf_dam_break",
     devices=cuda_test_devices,
-    test_options={"num-frames": 5, "dim-x": 8, "dim-y": 8, "dim-z": 8, "substeps": 2},
+    test_options={"num-frames": 60, "dim-x": 12, "dim-y": 8, "dim-z": 16, "substeps": 4},
     use_viewer=True,
 )
 
