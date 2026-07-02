@@ -2016,6 +2016,8 @@ def _advance_reduced_articulations_warp_kernel(
             index += tile_width
         _sync_reduced_group(group_mask)
 
+    # Bias and articulated-force propagation only depend on the completed child
+    # depth, so one reverse traversal can advance both recurrences.
     for reverse_depth in range(max_depth + wp.int32(1)):
         depth = max_depth - reverse_depth
         index = articulation_depth_start[articulation, depth] + lane
@@ -2024,45 +2026,33 @@ def _advance_reduced_articulations_warp_kernel(
             joint = articulation_depth_joint[index]
             child = joint_child[joint]
             subtree_bias = body_bias[child]
-            for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
-                descendant_joint = child_joint[child_index]
-                subtree_bias += body_bias[joint_child[descendant_joint]]
-            dof_start = joint_qd_start[joint]
-            dof_end = joint_qd_start[joint + wp.int32(1)]
-            joint_kind = joint_type[joint]
-            for dof in range(dof_start, dof_end):
-                applied = wp.float32(0.0)
-                if include_external and joint_kind != JointType.FREE and joint_kind != JointType.DISTANCE:
-                    applied = joint_f[dof]
-                if include_external and (
-                    joint_kind == JointType.REVOLUTE or joint_kind == JointType.PRISMATIC or joint_kind == JointType.D6
-                ):
-                    applied += joint_implicit_force[dof]
-                generalized_rhs[dof] = applied - wp.dot(joint_s[dof], subtree_bias)
-            body_bias[child] = subtree_bias
-            index += tile_width
-        _sync_reduced_group(group_mask)
-
-    for reverse_depth in range(max_depth + wp.int32(1)):
-        depth = max_depth - reverse_depth
-        index = articulation_depth_start[articulation, depth] + lane
-        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
-        while index < depth_end:
-            joint = articulation_depth_joint[index]
-            child = joint_child[joint]
             p = wp.spatial_vector()
             for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
                 descendant_joint = child_joint[child_index]
-                p += body_work[joint_child[descendant_joint]]
+                descendant = joint_child[descendant_joint]
+                subtree_bias += body_bias[descendant]
+                p += body_work[descendant]
             dof_start = joint_qd_start[joint]
             dof_end = joint_qd_start[joint + wp.int32(1)]
             dof_count = dof_end - dof_start
+            joint_kind = joint_type[joint]
             reduced_force = _vec6(0.0)
             d_inv_u = _vec6(0.0)
             for row in range(_MAX_JOINT_DOF):
                 if wp.int32(row) < dof_count:
                     dof = dof_start + wp.int32(row)
-                    reduced_force[row] = generalized_rhs[dof] - wp.dot(joint_s[dof], p)
+                    applied = wp.float32(0.0)
+                    if include_external and joint_kind != JointType.FREE and joint_kind != JointType.DISTANCE:
+                        applied = joint_f[dof]
+                    if include_external and (
+                        joint_kind == JointType.REVOLUTE
+                        or joint_kind == JointType.PRISMATIC
+                        or joint_kind == JointType.D6
+                    ):
+                        applied += joint_implicit_force[dof]
+                    dof_rhs = applied - wp.dot(joint_s[dof], subtree_bias)
+                    generalized_rhs[dof] = dof_rhs
+                    reduced_force[row] = dof_rhs - wp.dot(joint_s[dof], p)
                     joint_work[dof] = reduced_force[row]
             for row in range(_MAX_JOINT_DOF):
                 if wp.int32(row) < dof_count:
@@ -2073,6 +2063,7 @@ def _advance_reduced_articulations_warp_kernel(
             for column in range(_MAX_JOINT_DOF):
                 if wp.int32(column) < dof_count:
                     propagated += joint_u_matrix[dof_start + wp.int32(column)] * d_inv_u[column]
+            body_bias[child] = subtree_bias
             body_work[child] = propagated
             index += tile_width
         _sync_reduced_group(group_mask)

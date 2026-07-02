@@ -64,10 +64,25 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · advance-kernel NCU analyzed</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · repeatable G1 gate passed</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">G1 GATE + ABA GAIN</span><time>2 Jul - latest</time></div>
+      <h2>G1 now passes repeatably; one exact traversal is gone</h2>
+      <p>The reduced-coordinate PhoenX policy now passes the unchanged full quality gate at two independent evaluation seeds. This is the first repeatably successful G1 result, so throughput work can use a known-good training outcome instead of optimizing an unsuccessful recipe.</p>
+      <ul>
+        <li>Seed 1000: zero falls over 24,000 battery and 2,000 diagnostic samples, tracking 0.9172, action jerk 0.1980, roll/pitch rate 0.1886, yaw rate 0.1311, and leg-speed RMS 0.5924.</li>
+        <li>Seed 2000 repeats the zero-fall result and scores 0.9194 tracking; all other deterministic dynamics metrics remain passing.</li>
+        <li>The ABA advance now evaluates bias accumulation and articulated-force propagation in one reverse depth traversal. Both recurrences depend only on the already-completed child depth, so this removes an entire traversal and synchronization boundary without approximating or reordering either child sum.</li>
+        <li>Focused advance time falls from roughly 136-139 to 127.8 microseconds, about 6-8%. Exact full training A/B improves from 498.7k to 501.5k samples/s (+0.56%), narrowing the pinned nanoG1 gap from 2.57x to 2.55x.</li>
+        <li>The change is topology-general. Contact-enabled Anymal, H1, and G1 remain finite across single- and multi-world layouts; five of six small cross-robot timings improve and one is within short-run noise.</li>
+        <li>CUDA-graph serial-oracle, 8/16/32-lane topology, long-horizon energy/momentum, floating loop, contacting four-bar, and contact momentum tests pass.</li>
+      </ul>
+      <p><strong>Optimization headroom remains substantial.</strong> The successful walker is still about 2.55x behind nanoG1 training and PhoenX physics is still slower than MJWarp. The next useful gains must shorten dependent ABA/contact chains or avoid exact work through reusable structure; cache hints, shared-memory copies, narrower tiles, and launch-only fusion have already been measured and rejected.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">LAYOUT + SCHEDULE AUDIT</span><time>2 Jul - latest</time></div>
