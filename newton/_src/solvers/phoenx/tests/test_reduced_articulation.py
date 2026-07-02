@@ -22,6 +22,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _POINTS_PER_PAGE,
     _RESPONSE_TILE,
     _RESPONSE_TILES_PER_ARTICULATION,
+    _aligned_contact_dof_width,
     _build_generalized_contact_rows_kernel,
     _build_packed_generalized_contact_rows_kernel,
     _transpose_generalized_contact_response_kernel,
@@ -1532,7 +1533,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         bridge = solver._reduced_articulation
         block = bridge.contact_block_system
-        self.assertEqual(block.contact_dof_width, 32)
+        self.assertEqual(block.contact_dof_width, 8)
         dof_count = int(model.joint_dof_count)
         wrench = wp.spatial_vector(0.7, -0.2, 0.4, -0.3, 0.6, 0.1)
         row_body = np.full(block.row_body.shape, 4, dtype=np.int32)
@@ -1660,7 +1661,11 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")
 
-        for child_count, expected_width in ((30, 32), (34, 40), (44, 48), (50, 64)):
+        for dof_count in range(1, 65):
+            self.assertEqual(_aligned_contact_dof_width(dof_count), 4 * ((dof_count + 3) // 4))
+        self.assertEqual(_aligned_contact_dof_width(65), 64)
+
+        for child_count, expected_width in ((2, 4), (34, 36), (62, 64)):
             with self.subTest(expected_width=expected_width):
                 model = _make_wide_tree(device, child_count)
                 state = model.state()
@@ -2236,7 +2241,7 @@ class TestReducedArticulation(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         block = solver._reduced_articulation.contact_block_system
-        self.assertEqual(block.contact_dof_width, 32)
+        self.assertEqual(block.contact_dof_width, 8)
         self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(int(block.enabled.numpy()[0]), 1)
         self.assertEqual(int(block.deferred_active.numpy()[0]), 0)
