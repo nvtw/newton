@@ -2277,6 +2277,13 @@ class TestG1PhoenXRL(unittest.TestCase):
             net.forward_manual(obs)
             net.backward_manual(upstream)
         wp.capture_launch(capture.graph)
+        encoder_grad_first = net.encoder_weight.grad.numpy().copy()
+        recurrent_grad_first = net.recurrent_weights[0].grad.numpy().copy()
+        decoder_grad_first = net.decoder_weight.grad.numpy().copy()
+        wp.capture_launch(capture.graph)
+        np.testing.assert_array_equal(net.encoder_weight.grad.numpy(), encoder_grad_first)
+        np.testing.assert_array_equal(net.recurrent_weights[0].grad.numpy(), recurrent_grad_first)
+        np.testing.assert_array_equal(net.decoder_weight.grad.numpy(), decoder_grad_first)
 
         def sigmoid(x: np.ndarray) -> np.ndarray:
             return 1.0 / (1.0 + np.exp(-x))

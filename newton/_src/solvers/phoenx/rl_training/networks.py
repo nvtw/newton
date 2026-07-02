@@ -33,7 +33,6 @@ from .kernels import (
     dense_weight_bias_grad_kernel,
     dense_weight_grad_reduce_kernel,
     dense_weight_grad_splitk_tiled_kernel,
-    dense_weight_grad_tiled_kernel,
     fill_eps_kernel,
     fill_eps_seed_counter_kernel,
     gaussian_entropy_kernel,
@@ -724,6 +723,9 @@ class PufferMinGRUNet:
         self._manual_grad_highway: list[wp.array2d[wp.float32]] = []
         self._manual_grad_projected: list[wp.array2d[wp.float32]] = []
         self._manual_grad_inputs: list[wp.array2d[wp.float32]] = []
+        self._manual_encoder_weight_grad_partials: wp.array3d[wp.float32] | None = None
+        self._manual_decoder_weight_grad_partials: wp.array3d[wp.float32] | None = None
+        self._manual_recurrent_weight_grad_partials: list[wp.array3d[wp.float32]] = []
 
     def parameters(self) -> list[wp.array]:
         """Return trainable parameter arrays."""
@@ -854,7 +856,13 @@ class PufferMinGRUNet:
         if self._manual_decoder_input_grad is None:
             raise RuntimeError("manual decoder gradient buffer was not initialized")
         self._zero_tail(output_grad, rows, self.output_dim)
-        self._weight_grad(decoder_input, output_grad, rows, self.decoder_weight.grad)
+        self._weight_grad(
+            decoder_input,
+            output_grad,
+            rows,
+            self.decoder_weight.grad,
+            self._manual_decoder_weight_grad_partials,
+        )
         self._input_grad(output_grad, self.decoder_weight, rows, self.output_dim, self._manual_decoder_input_grad)
         grad_h = self._manual_decoder_input_grad
         self._zero_tail(grad_h, rows, self.hidden_size)
@@ -881,7 +889,13 @@ class PufferMinGRUNet:
                 device=self.device,
             )
             self._zero_tail(grad_combined, rows, 3 * self.hidden_size)
-            self._weight_grad(x_in, grad_combined, rows, self.recurrent_weights[layer].grad)
+            self._weight_grad(
+                x_in,
+                grad_combined,
+                rows,
+                self.recurrent_weights[layer].grad,
+                self._manual_recurrent_weight_grad_partials[layer],
+            )
             self._input_grad(
                 grad_combined,
                 self.recurrent_weights[layer],
@@ -899,7 +913,13 @@ class PufferMinGRUNet:
             grad_h = grad_x
             self._zero_tail(grad_h, rows, self.hidden_size)
 
-        self._weight_grad(self._manual_input, grad_h, rows, self.encoder_weight.grad)
+        self._weight_grad(
+            self._manual_input,
+            grad_h,
+            rows,
+            self.encoder_weight.grad,
+            self._manual_encoder_weight_grad_partials,
+        )
 
     def copy_from(self, other: PufferMinGRUNet) -> None:
         """Copy parameters from another MinGRU network."""
@@ -1025,6 +1045,21 @@ class PufferMinGRUNet:
             wp.empty((rows, self.hidden_size), dtype=wp.float32, device=self.device) for _ in range(self.num_layers)
         ]
 
+        def make_weight_grad_partials(weight: wp.array2d[wp.float32]) -> wp.array3d[wp.float32]:
+            padded_in = _ceil_div(int(weight.shape[0]), DENSE_TILE_IN) * DENSE_TILE_IN
+            padded_out = _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT) * DENSE_TILE_OUT
+            return wp.empty(
+                (DENSE_WEIGHT_GRAD_KCHUNKS, padded_in, padded_out),
+                dtype=wp.float32,
+                device=self.device,
+            )
+
+        self._manual_encoder_weight_grad_partials = make_weight_grad_partials(self.encoder_weight)
+        self._manual_decoder_weight_grad_partials = make_weight_grad_partials(self.decoder_weight)
+        self._manual_recurrent_weight_grad_partials = [
+            make_weight_grad_partials(weight) for weight in self.recurrent_weights
+        ]
+
     def _forward_rollout(
         self,
         x: wp.array2d[wp.float32],
@@ -1097,17 +1132,28 @@ class PufferMinGRUNet:
         grad_pre: wp.array2d[wp.float32],
         rows: int,
         weight_grad: wp.array2d[wp.float32],
+        partials: wp.array3d[wp.float32] | None,
     ) -> None:
         if self.device.is_cuda:
+            if partials is None:
+                raise RuntimeError("manual MinGRU weight-gradient partials were not initialized")
             wp.launch_tiled(
-                dense_weight_grad_tiled_kernel,
+                dense_weight_grad_splitk_tiled_kernel,
                 dim=(
                     _ceil_div(int(weight_grad.shape[0]), DENSE_TILE_IN),
                     _ceil_div(int(weight_grad.shape[1]), DENSE_TILE_OUT),
+                    DENSE_WEIGHT_GRAD_KCHUNKS,
                 ),
                 inputs=[x, grad_pre, rows],
-                outputs=[weight_grad],
+                outputs=[partials],
                 block_dim=DENSE_TILE_BLOCK_DIM,
+                device=self.device,
+            )
+            wp.launch(
+                dense_weight_grad_reduce_kernel,
+                dim=weight_grad.shape,
+                inputs=[partials, DENSE_WEIGHT_GRAD_KCHUNKS],
+                outputs=[weight_grad],
                 device=self.device,
             )
         else:

@@ -58,23 +58,24 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · learner speedup quality-audited</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · split-K learner milestone</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
 
     <article>
-      <div class="meta"><span class="tag">LEARNER SPEEDUP AUDITED</span><time>2 Jul - latest</time></div>
-      <h2>Linear-time MinGRU backprop is retained; the strict recipe still needs work</h2>
-      <p>A full PPO Nsight trace attributes about 43% of GPU time to neural kernels, 34% to core reduced-coordinate physics, and 5% to optional diagnostics. MinGRU backward was genuinely quadratic in sequence length because it recomputed every recurrent prefix at every reverse step. Forward now retains the needed recurrent states, making backpropagation linear; aligned projections use the existing tiled FP32 path.</p>
+      <div class="meta"><span class="tag">SPLIT-K TRAINING MILESTONE</span><time>2 Jul - latest</time></div>
+      <h2>Deterministic MinGRU gradients raise fast G1 training to 441.5k samples/s</h2>
+      <p>The post-linear-BPTT Nsight trace identified MinGRU weight gradients as the largest single GPU cost at 17.2%. They assigned one block to each 16x16 output tile and serially swept the entire rollout batch. PufferMinGRU now uses the existing fixed-order eight-way split-K contraction and reduction already proven by the generic Warp MLP.</p>
       <ul>
-        <li>On the established fast reduced schedule (5 temporal substeps, 2 PGS iterations, 1 velocity iteration), the clean graph-leapfrog baseline measures 393.5k samples/s, about 3.25x behind nanoG1&#39;s pinned 1.28M/s. The heavier 10x8x2 stability stress schedule reaches 220.5k/s and must not be confused with the fast training benchmark.</li>
-        <li>Under the deliberately expensive 25-iteration train/save/rebuild/evaluate protocol, optimized training reached 148.7k samples/s versus 137.4k for the parent implementation, an 8.2% gain. Short synchronized eager timing previously showed a larger update-side reduction.</li>
-        <li>A same-seed 75.5M-sample A/B produced zero-fall walking policies in both cases. Parent versus optimized quality was 0.881 versus 0.861 tracking, 0.280 versus 0.261 action jerk, and 0.412 versus 0.348 torso angular RMS. The optimized learner is not a systematic quality regression, but neither fixed recipe passes the unchanged strict gate.</li>
-        <li>Five focused CUDA-graph regressions pass: tiled-forward NumPy parity, analytical BPTT, finite-difference gradients, rollout/update replay consistency, and PPO train/save/load. The full G1 module has two pre-existing failures reproduced on the parent commit.</li>
-        <li>An exact dense inverse-mass contact operator was rejected after slowing contact-rich G1 physics by about 10%. Bounds-checked edge tiling was also rejected after an exact 10-iteration A/B measured 392.3k versus 393.5k/s.</li>
+        <li>On the established reduced 5x2x1 schedule, graph-leapfrog throughput rises from 393.5k to 441.5k samples/s (+12.2%). The remaining gap to nanoG1&#39;s pinned 1.28M/s is 2.90x, down from 3.25x immediately before this change.</li>
+        <li>The change is topology- and task-independent: each weight matrix receives padded split-K scratch, edge dimensions remain bounds-safe, and a fixed reduction order preserves bitwise graph-replay determinism.</li>
+        <li>A 13.1M-sample mini-quality continuation improves tracking from 0.679 to 0.723 with zero falls. Chunk training rises from about 275k to 300k samples/s despite graph reconstruction and checkpoint overhead, so learning remains healthy under the faster gradient path.</li>
+        <li>Six focused CUDA-graph tests pass, including NumPy split-K accuracy, bitwise replay determinism through PufferMinGRU, finite-difference BPTT, rollout/update replay consistency, and PPO train/save/load.</li>
+        <li>The earlier same-seed 75.5M audit produced zero-fall walkers before and after linear BPTT. Parent versus optimized quality was 0.881 versus 0.861 tracking, 0.280 versus 0.261 action jerk, and 0.412 versus 0.348 torso angular RMS. Neither fixed recipe yet passes the unchanged strict gate.</li>
+        <li>Rejected ideas stay removed: a dense inverse-mass contact operator slowed contact-rich physics by about 10%, and bounds-checked edge tiling measured 392.3k versus 393.5k/s.</li>
       </ul>
-      <p><strong>Next:</strong> use short deterministic training segments and mini-batteries to repair repeatability and screen optimizations. Reserve full 75M gates for candidates that first improve those fast signals. Continue with profile-backed dense-gradient/recurrent work and the remaining contact solve/publish/advance path without changing hard-Hertz physics.</p>
+      <p><strong>Next:</strong> refresh the bounded profile after split-K, then target the remaining dense input-gradient and contact solve/publish/advance costs. Screen with exact numerical tests, a short throughput run, and the mini walking battery; reserve the full 75M gate for candidates that survive all three.</p>
     </article>
 
     <article>
