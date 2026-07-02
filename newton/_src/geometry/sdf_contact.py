@@ -764,6 +764,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
                 edge_dir,
                 1.0,
                 use_bvh_for_sdf,
+                sdf_mesh_query_type,
                 sdf_is_heightfield,
                 hfd_sdf,
                 elevation_data,
