@@ -81,6 +81,7 @@
 
 ### Fixed
 
+- Fix `SolverPhoenX.prepare_refresh_stride` for reduced and hybrid articulations so internal substeps reuse cached block, deferred, and fallback contact preparation at the requested cadence instead of silently forcing a refresh every substep.
 - Fix the reduced-coordinate PhoenX fallback fast-path proof to retain deterministic fallback coloring for unrelated maximal rigid-body contacts.
 - Fix experimental PhoenX G1 replacement foot boxes bypassing the MJCF no-self-collision filters, preventing unintended robot self-contacts during policy exploration.
 - Fix the experimental PhoenX G1 recipe to match nanoG1's 8192-world batch and full-range command distribution; the pinned build does not enable its optional command curriculum.

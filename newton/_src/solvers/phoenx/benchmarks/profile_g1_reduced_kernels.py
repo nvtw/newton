@@ -47,6 +47,7 @@ def main() -> int:
     parser.add_argument("--sim-substeps", type=int, default=5)
     parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument("--velocity-iterations", type=int, default=1)
+    parser.add_argument("--prepare-refresh-stride", type=int, default=1)
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -70,7 +71,7 @@ def main() -> int:
             rigid_contact_max_per_world=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD,
             threads_per_world=g1_recipe.THREADS_PER_WORLD,
             multi_world_scheduler=g1_recipe.MULTI_WORLD_SCHEDULER,
-            prepare_refresh_stride=g1_recipe.PREPARE_REFRESH_STRIDE,
+            prepare_refresh_stride=args.prepare_refresh_stride,
         ),
         device=device,
     )
@@ -101,6 +102,7 @@ def main() -> int:
                 "sim_substeps": args.sim_substeps,
                 "solver_iterations": args.solver_iterations,
                 "velocity_iterations": args.velocity_iterations,
+                "prepare_refresh_stride": args.prepare_refresh_stride,
                 "graph_replays": args.replays,
                 "steps_per_graph": steps_per_graph,
                 "profiled_env_steps": env_steps,

@@ -2063,6 +2063,45 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
         np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
 
+    def test_reduced_contacts_honor_prepare_refresh_stride_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_grounded_articulation_cluster(device, worlds=1, articulations_per_world=1)
+        state = model.state()
+        output = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=3,
+            solver_iterations=2,
+            velocity_iterations=1,
+            prepare_refresh_stride=2,
+        )
+        contacts = model.contacts()
+        block = solver._reduced_articulation.contact_block_system
+        original_solve = block.solve
+        prepare_flags = []
+
+        def record_solve(*args, **kwargs):
+            prepare_flags.append(bool(kwargs["prepare"]))
+            return original_solve(*args, **kwargs)
+
+        block.solve = record_solve
+        try:
+            with wp.ScopedCapture(device=device) as capture:
+                model.collide(state, contacts)
+                solver.step(state, output, None, contacts, 1.0 / 240.0)
+        finally:
+            block.solve = original_solve
+        wp.capture_launch(capture.graph)
+
+        self.assertEqual(prepare_flags, [True, False, False, False, True, False])
+        self.assertTrue(np.isfinite(output.joint_q.numpy()).all())
+        self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
+
     def test_multiple_grounded_articulations_per_world_use_grouped_schedule_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

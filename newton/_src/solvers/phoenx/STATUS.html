@@ -64,10 +64,25 @@
   <main>
     <header>
       <div><div class="eyebrow">Newton · PhoenX</div><h1>Development<br>Status</h1></div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 · exact response-basis prototype</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 · layout and schedule audit</strong></div>
     </header>
 
     <section class="goal"><strong>Primary goal:</strong> repeatable Unitree G1 walking with PhoenX at nanoG1-level quality, followed by an Nsight-guided end-to-end performance campaign.</section>
+
+    <article>
+      <div class="meta"><span class="tag">LAYOUT + SCHEDULE AUDIT</span><time>2 Jul - latest</time></div>
+      <h2>Two plausible memory layouts were rejected; reduced refresh semantics are fixed</h2>
+      <p>The retained 8192-world, 5x2x1 reduced G1 graph measures 624.8k environment steps/s under the bounded profiler. Every candidate below preserved the exact ABA and hard-Hertz equations; slower candidates were removed completely.</p>
+      <ul>
+        <li>A production-shaped adaptive twelve-wrench response basis reached only 598k steps/s, 4.3% below baseline. Its isolated matrix synthesis win did not repay classification, scratch buffers, extra launches, and solve-path branching.</li>
+        <li>Atomic compaction of active contact rows reached 585k steps/s. Nsight showed compaction itself cost only 10.6 microseconds, but random articulation ordering destroyed factor/topology locality and raised the row builder from about 465 to 614 microseconds.</li>
+        <li>A locality-preserving 32-thread row block was also rejected at 615-624k steps/s. The existing 96-thread block remains best; inactive lanes cost less than losing articulation-local execution and cache reuse.</li>
+        <li>The frozen 125.8M walker proves that two PGS iterations are required: 5x1 produced 69 battery falls, and a 6x1 temporal schedule still produced 8 falls in a short 3,000-sample battery. Solver work cannot simply be deleted.</li>
+        <li><code>prepare_refresh_stride</code> was silently forced to one for reduced/hybrid articulations, and reduced contact blocks ignored the refresh decision. Both paths are now plumbed correctly for internal SolverPhoenX substeps, including block, deferred, and fallback contacts. A CUDA-graph regression verifies the exact prepare/cache cadence.</li>
+        <li>The current G1 environment performs collision plus a one-substep solver call externally, so automatic stride remains one and training physics is unchanged. Reusing rows across those changing collision sets would be physically unsafe.</li>
+      </ul>
+      <p><strong>Next:</strong> retain articulation-local ordering and target work elimination that does not stale collision data. A construction-time proven contacted-body basis remains plausible only if it removes runtime classification and consumer branching; otherwise the exact direct builder stays superior.</p>
+    </article>
 
     <article>
       <div class="meta"><span class="tag">EXACT BASIS PROTOTYPE</span><time>2 Jul - latest</time></div>
@@ -226,19 +241,7 @@
       <p><strong>Next:</strong> optimize the physically exact generalized contact response, beginning with solving the normal/two-tangent RHS triad together so each contact shares topology and articulated-factor loads. Gate it on both the simpler training scene and this contact-richer shared scene.</p>
     </article>
 
-    <article>
-      <div class="meta"><span class="tag">TOPOLOGY-GENERAL SPEEDUP</span><time>1 Jul - latest</time></div>
-      <h2>Reduced ABA advance now packs independent narrow trees into each warp</h2>
-      <p>The post-milestone trace showed advance, publish, generalized contact build/solve, and factorization as the remaining physics hot path. Reduced advance now chooses 8, 16, or 32 lanes per articulation from the model's actual maximum tree breadth, allowing up to four independent articulations per warp without changing the ABA equations.</p>
-      <ul>
-        <li>On the bounded 8192-world G1 trace, advance fell from about 163 to 138 us per substep (roughly 15%). Physics-only graph replay measured 539-549k env-steps/s; the previous retained milestone was about 546k, so the isolated kernel gain is clear while the small whole-graph change remains close to run-to-run noise.</li>
-        <li>The tempting publication-loop fusion was measured and rejected: fewer tree traversals increased register pressure and slowed that kernel from about 153 to 182-203 us. It was fully reverted.</li>
-        <li>The complete reduced-articulation CUDA graph suite passes 34/34. A new serial-equivalence regression exercises narrow, medium, and wide trees and verifies every 8/16/32-lane dispatch.</li>
-        <li>Seven G1 graph/training regressions pass. The unchanged 26k-step frozen walker still has zero battery and diagnostic falls, 0.938 tracking, 0.261 action jerk, 0.221 roll/pitch rate, 0.156 yaw rate, and 0.761 leg speed.</li>
-        <li>Contact-enabled Anymal, H1, and G1 all remain finite in both single- and multi-world layouts at one and 64 articulations. This optimization is topology-selected and has no robot-name or G1-specific branch.</li>
-      </ul>
-      <p><strong>Next:</strong> continue accumulating profile-backed general gains in contact build/solve, factor, and publication. Establish a local apples-to-apples MJWarp G1 throughput baseline before claiming relative performance; nanoG1 remains the separate 1.276-1.28M samples/s reference.</p>
-    </article>
+
 
 
 

@@ -263,8 +263,6 @@ class SolverPhoenX(SolverBase):
             raise ValueError("hybrid/reduced articulation modes require the fast-tail multi-world scheduler")
         if articulation_mode in ("hybrid", "reduced") and multi_world_scheduler == "auto":
             multi_world_scheduler = "fast_tail"
-        if articulation_mode in ("hybrid", "reduced"):
-            prepare_refresh_stride = 1
         self.articulation_mode = articulation_mode
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
         self._phoenx_body_inv_inertia = (

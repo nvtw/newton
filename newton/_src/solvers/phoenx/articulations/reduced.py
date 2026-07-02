@@ -3017,12 +3017,13 @@ class ReducedPhoenXArticulation:
             idt,
             wp.float32(world.sor_boost),
         ]
+        prepare = not relax and world._refresh_prepare_this_substep()
         common_tail = [
             world._contact_container,
             contact_views,
             wp.int32(iterations),
             wp.bool(not relax),
-            wp.bool(not relax),
+            wp.bool(prepare),
         ]
         self.contact_block_system.solve(
             world._contact_cols,
@@ -3033,7 +3034,7 @@ class ReducedPhoenXArticulation:
             contact_views,
             iterations,
             use_bias=not relax,
-            prepare=not relax,
+            prepare=prepare,
         )
 
         def solve_deferred_contacts() -> None:
@@ -3060,7 +3061,7 @@ class ReducedPhoenXArticulation:
             contact_views,
             iterations,
             use_bias=not relax,
-            prepare=not relax,
+            prepare=prepare,
         )
 
     def export_step(self, state: State) -> None:
