@@ -22,6 +22,23 @@ from ..core.types import Devicelike
 # keys as signed int64, so ``0x7FFF…`` (max positive int64) sorts last.
 SORT_KEY_SENTINEL = wp.constant(wp.int64(0x7FFFFFFFFFFFFFFF))
 
+# Below this capacity the tiered-sort bookkeeping costs more than the
+# radix passes it saves.
+_TIER_MIN_CAPACITY = 1 << 14
+
+
+@wp.kernel(enable_backward=False)
+def _classify_sort_tier(
+    contact_count: wp.array[int],
+    quarter_capacity: int,
+    half_capacity: int,
+    quarter_flag: wp.array[wp.int32],
+    half_flag: wp.array[wp.int32],
+):
+    n = contact_count[0]
+    quarter_flag[0] = wp.int32(1) if n <= quarter_capacity else wp.int32(0)
+    half_flag[0] = wp.int32(1) if n <= half_capacity else wp.int32(0)
+
 
 @wp.kernel(enable_backward=False)
 def _prepare_sort(
@@ -210,6 +227,13 @@ class ContactSorter:
             # radix_sort_pairs uses the second half as scratch, so allocate 2x.
             self._sort_indices = wp.zeros(2 * capacity, dtype=wp.int32)
             self._sort_keys_copy = wp.zeros(2 * capacity, dtype=wp.int64)
+            self._tier_quarter_flag = wp.zeros(1, dtype=wp.int32)
+            self._tier_half_flag = wp.zeros(1, dtype=wp.int32)
+            if self._sort_keys_copy.device.is_cuda and capacity >= _TIER_MIN_CAPACITY:
+                # Reserve the CUB temp storage at full capacity now; the
+                # tiered sorts inside conditional graph bodies must not
+                # allocate during capture.
+                wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, capacity)
 
             self._has_shape_props = per_contact_shape_properties
 
@@ -434,7 +458,18 @@ class ContactSorter:
     # ------------------------------------------------------------------
 
     def _sort_and_permute(self, sort_keys: wp.array, contact_count: wp.array, *, device: Devicelike = None) -> None:
-        """Prepare keys (sentinel-fill unused slots), then radix-sort over the full buffer."""
+        """Prepare keys (sentinel-fill unused slots), then radix-sort the active prefix.
+
+        Under CUDA graph capture, a conditional branch sorts only the smallest
+        quarter/half/full capacity tier that holds ``contact_count``. Radix
+        sort cost scales with the sorted length, so scenes whose live contact
+        count sits well below capacity skip most of the sentinel-tail work.
+        The sorted prefix ``[0, contact_count)`` is bit-identical to a
+        full-capacity sort (valid keys occupy the unsorted prefix and the
+        stable sort orders sentinels after them); slots past the sorted tier
+        are scratch, which is safe because every consumer (gather kernels,
+        ``ContactMatcher`` save/match) is bounded by ``contact_count``.
+        """
         n = self._capacity
         wp.launch(
             _prepare_sort,
@@ -442,4 +477,33 @@ class ContactSorter:
             inputs=[contact_count, sort_keys, self._sort_keys_copy, self._sort_indices],
             device=device,
         )
-        wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n)
+        dev = wp.get_device(device)
+        if (
+            n >= _TIER_MIN_CAPACITY
+            and dev.is_cuda
+            and dev.is_capturing
+            and wp.is_conditional_graph_supported()
+        ):
+            quarter = n // 4
+            half = n // 2
+            wp.launch(
+                _classify_sort_tier,
+                dim=1,
+                inputs=[contact_count, quarter, half],
+                outputs=[self._tier_quarter_flag, self._tier_half_flag],
+                device=device,
+            )
+
+            def _sort_quarter() -> None:
+                wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, quarter)
+
+            def _sort_half_or_full() -> None:
+                wp.capture_if(
+                    self._tier_half_flag,
+                    on_true=lambda: wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, half),
+                    on_false=lambda: wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n),
+                )
+
+            wp.capture_if(self._tier_quarter_flag, on_true=_sort_quarter, on_false=_sort_half_or_full)
+        else:
+            wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n)
