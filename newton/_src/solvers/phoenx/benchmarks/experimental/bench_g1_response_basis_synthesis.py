@@ -21,9 +21,10 @@ import warp as wp
 
 _ROWS = 24
 _BASIS = 12
-_DOFS = 48
+# Matches the production four-DOF-aligned G1 contact row width (35 DOFs -> 36).
+_DOFS = 36
 _PACKED_COLUMNS = 2 * _DOFS
-_COLUMN_TILE = 32
+_COLUMN_TILE = 24
 
 
 @wp.kernel(enable_backward=False)

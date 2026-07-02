@@ -199,6 +199,37 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Tried and reverted
 
+### Reduced G1 contact-row builder micro-optimizations (2026-07-02)
+- Fresh physics-only nsys (8192 worlds, 3 substeps, 2 iters, 1 relax, stride 1):
+  `_build_packed_generalized_contact_rows_kernel` is the #1 reduced-pipeline
+  kernel at **18.7% / ~410 us per launch**; contact pipeline (build + gather +
+  tile solve + finalize + transpose) totals ~38%. Three hypotheses falsified:
+  - **Scalar 1-DOF fast path** (skip the unrolled 6x6 `joint_d_inv` loops for
+    revolute joints, bit-identical): **neutral** (408 vs 410 us median). The
+    kernel is not ALU/instruction-bound.
+  - **Per-thread ancestor-delta stack** (replace the `aba_body_response`
+    global scratch round trip with a depth-indexed local stack, bit-identical;
+    ~280 MB/launch of scratch traffic removed): **-25% regression** (512 us).
+    The global round trip was already L2-absorbed (per-articulation working
+    set ~69 KB, re-read right after write); the 384 B/thread local stack frame
+    only added local-memory traffic. `ptxas` shows both variants at 64
+    registers, zero spills - occupancy is not register-limited either.
+  - **block_dim sweep** (32/48/64/96/192) on the builder: flat within +-4%.
+- Row-count scaling is strongly sub-linear (12-row unit-wrench basis build:
+  349 us vs 462 us for 24 rows in the isolated bench), so the cost is
+  dominated by per-thread serial full-tree traversal latency, not row count.
+- **Unit-wrench basis compression re-measured at the current 36-wide packed
+  layout** (`bench_g1_response_basis_aba`, width fixed from the stale 48):
+  compressed prepare+solve 504 us vs direct 566 us = only **1.12x**, with
+  FP-tolerance (not bit-exact) impulses. The old "~19%" claim predates the
+  four-DOF-aligned width and the scratch-clear/transpose-skip wins. Not worth
+  productionizing at 1.12x given the body-diversity dispatch + gate
+  revalidation it needs.
+- **Next diagnostic requires privileged counters** (`ERR_NVGPUCTRPERM` blocks
+  ncu for non-admin): `benchmarks/profile_g1_contact_rows_ncu.sh` captures a
+  full-set report of one builder launch. The stall/occupancy breakdown decides
+  between a depth-parallel cooperative builder vs accepting the latency wall.
+
 ### Raising block_world occupancy by cutting registers (latency-bound iterate)
 - 2026-06-25: ncu on `block_world` `prepare_plus_iterate` (dr_legs@4096) = latency-bound, **occupancy 25% limited by registers** (binding cap: 12 blocks/SM vs 24 from SM/barriers), 38% Long-Scoreboard stalls, ~7/32 active threads/warp. So the lever *looked* like "more resident warps to hide load latency".
 - **`__launch_bounds__` register cap (`launch_bounds=(block_dim, minBlocks)`): −35%.** Forcing 16 or 24 blocks/SM made the compiler spill the kernel's ~170 live registers to local memory; the spill traffic/latency dwarfed the occupancy gain (both 16 and 24 targets regressed identically → a spill cliff, not a tuning curve). The kernel's registers are load-bearing.

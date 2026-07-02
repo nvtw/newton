@@ -78,7 +78,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · reduced-state continuation</strong></div>
+      <div class="stamp">Last updated<br><strong>2 July 2026 (late) · contact-row builder diagnosis</strong></div>
     </header>
 
     <section class="hero">
@@ -106,7 +106,19 @@
       </ul>
     </article>
 
-    <div class="section-label">Latest retained gains</div>
+    <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag">PHYSICS · PROFILE REFRESH</span><time>2 Jul (late)</time></div>
+      <h2>Contact-row builder confirmed as the top solver kernel; three fix hypotheses falsified</h2>
+      <p>A fresh physics-only Nsight Systems trace after the state-continuation commit ranks the reduced-pipeline kernels: contact-row build 18.7% (410 µs/launch), ABA advance 12.8%, contact tile solve 12.9%, factorization 11.1%, publish 7.0%, contact gather 5.3%. The contact pipeline as a whole is ~38% of physics GPU time. Physics-only throughput is 1.189M env steps/s under the profiler, matching the headline.</p>
+      <ul>
+        <li>A bit-identical scalar fast path for 1-DOF joints (skipping the unrolled 6×6 inertia loops) was <strong>neutral</strong> — the builder is not instruction-bound.</li>
+        <li>Replacing the global ancestor-response scratch with a per-thread depth-indexed stack (bit-identical, removes ~280 MB/launch of scratch traffic) <strong>regressed 25%</strong> — that traffic was already L2-absorbed; the local stack frame only added local-memory pressure. Reverted.</li>
+        <li><code>ptxas</code> shows 64 registers, zero spills; a block-dim sweep (32–192) is flat — occupancy is not register- or shape-limited. Row-count scaling is strongly sub-linear (12 basis rows: 349 µs vs 24 rows: 462 µs), so the cost is per-thread serial tree-traversal latency.</li>
+        <li>The 2026-06 unit-wrench basis compression prototype was re-measured against today's 36-wide packed layout: only <strong>1.12×</strong> on build+solve (down from the recorded ~19%), with FP-tolerance rather than bit-exact impulses. Not worth productionizing; the stale-width benchmark was fixed and the result recorded in PERF_NOTES.</li>
+      </ul>
+    </article>
+
     <article>
       <div class="meta"><span class="tag">PHYSICS · CONTINUATION</span><time>3 Jul</time></div>
       <h2>External temporal substeps preserve authoritative reduced state</h2>
@@ -150,16 +162,19 @@
     <div class="section-label">Next decisions</div>
     <section class="next">
       <div>
-        <h2>Current critical path</h2>
-        <p>The refreshed combined trace is led by dense recurrent forward, ABA advance, BF16 weight gradients, factorization, contact-row construction, FK, contact solve, and publication.</p>
-        <p><strong>Next:</strong> refresh the combined profile after state continuation, then target a materially better dense-forward or physics data path. Keep short A/Bs first and reserve full training gates for meaningful candidates.</p>
+        <h2>Current critical path (solver-only scope)</h2>
+        <p>Optimization scope is now the PhoenX solver exclusively (user directive). Fresh physics ranking: contact-row build 18.7%, contact tile solve 12.9%, ABA advance 12.8%, factorization 11.1%, publish 7.0%, gather 5.3%, factor init 4.3%, contact sort 3.5%, FK 3.0%.</p>
+        <p><strong>Next:</strong> pending the requested ncu report on the row builder, examine ABA advance and factorization for the same latency-wall signature, and evaluate a depth-parallel cooperative row builder only if the counters support it.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
         <ul>
+          <li>Row builder scalar 1-DOF fast path: neutral (not ALU-bound).</li>
+          <li>Row builder local ancestor-delta stack: −25% (scratch already L2-absorbed).</li>
+          <li>Row builder block-dim sweep 32–192: flat.</li>
+          <li>Unit-wrench basis compression at width 36: only 1.12×, not bit-exact.</li>
           <li>BF16 recurrent forward: only +0.3%, removed.</li>
-          <li>Shared-factor staging: slower.</li>
-          <li>Factor init fusion: slower.</li>
+          <li>Shared-factor staging / factor init fusion: slower.</li>
           <li>Compact Jacobian path masks: +0.19%, removed.</li>
           <li>32-thread contact row builder: slower.</li>
           <li>One-sweep SOR and underconverged contact shortcuts: unstable or physically rejected.</li>
@@ -167,11 +182,13 @@
       </div>
     </section>
 
-    <article>
-      <div class="meta"><span class="tag warn">USER ACTION</span><time>None pending</time></div>
-      <h2>No Nsight Compute run is needed right now</h2>
-      <p>If privileged counters become decision-relevant, this page will show one prominent command, the expected runtime, and the report path.</p>
-    </article>
+    <div class="action-required">
+      <div class="meta"><span class="tag warn">USER ACTION REQUESTED</span><time>2 Jul (late)</time></div>
+      <h2>One Nsight Compute run would decide the next contact-row builder design</h2>
+      <p>GPU performance counters are blocked for non-admin users on this box (<code>ERR_NVGPUCTRPERM</code>). The builder is now proven neither instruction-bound nor register-bound, and its scratch traffic is L2-absorbed; the stall/occupancy breakdown decides between building a depth-parallel cooperative row builder (large change) and accepting the latency wall and moving to the next kernel. Expected runtime: about 5 minutes. Report lands at <code>/tmp/phoenx_g1_contact_rows_full.ncu-rep</code>.</p>
+      <pre>sudo bash newton/_src/solvers/phoenx/benchmarks/profile_g1_contact_rows_ncu.sh</pre>
+      <p class="muted">Afterwards, tell the agent the report exists (or paste <code>ncu --import /tmp/phoenx_g1_contact_rows_full.ncu-rep --page details | head -80</code>).</p>
+    </div>
 
     <div class="section-label">AI agent handoff</div>
     <section class="next" aria-label="Guidance for the next AI agent">
@@ -193,7 +210,8 @@
           <li>Move quickly with focused mini-benchmarks and CUDA-graph regression tests. Run full from-scratch training and two robust gates only for meaningful survivors.</li>
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
-          <li><strong>Immediate next step:</strong> refresh the combined learner/physics Systems trace after commit <code>1560dcc4</code>, then attack the new critical path rather than assuming the prior ranking.</li>
+          <li><strong>Scope update (2 Jul, user):</strong> optimize the PhoenX solver exclusively; the learner is out of scope. This page is the primary communication channel with the user, including requests to run privileged scripts (see the action box above).</li>
+          <li><strong>Immediate next step:</strong> read the ncu report at <code>/tmp/phoenx_g1_contact_rows_full.ncu-rep</code> once the user has produced it; meanwhile profile ABA advance and factorization for the same latency-wall signature before writing any new kernel.</li>
         </ul>
       </div>
     </section>
