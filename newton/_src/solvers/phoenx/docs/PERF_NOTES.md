@@ -40,6 +40,11 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Full begin_substep overlap is incorrect: ABA advance publishes link velocities read by contact warm-start tangent construction. A race-free prototype overlapped only kinematics/factorization with ingest and joined before advance.
 - It captured and replayed correctly inside the leapfrog trainer, but lost twice: 778.7k vs 800.9k samples/s, then 774.7k vs 796.1k in reversed order (about -2.7%). Concurrent factorization contends with the already-overlapped learner more than it hides setup. The implementation was removed completely.
 
+### Path-sparse packed contact Jacobian (2026-07-03) - REJECTED
+- Prototype stored only source-path Jacobian values plus DOF indices, removed the dense zero fill, and used dynamic `tile_extract` reads from shared generalized velocity with three manual warp reductions per contact point.
+- Exact equations and graph capture worked, and memory use fell, but G1 physics regressed from 1.593M to 1.569M steps/s (-1.5%). Indexed shared reads and repeated warp reductions moved more latency into every PGS iteration than the builder saved. Fully removed.
+- Do not retry without a materially cheaper indexed tile-dot/gather primitive. A future sparse path must preserve the current dense tile solve or amortize indexing across many more operations.
+
 ### Reduced contact-row builder: coalesced zero fill + recomputed path Jacobian (2026-07-02)
 - Nsight Compute (privileged run, user-assisted) on the G1 row builder:
   Memory 66% vs Compute 25% SOL, **5.1/32 bytes utilized per global-load
