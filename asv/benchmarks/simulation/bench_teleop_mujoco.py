@@ -16,6 +16,7 @@ import math
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 import warp as wp
@@ -428,10 +429,10 @@ def _skip_unavailable_mode(mode: _TeleopMode) -> None:
 
 
 class _TeleopMuJoCoBenchmark:
-    """Measure the scripted synchronous teleop control-loop core."""
+    """Shared setup for scripted synchronous teleop benchmarks."""
 
-    params = (tuple(_TELEOP_MODES.keys()),)
-    param_names = ["mode"]
+    params: ClassVar[tuple[tuple[str, ...]]] = (tuple(_TELEOP_MODES.keys()),)
+    param_names: ClassVar[list[str]] = ["mode"]
     repeat = 3
     number = 1
     rounds = 2
@@ -455,6 +456,46 @@ class _TeleopMuJoCoBenchmark:
 
     def time_teleop_loop(self, mode: str) -> None:
         self._step_frames(self.num_frames)
+
+    def _step_frames(self, frame_count: int, *, collect_workload_state: bool = False) -> None:
+        with wp.ScopedDevice(self.mode.device):
+            for _ in range(frame_count):
+                self.loop.step(collect_workload_state=collect_workload_state)
+
+    def _measure_frames(self, *, collect_workload_state: bool = False) -> None:
+        self.loop.clear_metrics()
+        self._step_frames(self.num_frames, collect_workload_state=collect_workload_state)
+
+    def _validate_workload(self) -> None:
+        if self.loop.stats.summary("hand_object_contact")[2] == 0.0:
+            raise RuntimeError("The G1 pushing workload did not produce hand-object contact")
+        if self.loop.stats.summary("object_displacement_m")[2] < 0.01:
+            raise RuntimeError("The G1 pushing workload did not move the object by at least 0.01 m")
+
+
+class FastTeleopMuJoCo(_TeleopMuJoCoBenchmark):
+    """Pull-request smoke benchmarks for GPU teleop latency."""
+
+    params: ClassVar[tuple[tuple[str, ...]]] = (("mjwarp_cuda_graph",),)
+    repeat = 2
+    num_frames = 120
+    warmup_frames = 30
+
+    def track_mean_loop_ms(self, mode: str) -> float:
+        self._measure_frames()
+        return self.loop.stats.summary("local_loop_ms")[0]
+
+    track_mean_loop_ms.unit = "ms/frame"
+
+    def track_p95_loop_ms(self, mode: str) -> float:
+        self._measure_frames()
+        return self.loop.stats.summary("local_loop_ms")[1]
+
+    track_p95_loop_ms.unit = "ms/frame"
+
+
+class TeleopMuJoCo(_TeleopMuJoCoBenchmark):
+    """Nightly teleop benchmark covering GPU and CPU solver backends."""
 
     def track_mean_loop_ms(self, mode: str) -> float:
         self._measure_frames()
@@ -521,34 +562,6 @@ class _TeleopMuJoCoBenchmark:
         return self.loop.stats.summary("object_displacement_m")[2]
 
     track_object_displacement_m.unit = "m"
-
-    def _step_frames(self, frame_count: int, *, collect_workload_state: bool = False) -> None:
-        with wp.ScopedDevice(self.mode.device):
-            for _ in range(frame_count):
-                self.loop.step(collect_workload_state=collect_workload_state)
-
-    def _measure_frames(self, *, collect_workload_state: bool = False) -> None:
-        self.loop.clear_metrics()
-        self._step_frames(self.num_frames, collect_workload_state=collect_workload_state)
-
-    def _validate_workload(self) -> None:
-        if self.loop.stats.summary("hand_object_contact")[2] == 0.0:
-            raise RuntimeError("The G1 pushing workload did not produce hand-object contact")
-        if self.loop.stats.summary("object_displacement_m")[2] < 0.01:
-            raise RuntimeError("The G1 pushing workload did not move the object by at least 0.01 m")
-
-
-class FastTeleopMuJoCo(_TeleopMuJoCoBenchmark):
-    """Pull-request smoke benchmark covering GPU and CPU solver backends."""
-
-    params = (tuple(_TELEOP_MODES.keys()),)
-    repeat = 2
-    num_frames = 120
-    warmup_frames = 30
-
-
-class TeleopMuJoCo(_TeleopMuJoCoBenchmark):
-    """Nightly teleop benchmark covering GPU and CPU solver backends."""
 
 
 if __name__ == "__main__":
