@@ -132,8 +132,8 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">893k/s</div><div class="label">fresh comparable graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.43×</div><div class="label">fresh gap to nanoG1 6dee587</div></div>
+      <div class="card"><div class="metric">911k/s</div><div class="label">retained persistent graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.40×</div><div class="label">retained gap to nanoG1 6dee587</div></div>
       <div class="card"><div class="metric good">+8.9%</div><div class="label">cumulative short-training gain</div></div>
     </section>
 
@@ -214,7 +214,7 @@
         <li>Many articulations in one world also improve: 64-robot ANYmal 45.8k → 47.1k/s (+2.9%) and H1 46.1k → 47.7k/s (+3.5%). Final state magnitudes match reference in every bracket.</li>
         <li>A CUDA-graph regression covers two substeps and more than two contact pages. Generalized state, body pose/twist, impulses, manifold data, and derived contact rows match the reference within 2e−6.</li>
         <li>The implementation supports the arbitrary-contact overflow loop and exposes no user contact-limit tuning. The reference execution path remains unchanged and selectable.</li>
-        <li><strong>Next:</strong> extend phase ownership toward biased contact solve plus post-contact ABA while measuring register pressure early. The target remains elimination of row materialization—not launch fusion alone.</li>
+        <li><strong>Next:</strong> build an exact adaptive contacted-link response basis. Runtime classification selects only articulations touching at most two links; all others remain on the direct reference rows.</li>
       </ul>
     </article>
     <article>
@@ -226,6 +226,17 @@
         <li>Steady G1 graph-leapfrog training measures 801.7k/s versus 877.1k/s reference (−8.6%). The second disjoint launch, fixed shared loads, and occupancy cost outweigh cached global-row traffic.</li>
         <li>The prototype is isolated on <code>twidmer/experiment-phoenx-resident-contact-rows</code> at <code>9d810d4d</code>; the active branch is back on the clean reference path.</li>
         <li><strong>Decision:</strong> multiple static paths remain the right framework for risky work, but the next candidate must eliminate whole phases or global materialization—not merely relocate row storage.</li>
+      </ul>
+    </article>
+    <article>
+      <div class="meta"><span class="tag">REJECTED · WORKING-SET OVERFUSION</span><time>3 Jul</time></div>
+      <h2>Biased contact solve plus ABA is exact, but 7–9% slower</h2>
+      <p>A larger megakernel continued from biased generalized contact solving through Coriolis ABA, momentum capture/restore, and intermediate publication. Overflow-page CUDA-graph parity remained within 2e−6, proving the reordered schedule was physically equivalent for topology-proven static contacts.</p>
+      <ul>
+        <li>Saturated G1 physics fell from about 1.91M to 1.74M steps/s (−9%). Full graph-leapfrog training fell from the retained 911k/s to about 846k/s (−7%).</li>
+        <li>The contact tile and ABA traversal share almost no live working set; combining them increases register pressure more than it removes memory traffic.</li>
+        <li>The exact prototype is preserved on <code>twidmer/experiment-phoenx-biased-contact-megakernel</code> at <code>6777ae00</code> and reverted from the active path at <code>c13deef5</code>.</li>
+        <li>The replacement direction is an exact low-rank contacted-link response basis. Deterministic runtime classification is now graph-captured and covered by the arbitrary-contact regression; no robot-name specialization or user tuning is involved.</li>
       </ul>
     </article>
     <article>

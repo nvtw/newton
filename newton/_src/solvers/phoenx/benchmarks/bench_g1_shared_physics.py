@@ -197,10 +197,15 @@ def main() -> int:
             projected_generalized_row_reduction = 1.0 - float(projected_rows) / float(current_rows)
     reduced_contact_points_mean = None
     reduced_contact_points_max = None
+    basis_enabled_count = None
+    basis_bodies = None
     if solver._reduced_articulation is not None:
         point_counts = solver._reduced_articulation.contact_block_system.total_point_count.numpy()
         reduced_contact_points_mean = float(np.mean(point_counts))
         reduced_contact_points_max = int(np.max(point_counts))
+        block = solver._reduced_articulation.contact_block_system
+        basis_enabled_count = int(np.count_nonzero(block.basis_enabled.numpy()))
+        basis_bodies = np.unique(block.basis_body.numpy()[block.basis_enabled.numpy() != 0], axis=0).tolist()
 
     print(
         json.dumps(
@@ -212,6 +217,8 @@ def main() -> int:
                 "articulation_contact_points_max": reduced_contact_points_max,
                 "articulation_contact_points_mean": reduced_contact_points_mean,
                 "body_count_per_world": int(model.body_count) // args.world_count,
+                "basis_enabled_count": basis_enabled_count,
+                "basis_bodies": basis_bodies,
                 "contact_capacity": int(contacts.rigid_contact_max),
                 "contact_column_count": contact_column_count,
                 "eligible_patch_columns": eligible_patch_columns,

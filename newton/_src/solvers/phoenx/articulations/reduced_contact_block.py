@@ -385,6 +385,9 @@ def _count_reduced_contact_pages_kernel(
     overflow_page_active: wp.array[wp.int32],
     transpose_active: wp.array[wp.int32],
     deferred_active: wp.array[wp.int32],
+    basis_body: wp.array2d[wp.int32],
+    basis_enabled: wp.array[wp.int32],
+    direct_enabled: wp.array[wp.int32],
 ):
     articulation = wp.tid()
     start = wp.int32(0)
@@ -393,8 +396,28 @@ def _count_reduced_contact_pages_kernel(
     end = schedule_section_end[articulation]
 
     count = wp.int32(0)
+    body0 = wp.int32(-1)
+    body1 = wp.int32(-1)
+    unique_body_count = wp.int32(0)
     for index in range(start, end):
-        count += contact_get_contact_count(columns, scheduled_column[index])
+        column = scheduled_column[index]
+        column_count = contact_get_contact_count(columns, column)
+        count += column_count
+        if column_count <= wp.int32(0):
+            continue
+        endpoint0 = contact_get_body1(columns, column)
+        endpoint1 = contact_get_body2(columns, column)
+        articulation_body = endpoint0
+        if bodies.reduced.body_articulation[endpoint0] < wp.int32(0):
+            articulation_body = endpoint1
+        body = articulation_body - wp.int32(1)
+        if body != body0 and body != body1:
+            unique_body_count += wp.int32(1)
+            if body0 < wp.int32(0) or body < body0:
+                body1 = body0
+                body0 = body
+            elif body1 < wp.int32(0) or body < body1:
+                body1 = body
 
     articulation_start = bodies.reduced.articulation_start[articulation]
     articulation_end = bodies.reduced.articulation_end[articulation]
@@ -402,7 +425,12 @@ def _count_reduced_contact_pages_kernel(
         bodies.reduced.joint_qd_start[articulation_end] - bodies.reduced.joint_qd_start[articulation_start]
     )
     use_block = count > wp.int32(0) and articulation_dofs <= wp.int32(_MAX_DOFS)
+    use_basis = use_block and unique_body_count <= wp.int32(2) and count > wp.int32(4)
     enabled[articulation] = wp.int32(1) if use_block else wp.int32(0)
+    basis_enabled[articulation] = wp.int32(1) if use_basis else wp.int32(0)
+    direct_enabled[articulation] = wp.int32(1) if use_block and not use_basis else wp.int32(0)
+    basis_body[articulation, 0] = body0
+    basis_body[articulation, 1] = body1
     total_point_count[articulation] = count
     if use_block:
         pages = (count + wp.int32(_POINTS_PER_PAGE - 1)) // wp.int32(_POINTS_PER_PAGE)
@@ -1449,6 +1477,9 @@ class ReducedContactBlockSystem:
         self.packed_response: wp.array2d[wp.float32] | None = None
         self.packed_previous_row_body: wp.array[wp.int32] | None = None
         self.enabled = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
+        self.basis_enabled = wp.zeros_like(self.enabled)
+        self.direct_enabled = wp.zeros_like(self.enabled)
+        self.basis_body = wp.full((articulation_count, 2), value=-1, dtype=wp.int32, device=self.device)
         self.total_point_count = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.max_page_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.multi_page_active = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -1779,6 +1810,9 @@ class ReducedContactBlockSystem:
                     self.overflow_page_active,
                     self.transpose_active,
                     self.deferred_active,
+                    self.basis_body,
+                    self.basis_enabled,
+                    self.direct_enabled,
                 ],
                 device=self.device,
             )

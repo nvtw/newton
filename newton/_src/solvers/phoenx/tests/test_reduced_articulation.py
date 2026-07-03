@@ -2733,6 +2733,11 @@ class TestReducedArticulation(unittest.TestCase):
 
         persistent_block = persistent._reduced_articulation.contact_block_system
         self.assertGreater(int(persistent_block.max_page_count.numpy()[0]), _CACHED_PAGE_COUNT)
+        self.assertEqual(int(persistent_block.basis_enabled.numpy()[0]), 1)
+        self.assertEqual(int(persistent_block.direct_enabled.numpy()[0]), 0)
+        basis_body = persistent_block.basis_body.numpy()[0]
+        self.assertGreaterEqual(int(basis_body[0]), 0)
+        self.assertEqual(int(basis_body[1]), -1)
         for persistent_value, reference_value in (
             (output_persistent.joint_q, output_reference.joint_q),
             (output_persistent.joint_qd, output_reference.joint_qd),
