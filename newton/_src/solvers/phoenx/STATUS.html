@@ -126,8 +126,8 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">911k/s</div><div class="label">retained persistent graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.40×</div><div class="label">retained gap to nanoG1 6dee587</div></div>
+      <div class="card"><div class="metric good">923k/s</div><div class="label">retained persistent graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.38×</div><div class="label">retained gap to nanoG1 6dee587</div></div>
       <div class="card"><div class="metric good">+8.9%</div><div class="label">cumulative short-training gain</div></div>
     </section>
 
@@ -199,7 +199,20 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag">ACTIVE · RESIDENT WORK QUEUE</span><time>3 Jul</time></div>
+      <div class="meta"><span class="tag good">RETAINED · CROSS-SCENE ROW CACHE</span><time>3 Jul</time></div>
+      <h2>Shared articulation factors remove the row builder's worst latency</h2>
+      <p>The existing contact-row Nsight report showed a 943.6 µs kernel with 76.7% of issue spacing in long-scoreboard stalls and 73% excessive global sectors. Every one of 96 row threads repeatedly loaded the same motion subspaces, articulated-inertia columns, and inverse joint factors.</p>
+      <ul>
+        <li>The row block now cooperatively loads those exact factors into about 4.6 KB of shared memory once, then evaluates the unchanged articulated response equations and deterministic row order.</li>
+        <li>Matched G1 graph-leapfrog training improves 913.8k → 923.0k samples/s (+1.0%). The retained nanoG1 gap is now about 1.38×.</li>
+        <li>Cross-scene gates also improve: 512-world ANYmal +0.5%, H1 +1.7%; 64 articulations in one world ANYmal +1.5%, H1 +1.7%. Final state magnitudes are identical.</li>
+        <li>Six focused CUDA regressions pass: exact generalized rows, arbitrary contact pages, persistent/reference parity, multiple grounded articulations per world, deterministic dense contacts, and spatial momentum conservation.</li>
+        <li>Commit <code>2ce2656a</code> is retained on <code>twidmer/experiment-phoenx-persistent-articulations</code>. Repository-wide pre-commit remains blocked only by unrelated pre-existing lint/typo failures; focused lint and formatting pass.</li>
+        <li><strong>Next:</strong> use the same profiler evidence to coalesce Jacobian/response writes and shorten path-metadata dependency chains. No user profiling action is required yet.</li>
+      </ul>
+    </article>
+    <article>
+      <div class="meta"><span class="tag warn">REJECTED · RESIDENT WORK QUEUE</span><time>3 Jul</time></div>
       <h2>Persistent scheduling recovered the failed fusion, but has not won yet</h2>
       <p>The retained result remains about 911k samples/s. A profiler-guided resident kernel now uses dynamic full-warp contact tasks, a bounded grid phase barrier, and the existing 8/16/32-thread articulation tiles for dynamics and publication.</p>
       <ul>
@@ -207,7 +220,7 @@
         <li>The resident queue removes local group coupling and replaces block-scoped tile operations with an exact scalar warp contact solve. Overflow-page CUDA-graph parity passes.</li>
         <li>The new kernel uses 104 registers, no spills, 72 bytes of stack, and 2 KB shared memory, versus 122 registers for the original monolith.</li>
         <li>G1 reaches 900.7k/s: a large recovery over failed fusion, but still 1.4% below the retained 913.8k/s matched baseline. The scalar warp solve alone reaches 909.0k/s, so it is not independently a win.</li>
-        <li><strong>Current experiment:</strong> move exact contact-row response construction into the resident pipeline and remove its separate build/transpose boundary. Contact rows are roughly 25% of solver GPU work, making this the first remaining fusion target with genuinely material upside.</li>
+        <li>Moving row construction into that monolith fell further to 890.7k/s: an extra grid barrier and instruction footprint outweighed the removed launch. The queue remains useful architectural evidence, not an active path.</li>
         <li>No new Nsight Compute action is required from the user yet. Acceptance still requires G1, ANYmal, H1, single-/multi-world, determinism, and arbitrary-contact graph gates.</li>
       </ul>
     </article>
