@@ -116,7 +116,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · path-Schur rejected end to end</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · sparse fused split rejected</strong></div>
     </header>
 
     <section class="hero">
@@ -190,7 +190,9 @@
         <li>Graph conditionals were tested and removed: their launch/control overhead made ANYmal and H1 slower, confirming they are not a free solution for sparse activation.</li>
         <li>CUDA-graph tests pass for an active compact page, a 72-contact dense fallback, full state/contact parity within 2e−5, and spatial momentum conservation.</li>
         <li>The complete experiment is preserved at <code>67f286e6</code> on <code>twidmer/experiment-phoenx-path-schur</code>. It is not merged into the retained solver.</li>
-        <li><strong>Conclusion:</strong> the current 923k/s solver is at a local plateau. More gains remain possible, but the next architecture must eliminate phases in the sparse live-contact regime—not only accelerate an all-active contact microbenchmark.</li>
+        <li>A follow-up split ran the large fused contact/advance/publish kernel only for live-contact articulations and the lean advance/publish kernel for the inactive complement. Arbitrary-page graph parity passes, but matched G1 training falls about 845k → 822k/s (−2.7%): the extra complementary launch costs more than inactive early returns save.</li>
+        <li>The split is preserved at <code>51b834f4</code> on <code>twidmer/experiment-phoenx-active-fused-split</code>, not merged.</li>
+        <li><strong>Conclusion:</strong> the current 923k/s solver is at a local plateau. More gains remain possible, but the next architecture must eliminate a phase without replacing it with another fleet-wide launch.</li>
       </ul>
     </article>
 
@@ -294,7 +296,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step:</strong> return to the retained 923k/s branch. Target sparse-live-contact phase elimination or a genuinely fused active-articulation route; do not promote path-Schur commit <code>67f286e6</code> despite its isolated win.</li>
+          <li><strong>Immediate next step after the requested pause:</strong> return to the retained 923k/s branch. Avoid both rejected branches <code>67f286e6</code> and <code>51b834f4</code>; the next candidate must delete a fleet-wide phase rather than add a complementary launch.</li>
         </ul>
       </div>
     </section>
