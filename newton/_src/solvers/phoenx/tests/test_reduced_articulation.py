@@ -2688,6 +2688,66 @@ class TestReducedArticulation(unittest.TestCase):
             atol=2.0e-6,
         )
 
+    def test_persistent_relax_publish_matches_reference_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_contact_overflow_model(device, contact_count=2 * _POINTS_PER_PAGE + 8)
+        state_reference = model.state()
+        state_persistent = model.state()
+        output_reference = model.state()
+        output_persistent = model.state()
+        qd = state_reference.joint_qd.numpy()
+        qd[2] = -0.2
+        for state in (state_reference, state_persistent):
+            state.joint_qd.assign(qd)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        reference = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            reduced_articulation_path="reference",
+            substeps=2,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        persistent = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            reduced_articulation_path="persistent",
+            substeps=2,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        contacts_reference = model.contacts()
+        contacts_persistent = model.contacts()
+        dt = 1.0 / 1000.0
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state_reference, contacts_reference)
+            reference.step(state_reference, output_reference, None, contacts_reference, dt)
+            model.collide(state_persistent, contacts_persistent)
+            persistent.step(state_persistent, output_persistent, None, contacts_persistent, dt)
+        wp.capture_launch(capture.graph)
+
+        persistent_block = persistent._reduced_articulation.contact_block_system
+        self.assertGreater(int(persistent_block.max_page_count.numpy()[0]), _CACHED_PAGE_COUNT)
+        for persistent_value, reference_value in (
+            (output_persistent.joint_q, output_reference.joint_q),
+            (output_persistent.joint_qd, output_reference.joint_qd),
+            (output_persistent.body_q, output_reference.body_q),
+            (output_persistent.body_qd, output_reference.body_qd),
+        ):
+            np.testing.assert_allclose(persistent_value.numpy(), reference_value.numpy(), rtol=2.0e-6, atol=2.0e-6)
+        for field in ("impulses", "lambdas", "derived"):
+            np.testing.assert_allclose(
+                getattr(persistent.world._contact_container, field).numpy(),
+                getattr(reference.world._contact_container, field).numpy(),
+                rtol=2.0e-6,
+                atol=2.0e-6,
+            )
+
     def test_velocity_only_relax_publish_matches_full_publish_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

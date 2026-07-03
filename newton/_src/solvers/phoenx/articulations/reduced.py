@@ -25,7 +25,13 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_iterate,
     reduced_contact_prepare,
 )
-from newton._src.solvers.phoenx.articulations.reduced_contact_block import ReducedContactBlockSystem
+from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
+    _POINTS_PER_PAGE,
+    _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES,
+    ReducedContactBlockSystem,
+    _finalize_reduced_contact_rows_device,
+    _sync_contact_warp,
+)
 from newton._src.solvers.phoenx.articulations.reduced_loop import ReducedLoopSystem
 from newton._src.solvers.phoenx.body import (
     MOTION_ARTICULATED,
@@ -3032,6 +3038,154 @@ def _make_advance_reduced_articulations_warp_kernel(
     return _advance_and_publish_reduced_articulations_warp_kernel
 
 
+@functools.cache
+def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int):
+    solve_device = _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES[max_dofs]
+    module = wp.get_module(f"reduced_contact_relax_publish_{max_dofs}")
+
+    @wp.kernel(enable_backward=False, module=module)
+    def _relax_and_publish_reduced_contacts_kernel(
+        columns: ContactColumnContainer,
+        bodies: BodyContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        cc: ContactContainer,
+        iterations: wp.int32,
+        enabled: wp.array[wp.int32],
+        point_count: wp.array[wp.int32],
+        point_contact: wp.array2d[wp.int32],
+        point_column: wp.array2d[wp.int32],
+        point0: wp.array2d[wp.vec3],
+        point1: wp.array2d[wp.vec3],
+        normal: wp.array2d[wp.vec3],
+        tangent0: wp.array2d[wp.vec3],
+        row_velocity: wp.array2d[wp.float32],
+        page_index: wp.array[wp.int32],
+        max_page_count: wp.array[wp.int32],
+        packed_jacobian: wp.array2d[wp.float32],
+        packed_response: wp.array2d[wp.float32],
+        max_depth: wp.int32,
+        articulation_depth_start: wp.array2d[wp.int32],
+        articulation_depth_joint: wp.array[wp.int32],
+        generalized_delta: wp.array2d[wp.float32],
+        body_delta: wp.array2d[wp.spatial_vector],
+        articulation_count: wp.int32,
+        joint_q: wp.array[wp.float32],
+        joint_qd_integrator: wp.array[wp.float32],
+        joint_q_start: wp.array[wp.int32],
+        joint_qd_start: wp.array[wp.int32],
+        joint_type: wp.array[wp.int32],
+        joint_parent: wp.array[wp.int32],
+        joint_child: wp.array[wp.int32],
+        joint_x_p: wp.array[wp.transform],
+        joint_x_c: wp.array[wp.transform],
+        joint_axis: wp.array[wp.vec3],
+        joint_dof_dim: wp.array2d[wp.int32],
+        body_com: wp.array[wp.vec3],
+        body_mass: wp.array[wp.float32],
+        body_inertia: wp.array[wp.mat33],
+        target_momentum: wp.array[wp.spatial_vector],
+        body_x_com: wp.array[wp.transform],
+        zero_generalized_acceleration: wp.array[wp.float32],
+        joint_qd_public: wp.array[wp.float32],
+        body_q: wp.array[wp.transform],
+        articulation_origin: wp.array[wp.vec3],
+        body_q_local: wp.array[wp.transform],
+        body_q_com: wp.array[wp.transform],
+        joint_anchor_local: wp.array[wp.transform],
+        joint_s_publish: wp.array[wp.spatial_vector],
+        body_qd: wp.array[wp.spatial_vector],
+    ):
+        articulation, lane = wp.tid()
+        if lane < wp.int32(_POINTS_PER_PAGE):
+            _finalize_reduced_contact_rows_device(
+                articulation,
+                lane,
+                columns,
+                bodies,
+                enabled,
+                point_count,
+                page_index,
+                point_column,
+                point0,
+                point1,
+                normal,
+                tangent0,
+                row_velocity,
+            )
+        _sync_contact_warp()
+        solve_device(
+            articulation,
+            lane,
+            columns,
+            idt,
+            sor_boost,
+            cc,
+            iterations,
+            wp.bool(False),
+            wp.bool(False),
+            enabled,
+            point_count,
+            point_contact,
+            point_column,
+            normal,
+            tangent0,
+            row_velocity,
+            page_index,
+            packed_jacobian,
+            packed_response,
+            bodies,
+            wp.bool(True),
+            max_depth,
+            articulation_depth_start,
+            articulation_depth_joint,
+            generalized_delta,
+            body_delta,
+        )
+        _sync_contact_warp()
+        if page_index[0] + wp.int32(1) >= max_page_count[0]:
+            _finish_and_publish_reduced_warp_device(
+                articulation * wp.int32(32) + lane,
+                articulation_count,
+                wp.int32(32),
+                max_depth,
+                articulation_depth_start,
+                articulation_depth_joint,
+                joint_q,
+                bodies.reduced.joint_qd,
+                joint_qd_integrator,
+                joint_q_start,
+                joint_qd_start,
+                joint_type,
+                joint_parent,
+                joint_child,
+                joint_x_p,
+                joint_x_c,
+                joint_axis,
+                joint_dof_dim,
+                body_com,
+                body_mass,
+                body_inertia,
+                target_momentum,
+                body_x_com,
+                zero_generalized_acceleration,
+                wp.float32(0.0),
+                wp.bool(False),
+                wp.bool(False),
+                joint_qd_public,
+                body_q,
+                bodies,
+                articulation_origin,
+                body_q_local,
+                body_q_com,
+                joint_anchor_local,
+                joint_s_publish,
+                body_qd,
+            )
+
+    return _relax_and_publish_reduced_contacts_kernel
+
+
 @wp.func
 def _flush_deferred_articulation(bodies: BodyContainer, articulation: wp.int32):
     data = bodies.reduced
@@ -3845,6 +3999,8 @@ class ReducedPhoenXArticulation:
             articulation_depth_joint=self.system.advance_articulation_depth_joint,
             max_depth=self.system.advance_max_depth,
         )
+        if execution_path == "persistent":
+            self.contact_block_system.relax_page_launcher = self._launch_persistent_relax_page
         self.owned_joint_mask_np = self.tree_joint_mask_np.copy()
         self.owned_joint_mask_np[self.loop_system.joint_indices_np] = True
 
@@ -3882,19 +4038,15 @@ class ReducedPhoenXArticulation:
         compute_impulse_response: bool = True,
     ) -> None:
         """Apply pre-PGS reduced dynamics at the current configuration."""
-        fuse_factor = self.execution_path == "persistent" and split_dynamics
-        self.system.factor(self.state, self.control, dt, factorize=not fuse_factor)
-        if fuse_factor:
-            self.system.factor_and_advance(self.state, self.control, self.bodies, dt)
-        else:
-            self.system.advance(
-                self.state,
-                self.control,
-                self.bodies,
-                dt,
-                include_external=True,
-                include_coriolis=not split_dynamics,
-            )
+        self.system.factor(self.state, self.control, dt)
+        self.system.advance(
+            self.state,
+            self.control,
+            self.bodies,
+            dt,
+            include_external=True,
+            include_coriolis=not split_dynamics,
+        )
         if compute_impulse_response:
             if self.model.device.is_cuda:
                 articulation_count = int(self.model.articulation_count)
@@ -4098,8 +4250,82 @@ class ReducedPhoenXArticulation:
             device=self.model.device,
         )
 
+    def _launch_persistent_relax_page(
+        self,
+        columns: ContactColumnContainer,
+        bodies: BodyContainer,
+        idt: wp.float32,
+        sor_boost: float,
+        cc: ContactContainer,
+        iterations: int,
+    ) -> None:
+        contact = self.contact_block_system
+        assert contact.packed_jacobian is not None
+        assert contact.packed_response is not None
+        kernel = _make_relax_and_publish_reduced_contacts_kernel(contact.contact_dof_width)
+        wp.launch_tiled(
+            kernel,
+            dim=[int(self.model.articulation_count)],
+            block_dim=32,
+            inputs=[
+                columns,
+                bodies,
+                idt,
+                wp.float32(sor_boost),
+                cc,
+                wp.int32(iterations),
+                contact.enabled,
+                contact.point_count,
+                contact.point_contact,
+                contact.point_column,
+                contact.point0,
+                contact.point1,
+                contact.normal,
+                contact.tangent0,
+                contact.row_velocity,
+                contact.page_index,
+                contact.max_page_count,
+                contact.packed_jacobian,
+                contact.packed_response,
+                wp.int32(self.system.advance_max_depth),
+                self.system.advance_articulation_depth_start,
+                self.system.advance_articulation_depth_joint,
+                contact.generalized_delta,
+                contact.generalized_body_delta,
+                wp.int32(self.model.articulation_count),
+                self.state.joint_q,
+                self.system.joint_qd_integrator,
+                self.model.joint_q_start,
+                self.model.joint_qd_start,
+                self.model.joint_type,
+                self.model.joint_parent,
+                self.model.joint_child,
+                self.model.joint_X_p,
+                self.model.joint_X_c,
+                self.model.joint_axis,
+                self.model.joint_dof_dim,
+                self.model.body_com,
+                self.model.body_mass,
+                self.model.body_inertia,
+                self.system.target_world_momentum,
+                self.system.body_x_com,
+                self.system.zero_generalized_force,
+                self.state.joint_qd,
+                self.state.body_q,
+                self.system.articulation_origin,
+                self.system.body_q_local,
+                self.system.body_q_com,
+                self.system.joint_anchor_local,
+                self.system.joint_s_publish,
+                self.state.body_qd,
+            ],
+            device=self.model.device,
+        )
+
     def finish_relax(self) -> None:
         """Publish bias-free velocity corrections without advancing configuration."""
+        if self.execution_path == "persistent":
+            return
         # Relax changes only velocities, so the pose-derived buffers from the
         # preceding full publication remain current.
         self._publish_state(0.0, update_configuration=False)

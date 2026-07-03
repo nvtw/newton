@@ -205,14 +205,16 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag">ACTIVE · HIGH-RISK ARCHITECTURE</span><time>3 Jul</time></div>
-      <h2>Contact-inclusive persistent articulation pipeline is now the main experiment</h2>
-      <p>The earlier boundary fusions were scaffolding, not a needle-moving result: post-contact advance plus publish was effectively neutral (+0.36% training), while factor plus external advance regressed target-scale training by 2.5%. They are checkpointed at <code>3d4bf2d1</code>.</p>
+      <div class="meta"><span class="tag good">RETAINED EXPERIMENT · CROSS-ROBOT WIN</span><time>3 Jul</time></div>
+      <h2>Contact relax and final publication now execute as one articulation phase</h2>
+      <p>The persistent path now executes contact velocity refresh, bias-free generalized contact solve, contact-delta application, and final articulation publication in one graph-captured kernel. The known-regressing factor fusion was removed from the active composition.</p>
       <ul>
-        <li>The active cut moves inside the expensive contact pipeline and aims to retain contact operators across biased solve, articulation dynamics, velocity refresh, relaxation, and final publication.</li>
-        <li>The reference tile solver has now been extracted into a reusable Warp device body while its original kernel remains a thin, graph-captured wrapper. A contact-rich G1 CUDA graph compiled and ran successfully after the refactor.</li>
-        <li><strong>Success criterion:</strong> remove complete global-memory phases and demonstrate a material full-training win. Launch-count-only fusion or a G1-only specialization does not qualify.</li>
-        <li>Dense and multi-page contacts will use a general page path or the exact reference fallback; no user-tuned hard contact limit will be exposed.</li>
+        <li>Full graph-leapfrog G1 training measures about 911.2k samples/s persistent versus 901.1k/s reference in the matched bracket (+1.1%). Saturated standalone G1 physics is effectively neutral/slightly negative (−0.35%), confirming that end-to-end overlap must remain the primary metric.</li>
+        <li>Contact-rich 512-world fleets improve ANYmal 365.6k → 381.0k/s (+4.2%) and H1 343.2k → 362.7k/s (+5.7%).</li>
+        <li>Many articulations in one world also improve: 64-robot ANYmal 45.8k → 47.1k/s (+2.9%) and H1 46.1k → 47.7k/s (+3.5%). Final state magnitudes match reference in every bracket.</li>
+        <li>A CUDA-graph regression covers two substeps and more than two contact pages. Generalized state, body pose/twist, impulses, manifold data, and derived contact rows match the reference within 2e−6.</li>
+        <li>The implementation supports the arbitrary-contact overflow loop and exposes no user contact-limit tuning. The reference execution path remains unchanged and selectable.</li>
+        <li><strong>Next:</strong> extend phase ownership toward biased contact solve plus post-contact ABA while measuring register pressure early. The target remains elimination of row materialization—not launch fusion alone.</li>
       </ul>
     </article>
     <article>

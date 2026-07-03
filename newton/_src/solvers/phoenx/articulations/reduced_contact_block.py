@@ -1409,6 +1409,7 @@ class ReducedContactBlockSystem:
         )
         self.contact_dof_width = _aligned_contact_dof_width(max_dof_count)
         self.solve_kernel = _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS[self.contact_dof_width]
+        self.relax_page_launcher = None
         self.requires_impulse_response = not (
             self._fallback_impossible_partitioned
             and self._fallback_impossible_rigid_only
@@ -1786,7 +1787,8 @@ class ReducedContactBlockSystem:
             assert self.packed_jacobian is not None
             assert self.packed_response is not None
             assert self.packed_previous_row_body is not None
-            if not gathered:
+            fused_relax = not prepare and self.relax_page_launcher is not None
+            if not gathered and not fused_relax:
                 wp.launch(
                     _finalize_reduced_contact_rows_kernel,
                     dim=(self.articulation_count, _POINTS_PER_PAGE),
@@ -1852,6 +1854,9 @@ class ReducedContactBlockSystem:
                     )
 
                 wp.capture_if(self.transpose_active, on_true=transpose_response)
+            if fused_relax:
+                self.relax_page_launcher(columns, bodies, idt, sor_boost, cc, iterations)
+                return
             wp.launch_tiled(
                 self.solve_kernel,
                 dim=[self.articulation_count],
