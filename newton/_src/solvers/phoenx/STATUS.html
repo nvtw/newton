@@ -167,7 +167,7 @@
     <div class="section-label">Active milestone</div>
     <article>
       <div class="meta"><span class="tag">DIVERSE RL COVERAGE</span><time>3 Jul</time></div>
-      <h2>Ant, Go2, and classic Humanoid now run without IsaacLab</h2>
+      <h2>Ant, Go2, H1, and classic Humanoid now run without IsaacLab</h2>
       <p>The requested IsaacLab scenes are being rebuilt as pure Newton/Warp environments with no IsaacLab runtime dependency. Task semantics are split cleanly into direct-torque locomotion (Ant/Humanoid) and command-tracking position control (legged robots), while rollout and PPO infrastructure stays shared.</p>
       <ul>
         <li>Existing reusable coverage: mature G1 and ANYmal-C environments; functional Ant code is being promoted from its validation script.</li>
@@ -176,7 +176,8 @@
         <li>Humanoid: the source task's 21 geared torque actions, 75-value observation, reward/termination equations, implicit actuator gains, self-collision, and 60 Hz control are implemented. Initial reward is exactly 2.6 as specified.</li>
         <li>Humanoid uses reduced articulation mode by default so every multi-axis motor armature remains physically representable. Its full rollout and PPO update execute in one CUDA graph with a device seed counter; a two-iteration train smoke passes.</li>
         <li>Ant is now a public reusable environment and its full rollout/update defaults to CUDA graph replay. Promotion exposed and fixed a duplicate up-axis conversion that had made every nominal reset immediately terminal; the regression now checks projected gravity explicitly.</li>
-        <li>Next: H1, then the specialized closed-loop DR Legs hold/walk tasks.</li>
+        <li>H1 adds a modern 19-DoF humanoid command task: source nominal pose, per-joint gains/limits, 69-value policy observation, world-yaw and planar-velocity tracking, posture/action/acceleration penalties, and reduced-coordinate execution. Environment and full graph PPO smokes pass; foot-air/clearance shaping and command curricula remain follow-up quality work.</li>
+        <li>Next: the specialized closed-loop DR Legs hold/walk tasks, followed by cross-task training-quality and throughput baselines.</li>
       </ul>
     </article>
 

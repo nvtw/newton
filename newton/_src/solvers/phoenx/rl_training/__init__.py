@@ -32,6 +32,7 @@ from .g1 import (
     g1_mirror_map_ppo,
 )
 from .go2 import ConfigEnvGo2PhoenX, EnvGo2PhoenX
+from .h1 import ACTION_DIM_H1, OBS_DIM_H1, ConfigEnvH1PhoenX, EnvH1PhoenX
 from .humanoid import ACTION_DIM_HUMANOID, OBS_DIM_HUMANOID, ConfigEnvHumanoidPhoenX, EnvHumanoidPhoenX
 from .networks import GaussianActor, PufferMinGRUNet, WarpMLP
 from .optim import Adam, Muon
@@ -90,6 +91,7 @@ __all__ = [
     "ACTION_DIM_ANT",
     "ACTION_DIM_ANYMAL",
     "ACTION_DIM_G1",
+    "ACTION_DIM_H1",
     "ACTION_DIM_HUMANOID",
     "ACTION_OBS_OFFSET_ANYMAL",
     "COMMAND_DIM_ANYMAL",
@@ -101,6 +103,7 @@ __all__ = [
     "OBS_DIM_G1",
     "OBS_DIM_G1_ISAACLAB_FLAT",
     "OBS_DIM_G1_NANOG1",
+    "OBS_DIM_H1",
     "OBS_DIM_HUMANOID",
     "Adam",
     "BatchSAC",
@@ -110,6 +113,7 @@ __all__ = [
     "ConfigEnvAnymalPhoenX",
     "ConfigEnvG1PhoenX",
     "ConfigEnvGo2PhoenX",
+    "ConfigEnvH1PhoenX",
     "ConfigEnvHumanoidPhoenX",
     "ConfigEvaluateAnymalPPO",
     "ConfigEvaluateG1GatePPO",
@@ -124,6 +128,7 @@ __all__ = [
     "EnvAnymalPhoenX",
     "EnvG1PhoenX",
     "EnvGo2PhoenX",
+    "EnvH1PhoenX",
     "EnvHumanoidPhoenX",
     "EnvPPO",
     "GaussianActor",
