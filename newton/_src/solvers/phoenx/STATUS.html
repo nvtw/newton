@@ -195,7 +195,7 @@
         <li>This changes no equation, approximation, row order, or solver tolerance. It only removes redundant zero stores and the block-wide barrier they required.</li>
         <li>The same captured graph is tested after every contact row changes source body, including shorter paths; packed Jacobians and ABA responses remain exactly equal to the dense reference.</li>
         <li>Arbitrary overflow-page replay and the high-degree momentum-conservation fallback pass under CUDA graph capture.</li>
-        <li>Nsight measures the steady row-builder median at 387 µs versus 402 µs (about 3.8% less). Saturated 8,192-world end-to-end A/B is a modest 1.912M → 1.919M physics steps/s; this is retained as a safe cumulative gain, not presented as a major breakthrough.</li>
+        <li>Nsight measures the steady row-builder median at 387 µs versus 402 µs (about 3.8% less). Saturated 8,192-world A/B is a modest 1.912M → 1.919M physics steps/s; the matched longer training gate improves 870.4k → 872.5k samples/s (+0.24%). This is retained as a safe cumulative gain, not presented as a major breakthrough.</li>
       </ul>
     </article>
     <article>
@@ -329,6 +329,8 @@
           <li>Factor/contact multi-stream overlap: −2.7% training from GPU contention.</li>
           <li>Conditional empty-reset FK/observation: neutral in overlapped training and −1.7% in high-reset stepping; fully reverted.</li>
           <li>Always-transposed response rows: faster physics, −2.7% training.</li>
+          <li>Early response-vector prefetch: +0.55% physics but −0.64% training from increased live-register pressure.</li>
+          <li>Drop tiled ABA <code>generalized_rhs</code> store: exact but about −0.6% physics; fully reverted.</li>
           <li>Stride-3 contact prepare: policy exploits stale-contact physics and fails the true-physics gate.</li>
           <li>Factor sub-warp tiling: +9% kernel time.</li>
           <li>Path-sparse Jacobian cache: −1.5% physics; indexed tile dots slowed every PGS update.</li>
