@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · post-fusion training baseline refreshed</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · factor fusion performance-gated</strong></div>
     </header>
 
     <section class="hero">
@@ -187,6 +187,15 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag">EXACT FACTOR FUSION · REJECTED</span><time>3 Jul</time></div>
+      <h2>Fusing factor initialization increases kernel pressure</h2>
+      <p>An exact prototype moved per-joint inertia, motion-subspace, and velocity initialization into the tiled reverse factor kernel, with a warp barrier before factorization. It changed scheduling only and passed the CUDA-graph ABA-versus-common-mass-matrix test.</p>
+      <ul>
+        <li>A same-session 8,192-world G1 bracket measured 1.918M steps/s fused versus 1.962M/s after reverting (−2.3%).</li>
+        <li>The launch saving is smaller than the cost of enlarging the already register-heavy factor kernel. The prototype is fully reverted; the clean post-fusion baseline remains intact.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED · EXACT CROSS-PHASE REUSE</span><time>3 Jul</time></div>
       <h2>ABA captures target momentum; publish restores it in place</h2>
@@ -359,6 +368,7 @@
           <li>Row blocks of 32 gain 0.56% isolated physics but lose 0.38% training. Blocks of 64 gain 0.65% G1 training overlap but lose 1.2–2.7% on contact-rich G1/H1/ANYmal fleets; retain the general 96-thread block.</li>
           <li>Stride-3 contact prepare: policy exploits stale-contact physics and fails the true-physics gate.</li>
           <li>Factor sub-warp tiling: +9% kernel time.</li>
+          <li>Fuse per-joint initialization into tiled factor: physically exact, but −2.3% G1 physics from increased kernel pressure.</li>
           <li>Path-sparse Jacobian cache: −1.5% physics; indexed tile dots slowed every PGS update.</li>
           <li>Remove ABA generalized-acceleration stores: neutral/slightly slower.</li>
           <li>Full 96-row shared response cache: −14% from fixed loads and occupancy.</li>
