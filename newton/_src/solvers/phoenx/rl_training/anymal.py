@@ -592,6 +592,7 @@ class EnvAnymalPhoenX:
 
     obs_dim = OBS_DIM_ANYMAL
     action_dim = ACTION_DIM_ANYMAL
+    _policy_to_model_joint = _LAB_TO_MUJOCO
 
     def __init__(self, config: ConfigEnvAnymalPhoenX | None = None, *, device: wp.context.Devicelike = None):
         self.config = config or ConfigEnvAnymalPhoenX()
@@ -611,7 +612,9 @@ class EnvAnymalPhoenX:
         self.control = self.model.control()
         self.contacts = self.model.contacts()
 
-        self.lab_to_mujoco = wp.array(np.array(_LAB_TO_MUJOCO, dtype=np.int32), dtype=wp.int32, device=self.device)
+        self.lab_to_mujoco = wp.array(
+            np.asarray(self._policy_to_model_joint, dtype=np.int32), dtype=wp.int32, device=self.device
+        )
         default_q_np = self.model.joint_q.numpy()[: self.coord_stride]
         self.default_joint_pos = wp.array(default_q_np[7 : 7 + ACTION_DIM_ANYMAL], dtype=wp.float32, device=self.device)
         self.current_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)

@@ -24,17 +24,9 @@ from .g1 import (
     EnvG1PhoenX,
     g1_mirror_map_ppo,
 )
+from .go2 import ConfigEnvGo2PhoenX, EnvGo2PhoenX
 from .networks import GaussianActor, PufferMinGRUNet, WarpMLP
 from .optim import Adam, Muon
-from .ppo import (
-    BufferRollout,
-    ConfigPPO,
-    MirrorMapPPO,
-    StatsPPOUpdate,
-    TrainerPPO,
-    load_ppo_checkpoint,
-    save_ppo_checkpoint,
-)
 from .pbt import (
     ConfigPBT,
     GenerationResult,
@@ -46,6 +38,15 @@ from .pbt import (
     population_based_train,
     population_based_train_anymal,
     population_based_train_g1,
+)
+from .ppo import (
+    BufferRollout,
+    ConfigPPO,
+    MirrorMapPPO,
+    StatsPPOUpdate,
+    TrainerPPO,
+    load_ppo_checkpoint,
+    save_ppo_checkpoint,
 )
 from .sac import BatchSAC, BufferReplaySAC, ConfigSAC, StatsSACUpdate, TrainerSAC
 from .toolbox import drop_ppo_checkpoint_inputs, insert_ppo_checkpoint_inputs, resize_ppo_checkpoint_inputs
@@ -79,17 +80,6 @@ from .training import (
 
 __all__ = [
     "ACTION_DIM_ANYMAL",
-    "ConfigPBT",
-    "GenerationResult",
-    "HparamSpec",
-    "ResultPBT",
-    "WorkerState",
-    "default_anymal_hparam_specs",
-    "default_g1_hparam_specs",
-    "population_based_train",
-    "population_based_train_anymal",
-    "population_based_train_g1",
-
     "ACTION_DIM_G1",
     "ACTION_OBS_OFFSET_ANYMAL",
     "COMMAND_DIM_ANYMAL",
@@ -106,18 +96,23 @@ __all__ = [
     "BufferRollout",
     "ConfigEnvAnymalPhoenX",
     "ConfigEnvG1PhoenX",
+    "ConfigEnvGo2PhoenX",
     "ConfigEvaluateAnymalPPO",
     "ConfigEvaluateG1GatePPO",
     "ConfigEvaluateG1PPO",
     "ConfigEvaluateG1TargetPPO",
+    "ConfigPBT",
     "ConfigPPO",
     "ConfigSAC",
     "ConfigTrainAnymalPPO",
     "ConfigTrainG1PPO",
     "EnvAnymalPhoenX",
     "EnvG1PhoenX",
+    "EnvGo2PhoenX",
     "EnvPPO",
     "GaussianActor",
+    "GenerationResult",
+    "HparamSpec",
     "MirrorMapPPO",
     "Muon",
     "PufferMinGRUNet",
@@ -125,6 +120,7 @@ __all__ = [
     "ResultEvaluateG1GatePPO",
     "ResultEvaluateG1PPO",
     "ResultEvaluateG1TargetPPO",
+    "ResultPBT",
     "ResultTrainAnymalPPO",
     "ResultTrainG1PPO",
     "StatsEvaluateAnymalTargetPPO",
@@ -139,9 +135,12 @@ __all__ = [
     "TrainerPPO",
     "TrainerSAC",
     "WarpMLP",
+    "WorkerState",
     "anymal_mirror_map_ppo",
     "capture_env_steps",
     "collect_ppo_rollout",
+    "default_anymal_hparam_specs",
+    "default_g1_hparam_specs",
     "drop_ppo_checkpoint_inputs",
     "evaluate_anymal_ppo",
     "evaluate_g1_gate_ppo",
@@ -150,6 +149,9 @@ __all__ = [
     "g1_mirror_map_ppo",
     "insert_ppo_checkpoint_inputs",
     "load_ppo_checkpoint",
+    "population_based_train",
+    "population_based_train_anymal",
+    "population_based_train_g1",
     "resize_ppo_checkpoint_inputs",
     "reward_functions",
     "save_ppo_checkpoint",

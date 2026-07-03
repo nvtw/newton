@@ -39,6 +39,7 @@ from .g1_recipe import (
     TRAIN_ITERATIONS,
     default_g1_ppo_config,
 )
+from .go2 import ConfigEnvGo2PhoenX, EnvGo2PhoenX
 from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_checkpoint
 
 _G1_TRAIN_STAT_COUNT = 15
@@ -1805,7 +1806,8 @@ def train_anymal_ppo(config: ConfigTrainAnymalPPO | None = None) -> ResultTrainA
     device = wp.get_device(cfg.device)
     env_config = cfg.env_config or ConfigEnvAnymalPhoenX()
     ppo_config = cfg.ppo_config or _default_ppo_config()
-    env = EnvAnymalPhoenX(env_config, device=device)
+    env_type = EnvGo2PhoenX if isinstance(env_config, ConfigEnvGo2PhoenX) else EnvAnymalPhoenX
+    env = env_type(env_config, device=device)
     if cfg.resume_checkpoint is not None:
         if cfg.resume_policy_only:
             trainer = TrainerPPO.load_checkpoint_policy_only(

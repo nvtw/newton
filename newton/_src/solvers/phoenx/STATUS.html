@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · contact delta moved to registers</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · diverse RL task expansion underway</strong></div>
     </header>
 
     <section class="hero">
@@ -110,7 +110,7 @@
 
     <section class="hero">
       <strong>Primary goal</strong>
-      <p>Repeatable Unitree G1 walking at nanoG1-level quality, then close the remaining end-to-end throughput gap without sacrificing physical reliability or generality. Scope (user): the PhoenX solver, and now also the collision pipeline — provided it stays reliable, general, and contact quality is never degraded.</p>
+      <p>Repeatable, fast PhoenX RL training without sacrificing physical reliability or generality. G1 remains the quality anchor; the active intermediate milestone adds pure-PhoenX Ant, Humanoid, Go2, H1, ANYmal-C, and DR Legs hold/walk tasks so physics quality and performance are measured across genuinely different robots.</p>
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
@@ -161,6 +161,19 @@
         <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
         <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
         <li>The controlled short graph-leapfrog benchmark now reaches 891k samples/s; the proven full-quality recipe is unchanged.</li>
+      </ul>
+    </article>
+
+    <div class="section-label">Active milestone</div>
+    <article>
+      <div class="meta"><span class="tag">DIVERSE RL COVERAGE</span><time>3 Jul</time></div>
+      <h2>First new standalone task: Unitree Go2</h2>
+      <p>The requested IsaacLab scenes are being rebuilt as pure Newton/Warp environments with no IsaacLab runtime dependency. Task semantics are split cleanly into direct-torque locomotion (Ant/Humanoid) and command-tracking position control (legged robots), while rollout and PPO infrastructure stays shared.</p>
+      <ul>
+        <li>Existing reusable coverage: mature G1 and ANYmal-C environments; functional Ant code is being promoted from its validation script.</li>
+        <li>New Go2 environment: official Newton USD, exact nominal pose and limits, source-task 50 Hz/5 ms cadence, 25/0.5 PD gains, robot-specific policy-to-model joint map, and shared symmetric quadruped observations/rewards.</li>
+        <li>Two-world multi-step CUDA graph capture passes with finite state and exact action-to-joint mapping. A graph-leapfrog PPO smoke remains finite at four 5 ms substeps and eight solver iterations.</li>
+        <li>Next: finish the reusable command-line trainer contract, then add Humanoid/H1 before the more specialized closed-loop DR Legs hold/walk tasks.</li>
       </ul>
     </article>
 
