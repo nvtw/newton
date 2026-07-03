@@ -12,14 +12,12 @@ from newton._src.sim import Control, JointType, Model, State
 from newton._src.sim.articulation import eval_fk
 from newton._src.solvers.featherstone.kernels import (
     compute_com_transforms,
-    compute_spatial_inertia,
     integrate_body_pose_from_com_twist,
     jcalc_integrate,
     jcalc_motion,
     jcalc_transform,
     spatial_cross,
     spatial_cross_dual,
-    transform_spatial_inertia,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_iterate,
@@ -61,6 +59,53 @@ def _pack_symmetric_mat66(matrix: wp.spatial_matrix) -> _sym_mat66:
         for column in range(row, 6):
             packed[index] = matrix[row, column]
             index += wp.int32(1)
+    return packed
+
+
+@wp.func
+def _pack_transformed_body_inertia(
+    transform: wp.transform,
+    mass: wp.float32,
+    inertia: wp.mat33,
+) -> _sym_mat66:
+    """Transform and pack a COM-centered rigid-body inertia."""
+    position = wp.transform_get_translation(transform)
+    rotation = wp.transform_get_rotation(transform)
+    local_x = wp.quat_rotate_inv(rotation, wp.vec3(1.0, 0.0, 0.0))
+    local_y = wp.quat_rotate_inv(rotation, wp.vec3(0.0, 1.0, 0.0))
+    local_z = wp.quat_rotate_inv(rotation, wp.vec3(0.0, 0.0, 1.0))
+    inertia_x = inertia * local_x
+    inertia_y = inertia * local_y
+    inertia_z = inertia * local_z
+    i_xx = wp.dot(local_x, inertia_x)
+    i_xy = wp.dot(local_x, inertia_y)
+    i_xz = wp.dot(local_x, inertia_z)
+    i_yy = wp.dot(local_y, inertia_y)
+    i_yz = wp.dot(local_y, inertia_z)
+    i_zz = wp.dot(local_z, inertia_z)
+    x = position[0]
+    y = position[1]
+    z = position[2]
+
+    packed = _sym_mat66(0.0)
+    packed[0] = mass
+    packed[3] = wp.float32(0.0)
+    packed[4] = mass * z
+    packed[5] = -mass * y
+    packed[6] = mass
+    packed[8] = -mass * z
+    packed[9] = wp.float32(0.0)
+    packed[10] = mass * x
+    packed[11] = mass
+    packed[12] = mass * y
+    packed[13] = -mass * x
+    packed[14] = wp.float32(0.0)
+    packed[15] = i_xx + mass * (y * y + z * z)
+    packed[16] = i_xy - mass * x * y
+    packed[17] = i_xz - mass * x * z
+    packed[18] = i_yy + mass * (x * x + z * z)
+    packed[19] = i_yz - mass * y * z
+    packed[20] = i_zz + mass * (x * x + y * y)
     return packed
 
 
@@ -414,7 +459,8 @@ def _initialize_reduced_factor_kernel(
     joint_qd_public: wp.array[wp.float32],
     joint_anchor_local: wp.array[wp.transform],
     body_q_com: wp.array[wp.transform],
-    body_i_m: wp.array[wp.spatial_matrix],
+    body_mass: wp.array[wp.float32],
+    body_inertia: wp.array[wp.mat33],
     joint_qd_internal: wp.array[wp.float32],
     body_i_s: wp.array[_sym_mat66],
     joint_s: wp.array[wp.spatial_vector],
@@ -428,7 +474,7 @@ def _initialize_reduced_factor_kernel(
         joint_qd_internal[dof] = joint_qd_public[dof]
 
     child = joint_child[joint]
-    body_i_s[child] = _pack_symmetric_mat66(transform_spatial_inertia(body_q_com[child], body_i_m[child]))
+    body_i_s[child] = _pack_transformed_body_inertia(body_q_com[child], body_mass[child], body_inertia[child])
 
     x_wpj = joint_anchor_local[joint]
     kind = joint_type[joint]
@@ -2704,7 +2750,6 @@ class ReducedArticulationSystem:
         self.factor_child_start = wp.array(child_start_np, device=self.device)
         self.factor_child_joint = wp.array(np.asarray(child_joint_list, dtype=np.int32), device=self.device)
 
-        self.body_i_m = wp.empty(body_count, dtype=wp.spatial_matrix, device=self.device)
         self.body_x_com = wp.empty(body_count, dtype=wp.transform, device=self.device)
         self.body_q_com = wp.empty(body_count, dtype=wp.transform, device=self.device)
         self.body_q_local = wp.empty(body_count, dtype=wp.transform, device=self.device)
@@ -2741,14 +2786,7 @@ class ReducedArticulationSystem:
         self.refresh_inertial_properties()
 
     def refresh_inertial_properties(self) -> None:
-        """Refresh graph-stable body inertia and COM transforms from the model."""
-        wp.launch(
-            compute_spatial_inertia,
-            dim=int(self.model.body_count),
-            inputs=[self.model.body_inertia, self.model.body_mass],
-            outputs=[self.body_i_m],
-            device=self.device,
-        )
+        """Refresh cached COM transforms; factorization reads body inertia directly."""
         wp.launch(
             compute_com_transforms,
             dim=int(self.model.body_count),
@@ -2859,7 +2897,8 @@ class ReducedArticulationSystem:
                 state.joint_qd,
                 self.joint_anchor_local,
                 self.body_q_com,
-                self.body_i_m,
+                self.model.body_mass,
+                self.model.body_inertia,
             ],
             outputs=[
                 self.joint_qd_internal,

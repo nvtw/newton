@@ -9,10 +9,13 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.featherstone.kernels import transform_spatial_inertia
 from newton._src.solvers.phoenx.articulations.reduced import (
     ReducedArticulationSystem,
     _capture_reduced_momentum_warp_kernel,
     _flush_deferred_articulation,
+    _pack_transformed_body_inertia,
+    _unpack_symmetric_mat66,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _apply_deferred_impulse,
@@ -32,6 +35,60 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
 )
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_wrench_response
+
+
+@wp.kernel(enable_backward=False)
+def _compare_compact_transformed_inertia_kernel(
+    transforms: wp.array[wp.transform],
+    masses: wp.array[wp.float32],
+    inertias: wp.array[wp.mat33],
+    compact: wp.array[wp.spatial_matrix],
+    dense: wp.array[wp.spatial_matrix],
+):
+    index = wp.tid()
+    mass = masses[index]
+    inertia = inertias[index]
+    body_inertia = wp.spatial_matrix(
+        mass,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        mass,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        mass,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        inertia[0, 0],
+        inertia[0, 1],
+        inertia[0, 2],
+        0.0,
+        0.0,
+        0.0,
+        inertia[1, 0],
+        inertia[1, 1],
+        inertia[1, 2],
+        0.0,
+        0.0,
+        0.0,
+        inertia[2, 0],
+        inertia[2, 1],
+        inertia[2, 2],
+    )
+    transform = transforms[index]
+    compact[index] = _unpack_symmetric_mat66(_pack_transformed_body_inertia(transform, mass, inertia))
+    dense[index] = transform_spatial_inertia(transform, body_inertia)
 
 
 def _make_mixed_tree_builder():
@@ -768,6 +825,41 @@ def _loop_closure_error(model, state, loop_joint):
 
 
 class TestReducedArticulation(unittest.TestCase):
+    def test_compact_transformed_inertia_matches_dense_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        rng = np.random.default_rng(1427)
+        count = 64
+        positions = rng.uniform(-3.0, 3.0, size=(count, 3)).astype(np.float32)
+        axes = rng.normal(size=(count, 3)).astype(np.float32)
+        axes /= np.linalg.norm(axes, axis=1, keepdims=True)
+        angles = rng.uniform(-np.pi, np.pi, size=count).astype(np.float32)
+        rotations = np.asarray(
+            [wp.quat_from_axis_angle(wp.vec3(*axis), float(angle)) for axis, angle in zip(axes, angles, strict=True)]
+        )
+        transforms = wp.array(np.concatenate((positions, rotations), axis=1), dtype=wp.transform, device=device)
+        masses_np = rng.uniform(0.05, 20.0, size=count).astype(np.float32)
+        factors = rng.normal(size=(count, 3, 3)).astype(np.float32)
+        inertias_np = factors @ np.transpose(factors, (0, 2, 1)) + 0.01 * np.eye(3, dtype=np.float32)
+        masses = wp.array(masses_np, dtype=wp.float32, device=device)
+        inertias = wp.array(inertias_np, dtype=wp.mat33, device=device)
+        compact = wp.empty(count, dtype=wp.spatial_matrix, device=device)
+        dense = wp.empty_like(compact)
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                _compare_compact_transformed_inertia_kernel,
+                dim=count,
+                inputs=[transforms, masses, inertias],
+                outputs=[compact, dense],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(compact.numpy(), dense.numpy(), rtol=2.0e-5, atol=2.0e-5)
+
     def test_aba_matches_common_mass_matrix_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

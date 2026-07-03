@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · factor fusion performance-gated</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · compact inertia retained</strong></div>
     </header>
 
     <section class="hero">
@@ -188,12 +188,24 @@
 
     <div class="section-label">Latest findings</div>
     <article>
+      <div class="meta"><span class="tag good">RETAINED · EXACT COMPACT INERTIA</span><time>3 Jul</time></div>
+      <h2>Rigid-body structure replaces dense 6×6 inertia transforms</h2>
+      <p>Reduced factor initialization now constructs the 21 stored symmetric entries directly from the COM mass, rotated 3×3 inertia, and parallel-axis terms. It removes a cached 36-float spatial matrix per body and the redundant dense 6×6 transform while preserving the same rigid-body operator.</p>
+      <ul>
+        <li>A randomized 64-body CUDA-graph regression matches the original dense transform within 2e−5; ABA/common-mass-matrix equivalence also passes.</li>
+        <li>Matched 8,192-world G1 physics improves 1.926M → 1.947–1.962M steps/s (+1.1–1.9%) and GPU use falls about 31 MiB.</li>
+        <li>Contact-rich 512-world fleets improve ANYmal +1.0%, H1 +0.8% on the longer bracket, and G1 +1.6%; this is not a G1-only specialization.</li>
+        <li>Matched full collect/update training improves about 695.2k → 700.4k samples/s (+0.74%). The authoritative 881k graph-leapfrog headline remains unchanged until its comparable refresh.</li>
+        <li>All 42 reduced CUDA-graph tests pass; one suite-wide graph-instantiation runtime error passes immediately in isolation. Coverage includes live mass updates, tile widths, Featherstone parity, momentum/energy, loops, dense/self/ground contacts, multi-articulation worlds, and determinism.</li>
+      </ul>
+    </article>
+    <article>
       <div class="meta"><span class="tag">EXACT FACTOR FUSION · REJECTED</span><time>3 Jul</time></div>
       <h2>Fusing factor initialization increases kernel pressure</h2>
       <p>An exact prototype moved per-joint inertia, motion-subspace, and velocity initialization into the tiled reverse factor kernel, with a warp barrier before factorization. It changed scheduling only and passed the CUDA-graph ABA-versus-common-mass-matrix test.</p>
       <ul>
-        <li>A same-session 8,192-world G1 bracket measured 1.918M steps/s fused versus 1.962M/s after reverting (−2.3%).</li>
-        <li>The launch saving is smaller than the cost of enlarging the already register-heavy factor kernel. The prototype is fully reverted; the clean post-fusion baseline remains intact.</li>
+        <li>A same-session 8,192-world G1 bracket measured 1.918M steps/s fused into factor versus 1.962M/s after reverting (−2.3%).</li>
+        <li>A second exact variant reused the freshly computed anchor and COM transforms inside local kinematics and passed the same physical gate, but reached only 1.894M/s (−3.5%). Both placements are fully reverted; separate narrow kernels remain faster.</li>
       </ul>
     </article>
     <article>
