@@ -35,6 +35,12 @@ class ShapeFlags(IntEnum):
     HYDROELASTIC = 1 << 4
     """Indicates that the shape uses hydroelastic collision."""
 
+    MESH_SIGN_NORMAL = 1 << 5
+    """Use the closest face normal to determine the sign of mesh point queries."""
+
+    MESH_SIGN_PARITY = 1 << 6
+    """Use ray intersection parity to determine the sign of mesh point queries."""
+
 
 __all__ = [
     "ParticleFlags",

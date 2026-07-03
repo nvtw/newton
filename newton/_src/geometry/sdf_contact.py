@@ -19,7 +19,7 @@ from .contact_reduction_global import (
     GlobalContactReducerData,
     export_and_reduce_contact_centered_two_spatial_depths,
 )
-from .kernels import MeshSignQuery, mesh_query_point_sign
+from .kernels import MeshSignMethod, mesh_query_point_sign, resolve_mesh_sign_method
 
 _MESH_QUERY_MAX_DIST = 1000.0
 
@@ -158,7 +158,7 @@ def sample_sdf_using_mesh(
     mesh_id: wp.uint64,
     world_pos: wp.vec3,
     max_dist: float = _MESH_QUERY_MAX_DIST,
-    sign_query_type: int = MeshSignQuery.NORMAL,
+    sign_method: int = MeshSignMethod.NORMAL,
 ) -> float:
     """
     Sample signed distance to mesh surface using mesh query.
@@ -171,12 +171,12 @@ def sample_sdf_using_mesh(
         mesh_id: The mesh ID (from wp.Mesh.id)
         world_pos: Query position in mesh local coordinates
         max_dist: Maximum distance to search for closest point
-        sign_query_type: Mesh sign query strategy.
+        sign_method: Method used to determine the mesh query sign.
 
     Returns:
         The signed distance value (negative inside, positive outside)
     """
-    hit, sign, face_index, face_u, face_v = mesh_query_point_sign(mesh_id, world_pos, max_dist, sign_query_type)
+    hit, sign, face_index, face_u, face_v = mesh_query_point_sign(mesh_id, world_pos, max_dist, sign_method)
 
     if hit:
         closest = wp.mesh_eval_position(mesh_id, face_index, face_u, face_v)
@@ -190,7 +190,7 @@ def sample_sdf_grad_using_mesh(
     mesh_id: wp.uint64,
     world_pos: wp.vec3,
     max_dist: float = _MESH_QUERY_MAX_DIST,
-    sign_query_type: int = MeshSignQuery.NORMAL,
+    sign_method: int = MeshSignMethod.NORMAL,
 ) -> tuple[float, wp.vec3]:
     """
     Sample signed distance and gradient to mesh surface using mesh query.
@@ -206,7 +206,7 @@ def sample_sdf_grad_using_mesh(
         mesh_id: The mesh ID (from wp.Mesh.id)
         world_pos: Query position in mesh local coordinates
         max_dist: Maximum distance to search for closest point
-        sign_query_type: Mesh sign query strategy.
+        sign_method: Method used to determine the mesh query sign.
 
     Returns:
         Tuple of (distance, gradient) where:
@@ -215,7 +215,7 @@ def sample_sdf_grad_using_mesh(
     """
     gradient = wp.vec3(0.0, 0.0, 0.0)
 
-    hit, sign, face_index, face_u, face_v = mesh_query_point_sign(mesh_id, world_pos, max_dist, sign_query_type)
+    hit, sign, face_index, face_u, face_v = mesh_query_point_sign(mesh_id, world_pos, max_dist, sign_method)
 
     if hit:
         closest = wp.mesh_eval_position(mesh_id, face_index, face_u, face_v)
@@ -932,7 +932,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_source: wp.array[wp.uint64],
         texture_sdf_table: wp.array[TextureSDFData],
         shape_sdf_index: wp.array[wp.int32],
-        shape_mesh_query_type: wp.array[wp.int32],
+        shape_mesh_properties: wp.array[wp.int32],
+        shape_flags: wp.array[wp.int32],
         shape_gap: wp.array[float],
         _shape_collision_aabb_lower: wp.array[wp.vec3],
         _shape_collision_aabb_upper: wp.array[wp.vec3],
@@ -997,7 +998,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         hfd_tri = heightfield_data[shape_heightfield_index[tri_shape]]
                     if sdf_is_hfield:
                         hfd_sdf = heightfield_data[shape_heightfield_index[sdf_shape]]
-                sdf_mesh_query_type = shape_mesh_query_type[sdf_shape]
+                sdf_mesh_query_type = resolve_mesh_sign_method(shape_flags[sdf_shape], shape_mesh_properties[sdf_shape])
 
                 # SDF availability: heightfields always use on-the-fly evaluation
                 use_bvh_for_sdf = False
@@ -1328,7 +1329,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         shape_source: wp.array[wp.uint64],
         texture_sdf_table: wp.array[TextureSDFData],
         shape_sdf_index: wp.array[wp.int32],
-        shape_mesh_query_type: wp.array[wp.int32],
+        shape_mesh_properties: wp.array[wp.int32],
+        shape_flags: wp.array[wp.int32],
         shape_gap: wp.array[float],
         shape_collision_aabb_lower: wp.array[wp.vec3],
         shape_collision_aabb_upper: wp.array[wp.vec3],
@@ -1413,7 +1415,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         hfd_tri = heightfield_data[shape_heightfield_index[tri_shape]]
                     if sdf_is_hfield:
                         hfd_sdf = heightfield_data[shape_heightfield_index[sdf_shape]]
-                sdf_mesh_query_type = shape_mesh_query_type[sdf_shape]
+                sdf_mesh_query_type = resolve_mesh_sign_method(shape_flags[sdf_shape], shape_mesh_properties[sdf_shape])
 
                 use_bvh_for_sdf = False
                 if not sdf_is_hfield:

@@ -14,11 +14,29 @@ from .types import (
 )
 
 
-class MeshSignQuery(enum.IntEnum):
-    """Mesh sign-query strategies used by collision kernels."""
+class MeshSignMethod(enum.IntEnum):
+    """Methods used to determine the sign of mesh point queries."""
 
     NORMAL = 0
     PARITY = 1
+
+
+class MeshProperties(enum.IntFlag):
+    """Mesh properties used by collision kernels."""
+
+    WATERTIGHT = 1 << 0
+
+
+@wp.func
+def resolve_mesh_sign_method(shape_flags: int, mesh_properties: int):
+    """Resolve the mesh sign method, honoring an explicit per-shape override."""
+    if shape_flags & ShapeFlags.MESH_SIGN_NORMAL:
+        return int(MeshSignMethod.NORMAL)
+    if shape_flags & ShapeFlags.MESH_SIGN_PARITY:
+        return int(MeshSignMethod.PARITY)
+    if mesh_properties & MeshProperties.WATERTIGHT:
+        return int(MeshSignMethod.PARITY)
+    return int(MeshSignMethod.NORMAL)
 
 
 @wp.func
@@ -875,8 +893,8 @@ def closest_edge_coordinate_cylinder(
 
 
 @wp.func
-def mesh_query_point_sign(mesh: wp.uint64, point: wp.vec3, max_dist: float, sign_query_type: int):
-    if sign_query_type == MeshSignQuery.PARITY:
+def mesh_query_point_sign(mesh: wp.uint64, point: wp.vec3, max_dist: float, sign_method: int):
+    if sign_method == MeshSignMethod.PARITY:
         query = wp.mesh_query_point_sign_parity(mesh, point, max_dist)
         if query.result:
             return True, query.sign, query.face, query.u, query.v
@@ -891,8 +909,8 @@ def mesh_query_point_sign(mesh: wp.uint64, point: wp.vec3, max_dist: float, sign
 
 
 @wp.func
-def mesh_sdf_with_sign_query(mesh: wp.uint64, point: wp.vec3, max_dist: float, sign_query_type: int):
-    hit, sign, face_index, face_u, face_v = mesh_query_point_sign(mesh, point, max_dist, sign_query_type)
+def mesh_sdf_with_sign_method(mesh: wp.uint64, point: wp.vec3, max_dist: float, sign_method: int):
+    hit, sign, face_index, face_u, face_v = mesh_query_point_sign(mesh, point, max_dist, sign_method)
 
     if hit:
         closest = wp.mesh_eval_position(mesh, face_index, face_u, face_v)
@@ -902,7 +920,7 @@ def mesh_sdf_with_sign_query(mesh: wp.uint64, point: wp.vec3, max_dist: float, s
 
 @wp.func
 def mesh_sdf(mesh: wp.uint64, point: wp.vec3, max_dist: float):
-    return mesh_sdf_with_sign_query(mesh, point, max_dist, MeshSignQuery.PARITY)
+    return mesh_sdf_with_sign_method(mesh, point, max_dist, MeshSignMethod.PARITY)
 
 
 @wp.func
@@ -1036,7 +1054,7 @@ def create_soft_contacts(
     shape_type: wp.array[int],
     shape_scale: wp.array[wp.vec3],
     shape_source_ptr: wp.array[wp.uint64],
-    shape_mesh_query_type: wp.array[wp.int32],
+    shape_mesh_properties: wp.array[wp.int32],
     shape_world: wp.array[int],  # World indices for shapes
     margin: float,
     shape_margin: wp.array[float],
@@ -1137,7 +1155,7 @@ def create_soft_contacts(
             mesh,
             wp.cw_div(x_local, geo_scale),
             margin + s_margin / min_scale + radius / min_scale,
-            shape_mesh_query_type[shape_index],
+            resolve_mesh_sign_method(shape_flags[shape_index], shape_mesh_properties[shape_index]),
         )
         if hit:
             shape_p = wp.mesh_eval_position(mesh, face_index, face_u, face_v)

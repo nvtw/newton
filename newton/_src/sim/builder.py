@@ -12,7 +12,7 @@ import math
 import warnings
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -44,7 +44,7 @@ from ..geometry import (
     transform_inertia,
 )
 from ..geometry.inertia import validate_and_correct_inertia_kernel, verify_and_correct_inertia
-from ..geometry.kernels import MeshSignQuery
+from ..geometry.kernels import MeshProperties
 from ..geometry.types import Heightfield
 from ..geometry.utils import RemeshingMethod, compute_inertia_obb, remesh_mesh
 from ..math import quat_between_vectors_robust
@@ -370,6 +370,7 @@ class ModelBuilder:
         inflation) and :attr:`margin` (contact-surface inflation). Rejected on
         ``MESH`` / ``CONVEX_MESH`` shapes — pass ``margin`` to
         :meth:`~newton.geometry.Mesh.build_sdf` instead."""
+        _mesh_sign_flags: int = field(default=0, init=False, repr=False)
 
         def configure_sdf(
             self,
@@ -428,6 +429,8 @@ class ModelBuilder:
                 )
             if self.sdf_max_resolution is not None and self.sdf_target_voxel_size is not None:
                 raise ValueError("Set only one of sdf_max_resolution or sdf_target_voxel_size, not both.")
+            if self._mesh_sign_flags == ShapeFlags.MESH_SIGN_NORMAL | ShapeFlags.MESH_SIGN_PARITY:
+                raise ValueError("Set only one of ShapeFlags.MESH_SIGN_NORMAL or ShapeFlags.MESH_SIGN_PARITY.")
             if self.sdf_max_resolution is not None and self.sdf_max_resolution % 8 != 0:
                 raise ValueError(
                     f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
@@ -479,6 +482,7 @@ class ModelBuilder:
             shape_flags |= ShapeFlags.COLLIDE_PARTICLES if self.has_particle_collision else 0
             shape_flags |= ShapeFlags.SITE if self.is_site else 0
             shape_flags |= ShapeFlags.HYDROELASTIC if self.is_hydroelastic else 0
+            shape_flags |= self._mesh_sign_flags
             return shape_flags
 
         @flags.setter
@@ -487,6 +491,7 @@ class ModelBuilder:
 
             self.is_visible = bool(value & ShapeFlags.VISIBLE)
             self.is_hydroelastic = bool(value & ShapeFlags.HYDROELASTIC)
+            self._mesh_sign_flags = value & (ShapeFlags.MESH_SIGN_NORMAL | ShapeFlags.MESH_SIGN_PARITY)
 
             # Check if SITE flag is being set
             is_site_flag = bool(value & ShapeFlags.SITE)
@@ -10623,8 +10628,8 @@ class ModelBuilder:
 
             # build list of ids for geometry sources (meshes, sdfs, heightfields)
             geo_sources = []
-            shape_mesh_sign_query = []
-            mesh_sign_query_by_source_id: dict[int, int] = {}
+            shape_mesh_properties = []
+            mesh_properties_by_source_id: dict[int, int] = {}
             finalized_geos = {}  # do not duplicate geometry
             gaussians = []
             heightfield_meshes = []
@@ -10669,23 +10674,22 @@ class ModelBuilder:
                 else:
                     geo_sources.append(0)
 
-                sign_query = MeshSignQuery.NORMAL
-                if (
-                    shape_flags & (ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)
-                    and shape_type in (GeoType.MESH, GeoType.CONVEX_MESH)
-                    and isinstance(geo, Mesh)
-                ):
+                mesh_properties = 0
+                if shape_type in (GeoType.MESH, GeoType.CONVEX_MESH) and isinstance(geo, Mesh):
                     source_id = id(geo)
-                    sign_query = mesh_sign_query_by_source_id.get(source_id)
-                    if sign_query is None:
-                        # Open meshes preserve legacy normal-based contacts; winding is used when constructing SDFs.
-                        sign_query = MeshSignQuery.PARITY if geo.is_watertight else MeshSignQuery.NORMAL
-                        mesh_sign_query_by_source_id[source_id] = sign_query
-                shape_mesh_sign_query.append(sign_query)
+                    mesh_properties = mesh_properties_by_source_id.get(source_id)
+                    if mesh_properties is None:
+                        mesh_properties = MeshProperties.WATERTIGHT if geo.is_watertight else 0
+                        mesh_properties_by_source_id[source_id] = mesh_properties
+                shape_mesh_properties.append(mesh_properties)
+
+                mesh_sign_flags = shape_flags & (ShapeFlags.MESH_SIGN_NORMAL | ShapeFlags.MESH_SIGN_PARITY)
+                if mesh_sign_flags == ShapeFlags.MESH_SIGN_NORMAL | ShapeFlags.MESH_SIGN_PARITY:
+                    raise ValueError("Set only one of ShapeFlags.MESH_SIGN_NORMAL or ShapeFlags.MESH_SIGN_PARITY.")
 
             m.shape_type = wp.array(self.shape_type, dtype=wp.int32)
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)
-            m._shape_mesh_sign_query = wp.array(shape_mesh_sign_query, dtype=wp.int32, device=device)
+            m._shape_mesh_properties = wp.array(shape_mesh_properties, dtype=wp.int32, device=device)
             m.heightfield_meshes = heightfield_meshes
             m._generated_sdf_edge_meshes = generated_sdf_edge_meshes
             m.gaussians_count = len(gaussians)

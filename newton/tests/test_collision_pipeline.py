@@ -13,9 +13,11 @@ from newton import GeoType
 from newton._src.geometry import create_mesh_terrain
 from newton._src.geometry.flags import ParticleFlags, ShapeFlags
 from newton._src.geometry.kernels import (
-    MeshSignQuery,
+    MeshProperties,
+    MeshSignMethod,
     create_soft_contacts,
     mesh_sdf,
+    resolve_mesh_sign_method,
 )
 from newton._src.sim.collide import CollisionPipeline, _compute_per_world_shape_pairs_max, _estimate_rigid_contact_max
 from newton._src.utils.heightfield import HeightfieldData
@@ -500,6 +502,16 @@ def _query_mesh_sdf(
     distances[i] = mesh_sdf(mesh, points[i], max_dist)
 
 
+@wp.kernel
+def _resolve_mesh_sign_methods(
+    shape_flags: wp.array[wp.int32],
+    mesh_properties: wp.array[wp.int32],
+    methods: wp.array[wp.int32],
+):
+    i = wp.tid()
+    methods[i] = resolve_mesh_sign_method(shape_flags[i], mesh_properties[i])
+
+
 @wp.func
 def _solid_angle(point: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3) -> float:
     pa = a - point
@@ -697,12 +709,16 @@ def test_mixed_winding_convex_pile_contact_normal(test, device):
             wp.array([int(GeoType.CONVEX_MESH)], dtype=wp.int32, device=device),
             wp.array([wp.vec3(1.0, 1.0, 1.0)], dtype=wp.vec3, device=device),
             wp.array([mesh.id], dtype=wp.uint64, device=device),
-            wp.array([MeshSignQuery.PARITY], dtype=wp.int32, device=device),
+            wp.zeros(1, dtype=wp.int32, device=device),
             wp.array([-1], dtype=wp.int32, device=device),
             0.0,
             wp.array([0.0], dtype=wp.float32, device=device),
             1,
-            wp.array([int(ShapeFlags.COLLIDE_PARTICLES)], dtype=wp.int32, device=device),
+            wp.array(
+                [int(ShapeFlags.COLLIDE_PARTICLES | ShapeFlags.MESH_SIGN_PARITY)],
+                dtype=wp.int32,
+                device=device,
+            ),
             wp.array([0], dtype=wp.int32, device=device),
             wp.empty(0, dtype=HeightfieldData, device=device),
             wp.empty(0, dtype=wp.float32, device=device),
@@ -787,7 +803,7 @@ def test_parity_sign_accuracy_exceeds_normal_query(test, device):
     )
 
 
-def test_model_mesh_sign_query_tracks_watertight(test, device):
+def test_model_mesh_properties_track_watertight(test, device):
     open_vertices, open_faces = _make_open_square()
     closed_vertices, closed_faces = _make_watertight_box((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
 
@@ -807,24 +823,19 @@ def test_model_mesh_sign_query_tracks_watertight(test, device):
     closed_shape = builder.add_shape_mesh(body=-1, mesh=closed_mesh)
     model = builder.finalize(device=device)
 
-    query_types = model._shape_mesh_sign_query.numpy()
-    test.assertEqual(int(query_types[open_shape]), MeshSignQuery.NORMAL)
-    test.assertEqual(int(query_types[closed_shape]), MeshSignQuery.PARITY)
+    mesh_properties = model._shape_mesh_properties.numpy()
+    test.assertFalse(int(mesh_properties[open_shape]) & MeshProperties.WATERTIGHT)
+    test.assertTrue(int(mesh_properties[closed_shape]) & MeshProperties.WATERTIGHT)
     test.assertEqual(closed_mesh.watertight_query_count, 1)
 
     CollisionPipeline(model)
     test.assertEqual(closed_mesh.watertight_query_count, 1)
 
 
-def test_mesh_query_type_skips_visual_only_mesh(test, device):
+def test_visual_only_mesh_properties_track_watertight(test, device):
     vertices, faces = _make_watertight_box((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
 
-    class VisualMesh(newton.Mesh):
-        @property
-        def is_watertight(self):
-            raise AssertionError("visual-only meshes should not require a mesh sign query type")
-
-    mesh = VisualMesh(vertices, faces, compute_inertia=False)
+    mesh = newton.Mesh(vertices, faces, compute_inertia=False)
     cfg = newton.ModelBuilder.ShapeConfig(
         density=0.0,
         has_shape_collision=False,
@@ -836,8 +847,34 @@ def test_mesh_query_type_skips_visual_only_mesh(test, device):
     shape = builder.add_shape_mesh(body=-1, mesh=mesh, cfg=cfg)
     model = builder.finalize(device=device)
 
-    query_types = model._shape_mesh_sign_query.numpy()
-    test.assertEqual(int(query_types[shape]), MeshSignQuery.NORMAL)
+    mesh_properties = model._shape_mesh_properties.numpy()
+    test.assertTrue(int(mesh_properties[shape]) & MeshProperties.WATERTIGHT)
+
+
+def test_mesh_sign_flags_override_mesh_properties(test, device):
+    shape_flags = wp.array(
+        [int(ShapeFlags.MESH_SIGN_PARITY), int(ShapeFlags.MESH_SIGN_NORMAL)],
+        dtype=wp.int32,
+        device=device,
+    )
+    mesh_properties = wp.array([0, int(MeshProperties.WATERTIGHT)], dtype=wp.int32, device=device)
+    methods = wp.empty(2, dtype=wp.int32, device=device)
+
+    wp.launch(_resolve_mesh_sign_methods, dim=2, inputs=[shape_flags, mesh_properties, methods], device=device)
+
+    methods_np = methods.numpy()
+    test.assertEqual(int(methods_np[0]), MeshSignMethod.PARITY)
+    test.assertEqual(int(methods_np[1]), MeshSignMethod.NORMAL)
+
+
+def test_shape_config_mesh_sign_flags(test, device):
+    cfg = newton.ModelBuilder.ShapeConfig()
+    cfg.flags |= ShapeFlags.MESH_SIGN_NORMAL
+    test.assertTrue(cfg.flags & ShapeFlags.MESH_SIGN_NORMAL)
+
+    cfg.flags |= ShapeFlags.MESH_SIGN_PARITY
+    with test.assertRaisesRegex(ValueError, "Set only one"):
+        cfg.validate(GeoType.MESH)
 
 
 add_function_test(
@@ -856,15 +893,29 @@ add_function_test(
 )
 add_function_test(
     TestMeshSignQueries,
-    "test_model_mesh_sign_query_tracks_watertight",
-    test_model_mesh_sign_query_tracks_watertight,
+    "test_model_mesh_properties_track_watertight",
+    test_model_mesh_properties_track_watertight,
     devices=devices,
     check_output=False,
 )
 add_function_test(
     TestMeshSignQueries,
-    "test_mesh_query_type_skips_visual_only_mesh",
-    test_mesh_query_type_skips_visual_only_mesh,
+    "test_visual_only_mesh_properties_track_watertight",
+    test_visual_only_mesh_properties_track_watertight,
+    devices=devices,
+    check_output=False,
+)
+add_function_test(
+    TestMeshSignQueries,
+    "test_mesh_sign_flags_override_mesh_properties",
+    test_mesh_sign_flags_override_mesh_properties,
+    devices=devices,
+    check_output=False,
+)
+add_function_test(
+    TestMeshSignQueries,
+    "test_shape_config_mesh_sign_flags",
+    test_shape_config_mesh_sign_flags,
     devices=devices,
     check_output=False,
 )
