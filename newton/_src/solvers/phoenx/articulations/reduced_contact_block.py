@@ -66,6 +66,7 @@ _POINTS_PER_PAGE = 32
 _MAX_ROWS = 3 * _POINTS_PER_PAGE
 _CACHED_PAGE_COUNT = 2
 _BLOCK_DIM = 32
+_PACKED_GATHER_TILE_WIDTH = 8
 _RESPONSE_TILE = 32
 _RESPONSE_ROW_TILES = _MAX_ROWS // _RESPONSE_TILE
 _RESPONSE_DOF_TILES = 2
@@ -310,7 +311,9 @@ def _solve_fallback_contact_column(
     use_bias: wp.bool,
 ):
     if phase == wp.int32(0):
-        reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(False), wp.bool(True), wp.bool(True))
+        reduced_contact_prepare(
+            columns, column, bodies, idt, cc, contacts, wp.bool(False), wp.bool(True), wp.bool(True)
+        )
     else:
         reduced_contact_iterate(columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, wp.bool(False))
 
@@ -485,7 +488,9 @@ def _gather_reduced_contact_blocks_kernel(
         if overlaps_page and prepare and (index - start) % wp.int32(_BLOCK_DIM) == lane:
             # Effective masses are derived exactly by the packed row builder
             # right after this gather; skip the redundant traversals here.
-            reduced_contact_prepare(columns, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(False), wp.bool(False))
+            reduced_contact_prepare(
+                columns, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(False), wp.bool(False)
+            )
 
         if global_point >= point_offset and global_point < column_end and global_point < page_end:
             point = lane
@@ -547,6 +552,127 @@ def _gather_reduced_contact_blocks_kernel(
                 row = wp.int32(3) * point + wp.int32(axis)
                 row_body[packed_articulation, row] = articulation_body - wp.int32(1)
                 row_wrench[packed_articulation, row] = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
+        point_offset = column_end
+
+
+@wp.kernel(enable_backward=False, module="reduced_contact_gather_packed")
+def _gather_reduced_contact_blocks_packed_kernel(
+    schedule_section_end: wp.array[wp.int32],
+    scheduled_column: wp.array[wp.int32],
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    prepare: wp.bool,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    enabled: wp.array[wp.int32],
+    total_point_count: wp.array[wp.int32],
+    page_index: wp.array[wp.int32],
+    point_count: wp.array[wp.int32],
+    point_contact: wp.array2d[wp.int32],
+    point_column: wp.array2d[wp.int32],
+    point0: wp.array2d[wp.vec3],
+    point1: wp.array2d[wp.vec3],
+    normal: wp.array2d[wp.vec3],
+    tangent0: wp.array2d[wp.vec3],
+    row_body: wp.array2d[wp.int32],
+    row_wrench: wp.array2d[wp.spatial_vector],
+    row_velocity: wp.array2d[wp.float32],
+):
+    articulation, lane = wp.tid()
+    start = wp.int32(0)
+    if articulation > wp.int32(0):
+        start = schedule_section_end[articulation - wp.int32(1)]
+    end = schedule_section_end[articulation]
+
+    page = page_index[0]
+    page_start = page * wp.int32(_POINTS_PER_PAGE)
+    storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
+    packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
+    remaining = total_point_count[articulation] - page_start
+    count = wp.min(wp.max(remaining, wp.int32(0)), wp.int32(_POINTS_PER_PAGE))
+    if lane == wp.int32(0):
+        point_count[packed_articulation] = count if enabled[articulation] != wp.int32(0) else wp.int32(0)
+    if enabled[articulation] == wp.int32(0) or count <= wp.int32(0):
+        return
+
+    page_end = page_start + count
+    point_offset = wp.int32(0)
+    for index in range(start, end):
+        column = scheduled_column[index]
+        column_count = contact_get_contact_count(columns, column)
+        column_end = point_offset + column_count
+        overlaps_page = point_offset < page_end and column_end > page_start
+        if overlaps_page and prepare and (index - start) % wp.int32(_PACKED_GATHER_TILE_WIDTH) == lane:
+            # Effective masses are derived exactly by the packed row builder
+            # right after this gather; skip the redundant traversals here.
+            reduced_contact_prepare(
+                columns, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(False), wp.bool(False)
+            )
+
+        global_point = wp.max(point_offset, page_start) + lane
+        column_page_end = wp.min(column_end, page_end)
+        while global_point < column_page_end:
+            point = global_point - page_start
+            offset = global_point - point_offset
+            contact = contact_get_contact_first(columns, column) + offset
+            body0 = contact_get_body1(columns, column)
+            body1 = contact_get_body2(columns, column)
+            articulation_body = body0
+            sign = wp.float32(-1.0)
+            if bodies.reduced.body_articulation[body0] < wp.int32(0):
+                articulation_body = body1
+                sign = wp.float32(1.0)
+
+            n = cc_get_normal(cc, contact)
+            t0 = cc_get_tangent1(cc, contact)
+            t1 = wp.cross(n, t0)
+            local0 = cc_get_local_p0(cc, contact)
+            local1 = cc_get_local_p1(cc, contact)
+            offset0 = (
+                wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
+                + contacts.rigid_contact_margin0[contact] * n
+            )
+            offset1 = (
+                wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
+                - contacts.rigid_contact_margin1[contact] * n
+            )
+            p0 = bodies.position[body0] + offset0
+            p1 = bodies.position[body1] + offset1
+            separation = p1 - p0
+            contact_point = p0 + wp.float32(0.5) * separation
+            point_contact[packed_articulation, point] = contact
+            point_column[packed_articulation, point] = column
+            point0[packed_articulation, point] = contact_point
+            point1[packed_articulation, point] = contact_point
+            normal[packed_articulation, point] = n
+            tangent0[packed_articulation, point] = t0
+
+            relative = _deferred_point_velocity(bodies, body1, contact_point) - _deferred_point_velocity(
+                bodies, body0, contact_point
+            )
+            row = wp.int32(3) * point
+            row_velocity[packed_articulation, row] = wp.dot(relative, n)
+            row_velocity[packed_articulation, row + wp.int32(1)] = wp.dot(relative, t0)
+            row_velocity[packed_articulation, row + wp.int32(2)] = wp.dot(relative, t1)
+
+            local_com_position = wp.transform_get_translation(
+                bodies.reduced.body_q_com[articulation_body - wp.int32(1)]
+            )
+            point_local = local_com_position + offset0 + wp.float32(0.5) * separation
+            if sign > wp.float32(0.0):
+                point_local = local_com_position + offset1 - wp.float32(0.5) * separation
+            for axis in range(3):
+                direction = n
+                if axis == 1:
+                    direction = t0
+                elif axis == 2:
+                    direction = t1
+                impulse = sign * direction
+                row = wp.int32(3) * point + wp.int32(axis)
+                row_body[packed_articulation, row] = articulation_body - wp.int32(1)
+                row_wrench[packed_articulation, row] = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
+            global_point += wp.int32(_PACKED_GATHER_TILE_WIDTH)
         point_offset = column_end
 
 
@@ -1151,6 +1277,13 @@ class ReducedContactBlockSystem:
             ),
         )
         self.articulation_count = int(model.articulation_count)
+        sm_count = max(1, int(getattr(self.device, "sm_count", 1)))
+        if self.articulation_count >= 8 * sm_count:
+            self.gather_kernel = _gather_reduced_contact_blocks_packed_kernel
+            self.gather_tile_width = _PACKED_GATHER_TILE_WIDTH
+        else:
+            self.gather_kernel = _gather_reduced_contact_blocks_kernel
+            self.gather_tile_width = _POINTS_PER_PAGE
         self.body_count = int(model.body_count) + 1
         self.schedule_capacity = 0
         self.schedule_world_count = 0
@@ -1626,8 +1759,8 @@ class ReducedContactBlockSystem:
             def solve_page() -> None:
                 if gather:
                     wp.launch(
-                        _gather_reduced_contact_blocks_kernel,
-                        dim=(self.articulation_count, _POINTS_PER_PAGE),
+                        self.gather_kernel,
+                        dim=(self.articulation_count, self.gather_tile_width),
                         block_dim=_BLOCK_DIM,
                         inputs=[
                             self.schedule_section_end,

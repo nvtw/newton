@@ -6,6 +6,17 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Topology-selected packed reduced-contact gather (2026-07-03)
+- NCU showed the gather at 67% memory SOL, 128 registers, 33% occupancy, and roughly 57% sector-utilization headroom. The old launch dedicated one 32-lane warp to each articulation even when only a few contact points were live.
+- A specialized 8-lane mapping packs four independent articulations per warp. It preserves every contact, all 32 points per page, arbitrary column counts, and the existing multi-page graph loop. Contact math remains identical.
+- The packed path is selected once at construction only when articulation_count is at least 8 times the device SM count. Smaller fleets keep the original kernel byte-for-byte; there is no user tuning knob.
+- A final 300-replay 8192-world bracket improves 1.417M to 1.512M steps/s (+6.7%); an earlier cooler bracket measured 1.625M to 1.717M (+5.6%). Steady graph-leapfrog training improves 795.6k to 803.7-805.6k samples/s (+1.0-1.3%).
+- The complete 40-test reduced CUDA-graph suite passes. The arbitrary-contact-count test explicitly forces the packed kernel through more than two 32-point pages, zero-contact replay, and contact restoration in the same captured graph. Anymal/H1/G1 512-world screens stay on the unchanged serial path.
+
+### Reduced factor/contact multi-stream overlap (2026-07-03) - REJECTED
+- Full begin_substep overlap is incorrect: ABA advance publishes link velocities read by contact warm-start tangent construction. A race-free prototype overlapped only kinematics/factorization with ingest and joined before advance.
+- It captured and replayed correctly inside the leapfrog trainer, but lost twice: 778.7k vs 800.9k samples/s, then 774.7k vs 796.1k in reversed order (about -2.7%). Concurrent factorization contends with the already-overlapped learner more than it hides setup. The implementation was removed completely.
+
 ### Reduced contact-row builder: coalesced zero fill + recomputed path Jacobian (2026-07-02)
 - Nsight Compute (privileged run, user-assisted) on the G1 row builder:
   Memory 66% vs Compute 25% SOL, **5.1/32 bytes utilized per global-load

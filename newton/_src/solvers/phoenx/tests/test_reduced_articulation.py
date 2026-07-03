@@ -19,12 +19,14 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _CACHED_PAGE_COUNT,
+    _PACKED_GATHER_TILE_WIDTH,
     _POINTS_PER_PAGE,
     _RESPONSE_TILE,
     _RESPONSE_TILES_PER_ARTICULATION,
     _aligned_contact_dof_width,
     _build_generalized_contact_rows_kernel,
     _build_packed_generalized_contact_rows_kernel,
+    _gather_reduced_contact_blocks_packed_kernel,
     _transpose_generalized_contact_response_kernel,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
@@ -2383,7 +2385,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state0.joint_q, state0.joint_qd, fk_state)
         np.testing.assert_allclose(state0.body_qd.numpy(), fk_state.body_qd.numpy(), atol=5.0e-5)
 
-    def test_contact_block_pages_arbitrary_contact_count_under_graph_capture(self):
+    def test_packed_contact_block_pages_arbitrary_contact_count_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")
@@ -2402,6 +2404,9 @@ class TestReducedArticulation(unittest.TestCase):
             solver_iterations=8,
             velocity_iterations=1,
         )
+        block = solver._reduced_articulation.contact_block_system
+        block.gather_kernel = _gather_reduced_contact_blocks_packed_kernel
+        block.gather_tile_width = _PACKED_GATHER_TILE_WIDTH
         contacts = model.contacts()
 
         with wp.ScopedCapture(device=device) as capture:
@@ -2409,7 +2414,6 @@ class TestReducedArticulation(unittest.TestCase):
             solver.step(state, output, None, contacts, 1.0 / 2000.0)
         wp.capture_launch(capture.graph)
 
-        block = solver._reduced_articulation.contact_block_system
         column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
         self.assertGreaterEqual(column_count, 1)
         self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 2 * _POINTS_PER_PAGE)

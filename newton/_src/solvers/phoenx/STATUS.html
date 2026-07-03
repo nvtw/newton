@@ -78,7 +78,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>2 July 2026 (late) · contact-row builder diagnosis</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · packed contact gather retained</strong></div>
     </header>
 
     <section class="hero">
@@ -95,7 +95,7 @@
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
       <div class="card"><div class="metric">805k/s</div><div class="label">steady graph-leapfrog training</div></div>
       <div class="card"><div class="metric">1.59×</div><div class="label">slower than pinned nanoG1</div></div>
-      <div class="card"><div class="metric">1.183M/s</div><div class="label">G1 reduced physics steps</div></div>
+      <div class="card"><div class="metric good">+6.7%</div><div class="label">G1 reduced physics throughput</div></div>
     </section>
 
     <div class="section-label">Current state</div>
@@ -113,103 +113,52 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag good">RETAINED + ONE REJECTION</span><time>2 Jul (night)</time></div>
-      <h2>Tiered contact sort retained; stride-3 prepare cadence rejected by the true-physics gate</h2>
+      <div class="meta"><span class="tag good">RETAINED · +4.7% PHYSICS</span><time>3 Jul</time></div>
+      <h2>Large articulation fleets now pack four contact gathers per warp</h2>
+      <p>Nsight Compute showed that the reduced contact gather was memory-bound and used only a fraction of each load sector. The old launch reserved all 32 lanes for one articulation; the new specialized path gives each articulation eight lanes and places four independent articulations in a warp.</p>
       <ul>
-        <li><strong>Reverted after passing tests (commit <code>3f51b909</code>):</strong> the tiered contact sort (−16% sort time, bit-identical) died in the leapfrog trainer — Warp's CUB sort allocates temp storage per stream, and conditional graph bodies must not allocate. Not worth ~0.5% physics until Warp accepts external temp storage.</li>
-        <li><strong>Retained (commit <code>8fb8cdbe</code>):</strong> the block contact gather no longer computes effective masses that the packed row builder overwrites moments later — three per-direction inverse-mass traversals of dead work per contact removed. Gather kernel −24% (110.8 → 84.6 µs); bit-identical; fallback and deferred paths unchanged.</li>
-        <li><strong>Rejected:</strong> <code>prepare_refresh_stride=3</code> (+3.1% physics) trains a walker that passes its own stride-3 gate (0.920, zero falls) but collapses under true stride-1 physics — 17k falls, perf 0.073 at both seeds. The policy exploited contact-staleness artifacts; the auto heuristic's stride-1 choice is now empirically justified, and the bench-vs-standalone-gate discrepancy is documented as a built-in physics-overfit detector.</li>
-        <li><strong>Second ncu report digested:</strong> advance runs at 0.34 waves/SM but a tile-width sweep (8/16/32 → 1.23/1.19/1.16M env steps/s) proves the small grid is not recoverable by launch shape — G1's tree width bounds parallelism. Factor is register-limited (168 regs, 25% occupancy); gather shows ~57% estimated coalescing headroom (next builder-style target); remaining structural lever for the depth-synchronized kernels is overlapping them with independent graph branches (multi-stream capture).</li>
+        <li>Every contact row remains present. Arbitrary contact-column counts and all 32 points per page are supported; the existing multi-page loop is unchanged.</li>
+        <li>Selection is automatic and construction-time stable: packing activates only when the articulation count is at least eight times the GPU SM count. Smaller fleets use the original kernel with no user knob.</li>
+        <li>Final 300-replay bracket: 1.417M → 1.512M steps/s (+6.7%); an earlier cooler bracket measured 1.625M → 1.717M (+5.6%).</li>
+        <li>Real graph-leapfrog training: 795.6k → 803.7–805.6k samples/s (+1.0–1.3%).</li>
+        <li>All 40 reduced-articulation CUDA graph tests pass. The packed-path regression covers more than two contact pages, dynamic zero contacts, and contact restoration in one captured graph.</li>
       </ul>
     </article>
     <article>
-      <div class="meta"><span class="tag good">RETAINED · NCU-GUIDED</span><time>2 Jul (late)</time></div>
-      <h2>Counters overturned the latency-wall theory: the row builder is strided-access-bound</h2>
-      <p>Your Nsight Compute report settled it: memory 66% vs compute 25% speed-of-light, and only <strong>5.1 of 32 bytes utilized per global-load sector</strong> (5.8/32 for stores) — every <code>[row, dof]</code> access puts adjacent row-threads 144 bytes apart. 61% of stalls wait on those accesses; occupancy is secondarily register-limited (62.5%).</p>
+      <div class="meta"><span class="tag warn">REJECTED · −2.7% TRAINING</span><time>3 Jul</time></div>
+      <h2>Intra-solver factor/contact stream overlap is clean but counterproductive</h2>
+      <p>The dataflow audit found that full pre-substep overlap would race ABA velocity publication against warm-start tangent construction. A correct prototype overlapped only factorization with contact ingest and joined before advance.</p>
       <ul>
-        <li><strong>Retained (commit <code>3acd36f9</code>):</strong> block-cooperative coalesced Jacobian zero-fill plus recomputing the source-path Jacobian dot for the effective mass instead of reloading the padded row per DOF. Bit-identical; all 40 reduced-articulation CUDA graph tests pass; builder 410.0 → 399.3 µs; physics-only runs at 1.22–1.24M env steps/s.</li>
-        <li><strong>Measured but not retained:</strong> always routing responses through the tile transpose cuts the builder to 312.5 µs (−24%) and lifts physics-only throughput, but consistently costs 2.7% of steady leapfrog training — the extra per-substep transpose contends with the overlapped learner stream.</li>
-        <li><strong>Strategic insight (corrected by a stream-balance trace):</strong> steady leapfrog training is <em>rollout-bound</em> — GPU union-busy is 96%, the rollout stream (~0.45 s/iter) dominates the update stream (~0.14 s/iter). Solver/collision wins are on the end-to-end critical path, but a few-percent physics gain is only ~1–2% end-to-end and sits inside bench noise; small candidates must be judged by rollout-stream busy time from nsys, not raw samples/s. The row builder also averages ~205 µs in real training vs ~400 µs in the standing-pose profile (fewer contacts mid-episode).</li>
+        <li>CUDA graph capture and replay worked, including the trainer's non-default rollout stream.</li>
+        <li>It lost twice in matched training: 778.7k vs 800.9k, then 774.7k vs 796.1k samples/s in reversed order.</li>
+        <li>The already-overlapped learner leaves too little uncontended capacity; the experiment was removed completely and recorded in PERF_NOTES.</li>
       </ul>
     </article>
-
     <article>
-      <div class="meta"><span class="tag">PHYSICS · PROFILE REFRESH</span><time>2 Jul (late)</time></div>
-      <h2>Contact-row builder confirmed as the top solver kernel; three fix hypotheses falsified</h2>
-      <p>A fresh physics-only Nsight Systems trace after the state-continuation commit ranks the reduced-pipeline kernels: contact-row build 18.7% (410 µs/launch), ABA advance 12.8%, contact tile solve 12.9%, factorization 11.1%, publish 7.0%, contact gather 5.3%. The contact pipeline as a whole is ~38% of physics GPU time. Physics-only throughput is 1.189M env steps/s under the profiler, matching the headline.</p>
-      <ul>
-        <li>A bit-identical scalar fast path for 1-DOF joints (skipping the unrolled 6×6 inertia loops) was <strong>neutral</strong> — the builder is not instruction-bound.</li>
-        <li>Replacing the global ancestor-response scratch with a per-thread depth-indexed stack (bit-identical, removes ~280 MB/launch of scratch traffic) <strong>regressed 25%</strong> — that traffic was already L2-absorbed; the local stack frame only added local-memory pressure. Reverted.</li>
-        <li><code>ptxas</code> shows 64 registers, zero spills; a block-dim sweep (32–192) is flat — occupancy is not register- or shape-limited. Row-count scaling is strongly sub-linear (12 basis rows: 349 µs vs 24 rows: 462 µs), so the cost is per-thread serial tree-traversal latency.</li>
-        <li>The 2026-06 unit-wrench basis compression prototype was re-measured against today's 36-wide packed layout: only <strong>1.12×</strong> on build+solve (down from the recorded ~19%), with FP-tolerance rather than bit-exact impulses. Not worth productionizing; the stale-width benchmark was fixed and the result recorded in PERF_NOTES.</li>
-        <li>The factorization kernel (168 registers, ~12 warps/SM) was given the advance kernel's sub-warp articulation packing — 4 G1 trees per warp, one occupancy wave instead of 3.6: <strong>+9% slower</strong>. Four independent experiments now agree the reduced pipeline sits at a dependent memory-latency wall that added concurrency does not cross.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag">PHYSICS · CONTINUATION</span><time>3 Jul</time></div>
-      <h2>External temporal substeps preserve authoritative reduced state</h2>
-      <p>An explicit continuation contract skips redundant pose, velocity, generalized-state import, and FK when the next input is the unmodified output of the preceding reduced-coordinate step. External forces, controls, and contacts are still refreshed.</p>
-      <ul>
-        <li>The three-step G1 schedule avoids two full state reconstructions per policy step. The controlled steady window rises from 784.3k to 805.2k samples/s (+2.7%); full-schedule throughput is flat within run variance.</li>
-        <li>A new graph oracle matches repeated full import on a branched multi-DOF tree. Contacting closed loops and mixed reduced/maximal contacts exercise the continuation path.</li>
-        <li>A fresh 157.3M-sample policy passes full gates at two seeds with zero falls. All 40 reduced-articulation CUDA graph tests pass.</li>
-        <li>The option is default-off for arbitrary callers and maximal-coordinate modes retain full import. It must be disabled after external state modification.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag">LEARNER · +10.6%</span><time>3 Jul</time></div>
-      <h2>BF16 hidden input gradients remove the largest learner bottleneck</h2>
-      <p>PufferMinGRU now reuses the BF16 gradient tiles already produced for weight contractions and keeps parameters, outputs, and accumulation in FP32.</p>
-      <ul>
-        <li>Input-gradient GPU time falls from 421.8 to 70.3 ms across the matched trace, a 6.0× kernel improvement.</li>
-        <li>Steady training rises from 709.1k to 784.3k samples/s; the nanoG1 gap falls from 1.81× to 1.63×.</li>
-        <li>CUDA-graph BF16-versus-FP32 gradient checks pass with bitwise BF16 replay determinism.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag">PHYSICS · EXACT</span><time>2–3 Jul</time></div>
-      <h2>Reduced contacts do less exact work and store narrower rows</h2>
-      <ul>
-        <li>Four-DOF-aligned generalized rows select width 36 for G1 instead of 48, reaching 1.183M environment steps/s and reducing row storage by 25%.</li>
-        <li>Source-path ABA scratch removes unnecessary per-row clears; matched physics improves 1.7–2.1%.</li>
-        <li>Sparse pages skip an empty response transpose automatically. Dense, overflow, self-contact, and fallback paths remain unchanged.</li>
-        <li>The complete reduced-articulation CUDA-graph suite covers momentum, determinism, loops, multiple articulations, dense contacts, and Featherstone comparisons.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag">WALL TIME</span><time>3 Jul</time></div>
-      <h2>Monitoring no longer stalls training</h2>
-      <p>A deterministic two-stage tile reduction replaced roughly 60 million contended diagnostic atomics. Monitoring cost falls from 80.5 ms to 0.225 ms per iteration, about 358× faster, without touching policy updates or physics.</p>
+      <div class="meta"><span class="tag good">QUALITY GATE</span><time>Current authority</time></div>
+      <h2>Training quality remains proven; throughput work stays solver-only</h2>
+      <p>The retained reduced-coordinate recipe still trains from scratch and passes frozen-policy evaluation at seeds 1000 and 2000 with zero falls. Hard-Hertz contacts, two PGS sweeps, one velocity relaxation, continuation-state substeps, and the final 10 ms phase remain unchanged.</p>
     </article>
 
     <div class="section-label">Next decisions</div>
     <section class="next">
       <div>
-        <h2>Current critical path (solver-only scope)</h2>
-        <p>Optimization scope is now the PhoenX solver exclusively (user directive). Fresh physics ranking: contact-row build 18.7%, contact tile solve 12.9%, ABA advance 12.8%, factorization 11.1%, publish 7.0%, gather 5.3%, factor init 4.3%, contact sort 3.5%, FK 3.0%.</p>
-        <p><strong>Next:</strong> implement the multi-stream capture overlap designed in PERF_NOTES ("Designed, not yet implemented"): fork <code>begin_substep</code> (kinematics + factor + advance, ~410 µs of &lt;35%-utilization kernels) against ingest + schedule + coloring (~200 µs) with an event join before the contact gather. Structure verified; four listed hazards must be audited first. Expected up to ~10% physics if clean; validate bit-exact hashes AND the leapfrog trainer (non-default-stream path).</p>
+        <h2>Refresh the real-training critical path</h2>
+        <p>The gather optimization moved physics by about 5% but end-to-end training by about 1%. The next step is a fresh short Nsight Systems trace of the retained graph, then choose the largest remaining solver kernel on the rollout critical path. No Nsight Compute run is currently requested.</p>
+        <p>Likely candidates remain ABA advance, factorization, packed contact-row build, contact solve, and publish. A candidate must beat the unchanged path in training and must remain general across robot types, contact density, loops, and single/multi-world layouts.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
         <ul>
-          <li>Row builder scalar 1-DOF fast path: neutral (not ALU-bound).</li>
-          <li>Row builder local ancestor-delta stack: −25% (scratch already L2-absorbed).</li>
-          <li>Row builder block-dim sweep 32–192: flat.</li>
-          <li>Factor kernel sub-warp tiling (4 trees/warp): +9% slower.</li>
-          <li>Unit-wrench basis compression at width 36: only 1.12×, not bit-exact.</li>
-          <li>BF16 recurrent forward: only +0.3%, removed.</li>
-          <li>Shared-factor staging / factor init fusion: slower.</li>
-          <li>Compact Jacobian path masks: +0.19%, removed.</li>
-          <li>32-thread contact row builder: slower.</li>
-          <li>One-sweep SOR and underconverged contact shortcuts: unstable or physically rejected.</li>
+          <li>Factor/contact multi-stream overlap: −2.7% training from GPU contention.</li>
+          <li>Always-transposed response rows: faster physics, −2.7% training.</li>
+          <li>Stride-3 contact prepare: policy exploits stale-contact physics and fails the true-physics gate.</li>
+          <li>Factor sub-warp tiling: +9% kernel time.</li>
+          <li>Row-builder local ancestor stack: −25%.</li>
+          <li>BF16 recurrent forward: +0.3%, removed.</li>
         </ul>
       </div>
     </section>
-
 
     <div class="section-label">AI agent handoff</div>
     <section class="next" aria-label="Guidance for the next AI agent">
@@ -232,7 +181,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope update (2 Jul, user):</strong> optimize the PhoenX solver exclusively; the learner is out of scope. This page is the primary communication channel with the user, including requests to run privileged scripts (see the action box above).</li>
-          <li><strong>Immediate next step:</strong> read the ncu report at <code>/tmp/phoenx_g1_contact_rows_full.ncu-rep</code> once the user has produced it; meanwhile profile ABA advance and factorization for the same latency-wall signature before writing any new kernel.</li>
+          <li><strong>Immediate next step:</strong> capture a fresh short combined training trace after the packed gather, rank rollout-critical solver work, and screen the next general candidate with focused graph benchmarks before a full quality gate.</li>
         </ul>
       </div>
     </section>
