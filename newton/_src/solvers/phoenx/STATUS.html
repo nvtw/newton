@@ -196,7 +196,9 @@
         <li>All 12 focused CUDA-graph gates pass: sliding-to-rest, static friction above the kinetic budget, velocity-level linear/angular momentum, multi-/single-world execution, raw-mesh fallback, bit determinism, classification, compound fallback, history remapping, coupled projection, and kinetic projection. Existing point-mode stacks and momentum also pass.</li>
         <li>Raw meshes, heightfields, cloth/soft contacts, compound body-pair columns, reduced articulations, mass splitting, and sleeping retain point friction or are explicitly rejected for this opt-in prototype.</li>
         <li>A scheduler-matched maximal G1 bracket is neutral-to-slightly-negative: 2.537M patch versus 2.548M point physics steps/s (−0.43%) after normal-only rows, redundant-mass removal, and launch fusion. Contact trajectories differ, so this is directional—not a win.</li>
-        <li>Next: commit this clean opt-in prototype, then decide whether reduced-coordinate row construction can benefit more materially. Do not replace point friction or claim training throughput until a broad end-to-end win exists.</li>
+        <li>Reduced-coordinate audit: its expensive generalized response builder currently constructs exactly three rows per point. A live 1,024-world G1 snapshot has 34,816 eligible points in 18,432 convex columns, so P normal rows plus 2C patch rows would remove exactly 31.37% of generalized contact rows.</li>
+        <li>The clean extension is a two-stage paged solve: all normal pages first, then whole-column patch pages. Splitting a patch at the existing point-page boundary would be an unphysical hidden approximation; arbitrary contact counts must remain supported without user caps.</li>
+        <li>Next: prototype that separate reduced patch-row stage and measure row-build plus end-to-end G1 training throughput. Do not replace point friction or claim a gain until physical gates and a broad benchmark win exist.</li>
       </ul>
     </article>
     <article>

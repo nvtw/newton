@@ -172,6 +172,23 @@ def main() -> int:
         raise RuntimeError("shared G1 benchmark produced non-finite body state")
 
     contact_count = int(contacts.rigid_contact_count.numpy()[0])
+    contact_column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+    eligible_patch_columns = None
+    eligible_patch_points = None
+    projected_generalized_row_reduction = None
+    if args.contact_friction_model == "patch":
+        eligible = solver.world._contact_cols.patch.eligible.numpy()[:contact_column_count] != 0
+        pair_source = solver.world._ingest_scratch.pair_source_idx.numpy()[:contact_column_count]
+        pair_count = solver.world._ingest_scratch.pair_count.numpy()
+        column_point_count = pair_count[pair_source]
+        eligible_patch_columns = int(np.count_nonzero(eligible))
+        eligible_patch_points = int(column_point_count[eligible].sum())
+        current_rows = 3 * contact_count
+        projected_rows = (
+            3 * (contact_count - eligible_patch_points) + eligible_patch_points + 2 * eligible_patch_columns
+        )
+        if current_rows > 0:
+            projected_generalized_row_reduction = 1.0 - float(projected_rows) / float(current_rows)
     reduced_contact_points_mean = None
     reduced_contact_points_max = None
     if solver._reduced_articulation is not None:
@@ -189,6 +206,10 @@ def main() -> int:
                 "articulation_contact_points_mean": reduced_contact_points_mean,
                 "body_count_per_world": int(model.body_count) // args.world_count,
                 "contact_capacity": int(contacts.rigid_contact_max),
+                "contact_column_count": contact_column_count,
+                "eligible_patch_columns": eligible_patch_columns,
+                "eligible_patch_points": eligible_patch_points,
+                "projected_generalized_row_reduction": projected_generalized_row_reduction,
                 "dt": args.dt,
                 "elapsed_s": elapsed,
                 "engine": "phoenx",
