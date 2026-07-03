@@ -27,9 +27,9 @@ import warp as wp
 import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 
-_NANOG1_TRAIN_ENV_SPS = 1_280_000.0
-_NANOG1_TRAIN_PHYSICS_SPS = 6_400_000.0
-_NANOG1_REFERENCE_SOURCE = "nanoG1 RESULTS.md rounded steady training SPS"
+_NANOG1_TRAIN_ENV_SPS = 1_276_000.0
+_NANOG1_TRAIN_PHYSICS_SPS = 6_380_000.0
+_NANOG1_REFERENCE_SOURCE = "nanoG1 6dee587 RESULTS.md measured steady SPS"
 _RESULT_END_MARKER = "=== END RESULT ==="
 _NANOG1_TRAIN_MARKERS = ("=== nanoG1 RESULT ===",)
 

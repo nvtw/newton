@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · reduced patch-row prototype rejected</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · matched training baseline refreshed</strong></div>
     </header>
 
     <section class="hero">
@@ -115,12 +115,12 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">891k/s</div><div class="label">pinned comparable graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.44×</div><div class="label">pinned gap to nanoG1</div></div>
+      <div class="card"><div class="metric">872k/s</div><div class="label">fresh comparable graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.46×</div><div class="label">fresh gap to nanoG1 6dee587</div></div>
       <div class="card"><div class="metric good">+7.5%</div><div class="label">cumulative short-training gain</div></div>
     </section>
 
-    <p class="profile-note">The 891k/s card is deliberately retained for the controlled cross-project comparison. Newer same-session optimization brackets reach 1.15–1.16M samples/s, but they use a faster run context and establish relative wins—not a replacement nanoG1 comparison.</p>
+    <p class="profile-note">Fresh full collect/update runs measure 870.8k and 872.7k samples/s (871.7k mean). The comparison uses nanoG1 commit <code>6dee587</code> and its measured 1.276M training SPS; newer 1.15–1.16M PhoenX same-session brackets remain useful only for relative optimization deltas.</p>
 
     <div class="section-label">Steady-training GPU work profile</div>
     <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
@@ -162,7 +162,7 @@
         <li>A fresh 157.3M-sample run passes the complete gate at seed 1000 and seed 2000.</li>
         <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
         <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
-        <li>The pinned comparable graph-leapfrog benchmark reaches 891k samples/s; newer same-session brackets reach 1.15–1.16M/s, but a fresh matched nanoG1 rerun is required before updating the 1.44× gap. The proven full-quality recipe is unchanged.</li>
+        <li>Fresh full collect/update graph-leapfrog runs reach 870.8k and 872.7k samples/s (871.7k mean), or 68.3% of nanoG1 commit <code>6dee587</code> at its measured 1.276M/s: PhoenX is currently 1.46× slower. The proven full-quality recipe is unchanged.</li>
       </ul>
     </article>
 
@@ -187,6 +187,17 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">BASELINE REFRESHED</span><time>3 Jul</time></div>
+      <h2>Current PhoenX training reaches 872k/s against nanoG1 at 1.276M/s</h2>
+      <p>Two fresh 8,192-world, 64-step, full collect/update graph-leapfrog runs used the current quality-facing reduced-coordinate recipe, mirror regularization, BF16 manual MLP paths, and no diagnostic readback.</p>
+      <ul>
+        <li>PhoenX measures 870,795 and 872,688 samples/s; the 871,741/s mean is rounded to 872k/s in the headline.</li>
+        <li>The local nanoG1 checkout is commit <code>6dee587</code>; its <code>RESULTS.md</code> reports measured steady training throughput of 1.276M samples/s on the same GPU class.</li>
+        <li>PhoenX therefore delivers 68.3% of nanoG1 throughput and is 1.46× slower. This supersedes the older 891k/s and 1.44× cards.</li>
+        <li>The benchmark default now uses the exact 1.276M measurement and records its commit provenance instead of the rounded 1.28M headline.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag">REDUCED PATCH ROWS · REJECTED</span><time>3 Jul</time></div>
       <h2>Maximal patch friction remains opt-in; reduced patch paging lost throughput</h2>
