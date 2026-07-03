@@ -676,8 +676,10 @@ def _gather_reduced_contact_blocks_packed_kernel(
         point_offset = column_end
 
 
-@wp.kernel(enable_backward=False)
-def _finalize_reduced_contact_rows_kernel(
+@wp.func
+def _finalize_reduced_contact_rows_device(
+    articulation: wp.int32,
+    point: wp.int32,
     columns: ContactColumnContainer,
     bodies: BodyContainer,
     enabled: wp.array[wp.int32],
@@ -690,7 +692,6 @@ def _finalize_reduced_contact_rows_kernel(
     tangent0: wp.array2d[wp.vec3],
     row_velocity: wp.array2d[wp.float32],
 ):
-    articulation, point = wp.tid()
     storage_page = wp.min(page_index[0], wp.int32(_CACHED_PAGE_COUNT - 1))
     packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
     if enabled[articulation] == wp.int32(0) or point >= point_count[packed_articulation]:
@@ -707,6 +708,38 @@ def _finalize_reduced_contact_rows_kernel(
     row_velocity[packed_articulation, row] = wp.dot(relative, n)
     row_velocity[packed_articulation, row + wp.int32(1)] = wp.dot(relative, t0)
     row_velocity[packed_articulation, row + wp.int32(2)] = wp.dot(relative, wp.cross(n, t0))
+
+
+@wp.kernel(enable_backward=False)
+def _finalize_reduced_contact_rows_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    enabled: wp.array[wp.int32],
+    point_count: wp.array[wp.int32],
+    page_index: wp.array[wp.int32],
+    point_column: wp.array2d[wp.int32],
+    point0: wp.array2d[wp.vec3],
+    point1: wp.array2d[wp.vec3],
+    normal: wp.array2d[wp.vec3],
+    tangent0: wp.array2d[wp.vec3],
+    row_velocity: wp.array2d[wp.float32],
+):
+    articulation, point = wp.tid()
+    _finalize_reduced_contact_rows_device(
+        articulation,
+        point,
+        columns,
+        bodies,
+        enabled,
+        point_count,
+        page_index,
+        point_column,
+        point0,
+        point1,
+        normal,
+        tangent0,
+        row_velocity,
+    )
 
 
 @wp.kernel(enable_backward=False, module="reduced_contact_rows")
@@ -1050,11 +1083,13 @@ def _sync_contact_warp(): ...
 def _sync_contact_block(): ...
 
 
-def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
+def _make_solve_generalized_contact_tile_ops(max_dofs: int):
     module = wp.get_module(f"reduced_contact_generalized_solve_{max_dofs}")
 
-    @wp.kernel(enable_backward=False, module=module)
-    def _solve_generalized_contact_tile_kernel(
+    @wp.func
+    def _solve_generalized_contact_tile_device(
+        articulation: wp.int32,
+        lane: wp.int32,
         columns: ContactColumnContainer,
         idt: wp.float32,
         sor_boost: wp.float32,
@@ -1080,7 +1115,6 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
         generalized_delta_out: wp.array2d[wp.float32],
         body_delta: wp.array2d[wp.spatial_vector],
     ):
-        articulation, lane = wp.tid()
         if enabled[articulation] == wp.int32(0):
             return
         storage_page = wp.min(page_index[0], wp.int32(_CACHED_PAGE_COUNT - 1))
@@ -1228,11 +1262,74 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
                 index += wp.int32(_BLOCK_DIM)
             _sync_contact_warp()
 
-    return _solve_generalized_contact_tile_kernel
+    @wp.kernel(enable_backward=False, module=module)
+    def _solve_generalized_contact_tile_kernel(
+        columns: ContactColumnContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        cc: ContactContainer,
+        iterations: wp.int32,
+        use_bias: wp.bool,
+        warmstart: wp.bool,
+        enabled: wp.array[wp.int32],
+        point_count: wp.array[wp.int32],
+        point_contact: wp.array2d[wp.int32],
+        point_column: wp.array2d[wp.int32],
+        normal: wp.array2d[wp.vec3],
+        tangent0: wp.array2d[wp.vec3],
+        row_velocity: wp.array2d[wp.float32],
+        page_index: wp.array[wp.int32],
+        packed_jacobian: wp.array2d[wp.float32],
+        packed_response: wp.array2d[wp.float32],
+        bodies: BodyContainer,
+        fuse_apply: wp.bool,
+        max_depth: wp.int32,
+        articulation_depth_start: wp.array2d[wp.int32],
+        articulation_depth_joint: wp.array[wp.int32],
+        generalized_delta_out: wp.array2d[wp.float32],
+        body_delta: wp.array2d[wp.spatial_vector],
+    ):
+        articulation, lane = wp.tid()
+        _solve_generalized_contact_tile_device(
+            articulation,
+            lane,
+            columns,
+            idt,
+            sor_boost,
+            cc,
+            iterations,
+            use_bias,
+            warmstart,
+            enabled,
+            point_count,
+            point_contact,
+            point_column,
+            normal,
+            tangent0,
+            row_velocity,
+            page_index,
+            packed_jacobian,
+            packed_response,
+            bodies,
+            fuse_apply,
+            max_depth,
+            articulation_depth_start,
+            articulation_depth_joint,
+            generalized_delta_out,
+            body_delta,
+        )
+
+    return _solve_generalized_contact_tile_device, _solve_generalized_contact_tile_kernel
 
 
+_SOLVE_GENERALIZED_CONTACT_TILE_OPS = {
+    width: _make_solve_generalized_contact_tile_ops(width) for width in range(4, _MAX_DOFS + 1, 4)
+}
+_SOLVE_GENERALIZED_CONTACT_TILE_DEVICES = {
+    width: operations[0] for width, operations in _SOLVE_GENERALIZED_CONTACT_TILE_OPS.items()
+}
 _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS = {
-    width: _make_solve_generalized_contact_tile_kernel(width) for width in range(4, _MAX_DOFS + 1, 4)
+    width: operations[1] for width, operations in _SOLVE_GENERALIZED_CONTACT_TILE_OPS.items()
 }
 
 
