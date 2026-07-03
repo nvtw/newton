@@ -587,6 +587,22 @@ wp.copy(self.state_0.body_qd, self.state_1.body_qd)
 
 If you ever see a graph-captured PhoenX scene where bodies appear to be on rails / trapped in a small region: drop ``ex.graph = None``, re-run, and compare. Identical motion -> there is a real solver issue. Wildly different motion -> it's almost certainly the swap pattern, not PhoenX.
 
+## Real G1 training trace after factor compaction (2026-07-03)
+
+- A delayed five-second Nsight Systems window captured steady graph-leapfrog
+  training in ``/tmp/phoenx_g1_train_after_dinv.nsys-rep`` without recording
+  initialization. The training-weighted ranking is: learner dense forward
+  10.8%, reduced ABA advance 8.9%, packed contact-row build 7.2%, generalized
+  contact solve 5.8%, reduced publish 5.3%, factor 4.7%, and narrow phase 2.6%.
+- ABA advance is therefore the largest in-scope solver kernel. A prepared
+  one-launch Nsight Compute run
+  (``analysis_tools/ncu_profile_reduced_advance.sh``) is required after the
+  compact D-inverse layout; the old counter report is unavailable and stale.
+- The warp advance still writes ``generalized_rhs`` even though its fused local
+  recurrence does not consume that output after the kernel. Treat removal as a
+  measured candidate only: eliminating the analogous generalized-acceleration
+  store was previously neutral, so counters should decide first.
+
 ## Reduced inverse-factor DOF-row layout (2026-07-03)
 
 - Replaced the fixed ``[joint_count, 6, 6]`` inverse-factor allocation with

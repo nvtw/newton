@@ -78,12 +78,14 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · inverse factors compacted</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · real training traced</strong></div>
     </header>
 
     <section class="hero">
-      <strong>User action</strong>
-      <p><span class="tag good">NONE PENDING</span> — no privileged profile run is needed now. Any future command will stay in this top box so it is visible without scrolling.</p>
+      <strong>User action required · one bounded Nsight Compute run</strong>
+      <p><span class="tag warn">READY TO RUN</span> — this profiles exactly one launch of the largest PhoenX solver kernel after the compact inverse-factor change.</p>
+      <pre><code>cd /home/twidmer/Documents/git/newton &amp;&amp; sudo bash newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_advance.sh</code></pre>
+      <p class="muted">Expected report: <code>/tmp/phoenx_g1_reduced_advance_latest.ncu-rep</code>. The script handles warmup, kernel filtering, one launch, export, and readable permissions.</p>
     </section>
 
     <section class="hero">
@@ -113,6 +115,16 @@
 
     <div class="section-label">Latest findings</div>
     <article>
+      <div class="meta"><span class="tag good">PROFILED · REAL TRAINING</span><time>3 Jul</time></div>
+      <h2>ABA advance is now the largest in-scope solver kernel</h2>
+      <p>A delayed five-second Nsight Systems window captured steady graph-leapfrog training without initialization noise. The ranking is training-weighted, not the contact-saturated standing proxy.</p>
+      <ul>
+        <li>Reduced ABA advance: 8.9%; packed contact-row builder: 7.2%; contact solve: 5.8%; publish: 5.3%; factor: 4.7%; narrow phase: 2.6%.</li>
+        <li>Learner dense forward is 10.8% but remains outside the current optimization scope.</li>
+        <li>The requested one-launch Nsight Compute report will decide whether advance is limited by memory latency, occupancy, or instruction dependency after D⁻¹ compaction.</li>
+      </ul>
+    </article>
+    <article>
       <div class="meta"><span class="tag good">RETAINED · +1.3% TRAINING</span><time>3 Jul</time></div>
       <h2>Inverse factors now scale with actual DOFs, not joint count</h2>
       <p>The exact per-joint D⁻¹ blocks now use six columns per real DOF instead of reserving a 6×6 matrix for every fixed, revolute, and multi-axis joint. Matrix values, arithmetic order, graph capture, and deterministic solve order are unchanged.</p>
@@ -134,18 +146,6 @@
       </ul>
     </article>
     <article>
-      <div class="meta"><span class="tag good">RETAINED · +6.7% PHYSICS</span><time>3 Jul</time></div>
-      <h2>Large articulation fleets pack four contact gathers per warp</h2>
-      <p>Nsight Compute showed that the reduced contact gather was memory-bound and used only a fraction of each load sector. The old launch reserved all 32 lanes for one articulation; the new specialized path gives each articulation eight lanes and places four independent articulations in a warp.</p>
-      <ul>
-        <li>Every contact row remains present. Arbitrary contact-column counts and all 32 points per page are supported; the existing multi-page loop is unchanged.</li>
-        <li>Selection is automatic and construction-time stable: packing activates only when the articulation count is at least eight times the GPU SM count. Smaller fleets use the original kernel with no user knob.</li>
-        <li>Final 300-replay bracket: 1.417M → 1.512M steps/s (+6.7%); an earlier cooler bracket measured 1.625M → 1.717M (+5.6%).</li>
-        <li>Real graph-leapfrog training: 795.6k → 803.7–805.6k samples/s (+1.0–1.3%).</li>
-        <li>All 40 reduced-articulation CUDA graph tests pass. The packed-path regression covers more than two contact pages, dynamic zero contacts, and contact restoration in one captured graph.</li>
-      </ul>
-    </article>
-    <article>
       <div class="meta"><span class="tag good">QUALITY GATE</span><time>Current authority</time></div>
       <h2>Training quality remains proven; throughput work stays solver-only</h2>
       <p>The retained reduced-coordinate recipe still trains from scratch and passes frozen-policy evaluation at seeds 1000 and 2000 with zero falls. Hard-Hertz contacts, two PGS sweeps, one velocity relaxation, continuation-state substeps, and the final 10 ms phase remain unchanged.</p>
@@ -156,7 +156,7 @@
       <div>
         <h2>Refresh the real-training critical path</h2>
         <p>The refreshed physics trace ranks packed contact-row build first at 22.8%, then ABA advance 13.8%, contact solve 13.2%, publish 7.8%, and the now-smaller factor at 6.9%. Training shares are lower for contact work because policies carry fewer rows than the standing profile.</p>
-        <p><strong>Next:</strong> refresh the real-training kernel trace after the compact factor changes, then target producer work in the packed row builder. Dense shared response caching loses 14%, the hard-coded two-body unit-wrench upper bound is only 1.14×, and path sparsity loses 1.5%. No Nsight Compute run is currently requested.</p>
+        <p><strong>Next:</strong> consume the requested one-launch ABA-advance counter report, then make the smallest general experiment justified by its bottleneck. Dense shared response caching loses 14%, the hard-coded two-body unit-wrench upper bound is only 1.14×, and path sparsity loses 1.5%.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -197,7 +197,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step:</strong> refresh the isolated real-training trace, then reduce packed row-builder producer work. Do not retry the full shared response slab; unit-wrench bases still need a truly general design and a larger measured payoff.</li>
+          <li><strong>Immediate next step:</strong> consume <code>/tmp/phoenx_g1_reduced_advance_latest.ncu-rep</code>, then optimize the training-leading ABA advance according to measured counters. Do not retry the full shared response slab.</li>
         </ul>
       </div>
     </section>
