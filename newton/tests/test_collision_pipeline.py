@@ -11,6 +11,7 @@ import warp.examples
 import newton
 from newton import GeoType
 from newton._src.geometry import create_mesh_terrain
+from newton._src.geometry.contact_sort import ContactSorter
 from newton._src.geometry.flags import ParticleFlags, ShapeFlags
 from newton._src.geometry.kernels import create_soft_contacts, mesh_sdf
 from newton._src.sim.collide import _compute_per_world_shape_pairs_max, _estimate_rigid_contact_max
@@ -1483,6 +1484,192 @@ class TestDeterministicPipeline(unittest.TestCase):
     pass
 
 
+def test_compact_contact_sort_pipeline_selection(test, device):
+    blueprint = newton.ModelBuilder()
+    body = blueprint.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.15)))
+    blueprint.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
+
+    builder = newton.ModelBuilder()
+    for world in range(3):
+        builder.add_world(
+            blueprint,
+            xform=wp.transform(p=wp.vec3(float(world), 0.0, 0.0)),
+        )
+    builder.add_ground_plane()
+    model = builder.finalize(device=device)
+
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        contact_matching="sticky",
+        rigid_contact_max=64,
+    )
+    test.assertIsNotNone(pipeline._contact_sorter._compact_shape_rank)
+    test.assertEqual(
+        pipeline._contact_sorter._compact_suffix_shape_start,
+        int(model.shape_world_start.numpy()[-2]),
+    )
+
+    full_pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        contact_matching="sticky",
+        rigid_contact_max=64,
+    )
+    full_sorter = ContactSorter(64, device=device)
+    full_pipeline._contact_sorter = full_sorter
+    full_pipeline._contact_matcher._sorter = full_sorter
+
+    state = model.state()
+    contacts = pipeline.contacts()
+    full_contacts = full_pipeline.contacts()
+    with wp.ScopedCapture(device=device) as capture:
+        pipeline.collide(state, contacts)
+        full_pipeline.collide(state, full_contacts)
+    for _ in range(3):
+        wp.capture_launch(capture.graph)
+
+    active = int(contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(active, 0)
+    test.assertEqual(active, int(full_contacts.rigid_contact_count.numpy()[0]))
+    for name in (
+        "rigid_contact_shape0",
+        "rigid_contact_shape1",
+        "rigid_contact_point0",
+        "rigid_contact_point1",
+        "rigid_contact_normal",
+        "rigid_contact_match_index",
+    ):
+        np.testing.assert_array_equal(
+            getattr(contacts, name).numpy()[:active],
+            getattr(full_contacts, name).numpy()[:active],
+        )
+    np.testing.assert_array_equal(
+        pipeline._contact_sorter.sorted_keys_view.numpy()[:active],
+        full_pipeline._contact_sorter.sorted_keys_view.numpy()[:active],
+    )
+
+    mesh_builder = newton.ModelBuilder()
+    mesh_body = mesh_builder.add_body()
+    mesh_builder.add_shape_convex_hull(
+        mesh_body,
+        mesh=newton.Mesh.create_box(
+            0.2,
+            0.2,
+            0.2,
+            duplicate_vertices=False,
+            compute_normals=False,
+            compute_uvs=False,
+            compute_inertia=False,
+        ),
+    )
+    mesh_model = mesh_builder.finalize(device=device)
+    mesh_pipeline = newton.CollisionPipeline(
+        mesh_model,
+        broad_phase="nxn",
+        deterministic=True,
+        rigid_contact_max=16,
+    )
+    test.assertIsNone(mesh_pipeline._contact_sorter._compact_shape_rank)
+
+
+def test_compact_contact_sort_matches_full_under_graph_capture(test, device):
+    capacity = 128
+    prefix_shape_count = 1
+    suffix_shape_start = 10
+    shape_count = 12
+    shape_rank_np = np.asarray([0, 1, 2, 3, 1, 2, 3, 1, 2, 3, 4, 5], dtype=np.int32)
+
+    contacts = []
+    for shape_a in range(shape_count):
+        if shape_a < prefix_shape_count or shape_a >= suffix_shape_start:
+            shape_bs = range(shape_count)
+        else:
+            world = (shape_a - prefix_shape_count) // 3
+            world_start = prefix_shape_count + 3 * world
+            shape_bs = [0, *range(world_start, world_start + 3), 10, 11]
+        for shape_b in shape_bs:
+            contacts.append((shape_a, shape_b, (3 * shape_a + 5 * shape_b) & 7))
+    np.random.default_rng(42).shuffle(contacts)
+
+    key_np = np.zeros(capacity, dtype=np.int64)
+    pair_np = np.zeros((capacity, 2), dtype=np.int32)
+    position_np = np.zeros((capacity, 3), dtype=np.float32)
+    for index, (shape_a, shape_b, subkey) in enumerate(contacts):
+        key_np[index] = (shape_a << 43) | (shape_b << 23) | subkey
+        pair_np[index] = (index, -index)
+        position_np[index] = (index, index + 0.25, -index)
+
+    count = wp.array([len(contacts)], dtype=wp.int32, device=device)
+    shape_rank = wp.array(shape_rank_np, dtype=wp.int32, device=device)
+    shape_pair_base_np = np.empty(shape_count, dtype=np.int32)
+    pair_base = 0
+    for shape_a in range(shape_count):
+        shape_pair_base_np[shape_a] = pair_base
+        pair_base += shape_count if shape_a < prefix_shape_count or shape_a >= suffix_shape_start else 6
+    shape_pair_base = wp.array(shape_pair_base_np, dtype=wp.int32, device=device)
+    full_sorter = ContactSorter(capacity, device=device)
+    compact_sorter = ContactSorter(
+        capacity,
+        compact_shape_rank=shape_rank,
+        compact_shape_pair_base=shape_pair_base,
+        compact_prefix_shape_count=prefix_shape_count,
+        compact_suffix_shape_start=suffix_shape_start,
+        compact_subkey_bits=3,
+        compact_key_bits=10,
+        device=device,
+    )
+
+    def make_arrays():
+        return (
+            wp.array(key_np, dtype=wp.int64, device=device),
+            wp.array(pair_np, dtype=wp.vec2i, device=device),
+            wp.array(position_np, dtype=wp.vec3, device=device),
+            wp.zeros(capacity, dtype=wp.vec3, device=device),
+            wp.zeros(capacity, dtype=wp.float32, device=device),
+        )
+
+    full_key, full_pair, full_position, full_normal, full_penetration = make_arrays()
+    compact_key, compact_pair, compact_position, compact_normal, compact_penetration = make_arrays()
+
+    def sort_both():
+        full_sorter.sort_simple(
+            full_key,
+            count,
+            contact_pair=full_pair,
+            contact_position=full_position,
+            contact_normal=full_normal,
+            contact_penetration=full_penetration,
+            device=device,
+        )
+        compact_sorter.sort_simple(
+            compact_key,
+            count,
+            contact_pair=compact_pair,
+            contact_position=compact_position,
+            contact_normal=compact_normal,
+            contact_penetration=compact_penetration,
+            device=device,
+        )
+
+    sort_both()
+    full_pair.assign(pair_np)
+    full_position.assign(position_np)
+    compact_pair.assign(pair_np)
+    compact_position.assign(position_np)
+    with wp.ScopedCapture(device=device) as capture:
+        sort_both()
+    wp.capture_launch(capture.graph)
+
+    active = len(contacts)
+    np.testing.assert_array_equal(compact_pair.numpy()[:active], full_pair.numpy()[:active])
+    np.testing.assert_array_equal(compact_position.numpy()[:active], full_position.numpy()[:active])
+    np.testing.assert_array_equal(
+        compact_sorter.sorted_keys_view.numpy()[:active],
+        full_sorter.sorted_keys_view.numpy()[:active],
+    )
+
+
 class TestMeshConvexMidphase(unittest.TestCase):
     """Test mesh-vs-convex triangle candidate generation."""
 
@@ -1964,6 +2151,22 @@ add_function_test(
     TestDeterministicPipeline,
     "test_deterministic_pipeline_sticky_500_steps",
     test_deterministic_pipeline_sticky_500_steps,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_compact_contact_sort_pipeline_selection",
+    test_compact_contact_sort_pipeline_selection,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_compact_contact_sort_matches_full_under_graph_capture",
+    test_compact_contact_sort_matches_full_under_graph_capture,
     devices=get_cuda_test_devices(),
     check_output=False,
 )

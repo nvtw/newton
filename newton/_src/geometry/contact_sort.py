@@ -40,6 +40,37 @@ def _prepare_sort(
         sort_indices[tid] = wp.int32(tid)
 
 
+@wp.kernel(enable_backward=False)
+def _prepare_compact_sort(
+    contact_count: wp.array[int],
+    sort_keys_src: wp.array[wp.int64],
+    shape_rank: wp.array[wp.int32],
+    shape_pair_base: wp.array[wp.int32],
+    prefix_shape_count: wp.int32,
+    suffix_shape_start: wp.int32,
+    subkey_bits: wp.int32,
+    key_bits: wp.int32,
+    sort_keys_dst: wp.array[wp.int32],
+    sort_indices: wp.array[wp.int32],
+):
+    tid = wp.tid()
+    if tid < contact_count[0]:
+        full_key = sort_keys_src[tid]
+        shape_a = wp.int32((full_key >> wp.int64(43)) & wp.int64(0xFFFFF))
+        shape_b = wp.int32((full_key >> wp.int64(23)) & wp.int64(0xFFFFF))
+        subkey_mask = (wp.int32(1) << subkey_bits) - wp.int32(1)
+        subkey = wp.int32(full_key & wp.int64(0x7FFFFF))
+        shape_b_rank = shape_rank[shape_b]
+        if shape_a < prefix_shape_count or shape_a >= suffix_shape_start:
+            shape_b_rank = shape_b
+        pair_rank = shape_pair_base[shape_a] + shape_b_rank
+        sort_keys_dst[tid] = (pair_rank << subkey_bits) | (subkey & subkey_mask)
+        sort_indices[tid] = wp.int32(tid)
+    else:
+        sort_keys_dst[tid] = wp.int32(1) << key_bits
+        sort_indices[tid] = wp.int32(tid)
+
+
 # -----------------------------------------------------------------------
 # Structs + fused backup/gather kernels for the two contact layouts.
 #
@@ -57,6 +88,9 @@ def _prepare_sort(
 class _SimpleContactArrays:
     """Live + scratch arrays for the simplified narrow-phase contact layout."""
 
+    sort_keys: wp.array[wp.int64]
+    sorted_keys: wp.array[wp.int64]
+    compact_sort: int
     pair: wp.array[wp.vec2i]
     position: wp.array[wp.vec3]
     normal: wp.array[wp.vec3]
@@ -96,6 +130,8 @@ def _gather_simple_kernel(data: _SimpleContactArrays, perm: wp.array[wp.int32], 
     if i >= count[0]:
         return
     p = perm[i]
+    if data.compact_sort != 0:
+        data.sorted_keys[i] = data.sort_keys[p]
     data.pair[i] = data.pair_buf[p]
     data.position[i] = data.position_buf[p]
     data.normal[i] = data.normal_buf[p]
@@ -110,6 +146,9 @@ def _gather_simple_kernel(data: _SimpleContactArrays, perm: wp.array[wp.int32], 
 class _FullContactArrays:
     """Live + scratch arrays for the full CollisionPipeline contact layout."""
 
+    sort_keys: wp.array[wp.int64]
+    sorted_keys: wp.array[wp.int64]
+    compact_sort: int
     shape0: wp.array[wp.int32]
     shape1: wp.array[wp.int32]
     point0: wp.array[wp.vec3]
@@ -173,6 +212,8 @@ def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], coun
     if i >= count[0]:
         return
     p = perm[i]
+    if data.compact_sort != 0:
+        data.sorted_keys[i] = data.sort_keys[p]
     data.shape0[i] = data.shape0_buf[p]
     data.shape1[i] = data.shape1_buf[p]
     data.point0[i] = data.point0_buf[p]
@@ -204,12 +245,38 @@ class ContactSorter:
     skip them via the ``contact_count`` guard.
     """
 
-    def __init__(self, capacity: int, *, per_contact_shape_properties: bool = False, device: Devicelike = None):
+    def __init__(
+        self,
+        capacity: int,
+        *,
+        per_contact_shape_properties: bool = False,
+        compact_shape_rank: wp.array[wp.int32] | None = None,
+        compact_shape_pair_base: wp.array[wp.int32] | None = None,
+        compact_prefix_shape_count: int = 0,
+        compact_suffix_shape_start: int = 0,
+        compact_subkey_bits: int = 0,
+        compact_key_bits: int = 0,
+        device: Devicelike = None,
+    ):
+        compact_sort = compact_shape_rank is not None
+        if compact_sort != (compact_shape_pair_base is not None):
+            raise ValueError("compact shape rank and pair base must be provided together")
+        if compact_sort and not (1 <= compact_subkey_bits < compact_key_bits <= 30):
+            raise ValueError("compact sort requires 1 <= subkey_bits < key_bits <= 30")
         with wp.ScopedDevice(device):
             self._capacity = capacity
             # radix_sort_pairs uses the second half as scratch, so allocate 2x.
             self._sort_indices = wp.zeros(2 * capacity, dtype=wp.int32)
             self._sort_keys_copy = wp.zeros(2 * capacity, dtype=wp.int64)
+            self._compact_shape_rank = compact_shape_rank
+            self._compact_shape_pair_base = compact_shape_pair_base
+            self._compact_prefix_shape_count = int(compact_prefix_shape_count)
+            self._compact_suffix_shape_start = int(compact_suffix_shape_start)
+            self._compact_subkey_bits = int(compact_subkey_bits)
+            self._compact_key_bits = int(compact_key_bits)
+            self._compact_sort_keys = (
+                wp.zeros(2 * capacity, dtype=wp.int32) if compact_sort else wp.zeros(0, dtype=wp.int32)
+            )
 
             self._has_shape_props = per_contact_shape_properties
 
@@ -283,6 +350,9 @@ class ContactSorter:
         has_match = match_index is not None and match_index.shape[0] > 0
 
         data = _SimpleContactArrays()
+        data.sort_keys = sort_keys
+        data.sorted_keys = self._sort_keys_copy
+        data.compact_sort = 1 if self._compact_shape_rank is not None else 0
         data.pair = contact_pair
         data.position = contact_position
         data.normal = contact_normal
@@ -354,6 +424,9 @@ class ContactSorter:
         has_match = match_index is not None and match_index.shape[0] > 0
 
         data = _FullContactArrays()
+        data.sort_keys = sort_keys
+        data.sorted_keys = self._sort_keys_copy
+        data.compact_sort = 1 if self._compact_shape_rank is not None else 0
         data.shape0 = shape0
         data.shape1 = shape1
         data.point0 = point0
@@ -436,10 +509,35 @@ class ContactSorter:
     def _sort_and_permute(self, sort_keys: wp.array, contact_count: wp.array, *, device: Devicelike = None) -> None:
         """Prepare keys (sentinel-fill unused slots), then radix-sort over the full buffer."""
         n = self._capacity
-        wp.launch(
-            _prepare_sort,
-            dim=n,
-            inputs=[contact_count, sort_keys, self._sort_keys_copy, self._sort_indices],
-            device=device,
-        )
-        wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n)
+        if self._compact_shape_rank is not None:
+            wp.launch(
+                _prepare_compact_sort,
+                dim=n,
+                inputs=[
+                    contact_count,
+                    sort_keys,
+                    self._compact_shape_rank,
+                    self._compact_shape_pair_base,
+                    self._compact_prefix_shape_count,
+                    self._compact_suffix_shape_start,
+                    self._compact_subkey_bits,
+                    self._compact_key_bits,
+                    self._compact_sort_keys,
+                    self._sort_indices,
+                ],
+                device=device,
+            )
+            wp.utils.radix_sort_pairs(
+                self._compact_sort_keys,
+                self._sort_indices,
+                n,
+                end_bit=self._compact_key_bits + 1,
+            )
+        else:
+            wp.launch(
+                _prepare_sort,
+                dim=n,
+                inputs=[contact_count, sort_keys, self._sort_keys_copy, self._sort_indices],
+                device=device,
+            )
+            wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n)

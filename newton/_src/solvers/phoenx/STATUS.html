@@ -78,12 +78,12 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · ABA parent loads removed</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · compact contact sort retained</strong></div>
     </header>
 
     <section class="hero">
       <strong>User action</strong>
-      <p><span class="tag good">NONE PENDING</span> — the ABA counter report was consumed successfully. Any future command will remain in this top box so it is visible without scrolling.</p>
+      <p><span class="tag good">NONE PENDING</span> — the compact contact-sort trace was consumed successfully. Any future command will remain in this top box so it is visible without scrolling.</p>
     </section>
 
     <section class="hero">
@@ -93,9 +93,9 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">876k/s</div><div class="label">short steady graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">878k/s</div><div class="label">short steady graph-leapfrog training</div></div>
       <div class="card"><div class="metric">1.46×</div><div class="label">slower than pinned nanoG1</div></div>
-      <div class="card"><div class="metric good">+5.7%</div><div class="label">cumulative short-training gain</div></div>
+      <div class="card"><div class="metric good">+5.9%</div><div class="label">cumulative short-training gain</div></div>
     </section>
 
     <div class="section-label">Current state</div>
@@ -107,11 +107,22 @@
         <li>A fresh 157.3M-sample run passes the complete gate at seed 1000 and seed 2000.</li>
         <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
         <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
-        <li>The controlled short graph-leapfrog benchmark now reaches 876k samples/s; the proven full-quality recipe is unchanged.</li>
+        <li>The controlled short graph-leapfrog benchmark now reaches 878k samples/s; the proven full-quality recipe is unchanged.</li>
       </ul>
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · +1.54% PHYSICS</span><time>3 Jul</time></div>
+      <h2>Primitive contact sorting now needs half as many radix passes</h2>
+      <p>A lossless multi-world pair rank converts eligible deterministic contact keys from int64 to int32. Prefix/suffix globals retain full pair intervals; local shapes reuse world-local ranks; all three manifold subkey bits remain exact.</p>
+      <ul>
+        <li>Nsight confirms four int32 radix passes per contact sort instead of eight int64 passes. A matched 300-replay G1 bracket improves 1.574M → 1.599M physics steps/s (+1.54%).</li>
+        <li>Short graph-leapfrog training reaches 877.7k/s versus 875.9k/s (+0.2%, within noise). This is a modest general collision win, not a major training breakthrough.</li>
+        <li>Meshes, convex meshes, heightfields, SDFs, external shapes, oversized keys, and expert pipelines automatically retain the original int64 path. No tuning knob is exposed.</li>
+        <li>Compact/full contact arrays, keys, and sticky matches are bit-identical under graph capture. Both long collision determinism tests pass; all 40 reduced tests pass after one transient graph-instantiation failure passed alone. Contact-rich Anymal/H1/G1 and single-/multi-world screens remain finite.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED · −8.1% ABA MEDIAN</span><time>3 Jul</time></div>
       <h2>Depth lanes forward parent state through registers</h2>
@@ -155,7 +166,7 @@
       <div>
         <h2>Refresh the real-training critical path</h2>
         <p>The refreshed physics trace ranks packed contact-row build first at 22.8%, then ABA advance 13.8%, contact solve 13.2%, publish 7.8%, and the now-smaller factor at 6.9%. Training shares are lower for contact work because policies carry fewer rows than the standing profile.</p>
-        <p><strong>Next:</strong> target packed contact-row producer work, now the clearest independent solver cost at 7.1%, while keeping collision work in scope when its measured combined payoff exceeds solver candidates. Dense shared response caching loses 14%, the hard-coded two-body unit-wrench upper bound is only 1.14×, and path sparsity loses 1.5%.</p>
+        <p><strong>Next:</strong> refresh the steady training trace after the compact sort, then target the largest remaining rollout-stream cost with short brackets. Packed contact-row work remains attractive, but its dense shared, hard-coded two-body, and path-sparse alternatives already lost or lacked generality.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -196,7 +207,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step:</strong> reduce packed contact-row producer work without scene-specific bases. Collision is in scope when quality-preserving; do not retry wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
+          <li><strong>Immediate next step:</strong> refresh the steady training trace, then attack its largest general rollout-stream cost. Collision remains in scope when quality-preserving; do not retry wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
         </ul>
       </div>
     </section>

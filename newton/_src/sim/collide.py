@@ -31,6 +31,84 @@ from ..sim.model import Model
 from ..sim.state import State
 
 
+def _primitive_compact_sort_config(
+    model: Model,
+    *,
+    extra_shape_count: int,
+    has_meshes: bool,
+    has_heightfields: bool,
+    hydroelastic_sdf: HydroelasticSDF | None,
+    device: wp.DeviceLike,
+) -> tuple[wp.array[wp.int32], wp.array[wp.int32], int, int, int, int] | None:
+    """Build a lossless int32 contact-sort rank for primitive-only worlds."""
+    if extra_shape_count != 0 or has_meshes or has_heightfields or hydroelastic_sdf is not None:
+        return None
+    if model.shape_world_start is None or model.shape_count <= 0:
+        return None
+    shape_types = model.shape_type.numpy()
+    if bool(np.any((shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.CONVEX_MESH)))):
+        return None
+    shape_sdf_index = getattr(model, "_shape_sdf_index", None)
+    if shape_sdf_index is not None and bool(np.any(shape_sdf_index.numpy() >= 0)):
+        return None
+
+    starts = model.shape_world_start.numpy()
+    world_count = int(model.world_count)
+    if starts.shape[0] != world_count + 2:
+        return None
+    prefix_global_count = int(starts[0])
+    suffix_global_start = int(starts[-2])
+    suffix_global_count = int(model.shape_count) - suffix_global_start
+    world_shape_counts = np.diff(starts[: world_count + 1])
+    max_world_shape_count = int(np.max(world_shape_counts)) if world_shape_counts.size else 0
+    rank_count = prefix_global_count + max_world_shape_count + suffix_global_count
+    if rank_count <= 0:
+        return None
+
+    shape_rank = np.zeros(int(model.shape_count), dtype=np.int32)
+    if prefix_global_count > 0:
+        shape_rank[:prefix_global_count] = np.arange(prefix_global_count, dtype=np.int32)
+    for world in range(world_count):
+        start = int(starts[world])
+        end = int(starts[world + 1])
+        shape_rank[start:end] = prefix_global_count + np.arange(end - start, dtype=np.int32)
+    if suffix_global_count > 0:
+        shape_rank[suffix_global_start:] = (
+            prefix_global_count + max_world_shape_count + np.arange(suffix_global_count, dtype=np.int32)
+        )
+
+    shape_count = int(model.shape_count)
+    pair_rank_count = 0
+    for shape_a in range(shape_count):
+        if shape_a < prefix_global_count or shape_a >= suffix_global_start:
+            pair_rank_count += shape_count
+        else:
+            pair_rank_count += rank_count
+    pair_rank_bits = max(1, (pair_rank_count - 1).bit_length())
+    # GJK/MPR manifolds use three low bits even for primitive geometry.
+    subkey_bits = 3
+    key_bits = pair_rank_bits + subkey_bits
+    if key_bits > 30:
+        return None
+
+    shape_pair_base = np.empty(shape_count, dtype=np.int32)
+    pair_base = 0
+    for shape_a in range(shape_count):
+        shape_pair_base[shape_a] = pair_base
+        if shape_a < prefix_global_count or shape_a >= suffix_global_start:
+            pair_base += shape_count
+        else:
+            pair_base += rank_count
+    return (
+        wp.array(shape_rank, dtype=wp.int32, device=device),
+        wp.array(shape_pair_base, dtype=wp.int32, device=device),
+        prefix_global_count,
+        suffix_global_start,
+        subkey_bits,
+        key_bits,
+    )
+
+
 @wp.struct
 class ContactWriterData:
     """Contact writer data for collide write_contact function."""
@@ -668,6 +746,13 @@ class CollisionPipeline:
         if matching_enabled:
             deterministic = True
 
+        compact_sort_shape_rank = None
+        compact_sort_shape_pair_base = None
+        compact_sort_prefix_shape_count = 0
+        compact_sort_suffix_shape_start = 0
+        compact_sort_subkey_bits = 0
+        compact_sort_key_bits = 0
+
         mode_from_broad_phase: str | None = None
         broad_phase_instance: BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseExplicit | None = None
         if broad_phase is not None:
@@ -896,6 +981,33 @@ class CollisionPipeline:
                 }
                 use_lean_gjk_mpr = not bool(lean_unsupported & set(shape_types.tolist()))
 
+            compact_sort_config = None
+            if deterministic:
+                compact_sort_config = _primitive_compact_sort_config(
+                    model,
+                    extra_shape_count=self.extra_shape_count,
+                    has_meshes=has_meshes,
+                    has_heightfields=has_heightfields,
+                    hydroelastic_sdf=hydroelastic_sdf,
+                    device=device,
+                )
+            if compact_sort_config is None:
+                compact_sort_shape_rank = None
+                compact_sort_shape_pair_base = None
+                compact_sort_prefix_shape_count = 0
+                compact_sort_suffix_shape_start = 0
+                compact_sort_subkey_bits = 0
+                compact_sort_key_bits = 0
+            else:
+                (
+                    compact_sort_shape_rank,
+                    compact_sort_shape_pair_base,
+                    compact_sort_prefix_shape_count,
+                    compact_sort_suffix_shape_start,
+                    compact_sort_subkey_bits,
+                    compact_sort_key_bits,
+                ) = compact_sort_config
+
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
@@ -974,7 +1086,15 @@ class CollisionPipeline:
             with wp.ScopedDevice(device):
                 self._sort_key_array = wp.zeros(rigid_contact_max, dtype=wp.int64, device=device)
             self._contact_sorter = ContactSorter(
-                rigid_contact_max, per_contact_shape_properties=per_contact_props, device=device
+                rigid_contact_max,
+                per_contact_shape_properties=per_contact_props,
+                compact_shape_rank=compact_sort_shape_rank,
+                compact_shape_pair_base=compact_sort_shape_pair_base,
+                compact_prefix_shape_count=compact_sort_prefix_shape_count,
+                compact_suffix_shape_start=compact_sort_suffix_shape_start,
+                compact_subkey_bits=compact_sort_subkey_bits,
+                compact_key_bits=compact_sort_key_bits,
+                device=device,
             )
         else:
             self._sort_key_array = wp.zeros(0, dtype=wp.int64, device=device)

@@ -6,6 +6,27 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Lossless compact primitive contact sort (2026-07-03)
+- Primitive-only deterministic pipelines now rank valid multi-world shape pairs
+  into a lossless positive int32 key. Prefix and suffix global shapes retain
+  full-width second-shape intervals; world-local shapes reuse only the
+  per-world rank interval. Three low bits preserve every analytic and GJK/MPR
+  manifold row. Mesh, convex-mesh, heightfield, SDF, external-shape, oversized,
+  and expert-component pipelines automatically keep the original int64 sort.
+- The G1 contact sort drops from eight int64 radix passes to four int32 passes.
+  A matched 300-replay bracket improves 1.574M to 1.599M physics steps/s
+  (+1.54%). Short graph-leapfrog training measures 877.7k/s versus the retained
+  875.9k/s (+0.2%, within short-run noise), so this is retained as a modest,
+  general collision-pipeline win rather than a headline training breakthrough.
+- CUDA-graph tests exhaust all 90 valid pair intervals across prefix globals,
+  three worlds, suffix globals, and subkeys 0-7. The active full-contact path
+  is bit-identical to the int64 fallback, including sorted keys and sticky
+  matching. Both long deterministic collision tests pass; the 40-test reduced
+  suite passes (one transient graph-instantiation error passed in isolation).
+  Contact-rich Anymal/H1/G1 fleets remain finite in 512 multi-world and
+  many-articulation single-world layouts.
+
+
 ### Symmetric-packed live body inertia (2026-07-03)
 - The pose-transformed per-body spatial inertia is also symmetric. Store its 21 independent entries once, then reconstruct on load in factor and both ABA advances; this reduces initialization stores and three hot tree-pass reads without changing equations.
 - Reversed 300-replay G1 bracket: 1.565M to 1.593M physics steps/s (+1.8%). Short graph-leapfrog training improves 851k to 862k samples/s (+1.3%).
