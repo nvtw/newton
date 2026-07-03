@@ -391,6 +391,7 @@
           <li>Row blocks of 32 gain 0.56% isolated physics but lose 0.38% training. Blocks of 64 gain 0.65% G1 training overlap but lose 1.2–2.7% on contact-rich G1/H1/ANYmal fleets; retain the general 96-thread block.</li>
           <li>Stride-3 contact prepare: policy exploits stale-contact physics and fails the true-physics gate.</li>
           <li>Factor sub-warp tiling: +9% kernel time.</li>
+          <li>Compile-time generalized-contact mode specialization: exact focused tests pass, but static iteration expansion drops G1 physics about 3%; keep the compact runtime loop.</li>
           <li>Fuse per-joint initialization into tiled factor: physically exact, but −2.3% G1 physics from increased kernel pressure.</li>
           <li>Path-sparse Jacobian cache: −1.5% physics; indexed tile dots slowed every PGS update.</li>
           <li>Remove ABA generalized-acceleration stores: neutral/slightly slower.</li>
