@@ -39,6 +39,7 @@ from newton._src.solvers.semi_implicit.kernels_body import joint_force
 _MAX_JOINT_DOF = 6
 _WARP_FACTOR_MIN_ARTICULATIONS = 32
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
+_sym_mat66 = wp.types.vector(length=21, dtype=wp.float32)
 _mat66 = wp.types.matrix(shape=(6, 6), dtype=wp.float32)
 
 
@@ -50,6 +51,30 @@ def _spatial_to_vec6(value: wp.spatial_vector) -> _vec6:
 @wp.func
 def _vec6_to_spatial(value: _vec6) -> wp.spatial_vector:
     return wp.spatial_vector(value[0], value[1], value[2], value[3], value[4], value[5])
+
+
+@wp.func
+def _pack_symmetric_mat66(matrix: wp.spatial_matrix) -> _sym_mat66:
+    packed = _sym_mat66(0.0)
+    index = wp.int32(0)
+    for row in range(6):
+        for column in range(row, 6):
+            packed[index] = matrix[row, column]
+            index += wp.int32(1)
+    return packed
+
+
+@wp.func
+def _unpack_symmetric_mat66(packed: _sym_mat66) -> wp.spatial_matrix:
+    matrix = wp.spatial_matrix()
+    index = wp.int32(0)
+    for row in range(6):
+        for column in range(row, 6):
+            value = packed[index]
+            matrix[row, column] = value
+            matrix[column, row] = value
+            index += wp.int32(1)
+    return matrix
 
 
 @wp.func
@@ -457,7 +482,7 @@ def _factor_reduced_depth_kernel(
     child_start: wp.array[wp.int32],
     child_joint: wp.array[wp.int32],
     body_i_s: wp.array[wp.spatial_matrix],
-    reduced_inertia: wp.array[wp.spatial_matrix],
+    reduced_inertia: wp.array[_sym_mat66],
     joint_u: wp.array[wp.spatial_vector],
     joint_d_inv: wp.array3d[wp.float32],
 ):
@@ -467,7 +492,7 @@ def _factor_reduced_depth_kernel(
     inertia = body_i_s[child]
     for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
         descendant_joint = child_joint[child_index]
-        inertia += reduced_inertia[joint_child[descendant_joint]]
+        inertia += _unpack_symmetric_mat66(reduced_inertia[joint_child[descendant_joint]])
 
     dof_start = joint_qd_start[joint]
     dof_end = joint_qd_start[joint + wp.int32(1)]
@@ -510,7 +535,7 @@ def _factor_reduced_depth_kernel(
                                 u_b = joint_u[dof_start + wp.int32(b)]
                                 correction += u_a[row] * d_inv[a, b] * u_b[column]
                 reduced[row, column] -= correction
-    reduced_inertia[child] = reduced
+    reduced_inertia[child] = _pack_symmetric_mat66(reduced)
 
 
 @wp.func
@@ -733,7 +758,7 @@ def _factor_reduced_warp_kernel(
     child_start: wp.array[wp.int32],
     child_joint: wp.array[wp.int32],
     body_i_s: wp.array[wp.spatial_matrix],
-    reduced_inertia: wp.array[wp.spatial_matrix],
+    reduced_inertia: wp.array[_sym_mat66],
     joint_u: wp.array[wp.spatial_vector],
     joint_d_inv: wp.array3d[wp.float32],
 ):
@@ -751,7 +776,7 @@ def _factor_reduced_warp_kernel(
             inertia = body_i_s[child]
             for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
                 descendant_joint = child_joint[child_index]
-                inertia += reduced_inertia[joint_child[descendant_joint]]
+                inertia += _unpack_symmetric_mat66(reduced_inertia[joint_child[descendant_joint]])
 
             dof_start = joint_qd_start[joint]
             dof_end = joint_qd_start[joint + wp.int32(1)]
@@ -796,7 +821,7 @@ def _factor_reduced_warp_kernel(
                                         u_b = joint_u[dof_start + wp.int32(b)]
                                         correction += u_a[row] * d_inv[a, b] * u_b[column]
                         reduced[row, column] -= correction
-            reduced_inertia[child] = reduced
+            reduced_inertia[child] = _pack_symmetric_mat66(reduced)
             index += wp.int32(32)
         _sync_reduced_warp()
 
@@ -2387,7 +2412,7 @@ class ReducedArticulationSystem:
         self.joint_qd_integrator = wp.empty(dof_count, dtype=wp.float32, device=self.device)
         self.joint_factor_diagonal = wp.empty(dof_count, dtype=wp.float32, device=self.device)
         self.joint_implicit_force = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
-        self.reduced_inertia = wp.empty(body_count, dtype=wp.spatial_matrix, device=self.device)
+        self.reduced_inertia = wp.empty(body_count, dtype=_sym_mat66, device=self.device)
         self.joint_u_matrix = wp.empty(dof_count, dtype=wp.spatial_vector, device=self.device)
         self.joint_d_inv = wp.zeros((joint_count, 6, 6), dtype=wp.float32, device=self.device)
         self.body_force = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)

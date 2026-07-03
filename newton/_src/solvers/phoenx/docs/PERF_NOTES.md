@@ -6,6 +6,11 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Symmetric-packed reduced inertia (2026-07-03)
+- Articulated-body reduction matrices are symmetric by construction. The internal child-to-parent cache now stores their 21 independent upper-triangle entries and reconstructs the symmetric 6x6 matrix on load, instead of moving 36 floats between tree depths.
+- Reversed 300-replay G1 bracket: 1.548M to 1.572M physics steps/s (+1.6%) on top of dead-store removal. Short graph-leapfrog training improves 842k to 851k samples/s (+1.1%).
+- All 40 reduced CUDA-graph tests pass, including mass-matrix/ABA parity, Featherstone comparisons, long-horizon momentum and energy, loops, self-contact, and live mass updates. Contact-rich 512-robot Anymal/H1/G1 screens remain finite.
+
 ### Remove unused articulated-inertia stores (2026-07-03)
 - Both reduced factor kernels wrote a full 6x6 `articulated_inertia` matrix per body, but no solver path ever read that buffer. Removing the dead output is exact: factor equations, reduction order, and public state are unchanged.
 - Reversed 300-replay G1 bracket: 1.539M to 1.556M physics steps/s (+1.1%). Device use falls by 32 MB at 8192 worlds. Short graph-leapfrog training improves 829k to 842k samples/s (+1.6%).
