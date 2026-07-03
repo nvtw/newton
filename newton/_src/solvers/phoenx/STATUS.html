@@ -119,10 +119,12 @@
       <div class="stamp">Last updated<br><strong>3 July 2026 · risky path experiment</strong></div>
     </header>
 
-    <section class="hero">
-      <strong>User action</strong>
-      <p><span class="tag good">NONE PENDING</span></p>
-      <p>The latest Nsight Compute report has been consumed. No command is needed from you right now.</p>
+    <section class="action-required">
+      <strong>User action requested · one bounded Nsight Compute capture</strong>
+      <p><span class="tag">PROFILE ONE KERNEL ONCE</span></p>
+      <p>The exact inline contact/ABA/publish megakernel is physically correct but slower. This report will distinguish register spills, instruction-cache pressure, memory latency, and synchronization before the next architecture is chosen.</p>
+      <pre><code>sudo /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/benchmarks/profile_g1_biased_megakernel_ncu.sh</code></pre>
+      <p>The script profiles exactly one matching kernel launch and writes <code>/tmp/phoenx_g1_biased_megakernel.ncu-rep</code>. The command wraps visually but copies as one line.</p>
     </section>
 
     <section class="hero">
@@ -204,6 +206,18 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag">REJECTED · DEVICE-CALL PHASE SPLIT</span><time>3 Jul</time></div>
+      <h2>A real compiler boundary makes the megakernel 24% slower</h2>
+      <p>A small general Warp prototype added explicit no-inline device functions. PTX proves that post-contact ABA survives as a separate <code>.func</code>/<code>call.uni</code> phase, rather than being flattened into the contact kernel.</p>
+      <ul>
+        <li>The existing overflow-page CUDA-graph parity regression passes, so the split does not alter the equations, deterministic schedule, or arbitrary-contact behavior.</li>
+        <li>Same-session G1 graph-leapfrog training measures about 700k/s for the no-inline megakernel versus 921k/s for the reference path. The former inline megakernel was about 846k/s.</li>
+        <li>The large device-call signature forces parameter marshalling and local-stack traffic; that cost is substantially worse than the register-lifetime pressure it removes.</li>
+        <li>A four-block CUDA launch bound also loses: about 837k/s versus roughly 846k/s unbounded. Compiler pressure cannot be fixed by a simple residency hint.</li>
+        <li><strong>Next:</strong> use one full-counter capture of the inline fused kernel to decide whether a compact-context redesign, instruction-footprint reduction, or a different phase-elimination boundary is justified.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED EXPERIMENT · CROSS-ROBOT WIN</span><time>3 Jul</time></div>
       <h2>Contact relax and final publication now execute as one articulation phase</h2>
@@ -289,7 +303,7 @@
       <div>
         <h2>Return to end-to-end work elimination</h2>
         <p>The response-basis study shows that optimizing row construction in isolation is not enough: extra operator construction, synchronization, and overlap pressure can dominate. The retained sparse-row path remains the best measured exact implementation.</p>
-        <p><strong>Next:</strong> test whether a genuine compiler-visible phase boundary can reduce register lifetime inside bounded persistent execution. Warp emits ordinary device helpers but offers no supported per-function no-inline control, so generated code and register counts must prove the premise before another large fusion is built. Otherwise return to eliminating a complete standalone phase rather than enlarging a kernel.</p>
+        <p><strong>Next:</strong> consume the bounded full-counter capture of the exact inline contact/ABA/publish kernel. Keep the large fusion only if the counters support a concrete compact-context or instruction-footprint redesign; otherwise return to eliminating a complete standalone phase with the retained bounded fusion as the safe baseline.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -312,6 +326,8 @@
           <li>Remove ABA generalized-acceleration stores: neutral/slightly slower.</li>
           <li>Full 96-row shared response cache: −14% from fixed loads and occupancy.</li>
           <li>Adaptive two-link unit-wrench response basis: exact algebra, but −0.5–1.6% across G1, ANYmal, and H1 training/robot brackets.</li>
+          <li>No-inline ABA phase inside the contact megakernel: exact and graph-safe, but about −24% G1 training from device-call marshalling/local-stack traffic.</li>
+          <li>Four-block launch bound on the inline megakernel: about −1%; register capping is not a free occupancy fix.</li>
           <li>Shared ABA-factor cache in contact-row blocks: mixed by articulation width/batch and −3–5% on smaller G1/ANYmal fleets; moving global reads to a synchronized shared phase is not a universal latency fix.</li>
           <li>Row-builder local ancestor stack: −25%.</li>
           <li>BF16 recurrent forward: +0.3%, removed.</li>
