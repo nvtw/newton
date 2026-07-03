@@ -78,12 +78,12 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · warp momentum capture retained</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · dead factor state removed</strong></div>
     </header>
 
     <section class="hero">
       <strong>User action</strong>
-      <p><span class="tag good">NONE PENDING</span> — both requested Nsight Compute runs were delivered and consumed. The first produced the retained row-builder win; the second killed the tile-width theory for the depth-synchronized kernels and pointed the contact gather out as the next coalescing target.</p>
+      <p><span class="tag good">NONE PENDING</span> — no privileged profile run is needed now. Any future command will stay in this top box so it is visible without scrolling.</p>
     </section>
 
     <section class="hero">
@@ -93,8 +93,8 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">822k/s</div><div class="label">steady graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.56×</div><div class="label">slower than pinned nanoG1</div></div>
+      <div class="card"><div class="metric">842k/s</div><div class="label">short steady graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.52×</div><div class="label">slower than pinned nanoG1</div></div>
       <div class="card"><div class="metric good">+6.7%</div><div class="label">G1 reduced physics throughput</div></div>
     </section>
 
@@ -112,6 +112,16 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · +1.6% TRAINING</span><time>3 Jul</time></div>
+      <h2>Reduced factorization no longer writes dead 6×6 state</h2>
+      <p>Both factor kernels stored a full articulated-inertia matrix for every body even though no path read it. Removing the buffer and stores changes no equations or summation order.</p>
+      <ul>
+        <li>Reversed G1 bracket: 1.539M → 1.556M physics steps/s (+1.1%); short graph-leapfrog training: 829k → 842k samples/s (+1.6%).</li>
+        <li>GPU use falls by 32 MB at 8192 worlds. All 40 reduced CUDA-graph tests pass; 512-robot Anymal/H1/G1 contact screens remain finite.</li>
+        <li>FeatherPGS confirms PhoenX already uses the important articulated matrix-free pattern: retain J and H⁻¹Jᵀ, skip the dense Delassus matrix, and update generalized velocity directly.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED · +1.0–1.6% TRAINING</span><time>3 Jul</time></div>
       <h2>Momentum capture now uses one deterministic warp per articulation</h2>
@@ -136,16 +146,6 @@
       </ul>
     </article>
     <article>
-      <div class="meta"><span class="tag warn">REJECTED · −2.7% TRAINING</span><time>3 Jul</time></div>
-      <h2>Intra-solver factor/contact stream overlap is clean but counterproductive</h2>
-      <p>The dataflow audit found that full pre-substep overlap would race ABA velocity publication against warm-start tangent construction. A correct prototype overlapped only factorization with contact ingest and joined before advance.</p>
-      <ul>
-        <li>CUDA graph capture and replay worked, including the trainer's non-default rollout stream.</li>
-        <li>It lost twice in matched training: 778.7k vs 800.9k, then 774.7k vs 796.1k samples/s in reversed order.</li>
-        <li>The already-overlapped learner leaves too little uncontended capacity; the experiment was removed completely and recorded in PERF_NOTES.</li>
-      </ul>
-    </article>
-    <article>
       <div class="meta"><span class="tag good">QUALITY GATE</span><time>Current authority</time></div>
       <h2>Training quality remains proven; throughput work stays solver-only</h2>
       <p>The retained reduced-coordinate recipe still trains from scratch and passes frozen-policy evaluation at seeds 1000 and 2000 with zero falls. Hard-Hertz contacts, two PGS sweeps, one velocity relaxation, continuation-state substeps, and the final 10 ms phase remain unchanged.</p>
@@ -156,7 +156,7 @@
       <div>
         <h2>Refresh the real-training critical path</h2>
         <p>The post-commit trace ranks solver work: ABA advance 8.5%, factor 6.5%, packed contact-row build 6.0%, contact solve 5.1%, and publish 4.8%. Momentum capture is now only 0.4%; packed gather is 1.2%.</p>
-        <p><strong>Next:</strong> target work that can be safely eliminated or fused around row build/solve. The second ABA pass is not optional: removing it gained 6% physics but failed six momentum/loop tests. No Nsight Compute run is currently requested.</p>
+        <p><strong>Next:</strong> profile the smaller factor after dead-store removal, then test symmetric-packed reduced inertia (21 rather than 36 floats) only if the remaining bandwidth supports it. No Nsight Compute run is currently requested.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -194,7 +194,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope update (2 Jul, user):</strong> optimize the PhoenX solver exclusively; the learner is out of scope. This page is the primary communication channel with the user, including requests to run privileged scripts (see the action box above).</li>
-          <li><strong>Immediate next step:</strong> investigate a shared-memory or fused row-build/contact-solve path that removes global round trips without changing equations, PGS order, or the momentum-conserving two-pass schedule.</li>
+          <li><strong>Immediate next step:</strong> continue the factor data-layout audit. Shared row-build/solve fusion is rejected: real training has no response transpose, relaxation needs the global cache, and the focused lane-0 fusion lost 23%.</li>
         </ul>
       </div>
     </section>

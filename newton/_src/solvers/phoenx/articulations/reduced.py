@@ -458,7 +458,6 @@ def _factor_reduced_depth_kernel(
     child_joint: wp.array[wp.int32],
     body_i_s: wp.array[wp.spatial_matrix],
     reduced_inertia: wp.array[wp.spatial_matrix],
-    articulated_inertia: wp.array[wp.spatial_matrix],
     joint_u: wp.array[wp.spatial_vector],
     joint_d_inv: wp.array3d[wp.float32],
 ):
@@ -469,7 +468,6 @@ def _factor_reduced_depth_kernel(
     for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
         descendant_joint = child_joint[child_index]
         inertia += reduced_inertia[joint_child[descendant_joint]]
-    articulated_inertia[child] = inertia
 
     dof_start = joint_qd_start[joint]
     dof_end = joint_qd_start[joint + wp.int32(1)]
@@ -736,7 +734,6 @@ def _factor_reduced_warp_kernel(
     child_joint: wp.array[wp.int32],
     body_i_s: wp.array[wp.spatial_matrix],
     reduced_inertia: wp.array[wp.spatial_matrix],
-    articulated_inertia: wp.array[wp.spatial_matrix],
     joint_u: wp.array[wp.spatial_vector],
     joint_d_inv: wp.array3d[wp.float32],
 ):
@@ -755,7 +752,6 @@ def _factor_reduced_warp_kernel(
             for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
                 descendant_joint = child_joint[child_index]
                 inertia += reduced_inertia[joint_child[descendant_joint]]
-            articulated_inertia[child] = inertia
 
             dof_start = joint_qd_start[joint]
             dof_end = joint_qd_start[joint + wp.int32(1)]
@@ -2391,7 +2387,6 @@ class ReducedArticulationSystem:
         self.joint_qd_integrator = wp.empty(dof_count, dtype=wp.float32, device=self.device)
         self.joint_factor_diagonal = wp.empty(dof_count, dtype=wp.float32, device=self.device)
         self.joint_implicit_force = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
-        self.articulated_inertia = wp.empty(body_count, dtype=wp.spatial_matrix, device=self.device)
         self.reduced_inertia = wp.empty(body_count, dtype=wp.spatial_matrix, device=self.device)
         self.joint_u_matrix = wp.empty(dof_count, dtype=wp.spatial_vector, device=self.device)
         self.joint_d_inv = wp.zeros((joint_count, 6, 6), dtype=wp.float32, device=self.device)
@@ -2562,7 +2557,6 @@ class ReducedArticulationSystem:
                     self.reduced_inertia,
                 ],
                 outputs=[
-                    self.articulated_inertia,
                     self.joint_u_matrix,
                     self.joint_d_inv,
                 ],
@@ -2587,7 +2581,6 @@ class ReducedArticulationSystem:
                         self.reduced_inertia,
                     ],
                     outputs=[
-                        self.articulated_inertia,
                         self.joint_u_matrix,
                         self.joint_d_inv,
                     ],

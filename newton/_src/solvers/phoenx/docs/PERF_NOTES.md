@@ -6,6 +6,12 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Remove unused articulated-inertia stores (2026-07-03)
+- Both reduced factor kernels wrote a full 6x6 `articulated_inertia` matrix per body, but no solver path ever read that buffer. Removing the dead output is exact: factor equations, reduction order, and public state are unchanged.
+- Reversed 300-replay G1 bracket: 1.539M to 1.556M physics steps/s (+1.1%). Device use falls by 32 MB at 8192 worlds. Short graph-leapfrog training improves 829k to 842k samples/s (+1.6%).
+- All 40 reduced CUDA-graph tests pass; contact-rich 512-robot Anymal/H1/G1 screens remain finite.
+- Related experiments rejected: kinematics/factor initialization fusion lost 0.6-1.6%; lane-0 row-velocity/solve fusion lost 23%; a FeatherPGS-inspired 64-thread contact solve lost 7%. Real G1 training does not launch the response transpose, and relax must retain global row caches, so a large row-build/solve megakernel has no credible traffic-elimination case.
+
 ### Warp-parallel reduced momentum capture (2026-07-03)
 - The momentum-conserving split captures every articulation's pre-Coriolis world momentum before the second ABA pass. The original CUDA kernel assigned one thread per tree and serially traversed every link; the retained kernel assigns one deterministic 32-lane tile per tree and reduces mass, system COM, linear momentum, and angular momentum in a fixed tree reduction. CPU keeps the serial path.
 - Post-commit nsys measures capture at 69.6 to 13.4 us per launch (5.2x, 1.9% to 0.4% of GPU time). Final matched G1 physics bracket: 1.528M to 1.543M steps/s (+1.0%). Graph-leapfrog training improves 813.5k to 821.9-826.5k samples/s (+1.0-1.6%). Contact-rich 512-robot fleets improve about 5% on Anymal/H1 and 3% on G1; many articulations in one world also pass.
