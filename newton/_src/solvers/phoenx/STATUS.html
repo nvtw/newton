@@ -116,7 +116,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · topology cache candidate</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · exact path-Schur candidate</strong></div>
     </header>
 
     <section class="hero">
@@ -125,7 +125,7 @@
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
+      <div class="card"><div class="metric good">1.53×</div><div class="label">exact contact-phase candidate speedup</div></div>
       <div class="card"><div class="metric good">923k/s</div><div class="label">retained persistent graph-leapfrog training</div></div>
       <div class="card"><div class="metric">1.38×</div><div class="label">retained gap to nanoG1 6dee587</div></div>
       <div class="card"><div class="metric good">+8.9%</div><div class="label">cumulative short-training gain</div></div>
@@ -179,21 +179,16 @@
 
     <div class="section-label">Active milestone</div>
     <article>
-      <div class="meta"><span class="tag">DIVERSE RL COVERAGE</span><time>3 Jul</time></div>
-      <h2>All requested diverse RL tasks now run without IsaacLab</h2>
-      <p>The requested IsaacLab scenes are being rebuilt as pure Newton/Warp environments with no IsaacLab runtime dependency. Task semantics are split cleanly into direct-torque locomotion (Ant/Humanoid) and command-tracking position control (legged robots), while rollout and PPO infrastructure stays shared.</p>
+      <div class="meta"><span class="tag good">PROMISING · EXACT PATH-SCHUR CONTACTS</span><time>3 Jul</time></div>
+      <h2>A new exact contact architecture clears the first needle-moving gate</h2>
+      <p>Instead of materializing every generalized Jacobian and response row across the full articulation, the candidate builds the exact contact-space Schur operator by traversing each source path and only the unique contacted target-body paths. Compact PGS then solves in contact space; all final impulses are summed into body wrenches and applied with one deterministic depth-parallel ABA.</p>
       <ul>
-        <li>Existing reusable coverage: mature G1 and ANYmal-C environments; functional Ant code is being promoted from its validation script.</li>
-        <li>New Go2 environment: official Newton USD, exact nominal pose and limits, source-task 50 Hz/5 ms cadence, 25/0.5 PD gains, robot-specific policy-to-model joint map, and shared symmetric quadruped observations/rewards.</li>
-        <li>Go2: two-world multi-step CUDA graph capture passes with finite state and exact action-to-joint mapping. Graph-leapfrog PPO stays finite at four 5 ms substeps and eight solver iterations.</li>
-        <li>Humanoid: the source task's 21 geared torque actions, 75-value observation, reward/termination equations, implicit actuator gains, self-collision, and 60 Hz control are implemented. Initial reward is exactly 2.6 as specified.</li>
-        <li>Humanoid uses reduced articulation mode by default so every multi-axis motor armature remains physically representable. Its full rollout and PPO update execute in one CUDA graph with a device seed counter; a two-iteration train smoke passes.</li>
-        <li>Ant is now a public reusable environment and its full rollout/update defaults to CUDA graph replay. Promotion exposed and fixed a duplicate up-axis conversion that had made every nominal reset immediately terminal; the regression now checks projected gravity explicitly.</li>
-        <li>H1 now matches the flat-task contact contract: measured ankle-foot colliders replace accidentally omitted mesh contacts; spawn height, biped air-time, foot slide, ankle soft limits, and graph-safe reset command sampling match the source task. A 500-iteration randomized-command curve improves reward −2.34 → +0.47, termination 1.08% → 0.11%, and tracking 0.053 → 0.214 at 133k samples/s.</li>
-        <li>DR Legs hold and walk now use maximal-coordinate PhoenX for all 36 revolute loop constraints, 12 implicit PD actions, two-hop self-collision filtering, graph-captured joint-state reconstruction, and the source 1 ms temporal schedule. After 20 policy steps the maximum loop-anchor residual is 0.392 mm.</li>
-        <li>DR walking now includes the source 1.0 s gait, contact matching, swing clearance, foot parallel/flat rewards, touchdown-speed penalty, and graph-safe reset command distribution. In 100 iterations, hold success improves 0.827 → 0.865 and walking tracking 0.164 → 0.212; walking terminations fall 2.46% → 0.29% at 59k samples/s.</li>
-        <li>CUDA-graph regressions require one-second stable bilateral H1 contact, measured foot collider ownership, DR closed-loop residual below 1 mm, exact action mapping, and graph-replay command sampling. Ant, Humanoid, Go2, and ANYmal-C retain graph smokes, but equivalent long deterministic policy evaluations remain future work—not silently claimed here.</li>
-        <li>Next: pivot back to general PhoenX solver throughput. The Box3D comparison suggests finishing restitution, testing dimensionless contact softness, and prototyping patch-central friction; CPU scheduling and fixed 24-color choices do not transfer directly to this GPU solver.</li>
+        <li>At 8,192 live G1 worlds, generalized contact-row construction falls from 460.1 to 80.0 µs: 5.75× faster after generalizing to any number of contacted bodies.</li>
+        <li>The compact Schur matrix matches production <code>J M⁻¹ Jᵀ</code> within 2.4e−7; solved impulses match within 3.0e−8; final generalized velocity changes match within 8.9e−8.</li>
+        <li>Construction + two PGS sweeps + deterministic parallel ABA application measure 370.8 µs versus 567.8 µs for the production build/solve phase: 1.53× faster end to end.</li>
+        <li>The algorithm uses no robot-name specialization, no two-contact-body assumption, no atomics, and no approximation. Its target-body de-duplication is derived from live row ownership.</li>
+        <li>Experimental checkpoint <code>516f49d5</code> is clean on <code>twidmer/experiment-phoenx-path-schur</code>. The reference path is untouched.</li>
+        <li><strong>Next:</strong> integrate as an explicit experimental reduced-contact path, retain arbitrary page overflow and graph capture, then gate G1, ANYmal, H1, single-/multi-world, dense contacts, determinism, momentum, and full training throughput.</li>
       </ul>
     </article>
 
@@ -239,136 +234,17 @@
         <li><strong>Next:</strong> target the measured publication/dependency chain with a compact native/noinline persistent phase design; no further user profiling action is currently required.</li>
       </ul>
     </article>
-    <article>
-      <div class="meta"><span class="tag warn">REJECTED · RESIDENT WORK QUEUE</span><time>3 Jul</time></div>
-      <h2>Persistent scheduling recovered the failed fusion, but has not won yet</h2>
-      <p>At the time of this rejected experiment, the retained baseline was about 911k samples/s; the newer shared-factor row cache has since raised the retained matched result to 923k/s. The resident kernel used dynamic full-warp contact tasks, a bounded grid phase barrier, and the existing 8/16/32-thread articulation tiles for dynamics and publication.</p>
-      <ul>
-        <li>The original exact contact/ABA/publish fusion reached only about 846k/s. Local 128-thread grouping made contact imbalance worse and fell to 731k/s; that form is rejected.</li>
-        <li>The resident queue removes local group coupling and replaces block-scoped tile operations with an exact scalar warp contact solve. Overflow-page CUDA-graph parity passes.</li>
-        <li>The new kernel uses 104 registers, no spills, 72 bytes of stack, and 2 KB shared memory, versus 122 registers for the original monolith.</li>
-        <li>G1 reaches 900.7k/s: a large recovery over failed fusion, but still 1.4% below the retained 913.8k/s matched baseline. The scalar warp solve alone reaches 909.0k/s, so it is not independently a win.</li>
-        <li>Moving row construction into that monolith fell further to 890.7k/s: an extra grid barrier and instruction footprint outweighed the removed launch. The queue remains useful architectural evidence, not an active path.</li>
-        <li>No new Nsight Compute action is required from the user yet. Acceptance still requires G1, ANYmal, H1, single-/multi-world, determinism, and arbitrary-contact graph gates.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">REJECTED · MATRIX-FREE JACOBIAN</span><time>3 Jul</time></div>
-      <h2>The monolith is latency-bound, but path reconstruction overfits G1</h2>
-      <p>The requested one-launch Nsight Compute report rules out further blind fusion and points toward compact, phase-specific warp cooperation: preserve residency only where it deletes traffic without lengthening dependency chains.</p>
-      <ul>
-        <li>The exact fused biased-contact/ABA/publish kernel takes 1.42 ms, uses 122 registers/thread, and reaches only 30.3% achieved occupancy. DRAM reaches 18.7% of peak, so raw bandwidth is not the limiter.</li>
-        <li>Schedulers have an eligible warp only 40.8% of cycles. Long-scoreboard dependencies consume 3.60 of the 9.01 cycles between issued instructions (39.9%); average active width is 15.1 threads/warp and predication reduces it to 13.0.</li>
-        <li>Global accesses waste 46% of transferred sectors; L1/L2 hit rates are already 75.0%/75.6%. The useful target is coalesced structure-of-arrays access and shorter dependency chains, not <code>__ldg()</code> or cache hints.</li>
-        <li>An exact matrix-free solve removed the global Jacobian matrix and passed overflow-page CUDA-graph parity. Matched G1 improved 913.8k → 922.8k/s (+0.98%).</li>
-        <li>The required cross-scene gates reject it: 512-world ANYmal/H1 fall 730.4k → 705.3k/s (−3.4%) and 708.9k → 687.9k/s (−3.0%); 64 articulations in one world fall 89.1k → 85.3k/s (−4.2%) and 90.9k → 89.3k/s (−1.8%). States match exactly.</li>
-        <li>The experiment is preserved on <code>twidmer/experiment-phoenx-matrix-free-contact-rows</code> at <code>030be01c</code>. <strong>Next:</strong> redesign contact response construction around coalesced warp tiles and shorter load-use chains, without recomputing sparse Jacobians or absorbing the full ABA/publish phase.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">REJECTED · DEVICE-CALL PHASE SPLIT</span><time>3 Jul</time></div>
-      <h2>A real compiler boundary makes the megakernel 24% slower</h2>
-      <p>A small general Warp prototype added explicit no-inline device functions. PTX proves that post-contact ABA survives as a separate <code>.func</code>/<code>call.uni</code> phase, rather than being flattened into the contact kernel.</p>
-      <ul>
-        <li>The existing overflow-page CUDA-graph parity regression passes, so the split does not alter the equations, deterministic schedule, or arbitrary-contact behavior.</li>
-        <li>Same-session G1 graph-leapfrog training measures about 700k/s for the no-inline megakernel versus 921k/s for the reference path. The former inline megakernel was about 846k/s.</li>
-        <li>The large device-call signature forces parameter marshalling and local-stack traffic; that cost is substantially worse than the register-lifetime pressure it removes.</li>
-        <li>Static assembly reports 122 registers, no spills, a 72-byte stack frame, and 18,696 SASS instructions. Separate contact and advance/publish phases use 80 and 101 registers respectively; fusion duplicates almost no instructions but raises the peak register footprint.</li>
-        <li>A meaningful 20-block residency target caps the kernel to 96 registers, but introduces 156/100 bytes of spill stores/loads and falls to about 834k/s versus roughly 846k/s unbounded. A four-block hint changes no resources and reaches about 837k/s.</li>
-        <li><strong>Decision:</strong> the completed full-counter capture selects a compact-context, coalesced phase design; further enlargement of this monolith is rejected.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED EXPERIMENT · CROSS-ROBOT WIN</span><time>3 Jul</time></div>
-      <h2>Contact relax and final publication now execute as one articulation phase</h2>
-      <p>The persistent path now executes contact velocity refresh, bias-free generalized contact solve, contact-delta application, and final articulation publication in one graph-captured kernel. The known-regressing factor fusion was removed from the active composition.</p>
-      <ul>
-        <li>Full graph-leapfrog G1 training measures about 911.2k samples/s persistent versus 901.1k/s reference in the matched bracket (+1.1%). Saturated standalone G1 physics is effectively neutral/slightly negative (−0.35%), confirming that end-to-end overlap must remain the primary metric.</li>
-        <li>Contact-rich 512-world fleets improve ANYmal 365.6k → 381.0k/s (+4.2%) and H1 343.2k → 362.7k/s (+5.7%).</li>
-        <li>Many articulations in one world also improve: 64-robot ANYmal 45.8k → 47.1k/s (+2.9%) and H1 46.1k → 47.7k/s (+3.5%). Final state magnitudes match reference in every bracket.</li>
-        <li>A CUDA-graph regression covers two substeps and more than two contact pages. Generalized state, body pose/twist, impulses, manifold data, and derived contact rows match the reference within 2e−6.</li>
-        <li>The implementation supports the arbitrary-contact overflow loop and exposes no user contact-limit tuning. The reference execution path remains unchanged and selectable.</li>
-        <li><strong>Next:</strong> preserve this bounded fusion and pursue phase elimination only when the replacement reduces both global traffic and live working set.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">REJECTED · EXACT RESPONSE BASIS</span><time>3 Jul</time></div>
-      <h2>Adaptive contacted-link bases lose end-to-end throughput</h2>
-      <p>An exact experimental path classified articulations touching at most two links, built six unit-wrench articulated responses for those links, and synthesized every contact row from that compact basis. Arbitrary-contact and denser articulations retained the direct reference path.</p>
-      <ul>
-        <li>Full graph-leapfrog G1 training measures about 898k/s versus the retained 911k/s (−1.5%). Contact-rich ANYmal measures 374.9k/s versus 381.0k/s (−1.6%); H1 measures 360.9k/s versus 362.7k/s (−0.5%).</li>
-        <li>The algebra is exact, but float reconstruction introduces roughly 1e−3 response stress error, 5e−5 state error, and up to 0.2% derived effective-mass error. Those bounded differences do not buy performance.</li>
-        <li>Only about 777 of 8,192 sampled G1 worlds qualified at runtime. Basis construction, synchronization, and coefficient traffic overwhelm the rows it replaces; this is not a general cross-scene win.</li>
-        <li>The prototype is preserved on <code>twidmer/experiment-phoenx-contact-response-basis</code> at <code>cdabaca7</code> and reverted from the active path at <code>5b8677e5</code>.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">REJECTED · ARCHITECTURAL EXPERIMENT</span><time>3 Jul</time></div>
-      <h2>Shared-resident contact rows are exact, but slower</h2>
-      <p>A separate graph-static articulation path cached 32 Jacobian and articulated-response rows in shared memory and routed denser articulations through the reference solver. This tested a substantially different memory strategy without risking the retained implementation.</p>
-      <ul>
-        <li>CUDA-graph reference/resident parity is bit-exact across multiple worlds and multiple articulations per world.</li>
-        <li>Steady G1 graph-leapfrog training measures 801.7k/s versus 877.1k/s reference (−8.6%). The second disjoint launch, fixed shared loads, and occupancy cost outweigh cached global-row traffic.</li>
-        <li>The prototype is isolated on <code>twidmer/experiment-phoenx-resident-contact-rows</code> at <code>9d810d4d</code>; the active branch is back on the clean reference path.</li>
-        <li><strong>Decision:</strong> multiple static paths remain the right framework for risky work, but the next candidate must eliminate whole phases or global materialization—not merely relocate row storage.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">REJECTED · WORKING-SET OVERFUSION</span><time>3 Jul</time></div>
-      <h2>Biased contact solve plus ABA is exact, but 7–9% slower</h2>
-      <p>A larger megakernel continued from biased generalized contact solving through Coriolis ABA, momentum capture/restore, and intermediate publication. Overflow-page CUDA-graph parity remained within 2e−6, proving the reordered schedule was physically equivalent for topology-proven static contacts.</p>
-      <ul>
-        <li>Saturated G1 physics fell from about 1.91M to 1.74M steps/s (−9%). Full graph-leapfrog training fell from the retained 911k/s to about 846k/s (−7%).</li>
-        <li>The contact tile and ABA traversal share almost no live working set; combining them increases register pressure more than it removes memory traffic.</li>
-        <li>The exact prototype is preserved on <code>twidmer/experiment-phoenx-biased-contact-megakernel</code> at <code>6777ae00</code> and reverted from the active path at <code>c13deef5</code>.</li>
-        <li>The replacement direction is an exact low-rank contacted-link response basis. Deterministic runtime classification is now graph-captured and covered by the arbitrary-contact regression; no robot-name specialization or user tuning is involved.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · −12.8% OBSERVE KERNEL</span><time>3 Jul</time></div>
-      <h2>Root-frame observation work is computed once per world</h2>
-      <p>G1 observation columns previously repeated the same quaternion transforms, root-origin velocity reconstruction, target rotation, and full 29-joint validity scan. One lane now computes the shared root features, broadcasts them within the fixed 128-thread block, and performs the validity scan once.</p>
-      <ul>
-        <li>The observation/reward kernel falls from 87.4 to 76.2 µs (−12.8%); its steady-training GPU-work share falls from 4.1% to 3.5%.</li>
-        <li>A six-interval graph-leapfrog run with two pipeline warmups averages 892.9k samples/s over the three complete measured intervals, versus the retained 890.4k/s baseline (+0.28%).</li>
-        <li>Observation values, masked updates, root-origin tracking, reward decomposition, and finite-explosion termination pass five focused CUDA-graph unittests.</li>
-        <li>The user-provided NCU report confirms the contact-row builder is latency-bound: long-scoreboard stalls dominate at 25.47 warps per issue, with 58.3% achieved occupancy and 97.9% branch efficiency. A physically exact shared-factor cache was tested and fully reverted: it helped H1 and saturated G1 but regressed smaller G1/ANYmal fleets, so it was not a general win.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · EXACT ABA SPECIALIZATION</span><time>3 Jul</time></div>
-      <h2>External-force and Coriolis ABA passes compile separately</h2>
-      <p>The split temporal schedule invokes ABA in two mutually exclusive modes. CUDA now compiles those modes separately, eliminating inactive external-force, Coriolis, and momentum-capture branches and their live state while preserving every equation and traversal order. CPU keeps the unified path.</p>
-      <ul>
-        <li>Nsight measures the specialized pair at 126.0 µs and 112.1 µs versus 124.5 µs twice for the unified kernel, reducing aggregate ABA GPU work by 4.6%.</li>
-        <li>Matched G1 physics improves about 1.955M → 1.959–1.964M steps/s; graph-leapfrog training improves 880.8k → 889.6–891.2k samples/s (+1.09% by the means).</li>
-        <li>Contact-rich fleets improve ANYmal +0.24%, H1 +0.86%, and G1 +0.97%, with identical reported final states. This is a schedule specialization, not a robot specialization.</li>
-        <li>All 42 reduced CUDA-graph tests pass; the recurring suite-wide graph-instantiation runtime error again passes alone. Coverage includes serial parity, fused momentum capture, 8/16/32-lane topologies, long-horizon momentum/energy, loops, contacts, Featherstone parity, multiple articulations, and determinism.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · EXACT COMPACT INERTIA</span><time>3 Jul</time></div>
-      <h2>Rigid-body structure replaces dense 6×6 inertia transforms</h2>
-      <p>Reduced factor initialization now constructs the 21 stored symmetric entries directly from the COM mass, rotated 3×3 inertia, and parallel-axis terms. It removes a cached 36-float spatial matrix per body and the redundant dense 6×6 transform while preserving the same rigid-body operator.</p>
-      <ul>
-        <li>A randomized 64-body CUDA-graph regression matches the original dense transform within 2e−5; ABA/common-mass-matrix equivalence also passes.</li>
-        <li>Matched 8,192-world G1 physics improves 1.926M → 1.947–1.962M steps/s (+1.1–1.9%) and GPU use falls about 31 MiB.</li>
-        <li>Contact-rich 512-world fleets improve ANYmal +1.0%, H1 +0.8% on the longer bracket, and G1 +1.6%; this is not a G1-only specialization.</li>
-        <li>Matched eager full collect/update training improves about 695.2k → 700.4k samples/s (+0.74%). Its graph-leapfrog refresh is neutral at 880.8k/s, so only the subsequent ABA specialization moves the authoritative headline.</li>
-        <li>All 42 reduced CUDA-graph tests pass; one suite-wide graph-instantiation runtime error passes immediately in isolation. Coverage includes live mass updates, tile widths, Featherstone parity, momentum/energy, loops, dense/self/ground contacts, multi-articulation worlds, and determinism.</li>
-      </ul>
-    </article>
     <div class="section-label">Next decisions</div>
     <section class="next">
       <div>
-        <h2>Return to end-to-end work elimination</h2>
-        <p>The response-basis study shows that optimizing row construction in isolation is not enough: extra operator construction, synchronization, and overlap pressure can dominate. The retained sparse-row path remains the best measured exact implementation.</p>
-        <p><strong>Next:</strong> consume the bounded full-counter capture of the exact inline contact/ABA/publish kernel. Keep the large fusion only if the counters support a concrete compact-context or instruction-footprint redesign; otherwise return to eliminating a complete standalone phase with the retained bounded fusion as the safe baseline.</p>
+        <h2>Productionize the path-Schur survivor</h2>
+        <p>The new candidate removes the dominant full-articulation response construction while retaining the exact Delassus operator and deterministic impulse application. Unlike earlier response-basis and contact-space attempts, its isolated win survives the complete build/solve/apply phase.</p>
+        <p><strong>Next:</strong> integrate behind an explicit experimental path, measure full graph-leapfrog training early, and reject or specialize only from topology-derived runtime facts—not robot identities.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
-          <li>Separate 32-row resident Jacobian/response solve: bit-exact but −8.6% G1 training from a second launch, fixed shared loads, and occupancy.</li>
         <ul>
+          <li>Separate 32-row resident Jacobian/response solve: bit-exact but −8.6% G1 training from a second launch, fixed shared loads, and occupancy.</li>
           <li>One-pass ABA / pre-contact-only Coriolis: +6% physics but severe momentum drift.</li>
           <li>Compile-time velocity-only publish kernel: exact but +0.1% (neutral).</li>
           <li>Factor/contact multi-stream overlap: −2.7% training from GPU contention.</li>
@@ -416,7 +292,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step:</strong> prototype cross-phase work elimination or bounded persistent articulation execution; gate it on full training early. Do not retry explicit response-basis operators, contact-delta register forwarding, wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
+          <li><strong>Immediate next step:</strong> productionize commit <code>516f49d5</code> as an opt-in exact path-Schur contact path. Preserve the reference implementation and run cross-robot/full-training gates before promotion.</li>
         </ul>
       </div>
     </section>
