@@ -10685,7 +10685,10 @@ class ModelBuilder:
                     geo_sources.append(0)
 
                 mesh_properties = 0
-                if shape_type in (GeoType.MESH, GeoType.CONVEX_MESH) and isinstance(geo, Mesh):
+                needs_auto_mesh_sign = mesh_sign_flags == 0 and bool(
+                    shape_flags & (ShapeFlags.COLLIDE_SHAPES | ShapeFlags.COLLIDE_PARTICLES)
+                )
+                if needs_auto_mesh_sign and shape_type in (GeoType.MESH, GeoType.CONVEX_MESH) and isinstance(geo, Mesh):
                     source_id = id(geo)
                     mesh_properties = mesh_properties_by_source_id.get(source_id)
                     if mesh_properties is None:

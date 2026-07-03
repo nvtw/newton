@@ -832,10 +832,18 @@ def test_model_mesh_properties_track_watertight(test, device):
     test.assertEqual(closed_mesh.watertight_query_count, 1)
 
 
-def test_visual_only_mesh_properties_track_watertight(test, device):
+def test_visual_only_mesh_properties_skip_watertight_query(test, device):
     vertices, faces = _make_watertight_box((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
 
-    mesh = newton.Mesh(vertices, faces, compute_inertia=False)
+    class CountingMesh(newton.Mesh):
+        watertight_query_count = 0
+
+        @property
+        def is_watertight(self):
+            self.watertight_query_count += 1
+            return super().is_watertight
+
+    mesh = CountingMesh(vertices, faces, compute_inertia=False)
     cfg = newton.ModelBuilder.ShapeConfig(
         density=0.0,
         has_shape_collision=False,
@@ -848,7 +856,8 @@ def test_visual_only_mesh_properties_track_watertight(test, device):
     model = builder.finalize(device=device)
 
     mesh_properties = model._shape_mesh_properties.numpy()
-    test.assertTrue(int(mesh_properties[shape]) & MeshProperties.WATERTIGHT)
+    test.assertFalse(int(mesh_properties[shape]) & MeshProperties.WATERTIGHT)
+    test.assertEqual(mesh.watertight_query_count, 0)
 
 
 def test_mesh_sign_flags_override_mesh_properties(test, device):
@@ -933,8 +942,8 @@ add_function_test(
 )
 add_function_test(
     TestMeshSignQueries,
-    "test_visual_only_mesh_properties_track_watertight",
-    test_visual_only_mesh_properties_track_watertight,
+    "test_visual_only_mesh_properties_skip_watertight_query",
+    test_visual_only_mesh_properties_skip_watertight_query,
     devices=devices,
     check_output=False,
 )
