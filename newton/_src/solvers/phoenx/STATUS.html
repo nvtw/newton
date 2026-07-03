@@ -116,7 +116,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · exact path-Schur candidate</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · path-Schur production checkpoint</strong></div>
     </header>
 
     <section class="hero">
@@ -125,7 +125,7 @@
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric good">1.53×</div><div class="label">exact contact-phase candidate speedup</div></div>
+      <div class="card"><div class="metric good">+3.1%</div><div class="label">early full-training path-Schur gain</div></div>
       <div class="card"><div class="metric good">923k/s</div><div class="label">retained persistent graph-leapfrog training</div></div>
       <div class="card"><div class="metric">1.38×</div><div class="label">retained gap to nanoG1 6dee587</div></div>
       <div class="card"><div class="metric good">+8.9%</div><div class="label">cumulative short-training gain</div></div>
@@ -179,16 +179,18 @@
 
     <div class="section-label">Active milestone</div>
     <article>
-      <div class="meta"><span class="tag good">PROMISING · EXACT PATH-SCHUR CONTACTS</span><time>3 Jul</time></div>
-      <h2>A new exact contact architecture clears the first needle-moving gate</h2>
-      <p>Instead of materializing every generalized Jacobian and response row across the full articulation, the candidate builds the exact contact-space Schur operator by traversing each source path and only the unique contacted target-body paths. Compact PGS then solves in contact space; all final impulses are summed into body wrenches and applied with one deterministic depth-parallel ABA.</p>
+      <div class="meta"><span class="tag good">PRODUCTION CANDIDATE · EXACT PATH-SCHUR</span><time>3 Jul</time></div>
+      <h2>The first needle-moving architecture now runs end to end</h2>
+      <p>The opt-in <code>reduced_articulation_path="path_schur"</code> builds the exact contact-space Schur operator from source and contacted target paths, solves compact PGS, sums all solved impulses into body wrenches, and applies them through one deterministic depth-parallel ABA. The established reference and persistent paths remain untouched.</p>
       <ul>
-        <li>At 8,192 live G1 worlds, generalized contact-row construction falls from 460.1 to 80.0 µs: 5.75× faster after generalizing to any number of contacted bodies.</li>
-        <li>The compact Schur matrix matches production <code>J M⁻¹ Jᵀ</code> within 2.4e−7; solved impulses match within 3.0e−8; final generalized velocity changes match within 8.9e−8.</li>
-        <li>Construction + two PGS sweeps + deterministic parallel ABA application measure 370.8 µs versus 567.8 µs for the production build/solve phase: 1.53× faster end to end.</li>
-        <li>The algorithm uses no robot-name specialization, no two-contact-body assumption, no atomics, and no approximation. Its target-body de-duplication is derived from live row ownership.</li>
-        <li>Experimental checkpoint <code>516f49d5</code> is clean on <code>twidmer/experiment-phoenx-path-schur</code>. The reference path is untouched.</li>
-        <li><strong>Next:</strong> integrate as an explicit experimental reduced-contact path, retain arbitrary page overflow and graph capture, then gate G1, ANYmal, H1, single-/multi-world, dense contacts, determinism, momentum, and full training throughput.</li>
+        <li>The isolated 8,192-world contact phase remains exact and 1.53× faster: 370.8 versus 567.8 µs, with Schur error 2.4e−7, impulse error 3.0e−8, and generalized-delta error 8.9e−8.</li>
+        <li>An early full graph-leapfrog training bracket improves about 918k → 946k samples/s (+3.1%) over the same measured intervals. This is a throughput gate, not yet a claim of preserved long-training quality.</li>
+        <li>Selection is algebraic and automatic per articulation page: use path-Schur only when contact rows ≤ articulation DOFs; dense pages use the exact generalized-row implementation. There are no robot names or user thresholds.</li>
+        <li>The dense 34-point G1 scene recovers from the rejected all-path result of 1.14M to 1.88M physics steps/s, versus 1.91M reference (−1.3%). Removing that remaining empty-path overhead is an optimization target, not grounds for scene-specific tuning.</li>
+        <li>CUDA-graph tests cover a genuinely active path page and a 72-contact arbitrary-page dense fallback. Full state, derived contact data, and impulses agree with reference within 2e−5 after algebraic reordering.</li>
+        <li>DOF-bounded Schur storage replaces the initial fixed 96×96 allocation, reducing 8,192-world G1 candidate storage from about 604 MiB to about 85 MiB.</li>
+        <li>Production checkpoint <code>d82f3065</code> is clean on <code>twidmer/experiment-phoenx-path-schur</code>.</li>
+        <li><strong>Next:</strong> ANYmal/H1 and single-world performance, determinism/momentum tests, then longer G1 training-quality gates. Promotion is conditional on broad wins and no physical regression.</li>
       </ul>
     </article>
 
@@ -292,7 +294,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step:</strong> productionize commit <code>516f49d5</code> as an opt-in exact path-Schur contact path. Preserve the reference implementation and run cross-robot/full-training gates before promotion.</li>
+          <li><strong>Immediate next step:</strong> validate production checkpoint <code>d82f3065</code> across ANYmal, H1, single-world fleets, momentum, determinism, and longer successful G1 training. Optimize empty-path overhead only with cross-scene evidence.</li>
         </ul>
       </div>
     </section>
