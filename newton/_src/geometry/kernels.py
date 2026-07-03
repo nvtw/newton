@@ -30,10 +30,14 @@ class MeshProperties(enum.IntFlag):
 @wp.func
 def resolve_mesh_sign_method(shape_flags: int, mesh_properties: int):
     """Resolve the mesh sign method, honoring an explicit per-shape override."""
-    if shape_flags & ShapeFlags.MESH_SIGN_NORMAL:
+    method_flags = shape_flags & ShapeFlags.MESH_SIGN_METHOD_MASK
+    if method_flags == ShapeFlags.MESH_SIGN_NORMAL:
         return int(MeshSignMethod.NORMAL)
-    if shape_flags & ShapeFlags.MESH_SIGN_PARITY:
+    if method_flags == ShapeFlags.MESH_SIGN_PARITY:
         return int(MeshSignMethod.PARITY)
+
+    # Zero selects automatically. Unknown encoded values also use the safe
+    # automatic behavior if flags are modified after model finalization.
     if mesh_properties & MeshProperties.WATERTIGHT:
         return int(MeshSignMethod.PARITY)
     return int(MeshSignMethod.NORMAL)

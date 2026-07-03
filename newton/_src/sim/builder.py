@@ -429,8 +429,11 @@ class ModelBuilder:
                 )
             if self.sdf_max_resolution is not None and self.sdf_target_voxel_size is not None:
                 raise ValueError("Set only one of sdf_max_resolution or sdf_target_voxel_size, not both.")
-            if self._mesh_sign_flags == ShapeFlags.MESH_SIGN_NORMAL | ShapeFlags.MESH_SIGN_PARITY:
-                raise ValueError("Set only one of ShapeFlags.MESH_SIGN_NORMAL or ShapeFlags.MESH_SIGN_PARITY.")
+            if self._mesh_sign_flags not in (0, ShapeFlags.MESH_SIGN_NORMAL, ShapeFlags.MESH_SIGN_PARITY):
+                raise ValueError(
+                    "Invalid mesh sign method in ShapeConfig.flags; use ShapeFlags.MESH_SIGN_NORMAL, "
+                    "ShapeFlags.MESH_SIGN_PARITY, or neither for automatic selection."
+                )
             if self.sdf_max_resolution is not None and self.sdf_max_resolution % 8 != 0:
                 raise ValueError(
                     f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
@@ -491,7 +494,7 @@ class ModelBuilder:
 
             self.is_visible = bool(value & ShapeFlags.VISIBLE)
             self.is_hydroelastic = bool(value & ShapeFlags.HYDROELASTIC)
-            self._mesh_sign_flags = value & (ShapeFlags.MESH_SIGN_NORMAL | ShapeFlags.MESH_SIGN_PARITY)
+            self._mesh_sign_flags = value & ShapeFlags.MESH_SIGN_METHOD_MASK
 
             # Check if SITE flag is being set
             is_site_flag = bool(value & ShapeFlags.SITE)
@@ -10636,6 +10639,13 @@ class ModelBuilder:
             for shape_type, geo, shape_flags in zip(
                 self.shape_type, generated_shape_sources, self.shape_flags, strict=True
             ):
+                mesh_sign_flags = shape_flags & ShapeFlags.MESH_SIGN_METHOD_MASK
+                if mesh_sign_flags not in (0, ShapeFlags.MESH_SIGN_NORMAL, ShapeFlags.MESH_SIGN_PARITY):
+                    raise ValueError(
+                        "Invalid mesh sign method in shape flags; use ShapeFlags.MESH_SIGN_NORMAL, "
+                        "ShapeFlags.MESH_SIGN_PARITY, or neither for automatic selection."
+                    )
+
                 geo_hash = hash(geo)  # avoid repeated hash computations
                 if isinstance(geo, Heightfield):
                     if geo_hash not in finalized_geos:
@@ -10682,10 +10692,6 @@ class ModelBuilder:
                         mesh_properties = MeshProperties.WATERTIGHT if geo.is_watertight else 0
                         mesh_properties_by_source_id[source_id] = mesh_properties
                 shape_mesh_properties.append(mesh_properties)
-
-                mesh_sign_flags = shape_flags & (ShapeFlags.MESH_SIGN_NORMAL | ShapeFlags.MESH_SIGN_PARITY)
-                if mesh_sign_flags == ShapeFlags.MESH_SIGN_NORMAL | ShapeFlags.MESH_SIGN_PARITY:
-                    raise ValueError("Set only one of ShapeFlags.MESH_SIGN_NORMAL or ShapeFlags.MESH_SIGN_PARITY.")
 
             m.shape_type = wp.array(self.shape_type, dtype=wp.int32)
             m.shape_source_ptr = wp.array(geo_sources, dtype=wp.uint64)

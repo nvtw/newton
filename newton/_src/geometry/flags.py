@@ -41,6 +41,9 @@ class ShapeFlags(IntEnum):
     MESH_SIGN_PARITY = 1 << 6
     """Use ray intersection parity to determine the sign of mesh point queries."""
 
+    MESH_SIGN_METHOD_MASK = 0b111 << 5
+    """Bit mask for the encoded mesh sign method."""
+
 
 __all__ = [
     "ParticleFlags",

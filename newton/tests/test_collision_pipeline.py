@@ -853,18 +853,40 @@ def test_visual_only_mesh_properties_track_watertight(test, device):
 
 def test_mesh_sign_flags_override_mesh_properties(test, device):
     shape_flags = wp.array(
-        [int(ShapeFlags.MESH_SIGN_PARITY), int(ShapeFlags.MESH_SIGN_NORMAL)],
+        [
+            int(ShapeFlags.MESH_SIGN_PARITY),
+            int(ShapeFlags.MESH_SIGN_NORMAL),
+            0,
+            0,
+            1 << 7,
+            1 << 7,
+        ],
         dtype=wp.int32,
         device=device,
     )
-    mesh_properties = wp.array([0, int(MeshProperties.WATERTIGHT)], dtype=wp.int32, device=device)
-    methods = wp.empty(2, dtype=wp.int32, device=device)
+    mesh_properties = wp.array(
+        [
+            0,
+            int(MeshProperties.WATERTIGHT),
+            0,
+            int(MeshProperties.WATERTIGHT),
+            0,
+            int(MeshProperties.WATERTIGHT),
+        ],
+        dtype=wp.int32,
+        device=device,
+    )
+    methods = wp.empty(6, dtype=wp.int32, device=device)
 
-    wp.launch(_resolve_mesh_sign_methods, dim=2, inputs=[shape_flags, mesh_properties, methods], device=device)
+    wp.launch(_resolve_mesh_sign_methods, dim=6, inputs=[shape_flags, mesh_properties, methods], device=device)
 
     methods_np = methods.numpy()
     test.assertEqual(int(methods_np[0]), MeshSignMethod.PARITY)
     test.assertEqual(int(methods_np[1]), MeshSignMethod.NORMAL)
+    test.assertEqual(int(methods_np[2]), MeshSignMethod.NORMAL)
+    test.assertEqual(int(methods_np[3]), MeshSignMethod.PARITY)
+    test.assertEqual(int(methods_np[4]), MeshSignMethod.NORMAL)
+    test.assertEqual(int(methods_np[5]), MeshSignMethod.PARITY)
 
 
 def test_shape_config_mesh_sign_flags(test, device):
@@ -873,8 +895,19 @@ def test_shape_config_mesh_sign_flags(test, device):
     test.assertTrue(cfg.flags & ShapeFlags.MESH_SIGN_NORMAL)
 
     cfg.flags |= ShapeFlags.MESH_SIGN_PARITY
-    with test.assertRaisesRegex(ValueError, "Set only one"):
+    with test.assertRaisesRegex(ValueError, "Invalid mesh sign method"):
         cfg.validate(GeoType.MESH)
+
+    cfg.flags = 1 << 7
+    with test.assertRaisesRegex(ValueError, "Invalid mesh sign method"):
+        cfg.validate(GeoType.MESH)
+
+    vertices, faces = _make_open_square()
+    builder = newton.ModelBuilder(gravity=0.0)
+    shape = builder.add_shape_mesh(body=-1, mesh=newton.Mesh(vertices, faces, compute_inertia=False))
+    builder.shape_flags[shape] |= 1 << 7
+    with test.assertRaisesRegex(ValueError, "Invalid mesh sign method"):
+        builder.finalize(device=device)
 
 
 add_function_test(
