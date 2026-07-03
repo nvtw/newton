@@ -146,10 +146,12 @@ class Example:
         max_steps: int = 1000,
         use_cuda_graph: bool = False,
         implicit_pd: bool = False,
+        target_sim_dt: float | None = None,
         gravity: bool = True,
         ground: bool = True,
         logging: bool = False,
-        linear_solver: str = "LLTB",
+        dynamics_solver: str = "padmm",
+        linear_solver: str | None = None,
         linear_solver_maxiter: int = 0,
         use_graph_conditionals: bool = False,
         headless: bool = False,
@@ -159,9 +161,13 @@ class Example:
         # Initialize target frames per second and corresponding time-steps
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
-        target_sim_dt = 0.01 if implicit_pd else 0.001
+        if target_sim_dt is None:
+            target_sim_dt = self.frame_dt / 12 if dynamics_solver == "dvi" else 0.01 if implicit_pd else 0.001
+        elif target_sim_dt <= 0.0:
+            raise ValueError("target_sim_dt must be positive.")
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
+        dvi_contact_margin = 5.0e-4 if dynamics_solver == "dvi" else 0.0
         msg.info(f"Using sim_dt = {self.sim_dt} ({self.sim_substeps} substeps per frame)")
         self.max_steps = max_steps
 
@@ -198,6 +204,9 @@ class Example:
         if ground:
             for w in range(num_worlds):
                 add_ground_box(self.builder, world_index=w)
+        if dvi_contact_margin > 0.0:
+            for geom in self.builder.all_geoms:
+                geom.margin = max(geom.margin, dvi_contact_margin)
 
         # Set gravity
         for w in range(self.builder.num_worlds):
@@ -211,6 +220,11 @@ class Example:
                 assert abs(joint.k_p_j[0] - 50.0) < 1e-4
                 assert abs(joint.k_d_j[0] - 1.0) < 1e-4
 
+        if linear_solver is None:
+            linear_solver = "CR" if dynamics_solver == "dvi" else "LLTB"
+        if dynamics_solver == "dvi" and linear_solver == "CR" and linear_solver_maxiter == 0:
+            linear_solver_maxiter = 9
+
         # Parse the linear solver max iterations for iterative solvers from the command-line arguments
         linear_solver_kwargs = {"maxiter": linear_solver_maxiter} if linear_solver_maxiter > 0 else {}
 
@@ -218,12 +232,13 @@ class Example:
         config = Simulator.Config()
         config.dt = self.sim_dt
         config.collision_detector.pipeline = "unified"  # Select from {"primitive", "unified"}
-        config.solver.sparse_jacobian = False
-        config.solver.sparse_dynamics = False
+        config.solver.dynamics_solver = dynamics_solver
+        config.solver.sparse_jacobian = dynamics_solver == "dvi"
+        config.solver.sparse_dynamics = dynamics_solver == "dvi"
         config.solver.integrator = "moreau"  # Select from {"euler", "moreau"}
         config.solver.constraints.alpha = 0.1
         config.solver.constraints.beta = 0.011
-        config.solver.constraints.gamma = 0.05
+        config.solver.constraints.gamma = 0.015
         config.solver.padmm.primal_tolerance = 1e-4
         config.solver.padmm.dual_tolerance = 1e-4
         config.solver.padmm.compl_tolerance = 1e-4
@@ -239,6 +254,22 @@ class Example:
         config.solver.compute_solution_metrics = logging and not use_cuda_graph
         config.solver.dynamics.linear_solver_type = linear_solver
         config.solver.dynamics.linear_solver_kwargs = linear_solver_kwargs
+        config.solver.dynamics.preconditioning = dynamics_solver != "dvi"
+        if dynamics_solver == "dvi":
+            config.solver.constraints.contact_recovery_speed = 1.0
+            config.solver.constraints.contact_deep_recovery_gamma = 0.10
+            config.solver.constraints.contact_deep_recovery_threshold = 1.0e-3
+            config.solver.dvi.max_iterations = 200
+            config.solver.dvi.tolerance = 1e-4
+            config.solver.dvi.regularization = 1e-5
+            config.solver.dvi.omega = 0.3
+            config.solver.dvi.block_iterations = 4
+            config.solver.dvi.contact_iterations = 2
+            config.solver.dvi.bilateral_solve_period = 1
+            config.solver.dvi.contact_jacobi_omega = 0.25
+            config.solver.dvi.contact_jacobi_relaxation = 0.9
+            config.solver.dvi.warmstart_mode = "containers"
+            config.solver.dvi.contact_warmstart_method = "geom_pair_net_force"
         config.solver.padmm.use_graph_conditionals = use_graph_conditionals
         config.solver.angular_velocity_damping = 0.0
 
@@ -449,6 +480,12 @@ if __name__ == "__main__":
         help="Enables implicit PD control of joints",
     )
     parser.add_argument(
+        "--target-sim-dt",
+        type=float,
+        default=None,
+        help="Target simulation timestep before rounding to an integer number of frame substeps",
+    )
+    parser.add_argument(
         "--gravity", action=argparse.BooleanOptionalAction, default=True, help="Enables gravity in the simulation"
     )
     parser.add_argument(
@@ -471,11 +508,17 @@ if __name__ == "__main__":
         help="Enable frame recording: 'sync' for synchronous, 'async' for asynchronous (non-blocking)",
     )
     parser.add_argument(
+        "--dynamics-solver",
+        default="padmm",
+        choices=["padmm", "dvi"],
+        help="Dynamics solver to use",
+    )
+    parser.add_argument(
         "--linear-solver",
-        default="LLTB",
+        default=None,
         choices=LinearSolverShorthand.values(),
         type=str.upper,
-        help="Linear solver to use",
+        help="Linear solver to use; defaults to LLTB for PADMM and CR for DVI",
     )
     parser.add_argument(
         "--linear-solver-maxiter", default=0, type=int, help="Max number of iterations for iterative linear solvers"
@@ -519,11 +562,13 @@ if __name__ == "__main__":
         device=device,
         use_cuda_graph=use_cuda_graph,
         num_worlds=args.num_worlds,
+        dynamics_solver=args.dynamics_solver,
         linear_solver=args.linear_solver,
         linear_solver_maxiter=args.linear_solver_maxiter,
         use_graph_conditionals=args.use_graph_conditionals,
         max_steps=args.num_steps,
         implicit_pd=args.implicit_pd,
+        target_sim_dt=args.target_sim_dt,
         gravity=args.gravity,
         ground=args.ground,
         headless=args.headless,

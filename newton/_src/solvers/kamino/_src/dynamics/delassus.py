@@ -1755,6 +1755,18 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators):
     def constraint_jacobian(self) -> BlockSparseMatrices:
         return self._jacobians._J_cts.bsm
 
+    @property
+    def model(self) -> ModelKamino:
+        return self._model
+
+    @property
+    def data(self) -> DataKamino:
+        return self._data
+
+    @property
+    def joint_constraint_nzb_count(self) -> wp.array:
+        return self._jacobians._J_cts_num_joint_nzb
+
     ###
     # Operations
     ###
