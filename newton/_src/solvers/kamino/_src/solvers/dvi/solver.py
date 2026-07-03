@@ -11,7 +11,7 @@ from ....config import DVISolverConfig
 from ...core.data import DataKamino
 from ...core.model import ModelKamino
 from ...core.size import SizeKamino
-from ...core.types import float32, to_warp_int32_array
+from ...core.types import to_warp_int32_array
 from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
@@ -49,6 +49,8 @@ from .sparse import solve_sparse
 from .types import DVIConfigStruct, DVIData, convert_config_to_struct
 
 wp.set_module_options({"enable_backward": False})
+
+float32 = wp.float32
 
 
 class DVISolver:

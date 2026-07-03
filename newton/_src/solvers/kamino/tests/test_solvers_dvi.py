@@ -13,7 +13,6 @@ import warp as wp
 
 import newton
 import newton._src.solvers.kamino.config as kamino_config
-from newton._src.solvers.kamino._src.core.types import vec2f, vec4f
 from newton._src.solvers.kamino._src.dynamics.dual import (
     DualProblem,
     DualProblemConfigStruct,
@@ -48,6 +47,9 @@ from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton._src.solvers.kamino.tests import setup_tests, test_context
 from newton._src.solvers.kamino.tests.utils.extract import extract_delassus, extract_problem_vector
 from newton._src.solvers.kamino.tests.utils.make import make_containers, make_test_problem_fourbar, update_containers
+
+vec2f = wp.vec2f
+vec4f = wp.vec4f
 
 
 def _check_solution_matches_dual_problem(testcase: unittest.TestCase, problem: DualProblem, solver: DVISolver):
@@ -1101,7 +1103,9 @@ class TestDVISolver(unittest.TestCase):
 
         q_tip = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), float(np.pi * 0.5))
         example.base_q.assign([wp.transformf((0.0, 0.0, 0.25), q_tip)])
-        example.solver.reset(state=example.state_0, base_q=example.base_q)
+        reset_config = SolverKamino.ResetConfig(base_pose=SolverKamino.ResetConfig.FromBaseQ(example.base_q))
+        example.solver.reset(state=example.state_0, config=reset_config)
+        example.solver.reset(state=example.state_1, config=reset_config)
         example.capture()
 
         base_start = example.state_0.body_q.numpy()[0, :3].copy()

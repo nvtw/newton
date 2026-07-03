@@ -8,11 +8,15 @@ from __future__ import annotations
 import warp as wp
 
 from ...core.math import FLOAT32_EPS
-from ...core.types import float32, int32, mat33f, vec3f
 from ..padmm.math import project_to_coulomb_cone, project_to_coulomb_dual_cone
 from .types import DVIConfigStruct, DVIStatus
 
 wp.set_module_options({"enable_backward": False})
+
+float32 = wp.float32
+int32 = wp.int32
+mat33f = wp.mat33f
+vec3f = wp.vec3f
 
 
 @wp.func

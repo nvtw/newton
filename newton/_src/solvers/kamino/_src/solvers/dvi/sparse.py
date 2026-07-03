@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import warp as wp
 
-from ...core.types import int32
 from ...dynamics.dual import DualProblem
 from . import sparse_kernels
 from .kernels import (
@@ -32,6 +31,8 @@ from .sparse_kernels import (
 )
 
 wp.set_module_options({"enable_backward": False})
+
+int32 = wp.int32
 
 
 _SPARSE_DELASSUS_ROWS_JOINTS = 0

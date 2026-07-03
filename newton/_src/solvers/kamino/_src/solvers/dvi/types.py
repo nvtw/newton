@@ -9,11 +9,15 @@ import warp as wp
 
 from ....config import DVISolverConfig
 from ...core.size import SizeKamino
-from ...core.types import float32, int32, mat33f, vec2f
 from ...linalg import DenseLinearOperatorData
 from ..padmm.types import PADMMSolution
 
 wp.set_module_options({"enable_backward": False})
+
+float32 = wp.float32
+int32 = wp.int32
+mat33f = wp.mat33f
+vec2f = wp.vec2f
 
 
 @wp.struct
