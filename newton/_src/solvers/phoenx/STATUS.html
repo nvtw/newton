@@ -199,6 +199,19 @@
 
     <div class="section-label">Latest findings</div>
     <article>
+      <div class="meta"><span class="tag">ACTIVE · RESIDENT WORK QUEUE</span><time>3 Jul</time></div>
+      <h2>Persistent scheduling recovered the failed fusion, but has not won yet</h2>
+      <p>The retained result remains about 911k samples/s. A profiler-guided resident kernel now uses dynamic full-warp contact tasks, a bounded grid phase barrier, and the existing 8/16/32-thread articulation tiles for dynamics and publication.</p>
+      <ul>
+        <li>The original exact contact/ABA/publish fusion reached only about 846k/s. Local 128-thread grouping made contact imbalance worse and fell to 731k/s; that form is rejected.</li>
+        <li>The resident queue removes local group coupling and replaces block-scoped tile operations with an exact scalar warp contact solve. Overflow-page CUDA-graph parity passes.</li>
+        <li>The new kernel uses 104 registers, no spills, 72 bytes of stack, and 2 KB shared memory, versus 122 registers for the original monolith.</li>
+        <li>G1 reaches 900.7k/s: a large recovery over failed fusion, but still 1.4% below the retained 913.8k/s matched baseline. The scalar warp solve alone reaches 909.0k/s, so it is not independently a win.</li>
+        <li><strong>Current experiment:</strong> move exact contact-row response construction into the resident pipeline and remove its separate build/transpose boundary. Contact rows are roughly 25% of solver GPU work, making this the first remaining fusion target with genuinely material upside.</li>
+        <li>No new Nsight Compute action is required from the user yet. Acceptance still requires G1, ANYmal, H1, single-/multi-world, determinism, and arbitrary-contact graph gates.</li>
+      </ul>
+    </article>
+    <article>
       <div class="meta"><span class="tag warn">REJECTED · MATRIX-FREE JACOBIAN</span><time>3 Jul</time></div>
       <h2>The monolith is latency-bound, but path reconstruction overfits G1</h2>
       <p>The requested one-launch Nsight Compute report rules out further blind fusion and points toward compact, phase-specific warp cooperation: preserve residency only where it deletes traffic without lengthening dependency chains.</p>
