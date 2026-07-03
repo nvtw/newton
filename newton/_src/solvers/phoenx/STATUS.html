@@ -57,9 +57,9 @@
     .work-bar span { min-width: 3px; }
     .work-physics { width: 73%; background: #2563eb; }
     .work-collision { width: 11%; background: #06a77d; }
-    .work-env { width: 9%; background: #7c5ce5; }
+    .work-env { width: 8%; background: #7c5ce5; }
     .work-rl { width: 5%; background: #e58b2a; }
-    .work-other { width: 2%; background: #aab3c2; }
+    .work-other { width: 3%; background: #aab3c2; }
     .solver-rows { width: 25%; background: #1748a6; }
     .solver-advance { width: 23%; background: #3478f6; }
     .solver-factor { width: 22%; background: #65a2ff; }
@@ -84,10 +84,26 @@
     .next { display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; padding: 23px; border-radius: 18px; }
     .muted { color: var(--muted); }
     .action-required {
-      margin: 18px 0; padding: 22px; border: 2px solid #f2a51a; border-radius: 18px;
-      background: #fff9eb; box-shadow: 0 0 0 5px rgba(242, 165, 26, .08);
+      position: relative; isolation: isolate; overflow: hidden;
+      margin: 18px 0; padding: 24px; border: 2px solid #f59e0b; border-radius: 20px;
+      background: linear-gradient(135deg, #fff8df 0%, #ffedb5 58%, #ffe29a 100%);
+      box-shadow: 0 18px 45px rgba(180, 83, 9, .18), 0 0 0 6px rgba(245, 158, 11, .10);
     }
-    .action-required pre { overflow-x: auto; padding: 15px; border-radius: 10px; background: #172033; color: white; }
+    .action-required::before {
+      content: "!"; position: absolute; z-index: -1; right: 20px; top: -42px;
+      color: rgba(180, 83, 9, .10); font-size: 11rem; font-weight: 900; line-height: 1;
+    }
+    .action-required strong { color: #8a4300; font-size: 1.12rem; }
+    .action-required .tag { color: #7c3900; background: rgba(255, 255, 255, .68); }
+    .action-required pre {
+      overflow-x: visible; padding: 16px; border: 1px solid rgba(255, 255, 255, .12); border-radius: 12px;
+      background: #24202a; color: #fff8e7; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
+      white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+    }
+    .action-required pre code {
+      padding: 0; color: inherit; background: transparent; white-space: inherit;
+      overflow-wrap: inherit; word-break: inherit;
+    }
     footer { margin-top: 24px; color: var(--muted); font-size: .84rem; text-align: center; }
     @media (max-width: 820px) { .metrics { grid-template-columns: repeat(2, 1fr); } .work-legend, .solver-legend { grid-template-columns: repeat(3, 1fr); } .next { grid-template-columns: 1fr; } }
     @media (max-width: 560px) { header { display: block; } .stamp { margin-top: 13px; text-align: left; } .metrics, .work-legend { grid-template-columns: 1fr; } }
@@ -100,12 +116,13 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · ABA modes specialized</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · observation work shared</strong></div>
     </header>
 
     <section class="hero">
       <strong>User action</strong>
-      <p><span class="tag good">NONE PENDING</span> — the generalized-contact-solve counter report was consumed successfully. Any future command will remain in this top box so it is visible without scrolling.</p>
+      <p><span class="tag good">NONE PENDING</span></p>
+      <p>The latest Nsight Compute report has been consumed. No command is needed from you right now.</p>
     </section>
 
     <section class="hero">
@@ -115,25 +132,25 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">890k/s</div><div class="label">fresh comparable graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">893k/s</div><div class="label">fresh comparable graph-leapfrog training</div></div>
       <div class="card"><div class="metric">1.43×</div><div class="label">fresh gap to nanoG1 6dee587</div></div>
-      <div class="card"><div class="metric good">+8.6%</div><div class="label">cumulative short-training gain</div></div>
+      <div class="card"><div class="metric good">+8.9%</div><div class="label">cumulative short-training gain</div></div>
     </section>
 
-    <p class="profile-note">Fresh specialized-ABA full collect/update runs measure 891.2k and 889.6k samples/s (890.4k mean). The comparison uses nanoG1 commit <code>6dee587</code> and its measured 1.276M training SPS; shorter same-session brackets remain useful only for relative optimization deltas.</p>
+    <p class="profile-note">The retained observation specialization averages 892.9k samples/s after two graph-pipeline warmups, versus the 890.4k specialized-ABA baseline. The comparison uses nanoG1 commit <code>6dee587</code> and its measured 1.276M training SPS; shorter same-session brackets remain useful only for relative optimization deltas.</p>
 
     <div class="section-label">Steady-training GPU work profile</div>
     <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
       <h2>Where GPU work is currently spent</h2>
-      <div class="work-bar" role="img" aria-label="Physics solver 73 percent, collision pipeline 11 percent, environment and rewards 9 percent, policy and learner 5 percent, runtime and other 2 percent">
+      <div class="work-bar" role="img" aria-label="Physics solver 73 percent, collision pipeline 11 percent, environment and rewards 8 percent, policy and learner 5 percent, runtime and other 3 percent">
         <span class="work-physics"></span><span class="work-collision"></span><span class="work-env"></span><span class="work-rl"></span><span class="work-other"></span>
       </div>
       <div class="work-legend">
         <div class="work-item"><strong><i style="background:#2563eb"></i>73%</strong>physics solver</div>
         <div class="work-item"><strong><i style="background:#06a77d"></i>11%</strong>collision pipeline</div>
-        <div class="work-item"><strong><i style="background:#7c5ce5"></i>9%</strong>environment + rewards</div>
+        <div class="work-item"><strong><i style="background:#7c5ce5"></i>8%</strong>environment + rewards</div>
         <div class="work-item"><strong><i style="background:#e58b2a"></i>5%</strong>policy + learner</div>
-        <div class="work-item"><strong><i style="background:#aab3c2"></i>2%</strong>runtime + other</div>
+        <div class="work-item"><strong><i style="background:#aab3c2"></i>3%</strong>runtime + other</div>
       </div>
       <p class="profile-note">Share of summed CUDA kernel duration in the latest five-second steady graph-leapfrog Nsight trace (rounded). Streams overlap, so these are GPU-work shares—not additive wall-clock latency. The current bounded trace includes compact inertia and specialized ABA; streams overlap, so kernel-work shares do not directly predict wall time.</p>
       <div class="subprofile">
@@ -162,7 +179,7 @@
         <li>A fresh 157.3M-sample run passes the complete gate at seed 1000 and seed 2000.</li>
         <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
         <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
-        <li>Fresh specialized-ABA full collect/update graph-leapfrog runs reach 891.2k and 889.6k samples/s (890.4k mean), or 69.8% of nanoG1 commit <code>6dee587</code> at its measured 1.276M/s: PhoenX is currently 1.43× slower. The proven full-quality recipe is unchanged.</li>
+        <li>The current full collect/update graph-leapfrog measurement reaches 892.9k samples/s, or 70.0% of nanoG1 commit <code>6dee587</code> at its measured 1.276M/s: PhoenX is currently 1.43× slower. The proven full-quality recipe is unchanged.</li>
       </ul>
     </article>
 
@@ -188,6 +205,17 @@
 
     <div class="section-label">Latest findings</div>
     <article>
+      <div class="meta"><span class="tag good">RETAINED · −12.8% OBSERVE KERNEL</span><time>3 Jul</time></div>
+      <h2>Root-frame observation work is computed once per world</h2>
+      <p>G1 observation columns previously repeated the same quaternion transforms, root-origin velocity reconstruction, target rotation, and full 29-joint validity scan. One lane now computes the shared root features, broadcasts them within the fixed 128-thread block, and performs the validity scan once.</p>
+      <ul>
+        <li>The observation/reward kernel falls from 87.4 to 76.2 µs (−12.8%); its steady-training GPU-work share falls from 4.1% to 3.5%.</li>
+        <li>A six-interval graph-leapfrog run with two pipeline warmups averages 892.9k samples/s over the three complete measured intervals, versus the retained 890.4k/s baseline (+0.28%).</li>
+        <li>Observation values, masked updates, root-origin tracking, reward decomposition, and finite-explosion termination pass five focused CUDA-graph unittests.</li>
+        <li>The user-provided NCU report confirms the contact-row builder is latency-bound: long-scoreboard stalls dominate at 25.47 warps per issue, with 58.3% achieved occupancy and 97.9% branch efficiency. A physically exact shared-factor cache was tested and fully reverted: it helped H1 and saturated G1 but regressed smaller G1/ANYmal fleets, so it was not a general win.</li>
+      </ul>
+    </article>
+    <article>
       <div class="meta"><span class="tag good">RETAINED · EXACT ABA SPECIALIZATION</span><time>3 Jul</time></div>
       <h2>External-force and Coriolis ABA passes compile separately</h2>
       <p>The split temporal schedule invokes ABA in two mutually exclusive modes. CUDA now compiles those modes separately, eliminating inactive external-force, Coriolis, and momentum-capture branches and their live state while preserving every equation and traversal order. CPU keeps the unified path.</p>
@@ -208,166 +236,6 @@
         <li>Contact-rich 512-world fleets improve ANYmal +1.0%, H1 +0.8% on the longer bracket, and G1 +1.6%; this is not a G1-only specialization.</li>
         <li>Matched eager full collect/update training improves about 695.2k → 700.4k samples/s (+0.74%). Its graph-leapfrog refresh is neutral at 880.8k/s, so only the subsequent ABA specialization moves the authoritative headline.</li>
         <li>All 42 reduced CUDA-graph tests pass; one suite-wide graph-instantiation runtime error passes immediately in isolation. Coverage includes live mass updates, tile widths, Featherstone parity, momentum/energy, loops, dense/self/ground contacts, multi-articulation worlds, and determinism.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">EXACT FACTOR FUSION · REJECTED</span><time>3 Jul</time></div>
-      <h2>Fusing factor initialization increases kernel pressure</h2>
-      <p>An exact prototype moved per-joint inertia, motion-subspace, and velocity initialization into the tiled reverse factor kernel, with a warp barrier before factorization. It changed scheduling only and passed the CUDA-graph ABA-versus-common-mass-matrix test.</p>
-      <ul>
-        <li>A same-session 8,192-world G1 bracket measured 1.918M steps/s fused into factor versus 1.962M/s after reverting (−2.3%).</li>
-        <li>A second exact variant reused the freshly computed anchor and COM transforms inside local kinematics and passed the same physical gate, but reached only 1.894M/s (−3.5%). Both placements are fully reverted; separate narrow kernels remain faster.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · EXACT CROSS-PHASE REUSE</span><time>3 Jul</time></div>
-      <h2>ABA captures target momentum; publish restores it in place</h2>
-      <p>The Coriolis ABA pass already computes each link's spatial inertia times velocity, while publish already produces every transformed COM and body twist consumed by momentum restore. The tiled CUDA path now reuses both dataflows and removes the standalone capture and restore kernels.</p>
-      <ul>
-        <li>Both phases retain deterministic subgroup reductions about the system COM and the same physical-inertia/root-Gram correction. CPU and non-tiled paths keep the original kernels.</li>
-        <li>Nsight confirms both launches disappear. Fused ABA averages 119.2 µs; fused publish+restore averages 80.2 µs versus roughly 73 µs publish plus 37 µs restore previously.</li>
-        <li>Capture fusion improves matched physics 1.921M → 1.925M and training 871.5k → 872.7k. Publish/restore fusion then improves 1.926M → 1.933M (+0.34%) and 875.2k → 877.3k (+0.24%).</li>
-        <li>The combined matched gain is about +0.63% physics and +0.67% training without changing integration or correction equations.</li>
-        <li>Direct fused-vs-standalone momentum, tiled/serial ABA, 8/16/32-lane topologies, long-horizon momentum/energy, internal loops, ground/self contacts, dense-contact determinism, Featherstone parity, and multi-world graph capture pass.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">RESPONSE BASIS · PRODUCTION PATH REJECTED</span><time>3 Jul</time></div>
-      <h2>The 1.142× microbenchmark did not survive full solver integration</h2>
-      <p>Three exact production implementations tested whether six unit-wrench ABA responses per contacted body could replace repeated per-row traversals. All retained hard-Hertz projection, deterministic row order, direct fallback, arbitrary paging, and graph capture; all were fully reverted because end-to-end performance regressed.</p>
-      <ul>
-        <li>Materializing ordinary packed rows from the basis reached about 1.79M versus 1.92M physics steps/s; synthesis traffic erased the traversal saving.</li>
-        <li>The compact 12×12 basis-space PGS path was physically sound: direct/basis joint and body states agreed within 2e−6, and three-page contact disappearance/reappearance passed in one graph.</li>
-        <li>Its dense-coefficient version reached 849k training samples/s versus the retained 872.5k/s baseline. Parallel sparse effective-mass derivation helped physics slightly but did not repair training throughput.</li>
-        <li>On-the-fly sparse tiles fell to 832k/s; a 12-lane register/shuffle formulation reached only about 1.77M physics steps/s. Both were reverted.</li>
-        <li>The original microbenchmark omitted production effective-mass work, mixed eligible/direct pages, fused articulation application, and learner overlap. Its local 14.2% result was real but insufficient evidence for an end-to-end win.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · EXACT ROW WORK REDUCTION</span><time>3 Jul</time></div>
-      <h2>Contact rows now clear only the previously active articulation path</h2>
-      <p>The packed reduced-contact builder no longer zero-fills every row across the articulation's full dense DOF width. Each row remembers its previous source body and clears exactly that body's sparse ancestor path before writing the current path.</p>
-      <ul>
-        <li>This changes no equation, approximation, row order, or solver tolerance. It only removes redundant zero stores and the block-wide barrier they required.</li>
-        <li>The same captured graph is tested after every contact row changes source body, including shorter paths; packed Jacobians and ABA responses remain exactly equal to the dense reference.</li>
-        <li>Arbitrary overflow-page replay and the high-degree momentum-conservation fallback pass under CUDA graph capture.</li>
-        <li>Nsight measures the steady row-builder median at 387 µs versus 402 µs (about 3.8% less). Saturated 8,192-world A/B is a modest 1.912M → 1.919M physics steps/s; the matched longer training gate improves 870.4k → 872.5k samples/s (+0.24%). This is retained as a safe cumulative gain, not presented as a major breakthrough.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">10 MS TRAINING · KEEP LATE TRANSITION</span><time>3 Jul</time></div>
-      <h2>Two-step physics trains, but early use creates a fragile policy basin</h2>
-      <p>Two fresh 157M-sample train-to-gate experiments tested the largest safe scheduling gain without changing PhoenX equations: two 10 ms physics steps from scratch, and a three-step bootstrap followed by 10 ms at 52.4M samples.</p>
-      <ul>
-        <li>Two steps from scratch passes seed 1000 at 152.0M samples with zero falls, tracking 0.934, jerk 0.159, roll/pitch rate 0.180, and yaw rate 0.088.</li>
-        <li>The 52.4M transition also passes seed 1000 at 157.3M samples with zero falls, tracking 0.930, jerk 0.163, roll/pitch rate 0.138, and yaw rate 0.100.</li>
-        <li>Both policies fail catastrophically at the established seed-2000 noisy-reset gate, even after extending the from-scratch policy to 209.7M samples. More late fine-tuning does not repair the narrow basin.</li>
-        <li>The proven 99.6M transition remains the default because it passes both seeds. The result supports 10 ms as an accurate final phase, but rejects using it earlier merely to inflate throughput.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">BASELINE REFRESHED</span><time>3 Jul</time></div>
-      <h2>Current PhoenX training reaches 890k/s against nanoG1 at 1.276M/s</h2>
-      <p>Two fresh 8,192-world, 64-step, full collect/update graph-leapfrog runs used the current quality-facing reduced-coordinate recipe, mirror regularization, BF16 manual MLP paths, and no diagnostic readback.</p>
-      <ul>
-        <li>Specialized-ABA PhoenX measures 891,203 and 889,645 samples/s; the 890,424/s mean is rounded to 890k/s in the headline.</li>
-        <li>The local nanoG1 checkout is commit <code>6dee587</code>; its <code>RESULTS.md</code> reports measured steady training throughput of 1.276M samples/s on the same GPU class.</li>
-        <li>PhoenX therefore delivers 69.8% of nanoG1 throughput and is 1.43× slower. This supersedes the post-fusion 881k/s and 1.45× cards.</li>
-        <li>The benchmark default now uses the exact 1.276M measurement and records its commit provenance instead of the rounded 1.28M headline.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">REDUCED PATCH ROWS · REJECTED</span><time>3 Jul</time></div>
-      <h2>Maximal patch friction remains opt-in; reduced patch paging lost throughput</h2>
-      <p>The Box3D-inspired maximal path remains a physically validated opt-in specialization. A complete reduced-coordinate implementation was also built and tested, then fully reverted because its separate normal/patch paging schedule cost substantially more than the generalized-row reduction saved.</p>
-      <ul>
-        <li>Both fast-tail multi-world and colored single-world CUDA-graph paths run. Point mode allocates only a one-entry sentinel and compiles its original hot path.</li>
-        <li>The block uses the full 2×2 tangent effective mass and existing static/kinetic Coulomb disk. Warm start is a world-space impulse remapped through persistent contact matches, so column reorder and first-contact changes are safe.</li>
-        <li>Both sides apply the patch impulse at one shared world midpoint. A new dynamic box-pair gate verifies linear and angular momentum conservation; the first separate-anchor formulation failed this gate and was corrected rather than tolerance-masked.</li>
-        <li>All 12 focused CUDA-graph gates pass: sliding-to-rest, static friction above the kinetic budget, velocity-level linear/angular momentum, multi-/single-world execution, raw-mesh fallback, bit determinism, classification, compound fallback, history remapping, coupled projection, and kinetic projection. Existing point-mode stacks and momentum also pass.</li>
-        <li>Raw meshes, heightfields, cloth/soft contacts, compound body-pair columns, reduced articulations, mass splitting, and sleeping retain point friction or are explicitly rejected for this opt-in prototype.</li>
-        <li>A scheduler-matched maximal G1 bracket is neutral-to-slightly-negative: 2.537M patch versus 2.548M point physics steps/s (−0.43%) after normal-only rows, redundant-mass removal, and launch fusion. Contact trajectories differ, so this is directional—not a win.</li>
-        <li>The reduced prototype implemented the full contract: one normal row per point, whole-column coupled 2×2 tangent pages, world-space warm start, conservative articulation fallback, arbitrary counts, and fixed CUDA-graph topology.</li>
-        <li>Its focused gates passed: 120-replay sliding-to-rest/resting contact, three-page contact disappearance/reappearance, compound point-friction fallback, exact default ABA rows, and finite graph-captured G1.</li>
-        <li>At 8,192 G1 worlds it removed 26% of generalized rows but reached only 1.73–1.74M physics steps/s versus 1.88–1.89M for point friction: a repeatable 7.4–8.0% loss. At 1,024 worlds it was about 4% slower.</li>
-        <li>The extra gather/build/solve page dominates the saved row traversal. The complete reduced prototype and tests were reverted; only the small reusable row-response extraction remains. <code>docs/REDUCED_PATCH_FRICTION.md</code> records the design and measured rejection to prevent a blind retry.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">BOX3D TRANSFER STUDY</span><time>3 Jul</time></div>
-      <h2>Patch friction is promising; two simpler transfers were rejected</h2>
-      <p>The local Box3D source at commit 8441b4a confirms that PhoenX already shares its Soft-Step/TGS core. CPU work stealing and fixed 24-color scheduling do not transfer to the GPU design.</p>
-      <ul>
-        <li>Skipping friction in the biased pass fails PhoenX static-friction and lateral force gates because PhoenX permits zero velocity iterations; the prototype was fully reverted.</li>
-        <li>Box3D-like contact softness at ω·h=π/4 is slightly worse than the hard-Hertz π baseline on matched G1 exploration traces; it was discarded.</li>
-        <li>Patch-central friction could remove 31% of scalar contact-row work on G1, 50% on H1, and 44% on DR Legs in measured snapshots. Every measured multi-point column had coherent normals.</li>
-        <li>The prototype will only treat a column as one patch when both shapes are provably convex. Any raw mesh or heightfield pair keeps per-point friction because contact reduction does not preserve disconnected patch identity.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · +1.0–1.3% TRAINING</span><time>3 Jul</time></div>
-      <h2>Generalized contact delta now stays in registers</h2>
-      <p>Fresh Nsight Compute counters show a latency-bound solve: 52% long-scoreboard stalls, 0.62 eligible warps per scheduler, and 44.5% achieved occupancy. The accumulated generalized delta now uses a distributed register tile instead of shared-memory round trips.</p>
-      <ul>
-        <li>Reversed contact-rich G1 brackets improve 1.626M → 1.636–1.640M physics steps/s (+0.6–0.9%).</li>
-        <li>Reversed graph-leapfrog brackets improve 1.139M → 1.150–1.154M training samples/s (+1.0–1.3%).</li>
-        <li>Equations, row order, reductions, and deterministic solve order are unchanged; this is a one-line storage-policy change.</li>
-        <li>All 40 reduced CUDA-graph tests pass (39 together plus the recurring driver-sensitive case alone), as does graph-leapfrog train-to-gate smoke.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · −28.6% OBSERVE GPU TIME</span><time>3 Jul</time></div>
-      <h2>Post-reset observation work now follows the exact reset mask</h2>
-      <p>Auto-reset already identifies every reset world. The second observation pass now updates only those worlds; periodic command resampling still takes the full path, and there is no conditional graph node.</p>
-      <ul>
-        <li>A matched bounded Nsight bracket cuts observation-kernel time from 5.498 to 3.927 ms across 65 launches.</li>
-        <li>Short graph-leapfrog training improves 1.15705M → 1.16033M samples/s (+0.28%); this is intentionally reported as a small exact rollout win.</li>
-        <li>Selected results match a full pass bit-for-bit and unselected results remain bit-exact. Observation, command, reset/FK, warm-start, and train-to-gate CUDA-graph tests pass.</li>
-        <li>An upper-triangle-only factor experiment improved that kernel just 0.6% and was neutral end-to-end, so it was fully reverted.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · +1.2% TRAINING</span><time>3 Jul</time></div>
-      <h2>Provably empty GJK/MPR stages no longer enter the graph</h2>
-      <p>The collision pipeline now proves from the complete pair topology whether generic convex work is possible. Eligible graphs omit the node at construction; unproven, external, and genuine convex scenes retain the unchanged path. There is no runtime conditional or tuning knob.</p>
-      <ul>
-        <li>A same-session short-training bracket improves about 880k → 891k samples/s (+1.2%), reducing the pinned nanoG1 gap to 1.44×.</li>
-        <li>Physics-only is neutral (1.610M original versus 1.609M specialized), as is H1 at 4,096 worlds. The gain comes from removing contention on the overlapped rollout path, not changing physics.</li>
-        <li>Specialized and forced-original contact arrays are bit-identical under graph capture; a box–box scene proves GJK fallback remains active. Long deterministic/sticky tests and diverse single-/multi-world robot screens pass.</li>
-        <li>The fresh trace still ranks advance 15.3%, row build 12.6%, contact solve 10.1%, publish 9.3%, and factor 8.2%. Shared-delta reuse was neutral and parent-delta shuffles lost 0.5%; both were fully reverted.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · +1.54% PHYSICS</span><time>3 Jul</time></div>
-      <h2>Primitive contact sorting now needs half as many radix passes</h2>
-      <p>A lossless multi-world pair rank converts eligible deterministic contact keys from int64 to int32. Prefix/suffix globals retain full pair intervals; local shapes reuse world-local ranks; all three manifold subkey bits remain exact.</p>
-      <ul>
-        <li>Nsight confirms four int32 radix passes per contact sort instead of eight int64 passes. A matched 300-replay G1 bracket improves 1.574M → 1.599M physics steps/s (+1.54%).</li>
-        <li>Short graph-leapfrog training reaches 877.7k/s versus 875.9k/s (+0.2%, within noise). This is a modest general collision win, not a major training breakthrough.</li>
-        <li>Meshes, convex meshes, heightfields, SDFs, external shapes, oversized keys, and expert pipelines automatically retain the original int64 path. No tuning knob is exposed.</li>
-        <li>Compact/full contact arrays, keys, and sticky matches are bit-identical under graph capture. Both long collision determinism tests pass; all 40 reduced tests pass after one transient graph-instantiation failure passed alone. Contact-rich Anymal/H1/G1 and single-/multi-world screens remain finite.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · −8.1% ABA MEDIAN</span><time>3 Jul</time></div>
-      <h2>Depth lanes forward parent state through registers</h2>
-      <p>Nsight Compute showed 80% long-scoreboard issue delay, only 13% eligible-warp cycles, 22.3% achieved occupancy, and an 86% L2 hit rate. Wider tiles lost 2.4%; the winning response removes dependent loads instead.</p>
-      <ul>
-        <li>A precomputed parent-lane index lets each depth lane forward parent velocity and Coriolis state with 12 subgroup register shuffles, avoiding their global-memory round trip. Tree arithmetic and deterministic ordering are unchanged.</li>
-        <li>ABA advance median falls 127.2 → 117.0 µs (−8.1%); mean falls 134.3 → 116.8 µs (−13.0%). Short training reaches 876k/s versus 873k/s (+0.3%; deliberately reported conservatively).</li>
-        <li>All 40 CUDA-graph tests pass across 8/16/32-lane topologies, loops, contacts, Featherstone parity, six-DOF roots, momentum/energy, and live mass updates. Contact-rich Anymal/H1/G1 fleets remain finite.</li>
-        <li>The refreshed concurrent-training trace still ranks advance first at 9.1%, then contact-row build 7.1%, contact solve 5.7%, publish 5.4%, factor 4.7%, and narrow phase 2.6%. Overlap hides much of the isolated kernel gain.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · +1.3% TRAINING</span><time>3 Jul</time></div>
-      <h2>Inverse factors now scale with actual DOFs, not joint count</h2>
-      <p>The exact per-joint D⁻¹ blocks now use six columns per real DOF instead of reserving a 6×6 matrix for every fixed, revolute, and multi-axis joint. Matrix values, arithmetic order, graph capture, and deterministic solve order are unchanged.</p>
-      <ul>
-        <li>Isolated short training improves 862k → 873k samples/s (+1.3%), reducing the nanoG1 gap to 1.47×; G1 GPU use falls by about 47 MiB at 8,192 worlds.</li>
-        <li>Physics-only timing is neutral within run noise (1.584M measured versus the preceding 1.593M reference).</li>
-        <li>All 40 CUDA-graph tests pass, including six-DOF roots, loops, ABA/mass-matrix parity, Featherstone comparisons, momentum/energy, contacts, and live mass updates. Anymal/H1/G1 contact fleets remain finite.</li>
-        <li>A full 96-row shared response cache was tested and reverted: it lost 14% from fixed loading and shared-memory occupancy.</li>
       </ul>
     </article>
     <div class="section-label">Next decisions</div>
@@ -396,6 +264,7 @@
           <li>Path-sparse Jacobian cache: −1.5% physics; indexed tile dots slowed every PGS update.</li>
           <li>Remove ABA generalized-acceleration stores: neutral/slightly slower.</li>
           <li>Full 96-row shared response cache: −14% from fixed loads and occupancy.</li>
+          <li>Shared ABA-factor cache in contact-row blocks: mixed by articulation width/batch and −3–5% on smaller G1/ANYmal fleets; moving global reads to a synchronized shared phase is not a universal latency fix.</li>
           <li>Row-builder local ancestor stack: −25%.</li>
           <li>BF16 recurrent forward: +0.3%, removed.</li>
         </ul>

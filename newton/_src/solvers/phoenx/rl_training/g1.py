@@ -1040,54 +1040,54 @@ def g1_observe_reward_kernel(
     q_base = world * coord_stride
     qd_base = world * dof_stride
 
-    qx = joint_q[q_base + wp.int32(3)]
-    qy = joint_q[q_base + wp.int32(4)]
-    qz = joint_q[q_base + wp.int32(5)]
-    qw = joint_q[q_base + wp.int32(6)]
-    lin_com_w = wp.vec3(joint_qd[qd_base], joint_qd[qd_base + wp.int32(1)], joint_qd[qd_base + wp.int32(2)])
-    ang_w = wp.vec3(
-        joint_qd[qd_base + wp.int32(3)],
-        joint_qd[qd_base + wp.int32(4)],
-        joint_qd[qd_base + wp.int32(5)],
-    )
-    root_com_b = body_com[world * body_stride]
-    root_com_w = _quat_rotate_wxyz(qw, qx, qy, qz, root_com_b)
-    lin_origin_w = lin_com_w - wp.cross(ang_w, root_com_w)
-    lin_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, lin_origin_w)
-    ang_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, ang_w)
-    gravity_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, wp.vec3(0.0, 0.0, -1.0))
-    target_delta_w = wp.vec3(
-        target_position[world, 0] - joint_q[q_base],
-        target_position[world, 1] - joint_q[q_base + wp.int32(1)],
-        wp.float32(0.0),
-    )
-    target_delta_b = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, target_delta_w)
+    qx = wp.float32(0.0)
+    qy = wp.float32(0.0)
+    qz = wp.float32(0.0)
+    qw = wp.float32(0.0)
+    lin_origin_w = wp.vec3(0.0)
+    ang_w = wp.vec3(0.0)
+    target_delta_w = wp.vec3(0.0)
+    root_motion = wp.spatial_vector()
+    root_targets = wp.spatial_vector()
+    if col == wp.int32(0):
+        qx = joint_q[q_base + wp.int32(3)]
+        qy = joint_q[q_base + wp.int32(4)]
+        qz = joint_q[q_base + wp.int32(5)]
+        qw = joint_q[q_base + wp.int32(6)]
+        lin_com_w = wp.vec3(joint_qd[qd_base], joint_qd[qd_base + wp.int32(1)], joint_qd[qd_base + wp.int32(2)])
+        ang_w = wp.vec3(
+            joint_qd[qd_base + wp.int32(3)],
+            joint_qd[qd_base + wp.int32(4)],
+            joint_qd[qd_base + wp.int32(5)],
+        )
+        root_com_b = body_com[world * body_stride]
+        root_com_w = _quat_rotate_wxyz(qw, qx, qy, qz, root_com_b)
+        lin_origin_w = lin_com_w - wp.cross(ang_w, root_com_w)
+        lin_b_local = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, lin_origin_w)
+        ang_b_local = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, ang_w)
+        gravity_b_local = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, wp.vec3(0.0, 0.0, -1.0))
+        target_delta_w = wp.vec3(
+            target_position[world, 0] - joint_q[q_base],
+            target_position[world, 1] - joint_q[q_base + wp.int32(1)],
+            wp.float32(0.0),
+        )
+        target_delta_b_local = _quat_rotate_inverse_wxyz(qw, qx, qy, qz, target_delta_w)
+        root_motion = wp.spatial_vector(lin_b_local, ang_b_local)
+        root_targets = wp.spatial_vector(gravity_b_local, target_delta_b_local)
+
+    root_motion_tile = wp.tile_from_thread(shape=(1,), value=root_motion, thread_idx=0, storage="shared")
+    root_targets_tile = wp.tile_from_thread(shape=(1,), value=root_targets, thread_idx=0, storage="shared")
+    shared_root_motion = wp.tile_extract(root_motion_tile, 0)
+    shared_root_targets = wp.tile_extract(root_targets_tile, 0)
+    lin_b = wp.spatial_top(shared_root_motion)
+    ang_b = wp.spatial_bottom(shared_root_motion)
+    gravity_b = wp.spatial_top(shared_root_targets)
+    target_delta_b = wp.spatial_bottom(shared_root_targets)
+
+    if col >= wp.int32(obs.shape[1]):
+        return
 
     state_bad = wp.int32(0)
-    if not wp.isfinite(qw) or not wp.isfinite(qx) or not wp.isfinite(qy) or not wp.isfinite(qz):
-        state_bad = wp.int32(1)
-    for i in range(3):
-        root_q = joint_q[q_base + i]
-        if not wp.isfinite(root_q):
-            state_bad = wp.int32(1)
-        if max_abs_root_position > wp.float32(0.0) and wp.abs(root_q) > max_abs_root_position:
-            state_bad = wp.int32(1)
-    if max_abs_root_linear_velocity > wp.float32(0.0):
-        if wp.dot(lin_origin_w, lin_origin_w) > max_abs_root_linear_velocity * max_abs_root_linear_velocity:
-            state_bad = wp.int32(1)
-    if max_abs_root_angular_velocity > wp.float32(0.0):
-        if wp.dot(ang_w, ang_w) > max_abs_root_angular_velocity * max_abs_root_angular_velocity:
-            state_bad = wp.int32(1)
-    for j in range(ACTION_DIM_G1):
-        joint_pos = joint_q[q_base + wp.int32(7) + j]
-        joint_vel = joint_qd[qd_base + wp.int32(6) + j]
-        if not wp.isfinite(joint_pos) or not wp.isfinite(joint_vel):
-            state_bad = wp.int32(1)
-        if max_abs_joint_position > wp.float32(0.0) and wp.abs(joint_pos) > max_abs_joint_position:
-            state_bad = wp.int32(1)
-        if max_abs_joint_velocity > wp.float32(0.0) and wp.abs(joint_vel) > max_abs_joint_velocity:
-            state_bad = wp.int32(1)
-
     value = wp.float32(0.0)
     if observation_mode == wp.int32(1):
         if col < wp.int32(3):
@@ -1144,6 +1144,30 @@ def g1_observe_reward_kernel(
     obs[world, col] = _clip_finite(value, wp.float32(-100.0), wp.float32(100.0))
 
     if col == 0:
+        if not wp.isfinite(qw) or not wp.isfinite(qx) or not wp.isfinite(qy) or not wp.isfinite(qz):
+            state_bad = wp.int32(1)
+        for i in range(3):
+            root_q = joint_q[q_base + i]
+            if not wp.isfinite(root_q):
+                state_bad = wp.int32(1)
+            if max_abs_root_position > wp.float32(0.0) and wp.abs(root_q) > max_abs_root_position:
+                state_bad = wp.int32(1)
+        if max_abs_root_linear_velocity > wp.float32(0.0):
+            if wp.dot(lin_origin_w, lin_origin_w) > max_abs_root_linear_velocity * max_abs_root_linear_velocity:
+                state_bad = wp.int32(1)
+        if max_abs_root_angular_velocity > wp.float32(0.0):
+            if wp.dot(ang_w, ang_w) > max_abs_root_angular_velocity * max_abs_root_angular_velocity:
+                state_bad = wp.int32(1)
+        for j in range(ACTION_DIM_G1):
+            joint_pos = joint_q[q_base + wp.int32(7) + j]
+            joint_vel = joint_qd[qd_base + wp.int32(6) + j]
+            if not wp.isfinite(joint_pos) or not wp.isfinite(joint_vel):
+                state_bad = wp.int32(1)
+            if max_abs_joint_position > wp.float32(0.0) and wp.abs(joint_pos) > max_abs_joint_position:
+                state_bad = wp.int32(1)
+            if max_abs_joint_velocity > wp.float32(0.0) and wp.abs(joint_vel) > max_abs_joint_velocity:
+                state_bad = wp.int32(1)
+
         lin_b_x = _clip_finite(lin_b[0], wp.float32(-50.0), wp.float32(50.0))
         lin_b_y = _clip_finite(lin_b[1], wp.float32(-50.0), wp.float32(50.0))
         lin_b_z = _clip_finite(lin_b[2], wp.float32(-50.0), wp.float32(50.0))
@@ -2703,9 +2727,10 @@ class EnvG1PhoenX:
                 device=self.device,
             )
 
-        wp.launch(
+        wp.launch_tiled(
             g1_observe_reward_kernel,
-            dim=(self.world_count, self.obs_dim),
+            dim=[self.world_count],
+            block_dim=128,
             inputs=[
                 self.state_0.joint_q,
                 self.state_0.joint_qd,
