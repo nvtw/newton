@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · exact sparse contact rows retained</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · response-basis production study complete</strong></div>
     </header>
 
     <section class="hero">
@@ -187,6 +187,18 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag">RESPONSE BASIS · PRODUCTION PATH REJECTED</span><time>3 Jul</time></div>
+      <h2>The 1.142× microbenchmark did not survive full solver integration</h2>
+      <p>Three exact production implementations tested whether six unit-wrench ABA responses per contacted body could replace repeated per-row traversals. All retained hard-Hertz projection, deterministic row order, direct fallback, arbitrary paging, and graph capture; all were fully reverted because end-to-end performance regressed.</p>
+      <ul>
+        <li>Materializing ordinary packed rows from the basis reached about 1.79M versus 1.92M physics steps/s; synthesis traffic erased the traversal saving.</li>
+        <li>The compact 12×12 basis-space PGS path was physically sound: direct/basis joint and body states agreed within 2e−6, and three-page contact disappearance/reappearance passed in one graph.</li>
+        <li>Its dense-coefficient version reached 849k training samples/s versus the retained 872.5k/s baseline. Parallel sparse effective-mass derivation helped physics slightly but did not repair training throughput.</li>
+        <li>On-the-fly sparse tiles fell to 832k/s; a 12-lane register/shuffle formulation reached only about 1.77M physics steps/s. Both were reverted.</li>
+        <li>The original microbenchmark omitted production effective-mass work, mixed eligible/direct pages, fused articulation application, and learner overlap. Its local 14.2% result was real but insufficient evidence for an end-to-end win.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED · EXACT ROW WORK REDUCTION</span><time>3 Jul</time></div>
       <h2>Contact rows now clear only the previously active articulation path</h2>
@@ -317,9 +329,9 @@
     <div class="section-label">Next decisions</div>
     <section class="next">
       <div>
-        <h2>Generalize exact contacted-body response bases</h2>
-        <p>A fresh 8,192-world live-G1 microbenchmark replaces repeated per-row ABA traversals with six unit-wrench responses per unique contacted body, then synthesizes every row by linearity. The full measured prepare+solve path falls 545.8 → 477.9 µs (1.142×); Jacobians are exact and response/impulse differences stay below 2.3e−6 from deterministic arithmetic reordering.</p>
-        <p><strong>Next:</strong> integrate this adaptively for arbitrary contacted bodies and pages, then gate articulation–ground, articulation–rigid, articulation–articulation, multiple articulations per world, loops, momentum, hard-Hertz convergence, graph capture, determinism, diverse robots, and full training. Keep the direct ABA path when basis construction cannot amortize.</p>
+        <h2>Return to end-to-end work elimination</h2>
+        <p>The response-basis study shows that optimizing row construction in isolation is not enough: extra operator construction, synchronization, and overlap pressure can dominate. The retained sparse-row path remains the best measured exact implementation.</p>
+        <p><strong>Next:</strong> target work that disappears across multiple phases—especially factor/advance/publish dataflow or a bounded persistent articulation pipeline—while keeping short full-training brackets ahead of elaborate validation. Revisit bases only if a new primitive can avoid explicit coefficient/operator traffic.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -363,7 +375,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step:</strong> generalize the exact contacted-body response-basis prototype with an automatic cost rule and direct-ABA fallback. Do not retry contact-delta register forwarding, wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
+          <li><strong>Immediate next step:</strong> prototype cross-phase work elimination or bounded persistent articulation execution; gate it on full training early. Do not retry explicit response-basis operators, contact-delta register forwarding, wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
         </ul>
       </div>
     </section>
