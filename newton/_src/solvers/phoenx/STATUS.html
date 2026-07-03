@@ -317,9 +317,9 @@
     <div class="section-label">Next decisions</div>
     <section class="next">
       <div>
-        <h2>Refresh the real-training critical path</h2>
-        <p>The refreshed physics trace ranks packed contact-row build first at 22.8%, then ABA advance 13.8%, contact solve 13.2%, publish 7.8%, and the now-smaller factor at 6.9%. Training shares are lower for contact work because policies carry fewer rows than the standing profile.</p>
-        <p><strong>Next:</strong> return to the refreshed solver ranking. ABA advance remains largest, followed by packed row build, contact solve, publish, and factor; pursue exact work elimination with short end-to-end brackets.</p>
+        <h2>Generalize exact contacted-body response bases</h2>
+        <p>A fresh 8,192-world live-G1 microbenchmark replaces repeated per-row ABA traversals with six unit-wrench responses per unique contacted body, then synthesizes every row by linearity. The full measured prepare+solve path falls 545.8 → 477.9 µs (1.142×); Jacobians are exact and response/impulse differences stay below 2.3e−6 from deterministic arithmetic reordering.</p>
+        <p><strong>Next:</strong> integrate this adaptively for arbitrary contacted bodies and pages, then gate articulation–ground, articulation–rigid, articulation–articulation, multiple articulations per world, loops, momentum, hard-Hertz convergence, graph capture, determinism, diverse robots, and full training. Keep the direct ABA path when basis construction cannot amortize.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -363,7 +363,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step:</strong> use the refreshed training ranking to select the next exact, general solver optimization. Do not retry contact-delta register forwarding, wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
+          <li><strong>Immediate next step:</strong> generalize the exact contacted-body response-basis prototype with an automatic cost rule and direct-ABA fallback. Do not retry contact-delta register forwarding, wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
         </ul>
       </div>
     </section>
