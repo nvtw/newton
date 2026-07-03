@@ -607,6 +607,11 @@ If you ever see a graph-captured PhoenX scene where bodies appear to be on rails
   875.9k versus 873k samples/s (+0.3%). All 40 reduced CUDA-graph tests pass,
   including serial parity across 8/16/32-lane topologies; Anymal/H1/G1 contact
   fleets remain finite.
+- A refreshed concurrent-training trace still ranks advance at 9.1%, packed
+  row build 7.1%, contact solve 5.7%, publish 5.4%, factor 4.7%, and narrow
+  phase 2.6%; overlap hides much of the isolated advance gain. Extending the
+  shuffles to final acceleration/twist improved isolated median another 2.5%
+  but reduced training to 869k/s, so that extension was fully reverted.
 
 ## Real G1 training trace after factor compaction (2026-07-03)
 

@@ -120,7 +120,7 @@
         <li>A precomputed parent-lane index lets each depth lane forward parent velocity and Coriolis state with 12 subgroup register shuffles, avoiding their global-memory round trip. Tree arithmetic and deterministic ordering are unchanged.</li>
         <li>ABA advance median falls 127.2 → 117.0 µs (−8.1%); mean falls 134.3 → 116.8 µs (−13.0%). Short training reaches 876k/s versus 873k/s (+0.3%; deliberately reported conservatively).</li>
         <li>All 40 CUDA-graph tests pass across 8/16/32-lane topologies, loops, contacts, Featherstone parity, six-DOF roots, momentum/energy, and live mass updates. Contact-rich Anymal/H1/G1 fleets remain finite.</li>
-        <li>The real-training ranking before this win was: ABA advance 8.9%, contact-row build 7.2%, contact solve 5.8%, publish 5.3%, factor 4.7%, and narrow phase 2.6%.</li>
+        <li>The refreshed concurrent-training trace still ranks advance first at 9.1%, then contact-row build 7.1%, contact solve 5.7%, publish 5.4%, factor 4.7%, and narrow phase 2.6%. Overlap hides much of the isolated kernel gain.</li>
       </ul>
     </article>
     <article>
@@ -155,7 +155,7 @@
       <div>
         <h2>Refresh the real-training critical path</h2>
         <p>The refreshed physics trace ranks packed contact-row build first at 22.8%, then ABA advance 13.8%, contact solve 13.2%, publish 7.8%, and the now-smaller factor at 6.9%. Training shares are lower for contact work because policies carry fewer rows than the standing profile.</p>
-        <p><strong>Next:</strong> refresh the training-weighted ranking after parent forwarding, then target packed contact-row producer work or the collision pipeline according to measured payoff. Dense shared response caching loses 14%, the hard-coded two-body unit-wrench upper bound is only 1.14×, and path sparsity loses 1.5%.</p>
+        <p><strong>Next:</strong> target packed contact-row producer work, now the clearest independent solver cost at 7.1%, while keeping collision work in scope when its measured combined payoff exceeds solver candidates. Dense shared response caching loses 14%, the hard-coded two-body unit-wrench upper bound is only 1.14×, and path sparsity loses 1.5%.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -196,7 +196,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step:</strong> refresh the training-weighted trace after ABA parent forwarding, then reduce the next measured solver/collision bottleneck. Do not retry wider ABA tiles or the full shared response slab.</li>
+          <li><strong>Immediate next step:</strong> reduce packed contact-row producer work without scene-specific bases. Collision is in scope when quality-preserving; do not retry wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
         </ul>
       </div>
     </section>
