@@ -116,7 +116,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · measured experiment result</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · topology cache candidate</strong></div>
     </header>
 
     <section class="hero">
@@ -198,6 +198,19 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">CANDIDATE · CROSS-ROBOT TOPOLOGY CACHE</span><time>3 Jul</time></div>
+      <h2>Static topology caching wins across G1, ANYmal, and H1</h2>
+      <p>The post-cache Nsight result showed that row threads still repeatedly chased static parent, path, and DOF metadata. A 768-byte shared cache now stores local parent and DOF metadata once per articulation block; every exact row uses a bounded parent walk while the proven factor cache, row order, and articulated equations remain unchanged.</p>
+      <ul>
+        <li>The 8192-world exact row microbenchmark is bit-identical and improves 220.8 → 210.7 µs (−4.6%). A larger staged-row design was 5% slower and was removed.</li>
+        <li>Matched G1 brackets reach 926.1k and 927.7k samples/s versus an immediate clean retained control at 920.6k/s: about +0.5–0.8%, depending on the retained control bracket.</li>
+        <li>Cross-robot multi-world contacts improve ANYmal 730.4k → 738.7k/s (+1.1%) and H1 708.9k → 717.9k/s (+1.3%).</li>
+        <li>With 64 articulations in one contacted world, ANYmal improves 89.1k → 90.5k/s (+1.6%) and H1 90.9k → 94.1k/s (+3.5%). Final state magnitudes are identical.</li>
+        <li>Articulations above 64 bodies automatically retain the original exact builder. Seven focused CUDA-graph regressions pass: exact rows, fallback selection, arbitrary contact pages, persistent/reference parity, multiple articulations per world, deterministic dense contacts, and spatial momentum.</li>
+        <li>Commit <code>7bc6b868</code> is clean on <code>twidmer/experiment-phoenx-staged-contact-rows</code>. This is a general retained-candidate improvement, not yet the requested needle-moving row-free persistent architecture.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag warn">MEASURED · BUILDER WIN REJECTED END TO END</span><time>3 Jul</time></div>
       <h2>Faster row construction alone does not move training throughput</h2>
