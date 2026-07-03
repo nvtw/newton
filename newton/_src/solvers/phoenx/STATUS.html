@@ -78,7 +78,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · compact contact sort retained</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · empty GJK stage removed</strong></div>
     </header>
 
     <section class="hero">
@@ -93,9 +93,9 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">878k/s</div><div class="label">short steady graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.46×</div><div class="label">slower than pinned nanoG1</div></div>
-      <div class="card"><div class="metric good">+5.9%</div><div class="label">cumulative short-training gain</div></div>
+      <div class="card"><div class="metric">891k/s</div><div class="label">short steady graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.44×</div><div class="label">slower than pinned nanoG1</div></div>
+      <div class="card"><div class="metric good">+7.5%</div><div class="label">cumulative short-training gain</div></div>
     </section>
 
     <div class="section-label">Current state</div>
@@ -107,11 +107,22 @@
         <li>A fresh 157.3M-sample run passes the complete gate at seed 1000 and seed 2000.</li>
         <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
         <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
-        <li>The controlled short graph-leapfrog benchmark now reaches 878k samples/s; the proven full-quality recipe is unchanged.</li>
+        <li>The controlled short graph-leapfrog benchmark now reaches 891k samples/s; the proven full-quality recipe is unchanged.</li>
       </ul>
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · +1.2% TRAINING</span><time>3 Jul</time></div>
+      <h2>Provably empty GJK/MPR stages no longer enter the graph</h2>
+      <p>The collision pipeline now proves from the complete pair topology whether generic convex work is possible. Eligible graphs omit the node at construction; unproven, external, and genuine convex scenes retain the unchanged path. There is no runtime conditional or tuning knob.</p>
+      <ul>
+        <li>A same-session short-training bracket improves about 880k → 891k samples/s (+1.2%), reducing the pinned nanoG1 gap to 1.44×.</li>
+        <li>Physics-only is neutral (1.610M original versus 1.609M specialized), as is H1 at 4,096 worlds. The gain comes from removing contention on the overlapped rollout path, not changing physics.</li>
+        <li>Specialized and forced-original contact arrays are bit-identical under graph capture; a box–box scene proves GJK fallback remains active. Long deterministic/sticky tests and diverse single-/multi-world robot screens pass.</li>
+        <li>The fresh trace still ranks advance 15.3%, row build 12.6%, contact solve 10.1%, publish 9.3%, and factor 8.2%. Shared-delta reuse was neutral and parent-delta shuffles lost 0.5%; both were fully reverted.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED · +1.54% PHYSICS</span><time>3 Jul</time></div>
       <h2>Primitive contact sorting now needs half as many radix passes</h2>
@@ -166,7 +177,7 @@
       <div>
         <h2>Refresh the real-training critical path</h2>
         <p>The refreshed physics trace ranks packed contact-row build first at 22.8%, then ABA advance 13.8%, contact solve 13.2%, publish 7.8%, and the now-smaller factor at 6.9%. Training shares are lower for contact work because policies carry fewer rows than the standing profile.</p>
-        <p><strong>Next:</strong> refresh the steady training trace after the compact sort, then target the largest remaining rollout-stream cost with short brackets. Packed contact-row work remains attractive, but its dense shared, hard-coded two-body, and path-sparse alternatives already lost or lacked generality.</p>
+        <p><strong>Next:</strong> return to the refreshed solver ranking. ABA advance remains largest, followed by packed row build, contact solve, publish, and factor; pursue exact work elimination with short end-to-end brackets.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -207,7 +218,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step:</strong> refresh the steady training trace, then attack its largest general rollout-stream cost. Collision remains in scope when quality-preserving; do not retry wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
+          <li><strong>Immediate next step:</strong> use the refreshed training ranking to select the next exact, general solver optimization. Do not retry contact-delta register forwarding, wider ABA tiles, final acceleration/twist shuffles, or the full shared response slab.</li>
         </ul>
       </div>
     </section>

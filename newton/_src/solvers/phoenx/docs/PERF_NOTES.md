@@ -6,6 +6,31 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Statically omit provably empty GJK/MPR stages (2026-07-03)
+- CollisionPipeline now proves from the complete collision topology whether any
+  pair can reach the generic convex stage. Explicit broad phases inspect every
+  configured pair; NXN/SAP conservatively inspect every geometry-type
+  combination. External shapes and every unproven case retain GJK/MPR.
+  Eligible graphs omit the node at construction, so there is no runtime
+  conditional, host synchronization, tuning knob, or contact approximation.
+- Fresh steady-training profiling had attributed 4.3% of kernel time to GJK/MPR
+  even though canonical G1 produces only analytic plane-cylinder and plane-box
+  pairs. A same-session short-training bracket improves about 880k to 891k
+  samples/s (+1.2%). Physics-only is neutral (1.610M original versus 1.609M
+  specialized), as is H1 at 4096 worlds (3.229M versus 3.226M); the measured
+  training gain comes from removing contention on the overlapped rollout path.
+- The specialized and forced-original graphs produce bit-identical contact
+  arrays. A real box-box scene proves the generic fallback remains active.
+  Long deterministic/sticky collision tests pass. The 40 reduced tests pass
+  (39 together plus the recurring driver graph-instantiation case alone), and
+  contact-rich Anymal/H1/G1 screens remain finite in multi-world and
+  many-articulation single-world layouts.
+- Two related contact-solve traffic experiments were rejected: keeping
+  generalized delta in shared memory was neutral (+0.1%), while forwarding
+  parent body delta through registers lost about 0.5% from added live
+  registers and shuffles.
+
+
 ### Lossless compact primitive contact sort (2026-07-03)
 - Primitive-only deterministic pipelines now rank valid multi-world shape pairs
   into a lossless positive int32 key. Prefix and suffix global shapes retain

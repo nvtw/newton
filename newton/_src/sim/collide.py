@@ -30,6 +30,66 @@ from ..sim.contacts import Contacts
 from ..sim.model import Model
 from ..sim.state import State
 
+_ANALYTIC_PRIMITIVE_PAIRS = frozenset(
+    {
+        (int(GeoType.PLANE), int(GeoType.SPHERE)),
+        (int(GeoType.PLANE), int(GeoType.CAPSULE)),
+        (int(GeoType.PLANE), int(GeoType.ELLIPSOID)),
+        (int(GeoType.PLANE), int(GeoType.CYLINDER)),
+        (int(GeoType.PLANE), int(GeoType.BOX)),
+        (int(GeoType.SPHERE), int(GeoType.SPHERE)),
+        (int(GeoType.SPHERE), int(GeoType.CAPSULE)),
+        (int(GeoType.SPHERE), int(GeoType.CYLINDER)),
+        (int(GeoType.SPHERE), int(GeoType.BOX)),
+        (int(GeoType.CAPSULE), int(GeoType.CAPSULE)),
+    }
+)
+
+
+def _pair_requires_generic_convex_narrow_phase(type_a: int, type_b: int) -> bool:
+    type_a, type_b = min(type_a, type_b), max(type_a, type_b)
+    if type_a in (int(GeoType.HFIELD), int(GeoType.MESH)):
+        return False
+    if type_b in (int(GeoType.HFIELD), int(GeoType.MESH)):
+        return False
+    if type_a == int(GeoType.PLANE) and type_b == int(GeoType.PLANE):
+        return False
+    return (type_a, type_b) not in _ANALYTIC_PRIMITIVE_PAIRS
+
+
+def _has_generic_convex_pairs(
+    model: Model,
+    *,
+    broad_phase_mode: str,
+    shape_pairs_filtered: Any,
+    extra_shape_count: int,
+) -> bool:
+    """Conservatively prove whether any broad-phase pair can reach GJK/MPR."""
+    if extra_shape_count != 0 or model.shape_type is None:
+        return True
+    shape_types = model.shape_type.numpy()
+    if broad_phase_mode == "explicit":
+        if shape_pairs_filtered is None:
+            return True
+        pairs = (
+            shape_pairs_filtered.numpy()
+            if isinstance(shape_pairs_filtered, wp.array)
+            else np.asarray(shape_pairs_filtered, dtype=np.int32)
+        )
+        if pairs.size == 0:
+            return False
+        pair_types = shape_types[pairs.reshape(-1, 2)]
+        return any(
+            _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b)) for type_a, type_b in pair_types
+        )
+
+    unique_types = np.unique(shape_types)
+    return any(
+        _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b))
+        for index, type_a in enumerate(unique_types)
+        for type_b in unique_types[index:]
+    )
+
 
 def _primitive_compact_sort_config(
     model: Model,
@@ -981,6 +1041,13 @@ class CollisionPipeline:
                 }
                 use_lean_gjk_mpr = not bool(lean_unsupported & set(shape_types.tolist()))
 
+            has_generic_convex_pairs = _has_generic_convex_pairs(
+                model,
+                broad_phase_mode=self.broad_phase_mode,
+                shape_pairs_filtered=self.shape_pairs_filtered,
+                extra_shape_count=self.extra_shape_count,
+            )
+
             compact_sort_config = None
             if deterministic:
                 compact_sort_config = _primitive_compact_sort_config(
@@ -1032,6 +1099,7 @@ class CollisionPipeline:
                 has_meshes=has_meshes,
                 has_heightfields=has_heightfields,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
+                has_generic_convex_pairs=has_generic_convex_pairs,
                 mesh_sdf_uses_texture=mesh_sdf_uses_texture,
                 deterministic=deterministic,
                 contact_max=rigid_contact_max,

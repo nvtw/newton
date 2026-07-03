@@ -1484,6 +1484,81 @@ class TestDeterministicPipeline(unittest.TestCase):
     pass
 
 
+def test_static_empty_gjk_specialization_under_graph_capture(test, device):
+    blueprint = newton.ModelBuilder()
+    body = blueprint.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.15)))
+    blueprint.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
+
+    builder = newton.ModelBuilder()
+    for world in range(3):
+        builder.add_world(
+            blueprint,
+            xform=wp.transform(p=wp.vec3(float(world), 0.0, 0.0)),
+        )
+    builder.add_ground_plane()
+    model = builder.finalize(device=device)
+
+    specialized = newton.CollisionPipeline(
+        model,
+        deterministic=True,
+        rigid_contact_max=64,
+    )
+    reference = newton.CollisionPipeline(
+        model,
+        deterministic=True,
+        rigid_contact_max=64,
+    )
+    test.assertFalse(specialized.narrow_phase.has_generic_convex_pairs)
+    reference.narrow_phase.has_generic_convex_pairs = True
+
+    state = model.state()
+    contacts = specialized.contacts()
+    reference_contacts = reference.contacts()
+    with wp.ScopedCapture(device=device) as capture:
+        specialized.collide(state, contacts)
+        reference.collide(state, reference_contacts)
+    wp.capture_launch(capture.graph)
+
+    active = int(contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(active, 0)
+    test.assertEqual(active, int(reference_contacts.rigid_contact_count.numpy()[0]))
+    for name in (
+        "rigid_contact_shape0",
+        "rigid_contact_shape1",
+        "rigid_contact_point0",
+        "rigid_contact_point1",
+        "rigid_contact_normal",
+        "rigid_contact_offset0",
+        "rigid_contact_offset1",
+        "rigid_contact_margin0",
+        "rigid_contact_margin1",
+    ):
+        np.testing.assert_array_equal(
+            getattr(contacts, name).numpy()[:active],
+            getattr(reference_contacts, name).numpy()[:active],
+        )
+
+    generic_builder = newton.ModelBuilder()
+    body0 = generic_builder.add_body(xform=wp.transform(p=wp.vec3(-0.1, 0.0, 0.0)))
+    body1 = generic_builder.add_body(xform=wp.transform(p=wp.vec3(0.1, 0.0, 0.0)))
+    generic_builder.add_shape_box(body0, hx=0.2, hy=0.2, hz=0.2)
+    generic_builder.add_shape_box(body1, hx=0.2, hy=0.2, hz=0.2)
+    generic_model = generic_builder.finalize(device=device)
+    generic_pipeline = newton.CollisionPipeline(
+        generic_model,
+        deterministic=True,
+        rigid_contact_max=16,
+    )
+    test.assertTrue(generic_pipeline.narrow_phase.has_generic_convex_pairs)
+
+    generic_state = generic_model.state()
+    generic_contacts = generic_pipeline.contacts()
+    with wp.ScopedCapture(device=device) as generic_capture:
+        generic_pipeline.collide(generic_state, generic_contacts)
+    wp.capture_launch(generic_capture.graph)
+    test.assertGreater(int(generic_contacts.rigid_contact_count.numpy()[0]), 0)
+
+
 def test_compact_contact_sort_pipeline_selection(test, device):
     blueprint = newton.ModelBuilder()
     body = blueprint.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.15)))
@@ -2151,6 +2226,14 @@ add_function_test(
     TestDeterministicPipeline,
     "test_deterministic_pipeline_sticky_500_steps",
     test_deterministic_pipeline_sticky_500_steps,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_static_empty_gjk_specialization_under_graph_capture",
+    test_static_empty_gjk_specialization_under_graph_capture,
     devices=get_cuda_test_devices(),
     check_output=False,
 )
