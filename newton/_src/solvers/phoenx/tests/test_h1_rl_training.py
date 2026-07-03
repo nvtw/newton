@@ -30,7 +30,7 @@ class TestH1PhoenXRL(unittest.TestCase):
         env.step(actions)
         env.reset()
         with wp.ScopedCapture(device=device) as capture:
-            for _ in range(3):
+            for _ in range(50):
                 env.step(actions)
         wp.capture_launch(capture.graph)
 
@@ -50,6 +50,10 @@ class TestH1PhoenXRL(unittest.TestCase):
             targets[:, 6:25], np.tile(expected_targets, (env.world_count, 1)), rtol=0.0, atol=1.0e-6
         )
         self.assertGreater(float(np.min(q[:, 2])), 0.8)
+        self.assertGreaterEqual(int(np.count_nonzero(env.foot_contacts.numpy())), env.world_count)
+        shape_bodies = {int(body) % env.body_stride for body in env.model.shape_body.numpy() if body >= 0}
+        self.assertIn(env._left_foot_body_local, shape_bodies)
+        self.assertIn(env._right_foot_body_local, shape_bodies)
 
     def test_initial_observation_matches_nominal_pose(self) -> None:
         device = require_cuda_graph_capture("PhoenX H1 RL tests")

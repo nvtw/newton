@@ -11,10 +11,16 @@ import warp as wp
 import newton
 import newton.utils
 
+from .command_observation import advance_command_seed_kernel, sample_done_velocity_commands_kernel
+from .contact_observation import scan_two_body_contacts_kernel
 from .reward_functions import gaussian_reward, projected_gravity_flat_penalty, tracking_reward_2d
 
 ACTION_DIM_H1 = 19
 OBS_DIM_H1 = 12 + 3 * ACTION_DIM_H1
+
+# AABB of the official ankle collision mesh; primitives avoid mesh-plane triangle expansion at RL scale.
+_H1_FOOT_COLLISION_CENTER = (0.05, 0.0, -0.02952094)
+_H1_FOOT_COLLISION_HALF_EXTENTS = (0.15, 0.015, 0.04047906)
 
 _H1_DEFAULT_Q = (
     0.0,
@@ -140,6 +146,8 @@ def h1_apply_actions_kernel(
 
 @wp.kernel(enable_backward=False)
 def h1_observe_reward_kernel(
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
     joint_q: wp.array[wp.float32],
     joint_qd: wp.array[wp.float32],
     default_joint_pos: wp.array[wp.float32],
@@ -147,6 +155,13 @@ def h1_observe_reward_kernel(
     previous_actions: wp.array2d[wp.float32],
     previous_joint_velocity: wp.array2d[wp.float32],
     command: wp.array2d[wp.float32],
+    foot_contacts: wp.array2d[wp.float32],
+    foot_air_time: wp.array2d[wp.float32],
+    foot_contact_time: wp.array2d[wp.float32],
+    foot_timer_episode_step: wp.array[wp.int32],
+    left_foot_body: wp.int32,
+    right_foot_body: wp.int32,
+    body_stride: wp.int32,
     coord_stride: wp.int32,
     dof_stride: wp.int32,
     episode_steps: wp.array[wp.int32],
@@ -167,6 +182,13 @@ def h1_observe_reward_kernel(
     hip_deviation_weight: wp.float32,
     arm_deviation_weight: wp.float32,
     torso_deviation_weight: wp.float32,
+    feet_air_time_weight: wp.float32,
+    feet_slide_weight: wp.float32,
+    ankle_limit_weight: wp.float32,
+    left_ankle_lower: wp.float32,
+    left_ankle_upper: wp.float32,
+    right_ankle_lower: wp.float32,
+    right_ankle_upper: wp.float32,
     termination_weight: wp.float32,
     obs: wp.array2d[wp.float32],
     rewards: wp.array[wp.float32],
@@ -242,6 +264,54 @@ def h1_observe_reward_kernel(
         yaw_tracking = gaussian_reward(angular_world[2] - command[world, 2], yaw_rate_sigma)
         upright = -gravity_body[2]
         fall = joint_q[q_base + wp.int32(2)] < min_base_height or upright < min_upright_cos
+
+        left_contact = foot_contacts[world, 0] > wp.float32(0.5)
+        right_contact = foot_contacts[world, 1] > wp.float32(0.5)
+        current_step = episode_steps[world]
+        if current_step > foot_timer_episode_step[world]:
+            foot_timer_episode_step[world] = current_step
+            if left_contact:
+                foot_contact_time[world, 0] = foot_contact_time[world, 0] + frame_dt
+                foot_air_time[world, 0] = wp.float32(0.0)
+            else:
+                foot_air_time[world, 0] = foot_air_time[world, 0] + frame_dt
+                foot_contact_time[world, 0] = wp.float32(0.0)
+            if right_contact:
+                foot_contact_time[world, 1] = foot_contact_time[world, 1] + frame_dt
+                foot_air_time[world, 1] = wp.float32(0.0)
+            else:
+                foot_air_time[world, 1] = foot_air_time[world, 1] + frame_dt
+                foot_contact_time[world, 1] = wp.float32(0.0)
+        air_time_reward = wp.float32(0.0)
+        if left_contact != right_contact and (
+            command[world, 0] * command[world, 0] + command[world, 1] * command[world, 1]
+        ) > wp.float32(0.01):
+            left_mode_time = foot_air_time[world, 0]
+            if left_contact:
+                left_mode_time = foot_contact_time[world, 0]
+            right_mode_time = foot_air_time[world, 1]
+            if right_contact:
+                right_mode_time = foot_contact_time[world, 1]
+            air_time_reward = wp.min(wp.min(left_mode_time, right_mode_time), wp.float32(0.6))
+
+        left_foot_velocity = wp.spatial_top(body_qd[world * body_stride + left_foot_body])
+        right_foot_velocity = wp.spatial_top(body_qd[world * body_stride + right_foot_body])
+        feet_slide = wp.float32(0.0)
+        if left_contact:
+            feet_slide = feet_slide + wp.sqrt(
+                left_foot_velocity[0] * left_foot_velocity[0] + left_foot_velocity[1] * left_foot_velocity[1]
+            )
+        if right_contact:
+            feet_slide = feet_slide + wp.sqrt(
+                right_foot_velocity[0] * right_foot_velocity[0] + right_foot_velocity[1] * right_foot_velocity[1]
+            )
+
+        left_ankle = joint_q[q_base + wp.int32(11)]
+        right_ankle = joint_q[q_base + wp.int32(16)]
+        ankle_limit_cost = wp.max(left_ankle_lower - left_ankle, wp.float32(0.0))
+        ankle_limit_cost = ankle_limit_cost + wp.max(left_ankle - left_ankle_upper, wp.float32(0.0))
+        ankle_limit_cost = ankle_limit_cost + wp.max(right_ankle_lower - right_ankle, wp.float32(0.0))
+        ankle_limit_cost = ankle_limit_cost + wp.max(right_ankle - right_ankle_upper, wp.float32(0.0))
         reward = (
             lin_vel_weight * linear_tracking
             + yaw_rate_weight * yaw_tracking
@@ -254,6 +324,9 @@ def h1_observe_reward_kernel(
             + hip_deviation_weight * hip_deviation
             + arm_deviation_weight * arm_deviation
             + torso_deviation_weight * torso_deviation
+            + feet_air_time_weight * air_time_reward
+            + feet_slide_weight * feet_slide
+            + ankle_limit_weight * ankle_limit_cost
         )
         done = wp.float32(0.0)
         if fall or not wp.isfinite(reward):
@@ -295,6 +368,9 @@ def h1_reset_done_kernel(
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
     previous_joint_velocity: wp.array2d[wp.float32],
+    foot_air_time: wp.array2d[wp.float32],
+    foot_contact_time: wp.array2d[wp.float32],
+    foot_timer_episode_step: wp.array[wp.int32],
 ):
     world, col = wp.tid()
     if dones[world] <= wp.float32(0.5):
@@ -309,8 +385,12 @@ def h1_reset_done_kernel(
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
         previous_joint_velocity[world, col] = wp.float32(0.0)
+    if col < wp.int32(2):
+        foot_air_time[world, col] = wp.float32(0.0)
+        foot_contact_time[world, col] = wp.float32(0.0)
     if col == wp.int32(0):
         episode_steps[world] = wp.int32(0)
+        foot_timer_episode_step[world] = wp.int32(-1)
 
 
 @dataclass
@@ -324,6 +404,12 @@ class ConfigEnvH1PhoenX:
     velocity_iterations: int = 1
     action_scale: float = 0.5
     command: tuple[float, float, float] = (1.0, 0.0, 0.0)
+    randomize_commands: bool = False
+    command_x_range: tuple[float, float] = (0.0, 1.0)
+    command_y_range: tuple[float, float] = (0.0, 0.0)
+    command_yaw_range: tuple[float, float] = (-1.0, 1.0)
+    standing_probability: float = 0.02
+    command_seed: int = 42
     max_episode_steps: int = 1000
     min_base_height: float = 0.55
     min_upright_cos: float = 0.54
@@ -340,6 +426,10 @@ class ConfigEnvH1PhoenX:
     hip_deviation_weight: float = -0.2
     arm_deviation_weight: float = -0.2
     torso_deviation_weight: float = -0.1
+    feet_air_time_weight: float = 1.0
+    feet_slide_weight: float = -0.25
+    ankle_limit_weight: float = -1.0
+    foot_contact_normal_impulse_threshold: float = 1.0e-6
     termination_weight: float = -200.0
     ground_friction: float = 1.0
     auto_reset: bool = True
@@ -362,8 +452,16 @@ class EnvH1PhoenX:
             raise ValueError("sim_substeps must be positive")
         if self.config.articulation_mode not in ("maximal", "reduced"):
             raise ValueError("articulation_mode must be 'maximal' or 'reduced'")
+        for name, limits in (
+            ("x", self.config.command_x_range),
+            ("y", self.config.command_y_range),
+            ("yaw", self.config.command_yaw_range),
+        ):
+            if float(limits[1]) < float(limits[0]):
+                raise ValueError(f"command {name} range must be ordered")
 
         self.model = self._build_model()
+        self.body_stride = int(self.model.body_count) // self.world_count
         self.coord_stride = int(self.model.joint_coord_count) // self.world_count
         self.dof_stride = int(self.model.joint_dof_count) // self.world_count
         if self.coord_stride != 26 or self.dof_stride != 25:
@@ -379,9 +477,15 @@ class EnvH1PhoenX:
         self.state_1 = self.model.state()
         self.control = self.model.control()
         self.contacts = self.model.contacts()
+        self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
         self.default_joint_pos = wp.array(_H1_DEFAULT_Q, dtype=wp.float32, device=self.device)
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
+        self._command_seed_counter = wp.array([int(self.config.command_seed)], dtype=wp.int32, device=self.device)
+        self.foot_contacts = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
+        self.foot_air_time = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
+        self.foot_contact_time = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
+        self.foot_timer_episode_step = wp.full(self.world_count, -1, dtype=wp.int32, device=self.device)
         self.current_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.previous_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.previous_joint_velocity = wp.zeros(
@@ -419,7 +523,36 @@ class EnvH1PhoenX:
             raise RuntimeError(
                 f"Expected H1 coordinate/dof counts (26, 25), got ({len(robot.joint_q)}, {len(robot.joint_qd)})"
             )
-        robot.joint_q[:7] = [0.0, 0.0, 1.05, 0.0, 0.0, 0.0, 1.0]
+        foot_bodies = {
+            label.rsplit("/", 1)[-1]: body
+            for body, label in enumerate(robot.body_label)
+            if label.rsplit("/", 1)[-1] in ("left_ankle_link", "right_ankle_link")
+        }
+        if set(foot_bodies) != {"left_ankle_link", "right_ankle_link"}:
+            raise RuntimeError("Expected H1 left and right ankle bodies")
+        self._left_foot_body_local = foot_bodies["left_ankle_link"]
+        self._right_foot_body_local = foot_bodies["right_ankle_link"]
+        foot_xform = wp.transform(wp.vec3(*_H1_FOOT_COLLISION_CENTER), wp.quat_identity())
+        for body, label in (
+            (self._left_foot_body_local, "left_ankle_foot_collision"),
+            (self._right_foot_body_local, "right_ankle_foot_collision"),
+        ):
+            robot.add_shape_box(
+                body,
+                xform=foot_xform,
+                hx=_H1_FOOT_COLLISION_HALF_EXTENTS[0],
+                hy=_H1_FOOT_COLLISION_HALF_EXTENTS[1],
+                hz=_H1_FOOT_COLLISION_HALF_EXTENTS[2],
+                label=label,
+            )
+        ankle_limits = []
+        for dof in (10, 15):
+            lower = float(robot.joint_limit_lower[dof])
+            upper = float(robot.joint_limit_upper[dof])
+            midpoint = 0.5 * (lower + upper)
+            ankle_limits.append((midpoint + 0.9 * (lower - midpoint), midpoint + 0.9 * (upper - midpoint)))
+        self._left_ankle_soft_limits, self._right_ankle_soft_limits = ankle_limits
+        robot.joint_q[:7] = [0.0, 0.0, 0.98, 0.0, 0.0, 0.0, 1.0]
         robot.joint_q[7:26] = _H1_DEFAULT_Q
         for action in range(ACTION_DIM_H1):
             dof = 6 + action
@@ -447,11 +580,56 @@ class EnvH1PhoenX:
         self.config.command = values
         self.command.assign(np.tile(np.asarray(values, dtype=np.float32), (self.world_count, 1)))
 
+    def _sample_done_commands(self) -> None:
+        if not self.config.randomize_commands:
+            return
+        wp.launch(
+            sample_done_velocity_commands_kernel,
+            dim=self.world_count,
+            inputs=[
+                self._command_seed_counter,
+                self.dones,
+                float(self.config.command_x_range[0]),
+                float(self.config.command_x_range[1]),
+                float(self.config.command_y_range[0]),
+                float(self.config.command_y_range[1]),
+                float(self.config.command_yaw_range[0]),
+                float(self.config.command_yaw_range[1]),
+                float(self.config.standing_probability),
+            ],
+            outputs=[self.command],
+            device=self.device,
+        )
+        wp.launch(advance_command_seed_kernel, dim=1, inputs=[self._command_seed_counter], device=self.device)
+
     def observe(self) -> wp.array:
+        self.foot_contacts.zero_()
+        contact_container = getattr(self.solver.world, "_contact_container", None)
+        if self._can_scan_foot_contacts and contact_container is not None and int(self.contacts.rigid_contact_max) > 0:
+            wp.launch(
+                scan_two_body_contacts_kernel,
+                dim=int(self.contacts.rigid_contact_max),
+                inputs=[
+                    self.contacts.rigid_contact_count,
+                    self.contacts.rigid_contact_shape0,
+                    self.contacts.rigid_contact_shape1,
+                    self.model.shape_body,
+                    self.model.shape_world,
+                    contact_container,
+                    self.body_stride,
+                    self._left_foot_body_local,
+                    self._right_foot_body_local,
+                    float(self.config.foot_contact_normal_impulse_threshold),
+                ],
+                outputs=[self.foot_contacts],
+                device=self.device,
+            )
         wp.launch(
             h1_observe_reward_kernel,
             dim=(self.world_count, self.obs_dim),
             inputs=[
+                self.state_0.body_q,
+                self.state_0.body_qd,
                 self.state_0.joint_q,
                 self.state_0.joint_qd,
                 self.default_joint_pos,
@@ -459,6 +637,13 @@ class EnvH1PhoenX:
                 self.previous_actions,
                 self.previous_joint_velocity,
                 self.command,
+                self.foot_contacts,
+                self.foot_air_time,
+                self.foot_contact_time,
+                self.foot_timer_episode_step,
+                self._left_foot_body_local,
+                self._right_foot_body_local,
+                self.body_stride,
                 self.coord_stride,
                 self.dof_stride,
                 self.episode_steps,
@@ -479,6 +664,13 @@ class EnvH1PhoenX:
                 float(self.config.hip_deviation_weight),
                 float(self.config.arm_deviation_weight),
                 float(self.config.torso_deviation_weight),
+                float(self.config.feet_air_time_weight),
+                float(self.config.feet_slide_weight),
+                float(self.config.ankle_limit_weight),
+                float(self._left_ankle_soft_limits[0]),
+                float(self._left_ankle_soft_limits[1]),
+                float(self._right_ankle_soft_limits[0]),
+                float(self._right_ankle_soft_limits[1]),
                 float(self.config.termination_weight),
             ],
             outputs=[self.obs, self.rewards, self.dones, self.successes],
@@ -492,6 +684,10 @@ class EnvH1PhoenX:
         self.current_actions.zero_()
         self.previous_actions.zero_()
         self.previous_joint_velocity.zero_()
+        self.foot_contacts.zero_()
+        self.foot_air_time.zero_()
+        self.foot_contact_time.zero_()
+        self.foot_timer_episode_step.fill_(-1)
         self.episode_steps.zero_()
         self.dones.zero_()
         self.successes.zero_()
@@ -500,6 +696,7 @@ class EnvH1PhoenX:
         return self.observe()
 
     def reset_done(self) -> None:
+        self._sample_done_commands()
         wp.launch(
             h1_reset_done_kernel,
             dim=(self.world_count, max(self.coord_stride, self.dof_stride, self.action_dim)),
@@ -511,6 +708,9 @@ class EnvH1PhoenX:
                 self.previous_actions,
                 self.current_actions,
                 self.previous_joint_velocity,
+                self.foot_air_time,
+                self.foot_contact_time,
+                self.foot_timer_episode_step,
             ],
             device=self.device,
         )

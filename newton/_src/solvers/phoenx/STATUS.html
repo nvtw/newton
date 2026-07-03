@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · diverse RL task expansion underway</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · RL milestone closed; solver optimization next</strong></div>
     </header>
 
     <section class="hero">
@@ -176,10 +176,11 @@
         <li>Humanoid: the source task's 21 geared torque actions, 75-value observation, reward/termination equations, implicit actuator gains, self-collision, and 60 Hz control are implemented. Initial reward is exactly 2.6 as specified.</li>
         <li>Humanoid uses reduced articulation mode by default so every multi-axis motor armature remains physically representable. Its full rollout and PPO update execute in one CUDA graph with a device seed counter; a two-iteration train smoke passes.</li>
         <li>Ant is now a public reusable environment and its full rollout/update defaults to CUDA graph replay. Promotion exposed and fixed a duplicate up-axis conversion that had made every nominal reset immediately terminal; the regression now checks projected gravity explicitly.</li>
-        <li>H1 adds a modern 19-DoF humanoid command task: source nominal pose, per-joint gains/limits, 69-value policy observation, world-yaw and planar-velocity tracking, posture/action/acceleration penalties, and reduced-coordinate execution. Environment and full graph PPO smokes pass; foot-air/clearance shaping and command curricula remain follow-up quality work.</li>
+        <li>H1 now matches the flat-task contact contract: measured ankle-foot colliders replace accidentally omitted mesh contacts; spawn height, biped air-time, foot slide, ankle soft limits, and graph-safe reset command sampling match the source task. A 500-iteration randomized-command curve improves reward −2.34 → +0.47, termination 1.08% → 0.11%, and tracking 0.053 → 0.214 at 133k samples/s.</li>
         <li>DR Legs hold and walk now use maximal-coordinate PhoenX for all 36 revolute loop constraints, 12 implicit PD actions, two-hop self-collision filtering, graph-captured joint-state reconstruction, and the source 1 ms temporal schedule. After 20 policy steps the maximum loop-anchor residual is 0.392 mm.</li>
-        <li>Both DR tasks have full rollout/update CUDA-graph trainers. Hold and walk graph smokes remain finite; the walking port currently has core tracking/posture/control terms, while contact-matching, foot-clearance/flatness, touchdown, and randomized-command curricula remain required before claiming training-quality parity.</li>
-        <li>Next: run cross-task training-quality and throughput baselines, then complete the explicitly listed H1 and DR Legs shaping/curriculum gaps.</li>
+        <li>DR walking now includes the source 1.0 s gait, contact matching, swing clearance, foot parallel/flat rewards, touchdown-speed penalty, and graph-safe reset command distribution. In 100 iterations, hold success improves 0.827 → 0.865 and walking tracking 0.164 → 0.212; walking terminations fall 2.46% → 0.29% at 59k samples/s.</li>
+        <li>CUDA-graph regressions require one-second stable bilateral H1 contact, measured foot collider ownership, DR closed-loop residual below 1 mm, exact action mapping, and graph-replay command sampling. Ant, Humanoid, Go2, and ANYmal-C retain graph smokes, but equivalent long deterministic policy evaluations remain future work—not silently claimed here.</li>
+        <li>Next: pivot back to general PhoenX solver throughput. The Box3D comparison suggests finishing restitution, testing dimensionless contact softness, and prototyping patch-central friction; CPU scheduling and fixed 24-color choices do not transfer directly to this GPU solver.</li>
       </ul>
     </article>
 

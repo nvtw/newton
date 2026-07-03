@@ -97,6 +97,39 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(targets[:, actuated], np.tile(expected, (env.world_count, 1)), rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.step_dones.numpy(), 0.0, rtol=0.0, atol=0.0)
 
+    def test_walk_commands_resample_on_reset_inside_cuda_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX DR Legs RL tests")
+        env = rl.EnvDrLegsPhoenX(
+            rl.ConfigEnvDrLegsPhoenX(
+                task="walk",
+                world_count=8,
+                sim_substeps=2,
+                collision_refresh_interval=1,
+                solver_iterations=2,
+                max_episode_steps=1,
+                randomize_commands=True,
+            ),
+            device=device,
+        )
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+        env.step(actions)
+        env.reset()
+        with wp.ScopedCapture(device=device) as capture:
+            for _ in range(2):
+                env.step(actions)
+        wp.capture_launch(capture.graph)
+
+        commands = env.command.numpy()
+        self.assertGreater(float(np.ptp(commands[:, 0])), 0.1)
+        self.assertGreater(float(np.ptp(commands[:, 1])), 0.1)
+        self.assertGreater(float(np.ptp(commands[:, 2])), 0.1)
+        self.assertTrue(np.all(commands[:, 0] >= -0.3))
+        self.assertTrue(np.all(commands[:, 0] <= 0.3))
+        self.assertTrue(np.all(commands[:, 1] >= -0.3))
+        self.assertTrue(np.all(commands[:, 1] <= 0.3))
+        self.assertTrue(np.all(commands[:, 2] >= -0.8))
+        self.assertTrue(np.all(commands[:, 2] <= 0.8))
+
 
 if __name__ == "__main__":
     unittest.main()

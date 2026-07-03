@@ -36,6 +36,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--command-x", type=float, default=1.0)
     parser.add_argument("--command-y", type=float, default=0.0)
     parser.add_argument("--command-yaw", type=float, default=0.0)
+    parser.add_argument("--fixed-command", action="store_true")
     parser.add_argument("--hidden-layers", type=int, nargs="+", default=(128, 128, 128))
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)
     parser.add_argument("--train-epochs", type=int, default=5)
@@ -63,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
             solver_iterations=int(args.solver_iterations),
             velocity_iterations=int(args.velocity_iterations),
             command=(float(args.command_x), float(args.command_y), float(args.command_yaw)),
+            randomize_commands=not bool(args.fixed_command),
+            command_seed=int(args.seed),
         ),
         device=device,
     )

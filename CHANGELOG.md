@@ -89,6 +89,8 @@
 ### Fixed
 
 - Fix the pure-PhoenX Ant environment applying the MJCF Z-up to Y-up rotation twice, which made every nominal reset pose immediately terminal.
+- Fix the pure-PhoenX H1 environment omitting ankle colliders, and add source-matched foot-contact, air-time, sliding, soft-limit, spawn-height, and graph-safe command behavior.
+- Fix the pure-PhoenX DR Legs walking task missing contact matching, swing clearance, foot orientation, touchdown-speed, gait-period, and graph-safe randomized-command behavior.
 - Fix `SolverPhoenX.prepare_refresh_stride` for reduced and hybrid articulations so internal substeps reuse cached block, deferred, and fallback contact preparation at the requested cadence instead of silently forcing a refresh every substep.
 - Fix the reduced-coordinate PhoenX fallback fast-path proof to retain deterministic fallback coloring for unrelated maximal rigid-body contacts.
 - Fix experimental PhoenX G1 replacement foot boxes bypassing the MJCF no-self-collision filters, preventing unintended robot self-contacts during policy exploration.

@@ -12,6 +12,8 @@ import warp as wp
 import newton
 import newton.utils
 
+from .command_observation import advance_command_seed_kernel, sample_done_velocity_commands_kernel
+from .contact_observation import scan_two_body_contacts_kernel
 from .reward_functions import gaussian_reward, projected_gravity_flat_penalty, tracking_reward_2d
 
 ACTION_DIM_DR_LEGS = 12
@@ -98,6 +100,7 @@ def dr_legs_observe_reward_kernel(
     previous_actions: wp.array2d[wp.float32],
     previous_previous_actions: wp.array2d[wp.float32],
     command: wp.array2d[wp.float32],
+    foot_contacts: wp.array2d[wp.float32],
     episode_steps: wp.array[wp.int32],
     body_stride: wp.int32,
     joint_stride: wp.int32,
@@ -107,6 +110,8 @@ def dr_legs_observe_reward_kernel(
     frame_dt: wp.float32,
     action_scale: wp.float32,
     gait_period: wp.float32,
+    left_foot_body: wp.int32,
+    right_foot_body: wp.int32,
     min_base_height: wp.float32,
     min_upright_cos: wp.float32,
     obs: wp.array2d[wp.float32],
@@ -194,12 +199,71 @@ def dr_legs_observe_reward_kernel(
                 linear_body[0], linear_body[1], command[world, 0], command[world, 1], wp.sqrt(wp.float32(0.125))
             )
             yaw_tracking = gaussian_reward(angular_body[2] - command[world, 2], wp.sqrt(wp.float32(0.5)))
-            orientation_reward = gaussian_reward(flat_penalty, wp.float32(0.2))
+            root_tilt_sq = wp.float32(0.5) * (wp.float32(1.0) - upright)
+            orientation_reward = wp.exp(-root_tilt_sq / wp.float32(0.08))
+            gait_phase = wp.float32(episode_steps[world]) * frame_dt / gait_period
+            gait_phase = gait_phase - wp.floor(gait_phase)
+            left_reference = gait_phase < wp.float32(0.5)
+            right_reference = not left_reference
+            left_contact = foot_contacts[world, 0] > wp.float32(0.5)
+            right_contact = foot_contacts[world, 1] > wp.float32(0.5)
+            contact_reward = wp.float32(-1.0)
+            if left_contact == left_reference:
+                contact_reward = contact_reward + wp.float32(1.0)
+            if right_contact == right_reference:
+                contact_reward = contact_reward + wp.float32(1.0)
+
+            left_transform = body_q[world * body_stride + left_foot_body]
+            right_transform = body_q[world * body_stride + right_foot_body]
+            left_rotation = wp.transform_get_rotation(left_transform)
+            right_rotation = wp.transform_get_rotation(right_transform)
+            left_position = wp.transform_get_translation(left_transform)
+            right_position = wp.transform_get_translation(right_transform)
+            left_target = wp.float32(0.065) * wp.max(
+                wp.sin(wp.float32(2.0) * wp.pi * (gait_phase - wp.float32(0.5))), wp.float32(0.0)
+            )
+            right_target = wp.float32(0.065) * wp.max(wp.sin(wp.float32(2.0) * wp.pi * gait_phase), wp.float32(0.0))
+            clearance_reward = wp.float32(0.0)
+            if left_target > wp.float32(0.0):
+                left_error = left_target - left_position[2]
+                clearance_reward = clearance_reward + wp.exp(-(left_error * left_error) / wp.float32(0.0002))
+            if right_target > wp.float32(0.0):
+                right_error = right_target - right_position[2]
+                clearance_reward = clearance_reward + wp.exp(-(right_error * right_error) / wp.float32(0.0002))
+
+            left_forward = wp.quat_rotate(left_rotation, wp.vec3(1.0, 0.0, 0.0))
+            right_forward = wp.quat_rotate(right_rotation, wp.vec3(1.0, 0.0, 0.0))
+            left_xy = wp.vec2(left_forward[0], left_forward[1])
+            right_xy = wp.vec2(right_forward[0], right_forward[1])
+            parallel_cos = wp.dot(left_xy, right_xy) / wp.max(
+                wp.length(left_xy) * wp.length(right_xy), wp.float32(1.0e-6)
+            )
+            parallel_error = wp.float32(0.5) * (
+                wp.float32(1.0) - _clip_dr_legs(parallel_cos, wp.float32(-1.0), wp.float32(1.0))
+            )
+            parallel_reward = wp.exp(-parallel_error / wp.float32(0.08))
+            left_up = wp.quat_rotate(left_rotation, wp.vec3(0.0, 0.0, 1.0))[2]
+            right_up = wp.quat_rotate(right_rotation, wp.vec3(0.0, 0.0, 1.0))[2]
+            left_flat = wp.exp(-wp.float32(0.5) * (wp.float32(1.0) - left_up) / wp.float32(0.08))
+            right_flat = wp.exp(-wp.float32(0.5) * (wp.float32(1.0) - right_up) / wp.float32(0.08))
+            flat_feet_reward = wp.float32(0.5) * (left_flat + right_flat)
+            left_foot_velocity = wp.spatial_top(body_qd[world * body_stride + left_foot_body])
+            right_foot_velocity = wp.spatial_top(body_qd[world * body_stride + right_foot_body])
+            touchdown_velocity = wp.float32(0.0)
+            if left_contact:
+                touchdown_velocity = touchdown_velocity + wp.max(-left_foot_velocity[2], wp.float32(0.0))
+            if right_contact:
+                touchdown_velocity = touchdown_velocity + wp.max(-right_foot_velocity[2], wp.float32(0.0))
             reward = (
                 wp.float32(10.0)
+                + wp.float32(10.0) * contact_reward
                 + wp.float32(5.0) * linear_tracking
                 + wp.float32(5.0) * orientation_reward
+                + wp.float32(5.0) * clearance_reward
                 + wp.float32(2.0) * yaw_tracking
+                + wp.float32(2.0) * parallel_reward
+                + wp.float32(2.0) * flat_feet_reward
+                - wp.float32(2.0) * touchdown_velocity
                 - wp.float32(0.5) * linear_body[2] * linear_body[2]
                 - wp.float32(0.5) * (angular_body[0] * angular_body[0] + angular_body[1] * angular_body[1])
                 - wp.float32(0.001) * torque_proxy
@@ -307,7 +371,14 @@ class ConfigEnvDrLegsPhoenX:
     velocity_iterations: int = 1
     action_scale: float = 0.3
     command: tuple[float, float, float] = (0.3, 0.0, 0.0)
-    gait_period: float = 0.8
+    randomize_commands: bool = False
+    command_x_range: tuple[float, float] = (-0.3, 0.3)
+    command_y_range: tuple[float, float] = (-0.3, 0.3)
+    command_yaw_range: tuple[float, float] = (-0.8, 0.8)
+    standing_probability: float = 0.1
+    command_seed: int = 42
+    gait_period: float = 1.0
+    foot_contact_normal_impulse_threshold: float = 1.0e-6
     max_episode_steps: int = 500
     min_base_height: float = 0.12
     min_upright_cos: float = math.cos(1.0)
@@ -332,6 +403,13 @@ class EnvDrLegsPhoenX:
             raise ValueError("sim_substeps must be positive")
         if int(self.config.collision_refresh_interval) <= 0:
             raise ValueError("collision_refresh_interval must be positive")
+        for name, limits in (
+            ("x", self.config.command_x_range),
+            ("y", self.config.command_y_range),
+            ("yaw", self.config.command_yaw_range),
+        ):
+            if float(limits[1]) < float(limits[0]):
+                raise ValueError(f"command {name} range must be ordered")
         self.task = TASK_DR_LEGS_WALK if self.config.task == "walk" else TASK_DR_LEGS_HOLD
         self.obs_dim = OBS_DIM_DR_LEGS_WALK if self.task == TASK_DR_LEGS_WALK else OBS_DIM_DR_LEGS_HOLD
 
@@ -350,9 +428,12 @@ class EnvDrLegsPhoenX:
         self.state_1 = self.model.state()
         self.control = self.model.control()
         self.contacts = self.model.contacts()
+        self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
         self.actuated_joint = wp.array(_DR_LEGS_ACTUATED_JOINT, dtype=wp.int32, device=self.device)
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
+        self._command_seed_counter = wp.array([int(self.config.command_seed)], dtype=wp.int32, device=self.device)
+        self.foot_contacts = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
         self.current_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.previous_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.previous_previous_actions = wp.zeros(
@@ -389,6 +470,15 @@ class EnvDrLegsPhoenX:
             raise RuntimeError(
                 f"Expected DR Legs joint/body counts (36, 31), got ({len(robot.joint_q)}, {len(robot.body_q)})"
             )
+        foot_bodies = {
+            label.rsplit("/", 1)[-1]: body
+            for body, label in enumerate(robot.body_label)
+            if label.rsplit("/", 1)[-1] in ("foot_l", "foot_r")
+        }
+        if set(foot_bodies) != {"foot_l", "foot_r"}:
+            raise RuntimeError("Expected DR Legs foot_l and foot_r bodies")
+        self._left_foot_body_local = foot_bodies["foot_l"]
+        self._right_foot_body_local = foot_bodies["foot_r"]
         pelvis_z = float(wp.transform_get_translation(robot.body_q[0])[2])
         translation_z = 0.28 - pelvis_z
         for body, transform in enumerate(robot.body_q):
@@ -426,7 +516,50 @@ class EnvDrLegsPhoenX:
         self.config.command = values
         self.command.assign(np.tile(np.asarray(values, dtype=np.float32), (self.world_count, 1)))
 
+    def _sample_done_commands(self) -> None:
+        if self.task != TASK_DR_LEGS_WALK or not self.config.randomize_commands:
+            return
+        wp.launch(
+            sample_done_velocity_commands_kernel,
+            dim=self.world_count,
+            inputs=[
+                self._command_seed_counter,
+                self.dones,
+                float(self.config.command_x_range[0]),
+                float(self.config.command_x_range[1]),
+                float(self.config.command_y_range[0]),
+                float(self.config.command_y_range[1]),
+                float(self.config.command_yaw_range[0]),
+                float(self.config.command_yaw_range[1]),
+                float(self.config.standing_probability),
+            ],
+            outputs=[self.command],
+            device=self.device,
+        )
+        wp.launch(advance_command_seed_kernel, dim=1, inputs=[self._command_seed_counter], device=self.device)
+
     def observe(self) -> wp.array:
+        self.foot_contacts.zero_()
+        contact_container = getattr(self.solver.world, "_contact_container", None)
+        if self._can_scan_foot_contacts and contact_container is not None and int(self.contacts.rigid_contact_max) > 0:
+            wp.launch(
+                scan_two_body_contacts_kernel,
+                dim=int(self.contacts.rigid_contact_max),
+                inputs=[
+                    self.contacts.rigid_contact_count,
+                    self.contacts.rigid_contact_shape0,
+                    self.contacts.rigid_contact_shape1,
+                    self.model.shape_body,
+                    self.model.shape_world,
+                    contact_container,
+                    self.body_stride,
+                    self._left_foot_body_local,
+                    self._right_foot_body_local,
+                    float(self.config.foot_contact_normal_impulse_threshold),
+                ],
+                outputs=[self.foot_contacts],
+                device=self.device,
+            )
         wp.launch(
             dr_legs_observe_reward_kernel,
             dim=(self.world_count, self.obs_dim),
@@ -440,6 +573,7 @@ class EnvDrLegsPhoenX:
                 self.previous_actions,
                 self.previous_previous_actions,
                 self.command,
+                self.foot_contacts,
                 self.episode_steps,
                 self.body_stride,
                 self.joint_stride,
@@ -449,6 +583,8 @@ class EnvDrLegsPhoenX:
                 float(self.config.frame_dt),
                 float(self.config.action_scale),
                 float(self.config.gait_period),
+                self._left_foot_body_local,
+                self._right_foot_body_local,
                 float(self.config.min_base_height),
                 float(self.config.min_upright_cos),
             ],
@@ -465,6 +601,7 @@ class EnvDrLegsPhoenX:
         self.current_actions.zero_()
         self.previous_actions.zero_()
         self.previous_previous_actions.zero_()
+        self.foot_contacts.zero_()
         self.episode_steps.zero_()
         self.dones.zero_()
         self.successes.zero_()
@@ -472,6 +609,7 @@ class EnvDrLegsPhoenX:
         return self.observe()
 
     def reset_done(self) -> None:
+        self._sample_done_commands()
         wp.launch(
             dr_legs_reset_done_kernel,
             dim=(self.world_count, max(self.body_stride, self.joint_stride, self.action_dim)),
