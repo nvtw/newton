@@ -3180,7 +3180,8 @@ version = "0.5.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0e/4a/c27b42ed9b1c7d13d9ba8b6905dece787d6259152f2309338aed29b2447b/ml_dtypes-0.5.4.tar.gz", hash = "sha256:8ab06a50fb9bf9666dd0fe5dfb4676fa2b0ac0f31ecff72a6c3af8e22c063453", size = 692314, upload-time = "2025-11-17T22:32:31.031Z" }
 wheels = [
@@ -3968,7 +3969,7 @@ requires-dist = [
     { name = "viser", marker = "extra == 'docs'", specifier = "==1.0.26" },
     { name = "viser", marker = "extra == 'notebook'", specifier = "==1.0.26" },
     { name = "warp-lang", specifier = ">=1.15.0.dev20260626", index = "https://pypi.nvidia.com/" },
-    { name = "warp-nn", extras = ["onnx"], marker = "extra == 'onnx'", git = "https://github.com/NVIDIA/warp-nn.git?rev=4200c82b2c9617b4367f87f411e7df66f1e5c5a0" },
+    { name = "warp-nn", extras = ["onnx"], marker = "extra == 'onnx'", specifier = "==0.3.0" },
 ]
 provides-extras = ["sim", "onnx", "importers", "remesh", "examples", "rtx", "torch-cu12", "torch-cu13", "dev", "docs", "notebook"]
 
@@ -4552,7 +4553,8 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ml-dtypes" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
+    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-newton-torch-cu12' and extra == 'extra-6-newton-torch-cu13')" },
     { name = "protobuf" },
     { name = "typing-extensions" },
 ]
@@ -7376,10 +7378,13 @@ wheels = [
 
 [[package]]
 name = "warp-nn"
-version = "0.2.0"
-source = { git = "https://github.com/NVIDIA/warp-nn.git?rev=4200c82b2c9617b4367f87f411e7df66f1e5c5a0#4200c82b2c9617b4367f87f411e7df66f1e5c5a0" }
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "warp-lang" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/02/cb/eeae816f30f46fdae84133431a9c732a89176cc78e26f09481762eb55702/warp_nn-0.3.0-py3-none-any.whl", hash = "sha256:8d4f37a3776434c46032455dd6eabad2ffb5a4565795310a24dfe6aab967cb20", size = 71923, upload-time = "2026-07-03T14:45:31.797Z" },
 ]
 
 [package.optional-dependencies]
