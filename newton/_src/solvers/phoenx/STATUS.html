@@ -220,7 +220,10 @@
         <li>An exact compressed 12D body-mobility cache improves its isolated response calculation by 6.7%, but only about 486–503 of 8192 training worlds are eligible. Build and launch overhead lowers complete training throughput, so the path is rejected.</li>
         <li>An exact ≤4-contact shared-row builder reproduces Jacobians and articulated responses bit-for-bit and improves stable isolated builder medians about 8.5% (222 → 203 µs).</li>
         <li>Integrated training nevertheless reaches 892.4k/s versus an immediate clean retained control at 922.8k/s: a real 3.3% regression. The extra launch and global row publication erase the local saving; this implementation is rejected.</li>
-        <li>Direct shared-memory PGS variants were also exact, but register/instruction pressure made them 5–40% slower than the proven tile solve. The next credible large experiment must remove row publication and phase boundaries together while preserving compact, separately compiled/noinline phase bodies.</li>
+        <li>Direct shared-memory PGS variants were also exact, but register/instruction pressure made them 5–40% slower than the proven tile solve.</li>
+        <li>Compiler-supported <code>noinline</code> phase bodies also fail: the exact by-value call ABI reaches about 793k/s, while passing aggregate descriptors by reference falls to about 509k/s because array/member accesses stay behind pointer loads. Both forms are rejected.</li>
+        <li>An exact contact-space Delassus solve and combined articulated impulse application pass graph parity, but reach only 892k/s after depth parallelization; they reduce storage without reducing the dominant per-row articulated work.</li>
+        <li>The next credible large experiment must remove row publication and phase boundaries while also reducing—not repackaging—the <code>O(contact rows × articulation size)</code> response construction.</li>
       </ul>
     </article>
     <article>
