@@ -15,6 +15,13 @@ from .anymal import (
     EnvAnymalPhoenX,
     anymal_mirror_map_ppo,
 )
+from .dr_legs import (
+    ACTION_DIM_DR_LEGS,
+    OBS_DIM_DR_LEGS_HOLD,
+    OBS_DIM_DR_LEGS_WALK,
+    ConfigEnvDrLegsPhoenX,
+    EnvDrLegsPhoenX,
+)
 from .env import (
     EnvPPO,
     capture_env_steps,
@@ -90,6 +97,7 @@ from .training import (
 __all__ = [
     "ACTION_DIM_ANT",
     "ACTION_DIM_ANYMAL",
+    "ACTION_DIM_DR_LEGS",
     "ACTION_DIM_G1",
     "ACTION_DIM_H1",
     "ACTION_DIM_HUMANOID",
@@ -100,6 +108,8 @@ __all__ = [
     "JOINT_VEL_OBS_OFFSET_ANYMAL",
     "OBS_DIM_ANT",
     "OBS_DIM_ANYMAL",
+    "OBS_DIM_DR_LEGS_HOLD",
+    "OBS_DIM_DR_LEGS_WALK",
     "OBS_DIM_G1",
     "OBS_DIM_G1_ISAACLAB_FLAT",
     "OBS_DIM_G1_NANOG1",
@@ -111,6 +121,7 @@ __all__ = [
     "BufferRollout",
     "ConfigEnvAntPhoenX",
     "ConfigEnvAnymalPhoenX",
+    "ConfigEnvDrLegsPhoenX",
     "ConfigEnvG1PhoenX",
     "ConfigEnvGo2PhoenX",
     "ConfigEnvH1PhoenX",
@@ -126,6 +137,7 @@ __all__ = [
     "ConfigTrainG1PPO",
     "EnvAntPhoenX",
     "EnvAnymalPhoenX",
+    "EnvDrLegsPhoenX",
     "EnvG1PhoenX",
     "EnvGo2PhoenX",
     "EnvH1PhoenX",
