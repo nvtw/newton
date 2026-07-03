@@ -52,6 +52,28 @@
     .card { padding: 18px; border-radius: 17px; }
     .metric { font-size: 1.7rem; font-weight: 780; letter-spacing: -.045em; line-height: 1.05; }
     .label { margin-top: 7px; color: var(--muted); font-size: .84rem; }
+    .work-profile { padding: 21px 23px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); box-shadow: var(--shadow); }
+    .work-bar { display: flex; height: 22px; margin: 15px 0 13px; overflow: hidden; border-radius: 999px; background: #edf1f6; }
+    .work-bar span { min-width: 3px; }
+    .work-physics { width: 73%; background: #2563eb; }
+    .work-collision { width: 11%; background: #06a77d; }
+    .work-env { width: 9%; background: #7c5ce5; }
+    .work-rl { width: 5%; background: #e58b2a; }
+    .work-other { width: 2%; background: #aab3c2; }
+    .solver-rows { width: 24%; background: #1748a6; }
+    .solver-advance { width: 21%; background: #3478f6; }
+    .solver-factor { width: 21%; background: #65a2ff; }
+    .solver-publish { width: 18%; background: #08a88a; }
+    .solver-contact { width: 14%; background: #61c5ad; }
+    .solver-other { width: 2%; background: #b7c0ce; }
+    .work-legend { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+    .solver-legend { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .subprofile { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+    .subprofile h3 { font-size: .92rem; }
+    .work-item { color: var(--muted); font-size: .8rem; }
+    .work-item strong { display: block; color: var(--ink); font-size: .94rem; }
+    .work-item i { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; }
+    .profile-note { margin-top: 12px; color: var(--muted); font-size: .78rem; }
     .good { color: var(--green); }
     .section-label { margin: 30px 3px 9px; color: var(--muted); font-size: .75rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
     article { padding: 22px 23px; border-radius: 18px; margin-top: 12px; }
@@ -67,8 +89,8 @@
     }
     .action-required pre { overflow-x: auto; padding: 15px; border-radius: 10px; background: #172033; color: white; }
     footer { margin-top: 24px; color: var(--muted); font-size: .84rem; text-align: center; }
-    @media (max-width: 820px) { .metrics { grid-template-columns: repeat(2, 1fr); } .next { grid-template-columns: 1fr; } }
-    @media (max-width: 560px) { header { display: block; } .stamp { margin-top: 13px; text-align: left; } .metrics { grid-template-columns: 1fr; } }
+    @media (max-width: 820px) { .metrics { grid-template-columns: repeat(2, 1fr); } .work-legend, .solver-legend { grid-template-columns: repeat(3, 1fr); } .next { grid-template-columns: 1fr; } }
+    @media (max-width: 560px) { header { display: block; } .stamp { margin-top: 13px; text-align: left; } .metrics, .work-legend { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -78,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · empty GJK stage removed</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · GPU work profile added</strong></div>
     </header>
 
     <section class="hero">
@@ -96,6 +118,37 @@
       <div class="card"><div class="metric">891k/s</div><div class="label">short steady graph-leapfrog training</div></div>
       <div class="card"><div class="metric">1.44×</div><div class="label">slower than pinned nanoG1</div></div>
       <div class="card"><div class="metric good">+7.5%</div><div class="label">cumulative short-training gain</div></div>
+    </section>
+
+    <div class="section-label">Steady-training GPU work profile</div>
+    <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
+      <h2>Where GPU work is currently spent</h2>
+      <div class="work-bar" role="img" aria-label="Physics solver 73 percent, collision pipeline 11 percent, environment and rewards 9 percent, policy and learner 5 percent, runtime and other 2 percent">
+        <span class="work-physics"></span><span class="work-collision"></span><span class="work-env"></span><span class="work-rl"></span><span class="work-other"></span>
+      </div>
+      <div class="work-legend">
+        <div class="work-item"><strong><i style="background:#2563eb"></i>73%</strong>physics solver</div>
+        <div class="work-item"><strong><i style="background:#06a77d"></i>11%</strong>collision pipeline</div>
+        <div class="work-item"><strong><i style="background:#7c5ce5"></i>9%</strong>environment + rewards</div>
+        <div class="work-item"><strong><i style="background:#e58b2a"></i>5%</strong>policy + learner</div>
+        <div class="work-item"><strong><i style="background:#aab3c2"></i>2%</strong>runtime + other</div>
+      </div>
+      <p class="profile-note">Share of summed CUDA kernel duration in the latest five-second steady graph-leapfrog Nsight trace (rounded). Streams overlap, so these are GPU-work shares—not additive wall-clock latency. The trace predates removal of the empty GJK stage, so current collision share is slightly lower.</p>
+      <div class="subprofile">
+        <h3>Inside physics solver work</h3>
+        <div class="work-bar" role="img" aria-label="Contact row construction 24 percent, articulation advance 21 percent, factorization and kinematics 21 percent, publish and momentum 18 percent, contact solve 14 percent, joints and other 2 percent">
+          <span class="solver-rows"></span><span class="solver-advance"></span><span class="solver-factor"></span><span class="solver-publish"></span><span class="solver-contact"></span><span class="solver-other"></span>
+        </div>
+        <div class="work-legend solver-legend">
+          <div class="work-item"><strong><i style="background:#1748a6"></i>24%</strong>contact rows</div>
+          <div class="work-item"><strong><i style="background:#3478f6"></i>21%</strong>articulation advance</div>
+          <div class="work-item"><strong><i style="background:#65a2ff"></i>21%</strong>factor + kinematics</div>
+          <div class="work-item"><strong><i style="background:#08a88a"></i>18%</strong>publish + momentum</div>
+          <div class="work-item"><strong><i style="background:#61c5ad"></i>14%</strong>contact solve</div>
+          <div class="work-item"><strong><i style="background:#b7c0ce"></i>2%</strong>joints + other</div>
+        </div>
+        <p class="profile-note">Normalized within physics-solver GPU duration. “Contact rows” includes gather/build/finalize; “factor + kinematics” includes reduced factor initialization and local kinematics.</p>
+      </div>
     </section>
 
     <div class="section-label">Current state</div>
@@ -185,6 +238,7 @@
           <li>One-pass ABA / pre-contact-only Coriolis: +6% physics but severe momentum drift.</li>
           <li>Compile-time velocity-only publish kernel: exact but +0.1% (neutral).</li>
           <li>Factor/contact multi-stream overlap: −2.7% training from GPU contention.</li>
+          <li>Conditional empty-reset FK/observation: neutral in overlapped training and −1.7% in high-reset stepping; fully reverted.</li>
           <li>Always-transposed response rows: faster physics, −2.7% training.</li>
           <li>Stride-3 contact prepare: policy exploits stale-contact physics and fails the true-physics gate.</li>
           <li>Factor sub-warp tiling: +9% kernel time.</li>

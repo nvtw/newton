@@ -403,6 +403,20 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Tried and reverted
 
+### Conditional empty-reset FK/observation (2026-07-03) - REJECTED
+- G1 observation produced an exact device-side `any_done` reduction, and a CUDA
+  graph conditional skipped masked FK plus the second observation when no world
+  terminated. Reset state clearing, RNG advancement, and command sampling stayed
+  unconditional, so the experiment preserved deterministic reset semantics.
+- The same captured graph adapted correctly between empty and nonempty reset
+  sets. Existing FK masking and periodic-command graph tests passed.
+- At 8192 worlds the random-policy graph-leapfrog benchmark was neutral:
+  1.15385M samples/s candidate versus 1.15325M baseline, because at least one
+  world terminated on almost every step. Isolated high-reset stepping regressed
+  about 1.7% (2.724M versus 2.771M samples/s). A low-fall benefit remained
+  plausible but unproven, so the conditional and its extra reduction were fully
+  reverted rather than retained speculatively.
+
 ### prepare_refresh_stride=3 for the G1 recipe (2026-07-02) - REJECTED, physics-changing
 - +3.1% physics-only throughput (1.226M vs 1.189M env steps/s). Full
   train-to-gate at stride 3 *passes its own internal gate* (battery_perf
