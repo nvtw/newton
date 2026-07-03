@@ -1,5 +1,21 @@
 # Reduced-coordinate convex patch friction
 
+## Experiment outcome
+
+A complete implementation of this design was tested and rejected on 3 July
+2026. It passed focused CUDA-graph behavior gates, including multi-point
+sliding-to-rest, arbitrary three-page column counts with contact disappearance
+and reappearance, compound-column point fallback, and the unchanged default
+ABA row comparison.
+
+The separate normal and patch phases did not amortize. At 8,192 G1 worlds the
+prototype removed about 26% of generalized rows but measured 1.73-1.74M
+physics steps/s versus 1.88-1.89M for point friction, a 7.4-8.0% regression.
+At 1,024 worlds it was about 4% slower. The implementation and its feature
+tests were fully reverted; only the small generic row-response extraction was
+retained. A future retry needs a design that avoids the additional gather,
+build, and solve page rather than reimplementing this two-stage schedule.
+
 ## Objective
 
 Reduce generalized contact-row construction without changing point-normal

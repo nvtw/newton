@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · convex patch-friction prototype active</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · reduced patch-row prototype rejected</strong></div>
     </header>
 
     <section class="hero">
@@ -188,9 +188,9 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag good">PATCH FRICTION · INTEGRATED PROTOTYPE</span><time>3 Jul</time></div>
-      <h2>Maximal PhoenX now has an opt-in coupled convex-patch friction solve</h2>
-      <p>The Box3D-inspired path is integrated as a compile-time specialization for maximal rigid PGS. It keeps every point normal and replaces eligible point tangents with one central 2D friction block. The default point solver remains unchanged; no performance claim is made until broader gates and G1 measurement finish.</p>
+      <div class="meta"><span class="tag">REDUCED PATCH ROWS · REJECTED</span><time>3 Jul</time></div>
+      <h2>Maximal patch friction remains opt-in; reduced patch paging lost throughput</h2>
+      <p>The Box3D-inspired maximal path remains a physically validated opt-in specialization. A complete reduced-coordinate implementation was also built and tested, then fully reverted because its separate normal/patch paging schedule cost substantially more than the generalized-row reduction saved.</p>
       <ul>
         <li>Both fast-tail multi-world and colored single-world CUDA-graph paths run. Point mode allocates only a one-entry sentinel and compiles its original hot path.</li>
         <li>The block uses the full 2×2 tangent effective mass and existing static/kinetic Coulomb disk. Warm start is a world-space impulse remapped through persistent contact matches, so column reorder and first-contact changes are safe.</li>
@@ -198,10 +198,10 @@
         <li>All 12 focused CUDA-graph gates pass: sliding-to-rest, static friction above the kinetic budget, velocity-level linear/angular momentum, multi-/single-world execution, raw-mesh fallback, bit determinism, classification, compound fallback, history remapping, coupled projection, and kinetic projection. Existing point-mode stacks and momentum also pass.</li>
         <li>Raw meshes, heightfields, cloth/soft contacts, compound body-pair columns, reduced articulations, mass splitting, and sleeping retain point friction or are explicitly rejected for this opt-in prototype.</li>
         <li>A scheduler-matched maximal G1 bracket is neutral-to-slightly-negative: 2.537M patch versus 2.548M point physics steps/s (−0.43%) after normal-only rows, redundant-mass removal, and launch fusion. Contact trajectories differ, so this is directional—not a win.</li>
-        <li>Reduced-coordinate audit: its expensive generalized response builder currently constructs exactly three rows per point. A live 1,024-world G1 snapshot has 34,816 eligible points in 18,432 convex columns, so P normal rows plus 2C patch rows would remove exactly 31.37% of generalized contact rows.</li>
-        <li>The clean extension is a two-stage paged solve: all normal pages first, then whole-column patch pages. Splitting a patch at the existing point-page boundary would be an unphysical hidden approximation; arbitrary contact counts must remain supported without user caps.</li>
-        <li>The implementation contract and rejection gates are now captured in <code>docs/REDUCED_PATCH_FRICTION.md</code>. The optimistic ceiling is 11.9% of reduced solver work, or 8.7% of current total training GPU work; a complicated or scene-specific implementation must be rejected.</li>
-        <li>Next: prototype that separate reduced patch-row stage and measure row-build plus end-to-end G1 training throughput. Do not replace point friction or claim a gain until physical gates and a broad benchmark win exist.</li>
+        <li>The reduced prototype implemented the full contract: one normal row per point, whole-column coupled 2×2 tangent pages, world-space warm start, conservative articulation fallback, arbitrary counts, and fixed CUDA-graph topology.</li>
+        <li>Its focused gates passed: 120-replay sliding-to-rest/resting contact, three-page contact disappearance/reappearance, compound point-friction fallback, exact default ABA rows, and finite graph-captured G1.</li>
+        <li>At 8,192 G1 worlds it removed 26% of generalized rows but reached only 1.73–1.74M physics steps/s versus 1.88–1.89M for point friction: a repeatable 7.4–8.0% loss. At 1,024 worlds it was about 4% slower.</li>
+        <li>The extra gather/build/solve page dominates the saved row traversal. The complete reduced prototype and tests were reverted; only the small reusable row-response extraction remains. <code>docs/REDUCED_PATCH_FRICTION.md</code> records the design and measured rejection to prevent a blind retry.</li>
       </ul>
     </article>
     <article>
