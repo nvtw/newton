@@ -78,7 +78,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · packed contact gather retained</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · warp momentum capture retained</strong></div>
     </header>
 
     <section class="hero">
@@ -93,8 +93,8 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">805k/s</div><div class="label">steady graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.59×</div><div class="label">slower than pinned nanoG1</div></div>
+      <div class="card"><div class="metric">822k/s</div><div class="label">steady graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.56×</div><div class="label">slower than pinned nanoG1</div></div>
       <div class="card"><div class="metric good">+6.7%</div><div class="label">G1 reduced physics throughput</div></div>
     </section>
 
@@ -113,8 +113,19 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag good">RETAINED · +4.7% PHYSICS</span><time>3 Jul</time></div>
-      <h2>Large articulation fleets now pack four contact gathers per warp</h2>
+      <div class="meta"><span class="tag good">RETAINED · +1.0–1.6% TRAINING</span><time>3 Jul</time></div>
+      <h2>Momentum capture now uses one deterministic warp per articulation</h2>
+      <p>The physically required two-pass dynamics schedule remains intact. Only the pre-Coriolis momentum measurement changed: one thread no longer serially walks an entire tree; 32 lanes reduce its mass, center of mass, and spatial momentum with a fixed summation tree.</p>
+      <ul>
+        <li>Matched G1 physics: 1.528M → 1.543M steps/s (+1.0%). Real training: 813.5k → 821.9–826.5k samples/s (+1.0–1.6%).</li>
+        <li>Contact-rich 512-robot fleets improve about 5% on Anymal/H1 and 3% on G1. Hundreds of articulations in one single world also run correctly.</li>
+        <li>All 40 reduced CUDA-graph tests pass, including strict momentum/energy, loops, self-contact, dense contacts, hybrid mode, and Featherstone comparisons.</li>
+        <li>A fresh policy passes the full frozen gate at only 91.75M samples. Seeds 1000/2000: zero falls, tracking 0.9057/0.9035, jerk 0.1434, roll/pitch 0.2038, yaw 0.1172, leg speed 0.9728.</li>
+      </ul>
+    </article>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · +6.7% PHYSICS</span><time>3 Jul</time></div>
+      <h2>Large articulation fleets pack four contact gathers per warp</h2>
       <p>Nsight Compute showed that the reduced contact gather was memory-bound and used only a fraction of each load sector. The old launch reserved all 32 lanes for one articulation; the new specialized path gives each articulation eight lanes and places four independent articulations in a warp.</p>
       <ul>
         <li>Every contact row remains present. Arbitrary contact-column counts and all 32 points per page are supported; the existing multi-page loop is unchanged.</li>
@@ -144,12 +155,14 @@
     <section class="next">
       <div>
         <h2>Refresh the real-training critical path</h2>
-        <p>The gather optimization moved physics by about 5% but end-to-end training by about 1%. The next step is a fresh short Nsight Systems trace of the retained graph, then choose the largest remaining solver kernel on the rollout critical path. No Nsight Compute run is currently requested.</p>
-        <p>Likely candidates remain ABA advance, factorization, packed contact-row build, contact solve, and publish. A candidate must beat the unchanged path in training and must remain general across robot types, contact density, loops, and single/multi-world layouts.</p>
+        <p>The refreshed trace ranks solver work: ABA advance 8.6%, factor 6.3%, packed contact-row build 6.0%, contact solve 4.9%, and publish 4.7%. Packed gather is down to 1.1% (40.2 µs versus 75.2 µs).</p>
+        <p><strong>Next:</strong> target work that can be safely eliminated or fused around row build/solve. The second ABA pass is not optional: removing it gained 6% physics but failed six momentum/loop tests. No Nsight Compute run is currently requested.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
         <ul>
+          <li>One-pass ABA / pre-contact-only Coriolis: +6% physics but severe momentum drift.</li>
+          <li>Compile-time velocity-only publish kernel: exact but +0.1% (neutral).</li>
           <li>Factor/contact multi-stream overlap: −2.7% training from GPU contention.</li>
           <li>Always-transposed response rows: faster physics, −2.7% training.</li>
           <li>Stride-3 contact prepare: policy exploits stale-contact physics and fails the true-physics gate.</li>
@@ -181,7 +194,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope update (2 Jul, user):</strong> optimize the PhoenX solver exclusively; the learner is out of scope. This page is the primary communication channel with the user, including requests to run privileged scripts (see the action box above).</li>
-          <li><strong>Immediate next step:</strong> capture a fresh short combined training trace after the packed gather, rank rollout-critical solver work, and screen the next general candidate with focused graph benchmarks before a full quality gate.</li>
+          <li><strong>Immediate next step:</strong> investigate a shared-memory or fused row-build/contact-solve path that removes global round trips without changing equations, PGS order, or the momentum-conserving two-pass schedule.</li>
         </ul>
       </div>
     </section>

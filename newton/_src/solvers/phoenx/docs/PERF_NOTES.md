@@ -6,6 +6,13 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Warp-parallel reduced momentum capture (2026-07-03)
+- The momentum-conserving split captures every articulation's pre-Coriolis world momentum before the second ABA pass. The original CUDA kernel assigned one thread per tree and serially traversed every link; the retained kernel assigns one deterministic 32-lane tile per tree and reduces mass, system COM, linear momentum, and angular momentum in a fixed tree reduction. CPU keeps the serial path.
+- Final matched G1 physics bracket: 1.528M to 1.543M steps/s (+1.0%). Graph-leapfrog training improves 813.5k to 821.9-826.5k samples/s (+1.0-1.6%). Contact-rich 512-robot fleets improve about 5% on Anymal/H1 and 3% on G1; many articulations in one world also pass.
+- Physical validation is load-bearing because the parallel sum changes FP rounding order: all 40 reduced CUDA-graph tests pass, including strict long-horizon energy/momentum, internal loops, self-contact, dense contacts, hybrid mode, and Featherstone comparisons.
+- A fresh from-scratch policy passes the full frozen gate at only 91.75M samples (iteration 175), before fine tuning. Seed 1000/2000: zero falls, battery tracking 0.9057/0.9035, jerk 0.1434, roll/pitch rate 0.2038, yaw rate 0.1172, leg speed 0.9728.
+- Rejected alternatives: removing the post-contact Coriolis ABA pass gained 6% physics but failed six momentum/loop tests (up to 5.6% long-horizon drift); compile-time full/velocity publish specialization was exact but neutral (+0.1%).
+
 ### Topology-selected packed reduced-contact gather (2026-07-03)
 - NCU showed the gather at 67% memory SOL, 128 registers, 33% occupancy, and roughly 57% sector-utilization headroom. The old launch dedicated one 32-lane warp to each articulation even when only a few contact points were live.
 - A specialized 8-lane mapping packs four independent articulations per warp. It preserves every contact, all 32 points per page, arbitrary column counts, and the existing multi-page graph loop. Contact math remains identical.

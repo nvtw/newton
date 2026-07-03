@@ -880,6 +880,86 @@ def _capture_reduced_momentum_kernel(
     )
 
 
+@wp.kernel(enable_backward=False, module="reduced_momentum_capture")
+def _capture_reduced_momentum_warp_kernel(
+    articulation_start: wp.array[wp.int32],
+    articulation_end: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    body_mass: wp.array[wp.float32],
+    body_inertia: wp.array[wp.mat33],
+    bodies: BodyContainer,
+    momentum_out: wp.array[wp.spatial_vector],
+):
+    articulation, lane = wp.tid()
+    start = articulation_start[articulation]
+    end = articulation_end[articulation]
+    body_q_com = bodies.reduced.body_q_com
+
+    local_mass = wp.float32(0.0)
+    local_weighted_x = wp.float32(0.0)
+    local_weighted_y = wp.float32(0.0)
+    local_weighted_z = wp.float32(0.0)
+    joint = start + lane
+    while joint < end:
+        body = joint_child[joint]
+        mass = body_mass[body]
+        position = wp.transform_get_translation(body_q_com[body])
+        local_mass += mass
+        local_weighted_x += mass * position[0]
+        local_weighted_y += mass * position[1]
+        local_weighted_z += mass * position[2]
+        joint += wp.int32(32)
+
+    total_mass = wp.tile_sum(wp.tile(local_mass))[0]
+    weighted_position = wp.vec3(
+        wp.tile_sum(wp.tile(local_weighted_x))[0],
+        wp.tile_sum(wp.tile(local_weighted_y))[0],
+        wp.tile_sum(wp.tile(local_weighted_z))[0],
+    )
+    origin = wp.vec3(0.0)
+    if total_mass > wp.float32(0.0):
+        origin = weighted_position / total_mass
+
+    local_linear_x = wp.float32(0.0)
+    local_linear_y = wp.float32(0.0)
+    local_linear_z = wp.float32(0.0)
+    local_angular_x = wp.float32(0.0)
+    local_angular_y = wp.float32(0.0)
+    local_angular_z = wp.float32(0.0)
+    joint = start + lane
+    while joint < end:
+        body = joint_child[joint]
+        slot = body + wp.int32(1)
+        mass = body_mass[body]
+        velocity = bodies.velocity[slot]
+        omega = bodies.angular_velocity[slot]
+        q_com = body_q_com[body]
+        position = wp.transform_get_translation(q_com)
+        rotation = wp.transform_get_rotation(q_com)
+        body_omega = wp.quat_rotate_inv(rotation, omega)
+        spin = wp.quat_rotate(rotation, body_inertia[body] * body_omega)
+        linear = mass * velocity
+        angular = spin + wp.cross(position - origin, linear)
+        local_linear_x += linear[0]
+        local_linear_y += linear[1]
+        local_linear_z += linear[2]
+        local_angular_x += angular[0]
+        local_angular_y += angular[1]
+        local_angular_z += angular[2]
+        joint += wp.int32(32)
+
+    momentum = wp.spatial_vector(
+        wp.tile_sum(wp.tile(local_linear_x))[0],
+        wp.tile_sum(wp.tile(local_linear_y))[0],
+        wp.tile_sum(wp.tile(local_linear_z))[0],
+        wp.tile_sum(wp.tile(local_angular_x))[0],
+        wp.tile_sum(wp.tile(local_angular_y))[0],
+        wp.tile_sum(wp.tile(local_angular_z))[0],
+    )
+    if lane == wp.int32(0):
+        momentum_out[articulation] = momentum
+
+
 @wp.kernel(enable_backward=False)
 def _restore_reduced_momentum_kernel(
     articulation_start: wp.array[wp.int32],
@@ -2185,7 +2265,9 @@ def _solve_reduced_deferred_contacts_kernel(
     if prepare:
         for index in range(start, end):
             column = scheduled_column[index]
-            reduced_contact_prepare(contact_cols, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(True), wp.bool(True))
+            reduced_contact_prepare(
+                contact_cols, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(True), wp.bool(True)
+            )
 
     for iteration in range(iterations):
         for offset in range(end - start):
@@ -2940,20 +3022,31 @@ class ReducedPhoenXArticulation:
 
     def end_substep(self, dt: float, *, split_dynamics: bool) -> None:
         """Apply post-impulse Coriolis dynamics, integrate, and conserve momentum."""
-        wp.launch(
-            _capture_reduced_momentum_kernel,
-            dim=int(self.model.articulation_count),
-            inputs=[
-                self.model.articulation_start,
-                self.model.articulation_end,
-                self.model.joint_child,
-                self.model.body_mass,
-                self.model.body_inertia,
-                self.bodies,
-            ],
-            outputs=[self.system.target_world_momentum],
-            device=self.model.device,
-        )
+        capture_inputs = [
+            self.model.articulation_start,
+            self.model.articulation_end,
+            self.model.joint_child,
+            self.model.body_mass,
+            self.model.body_inertia,
+            self.bodies,
+        ]
+        if self.model.device.is_cuda:
+            wp.launch_tiled(
+                _capture_reduced_momentum_warp_kernel,
+                dim=[int(self.model.articulation_count)],
+                inputs=capture_inputs,
+                outputs=[self.system.target_world_momentum],
+                block_dim=32,
+                device=self.model.device,
+            )
+        else:
+            wp.launch(
+                _capture_reduced_momentum_kernel,
+                dim=int(self.model.articulation_count),
+                inputs=capture_inputs,
+                outputs=[self.system.target_world_momentum],
+                device=self.model.device,
+            )
         if split_dynamics:
             self.system.advance(
                 self.state,
