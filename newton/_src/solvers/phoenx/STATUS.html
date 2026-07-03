@@ -222,7 +222,7 @@
     <article>
       <div class="meta"><span class="tag warn">REJECTED · RESIDENT WORK QUEUE</span><time>3 Jul</time></div>
       <h2>Persistent scheduling recovered the failed fusion, but has not won yet</h2>
-      <p>The retained result remains about 911k samples/s. A profiler-guided resident kernel now uses dynamic full-warp contact tasks, a bounded grid phase barrier, and the existing 8/16/32-thread articulation tiles for dynamics and publication.</p>
+      <p>At the time of this rejected experiment, the retained baseline was about 911k samples/s; the newer shared-factor row cache has since raised the retained matched result to 923k/s. The resident kernel used dynamic full-warp contact tasks, a bounded grid phase barrier, and the existing 8/16/32-thread articulation tiles for dynamics and publication.</p>
       <ul>
         <li>The original exact contact/ABA/publish fusion reached only about 846k/s. Local 128-thread grouping made contact imbalance worse and fell to 731k/s; that form is rejected.</li>
         <li>The resident queue removes local group coupling and replaces block-scoped tile operations with an exact scalar warp contact solve. Overflow-page CUDA-graph parity passes.</li>
