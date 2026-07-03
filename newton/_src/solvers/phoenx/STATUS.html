@@ -60,12 +60,12 @@
     .work-env { width: 9%; background: #7c5ce5; }
     .work-rl { width: 5%; background: #e58b2a; }
     .work-other { width: 2%; background: #aab3c2; }
-    .solver-rows { width: 24%; background: #1748a6; }
-    .solver-advance { width: 21%; background: #3478f6; }
-    .solver-factor { width: 21%; background: #65a2ff; }
-    .solver-publish { width: 18%; background: #08a88a; }
-    .solver-contact { width: 14%; background: #61c5ad; }
-    .solver-other { width: 2%; background: #b7c0ce; }
+    .solver-rows { width: 25%; background: #1748a6; }
+    .solver-advance { width: 23%; background: #3478f6; }
+    .solver-factor { width: 22%; background: #65a2ff; }
+    .solver-publish { width: 15%; background: #08a88a; }
+    .solver-contact { width: 15%; background: #61c5ad; }
+    .solver-other { width: 0%; background: #b7c0ce; }
     .work-legend { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
     .solver-legend { grid-template-columns: repeat(6, minmax(0, 1fr)); }
     .subprofile { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · compact inertia retained</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · ABA modes specialized</strong></div>
     </header>
 
     <section class="hero">
@@ -115,12 +115,12 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">881k/s</div><div class="label">fresh comparable graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.45×</div><div class="label">fresh gap to nanoG1 6dee587</div></div>
-      <div class="card"><div class="metric good">+7.5%</div><div class="label">cumulative short-training gain</div></div>
+      <div class="card"><div class="metric">890k/s</div><div class="label">fresh comparable graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.43×</div><div class="label">fresh gap to nanoG1 6dee587</div></div>
+      <div class="card"><div class="metric good">+8.6%</div><div class="label">cumulative short-training gain</div></div>
     </section>
 
-    <p class="profile-note">Fresh post-fusion full collect/update runs measure 877.1k and 885.3k samples/s (881.2k mean). The comparison uses nanoG1 commit <code>6dee587</code> and its measured 1.276M training SPS; shorter same-session brackets remain useful only for relative optimization deltas.</p>
+    <p class="profile-note">Fresh specialized-ABA full collect/update runs measure 891.2k and 889.6k samples/s (890.4k mean). The comparison uses nanoG1 commit <code>6dee587</code> and its measured 1.276M training SPS; shorter same-session brackets remain useful only for relative optimization deltas.</p>
 
     <div class="section-label">Steady-training GPU work profile</div>
     <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
@@ -135,21 +135,21 @@
         <div class="work-item"><strong><i style="background:#e58b2a"></i>5%</strong>policy + learner</div>
         <div class="work-item"><strong><i style="background:#aab3c2"></i>2%</strong>runtime + other</div>
       </div>
-      <p class="profile-note">Share of summed CUDA kernel duration in the latest five-second steady graph-leapfrog Nsight trace (rounded). Streams overlap, so these are GPU-work shares—not additive wall-clock latency. The trace predates removal of the empty GJK stage and masked reset observations, so current collision and environment shares are slightly lower.</p>
+      <p class="profile-note">Share of summed CUDA kernel duration in the latest five-second steady graph-leapfrog Nsight trace (rounded). Streams overlap, so these are GPU-work shares—not additive wall-clock latency. The current bounded trace includes compact inertia and specialized ABA; streams overlap, so kernel-work shares do not directly predict wall time.</p>
       <div class="subprofile">
         <h3>Inside physics solver work</h3>
-        <div class="work-bar" role="img" aria-label="Contact row construction 24 percent, articulation advance 21 percent, factorization and kinematics 21 percent, publish and momentum 18 percent, contact solve 14 percent, joints and other 2 percent">
+        <div class="work-bar" role="img" aria-label="Contact row construction 25 percent, articulation advance 23 percent, factorization and kinematics 22 percent, publish and momentum 15 percent, contact solve 15 percent">
           <span class="solver-rows"></span><span class="solver-advance"></span><span class="solver-factor"></span><span class="solver-publish"></span><span class="solver-contact"></span><span class="solver-other"></span>
         </div>
         <div class="work-legend solver-legend">
-          <div class="work-item"><strong><i style="background:#1748a6"></i>24%</strong>contact rows</div>
-          <div class="work-item"><strong><i style="background:#3478f6"></i>21%</strong>articulation advance</div>
-          <div class="work-item"><strong><i style="background:#65a2ff"></i>21%</strong>factor + kinematics</div>
-          <div class="work-item"><strong><i style="background:#08a88a"></i>18%</strong>publish + momentum</div>
-          <div class="work-item"><strong><i style="background:#61c5ad"></i>14%</strong>contact solve</div>
-          <div class="work-item"><strong><i style="background:#b7c0ce"></i>2%</strong>joints + other</div>
+          <div class="work-item"><strong><i style="background:#1748a6"></i>25%</strong>contact rows</div>
+          <div class="work-item"><strong><i style="background:#3478f6"></i>23%</strong>articulation advance</div>
+          <div class="work-item"><strong><i style="background:#65a2ff"></i>22%</strong>factor + kinematics</div>
+          <div class="work-item"><strong><i style="background:#08a88a"></i>15%</strong>publish + momentum</div>
+          <div class="work-item"><strong><i style="background:#61c5ad"></i>15%</strong>contact solve</div>
+          <div class="work-item"><strong><i style="background:#b7c0ce"></i>0%</strong>joints + other</div>
         </div>
-        <p class="profile-note">Normalized within physics-solver GPU duration. “Contact rows” includes gather/build/finalize; “factor + kinematics” includes reduced factor initialization and local kinematics. The retained register-delta change makes the current contact-solve share slightly lower.</p>
+        <p class="profile-note">Normalized within physics-solver GPU duration. “Contact rows” includes gather/build/finalize; “factor + kinematics” includes reduced factor initialization and local kinematics. The two specialized ABA modes total 45.7 ms in the bounded trace versus 47.8 ms for the former unified kernel; rows are now the largest individual category.</p>
       </div>
     </section>
 
@@ -162,7 +162,7 @@
         <li>A fresh 157.3M-sample run passes the complete gate at seed 1000 and seed 2000.</li>
         <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
         <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
-        <li>Fresh post-fusion full collect/update graph-leapfrog runs reach 877.1k and 885.3k samples/s (881.2k mean), or 69.1% of nanoG1 commit <code>6dee587</code> at its measured 1.276M/s: PhoenX is currently 1.45× slower. The proven full-quality recipe is unchanged.</li>
+        <li>Fresh specialized-ABA full collect/update graph-leapfrog runs reach 891.2k and 889.6k samples/s (890.4k mean), or 69.8% of nanoG1 commit <code>6dee587</code> at its measured 1.276M/s: PhoenX is currently 1.43× slower. The proven full-quality recipe is unchanged.</li>
       </ul>
     </article>
 
@@ -188,6 +188,17 @@
 
     <div class="section-label">Latest findings</div>
     <article>
+      <div class="meta"><span class="tag good">RETAINED · EXACT ABA SPECIALIZATION</span><time>3 Jul</time></div>
+      <h2>External-force and Coriolis ABA passes compile separately</h2>
+      <p>The split temporal schedule invokes ABA in two mutually exclusive modes. CUDA now compiles those modes separately, eliminating inactive external-force, Coriolis, and momentum-capture branches and their live state while preserving every equation and traversal order. CPU keeps the unified path.</p>
+      <ul>
+        <li>Nsight measures the specialized pair at 126.0 µs and 112.1 µs versus 124.5 µs twice for the unified kernel, reducing aggregate ABA GPU work by 4.6%.</li>
+        <li>Matched G1 physics improves about 1.955M → 1.959–1.964M steps/s; graph-leapfrog training improves 880.8k → 889.6–891.2k samples/s (+1.09% by the means).</li>
+        <li>Contact-rich fleets improve ANYmal +0.24%, H1 +0.86%, and G1 +0.97%, with identical reported final states. This is a schedule specialization, not a robot specialization.</li>
+        <li>All 42 reduced CUDA-graph tests pass; the recurring suite-wide graph-instantiation runtime error again passes alone. Coverage includes serial parity, fused momentum capture, 8/16/32-lane topologies, long-horizon momentum/energy, loops, contacts, Featherstone parity, multiple articulations, and determinism.</li>
+      </ul>
+    </article>
+    <article>
       <div class="meta"><span class="tag good">RETAINED · EXACT COMPACT INERTIA</span><time>3 Jul</time></div>
       <h2>Rigid-body structure replaces dense 6×6 inertia transforms</h2>
       <p>Reduced factor initialization now constructs the 21 stored symmetric entries directly from the COM mass, rotated 3×3 inertia, and parallel-axis terms. It removes a cached 36-float spatial matrix per body and the redundant dense 6×6 transform while preserving the same rigid-body operator.</p>
@@ -195,7 +206,7 @@
         <li>A randomized 64-body CUDA-graph regression matches the original dense transform within 2e−5; ABA/common-mass-matrix equivalence also passes.</li>
         <li>Matched 8,192-world G1 physics improves 1.926M → 1.947–1.962M steps/s (+1.1–1.9%) and GPU use falls about 31 MiB.</li>
         <li>Contact-rich 512-world fleets improve ANYmal +1.0%, H1 +0.8% on the longer bracket, and G1 +1.6%; this is not a G1-only specialization.</li>
-        <li>Matched full collect/update training improves about 695.2k → 700.4k samples/s (+0.74%). The authoritative 881k graph-leapfrog headline remains unchanged until its comparable refresh.</li>
+        <li>Matched eager full collect/update training improves about 695.2k → 700.4k samples/s (+0.74%). Its graph-leapfrog refresh is neutral at 880.8k/s, so only the subsequent ABA specialization moves the authoritative headline.</li>
         <li>All 42 reduced CUDA-graph tests pass; one suite-wide graph-instantiation runtime error passes immediately in isolation. Coverage includes live mass updates, tile widths, Featherstone parity, momentum/energy, loops, dense/self/ground contacts, multi-articulation worlds, and determinism.</li>
       </ul>
     </article>
@@ -256,12 +267,12 @@
     </article>
     <article>
       <div class="meta"><span class="tag good">BASELINE REFRESHED</span><time>3 Jul</time></div>
-      <h2>Current PhoenX training reaches 881k/s against nanoG1 at 1.276M/s</h2>
+      <h2>Current PhoenX training reaches 890k/s against nanoG1 at 1.276M/s</h2>
       <p>Two fresh 8,192-world, 64-step, full collect/update graph-leapfrog runs used the current quality-facing reduced-coordinate recipe, mirror regularization, BF16 manual MLP paths, and no diagnostic readback.</p>
       <ul>
-        <li>Post-fusion PhoenX measures 877,075 and 885,293 samples/s; the 881,184/s mean is rounded to 881k/s in the headline.</li>
+        <li>Specialized-ABA PhoenX measures 891,203 and 889,645 samples/s; the 890,424/s mean is rounded to 890k/s in the headline.</li>
         <li>The local nanoG1 checkout is commit <code>6dee587</code>; its <code>RESULTS.md</code> reports measured steady training throughput of 1.276M samples/s on the same GPU class.</li>
-        <li>PhoenX therefore delivers 69.1% of nanoG1 throughput and is 1.45× slower. This supersedes the pre-fusion 872k/s and 1.46× cards.</li>
+        <li>PhoenX therefore delivers 69.8% of nanoG1 throughput and is 1.43× slower. This supersedes the post-fusion 881k/s and 1.45× cards.</li>
         <li>The benchmark default now uses the exact 1.276M measurement and records its commit provenance instead of the rounded 1.28M headline.</li>
       </ul>
     </article>
