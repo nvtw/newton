@@ -587,6 +587,27 @@ wp.copy(self.state_0.body_qd, self.state_1.body_qd)
 
 If you ever see a graph-captured PhoenX scene where bodies appear to be on rails / trapped in a small region: drop ``ex.graph = None``, re-run, and compare. Identical motion -> there is a real solver issue. Wildly different motion -> it's almost certainly the swap pattern, not PhoenX.
 
+## Register-forwarded ABA parent state (2026-07-03)
+
+- The one-launch Nsight Compute report for reduced ABA advance measured 80% of
+  issue delay as long-scoreboard waits on global/L1TEX operations, only 13.03%
+  of cycles with an eligible warp, 22.3% achieved occupancy, 86.1% L2 hit rate,
+  no spills, and only 17.5% compute throughput. The 8,192-articulation grid was
+  just 0.30 full resident waves on the large Blackwell GPU.
+- Widening G1 advance tiles from 8 to 16 lanes to expose more warps was exact
+  but lost 2.4% physics throughput (1.546M versus 1.584M steps/s) because idle
+  lane work outweighed latency hiding; it was fully reverted.
+- The retained path precomputes each joint parent lane within the previous tree
+  depth. All subgroup lanes execute a small 6-float native shuffle, forwarding
+  parent velocity and Coriolis registers directly between depths while keeping
+  the original global outputs for later phases. This removes two dependent
+  parent-state loads per non-root joint without changing arithmetic or order.
+- Bounded Nsight Systems comparison: advance median 127.2 to 117.0 us (-8.1%);
+  mean 134.3 to 116.8 us (-13.0%). Short graph-leapfrog training measures
+  875.9k versus 873k samples/s (+0.3%). All 40 reduced CUDA-graph tests pass,
+  including serial parity across 8/16/32-lane topologies; Anymal/H1/G1 contact
+  fleets remain finite.
+
 ## Real G1 training trace after factor compaction (2026-07-03)
 
 - A delayed five-second Nsight Systems window captured steady graph-leapfrog

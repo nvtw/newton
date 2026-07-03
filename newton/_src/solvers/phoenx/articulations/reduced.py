@@ -646,6 +646,27 @@ def _sync_reduced_warp(): ...
 def _sync_reduced_group(mask: wp.uint32): ...
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    wp::spatial_vector result;
+    for (int component = 0; component < 6; ++component) {
+        result[component] = __shfl_sync(mask, value[component], source_lane, width);
+    }
+    return result;
+#else
+    return value;
+#endif
+"""
+)
+def _shuffle_reduced_spatial(
+    value: wp.spatial_vector,
+    source_lane: wp.int32,
+    width: wp.int32,
+    mask: wp.uint32,
+) -> wp.spatial_vector: ...
+
+
 @wp.kernel(enable_backward=False, module="reduced_impulse_response")
 def _compute_reduced_impulse_response_warp_kernel(
     bodies: BodyContainer,
@@ -2022,6 +2043,7 @@ def _advance_reduced_articulations_warp_kernel(
     max_depth: wp.int32,
     articulation_depth_start: wp.array2d[wp.int32],
     articulation_depth_joint: wp.array[wp.int32],
+    joint_parent_lane: wp.array[wp.int32],
     child_start: wp.array[wp.int32],
     child_joint: wp.array[wp.int32],
     joint_type: wp.array[wp.int32],
@@ -2065,20 +2087,25 @@ def _advance_reduced_articulations_warp_kernel(
     if tile_width < wp.int32(32):
         group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
 
+    previous_velocity = wp.spatial_vector()
+    previous_coriolis = wp.spatial_vector()
     for depth in range(max_depth + wp.int32(1)):
         index = articulation_depth_start[articulation, depth] + lane
         depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
-        while index < depth_end:
+        active = index < depth_end
+        joint = wp.int32(-1)
+        parent_lane = wp.int32(0)
+        if active:
             joint = articulation_depth_joint[index]
-            parent = joint_parent[joint]
+            parent_lane = joint_parent_lane[joint]
+        parent_velocity = _shuffle_reduced_spatial(previous_velocity, parent_lane, tile_width, group_mask)
+        parent_coriolis = _shuffle_reduced_spatial(previous_coriolis, parent_lane, tile_width, group_mask)
+        velocity = wp.spatial_vector()
+        coriolis = wp.spatial_vector()
+        if active:
             child = joint_child[joint]
             dof_start = joint_qd_start[joint]
             dof_end = joint_qd_start[joint + wp.int32(1)]
-            parent_velocity = wp.spatial_vector()
-            parent_coriolis = wp.spatial_vector()
-            if parent >= wp.int32(0):
-                parent_velocity = body_velocity[parent]
-                parent_coriolis = body_coriolis[parent]
             joint_velocity = wp.spatial_vector()
             for dof in range(dof_start, dof_end):
                 joint_velocity += joint_s[dof] * joint_qd[dof]
@@ -2116,7 +2143,8 @@ def _advance_reduced_articulations_warp_kernel(
             body_velocity[child] = velocity
             body_coriolis[child] = coriolis
             body_bias[child] = bias
-            index += tile_width
+        previous_velocity = velocity
+        previous_coriolis = coriolis
         _sync_reduced_group(group_mask)
 
     # Bias and articulated-force propagation only depend on the completed child
@@ -2367,15 +2395,19 @@ class ReducedArticulationSystem:
             (articulation_count, self.advance_max_depth + 2),
             dtype=np.int32,
         )
+        joint_depth_lane_np = np.zeros(joint_count, dtype=np.int32)
         articulation_depth_joint_list: list[int] = []
         for articulation in range(articulation_count):
             joint_start = int(articulation_start_np[articulation])
             joint_end = int(articulation_end_np[articulation])
             for depth in range(self.advance_max_depth + 1):
                 articulation_depth_start_np[articulation, depth] = len(articulation_depth_joint_list)
+                depth_lane = 0
                 for joint in range(joint_start, joint_end):
                     if int(joint_depth_np[joint]) == depth:
+                        joint_depth_lane_np[joint] = depth_lane
                         articulation_depth_joint_list.append(joint)
+                        depth_lane += 1
             articulation_depth_start_np[articulation, self.advance_max_depth + 1] = len(articulation_depth_joint_list)
 
         child_start_np = np.zeros(joint_count + 1, dtype=np.int32)
@@ -2391,6 +2423,12 @@ class ReducedArticulationSystem:
             np.asarray(articulation_depth_joint_list, dtype=np.int32),
             device=self.device,
         )
+        joint_parent_lane_np = np.zeros(joint_count, dtype=np.int32)
+        for joint in tree_joint_np:
+            parent = int(joint_parent_np[joint])
+            if parent >= 0:
+                joint_parent_lane_np[joint] = joint_depth_lane_np[body_joint_np[parent]]
+        self.advance_joint_parent_lane = wp.array(joint_parent_lane_np, device=self.device)
         max_articulation_breadth = int(np.max(np.diff(articulation_depth_start_np, axis=1)))
         if max_articulation_breadth <= 8:
             self.advance_tile_width = 8
@@ -2718,6 +2756,7 @@ class ReducedArticulationSystem:
                     wp.int32(self.advance_max_depth),
                     self.advance_articulation_depth_start,
                     self.advance_articulation_depth_joint,
+                    self.advance_joint_parent_lane,
                     self.factor_child_start,
                     self.factor_child_joint,
                     *advance_inputs,
