@@ -1672,6 +1672,7 @@ class TestReducedArticulation(unittest.TestCase):
                     block.max_page_count,
                     block.page_index,
                     wp.bool(True),
+                    block.packed_previous_row_body,
                 ],
                 outputs=[
                     block.packed_jacobian,
@@ -1733,6 +1734,21 @@ class TestReducedArticulation(unittest.TestCase):
         expected_effective_mass = 1.0 / float(np.dot(jacobian_row, response_row))
         actual_effective_mass = float(solver.world._contact_container.derived.numpy()[0, 0])
         self.assertAlmostEqual(actual_effective_mass, expected_effective_mass, delta=2.0e-5)
+
+        # Reuse the same cached rows with different source paths. The packed
+        # builder must clear every DOF from the prior path before writing the
+        # new sparse path, including when the path becomes shorter.
+        changed_row_body = rng.integers(0, int(model.body_count), size=block.row_body.shape, dtype=np.int32)
+        block.row_body.assign(changed_row_body)
+        wp.capture_launch(capture.graph)
+        np.testing.assert_array_equal(
+            block.packed_jacobian.numpy()[: block.row_wrench.shape[1], :dof_count],
+            reference_jacobian.numpy()[0, :, :dof_count],
+        )
+        np.testing.assert_array_equal(
+            block.packed_response.numpy()[: block.row_wrench.shape[1], :dof_count],
+            reference_response.numpy()[0, :, :dof_count],
+        )
 
     def test_contact_block_selects_smallest_dof_width_under_graph_capture(self):
         device = wp.get_preferred_device()

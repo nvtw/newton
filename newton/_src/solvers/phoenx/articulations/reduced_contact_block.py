@@ -909,6 +909,7 @@ def _build_packed_generalized_contact_rows_kernel(
     max_page_count: wp.array[wp.int32],
     page_index: wp.array[wp.int32],
     prepare: wp.bool,
+    previous_row_body: wp.array[wp.int32],
     packed_jacobian: wp.array2d[wp.float32],
     packed_response: wp.array2d[wp.float32],
     joint_work: wp.array3d[wp.float32],
@@ -925,8 +926,6 @@ def _build_packed_generalized_contact_rows_kernel(
     storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
     packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
     row_count = wp.int32(3) * point_count[packed_articulation]
-    # These exit conditions are uniform across the block, so returning before
-    # the cooperative zero fill and its barrier below is safe.
     if enabled[articulation] == wp.int32(0) or dof_count_articulation > wp.int32(packed_jacobian.shape[1]):
         return
     if not prepare and (
@@ -934,20 +933,20 @@ def _build_packed_generalized_contact_rows_kernel(
     ):
         return
 
-    # The dense Jacobian needs explicit zeros. All block threads (one block is
-    # one articulation) stride the flat [row, dof] slab so the stores coalesce
-    # instead of each row thread walking its own 144-byte-strided row.
-    first_packed_row = packed_articulation * wp.int32(_MAX_ROWS)
-    zero_total = row_count * dof_count_articulation
-    zero_index = row
-    while zero_index < zero_total:
-        zero_row = zero_index // dof_count_articulation
-        packed_jacobian[first_packed_row + zero_row, zero_index - zero_row * dof_count_articulation] = wp.float32(0.0)
-        zero_index += wp.int32(_MAX_ROWS)
-    _sync_contact_block()
     if row >= row_count:
         return
-    packed_row = first_packed_row + row
+    packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
+    previous_body = previous_row_body[packed_row]
+    if previous_body >= wp.int32(0):
+        previous_path_start = data.body_path_start[previous_body]
+        previous_path_end = data.body_path_start[previous_body + wp.int32(1)]
+        for path_index in range(previous_path_start, previous_path_end):
+            previous_joint = data.body_path_joint[path_index]
+            previous_dof_start = data.joint_qd_start[previous_joint]
+            previous_dof_end = data.joint_qd_start[previous_joint + wp.int32(1)]
+            for dof in range(previous_dof_start, previous_dof_end):
+                packed_jacobian[packed_row, dof - dof_start_articulation] = wp.float32(0.0)
+    previous_row_body[packed_row] = row_body[packed_articulation, row]
 
     inverse_mass = _build_packed_generalized_row(
         articulation,
@@ -1350,6 +1349,7 @@ class ReducedContactBlockSystem:
         self.fallback_partitioner: IncrementalContactPartitioner | None = None
         self.packed_jacobian: wp.array2d[wp.float32] | None = None
         self.packed_response: wp.array2d[wp.float32] | None = None
+        self.packed_previous_row_body: wp.array[wp.int32] | None = None
         self.enabled = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.total_point_count = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.max_page_count = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -1406,6 +1406,7 @@ class ReducedContactBlockSystem:
             device=self.device,
         )
         self.packed_response = wp.zeros_like(self.packed_jacobian)
+        self.packed_previous_row_body = wp.full(packed_row_capacity, value=-1, dtype=wp.int32, device=self.device)
         worker_blocks = max(1, int(getattr(self.device, "sm_count", 1)))
         self.fallback_worker_count = min(capacity, worker_blocks * _FALLBACK_BLOCK_DIM)
         self.schedule_keys = wp.empty(2 * capacity, dtype=wp.int64, device=self.device)
@@ -1687,6 +1688,7 @@ class ReducedContactBlockSystem:
         def solve_resident_page(*, gathered: bool = False, build_rows: bool = True) -> None:
             assert self.packed_jacobian is not None
             assert self.packed_response is not None
+            assert self.packed_previous_row_body is not None
             if not gathered:
                 wp.launch(
                     _finalize_reduced_contact_rows_kernel,
@@ -1723,6 +1725,7 @@ class ReducedContactBlockSystem:
                         self.max_page_count,
                         self.page_index,
                         wp.bool(prepare),
+                        self.packed_previous_row_body,
                     ],
                     outputs=[
                         self.packed_jacobian,

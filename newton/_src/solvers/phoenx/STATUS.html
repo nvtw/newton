@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · 10 ms curriculum stress-tested</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · exact sparse contact rows retained</strong></div>
     </header>
 
     <section class="hero">
@@ -187,6 +187,17 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · EXACT ROW WORK REDUCTION</span><time>3 Jul</time></div>
+      <h2>Contact rows now clear only the previously active articulation path</h2>
+      <p>The packed reduced-contact builder no longer zero-fills every row across the articulation's full dense DOF width. Each row remembers its previous source body and clears exactly that body's sparse ancestor path before writing the current path.</p>
+      <ul>
+        <li>This changes no equation, approximation, row order, or solver tolerance. It only removes redundant zero stores and the block-wide barrier they required.</li>
+        <li>The same captured graph is tested after every contact row changes source body, including shorter paths; packed Jacobians and ABA responses remain exactly equal to the dense reference.</li>
+        <li>Arbitrary overflow-page replay and the high-degree momentum-conservation fallback pass under CUDA graph capture.</li>
+        <li>Nsight measures the steady row-builder median at 387 µs versus 402 µs (about 3.8% less). Saturated 8,192-world end-to-end A/B is a modest 1.912M → 1.919M physics steps/s; this is retained as a safe cumulative gain, not presented as a major breakthrough.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag">10 MS TRAINING · KEEP LATE TRANSITION</span><time>3 Jul</time></div>
       <h2>Two-step physics trains, but early use creates a fragile policy basin</h2>

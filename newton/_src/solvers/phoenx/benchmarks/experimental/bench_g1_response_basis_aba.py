@@ -592,6 +592,7 @@ def main() -> int:
                 block.max_page_count,
                 block.page_index,
                 wp.bool(True),
+                block.packed_previous_row_body,
             ],
             outputs=[block.packed_jacobian, block.packed_response, block.aba_joint_work, block.aba_body_response],
             device=device,
