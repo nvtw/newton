@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · Box3D-guided solver experiments active</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · convex patch-friction prototype active</strong></div>
     </header>
 
     <section class="hero">
@@ -185,6 +185,18 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag">PATCH FRICTION · FOUNDATION</span><time>3 Jul</time></div>
+      <h2>Convex-only coupled friction now has a graph-safe state and projection core</h2>
+      <p>The Box3D-inspired prototype keeps every point normal, but will replace eligible per-point tangents with one central, coupled 2D friction block. This is not in the production solve yet; integration and physical gates remain before any performance claim.</p>
+      <ul>
+        <li>Eligibility is deliberately conservative: primitives and convex meshes qualify only for unmerged shape-pair columns. Raw meshes, heightfields, cloth/soft contacts, and compound body-pair columns retain existing point friction.</li>
+        <li>The projection uses the full 2×2 tangent effective mass, including its rotational cross term, and the existing PhoenX static/kinetic Coulomb disk law.</li>
+        <li>Warm-start state is stored as a world-space patch impulse. Transfer follows contact matching plus the prior contact-to-column map, so reordered columns or a changed first manifold contact cannot attach history to the wrong pair.</li>
+        <li>Six focused CUDA-graph tests pass: convex/mesh classification, conservative compound fallback, scoped history copy, reordered-column matching, full coupled solve, and kinetic projection.</li>
+        <li>Next: integrate the maximal rigid prepare/iterate path as a compile-time specialization, then require momentum, stacking, static/kinetic friction, mesh fallback, determinism, single-/multi-world, and G1 throughput gates.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag">BOX3D TRANSFER STUDY</span><time>3 Jul</time></div>
       <h2>Patch friction is promising; two simpler transfers were rejected</h2>
