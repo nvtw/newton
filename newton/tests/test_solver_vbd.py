@@ -1840,7 +1840,8 @@ def _capsule_axial_spin_dissipates_via_friction(test, device, hard_contact=True)
         state_0 = model.state()
         state_1 = model.state()
         control = model.control()
-        contacts = model.contacts()
+        collision_pipeline = newton.CollisionPipeline(model)
+        contacts = collision_pipeline.contacts()
 
         init_qd = state_0.body_qd.numpy().copy()
         init_qd[0] = [0.0, 0.0, 0.0, omega_init, 0.0, 0.0]
@@ -1849,7 +1850,7 @@ def _capsule_axial_spin_dissipates_via_friction(test, device, hard_contact=True)
         sim_dt = 1.0e-3
         for _ in range(500):
             state_0.clear_forces()
-            model.collide(state_0, contacts)
+            collision_pipeline.collide(state_0, contacts)
             solver.step(state_0, state_1, control, contacts, sim_dt)
             state_0, state_1 = state_1, state_0
 
@@ -1919,7 +1920,8 @@ def _yawed_cable_does_not_inject_energy(test, device, hard_contact=True):
         state_0 = model.state()
         state_1 = model.state()
         control = model.control()
-        contacts = model.contacts()
+        collision_pipeline = newton.CollisionPipeline(model)
+        contacts = collision_pipeline.contacts()
 
         masses = model.body_mass.numpy()
         inertias = model.body_inertia.numpy()
@@ -1939,7 +1941,7 @@ def _yawed_cable_does_not_inject_energy(test, device, hard_contact=True):
         for frame in range(num_frames):
             for _ in range(substeps):
                 state_0.clear_forces()
-                model.collide(state_0, contacts)
+                collision_pipeline.collide(state_0, contacts)
                 solver.step(state_0, state_1, control, contacts, sim_dt)
                 state_0, state_1 = state_1, state_0
             if frame >= settle_frames:
@@ -1975,9 +1977,10 @@ def _collect_rigid_contact_forces_reports_surface_points(test, device):
         state_0 = model.state()
         state_1 = model.state()
         control = model.control()
-        contacts = model.contacts()
+        collision_pipeline = newton.CollisionPipeline(model)
+        contacts = collision_pipeline.contacts()
 
-        model.collide(state_0, contacts)
+        collision_pipeline.collide(state_0, contacts)
         body_q_prev_snapshot = wp.clone(solver.body_q_prev)
         solver.step(state_0, state_1, control, contacts, 1.0e-3)
 

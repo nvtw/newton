@@ -173,7 +173,8 @@ class Example:
         if use_mujoco_contacts:
             self.contacts = None
         else:
-            self.contacts = self.model.contacts()
+            self.collision_pipeline = newton.CollisionPipeline(self.model)
+            self.contacts = self.collision_pipeline.contacts()
 
         # Download the policy from the newton-assets repository
         policy_asset_path = newton.utils.download_asset("anybotics_anymal_c")
@@ -220,7 +221,7 @@ class Example:
             self.viewer.apply_forces(self.state_0)
 
             if self.contacts is not None:
-                self.model.collide(self.state_0, self.contacts)
+                self.collision_pipeline.collide(self.state_0, self.contacts)
 
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 

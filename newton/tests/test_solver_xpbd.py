@@ -84,7 +84,8 @@ def test_particle_particle_friction_uses_relative_velocity(test, device):
 
     state0 = model.state()
     state1 = model.state()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     # Apply equal and opposite forces to keep the particles in sustained contact.
     # Without this, the initial overlap may be resolved in ~1 iteration and friction becomes hard to observe,
@@ -111,7 +112,7 @@ def test_particle_particle_friction_uses_relative_velocity(test, device):
 
     # Run simulation
     for _ in range(num_steps):
-        model.collide(state0, contacts)
+        collision_pipeline.collide(state0, contacts)
         control = model.control()
         solver.step(state0, state1, control, contacts, dt)
         state0, state1 = state1, state0
@@ -199,10 +200,11 @@ def test_particle_particle_friction_with_relative_motion(test, device):
 
         state0 = model.state()
         state1 = model.state()
-        contacts = model.contacts()
+        collision_pipeline = newton.CollisionPipeline(model)
+        contacts = collision_pipeline.contacts()
 
         # One step: measure tangential slip (relative z displacement).
-        model.collide(state0, contacts)
+        collision_pipeline.collide(state0, contacts)
         control = model.control()
         solver.step(state0, state1, control, contacts, dt)
 
@@ -244,7 +246,8 @@ def test_xpbd_particle_particle_contact_nan_guard(test, device):
     solver = newton.solvers.SolverXPBD(model=model, iterations=1)
     state0 = model.state()
     state1 = model.state()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver.step(state0, state1, model.control(), contacts, 1.0 / 60.0)
 
@@ -278,7 +281,8 @@ def test_xpbd_particle_particle_tiny_separation_contact_remains_active(test, dev
     solver = newton.solvers.SolverXPBD(model=model, iterations=1)
     state0 = model.state()
     state1 = model.state()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver.step(state0, state1, model.control(), contacts, 1.0 / 60.0)
 
@@ -349,8 +353,9 @@ def test_particle_shape_restitution_correct_particle(test, device):
     dt = 1.0 / 60.0
 
     # Run a single step — enough for the contact + restitution pass
-    contacts = model.contacts()
-    model.collide(state0, contacts)
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
+    collision_pipeline.collide(state0, contacts)
     control = model.control()
     solver.step(state0, state1, control, contacts, dt)
 
@@ -427,8 +432,9 @@ def test_particle_shape_restitution_accounts_for_body_velocity(test, device):
     state0.body_qd.assign(wp.array(body_vel, dtype=wp.spatial_vector, device=device))
 
     dt = 1.0 / 60.0
-    contacts = model.contacts()
-    model.collide(state0, contacts)
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
+    collision_pipeline.collide(state0, contacts)
     control = model.control()
     solver.step(state0, state1, control, contacts, dt)
 
@@ -490,7 +496,8 @@ def test_articulation_contact_drift(test, device):
     state_0 = model.state()
     state_1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
@@ -503,7 +510,7 @@ def test_articulation_contact_drift(test, device):
     for _ in range(200):
         for _ in range(sim_substeps):
             state_0.clear_forces()
-            model.collide(state_0, contacts)
+            collision_pipeline.collide(state_0, contacts)
             solver.step(state_0, state_1, control, contacts, sim_dt)
             state_0, state_1 = state_1, state_0
 
@@ -515,7 +522,7 @@ def test_articulation_contact_drift(test, device):
     for _ in range(300):
         for _ in range(sim_substeps):
             state_0.clear_forces()
-            model.collide(state_0, contacts)
+            collision_pipeline.collide(state_0, contacts)
             solver.step(state_0, state_1, control, contacts, sim_dt)
             state_0, state_1 = state_1, state_0
 
@@ -606,7 +613,8 @@ def test_xpbd_contact_force_static_equilibrium(test, device):
     state_in = model.state()
     state_out = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
 
     dt = 1.0 / 60.0
@@ -618,7 +626,7 @@ def test_xpbd_contact_force_static_equilibrium(test, device):
     for _ in range(settle_steps):
         for _ in range(num_substeps):
             state_in.clear_forces()
-            model.collide(state_in, contacts)
+            collision_pipeline.collide(state_in, contacts)
             solver.step(state_in, state_out, control, contacts, sub_dt)
             state_in, state_out = state_out, state_in
 
@@ -633,7 +641,7 @@ def test_xpbd_contact_force_static_equilibrium(test, device):
     for _ in range(avg_steps):
         for _ in range(num_substeps):
             state_in.clear_forces()
-            model.collide(state_in, contacts)
+            collision_pipeline.collide(state_in, contacts)
             solver.step(state_in, state_out, control, contacts, sub_dt)
             state_in, state_out = state_out, state_in
         solver.update_contacts(contacts, state_in)
@@ -744,12 +752,13 @@ def test_xpbd_contact_force_zero_when_no_contact(test, device):
     state_in = model.state()
     state_out = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
 
     dt = 1.0 / 60.0
     state_in.clear_forces()
-    model.collide(state_in, contacts)
+    collision_pipeline.collide(state_in, contacts)
     solver.step(state_in, state_out, control, contacts, dt)
     solver.update_contacts(contacts, state_out)
 
@@ -780,11 +789,12 @@ def test_xpbd_contact_force_zero_when_not_touching(test, device):
     state_in = model.state()
     state_out = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
 
     state_in.clear_forces()
-    model.collide(state_in, contacts)
+    collision_pipeline.collide(state_in, contacts)
 
     ncontacts = int(contacts.rigid_contact_count.numpy()[0])
     test.assertGreater(ncontacts, 0, "Gap should cause a contact pair to be generated")
@@ -813,10 +823,11 @@ def test_xpbd_update_contacts_requires_force_attribute(test, device):
     state_in = model.state()
     state_out = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     state_in.clear_forces()
-    model.collide(state_in, contacts)
+    collision_pipeline.collide(state_in, contacts)
     solver.step(state_in, state_out, control, contacts, 1.0 / 60.0)
 
     test.assertIsNone(contacts.force)

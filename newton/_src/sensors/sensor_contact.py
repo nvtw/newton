@@ -288,7 +288,8 @@ class SensorContact:
             sensor = SensorContact(model, sensing_shapes="ball")
             solver = newton.solvers.SolverMuJoCo(model)
             state = model.state()
-            contacts = model.contacts()
+            collision_pipeline = newton.CollisionPipeline(model)
+            contacts = collision_pipeline.contacts()
 
             solver.step(state, state, None, None, dt=1.0 / 60.0)
             solver.update_contacts(contacts)

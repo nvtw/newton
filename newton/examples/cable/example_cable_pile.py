@@ -173,8 +173,8 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        pipeline = newton.CollisionPipeline(self.model, contact_matching="latest")
-        self.contacts = self.model.contacts(collision_pipeline=pipeline)
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="latest")
+        self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
         self.viewer.set_picking_linear_only_bodies(rod_bodies_all)
@@ -202,7 +202,7 @@ class Example:
         for _substep in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
-            self.model.collide(self.state_0, self.contacts)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
 
             self.solver.step(
                 self.state_0,

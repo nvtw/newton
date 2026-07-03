@@ -293,7 +293,8 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = newton.CollisionPipeline(self.model)
+        self.contacts = self.collision_pipeline.contacts()
         self.viewer.set_model(self.model)
         self.viewer.set_picking_linear_only_bodies(cable_body_ids)
 
@@ -371,7 +372,7 @@ class Example:
             # Collision detection and contact refresh cadence.
             refresh_contacts = (substep % self.update_step_interval) == 0
             if refresh_contacts:
-                self.model.collide(self.state_0, self.contacts)
+                self.collision_pipeline.collide(self.state_0, self.contacts)
 
             self.solver.set_rigid_history_update(refresh_contacts)
             self.solver.step(

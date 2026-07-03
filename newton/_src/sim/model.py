@@ -1730,6 +1730,11 @@ class Model:
         """
         Create and return a :class:`Contacts` object for this model.
 
+        .. deprecated:: 1.4
+
+            Create a :class:`CollisionPipeline` and call
+            :meth:`CollisionPipeline.contacts` instead.
+
         This method initializes a collision pipeline with default arguments (when not already
         cached) and allocates a contacts buffer suitable for storing collision detection results.
         Call :meth:`collide` to run the collision detection and populate the contacts object.
@@ -1742,6 +1747,11 @@ class Model:
         Returns:
             The contact object containing collision information.
         """
+        warnings.warn(
+            "Model.contacts() is deprecated; create a CollisionPipeline and call pipeline.contacts() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if collision_pipeline is not None:
             self._collision_pipeline = collision_pipeline
         if self._collision_pipeline is None:
@@ -1760,12 +1770,23 @@ class Model:
         Generate contact points for the particles and rigid bodies in the model using the default collision
         pipeline.
 
+        .. deprecated:: 1.4
+
+            Create a :class:`CollisionPipeline` and call
+            :meth:`CollisionPipeline.collide` instead.
+
         Args:
             state: The current simulation state.
             contacts: The contacts buffer to populate (will be cleared first). If None, a new
                 contacts buffer is allocated via :meth:`contacts`.
             collision_pipeline: Optional collision pipeline override.
         """
+        warnings.warn(
+            "Model.collide() is deprecated; create a CollisionPipeline and call "
+            "pipeline.collide(state, contacts) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if collision_pipeline is not None:
             self._collision_pipeline = collision_pipeline
         if self._collision_pipeline is None:

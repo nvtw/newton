@@ -94,10 +94,11 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
 
         model = builder.finalize(device=self.device)
         state = model.state()
-        contacts = model.contacts()
+        collision_pipeline = newton.CollisionPipeline(model)
+        contacts = collision_pipeline.contacts()
 
         # Run collision detection
-        model.collide(state, contacts)
+        collision_pipeline.collide(state, contacts)
 
         # Get soft contact count
         soft_contact_count = int(contacts.soft_contact_count.numpy()[0])

@@ -770,7 +770,8 @@ def _cable_bend_stiffness_impl(test: unittest.TestCase, device):
 
     state0, state1 = model.state(), model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
     solver = newton.solvers.SolverVBD(model, iterations=10)
 
     frame_dt = 1.0 / 60.0
@@ -783,7 +784,7 @@ def _cable_bend_stiffness_impl(test: unittest.TestCase, device):
         nonlocal state0, state1
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
@@ -827,7 +828,8 @@ def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
     """Cable VBD: pinned chain should sag under gravity while remaining numerically stable."""
     segment_length = 0.2
     model, state0, state1, control, _rod_bodies = _build_cable_chain(device, num_links=6, segment_length=segment_length)
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
     solver = newton.solvers.SolverVBD(model, iterations=10)
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -842,7 +844,7 @@ def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
         nonlocal state0, state1
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
@@ -913,7 +915,8 @@ def _cable_twist_response_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(model, iterations=10)
 
@@ -950,7 +953,7 @@ def _cable_twist_response_impl(test: unittest.TestCase, device):
         nonlocal state0, state1
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
@@ -1122,7 +1125,8 @@ def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(model, iterations=10, friction_epsilon=0.1)
     frame_dt = 1.0 / 60.0
@@ -1136,7 +1140,7 @@ def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device):
         nonlocal state0, state1
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
@@ -1272,7 +1276,8 @@ def _cable_ball_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(
         model,
@@ -1306,7 +1311,7 @@ def _cable_ball_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device
                 ],
                 device=device,
             )
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
             wp.launch(_advance_time, dim=1, inputs=[sim_time_arr, sim_dt], device=device)
@@ -1449,7 +1454,8 @@ def _cable_fixed_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, devic
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(
         model,
@@ -1482,7 +1488,7 @@ def _cable_fixed_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, devic
                 ],
                 device=device,
             )
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
             wp.launch(_advance_time, dim=1, inputs=[sim_time_arr, sim_dt], device=device)
@@ -1647,7 +1653,8 @@ def _cable_revolute_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, de
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(
         model,
@@ -1680,7 +1687,7 @@ def _cable_revolute_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, de
                 ],
                 device=device,
             )
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
             wp.launch(_advance_time, dim=1, inputs=[sim_time_arr, sim_dt], device=device)
@@ -1832,7 +1839,8 @@ def _cable_revolute_drive_tracks_target_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     # Set drive target position.
     tp = control.joint_target_q.numpy()
@@ -1849,7 +1857,7 @@ def _cable_revolute_drive_tracks_target_impl(test: unittest.TestCase, device):
     def simulate():
         nonlocal state0, state1
         for _substep in range(sim_substeps):
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
 
@@ -1961,7 +1969,8 @@ def _cable_revolute_drive_limit_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     tp = control.joint_target_q.numpy()
     tp[dof_idx] = target_angle
@@ -1977,7 +1986,7 @@ def _cable_revolute_drive_limit_impl(test: unittest.TestCase, device):
     def simulate():
         nonlocal state0, state1
         for _substep in range(sim_substeps):
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
 
@@ -2084,7 +2093,8 @@ def _cable_prismatic_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, d
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(
         model,
@@ -2119,7 +2129,7 @@ def _cable_prismatic_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, d
                 ],
                 device=device,
             )
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
             wp.launch(_advance_time, dim=1, inputs=[sim_time_arr, sim_dt], device=device)
@@ -2235,7 +2245,8 @@ def _cable_prismatic_drive_tracks_target_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     # Set drive target position.
     tp = control.joint_target_q.numpy()
@@ -2252,7 +2263,7 @@ def _cable_prismatic_drive_tracks_target_impl(test: unittest.TestCase, device):
     def simulate():
         nonlocal state0, state1
         for _substep in range(sim_substeps):
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
 
@@ -2364,7 +2375,8 @@ def _cable_prismatic_drive_limit_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     tp = control.joint_target_q.numpy()
     tp[dof_idx] = target_displacement
@@ -2380,7 +2392,7 @@ def _cable_prismatic_drive_limit_impl(test: unittest.TestCase, device):
     def simulate():
         nonlocal state0, state1
         for _substep in range(sim_substeps):
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
 
@@ -2493,7 +2505,8 @@ def _cable_d6_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(model, iterations=10)
 
@@ -2532,7 +2545,7 @@ def _cable_d6_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
                 inputs=[rod0_id, sim_time_arr, 1.0e-2, 2.0, state0.body_f],
                 device=device,
             )
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
             wp.launch(_advance_time, dim=1, inputs=[sim_time_arr, sim_dt], device=device)
@@ -2645,7 +2658,8 @@ def _cable_d6_joint_all_locked_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(model, iterations=10)
 
@@ -2675,7 +2689,7 @@ def _cable_d6_joint_all_locked_impl(test: unittest.TestCase, device):
                 ],
                 device=device,
             )
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
             wp.launch(_advance_time, dim=1, inputs=[sim_time_arr, sim_dt], device=device)
@@ -2778,7 +2792,8 @@ def _cable_d6_joint_locked_x_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(model, iterations=10)
 
@@ -2810,7 +2825,7 @@ def _cable_d6_joint_locked_x_impl(test: unittest.TestCase, device):
                 ],
                 device=device,
             )
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
             wp.launch(_advance_time, dim=1, inputs=[sim_time_arr, sim_dt], device=device)
@@ -2953,7 +2968,8 @@ def _cable_d6_drive_tracks_target_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     # Set drive target positions.
     tp = control.joint_target_q.numpy()
@@ -2971,7 +2987,7 @@ def _cable_d6_drive_tracks_target_impl(test: unittest.TestCase, device):
     def simulate():
         nonlocal state0, state1
         for _substep in range(sim_substeps):
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
 
@@ -3110,7 +3126,8 @@ def _cable_d6_drive_limit_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     tp = control.joint_target_q.numpy()
     tp[qd_s] = target_displacement
@@ -3127,7 +3144,7 @@ def _cable_d6_drive_limit_impl(test: unittest.TestCase, device):
     def simulate():
         nonlocal state0, state1
         for _substep in range(sim_substeps):
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
 
@@ -3262,7 +3279,8 @@ def _cable_kinematic_gripper_picks_capsule_impl(test: unittest.TestCase, device)
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(
         model,
@@ -3322,7 +3340,7 @@ def _cable_kinematic_gripper_picks_capsule_impl(test: unittest.TestCase, device)
                 device=device,
             )
 
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
             wp.launch(_advance_time, dim=1, inputs=[sim_time_arr, sim_dt], device=device)
@@ -3451,12 +3469,13 @@ def _cable_graph_y_junction_spanning_tree_impl(test: unittest.TestCase, device):
     sim_dt = frame_dt / sim_substeps
     num_steps = 20
 
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     def simulate():
         nonlocal state0, state1
         for _substep in range(sim_substeps):
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             state0.clear_forces()
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
@@ -3591,13 +3610,14 @@ def _cable_rod_ring_closed_in_articulation_impl(test: unittest.TestCase, device)
     q_init = state0.body_q.numpy()
     z_init_min = float(np.min(q_init[rod_bodies, 2]))
 
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     def simulate():
         nonlocal state0, state1
         for _substep in range(sim_substeps):
             state0.clear_forces()
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, sim_dt)
             state0, state1 = state1, state0
 
@@ -3831,14 +3851,15 @@ def _collect_rigid_body_contact_forces_impl(test: unittest.TestCase, device):
 
     state0 = model.state()
     state1 = model.state()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
     control = model.control()
     solver = newton.solvers.SolverVBD(model, iterations=2)
 
     dt = 1.0 / 60.0
 
     # Collide + step so ALM state (penalty_k, lambda) gets populated.
-    model.collide(state0, contacts)
+    collision_pipeline.collide(state0, contacts)
     body_q_prev_snapshot = wp.clone(solver.body_q_prev)
     solver.step(state0, state1, control, contacts, dt)
 
@@ -3973,14 +3994,20 @@ def _cable_world_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, devic
         state0 = model.state()
         state1 = model.state()
         control = model.control()
-        contacts = model.contacts()
+        collision_pipeline = newton.CollisionPipeline(model)
+        contacts = collision_pipeline.contacts()
 
         solver = newton.solvers.SolverVBD(model, iterations=10)
 
-        def simulate(_model=model, _solver=solver, _control=control, _contacts=contacts):
+        def simulate(
+            _solver=solver,
+            _control=control,
+            _collision_pipeline=collision_pipeline,
+            _contacts=contacts,
+        ):
             nonlocal state0, state1
             for _substep in range(sim_substeps):
-                _model.collide(state0, _contacts)
+                _collision_pipeline.collide(state0, _contacts)
                 _solver.step(state0, state1, _control, _contacts, dt=sim_dt)
                 state0, state1 = state1, state0
 
@@ -4112,7 +4139,8 @@ def _joint_enabled_toggle_impl(test: unittest.TestCase, device):
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(model, iterations=10)
 
@@ -4121,7 +4149,7 @@ def _joint_enabled_toggle_impl(test: unittest.TestCase, device):
     def step_n(n):
         nonlocal state0, state1
         for _ in range(n):
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
 
@@ -4207,7 +4235,8 @@ def _cable_fixed_joint_tracks_moving_kinematic_impl(test: unittest.TestCase, dev
     state0 = model.state()
     state1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
 
     solver = newton.solvers.SolverVBD(model, iterations=20)
 
@@ -4242,7 +4271,7 @@ def _cable_fixed_joint_tracks_moving_kinematic_impl(test: unittest.TestCase, dev
                 ],
                 device=device,
             )
-            model.collide(state0, contacts)
+            collision_pipeline.collide(state0, contacts)
             solver.step(state0, state1, control, contacts, dt=sim_dt)
             state0, state1 = state1, state0
             wp.launch(_advance_time, dim=1, inputs=[sim_time_arr, sim_dt], device=device)
