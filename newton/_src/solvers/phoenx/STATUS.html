@@ -214,7 +214,18 @@
         <li>Many articulations in one world also improve: 64-robot ANYmal 45.8k → 47.1k/s (+2.9%) and H1 46.1k → 47.7k/s (+3.5%). Final state magnitudes match reference in every bracket.</li>
         <li>A CUDA-graph regression covers two substeps and more than two contact pages. Generalized state, body pose/twist, impulses, manifold data, and derived contact rows match the reference within 2e−6.</li>
         <li>The implementation supports the arbitrary-contact overflow loop and exposes no user contact-limit tuning. The reference execution path remains unchanged and selectable.</li>
-        <li><strong>Next:</strong> build an exact adaptive contacted-link response basis. Runtime classification selects only articulations touching at most two links; all others remain on the direct reference rows.</li>
+        <li><strong>Next:</strong> preserve this bounded fusion and pursue phase elimination only when the replacement reduces both global traffic and live working set.</li>
+      </ul>
+    </article>
+    <article>
+      <div class="meta"><span class="tag">REJECTED · EXACT RESPONSE BASIS</span><time>3 Jul</time></div>
+      <h2>Adaptive contacted-link bases lose end-to-end throughput</h2>
+      <p>An exact experimental path classified articulations touching at most two links, built six unit-wrench articulated responses for those links, and synthesized every contact row from that compact basis. Arbitrary-contact and denser articulations retained the direct reference path.</p>
+      <ul>
+        <li>Full graph-leapfrog G1 training measures about 898k/s versus the retained 911k/s (−1.5%). Contact-rich ANYmal measures 374.9k/s versus 381.0k/s (−1.6%); H1 measures 360.9k/s versus 362.7k/s (−0.5%).</li>
+        <li>The algebra is exact, but float reconstruction introduces roughly 1e−3 response stress error, 5e−5 state error, and up to 0.2% derived effective-mass error. Those bounded differences do not buy performance.</li>
+        <li>Only about 777 of 8,192 sampled G1 worlds qualified at runtime. Basis construction, synchronization, and coefficient traffic overwhelm the rows it replaces; this is not a general cross-scene win.</li>
+        <li>The prototype is preserved on <code>twidmer/experiment-phoenx-contact-response-basis</code> at <code>cdabaca7</code> and reverted from the active path at <code>5b8677e5</code>.</li>
       </ul>
     </article>
     <article>
@@ -278,7 +289,7 @@
       <div>
         <h2>Return to end-to-end work elimination</h2>
         <p>The response-basis study shows that optimizing row construction in isolation is not enough: extra operator construction, synchronization, and overlap pressure can dominate. The retained sparse-row path remains the best measured exact implementation.</p>
-        <p><strong>Next:</strong> target work that disappears across multiple phases—especially factor/advance/publish dataflow or a bounded persistent articulation pipeline—while keeping short full-training brackets ahead of elaborate validation. Revisit bases only if a new primitive can avoid explicit coefficient/operator traffic.</p>
+        <p><strong>Next:</strong> test whether a genuine compiler-visible phase boundary can reduce register lifetime inside bounded persistent execution. Warp emits ordinary device helpers but offers no supported per-function no-inline control, so generated code and register counts must prove the premise before another large fusion is built. Otherwise return to eliminating a complete standalone phase rather than enlarging a kernel.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -300,6 +311,7 @@
           <li>Path-sparse Jacobian cache: −1.5% physics; indexed tile dots slowed every PGS update.</li>
           <li>Remove ABA generalized-acceleration stores: neutral/slightly slower.</li>
           <li>Full 96-row shared response cache: −14% from fixed loads and occupancy.</li>
+          <li>Adaptive two-link unit-wrench response basis: exact algebra, but −0.5–1.6% across G1, ANYmal, and H1 training/robot brackets.</li>
           <li>Shared ABA-factor cache in contact-row blocks: mixed by articulation width/batch and −3–5% on smaller G1/ANYmal fleets; moving global reads to a synchronized shared phase is not a universal latency fix.</li>
           <li>Row-builder local ancestor stack: −25%.</li>
           <li>BF16 recurrent forward: +0.3%, removed.</li>
