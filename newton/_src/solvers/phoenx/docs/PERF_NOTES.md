@@ -6,6 +6,25 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Register-resident generalized contact delta (2026-07-03)
+- A user-assisted one-launch Nsight Compute report measured the reduced
+  generalized contact solve at 52% long-scoreboard stalls, only 0.62 eligible
+  warps per scheduler, 44.5% achieved occupancy, 50.7% L1 hit rate, and 69.8%
+  L2 hit rate. The kernel is latency-bound; another full shared row cache would
+  reduce occupancy and had already regressed 14%.
+- The accumulated generalized-velocity delta now remains in a distributed
+  register tile across warmstart and PGS rows instead of round-tripping through
+  shared memory. Equations, contact order, tile reductions, and deterministic
+  solve order are unchanged; only tile storage changes.
+- Reversed 300-replay contact-rich G1 brackets improve 1.626M to
+  1.636-1.640M physics steps/s (+0.6-0.9%). Reversed graph-leapfrog brackets
+  improve 1.139M to 1.150-1.154M samples/s (+1.0-1.3%).
+- The complete 40-test reduced CUDA-graph battery passes (39 together plus the
+  recurring driver graph-instantiation case alone), covering 4/8/36/64-DOF
+  widths, arbitrary contact pages, loops, ABA/Featherstone parity, momentum,
+  energy, determinism, self-contact, cloth, and live mass updates. The
+  graph-leapfrog train-to-gate smoke also passes.
+
 ### Mask post-reset G1 observation work (2026-07-03)
 - Auto-reset already produces an exact per-world articulation mask. The second
   observation pass now uses that mask, so reset worlds still recompute the

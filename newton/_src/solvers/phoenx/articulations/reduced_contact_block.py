@@ -1046,7 +1046,8 @@ def _make_solve_generalized_contact_tile_kernel(max_dofs: int):
             return
         storage_page = wp.min(page_index[0], wp.int32(_CACHED_PAGE_COUNT - 1))
         packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
-        generalized_delta = wp.tile_zeros(shape=max_dofs, dtype=wp.float32, storage="shared")
+        # Reuse across every contact row; registers avoid shared-memory round trips.
+        generalized_delta = wp.tile_zeros(shape=max_dofs, dtype=wp.float32, storage="register")
         active_point_count = point_count[packed_articulation]
         if warmstart:
             for point_offset in range(active_point_count):

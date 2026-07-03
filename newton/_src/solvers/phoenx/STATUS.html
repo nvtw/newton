@@ -100,12 +100,12 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · reset observation work masked</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · contact delta moved to registers</strong></div>
     </header>
 
     <section class="hero">
       <strong>User action</strong>
-      <p><span class="tag good">NONE PENDING</span> — the compact contact-sort trace was consumed successfully. Any future command will remain in this top box so it is visible without scrolling.</p>
+      <p><span class="tag good">NONE PENDING</span> — the generalized-contact-solve counter report was consumed successfully. Any future command will remain in this top box so it is visible without scrolling.</p>
     </section>
 
     <section class="hero">
@@ -147,7 +147,7 @@
           <div class="work-item"><strong><i style="background:#61c5ad"></i>14%</strong>contact solve</div>
           <div class="work-item"><strong><i style="background:#b7c0ce"></i>2%</strong>joints + other</div>
         </div>
-        <p class="profile-note">Normalized within physics-solver GPU duration. “Contact rows” includes gather/build/finalize; “factor + kinematics” includes reduced factor initialization and local kinematics.</p>
+        <p class="profile-note">Normalized within physics-solver GPU duration. “Contact rows” includes gather/build/finalize; “factor + kinematics” includes reduced factor initialization and local kinematics. The retained register-delta change makes the current contact-solve share slightly lower.</p>
       </div>
     </section>
 
@@ -165,6 +165,17 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · +1.0–1.3% TRAINING</span><time>3 Jul</time></div>
+      <h2>Generalized contact delta now stays in registers</h2>
+      <p>Fresh Nsight Compute counters show a latency-bound solve: 52% long-scoreboard stalls, 0.62 eligible warps per scheduler, and 44.5% achieved occupancy. The accumulated generalized delta now uses a distributed register tile instead of shared-memory round trips.</p>
+      <ul>
+        <li>Reversed contact-rich G1 brackets improve 1.626M → 1.636–1.640M physics steps/s (+0.6–0.9%).</li>
+        <li>Reversed graph-leapfrog brackets improve 1.139M → 1.150–1.154M training samples/s (+1.0–1.3%).</li>
+        <li>Equations, row order, reductions, and deterministic solve order are unchanged; this is a one-line storage-policy change.</li>
+        <li>All 40 reduced CUDA-graph tests pass (39 together plus the recurring driver-sensitive case alone), as does graph-leapfrog train-to-gate smoke.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED · −28.6% OBSERVE GPU TIME</span><time>3 Jul</time></div>
       <h2>Post-reset observation work now follows the exact reset mask</h2>
@@ -218,16 +229,6 @@
         <li>Physics-only timing is neutral within run noise (1.584M measured versus the preceding 1.593M reference).</li>
         <li>All 40 CUDA-graph tests pass, including six-DOF roots, loops, ABA/mass-matrix parity, Featherstone comparisons, momentum/energy, contacts, and live mass updates. Anymal/H1/G1 contact fleets remain finite.</li>
         <li>A full 96-row shared response cache was tested and reverted: it lost 14% from fixed loading and shared-memory occupancy.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · +4.0% TRAINING</span><time>3 Jul</time></div>
-      <h2>Reduced factor state is smaller and does less work</h2>
-      <p>Three physically exact layout wins compound: remove an unused full matrix, store reduced child-to-parent inertia as 21 symmetric entries instead of 36, and do the same for live per-body spatial inertia read by factor and both ABA advances.</p>
-      <ul>
-        <li>Combined G1 brackets: about 1.539M → 1.593M physics steps/s (+3.5%); short graph-leapfrog training: 829k → 862k samples/s (+4.0%).</li>
-        <li>All 40 reduced CUDA-graph tests pass, including ABA/mass-matrix parity, Featherstone comparisons, long-horizon momentum/energy, loops, self-contact, and live mass updates.</li>
-        <li>Contact-rich 512-robot Anymal/H1/G1 screens remain finite. FeatherPGS also confirms PhoenX already uses its key articulated matrix-free J/H⁻¹Jᵀ solve pattern.</li>
       </ul>
     </article>
     <div class="section-label">Next decisions</div>
