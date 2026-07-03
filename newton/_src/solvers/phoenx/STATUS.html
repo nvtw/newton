@@ -119,14 +119,6 @@
       <div class="stamp">Last updated<br><strong>3 July 2026 · risky path experiment</strong></div>
     </header>
 
-    <section class="action-required">
-      <strong>User action requested · one bounded Nsight Compute capture</strong>
-      <p><span class="tag">PROFILE ONE KERNEL ONCE</span></p>
-      <p>The exact inline contact/ABA/publish megakernel is physically correct but slower. This report will distinguish register spills, instruction-cache pressure, memory latency, and synchronization before the next architecture is chosen.</p>
-      <pre><code>sudo /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/benchmarks/profile_g1_biased_megakernel_ncu.sh</code></pre>
-      <p>The script profiles exactly one matching kernel launch and writes <code>/tmp/phoenx_g1_biased_megakernel.ncu-rep</code>. The command wraps visually but copies as one line.</p>
-    </section>
-
     <section class="hero">
       <strong>Primary goal</strong>
       <p>Deliver a genuinely needle-moving PhoenX RL architecture: a contact-inclusive persistent reduced-articulation megakernel that eliminates global contact-row materialization and intermediate publication across biased solve, dynamics, relaxation, and final publish. The established reference path remains the safe fallback; physical accuracy, arbitrary contact counts, CUDA graph capture, and cross-robot performance remain hard gates.</p>
@@ -207,6 +199,19 @@
 
     <div class="section-label">Latest findings</div>
     <article>
+      <div class="meta"><span class="tag good">PROFILER-GUIDED · MATRIX-FREE CANDIDATE</span><time>3 Jul</time></div>
+      <h2>The monolith is latency-bound; one global contact matrix is now removable</h2>
+      <p>The requested one-launch Nsight Compute report is complete. It rules out further blind fusion and points toward compact, phase-specific warp cooperation: preserve residency where it deletes traffic, but do not combine the contact solver with the full articulation advance working set.</p>
+      <ul>
+        <li>The exact fused biased-contact/ABA/publish kernel takes 1.42 ms, uses 122 registers/thread, and reaches only 30.3% achieved occupancy. DRAM reaches 18.7% of peak, so raw bandwidth is not the limiter.</li>
+        <li>Schedulers have an eligible warp only 40.8% of cycles. Long-scoreboard dependencies consume 3.60 of the 9.01 cycles between issued instructions (39.9%); average active width is 15.1 threads/warp and predication reduces it to 13.0.</li>
+        <li>Global accesses waste 46% of transferred sectors; L1/L2 hit rates are already 75.0%/75.6%. The useful target is coalesced structure-of-arrays access and shorter dependency chains, not <code>__ldg()</code> or cache hints.</li>
+        <li>A new exact matrix-free contact solve reconstructs sparse Jacobian products from each contacted body path instead of globally materializing Jacobian rows. The overflow-page CUDA-graph parity regression passes.</li>
+        <li>Matched longer G1 runs measure 922.8k/s matrix-free versus 913.8k/s retained baseline (+0.98%). This is a reproducible enabling gain, not yet the needle-moving result.</li>
+        <li><strong>Next:</strong> delete the dead Jacobian buffer, then fuse response construction with solving through a compact shared response tile—without absorbing the register-heavy ABA/publish phase. No user profiler action is currently required.</li>
+      </ul>
+    </article>
+    <article>
       <div class="meta"><span class="tag">REJECTED · DEVICE-CALL PHASE SPLIT</span><time>3 Jul</time></div>
       <h2>A real compiler boundary makes the megakernel 24% slower</h2>
       <p>A small general Warp prototype added explicit no-inline device functions. PTX proves that post-contact ABA survives as a separate <code>.func</code>/<code>call.uni</code> phase, rather than being flattened into the contact kernel.</p>
@@ -216,7 +221,7 @@
         <li>The large device-call signature forces parameter marshalling and local-stack traffic; that cost is substantially worse than the register-lifetime pressure it removes.</li>
         <li>Static assembly reports 122 registers, no spills, a 72-byte stack frame, and 18,696 SASS instructions. Separate contact and advance/publish phases use 80 and 101 registers respectively; fusion duplicates almost no instructions but raises the peak register footprint.</li>
         <li>A meaningful 20-block residency target caps the kernel to 96 registers, but introduces 156/100 bytes of spill stores/loads and falls to about 834k/s versus roughly 846k/s unbounded. A four-block hint changes no resources and reaches about 837k/s.</li>
-        <li><strong>Next:</strong> use one full-counter capture of the inline fused kernel to decide whether a compact-context redesign, instruction-footprint reduction, or a different phase-elimination boundary is justified.</li>
+        <li><strong>Decision:</strong> the completed full-counter capture selects a compact-context, coalesced phase design; further enlargement of this monolith is rejected.</li>
       </ul>
     </article>
     <article>
