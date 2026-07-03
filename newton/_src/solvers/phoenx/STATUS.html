@@ -199,16 +199,16 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag good">PROFILER-GUIDED · MATRIX-FREE CANDIDATE</span><time>3 Jul</time></div>
-      <h2>The monolith is latency-bound; one global contact matrix is now removable</h2>
-      <p>The requested one-launch Nsight Compute report is complete. It rules out further blind fusion and points toward compact, phase-specific warp cooperation: preserve residency where it deletes traffic, but do not combine the contact solver with the full articulation advance working set.</p>
+      <div class="meta"><span class="tag warn">REJECTED · MATRIX-FREE JACOBIAN</span><time>3 Jul</time></div>
+      <h2>The monolith is latency-bound, but path reconstruction overfits G1</h2>
+      <p>The requested one-launch Nsight Compute report rules out further blind fusion and points toward compact, phase-specific warp cooperation: preserve residency only where it deletes traffic without lengthening dependency chains.</p>
       <ul>
         <li>The exact fused biased-contact/ABA/publish kernel takes 1.42 ms, uses 122 registers/thread, and reaches only 30.3% achieved occupancy. DRAM reaches 18.7% of peak, so raw bandwidth is not the limiter.</li>
         <li>Schedulers have an eligible warp only 40.8% of cycles. Long-scoreboard dependencies consume 3.60 of the 9.01 cycles between issued instructions (39.9%); average active width is 15.1 threads/warp and predication reduces it to 13.0.</li>
         <li>Global accesses waste 46% of transferred sectors; L1/L2 hit rates are already 75.0%/75.6%. The useful target is coalesced structure-of-arrays access and shorter dependency chains, not <code>__ldg()</code> or cache hints.</li>
-        <li>A new exact matrix-free contact solve reconstructs sparse Jacobian products from each contacted body path instead of globally materializing Jacobian rows. The overflow-page CUDA-graph parity regression passes.</li>
-        <li>Matched longer G1 runs measure 922.8k/s matrix-free versus 913.8k/s retained baseline (+0.98%). This is a reproducible enabling gain, not yet the needle-moving result.</li>
-        <li><strong>Next:</strong> delete the dead Jacobian buffer, then fuse response construction with solving through a compact shared response tile—without absorbing the register-heavy ABA/publish phase. No user profiler action is currently required.</li>
+        <li>An exact matrix-free solve removed the global Jacobian matrix and passed overflow-page CUDA-graph parity. Matched G1 improved 913.8k → 922.8k/s (+0.98%).</li>
+        <li>The required cross-scene gates reject it: 512-world ANYmal/H1 fall 730.4k → 705.3k/s (−3.4%) and 708.9k → 687.9k/s (−3.0%); 64 articulations in one world fall 89.1k → 85.3k/s (−4.2%) and 90.9k → 89.3k/s (−1.8%). States match exactly.</li>
+        <li>The experiment is preserved on <code>twidmer/experiment-phoenx-matrix-free-contact-rows</code> at <code>030be01c</code>. <strong>Next:</strong> redesign contact response construction around coalesced warp tiles and shorter load-use chains, without recomputing sparse Jacobians or absorbing the full ABA/publish phase.</li>
       </ul>
     </article>
     <article>
