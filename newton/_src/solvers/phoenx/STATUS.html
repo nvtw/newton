@@ -116,7 +116,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · observation work shared</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · risky path experiment</strong></div>
     </header>
 
     <section class="hero">
@@ -205,6 +205,17 @@
 
     <div class="section-label">Latest findings</div>
     <article>
+      <div class="meta"><span class="tag">REJECTED · ARCHITECTURAL EXPERIMENT</span><time>3 Jul</time></div>
+      <h2>Shared-resident contact rows are exact, but slower</h2>
+      <p>A separate graph-static articulation path cached 32 Jacobian and articulated-response rows in shared memory and routed denser articulations through the reference solver. This tested a substantially different memory strategy without risking the retained implementation.</p>
+      <ul>
+        <li>CUDA-graph reference/resident parity is bit-exact across multiple worlds and multiple articulations per world.</li>
+        <li>Steady G1 graph-leapfrog training measures 801.7k/s versus 877.1k/s reference (−8.6%). The second disjoint launch, fixed shared loads, and occupancy cost outweigh cached global-row traffic.</li>
+        <li>The prototype is isolated on <code>twidmer/experiment-phoenx-resident-contact-rows</code> at <code>9d810d4d</code>; the active branch is back on the clean reference path.</li>
+        <li><strong>Decision:</strong> multiple static paths remain the right framework for risky work, but the next candidate must eliminate whole phases or global materialization—not merely relocate row storage.</li>
+      </ul>
+    </article>
+    <article>
       <div class="meta"><span class="tag good">RETAINED · −12.8% OBSERVE KERNEL</span><time>3 Jul</time></div>
       <h2>Root-frame observation work is computed once per world</h2>
       <p>G1 observation columns previously repeated the same quaternion transforms, root-origin velocity reconstruction, target rotation, and full 29-joint validity scan. One lane now computes the shared root features, broadcasts them within the fixed 128-thread block, and performs the validity scan once.</p>
@@ -247,6 +258,7 @@
       </div>
       <div>
         <h2>Do not repeat</h2>
+          <li>Separate 32-row resident Jacobian/response solve: bit-exact but −8.6% G1 training from a second launch, fixed shared loads, and occupancy.</li>
         <ul>
           <li>One-pass ABA / pre-contact-only Coriolis: +6% physics but severe momentum drift.</li>
           <li>Compile-time velocity-only publish kernel: exact but +0.1% (neutral).</li>

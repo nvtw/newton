@@ -117,6 +117,23 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - A final 300-replay 8192-world bracket improves 1.417M to 1.512M steps/s (+6.7%); an earlier cooler bracket measured 1.625M to 1.717M (+5.6%). Steady graph-leapfrog training improves 795.6k to 803.7-805.6k samples/s (+1.0-1.3%).
 - The complete 40-test reduced CUDA-graph suite passes. The arbitrary-contact-count test explicitly forces the packed kernel through more than two 32-point pages, zero-contact replay, and contact restoration in the same captured graph. Anymal/H1/G1 512-world screens stay on the unchanged serial path.
 
+### Resident generalized-contact rows (2026-07-03) - REJECTED
+- A graph-static `resident32` path cached the first 32 Jacobian and articulated
+  response rows in shared memory. Per-articulation masks routed sparse blocks
+  through the resident kernel and denser blocks through the reference kernel,
+  avoiding batch-global fallback and conditional launches.
+- A CUDA-graph regression with several worlds and multiple articulations per
+  world exercised the resident kernel and produced bit-identical generalized
+  coordinates, body poses, and velocities relative to the reference path.
+- Four steady G1 graph-leapfrog intervals measured **801.7k samples/s versus
+  877.1k/s reference (-8.6%)**. The extra disjoint launch, fixed shared loads,
+  and reduced occupancy cost more than repeated reads of already cached global
+  rows.
+- The prototype is preserved at commit `9d810d4d` on branch
+  `twidmer/experiment-phoenx-resident-contact-rows`. Do not retry a standalone
+  row cache; revisit only as part of a fused pipeline that removes launches and
+  global row materialization altogether.
+
 ### Reduced factor/contact multi-stream overlap (2026-07-03) - REJECTED
 - Full begin_substep overlap is incorrect: ABA advance publishes link velocities read by contact warm-start tangent construction. A race-free prototype overlapped only kinematics/factorization with ingest and joined before advance.
 - It captured and replayed correctly inside the leapfrog trainer, but lost twice: 778.7k vs 800.9k samples/s, then 774.7k vs 796.1k in reversed order (about -2.7%). Concurrent factorization contends with the already-overlapped learner more than it hides setup. The implementation was removed completely.
