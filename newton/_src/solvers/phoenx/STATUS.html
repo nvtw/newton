@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · RL milestone closed; solver optimization next</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · Box3D-guided solver experiments active</strong></div>
     </header>
 
     <section class="hero">
@@ -185,6 +185,17 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag">BOX3D TRANSFER STUDY</span><time>3 Jul</time></div>
+      <h2>Patch friction is promising; two simpler transfers were rejected</h2>
+      <p>The local Box3D source at commit 8441b4a confirms that PhoenX already shares its Soft-Step/TGS core. CPU work stealing and fixed 24-color scheduling do not transfer to the GPU design.</p>
+      <ul>
+        <li>Skipping friction in the biased pass fails PhoenX static-friction and lateral force gates because PhoenX permits zero velocity iterations; the prototype was fully reverted.</li>
+        <li>Box3D-like contact softness at ω·h=π/4 is slightly worse than the hard-Hertz π baseline on matched G1 exploration traces; it was discarded.</li>
+        <li>Patch-central friction could remove 31% of scalar contact-row work on G1, 50% on H1, and 44% on DR Legs in measured snapshots. Every measured multi-point column had coherent normals.</li>
+        <li>The prototype will only treat a column as one patch when both shapes are provably convex. Any raw mesh or heightfield pair keeps per-point friction because contact reduction does not preserve disconnected patch identity.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED · +1.0–1.3% TRAINING</span><time>3 Jul</time></div>
       <h2>Generalized contact delta now stays in registers</h2>
