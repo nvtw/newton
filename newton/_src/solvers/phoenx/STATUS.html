@@ -214,7 +214,8 @@
         <li>The existing overflow-page CUDA-graph parity regression passes, so the split does not alter the equations, deterministic schedule, or arbitrary-contact behavior.</li>
         <li>Same-session G1 graph-leapfrog training measures about 700k/s for the no-inline megakernel versus 921k/s for the reference path. The former inline megakernel was about 846k/s.</li>
         <li>The large device-call signature forces parameter marshalling and local-stack traffic; that cost is substantially worse than the register-lifetime pressure it removes.</li>
-        <li>A four-block CUDA launch bound also loses: about 837k/s versus roughly 846k/s unbounded. Compiler pressure cannot be fixed by a simple residency hint.</li>
+        <li>Static assembly reports 122 registers, no spills, a 72-byte stack frame, and 18,696 SASS instructions. Separate contact and advance/publish phases use 80 and 101 registers respectively; fusion duplicates almost no instructions but raises the peak register footprint.</li>
+        <li>A meaningful 20-block residency target caps the kernel to 96 registers, but introduces 156/100 bytes of spill stores/loads and falls to about 834k/s versus roughly 846k/s unbounded. A four-block hint changes no resources and reaches about 837k/s.</li>
         <li><strong>Next:</strong> use one full-counter capture of the inline fused kernel to decide whether a compact-context redesign, instruction-footprint reduction, or a different phase-elimination boundary is justified.</li>
       </ul>
     </article>
@@ -327,7 +328,7 @@
           <li>Full 96-row shared response cache: −14% from fixed loads and occupancy.</li>
           <li>Adaptive two-link unit-wrench response basis: exact algebra, but −0.5–1.6% across G1, ANYmal, and H1 training/robot brackets.</li>
           <li>No-inline ABA phase inside the contact megakernel: exact and graph-safe, but about −24% G1 training from device-call marshalling/local-stack traffic.</li>
-          <li>Four-block launch bound on the inline megakernel: about −1%; register capping is not a free occupancy fix.</li>
+          <li>Launch bounds on the inline megakernel: four blocks leave its 122 registers unchanged; 20 blocks cap it to 96 with spills and regress training to about 834k/s.</li>
           <li>Shared ABA-factor cache in contact-row blocks: mixed by articulation width/batch and −3–5% on smaller G1/ANYmal fleets; moving global reads to a synchronized shared phase is not a universal latency fix.</li>
           <li>Row-builder local ancestor stack: −25%.</li>
           <li>BF16 recurrent forward: +0.3%, removed.</li>
