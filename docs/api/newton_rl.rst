@@ -28,6 +28,7 @@ Warp-only reinforcement learning utilities for Newton.
    BatchSAC
    BufferReplaySAC
    BufferRollout
+   ConfigEnvAntPhoenX
    ConfigEnvAnymalPhoenX
    ConfigEnvG1PhoenX
    ConfigEnvGo2PhoenX
@@ -41,6 +42,7 @@ Warp-only reinforcement learning utilities for Newton.
    ConfigSAC
    ConfigTrainAnymalPPO
    ConfigTrainG1PPO
+   EnvAntPhoenX
    EnvAnymalPhoenX
    EnvG1PhoenX
    EnvGo2PhoenX
@@ -109,6 +111,8 @@ Warp-only reinforcement learning utilities for Newton.
 
    * - Name
      - Value
+   * - ``ACTION_DIM_ANT``
+     - ``8``
    * - ``ACTION_DIM_ANYMAL``
      - ``12``
    * - ``ACTION_DIM_G1``
@@ -125,6 +129,8 @@ Warp-only reinforcement learning utilities for Newton.
      - ``13``
    * - ``JOINT_VEL_OBS_OFFSET_ANYMAL``
      - ``25``
+   * - ``OBS_DIM_ANT``
+     - ``34``
    * - ``OBS_DIM_ANYMAL``
      - ``49``
    * - ``OBS_DIM_G1``

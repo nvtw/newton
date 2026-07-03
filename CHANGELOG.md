@@ -7,7 +7,7 @@
 - Add `SolverPhoenX(solver_flavor="simple")`, an experimental rigid-body flavor that replaces graph-colored block PGS with fixed-capacity, one-thread-per-scalar-equation Jacobi rows and atomic body-delta accumulation and copy-free mass splitting that normalizes arbitrary row fan-in while conserving momentum. `jacobi_max_colors` defaults to 10 and scales the effective Jacobi substep count without constructing a constraint graph. Matched normal and tangent contact multipliers, together with stable Cartesian joint-row multipliers, persist as Jacobi initial guesses.
 - Add `example_motorized_cable_chain` as a one-for-one cable-joint counterpart to the PhoenX motorized hinge-chain example.
 - Add pure-Warp Muon optimizer support to `newton.rl` PPO trainers so experimental G1 runs can match nanoG1 optimizer settings without PyTorch.
-- Add pure-PhoenX `newton.rl` environments and CUDA-graph PPO training scripts for Unitree Go2 flat locomotion and the classic 21-action Humanoid task.
+- Add pure-PhoenX `newton.rl` environments and CUDA-graph PPO training scripts for Ant, Unitree Go2 flat locomotion, and the classic 21-action Humanoid task.
 - Add `ConfigEnvG1PhoenX` scheduler knobs for `threads_per_world`, `multi_world_scheduler`, and `prepare_refresh_stride` so experimental G1 RL runs can benchmark PhoenX solver schedules without monkeypatching.
 - Add experimental `SolverPhoenX(articulation_mode="reduced")` support for linear-time reduced-coordinate articulation dynamics and rigid contacts through the common Newton `State` and `Control` API, including CUDA graph capture and multi-world execution.
 - Add experimental `SolverPhoenX(articulation_mode="hybrid")` support, keeping maximal PGS joint rows active while using the exact armature-aware articulated-body response as their preconditioner. This improves stiff robot training stability while preserving CUDA graph capture and multi-world execution.
@@ -88,6 +88,7 @@
 
 ### Fixed
 
+- Fix the pure-PhoenX Ant environment applying the MJCF Z-up to Y-up rotation twice, which made every nominal reset pose immediately terminal.
 - Fix `SolverPhoenX.prepare_refresh_stride` for reduced and hybrid articulations so internal substeps reuse cached block, deferred, and fallback contact preparation at the requested cadence instead of silently forcing a refresh every substep.
 - Fix the reduced-coordinate PhoenX fallback fast-path proof to retain deterministic fallback coloring for unrelated maximal rigid-body contacts.
 - Fix experimental PhoenX G1 replacement foot boxes bypassing the MJCF no-self-collision filters, preventing unintended robot self-contacts during policy exploration.

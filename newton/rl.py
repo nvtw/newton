@@ -8,6 +8,7 @@ import json
 from dataclasses import asdict
 
 from ._src.solvers.phoenx.rl_training import (
+    ACTION_DIM_ANT,
     ACTION_DIM_ANYMAL,
     ACTION_DIM_G1,
     ACTION_DIM_HUMANOID,
@@ -16,6 +17,7 @@ from ._src.solvers.phoenx.rl_training import (
     COMMAND_OBS_OFFSET_ANYMAL,
     JOINT_POS_OBS_OFFSET_ANYMAL,
     JOINT_VEL_OBS_OFFSET_ANYMAL,
+    OBS_DIM_ANT,
     OBS_DIM_ANYMAL,
     OBS_DIM_G1,
     OBS_DIM_G1_ISAACLAB_FLAT,
@@ -25,6 +27,7 @@ from ._src.solvers.phoenx.rl_training import (
     BatchSAC,
     BufferReplaySAC,
     BufferRollout,
+    ConfigEnvAntPhoenX,
     ConfigEnvAnymalPhoenX,
     ConfigEnvG1PhoenX,
     ConfigEnvGo2PhoenX,
@@ -38,6 +41,7 @@ from ._src.solvers.phoenx.rl_training import (
     ConfigSAC,
     ConfigTrainAnymalPPO,
     ConfigTrainG1PPO,
+    EnvAntPhoenX,
     EnvAnymalPhoenX,
     EnvG1PhoenX,
     EnvGo2PhoenX,
@@ -96,6 +100,7 @@ from ._src.solvers.phoenx.rl_training import (
 )
 
 __all__ = [
+    "ACTION_DIM_ANT",
     "ACTION_DIM_ANYMAL",
     "ACTION_DIM_G1",
     "ACTION_DIM_HUMANOID",
@@ -104,6 +109,7 @@ __all__ = [
     "COMMAND_OBS_OFFSET_ANYMAL",
     "JOINT_POS_OBS_OFFSET_ANYMAL",
     "JOINT_VEL_OBS_OFFSET_ANYMAL",
+    "OBS_DIM_ANT",
     "OBS_DIM_ANYMAL",
     "OBS_DIM_G1",
     "OBS_DIM_G1_ISAACLAB_FLAT",
@@ -113,6 +119,7 @@ __all__ = [
     "BatchSAC",
     "BufferReplaySAC",
     "BufferRollout",
+    "ConfigEnvAntPhoenX",
     "ConfigEnvAnymalPhoenX",
     "ConfigEnvG1PhoenX",
     "ConfigEnvGo2PhoenX",
@@ -126,6 +133,7 @@ __all__ = [
     "ConfigSAC",
     "ConfigTrainAnymalPPO",
     "ConfigTrainG1PPO",
+    "EnvAntPhoenX",
     "EnvAnymalPhoenX",
     "EnvG1PhoenX",
     "EnvGo2PhoenX",

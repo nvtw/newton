@@ -8,19 +8,21 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.rl_training.examples.train_ant_phoenx_ppo import ConfigEnvAntPhoenX, EnvAntPhoenX
+import newton.rl as rl
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
 class TestAntPhoenXRL(unittest.TestCase):
     def test_ant_step_is_cuda_graph_capturable(self) -> None:
         device = require_cuda_graph_capture("PhoenX Ant RL tests")
-        env = EnvAntPhoenX(
-            ConfigEnvAntPhoenX(world_count=8, max_episode_steps=0, auto_reset=False),
+        env = rl.EnvAntPhoenX(
+            rl.ConfigEnvAntPhoenX(world_count=8, max_episode_steps=0, auto_reset=False),
             device=device,
         )
         actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
 
+        np.testing.assert_allclose(env.dones.numpy(), 0.0, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(env.obs.numpy()[:, 8], -1.0, rtol=0.0, atol=1.0e-6)
         env.step(actions)
         env.reset()
         with wp.ScopedCapture(device=device) as capture:
