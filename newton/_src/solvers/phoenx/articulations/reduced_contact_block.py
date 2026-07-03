@@ -1437,6 +1437,7 @@ class ReducedContactBlockSystem:
         )
         self.contact_dof_width = _aligned_contact_dof_width(max_dof_count)
         self.solve_kernel = _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS[self.contact_dof_width]
+        self.biased_page_launcher = None
         self.relax_page_launcher = None
         self.requires_impulse_response = not (
             self._fallback_impossible_partitioned
@@ -1482,6 +1483,7 @@ class ReducedContactBlockSystem:
         self.basis_body = wp.full((articulation_count, 2), value=-1, dtype=wp.int32, device=self.device)
         self.total_point_count = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.max_page_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.biased_advanced = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.multi_page_active = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.overflow_page_active = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.transpose_active = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -1788,6 +1790,7 @@ class ReducedContactBlockSystem:
         prepare: bool,
     ) -> None:
         if prepare:
+            self.biased_advanced.zero_()
             self.deferred_active.zero_()
             self.max_page_count.zero_()
             self.multi_page_active.zero_()
@@ -1821,6 +1824,7 @@ class ReducedContactBlockSystem:
             assert self.packed_jacobian is not None
             assert self.packed_response is not None
             assert self.packed_previous_row_body is not None
+            fused_bias = prepare and self.biased_page_launcher is not None
             fused_relax = not prepare and self.relax_page_launcher is not None
             if not gathered and not fused_relax:
                 wp.launch(
@@ -1888,6 +1892,9 @@ class ReducedContactBlockSystem:
                     )
 
                 wp.capture_if(self.transpose_active, on_true=transpose_response)
+            if fused_bias:
+                self.biased_page_launcher(columns, bodies, idt, sor_boost, cc, iterations)
+                return
             if fused_relax:
                 self.relax_page_launcher(columns, bodies, idt, sor_boost, cc, iterations)
                 return
