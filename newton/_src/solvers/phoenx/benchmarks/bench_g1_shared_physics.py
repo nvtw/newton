@@ -68,6 +68,11 @@ def main() -> int:
     parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument("--velocity-iterations", type=int, default=1)
     parser.add_argument(
+        "--contact-friction-model",
+        choices=("point", "patch"),
+        default="point",
+    )
+    parser.add_argument(
         "--articulation-mode",
         choices=("maximal", "hybrid", "reduced"),
         default="reduced",
@@ -76,6 +81,11 @@ def main() -> int:
         "--cuda-profiler-api",
         action="store_true",
         help="Bracket only measured graph replays with the CUDA profiler API.",
+    )
+    parser.add_argument(
+        "--multi-world-scheduler",
+        choices=("auto", "fast_tail", "block_world"),
+        default="auto",
     )
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
@@ -119,9 +129,11 @@ def main() -> int:
     solver = newton.solvers.SolverPhoenX(
         model,
         articulation_mode=args.articulation_mode,
+        contact_friction_model=args.contact_friction_model,
         substeps=1,
         solver_iterations=args.solver_iterations,
         velocity_iterations=args.velocity_iterations,
+        multi_world_scheduler=args.multi_world_scheduler,
     )
     state = model.state()
     control = model.control()
@@ -171,6 +183,7 @@ def main() -> int:
         json.dumps(
             {
                 "articulation_mode": args.articulation_mode,
+                "contact_friction_model": args.contact_friction_model,
                 "active_contact_count": contact_count,
                 "articulation_contact_points_max": reduced_contact_points_max,
                 "articulation_contact_points_mean": reduced_contact_points_mean,
@@ -181,6 +194,7 @@ def main() -> int:
                 "engine": "phoenx",
                 "gpu_used_gb": gpu_used_gb,
                 "measure_replays": args.measure_replays,
+                "multi_world_scheduler": args.multi_world_scheduler,
                 "physics_steps": physics_steps,
                 "physics_steps_per_s": physics_steps / elapsed,
                 "shape_count_per_world": (int(model.shape_count) - 1) // args.world_count,

@@ -89,6 +89,7 @@ class _PhoenXScene:
         mass_splitting_batch_size: int = 8,
         solver_flavor: str = "standard",
         jacobi_max_colors: int = 10,
+        contact_friction_model: str = "point",
     ) -> None:
         self.device = wp.get_device("cuda:0")
         self.fps = int(fps)
@@ -104,6 +105,7 @@ class _PhoenXScene:
         self.mass_splitting_batch_size = int(mass_splitting_batch_size)
         self.solver_flavor = solver_flavor
         self.jacobi_max_colors = int(jacobi_max_colors)
+        self.contact_friction_model = contact_friction_model
 
         self.mb = newton.ModelBuilder()
         # Pick up the PhoenX contact-ahead-of-impact default so every
@@ -345,6 +347,7 @@ class _PhoenXScene:
             mass_splitting_batch_size=self.mass_splitting_batch_size,
             solver_flavor=self.solver_flavor,
             jacobi_max_colors=self.jacobi_max_colors,
+            contact_friction_model=self.contact_friction_model,
             device=self.device,
         )
 

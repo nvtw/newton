@@ -25,6 +25,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 __all__ = [
     "contact_frame_velocity_update",
     "contact_frame_velocity_update_no_soft_pd",
+    "contact_project_normal_velocity_update",
+    "contact_project_normal_velocity_update_no_soft_pd",
     "contact_project_velocity_update",
     "contact_project_velocity_update_no_soft_pd",
 ]
@@ -41,6 +43,51 @@ def _friction_normal_lambda(
     """Normal load for Coulomb friction, excluding Baumgarte correction."""
     load = lambda_n + mass_coeff_n * eff_n * bias_n * sor_boost
     return wp.clamp(load, wp.float32(0.0), lambda_n)
+
+
+def _make_contact_project_normal_velocity_update(has_soft_contact_pd: bool):
+    @wp.func
+    def impl(
+        cc: ContactContainer,
+        k: wp.int32,
+        normal: wp.vec3f,
+        jv_n: wp.float32,
+        eff_n: wp.float32,
+        bias_n: wp.float32,
+        mass_coeff_n: wp.float32,
+        impulse_coeff_n: wp.float32,
+        sor_boost: wp.float32,
+        pd_eff_soft_n: wp.float32,
+        pd_gamma_n: wp.float32,
+        pd_bias_n: wp.float32,
+    ) -> wp.vec3f:
+        """Solve one normal row without evaluating unused tangent rows."""
+        lambda_old = cc_get_normal_lambda(cc, k)
+        inverse_response = eff_n
+        rhs = jv_n + bias_n
+        normal_mass_coeff = mass_coeff_n
+        normal_impulse_coeff = impulse_coeff_n
+        if wp.static(has_soft_contact_pd):
+            if pd_eff_soft_n > wp.float32(0.0):
+                inverse_response = pd_eff_soft_n
+                rhs = jv_n - pd_bias_n + pd_gamma_n * lambda_old
+                normal_mass_coeff = wp.float32(1.0)
+                normal_impulse_coeff = wp.float32(0.0)
+
+        update = block_solve_accumulated_inverse_bounded_1(
+            inverse_response,
+            rhs,
+            lambda_old,
+            normal_mass_coeff,
+            normal_impulse_coeff,
+            sor_boost,
+            wp.float32(0.0),
+            BLOCK_LAMBDA_INF,
+        )
+        cc_set_normal_lambda(cc, k, update.lambda_new)
+        return update.delta * normal
+
+    return impl
 
 
 def _make_contact_project_velocity_update(has_soft_contact_pd: bool):
@@ -250,6 +297,10 @@ def _make_contact_frame_velocity_update(has_soft_contact_pd: bool):
     return impl
 
 
+contact_project_normal_velocity_update = _make_contact_project_normal_velocity_update(has_soft_contact_pd=True)
+contact_project_normal_velocity_update_no_soft_pd = _make_contact_project_normal_velocity_update(
+    has_soft_contact_pd=False
+)
 contact_frame_velocity_update = _make_contact_frame_velocity_update(has_soft_contact_pd=True)
 contact_frame_velocity_update_no_soft_pd = _make_contact_frame_velocity_update(has_soft_contact_pd=False)
 contact_project_velocity_update = _make_contact_project_velocity_update(has_soft_contact_pd=True)

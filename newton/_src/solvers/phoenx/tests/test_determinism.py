@@ -164,7 +164,7 @@ def _build_pyramid_scene(layers: int) -> _PhoenXScene:
     return scene
 
 
-def _build_mesh_sdf_pyramid_scene(layers: int) -> _PhoenXScene:
+def _build_mesh_sdf_pyramid_scene(layers: int, contact_friction_model: str = "point") -> _PhoenXScene:
     """Mesh-cube pyramid with a 128-voxel SDF per shape.
 
     Every body is the same mesh-cube shape backed by an SDF built at
@@ -175,7 +175,12 @@ def _build_mesh_sdf_pyramid_scene(layers: int) -> _PhoenXScene:
     Warp ``Mesh`` / ``SDF`` instances are stateless GPU buffers and
     can back any number of shapes.
     """
-    scene = _PhoenXScene(fps=60, substeps=10, solver_iterations=8)
+    scene = _PhoenXScene(
+        fps=60,
+        substeps=10,
+        solver_iterations=8,
+        contact_friction_model=contact_friction_model,
+    )
     scene.add_ground_plane()
 
     half_extent = 0.1

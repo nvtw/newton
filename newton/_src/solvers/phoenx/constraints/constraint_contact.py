@@ -43,6 +43,10 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
 )
+from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
+    ContactPatchFriction,
+    contact_patch_friction_zeros,
+)
 from newton._src.solvers.phoenx.constraints.contact_projection import (
     contact_frame_velocity_update,
     contact_frame_velocity_update_no_soft_pd,
@@ -227,15 +231,20 @@ class ContactColumnContainer:
     """
 
     data: wp.array2d[wp.float32]
+    patch: ContactPatchFriction
 
 
 def contact_column_container_zeros(
     num_columns: int,
     device: wp.DeviceLike = None,
+    *,
+    enable_patch_friction: bool = False,
 ) -> ContactColumnContainer:
     """Allocate a zero-initialised :class:`ContactColumnContainer`."""
     c = ContactColumnContainer()
     c.data = wp.zeros((int(CONTACT_DWORDS), int(num_columns)), dtype=wp.float32, device=device)
+    patch_capacity = num_columns if enable_patch_friction else 1
+    c.patch = contact_patch_friction_zeros(patch_capacity, device=device)
     return c
 
 

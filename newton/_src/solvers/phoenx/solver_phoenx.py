@@ -95,6 +95,10 @@ from newton._src.solvers.phoenx.constraints.contact_ingest import (
     ingest_contacts,
     stamp_forward_contact_map,
 )
+from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
+    copy_contact_patch_impulses,
+    gather_contact_patch_warmstart,
+)
 from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
@@ -610,6 +614,7 @@ class PhoenXWorld:
         prepare_refresh_stride: int | str = "auto",
         solver_flavor: str = "standard",
         jacobi_max_colors: int = 10,
+        contact_friction_model: str = "point",
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -636,6 +641,9 @@ class PhoenXWorld:
                 replaced by each Jacobi step. The simple solver uses
                 ``substeps * jacobi_max_colors`` substeps. Defaults to 10.
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
+            contact_friction_model: "point" uses per-contact tangent
+                rows. Experimental "patch" uses one coupled central
+                tangent block for each eligible convex shape pair.
             rigid_contact_max: Sizes per-contact state. ``0`` disables
                 contacts.
             max_contact_columns: Optional cap for per-column state.
@@ -678,6 +686,27 @@ class PhoenXWorld:
         if solver_flavor not in valid_solver_flavors:
             raise ValueError(f"solver_flavor must be one of {valid_solver_flavors}, got {solver_flavor!r}")
         self.solver_flavor = solver_flavor
+        valid_contact_friction_models = ("point", "patch")
+        if contact_friction_model not in valid_contact_friction_models:
+            raise ValueError(
+                f"contact_friction_model must be one of {valid_contact_friction_models}, got {contact_friction_model!r}"
+            )
+        self.contact_friction_model = contact_friction_model
+        self._contact_patch_enabled = contact_friction_model == "patch"
+        if self._contact_patch_enabled and (
+            mass_splitting
+            or solver_flavor != "standard"
+            or num_particles > 0
+            or num_cloth_triangles > 0
+            or num_cloth_bending > 0
+            or num_soft_tetrahedra > 0
+            or num_soft_hexahedra > 0
+        ):
+            raise NotImplementedError(
+                "contact_friction_model='patch' currently supports maximal rigid standard-PGS worlds without mass splitting"
+            )
+        if self._contact_patch_enabled and float(sleeping_velocity_threshold) > 0.0:
+            raise NotImplementedError("contact_friction_model='patch' does not yet support sleeping")
 
         #: Opt-in per-column wall-clock profiler. When ``True``, PGS
         #: dispatches atomic-add their elapsed us into the column's
@@ -807,7 +836,8 @@ class PhoenXWorld:
             raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
         sleeping_requested = float(sleeping_velocity_threshold) > 0.0
         cached_prepare_unsupported = (
-            bool(mass_splitting)
+            self._contact_patch_enabled
+            or bool(mass_splitting)
             or sleeping_requested
             or self.num_particles > 0
             or self.num_cloth_triangles > 0
@@ -1183,7 +1213,9 @@ class PhoenXWorld:
                 self.rigid_contact_max, device=self.device
             )
             self._contact_cols: ContactColumnContainer = contact_column_container_zeros(
-                self.max_contact_columns, device=self.device
+                self.max_contact_columns,
+                device=self.device,
+                enable_patch_friction=self._contact_patch_enabled,
             )
             self._enable_body_pair_grouping: bool = bool(enable_body_pair_grouping)
             self._ingest_scratch: IngestScratch | None = IngestScratch(
@@ -2972,6 +3004,12 @@ class PhoenXWorld:
         # cc buffers); we then refresh it to this frame's count, which is the
         # range the upcoming solve writes and the next copy must preserve.
         contact_container_copy_current_to_prev(self._contact_container, self._cc_valid_count, device=self.device)
+        if self._contact_patch_enabled:
+            copy_contact_patch_impulses(
+                self._contact_cols.patch,
+                self._ingest_scratch.num_contact_columns,
+                device=self.device,
+            )
         wp.copy(self._cc_valid_count, contacts.rigid_contact_count, count=1)
         wp.copy(
             self._cid_of_contact_prev,
@@ -3061,6 +3099,19 @@ class PhoenXWorld:
             # the sleep threshold; substep-local warm-start still applies.
             carry_impulses=not self._sleeping_enabled,
         )
+
+        if self._contact_patch_enabled:
+            gather_contact_patch_warmstart(
+                self._contact_cols.patch,
+                self._ingest_scratch,
+                gather_match_index,
+                self._cid_of_contact_prev,
+                self._reuse_contact_indices,
+                self._contact_offset,
+                shape_type,
+                enable_body_pair_grouping=self._enable_body_pair_grouping,
+                device=self.device,
+            )
 
         # Cloth-aware overlay: when shape_endpoints is populated
         # (i.e. setup_cloth_collision_pipeline was called), re-stamp
@@ -3791,6 +3842,7 @@ class PhoenXWorld:
         return bool(
             self.step_layout != "single_world"
             and not self.mass_splitting_enabled
+            and not self._contact_patch_enabled
             and self.num_particles == 0
             and self.num_cloth_triangles == 0
             and self.num_cloth_bending == 0
@@ -4117,6 +4169,7 @@ class PhoenXWorld:
             "solve_joint_inner_sweeps": joint_sweeps,
             "solve_contact_inner_sweeps": contact_sweeps,
             "solve_outer_iteration_chunk": outer_chunk,
+            "patch_friction": self._contact_patch_enabled,
         }
         if cached_prepare is not None:
             kw["cached_prepare"] = bool(cached_prepare)
@@ -4151,6 +4204,7 @@ class PhoenXWorld:
             "has_contacts": self.max_contact_columns > 0 and self._reduced_articulation is None,
             "has_mass_splitting": self.mass_splitting_enabled,
             "rigid_direct": self._singleworld_rigid_direct(),
+            "patch_friction": self._contact_patch_enabled,
         }
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),

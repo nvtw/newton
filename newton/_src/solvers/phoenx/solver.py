@@ -177,6 +177,7 @@ class SolverPhoenX(SolverBase):
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
         joint_friction_model: str = "hard",
+        contact_friction_model: str = "point",
         default_friction: float = 0.5,
         step_layout: str = "multi_world",
         threads_per_world: int | str = "auto",
@@ -205,6 +206,11 @@ class SolverPhoenX(SolverBase):
             joint_friction_model: "hard" uses PhoenX Coulomb friction;
                 "mujoco" maps MuJoCo solref/solimp friction metadata
                 when available.
+            contact_friction_model: "point" solves two tangent rows at
+                every contact point. Experimental "patch" keeps every
+                point normal but couples friction into one central 2D row for
+                each convex shape pair. Raw meshes, heightfields, and compound
+                body-pair columns retain point friction.
             prepare_refresh_stride: Refresh cached rigid contact/joint
                 prepare data every N substeps. ``"auto"`` chooses a
                 conservative stride from the substep count and falls back
@@ -256,6 +262,14 @@ class SolverPhoenX(SolverBase):
         super().__init__(model)
         if articulation_mode not in ("maximal", "hybrid", "reduced"):
             raise ValueError(f"articulation_mode must be 'maximal', 'hybrid', or 'reduced', got {articulation_mode!r}")
+        if contact_friction_model not in ("point", "patch"):
+            raise ValueError(f"contact_friction_model must be 'point' or 'patch', got {contact_friction_model!r}")
+        if contact_friction_model == "patch" and articulation_mode != "maximal":
+            raise ValueError("contact_friction_model='patch' currently requires articulation_mode='maximal'")
+        if contact_friction_model == "patch" and (mass_splitting or solver_flavor != "standard"):
+            raise ValueError(
+                "contact_friction_model='patch' currently requires solver_flavor='standard' and mass_splitting=False"
+            )
         if articulation_mode in ("hybrid", "reduced") and solver_flavor != "standard":
             raise ValueError("hybrid/reduced articulations currently require solver_flavor='standard'")
         if articulation_mode in ("hybrid", "reduced") and mass_splitting:
@@ -420,6 +434,7 @@ class SolverPhoenX(SolverBase):
             max_colored_partitions=max_colored_partitions,
             solver_flavor=solver_flavor,
             jacobi_max_colors=jacobi_max_colors,
+            contact_friction_model=contact_friction_model,
             mass_splitting_batch_size=mass_splitting_batch_size,
             partitioner_algorithm=partitioner_algorithm,
             enable_warm_start_coloring=enable_warm_start_coloring,

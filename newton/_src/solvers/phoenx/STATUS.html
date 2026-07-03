@@ -186,15 +186,17 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag">PATCH FRICTION · FOUNDATION</span><time>3 Jul</time></div>
-      <h2>Convex-only coupled friction now has a graph-safe state and projection core</h2>
-      <p>The Box3D-inspired prototype keeps every point normal, but will replace eligible per-point tangents with one central, coupled 2D friction block. This is not in the production solve yet; integration and physical gates remain before any performance claim.</p>
+      <div class="meta"><span class="tag good">PATCH FRICTION · INTEGRATED PROTOTYPE</span><time>3 Jul</time></div>
+      <h2>Maximal PhoenX now has an opt-in coupled convex-patch friction solve</h2>
+      <p>The Box3D-inspired path is integrated as a compile-time specialization for maximal rigid PGS. It keeps every point normal and replaces eligible point tangents with one central 2D friction block. The default point solver remains unchanged; no performance claim is made until broader gates and G1 measurement finish.</p>
       <ul>
-        <li>Eligibility is deliberately conservative: primitives and convex meshes qualify only for unmerged shape-pair columns. Raw meshes, heightfields, cloth/soft contacts, and compound body-pair columns retain existing point friction.</li>
-        <li>The projection uses the full 2×2 tangent effective mass, including its rotational cross term, and the existing PhoenX static/kinetic Coulomb disk law.</li>
-        <li>Warm-start state is stored as a world-space patch impulse. Transfer follows contact matching plus the prior contact-to-column map, so reordered columns or a changed first manifold contact cannot attach history to the wrong pair.</li>
-        <li>Six focused CUDA-graph tests pass: convex/mesh classification, conservative compound fallback, scoped history copy, reordered-column matching, full coupled solve, and kinetic projection.</li>
-        <li>Next: integrate the maximal rigid prepare/iterate path as a compile-time specialization, then require momentum, stacking, static/kinetic friction, mesh fallback, determinism, single-/multi-world, and G1 throughput gates.</li>
+        <li>Both fast-tail multi-world and colored single-world CUDA-graph paths run. Point mode allocates only a one-entry sentinel and compiles its original hot path.</li>
+        <li>The block uses the full 2×2 tangent effective mass and existing static/kinetic Coulomb disk. Warm start is a world-space impulse remapped through persistent contact matches, so column reorder and first-contact changes are safe.</li>
+        <li>Both sides apply the patch impulse at one shared world midpoint. A new dynamic box-pair gate verifies linear and angular momentum conservation; the first separate-anchor formulation failed this gate and was corrected rather than tolerance-masked.</li>
+        <li>All 12 focused CUDA-graph gates pass: sliding-to-rest, static friction above the kinetic budget, velocity-level linear/angular momentum, multi-/single-world execution, raw-mesh fallback, bit determinism, classification, compound fallback, history remapping, coupled projection, and kinetic projection. Existing point-mode stacks and momentum also pass.</li>
+        <li>Raw meshes, heightfields, cloth/soft contacts, compound body-pair columns, reduced articulations, mass splitting, and sleeping retain point friction or are explicitly rejected for this opt-in prototype.</li>
+        <li>A scheduler-matched maximal G1 bracket is neutral-to-slightly-negative: 2.537M patch versus 2.548M point physics steps/s (−0.43%) after normal-only rows, redundant-mass removal, and launch fusion. Contact trajectories differ, so this is directional—not a win.</li>
+        <li>Next: commit this clean opt-in prototype, then decide whether reduced-coordinate row construction can benefit more materially. Do not replace point friction or claim training throughput until a broad end-to-end win exists.</li>
       </ul>
     </article>
     <article>

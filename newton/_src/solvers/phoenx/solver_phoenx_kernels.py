@@ -65,11 +65,17 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_iterate_no_sleep,
     contact_iterate_no_sleep_no_soft_pd,
     contact_iterate_no_soft_pd,
+    contact_iterate_patch_lean_no_sleep,
+    contact_iterate_patch_lean_no_sleep_no_soft_pd,
+    contact_iterate_patch_multi,
+    contact_iterate_patch_multi_no_soft_pd,
     contact_prepare_for_iteration,
     contact_prepare_for_iteration_cloth_aware,
     contact_prepare_for_iteration_lean,
     contact_prepare_for_iteration_lean_no_soft_pd,
     contact_prepare_for_iteration_no_soft_pd,
+    contact_prepare_for_iteration_patch_lean,
+    contact_prepare_for_iteration_patch_lean_no_soft_pd,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
@@ -762,6 +768,7 @@ def _make_multiworld_rigid_prepare_dispatch_func(
     has_soft_contact_pd: bool,
     cached_prepare: bool,
     enable_column_timers: bool,
+    patch_friction: bool = False,
 ):
     """Generated rigid multi-world prepare dispatch."""
 
@@ -825,7 +832,33 @@ def _make_multiworld_rigid_prepare_dispatch_func(
                 wp.int32(0),
             )
         else:
-            if wp.static(has_soft_contact_pd):
+            if wp.static(patch_friction and has_soft_contact_pd):
+                contact_prepare_for_iteration_patch_lean(
+                    contact_cols,
+                    local_cid,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    idt,
+                    cc,
+                    contacts,
+                    copy_state,
+                    wp.int32(0),
+                )
+            elif wp.static(patch_friction):
+                contact_prepare_for_iteration_patch_lean_no_soft_pd(
+                    contact_cols,
+                    local_cid,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    idt,
+                    cc,
+                    contacts,
+                    copy_state,
+                    wp.int32(0),
+                )
+            elif wp.static(has_soft_contact_pd):
                 contact_prepare_for_iteration_lean(
                     contact_cols,
                     local_cid,
@@ -912,6 +945,7 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
     has_soft_contact_pd: bool,
     enable_column_timers: bool,
     use_bias: bool,
+    patch_friction: bool = False,
 ):
     """Generated rigid multi-world multi-sweep iterate dispatch."""
 
@@ -988,7 +1022,39 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
                 if fr1 and fr2:
                     skip_frozen = True
         if not skip_frozen:
-            if wp.static(has_soft_contact_pd):
+            if wp.static(patch_friction and has_soft_contact_pd):
+                contact_iterate_patch_multi(
+                    contact_cols,
+                    local_cid,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    idt,
+                    cc,
+                    contacts,
+                    use_bias,
+                    num_sweeps,
+                    copy_state,
+                    wp.int32(0),
+                    sor_boost,
+                )
+            elif wp.static(patch_friction):
+                contact_iterate_patch_multi_no_soft_pd(
+                    contact_cols,
+                    local_cid,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    idt,
+                    cc,
+                    contacts,
+                    use_bias,
+                    num_sweeps,
+                    copy_state,
+                    wp.int32(0),
+                    sor_boost,
+                )
+            elif wp.static(has_soft_contact_pd):
                 contact_iterate_multi(
                     contact_cols,
                     local_cid,
@@ -1090,6 +1156,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     soft_tet_neohookean: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
+    patch_friction: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
     family_split: bool = False,
@@ -1111,6 +1178,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=cached_prepare,
         enable_column_timers=enable_column_timers,
+        patch_friction=patch_friction,
     )
     (
         _dispatch_iterate_cid,
@@ -1126,6 +1194,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
         use_bias=True,
+        patch_friction=patch_friction,
     )
     _dispatch_prepare_any_cid = None
     _dispatch_iterate_any_cid = None
@@ -1532,6 +1601,7 @@ def _make_fast_tail_relax_kernel(
     cloth_support: bool = False,
     soft_tet_neohookean: bool = False,
     enable_column_timers: bool = False,
+    patch_friction: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
     family_split: bool = False,
@@ -1551,6 +1621,7 @@ def _make_fast_tail_relax_kernel(
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
         use_bias=False,
+        patch_friction=patch_friction,
     )
     _dispatch_relax_any_cid = None
     if cloth_support:
@@ -2201,6 +2272,7 @@ def get_fast_tail_kernel(
     soft_tet_neohookean: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
+    patch_friction: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
     family_split: bool = False,
@@ -2228,6 +2300,7 @@ def get_fast_tail_kernel(
             soft_tet_neohookean=soft_tet_neohookean,
             cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
+            patch_friction=patch_friction,
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,
             family_split=family_split,
@@ -2247,6 +2320,7 @@ def get_fast_tail_kernel(
             cloth_support=cloth_support,
             soft_tet_neohookean=soft_tet_neohookean,
             enable_column_timers=enable_column_timers,
+            patch_friction=patch_friction,
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,
             family_split=family_split,
@@ -3062,9 +3136,16 @@ def _make_singleworld_rigid_contact_dispatch_func(
     is_prepare: bool,
     is_cached_prepare: bool,
     use_bias: bool,
+    patch_friction: bool = False,
 ):
     if is_prepare:
-        if has_mass_splitting:
+        if patch_friction:
+            prepare_func = (
+                contact_prepare_for_iteration_patch_lean
+                if has_soft_contact_pd
+                else contact_prepare_for_iteration_patch_lean_no_soft_pd
+            )
+        elif has_mass_splitting:
             prepare_func = (
                 contact_prepare_for_iteration if has_soft_contact_pd else contact_prepare_for_iteration_no_soft_pd
             )
@@ -3132,7 +3213,13 @@ def _make_singleworld_rigid_contact_dispatch_func(
             )
 
     else:
-        if has_mass_splitting:
+        if patch_friction:
+            iterate_func = (
+                contact_iterate_patch_lean_no_sleep
+                if has_soft_contact_pd
+                else contact_iterate_patch_lean_no_sleep_no_soft_pd
+            )
+        elif has_mass_splitting:
             if has_sleeping:
                 iterate_func = contact_iterate if has_soft_contact_pd else contact_iterate_no_soft_pd
             else:
@@ -3241,6 +3328,7 @@ def _make_singleworld_dispatch_func(
     is_prepare: bool,
     is_cached_prepare: bool,
     use_bias: bool,
+    patch_friction: bool = False,
 ):
     """Per-cid dispatch helper used by head and fused PGS kernels.
 
@@ -3255,6 +3343,7 @@ def _make_singleworld_dispatch_func(
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
+        patch_friction=patch_friction,
     )
     _dispatch_rigid_joint = _make_singleworld_rigid_joint_dispatch_func(
         revolute_only=revolute_only,
@@ -3656,6 +3745,7 @@ def _make_singleworld_persistent_kernel(
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
+    patch_friction: bool = False,
 ):
     """Persistent-grid PGS kernel for the requested phase.
 
@@ -3685,6 +3775,7 @@ def _make_singleworld_persistent_kernel(
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
+        patch_friction=patch_friction,
     )
     _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
         revolute_only=revolute_only,
@@ -3851,6 +3942,7 @@ def _make_singleworld_fused_kernel(
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
+    patch_friction: bool = False,
 ):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
@@ -3873,6 +3965,7 @@ def _make_singleworld_fused_kernel(
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
+        patch_friction=patch_friction,
     )
     _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
         revolute_only=revolute_only,
@@ -4036,6 +4129,7 @@ def get_singleworld_kernel(
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
+    patch_friction: bool = False,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
@@ -4054,4 +4148,5 @@ def get_singleworld_kernel(
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         rigid_direct=rigid_direct,
+        patch_friction=patch_friction,
     )
