@@ -119,6 +119,14 @@
       <div class="stamp">Last updated<br><strong>3 July 2026 · risky path experiment</strong></div>
     </header>
 
+    <section class="action-required">
+      <strong>User action requested · one cached-row Nsight Compute capture</strong>
+      <p><span class="tag">PROFILE ONE KERNEL ONCE</span></p>
+      <p>The shared-factor cache is retained and wins across G1, ANYmal, and H1. This post-change report will identify the remaining path-metadata or strided-write dependency stalls before the next row-layout change.</p>
+      <pre><code>sudo /tmp/newton_row_cache/newton/_src/solvers/phoenx/benchmarks/profile_g1_contact_rows_cached_ncu.sh</code></pre>
+      <p>The script profiles exactly one contact-row launch and writes <code>/tmp/phoenx_g1_contact_rows_cached.ncu-rep</code>. The command wraps visually but copies as one line.</p>
+    </section>
+
     <section class="hero">
       <strong>Primary goal</strong>
       <p>Deliver a genuinely needle-moving PhoenX RL architecture: a contact-inclusive persistent reduced-articulation megakernel that eliminates global contact-row materialization and intermediate publication across biased solve, dynamics, relaxation, and final publish. The established reference path remains the safe fallback; physical accuracy, arbitrary contact counts, CUDA graph capture, and cross-robot performance remain hard gates.</p>
@@ -208,7 +216,7 @@
         <li>Cross-scene gates also improve: 512-world ANYmal +0.5%, H1 +1.7%; 64 articulations in one world ANYmal +1.5%, H1 +1.7%. Final state magnitudes are identical.</li>
         <li>Six focused CUDA regressions pass: exact generalized rows, arbitrary contact pages, persistent/reference parity, multiple grounded articulations per world, deterministic dense contacts, and spatial momentum conservation.</li>
         <li>Commit <code>2ce2656a</code> is retained on <code>twidmer/experiment-phoenx-persistent-articulations</code>. Repository-wide pre-commit remains blocked only by unrelated pre-existing lint/typo failures; focused lint and formatting pass.</li>
-        <li><strong>Next:</strong> use the same profiler evidence to coalesce Jacobian/response writes and shorten path-metadata dependency chains. No user profiling action is required yet.</li>
+        <li><strong>Next:</strong> consume one post-cache contact-row capture, then target only the remaining measured dependency chain. The bounded command is shown at the top of this page.</li>
       </ul>
     </article>
     <article>
