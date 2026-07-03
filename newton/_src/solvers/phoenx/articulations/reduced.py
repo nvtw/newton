@@ -649,6 +649,43 @@ def _sync_reduced_group(mask: wp.uint32): ...
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
+    float result = value;
+    for (int offset = width >> 1; offset > 0; offset >>= 1) {
+        result += __shfl_down_sync(mask, result, offset, width);
+    }
+    return result;
+#else
+    return value;
+#endif
+"""
+)
+def _sum_reduced_group_float(
+    value: wp.float32,
+    width: wp.int32,
+    mask: wp.uint32,
+) -> wp.float32: ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    return __shfl_sync(mask, value, source_lane, width);
+#else
+    return value;
+#endif
+"""
+)
+def _shuffle_reduced_float(
+    value: wp.float32,
+    source_lane: wp.int32,
+    width: wp.int32,
+    mask: wp.uint32,
+) -> wp.float32: ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
     wp::spatial_vector result;
     for (int component = 0; component < 6; ++component) {
         result[component] = __shfl_sync(mask, value[component], source_lane, width);
@@ -2065,6 +2102,7 @@ def _advance_reduced_articulations_warp_kernel(
     dt: wp.float32,
     include_external: wp.bool,
     include_coriolis: wp.bool,
+    capture_momentum: wp.bool,
     body_velocity: wp.array[wp.spatial_vector],
     body_coriolis: wp.array[wp.spatial_vector],
     body_bias: wp.array[wp.spatial_vector],
@@ -2075,6 +2113,7 @@ def _advance_reduced_articulations_warp_kernel(
     generalized_acceleration: wp.array[wp.float32],
     public_body_qd: wp.array[wp.spatial_vector],
     bodies: BodyContainer,
+    captured_momentum: wp.array[wp.spatial_vector],
 ):
     thread = wp.tid()
     articulation = thread // tile_width
@@ -2087,6 +2126,42 @@ def _advance_reduced_articulations_warp_kernel(
     if tile_width < wp.int32(32):
         group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
 
+    data = bodies.reduced
+    start = data.articulation_start[articulation]
+    end = data.articulation_end[articulation]
+    momentum_origin = wp.vec3(0.0)
+    if capture_momentum:
+        local_mass = wp.float32(0.0)
+        local_weighted_x = wp.float32(0.0)
+        local_weighted_y = wp.float32(0.0)
+        local_weighted_z = wp.float32(0.0)
+        joint_index = start + lane
+        while joint_index < end:
+            body = joint_child[joint_index]
+            mass = body_mass[body]
+            position = wp.transform_get_translation(body_q_com[body])
+            local_mass += mass
+            local_weighted_x += mass * position[0]
+            local_weighted_y += mass * position[1]
+            local_weighted_z += mass * position[2]
+            joint_index += tile_width
+        total_mass = _sum_reduced_group_float(local_mass, tile_width, group_mask)
+        weighted_x = _sum_reduced_group_float(local_weighted_x, tile_width, group_mask)
+        weighted_y = _sum_reduced_group_float(local_weighted_y, tile_width, group_mask)
+        weighted_z = _sum_reduced_group_float(local_weighted_z, tile_width, group_mask)
+        total_mass = _shuffle_reduced_float(total_mass, wp.int32(0), tile_width, group_mask)
+        weighted_x = _shuffle_reduced_float(weighted_x, wp.int32(0), tile_width, group_mask)
+        weighted_y = _shuffle_reduced_float(weighted_y, wp.int32(0), tile_width, group_mask)
+        weighted_z = _shuffle_reduced_float(weighted_z, wp.int32(0), tile_width, group_mask)
+        if total_mass > wp.float32(0.0):
+            momentum_origin = wp.vec3(weighted_x, weighted_y, weighted_z) / total_mass
+
+    local_momentum_x = wp.float32(0.0)
+    local_momentum_y = wp.float32(0.0)
+    local_momentum_z = wp.float32(0.0)
+    local_angular_x = wp.float32(0.0)
+    local_angular_y = wp.float32(0.0)
+    local_angular_z = wp.float32(0.0)
     previous_velocity = wp.spatial_vector()
     previous_coriolis = wp.spatial_vector()
     for depth in range(max_depth + wp.int32(1)):
@@ -2114,8 +2189,20 @@ def _advance_reduced_articulations_warp_kernel(
             inertia = _unpack_symmetric_mat66(body_inertia[child])
             x_com = wp.transform_get_translation(body_q_com[child])
             bias = wp.spatial_vector()
+            spatial_momentum = wp.spatial_vector()
+            if include_coriolis or capture_momentum:
+                spatial_momentum = inertia * velocity
             if include_coriolis:
-                bias += inertia * coriolis + spatial_cross_dual(velocity, inertia * velocity)
+                bias += inertia * coriolis + spatial_cross_dual(velocity, spatial_momentum)
+            if capture_momentum:
+                linear = wp.spatial_top(spatial_momentum)
+                angular = wp.spatial_bottom(spatial_momentum) - wp.cross(momentum_origin, linear)
+                local_momentum_x += linear[0]
+                local_momentum_y += linear[1]
+                local_momentum_z += linear[2]
+                local_angular_x += angular[0]
+                local_angular_y += angular[1]
+                local_angular_z += angular[2]
             if include_external:
                 gravity_force = body_mass[child] * gravity[wp.max(body_world[child], wp.int32(0))]
                 gravity_wrench = wp.spatial_vector(gravity_force, wp.cross(x_com, gravity_force))
@@ -2146,6 +2233,18 @@ def _advance_reduced_articulations_warp_kernel(
         previous_velocity = velocity
         previous_coriolis = coriolis
         _sync_reduced_group(group_mask)
+
+    if capture_momentum:
+        linear_x = _sum_reduced_group_float(local_momentum_x, tile_width, group_mask)
+        linear_y = _sum_reduced_group_float(local_momentum_y, tile_width, group_mask)
+        linear_z = _sum_reduced_group_float(local_momentum_z, tile_width, group_mask)
+        angular_x = _sum_reduced_group_float(local_angular_x, tile_width, group_mask)
+        angular_y = _sum_reduced_group_float(local_angular_y, tile_width, group_mask)
+        angular_z = _sum_reduced_group_float(local_angular_z, tile_width, group_mask)
+        if lane == wp.int32(0):
+            captured_momentum[articulation] = wp.spatial_vector(
+                linear_x, linear_y, linear_z, angular_x, angular_y, angular_z
+            )
 
     # Bias and articulated-force propagation only depend on the completed child
     # depth, so one reverse traversal can advance both recurrences.
@@ -2707,6 +2806,7 @@ class ReducedArticulationSystem:
         *,
         include_external: bool,
         include_coriolis: bool,
+        capture_momentum: bool = False,
     ) -> None:
         """Apply one split ABA velocity update and publish link twists."""
         advance_inputs = [
@@ -2760,8 +2860,9 @@ class ReducedArticulationSystem:
                     self.factor_child_start,
                     self.factor_child_joint,
                     *advance_inputs,
+                    wp.bool(capture_momentum),
                 ],
-                outputs=advance_outputs,
+                outputs=[*advance_outputs, self.target_world_momentum],
                 device=self.device,
             )
         else:
@@ -3089,23 +3190,25 @@ class ReducedPhoenXArticulation:
             self.model.body_inertia,
             self.bodies,
         ]
-        if self.model.device.is_cuda:
-            wp.launch_tiled(
-                _capture_reduced_momentum_warp_kernel,
-                dim=[int(self.model.articulation_count)],
-                inputs=capture_inputs,
-                outputs=[self.system.target_world_momentum],
-                block_dim=32,
-                device=self.model.device,
-            )
-        else:
-            wp.launch(
-                _capture_reduced_momentum_kernel,
-                dim=int(self.model.articulation_count),
-                inputs=capture_inputs,
-                outputs=[self.system.target_world_momentum],
-                device=self.model.device,
-            )
+        fused_capture = self.model.device.is_cuda and self.system.use_warp_advance and split_dynamics
+        if not fused_capture:
+            if self.model.device.is_cuda:
+                wp.launch_tiled(
+                    _capture_reduced_momentum_warp_kernel,
+                    dim=[int(self.model.articulation_count)],
+                    inputs=capture_inputs,
+                    outputs=[self.system.target_world_momentum],
+                    block_dim=32,
+                    device=self.model.device,
+                )
+            else:
+                wp.launch(
+                    _capture_reduced_momentum_kernel,
+                    dim=int(self.model.articulation_count),
+                    inputs=capture_inputs,
+                    outputs=[self.system.target_world_momentum],
+                    device=self.model.device,
+                )
         if split_dynamics:
             self.system.advance(
                 self.state,
@@ -3114,6 +3217,7 @@ class ReducedPhoenXArticulation:
                 dt,
                 include_external=False,
                 include_coriolis=True,
+                capture_momentum=fused_capture,
             )
 
         self._publish_state(dt)

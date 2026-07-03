@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · response-basis production study complete</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · momentum capture fused into ABA</strong></div>
     </header>
 
     <section class="hero">
@@ -187,6 +187,17 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · EXACT CROSS-PHASE REUSE</span><time>3 Jul</time></div>
+      <h2>Post-contact ABA now captures momentum from work it already performs</h2>
+      <p>The Coriolis ABA pass already computes each link's spatial inertia times velocity. The tiled CUDA path now accumulates that exact quantity into system momentum during the forward tree traversal, removing the standalone two-pass momentum-capture kernel.</p>
+      <ul>
+        <li>The target momentum still uses a deterministic subgroup reduction about the system COM; CPU and non-tiled paths retain the original capture kernel.</li>
+        <li>Nsight confirms the capture launch disappears. Fused ABA averages 119.2 µs; its cost is slightly below the former ABA plus capture pair.</li>
+        <li>Matched 8,192-world A/B improves physics 1.921M → 1.925M steps/s (+0.23%) and full graph-leapfrog training 871.5k → 872.7k samples/s (+0.14%).</li>
+        <li>Tiled/serial ABA parity, 8/16/32-lane topologies, long-horizon momentum/energy, internal loops, ground/self contacts, dense-contact determinism, Featherstone parity, and multi-world graph capture pass.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag">RESPONSE BASIS · PRODUCTION PATH REJECTED</span><time>3 Jul</time></div>
       <h2>The 1.142× microbenchmark did not survive full solver integration</h2>

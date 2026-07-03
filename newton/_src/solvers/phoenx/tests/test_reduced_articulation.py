@@ -11,6 +11,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.articulations.reduced import (
     ReducedArticulationSystem,
+    _capture_reduced_momentum_warp_kernel,
     _flush_deferred_articulation,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
@@ -1862,6 +1863,63 @@ class TestReducedArticulation(unittest.TestCase):
         momentum_after = _total_momentum(model, bridge.state)
         np.testing.assert_allclose(momentum_after, momentum_before, rtol=0.0, atol=1.0e-5)
         self.assertGreater(float(np.linalg.norm(bridge.state.joint_qd.numpy())), 1.0e-4)
+
+    def test_fused_advance_momentum_matches_standalone_capture_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_branched_tree(device)
+        state = model.state()
+        state.joint_qd.assign(np.linspace(-0.45, 0.55, int(model.joint_dof_count), dtype=np.float32))
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        control = model.control()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+        )
+        bridge = solver._reduced_articulation
+        reference = wp.zeros(int(model.articulation_count), dtype=wp.spatial_vector, device=device)
+        dt = 1.0 / 240.0
+
+        with wp.ScopedCapture(device=device) as capture:
+            bridge.import_step(state, control)
+            bridge.begin_substep(dt, split_dynamics=True)
+            wp.launch_tiled(
+                _capture_reduced_momentum_warp_kernel,
+                dim=[int(model.articulation_count)],
+                inputs=[
+                    model.articulation_start,
+                    model.articulation_end,
+                    model.joint_child,
+                    model.body_mass,
+                    model.body_inertia,
+                    solver.bodies,
+                ],
+                outputs=[reference],
+                block_dim=32,
+                device=device,
+            )
+            bridge.system.advance(
+                bridge.state,
+                control,
+                solver.bodies,
+                dt,
+                include_external=False,
+                include_coriolis=True,
+                capture_momentum=True,
+            )
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(
+            bridge.system.target_world_momentum.numpy(),
+            reference.numpy(),
+            rtol=2.0e-6,
+            atol=2.0e-6,
+        )
 
     def test_warp_advance_matches_serial_on_branched_tree_under_graph_capture(self):
         device = wp.get_preferred_device()
