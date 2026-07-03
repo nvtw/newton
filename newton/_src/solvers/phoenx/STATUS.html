@@ -115,10 +115,12 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">891k/s</div><div class="label">short steady graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.44×</div><div class="label">slower than pinned nanoG1</div></div>
+      <div class="card"><div class="metric">891k/s</div><div class="label">pinned comparable graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.44×</div><div class="label">pinned gap to nanoG1</div></div>
       <div class="card"><div class="metric good">+7.5%</div><div class="label">cumulative short-training gain</div></div>
     </section>
+
+    <p class="profile-note">The 891k/s card is deliberately retained for the controlled cross-project comparison. Newer same-session optimization brackets reach 1.15–1.16M samples/s, but they use a faster run context and establish relative wins—not a replacement nanoG1 comparison.</p>
 
     <div class="section-label">Steady-training GPU work profile</div>
     <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
@@ -160,7 +162,7 @@
         <li>A fresh 157.3M-sample run passes the complete gate at seed 1000 and seed 2000.</li>
         <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
         <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
-        <li>The controlled short graph-leapfrog benchmark now reaches 891k samples/s; the proven full-quality recipe is unchanged.</li>
+        <li>The pinned comparable graph-leapfrog benchmark reaches 891k samples/s; newer same-session brackets reach 1.15–1.16M/s, but a fresh matched nanoG1 rerun is required before updating the 1.44× gap. The proven full-quality recipe is unchanged.</li>
       </ul>
     </article>
 
