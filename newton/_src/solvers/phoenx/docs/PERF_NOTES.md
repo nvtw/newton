@@ -40,6 +40,9 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Full begin_substep overlap is incorrect: ABA advance publishes link velocities read by contact warm-start tangent construction. A race-free prototype overlapped only kinematics/factorization with ingest and joined before advance.
 - It captured and replayed correctly inside the leapfrog trainer, but lost twice: 778.7k vs 800.9k samples/s, then 774.7k vs 796.1k in reversed order (about -2.7%). Concurrent factorization contends with the already-overlapped learner more than it hides setup. The implementation was removed completely.
 
+### ABA generalized-acceleration publication removal (2026-07-03) - REJECTED
+- Both advance kernels publish per-DOF acceleration to the shared inverse-mass response buffer even though normal advance/publication does not consume it. Removing the argument and stores was exact but neutral/slightly slower: matched 500-replay G1 physics was 1.443M candidate vs 1.445M baseline. The compiler already hides or benefits from these stores; fully removed.
+
 ### Path-sparse packed contact Jacobian (2026-07-03) - REJECTED
 - Prototype stored only source-path Jacobian values plus DOF indices, removed the dense zero fill, and used dynamic `tile_extract` reads from shared generalized velocity with three manual warp reductions per contact point.
 - Exact equations and graph capture worked, and memory use fell, but G1 physics regressed from 1.593M to 1.569M steps/s (-1.5%). Indexed shared reads and repeated warp reductions moved more latency into every PGS iteration than the builder saved. Fully removed.
@@ -401,12 +404,12 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
   349 us vs 462 us for 24 rows in the isolated bench), so the cost is
   dominated by per-thread serial full-tree traversal latency, not row count.
 - **Unit-wrench basis compression re-measured at the current 36-wide packed
-  layout** (`bench_g1_response_basis_aba`, width fixed from the stale 48):
-  compressed prepare+solve 504 us vs direct 566 us = only **1.12x**, with
-  FP-tolerance (not bit-exact) impulses. The old "~19%" claim predates the
-  four-DOF-aligned width and the scratch-clear/transpose-skip wins. Not worth
-  productionizing at 1.12x given the body-diversity dispatch + gate
-  revalidation it needs.
+  layout** (`bench_g1_response_basis_aba`, 2026-07-03): compressed
+  prepare+solve 495 us vs direct 563 us = **1.14x**, with response error up to
+  2.0e-6. This is an optimistic hard-coded G1 case with exactly two source
+  bodies; a general path needs active-body deduplication, variable-width basis
+  dispatch, and fallback for arbitrary contact diversity. The projected gain
+  is too small to justify a scene-specific production specialization.
 - **Factor kernel sub-warp tiling also regressed** (same session):
   `_factor_reduced_warp_kernel` (11.1%, 168 registers, ~12 warps/SM occupancy)
   was given the advance kernel's `tile_width=8` articulation packing

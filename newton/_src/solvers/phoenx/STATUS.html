@@ -78,7 +78,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · sparse Jacobian rejected</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · row alternatives screened</strong></div>
     </header>
 
     <section class="hero">
@@ -156,7 +156,7 @@
       <div>
         <h2>Refresh the real-training critical path</h2>
         <p>The refreshed physics trace ranks packed contact-row build first at 22.8%, then ABA advance 13.8%, contact solve 13.2%, publish 7.8%, and the now-smaller factor at 6.9%. Training shares are lower for contact work because policies carry fewer rows than the standing profile.</p>
-        <p><strong>Next:</strong> evaluate shared unit-wrench response bases for active source bodies only. Path-sparse Jacobians are rejected: less builder traffic was outweighed by indexed shared reads and manual warp reductions in every PGS update. No Nsight Compute run is currently requested.</p>
+        <p><strong>Next:</strong> investigate dense response-cache access and contact-solve reuse. The hard-coded two-body unit-wrench upper bound is only 1.14× and needs non-general dispatch; path sparsity loses 1.5%. No Nsight Compute run is currently requested.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -168,6 +168,7 @@
           <li>Stride-3 contact prepare: policy exploits stale-contact physics and fails the true-physics gate.</li>
           <li>Factor sub-warp tiling: +9% kernel time.</li>
           <li>Path-sparse Jacobian cache: −1.5% physics; indexed tile dots slowed every PGS update.</li>
+          <li>Remove ABA generalized-acceleration stores: neutral/slightly slower.</li>
           <li>Row-builder local ancestor stack: −25%.</li>
           <li>BF16 recurrent forward: +0.3%, removed.</li>
         </ul>
@@ -195,7 +196,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope update (2 Jul, user):</strong> optimize the PhoenX solver exclusively; the learner is out of scope. This page is the primary communication channel with the user, including requests to run privileged scripts (see the action box above).</li>
-          <li><strong>Immediate next step:</strong> test whether active-body unit-wrench bases can reduce full-tree row traversals while preserving the fast dense tile solve. Do not repeat sparse indexed dots or shared build/solve fusion.</li>
+          <li><strong>Immediate next step:</strong> inspect dense response-cache reuse in the contact solve. Unit-wrench bases are only a 1.14× G1-specific upper bound; do not promote without a truly general design and larger measured payoff.</li>
         </ul>
       </div>
     </section>
