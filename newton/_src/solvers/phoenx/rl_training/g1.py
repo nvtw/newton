@@ -2164,6 +2164,7 @@ class ConfigEnvG1PhoenX:
     multi_world_scheduler: str = g1_recipe.MULTI_WORLD_SCHEDULER
     prepare_refresh_stride: int | str = g1_recipe.PREPARE_REFRESH_STRIDE
     articulation_mode: str = "maximal"
+    reduced_articulation_path: str = "reference"
 
 
 class EnvG1PhoenX:
@@ -2464,6 +2465,7 @@ class EnvG1PhoenX:
             multi_world_scheduler=self.config.multi_world_scheduler,
             prepare_refresh_stride=self.config.prepare_refresh_stride,
             articulation_mode=str(self.config.articulation_mode),
+            reduced_articulation_path=str(self.config.reduced_articulation_path),
         )
 
     def _resolve_foot_body_local(self, side: str) -> int:

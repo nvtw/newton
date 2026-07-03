@@ -196,6 +196,7 @@ class SolverPhoenX(SolverBase):
         solver_flavor: str = "standard",
         jacobi_max_colors: int = 10,
         articulation_mode: str = "maximal",
+        reduced_articulation_path: str = "reference",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -258,10 +259,19 @@ class SolverPhoenX(SolverBase):
                 joint rows active while using the exact articulated-body response
                 as their preconditioner. "reduced" lets generalized coordinates
                 own tree joints.
+            reduced_articulation_path: ``"reference"`` uses the established
+                reduced solver. Experimental ``"persistent"`` enables
+                topology-proven cross-phase articulation fusion on CUDA.
         """
         super().__init__(model)
         if articulation_mode not in ("maximal", "hybrid", "reduced"):
             raise ValueError(f"articulation_mode must be 'maximal', 'hybrid', or 'reduced', got {articulation_mode!r}")
+        if reduced_articulation_path not in ("reference", "persistent"):
+            raise ValueError(
+                f"reduced_articulation_path must be 'reference' or 'persistent', got {reduced_articulation_path!r}"
+            )
+        if articulation_mode == "maximal" and reduced_articulation_path != "reference":
+            raise ValueError("reduced_articulation_path requires articulation_mode='hybrid' or 'reduced'")
         if contact_friction_model not in ("point", "patch"):
             raise ValueError(f"contact_friction_model must be 'point' or 'patch', got {contact_friction_model!r}")
         if contact_friction_model == "patch" and articulation_mode != "maximal":
@@ -279,6 +289,7 @@ class SolverPhoenX(SolverBase):
         if articulation_mode in ("hybrid", "reduced") and multi_world_scheduler == "auto":
             multi_world_scheduler = "fast_tail"
         self.articulation_mode = articulation_mode
+        self.reduced_articulation_path = reduced_articulation_path
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
         self._phoenx_body_inv_inertia = (
             _build_maximal_motor_body_inv_inertia(model) if articulation_mode == "maximal" else model.body_inv_inertia
@@ -502,7 +513,9 @@ class SolverPhoenX(SolverBase):
             self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
 
         if self.articulation_mode in ("hybrid", "reduced") and int(model.articulation_count) > 0:
-            self._reduced_articulation = ReducedPhoenXArticulation(model, self.bodies)
+            self._reduced_articulation = ReducedPhoenXArticulation(
+                model, self.bodies, execution_path=self.reduced_articulation_path
+            )
             joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
             joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
             if self.articulation_mode == "reduced":

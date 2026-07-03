@@ -853,8 +853,9 @@ def _compute_reduced_local_kinematics_warp_kernel(
         _sync_reduced_group(group_mask)
 
 
-@wp.kernel(enable_backward=False, module="reduced_factor")
-def _factor_reduced_warp_kernel(
+@wp.func
+def _factor_reduced_warp_device(
+    thread: wp.int32,
     max_depth: wp.int32,
     articulation_depth_start: wp.array2d[wp.int32],
     articulation_depth_joint: wp.array[wp.int32],
@@ -869,7 +870,6 @@ def _factor_reduced_warp_kernel(
     joint_u: wp.array[wp.spatial_vector],
     joint_d_inv: wp.array2d[wp.float32],
 ):
-    thread = wp.tid()
     articulation = thread // wp.int32(32)
     lane = thread - articulation * wp.int32(32)
 
@@ -932,6 +932,40 @@ def _factor_reduced_warp_kernel(
             reduced_inertia[child] = _pack_symmetric_mat66(reduced)
             index += wp.int32(32)
         _sync_reduced_warp()
+
+
+@wp.kernel(enable_backward=False, module="reduced_factor")
+def _factor_reduced_warp_kernel(
+    max_depth: wp.int32,
+    articulation_depth_start: wp.array2d[wp.int32],
+    articulation_depth_joint: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    factor_diagonal: wp.array[wp.float32],
+    joint_s: wp.array[wp.spatial_vector],
+    child_start: wp.array[wp.int32],
+    child_joint: wp.array[wp.int32],
+    body_i_s: wp.array[_sym_mat66],
+    reduced_inertia: wp.array[_sym_mat66],
+    joint_u: wp.array[wp.spatial_vector],
+    joint_d_inv: wp.array2d[wp.float32],
+):
+    _factor_reduced_warp_device(
+        wp.tid(),
+        max_depth,
+        articulation_depth_start,
+        articulation_depth_joint,
+        joint_child,
+        joint_qd_start,
+        factor_diagonal,
+        joint_s,
+        child_start,
+        child_joint,
+        body_i_s,
+        reduced_inertia,
+        joint_u,
+        joint_d_inv,
+    )
 
 
 @wp.func
@@ -1580,8 +1614,9 @@ def _publish_reduced_local_velocities_kernel(
         bodies.angular_velocity[slot] = omega
 
 
-@wp.kernel(enable_backward=False, module="reduced_publish")
-def _finish_and_publish_reduced_warp_kernel(
+@wp.func
+def _finish_and_publish_reduced_warp_device(
+    thread: wp.int32,
     articulation_count: wp.int32,
     tile_width: wp.int32,
     max_depth: wp.int32,
@@ -1618,7 +1653,6 @@ def _finish_and_publish_reduced_warp_kernel(
     joint_s_publish: wp.array[wp.spatial_vector],
     body_qd: wp.array[wp.spatial_vector],
 ):
-    thread = wp.tid()
     articulation = thread // tile_width
     lane = thread - articulation * tile_width
     if articulation >= articulation_count:
@@ -2011,6 +2045,84 @@ def _finish_and_publish_reduced_warp_kernel(
             joint_qd_public[dof_start + wp.int32(5)] += delta_omega_joint[2]
 
 
+@wp.kernel(enable_backward=False, module="reduced_publish")
+def _finish_and_publish_reduced_warp_kernel(
+    articulation_count: wp.int32,
+    tile_width: wp.int32,
+    max_depth: wp.int32,
+    articulation_depth_start: wp.array2d[wp.int32],
+    articulation_depth_joint: wp.array[wp.int32],
+    joint_q: wp.array[wp.float32],
+    joint_qd_local: wp.array[wp.float32],
+    joint_qd_integrator: wp.array[wp.float32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_dof_dim: wp.array2d[wp.int32],
+    body_com: wp.array[wp.vec3],
+    body_mass: wp.array[wp.float32],
+    body_inertia: wp.array[wp.mat33],
+    target_momentum: wp.array[wp.spatial_vector],
+    body_x_com: wp.array[wp.transform],
+    zero_generalized_acceleration: wp.array[wp.float32],
+    dt: wp.float32,
+    update_configuration: wp.bool,
+    restore_momentum: wp.bool,
+    joint_qd_public: wp.array[wp.float32],
+    body_q: wp.array[wp.transform],
+    bodies: BodyContainer,
+    articulation_origin: wp.array[wp.vec3],
+    body_q_local: wp.array[wp.transform],
+    body_q_com: wp.array[wp.transform],
+    joint_anchor_local: wp.array[wp.transform],
+    joint_s_publish: wp.array[wp.spatial_vector],
+    body_qd: wp.array[wp.spatial_vector],
+):
+    _finish_and_publish_reduced_warp_device(
+        wp.tid(),
+        articulation_count,
+        tile_width,
+        max_depth,
+        articulation_depth_start,
+        articulation_depth_joint,
+        joint_q,
+        joint_qd_local,
+        joint_qd_integrator,
+        joint_q_start,
+        joint_qd_start,
+        joint_type,
+        joint_parent,
+        joint_child,
+        joint_x_p,
+        joint_x_c,
+        joint_axis,
+        joint_dof_dim,
+        body_com,
+        body_mass,
+        body_inertia,
+        target_momentum,
+        body_x_com,
+        zero_generalized_acceleration,
+        dt,
+        update_configuration,
+        restore_momentum,
+        joint_qd_public,
+        body_q,
+        bodies,
+        articulation_origin,
+        body_q_local,
+        body_q_com,
+        joint_anchor_local,
+        joint_s_publish,
+        body_qd,
+    )
+
+
 @wp.kernel(enable_backward=False)
 def _solve_articulated_system_kernel(
     articulation_start: wp.array[wp.int32],
@@ -2293,11 +2405,19 @@ def _make_advance_reduced_articulations_warp_kernel(
     include_external: bool,
     include_coriolis: bool,
     capture_momentum: bool,
+    fuse_publish: bool = False,
+    fuse_factor: bool = False,
 ):
-    module = wp.get_module(f"reduced_advance_{int(include_external)}_{int(include_coriolis)}_{int(capture_momentum)}")
+    if fuse_publish and fuse_factor:
+        raise ValueError("factor and publish fusion are separate schedule boundaries")
+    suffix = "_publish" if fuse_publish else "_factor" if fuse_factor else ""
+    module = wp.get_module(
+        f"reduced_advance_{int(include_external)}_{int(include_coriolis)}_{int(capture_momentum)}{suffix}"
+    )
 
-    @wp.kernel(enable_backward=False, module=module)
-    def _advance_reduced_articulations_warp_kernel(
+    @wp.func
+    def _advance_reduced_articulations_warp_device(
+        thread: wp.int32,
         articulation_count: wp.int32,
         tile_width: wp.int32,
         max_depth: wp.int32,
@@ -2335,7 +2455,6 @@ def _make_advance_reduced_articulations_warp_kernel(
         bodies: BodyContainer,
         captured_momentum: wp.array[wp.spatial_vector],
     ):
-        thread = wp.tid()
         articulation = thread // tile_width
         lane = thread - articulation * tile_width
         if articulation >= articulation_count:
@@ -2568,7 +2687,349 @@ def _make_advance_reduced_articulations_warp_kernel(
                 index += tile_width
             _sync_reduced_group(group_mask)
 
-    return _advance_reduced_articulations_warp_kernel
+    @wp.kernel(enable_backward=False, module=module)
+    def _advance_reduced_articulations_warp_kernel(
+        articulation_count: wp.int32,
+        tile_width: wp.int32,
+        max_depth: wp.int32,
+        articulation_depth_start: wp.array2d[wp.int32],
+        articulation_depth_joint: wp.array[wp.int32],
+        joint_parent_lane: wp.array[wp.int32],
+        child_start: wp.array[wp.int32],
+        child_joint: wp.array[wp.int32],
+        joint_type: wp.array[wp.int32],
+        joint_parent: wp.array[wp.int32],
+        joint_child: wp.array[wp.int32],
+        joint_qd_start: wp.array[wp.int32],
+        joint_qd: wp.array[wp.float32],
+        joint_s: wp.array[wp.spatial_vector],
+        joint_u_matrix: wp.array[wp.spatial_vector],
+        joint_d_inv: wp.array2d[wp.float32],
+        joint_f: wp.array[wp.float32],
+        joint_implicit_force: wp.array[wp.float32],
+        body_mass: wp.array[wp.float32],
+        body_world: wp.array[wp.int32],
+        gravity: wp.array[wp.vec3],
+        body_q_com: wp.array[wp.transform],
+        body_inertia: wp.array[_sym_mat66],
+        external_force_com: wp.array[wp.spatial_vector],
+        dt: wp.float32,
+        body_velocity: wp.array[wp.spatial_vector],
+        body_coriolis: wp.array[wp.spatial_vector],
+        body_bias: wp.array[wp.spatial_vector],
+        generalized_rhs: wp.array[wp.float32],
+        body_work: wp.array[wp.spatial_vector],
+        joint_work: wp.array[wp.float32],
+        body_acceleration: wp.array[wp.spatial_vector],
+        generalized_acceleration: wp.array[wp.float32],
+        public_body_qd: wp.array[wp.spatial_vector],
+        bodies: BodyContainer,
+        captured_momentum: wp.array[wp.spatial_vector],
+    ):
+        _advance_reduced_articulations_warp_device(
+            wp.tid(),
+            articulation_count,
+            tile_width,
+            max_depth,
+            articulation_depth_start,
+            articulation_depth_joint,
+            joint_parent_lane,
+            child_start,
+            child_joint,
+            joint_type,
+            joint_parent,
+            joint_child,
+            joint_qd_start,
+            joint_qd,
+            joint_s,
+            joint_u_matrix,
+            joint_d_inv,
+            joint_f,
+            joint_implicit_force,
+            body_mass,
+            body_world,
+            gravity,
+            body_q_com,
+            body_inertia,
+            external_force_com,
+            dt,
+            body_velocity,
+            body_coriolis,
+            body_bias,
+            generalized_rhs,
+            body_work,
+            joint_work,
+            body_acceleration,
+            generalized_acceleration,
+            public_body_qd,
+            bodies,
+            captured_momentum,
+        )
+
+    if fuse_factor:
+
+        @wp.kernel(enable_backward=False, module=module)
+        def _factor_and_advance_reduced_articulations_warp_kernel(
+            articulation_count: wp.int32,
+            max_depth: wp.int32,
+            articulation_depth_start: wp.array2d[wp.int32],
+            articulation_depth_joint: wp.array[wp.int32],
+            joint_parent_lane: wp.array[wp.int32],
+            child_start: wp.array[wp.int32],
+            child_joint: wp.array[wp.int32],
+            joint_type: wp.array[wp.int32],
+            joint_parent: wp.array[wp.int32],
+            joint_child: wp.array[wp.int32],
+            joint_qd_start: wp.array[wp.int32],
+            factor_diagonal: wp.array[wp.float32],
+            joint_qd: wp.array[wp.float32],
+            joint_s: wp.array[wp.spatial_vector],
+            body_inertia: wp.array[_sym_mat66],
+            reduced_inertia: wp.array[_sym_mat66],
+            joint_u_matrix: wp.array[wp.spatial_vector],
+            joint_d_inv: wp.array2d[wp.float32],
+            joint_f: wp.array[wp.float32],
+            joint_implicit_force: wp.array[wp.float32],
+            body_mass: wp.array[wp.float32],
+            body_world: wp.array[wp.int32],
+            gravity: wp.array[wp.vec3],
+            body_q_com: wp.array[wp.transform],
+            external_force_com: wp.array[wp.spatial_vector],
+            dt: wp.float32,
+            body_velocity: wp.array[wp.spatial_vector],
+            body_coriolis: wp.array[wp.spatial_vector],
+            body_bias: wp.array[wp.spatial_vector],
+            generalized_rhs: wp.array[wp.float32],
+            body_work: wp.array[wp.spatial_vector],
+            joint_work: wp.array[wp.float32],
+            body_acceleration: wp.array[wp.spatial_vector],
+            generalized_acceleration: wp.array[wp.float32],
+            public_body_qd: wp.array[wp.spatial_vector],
+            bodies: BodyContainer,
+            captured_momentum: wp.array[wp.spatial_vector],
+        ):
+            thread = wp.tid()
+            articulation = thread // wp.int32(32)
+            if articulation >= articulation_count:
+                return
+            _factor_reduced_warp_device(
+                thread,
+                max_depth,
+                articulation_depth_start,
+                articulation_depth_joint,
+                joint_child,
+                joint_qd_start,
+                factor_diagonal,
+                joint_s,
+                child_start,
+                child_joint,
+                body_inertia,
+                reduced_inertia,
+                joint_u_matrix,
+                joint_d_inv,
+            )
+            _advance_reduced_articulations_warp_device(
+                thread,
+                articulation_count,
+                wp.int32(32),
+                max_depth,
+                articulation_depth_start,
+                articulation_depth_joint,
+                joint_parent_lane,
+                child_start,
+                child_joint,
+                joint_type,
+                joint_parent,
+                joint_child,
+                joint_qd_start,
+                joint_qd,
+                joint_s,
+                joint_u_matrix,
+                joint_d_inv,
+                joint_f,
+                joint_implicit_force,
+                body_mass,
+                body_world,
+                gravity,
+                body_q_com,
+                body_inertia,
+                external_force_com,
+                dt,
+                body_velocity,
+                body_coriolis,
+                body_bias,
+                generalized_rhs,
+                body_work,
+                joint_work,
+                body_acceleration,
+                generalized_acceleration,
+                public_body_qd,
+                bodies,
+                captured_momentum,
+            )
+
+        return _factor_and_advance_reduced_articulations_warp_kernel
+
+    if not fuse_publish:
+        return _advance_reduced_articulations_warp_kernel
+
+    @wp.kernel(enable_backward=False, module=module)
+    def _advance_and_publish_reduced_articulations_warp_kernel(
+        articulation_count: wp.int32,
+        tile_width: wp.int32,
+        max_depth: wp.int32,
+        articulation_depth_start: wp.array2d[wp.int32],
+        articulation_depth_joint: wp.array[wp.int32],
+        joint_parent_lane: wp.array[wp.int32],
+        child_start: wp.array[wp.int32],
+        child_joint: wp.array[wp.int32],
+        joint_type: wp.array[wp.int32],
+        joint_parent: wp.array[wp.int32],
+        joint_child: wp.array[wp.int32],
+        joint_q_start: wp.array[wp.int32],
+        joint_qd_start: wp.array[wp.int32],
+        joint_x_p: wp.array[wp.transform],
+        joint_x_c: wp.array[wp.transform],
+        joint_axis: wp.array[wp.vec3],
+        joint_dof_dim: wp.array2d[wp.int32],
+        body_com: wp.array[wp.vec3],
+        body_mass: wp.array[wp.float32],
+        body_inertia: wp.array[wp.mat33],
+        body_world: wp.array[wp.int32],
+        gravity: wp.array[wp.vec3],
+        body_x_com: wp.array[wp.transform],
+        zero_generalized_acceleration: wp.array[wp.float32],
+        joint_f: wp.array[wp.float32],
+        joint_implicit_force: wp.array[wp.float32],
+        external_force_com: wp.array[wp.spatial_vector],
+        dt: wp.float32,
+        joint_q: wp.array[wp.float32],
+        joint_qd: wp.array[wp.float32],
+        joint_qd_integrator: wp.array[wp.float32],
+        joint_s: wp.array[wp.spatial_vector],
+        joint_u_matrix: wp.array[wp.spatial_vector],
+        joint_d_inv: wp.array2d[wp.float32],
+        body_inertia_spatial: wp.array[_sym_mat66],
+        body_velocity: wp.array[wp.spatial_vector],
+        body_coriolis: wp.array[wp.spatial_vector],
+        body_bias: wp.array[wp.spatial_vector],
+        generalized_rhs: wp.array[wp.float32],
+        body_work: wp.array[wp.spatial_vector],
+        joint_work: wp.array[wp.float32],
+        body_acceleration: wp.array[wp.spatial_vector],
+        generalized_acceleration: wp.array[wp.float32],
+        joint_qd_public: wp.array[wp.float32],
+        body_q: wp.array[wp.transform],
+        public_body_qd: wp.array[wp.spatial_vector],
+        bodies: BodyContainer,
+        captured_momentum: wp.array[wp.spatial_vector],
+        articulation_origin: wp.array[wp.vec3],
+        body_q_local: wp.array[wp.transform],
+        body_q_com: wp.array[wp.transform],
+        joint_anchor_local: wp.array[wp.transform],
+        joint_s_publish: wp.array[wp.spatial_vector],
+    ):
+        thread = wp.tid()
+        articulation = thread // tile_width
+        if articulation >= articulation_count:
+            return
+
+        _advance_reduced_articulations_warp_device(
+            thread,
+            articulation_count,
+            tile_width,
+            max_depth,
+            articulation_depth_start,
+            articulation_depth_joint,
+            joint_parent_lane,
+            child_start,
+            child_joint,
+            joint_type,
+            joint_parent,
+            joint_child,
+            joint_qd_start,
+            joint_qd,
+            joint_s,
+            joint_u_matrix,
+            joint_d_inv,
+            joint_f,
+            joint_implicit_force,
+            body_mass,
+            body_world,
+            gravity,
+            body_q_com,
+            body_inertia_spatial,
+            external_force_com,
+            dt,
+            body_velocity,
+            body_coriolis,
+            body_bias,
+            generalized_rhs,
+            body_work,
+            joint_work,
+            body_acceleration,
+            generalized_acceleration,
+            public_body_qd,
+            bodies,
+            captured_momentum,
+        )
+
+        lane = thread - articulation * tile_width
+        warp_lane = thread & wp.int32(31)
+        group = warp_lane // tile_width
+        group_mask = wp.uint32(4294967295)
+        if tile_width < wp.int32(32):
+            group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
+        for depth in range(max_depth + wp.int32(1)):
+            index = articulation_depth_start[articulation, depth] + lane
+            depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+            while index < depth_end:
+                joint = articulation_depth_joint[index]
+                for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
+                    joint_qd_integrator[dof] = joint_qd[dof]
+                index += tile_width
+            _sync_reduced_group(group_mask)
+
+        _finish_and_publish_reduced_warp_device(
+            thread,
+            articulation_count,
+            tile_width,
+            max_depth,
+            articulation_depth_start,
+            articulation_depth_joint,
+            joint_q,
+            joint_qd,
+            joint_qd_integrator,
+            joint_q_start,
+            joint_qd_start,
+            joint_type,
+            joint_parent,
+            joint_child,
+            joint_x_p,
+            joint_x_c,
+            joint_axis,
+            joint_dof_dim,
+            body_com,
+            body_mass,
+            body_inertia,
+            captured_momentum,
+            body_x_com,
+            zero_generalized_acceleration,
+            dt,
+            wp.bool(True),
+            wp.bool(True),
+            joint_qd_public,
+            body_q,
+            bodies,
+            articulation_origin,
+            body_q_local,
+            body_q_com,
+            joint_anchor_local,
+            joint_s_publish,
+            public_body_qd,
+        )
+
+    return _advance_and_publish_reduced_articulations_warp_kernel
 
 
 @wp.func
@@ -2864,7 +3325,14 @@ class ReducedArticulationSystem:
                 device=self.device,
             )
 
-    def factor(self, state: State, control: Control | None = None, dt: float = 0.0) -> None:
+    def factor(
+        self,
+        state: State,
+        control: Control | None = None,
+        dt: float = 0.0,
+        *,
+        factorize: bool = True,
+    ) -> None:
         """Factor the generalized mass and optional implicit joint operator."""
         if control is None:
             wp.copy(self.joint_factor_diagonal, self.model.joint_armature)
@@ -2921,6 +3389,8 @@ class ReducedArticulationSystem:
             ],
             device=self.device,
         )
+        if not factorize:
+            return
         if self.use_warp_factor:
             wp.launch(
                 _factor_reduced_warp_kernel,
@@ -3101,6 +3571,67 @@ class ReducedArticulationSystem:
                 device=self.device,
             )
 
+    def factor_and_advance(
+        self,
+        state: State,
+        control: Control,
+        bodies: BodyContainer,
+        dt: float,
+    ) -> None:
+        """Run the deferred factor pass and external-force ABA in one kernel."""
+        articulation_count = int(self.model.articulation_count)
+        kernel = _make_advance_reduced_articulations_warp_kernel(
+            include_external=True,
+            include_coriolis=False,
+            capture_momentum=False,
+            fuse_factor=True,
+        )
+        wp.launch(
+            kernel,
+            dim=articulation_count * 32,
+            block_dim=32,
+            inputs=[
+                wp.int32(articulation_count),
+                wp.int32(self.advance_max_depth),
+                self.advance_articulation_depth_start,
+                self.advance_articulation_depth_joint,
+                self.advance_joint_parent_lane,
+                self.factor_child_start,
+                self.factor_child_joint,
+                self.model.joint_type,
+                self.model.joint_parent,
+                self.model.joint_child,
+                self.model.joint_qd_start,
+                self.joint_factor_diagonal,
+                self.joint_qd_internal,
+                self.joint_s,
+                self.body_i_s,
+                self.reduced_inertia,
+                self.joint_u_matrix,
+                self.joint_d_inv,
+                control.joint_f,
+                self.joint_implicit_force,
+                self.model.body_mass,
+                self.model.body_world,
+                self.model.gravity,
+                self.body_q_com,
+                state.body_f,
+                wp.float32(dt),
+                self.body_velocity,
+                self.body_coriolis,
+                self.body_bias,
+                self.generalized_rhs,
+                self.body_work,
+                self.joint_work,
+                self.body_acceleration,
+                self.generalized_acceleration,
+                state.body_qd,
+                bodies,
+                self.target_world_momentum,
+            ],
+            device=self.device,
+        )
+
     def solve_forces(
         self,
         generalized_force: wp.array[wp.float32],
@@ -3142,10 +3673,80 @@ class ReducedArticulationSystem:
         return self.solve_forces(self.zero_generalized_force, body_force)
 
 
+_PERSISTENT_ELIGIBLE = "eligible"
+
+
+def _build_persistent_articulation_eligibility(
+    model: Model,
+    loop_joint_indices: np.ndarray,
+) -> tuple[np.ndarray, tuple[str, ...]]:
+    """Prove which reduced trees have no dynamic coupling outside the tree."""
+    articulation_count = int(model.articulation_count)
+    eligible = np.ones(articulation_count, dtype=bool)
+    reasons = [_PERSISTENT_ELIGIBLE] * articulation_count
+    if articulation_count == 0:
+        return eligible, tuple(reasons)
+
+    def reject(articulation: int, reason: str) -> None:
+        if articulation >= 0 and eligible[articulation]:
+            eligible[articulation] = False
+            reasons[articulation] = reason
+
+    articulation_start = model.articulation_start.numpy()
+    articulation_end = model.articulation_end.numpy()
+    joint_child = model.joint_child.numpy()
+    body_articulation = np.full(int(model.body_count), -1, dtype=np.int32)
+    for articulation in range(articulation_count):
+        start = int(articulation_start[articulation])
+        end = int(articulation_end[articulation])
+        body_articulation[joint_child[start:end]] = articulation
+
+    if int(getattr(model, "particle_count", 0) or 0) > 0:
+        for articulation in range(articulation_count):
+            reject(articulation, "deformable scene")
+
+    joint_parent = model.joint_parent.numpy()
+    for joint in np.asarray(loop_joint_indices, dtype=np.int32):
+        parent = int(joint_parent[joint])
+        child = int(joint_child[joint])
+        parent_articulation = int(body_articulation[parent]) if parent >= 0 else -1
+        child_articulation = int(body_articulation[child]) if child >= 0 else -1
+        reject(parent_articulation, "loop or external joint")
+        reject(child_articulation, "loop or external joint")
+
+    pairs_array = getattr(model, "shape_contact_pairs", None)
+    if pairs_array is None:
+        for articulation in range(articulation_count):
+            reject(articulation, "unproven collision topology")
+        return eligible, tuple(reasons)
+
+    if model.shape_body is None:
+        if int(model.shape_count) > 0:
+            for articulation in range(articulation_count):
+                reject(articulation, "missing shape ownership")
+        return eligible, tuple(reasons)
+
+    shape_body = model.shape_body.numpy()
+    for shape_a, shape_b in pairs_array.numpy():
+        body_a = int(shape_body[int(shape_a)])
+        body_b = int(shape_body[int(shape_b)])
+        articulation_a = int(body_articulation[body_a]) if body_a >= 0 else -1
+        articulation_b = int(body_articulation[body_b]) if body_b >= 0 else -1
+        if articulation_a >= 0 and body_b >= 0:
+            reject(articulation_a, "dynamic contact")
+        if articulation_b >= 0 and body_a >= 0:
+            reject(articulation_b, "dynamic contact")
+
+    return eligible, tuple(reasons)
+
+
 class ReducedPhoenXArticulation:
     """Graph-stable bridge between common Newton articulation state and PhoenX bodies."""
 
-    def __init__(self, model: Model, bodies: BodyContainer):
+    def __init__(self, model: Model, bodies: BodyContainer, *, execution_path: str = "reference"):
+        if execution_path not in ("reference", "persistent"):
+            raise ValueError(f"execution_path must be 'reference' or 'persistent', got {execution_path!r}")
+        self.execution_path = execution_path
         self.model = model
         self.bodies = bodies
         self.system = ReducedArticulationSystem(model)
@@ -3224,6 +3825,20 @@ class ReducedPhoenXArticulation:
         self.body_is_reduced_np = body_is_reduced_np.astype(bool)
         self.tree_joint_mask_np = tree_joint_mask_np.astype(bool)
         self.loop_system = ReducedLoopSystem(model, self.body_is_reduced_np)
+        self.persistent_eligible_np, self.persistent_ineligible_reasons = _build_persistent_articulation_eligibility(
+            model, self.loop_system.joint_indices_np
+        )
+        self.persistent_eligible = wp.array(
+            self.persistent_eligible_np.astype(np.int32), dtype=wp.int32, device=model.device
+        )
+        if execution_path == "persistent":
+            if not model.device.is_cuda:
+                raise ValueError("execution_path='persistent' currently requires CUDA")
+            if not bool(np.all(self.persistent_eligible_np)):
+                rejected = sorted(
+                    {reason for reason in self.persistent_ineligible_reasons if reason != _PERSISTENT_ELIGIBLE}
+                )
+                raise ValueError(f"persistent articulation path is not proven safe: {', '.join(rejected)}")
         self.contact_block_system = ReducedContactBlockSystem(
             model,
             articulation_depth_start=self.system.advance_articulation_depth_start,
@@ -3267,15 +3882,19 @@ class ReducedPhoenXArticulation:
         compute_impulse_response: bool = True,
     ) -> None:
         """Apply pre-PGS reduced dynamics at the current configuration."""
-        self.system.factor(self.state, self.control, dt)
-        self.system.advance(
-            self.state,
-            self.control,
-            self.bodies,
-            dt,
-            include_external=True,
-            include_coriolis=not split_dynamics,
-        )
+        fuse_factor = self.execution_path == "persistent" and split_dynamics
+        self.system.factor(self.state, self.control, dt, factorize=not fuse_factor)
+        if fuse_factor:
+            self.system.factor_and_advance(self.state, self.control, self.bodies, dt)
+        else:
+            self.system.advance(
+                self.state,
+                self.control,
+                self.bodies,
+                dt,
+                include_external=True,
+                include_coriolis=not split_dynamics,
+            )
         if compute_impulse_response:
             if self.model.device.is_cuda:
                 articulation_count = int(self.model.articulation_count)
@@ -3407,6 +4026,78 @@ class ReducedPhoenXArticulation:
                 device=self.model.device,
             )
 
+    def _advance_and_publish_persistent(self, dt: float) -> None:
+        articulation_count = int(self.model.articulation_count)
+        tile_width = self.system.advance_tile_width
+        thread_count = ((articulation_count * tile_width + 31) // 32) * 32
+        kernel = _make_advance_reduced_articulations_warp_kernel(
+            include_external=False,
+            include_coriolis=True,
+            capture_momentum=True,
+            fuse_publish=True,
+        )
+        wp.launch(
+            kernel,
+            dim=thread_count,
+            block_dim=128 if tile_width < 32 else 32,
+            inputs=[
+                wp.int32(articulation_count),
+                wp.int32(tile_width),
+                wp.int32(self.system.advance_max_depth),
+                self.system.advance_articulation_depth_start,
+                self.system.advance_articulation_depth_joint,
+                self.system.advance_joint_parent_lane,
+                self.system.factor_child_start,
+                self.system.factor_child_joint,
+                self.model.joint_type,
+                self.model.joint_parent,
+                self.model.joint_child,
+                self.model.joint_q_start,
+                self.model.joint_qd_start,
+                self.model.joint_X_p,
+                self.model.joint_X_c,
+                self.model.joint_axis,
+                self.model.joint_dof_dim,
+                self.model.body_com,
+                self.model.body_mass,
+                self.model.body_inertia,
+                self.model.body_world,
+                self.model.gravity,
+                self.system.body_x_com,
+                self.system.zero_generalized_force,
+                self.control.joint_f,
+                self.system.joint_implicit_force,
+                self.state.body_f,
+                wp.float32(dt),
+                self.state.joint_q,
+                self.system.joint_qd_internal,
+                self.system.joint_qd_integrator,
+                self.system.joint_s,
+                self.system.joint_u_matrix,
+                self.system.joint_d_inv,
+                self.system.body_i_s,
+                self.system.body_velocity,
+                self.system.body_coriolis,
+                self.system.body_bias,
+                self.system.generalized_rhs,
+                self.system.body_work,
+                self.system.joint_work,
+                self.system.body_acceleration,
+                self.system.generalized_acceleration,
+                self.state.joint_qd,
+                self.state.body_q,
+                self.state.body_qd,
+                self.bodies,
+                self.system.target_world_momentum,
+                self.system.articulation_origin,
+                self.system.body_q_local,
+                self.system.body_q_com,
+                self.system.joint_anchor_local,
+                self.system.joint_s_publish,
+            ],
+            device=self.model.device,
+        )
+
     def finish_relax(self) -> None:
         """Publish bias-free velocity corrections without advancing configuration."""
         # Relax changes only velocities, so the pose-derived buffers from the
@@ -3415,6 +4106,9 @@ class ReducedPhoenXArticulation:
 
     def end_substep(self, dt: float, *, split_dynamics: bool) -> None:
         """Apply post-impulse Coriolis dynamics, integrate, and conserve momentum."""
+        if self.execution_path == "persistent" and split_dynamics:
+            self._advance_and_publish_persistent(dt)
+            return
         capture_inputs = [
             self.model.articulation_start,
             self.model.articulation_end,

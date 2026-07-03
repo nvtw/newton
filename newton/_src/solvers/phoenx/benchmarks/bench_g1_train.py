@@ -194,6 +194,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
         articulation_mode=str(args.articulation_mode),
+        reduced_articulation_path=str(args.reduced_articulation_path),
         actuation_model=str(args.actuation_model),
         controlled_action_count=int(args.controlled_action_count),
         reward_mode=str(args.reward_mode),
@@ -331,6 +332,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
         "articulation_mode": str(args.articulation_mode),
+        "reduced_articulation_path": str(args.reduced_articulation_path),
         "actuation_model": str(args.actuation_model),
         "reward_mode": str(args.reward_mode),
         "w_alive": float(args.w_alive),
@@ -458,6 +460,12 @@ def _parse_args() -> argparse.Namespace:
         choices=("maximal", "hybrid", "reduced"),
         default="reduced",
         help="PhoenX articulation mode used by the training benchmark.",
+    )
+    parser.add_argument(
+        "--reduced-articulation-path",
+        choices=("reference", "persistent"),
+        default="reference",
+        help="Static reduced-articulation execution path used by the training benchmark.",
     )
     parser.add_argument(
         "--reward-mode", choices=("nanog1_dense", "sparse_command", "sparse_target"), default=g1_recipe.REWARD_MODE
