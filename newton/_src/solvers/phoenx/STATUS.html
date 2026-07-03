@@ -78,7 +78,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · reduced inertia packed</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · spatial inertia packed</strong></div>
     </header>
 
     <section class="hero">
@@ -93,9 +93,9 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">851k/s</div><div class="label">short steady graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.50×</div><div class="label">slower than pinned nanoG1</div></div>
-      <div class="card"><div class="metric good">+2.1%</div><div class="label">today’s exact factor gains</div></div>
+      <div class="card"><div class="metric">862k/s</div><div class="label">short steady graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.49×</div><div class="label">slower than pinned nanoG1</div></div>
+      <div class="card"><div class="metric good">+3.5%</div><div class="label">today’s exact physics gains</div></div>
     </section>
 
     <div class="section-label">Current state</div>
@@ -113,11 +113,11 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag good">RETAINED · +2.7% TRAINING</span><time>3 Jul</time></div>
+      <div class="meta"><span class="tag good">RETAINED · +4.0% TRAINING</span><time>3 Jul</time></div>
       <h2>Reduced factor state is smaller and does less work</h2>
-      <p>Two exact layout wins compound. The solver no longer writes an unused full articulated-inertia matrix, and the live child-to-parent cache stores the 21 independent entries of each symmetric 6×6 reduced inertia instead of 36 floats.</p>
+      <p>Three physically exact layout wins compound: remove an unused full matrix, store reduced child-to-parent inertia as 21 symmetric entries instead of 36, and do the same for live per-body spatial inertia read by factor and both ABA advances.</p>
       <ul>
-        <li>Combined reversed G1 brackets: 1.539M → 1.572M physics steps/s (+2.1%); short graph-leapfrog training: 829k → 851k samples/s (+2.7%).</li>
+        <li>Combined G1 brackets: about 1.539M → 1.593M physics steps/s (+3.5%); short graph-leapfrog training: 829k → 862k samples/s (+4.0%).</li>
         <li>All 40 reduced CUDA-graph tests pass, including ABA/mass-matrix parity, Featherstone comparisons, long-horizon momentum/energy, loops, self-contact, and live mass updates.</li>
         <li>Contact-rich 512-robot Anymal/H1/G1 screens remain finite. FeatherPGS also confirms PhoenX already uses its key articulated matrix-free J/H⁻¹Jᵀ solve pattern.</li>
       </ul>
@@ -155,8 +155,8 @@
     <section class="next">
       <div>
         <h2>Refresh the real-training critical path</h2>
-        <p>The post-commit trace ranks solver work: ABA advance 8.5%, factor 6.5%, packed contact-row build 6.0%, contact solve 5.1%, and publish 4.8%. Momentum capture is now only 0.4%; packed gather is 1.2%.</p>
-        <p><strong>Next:</strong> refresh the end-to-end kernel ranking after both factor wins, then continue only where the new critical path shows general headroom. No Nsight Compute run is currently requested.</p>
+        <p>The refreshed physics trace ranks packed contact-row build first at 22.8%, then ABA advance 13.8%, contact solve 13.2%, publish 7.8%, and the now-smaller factor at 6.9%. Training shares are lower for contact work because policies carry fewer rows than the standing profile.</p>
+        <p><strong>Next:</strong> return to packed contact-row construction, now the clear physics bottleneck, but require a focused design to beat the already-rejected global-cache and shared-memory variants. No Nsight Compute run is currently requested.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -194,7 +194,7 @@
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
           <li><strong>Scope update (2 Jul, user):</strong> optimize the PhoenX solver exclusively; the learner is out of scope. This page is the primary communication channel with the user, including requests to run privileged scripts (see the action box above).</li>
-          <li><strong>Immediate next step:</strong> refresh the real-training profile after the two factor-layout wins. Shared row-build/solve fusion remains rejected: real training has no response transpose, relaxation needs the global cache, and the focused lane-0 fusion lost 23%.</li>
+          <li><strong>Immediate next step:</strong> optimize packed row construction without repeating the rejected shared build/solve fusion: real training has no response transpose, relaxation needs the global cache, and the focused lane-0 fusion lost 23%.</li>
         </ul>
       </div>
     </section>

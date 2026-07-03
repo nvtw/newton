@@ -6,6 +6,11 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Symmetric-packed live body inertia (2026-07-03)
+- The pose-transformed per-body spatial inertia is also symmetric. Store its 21 independent entries once, then reconstruct on load in factor and both ABA advances; this reduces initialization stores and three hot tree-pass reads without changing equations.
+- Reversed 300-replay G1 bracket: 1.565M to 1.593M physics steps/s (+1.8%). Short graph-leapfrog training improves 851k to 862k samples/s (+1.3%).
+- All 40 reduced CUDA-graph tests pass; contact-rich 512-robot Anymal/H1/G1 screens remain finite. Together with the other two factor-layout wins, current same-session measurements improve about 1.539M to 1.593M physics (+3.5%) and 829k to 862k training (+4.0%).
+
 ### Symmetric-packed reduced inertia (2026-07-03)
 - Articulated-body reduction matrices are symmetric by construction. The internal child-to-parent cache now stores their 21 independent upper-triangle entries and reconstructs the symmetric 6x6 matrix on load, instead of moving 36 floats between tree depths.
 - Reversed 300-replay G1 bracket: 1.548M to 1.572M physics steps/s (+1.6%) on top of dead-store removal. Short graph-leapfrog training improves 842k to 851k samples/s (+1.1%).

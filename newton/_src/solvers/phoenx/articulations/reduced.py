@@ -254,7 +254,7 @@ def _compute_forward_dynamics_rhs_kernel(
     body_world: wp.array[wp.int32],
     gravity: wp.array[wp.vec3],
     body_q_com: wp.array[wp.transform],
-    body_inertia: wp.array[wp.spatial_matrix],
+    body_inertia: wp.array[_sym_mat66],
     body_force: wp.array[wp.spatial_vector],
     body_velocity: wp.array[wp.spatial_vector],
     body_coriolis: wp.array[wp.spatial_vector],
@@ -280,7 +280,7 @@ def _compute_forward_dynamics_rhs_kernel(
             joint_velocity += joint_s[dof] * joint_qd[dof]
         velocity = parent_velocity + joint_velocity
         coriolis = parent_coriolis + spatial_cross(velocity, joint_velocity)
-        inertia = body_inertia[child]
+        inertia = _unpack_symmetric_mat66(body_inertia[child])
         gravity_force = body_mass[child] * gravity[wp.max(body_world[child], wp.int32(0))]
         x_com = wp.transform_get_translation(body_q_com[child])
         gravity_wrench = wp.spatial_vector(gravity_force, wp.cross(x_com, gravity_force))
@@ -416,7 +416,7 @@ def _initialize_reduced_factor_kernel(
     body_q_com: wp.array[wp.transform],
     body_i_m: wp.array[wp.spatial_matrix],
     joint_qd_internal: wp.array[wp.float32],
-    body_i_s: wp.array[wp.spatial_matrix],
+    body_i_s: wp.array[_sym_mat66],
     joint_s: wp.array[wp.spatial_vector],
 ):
     """Initialize independent per-joint quantities for a depth factorization."""
@@ -428,7 +428,7 @@ def _initialize_reduced_factor_kernel(
         joint_qd_internal[dof] = joint_qd_public[dof]
 
     child = joint_child[joint]
-    body_i_s[child] = transform_spatial_inertia(body_q_com[child], body_i_m[child])
+    body_i_s[child] = _pack_symmetric_mat66(transform_spatial_inertia(body_q_com[child], body_i_m[child]))
 
     x_wpj = joint_anchor_local[joint]
     kind = joint_type[joint]
@@ -481,7 +481,7 @@ def _factor_reduced_depth_kernel(
     joint_s: wp.array[wp.spatial_vector],
     child_start: wp.array[wp.int32],
     child_joint: wp.array[wp.int32],
-    body_i_s: wp.array[wp.spatial_matrix],
+    body_i_s: wp.array[_sym_mat66],
     reduced_inertia: wp.array[_sym_mat66],
     joint_u: wp.array[wp.spatial_vector],
     joint_d_inv: wp.array3d[wp.float32],
@@ -489,7 +489,7 @@ def _factor_reduced_depth_kernel(
     """Factor one tree depth with stable per-parent child reductions."""
     joint = depth_joint[depth_offset + wp.tid()]
     child = joint_child[joint]
-    inertia = body_i_s[child]
+    inertia = _unpack_symmetric_mat66(body_i_s[child])
     for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
         descendant_joint = child_joint[child_index]
         inertia += _unpack_symmetric_mat66(reduced_inertia[joint_child[descendant_joint]])
@@ -757,7 +757,7 @@ def _factor_reduced_warp_kernel(
     joint_s: wp.array[wp.spatial_vector],
     child_start: wp.array[wp.int32],
     child_joint: wp.array[wp.int32],
-    body_i_s: wp.array[wp.spatial_matrix],
+    body_i_s: wp.array[_sym_mat66],
     reduced_inertia: wp.array[_sym_mat66],
     joint_u: wp.array[wp.spatial_vector],
     joint_d_inv: wp.array3d[wp.float32],
@@ -773,7 +773,7 @@ def _factor_reduced_warp_kernel(
         while index < depth_end:
             joint = articulation_depth_joint[index]
             child = joint_child[joint]
-            inertia = body_i_s[child]
+            inertia = _unpack_symmetric_mat66(body_i_s[child])
             for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
                 descendant_joint = child_joint[child_index]
                 inertia += _unpack_symmetric_mat66(reduced_inertia[joint_child[descendant_joint]])
@@ -1841,7 +1841,7 @@ def _advance_reduced_articulations_kernel(
     body_world: wp.array[wp.int32],
     gravity: wp.array[wp.vec3],
     body_q_com: wp.array[wp.transform],
-    body_inertia: wp.array[wp.spatial_matrix],
+    body_inertia: wp.array[_sym_mat66],
     external_force_com: wp.array[wp.spatial_vector],
     dt: wp.float32,
     include_external: wp.bool,
@@ -1877,7 +1877,7 @@ def _advance_reduced_articulations_kernel(
             joint_velocity += joint_s[dof] * joint_qd[dof]
         velocity = parent_velocity + joint_velocity
         coriolis = parent_coriolis + spatial_cross(velocity, joint_velocity)
-        inertia = body_inertia[child]
+        inertia = _unpack_symmetric_mat66(body_inertia[child])
         x_com = wp.transform_get_translation(body_q_com[child])
         bias = wp.spatial_vector()
         if include_coriolis:
@@ -2036,7 +2036,7 @@ def _advance_reduced_articulations_warp_kernel(
     body_world: wp.array[wp.int32],
     gravity: wp.array[wp.vec3],
     body_q_com: wp.array[wp.transform],
-    body_inertia: wp.array[wp.spatial_matrix],
+    body_inertia: wp.array[_sym_mat66],
     external_force_com: wp.array[wp.spatial_vector],
     dt: wp.float32,
     include_external: wp.bool,
@@ -2082,7 +2082,7 @@ def _advance_reduced_articulations_warp_kernel(
                 joint_velocity += joint_s[dof] * joint_qd[dof]
             velocity = parent_velocity + joint_velocity
             coriolis = parent_coriolis + spatial_cross(velocity, joint_velocity)
-            inertia = body_inertia[child]
+            inertia = _unpack_symmetric_mat66(body_inertia[child])
             x_com = wp.transform_get_translation(body_q_com[child])
             bias = wp.spatial_vector()
             if include_coriolis:
@@ -2405,7 +2405,7 @@ class ReducedArticulationSystem:
         self.body_q_local = wp.empty(body_count, dtype=wp.transform, device=self.device)
         self.joint_anchor_local = wp.empty(joint_count, dtype=wp.transform, device=self.device)
         self.articulation_origin = wp.empty(int(model.articulation_count), dtype=wp.vec3, device=self.device)
-        self.body_i_s = wp.empty(body_count, dtype=wp.spatial_matrix, device=self.device)
+        self.body_i_s = wp.empty(body_count, dtype=_sym_mat66, device=self.device)
         self.joint_s = wp.empty(dof_count, dtype=wp.spatial_vector, device=self.device)
         self.joint_s_publish = wp.empty(dof_count, dtype=wp.spatial_vector, device=self.device)
         self.joint_qd_internal = wp.empty(dof_count, dtype=wp.float32, device=self.device)
