@@ -31,6 +31,7 @@ Warp-only reinforcement learning utilities for Newton.
    ConfigEnvAnymalPhoenX
    ConfigEnvG1PhoenX
    ConfigEnvGo2PhoenX
+   ConfigEnvHumanoidPhoenX
    ConfigEvaluateAnymalPPO
    ConfigEvaluateG1GatePPO
    ConfigEvaluateG1PPO
@@ -43,6 +44,7 @@ Warp-only reinforcement learning utilities for Newton.
    EnvAnymalPhoenX
    EnvG1PhoenX
    EnvGo2PhoenX
+   EnvHumanoidPhoenX
    EnvPPO
    GaussianActor
    GenerationResult
@@ -80,6 +82,7 @@ Warp-only reinforcement learning utilities for Newton.
    anymal_mirror_map_ppo
    capture_env_steps
    collect_ppo_rollout
+   collect_ppo_rollout_seed_counter
    default_anymal_hparam_specs
    default_g1_hparam_specs
    drop_ppo_checkpoint_inputs
@@ -90,6 +93,7 @@ Warp-only reinforcement learning utilities for Newton.
    g1_mirror_map_ppo
    insert_ppo_checkpoint_inputs
    load_ppo_checkpoint
+   make_seed_counter
    population_based_train
    population_based_train_anymal
    population_based_train_g1
@@ -109,6 +113,8 @@ Warp-only reinforcement learning utilities for Newton.
      - ``12``
    * - ``ACTION_DIM_G1``
      - ``29``
+   * - ``ACTION_DIM_HUMANOID``
+     - ``21``
    * - ``ACTION_OBS_OFFSET_ANYMAL``
      - ``37``
    * - ``COMMAND_DIM_ANYMAL``
@@ -127,3 +133,5 @@ Warp-only reinforcement learning utilities for Newton.
      - ``99``
    * - ``OBS_DIM_G1_NANOG1``
      - ``98``
+   * - ``OBS_DIM_HUMANOID``
+     - ``75``

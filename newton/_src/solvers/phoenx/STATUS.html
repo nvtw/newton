@@ -167,13 +167,15 @@
     <div class="section-label">Active milestone</div>
     <article>
       <div class="meta"><span class="tag">DIVERSE RL COVERAGE</span><time>3 Jul</time></div>
-      <h2>First new standalone task: Unitree Go2</h2>
+      <h2>Go2 and classic Humanoid now run without IsaacLab</h2>
       <p>The requested IsaacLab scenes are being rebuilt as pure Newton/Warp environments with no IsaacLab runtime dependency. Task semantics are split cleanly into direct-torque locomotion (Ant/Humanoid) and command-tracking position control (legged robots), while rollout and PPO infrastructure stays shared.</p>
       <ul>
         <li>Existing reusable coverage: mature G1 and ANYmal-C environments; functional Ant code is being promoted from its validation script.</li>
         <li>New Go2 environment: official Newton USD, exact nominal pose and limits, source-task 50 Hz/5 ms cadence, 25/0.5 PD gains, robot-specific policy-to-model joint map, and shared symmetric quadruped observations/rewards.</li>
-        <li>Two-world multi-step CUDA graph capture passes with finite state and exact action-to-joint mapping. A graph-leapfrog PPO smoke remains finite at four 5 ms substeps and eight solver iterations.</li>
-        <li>Next: finish the reusable command-line trainer contract, then add Humanoid/H1 before the more specialized closed-loop DR Legs hold/walk tasks.</li>
+        <li>Go2: two-world multi-step CUDA graph capture passes with finite state and exact action-to-joint mapping. Graph-leapfrog PPO stays finite at four 5 ms substeps and eight solver iterations.</li>
+        <li>Humanoid: the source task's 21 geared torque actions, 75-value observation, reward/termination equations, implicit actuator gains, self-collision, and 60 Hz control are implemented. Initial reward is exactly 2.6 as specified.</li>
+        <li>Humanoid uses reduced articulation mode by default so every multi-axis motor armature remains physically representable. Its full rollout and PPO update execute in one CUDA graph with a device seed counter; a two-iteration train smoke passes.</li>
+        <li>Next: H1, then promote Ant and add the specialized closed-loop DR Legs hold/walk tasks.</li>
       </ul>
     </article>
 
