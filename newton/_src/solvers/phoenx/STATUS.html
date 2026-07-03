@@ -355,6 +355,8 @@
           <li>Always-transposed response rows: faster physics, −2.7% training.</li>
           <li>Early response-vector prefetch: +0.55% physics but −0.64% training from increased live-register pressure.</li>
           <li>Drop tiled ABA <code>generalized_rhs</code> store: exact but about −0.6% physics; fully reverted.</li>
+          <li>Serial three-row contact scheduling: 1.06M versus 1.93M physics steps/s; row parallelism is essential.</li>
+          <li>Row blocks of 32 gain 0.56% isolated physics but lose 0.38% training. Blocks of 64 gain 0.65% G1 training overlap but lose 1.2–2.7% on contact-rich G1/H1/ANYmal fleets; retain the general 96-thread block.</li>
           <li>Stride-3 contact prepare: policy exploits stale-contact physics and fails the true-physics gate.</li>
           <li>Factor sub-warp tiling: +9% kernel time.</li>
           <li>Path-sparse Jacobian cache: −1.5% physics; indexed tile dots slowed every PGS update.</li>
