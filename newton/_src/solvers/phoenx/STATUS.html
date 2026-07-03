@@ -198,6 +198,7 @@
         <li>A scheduler-matched maximal G1 bracket is neutral-to-slightly-negative: 2.537M patch versus 2.548M point physics steps/s (−0.43%) after normal-only rows, redundant-mass removal, and launch fusion. Contact trajectories differ, so this is directional—not a win.</li>
         <li>Reduced-coordinate audit: its expensive generalized response builder currently constructs exactly three rows per point. A live 1,024-world G1 snapshot has 34,816 eligible points in 18,432 convex columns, so P normal rows plus 2C patch rows would remove exactly 31.37% of generalized contact rows.</li>
         <li>The clean extension is a two-stage paged solve: all normal pages first, then whole-column patch pages. Splitting a patch at the existing point-page boundary would be an unphysical hidden approximation; arbitrary contact counts must remain supported without user caps.</li>
+        <li>The implementation contract and rejection gates are now captured in <code>docs/REDUCED_PATCH_FRICTION.md</code>. The optimistic ceiling is 11.9% of reduced solver work, or 8.7% of current total training GPU work; a complicated or scene-specific implementation must be rejected.</li>
         <li>Next: prototype that separate reduced patch-row stage and measure row-build plus end-to-end G1 training throughput. Do not replace point friction or claim a gain until physical gates and a broad benchmark win exist.</li>
       </ul>
     </article>
