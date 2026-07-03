@@ -6,6 +6,22 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 
 ## Active wins
 
+### Mask post-reset G1 observation work (2026-07-03)
+- Auto-reset already produces an exact per-world articulation mask. The second
+  observation pass now uses that mask, so reset worlds still recompute the
+  identical observation, reward, termination, success, and timer state while
+  non-reset worlds keep the values produced by the first pass. Periodic command
+  resampling deliberately retains a full observation pass.
+- A matched ten-replay Nsight Systems bracket reduces total G1 observation
+  kernel time from 5.498 to 3.927 ms (-28.6%). The controlled short
+  graph-leapfrog benchmark improves from 1.15705M to 1.16033M samples/s
+  (+0.28%); this is retained as a small exact rollout-path win.
+- A CUDA-graph regression proves selected outputs are bit-identical to a full
+  pass and every unselected output remains bit-exact. Observation-contract,
+  command-resampling, reset/FK, contact-warmstart, and train-to-gate graph tests
+  pass. A stochastic no-update threshold failure reproduces on the committed
+  baseline (0.883 done fraction), so it is not attributed to this change.
+
 ### Statically omit provably empty GJK/MPR stages (2026-07-03)
 - CollisionPipeline now proves from the complete collision topology whether any
   pair can reach the generic convex stage. Explicit broad phases inspect every
@@ -402,6 +418,16 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Use the production benchmark suite and the unified-block proxy benchmark for decisions that affect defaults. Re-enable actual-solve prototype modes only for isolated scheduler debugging with short timeouts.
 
 ## Tried and reverted
+
+### Upper-triangle-only reduced factor correction (2026-07-03) - REJECTED
+- Reduced inertia is stored as 21 symmetric upper-triangle values, so two exact
+  prototypes stopped computing the discarded lower triangle. The stronger
+  version also kept the local result packed throughout, removing the final
+  repack and a duplicate 36-float local matrix.
+- The factor kernel improved only 129.04 to 128.27 us (-0.6%), while a reversed
+  300-replay G1 bracket was neutral (1.633M candidate versus 1.631M baseline;
+  the simpler form had regressed about 0.4%). Factorization remains dominated
+  by inertia traversal and memory latency, so both forms were fully reverted.
 
 ### Conditional empty-reset FK/observation (2026-07-03) - REJECTED
 - G1 observation produced an exact device-side `any_done` reduction, and a CUDA

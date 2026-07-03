@@ -1022,6 +1022,7 @@ def g1_observe_reward_kernel(
     sparse_target_success_min_base_height: wp.float32,
     sparse_target_success_max_base_height: wp.float32,
     w_mechanical_power: wp.float32,
+    world_mask: wp.array[wp.bool],
     foot_air_time: wp.array2d[wp.float32],
     foot_contact_time: wp.array2d[wp.float32],
     foot_timer_episode_step: wp.array[wp.int32],
@@ -1034,6 +1035,8 @@ def g1_observe_reward_kernel(
     successes: wp.array[wp.float32],
 ):
     world, col = wp.tid()
+    if world_mask and not world_mask[world]:
+        return
     q_base = world * coord_stride
     qd_base = world * dof_stride
 
@@ -2671,8 +2674,12 @@ class EnvG1PhoenX:
             self.config.command_x_range, self.config.command_y_range, self.config.command_yaw_range
         )
 
-    def observe(self) -> wp.array:
-        """Update and return the current observation array."""
+    def observe(self, mask: wp.array[wp.bool] | None = None) -> wp.array:
+        """Update and return observations for all or selected worlds.
+
+        Args:
+            mask: Worlds to update. If ``None``, update every world.
+        """
 
         self.foot_contacts.zero_()
         contact_container = getattr(self.solver.world, "_contact_container", None)
@@ -2768,6 +2775,7 @@ class EnvG1PhoenX:
                 self.config.sparse_target_success_min_base_height,
                 self.config.sparse_target_success_max_base_height,
                 self.config.w_mechanical_power,
+                mask,
             ],
             outputs=[
                 self.foot_air_time,
@@ -3157,17 +3165,17 @@ class EnvG1PhoenX:
         wp.copy(self.step_dones, self.dones)
         wp.copy(self.step_successes, self.successes)
         wp.copy(self.previous_actions, self.current_actions)
-        update_obs = False
+        reset_observation = False
         if self.config.auto_reset:
             if self._reset_seed_counter is None:
                 self.reset_done()
             else:
                 self.reset_done_seed_counter(self._reset_seed_counter)
-            update_obs = True
+            reset_observation = True
         if self._resample_due_commands():
-            update_obs = True
-        if update_obs:
             self.observe()
+        elif reset_observation:
+            self.observe(mask=self._reset_articulation_mask)
         self.sim_time += float(self.config.frame_dt)
         return self.obs, self.step_rewards, self.step_dones
 

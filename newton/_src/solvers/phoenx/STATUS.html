@@ -100,7 +100,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · GPU work profile added</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · reset observation work masked</strong></div>
     </header>
 
     <section class="hero">
@@ -133,7 +133,7 @@
         <div class="work-item"><strong><i style="background:#e58b2a"></i>5%</strong>policy + learner</div>
         <div class="work-item"><strong><i style="background:#aab3c2"></i>2%</strong>runtime + other</div>
       </div>
-      <p class="profile-note">Share of summed CUDA kernel duration in the latest five-second steady graph-leapfrog Nsight trace (rounded). Streams overlap, so these are GPU-work shares—not additive wall-clock latency. The trace predates removal of the empty GJK stage, so current collision share is slightly lower.</p>
+      <p class="profile-note">Share of summed CUDA kernel duration in the latest five-second steady graph-leapfrog Nsight trace (rounded). Streams overlap, so these are GPU-work shares—not additive wall-clock latency. The trace predates removal of the empty GJK stage and masked reset observations, so current collision and environment shares are slightly lower.</p>
       <div class="subprofile">
         <h3>Inside physics solver work</h3>
         <div class="work-bar" role="img" aria-label="Contact row construction 24 percent, articulation advance 21 percent, factorization and kinematics 21 percent, publish and momentum 18 percent, contact solve 14 percent, joints and other 2 percent">
@@ -165,6 +165,17 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · −28.6% OBSERVE GPU TIME</span><time>3 Jul</time></div>
+      <h2>Post-reset observation work now follows the exact reset mask</h2>
+      <p>Auto-reset already identifies every reset world. The second observation pass now updates only those worlds; periodic command resampling still takes the full path, and there is no conditional graph node.</p>
+      <ul>
+        <li>A matched bounded Nsight bracket cuts observation-kernel time from 5.498 to 3.927 ms across 65 launches.</li>
+        <li>Short graph-leapfrog training improves 1.15705M → 1.16033M samples/s (+0.28%); this is intentionally reported as a small exact rollout win.</li>
+        <li>Selected results match a full pass bit-for-bit and unselected results remain bit-exact. Observation, command, reset/FK, warm-start, and train-to-gate CUDA-graph tests pass.</li>
+        <li>An upper-triangle-only factor experiment improved that kernel just 0.6% and was neutral end-to-end, so it was fully reverted.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED · +1.2% TRAINING</span><time>3 Jul</time></div>
       <h2>Provably empty GJK/MPR stages no longer enter the graph</h2>
@@ -219,12 +230,6 @@
         <li>Contact-rich 512-robot Anymal/H1/G1 screens remain finite. FeatherPGS also confirms PhoenX already uses its key articulated matrix-free J/H⁻¹Jᵀ solve pattern.</li>
       </ul>
     </article>
-    <article>
-      <div class="meta"><span class="tag good">QUALITY GATE</span><time>Current authority</time></div>
-      <h2>Training quality remains proven; throughput work stays solver-only</h2>
-      <p>The retained reduced-coordinate recipe still trains from scratch and passes frozen-policy evaluation at seeds 1000 and 2000 with zero falls. Hard-Hertz contacts, two PGS sweeps, one velocity relaxation, continuation-state substeps, and the final 10 ms phase remain unchanged.</p>
-    </article>
-
     <div class="section-label">Next decisions</div>
     <section class="next">
       <div>

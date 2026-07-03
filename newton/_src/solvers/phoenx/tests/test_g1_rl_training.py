@@ -855,6 +855,59 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected = _reference_obs_from_nanog1_deploy(deploy, q, qd, command, prev_action, episode_step)
         np.testing.assert_allclose(env.obs.numpy()[0], expected, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_observe_mask_updates_only_selected_worlds_inside_graph(self) -> None:
+        env = _g1_test_env(world_count=2)
+        mask = wp.array([True, False], dtype=wp.bool, device=env.device)
+        env.obs.fill_(wp.float32(7.0))
+        env.rewards.fill_(wp.float32(8.0))
+        env.dones.fill_(wp.float32(9.0))
+        env.successes.fill_(wp.float32(10.0))
+        env.foot_air_time.fill_(wp.float32(3.0))
+        env.foot_contact_time.fill_(wp.float32(4.0))
+        env.foot_timer_episode_step.fill_(5)
+        env.previous_joint_qd.fill_(wp.float32(6.0))
+        env.joint_acc_l2.fill_(wp.float32(11.0))
+        env.joint_regularizer_episode_step.fill_(12)
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.observe(mask=mask)
+        wp.capture_launch(capture.graph)
+
+        self.assertFalse(np.all(env.obs.numpy()[0] == np.float32(7.0)))
+        self.assertNotEqual(float(env.dones.numpy()[0]), 9.0)
+        np.testing.assert_array_equal(env.obs.numpy()[1], np.full(env.obs_dim, 7.0, dtype=np.float32))
+        self.assertEqual(float(env.rewards.numpy()[1]), 8.0)
+        self.assertEqual(float(env.dones.numpy()[1]), 9.0)
+        self.assertEqual(float(env.successes.numpy()[1]), 10.0)
+        np.testing.assert_array_equal(env.foot_air_time.numpy()[1], np.full(2, 3.0, dtype=np.float32))
+        np.testing.assert_array_equal(env.foot_contact_time.numpy()[1], np.full(2, 4.0, dtype=np.float32))
+        self.assertEqual(int(env.foot_timer_episode_step.numpy()[1]), 5)
+        np.testing.assert_array_equal(env.previous_joint_qd.numpy()[1], np.full(env.action_dim, 6.0, dtype=np.float32))
+        self.assertEqual(float(env.joint_acc_l2.numpy()[1]), 11.0)
+        self.assertEqual(int(env.joint_regularizer_episode_step.numpy()[1]), 12)
+
+        selected = {
+            "obs": env.obs.numpy()[0].copy(),
+            "reward": env.rewards.numpy()[0],
+            "done": env.dones.numpy()[0],
+            "success": env.successes.numpy()[0],
+            "foot_air_time": env.foot_air_time.numpy()[0].copy(),
+            "foot_contact_time": env.foot_contact_time.numpy()[0].copy(),
+            "previous_joint_qd": env.previous_joint_qd.numpy()[0].copy(),
+            "joint_acc_l2": env.joint_acc_l2.numpy()[0],
+        }
+        with wp.ScopedCapture(device=env.device) as full_capture:
+            env.observe()
+        wp.capture_launch(full_capture.graph)
+        np.testing.assert_array_equal(env.obs.numpy()[0], selected["obs"])
+        self.assertEqual(float(env.rewards.numpy()[0]), float(selected["reward"]))
+        self.assertEqual(float(env.dones.numpy()[0]), float(selected["done"]))
+        self.assertEqual(float(env.successes.numpy()[0]), float(selected["success"]))
+        np.testing.assert_array_equal(env.foot_air_time.numpy()[0], selected["foot_air_time"])
+        np.testing.assert_array_equal(env.foot_contact_time.numpy()[0], selected["foot_contact_time"])
+        np.testing.assert_array_equal(env.previous_joint_qd.numpy()[0], selected["previous_joint_qd"])
+        self.assertEqual(float(env.joint_acc_l2.numpy()[0]), float(selected["joint_acc_l2"]))
+
     def test_g1_gate_velocity_metric_uses_phoenx_xyzw_quaternions(self) -> None:
         env = _g1_test_env(world_count=1)
         identity_xyzw = np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
