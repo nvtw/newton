@@ -4000,6 +4000,7 @@ class ReducedPhoenXArticulation:
             max_depth=self.system.advance_max_depth,
         )
         if execution_path == "persistent":
+            self.contact_block_system.enable_basis_experiment = True
             self.contact_block_system.relax_page_launcher = self._launch_persistent_relax_page
         self.owned_joint_mask_np = self.tree_joint_mask_np.copy()
         self.owned_joint_mask_np[self.loop_system.joint_indices_np] = True

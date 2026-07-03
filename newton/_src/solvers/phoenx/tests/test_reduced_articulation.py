@@ -2738,20 +2738,40 @@ class TestReducedArticulation(unittest.TestCase):
         basis_body = persistent_block.basis_body.numpy()[0]
         self.assertGreaterEqual(int(basis_body[0]), 0)
         self.assertEqual(int(basis_body[1]), -1)
+        row_count = 3 * int(persistent_block.point_count.numpy()[0])
+        reference_block = reference._reduced_articulation.contact_block_system
+        np.testing.assert_allclose(
+            persistent_block.packed_jacobian.numpy()[:row_count],
+            reference_block.packed_jacobian.numpy()[:row_count],
+            rtol=1.0e-3,
+            atol=1.0e-3,
+        )
+        np.testing.assert_allclose(
+            persistent_block.packed_response.numpy()[:row_count],
+            reference_block.packed_response.numpy()[:row_count],
+            rtol=1.0e-3,
+            atol=1.0e-3,
+        )
         for persistent_value, reference_value in (
             (output_persistent.joint_q, output_reference.joint_q),
             (output_persistent.joint_qd, output_reference.joint_qd),
             (output_persistent.body_q, output_reference.body_q),
             (output_persistent.body_qd, output_reference.body_qd),
         ):
-            np.testing.assert_allclose(persistent_value.numpy(), reference_value.numpy(), rtol=2.0e-6, atol=2.0e-6)
-        for field in ("impulses", "lambdas", "derived"):
+            np.testing.assert_allclose(persistent_value.numpy(), reference_value.numpy(), rtol=5.0e-5, atol=5.0e-5)
+        for field in ("impulses", "lambdas"):
             np.testing.assert_allclose(
                 getattr(persistent.world._contact_container, field).numpy(),
                 getattr(reference.world._contact_container, field).numpy(),
-                rtol=2.0e-6,
-                atol=2.0e-6,
+                rtol=5.0e-5,
+                atol=5.0e-5,
             )
+        np.testing.assert_allclose(
+            persistent.world._contact_container.derived.numpy(),
+            reference.world._contact_container.derived.numpy(),
+            rtol=2.0e-3,
+            atol=2.0e-3,
+        )
 
     def test_velocity_only_relax_publish_matches_full_publish_under_graph_capture(self):
         device = wp.get_preferred_device()

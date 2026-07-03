@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import warp as wp
 
@@ -14,6 +16,10 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_deferred_owner,
     reduced_contact_iterate,
     reduced_contact_prepare,
+)
+from newton._src.solvers.phoenx.articulations.reduced_contact_basis import (
+    BASIS_SIZE,
+    make_reduced_contact_basis_build_ops,
 )
 from newton._src.solvers.phoenx.body import BodyContainer, ReducedArticulationData
 from newton._src.solvers.phoenx.cloth_collision import SHAPE_ENDPOINT_KIND_RIGID
@@ -1111,6 +1117,130 @@ def _sync_contact_warp(): ...
 def _sync_contact_block(): ...
 
 
+@functools.cache
+def _make_adaptive_contact_rows_kernel(max_dofs: int):
+    build_basis_device, _build_kernel, _effective_kernel, _coefficient_kernel, synthesize_rows_device, _synth_kernel = (
+        make_reduced_contact_basis_build_ops(max_dofs)
+    )
+    module = wp.get_module(f"reduced_contact_rows_adaptive_{max_dofs}")
+
+    @wp.kernel(enable_backward=False, module=module)
+    def adaptive_contact_rows_kernel(
+        bodies: BodyContainer,
+        enabled: wp.array[wp.int32],
+        basis_enabled: wp.array[wp.int32],
+        basis_body: wp.array2d[wp.int32],
+        point_count: wp.array[wp.int32],
+        row_body: wp.array2d[wp.int32],
+        row_wrench: wp.array2d[wp.spatial_vector],
+        point_contact: wp.array2d[wp.int32],
+        cc: ContactContainer,
+        max_page_count: wp.array[wp.int32],
+        page_index: wp.array[wp.int32],
+        prepare: wp.bool,
+        previous_row_body: wp.array[wp.int32],
+        basis_packed: wp.array2d[wp.float32],
+        packed_jacobian: wp.array2d[wp.float32],
+        packed_response: wp.array2d[wp.float32],
+        joint_work: wp.array3d[wp.float32],
+        body_response: wp.array3d[wp.spatial_vector],
+    ):
+        articulation, row = wp.tid()
+        if enabled[articulation] == wp.int32(0):
+            return
+        if basis_enabled[articulation] != wp.int32(0):
+            if row < wp.int32(BASIS_SIZE):
+                build_basis_device(
+                    articulation,
+                    row,
+                    bodies,
+                    basis_enabled,
+                    basis_body,
+                    basis_packed,
+                    joint_work,
+                    body_response,
+                )
+            _sync_contact_block()
+            synthesize_rows_device(
+                articulation,
+                row,
+                basis_enabled,
+                basis_body,
+                point_count,
+                page_index,
+                row_body,
+                row_wrench,
+                point_contact,
+                cc,
+                basis_packed,
+                packed_jacobian,
+                packed_response,
+            )
+            return
+
+        data = bodies.reduced
+        start = data.articulation_start[articulation]
+        end = data.articulation_end[articulation]
+        dof_start_articulation = data.joint_qd_start[start]
+        dof_count_articulation = data.joint_qd_start[end] - dof_start_articulation
+        page = page_index[0]
+        storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
+        packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
+        row_count = wp.int32(3) * point_count[packed_articulation]
+        if dof_count_articulation > wp.int32(max_dofs):
+            return
+        if not prepare and (
+            page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
+        ):
+            return
+        if row >= row_count:
+            return
+
+        packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
+        previous_body = previous_row_body[packed_row]
+        if previous_body >= wp.int32(0):
+            previous_path_start = data.body_path_start[previous_body]
+            previous_path_end = data.body_path_start[previous_body + wp.int32(1)]
+            for path_index in range(previous_path_start, previous_path_end):
+                previous_joint = data.body_path_joint[path_index]
+                previous_dof_start = data.joint_qd_start[previous_joint]
+                previous_dof_end = data.joint_qd_start[previous_joint + wp.int32(1)]
+                for dof in range(previous_dof_start, previous_dof_end):
+                    packed_jacobian[packed_row, dof - dof_start_articulation] = wp.float32(0.0)
+        previous_row_body[packed_row] = row_body[packed_articulation, row]
+        inverse_mass = _build_packed_generalized_row(
+            articulation,
+            row,
+            row_count,
+            packed_articulation,
+            packed_row,
+            data,
+            start,
+            end,
+            dof_start_articulation,
+            dof_count_articulation,
+            row_body,
+            row_wrench,
+            packed_jacobian,
+            packed_response,
+            joint_work,
+            body_response,
+        )
+        if inverse_mass > wp.float32(1.0e-12):
+            effective_mass = wp.float32(1.0) / inverse_mass
+            point = row // wp.int32(3)
+            axis = row - wp.int32(3) * point
+            contact = point_contact[packed_articulation, point]
+            if axis == wp.int32(0):
+                cc_set_eff_n(cc, contact, effective_mass)
+            elif axis == wp.int32(1):
+                cc_set_eff_t1(cc, contact, effective_mass)
+            else:
+                cc_set_eff_t2(cc, contact, effective_mass)
+
+    return adaptive_contact_rows_kernel
+
+
 def _make_solve_generalized_contact_tile_ops(max_dofs: int):
     module = wp.get_module(f"reduced_contact_generalized_solve_{max_dofs}")
 
@@ -1480,6 +1610,27 @@ class ReducedContactBlockSystem:
         self.basis_enabled = wp.zeros_like(self.enabled)
         self.direct_enabled = wp.zeros_like(self.enabled)
         self.basis_body = wp.full((articulation_count, 2), value=-1, dtype=wp.int32, device=self.device)
+        self.enable_basis_experiment = False
+        (
+            self.basis_build_device,
+            self.basis_build_kernel,
+            self.basis_effective_kernel,
+            self.basis_coefficients_kernel,
+            self.basis_synthesis_device,
+            self.basis_synthesis_kernel,
+        ) = make_reduced_contact_basis_build_ops(self.contact_dof_width)
+        self.adaptive_row_kernel = _make_adaptive_contact_rows_kernel(self.contact_dof_width)
+        self.basis_packed = wp.zeros(
+            (articulation_count * BASIS_SIZE, 2 * self.contact_dof_width), dtype=wp.float32, device=self.device
+        )
+        self.basis_effective = wp.zeros(
+            (articulation_count * BASIS_SIZE, BASIS_SIZE), dtype=wp.float32, device=self.device
+        )
+        self.basis_coefficients = wp.zeros(
+            (articulation_count * _CACHED_PAGE_COUNT * _MAX_ROWS, BASIS_SIZE),
+            dtype=wp.float32,
+            device=self.device,
+        )
         self.total_point_count = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.max_page_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.multi_page_active = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -1822,6 +1973,7 @@ class ReducedContactBlockSystem:
             assert self.packed_response is not None
             assert self.packed_previous_row_body is not None
             fused_relax = not prepare and self.relax_page_launcher is not None
+            row_enabled = self.direct_enabled if self.enable_basis_experiment else self.enabled
             if not gathered and not fused_relax:
                 wp.launch(
                     _finalize_reduced_contact_rows_kernel,
@@ -1843,13 +1995,30 @@ class ReducedContactBlockSystem:
                     device=self.device,
                 )
             if build_rows:
-                wp.launch(
-                    _build_packed_generalized_contact_rows_kernel,
-                    dim=(self.articulation_count, _MAX_ROWS),
-                    block_dim=_MAX_ROWS,
-                    inputs=[
+                row_kernel = (
+                    self.adaptive_row_kernel
+                    if self.enable_basis_experiment
+                    else _build_packed_generalized_contact_rows_kernel
+                )
+                row_inputs = [
+                    bodies,
+                    self.enabled,
+                    self.point_count,
+                    self.row_body,
+                    self.row_wrench,
+                    self.point_contact,
+                    cc,
+                    self.max_page_count,
+                    self.page_index,
+                    wp.bool(prepare),
+                    self.packed_previous_row_body,
+                ]
+                if self.enable_basis_experiment:
+                    row_inputs = [
                         bodies,
                         self.enabled,
+                        self.basis_enabled,
+                        self.basis_body,
                         self.point_count,
                         self.row_body,
                         self.row_wrench,
@@ -1859,7 +2028,13 @@ class ReducedContactBlockSystem:
                         self.page_index,
                         wp.bool(prepare),
                         self.packed_previous_row_body,
-                    ],
+                        self.basis_packed,
+                    ]
+                wp.launch(
+                    row_kernel,
+                    dim=(self.articulation_count, _MAX_ROWS),
+                    block_dim=_MAX_ROWS,
+                    inputs=row_inputs,
                     outputs=[
                         self.packed_jacobian,
                         self.packed_response,
@@ -1876,7 +2051,7 @@ class ReducedContactBlockSystem:
                         block_dim=_RESPONSE_TILE,
                         inputs=[
                             bodies,
-                            self.enabled,
+                            row_enabled,
                             self.point_count,
                             self.page_index,
                             self.max_page_count,
