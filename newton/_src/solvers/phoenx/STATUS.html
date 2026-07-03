@@ -116,16 +116,8 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · risky path experiment</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · measured experiment result</strong></div>
     </header>
-
-    <section class="action-required">
-      <strong>User action requested · one cached-row Nsight Compute capture</strong>
-      <p><span class="tag">PROFILE ONE KERNEL ONCE</span></p>
-      <p>The shared-factor cache is retained and wins across G1, ANYmal, and H1. This post-change report will identify the remaining path-metadata or strided-write dependency stalls before the next row-layout change.</p>
-      <pre><code>sudo /tmp/newton_row_cache/newton/_src/solvers/phoenx/benchmarks/profile_g1_contact_rows_cached_ncu.sh</code></pre>
-      <p>The script profiles exactly one contact-row launch and writes <code>/tmp/phoenx_g1_contact_rows_cached.ncu-rep</code>. The command wraps visually but copies as one line.</p>
-    </section>
 
     <section class="hero">
       <strong>Primary goal</strong>
@@ -207,6 +199,18 @@
 
     <div class="section-label">Latest findings</div>
     <article>
+      <div class="meta"><span class="tag warn">MEASURED · BUILDER WIN REJECTED END TO END</span><time>3 Jul</time></div>
+      <h2>Faster row construction alone does not move training throughput</h2>
+      <p>The requested post-cache Nsight Compute capture and two exact follow-up prototypes now isolate the remaining problem. The retained headline stays at 923k samples/s; no higher number is being claimed.</p>
+      <ul>
+        <li>After the retained shared-factor cache, contact-row construction falls 943.6 → 879.7 µs (−6.8%), but remains latency-bound: about 68% long-scoreboard issue spacing, only 19.8% scheduler cycles with an eligible warp, and 79% excessive global sectors.</li>
+        <li>An exact compressed 12D body-mobility cache improves its isolated response calculation by 6.7%, but only about 486–503 of 8192 training worlds are eligible. Build and launch overhead lowers complete training throughput, so the path is rejected.</li>
+        <li>An exact ≤4-contact shared-row builder reproduces Jacobians and articulated responses bit-for-bit and improves stable isolated builder medians about 8.5% (222 → 203 µs).</li>
+        <li>Integrated training nevertheless reaches 892.4k/s versus an immediate clean retained control at 922.8k/s: a real 3.3% regression. The extra launch and global row publication erase the local saving; this implementation is rejected.</li>
+        <li>Direct shared-memory PGS variants were also exact, but register/instruction pressure made them 5–40% slower than the proven tile solve. The next credible large experiment must remove row publication and phase boundaries together while preserving compact, separately compiled/noinline phase bodies.</li>
+      </ul>
+    </article>
+    <article>
       <div class="meta"><span class="tag good">RETAINED · CROSS-SCENE ROW CACHE</span><time>3 Jul</time></div>
       <h2>Shared articulation factors remove the row builder's worst latency</h2>
       <p>The existing contact-row Nsight report showed a 943.6 µs kernel with 76.7% of issue spacing in long-scoreboard stalls and 73% excessive global sectors. Every one of 96 row threads repeatedly loaded the same motion subspaces, articulated-inertia columns, and inverse joint factors.</p>
@@ -216,7 +220,7 @@
         <li>Cross-scene gates also improve: 512-world ANYmal +0.5%, H1 +1.7%; 64 articulations in one world ANYmal +1.5%, H1 +1.7%. Final state magnitudes are identical.</li>
         <li>Six focused CUDA regressions pass: exact generalized rows, arbitrary contact pages, persistent/reference parity, multiple grounded articulations per world, deterministic dense contacts, and spatial momentum conservation.</li>
         <li>Commit <code>2ce2656a</code> is retained on <code>twidmer/experiment-phoenx-persistent-articulations</code>. Repository-wide pre-commit remains blocked only by unrelated pre-existing lint/typo failures; focused lint and formatting pass.</li>
-        <li><strong>Next:</strong> consume one post-cache contact-row capture, then target only the remaining measured dependency chain. The bounded command is shown at the top of this page.</li>
+        <li><strong>Next:</strong> target the measured publication/dependency chain with a compact native/noinline persistent phase design; no further user profiling action is currently required.</li>
       </ul>
     </article>
     <article>
