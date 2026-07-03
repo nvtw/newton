@@ -78,7 +78,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · row alternatives screened</strong></div>
+      <div class="stamp">Last updated<br><strong>3 July 2026 · inverse factors compacted</strong></div>
     </header>
 
     <section class="hero">
@@ -93,9 +93,9 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric good">2 / 2</div><div class="label">full frozen-policy gates pass</div></div>
-      <div class="card"><div class="metric">862k/s</div><div class="label">short steady graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.49×</div><div class="label">slower than pinned nanoG1</div></div>
-      <div class="card"><div class="metric good">+3.5%</div><div class="label">today’s exact physics gains</div></div>
+      <div class="card"><div class="metric">873k/s</div><div class="label">short steady graph-leapfrog training</div></div>
+      <div class="card"><div class="metric">1.47×</div><div class="label">slower than pinned nanoG1</div></div>
+      <div class="card"><div class="metric good">+5.3%</div><div class="label">cumulative short-training gain</div></div>
     </section>
 
     <div class="section-label">Current state</div>
@@ -107,11 +107,22 @@
         <li>A fresh 157.3M-sample run passes the complete gate at seed 1000 and seed 2000.</li>
         <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
         <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
-        <li>Full-schedule training measures 744.5k samples/s; the controlled short steady-state benchmark reaches 805.2k samples/s.</li>
+        <li>The controlled short graph-leapfrog benchmark now reaches 873k samples/s; the proven full-quality recipe is unchanged.</li>
       </ul>
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · +1.3% TRAINING</span><time>3 Jul</time></div>
+      <h2>Inverse factors now scale with actual DOFs, not joint count</h2>
+      <p>The exact per-joint D⁻¹ blocks now use six columns per real DOF instead of reserving a 6×6 matrix for every fixed, revolute, and multi-axis joint. Matrix values, arithmetic order, graph capture, and deterministic solve order are unchanged.</p>
+      <ul>
+        <li>Isolated short training improves 862k → 873k samples/s (+1.3%), reducing the nanoG1 gap to 1.47×; G1 GPU use falls by about 47 MiB at 8,192 worlds.</li>
+        <li>Physics-only timing is neutral within run noise (1.584M measured versus the preceding 1.593M reference).</li>
+        <li>All 40 CUDA-graph tests pass, including six-DOF roots, loops, ABA/mass-matrix parity, Featherstone comparisons, momentum/energy, contacts, and live mass updates. Anymal/H1/G1 contact fleets remain finite.</li>
+        <li>A full 96-row shared response cache was tested and reverted: it lost 14% from fixed loading and shared-memory occupancy.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED · +4.0% TRAINING</span><time>3 Jul</time></div>
       <h2>Reduced factor state is smaller and does less work</h2>
@@ -120,17 +131,6 @@
         <li>Combined G1 brackets: about 1.539M → 1.593M physics steps/s (+3.5%); short graph-leapfrog training: 829k → 862k samples/s (+4.0%).</li>
         <li>All 40 reduced CUDA-graph tests pass, including ABA/mass-matrix parity, Featherstone comparisons, long-horizon momentum/energy, loops, self-contact, and live mass updates.</li>
         <li>Contact-rich 512-robot Anymal/H1/G1 screens remain finite. FeatherPGS also confirms PhoenX already uses its key articulated matrix-free J/H⁻¹Jᵀ solve pattern.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · +1.0–1.6% TRAINING</span><time>3 Jul</time></div>
-      <h2>Momentum capture now uses one deterministic warp per articulation</h2>
-      <p>The physically required two-pass dynamics schedule remains intact. Only the pre-Coriolis momentum measurement changed: one thread no longer serially walks an entire tree; 32 lanes reduce its mass, center of mass, and spatial momentum with a fixed summation tree.</p>
-      <ul>
-        <li>Momentum capture itself falls from 69.6 to 13.4 µs per launch (5.2×; 1.9% → 0.4% of GPU time). Matched physics improves 1.528M → 1.543M steps/s (+1.0%); training improves 813.5k → 821.9–826.5k (+1.0–1.6%).</li>
-        <li>Contact-rich 512-robot fleets improve about 5% on Anymal/H1 and 3% on G1. Hundreds of articulations in one single world also run correctly.</li>
-        <li>All 40 reduced CUDA-graph tests pass, including strict momentum/energy, loops, self-contact, dense contacts, hybrid mode, and Featherstone comparisons.</li>
-        <li>A fresh policy passes the full frozen gate at only 91.75M samples. Seeds 1000/2000: zero falls, tracking 0.9057/0.9035, jerk 0.1434, roll/pitch 0.2038, yaw 0.1172, leg speed 0.9728.</li>
       </ul>
     </article>
     <article>
@@ -156,7 +156,7 @@
       <div>
         <h2>Refresh the real-training critical path</h2>
         <p>The refreshed physics trace ranks packed contact-row build first at 22.8%, then ABA advance 13.8%, contact solve 13.2%, publish 7.8%, and the now-smaller factor at 6.9%. Training shares are lower for contact work because policies carry fewer rows than the standing profile.</p>
-        <p><strong>Next:</strong> investigate dense response-cache access and contact-solve reuse. The hard-coded two-body unit-wrench upper bound is only 1.14× and needs non-general dispatch; path sparsity loses 1.5%. No Nsight Compute run is currently requested.</p>
+        <p><strong>Next:</strong> refresh the real-training kernel trace after the compact factor changes, then target producer work in the packed row builder. Dense shared response caching loses 14%, the hard-coded two-body unit-wrench upper bound is only 1.14×, and path sparsity loses 1.5%. No Nsight Compute run is currently requested.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -169,6 +169,7 @@
           <li>Factor sub-warp tiling: +9% kernel time.</li>
           <li>Path-sparse Jacobian cache: −1.5% physics; indexed tile dots slowed every PGS update.</li>
           <li>Remove ABA generalized-acceleration stores: neutral/slightly slower.</li>
+          <li>Full 96-row shared response cache: −14% from fixed loads and occupancy.</li>
           <li>Row-builder local ancestor stack: −25%.</li>
           <li>BF16 recurrent forward: +0.3%, removed.</li>
         </ul>
@@ -195,8 +196,8 @@
           <li>Move quickly with focused mini-benchmarks and CUDA-graph regression tests. Run full from-scratch training and two robust gates only for meaningful survivors.</li>
           <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
           <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
-          <li><strong>Scope update (2 Jul, user):</strong> optimize the PhoenX solver exclusively; the learner is out of scope. This page is the primary communication channel with the user, including requests to run privileged scripts (see the action box above).</li>
-          <li><strong>Immediate next step:</strong> inspect dense response-cache reuse in the contact solve. Unit-wrench bases are only a 1.14× G1-specific upper bound; do not promote without a truly general design and larger measured payoff.</li>
+          <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
+          <li><strong>Immediate next step:</strong> refresh the isolated real-training trace, then reduce packed row-builder producer work. Do not retry the full shared response slab; unit-wrench bases still need a truly general design and a larger measured payoff.</li>
         </ul>
       </div>
     </section>

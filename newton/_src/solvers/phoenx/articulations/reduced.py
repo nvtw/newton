@@ -484,7 +484,7 @@ def _factor_reduced_depth_kernel(
     body_i_s: wp.array[_sym_mat66],
     reduced_inertia: wp.array[_sym_mat66],
     joint_u: wp.array[wp.spatial_vector],
-    joint_d_inv: wp.array3d[wp.float32],
+    joint_d_inv: wp.array2d[wp.float32],
 ):
     """Factor one tree depth with stable per-parent child reductions."""
     joint = depth_joint[depth_offset + wp.tid()]
@@ -503,7 +503,7 @@ def _factor_reduced_depth_kernel(
         u = inertia * joint_s[dof]
         joint_u[dof] = u
         d_inv_scalar = wp.float32(1.0) / wp.max(wp.dot(joint_s[dof], u) + factor_diagonal[dof], wp.float32(1.0e-20))
-        joint_d_inv[joint, 0, 0] = d_inv_scalar
+        joint_d_inv[dof, 0] = d_inv_scalar
         for row in range(6):
             for column in range(6):
                 reduced[row, column] -= u[row] * d_inv_scalar * u[column]
@@ -521,8 +521,9 @@ def _factor_reduced_depth_kernel(
 
         d_inv = _invert_spd(d, dof_count)
         for row in range(_MAX_JOINT_DOF):
-            for column in range(_MAX_JOINT_DOF):
-                joint_d_inv[joint, row, column] = d_inv[row, column]
+            if wp.int32(row) < dof_count:
+                for column in range(_MAX_JOINT_DOF):
+                    joint_d_inv[dof_start + wp.int32(row), column] = d_inv[row, column]
 
         for row in range(6):
             for column in range(6):
@@ -575,7 +576,7 @@ def _compute_reduced_impulse_response_basis(
         if wp.int32(row) < dof_count:
             for column in range(_MAX_JOINT_DOF):
                 if wp.int32(column) < dof_count:
-                    d_inv_u[row] += data.joint_d_inv[joint, row, column] * reduced_force[column]
+                    d_inv_u[row] += data.joint_d_inv[dof_start + wp.int32(row), column] * reduced_force[column]
 
     propagated_negative_force = negative_force
     for column in range(_MAX_JOINT_DOF):
@@ -600,7 +601,7 @@ def _compute_reduced_impulse_response_basis(
         if wp.int32(row) < dof_count:
             for column in range(_MAX_JOINT_DOF):
                 if wp.int32(column) < dof_count:
-                    response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
+                    response[row] += data.joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
 
     child_response = parent_response
     for row in range(_MAX_JOINT_DOF):
@@ -760,7 +761,7 @@ def _factor_reduced_warp_kernel(
     body_i_s: wp.array[_sym_mat66],
     reduced_inertia: wp.array[_sym_mat66],
     joint_u: wp.array[wp.spatial_vector],
-    joint_d_inv: wp.array3d[wp.float32],
+    joint_d_inv: wp.array2d[wp.float32],
 ):
     thread = wp.tid()
     articulation = thread // wp.int32(32)
@@ -789,7 +790,7 @@ def _factor_reduced_warp_kernel(
                 d_inv_scalar = wp.float32(1.0) / wp.max(
                     wp.dot(joint_s[dof], u) + factor_diagonal[dof], wp.float32(1.0e-20)
                 )
-                joint_d_inv[joint, 0, 0] = d_inv_scalar
+                joint_d_inv[dof, 0] = d_inv_scalar
                 for row in range(6):
                     for column in range(6):
                         reduced[row, column] -= u[row] * d_inv_scalar * u[column]
@@ -807,8 +808,9 @@ def _factor_reduced_warp_kernel(
 
                 d_inv = _invert_spd(d, dof_count)
                 for row in range(_MAX_JOINT_DOF):
-                    for column in range(_MAX_JOINT_DOF):
-                        joint_d_inv[joint, row, column] = d_inv[row, column]
+                    if wp.int32(row) < dof_count:
+                        for column in range(_MAX_JOINT_DOF):
+                            joint_d_inv[dof_start + wp.int32(row), column] = d_inv[row, column]
 
                 for row in range(6):
                     for column in range(6):
@@ -1746,7 +1748,7 @@ def _solve_articulated_system_kernel(
     joint_qd_start: wp.array[wp.int32],
     joint_s: wp.array[wp.spatial_vector],
     joint_u_matrix: wp.array[wp.spatial_vector],
-    joint_d_inv: wp.array3d[wp.float32],
+    joint_d_inv: wp.array2d[wp.float32],
     generalized_force: wp.array[wp.float32],
     body_force: wp.array[wp.spatial_vector],
     body_work: wp.array[wp.spatial_vector],
@@ -1783,7 +1785,7 @@ def _solve_articulated_system_kernel(
             if wp.int32(row) < dof_count:
                 for column in range(_MAX_JOINT_DOF):
                     if wp.int32(column) < dof_count:
-                        d_inv_u[row] += joint_d_inv[joint, row, column] * reduced_force[column]
+                        d_inv_u[row] += joint_d_inv[dof_start + wp.int32(row), column] * reduced_force[column]
 
         propagated = p
         for column in range(_MAX_JOINT_DOF):
@@ -1812,7 +1814,7 @@ def _solve_articulated_system_kernel(
             if wp.int32(row) < dof_count:
                 for column in range(_MAX_JOINT_DOF):
                     if wp.int32(column) < dof_count:
-                        qdd[row] += joint_d_inv[joint, row, column] * rhs[column]
+                        qdd[row] += joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
 
         child_acceleration = parent_acceleration
         for row in range(_MAX_JOINT_DOF):
@@ -1834,7 +1836,7 @@ def _advance_reduced_articulations_kernel(
     joint_qd: wp.array[wp.float32],
     joint_s: wp.array[wp.spatial_vector],
     joint_u_matrix: wp.array[wp.spatial_vector],
-    joint_d_inv: wp.array3d[wp.float32],
+    joint_d_inv: wp.array2d[wp.float32],
     joint_f: wp.array[wp.float32],
     joint_implicit_force: wp.array[wp.float32],
     body_mass: wp.array[wp.float32],
@@ -1954,7 +1956,7 @@ def _advance_reduced_articulations_kernel(
             if wp.int32(row) < dof_count:
                 for column in range(_MAX_JOINT_DOF):
                     if wp.int32(column) < dof_count:
-                        d_inv_u[row] += joint_d_inv[joint, row, column] * reduced_force[column]
+                        d_inv_u[row] += joint_d_inv[dof_start + wp.int32(row), column] * reduced_force[column]
         propagated = p
         for column in range(_MAX_JOINT_DOF):
             if wp.int32(column) < dof_count:
@@ -1981,7 +1983,7 @@ def _advance_reduced_articulations_kernel(
             if wp.int32(row) < dof_count:
                 for column in range(_MAX_JOINT_DOF):
                     if wp.int32(column) < dof_count:
-                        qdd[row] += joint_d_inv[joint, row, column] * rhs[column]
+                        qdd[row] += joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
         child_acceleration = parent_acceleration
         for row in range(_MAX_JOINT_DOF):
             if wp.int32(row) < dof_count:
@@ -2029,7 +2031,7 @@ def _advance_reduced_articulations_warp_kernel(
     joint_qd: wp.array[wp.float32],
     joint_s: wp.array[wp.spatial_vector],
     joint_u_matrix: wp.array[wp.spatial_vector],
-    joint_d_inv: wp.array3d[wp.float32],
+    joint_d_inv: wp.array2d[wp.float32],
     joint_f: wp.array[wp.float32],
     joint_implicit_force: wp.array[wp.float32],
     body_mass: wp.array[wp.float32],
@@ -2159,7 +2161,7 @@ def _advance_reduced_articulations_warp_kernel(
                 if wp.int32(row) < dof_count:
                     for column in range(_MAX_JOINT_DOF):
                         if wp.int32(column) < dof_count:
-                            d_inv_u[row] += joint_d_inv[joint, row, column] * reduced_force[column]
+                            d_inv_u[row] += joint_d_inv[dof_start + wp.int32(row), column] * reduced_force[column]
             propagated = p
             for column in range(_MAX_JOINT_DOF):
                 if wp.int32(column) < dof_count:
@@ -2194,7 +2196,7 @@ def _advance_reduced_articulations_warp_kernel(
                 if wp.int32(row) < dof_count:
                     for column in range(_MAX_JOINT_DOF):
                         if wp.int32(column) < dof_count:
-                            qdd[row] += joint_d_inv[joint, row, column] * rhs[column]
+                            qdd[row] += joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
             child_acceleration = parent_acceleration
             for row in range(_MAX_JOINT_DOF):
                 if wp.int32(row) < dof_count:
@@ -2241,7 +2243,7 @@ def _flush_deferred_articulation(bodies: BodyContainer, articulation: wp.int32):
             if wp.int32(row) < dof_count:
                 for column in range(_MAX_JOINT_DOF):
                     if wp.int32(column) < dof_count:
-                        response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
+                        response[row] += data.joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
         child_delta = parent_delta
         for row in range(_MAX_JOINT_DOF):
             if wp.int32(row) < dof_count:
@@ -2414,7 +2416,7 @@ class ReducedArticulationSystem:
         self.joint_implicit_force = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
         self.reduced_inertia = wp.empty(body_count, dtype=_sym_mat66, device=self.device)
         self.joint_u_matrix = wp.empty(dof_count, dtype=wp.spatial_vector, device=self.device)
-        self.joint_d_inv = wp.zeros((joint_count, 6, 6), dtype=wp.float32, device=self.device)
+        self.joint_d_inv = wp.zeros((max(1, dof_count), 6), dtype=wp.float32, device=self.device)
         self.body_force = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
         self.body_velocity = wp.empty(body_count, dtype=wp.spatial_vector, device=self.device)
         self.body_coriolis = wp.empty(body_count, dtype=wp.spatial_vector, device=self.device)

@@ -587,6 +587,26 @@ wp.copy(self.state_0.body_qd, self.state_1.body_qd)
 
 If you ever see a graph-captured PhoenX scene where bodies appear to be on rails / trapped in a small region: drop ``ex.graph = None``, re-run, and compare. Identical motion -> there is a real solver issue. Wildly different motion -> it's almost certainly the swap pattern, not PhoenX.
 
+## Reduced inverse-factor DOF-row layout (2026-07-03)
+
+- Replaced the fixed ``[joint_count, 6, 6]`` inverse-factor allocation with
+  ``[dof_count, 6]``. Row ``r`` of a joint now lives at its global DOF index;
+  the six columns retain the identical dense per-joint values and arithmetic
+  order. Fixed joints allocate no rows, 1-DOF joints consume six floats rather
+  than 36, and 6-DOF joints retain all 36 entries.
+- G1 at 8,192 worlds uses about 47 MiB less GPU memory. The isolated short
+  graph-leapfrog training benchmark improves 862k to 873k samples/s (+1.3%).
+  The contact-rich physics benchmark is approximately neutral within run noise
+  (1.584M measured versus the preceding 1.593M reference).
+- All 40 reduced CUDA-graph tests pass, including ABA/mass-matrix parity,
+  6-DOF roots, tiled loops, Featherstone comparisons, contacts, deterministic
+  momentum/energy, and live mass updates. Contact-rich 512-robot Anymal/H1/G1
+  screens remain finite.
+- A full fixed 96-row response slab in shared memory was also tested and fully
+  reverted: 1.375M versus about 1.593M physics steps/s (-14%). The footprint
+  reduced occupancy and loaded unused rows; the existing repeated row loads
+  are already served effectively by cache.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

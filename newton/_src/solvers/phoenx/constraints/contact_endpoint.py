@@ -185,7 +185,7 @@ def _articulation_pair_wrench_response(
             if wp.int32(row) < dof_count:
                 for column in range(6):
                     if wp.int32(column) < dof_count:
-                        d_inv_u[row] += data.joint_d_inv[joint, row, column] * reduced_force[column]
+                        d_inv_u[row] += data.joint_d_inv[dof_start + wp.int32(row), column] * reduced_force[column]
 
         propagated = p
         for column in range(6):
@@ -214,7 +214,7 @@ def _articulation_pair_wrench_response(
             if wp.int32(row) < dof_count:
                 for column in range(6):
                     if wp.int32(column) < dof_count:
-                        response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
+                        response[row] += data.joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
 
         child_acceleration = parent_acceleration
         for row in range(6):

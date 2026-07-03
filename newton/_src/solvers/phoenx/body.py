@@ -97,7 +97,7 @@ class ReducedArticulationData:
     joint_qd_start: wp.array[wp.int32]
     joint_s: wp.array[wp.spatial_vector]
     joint_u: wp.array[wp.spatial_vector]
-    joint_d_inv: wp.array3d[wp.float32]
+    joint_d_inv: wp.array2d[wp.float32]
     joint_qd: wp.array[wp.float32]
     body_work: wp.array[wp.spatial_vector]
     joint_work: wp.array[wp.float32]
@@ -124,7 +124,7 @@ def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArti
     data.joint_qd_start = wp.zeros(2, dtype=wp.int32, device=device)
     data.joint_s = wp.zeros(1, dtype=wp.spatial_vector, device=device)
     data.joint_u = wp.zeros(1, dtype=wp.spatial_vector, device=device)
-    data.joint_d_inv = wp.zeros((1, 6, 6), dtype=wp.float32, device=device)
+    data.joint_d_inv = wp.zeros((1, 6), dtype=wp.float32, device=device)
     data.joint_qd = wp.zeros(1, dtype=wp.float32, device=device)
     data.body_work = wp.zeros(1, dtype=wp.spatial_vector, device=device)
     data.joint_work = wp.zeros(1, dtype=wp.float32, device=device)

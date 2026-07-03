@@ -318,7 +318,7 @@ def _apply_deferred_impulse(
             if wp.int32(row) < dof_count:
                 for column in range(6):
                     if wp.int32(column) < dof_count:
-                        reduced[row] += data.joint_d_inv[joint, row, column] * projected[column]
+                        reduced[row] += data.joint_d_inv[dof_start + wp.int32(row), column] * projected[column]
         propagated = wrench
         for row in range(6):
             if wp.int32(row) < dof_count:
@@ -355,7 +355,7 @@ def _deferred_link_delta_twist(bodies: BodyContainer, body_slot: wp.int32) -> wp
             if wp.int32(row) < dof_count:
                 for column in range(6):
                     if wp.int32(column) < dof_count:
-                        response[row] += data.joint_d_inv[joint, row, column] * rhs[column]
+                        response[row] += data.joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
         for row in range(6):
             if wp.int32(row) < dof_count:
                 delta += data.joint_s[dof_start + wp.int32(row)] * response[row]
@@ -458,9 +458,7 @@ def reduced_contact_prepare(
                     direction = tangent1
                 inverse_mass = wp.float32(0.0)
                 if use_deferred:
-                    inverse_mass = _deferred_inverse_mass(
-                        bodies, body0, contact_point, body1, contact_point, direction
-                    )
+                    inverse_mass = _deferred_inverse_mass(bodies, body0, contact_point, body1, contact_point, direction)
                 else:
                     inverse_mass = _pair_inverse_mass(bodies, body0, contact_point, body1, contact_point, direction)
                 if inverse_mass > wp.float32(1.0e-12):

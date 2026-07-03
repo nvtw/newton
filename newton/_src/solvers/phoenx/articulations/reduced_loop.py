@@ -506,7 +506,7 @@ def _accumulate_articulation_schur_tile(
                 for column in range(_MAX_ROWS):
                     if wp.int32(column) < dof_count:
                         source = wp.tile_load(joint_work[dof_start + wp.int32(column)], shape=_MAX_ROWS)
-                        d_inv_u += data.joint_d_inv[joint, row, column] * source
+                        d_inv_u += data.joint_d_inv[dof_start + wp.int32(row), column] * source
                 propagated = wp.tile_map(
                     _tile_spatial_scale_add,
                     propagated,
@@ -539,7 +539,7 @@ def _accumulate_articulation_schur_tile(
                             parent_response,
                             data.joint_u[dof_start + wp.int32(column)],
                         )
-                        response += data.joint_d_inv[joint, row, column] * source_rhs
+                        response += data.joint_d_inv[dof_start + wp.int32(row), column] * source_rhs
                 child_response = wp.tile_map(
                     _tile_spatial_scale_add,
                     child_response,

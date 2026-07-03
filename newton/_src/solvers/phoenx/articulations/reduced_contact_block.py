@@ -761,7 +761,9 @@ def _build_generalized_contact_rows_kernel(
             if wp.int32(dof_row) < dof_count:
                 for dof_column in range(6):
                     if wp.int32(dof_column) < dof_count:
-                        reduced[dof_row] += data.joint_d_inv[joint, dof_row, dof_column] * projected[dof_column]
+                        reduced[dof_row] += (
+                            data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * projected[dof_column]
+                        )
                 propagated_wrench -= data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
 
     for joint in range(start, end):
@@ -785,7 +787,9 @@ def _build_generalized_contact_rows_kernel(
             if wp.int32(dof_row) < dof_count:
                 for dof_column in range(6):
                     if wp.int32(dof_column) < dof_count:
-                        generalized_delta[dof_row] += data.joint_d_inv[joint, dof_row, dof_column] * rhs[dof_column]
+                        generalized_delta[dof_row] += (
+                            data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * rhs[dof_column]
+                        )
                 dof = dof_start + wp.int32(dof_row)
                 response[articulation, row, dof - dof_start_articulation] = generalized_delta[dof_row]
                 parent_delta += data.joint_s[dof] * generalized_delta[dof_row]
@@ -868,7 +872,9 @@ def _build_packed_generalized_contact_rows_kernel(
             if wp.int32(dof_row) < dof_count:
                 for dof_column in range(6):
                     if wp.int32(dof_column) < dof_count:
-                        reduced[dof_row] += data.joint_d_inv[joint, dof_row, dof_column] * projected[dof_column]
+                        reduced[dof_row] += (
+                            data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * projected[dof_column]
+                        )
                 propagated_wrench -= data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
 
     inverse_mass = wp.float32(0.0)
@@ -899,7 +905,9 @@ def _build_packed_generalized_contact_rows_kernel(
             if wp.int32(dof_row) < dof_count:
                 for dof_column in range(6):
                     if wp.int32(dof_column) < dof_count:
-                        generalized_delta[dof_row] += data.joint_d_inv[joint, dof_row, dof_column] * rhs[dof_column]
+                        generalized_delta[dof_row] += (
+                            data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * rhs[dof_column]
+                        )
                 dof = dof_start + wp.int32(dof_row)
                 response_value = generalized_delta[dof_row]
                 if row_count > wp.int32(_RESPONSE_TILE):
