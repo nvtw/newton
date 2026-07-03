@@ -117,7 +117,7 @@
       <h2>Momentum capture now uses one deterministic warp per articulation</h2>
       <p>The physically required two-pass dynamics schedule remains intact. Only the pre-Coriolis momentum measurement changed: one thread no longer serially walks an entire tree; 32 lanes reduce its mass, center of mass, and spatial momentum with a fixed summation tree.</p>
       <ul>
-        <li>Matched G1 physics: 1.528M → 1.543M steps/s (+1.0%). Real training: 813.5k → 821.9–826.5k samples/s (+1.0–1.6%).</li>
+        <li>Momentum capture itself falls from 69.6 to 13.4 µs per launch (5.2×; 1.9% → 0.4% of GPU time). Matched physics improves 1.528M → 1.543M steps/s (+1.0%); training improves 813.5k → 821.9–826.5k (+1.0–1.6%).</li>
         <li>Contact-rich 512-robot fleets improve about 5% on Anymal/H1 and 3% on G1. Hundreds of articulations in one single world also run correctly.</li>
         <li>All 40 reduced CUDA-graph tests pass, including strict momentum/energy, loops, self-contact, dense contacts, hybrid mode, and Featherstone comparisons.</li>
         <li>A fresh policy passes the full frozen gate at only 91.75M samples. Seeds 1000/2000: zero falls, tracking 0.9057/0.9035, jerk 0.1434, roll/pitch 0.2038, yaw 0.1172, leg speed 0.9728.</li>
@@ -155,7 +155,7 @@
     <section class="next">
       <div>
         <h2>Refresh the real-training critical path</h2>
-        <p>The refreshed trace ranks solver work: ABA advance 8.6%, factor 6.3%, packed contact-row build 6.0%, contact solve 4.9%, and publish 4.7%. Packed gather is down to 1.1% (40.2 µs versus 75.2 µs).</p>
+        <p>The post-commit trace ranks solver work: ABA advance 8.5%, factor 6.5%, packed contact-row build 6.0%, contact solve 5.1%, and publish 4.8%. Momentum capture is now only 0.4%; packed gather is 1.2%.</p>
         <p><strong>Next:</strong> target work that can be safely eliminated or fused around row build/solve. The second ABA pass is not optional: removing it gained 6% physics but failed six momentum/loop tests. No Nsight Compute run is currently requested.</p>
       </div>
       <div>
