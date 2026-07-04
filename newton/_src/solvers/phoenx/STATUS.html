@@ -125,13 +125,13 @@
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric good">231.4 s</div><div class="label">first valid G1 cold success</div></div>
+      <div class="card"><div class="metric">1 / 2</div><div class="label">paired G1 cold trials passing</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
       <div class="card"><div class="metric good">3 / 8</div><div class="label">tasks wired to process-level metric</div></div>
       <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
-    <p class="profile-note">The authoritative runner and deterministic learner are ready, but no multi-seed production baseline exists yet. Earlier same-seed divergence exposed atomic learner reductions and is excluded from baseline estimates; optimization rankings require repaired process-start trials and first-passing evaluation under the frozen protocol.</p>
+    <p class="profile-note">The first repaired paired outcomes are one success and one censored miss. Their plug-in restart cost is 591.37 s, but two trials leave success probability and expected cost highly uncertain; this is an initial baseline, not a stable ranking.</p>
 
     <div class="section-label">Steady-training GPU work profile</div>
     <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
@@ -213,7 +213,9 @@
         <li>Live continuation originally overwrote runtime environment flags and disabled episode command randomization after the first chunk. It now changes only the intended phase fields; the CUDA smoke asserts that randomization survives the transition.</li>
         <li><strong>First valid cold success:</strong> deterministic train seed 42 / gate seed 1000 qualifies after 315 iterations (165.15M samples) in 231.37 s fresh-process wall time. The child records 197.95 s training, 7.49 s screening, and 22.44 s full-gate time.</li>
         <li>Full gates at iterations 290 and 315 both pass with zero falls and battery performance 0.9261 / 0.9260. Action jerk, roll/pitch angular velocity, yaw rate, and leg velocity all remain comfortably within the frozen limits.</li>
-        <li><strong>Next:</strong> expand the paired train/gate seed bank before treating 231.37 s as an expectation estimate. One success gives <code>p=1</code> empirically but a very wide Wilson interval; thresholds remain frozen.</li>
+        <li><strong>Second paired outcome:</strong> train seed 11 / gate seed 2000 completes all 325 iterations in 216.29 s process wall time but misses. Its screen peaks at 0.8477 with zero falls, so it is censored and charged the full 360 s restart horizon.</li>
+        <li><strong>Preliminary expectation:</strong> one success in two trials gives empirical <code>p=0.5</code>, two expected attempts, and 591.37 s expected restart cost. The 95% Wilson interval for <code>p</code> is roughly 0.095–0.905, and bootstrap cost remains unbounded with this tiny sample.</li>
+        <li><strong>Next:</strong> improve recipe reliability without seed-specific tuning, then race candidates on the same paired bank and confirm on unseen seeds. Full gate thresholds remain frozen.</li>
       </ul>
     </article>
 
