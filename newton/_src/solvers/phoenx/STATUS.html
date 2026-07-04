@@ -127,11 +127,11 @@
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric">TBD</div><div class="label">cold-start suite baseline</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
-      <div class="card"><div class="metric good">2 / 2</div><div class="label">existing G1 quality-gate seeds pass</div></div>
+      <div class="card"><div class="metric good">1 / 8</div><div class="label">tasks wired to process-level metric</div></div>
       <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
-    <p class="profile-note">No authoritative time-to-policy baseline exists yet. Existing throughput and 157.3M-sample G1 results remain useful diagnostics, but they cannot rank changes until process-start timing and first-passing evaluation are measured under one protocol.</p>
+    <p class="profile-note">The authoritative runner is ready, but no multi-seed production baseline exists yet. Existing throughput and 157.3M-sample G1 results remain useful diagnostics; optimization rankings now require process-start timing and first-passing evaluation under the frozen protocol.</p>
 
     <div class="section-label">Steady-training GPU work profile</div>
     <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
@@ -167,13 +167,13 @@
     <div class="section-label">Current state</div>
     <article>
       <div class="meta"><span class="tag good">FOUNDATION READY</span><time>Known evidence</time></div>
-      <h2>Training works; time-to-policy is not measured yet</h2>
+      <h2>Training works; the authoritative measurement loop now runs</h2>
       <p>Reduced-coordinate PhoenX already trains a robust G1 walker from scratch: two independent 157.3M-sample runs pass the complete frozen-policy gate with zero falls and about 0.91 tracking. This proves feasibility, not optimal wall-clock convergence.</p>
       <ul>
         <li>Pure PhoenX/PhoenX-RL environments now cover Ant, Humanoid, Go2, G1, H1, ANYmal-C, DR Legs hold-pose, and DR Legs walking, without IsaacLab runtime dependencies.</li>
         <li>Reduced, hybrid, and full-coordinate PhoenX are all eligible. Coordinate choice is an experimental variable, not an ideology; physical accuracy, stability, and the task gate decide.</li>
         <li>The retained 923k/s steady-training result and solver profiles remain secondary diagnostics for explaining time-to-policy changes.</li>
-        <li>The first missing artifact is a unified cold-start runner with comparable task gates, periodic held-out evaluation, first-pass timestamps, seed metadata, and failure censoring.</li>
+        <li>G1 now has a fresh-process runner with paired train/gate seeds, first-qualification timing, consecutive gate windows, strict JSON records, timeout/crash/miss censoring, and restart-cost uncertainty. The next gap is wiring equivalent frozen gates for the other task families.</li>
       </ul>
     </article>
 
@@ -193,11 +193,24 @@
         <li><strong>Generalization:</strong> development uses a rotating subset of the eight task families; promotion requires locomotion diversity and a held-out task. No robot-name solver specializations.</li>
         <li><strong>Allowed levers:</strong> timestep/substeps, full or reduced coordinates, contact/solver schedules, PPO variants, curricula, recurrent/feed-forward policies, mixed precision, PBT, and overlap. All consumed wall time and GPU work count.</li>
         <li><strong>Hard gates:</strong> physically defensible simulation, stable contacts/joints, no reward exploitation of stale or degraded physics, CUDA graph support for measured paths, and versatile reusable RL code.</li>
-        <li><strong>Next:</strong> define compact gates for the diverse task suite and implement one runner that emits first-pass wall time, samples, physics steps, evaluations, seed, solver/RL configuration, and failure reason.</li>
+        <li><strong>Implemented:</strong> the G1 runner emits raw per-seed outcomes and a continuously updated suite record. It reports empirical success probability, Wilson uncertainty, successful-run time, full-cutoff restart charges, expected attempts, and bootstrapped expected time to success.</li>
+        <li><strong>Next:</strong> freeze compact gates for a quadruped and a structurally different task, then establish paired-seed cold-start baselines before changing solver or RL recipes.</li>
       </ul>
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · PROCESS-LEVEL METRIC</span><time>4 Jul</time></div>
+      <h2>Cold-start G1 trials are executable and failure-aware</h2>
+      <p><code>bench_time_to_policy</code> launches each G1 attempt in a fresh Python process, so imports, CUDA initialization, normal cache loading, graph capture, training, checkpoint reload, and held-out evaluation all contribute to wall time. Candidate recipes cannot improve the score merely by failing more often.</p>
+      <ul>
+        <li>Training seeds and held-out gate seeds are recorded separately and paired in a frozen order. Candidate comparisons can reuse the same banks; final confirmation can use an unseen bank.</li>
+        <li>Qualification can require multiple successive held-out windows. A failure resets the streak, and the child stops only when the configured streak is complete.</li>
+        <li>Timeouts, crashes, and quality misses are retained as censored trials and charged the full restart horizon. Zero observed successes produces an explicit infinite-cost state, serialized as strict JSON <code>null</code> plus a flag.</li>
+        <li>Nine focused unit tests pass. A CUDA graph-leapfrog smoke completed the full two-window path in a fresh process; a forced 10 ms timeout was correctly censored and charged.</li>
+        <li>The smoke's 3.93 s value used trivial two-world/two-iteration gates and is only protocol validation—not a training result. No new performance claim is made yet.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">CANDIDATE · CROSS-ROBOT TOPOLOGY CACHE</span><time>3 Jul</time></div>
       <h2>Static topology caching wins across G1, ANYmal, and H1</h2>

@@ -138,6 +138,11 @@ def _samples_for_iteration(args: argparse.Namespace, iteration: int) -> int:
     return int(iteration) * int(args.world_count) * int(args.rollout_steps)
 
 
+def _updated_pass_streak(pass_gate: bool, current_streak: int) -> int:
+    """Return the consecutive quality-gate pass count after one window."""
+    return int(current_streak) + 1 if pass_gate else 0
+
+
 def _evaluate_checkpoint(
     checkpoint_path: str | Path,
     args: argparse.Namespace,
@@ -181,6 +186,10 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("target_samples must be positive")
     if args.final_phase_sim_substeps <= 0:
         raise ValueError("final_phase_sim_substeps must be positive")
+    if args.required_consecutive_passes <= 0:
+        raise ValueError("required_consecutive_passes must be positive")
+    if bool(args.evaluate_only) and args.required_consecutive_passes != 1:
+        raise ValueError("evaluate_only supports exactly one required pass")
 
     checkpoint_template = args.checkpoint_path or "/tmp/phoenx_g1_gate_{iteration}.npz"
     env_config = _make_env_config(args)
@@ -211,6 +220,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     gate_history: list[dict[str, Any]] = []
     train_history: list[dict[str, Any]] = []
     first_pass: dict[str, Any] | None = None
+    pass_streak = 0
     total_t0 = time.perf_counter()
 
     if bool(args.evaluate_only):
@@ -229,9 +239,13 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
             "samples": int(_samples_for_iteration(args, completed_iterations)),
             "checkpoint": str(resume_checkpoint),
             "stats": asdict(gate_result.stats),
+            "total_wall_seconds": float(time.perf_counter() - total_t0),
         }
         gate_history.append(gate_entry)
-        if gate_result.stats.pass_gate:
+        pass_streak = _updated_pass_streak(gate_result.stats.pass_gate, pass_streak)
+        gate_entry["consecutive_passes"] = int(pass_streak)
+        gate_entry["qualified"] = pass_streak >= int(args.required_consecutive_passes)
+        if gate_entry["qualified"]:
             first_pass = gate_entry
 
     while not bool(args.evaluate_only) and completed_iterations < int(args.max_iterations):
@@ -312,9 +326,13 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
             "samples": int(samples),
             "checkpoint": str(checkpoint_path),
             "stats": asdict(gate_result.stats),
+            "total_wall_seconds": float(time.perf_counter() - total_t0),
         }
         gate_history.append(gate_entry)
-        if gate_result.stats.pass_gate and first_pass is None:
+        pass_streak = _updated_pass_streak(gate_result.stats.pass_gate, pass_streak)
+        gate_entry["consecutive_passes"] = int(pass_streak)
+        gate_entry["qualified"] = pass_streak >= int(args.required_consecutive_passes)
+        if gate_entry["qualified"] and first_pass is None:
             first_pass = gate_entry
             if not bool(args.keep_going_after_pass):
                 break
@@ -430,6 +448,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "estimated_target_total_seconds": estimated_target_total_seconds,
         "checkpoint_path": str(resume_checkpoint) if resume_checkpoint is not None else None,
         "pass_gate": bool(pass_gate),
+        "required_consecutive_passes": int(args.required_consecutive_passes),
         "first_pass": first_pass,
         "gate_history": gate_history,
         "train_history": train_history if bool(args.include_train_history) else [],
@@ -668,8 +687,15 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-yaw-rate-rms", type=float, default=0.20)
     parser.add_argument("--max-leg-qvel-rms", type=float, default=1.22)
     parser.add_argument("--keep-going-after-pass", action="store_true")
+    parser.add_argument(
+        "--required-consecutive-passes",
+        type=int,
+        default=1,
+        help="Require this many successive held-out gate windows before declaring success.",
+    )
     parser.add_argument("--fail-on-miss", action="store_true")
     parser.add_argument("--include-train-history", action="store_true")
+    parser.add_argument("--json-output", default=None, help="Also write the final result to this JSON file.")
     parser.add_argument("--json-indent", type=int, default=2)
     return parser
 
@@ -684,6 +710,10 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     result = benchmark_train_to_gate(args)
+    if args.json_output is not None:
+        output_path = Path(args.json_output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(result, indent=args.json_indent, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=args.json_indent, sort_keys=True))
     return 1 if args.fail_on_miss and not result["pass_gate"] else 0
 
