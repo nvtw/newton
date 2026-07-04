@@ -89,6 +89,7 @@
 
 ### Fixed
 
+- Fix experimental PhoenX G1 held-out evaluation to preserve fixed commands across fall resets and accumulate metrics in deterministic CUDA graphs without per-step host synchronization.
 - Fix the pure-PhoenX Ant environment applying the MJCF Z-up to Y-up rotation twice, which made every nominal reset pose immediately terminal.
 - Fix the pure-PhoenX H1 environment omitting ankle colliders, and add source-matched foot-contact, air-time, sliding, soft-limit, spawn-height, and graph-safe command behavior.
 - Fix the pure-PhoenX DR Legs walking task missing contact matching, swing clearance, foot orientation, touchdown-speed, gait-period, and graph-safe randomized-command behavior.

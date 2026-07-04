@@ -5197,20 +5197,18 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(math.isfinite(target_result.stats[0].fall_fraction))
             self.assertTrue(math.isfinite(target_result.stats[0].mean_path_length))
 
-            gate_result = rl.evaluate_g1_gate_ppo(
-                restored,
-                rl.ConfigEvaluateG1GatePPO(
-                    env_config=env_config,
-                    battery_commands=((0.0, 0.0, 0.0),),
-                    seeds_per_command=1,
-                    battery_steps=1,
-                    diagnostic_steps=1,
-                    diagnostic_world_count=1,
-                    device=device,
-                    deterministic=True,
-                    min_battery_perf=2.0,
-                ),
+            gate_config = rl.ConfigEvaluateG1GatePPO(
+                env_config=env_config,
+                battery_commands=((0.0, 0.0, 0.0),),
+                seeds_per_command=1,
+                battery_steps=1,
+                diagnostic_steps=1,
+                diagnostic_world_count=1,
+                device=device,
+                deterministic=True,
+                min_battery_perf=2.0,
             )
+            gate_result = rl.evaluate_g1_gate_ppo(restored, gate_config)
             gate_stats = gate_result.stats
             self.assertEqual(gate_stats.battery_samples, 1)
             self.assertEqual(len(gate_stats.per_command), 1)
@@ -5221,6 +5219,16 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(math.isfinite(gate_stats.yaw_rate_rms))
             self.assertTrue(math.isfinite(gate_stats.leg_qvel_rms))
             self.assertGreater(gate_stats.samples_per_second, 0.0)
+
+            gate_repeat = rl.evaluate_g1_gate_ppo(restored, gate_config).stats
+            self.assertEqual(gate_repeat.battery_falls, gate_stats.battery_falls)
+            self.assertEqual(gate_repeat.battery_perf, gate_stats.battery_perf)
+            self.assertEqual(gate_repeat.action_jerk_rms, gate_stats.action_jerk_rms)
+            self.assertEqual(gate_repeat.ang_vel_xy_rms, gate_stats.ang_vel_xy_rms)
+            self.assertEqual(gate_repeat.yaw_rate_rms, gate_stats.yaw_rate_rms)
+            self.assertEqual(gate_repeat.leg_qvel_rms, gate_stats.leg_qvel_rms)
+            self.assertEqual(gate_repeat.diagnostic_falls, gate_stats.diagnostic_falls)
+            self.assertEqual(gate_repeat.per_command, gate_stats.per_command)
 
             resumed = rl.train_g1_ppo(
                 rl.ConfigTrainG1PPO(
@@ -5288,6 +5296,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             command_zero_probability=0.0,
             command_resample_steps=0,
             max_episode_steps=0,
+            min_base_height=10.0,
             auto_reset=False,
         )
         policy = RecorderPolicy(device)
@@ -5298,7 +5307,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 env_config=env_config,
                 battery_commands=(fixed_command,),
                 seeds_per_command=2,
-                battery_steps=1,
+                battery_steps=2,
                 diagnostic_steps=1,
                 diagnostic_world_count=1,
                 device=device,
@@ -5308,9 +5317,10 @@ class TestG1PhoenXRL(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(len(policy.battery_commands), 1)
+        self.assertEqual(len(policy.battery_commands), 2)
         expected = np.tile(np.asarray(fixed_command, dtype=np.float32), (2, 1))
-        np.testing.assert_allclose(policy.battery_commands[0], expected, rtol=0.0, atol=0.0)
+        for observed in policy.battery_commands:
+            np.testing.assert_allclose(observed, expected, rtol=0.0, atol=0.0)
 
     def test_train_graph_leapfrog_save_and_resume(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 graph-leapfrog training tests")

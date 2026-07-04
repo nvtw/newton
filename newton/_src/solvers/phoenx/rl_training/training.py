@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import numpy as np
 import warp as wp
 
 from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX, anymal_mirror_map_ppo
-from .env import collect_ppo_rollout_seed_counter, make_seed_counter
+from .env import advance_seed_counter, collect_ppo_rollout_seed_counter, make_seed_counter
 from .g1 import ConfigEnvG1PhoenX, EnvG1PhoenX, g1_mirror_map_ppo
 from .g1_recipe import (
     ACTIVATION,
@@ -44,6 +45,133 @@ from .ppo import BufferRollout, ConfigPPO, StatsPPOUpdate, TrainerPPO, load_ppo_
 
 _G1_TRAIN_STAT_COUNT = 15
 _ANYMAL_TRAIN_STAT_COUNT = 9
+_G1_GATE_BATTERY_STAT_COUNT = 4
+_G1_GATE_DIAGNOSTIC_STAT_COUNT = 7
+
+
+@wp.kernel
+def _advance_seed_counter_if_done_kernel(
+    dones: wp.array[wp.float32],
+    world_count: wp.int32,
+    seed_counter: wp.array[wp.int32],
+):
+    if wp.tid() != wp.int32(0):
+        return
+    world = wp.int32(0)
+    while world < world_count:
+        if dones[world] > wp.float32(0.5):
+            seed_counter[0] = wp.int32((wp.int64(seed_counter[0]) + wp.int64(1)) % wp.int64(2147483647))
+            return
+        world = world + wp.int32(1)
+
+
+@wp.kernel
+def _g1_gate_battery_accumulate_kernel(
+    joint_q: wp.array[wp.float32],
+    joint_qd: wp.array[wp.float32],
+    body_com: wp.array[wp.vec3],
+    command: wp.array2d[wp.float32],
+    dones: wp.array[wp.float32],
+    successes: wp.array[wp.float32],
+    coord_stride: wp.int32,
+    dof_stride: wp.int32,
+    body_stride: wp.int32,
+    stats: wp.array2d[wp.float64],
+):
+    world = wp.tid()
+    q_offset = world * coord_stride
+    qd_offset = world * dof_stride
+    rotation = wp.quat(
+        joint_q[q_offset + wp.int32(3)],
+        joint_q[q_offset + wp.int32(4)],
+        joint_q[q_offset + wp.int32(5)],
+        joint_q[q_offset + wp.int32(6)],
+    )
+    linear_com = wp.vec3(joint_qd[qd_offset], joint_qd[qd_offset + wp.int32(1)], joint_qd[qd_offset + wp.int32(2)])
+    angular = wp.vec3(
+        joint_qd[qd_offset + wp.int32(3)],
+        joint_qd[qd_offset + wp.int32(4)],
+        joint_qd[qd_offset + wp.int32(5)],
+    )
+    root_com_world = wp.quat_rotate(rotation, body_com[world * body_stride])
+    linear_origin = linear_com - wp.cross(angular, root_com_world)
+    linear_body = wp.quat_rotate_inv(rotation, linear_origin)
+    angular_body = wp.quat_rotate_inv(rotation, angular)
+    linear_x_error = command[world, 0] - linear_body[0]
+    linear_y_error = command[world, 1] - linear_body[1]
+    yaw_error = wp.abs(command[world, 2] - angular_body[2])
+    fall = wp.float64(0.0)
+    if dones[world] > wp.float32(0.5):
+        fall = wp.float64(1.0)
+
+    stats[world, 0] = stats[world, 0] + fall
+    stats[world, 1] = stats[world, 1] + wp.float64(successes[world])
+    stats[world, 2] = stats[world, 2] + wp.float64(
+        wp.sqrt(linear_x_error * linear_x_error + linear_y_error * linear_y_error)
+    )
+    stats[world, 3] = stats[world, 3] + wp.float64(yaw_error)
+
+
+@wp.kernel
+def _g1_gate_diagnostic_accumulate_kernel(
+    joint_q: wp.array[wp.float32],
+    joint_qd: wp.array[wp.float32],
+    actions: wp.array2d[wp.float32],
+    dones: wp.array[wp.float32],
+    coord_stride: wp.int32,
+    dof_stride: wp.int32,
+    previous_actions: wp.array2d[wp.float32],
+    has_previous: wp.array[wp.int32],
+    stats: wp.array2d[wp.float64],
+):
+    world = wp.tid()
+    if dones[world] > wp.float32(0.5):
+        stats[world, 0] = stats[world, 0] + wp.float64(1.0)
+        has_previous[world] = wp.int32(0)
+        return
+
+    if has_previous[world] != wp.int32(0):
+        jerk_sq = wp.float32(0.0)
+        action = wp.int32(0)
+        while action < wp.int32(12):
+            delta = actions[world, action] - previous_actions[world, action]
+            jerk_sq = jerk_sq + delta * delta
+            action = action + wp.int32(1)
+        stats[world, 1] = stats[world, 1] + wp.float64(jerk_sq)
+        stats[world, 2] = stats[world, 2] + wp.float64(12.0)
+
+    action = wp.int32(0)
+    while action < wp.int32(12):
+        previous_actions[world, action] = actions[world, action]
+        action = action + wp.int32(1)
+    has_previous[world] = wp.int32(1)
+
+    q_offset = world * coord_stride
+    qd_offset = world * dof_stride
+    rotation = wp.quat(
+        joint_q[q_offset + wp.int32(3)],
+        joint_q[q_offset + wp.int32(4)],
+        joint_q[q_offset + wp.int32(5)],
+        joint_q[q_offset + wp.int32(6)],
+    )
+    angular = wp.vec3(
+        joint_qd[qd_offset + wp.int32(3)],
+        joint_qd[qd_offset + wp.int32(4)],
+        joint_qd[qd_offset + wp.int32(5)],
+    )
+    angular_body = wp.quat_rotate_inv(rotation, angular)
+    stats[world, 3] = stats[world, 3] + wp.float64(
+        angular_body[0] * angular_body[0] + angular_body[1] * angular_body[1]
+    )
+    stats[world, 4] = stats[world, 4] + wp.float64(angular_body[2] * angular_body[2])
+    leg_qvel_sq = wp.float32(0.0)
+    dof = wp.int32(6)
+    while dof < wp.int32(18):
+        velocity = joint_qd[qd_offset + dof]
+        leg_qvel_sq = leg_qvel_sq + velocity * velocity
+        dof = dof + wp.int32(1)
+    stats[world, 5] = stats[world, 5] + wp.float64(leg_qvel_sq)
+    stats[world, 6] = stats[world, 6] + wp.float64(1.0)
 
 
 @wp.kernel
@@ -1720,6 +1848,7 @@ def evaluate_g1_gate_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1GatePPO | 
         world_count=int(commands.shape[0]) * int(cfg.seeds_per_command),
         auto_reset=False,
         max_episode_steps=0,
+        randomize_commands_on_reset=False,
     )
     battery_env = EnvG1PhoenX(battery_config, device=device)
     _check_g1_trainer_dimensions(trainer, battery_env)
@@ -1730,15 +1859,20 @@ def evaluate_g1_gate_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1GatePPO | 
         command=tuple(float(x) for x in cfg.diagnostic_command),
         auto_reset=False,
         max_episode_steps=0,
+        randomize_commands_on_reset=False,
     )
     diagnostic_env = EnvG1PhoenX(diagnostic_config, device=device)
     _check_g1_trainer_dimensions(trainer, diagnostic_env)
 
-    t0 = time.perf_counter()
-    per_command, battery_falls, battery_perf, battery_samples = _evaluate_g1_gate_battery(
-        trainer, battery_env, cfg, commands
+    use_device_gate = isinstance(trainer, TrainerPPO) and device.is_cuda and wp.is_mempool_enabled(device)
+    battery_evaluator = _evaluate_g1_gate_battery_device if use_device_gate else _evaluate_g1_gate_battery_host
+    diagnostic_evaluator = (
+        _evaluate_g1_gate_diagnostics_device if use_device_gate else _evaluate_g1_gate_diagnostics_host
     )
-    diagnostic = _evaluate_g1_gate_diagnostics(trainer, diagnostic_env, cfg)
+
+    t0 = time.perf_counter()
+    per_command, battery_falls, battery_perf, battery_samples = battery_evaluator(trainer, battery_env, cfg, commands)
+    diagnostic = diagnostic_evaluator(trainer, diagnostic_env, cfg)
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
 
     diagnostic_falls, diagnostic_samples, action_jerk, ang_vel_xy, yaw_rate, leg_qvel = diagnostic
@@ -2282,7 +2416,136 @@ def _check_g1_trainer_dimensions(trainer: TrainerPPO, env: EnvG1PhoenX) -> None:
         raise ValueError("Trainer dimensions do not match the G1 environment")
 
 
-def _evaluate_g1_gate_battery(
+def _run_g1_gate_graph_steps(
+    *,
+    device: wp.context.Device,
+    steps: int,
+    step: Callable[[], None],
+    reset: Callable[[], None],
+) -> None:
+    if not device.is_cuda or not wp.is_mempool_enabled(device):
+        raise RuntimeError("G1 quality-gate evaluation requires CUDA with Warp mempool enabled")
+
+    # Warm both state-buffer orientations before capture so no allocation or
+    # compilation becomes part of either graph.
+    reset()
+    step()
+    step()
+    wp.synchronize_device(device)
+
+    reset()
+    capture_stream = wp.Stream(device)
+    phase_0 = _capture_stream_graph(capture_stream, device, step)
+    phase_1 = _capture_stream_graph(capture_stream, device, step)
+
+    reset()
+    for index in range(int(steps)):
+        wp.capture_launch(phase_0 if index % 2 == 0 else phase_1)
+
+
+def _reset_g1_done_worlds_device(
+    env: EnvG1PhoenX,
+    reset_seed_counter: wp.array[wp.int32],
+    fixed_commands: wp.array2d[wp.float32],
+) -> wp.array2d[wp.float32]:
+    env.reset_done_seed_counter(reset_seed_counter, advance=0)
+    wp.launch(
+        _advance_seed_counter_if_done_kernel,
+        dim=1,
+        inputs=[env.dones, env.world_count],
+        outputs=[reset_seed_counter],
+        device=env.device,
+    )
+    env.dones.zero_()
+    wp.copy(env.command, fixed_commands)
+    return env.observe()
+
+
+def _evaluate_g1_gate_battery_device(
+    trainer: TrainerPPO,
+    env: EnvG1PhoenX,
+    cfg: ConfigEvaluateG1GatePPO,
+    commands: np.ndarray,
+) -> tuple[tuple[StatsEvaluateG1GateCommandPPO, ...], int, float, int]:
+    command_ids = np.repeat(np.arange(commands.shape[0], dtype=np.int32), int(cfg.seeds_per_command))
+    command_np = commands[command_ids].astype(np.float32, copy=False)
+    fixed_commands = wp.array(command_np, dtype=wp.float32, device=env.device)
+    accum = wp.zeros((env.world_count, _G1_GATE_BATTERY_STAT_COUNT), dtype=wp.float64, device=env.device)
+
+    reset_seed_counter = make_seed_counter(int(cfg.seed) + 1, device=env.device)
+    action_seed_counter = make_seed_counter(int(cfg.seed), device=env.device)
+    trainer.reserve_buffers(env.world_count)
+
+    def reset() -> None:
+        env.reset_noisy(seed=int(cfg.seed))
+        reset_seed_counter.assign(np.asarray([int(cfg.seed) + 1], dtype=np.int32))
+        action_seed_counter.assign(np.asarray([int(cfg.seed)], dtype=np.int32))
+        wp.copy(env.command, fixed_commands)
+        env.observe()
+        trainer.reset_rollout_state()
+        accum.zero_()
+
+    def step() -> None:
+        actions, _log_probs, _values = trainer.act_reuse_seed_counter(
+            env.obs,
+            seed_counter=action_seed_counter,
+            deterministic=bool(cfg.deterministic),
+        )
+        advance_seed_counter(action_seed_counter, device=env.device)
+        _obs, _rewards, dones = env.step(actions)
+        wp.launch(
+            _g1_gate_battery_accumulate_kernel,
+            dim=env.world_count,
+            inputs=[
+                env.state_0.joint_q,
+                env.state_0.joint_qd,
+                env.model.body_com,
+                env.command,
+                dones,
+                env.step_successes,
+                env.coord_stride,
+                env.dof_stride,
+                env.body_stride,
+            ],
+            outputs=[accum],
+            device=env.device,
+        )
+        trainer.reset_rollout_state(dones)
+        _reset_g1_done_worlds_device(env, reset_seed_counter, fixed_commands)
+
+    _run_g1_gate_graph_steps(
+        device=env.device,
+        steps=int(cfg.battery_steps),
+        step=step,
+        reset=reset,
+    )
+    accum_np = accum.numpy()
+    samples_per_step = np.bincount(command_ids, minlength=commands.shape[0]).astype(np.int64)
+    sample_count = samples_per_step * int(cfg.battery_steps)
+    falls = np.bincount(command_ids, weights=accum_np[:, 0], minlength=commands.shape[0]).astype(np.int64)
+    perf_sum = np.bincount(command_ids, weights=accum_np[:, 1], minlength=commands.shape[0])
+    lin_err_sum = np.bincount(command_ids, weights=accum_np[:, 2], minlength=commands.shape[0])
+    yaw_err_sum = np.bincount(command_ids, weights=accum_np[:, 3], minlength=commands.shape[0])
+
+    stats = []
+    for command_index, command in enumerate(commands):
+        denom = float(max(int(sample_count[command_index]), 1))
+        stats.append(
+            StatsEvaluateG1GateCommandPPO(
+                command=(float(command[0]), float(command[1]), float(command[2])),
+                falls=int(falls[command_index]),
+                mean_tracking_perf=float(perf_sum[command_index] / denom),
+                mean_linear_velocity_error=float(lin_err_sum[command_index] / denom),
+                mean_yaw_rate_error=float(yaw_err_sum[command_index] / denom),
+                samples=int(sample_count[command_index]),
+            )
+        )
+    total_samples = int(np.sum(sample_count))
+    battery_perf = float(np.sum(perf_sum) / float(max(total_samples, 1)))
+    return tuple(stats), int(np.sum(falls)), battery_perf, total_samples
+
+
+def _evaluate_g1_gate_battery_host(
     trainer: TrainerPPO,
     env: EnvG1PhoenX,
     cfg: ConfigEvaluateG1GatePPO,
@@ -2345,7 +2608,81 @@ def _evaluate_g1_gate_battery(
     return tuple(stats), int(np.sum(falls)), battery_perf, total_samples
 
 
-def _evaluate_g1_gate_diagnostics(
+def _evaluate_g1_gate_diagnostics_device(
+    trainer: TrainerPPO, env: EnvG1PhoenX, cfg: ConfigEvaluateG1GatePPO
+) -> tuple[int, int, float, float, float, float]:
+    accum = wp.zeros((env.world_count, _G1_GATE_DIAGNOSTIC_STAT_COUNT), dtype=wp.float64, device=env.device)
+    previous_actions = wp.zeros((env.world_count, 12), dtype=wp.float32, device=env.device)
+    has_previous = wp.zeros(env.world_count, dtype=wp.int32, device=env.device)
+    fixed_commands = wp.array(
+        np.tile(np.asarray(cfg.diagnostic_command, dtype=np.float32), (env.world_count, 1)),
+        dtype=wp.float32,
+        device=env.device,
+    )
+
+    reset_seed_counter = make_seed_counter(0, device=env.device)
+    action_seed_counter = make_seed_counter(int(cfg.seed) + 1_000_003, device=env.device)
+    trainer.reserve_buffers(env.world_count)
+
+    def reset() -> None:
+        env.reset()
+        reset_seed_counter.assign(np.asarray([0], dtype=np.int32))
+        action_seed_counter.assign(np.asarray([int(cfg.seed) + 1_000_003], dtype=np.int32))
+        wp.copy(env.command, fixed_commands)
+        env.observe()
+        trainer.reset_rollout_state()
+        accum.zero_()
+        previous_actions.zero_()
+        has_previous.zero_()
+
+    def step() -> None:
+        actions, _log_probs, _values = trainer.act_reuse_seed_counter(
+            env.obs,
+            seed_counter=action_seed_counter,
+            deterministic=bool(cfg.deterministic),
+        )
+        advance_seed_counter(action_seed_counter, device=env.device)
+        _obs, _rewards, dones = env.step(actions)
+        wp.launch(
+            _g1_gate_diagnostic_accumulate_kernel,
+            dim=env.world_count,
+            inputs=[
+                env.state_0.joint_q,
+                env.state_0.joint_qd,
+                env.current_actions,
+                dones,
+                env.coord_stride,
+                env.dof_stride,
+            ],
+            outputs=[previous_actions, has_previous, accum],
+            device=env.device,
+        )
+        trainer.reset_rollout_state(dones)
+        _reset_g1_done_worlds_device(env, reset_seed_counter, fixed_commands)
+
+    _run_g1_gate_graph_steps(
+        device=env.device,
+        steps=int(cfg.diagnostic_steps),
+        step=step,
+        reset=reset,
+    )
+    totals = np.sum(accum.numpy(), axis=0)
+    falls = int(totals[0])
+    jerk_sum = float(totals[1])
+    jerk_count = int(totals[2])
+    ang_vel_xy_sum = float(totals[3])
+    yaw_rate_sum = float(totals[4])
+    leg_qvel_sum = float(totals[5])
+    valid_samples = int(totals[6])
+    action_jerk = float(np.sqrt(jerk_sum / float(max(jerk_count, 1))))
+    ang_vel_xy = float(np.sqrt(ang_vel_xy_sum / float(max(valid_samples, 1))))
+    yaw_rate = float(np.sqrt(yaw_rate_sum / float(max(valid_samples, 1))))
+    leg_qvel = float(np.sqrt(leg_qvel_sum / float(max(valid_samples * 12, 1))))
+    diagnostic_samples = int(env.world_count) * int(cfg.diagnostic_steps)
+    return falls, diagnostic_samples, action_jerk, ang_vel_xy, yaw_rate, leg_qvel
+
+
+def _evaluate_g1_gate_diagnostics_host(
     trainer: TrainerPPO, env: EnvG1PhoenX, cfg: ConfigEvaluateG1GatePPO
 ) -> tuple[int, int, float, float, float, float]:
     obs = env.reset()

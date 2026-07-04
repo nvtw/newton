@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>4 July 2026 · cross-scene time-to-policy</strong></div>
+      <div class="stamp">Last updated<br><strong>4 July 2026 · CUDA-graph policy gates</strong></div>
     </header>
 
     <section class="hero">
@@ -262,6 +262,18 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED CANDIDATE · GRAPHED QUALITY GATE</span><time>4 Jul</time></div>
+      <h2>Device-side evaluation cuts the full G1 gate to 3.44 seconds</h2>
+      <p>The held-out evaluator previously copied dones, successes, actions, joint positions, and velocities to the CPU on every policy step. The replacement accumulates one deterministic, atom-free metric row per evaluation world and reads back only the final totals.</p>
+      <ul>
+        <li>The complete policy → PhoenX step → metric accumulation → recurrent-state reset → done-world reset sequence runs in alternating CUDA graphs. Alternating graphs preserve state-buffer orientation for both odd and even PhoenX substep counts.</li>
+        <li>The known seed-42 iteration-315 policy still passes with zero falls, <code>battery_perf=0.9259843</code>, action jerk <code>0.15872</code>, roll/pitch angular velocity <code>0.14233</code>, yaw rate <code>0.08617</code>, and leg velocity <code>0.72414</code>. These match the pre-optimization frozen result to reporting precision.</li>
+        <li>Internal full-gate time falls from about <strong>11.22 s to 3.44 s</strong> (3.3× faster). A 100-step cheap screen takes about 0.55 s; full cold-start savings will be established with fresh paired runs rather than projected into the headline metric.</li>
+        <li>Reset seed advancement remains conditional on an actual fall and is performed on-device. Fixed held-out commands are now explicitly restored after a reset, preventing command randomization from silently changing the requested evaluation trajectory.</li>
+        <li>CUDA regressions cover odd-substep graph execution, repeated bit-identical gate metrics, command preservation across a forced fall/reset, and the complete train/checkpoint/reload/gate path. Non-PPO protocol policies and non-graph devices retain the reference evaluator.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">FIXED · DETERMINISTIC RL</span><time>4 Jul</time></div>
       <h2>Fixed-order reductions make seeded PPO reproducible</h2>
