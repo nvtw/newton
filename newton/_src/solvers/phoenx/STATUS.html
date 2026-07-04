@@ -127,7 +127,7 @@
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric">TBD</div><div class="label">cold-start suite baseline</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
-      <div class="card"><div class="metric good">1 / 8</div><div class="label">tasks wired to process-level metric</div></div>
+      <div class="card"><div class="metric good">2 / 8</div><div class="label">tasks wired to process-level metric</div></div>
       <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
@@ -173,7 +173,7 @@
         <li>Pure PhoenX/PhoenX-RL environments now cover Ant, Humanoid, Go2, G1, H1, ANYmal-C, DR Legs hold-pose, and DR Legs walking, without IsaacLab runtime dependencies.</li>
         <li>Reduced, hybrid, and full-coordinate PhoenX are all eligible. Coordinate choice is an experimental variable, not an ideology; physical accuracy, stability, and the task gate decide.</li>
         <li>The retained 923k/s steady-training result and solver profiles remain secondary diagnostics for explaining time-to-policy changes.</li>
-        <li>G1 now has a fresh-process runner with paired train/gate seeds, first-qualification timing, consecutive gate windows, strict JSON records, timeout/crash/miss censoring, and restart-cost uncertainty. The next gap is wiring equivalent frozen gates for the other task families.</li>
+        <li>G1 and ANYmal now run under the fresh-process metric with paired train/gate seeds, consecutive held-out windows, strict JSON records, timeout/crash/miss censoring, and restart-cost uncertainty. The next gap is a structurally different task.</li>
       </ul>
     </article>
 
@@ -209,6 +209,8 @@
         <li>Timeouts, crashes, and quality misses are retained as censored trials and charged the full restart horizon. Zero observed successes produces an explicit infinite-cost state, serialized as strict JSON <code>null</code> plus a flag.</li>
         <li>Nine focused unit tests pass. A CUDA graph-leapfrog smoke completed the full two-window path in a fresh process; a forced 10 ms timeout was correctly censored and charged.</li>
         <li>The smoke's 3.93 s value used trivial two-world/two-iteration gates and is only protocol validation—not a training result. No new performance claim is made yet.</li>
+        <li>ANYmal's existing pure-PhoenX forward curriculum is now a second task adapter. Its final no-reset walking gate is repeated with distinct held-out disturbance seeds, so confirmation windows exercise different physical trajectories.</li>
+        <li>A tiny ANYmal graph-leapfrog smoke trained, checkpointed, reloaded, evaluated, correctly missed the walking gate, and was retained as a 180 s charged failure. This validates failure accounting; it is not a learning result.</li>
       </ul>
     </article>
     <article>

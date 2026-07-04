@@ -135,6 +135,24 @@ class TestTimeToPolicyProtocol(unittest.TestCase):
         self.assertEqual(command[command.index("--required-consecutive-passes") + 1], "2")
         self.assertEqual(command[-2:], ["--world-count", "64"])
 
+    def test_anymal_command_uses_frozen_forward_gate(self):
+        command = _child_command(
+            task="anymal",
+            train_seed=29,
+            gate_seed=2000,
+            required_consecutive_passes=2,
+            result_path=Path("results/anymal.json"),
+            checkpoint_path=Path("unused.npz"),
+            forwarded_args=("--world-count", "128"),
+        )
+
+        self.assertIn("bench_anymal_train_to_gate", " ".join(command))
+        self.assertEqual(command[command.index("--recipe") + 1], "forward")
+        self.assertEqual(command[command.index("--execution-mode") + 1], "graph_leapfrog")
+        self.assertEqual(command[command.index("--seed") + 1], "29")
+        self.assertEqual(command[command.index("--gate-seed") + 1], "2000")
+        self.assertEqual(command[-2:], ["--world-count", "128"])
+
 
 if __name__ == "__main__":
     unittest.main()
