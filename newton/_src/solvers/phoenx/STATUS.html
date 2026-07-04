@@ -185,7 +185,11 @@
       <ul>
         <li><strong>Primary deployment clock:</strong> a normal ready installation with its persistent Warp kernel cache in the declared state. A cleared-JIT-cache first-install clock is reported separately so compiler noise cannot hide training improvements.</li>
         <li><strong>Success:</strong> task-specific thresholds are frozen before an optimization run, evaluated on held-out randomized commands/initial states, and must pass in consecutive evaluation windows. Failed runs are not dropped.</li>
-        <li><strong>Robustness:</strong> use multiple seeds for finalists; report median time, success rate, and tail/failure behavior. A fast lucky seed is not a win.</li>
+        <li><strong>Expectation value:</strong> time-to-policy is a random variable. The primary estimate is expected wall-clock cost to success under a frozen restart cutoff <code>H</code>: successful-run time plus <code>H × (1−p)/p</code>, where <code>p</code> is success probability by <code>H</code>. Also report median, survival curve, confidence interval, and raw seed outcomes.</li>
+        <li><strong>Censoring:</strong> timed-out and failed runs are retained. They are not assigned the mean of successful runs; the restart-cost estimate explicitly penalizes unreliability. A configuration with no successes by <code>H</code> is unresolved/dominated, not silently excluded.</li>
+        <li><strong>Sequential judgment:</strong> one run may reject only a correctness failure or overwhelming regression. Ordinary candidates get paired seeds and adaptive racing; uncertain results receive more runs. Finalists use enough independent seeds to estimate expected cost and uncertainty.</li>
+        <li><strong>Seed protocol:</strong> vary seeds for policy initialization, environment/reset randomization, command sampling, and learner ordering. Compare candidates on the same paired development seed bank, then confirm on a separate unseen seed bank. Because PhoenX/PhoenX-RL is deterministic per seed, every trial is exactly reproducible and seed effects are not confused with runtime noise.</li>
+        <li><strong>Evaluation budget:</strong> frequent cheap screening evaluations trigger the full held-out gate only when promising. Both screening and confirmation time count, and stopping rules are frozen to avoid cherry-picking.</li>
         <li><strong>Generalization:</strong> development uses a rotating subset of the eight task families; promotion requires locomotion diversity and a held-out task. No robot-name solver specializations.</li>
         <li><strong>Allowed levers:</strong> timestep/substeps, full or reduced coordinates, contact/solver schedules, PPO variants, curricula, recurrent/feed-forward policies, mixed precision, PBT, and overlap. All consumed wall time and GPU work count.</li>
         <li><strong>Hard gates:</strong> physically defensible simulation, stable contacts/joints, no reward exploitation of stale or degraded physics, CUDA graph support for measured paths, and versatile reusable RL code.</li>
@@ -277,8 +281,8 @@
       <div>
         <h2>Mission and non-negotiables</h2>
         <ul>
-          <li><strong>Main quest:</strong> minimize median cold-start wall-clock time to a passing policy with PhoenX + PhoenX RL.</li>
-          <li>Count the whole process and every population/evaluation cost. Record failed and timed-out seeds.</li>
+          <li><strong>Main quest:</strong> minimize expected cold-start wall-clock cost to a passing policy with PhoenX + PhoenX RL under a frozen restart policy.</li>
+          <li>Count the whole process and every population/evaluation cost. Estimate a distribution over varied, logged seeds—not one lucky runtime—and retain failed/censored seeds.</li>
           <li>Keep physics clean and physically grounded. Larger timesteps and full coordinates are welcome only when policy and physical-quality gates pass.</li>
           <li>Do not overfit G1. Use the pure-PhoenX Ant, Humanoid, Go2, G1, H1, ANYmal-C, and DR Legs tasks as a rotating development/held-out suite.</li>
           <li>Measured solver/RL paths must retain CUDA graph support. Reusable RL improvements must not be task-specific hacks.</li>
@@ -288,11 +292,11 @@
         <h2>How to continue</h2>
         <ul>
           <li>First implement the unified time-to-policy protocol and establish honest baselines; do not infer convergence time from SPS or sample count alone.</li>
-          <li>Use cheap learning-curve checkpoints for iteration, then multiple seeds and held-out evaluations for survivors.</li>
+          <li>Use paired seeds, cheap learning-curve checkpoints, and sequential racing for iteration. Do not reject an ordinary candidate from one bad run; spend additional seeds when the expected-cost comparison remains uncertain.</li>
           <li>Optimize solver, collision, environment, policy, learner, curriculum, precision, and overlap jointly. PBT is allowed, but its full wall time counts.</li>
-          <li>Track supporting diagnostics: samples/s, physics steps/s, sample count to gate, evaluation trajectory quality, timestep, GPU memory, and compilation/setup time.</li>
+          <li>Track supporting diagnostics: paired development seed, held-out evaluation seed bank, samples/s, physics steps/s, sample count to gate, evaluation quality, timestep, GPU memory, and compilation/setup time.</li>
           <li>Keep this page compact and newest-first, update it whenever the decision state changes, and open it in Chrome after every update.</li>
-          <li><strong>Immediate next step:</strong> freeze initial G1, quadruped, and non-humanoid/non-quadruped task gates; add a process-level runner that stops at the first consecutive passing held-out evaluations.</li>
+          <li><strong>Immediate next step:</strong> freeze task gates, restart cutoffs, evaluation cadence, and sequential stopping rules; add a runner that records censored trials and estimates expected restart cost with uncertainty.</li>
         </ul>
       </div>
     </section>
