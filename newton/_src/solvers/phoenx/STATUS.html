@@ -139,7 +139,7 @@
       <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
-    <p class="profile-note">The first three deterministic paired G1 outcomes contain one success and two frozen early rejections. Their plug-in restart cost is 459.30 s; three trials still leave success probability and expected cost highly uncertain, so this is an initial baseline rather than a stable ranking.</p>
+    <p class="profile-note">The first three deterministic paired G1 outcomes contain one success and two frozen early rejections. Their post-optimization plug-in restart cost is 436.57 s; three trials still leave success probability and expected cost highly uncertain, so this is an initial baseline rather than a stable ranking.</p>
 
     <div class="section-label">Zero to qualified policy</div>
     <section class="work-profile" aria-label="Cold-start time to policy across training scenes">
@@ -153,9 +153,9 @@
           <tbody>
             <tr>
               <td>G1 · PhoenX</td>
-              <td class="number good">231.37 s</td>
-              <td class="number">459.30 s preliminary</td>
-              <td>1/3 paired seeds pass. Two attempts are rejected at iteration 150 in 113.95 / 113.98 s. Full success requires two consecutive held-out gates with zero falls.</td>
+              <td class="number good">211.95 s</td>
+              <td class="number">436.57 s preliminary</td>
+              <td>1/3 paired seeds pass. Two attempts are rejected at iteration 150 in 112.54 / 112.07 s. Full success requires two consecutive held-out gates with zero falls.</td>
             </tr>
             <tr>
               <td>ANYmal-C · PhoenX</td>
@@ -193,7 +193,7 @@
           </tbody>
         </table>
       </div>
-      <p class="profile-note">nanoG1 source: <a href="https://github.com/kingjulio8238/nanoG1">project README</a>, which states 58.9 s / about 59 s from scratch. The PhoenX expected value is the plug-in estimate from only three paired seeds and must be tightened with more trials.</p>
+      <p class="profile-note">nanoG1 source: <a href="https://github.com/kingjulio8238/nanoG1">project README</a>, which states 58.9 s / about 59 s from scratch. The PhoenX expected value is the post-optimization plug-in estimate from only three paired seeds and must be tightened with more trials.</p>
     </section>
 
     <div class="section-label">Steady-training GPU work profile</div>
@@ -269,7 +269,8 @@
       <ul>
         <li>The complete policy → PhoenX step → metric accumulation → recurrent-state reset → done-world reset sequence runs in alternating CUDA graphs. Alternating graphs preserve state-buffer orientation for both odd and even PhoenX substep counts.</li>
         <li>The known seed-42 iteration-315 policy still passes with zero falls, <code>battery_perf=0.9259843</code>, action jerk <code>0.15872</code>, roll/pitch angular velocity <code>0.14233</code>, yaw rate <code>0.08617</code>, and leg velocity <code>0.72414</code>. These match the pre-optimization frozen result to reporting precision.</li>
-        <li>Internal full-gate time falls from about <strong>11.22 s to 3.44 s</strong> (3.3× faster). A 100-step cheap screen takes about 0.55 s; full cold-start savings will be established with fresh paired runs rather than projected into the headline metric.</li>
+        <li>Internal full-gate time falls from about <strong>11.22 s to 3.44 s</strong> (3.3× faster). In the fresh passing run, two confirmation gates total 6.76 s and all cheap screens total 4.17 s, versus 22.44 s and 7.49 s previously.</li>
+        <li><strong>Fresh three-seed result:</strong> the successful cold process falls from 231.37 s to 211.95 s (−8.4%). Failed attempts stop at 112.54 / 112.07 s, and the same 1/3 success rate gives 436.57 s preliminary expected time-to-policy, down from 459.30 s (−5.0%).</li>
         <li>Reset seed advancement remains conditional on an actual fall and is performed on-device. Fixed held-out commands are now explicitly restored after a reset, preventing command randomization from silently changing the requested evaluation trajectory.</li>
         <li>CUDA regressions cover odd-substep graph execution, repeated bit-identical gate metrics, command preservation across a forced fall/reset, and the complete train/checkpoint/reload/gate path. Non-PPO protocol policies and non-graph devices retain the reference evaluator.</li>
       </ul>
@@ -289,7 +290,7 @@
         <li><strong>First valid cold success:</strong> deterministic train seed 42 / gate seed 1000 qualifies after 315 iterations (165.15M samples) in 231.37 s fresh-process wall time. The child records 197.95 s training, 7.49 s screening, and 22.44 s full-gate time.</li>
         <li>Full gates at iterations 290 and 315 both pass with zero falls and battery performance 0.9261 / 0.9260. Action jerk, roll/pitch angular velocity, yaw rate, and leg velocity all remain comfortably within the frozen limits.</li>
         <li><strong>Frozen early restart:</strong> a one-shot held-out screen at 78.64M samples rejects runs below 0.80 battery performance. Seed 11 scores 0.7581 and stops in 113.95 s; unseen seed 29 also rejects in 113.98 s. Seed 42 was already at 0.8456 and continues to its pass, so the rule does not alter the known success. A diagnostic continuation of seed 29 from the saved iteration-150 checkpoint through iteration 325 still misses (peak screen 0.8722, final 0.8681), confirming this held-out rejection was not a late-learning false negative.</li>
-        <li><strong>Preliminary expectation:</strong> one success in three paired trials gives empirical <code>p=1/3</code>, three expected attempts, and 459.30 s expected restart cost. This is 22% below the earlier 591.37 s two-trial/full-cutoff estimate, but uncertainty remains very large and the early rule needs more unseen-seed validation.</li>
+        <li><strong>Preliminary expectation:</strong> one success in three paired trials gives empirical <code>p=1/3</code> and three expected attempts. After graphing the held-out evaluator, fresh paired reruns measure 436.57 s expected restart cost. This is 26% below the earlier 591.37 s two-trial/full-cutoff estimate, but uncertainty remains very large and the early rule needs more unseen-seed validation.</li>
         <li><strong>Next:</strong> improve recipe reliability without seed-specific tuning, then race candidates on the same paired bank and confirm on unseen seeds. Full gate thresholds remain frozen.</li>
       </ul>
     </article>
