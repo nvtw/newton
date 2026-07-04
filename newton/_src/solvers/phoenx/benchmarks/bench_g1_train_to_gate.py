@@ -179,6 +179,12 @@ def _screen_promising(stats: rl.StatsEvaluateG1GatePPO, args: argparse.Namespace
     return stats.battery_falls <= int(args.max_battery_falls) and stats.battery_perf >= trigger_perf
 
 
+def _screen_rejects_early(stats: rl.StatsEvaluateG1GatePPO, args: argparse.Namespace) -> bool:
+    return stats.battery_falls > int(args.max_battery_falls) or stats.battery_perf < float(
+        args.early_reject_min_battery_perf
+    )
+
+
 def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     device = wp.get_device(args.device)
 
@@ -209,6 +215,8 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     checkpoint_template = args.checkpoint_path or "/tmp/phoenx_g1_gate_{iteration}.npz"
     env_config = _make_env_config(args)
     ppo_config = _make_ppo_config(args)
+    if args.early_reject_samples < 0:
+        raise ValueError("early_reject_samples must be non-negative")
     command_curriculum_start = float(getattr(args, "command_curriculum_start", g1_recipe.COMMAND_CURRICULUM_START))
     command_curriculum_samples = int(getattr(args, "command_curriculum_samples", g1_recipe.COMMAND_CURRICULUM_SAMPLES))
     angular_fine_tune_start_samples = int(args.angular_fine_tune_start_samples)
@@ -240,6 +248,11 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     first_pass: dict[str, Any] | None = None
     live_result: rl.ResultTrainG1PPO | None = None
     pass_streak = 0
+    early_rejection_checked = (
+        bool(args.no_screening) or args.early_reject_samples <= 0 or start_samples >= args.early_reject_samples
+    )
+    early_stopped = False
+    early_stop: dict[str, Any] | None = None
     total_t0 = time.perf_counter()
 
     if bool(args.evaluate_only):
@@ -365,16 +378,22 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
             screen_seconds += elapsed_screen
             gate_seconds += elapsed_screen
             promising = _screen_promising(screen_result.stats, args)
-            screen_history.append(
-                {
-                    "iteration": int(completed_iterations),
-                    "samples": int(samples),
-                    "checkpoint": str(checkpoint_path),
-                    "stats": asdict(screen_result.stats),
-                    "promoted": promising,
-                    "total_wall_seconds": float(time.perf_counter() - total_t0),
-                }
-            )
+            screen_entry = {
+                "iteration": int(completed_iterations),
+                "samples": int(samples),
+                "checkpoint": str(checkpoint_path),
+                "stats": asdict(screen_result.stats),
+                "promoted": promising,
+                "total_wall_seconds": float(time.perf_counter() - total_t0),
+            }
+            screen_history.append(screen_entry)
+            if not early_rejection_checked and samples >= int(args.early_reject_samples):
+                early_rejection_checked = True
+                screen_entry["early_reject_checked"] = True
+                if _screen_rejects_early(screen_result.stats, args):
+                    early_stopped = True
+                    early_stop = screen_entry
+                    break
             if not promising:
                 pass_streak = 0
                 continue
@@ -497,6 +516,10 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "max_iterations": int(args.max_iterations),
         "chunk_iterations": int(args.chunk_iterations),
         "reset_env_between_chunks": bool(args.reset_env_between_chunks),
+        "early_reject_samples": int(args.early_reject_samples),
+        "early_reject_min_battery_perf": float(args.early_reject_min_battery_perf),
+        "early_stopped": bool(early_stopped),
+        "early_stop": early_stop,
         "start_iterations": int(start_iterations),
         "completed_iterations": int(completed_iterations),
         "start_samples": int(start_samples),
@@ -530,7 +553,10 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "phoenx_train_sps_over_nanog1": train_sps / _NANOG1_WALK_SPS,
     }
     if args.fail_on_miss and not pass_gate:
-        result["error"] = "quality gate was not reached within max_iterations"
+        if early_stopped:
+            result["error"] = "frozen early-restart screen rejected the attempt"
+        else:
+            result["error"] = "quality gate was not reached within max_iterations"
     return result
 
 
@@ -746,6 +772,18 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--evaluate-only", action="store_true")
     parser.add_argument("--checkpoint-path", default=None)
+    parser.add_argument(
+        "--early-reject-samples",
+        type=int,
+        default=150 * g1_recipe.WORLD_COUNT * g1_recipe.ROLLOUT_STEPS,
+        help="Apply the frozen early-restart screen once at or after this many environment samples; 0 disables it.",
+    )
+    parser.add_argument(
+        "--early-reject-min-battery-perf",
+        type=float,
+        default=0.80,
+        help="Restart an attempt whose one-shot early screen is below this tracking score.",
+    )
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)
     parser.add_argument("--battery-steps", type=int, default=1000)

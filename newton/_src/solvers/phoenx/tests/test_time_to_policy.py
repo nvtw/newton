@@ -20,7 +20,11 @@ from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate impo
 from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
     check_gate as check_dr_legs_gate,
 )
-from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import _screen_promising, _updated_pass_streak
+from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
+    _screen_promising,
+    _screen_rejects_early,
+    _updated_pass_streak,
+)
 from newton._src.solvers.phoenx.benchmarks.bench_time_to_policy import (
     TrialOutcome,
     _child_command,
@@ -36,20 +40,24 @@ def _trial(
     *,
     passed: bool,
     censored: bool | None = None,
+    failure_charge: float = 100.0,
+    early_stopped: bool = False,
 ) -> TrialOutcome:
+    is_censored = not passed if censored is None else censored
     return TrialOutcome(
         task="g1",
         trial_index=index,
         train_seed=10 + index,
         gate_seed=100 + index,
         process_wall_seconds=seconds,
-        charged_seconds=seconds if passed else 100.0,
+        charged_seconds=seconds if passed and not is_censored else failure_charge,
         pass_gate=passed,
-        censored=not passed if censored is None else censored,
+        censored=is_censored,
         timed_out=False,
         return_code=0,
         result_path=f"trial_{index}.json",
         log_path=f"trial_{index}.log",
+        early_stopped=early_stopped,
     )
 
 
@@ -80,6 +88,20 @@ class TestTimeToPolicyStatistics(unittest.TestCase):
         self.assertEqual(summary["mean_success_seconds"], 30.0)
         self.assertEqual(summary["expected_seconds_to_success"], 130.0)
         self.assertEqual(summary["mean_charged_attempt_seconds"], 65.0)
+
+    def test_early_restarts_use_observed_failure_cost(self):
+        summary = summarize_trials(
+            [
+                _trial(0, 20.0, passed=True),
+                _trial(1, 40.0, passed=False, failure_charge=40.0, early_stopped=True),
+            ],
+            100.0,
+            bootstrap_samples=0,
+        )
+
+        self.assertEqual(summary["early_stopped_count"], 1)
+        self.assertEqual(summary["mean_failure_seconds"], 40.0)
+        self.assertEqual(summary["expected_seconds_to_success"], 60.0)
 
     def test_zero_successes_report_infinite_expected_cost(self):
         summary = summarize_trials([_trial(0, 100.0, passed=False)], 100.0, bootstrap_samples=8)
@@ -136,6 +158,13 @@ class TestTimeToPolicyProtocol(unittest.TestCase):
         self.assertFalse(_screen_promising(SimpleNamespace(battery_perf=0.90, battery_falls=2), args))
         args.min_battery_perf = -1.0
         self.assertTrue(_screen_promising(SimpleNamespace(battery_perf=0.0, battery_falls=0), args))
+
+    def test_early_g1_screen_rejects_only_frozen_failures(self):
+        args = SimpleNamespace(early_reject_min_battery_perf=0.80, max_battery_falls=1)
+
+        self.assertTrue(_screen_rejects_early(SimpleNamespace(battery_perf=0.79, battery_falls=0), args))
+        self.assertFalse(_screen_rejects_early(SimpleNamespace(battery_perf=0.81, battery_falls=1), args))
+        self.assertTrue(_screen_rejects_early(SimpleNamespace(battery_perf=0.90, battery_falls=2), args))
 
     def test_runner_owns_seed_and_output_arguments(self):
         for option in ("--seed", "--seed=12", "--json-output", "--required-consecutive-passes=3"):

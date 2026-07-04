@@ -5698,6 +5698,8 @@ class TestG1PhoenXRL(unittest.TestCase):
                 seeds_per_command=1,
                 diagnostic_steps=1,
                 no_screening=True,
+                early_reject_samples=0,
+                early_reject_min_battery_perf=0.80,
                 diagnostic_world_count=1,
                 stochastic_gate=False,
                 gate_seed=41,
@@ -5790,6 +5792,17 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(len(eval_result["gate_history"]), 1)
             self.assertGreater(result["train_env_samples_per_s"], 0.0)
             self.assertTrue(math.isfinite(result["gate_history"][0]["stats"]["battery_perf"]))
+
+            early_args = argparse.Namespace(**vars(args))
+            early_args.no_screening = False
+            early_args.early_reject_samples = 2
+            early_args.early_reject_min_battery_perf = 2.0
+            early_args.checkpoint_path = f"{tmpdir}/early_{{iteration:06d}}.npz"
+            early_result = benchmark_train_to_gate(early_args)
+            self.assertTrue(early_result["early_stopped"])
+            self.assertEqual(early_result["early_stop"]["iteration"], 2)
+            self.assertEqual(len(early_result["screen_history"]), 1)
+            self.assertEqual(len(early_result["gate_history"]), 0)
 
 
 if __name__ == "__main__":

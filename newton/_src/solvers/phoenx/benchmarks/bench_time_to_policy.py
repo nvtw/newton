@@ -4,9 +4,11 @@
 """Measure expected cold-process time to a qualified PhoenX policy.
 
 Each trial starts the task benchmark in a fresh process, varies the training
-seed, evaluates a frozen held-out seed bank, and charges misses, crashes, and
-timeouts the complete restart cutoff. The primary estimate is the expected
-wall time under that frozen restart policy, not successful-run throughput.
+seed, and evaluates a frozen held-out seed bank. A child-declared, predeclared
+early rejection is charged its observed process time; other misses, crashes,
+and timeouts are charged the complete restart cutoff. The primary estimate is
+the expected wall time under that frozen restart policy, not successful-run
+throughput.
 
 The task-specific arguments after ``--`` are forwarded to the child benchmark::
 
@@ -65,40 +67,40 @@ class TrialOutcome:
     return_code: int | None
     result_path: str
     log_path: str
+    early_stopped: bool = False
     error: str | None = None
 
 
 def _restart_expectation(trials: Sequence[TrialOutcome], cutoff_seconds: float) -> dict[str, Any]:
-    """Estimate expected time until success under fixed-cutoff restarts."""
+    """Estimate expected time until success under the frozen restart policy."""
     if not trials:
         raise ValueError("at least one trial is required")
     if not math.isfinite(cutoff_seconds) or cutoff_seconds <= 0.0:
         raise ValueError("cutoff_seconds must be finite and positive")
 
+    is_successful = [
+        trial.pass_gate and not trial.censored and trial.process_wall_seconds <= cutoff_seconds for trial in trials
+    ]
     successful_times = [
-        trial.process_wall_seconds
-        for trial in trials
-        if trial.pass_gate and not trial.censored and trial.process_wall_seconds <= cutoff_seconds
+        trial.process_wall_seconds for trial, success in zip(trials, is_successful, strict=True) if success
+    ]
+    failed_charges = [
+        trial.charged_seconds for trial, success in zip(trials, is_successful, strict=True) if not success
     ]
     trial_count = len(trials)
     success_count = len(successful_times)
     success_probability = success_count / trial_count
     mean_success_seconds = None if not successful_times else sum(successful_times) / success_count
-    expected_seconds = (
-        math.inf
-        if mean_success_seconds is None
-        else mean_success_seconds + cutoff_seconds * (1.0 - success_probability) / success_probability
-    )
-    mean_charged_seconds = (
-        sum(
-            trial.process_wall_seconds if is_successful else cutoff_seconds
-            for trial, is_successful in (
-                (item, item.pass_gate and not item.censored and item.process_wall_seconds <= cutoff_seconds)
-                for item in trials
-            )
+    mean_failure_seconds = None if not failed_charges else sum(failed_charges) / len(failed_charges)
+    if mean_success_seconds is None:
+        expected_seconds = math.inf
+    elif mean_failure_seconds is None:
+        expected_seconds = mean_success_seconds
+    else:
+        expected_seconds = mean_success_seconds + mean_failure_seconds * (
+            (1.0 - success_probability) / success_probability
         )
-        / trial_count
-    )
+    mean_charged_seconds = sum(trial.charged_seconds for trial in trials) / trial_count
 
     # Wilson interval stays meaningful for the small adaptive-racing samples.
     z = 1.959963984540054
@@ -118,9 +120,11 @@ def _restart_expectation(trials: Sequence[TrialOutcome], cutoff_seconds: float) 
         "success_probability": success_probability,
         "success_probability_wilson95": [max(0.0, center - radius), min(1.0, center + radius)],
         "mean_success_seconds": mean_success_seconds,
+        "early_stopped_count": sum(trial.early_stopped for trial in trials),
         "mean_charged_attempt_seconds": mean_charged_seconds,
         "expected_attempts_to_success": math.inf if success_count == 0 else 1.0 / success_probability,
         "expected_seconds_to_success": expected_seconds,
+        "mean_failure_seconds": mean_failure_seconds,
         "expected_cost_is_infinite": math.isinf(expected_seconds),
         "restart_cutoff_seconds": cutoff_seconds,
     }
@@ -327,7 +331,9 @@ def _run_trial(
         error = "child process produced no result"
 
     pass_gate = bool(child_result.get("pass_gate", False)) and not timed_out and return_code == 0
+    early_stopped = bool(child_result.get("early_stopped", False)) and not pass_gate and not timed_out
     censored = not pass_gate
+    charged_seconds = process_seconds if pass_gate or early_stopped else cutoff_seconds
     if return_code not in (None, 0) and error is None:
         error = str(child_result.get("error", f"child exited with status {return_code}"))
     return TrialOutcome(
@@ -336,7 +342,7 @@ def _run_trial(
         train_seed=train_seed,
         gate_seed=gate_seed,
         process_wall_seconds=process_seconds,
-        charged_seconds=process_seconds if pass_gate else cutoff_seconds,
+        charged_seconds=charged_seconds,
         pass_gate=pass_gate,
         censored=censored,
         timed_out=timed_out,
@@ -344,6 +350,7 @@ def _run_trial(
         result_path=str(result_path),
         log_path=str(log_path),
         error=error,
+        early_stopped=early_stopped,
     )
 
 
@@ -389,11 +396,12 @@ def main() -> int:
         )
         trials.append(trial)
         payload = {
-            "schema": "phoenx_time_to_policy_v1",
+            "schema": "phoenx_time_to_policy_v2",
             "task": args.task,
             "restart_policy": {
                 "cutoff_seconds": args.restart_cutoff_seconds,
                 "required_consecutive_passes": args.required_consecutive_passes,
+                "failure_charging": "observed wall time for child-declared early rejection; cutoff otherwise",
             },
             "seed_protocol": {
                 "train_seeds": list(args.train_seeds),

@@ -74,6 +74,14 @@
     .work-item strong { display: block; color: var(--ink); font-size: .94rem; }
     .work-item i { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; }
     .profile-note { margin-top: 12px; color: var(--muted); font-size: .78rem; }
+    .ttp-table-wrap { overflow-x: auto; margin-top: 14px; border: 1px solid var(--line); border-radius: 14px; }
+    .ttp-table { width: 100%; border-collapse: collapse; min-width: 800px; background: rgba(255, 255, 255, .7); }
+    .ttp-table th, .ttp-table td { padding: 13px 15px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .ttp-table th { color: var(--muted); background: #f8faff; font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+    .ttp-table tr:last-child td { border-bottom: 0; }
+    .ttp-table td:first-child { font-weight: 760; white-space: nowrap; }
+    .ttp-table .number { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .ttp-table .pending { color: var(--muted); }
     .good { color: var(--green); }
     .section-label { margin: 30px 3px 9px; color: var(--muted); font-size: .75rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
     article { padding: 22px 23px; border-radius: 18px; margin-top: 12px; }
@@ -116,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>4 July 2026 · deterministic time-to-policy</strong></div>
+      <div class="stamp">Last updated<br><strong>4 July 2026 · cross-scene time-to-policy</strong></div>
     </header>
 
     <section class="hero">
@@ -125,13 +133,68 @@
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric">1 / 2</div><div class="label">paired G1 cold trials passing</div></div>
+      <div class="card"><div class="metric">1 / 3</div><div class="label">paired G1 cold trials passing</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
       <div class="card"><div class="metric good">3 / 8</div><div class="label">tasks wired to process-level metric</div></div>
       <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
-    <p class="profile-note">The first repaired paired outcomes are one success and one censored miss. Their plug-in restart cost is 591.37 s, but two trials leave success probability and expected cost highly uncertain; this is an initial baseline, not a stable ranking.</p>
+    <p class="profile-note">The first three deterministic paired G1 outcomes contain one success and two frozen early rejections. Their plug-in restart cost is 459.30 s; three trials still leave success probability and expected cost highly uncertain, so this is an initial baseline rather than a stable ranking.</p>
+
+    <div class="section-label">Zero to qualified policy</div>
+    <section class="work-profile" aria-label="Cold-start time to policy across training scenes">
+      <h2>Cross-scene wall-clock scorecard</h2>
+      <p>Times include fresh-process startup, normal cached compilation/loading, CUDA graph capture, training, screening, and held-out evaluation. A number is shown as authoritative only when the policy passes that scene's frozen quality gate.</p>
+      <div class="ttp-table-wrap">
+        <table class="ttp-table">
+          <thead>
+            <tr><th>Scene</th><th>Passing cold run</th><th>Expected time under restart policy</th><th>Evidence / next measurement</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>G1 · PhoenX</td>
+              <td class="number good">231.37 s</td>
+              <td class="number">459.30 s preliminary</td>
+              <td>1/3 paired seeds pass. Two attempts are rejected at iteration 150 in 113.95 / 113.98 s. Full success requires two consecutive held-out gates with zero falls.</td>
+            </tr>
+            <tr>
+              <td>ANYmal-C · PhoenX</td>
+              <td class="pending">No qualified policy yet</td>
+              <td class="pending">Unresolved</td>
+              <td>Fresh-process runner and held-out disturbance gate work. The 180 s smoke is a charged protocol miss, not a training baseline.</td>
+            </tr>
+            <tr>
+              <td>DR Legs hold · PhoenX</td>
+              <td class="pending">No qualified policy yet</td>
+              <td class="pending">Unresolved</td>
+              <td>Fresh-process runner and closed-linkage physical gate work. A 50-update diagnostic improves survival but does not pass.</td>
+            </tr>
+            <tr>
+              <td>Ant · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>
+            </tr>
+            <tr>
+              <td>Humanoid · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>
+            </tr>
+            <tr>
+              <td>Go2 · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>
+            </tr>
+            <tr>
+              <td>H1 · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>
+            </tr>
+            <tr>
+              <td>DR Legs walk · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>
+            </tr>
+            <tr>
+              <td>G1 · nanoG1 claim</td>
+              <td class="number">58.9 s</td>
+              <td class="pending">Not reported as a varied-seed expectation</td>
+              <td>Published claim: 75M samples at 1.28M samples/s on one RTX PRO 6000. Its “walk” criterion is not yet matched to our stricter held-out two-window physical gate, so this is a target—not an apples-to-apples result.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="profile-note">nanoG1 source: <a href="https://github.com/kingjulio8238/nanoG1">project README</a>, which states 58.9 s / about 59 s from scratch. The PhoenX expected value is the plug-in estimate from only three paired seeds and must be tightened with more trials.</p>
+    </section>
 
     <div class="section-label">Steady-training GPU work profile</div>
     <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
@@ -185,7 +248,7 @@
       <ul>
         <li><strong>Primary deployment clock:</strong> a normal ready installation with its persistent Warp kernel cache in the declared state. A cleared-JIT-cache first-install clock is reported separately so compiler noise cannot hide training improvements.</li>
         <li><strong>Success:</strong> task-specific thresholds are frozen before an optimization run, evaluated on held-out randomized commands/initial states, and must pass in consecutive evaluation windows. Failed runs are not dropped.</li>
-        <li><strong>Expectation value:</strong> time-to-policy is a random variable. The primary estimate is expected wall-clock cost to success under a frozen restart cutoff <code>H</code>: successful-run time plus <code>H × (1−p)/p</code>, where <code>p</code> is success probability by <code>H</code>. Also report median, survival curve, confidence interval, and raw seed outcomes.</li>
+        <li><strong>Expectation value:</strong> time-to-policy is a random variable. The primary estimate is expected wall-clock cost to success under a frozen restart policy: mean successful-run time plus mean charged failure time × <code>(1−p)/p</code>, where <code>p</code> is success probability. A predeclared early rejection is charged its observed time; crashes, timeouts, and ordinary misses are conservatively charged the full cutoff <code>H</code>. Also report uncertainty and raw seed outcomes.</li>
         <li><strong>Censoring:</strong> timed-out and failed runs are retained. They are not assigned the mean of successful runs; the restart-cost estimate explicitly penalizes unreliability. A configuration with no successes by <code>H</code> is unresolved/dominated, not silently excluded.</li>
         <li><strong>Sequential judgment:</strong> one run may reject only a correctness failure or overwhelming regression. Ordinary candidates get paired seeds and adaptive racing; uncertain results receive more runs. Finalists use enough independent seeds to estimate expected cost and uncertainty.</li>
         <li><strong>Seed protocol:</strong> vary seeds for policy initialization, environment/reset randomization, command sampling, and learner ordering. Compare candidates on the same paired development seed bank, then confirm on a separate unseen seed bank. Because PhoenX/PhoenX-RL is deterministic per seed, every trial is exactly reproducible and seed effects are not confused with runtime noise.</li>
@@ -213,8 +276,8 @@
         <li>Live continuation originally overwrote runtime environment flags and disabled episode command randomization after the first chunk. It now changes only the intended phase fields; the CUDA smoke asserts that randomization survives the transition.</li>
         <li><strong>First valid cold success:</strong> deterministic train seed 42 / gate seed 1000 qualifies after 315 iterations (165.15M samples) in 231.37 s fresh-process wall time. The child records 197.95 s training, 7.49 s screening, and 22.44 s full-gate time.</li>
         <li>Full gates at iterations 290 and 315 both pass with zero falls and battery performance 0.9261 / 0.9260. Action jerk, roll/pitch angular velocity, yaw rate, and leg velocity all remain comfortably within the frozen limits.</li>
-        <li><strong>Second paired outcome:</strong> train seed 11 / gate seed 2000 completes all 325 iterations in 216.29 s process wall time but misses. Its screen peaks at 0.8477 with zero falls, so it is censored and charged the full 360 s restart horizon.</li>
-        <li><strong>Preliminary expectation:</strong> one success in two trials gives empirical <code>p=0.5</code>, two expected attempts, and 591.37 s expected restart cost. The 95% Wilson interval for <code>p</code> is roughly 0.095–0.905, and bootstrap cost remains unbounded with this tiny sample.</li>
+        <li><strong>Frozen early restart:</strong> a one-shot held-out screen at 78.64M samples rejects runs below 0.80 battery performance. Seed 11 scores 0.7581 and stops in 113.95 s; unseen seed 29 also rejects in 113.98 s. Seed 42 was already at 0.8456 and continues to its pass, so the rule does not alter the known success.</li>
+        <li><strong>Preliminary expectation:</strong> one success in three paired trials gives empirical <code>p=1/3</code>, three expected attempts, and 459.30 s expected restart cost. This is 22% below the earlier 591.37 s two-trial/full-cutoff estimate, but uncertainty remains very large and the early rule needs more unseen-seed validation.</li>
         <li><strong>Next:</strong> improve recipe reliability without seed-specific tuning, then race candidates on the same paired bank and confirm on unseen seeds. Full gate thresholds remain frozen.</li>
       </ul>
     </article>
@@ -226,8 +289,8 @@
       <ul>
         <li>Training seeds and held-out gate seeds are recorded separately and paired in a frozen order. Candidate comparisons can reuse the same banks; final confirmation can use an unseen bank.</li>
         <li>Qualification can require multiple successive held-out windows. A failure resets the streak, and the child stops only when the configured streak is complete.</li>
-        <li>Timeouts, crashes, and quality misses are retained as censored trials and charged the full restart horizon. Zero observed successes produces an explicit infinite-cost state, serialized as strict JSON <code>null</code> plus a flag.</li>
-        <li>Nineteen focused protocol, optimizer, determinism, and CUDA-graph tests pass. A forced 10 ms timeout is correctly censored and charged.</li>
+        <li>Timeouts, crashes, and ordinary quality misses are retained as censored trials and charged the full restart horizon. A child-declared predeclared early rejection is charged its observed wall time. Zero observed successes produces an explicit infinite-cost state, serialized as strict JSON <code>null</code> plus a flag.</li>
+        <li>Twenty focused protocol, optimizer, determinism, and CUDA-graph tests pass. A forced 10 ms timeout is correctly censored and charged.</li>
         <li>The smoke's 3.93 s value used trivial two-world/two-iteration gates and is only protocol validation—not a training result. No new performance claim is made yet.</li>
         <li>ANYmal's existing pure-PhoenX forward curriculum is now a second task adapter. Its final no-reset walking gate is repeated with distinct held-out disturbance seeds, so confirmation windows exercise different physical trajectories.</li>
         <li>A tiny ANYmal graph-leapfrog smoke trained, checkpointed, reloaded, evaluated, correctly missed the walking gate, and was retained as a 180 s charged failure. This validates failure accounting; it is not a learning result.</li>
