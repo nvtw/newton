@@ -116,22 +116,22 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>3 July 2026 · sparse fused split rejected</strong></div>
+      <div class="stamp">Last updated<br><strong>4 July 2026 · time-to-policy objective</strong></div>
     </header>
 
     <section class="hero">
       <strong>Primary goal</strong>
-      <p>Deliver a genuinely needle-moving PhoenX RL architecture: a contact-inclusive persistent reduced-articulation megakernel that eliminates global contact-row materialization and intermediate publication across biased solve, dynamics, relaxation, and final publish. The established reference path remains the safe fallback; physical accuracy, arbitrary contact counts, CUDA graph capture, and cross-robot performance remain hard gates.</p>
+      <p>Minimize wall-clock time from a zero-training process start to the first policy that passes a predeclared held-out quality gate, using only PhoenX physics and PhoenX RL. Solver speed, timestep size, stability, sample efficiency, curricula, population methods, and learner throughput are jointly optimized—but every cost is counted and every survivor must generalize across diverse tasks.</p>
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric">0%</div><div class="label">confirmed path-Schur training gain</div></div>
-      <div class="card"><div class="metric good">923k/s</div><div class="label">retained persistent graph-leapfrog training</div></div>
-      <div class="card"><div class="metric">1.38×</div><div class="label">retained gap to nanoG1 6dee587</div></div>
-      <div class="card"><div class="metric good">+8.9%</div><div class="label">cumulative short-training gain</div></div>
+      <div class="card"><div class="metric">TBD</div><div class="label">cold-start suite baseline</div></div>
+      <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
+      <div class="card"><div class="metric good">2 / 2</div><div class="label">existing G1 quality-gate seeds pass</div></div>
+      <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
-    <p class="profile-note">The retained observation specialization averages 892.9k samples/s after two graph-pipeline warmups, versus the 890.4k specialized-ABA baseline. The comparison uses nanoG1 commit <code>6dee587</code> and its measured 1.276M training SPS; shorter same-session brackets remain useful only for relative optimization deltas.</p>
+    <p class="profile-note">No authoritative time-to-policy baseline exists yet. Existing throughput and 157.3M-sample G1 results remain useful diagnostics, but they cannot rank changes until process-start timing and first-passing evaluation are measured under one protocol.</p>
 
     <div class="section-label">Steady-training GPU work profile</div>
     <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
@@ -166,33 +166,30 @@
 
     <div class="section-label">Current state</div>
     <article>
-      <div class="meta"><span class="tag good">TRAINING WORKS</span><time>Authoritative result</time></div>
-      <h2>Reduced-coordinate PhoenX trains a robust G1 walker from scratch</h2>
-      <p>The retained recipe uses three 6.67 ms physics steps, two PGS sweeps, one velocity relaxation, hard-Hertz contacts, and a final two-step 10 ms phase after 99.6M samples.</p>
+      <div class="meta"><span class="tag good">FOUNDATION READY</span><time>Known evidence</time></div>
+      <h2>Training works; time-to-policy is not measured yet</h2>
+      <p>Reduced-coordinate PhoenX already trains a robust G1 walker from scratch: two independent 157.3M-sample runs pass the complete frozen-policy gate with zero falls and about 0.91 tracking. This proves feasibility, not optimal wall-clock convergence.</p>
       <ul>
-        <li>A fresh 157.3M-sample run passes the complete gate at seed 1000 and seed 2000.</li>
-        <li>Seed 1000: zero falls, tracking 0.9125, jerk 0.1420, roll/pitch rate 0.1437, yaw rate 0.0837, and leg speed 0.5573.</li>
-        <li>Seed 2000: zero falls, tracking 0.9153, jerk 0.1420, with the same passing dynamics diagnostics.</li>
-        <li>The current full collect/update graph-leapfrog measurement reaches 892.9k samples/s, or 70.0% of nanoG1 commit <code>6dee587</code> at its measured 1.276M/s: PhoenX is currently 1.43× slower. The proven full-quality recipe is unchanged.</li>
+        <li>Pure PhoenX/PhoenX-RL environments now cover Ant, Humanoid, Go2, G1, H1, ANYmal-C, DR Legs hold-pose, and DR Legs walking, without IsaacLab runtime dependencies.</li>
+        <li>Reduced, hybrid, and full-coordinate PhoenX are all eligible. Coordinate choice is an experimental variable, not an ideology; physical accuracy, stability, and the task gate decide.</li>
+        <li>The retained 923k/s steady-training result and solver profiles remain secondary diagnostics for explaining time-to-policy changes.</li>
+        <li>The first missing artifact is a unified cold-start runner with comparable task gates, periodic held-out evaluation, first-pass timestamps, seed metadata, and failure censoring.</li>
       </ul>
     </article>
 
     <div class="section-label">Active milestone</div>
     <article>
-      <div class="meta"><span class="tag warn">REJECTED END TO END · EXACT PATH-SCHUR</span><time>3 Jul</time></div>
-      <h2>A 1.53× exact contact-phase win does not improve real training</h2>
-      <p>The experiment built the exact contact-space Schur operator from contacted body paths, solved compact PGS, and applied the summed body wrench through one deterministic depth-parallel ABA. It was physically clean, graph-captured, and substantially faster on the isolated all-active G1 contact state—but realistic activation patterns and extra phases erase the gain.</p>
+      <div class="meta"><span class="tag good">NEW AUTHORITATIVE METRIC</span><time>4 Jul</time></div>
+      <h2>Cold-start wall-clock time to a qualified policy</h2>
+      <p>The clock starts immediately before launching the training process with no policy, replay, optimizer, normalization, or curriculum state. It stops at the first held-out evaluation that satisfies the task gate. Environment/model creation, normal Warp cache loading, graph capture, rollout, learning, evaluation, checkpointing, and any population overhead are included.</p>
       <ul>
-        <li>The isolated 8,192-world contact phase is 370.8 versus 567.8 µs (1.53×), with Schur error 2.4e−7, impulse error 3.0e−8, and generalized-delta error 8.9e−8.</li>
-        <li>The initial short G1 bracket suggested +3.1%, but the confirmation bracket measures about 915k/s path-Schur versus 918k/s reference: neutral/slightly slower. The retained 923k/s headline is unchanged.</li>
-        <li>Saturated 8,192-world ANYmal rejects the route at 1.57M versus 1.67M env-steps/s (−6.0%). The dense 34-point G1 scene also remains 1.3% slower after exact dimension-based fallback.</li>
-        <li>At 512 worlds, hardware-saturation fallback recovers reference performance: ANYmal 373.9k versus 373.5k/s and H1 352.7k versus 357.1k/s (the latter within short-bracket variance). Single/few-articulation scenes likewise retain the reference route.</li>
-        <li>Graph conditionals were tested and removed: their launch/control overhead made ANYmal and H1 slower, confirming they are not a free solution for sparse activation.</li>
-        <li>CUDA-graph tests pass for an active compact page, a 72-contact dense fallback, full state/contact parity within 2e−5, and spatial momentum conservation.</li>
-        <li>The complete experiment is preserved at <code>67f286e6</code> on <code>twidmer/experiment-phoenx-path-schur</code>. It is not merged into the retained solver.</li>
-        <li>A follow-up split ran the large fused contact/advance/publish kernel only for live-contact articulations and the lean advance/publish kernel for the inactive complement. Arbitrary-page graph parity passes, but matched G1 training falls about 845k → 822k/s (−2.7%): the extra complementary launch costs more than inactive early returns save.</li>
-        <li>The split is preserved at <code>51b834f4</code> on <code>twidmer/experiment-phoenx-active-fused-split</code>, not merged.</li>
-        <li><strong>Conclusion:</strong> the current 923k/s solver is at a local plateau. More gains remain possible, but the next architecture must eliminate a phase without replacing it with another fleet-wide launch.</li>
+        <li><strong>Primary deployment clock:</strong> a normal ready installation with its persistent Warp kernel cache in the declared state. A cleared-JIT-cache first-install clock is reported separately so compiler noise cannot hide training improvements.</li>
+        <li><strong>Success:</strong> task-specific thresholds are frozen before an optimization run, evaluated on held-out randomized commands/initial states, and must pass in consecutive evaluation windows. Failed runs are not dropped.</li>
+        <li><strong>Robustness:</strong> use multiple seeds for finalists; report median time, success rate, and tail/failure behavior. A fast lucky seed is not a win.</li>
+        <li><strong>Generalization:</strong> development uses a rotating subset of the eight task families; promotion requires locomotion diversity and a held-out task. No robot-name solver specializations.</li>
+        <li><strong>Allowed levers:</strong> timestep/substeps, full or reduced coordinates, contact/solver schedules, PPO variants, curricula, recurrent/feed-forward policies, mixed precision, PBT, and overlap. All consumed wall time and GPU work count.</li>
+        <li><strong>Hard gates:</strong> physically defensible simulation, stable contacts/joints, no reward exploitation of stale or degraded physics, CUDA graph support for measured paths, and versatile reusable RL code.</li>
+        <li><strong>Next:</strong> define compact gates for the diverse task suite and implement one runner that emits first-pass wall time, samples, physics steps, evaluations, seed, solver/RL configuration, and failure reason.</li>
       </ul>
     </article>
 
@@ -241,9 +238,9 @@
     <div class="section-label">Next decisions</div>
     <section class="next">
       <div>
-        <h2>Productionize the path-Schur survivor</h2>
-        <p>The new candidate removes the dominant full-articulation response construction while retaining the exact Delassus operator and deterministic impulse application. Unlike earlier response-basis and contact-space attempts, its isolated win survives the complete build/solve/apply phase.</p>
-        <p><strong>Next:</strong> integrate behind an explicit experimental path, measure full graph-leapfrog training early, and reject or specialize only from topology-derived runtime facts—not robot identities.</p>
+        <h2>Build the measurement loop first</h2>
+        <p>Optimizing throughput before measuring first-passing wall time can reward the wrong solver, timestep, curriculum, or learner. The benchmark must make failures and evaluation cost visible and produce one comparable JSON record per run.</p>
+        <p><strong>First baseline set:</strong> G1 plus a quadruped and a structurally different task, using current proven recipes. Then compare safe timestep/schedule changes, reduced versus full coordinates where valid, and RL changes by time-to-gate—not isolated SPS.</p>
       </div>
       <div>
         <h2>Do not repeat</h2>
@@ -280,23 +277,22 @@
       <div>
         <h2>Mission and non-negotiables</h2>
         <ul>
-          <li><strong>Main quest:</strong> maximize end-to-end PhoenX G1 RL training throughput while keeping repeatable successful training. Faster unsuccessful training does not count.</li>
-          <li>Optimize the reduced-coordinate path where training currently succeeds; improving maximal-coordinate training remains valuable, but do not abandon the proven walker.</li>
-          <li>Keep physics clean and physically grounded: conserve momentum, preserve reliable convergence, retain the hard-Hertz contact model where possible, and use no scene-specific hacks.</li>
-          <li>End-to-end CUDA graph capture is mandatory. Classic PhoenX must remain deterministic.</li>
-          <li>Never overfit to G1. Screen Anymal, H1/G1-class robots, contact-rich scenes, closed loops, mixed ordinary joints/constraints, multiple articulations per world, and both single- and multi-world execution.</li>
+          <li><strong>Main quest:</strong> minimize median cold-start wall-clock time to a passing policy with PhoenX + PhoenX RL.</li>
+          <li>Count the whole process and every population/evaluation cost. Record failed and timed-out seeds.</li>
+          <li>Keep physics clean and physically grounded. Larger timesteps and full coordinates are welcome only when policy and physical-quality gates pass.</li>
+          <li>Do not overfit G1. Use the pure-PhoenX Ant, Humanoid, Go2, G1, H1, ANYmal-C, and DR Legs tasks as a rotating development/held-out suite.</li>
+          <li>Measured solver/RL paths must retain CUDA graph support. Reusable RL improvements must not be task-specific hacks.</li>
         </ul>
       </div>
       <div>
         <h2>How to continue</h2>
         <ul>
-          <li>Be innovative. New algorithms and data layouts are welcome; the fastest work is work safely eliminated. Megakernels, Warp tile operations, compact shared memory, and reasonably sized <code>wp.func_native</code> helpers are allowed when evidence supports them.</li>
-          <li>Use Nsight Systems to rank end-to-end costs. Ask for Nsight Compute only when counters can change a decision; prepare one bounded script measuring one kernel, then place its single command in a prominent action box on this page.</li>
-          <li>Move quickly with focused mini-benchmarks and CUDA-graph regression tests. Run full from-scratch training and two robust gates only for meaningful survivors.</li>
-          <li>Compare against nanoG1, MJWarp, FeatherPGS, and full-coordinate PhoenX without trading away accuracy or reliability.</li>
-          <li>Commit measured gains when worthwhile. Keep this page compact, newest information first, remove stale entries, and open it in Chrome after every update.</li>
-          <li><strong>Scope:</strong> prioritize PhoenX solver throughput; collision-pipeline gains are allowed when general and quality-preserving. The learner is currently out of scope. This page is the primary communication channel, including privileged-run requests in the top action box.</li>
-          <li><strong>Immediate next step after the requested pause:</strong> return to the retained 923k/s branch. Avoid both rejected branches <code>67f286e6</code> and <code>51b834f4</code>; the next candidate must delete a fleet-wide phase rather than add a complementary launch.</li>
+          <li>First implement the unified time-to-policy protocol and establish honest baselines; do not infer convergence time from SPS or sample count alone.</li>
+          <li>Use cheap learning-curve checkpoints for iteration, then multiple seeds and held-out evaluations for survivors.</li>
+          <li>Optimize solver, collision, environment, policy, learner, curriculum, precision, and overlap jointly. PBT is allowed, but its full wall time counts.</li>
+          <li>Track supporting diagnostics: samples/s, physics steps/s, sample count to gate, evaluation trajectory quality, timestep, GPU memory, and compilation/setup time.</li>
+          <li>Keep this page compact and newest-first, update it whenever the decision state changes, and open it in Chrome after every update.</li>
+          <li><strong>Immediate next step:</strong> freeze initial G1, quadruped, and non-humanoid/non-quadruped task gates; add a process-level runner that stops at the first consecutive passing held-out evaluations.</li>
         </ul>
       </div>
     </section>
