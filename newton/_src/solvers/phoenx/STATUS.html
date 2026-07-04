@@ -127,7 +127,7 @@
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric">TBD</div><div class="label">cold-start suite baseline</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
-      <div class="card"><div class="metric good">2 / 8</div><div class="label">tasks wired to process-level metric</div></div>
+      <div class="card"><div class="metric good">3 / 8</div><div class="label">tasks wired to process-level metric</div></div>
       <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
@@ -173,7 +173,7 @@
         <li>Pure PhoenX/PhoenX-RL environments now cover Ant, Humanoid, Go2, G1, H1, ANYmal-C, DR Legs hold-pose, and DR Legs walking, without IsaacLab runtime dependencies.</li>
         <li>Reduced, hybrid, and full-coordinate PhoenX are all eligible. Coordinate choice is an experimental variable, not an ideology; physical accuracy, stability, and the task gate decide.</li>
         <li>The retained 923k/s steady-training result and solver profiles remain secondary diagnostics for explaining time-to-policy changes.</li>
-        <li>G1 and ANYmal now run under the fresh-process metric with paired train/gate seeds, consecutive held-out windows, strict JSON records, timeout/crash/miss censoring, and restart-cost uncertainty. The next gap is a structurally different task.</li>
+        <li>G1, ANYmal, and closed-loop DR Legs hold now run under the fresh-process metric with paired train/gate seeds, consecutive held-out windows, strict JSON records, timeout/crash/miss censoring, and restart-cost uncertainty.</li>
       </ul>
     </article>
 
@@ -213,6 +213,10 @@
         <li>A tiny ANYmal graph-leapfrog smoke trained, checkpointed, reloaded, evaluated, correctly missed the walking gate, and was retained as a 180 s charged failure. This validates failure accounting; it is not a learning result.</li>
       </ul>
     </article>
+        <li>DR Legs hold adds a structurally different maximal-coordinate closed linkage. Its no-reset gate applies seeded whole-robot horizontal velocity impulses and independently checks falls, survival, pose success, pelvis height/uprightness/drift, finite state, and closed-loop anchor residual.</li>
+        <li>The untrained DR policy is correctly rejected: all 64 kicked worlds fall, with about 12–13% survival. Anchor residual remains below 0.5 mm, separating policy failure from a broken linkage solve.</li>
+        <li>After 50 production-size PPO updates, survival improves to 15.5% and minimum pelvis height to 0.164 m, but the policy still fails. This is useful direction, not a passing result; no DR time-to-policy baseline is claimed yet.</li>
+        <li>A large-world ordering bug was isolated: building the evaluation model after capturing but before first launching the training graph triggered CUDA error 700. The logically correct order—zero-training gate first, then capture—removes the failure at 2048 and 4096 training worlds.</li>
     <article>
       <div class="meta"><span class="tag good">CANDIDATE · CROSS-ROBOT TOPOLOGY CACHE</span><time>3 Jul</time></div>
       <h2>Static topology caching wins across G1, ANYmal, and H1</h2>

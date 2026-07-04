@@ -7,8 +7,18 @@ import json
 import math
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
+from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
+    StatsEvaluateDrLegsHold,
+)
+from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
+    _make_parser as make_dr_legs_parser,
+)
+from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
+    check_gate as check_dr_legs_gate,
+)
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import _updated_pass_streak
 from newton._src.solvers.phoenx.benchmarks.bench_time_to_policy import (
     TrialOutcome,
@@ -152,6 +162,44 @@ class TestTimeToPolicyProtocol(unittest.TestCase):
         self.assertEqual(command[command.index("--seed") + 1], "29")
         self.assertEqual(command[command.index("--gate-seed") + 1], "2000")
         self.assertEqual(command[-2:], ["--world-count", "128"])
+
+    def test_dr_legs_command_uses_closed_loop_hold_gate(self):
+        command = _child_command(
+            task="dr_legs_hold",
+            train_seed=47,
+            gate_seed=3000,
+            required_consecutive_passes=2,
+            result_path=Path("results/dr_legs.json"),
+            checkpoint_path=Path("checkpoint_{iteration}.npz"),
+            forwarded_args=("--world-count", "64"),
+        )
+
+        self.assertIn("bench_dr_legs_hold_train_to_gate", " ".join(command))
+        self.assertEqual(command[command.index("--seed") + 1], "47")
+        self.assertEqual(command[command.index("--gate-seed") + 1], "3000")
+        self.assertEqual(command[-2:], ["--world-count", "64"])
+
+    def test_dr_legs_gate_includes_closed_loop_residual(self):
+        args = make_dr_legs_parser().parse_args(["--checkpoint-path", "checkpoint.npz", "--json-output", "result.json"])
+        stats = StatsEvaluateDrLegsHold(
+            steps=250,
+            fall_fraction=0.0,
+            survival_fraction=1.0,
+            mean_success=0.9,
+            min_pelvis_height=0.24,
+            max_pelvis_height=0.30,
+            min_upright_cos=0.95,
+            max_horizontal_drift=0.05,
+            mean_action_rms=0.2,
+            max_anchor_residual=5.0e-4,
+            finite=True,
+        )
+
+        self.assertEqual(check_dr_legs_gate(stats, args), [])
+        self.assertIn(
+            "closed-loop anchor residual",
+            check_dr_legs_gate(replace(stats, max_anchor_residual=2.0e-3), args),
+        )
 
 
 if __name__ == "__main__":

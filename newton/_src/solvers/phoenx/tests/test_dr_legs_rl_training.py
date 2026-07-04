@@ -3,12 +3,20 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import warp as wp
 
 import newton.rl as rl
+from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
+    _make_parser as make_dr_legs_gate_parser,
+)
+from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
+    benchmark_train_to_gate,
+)
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
@@ -129,6 +137,73 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(commands[:, 1] <= 0.3))
         self.assertTrue(np.all(commands[:, 2] >= -0.8))
         self.assertTrue(np.all(commands[:, 2] <= 0.8))
+
+    def test_hold_time_to_policy_smoke_inside_cuda_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX DR Legs time-to-policy tests")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = str(Path(tmpdir) / "checkpoint_{iteration:06d}.npz")
+            output = str(Path(tmpdir) / "result.json")
+            args = make_dr_legs_gate_parser().parse_args(
+                [
+                    "--device",
+                    str(device),
+                    "--world-count",
+                    "2",
+                    "--iterations",
+                    "1",
+                    "--chunk-iterations",
+                    "1",
+                    "--rollout-steps",
+                    "1",
+                    "--sim-substeps",
+                    "1",
+                    "--collision-refresh-interval",
+                    "1",
+                    "--solver-iterations",
+                    "1",
+                    "--velocity-iterations",
+                    "1",
+                    "--hidden-layers",
+                    "8",
+                    "--train-epochs",
+                    "1",
+                    "--minibatch-size",
+                    "1",
+                    "--eval-world-count",
+                    "2",
+                    "--eval-steps",
+                    "1",
+                    "--eval-kick-speed",
+                    "0",
+                    "--required-consecutive-passes",
+                    "2",
+                    "--gate-max-fall-fraction",
+                    "1",
+                    "--gate-min-survival-fraction",
+                    "0",
+                    "--gate-min-success",
+                    "0",
+                    "--gate-min-pelvis-height=-100",
+                    "--gate-max-pelvis-height",
+                    "100",
+                    "--gate-min-upright-cos=-1",
+                    "--gate-max-horizontal-drift",
+                    "100",
+                    "--gate-max-anchor-residual",
+                    "100",
+                    "--checkpoint-path",
+                    checkpoint,
+                    "--json-output",
+                    output,
+                ]
+            )
+
+            result = benchmark_train_to_gate(args)
+
+        self.assertTrue(result["pass_gate"])
+        self.assertEqual(result["completed_iterations"], 1)
+        self.assertEqual([entry["iteration"] for entry in result["gate_history"]], [0, 1])
+        self.assertEqual(result["first_pass"]["consecutive_passes"], 2)
 
 
 if __name__ == "__main__":

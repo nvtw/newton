@@ -34,6 +34,7 @@ from typing import Any
 
 _G1_MODULE = "newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate"
 _ANYMAL_MODULE = "newton._src.solvers.phoenx.benchmarks.bench_anymal_train_to_gate"
+_DR_LEGS_HOLD_MODULE = "newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate"
 _CONTROLLED_CHILD_OPTIONS = (
     "--checkpoint-path",
     "--fail-on-miss",
@@ -249,6 +250,24 @@ def _child_command(
             str(result_path),
             *forwarded_args,
         ]
+    if task == "dr_legs_hold":
+        return [
+            sys.executable,
+            "-m",
+            _DR_LEGS_HOLD_MODULE,
+            "--seed",
+            str(train_seed),
+            "--gate-seed",
+            str(gate_seed),
+            "--required-consecutive-passes",
+            str(required_consecutive_passes),
+            "--checkpoint-path",
+            str(checkpoint_path),
+            "--json-output",
+            str(result_path),
+            *forwarded_args,
+        ]
+
     raise ValueError(f"unsupported task: {task}")
 
 
@@ -330,7 +349,7 @@ def _run_trial(
 
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task", choices=("g1", "anymal"), default="g1")
+    parser.add_argument("--task", choices=("g1", "anymal", "dr_legs_hold"), default="g1")
     parser.add_argument("--train-seeds", type=int, nargs="+", default=(11, 29, 47))
     parser.add_argument("--gate-seeds", type=int, nargs="+", default=(1000, 2000, 3000))
     parser.add_argument("--restart-cutoff-seconds", type=float, default=180.0)
