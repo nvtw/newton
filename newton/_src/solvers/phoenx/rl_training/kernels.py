@@ -26,6 +26,8 @@ DENSE_BIAS_TILE_BATCH = 256
 # per output tile fills the GPU; a fixed-order reduction keeps it deterministic.
 DENSE_WEIGHT_GRAD_KCHUNKS = 8
 PPO_LOG_STD_PARTIAL_BATCH = 256
+PPO_ADVANTAGE_PARTIAL_COUNT = 256
+OPTIMIZER_GRAD_PARTIAL_COUNT = 256
 
 
 @wp.func
@@ -672,7 +674,7 @@ def ppo_actor_loss_backward_kernel(
     clip_fraction: wp.array[wp.float32],
     ratios: wp.array[wp.float32],
     policy_out_grad: wp.array2d[wp.float32],
-    log_std_grad_partials: wp.array2d[wp.float32],
+    d_log_prob_rows: wp.array[wp.float32],
 ):
     row = wp.tid()
     total_log_prob = wp.float32(0.0)
@@ -711,6 +713,7 @@ def ppo_actor_loss_backward_kernel(
     if wp.abs(ratio - wp.float32(1.0)) > clip_ratio:
         wp.atomic_add(clip_fraction, 0, inv_batch)
 
+    d_log_prob_rows[row] = d_log_prob
     for j in range(action_dim):
         mean = policy_out[row, j]
         raw_log_std = log_std_param[j]
@@ -730,9 +733,42 @@ def ppo_actor_loss_backward_kernel(
             d_log_std = d_log_prob * (diff * diff / var - wp.float32(1.0)) - entropy_coeff[0] * inv_batch
         if state_dependent_std != 0:
             policy_out_grad[row, action_dim + j] = d_log_std
-        else:
-            partial = row / PPO_LOG_STD_PARTIAL_BATCH
-            wp.atomic_add(log_std_grad_partials, partial, j, d_log_std)
+
+
+@wp.kernel
+def ppo_log_std_grad_partials_kernel(
+    policy_out: wp.array2d[wp.float32],
+    log_std_param: wp.array[wp.float32],
+    actions: wp.array2d[wp.float32],
+    d_log_prob_rows: wp.array[wp.float32],
+    entropy_coeff: wp.array[wp.float32],
+    action_dim: wp.int32,
+    squash: wp.int32,
+    log_std_min: wp.float32,
+    log_std_max: wp.float32,
+    batch_size: wp.int32,
+    partials: wp.array2d[wp.float32],
+):
+    partial, action = wp.tid()
+    start = partial * wp.int32(PPO_LOG_STD_PARTIAL_BATCH)
+    end = wp.min(start + wp.int32(PPO_LOG_STD_PARTIAL_BATCH), batch_size)
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    raw_log_std = log_std_param[action]
+    log_std = _clip(raw_log_std, log_std_min, log_std_max)
+    std = wp.exp(log_std)
+    var = std * std
+    raw_log_std_active = raw_log_std >= log_std_min and raw_log_std <= log_std_max
+    total = wp.float32(0.0)
+    for row in range(start, end):
+        mean = policy_out[row, action]
+        value = actions[row, action]
+        if squash != 0:
+            value = _atanh_clamped(value)
+        diff = value - mean
+        if raw_log_std_active:
+            total = total + d_log_prob_rows[row] * (diff * diff / var - wp.float32(1.0))
+            total = total - entropy_coeff[0] * inv_batch
+    partials[partial, action] = total
 
 
 @wp.kernel
@@ -965,12 +1001,39 @@ def trajectory_priority_weight_kernel(
     priorities: wp.array[wp.float32],
     priority_alpha: wp.float32,
     weights: wp.array[wp.float32],
-    total_weight: wp.array[wp.float32],
 ):
     env = wp.tid()
     weight = wp.pow(wp.max(priorities[env], wp.float32(0.0)), priority_alpha)
     weights[env] = weight
-    wp.atomic_add(total_weight, 0, weight)
+
+
+@wp.kernel
+def sum_partials_kernel(
+    values: wp.array[wp.float32],
+    count: wp.int32,
+    partials: wp.array[wp.float32],
+):
+    partial = wp.tid()
+    partial_count = partials.shape[0]
+    chunk = (count + partial_count - wp.int32(1)) / partial_count
+    start = partial * chunk
+    total = wp.float32(0.0)
+    for offset in range(chunk):
+        i = start + offset
+        if i < count:
+            total = total + values[i]
+    partials[partial] = total
+
+
+@wp.kernel
+def reduce_sum_partials_kernel(
+    partials: wp.array[wp.float32],
+    total_out: wp.array[wp.float32],
+):
+    total = wp.float32(0.0)
+    for partial in range(partials.shape[0]):
+        total = total + partials[partial]
+    total_out[0] = total
 
 
 @wp.kernel
@@ -1242,12 +1305,39 @@ def compute_puffer_vtrace_returns_kernel(
 
 
 @wp.kernel
-def sum_and_sumsq_kernel(x: wp.array[wp.float32], count: wp.int32, stats: wp.array[wp.float32]):
-    i = wp.tid()
-    if i < count:
-        v = x[i]
-        wp.atomic_add(stats, 0, v)
-        wp.atomic_add(stats, 1, v * v)
+def sum_and_sumsq_partials_kernel(
+    x: wp.array[wp.float32],
+    count: wp.int32,
+    partials: wp.array2d[wp.float32],
+):
+    partial = wp.tid()
+    partial_count = partials.shape[0]
+    chunk = (count + partial_count - wp.int32(1)) / partial_count
+    start = partial * chunk
+    total = wp.float32(0.0)
+    total_sq = wp.float32(0.0)
+    for offset in range(chunk):
+        i = start + offset
+        if i < count:
+            value = x[i]
+            total = total + value
+            total_sq = total_sq + value * value
+    partials[partial, 0] = total
+    partials[partial, 1] = total_sq
+
+
+@wp.kernel
+def reduce_sum_and_sumsq_partials_kernel(
+    partials: wp.array2d[wp.float32],
+    stats: wp.array[wp.float32],
+):
+    total = wp.float32(0.0)
+    total_sq = wp.float32(0.0)
+    for partial in range(partials.shape[0]):
+        total = total + partials[partial, 0]
+        total_sq = total_sq + partials[partial, 1]
+    stats[0] = total
+    stats[1] = total_sq
 
 
 @wp.kernel
@@ -1448,17 +1538,69 @@ def soft_update_2d_kernel(src: wp.array2d[wp.float32], tau: wp.float32, dst: wp.
 
 
 @wp.kernel
-def grad_sumsq_1d_kernel(grad: wp.array[wp.float32], grad_sumsq: wp.array[wp.float32]):
-    i = wp.tid()
-    g = grad[i]
-    wp.atomic_add(grad_sumsq, 0, g * g)
+def grad_sumsq_partials_1d_kernel(
+    grad: wp.array[wp.float32],
+    param_index: wp.int32,
+    partials: wp.array2d[wp.float32],
+):
+    partial = wp.tid()
+    partial_count = partials.shape[1]
+    count = grad.shape[0]
+    chunk = (count + partial_count - wp.int32(1)) / partial_count
+    start = partial * chunk
+    total = wp.float32(0.0)
+    for offset in range(chunk):
+        i = start + offset
+        if i < count:
+            value = grad[i]
+            total = total + value * value
+    partials[param_index, partial] = total
 
 
 @wp.kernel
-def grad_sumsq_2d_kernel(grad: wp.array2d[wp.float32], grad_sumsq: wp.array[wp.float32]):
-    i, j = wp.tid()
-    g = grad[i, j]
-    wp.atomic_add(grad_sumsq, 0, g * g)
+def grad_sumsq_partials_2d_kernel(
+    grad: wp.array2d[wp.float32],
+    param_index: wp.int32,
+    partials: wp.array2d[wp.float32],
+):
+    partial = wp.tid()
+    partial_count = partials.shape[1]
+    cols = grad.shape[1]
+    count = grad.shape[0] * cols
+    chunk = (count + partial_count - wp.int32(1)) / partial_count
+    start = partial * chunk
+    total = wp.float32(0.0)
+    for offset in range(chunk):
+        flat = start + offset
+        if flat < count:
+            value = grad[flat / cols, flat % cols]
+            total = total + value * value
+    partials[param_index, partial] = total
+
+
+@wp.kernel
+def reduce_grad_sumsq_partials_kernel(
+    partials: wp.array2d[wp.float32],
+    param_count: wp.int32,
+    total_out: wp.array[wp.float32],
+):
+    total = wp.float32(0.0)
+    for param in range(param_count):
+        for partial in range(partials.shape[1]):
+            total = total + partials[param, partial]
+    total_out[0] = total
+
+
+@wp.kernel
+def reduce_grad_sumsq_param_partials_kernel(
+    partials: wp.array2d[wp.float32],
+    param_index: wp.int32,
+    total_out: wp.array[wp.float32],
+):
+    total = wp.float32(0.0)
+    for partial in range(partials.shape[1]):
+        total = total + partials[param_index, partial]
+    total_out[0] = total
 
 
 @wp.func

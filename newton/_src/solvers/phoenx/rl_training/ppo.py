@@ -12,6 +12,7 @@ import numpy as np
 import warp as wp
 
 from .kernels import (
+    PPO_ADVANTAGE_PARTIAL_COUNT,
     PPO_LOG_STD_PARTIAL_BATCH,
     compute_gae_kernel,
     compute_puffer_vtrace_returns_kernel,
@@ -25,15 +26,19 @@ from .kernels import (
     pack_ppo_update_stats_kernel,
     ppo_actor_loss_backward_kernel,
     ppo_actor_loss_kernel,
+    ppo_log_std_grad_partials_kernel,
     ppo_lr_scale_kernel,
     reduce_ppo_log_std_grad_kernel,
+    reduce_sum_and_sumsq_partials_kernel,
+    reduce_sum_partials_kernel,
     rollout_reward_done_success_sums_kernel,
     sample_trajectory_env_ids_kernel,
     sample_trajectory_env_ids_seed_counter_kernel,
     scatter_trajectory_ratios_kernel,
     scatter_trajectory_values_kernel,
     seed_counter_increment_kernel,
-    sum_and_sumsq_kernel,
+    sum_and_sumsq_partials_kernel,
+    sum_partials_kernel,
     trajectory_priority_kernel,
     trajectory_priority_weight_kernel,
     value_column_loss_grad_kernel,
@@ -211,6 +216,7 @@ class BatchPPO:
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.old_values = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
+        self._advantage_partials = wp.zeros((PPO_ADVANTAGE_PARTIAL_COUNT, 2), dtype=wp.float32, device=self.device)
         self.priority_weights = wp.ones(self.num_envs, dtype=wp.float32, device=self.device)
         self._advantage_stats = wp.zeros(2, dtype=wp.float32, device=self.device)
 
@@ -223,7 +229,14 @@ class BatchPPO:
     def normalize_advantages(self, eps: float = 1.0e-8) -> None:
         """Normalize advantages in place."""
 
-        _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps, stats=self._advantage_stats)
+        _normalize_advantages(
+            self.advantages,
+            self.num_samples,
+            self.device,
+            eps=eps,
+            stats=self._advantage_stats,
+            partials=self._advantage_partials,
+        )
 
 
 class BufferRollout:
@@ -270,6 +283,8 @@ class BufferRollout:
         self._metric_sums = wp.zeros(3, dtype=wp.float32, device=self.device)
         self._metric_sums_host = wp.empty(3, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
 
+        self._advantage_partials = wp.zeros((PPO_ADVANTAGE_PARTIAL_COUNT, 2), dtype=wp.float32, device=self.device)
+
     @property
     def num_samples(self) -> int:
         """Number of transition rows in the buffer."""
@@ -300,7 +315,14 @@ class BufferRollout:
     def normalize_advantages(self, eps: float = 1.0e-8) -> None:
         """Normalize advantages in place."""
 
-        _normalize_advantages(self.advantages, self.num_samples, self.device, eps=eps, stats=self._advantage_stats)
+        _normalize_advantages(
+            self.advantages,
+            self.num_samples,
+            self.device,
+            eps=eps,
+            stats=self._advantage_stats,
+            partials=self._advantage_partials,
+        )
 
     def compute_reward_done_success_sums(self) -> wp.array[wp.float32]:
         """Compute rollout reward, done, and success sums in preallocated storage."""
@@ -473,8 +495,10 @@ class TrainerPPO:
         self._trajectory_priorities: wp.array[wp.float32] | None = None
         self._trajectory_priority_weights: wp.array[wp.float32] | None = None
         self._trajectory_priority_total: wp.array[wp.float32] | None = None
+        self._trajectory_priority_partials: wp.array[wp.float32] | None = None
         self._actor_policy_out_grad: wp.array2d[wp.float32] | None = None
         self._critic_value_grad: wp.array2d[wp.float32] | None = None
+        self._actor_d_log_prob: wp.array[wp.float32] | None = None
         self._actor_log_std_grad = wp.zeros_like(self.actor.log_std, requires_grad=False)
         self._actor_log_std_grad_partials: wp.array2d[wp.float32] | None = None
         self._actor_log_std_grad_partial_count = 0
@@ -830,6 +854,7 @@ class TrainerPPO:
         self._ensure_actor_log_std_grad_partials(rows)
         if self.config.mirror_loss_coeff > 0.0:
             self._ensure_mirror_obs(rows)
+        self._ensure_actor_d_log_prob(rows)
         if self.critic is not None:
             self.critic.reserve_buffers(rows)
             self._ensure_critic_backward_buffers(rows)
@@ -1115,6 +1140,9 @@ class TrainerPPO:
             self._trajectory_priorities = wp.zeros(env_count, dtype=wp.float32, device=self.device)
             self._trajectory_priority_weights = wp.zeros(env_count, dtype=wp.float32, device=self.device)
             self._trajectory_priority_total = wp.zeros(1, dtype=wp.float32, device=self.device)
+            self._trajectory_priority_partials = wp.zeros(
+                PPO_ADVANTAGE_PARTIAL_COUNT, dtype=wp.float32, device=self.device
+            )
 
     def _prepare_trajectory_priority_weights(self, buffer: BufferRollout) -> bool:
         priority_alpha = float(self.config.priority_alpha)
@@ -1123,9 +1151,8 @@ class TrainerPPO:
             return False
         if self._trajectory_priorities is None or self._trajectory_priority_weights is None:
             raise RuntimeError("trajectory priority buffers were not initialized")
-        if self._trajectory_priority_total is None:
+        if self._trajectory_priority_total is None or self._trajectory_priority_partials is None:
             raise RuntimeError("trajectory priority total buffer was not initialized")
-        self._trajectory_priority_total.zero_()
         wp.launch(
             trajectory_priority_kernel,
             dim=buffer.num_envs,
@@ -1137,7 +1164,21 @@ class TrainerPPO:
             trajectory_priority_weight_kernel,
             dim=buffer.num_envs,
             inputs=[self._trajectory_priorities, priority_alpha],
-            outputs=[self._trajectory_priority_weights, self._trajectory_priority_total],
+            outputs=[self._trajectory_priority_weights],
+            device=self.device,
+        )
+        wp.launch(
+            sum_partials_kernel,
+            dim=PPO_ADVANTAGE_PARTIAL_COUNT,
+            inputs=[self._trajectory_priority_weights, buffer.num_envs],
+            outputs=[self._trajectory_priority_partials],
+            device=self.device,
+        )
+        wp.launch(
+            reduce_sum_partials_kernel,
+            dim=1,
+            inputs=[self._trajectory_priority_partials],
+            outputs=[self._trajectory_priority_total],
             device=self.device,
         )
         return True
@@ -1252,6 +1293,7 @@ class TrainerPPO:
 
         policy_out = self.actor.net.forward_manual(buffer.obs)
         policy_out_grad = self._ensure_actor_backward_buffers(buffer.num_samples, int(policy_out.shape[1]))
+        d_log_prob_rows = self._ensure_actor_d_log_prob(buffer.num_samples)
         wp.launch(
             ppo_actor_loss_backward_kernel,
             dim=buffer.num_samples,
@@ -1276,7 +1318,7 @@ class TrainerPPO:
                 self._clip_fraction,
                 buffer.ratios,
                 policy_out_grad,
-                log_std_grad_partials,
+                d_log_prob_rows,
             ],
             device=self.device,
         )
@@ -1329,6 +1371,24 @@ class TrainerPPO:
         self.actor.net.backward_manual(policy_out_grad)
         if not self.actor.state_dependent_std:
             wp.launch(
+                ppo_log_std_grad_partials_kernel,
+                dim=(log_std_partial_count, self.action_dim),
+                inputs=[
+                    policy_out,
+                    self.actor.log_std,
+                    buffer.actions,
+                    d_log_prob_rows,
+                    self._entropy_coeff_buf,
+                    self.action_dim,
+                    int(self.actor.squash),
+                    self.actor.log_std_min,
+                    self.actor.log_std_max,
+                    buffer.num_samples,
+                ],
+                outputs=[log_std_grad_partials],
+                device=self.device,
+            )
+            wp.launch(
                 reduce_ppo_log_std_grad_kernel,
                 dim=self.action_dim,
                 inputs=[log_std_grad_partials, log_std_partial_count],
@@ -1361,6 +1421,12 @@ class TrainerPPO:
             )
         return self._actor_policy_out_grad
 
+    def _ensure_actor_d_log_prob(self, rows: int) -> wp.array[wp.float32]:
+        requested_rows = int(rows)
+        if self._actor_d_log_prob is None or int(self._actor_d_log_prob.shape[0]) < requested_rows:
+            self._actor_d_log_prob = wp.zeros(requested_rows, dtype=wp.float32, device=self.device)
+        return self._actor_d_log_prob
+
     def _ensure_actor_log_std_grad_partials(self, rows: int) -> tuple[wp.array2d[wp.float32], int]:
         partial_count = (int(rows) + PPO_LOG_STD_PARTIAL_BATCH - 1) // PPO_LOG_STD_PARTIAL_BATCH
         partial_count = max(partial_count, 1)
@@ -1392,6 +1458,7 @@ class TrainerPPO:
             device=self.device,
         )
         policy_out = self.actor.net.forward_manual(buffer.obs)
+        d_log_prob_rows = self._ensure_actor_d_log_prob(buffer.num_samples)
         policy_out_grad = self._ensure_actor_backward_buffers(buffer.num_samples, int(policy_out.shape[1]))
         wp.launch(
             ppo_actor_loss_backward_kernel,
@@ -1417,7 +1484,7 @@ class TrainerPPO:
                 self._clip_fraction,
                 buffer.ratios,
                 policy_out_grad,
-                log_std_grad_partials,
+                d_log_prob_rows,
             ],
             device=self.device,
         )
@@ -1439,6 +1506,24 @@ class TrainerPPO:
             )
         self.actor.net.backward_manual(policy_out_grad)
         if not self.actor.state_dependent_std:
+            wp.launch(
+                ppo_log_std_grad_partials_kernel,
+                dim=(log_std_partial_count, self.action_dim),
+                inputs=[
+                    policy_out,
+                    self.actor.log_std,
+                    buffer.actions,
+                    d_log_prob_rows,
+                    self._entropy_coeff_buf,
+                    self.action_dim,
+                    int(self.actor.squash),
+                    self.actor.log_std_min,
+                    self.actor.log_std_max,
+                    buffer.num_samples,
+                ],
+                outputs=[log_std_grad_partials],
+                device=self.device,
+            )
             wp.launch(
                 reduce_ppo_log_std_grad_kernel,
                 dim=self.action_dim,
@@ -1650,6 +1735,7 @@ def _normalize_advantages(
     *,
     eps: float,
     stats: wp.array[wp.float32] | None = None,
+    partials: wp.array2d[wp.float32] | None = None,
 ) -> None:
     if count <= 0:
         return
@@ -1657,11 +1743,21 @@ def _normalize_advantages(
         stats = wp.zeros(2, dtype=wp.float32, device=device)
     elif int(stats.shape[0]) != 2:
         raise ValueError("advantage normalization stats buffer must have length 2")
-    stats.zero_()
+    if partials is None:
+        partials = wp.zeros((PPO_ADVANTAGE_PARTIAL_COUNT, 2), dtype=wp.float32, device=device)
+    elif int(partials.shape[0]) != PPO_ADVANTAGE_PARTIAL_COUNT or int(partials.shape[1]) != 2:
+        raise ValueError("advantage normalization partials buffer has the wrong shape")
     wp.launch(
-        sum_and_sumsq_kernel,
-        dim=count,
+        sum_and_sumsq_partials_kernel,
+        dim=PPO_ADVANTAGE_PARTIAL_COUNT,
         inputs=[advantages, count],
+        outputs=[partials],
+        device=device,
+    )
+    wp.launch(
+        reduce_sum_and_sumsq_partials_kernel,
+        dim=1,
+        inputs=[partials],
         outputs=[stats],
         device=device,
     )

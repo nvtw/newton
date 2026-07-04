@@ -2825,6 +2825,105 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected = (h @ w1 + b1).astype(np.float32)  # output layer is linear
         np.testing.assert_allclose(out.numpy(), expected, rtol=2.0e-3, atol=2.0e-3)
 
+    def test_recurrent_ppo_update_is_reproducible_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX recurrent PPO determinism tests")
+        num_steps = 64
+        num_envs = 128
+        obs_dim = 12
+        action_dim = 4
+        rng = np.random.default_rng(83)
+        buffer_data = {
+            "obs": rng.standard_normal((num_steps * num_envs, obs_dim)).astype(np.float32),
+            "actions": (0.2 * rng.standard_normal((num_steps * num_envs, action_dim))).astype(np.float32),
+            "old_log_probs": rng.standard_normal(num_steps * num_envs).astype(np.float32),
+            "rewards": rng.standard_normal(num_steps * num_envs).astype(np.float32),
+            "dones": np.zeros(num_steps * num_envs, dtype=np.float32),
+            "values": rng.standard_normal((num_steps + 1) * num_envs).astype(np.float32),
+        }
+        config = rl.ConfigPPO(
+            policy_network="puffer_mingru",
+            shared_value_network=True,
+            manual_actor_backward=True,
+            manual_critic_backward=True,
+            manual_mlp_weight_grad_dtype="bfloat16",
+            optimizer="muon",
+            actor_lr=2.0e-2,
+            critic_lr=2.0e-2,
+            max_grad_norm=0.3,
+            minibatch_size=2048,
+            replay_ratio=1.0,
+            priority_alpha=0.4,
+            priority_beta=1.0,
+            vtrace_rho_clip=3.0,
+            vtrace_c_clip=3.0,
+            puffer_vtrace_advantage=True,
+            normalize_advantages=True,
+        )
+        trainers = []
+        buffers = []
+        graphs = []
+        for _ in range(2):
+            buffer = rl.BufferRollout(
+                num_steps=num_steps,
+                num_envs=num_envs,
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                device=device,
+            )
+            for name, values in buffer_data.items():
+                getattr(buffer, name).assign(values)
+            trainer = rl.TrainerPPO(
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                hidden_layers=(32, 32),
+                config=config,
+                device=device,
+                seed=97,
+                squash_actions=False,
+                activation="relu",
+            )
+            trainer.reserve_update_buffers(buffer)
+            seed_counter = make_seed_counter(193, device=device)
+            with wp.ScopedCapture(device=device) as capture:
+                trainer.update_seed_counter(buffer, seed_counter=seed_counter, read_stats=False)
+            trainers.append(trainer)
+            buffers.append(buffer)
+            graphs.append(capture.graph)
+
+        for graph in graphs:
+            wp.capture_launch(graph)
+
+        for first, second in zip(trainers[0].actor.parameters(), trainers[1].actor.parameters(), strict=True):
+            np.testing.assert_array_equal(first.numpy(), second.numpy())
+        for first, second in zip(trainers[0].actor_optimizer.m, trainers[1].actor_optimizer.m, strict=True):
+            np.testing.assert_array_equal(first.numpy(), second.numpy())
+
+    def test_advantage_normalization_is_deterministic_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX PPO advantage normalization tests")
+        count = 65536
+        rng = np.random.default_rng(73)
+        source_np = rng.standard_normal(count).astype(np.float32)
+        source = wp.array(source_np, dtype=wp.float32, device=device)
+        buffer = rl.BufferRollout(
+            num_steps=64,
+            num_envs=count // 64,
+            obs_dim=1,
+            action_dim=1,
+            device=device,
+        )
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.copy(buffer.advantages, source)
+            buffer.normalize_advantages()
+        wp.capture_launch(capture.graph)
+        first = buffer.advantages.numpy().copy()
+        wp.capture_launch(capture.graph)
+        second = buffer.advantages.numpy()
+
+        np.testing.assert_array_equal(second, first)
+        self.assertAlmostEqual(float(first.mean()), 0.0, places=5)
+        self.assertAlmostEqual(float(first.std(ddof=1)), 1.0, places=5)
+
     def test_split_k_weight_grad_matches_numpy_across_chunks_and_is_deterministic(self) -> None:
         # The split-K weight gradient reduces the batch contraction across
         # several blocks per output tile. Use a batch large enough that the
@@ -5546,7 +5645,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 command_zero_probability=g1_recipe.COMMAND_ZERO_PROBABILITY,
                 command_curriculum_start=g1_recipe.COMMAND_CURRICULUM_START,
                 command_curriculum_samples=g1_recipe.COMMAND_CURRICULUM_SAMPLES,
-                no_command_randomization=True,
+                no_command_randomization=False,
                 sim_substeps=1,
                 solver_iterations=1,
                 velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
@@ -5598,6 +5697,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 battery_steps=1,
                 seeds_per_command=1,
                 diagnostic_steps=1,
+                no_screening=True,
                 diagnostic_world_count=1,
                 stochastic_gate=False,
                 gate_seed=41,
@@ -5624,6 +5724,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 self.assertEqual(checkpoint["metadata_g1_schema"].item(), "training_v1")
                 self.assertEqual(checkpoint["metadata_g1_env_sim_substeps"].item(), 2)
                 self.assertEqual(checkpoint["metadata_g1_env_solver_iterations"].item(), 1)
+                self.assertTrue(checkpoint["metadata_g1_env_randomize_commands_on_reset"].item())
                 self.assertEqual(checkpoint["metadata_g1_train_execution_mode"].item(), "graph_leapfrog")
             eval_args = argparse.Namespace(**vars(args))
             eval_args.evaluate_only = True

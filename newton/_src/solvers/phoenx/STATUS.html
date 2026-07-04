@@ -116,7 +116,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>4 July 2026 · time-to-policy objective</strong></div>
+      <div class="stamp">Last updated<br><strong>4 July 2026 · deterministic time-to-policy</strong></div>
     </header>
 
     <section class="hero">
@@ -125,13 +125,13 @@
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric">TBD</div><div class="label">cold-start suite baseline</div></div>
+      <div class="card"><div class="metric good">231.4 s</div><div class="label">first valid G1 cold success</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
       <div class="card"><div class="metric good">3 / 8</div><div class="label">tasks wired to process-level metric</div></div>
       <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
-    <p class="profile-note">The authoritative runner is ready, but no multi-seed production baseline exists yet. Existing throughput and 157.3M-sample G1 results remain useful diagnostics; optimization rankings now require process-start timing and first-passing evaluation under the frozen protocol.</p>
+    <p class="profile-note">The authoritative runner and deterministic learner are ready, but no multi-seed production baseline exists yet. Earlier same-seed divergence exposed atomic learner reductions and is excluded from baseline estimates; optimization rankings require repaired process-start trials and first-passing evaluation under the frozen protocol.</p>
 
     <div class="section-label">Steady-training GPU work profile</div>
     <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
@@ -200,6 +200,24 @@
 
     <div class="section-label">Latest findings</div>
     <article>
+      <div class="meta"><span class="tag good">FIXED · DETERMINISTIC RL</span><time>4 Jul</time></div>
+      <h2>Fixed-order reductions make seeded PPO reproducible</h2>
+      <p>The first cold G1 attempts exposed a learner defect rather than ordinary seed variance: identical seed-42 jobs produced bit-identical observations, actions, rewards, physics states, values, and returns, yet diverged after PPO updates. Floating-point atomic reductions changed normalized advantages, prioritized sampling totals, Muon clipping/normalization, and the shared policy log-standard-deviation gradient; the high-learning-rate recurrent learner amplified those tiny changes into different policies.</p>
+      <ul>
+        <li>All update-critical reductions now use graph-capturable fixed-order partial sums with preallocated device buffers. No host synchronization or scene-specific path was added.</li>
+        <li>Independent normal multi-minibatch updates now produce bit-identical policy and optimizer checkpoints. A production-size 25-iteration pair also matches every checkpoint key and the held-out screen exactly (<code>0.5846359273</code>).</li>
+        <li>The 25-iteration pair takes 26.25 and 26.32 s versus 26.77 s before the fix. Removing contended atomics did not impose a throughput penalty in this bracket.</li>
+        <li>Permanent CUDA-graph tests cover fixed-order advantage normalization, complete recurrent PPO update reproducibility, and the G1 train/checkpoint/gate path.</li>
+        <li>The earlier 217 s cold attempts are diagnostic failures, not baseline samples: one happened to learn and one did not under the same nominal seed. They are retained as evidence that expected time-to-policy must not be estimated until seeded reproducibility is established.</li>
+        <li>Live model/trainer reuse plus cheap screening remains retained. A continuation from the old iteration-150 checkpoint passed full gates at iterations 290 and 315 in 129.6 s, but it is not counted as cold-start evidence.</li>
+        <li>Live continuation originally overwrote runtime environment flags and disabled episode command randomization after the first chunk. It now changes only the intended phase fields; the CUDA smoke asserts that randomization survives the transition.</li>
+        <li><strong>First valid cold success:</strong> deterministic train seed 42 / gate seed 1000 qualifies after 315 iterations (165.15M samples) in 231.37 s fresh-process wall time. The child records 197.95 s training, 7.49 s screening, and 22.44 s full-gate time.</li>
+        <li>Full gates at iterations 290 and 315 both pass with zero falls and battery performance 0.9261 / 0.9260. Action jerk, roll/pitch angular velocity, yaw rate, and leg velocity all remain comfortably within the frozen limits.</li>
+        <li><strong>Next:</strong> expand the paired train/gate seed bank before treating 231.37 s as an expectation estimate. One success gives <code>p=1</code> empirically but a very wide Wilson interval; thresholds remain frozen.</li>
+      </ul>
+    </article>
+
+    <article>
       <div class="meta"><span class="tag good">RETAINED · PROCESS-LEVEL METRIC</span><time>4 Jul</time></div>
       <h2>Cold-start G1 trials are executable and failure-aware</h2>
       <p><code>bench_time_to_policy</code> launches each G1 attempt in a fresh Python process, so imports, CUDA initialization, normal cache loading, graph capture, training, checkpoint reload, and held-out evaluation all contribute to wall time. Candidate recipes cannot improve the score merely by failing more often.</p>
@@ -207,16 +225,22 @@
         <li>Training seeds and held-out gate seeds are recorded separately and paired in a frozen order. Candidate comparisons can reuse the same banks; final confirmation can use an unseen bank.</li>
         <li>Qualification can require multiple successive held-out windows. A failure resets the streak, and the child stops only when the configured streak is complete.</li>
         <li>Timeouts, crashes, and quality misses are retained as censored trials and charged the full restart horizon. Zero observed successes produces an explicit infinite-cost state, serialized as strict JSON <code>null</code> plus a flag.</li>
-        <li>Nine focused unit tests pass. A CUDA graph-leapfrog smoke completed the full two-window path in a fresh process; a forced 10 ms timeout was correctly censored and charged.</li>
+        <li>Nineteen focused protocol, optimizer, determinism, and CUDA-graph tests pass. A forced 10 ms timeout is correctly censored and charged.</li>
         <li>The smoke's 3.93 s value used trivial two-world/two-iteration gates and is only protocol validation—not a training result. No new performance claim is made yet.</li>
         <li>ANYmal's existing pure-PhoenX forward curriculum is now a second task adapter. Its final no-reset walking gate is repeated with distinct held-out disturbance seeds, so confirmation windows exercise different physical trajectories.</li>
         <li>A tiny ANYmal graph-leapfrog smoke trained, checkpointed, reloaded, evaluated, correctly missed the walking gate, and was retained as a 180 s charged failure. This validates failure accounting; it is not a learning result.</li>
       </ul>
     </article>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED · CLOSED LINKAGE TASK</span><time>4 Jul</time></div>
+      <h2>DR Legs provides structurally different coverage</h2>
+      <ul>
         <li>DR Legs hold adds a structurally different maximal-coordinate closed linkage. Its no-reset gate applies seeded whole-robot horizontal velocity impulses and independently checks falls, survival, pose success, pelvis height/uprightness/drift, finite state, and closed-loop anchor residual.</li>
         <li>The untrained DR policy is correctly rejected: all 64 kicked worlds fall, with about 12–13% survival. Anchor residual remains below 0.5 mm, separating policy failure from a broken linkage solve.</li>
         <li>After 50 production-size PPO updates, survival improves to 15.5% and minimum pelvis height to 0.164 m, but the policy still fails. This is useful direction, not a passing result; no DR time-to-policy baseline is claimed yet.</li>
         <li>A large-world ordering bug was isolated: building the evaluation model after capturing but before first launching the training graph triggered CUDA error 700. The logically correct order—zero-training gate first, then capture—removes the failure at 2048 and 4096 training worlds.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">CANDIDATE · CROSS-ROBOT TOPOLOGY CACHE</span><time>3 Jul</time></div>
       <h2>Static topology caching wins across G1, ANYmal, and H1</h2>

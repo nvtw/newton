@@ -34,6 +34,7 @@ from newton._src.solvers.phoenx.benchmarks.bench_g1_train import (
     _parse_int_or_auto,
 )
 from newton._src.solvers.phoenx.rl_training import g1_recipe
+from newton._src.solvers.phoenx.rl_training.training import _train_g1_ppo_cycle
 
 _NANOG1_WALK_SAMPLES = 75_000_000
 _NANOG1_WALK_SECONDS = 58.9
@@ -149,15 +150,16 @@ def _evaluate_checkpoint(
     *,
     device: wp.context.Device,
     env_config: rl.ConfigEnvG1PhoenX | None = None,
+    screening: bool = False,
 ) -> rl.ResultEvaluateG1GatePPO:
     reloaded = rl.load_ppo_checkpoint(checkpoint_path, device=device)
     return rl.evaluate_g1_gate_ppo(
         reloaded,
         rl.ConfigEvaluateG1GatePPO(
             env_config=env_config if env_config is not None else _make_env_config(args),
-            battery_steps=int(args.battery_steps),
-            seeds_per_command=int(args.seeds_per_command),
-            diagnostic_steps=int(args.diagnostic_steps),
+            battery_steps=int(args.screen_battery_steps if screening else args.battery_steps),
+            seeds_per_command=int(args.screen_seeds_per_command if screening else args.seeds_per_command),
+            diagnostic_steps=int(args.screen_diagnostic_steps if screening else args.diagnostic_steps),
             diagnostic_world_count=int(args.diagnostic_world_count),
             device=device,
             deterministic=not bool(args.stochastic_gate),
@@ -172,8 +174,14 @@ def _evaluate_checkpoint(
     )
 
 
+def _screen_promising(stats: rl.StatsEvaluateG1GatePPO, args: argparse.Namespace) -> bool:
+    trigger_perf = min(float(args.screen_trigger_battery_perf), float(args.min_battery_perf))
+    return stats.battery_falls <= int(args.max_battery_falls) and stats.battery_perf >= trigger_perf
+
+
 def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     device = wp.get_device(args.device)
+
     if not device.is_cuda or not wp.is_mempool_enabled(device):
         raise RuntimeError("PhoenX G1 train-to-gate benchmark requires CUDA with Warp mempool enabled")
     if args.max_iterations <= 0:
@@ -186,6 +194,13 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("target_samples must be positive")
     if args.final_phase_sim_substeps <= 0:
         raise ValueError("final_phase_sim_substeps must be positive")
+    if not bool(args.no_screening):
+        if args.screen_battery_steps <= 0:
+            raise ValueError("screen_battery_steps must be positive")
+        if args.screen_seeds_per_command <= 0:
+            raise ValueError("screen_seeds_per_command must be positive")
+        if args.screen_diagnostic_steps <= 0:
+            raise ValueError("screen_diagnostic_steps must be positive")
     if args.required_consecutive_passes <= 0:
         raise ValueError("required_consecutive_passes must be positive")
     if bool(args.evaluate_only) and args.required_consecutive_passes != 1:
@@ -206,6 +221,8 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     train_seconds = 0.0
     gate_seconds = 0.0
     resume_checkpoint: str | None = str(args.resume_checkpoint) if args.resume_checkpoint is not None else None
+    screen_seconds = 0.0
+    full_gate_seconds = 0.0
     completed_iterations = 0
     if resume_checkpoint is not None:
         completed_iterations = int(
@@ -218,8 +235,10 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     start_iterations = int(completed_iterations)
     start_samples = _samples_for_iteration(args, start_iterations)
     gate_history: list[dict[str, Any]] = []
+    screen_history: list[dict[str, Any]] = []
     train_history: list[dict[str, Any]] = []
     first_pass: dict[str, Any] | None = None
+    live_result: rl.ResultTrainG1PPO | None = None
     pass_streak = 0
     total_t0 = time.perf_counter()
 
@@ -233,7 +252,9 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
             )
         gate_t0 = time.perf_counter()
         gate_result = _evaluate_checkpoint(resume_checkpoint, args, device=device, env_config=evaluation_env_config)
-        gate_seconds += time.perf_counter() - gate_t0
+        elapsed_gate = time.perf_counter() - gate_t0
+        gate_seconds += elapsed_gate
+        full_gate_seconds += elapsed_gate
         gate_entry = {
             "iteration": int(completed_iterations),
             "samples": int(_samples_for_iteration(args, completed_iterations)),
@@ -268,42 +289,55 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 ppo_config,
                 lr_anneal_timesteps=int(args.angular_fine_tune_lr_anneal_timesteps),
             )
-        chunk_t0 = time.perf_counter()
-        result = rl.train_g1_ppo(
-            rl.ConfigTrainG1PPO(
-                iterations=chunk_iterations,
-                rollout_steps=int(args.rollout_steps),
-                hidden_layers=tuple(args.hidden_layers),
-                activation=str(args.activation),
-                env_config=active_env_config,
-                ppo_config=active_ppo_config,
-                device=device,
-                seed=int(args.seed),
-                log_interval=0,
-                randomize_commands=not bool(args.no_command_randomization),
-                command_x_range=tuple(float(v) for v in args.command_x_range),
-                command_y_range=tuple(float(v) for v in args.command_y_range),
-                command_yaw_range=tuple(float(v) for v in args.command_yaw_range),
-                command_zero_probability=float(args.command_zero_probability),
-                command_curriculum_start=command_curriculum_start,
-                command_curriculum_samples=command_curriculum_samples,
-                use_target_curriculum=not bool(args.no_target_curriculum),
-                target_distance_start=float(args.target_distance_start),
-                target_distance_end=float(args.target_distance_end),
-                target_curriculum_samples=int(args.target_curriculum_samples),
-                randomize_target_positions=bool(args.randomize_target_positions),
-                target_angle_min=float(args.target_angle_min),
-                target_angle_max=float(args.target_angle_max),
-                reset_recurrent_state_on_rollout_start=bool(args.reset_recurrent_state_on_rollout_start),
-                squash_actions=bool(args.squash_actions),
-                log_std_init=float(args.log_std_init),
-                resume_checkpoint=resume_checkpoint,
-                checkpoint_path=checkpoint_template,
-                checkpoint_interval=0,
-                readback_diagnostics=bool(args.readback_diagnostics),
-                execution_mode=str(args.execution_mode),
-            )
+        train_config = rl.ConfigTrainG1PPO(
+            iterations=chunk_iterations,
+            rollout_steps=int(args.rollout_steps),
+            hidden_layers=tuple(args.hidden_layers),
+            activation=str(args.activation),
+            env_config=active_env_config,
+            ppo_config=active_ppo_config,
+            device=device,
+            seed=int(args.seed),
+            log_interval=0,
+            randomize_commands=not bool(args.no_command_randomization),
+            command_x_range=tuple(float(v) for v in args.command_x_range),
+            command_y_range=tuple(float(v) for v in args.command_y_range),
+            command_yaw_range=tuple(float(v) for v in args.command_yaw_range),
+            command_zero_probability=float(args.command_zero_probability),
+            command_curriculum_start=command_curriculum_start,
+            command_curriculum_samples=command_curriculum_samples,
+            use_target_curriculum=not bool(args.no_target_curriculum),
+            target_distance_start=float(args.target_distance_start),
+            target_distance_end=float(args.target_distance_end),
+            target_curriculum_samples=int(args.target_curriculum_samples),
+            randomize_target_positions=bool(args.randomize_target_positions),
+            target_angle_min=float(args.target_angle_min),
+            target_angle_max=float(args.target_angle_max),
+            reset_recurrent_state_on_rollout_start=bool(args.reset_recurrent_state_on_rollout_start),
+            squash_actions=bool(args.squash_actions),
+            log_std_init=float(args.log_std_init),
+            resume_checkpoint=resume_checkpoint if live_result is None else None,
+            checkpoint_path=checkpoint_template,
+            checkpoint_interval=0,
+            readback_diagnostics=bool(args.readback_diagnostics),
+            execution_mode=str(args.execution_mode),
         )
+        chunk_t0 = time.perf_counter()
+        if live_result is None:
+            result = rl.train_g1_ppo(train_config)
+        else:
+            live_result.env.config = replace(
+                live_result.env.config,
+                sim_substeps=active_env_config.sim_substeps,
+                w_ang_vel_xy=active_env_config.w_ang_vel_xy,
+            )
+            live_result.trainer.config.lr_anneal_timesteps = active_ppo_config.lr_anneal_timesteps
+            if bool(args.reset_env_between_chunks):
+                live_result.env.use_reset_seed_counter(None)
+                live_result.env.use_command_seed_counter(None)
+                live_result.env.reset()
+            result = _train_g1_ppo_cycle(live_result, train_config)
+        live_result = result
         train_seconds += time.perf_counter() - chunk_t0
         completed_iterations = int(result.trainer.iteration)
         checkpoint_path = _format_checkpoint_template(checkpoint_template, completed_iterations)
@@ -317,10 +351,39 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         ):
             continue
 
+        samples = _samples_for_iteration(args, completed_iterations)
+        if not bool(args.no_screening):
+            screen_t0 = time.perf_counter()
+            screen_result = _evaluate_checkpoint(
+                checkpoint_path,
+                args,
+                device=device,
+                env_config=active_env_config,
+                screening=True,
+            )
+            elapsed_screen = time.perf_counter() - screen_t0
+            screen_seconds += elapsed_screen
+            gate_seconds += elapsed_screen
+            promising = _screen_promising(screen_result.stats, args)
+            screen_history.append(
+                {
+                    "iteration": int(completed_iterations),
+                    "samples": int(samples),
+                    "checkpoint": str(checkpoint_path),
+                    "stats": asdict(screen_result.stats),
+                    "promoted": promising,
+                    "total_wall_seconds": float(time.perf_counter() - total_t0),
+                }
+            )
+            if not promising:
+                pass_streak = 0
+                continue
+
         gate_t0 = time.perf_counter()
         gate_result = _evaluate_checkpoint(checkpoint_path, args, device=device, env_config=active_env_config)
-        gate_seconds += time.perf_counter() - gate_t0
-        samples = _samples_for_iteration(args, completed_iterations)
+        elapsed_gate = time.perf_counter() - gate_t0
+        full_gate_seconds += elapsed_gate
+        gate_seconds += elapsed_gate
         gate_entry = {
             "iteration": int(completed_iterations),
             "samples": int(samples),
@@ -352,7 +415,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
 
     result = {
         "engine": "phoenx_g1_warp_ppo_train_to_gate",
-        "metric": "train, save, reload, and evaluate G1 quality gate",
+        "metric": "train, save, reload, screen, and evaluate G1 quality gate",
         "device": device.name,
         "execution_mode": str(args.execution_mode),
         "readback_diagnostics": bool(args.readback_diagnostics),
@@ -433,6 +496,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "muon_momentum": float(args.muon_momentum),
         "max_iterations": int(args.max_iterations),
         "chunk_iterations": int(args.chunk_iterations),
+        "reset_env_between_chunks": bool(args.reset_env_between_chunks),
         "start_iterations": int(start_iterations),
         "completed_iterations": int(completed_iterations),
         "start_samples": int(start_samples),
@@ -441,6 +505,9 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "target_samples": int(args.target_samples),
         "train_seconds": float(train_seconds),
         "gate_seconds": float(gate_seconds),
+        "screen_seconds": float(screen_seconds),
+        "full_gate_seconds": float(full_gate_seconds),
+        "screening_enabled": not bool(args.no_screening),
         "total_wall_seconds": float(total_seconds),
         "train_env_samples_per_s": float(train_sps),
         "total_env_samples_per_s": float(total_sps),
@@ -450,6 +517,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "pass_gate": bool(pass_gate),
         "required_consecutive_passes": int(args.required_consecutive_passes),
         "first_pass": first_pass,
+        "screen_history": screen_history,
         "gate_history": gate_history,
         "train_history": train_history if bool(args.include_train_history) else [],
         "nanog1_reference_source": _NANOG1_REFERENCE,
@@ -477,6 +545,12 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-steps", type=int, default=g1_recipe.ROLLOUT_STEPS)
     parser.add_argument("--target-samples", type=int, default=_NANOG1_WALK_SAMPLES)
     parser.add_argument("--max-iterations", type=int, default=None)
+    parser.add_argument(
+        "--reset-env-between-chunks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Refresh all training worlds at evaluation boundaries while preserving the live trainer.",
+    )
     parser.add_argument("--chunk-iterations", type=int, default=25)
     parser.add_argument("--hidden-layers", type=_parse_hidden_layers, default=g1_recipe.HIDDEN_LAYERS)
     parser.add_argument("--activation", choices=("relu", "elu"), default=g1_recipe.ACTIVATION)
@@ -677,6 +751,16 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--battery-steps", type=int, default=1000)
     parser.add_argument("--seeds-per-command", type=int, default=4)
     parser.add_argument("--diagnostic-steps", type=int, default=2000)
+    parser.add_argument("--no-screening", action="store_true")
+    parser.add_argument("--screen-battery-steps", type=int, default=100)
+    parser.add_argument("--screen-seeds-per-command", type=int, default=1)
+    parser.add_argument("--screen-diagnostic-steps", type=int, default=1)
+    parser.add_argument(
+        "--screen-trigger-battery-perf",
+        type=float,
+        default=0.88,
+        help="Run the full held-out gate once the cheap screen reaches this battery score.",
+    )
     parser.add_argument("--diagnostic-world-count", type=int, default=1)
     parser.add_argument("--stochastic-gate", action="store_true")
     parser.add_argument("--gate-seed", type=int, default=1000)

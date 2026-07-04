@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
     StatsEvaluateDrLegsHold,
@@ -19,7 +20,7 @@ from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate impo
 from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
     check_gate as check_dr_legs_gate,
 )
-from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import _updated_pass_streak
+from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import _screen_promising, _updated_pass_streak
 from newton._src.solvers.phoenx.benchmarks.bench_time_to_policy import (
     TrialOutcome,
     _child_command,
@@ -122,6 +123,19 @@ class TestTimeToPolicyProtocol(unittest.TestCase):
             streak = _updated_pass_streak(passed, streak)
 
         self.assertEqual(streak, 1)
+
+    def test_cheap_g1_screen_promotes_only_promising_checkpoints(self):
+        args = SimpleNamespace(
+            screen_trigger_battery_perf=0.85,
+            min_battery_perf=0.90,
+            max_battery_falls=1,
+        )
+
+        self.assertFalse(_screen_promising(SimpleNamespace(battery_perf=0.84, battery_falls=0), args))
+        self.assertTrue(_screen_promising(SimpleNamespace(battery_perf=0.86, battery_falls=1), args))
+        self.assertFalse(_screen_promising(SimpleNamespace(battery_perf=0.90, battery_falls=2), args))
+        args.min_battery_perf = -1.0
+        self.assertTrue(_screen_promising(SimpleNamespace(battery_perf=0.0, battery_falls=0), args))
 
     def test_runner_owns_seed_and_output_arguments(self):
         for option in ("--seed", "--seed=12", "--json-output", "--required-consecutive-passes=3"):
