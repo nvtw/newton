@@ -58,16 +58,24 @@ class SingleWorldMassSplittingDispatcher:
             w._mass_splitting_average_and_broadcast(inv_dt)
         else:
             w._run_cached_prepare_bookkeeping(idt)
+        w._gather_colored_contact_rows()
 
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
-            w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
+            w._singleworld_head_plus_tail_sweep(
+                iterate_head,
+                iterate_fused,
+                idt,
+                contact_container=w._contact_container_solve,
+            )
             w._mass_splitting_average_and_broadcast(inv_dt)
 
         # Writeback slot[0].velocity -> body.velocity. step()'s
         # integrate_positions then advances bodies with the post-PGS
         # velocity.
         w._mass_splitting_writeback(already_averaged=True)
+        if w.velocity_iterations <= 0:
+            w._scatter_colored_contact_rows()
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
@@ -78,12 +86,18 @@ class SingleWorldMassSplittingDispatcher:
         _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
         for _ in range(w.velocity_iterations):
             w._partitioner.begin_sweep()
-            w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
+            w._singleworld_head_plus_tail_sweep(
+                relax_head,
+                relax_fused,
+                idt,
+                contact_container=w._contact_container_solve,
+            )
             w._mass_splitting_average_and_broadcast(inv_dt)
 
         # Second writeback after relax: relax also routes through slots,
         # so the next substep would see stale body.velocity otherwise.
         w._mass_splitting_writeback(already_averaged=True)
+        w._scatter_colored_contact_rows()
 
 
 __all__ = ["SingleWorldMassSplittingDispatcher"]

@@ -46,11 +46,14 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     RIGID_CONTACT_SOLVE_DWORDS,
     ContactColumnContainer,
     ContactViews,
+    contact_build_colored_row_offsets,
     contact_column_container_zeros,
+    contact_gather_colored_rows,
     contact_pack_colored_headers,
     contact_pair_wrench_kernel,
     contact_per_contact_error_kernel,
     contact_per_contact_wrench_kernel,
+    contact_scatter_colored_rows,
     contact_views_make,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -90,6 +93,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     contact_container_copy_current_to_prev,
     contact_container_zeros,
+    contact_solve_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.contact_ingest import (
     IngestScratch,
@@ -594,6 +598,7 @@ class PhoenXWorld:
         max_thread_blocks: int | None = None,
         enable_body_pair_grouping: bool = False,
         colored_contact_headers: bool = False,
+        colored_contact_rows: bool = False,
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
@@ -670,6 +675,8 @@ class PhoenXWorld:
                 grid; ``None`` auto-sizes. No effect on multi-world.
             colored_contact_headers: Store rigid-contact column metadata in
                 color-slot order for the single-world mass-splitting solve.
+            colored_contact_rows: Store hot rigid-contact iterate rows in
+                color-slot order. Requires colored_contact_headers.
             mass_splitting: Enable Tonge mass splitting -- coloring caps
                 at ``max_colored_partitions`` and the overflow bucket
                 is solved Jacobi-style on per-partition copy states.
@@ -701,6 +708,11 @@ class PhoenXWorld:
         self.contact_friction_model = contact_friction_model
         self._contact_patch_enabled = contact_friction_model == "patch"
         self._colored_contact_headers = bool(colored_contact_headers)
+        self._colored_contact_rows = bool(colored_contact_rows)
+        if self._colored_contact_rows and not self._colored_contact_headers:
+            raise ValueError("colored_contact_rows requires colored_contact_headers")
+        if self._colored_contact_rows and rigid_contact_max <= 0:
+            raise ValueError("colored_contact_rows requires rigid_contact_max > 0")
         if self._colored_contact_headers and (
             step_layout != "single_world"
             or not mass_splitting
@@ -1251,6 +1263,17 @@ class PhoenXWorld:
                 if self._colored_contact_headers
                 else self._contact_cols
             )
+            self._contact_container_solve = (
+                contact_solve_container_zeros(self.rigid_contact_max, device=self.device)
+                if self._colored_contact_rows
+                else self._contact_container
+            )
+            if self._colored_contact_rows:
+                self._contact_row_counts = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)
+                self._contact_row_offsets = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)
+                self._contact_row_source_indices = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=self.device)
+                self._contact_row_slots = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=self.device)
+                self._contact_row_total = wp.zeros(1, dtype=wp.int32, device=self.device)
             self._enable_body_pair_grouping: bool = bool(enable_body_pair_grouping)
             self._ingest_scratch: IngestScratch | None = IngestScratch(
                 rigid_contact_max=self.rigid_contact_max,
@@ -1269,6 +1292,7 @@ class PhoenXWorld:
             self._cc_valid_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
+            self._contact_container_solve = self._contact_container
             self._contact_cols = contact_column_container_zeros(1, device=self.device)
             self._contact_cols_packed = self._contact_cols
             self._ingest_scratch = None
@@ -2912,6 +2936,20 @@ class PhoenXWorld:
                         self._constraint_capacity,
                         device=self.device,
                     )
+                    if self._colored_contact_rows:
+                        contact_build_colored_row_offsets(
+                            self._contact_cols_packed,
+                            self._partitioner.element_ids_by_color,
+                            self._num_active_constraints,
+                            self._contact_offset,
+                            self._contact_row_counts,
+                            self._contact_row_offsets,
+                            self._contact_row_source_indices,
+                            self._contact_row_slots,
+                            self._contact_row_total,
+                            self._constraint_capacity,
+                            device=self.device,
+                        )
 
         # Substep order: bias-on solve -> integrate -> bias-off relax. Reversing
         # would discard the positional bias's penetration recovery.
@@ -3992,9 +4030,12 @@ class PhoenXWorld:
         kernel,
         idt: wp.float32,
         fuse_threshold: wp.int32,
+        contact_container: ContactContainer | None = None,
     ) -> None:
         """Launch the persistent-grid single-world head kernel."""
         contact_views = self._active_contact_views()
+        if contact_container is None:
+            contact_container = self._contact_container
         ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
         ms_batch = wp.int32(int(self.mass_splitting_batch_size))
         wp.launch(
@@ -4012,7 +4053,7 @@ class PhoenXWorld:
                 self._partitioner.color_family_starts,
                 self._partitioner.num_colors,
                 self._partitioner.color_cursor,
-                self._contact_container,
+                contact_container,
                 contact_views,
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
@@ -4038,15 +4079,21 @@ class PhoenXWorld:
         NUM_INNER_WHILE_ITERATIONS times. Tail launches no-op once head_active
         clears within the same outer iter."""
         idt = kw.get("idt", wp.float32(0.0))
+        contact_container = kw.get("contact_container", self._contact_container)
+        if contact_container is None:
+            contact_container = self._contact_container
         fuse_threshold = wp.int32(self._fuse_threshold)
         for _ in range(NUM_INNER_WHILE_ITERATIONS):
-            self._launch_singleworld_head(kernel, idt, fuse_threshold)
+            self._launch_singleworld_head(kernel, idt, fuse_threshold, contact_container)
 
     def _capture_singleworld_tail_sweep(self, kernel, **kw) -> None:
         """capture_while body: drain remaining small colours in one block via
         wp.launch_tiled. Hands back to the head path on a colour > fuse_threshold."""
         contact_views = self._active_contact_views()
         idt = kw.get("idt", wp.float32(0.0))
+        contact_container = kw.get("contact_container", self._contact_container)
+        if contact_container is None:
+            contact_container = self._contact_container
         ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
         ms_batch = wp.int32(int(self.mass_splitting_batch_size))
         wp.launch_tiled(
@@ -4064,7 +4111,7 @@ class PhoenXWorld:
                 self._partitioner.color_family_starts,
                 self._partitioner.num_colors,
                 self._partitioner.color_cursor,
-                self._contact_container,
+                contact_container,
                 contact_views,
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
@@ -4084,7 +4131,13 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _singleworld_head_plus_tail_sweep(self, head_kernel, tail_kernel, idt: wp.float32) -> None:
+    def _singleworld_head_plus_tail_sweep(
+        self,
+        head_kernel,
+        tail_kernel,
+        idt: wp.float32,
+        contact_container: ContactContainer | None = None,
+    ) -> None:
         """Persistent-grid head + fused single-block tail.
 
         Outer ``wp.capture_while`` on ``color_cursor`` so head and tail
@@ -4121,10 +4174,45 @@ class PhoenXWorld:
                 self._capture_singleworld_sweep,
                 kernel=head_kernel,
                 idt=idt,
+                contact_container=contact_container,
             )
-            self._capture_singleworld_tail_sweep(kernel=tail_kernel, idt=idt)
+            self._capture_singleworld_tail_sweep(
+                kernel=tail_kernel,
+                idt=idt,
+                contact_container=contact_container,
+            )
 
         wp.capture_while(self._partitioner.color_cursor, _round)
+
+    def _gather_colored_contact_rows(self) -> None:
+        if not self._colored_contact_rows:
+            return
+        contact_gather_colored_rows(
+            self._contact_container,
+            self._contact_container_solve,
+            self._contact_cols_packed,
+            self._contact_row_offsets,
+            self._contact_row_source_indices,
+            self._contact_row_slots,
+            self._contact_row_total,
+            self.rigid_contact_max,
+            device=self.device,
+        )
+
+    def _scatter_colored_contact_rows(self) -> None:
+        if not self._colored_contact_rows:
+            return
+        contact_scatter_colored_rows(
+            self._contact_container_solve,
+            self._contact_container,
+            self._contact_cols_packed,
+            self._contact_row_offsets,
+            self._contact_row_source_indices,
+            self._contact_row_slots,
+            self._contact_row_total,
+            self.rigid_contact_max,
+            device=self.device,
+        )
 
     def _solve_main_singleworld(self) -> None:
         """Single-world prepare + main PGS iterate. Each sweep is head (large

@@ -73,6 +73,7 @@ __all__ = [
     "contact_container_clear_reset_worlds",
     "contact_container_copy_current_to_prev",
     "contact_container_zeros",
+    "contact_solve_container_zeros",
 ]
 
 
@@ -548,6 +549,24 @@ def contact_container_zeros(
     cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    return cc
+
+
+def contact_solve_container_zeros(
+    rigid_contact_max: int,
+    device: wp.DeviceLike = None,
+) -> ContactContainer:
+    """Allocate only the rows consumed by rigid contact iterate/relax."""
+    n = max(1, int(rigid_contact_max))
+    cc = ContactContainer()
+    cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.prev_impulses = wp.zeros((1, 1), dtype=wp.float32, device=device)
+    # Iterate reads normal + tangent1; local anchors stay in the canonical
+    # prepare container.
+    cc.lambdas = wp.zeros((6, n), dtype=wp.float32, device=device)
+    cc.prev_lambdas = wp.zeros((1, 1), dtype=wp.float32, device=device)
+    # Iterate reads through r1 (row 14); start_gap belongs to prepare.
+    cc.derived = wp.zeros((15, n), dtype=wp.float32, device=device)
     return cc
 
 

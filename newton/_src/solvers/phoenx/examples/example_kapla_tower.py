@@ -84,6 +84,7 @@ GROUND_HEIGHT: float = 0.35 * GLOBAL_SCALING
 USE_BIG_WORLD_MODE: bool = True
 STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 USE_COLORED_CONTACT_HEADERS: bool = True
+USE_COLORED_CONTACT_ROWS: bool = True
 
 # Tonge mass splitting (C# PhoenX default). When ``True`` the
 # partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
@@ -366,6 +367,7 @@ class Example:
             mass_splitting_unrolled=True,
             mass_splitting_batch_size=1,
             colored_contact_headers=USE_COLORED_CONTACT_HEADERS,
+            colored_contact_rows=USE_COLORED_CONTACT_ROWS,
             sor_boost=1.0,
             solver_flavor=solver_flavor,
             jacobi_max_colors=self.max_colors,

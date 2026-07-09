@@ -124,19 +124,12 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · Kapla contact layout</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · color-ordered contact rows</strong></div>
     </header>
 
     <section class="hero">
       <strong>Primary goal</strong>
       <p>Minimize wall-clock time from a zero-training process start to the first policy that passes a predeclared held-out quality gate, using only PhoenX physics and PhoenX RL. Solver speed, timestep size, stability, sample efficiency, curricula, population methods, and learner throughput are jointly optimized—but every cost is counted and every survivor must generalize across diverse tasks.</p>
-    </section>
-
-    <section class="action-required" aria-label="Action required">
-      <div class="meta"><span class="tag">ACTION REQUIRED</span><time>One source-correlated iterate</time></div>
-      <strong>Run one bounded Nsight Compute source pass</strong>
-      <p>The post-layout counters are analyzed. One launch with source counters should identify the exact remaining long-scoreboard load, without profiling the full frame or repeating six kernels.</p>
-      <pre><code>sudo bash /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/analysis_tools/ncu_profile_kapla.sh 1 /tmp/phoenx_kapla_ncu_source.txt singleworld_persistent 17</code></pre>
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
@@ -270,19 +263,17 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag good">RETAINED CANDIDATE · CONTACT LAYOUT</span><time>9 Jul</time></div>
-      <h2>Color-slot headers reduce Kapla's dependent contact loads</h2>
-      <p>The corrected Nsight Compute run identifies the dominant rigid-contact iterate as latency-bound rather than bandwidth-bound: 91 registers/thread, only about 8% scheduler cycles with an eligible warp, 56–61% long-scoreboard issue spacing, 26–30% DRAM throughput, and roughly 4% achieved occupancy.</p>
+      <div class="meta"><span class="tag good">RETAINED CANDIDATE · CONTACT ROW LAYOUT</span><time>9 Jul</time></div>
+      <h2>Color-ordered contact rows move fixed Kapla to 74.9 FPS</h2>
+      <p>The completed source-counter pass confirms that the dominant rigid-contact iterate is a gather-latency problem: 78.2% of issue spacing is long-scoreboard stall and Nsight reports 1.81 million excess global sectors—78% of all sectors. Arithmetic, DRAM saturation, <code>__ldg()</code>, and sleeping are not the target.</p>
       <ul>
-        <li>An opt-in single-world mass-splitting path now gathers ten hot contact-header fields into color-slot order once per rebuilt contact graph. PGS reads the packed view directly, while ingest, warm starting, coloring, and slot-cache construction retain the canonical columns.</li>
-        <li>The shipped 1×1 Kapla schedule remains fixed at 6 substeps, 10 PGS iterations, and 1 velocity iteration. Clean runs improve from about 68.0 to 69.0 FPS.</li>
-        <li>The packed iterate improves cache hit rates to roughly 62–64% in L1 and 50–51% in L2, but still has no eligible warp in 93% of scheduler cycles. A simple packed-path grid specialization uses 12 rather than 4 blocks/SM and raises end-to-end throughput to <strong>70.03 FPS</strong>; 16 and 20 blocks are slower.</li>
-        <li>The post-grid Systems trace measures iterate at 6.81 µs (previously 7.15), prepare at 15.72 µs (16.56), and relax at 6.80 µs (7.27). Contact iterate remains 51.4% of GPU kernel time; the 10-field gather costs only 4.17 µs once per frame.</li>
-        <li>A 2×2 scene with 45,360 bricks improves 20.68 → 21.53 FPS (+4.1%); the measured final state is bit-identical in the paired run. The real-data Kapla CUDA-graph regression passes.</li>
-        <li>The packed buffer retains arbitrary contiguous <code>[first, count)</code> contact manifolds, including large mesh-generated groups. A linked chunk chain was not added: it would introduce another dependent pointer load into the exact bottleneck exposed by Nsight.</li>
-        <li>Rejected alternatives: six persistent blocks/SM overfit and regress several robot/tower scenes; dependency-wave scheduling is 42% slower with no extra overlap; a statically unrolled ≤5-contact solve regresses FPS and stability.</li>
-        <li>The larger convex-patch experiment also fails its gate: mass-splitting patch friction reaches 68.13 FPS versus 68.85 for packed point friction, while mean drift rises from about 0.016 m to 0.054 m. It was fully reverted.</li>
-        <li>Further simple experiments were rejected quickly: direct regular colors plus split overflow falls to 60.4 FPS; overflow batch size 2 falls to 67.79 FPS; separate 4-block regular / 12-block overflow launches are neutral. Copy-state locality and one-thread-per-overflow-row parallelism are both valuable.</li>
+        <li>The safe opt-in path keeps canonical rows for ingest, warm start, and prepare. After prepare, one thread per contact gathers only the 24 rows consumed by iterate/relax into color order; after relax, one thread per contact scatters only the three accumulated impulses back.</li>
+        <li>An exclusive device scan builds offsets and a packed-to-canonical map once per rebuilt contact graph. There is no hard-coded contact count, binary search, or linked-list traversal. A CUDA-graph unit test covers interleaved 1-, 7-, and 13-contact columns.</li>
+        <li>The shipped workload is unchanged at 6 substeps, 10 PGS iterations, and 1 velocity iteration. Three 120-frame runs measure 74.83 / 75.07 / 74.92 FPS. Against the retained 70.03-FPS checkpoint this is about <strong>+7.0%</strong>.</li>
+        <li>The 2×2 scene with 45,360 bricks improves 23.87 → <strong>28.29 FPS</strong> in the matched run (+18.5%), so the gain grows with contact load rather than overfitting to 1×1. Drift, maximum displacement, and height match the paired baseline.</li>
+        <li>The post-change Systems trace measures the persistent iterate at 5.59 µs average, down from 6.81 µs at the previous checkpoint. Contact-thread gather costs 12.26 µs per substep and only 1.1% of kernel time; iterate falls from 51.4% to 46.9% of the profile.</li>
+        <li>The real-data Kapla settle test and launch-shape suite pass under CUDA graph capture. The arbitrary-count row round-trip test also passes.</li>
+        <li>A smaller response-cache experiment was rejected: it helped 1×1 by 1.4% but hurt 2×2 by 1.4%. The earlier column-thread row gather was also rejected after regressing 2×2; contact-thread staging is the version that scales.</li>
       </ul>
     </article>
     <article>

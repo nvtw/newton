@@ -37,12 +37,12 @@ class SingleWorldMassSplittingUnrolledDispatcher:
     def begin_step(self) -> None:
         self._world._rebuild_mass_splitting_graph()
 
-    def _unrolled_sweep(self, head_kernel, idt: wp.float32) -> None:
+    def _unrolled_sweep(self, head_kernel, idt: wp.float32, contact_container=None) -> None:
         """Head-only fixed-count colour drain."""
         w = self._world
         fuse_threshold = wp.int32(-1)
         for _ in range(self._launch_bound):
-            w._launch_singleworld_head(head_kernel, idt, fuse_threshold)
+            w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container)
 
     def solve(self, idt: wp.float32) -> None:
         w = self._world
@@ -59,13 +59,16 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._mass_splitting_average_and_broadcast(inv_dt)
         else:
             w._run_cached_prepare_bookkeeping(idt)
+        w._gather_colored_contact_rows()
 
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
-            self._unrolled_sweep(iterate_head, idt)
+            self._unrolled_sweep(iterate_head, idt, w._contact_container_solve)
             w._mass_splitting_average_and_broadcast(inv_dt)
 
         w._mass_splitting_writeback(already_averaged=True)
+        if w.velocity_iterations <= 0:
+            w._scatter_colored_contact_rows()
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
@@ -76,10 +79,11 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         _, _, _, _, relax_head, _ = w._singleworld_kernels()
         for _ in range(w.velocity_iterations):
             w._partitioner.begin_sweep()
-            self._unrolled_sweep(relax_head, idt)
+            self._unrolled_sweep(relax_head, idt, w._contact_container_solve)
             w._mass_splitting_average_and_broadcast(inv_dt)
 
         w._mass_splitting_writeback(already_averaged=True)
+        w._scatter_colored_contact_rows()
 
 
 __all__ = ["SingleWorldMassSplittingUnrolledDispatcher"]

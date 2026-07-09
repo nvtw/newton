@@ -25,6 +25,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     soft_constraint_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
+    CC_IMPULSE_DWORDS_PER_CONTACT,
     ContactContainer,
     cc_get_bias,
     cc_get_bias_t1,
@@ -68,7 +69,9 @@ __all__ = [
     "ContactConstraintData",
     "ContactViews",
     "contact_accumulate_time_us",
+    "contact_build_colored_row_offsets",
     "contact_column_container_zeros",
+    "contact_gather_colored_rows",
     "contact_get_body1",
     "contact_get_body2",
     "contact_get_contact_count",
@@ -97,6 +100,7 @@ __all__ = [
     "contact_per_contact_wrench_kernel",
     "contact_per_k_error_at",
     "contact_per_k_wrench_at",
+    "contact_scatter_colored_rows",
     "contact_set_body1",
     "contact_set_body2",
     "contact_set_contact_count",
@@ -218,7 +222,8 @@ CONTACT_DWORDS: int = num_dwords(ContactConstraintData)
 # Rigid mass-splitting reads the prefix through ``count2``. Endpoint
 # metadata occupies holes in that prefix but is compile-time dead in the
 # rigid solve; retaining the original offsets avoids a second getter family.
-RIGID_CONTACT_SOLVE_DWORDS: int = int(_OFF_COUNT2) + 1
+_OFF_ORIGINAL_CONTACT_FIRST: int = int(_OFF_COUNT2) + 1
+RIGID_CONTACT_SOLVE_DWORDS: int = _OFF_ORIGINAL_CONTACT_FIRST + 1
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +301,106 @@ def _contact_pack_colored_headers_kernel(
     destination.data[_OFF_SLOT2, slot] = source.data[_OFF_SLOT2, local_cid]
     destination.data[_OFF_COUNT1, slot] = source.data[_OFF_COUNT1, local_cid]
     destination.data[_OFF_COUNT2, slot] = source.data[_OFF_COUNT2, local_cid]
+    destination.data[_OFF_ORIGINAL_CONTACT_FIRST, slot] = source.data[_OFF_CONTACT_FIRST, local_cid]
+
+
+@wp.kernel(enable_backward=False)
+def _contact_colored_row_counts_kernel(
+    packed_headers: ContactColumnContainer,
+    element_ids_by_color: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    contact_offset: wp.int32,
+    counts: wp.array[wp.int32],
+):
+    slot = wp.tid()
+    count = wp.int32(0)
+    if slot < num_active_constraints[0] and element_ids_by_color[slot] >= contact_offset:
+        count = contact_get_contact_count(packed_headers, slot)
+    counts[slot] = count
+
+
+@wp.kernel(enable_backward=False)
+def _contact_build_colored_row_map_kernel(
+    packed_headers: ContactColumnContainer,
+    element_ids_by_color: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    contact_offset: wp.int32,
+    offsets: wp.array[wp.int32],
+    source_indices: wp.array[wp.int32],
+    slots: wp.array[wp.int32],
+):
+    slot = wp.tid()
+    if slot >= num_active_constraints[0] or element_ids_by_color[slot] < contact_offset:
+        return
+    source_first = reinterpret_float_as_int(packed_headers.data[_OFF_ORIGINAL_CONTACT_FIRST, slot])
+    count = contact_get_contact_count(packed_headers, slot)
+    destination_first = offsets[slot]
+    for i in range(count):
+        destination_k = destination_first + i
+        source_indices[destination_k] = source_first + i
+        slots[destination_k] = slot
+
+
+@wp.kernel(enable_backward=False)
+def _contact_colored_row_total_kernel(
+    counts: wp.array[wp.int32],
+    offsets: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    total: wp.array[wp.int32],
+):
+    active = num_active_constraints[0]
+    if active > wp.int32(0):
+        last = active - wp.int32(1)
+        total[0] = offsets[last] + counts[last]
+    else:
+        total[0] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def _contact_gather_colored_rows_kernel(
+    source: ContactContainer,
+    destination: ContactContainer,
+    packed_headers: ContactColumnContainer,
+    offsets: wp.array[wp.int32],
+    source_indices: wp.array[wp.int32],
+    slots: wp.array[wp.int32],
+    total: wp.array[wp.int32],
+):
+    destination_k = wp.tid()
+    if destination_k >= total[0]:
+        return
+    source_k = source_indices[destination_k]
+    slot = slots[destination_k]
+    if destination_k == offsets[slot]:
+        packed_headers.data[_OFF_CONTACT_FIRST, slot] = reinterpret_int_as_float(destination_k)
+    for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
+        destination.impulses[row, destination_k] = source.impulses[row, source_k]
+    for row in range(6):
+        destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
+    for row in range(15):
+        destination.derived[row, destination_k] = source.derived[row, source_k]
+
+
+@wp.kernel(enable_backward=False)
+def _contact_scatter_colored_rows_kernel(
+    source: ContactContainer,
+    destination: ContactContainer,
+    packed_headers: ContactColumnContainer,
+    offsets: wp.array[wp.int32],
+    source_indices: wp.array[wp.int32],
+    slots: wp.array[wp.int32],
+    total: wp.array[wp.int32],
+):
+    source_k = wp.tid()
+    if source_k >= total[0]:
+        return
+    destination_k = source_indices[source_k]
+    slot = slots[source_k]
+    if source_k == offsets[slot]:
+        original_first = reinterpret_float_as_int(packed_headers.data[_OFF_ORIGINAL_CONTACT_FIRST, slot])
+        packed_headers.data[_OFF_CONTACT_FIRST, slot] = reinterpret_int_as_float(original_first)
+    for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
+        destination.impulses[row, destination_k] = source.impulses[row, source_k]
 
 
 def contact_pack_colored_headers(
@@ -312,6 +417,111 @@ def contact_pack_colored_headers(
         _contact_pack_colored_headers_kernel,
         dim=max(1, int(capacity)),
         inputs=[source, destination, element_ids_by_color, num_active_constraints, wp.int32(contact_offset)],
+        device=device,
+    )
+
+
+def contact_build_colored_row_offsets(
+    packed_headers: ContactColumnContainer,
+    element_ids_by_color: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    contact_offset: int,
+    counts: wp.array[wp.int32],
+    offsets: wp.array[wp.int32],
+    source_indices: wp.array[wp.int32],
+    slots: wp.array[wp.int32],
+    total: wp.array[wp.int32],
+    capacity: int,
+    device: wp.DeviceLike = None,
+) -> None:
+    """Build general exclusive row offsets for color-ordered contact columns."""
+    wp.launch(
+        _contact_colored_row_counts_kernel,
+        dim=max(1, int(capacity)),
+        inputs=[
+            packed_headers,
+            element_ids_by_color,
+            num_active_constraints,
+            wp.int32(contact_offset),
+            counts,
+        ],
+        device=device,
+    )
+    wp.utils.array_scan(counts, offsets, inclusive=False)
+    wp.launch(
+        _contact_build_colored_row_map_kernel,
+        dim=max(1, int(capacity)),
+        inputs=[
+            packed_headers,
+            element_ids_by_color,
+            num_active_constraints,
+            wp.int32(contact_offset),
+            offsets,
+            source_indices,
+            slots,
+        ],
+        device=device,
+    )
+    wp.launch(
+        _contact_colored_row_total_kernel,
+        dim=1,
+        inputs=[counts, offsets, num_active_constraints, total],
+        device=device,
+    )
+
+
+def contact_gather_colored_rows(
+    source: ContactContainer,
+    destination: ContactContainer,
+    packed_headers: ContactColumnContainer,
+    offsets: wp.array[wp.int32],
+    source_indices: wp.array[wp.int32],
+    slots: wp.array[wp.int32],
+    total: wp.array[wp.int32],
+    row_capacity: int,
+    device: wp.DeviceLike = None,
+) -> None:
+    """Gather iterate rows and switch packed headers to color-order indices."""
+    wp.launch(
+        _contact_gather_colored_rows_kernel,
+        dim=max(1, int(row_capacity)),
+        inputs=[
+            source,
+            destination,
+            packed_headers,
+            offsets,
+            source_indices,
+            slots,
+            total,
+        ],
+        device=device,
+    )
+
+
+def contact_scatter_colored_rows(
+    source: ContactContainer,
+    destination: ContactContainer,
+    packed_headers: ContactColumnContainer,
+    offsets: wp.array[wp.int32],
+    source_indices: wp.array[wp.int32],
+    slots: wp.array[wp.int32],
+    total: wp.array[wp.int32],
+    row_capacity: int,
+    device: wp.DeviceLike = None,
+) -> None:
+    """Scatter accumulated impulses and restore canonical contact indices."""
+    wp.launch(
+        _contact_scatter_colored_rows_kernel,
+        dim=max(1, int(row_capacity)),
+        inputs=[
+            source,
+            destination,
+            packed_headers,
+            offsets,
+            source_indices,
+            slots,
+            total,
+        ],
         device=device,
     )
 
