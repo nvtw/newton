@@ -117,7 +117,6 @@ def _solve_dvi(
     solver.reset()
     solver.coldstart()
     solver.solve(problem)
-    wp.synchronize()
     return solver
 
 
@@ -318,8 +317,6 @@ class TestDVISolver(unittest.TestCase):
         solver.reset()
         solver.coldstart()
         solver.solve(problem)
-        wp.synchronize()
-
         _check_solution_matches_dual_problem(self, problem, solver)
 
     def test_02_public_solver_step_with_dvi(self):
@@ -332,7 +329,6 @@ class TestDVISolver(unittest.TestCase):
             label="link",
             mass=1.0,
             xform=wp.transformf(wp.vec3f(0.0, 0.0, 1.0), wp.quat_identity(dtype=wp.float32)),
-            lock_inertia=True,
         )
         builder.add_shape_box(label="box", body=body, hx=0.1, hy=0.1, hz=0.1)
         joint = builder.add_joint_revolute(
@@ -355,8 +351,6 @@ class TestDVISolver(unittest.TestCase):
         state_in = model.state()
         state_out = model.state()
         solver.step(state_in, state_out, control=None, contacts=None, dt=1e-3)
-        wp.synchronize()
-
         body_q = state_out.body_q.numpy()
         body_qd = state_out.body_qd.numpy()
         self.assertTrue(np.all(np.isfinite(body_q)))
@@ -401,8 +395,6 @@ class TestDVISolver(unittest.TestCase):
         solver.reset()
         solver.coldstart()
         solver.solve(problem)
-        wp.synchronize()
-
         status = solver.data.status.numpy()[0]
         self.assertEqual(int(status["converged"]), 1)
         self.assertLessEqual(int(status["iterations"]), _status_iteration_budget(solver, 0))
@@ -492,7 +484,6 @@ class TestDVISolver(unittest.TestCase):
             if use_colored_contacts:
                 solver.set_contacts(detector.contacts)
             solver.solve(problem)
-            wp.synchronize()
             return solver
 
         contact_paths = [False]
@@ -545,8 +536,6 @@ class TestDVISolver(unittest.TestCase):
             solver.reset()
             solver.coldstart()
             solver.solve(problem)
-            wp.synchronize()
-
             self.assertEqual(int(solver.data.state.contact_num_colors.numpy()[0]), 0)
             lambdas = extract_problem_vector(
                 problem.delassus, solver.data.solution.lambdas.numpy(), only_active_dims=True
@@ -616,8 +605,6 @@ class TestDVISolver(unittest.TestCase):
             if use_colored_contacts:
                 solver.set_contacts(detector.contacts)
             solver.solve(problem)
-            wp.synchronize()
-
             status = solver.data.status.numpy()
             self.assertEqual([int(status[wid]["iterations"]) for wid in range(3)], [1, 3, 3])
             if use_colored_contacts:
@@ -679,8 +666,6 @@ class TestDVISolver(unittest.TestCase):
         solver.reset()
         solver.coldstart()
         solver.solve(problem)
-        wp.synchronize()
-
         v_plus = extract_problem_vector(problem.delassus, solver.data.solution.v_plus.numpy(), only_active_dims=True)[0]
         njc = int(problem.data.njc.numpy()[0])
         status = solver.data.status.numpy()[0]
@@ -724,8 +709,6 @@ class TestDVISolver(unittest.TestCase):
         solver.reset()
         solver.coldstart()
         solver.solve(problem)
-        wp.synchronize()
-
         status = solver.data.status.numpy()[0]
         self.assertEqual(int(status["converged"]), 1)
         self.assertEqual(int(status["iterations"]), 1)
@@ -774,12 +757,9 @@ class TestDVISolver(unittest.TestCase):
             ],
             device=self.device,
         )
-        wp.synchronize()
         self.assertEqual(int(solver.data.status.numpy()[0]["iterations"]), 5)
 
         solver.solve(problem)
-        wp.synchronize()
-
         status = solver.data.status.numpy()[0]
         self.assertEqual(int(status["converged"]), 1)
         self.assertEqual(int(status["iterations"]), 1)
@@ -814,8 +794,6 @@ class TestDVISolver(unittest.TestCase):
             ],
             device=self.device,
         )
-        wp.synchronize()
-
         colors = contact_colors.numpy()
         num_colors = int(contact_num_colors.numpy()[0])
         self.assertGreaterEqual(num_colors, 2)
@@ -838,11 +816,8 @@ class TestDVISolver(unittest.TestCase):
         q_j[:] = 1.0
         data.joints.q_j.assign(q_j)
         limits.detect(q_j=data.joints.q_j)
-        wp.synchronize()
         update_constraints_info(model=model, data=data)
-        wp.synchronize()
         jacobians.build(model=model, data=data, limits=limits.data, contacts=None)
-        wp.synchronize()
         self.assertGreater(int(limits.model_active_limits.numpy()[0]), 0)
 
         problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
@@ -911,7 +886,6 @@ class TestDVISolver(unittest.TestCase):
         problem.build(model=model, data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians)
         internal_solver.warmstart(problem, model, data)
         internal_solver.solve(problem)
-        wp.synchronize()
         _assert_solver_status_converged(self, internal_solver)
         self.assertLessEqual(int(internal_solver.data.status.numpy()[0]["iterations"]), cold_iterations)
 
@@ -931,7 +905,6 @@ class TestDVISolver(unittest.TestCase):
         problem.build(model=model, data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians)
         container_solver.warmstart(problem, model, data, limits, detector.contacts)
         container_solver.solve(problem)
-        wp.synchronize()
         _assert_solver_status_converged(self, container_solver)
         _check_solution_matches_dual_problem(self, problem, container_solver)
 
@@ -944,7 +917,6 @@ class TestDVISolver(unittest.TestCase):
         )
         jacobians = DenseSystemJacobians(model=model, limits=limits, contacts=contacts)
         jacobians.build(model=model, data=data, limits=limits.data, contacts=None)
-        wp.synchronize()
         self.assertGreater(int(limits.model_active_limits.numpy()[0]), 0)
 
         problem = _make_dense_dual_problem(model, data, limits, contacts, jacobians)
@@ -971,7 +943,6 @@ class TestDVISolver(unittest.TestCase):
             label="link",
             mass=1.0,
             xform=wp.transformf(wp.vec3f(0.0, 0.0, 1.0), wp.quat_identity(dtype=wp.float32)),
-            lock_inertia=True,
         )
         builder.add_shape_box(label="box", body=body, hx=0.1, hy=0.1, hz=0.1)
         joint = builder.add_joint_revolute(
@@ -996,8 +967,6 @@ class TestDVISolver(unittest.TestCase):
         for _ in range(8):
             solver.step(state_in, state_out, control=None, contacts=None, dt=1e-3)
             state_in, state_out = state_out, state_in
-        wp.synchronize()
-
         self.assertTrue(np.all(np.isfinite(state_in.body_q.numpy())))
         self.assertTrue(np.all(np.isfinite(state_in.body_qd.numpy())))
         self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)

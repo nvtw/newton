@@ -76,18 +76,18 @@ class DVIState:
     """Scratch arrays used by the DVI solver."""
 
     def __init__(self, size: SizeKamino | None = None):
-        self.sigma: wp.array | None = None
-        self.v_aug: wp.array | None = None
-        self.s: wp.array | None = None
-        self.scratch: wp.array | None = None
-        self.bilateral_rhs: wp.array | None = None
-        self.bilateral_solution: wp.array | None = None
-        self.bilateral_preconditioner: wp.array | None = None
-        self.bilateral_active_dim: wp.array | None = None
-        self.contact_block_inv: wp.array | None = None
-        self.contact_colors: wp.array | None = None
-        self.contact_num_colors: wp.array | None = None
-        self.world_mask: wp.array | None = None
+        self.sigma: wp.array[vec2f] | None = None
+        self.v_aug: wp.array[float32] | None = None
+        self.s: wp.array[float32] | None = None
+        self.scratch: wp.array[float32] | None = None
+        self.bilateral_rhs: wp.array[float32] | None = None
+        self.bilateral_solution: wp.array[float32] | None = None
+        self.bilateral_preconditioner: wp.array[float32] | None = None
+        self.bilateral_active_dim: wp.array[int32] | None = None
+        self.contact_block_inv: wp.array[mat33f] | None = None
+        self.contact_colors: wp.array[int32] | None = None
+        self.contact_num_colors: wp.array[int32] | None = None
+        self.world_mask: wp.array[wp.bool] | None = None
         if size is not None:
             self.finalize(size)
 
@@ -129,8 +129,8 @@ class DVIData:
         size: SizeKamino | None = None,
         device: wp.DeviceLike = None,
     ):
-        self.config: wp.array | None = None
-        self.status: wp.array | None = None
+        self.config: wp.array[DVIConfigStruct] | None = None
+        self.status: wp.array[DVIStatus] | None = None
         self.state: DVIState | None = None
         self.solution: PADMMSolution | None = None
         self.bilateral_operator: DenseLinearOperatorData | None = None

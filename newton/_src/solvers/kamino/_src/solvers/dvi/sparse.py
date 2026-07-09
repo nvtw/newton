@@ -137,7 +137,7 @@ def _compute_sparse_solution_vectors(solver, problem: DualProblem) -> None:
     )
 
 
-def _sparse_delassus_regularization(problem: DualProblem) -> wp.array | None:
+def _sparse_delassus_regularization(problem: DualProblem) -> wp.array[wp.float32] | None:
     combined_regularization = getattr(problem.delassus, "_combined_regularization", None)
     if combined_regularization is not None:
         return combined_regularization

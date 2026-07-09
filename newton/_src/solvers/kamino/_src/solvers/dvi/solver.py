@@ -77,8 +77,18 @@ class DVISolver:
         self._bilateral_solve_after_block: tuple[bool, ...] = ()
         self._has_contact_block_preconditioner: bool = False
         self._has_unilateral_constraints: bool = False
-        self._contact_bid_AB: wp.array | None = None
-        self._bilateral_nzb_pairs: tuple[wp.array, wp.array, wp.array, wp.array, wp.array, wp.array] | None = None
+        self._contact_bid_AB: wp.array[wp.vec2i] | None = None
+        self._bilateral_nzb_pairs: (
+            tuple[
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+            ]
+            | None
+        ) = None
         self._device: wp.DeviceLike = None
 
         if model is not None:
@@ -213,7 +223,7 @@ class DVISolver:
         else:
             self._contact_bid_AB = None
 
-    def reset(self, problem: DualProblem | None = None, world_mask: wp.array | None = None):
+    def reset(self, problem: DualProblem | None = None, world_mask: wp.array[wp.bool] | None = None):
         """Reset scratch state and cached solution data."""
         self._data.state.reset()
         if world_mask is None:
@@ -387,7 +397,7 @@ class DVISolver:
             device=self.device,
         )
 
-    def _solve_bilateral_block(self, problem: DualProblem, active_dim: wp.array | None = None):
+    def _solve_bilateral_block(self, problem: DualProblem, active_dim: wp.array[wp.int32] | None = None):
         operator = self._data.bilateral_operator
         state = self._data.state
         wp.launch(
