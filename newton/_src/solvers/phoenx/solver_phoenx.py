@@ -10,6 +10,12 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.articulations.maximal_contact_gs import (
+    MaximalContactRunSchedule,
+    iterate_maximal_contact_runs_kernel,
+    refresh_maximal_contact_mobility_kernel,
+)
+from newton._src.solvers.phoenx.articulations.maximal_contact_response import MaximalContactResponse
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -935,6 +941,8 @@ class PhoenXWorld:
         )
         self._reduced_articulation = None
         self._maximal_tree_projector = None
+        self._maximal_contact_response: MaximalContactResponse | None = None
+        self._maximal_contact_schedule: MaximalContactRunSchedule | None = None
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
         self._reduced_constraints_active_this_step = False
@@ -1264,6 +1272,8 @@ class PhoenXWorld:
                 if self._colored_contact_headers
                 else self._contact_cols
             )
+            # Packed headers use the same dynamic solver-ownership metadata.
+            self._contact_cols_packed.articulation_owner = self._contact_cols.articulation_owner
             self._contact_container_solve = (
                 contact_solve_container_zeros(self.rigid_contact_max, device=self.device)
                 if self._colored_contact_rows
@@ -1961,14 +1971,18 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def set_reduced_articulation(self, articulation, joint_pgs_enabled: np.ndarray) -> None:
-        """Bind a reduced backend and transfer ownership of selected joint columns."""
+    def set_joint_pgs_ownership(self, joint_pgs_enabled: np.ndarray) -> None:
+        """Set joint ownership: 0 disabled, 1 prepare and iterate, 2 prepare only."""
         enabled = np.asarray(joint_pgs_enabled, dtype=np.int32)
         if enabled.shape != (self.num_joints,):
             raise ValueError(f"joint_pgs_enabled must have shape ({self.num_joints},), got {enabled.shape}")
         self._joint_pgs_enabled.assign(enabled)
         self._joint_pgs_ownership_active = True
         self._joint_pgs_all_disabled = not bool(enabled.any())
+
+    def set_reduced_articulation(self, articulation, joint_pgs_enabled: np.ndarray) -> None:
+        """Bind a reduced backend and transfer ownership of selected joint columns."""
+        self.set_joint_pgs_ownership(joint_pgs_enabled)
         self._reduced_articulation = articulation
         articulation.contact_block_system.configure_schedule(
             self.max_contact_columns,
@@ -2852,6 +2866,12 @@ class PhoenXWorld:
         # reused columns are exactly the prior substep's converged values.
         if not reuse_partition:
             self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
+            if self._maximal_contact_schedule is not None and self._ingest_scratch is not None:
+                self._maximal_contact_schedule.build(
+                    self._contact_cols,
+                    self.bodies,
+                    self._ingest_scratch.num_contact_columns,
+                )
             if (
                 self._reduced_contacts_active_this_step
                 and self._ingest_scratch is not None
@@ -3067,6 +3087,10 @@ class PhoenXWorld:
         self._has_soft_contact_pd = (contact_stiffness_src is not None and int(contact_stiffness_src.shape[0]) > 0) or (
             contact_damping_src is not None and int(contact_damping_src.shape[0]) > 0
         )
+        if self._maximal_contact_schedule is not None and self._has_soft_contact_pd:
+            raise NotImplementedError(
+                "maximal_articulated does not yet support soft-PD contacts; use maximal_projected or reduced"
+            )
         contact_stiffness = contact_stiffness_src if contact_stiffness_src is not None else self._soft_contact_sentinel
         contact_damping = contact_damping_src if contact_damping_src is not None else self._soft_contact_sentinel
         contact_friction = (
@@ -3811,6 +3835,51 @@ class PhoenXWorld:
             cloth_recover_kernel,
             dim=self.num_particles,
             inputs=[self.particles, wp.float32(1.0 / self.substep_dt)],
+            device=self.device,
+        )
+
+    def _solve_maximal_articulated_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
+        """Run one exact articulation-response contact correction sweep."""
+        response = self._maximal_contact_response
+        schedule = self._maximal_contact_schedule
+        projector = self._maximal_tree_projector
+        if response is None or schedule is None or projector is None:
+            return
+        if refresh_mobility:
+            response.compute_mobility()
+            wp.launch(
+                refresh_maximal_contact_mobility_kernel,
+                dim=projector.launch_dim,
+                block_dim=projector.block_dim,
+                inputs=[
+                    projector.data,
+                    response.data,
+                    self.bodies,
+                    self._contact_cols,
+                    self._contact_container,
+                    schedule.columns,
+                    schedule.section_end,
+                    schedule.mobility,
+                ],
+                device=self.device,
+            )
+        wp.launch(
+            iterate_maximal_contact_runs_kernel,
+            dim=projector.launch_dim,
+            block_dim=projector.block_dim,
+            inputs=[
+                projector.data,
+                response.data,
+                self.bodies,
+                self._contact_cols,
+                self._contact_container,
+                wp.float32(1.0 / self.substep_dt),
+                wp.float32(self.sor_boost),
+                schedule.columns,
+                schedule.section_end,
+                schedule.mobility,
+                wp.bool(use_bias),
+            ],
             device=self.device,
         )
 

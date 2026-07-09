@@ -64,6 +64,81 @@ def _point_wrench(
 
 
 @wp.func
+def maximal_contact_wrench_cross_mobility(
+    tree: MaximalTreeProjectorData,
+    response: MaximalContactResponseData,
+    bodies: BodyContainer,
+    body0: wp.int32,
+    point0: wp.vec3f,
+    direction0: wp.vec3f,
+    body1: wp.int32,
+    point1: wp.vec3f,
+    direction1: wp.vec3f,
+):
+    """Return one bilinear block of the joint-constrained mobility."""
+    if body0 < wp.int32(0) or body1 < wp.int32(0):
+        return wp.float32(0.0)
+    articulation = response.body_articulation[body0]
+    if articulation < wp.int32(0) or response.body_articulation[body1] != articulation:
+        return wp.float32(0.0)
+
+    node0 = response.body_lane[body0]
+    node1 = response.body_lane[body1]
+    wrench0 = _point_wrench(bodies, body0, point0, direction0)
+    wrench1 = _point_wrench(bodies, body1, point1, direction1)
+    if node0 == node1:
+        return wp.dot(wrench0, response.mobility[articulation, node0] @ wrench1)
+
+    depth0 = tree.depth[articulation, node0]
+    depth1 = tree.depth[articulation, node1]
+    while depth0 > depth1:
+        wrench0 = wp.transpose(response.conditional_map[articulation, node0]) @ wrench0
+        node0 = tree.parent[articulation, node0]
+        depth0 -= wp.int32(1)
+    while depth1 > depth0:
+        wrench1 = wp.transpose(response.conditional_map[articulation, node1]) @ wrench1
+        node1 = tree.parent[articulation, node1]
+        depth1 -= wp.int32(1)
+    while node0 != node1:
+        wrench0 = wp.transpose(response.conditional_map[articulation, node0]) @ wrench0
+        wrench1 = wp.transpose(response.conditional_map[articulation, node1]) @ wrench1
+        node0 = tree.parent[articulation, node0]
+        node1 = tree.parent[articulation, node1]
+    return wp.dot(wrench0, response.mobility[articulation, node0] @ wrench1)
+
+
+@wp.func
+def maximal_contact_pair_cross_inverse_mass(
+    tree: MaximalTreeProjectorData,
+    response: MaximalContactResponseData,
+    bodies: BodyContainer,
+    body0: wp.int32,
+    point0: wp.vec3f,
+    direction00: wp.vec3f,
+    direction01: wp.vec3f,
+    body1: wp.int32,
+    point1: wp.vec3f,
+    direction10: wp.vec3f,
+    direction11: wp.vec3f,
+):
+    """Return the bilinear mobility between two two-body rows."""
+    return (
+        maximal_contact_wrench_cross_mobility(
+            tree, response, bodies, body0, point0, direction00, body0, point0, direction01
+        )
+        + maximal_contact_wrench_cross_mobility(
+            tree, response, bodies, body0, point0, direction00, body1, point1, direction11
+        )
+        + maximal_contact_wrench_cross_mobility(
+            tree, response, bodies, body1, point1, direction10, body0, point0, direction01
+        )
+        + maximal_contact_wrench_cross_mobility(
+            tree, response, bodies, body1, point1, direction10, body1, point1, direction11
+        )
+    )
+
+
+@wp.func
 def maximal_contact_pair_inverse_mass(
     tree: MaximalTreeProjectorData,
     response: MaximalContactResponseData,
@@ -157,14 +232,13 @@ def _compute_maximal_contact_mobility_kernel(
         current_depth += wp.int32(1)
 
 
-@wp.kernel(enable_backward=False)
-def _apply_maximal_contact_impulse_kernel(
+@wp.func
+def apply_maximal_contact_impulse_thread(
+    articulation: wp.int32,
+    lane: wp.int32,
     tree: MaximalTreeProjectorData,
     response: MaximalContactResponseData,
 ):
-    tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
     body_count = tree.body_count[articulation]
     max_depth = tree.max_depth[articulation]
 
@@ -209,6 +283,17 @@ def _apply_maximal_contact_impulse_kernel(
             response.velocity[articulation, lane] = base + joint_velocity * motion
         _sync_warp()
         current_depth += wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def _apply_maximal_contact_impulse_kernel(
+    tree: MaximalTreeProjectorData,
+    response: MaximalContactResponseData,
+):
+    tid = wp.tid()
+    articulation = tid // wp.int32(_WARP_SIZE)
+    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    apply_maximal_contact_impulse_thread(articulation, lane, tree, response)
 
 
 class MaximalContactResponse:
@@ -258,4 +343,10 @@ class MaximalContactResponse:
         )
 
 
-__all__ = ["MaximalContactResponse", "maximal_contact_pair_inverse_mass"]
+__all__ = [
+    "MaximalContactResponse",
+    "apply_maximal_contact_impulse_thread",
+    "maximal_contact_pair_cross_inverse_mass",
+    "maximal_contact_pair_inverse_mass",
+    "maximal_contact_wrench_cross_mobility",
+]

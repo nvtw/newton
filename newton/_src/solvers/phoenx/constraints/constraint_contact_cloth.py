@@ -1015,6 +1015,9 @@ def _make_contact_iterate_at(
         """
         _ = base_offset
 
+        if constraints.articulation_owner[cid] >= wp.int32(0):
+            return
+
         b1 = body_pair.b1
         b2 = body_pair.b2
 

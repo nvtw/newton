@@ -74,7 +74,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--articulation-mode",
-        choices=("maximal", "maximal_projected", "hybrid", "reduced"),
+        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
     )
     parser.add_argument(

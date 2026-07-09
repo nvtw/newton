@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · articulated contact GS proven</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · articulated contact training measured</strong></div>
     </header>
 
     <section class="hero">
@@ -229,18 +229,22 @@
 
     <div class="section-label">Current state</div>
     <article>
-      <div class="meta"><span class="tag good">BIG EXPERIMENT · GPU PRIMITIVES PASS</span><time>Latest evidence</time></div>
-      <h2>Articulation-aware contact GS is both exact and promising</h2>
-      <p>A new contact schedule keeps maximal body state but solves each contact with the exact joint-constrained mobility. Contact-only coloring treats an articulation as one graph node; after each contact color, one factored vector tree pass propagates all independent impulses. This preserves true Gauss&ndash;Seidel ordering without publishing a generalized response row per contact.</p>
+      <div class="meta"><span class="tag warn">PHYSICS EXPERIMENT &middot; TRAINING QUALITY REJECTS PROMOTION</span><time>Latest evidence</time></div>
+      <h2>Direct articulated-contact GS improves maximal physics, but reduced coordinates still win</h2>
+      <p>The new opt-in <code>maximal_articulated</code> path keeps maximal body coordinates, prepares and warm-starts the established hard-Hertz contacts, projects the joint tree exactly, and then solves contacts using the exact joint-constrained mobility. Normal and the coupled 2&times;2 friction block preserve sequential GS semantics but share one factored tree response per point.</p>
       <ul>
-        <li>The exact diagonal mobility recurrence and lowest-common-ancestor cross response match dense KKT blocks in 100 randomized trees to machine precision in double precision. Production-style float32 Warp kernels match dense results to approximately 4&times;10<sup>&minus;5</sup> in the deliberately ill-conditioned 29-body case.</li>
-        <li>Across 64 randomized trees at each ratio, two exact articulation-GS sweeps leave median contact residual 0.115 / 0.122 / 0.137 at 100:1 / 10,000:1 / 1,000,000:1. The current free-body-PGS-then-project split leaves 0.635 / 0.706 / 0.739.</li>
-        <li>Body-only coloring is mathematically invalid after joint propagation: its median residual exceeds 1 and can exceed 6. Articulation supernode coloring removes that race instead of hiding it with under-relaxation.</li>
-        <li>At 8,192 independent 29-body trees, all exact 6&times;6 body mobility blocks cost about 114 &micro;s and one arbitrary impulse-batch response costs about 90 &micro;s. The response reuses the factorization and is roughly 3.7&times; cheaper than rerunning the full projector.</li>
-        <li>A permanent CUDA-graph test covers two articulations in one world, arbitrary spatial impulses, and a same-articulation two-body contact row; factored response, mass-metric projection, and the LCA cross effective mass agree.</li>
-        <li><strong>Not integrated yet:</strong> structural joint preparation and contact-only coloring need separate graphs. Reusing the global graph after collapsing links would serialize G1's structural joints into 31 colors. The next implementation builds a transient contact-only articulation graph after collision detection and keeps the established path as fallback.</li>
+        <li>A concrete integration bug was found and fixed: the first prototype overwrote the standard contact effective-mass cache, so the following free-body relaxation pass applied articulated masses through the wrong operator. Exact mobility now has an isolated six-float symmetric contact-frame SoA and never contaminates standard PGS state.</li>
+        <li>The corrected 5-substep G1 screen matches projected maximal: median first termination 80.0 versus 80.5, p10 74.3 versus 76.1, and maximum active joint-anchor error 0.000149 m versus 0.000188 m.</li>
+        <li>At four substeps, the direct path materially improves the difficult screen: median 65 versus 51 and maximum anchor error 0.000742 m versus 0.0131 m. Three substeps remain unstable and are not being promoted.</li>
+        <li>The fallback-aware matched physics measurement reaches <strong>1.033M environment steps/s</strong> at four substeps versus <strong>1.034M/s</strong> for five-substep projected maximal. However, the proven reduced-coordinate 3&times;2 schedule reaches <strong>1.463M/s</strong>: best-versus-best, direct maximal remains 29.4% slower.</li>
+        <li>Across randomized trees, two exact articulation-GS sweeps leave median residual 0.115 / 0.122 / 0.137 at mass ratios 100:1 / 10,000:1 / 1,000,000:1, versus 0.635 / 0.706 / 0.739 for free-body PGS followed by projection.</li>
+        <li>Deterministic per-column ownership keeps unsupported articulation&ndash;articulation and external dynamic contacts on established colored PGS. Structural joints use a separate prepare-only ownership state: projector geometry is always refreshed, while redundant joint iterations are skipped.</li>
+        <li>New CUDA-graph gates pass for exact bilinear mobility, isolated contact-mobility storage, bitwise determinism, multiple articulations per world, single- and multi-world execution, and deterministic colored fallback for inter-articulation contacts.</li>
+        <li>The decisive paired seed-42 iteration-75 screen rejects promotion. Reduced 3&times;2 scores <strong>0.716</strong> with zero falls and passes the frozen 0.680 early gate; articulated maximal 4&times;2 scores 0.493 with four falls, while 5&times;2 improves to 0.565 with zero falls but still misses the gate.</li>
+        <li>The measured training-throughput numbers are cache-order biased because reduced compiled the shared RL kernels first. They do not rescue the candidate: it already loses the isolated physics bracket and, more importantly, policy quality.</li>
+        <li><strong>Current conclusion:</strong> retain this as an opt-in research path for exact high-mass-ratio contact convergence, but do not replace reduced coordinates or claim a time-to-policy breakthrough. The physically complete bias-free relaxation variant was also rejected: it scores 0.579 and runs at 0.728M environment steps/s (4&times;2), versus reduced 3&times;2 at 0.716 and 1.463M/s.</li>
       </ul>
-      <p class="profile-note">Derivation and gates: <a href="docs/ARTICULATED_COLOR_GS.md">ARTICULATED_COLOR_GS.md</a>. Reproducible randomized convergence probe: <code>bench_articulated_color_gs</code>. This is not yet a training-throughput or policy-quality claim.</p>
+      <p class="profile-note">Derivation and primitive gates: <a href="docs/ARTICULATED_COLOR_GS.md">ARTICULATED_COLOR_GS.md</a>. The final bias-free path passes focused single-/multi-world, bitwise-determinism, and inter-articulation-fallback CUDA graph gates. Broad CUDA graph suites pass except for one aggregate-suite graph-instantiation resource failure that passes alone; stacking, contact-force, soft-contact, and multi-world ordering suites are green. The retained <code>maximal_projected</code> and reduced paths remain unchanged.</p>
     </article>
     <article>
       <div class="meta"><span class="tag good">THROUGHPUT PARITY · QUALITY PENDING</span><time>Latest matched G1 evidence</time></div>

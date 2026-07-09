@@ -559,7 +559,9 @@ def _parse_args() -> argparse.Namespace:
         "--actuation-model", choices=("explicit_torque", "constraint_drive"), default="constraint_drive"
     )
     parser.add_argument(
-        "--articulation-mode", choices=("maximal", "maximal_projected", "hybrid", "reduced"), default="maximal"
+        "--articulation-mode",
+        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        default="maximal",
     )
     parser.add_argument("--armature-scale", type=float, default=1.0)
     parser.add_argument("--parse-meshes", action="store_true")

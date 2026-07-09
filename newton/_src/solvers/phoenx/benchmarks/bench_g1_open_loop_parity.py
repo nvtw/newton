@@ -802,7 +802,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
     parser.add_argument(
         "--articulation-mode",
-        choices=("maximal", "maximal_projected", "hybrid", "reduced"),
+        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
         help="PhoenX articulation response used for the comparison.",
     )

@@ -243,6 +243,7 @@ class ContactColumnContainer:
 
     data: wp.array2d[wp.float32]
     patch: ContactPatchFriction
+    articulation_owner: wp.array[wp.int32]
 
 
 def contact_column_container_zeros(
@@ -255,6 +256,7 @@ def contact_column_container_zeros(
     """Allocate a zero-initialised :class:`ContactColumnContainer`."""
     c = ContactColumnContainer()
     c.data = wp.zeros((int(data_dwords), int(num_columns)), dtype=wp.float32, device=device)
+    c.articulation_owner = wp.full(int(num_columns), -1, dtype=wp.int32, device=device)
     patch_capacity = num_columns if enable_patch_friction else 1
     c.patch = contact_patch_friction_zeros(patch_capacity, device=device)
     return c
@@ -1062,6 +1064,8 @@ def contact_iterate_multi(
     parallel_id: wp.int32,
     sor_boost: wp.float32,
 ):
+    if constraints.articulation_owner[cid] >= wp.int32(0):
+        return
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     # Sleep-transition safety (drop frozen-vs-frozen contacts) is now
@@ -1108,6 +1112,8 @@ def contact_iterate_multi_no_soft_pd(
     parallel_id: wp.int32,
     sor_boost: wp.float32,
 ):
+    if constraints.articulation_owner[cid] >= wp.int32(0):
+        return
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     body_pair = constraint_bodies_make(b1, b2)

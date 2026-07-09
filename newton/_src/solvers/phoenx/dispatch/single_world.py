@@ -32,21 +32,19 @@ class SingleWorldDispatcher:
         w = self._world
         if w._constraint_capacity == 0:
             return
-        if not w._regular_pgs_active_this_step:
-            if w._reduced_constraints_active_this_step:
-                w._reduced_articulation.solve_constraints(w, idt, relax=False)
-            return
-        prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
-        if w._refresh_prepare_this_substep():
-            w._partitioner.begin_sweep()
-            w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
-        else:
-            w._run_cached_prepare_bookkeeping(idt)
-        for _ in range(w.solver_iterations):
-            w._partitioner.begin_sweep()
-            w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
+        if w._regular_pgs_active_this_step:
+            prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
+            if w._refresh_prepare_this_substep():
+                w._partitioner.begin_sweep()
+                w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+            else:
+                w._run_cached_prepare_bookkeeping(idt)
+            for _ in range(w.solver_iterations):
+                w._partitioner.begin_sweep()
+                w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=True)
+            w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=False)
 
@@ -54,17 +52,15 @@ class SingleWorldDispatcher:
         w = self._world
         if w._constraint_capacity == 0:
             return
-        if not w._regular_pgs_active_this_step:
-            if w._reduced_constraints_active_this_step:
-                w._reduced_articulation.solve_constraints(w, idt, relax=True)
-            return
-        if w.velocity_iterations > 0:
+        if w._regular_pgs_active_this_step and w.velocity_iterations > 0:
             _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
             for _ in range(w.velocity_iterations):
                 w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=False)
+            if w.velocity_iterations > 0:
+                w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=True)
 

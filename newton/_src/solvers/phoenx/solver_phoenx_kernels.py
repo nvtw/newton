@@ -1092,7 +1092,7 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
     @wp.func
     def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
         if wp.static(selective_joint_pgs):
-            return joint_pgs_enabled[cid] != wp.int32(0)
+            return joint_pgs_enabled[cid] == wp.int32(1)
         return True
 
     @wp.func
@@ -1482,7 +1482,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             base = local_tid
                             while base < count_joints:
                                 cid = world_element_ids_by_color[joint_start + base]
-                                if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                                if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] == wp.int32(1):
                                     _dispatch_iterate_joint(
                                         constraints,
                                         bodies,
@@ -1544,7 +1544,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         else:
                             if wp.static(has_joints and not has_contacts):
                                 if wp.static(not skip_joint_pgs):
-                                    if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                                    if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] == wp.int32(1):
                                         _dispatch_iterate_joint(
                                             constraints,
                                             bodies,
@@ -1558,7 +1558,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                         )
                             elif cid < num_joints:
                                 if wp.static(not skip_joint_pgs):
-                                    if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                                    if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] == wp.int32(1):
                                         _dispatch_iterate_joint(
                                             constraints,
                                             bodies,
@@ -1770,7 +1770,7 @@ def _make_fast_tail_relax_kernel(
                             base = local_tid
                             while base < count_joints:
                                 cid = world_element_ids_by_color[joint_start + base]
-                                if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                                if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] == wp.int32(1):
                                     _dispatch_iterate_joint(
                                         constraints,
                                         bodies,
@@ -3380,7 +3380,9 @@ def _make_singleworld_dispatch_func(
     @wp.func
     def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
         if wp.static(selective_joint_pgs):
-            return joint_pgs_enabled[cid] != wp.int32(0)
+            if wp.static(is_prepare or is_cached_prepare):
+                return joint_pgs_enabled[cid] != wp.int32(0)
+            return joint_pgs_enabled[cid] == wp.int32(1)
         return True
 
     @wp.func
@@ -3678,7 +3680,9 @@ def _make_singleworld_rigid_direct_color_func(
     @wp.func
     def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
         if wp.static(selective_joint_pgs):
-            return joint_pgs_enabled[cid] != wp.int32(0)
+            if wp.static(is_prepare or is_cached_prepare):
+                return joint_pgs_enabled[cid] != wp.int32(0)
+            return joint_pgs_enabled[cid] == wp.int32(1)
         return True
 
     @wp.func

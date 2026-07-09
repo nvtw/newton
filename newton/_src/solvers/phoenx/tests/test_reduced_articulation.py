@@ -10,9 +10,13 @@ import warp as wp
 
 import newton
 from newton._src.solvers.featherstone.kernels import transform_spatial_inertia
+from newton._src.solvers.phoenx.articulations.maximal_contact_gs import (
+    refresh_maximal_contact_mobility_kernel,
+)
 from newton._src.solvers.phoenx.articulations.maximal_contact_response import (
     MaximalContactResponse,
     MaximalContactResponseData,
+    maximal_contact_pair_cross_inverse_mass,
     maximal_contact_pair_inverse_mass,
 )
 from newton._src.solvers.phoenx.articulations.maximal_projector import (
@@ -70,6 +74,36 @@ def _evaluate_maximal_contact_pair_inverse_mass_kernel(
         body1,
         point1,
         direction1,
+    )
+
+
+@wp.kernel(enable_backward=False)
+def _evaluate_maximal_contact_pair_cross_inverse_mass_kernel(
+    tree: MaximalTreeProjectorData,
+    response: MaximalContactResponseData,
+    bodies: BodyContainer,
+    body0: wp.int32,
+    point0: wp.vec3f,
+    direction00: wp.vec3f,
+    direction01: wp.vec3f,
+    body1: wp.int32,
+    point1: wp.vec3f,
+    direction10: wp.vec3f,
+    direction11: wp.vec3f,
+    result: wp.array[wp.float32],
+):
+    result[0] = maximal_contact_pair_cross_inverse_mass(
+        tree,
+        response,
+        bodies,
+        body0,
+        point0,
+        direction00,
+        direction01,
+        body1,
+        point1,
+        direction10,
+        direction11,
     )
 
 
@@ -426,6 +460,26 @@ def _make_translated_floating_pair(device, translation=4096.0):
         blueprint,
         xform=wp.transform(wp.vec3(translation, -0.5 * translation, 0.25 * translation), wp.quat_identity()),
     )
+    return builder.finalize(device=device)
+
+
+def _make_contact_floating_tree_cluster(device, *, worlds=1, articulations_per_world=2, articulation_spacing=1.5):
+    blueprint = _make_floating_tree_builder()
+    cluster = newton.ModelBuilder(gravity=-9.81, up_axis=newton.Axis.Z)
+    for articulation in range(articulations_per_world):
+        cluster.add_builder(
+            blueprint,
+            xform=wp.transform(
+                wp.vec3(articulation_spacing * articulation, 0.0, 0.08),
+                wp.quat_identity(),
+            ),
+        )
+    cluster.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1, mu=0.7, restitution=0.0))
+    builder = newton.ModelBuilder(gravity=-9.81, up_axis=newton.Axis.Z)
+    if worlds == 1:
+        builder.add_builder(cluster)
+    else:
+        builder.replicate(cluster, world_count=worlds)
     return builder.finalize(device=device)
 
 
@@ -1572,6 +1626,250 @@ class TestReducedArticulation(unittest.TestCase):
             float(expected_inverse_mass),
             delta=3.0e-5,
         )
+
+        direction0_b = np.array([-0.45, 0.2, 0.35], dtype=np.float32)
+        direction1_b = np.array([0.15, -0.25, 0.4], dtype=np.float32)
+        wrench0_b = np.concatenate((direction0_b, np.cross(point0 - positions[slot0], direction0_b)))
+        wrench1_b = np.concatenate((direction1_b, np.cross(point1 - positions[slot1], direction1_b)))
+        cross_impulses = np.zeros_like(impulses)
+        cross_impulses[0, 0] = wrench0_b
+        cross_impulses[0, 1] = wrench1_b
+        response.data.impulse.assign(cross_impulses)
+        pair_cross_inverse_mass = wp.zeros(1, dtype=wp.float32, device=device)
+        with wp.ScopedCapture(device=device) as cross_capture:
+            response.compute_mobility()
+            wp.launch(
+                _evaluate_maximal_contact_pair_cross_inverse_mass_kernel,
+                dim=1,
+                inputs=[
+                    projector.data,
+                    response.data,
+                    solver.world.bodies,
+                    slot0,
+                    wp.vec3f(*point0),
+                    wp.vec3f(*direction0),
+                    wp.vec3f(*direction0_b),
+                    slot1,
+                    wp.vec3f(*point1),
+                    wp.vec3f(*direction1),
+                    wp.vec3f(*direction1_b),
+                    pair_cross_inverse_mass,
+                ],
+                device=device,
+            )
+            response.solve_impulses()
+        wp.capture_launch(cross_capture.graph)
+
+        cross_velocity = response.data.velocity.numpy()
+        expected_cross = np.dot(wrench0, cross_velocity[0, 0]) + np.dot(wrench1, cross_velocity[0, 1])
+        self.assertAlmostEqual(
+            float(pair_cross_inverse_mass.numpy()[0]),
+            float(expected_cross),
+            delta=3.0e-5,
+        )
+
+    def test_maximal_articulated_contact_storage_and_world_modes_inside_graph(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("articulated contact tests require CUDA graph capture")
+
+        for worlds in (1, 3):
+            with self.subTest(worlds=worlds):
+                model = _make_contact_floating_tree_cluster(
+                    device,
+                    worlds=worlds,
+                    articulations_per_world=2,
+                )
+                state0 = model.state()
+                state1 = model.state()
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    articulation_mode="maximal_articulated",
+                    substeps=4,
+                    solver_iterations=2,
+                    velocity_iterations=1,
+                )
+                contacts = model.contacts()
+                control = model.control()
+                dt = 1.0 / 120.0
+                with wp.ScopedCapture(device=device) as capture:
+                    model.collide(state0, contacts)
+                    solver.step(state0, state1, control, contacts, dt)
+                    model.collide(state1, contacts)
+                    solver.step(state1, state0, control, contacts, dt, state_is_continuation=True)
+                wp.capture_launch(capture.graph)
+                self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
+                schedule = solver._maximal_contact_schedule
+                response = solver._maximal_contact_response
+                projector = solver._maximal_tree_projector
+                self.assertIsNotNone(schedule)
+                self.assertIsNotNone(response)
+                self.assertIsInstance(projector, MaximalTreeProjector)
+                column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+                owners = solver.world._contact_cols.articulation_owner.numpy()[:column_count]
+                self.assertGreater(int(np.count_nonzero(owners >= 0)), 0)
+                joint_ownership = solver.world._joint_pgs_enabled.numpy()
+                self.assertGreater(int(np.count_nonzero(joint_ownership == 2)), 0)
+
+                standard_derived_before = solver.world._contact_container.derived.numpy()
+                with wp.ScopedCapture(device=device) as mobility_capture:
+                    response.compute_mobility()
+                    wp.launch(
+                        refresh_maximal_contact_mobility_kernel,
+                        dim=projector.launch_dim,
+                        block_dim=projector.block_dim,
+                        inputs=[
+                            projector.data,
+                            response.data,
+                            solver.world.bodies,
+                            solver.world._contact_cols,
+                            solver.world._contact_container,
+                            schedule.columns,
+                            schedule.section_end,
+                            schedule.mobility,
+                        ],
+                        device=device,
+                    )
+                wp.capture_launch(mobility_capture.graph)
+                np.testing.assert_array_equal(
+                    solver.world._contact_container.derived.numpy(),
+                    standard_derived_before,
+                )
+                exact_mobility = schedule.mobility.numpy()
+                self.assertTrue(np.isfinite(exact_mobility).all())
+                self.assertGreater(float(np.max(exact_mobility[0])), 0.0)
+
+                for _ in range(11):
+                    wp.capture_launch(capture.graph)
+                self.assertTrue(np.isfinite(state0.body_q.numpy()).all())
+                self.assertTrue(np.isfinite(state0.body_qd.numpy()).all())
+
+    def test_maximal_articulated_contact_relax_removes_bias_velocity_inside_graph(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("articulated contact tests require CUDA graph capture")
+
+        velocities = []
+        for velocity_iterations in (0, 1):
+            model = _make_contact_floating_tree_cluster(
+                device,
+                worlds=1,
+                articulations_per_world=1,
+            )
+            state0 = model.state()
+            state1 = model.state()
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                articulation_mode="maximal_articulated",
+                substeps=1,
+                solver_iterations=2,
+                velocity_iterations=velocity_iterations,
+            )
+            contacts = model.contacts()
+            control = model.control()
+            with wp.ScopedCapture(device=device) as capture:
+                model.collide(state0, contacts)
+                solver.step(state0, state1, control, contacts, 1.0 / 120.0)
+            wp.capture_launch(capture.graph)
+            self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+            velocities.append(state1.body_qd.numpy())
+
+        unrelaxed, relaxed = velocities
+        self.assertTrue(np.isfinite(relaxed).all())
+        self.assertLess(float(np.linalg.norm(relaxed)), 0.8 * float(np.linalg.norm(unrelaxed)))
+
+    def test_maximal_articulated_contacts_are_bitwise_deterministic_inside_graph(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("articulated contact tests require CUDA graph capture")
+
+        model = _make_contact_floating_tree_cluster(
+            device,
+            worlds=2,
+            articulations_per_world=2,
+        )
+        states_a = (model.state(), model.state())
+        states_b = (model.state(), model.state())
+        solver_a = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal_articulated",
+            substeps=4,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        solver_b = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal_articulated",
+            substeps=4,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        contacts_a = model.contacts()
+        contacts_b = model.contacts()
+        control = model.control()
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(states_a[0], contacts_a)
+            solver_a.step(states_a[0], states_a[1], control, contacts_a, 1.0 / 240.0)
+            model.collide(states_a[1], contacts_a)
+            solver_a.step(states_a[1], states_a[0], control, contacts_a, 1.0 / 240.0, state_is_continuation=True)
+            model.collide(states_b[0], contacts_b)
+            solver_b.step(states_b[0], states_b[1], control, contacts_b, 1.0 / 240.0)
+            model.collide(states_b[1], contacts_b)
+            solver_b.step(states_b[1], states_b[0], control, contacts_b, 1.0 / 240.0, state_is_continuation=True)
+        for _ in range(16):
+            wp.capture_launch(capture.graph)
+
+        np.testing.assert_array_equal(states_a[0].body_q.numpy(), states_b[0].body_q.numpy())
+        np.testing.assert_array_equal(states_a[0].body_qd.numpy(), states_b[0].body_qd.numpy())
+        np.testing.assert_array_equal(states_a[0].joint_q.numpy(), states_b[0].joint_q.numpy())
+        np.testing.assert_array_equal(states_a[0].joint_qd.numpy(), states_b[0].joint_qd.numpy())
+
+    def test_maximal_articulated_inter_articulation_fallback_inside_graph(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("articulated contact tests require CUDA graph capture")
+
+        model = _make_contact_floating_tree_cluster(
+            device,
+            worlds=2,
+            articulations_per_world=2,
+            articulation_spacing=0.1,
+        )
+        state0 = model.state()
+        state1 = model.state()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal_articulated",
+            substeps=4,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        contacts = model.contacts()
+        control = model.control()
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state0, contacts)
+            solver.step(state0, state1, control, contacts, 1.0 / 2000.0)
+            model.collide(state1, contacts)
+            solver.step(state1, state0, control, contacts, 1.0 / 2000.0, state_is_continuation=True)
+        wp.capture_launch(capture.graph)
+
+        column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        owners = solver.world._contact_cols.articulation_owner.numpy()[:column_count]
+        self.assertGreater(int(np.count_nonzero(owners >= 0)), 0)
+        self.assertGreater(int(np.count_nonzero(owners < 0)), 0)
+
+        root_slots = solver._maximal_tree_projector.data.body_slot.numpy()[:, 0]
+        positions_before = state0.body_q.numpy()[root_slots, :3].copy()
+        for _ in range(15):
+            wp.capture_launch(capture.graph)
+        positions_after = state0.body_q.numpy()[root_slots, :3]
+        self.assertTrue(np.isfinite(positions_after).all())
+        for world in range(2):
+            begin = 2 * world
+            distance_before = np.linalg.norm(positions_before[begin + 1] - positions_before[begin])
+            distance_after = np.linalg.norm(positions_after[begin + 1] - positions_after[begin])
+            self.assertGreater(distance_after, distance_before)
 
     def test_maximal_projected_mixed_tree_and_hybrid_fallback_inside_graph(self):
         device = wp.get_preferred_device()

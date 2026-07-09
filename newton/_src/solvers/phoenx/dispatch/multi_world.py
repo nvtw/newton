@@ -40,6 +40,7 @@ class MultiWorldDispatcher:
                 self._world._solve_main()
         if self._world._maximal_tree_projector is not None:
             self._world._maximal_tree_projector.project(use_bias=True)
+            self._world._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
         if self._world._reduced_constraints_active_this_step:
             self._world._reduced_articulation.solve_constraints(self._world, idt, relax=False)
 
@@ -51,6 +52,8 @@ class MultiWorldDispatcher:
                 self._world._relax_velocities()
         if self._world._maximal_tree_projector is not None:
             self._world._maximal_tree_projector.project(use_bias=False)
+            if self._world.velocity_iterations > 0:
+                self._world._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
         if self._world._reduced_constraints_active_this_step:
             self._world._reduced_articulation.solve_constraints(self._world, idt, relax=True)
 
