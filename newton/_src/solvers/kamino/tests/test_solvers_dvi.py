@@ -18,6 +18,7 @@ from newton._src.solvers.kamino._src.dynamics.dual import (
     DualProblemConfigStruct,
     _build_free_velocity_bias_contacts,
 )
+from newton._src.solvers.kamino._src.integrators.euler import integrate_euler_semi_implicit
 from newton._src.solvers.kamino._src.kinematics.constraints import unpack_constraint_solutions, update_constraints_info
 from newton._src.solvers.kamino._src.kinematics.jacobians import DenseSystemJacobians
 from newton._src.solvers.kamino._src.linalg import LLTBlockedSolver
@@ -30,6 +31,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
     _sparse_delassus_matvec_rows,
 )
+from newton._src.solvers.kamino._src.solvers.metrics import SolutionMetrics
 from newton._src.solvers.kamino._src.solvers.padmm.types import PADMMWarmStartMode
 from newton._src.solvers.kamino._src.utils.benchmark.configs import (
     load_solver_configs_to_hdf5,
@@ -46,8 +48,10 @@ from newton._src.solvers.kamino._src.utils.benchmark.metrics import _reduce_solv
 from newton._src.solvers.kamino._src.utils.benchmark.render import render_solver_configs_table
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton._src.solvers.kamino.tests import setup_tests, test_context
+from newton._src.solvers.kamino.tests.test_solvers_padmm import TestSetup
 from newton._src.solvers.kamino.tests.utils.extract import extract_delassus, extract_problem_vector
 from newton._src.solvers.kamino.tests.utils.make import make_containers, make_test_problem_fourbar, update_containers
+from newton.tests.utils import basics as public_basics
 
 vec2f = wp.vec2f
 vec4f = wp.vec4f
@@ -142,6 +146,38 @@ def _assert_solver_status_converged(testcase: unittest.TestCase, solver: DVISolv
 def _assert_solution_finite(testcase: unittest.TestCase, solver: DVISolver):
     testcase.assertTrue(np.all(np.isfinite(solver.data.solution.lambdas.numpy())))
     testcase.assertTrue(np.all(np.isfinite(solver.data.solution.v_plus.numpy())))
+
+
+def _evaluate_solution_metrics(test: TestSetup, solver: DVISolver) -> dict[str, float]:
+    integrate_euler_semi_implicit(model=test.model, data=test.data)
+    metrics = SolutionMetrics(model=test.model)
+    metrics.evaluate(
+        sigma=solver.data.state.sigma,
+        lambdas=solver.data.solution.lambdas,
+        v_plus=solver.data.solution.v_plus,
+        model=test.model,
+        data=test.data,
+        state_p=test.state_p,
+        problem=test.problem,
+        jacobians=test.jacobians,
+        limits=test.limits,
+        contacts=test.contacts,
+    )
+    return {
+        name: float(np.max(getattr(metrics.data, name).numpy()))
+        for name in (
+            "r_eom",
+            "r_kinematics",
+            "r_cts_joints",
+            "r_cts_limits",
+            "r_cts_contacts",
+            "r_v_plus",
+            "r_ncp_primal",
+            "r_ncp_dual",
+            "r_ncp_compl",
+            "r_vi_natmap",
+        )
+    }
 
 
 class _MiniHDF5Dataset:
@@ -251,7 +287,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.contact_jacobi_omega, 0.3)
         self.assertEqual(config.dvi.contact_jacobi_relaxation, 0.9)
         self.assertFalse(config.dvi.contact_block_preconditioner)
-        self.assertEqual(config.dvi.contact_warmstart_method, "geom_pair_net_force")
+        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_net_force_backup")
         self.assertFalse(config.dynamics.preconditioning)
         self.assertEqual(config.constraints.contact_recovery_speed, -1.0)
         self.assertEqual(config.constraints.contact_deep_recovery_gamma, -1.0)
@@ -269,16 +305,24 @@ class TestDVISolver(unittest.TestCase):
             kamino_config.ConstraintStabilizationConfig(contact_deep_recovery_gamma=1.1)
         with self.assertRaises(ValueError):
             kamino_config.ConstraintStabilizationConfig(contact_deep_recovery_threshold=-1.0)
-        with self.assertRaises(ValueError):
-            kamino_config.DVISolverConfig(block_iterations=0)
-        with self.assertRaises(ValueError):
-            kamino_config.DVISolverConfig(contact_iterations=0)
-        with self.assertRaises(ValueError):
-            kamino_config.DVISolverConfig(bilateral_solve_period=0)
-        with self.assertRaises(ValueError):
-            kamino_config.DVISolverConfig(contact_jacobi_omega=0.0)
-        with self.assertRaises(ValueError):
-            kamino_config.DVISolverConfig(contact_jacobi_relaxation=1.1)
+        invalid_dvi_configs = (
+            {"max_iterations": 0},
+            {"tolerance": -1.0},
+            {"regularization": 0.0},
+            {"omega": 0.0},
+            {"omega": 2.1},
+            {"block_iterations": 0},
+            {"contact_iterations": 0},
+            {"bilateral_solve_period": 0},
+            {"contact_jacobi_omega": 0.0},
+            {"contact_jacobi_omega": 2.1},
+            {"contact_jacobi_relaxation": 0.0},
+            {"contact_jacobi_relaxation": 1.1},
+            {"warmstart_mode": "invalid"},
+        )
+        for kwargs in invalid_dvi_configs:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                kamino_config.DVISolverConfig(**kwargs)
         for method in (
             "key_and_position",
             "geom_pair_net_force",
@@ -839,6 +883,76 @@ class TestDVISolver(unittest.TestCase):
         self.assertNotEqual(colors[1], colors[4])
         self.assertLess(colors[3], num_colors)
 
+    def test_03h_dvi_canonical_contact_solution_metrics(self):
+        for builder_fn, max_world_contacts in (
+            (basics.build_box_on_plane, 4),
+            (basics.build_boxes_hinged, 8),
+        ):
+            for sparse in (False, True):
+                with self.subTest(builder=builder_fn.__name__, sparse=sparse):
+                    test = TestSetup(
+                        builder_fn=builder_fn,
+                        max_world_contacts=max_world_contacts,
+                        gravity=True,
+                        perturb=True,
+                        device=self.device,
+                        sparse=sparse,
+                    )
+                    test.build()
+                    config = SolverKamino.Config(
+                        dynamics_solver="dvi",
+                        sparse_dynamics=sparse,
+                        sparse_jacobian=sparse,
+                    ).dvi
+                    solver = _solve_dvi(test.model, test.problem, config=config)
+                    solution_metrics = _evaluate_solution_metrics(test, solver)
+
+                    _assert_solution_finite(self, solver)
+                    for name, value in solution_metrics.items():
+                        self.assertTrue(np.isfinite(value), msg=f"{name}={value}")
+
+                    # DVI trades some contact accuracy for throughput, but its
+                    # solution must still satisfy dynamics and cone feasibility.
+                    self.assertLess(solution_metrics["r_eom"], 1.0e-4, msg=str(solution_metrics))
+                    self.assertLess(solution_metrics["r_kinematics"], 1.0e-4, msg=str(solution_metrics))
+                    self.assertLess(solution_metrics["r_cts_joints"], 1.0e-4, msg=str(solution_metrics))
+                    self.assertLess(solution_metrics["r_v_plus"], 1.0e-4, msg=str(solution_metrics))
+                    self.assertLess(solution_metrics["r_ncp_primal"], 1.0e-4, msg=str(solution_metrics))
+                    self.assertLess(solution_metrics["r_ncp_dual"], 1.0e-2, msg=str(solution_metrics))
+                    self.assertLess(solution_metrics["r_ncp_compl"], 1.0e-2, msg=str(solution_metrics))
+                    self.assertLess(solution_metrics["r_vi_natmap"], 1.0e-2, msg=str(solution_metrics))
+
+    def test_03i_dvi_coldstart_is_repeatable(self):
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                test = TestSetup(
+                    builder_fn=basics.build_boxes_hinged,
+                    max_world_contacts=8,
+                    gravity=True,
+                    perturb=True,
+                    device=self.device,
+                    sparse=sparse,
+                )
+                test.build()
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=sparse,
+                ).dvi
+                solver = _solve_dvi(test.model, test.problem, config=config)
+                first_lambdas = solver.data.solution.lambdas.numpy().copy()
+                first_v_plus = solver.data.solution.v_plus.numpy().copy()
+                first_status = solver.data.status.numpy().copy()
+
+                test.build()
+                solver.reset()
+                solver.coldstart()
+                solver.solve(test.problem)
+
+                np.testing.assert_allclose(solver.data.solution.lambdas.numpy(), first_lambdas, rtol=0.0, atol=1e-6)
+                np.testing.assert_allclose(solver.data.solution.v_plus.numpy(), first_v_plus, rtol=0.0, atol=1e-6)
+                np.testing.assert_array_equal(solver.data.status.numpy(), first_status)
+
     def test_04_dvi_solve_active_joint_limit(self):
         builder = testing.build_unary_revolute_joint_test(limits=True, ground=False)
         model, data, state, limits, detector, jacobians = make_containers(
@@ -945,6 +1059,49 @@ class TestDVISolver(unittest.TestCase):
         _assert_solver_status_converged(self, container_solver)
         _check_solution_matches_dual_problem(self, problem, container_solver)
 
+    def test_06a_dvi_masked_reset_preserves_unselected_worlds(self):
+        builder = builder_utils.make_homogeneous_builder(
+            num_worlds=3,
+            build_fn=basics.build_box_on_plane,
+            ground=True,
+        )
+        model, data, state, limits, detector, jacobians = make_containers(
+            builder=builder,
+            device=self.device,
+            max_world_contacts=4,
+            sparse=False,
+        )
+        update_containers(
+            model=model,
+            data=data,
+            state=state,
+            limits=limits,
+            detector=detector,
+            jacobians=jacobians,
+        )
+        problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
+        solver = _solve_dvi(model, problem)
+        lambdas_before = solver.data.solution.lambdas.numpy().copy()
+        v_plus_before = solver.data.solution.v_plus.numpy().copy()
+
+        world_mask = wp.array([False, True, False], dtype=wp.bool, device=self.device)
+        solver.reset(problem=problem, world_mask=world_mask)
+
+        lambdas_after = extract_problem_vector(
+            problem.delassus, solver.data.solution.lambdas.numpy(), only_active_dims=False
+        )
+        v_plus_after = extract_problem_vector(
+            problem.delassus, solver.data.solution.v_plus.numpy(), only_active_dims=False
+        )
+        lambdas_before = extract_problem_vector(problem.delassus, lambdas_before, only_active_dims=False)
+        v_plus_before = extract_problem_vector(problem.delassus, v_plus_before, only_active_dims=False)
+        np.testing.assert_array_equal(lambdas_after[0], lambdas_before[0])
+        np.testing.assert_array_equal(lambdas_after[2], lambdas_before[2])
+        np.testing.assert_array_equal(v_plus_after[0], v_plus_before[0])
+        np.testing.assert_array_equal(v_plus_after[2], v_plus_before[2])
+        np.testing.assert_array_equal(lambdas_after[1], np.zeros_like(lambdas_after[1]))
+        np.testing.assert_array_equal(v_plus_after[1], np.zeros_like(v_plus_after[1]))
+
     def test_07_dvi_singular_limit_rows_remain_finite(self):
         model, data, _state, limits, contacts = make_test_problem_fourbar(
             device=self.device,
@@ -1007,6 +1164,43 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(state_in.body_q.numpy())))
         self.assertTrue(np.all(np.isfinite(state_in.body_qd.numpy())))
         self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
+
+    def test_08a_public_solver_heterogeneous_contact_rollout_with_dvi(self):
+        builder = newton.ModelBuilder()
+        SolverKamino.register_custom_attributes(builder)
+        public_basics.make_basics_heterogeneous_builder(builder=builder, ground=True)
+        model = builder.finalize(device=self.device, skip_validation_joints=True)
+
+        config = SolverKamino.Config(
+            dynamics_solver="dvi",
+            use_collision_detector=True,
+            collision_detector=kamino_config.CollisionDetectorConfig(
+                max_contacts=64 * model.world_count,
+                max_contacts_per_world=64,
+                max_contacts_per_pair=16,
+            ),
+        )
+        solver = SolverKamino(model, config=config)
+        state_in = model.state()
+        state_out = model.state()
+        control = model.control()
+
+        contact_seen = False
+        for _ in range(24):
+            solver.step(state_in, state_out, control=control, contacts=None, dt=1.0e-3)
+            state_in, state_out = state_out, state_in
+            contact_seen = contact_seen or bool(np.any(solver._contacts_kamino.world_active_contacts.numpy() > 0))
+
+        status = solver._solver_kamino.solver_fd.data.status.numpy()
+        self.assertTrue(contact_seen)
+        self.assertTrue(np.all(np.isfinite(state_in.body_q.numpy())))
+        self.assertTrue(np.all(np.isfinite(state_in.body_qd.numpy())))
+        self.assertTrue(np.all(np.isfinite(status["r_p"])))
+        self.assertTrue(np.all(np.isfinite(status["r_d"])))
+        self.assertLess(float(np.max(np.abs(state_in.body_qd.numpy()))), 100.0)
+        self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
+        self.assertTrue(config.sparse_dynamics)
+        self.assertTrue(config.sparse_jacobian)
 
     def test_08b_dr_legs_contact_capacity_scales_with_world_count(self):
         if not self.device.is_cuda:
@@ -1342,6 +1536,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.contact_jacobi_omega, 0.3)
         self.assertEqual(config.dvi.contact_jacobi_relaxation, 0.9)
         self.assertFalse(config.dvi.contact_block_preconditioner)
+        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_net_force_backup")
         self.assertEqual(config.constraints.gamma, 0.015)
         self.assertEqual(config.constraints.contact_deep_recovery_gamma, 0.10)
         self.assertEqual(config.constraints.contact_deep_recovery_threshold, 1.0e-3)

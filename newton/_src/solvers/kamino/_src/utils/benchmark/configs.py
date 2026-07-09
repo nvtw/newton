@@ -334,7 +334,7 @@ def make_solver_config_dense_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Config
     # ------------------------------------------------------------------------------
     # Warm-starting
     config.dvi.warmstart_mode = "containers"
-    config.dvi.contact_warmstart_method = "geom_pair_net_force"
+    config.dvi.contact_warmstart_method = "key_and_position_with_net_force_backup"
     # ------------------------------------------------------------------------------
     return name, config
 

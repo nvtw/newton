@@ -898,11 +898,11 @@ class DVISolverConfig:
         "key_and_position",
         "geom_pair_net_force",
         "key_and_position_with_net_force_backup",
-    ] = "geom_pair_net_force"
+    ] = "key_and_position_with_net_force_backup"
     """
     The contact warmstart method used when `warmstart_mode` is `containers`.
     See :class:`WarmstarterContacts.Method` for available options.
-    Defaults to `geom_pair_net_force`.
+    Defaults to `key_and_position_with_net_force_backup`.
     """
 
     @override

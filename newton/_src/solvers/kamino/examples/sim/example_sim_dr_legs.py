@@ -269,7 +269,7 @@ class Example:
             config.solver.dvi.contact_jacobi_omega = 0.45
             config.solver.dvi.contact_jacobi_relaxation = 0.9
             config.solver.dvi.warmstart_mode = "containers"
-            config.solver.dvi.contact_warmstart_method = "geom_pair_net_force"
+            config.solver.dvi.contact_warmstart_method = "key_and_position_with_net_force_backup"
         config.solver.padmm.use_graph_conditionals = use_graph_conditionals
         config.solver.angular_velocity_damping = 0.0
 
