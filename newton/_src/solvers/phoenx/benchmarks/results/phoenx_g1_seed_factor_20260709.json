@@ -1,0 +1,25 @@
+{
+  "coordinate_mode": "reduced",
+  "date": "2026-07-09",
+  "decision": "diagnostic_only",
+  "experiment": "reciprocal initialization/update versus rollout/environment seed factorization",
+  "frozen_iteration": 75,
+  "frozen_min_battery_perf": 0.68,
+  "official_expected_seconds_to_success": 343.1915,
+  "results": {
+    "initialization_and_update_seed_42_rollout_and_environment_seed_11": {
+      "battery_falls": 0,
+      "battery_perf": 0.6685940298438072,
+      "passes_early_screen": false,
+      "total_wall_seconds": 60.50329695200344
+    },
+    "initialization_and_update_seed_11_rollout_and_environment_seed_42": {
+      "battery_falls": 0,
+      "battery_perf": 0.66685109252731,
+      "passes_early_screen": false,
+      "total_wall_seconds": 60.904420058999676
+    }
+  },
+  "schema": "phoenx_g1_seed_factor_v1",
+  "finding": "Neither reciprocal factor passes the frozen screen. The failure is not attributable to initialization alone or rollout/environment randomness alone; their interaction with update sampling matters. Do not spend the next experiment only on an initializer replacement or only on action-noise pairing."
+}

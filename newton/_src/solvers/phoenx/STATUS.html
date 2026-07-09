@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · adaptive replay measured</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · seed variance isolated</strong></div>
     </header>
 
     <section class="hero">
@@ -228,6 +228,19 @@
     </section>
 
     <div class="section-label">Current state</div>
+    <article>
+      <div class="meta"><span class="tag warn">DIAGNOSTIC &middot; INTERACTION IDENTIFIED</span><time>Latest paired evidence</time></div>
+      <h2>G1 seed failures are not caused by initialization alone</h2>
+      <p>A reciprocal factor experiment separated the known-success and failed policy/update seeds from environment, command, reset, and rollout randomness. Both mixed runs used the retained reduced-coordinate 3&times;2&times;1 schedule and the frozen iteration-75 screen.</p>
+      <ul>
+        <li>Known-success initialization/update seed 42 with failed rollout/environment seed 11 scores <strong>0.6686</strong>, below the frozen 0.68 threshold.</li>
+        <li>Failed initialization/update seed 11 with known-success rollout/environment seed 42 scores <strong>0.6669</strong>, also below the threshold.</li>
+        <li>Both runs have zero screen falls, so the result is learning-quality variance rather than a physics crash or instability.</li>
+        <li><strong>Conclusion:</strong> neither a standalone initializer replacement nor standalone action-noise pairing is well motivated. The basin depends on the interaction between policy initialization, update ordering, and collected trajectories. The next general candidate should stabilize that coupled update process, then be raced on paired G1 seeds and a non-G1 task.</li>
+        <li>The official expected G1 cost remains <strong>343.19 s</strong>; reduced coordinates remain the fastest reliable path, while physically complete maximal-articulated G1 is still about 2&times; slower.</li>
+      </ul>
+      <p class="profile-note">Retained record: <a href="benchmarks/results/phoenx_g1_seed_factor_20260709.json">phoenx_g1_seed_factor_20260709.json</a>. No user profiling action is currently required.</p>
+    </article>
     <article>
       <div class="meta"><span class="tag warn">EARLY LEARNING WIN &middot; FULL GATE MISS</span><time>Latest systematic experiment</time></div>
       <h2>Adaptive replay accelerates acquisition but not final G1 quality</h2>
