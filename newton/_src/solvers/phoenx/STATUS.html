@@ -270,9 +270,11 @@
       <ul>
         <li>At the G1-like 5 substeps × 2 PGS iterations, the heavy box falls from the stack and its supported-load error is 73.9%. At 5×4 the stack remains intact, but mean load error is still 45.8%.</li>
         <li>8×4 reduces mean load error to 25.2%; 8×8 reaches <strong>3.3%</strong>, with 0.025 / 0.034 m/s bottom/top RMS speed and only 0.020 m maximum lateral drift.</li>
+        <li>At fixed five substeps, 5×12 reaches 2.7% error for 100:1 and remains <strong>2.8× faster</strong> than reduced 5×2 on the matched 512-world G1 physics diagnostic. At 400:1 it still has 14.9% error, confirming the benchmark scales beyond one tuned ratio.</li>
         <li>The old 40×32 unit-test schedule is therefore far above the current convergence frontier, but ordinary RL-like budgets remain insufficient. Increasing substeps alone does not replace GS propagation in this case.</li>
         <li>Split SOR at 1.2 reduced drift and some instantaneous residuals but did not materially improve the time-averaged load; it is rejected as a standalone fix.</li>
-        <li>The next experiment keeps deterministic colored Gauss–Seidel: use a support-aware preconditioner or targeted physical GS sweeps for difficult rows, then finish with ordinary unscaled sweeps. Momentum, energy, load transfer, arbitrary contact counts, and graph capture remain hard gates.</li>
+        <li>A frozen seed-42 maximal 5×12 G1 screen still fails decisively: 488k samples/s, but battery performance is only 0.154 with 286/600 falls. Contact load convergence is therefore not the root cause of maximal G1 learning failure; joint-chain/control dynamics remain distinct work.</li>
+        <li>The next solver experiment keeps deterministic colored Gauss–Seidel: use a support-aware preconditioner or targeted physical GS sweeps for difficult rows, then finish with ordinary unscaled sweeps. Momentum, energy, load transfer, arbitrary contact counts, and graph capture remain hard gates.</li>
       </ul>
     </article>
     <article>

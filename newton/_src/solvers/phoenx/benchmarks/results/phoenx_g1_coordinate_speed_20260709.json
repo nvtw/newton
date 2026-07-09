@@ -16,10 +16,15 @@
     "environment_steps_per_second": 891781.6636725955,
     "milliseconds_per_world_step": 0.0011213507080665153
   },
+  "maximal_5x12": {
+    "environment_steps_per_second": 469025.99183888966,
+    "milliseconds_per_world_step": 0.002132078002925475,
+    "speedup_over_reduced_5x2": 2.794
+  },
   "reduced": {
     "environment_steps_per_second": 167880.17061053062,
     "milliseconds_per_world_step": 0.005956629638648181
   },
-  "maximal_speedup": 5.311, 
+  "maximal_speedup": 5.311,
   "qualification": "Raw simulation throughput only; policy quality and physical trajectories are not equivalent in this measurement."
 }

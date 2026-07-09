@@ -1,0 +1,30 @@
+{
+  "schema": "phoenx_g1_screen_v1",
+  "date": "2026-07-09",
+  "decision": "rejected",
+  "device": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "train_seed": 42,
+  "gate_seed": 1000,
+  "settings": {
+    "articulation_mode": "maximal",
+    "sim_substeps": 5,
+    "solver_iterations": 12,
+    "velocity_iterations": 1,
+    "completed_iterations": 75,
+    "trained_samples": 39321600
+  },
+  "throughput": {
+    "train_environment_samples_per_second": 494128.94930231053,
+    "total_environment_samples_per_second": 487536.67674977484,
+    "total_wall_seconds": 80.65362438400007
+  },
+  "held_out_screen": {
+    "battery_perf": 0.15380738081395975,
+    "required_battery_perf": 0.68,
+    "battery_falls": 286,
+    "battery_samples": 600,
+    "angular_velocity_xy_rms": 5.802039465290383,
+    "leg_velocity_rms": 6.370341475040902
+  },
+  "reason": "Accurate heavy-stack load transfer at the same 5x12 GS schedule did not recover maximal-coordinate G1 learning quality."
+}
