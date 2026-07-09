@@ -246,7 +246,13 @@ def _extract_tail_overlap_wave_grid(world: PhoenXWorld, tail_fraction: float) ->
 
 
 def _run_case(args: argparse.Namespace, scene: str, num_worlds: int) -> None:
-    handle = _build_scene(scene, num_worlds, substeps=args.substeps, solver_iterations=args.solver_iterations)
+    handle = _build_scene(
+        scene,
+        num_worlds,
+        substeps=args.substeps,
+        solver_iterations=args.solver_iterations,
+        prepare_refresh_stride=1,
+    )
     solver = _extract_solver(handle)
     world = solver.world
     if world.step_layout == "single_world" or world.mass_splitting_enabled or world.num_particles > 0:

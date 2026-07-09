@@ -91,6 +91,7 @@ __all__ = [
     "contact_iterate_at_multi_no_soft_pd",
     "contact_iterate_multi",
     "contact_iterate_multi_no_soft_pd",
+    "contact_pack_colored_headers",
     "contact_pair_wrench_kernel",
     "contact_per_contact_error_kernel",
     "contact_per_contact_wrench_kernel",
@@ -154,6 +155,14 @@ class ContactConstraintData:
     #: Number of contacts in this column.
     contact_count: wp.int32
 
+    #: Mass-splitting slot cache for the first endpoint node on each side.
+    slot1: wp.int32
+    slot2: wp.int32
+    #: Per-endpoint slot count used as Tonge's inverse-mass factor.
+    #: ``1`` means no split / no slot.
+    count1: wp.int32
+    count2: wp.int32
+
     #: Endpoint kind per side: ``0`` = rigid body, ``1`` = cloth triangle,
     #: ``2`` = soft tetrahedron. ``body1`` / ``body2`` store the first
     #: unified body-or-particle index; ``*_nodes_extra`` holds the 2nd /
@@ -165,17 +174,10 @@ class ContactConstraintData:
     side0_nodes_extra: wp.vec3i
     side1_nodes_extra: wp.vec3i
 
-    #: Mass-splitting slot cache for endpoint node 0 on each side.
-    slot1: wp.int32
-    slot2: wp.int32
     #: Slot cache for endpoint nodes 1..3 on each side. Rigid endpoints
     #: leave these at ``-1``.
     side0_slots_extra: wp.vec3i
     side1_slots_extra: wp.vec3i
-    #: Per-endpoint slot count used as Tonge's inverse-mass factor.
-    #: ``1`` means no split / no slot.
-    count1: wp.int32
-    count2: wp.int32
     side0_counts_extra: wp.vec3i
     side1_counts_extra: wp.vec3i
 
@@ -213,6 +215,10 @@ CONTACT_TIME_US_OFFSET = wp.constant(dword_offset_of(ContactConstraintData, "tim
 #: Dwords per contact column. The per-pair layout drops every per-slot
 #: field, leaving just the header (~22x smaller than the joint container).
 CONTACT_DWORDS: int = num_dwords(ContactConstraintData)
+# Rigid mass-splitting reads the prefix through ``count2``. Endpoint
+# metadata occupies holes in that prefix but is compile-time dead in the
+# rigid solve; retaining the original offsets avoids a second getter family.
+RIGID_CONTACT_SOLVE_DWORDS: int = int(_OFF_COUNT2) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -239,10 +245,11 @@ def contact_column_container_zeros(
     device: wp.DeviceLike = None,
     *,
     enable_patch_friction: bool = False,
+    data_dwords: int = CONTACT_DWORDS,
 ) -> ContactColumnContainer:
     """Allocate a zero-initialised :class:`ContactColumnContainer`."""
     c = ContactColumnContainer()
-    c.data = wp.zeros((int(CONTACT_DWORDS), int(num_columns)), dtype=wp.float32, device=device)
+    c.data = wp.zeros((int(data_dwords), int(num_columns)), dtype=wp.float32, device=device)
     patch_capacity = num_columns if enable_patch_friction else 1
     c.patch = contact_patch_friction_zeros(patch_capacity, device=device)
     return c
@@ -262,6 +269,51 @@ def _col_write_int(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32
 @wp.func
 def _col_read_float(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32) -> wp.float32:
     return read2d_f32(c.data, off, local_cid)
+
+
+@wp.kernel(enable_backward=False)
+def _contact_pack_colored_headers_kernel(
+    source: ContactColumnContainer,
+    destination: ContactColumnContainer,
+    element_ids_by_color: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    contact_offset: wp.int32,
+):
+    slot = wp.tid()
+    if slot >= num_active_constraints[0]:
+        return
+    cid = element_ids_by_color[slot]
+    if cid < contact_offset:
+        return
+    local_cid = cid - contact_offset
+    destination.data[_OFF_BODY1, slot] = source.data[_OFF_BODY1, local_cid]
+    destination.data[_OFF_BODY2, slot] = source.data[_OFF_BODY2, local_cid]
+    destination.data[_OFF_FRICTION, slot] = source.data[_OFF_FRICTION, local_cid]
+    destination.data[_OFF_FRICTION_DYNAMIC, slot] = source.data[_OFF_FRICTION_DYNAMIC, local_cid]
+    destination.data[_OFF_CONTACT_FIRST, slot] = source.data[_OFF_CONTACT_FIRST, local_cid]
+    destination.data[_OFF_CONTACT_COUNT, slot] = source.data[_OFF_CONTACT_COUNT, local_cid]
+    destination.data[_OFF_SLOT1, slot] = source.data[_OFF_SLOT1, local_cid]
+    destination.data[_OFF_SLOT2, slot] = source.data[_OFF_SLOT2, local_cid]
+    destination.data[_OFF_COUNT1, slot] = source.data[_OFF_COUNT1, local_cid]
+    destination.data[_OFF_COUNT2, slot] = source.data[_OFF_COUNT2, local_cid]
+
+
+def contact_pack_colored_headers(
+    source: ContactColumnContainer,
+    destination: ContactColumnContainer,
+    element_ids_by_color: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    contact_offset: int,
+    capacity: int,
+    device: wp.DeviceLike = None,
+) -> None:
+    """Gather contact headers into the partitioner's color-slot order."""
+    wp.launch(
+        _contact_pack_colored_headers_kernel,
+        dim=max(1, int(capacity)),
+        inputs=[source, destination, element_ids_by_color, num_active_constraints, wp.int32(contact_offset)],
+        device=device,
+    )
 
 
 @wp.func

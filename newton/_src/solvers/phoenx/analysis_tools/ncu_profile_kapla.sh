@@ -12,10 +12,12 @@
 #
 # GPU performance counters require elevated privileges, so run with sudo:
 #
-#     sudo bash ncu_profile_kapla.sh [LAUNCH_COUNT] [OUT_FILE] [KERNEL_REGEX]
+#     sudo bash ncu_profile_kapla.sh [LAUNCH_COUNT] [OUT_FILE] [KERNEL_REGEX] [LAUNCH_SKIP]
 #
 # Defaults: LAUNCH_COUNT=8, OUT=/tmp/phoenx_kapla_ncu.txt,
-#           KERNEL_REGEX=singleworld_persistent
+#           KERNEL_REGEX=singleworld_persistent, LAUNCH_SKIP=9.
+# The skipped matches are the prepare sweep's nine colors, so profiling
+# starts at the first iterate sweep.
 #
 # Notes:
 #   * The runner forces a NON-conditional CUDA graph -- ``mass_splitting_unrolled``
@@ -36,6 +38,7 @@ set -u
 LAUNCH_COUNT="${1:-8}"
 OUT="${2:-/tmp/phoenx_kapla_ncu.txt}"
 KERNEL_REGEX="${3:-singleworld_persistent}"
+LAUNCH_SKIP="${4:-9}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../../../.." && pwd)"
@@ -47,7 +50,7 @@ export HOME="${SUDO_USER:+/home/$SUDO_USER}"
 [ -n "$HOME" ] && [ -d "$HOME" ] || export HOME="$(cd "$REPO/.." && pwd)"
 export PYTHONNOUSERSITE=1 PYTHONPATH="$REPO" PYTHONUTF8=1
 
-echo "launch_count=$LAUNCH_COUNT  kernel=/$KERNEL_REGEX/  ncu=$NCU  out=$OUT"
+echo "launch_count=$LAUNCH_COUNT  launch_skip=$LAUNCH_SKIP  kernel=/$KERNEL_REGEX/  ncu=$NCU  out=$OUT"
 [ -x "$NCU" ] || { echo "ERROR: ncu not found (install Nsight Compute)"; exit 1; }
 [ -x "$PY" ]  || { echo "ERROR: python not found at $PY (set PHOENX_PY)"; exit 1; }
 
@@ -109,6 +112,7 @@ echo "=== running ncu (eager kapla, $LAUNCH_COUNT launches x a few passes; a cou
   --replay-mode kernel \
   --profile-from-start off \
   --kernel-name "regex:$KERNEL_REGEX" \
+  --launch-skip "$LAUNCH_SKIP" \
   --launch-count "$LAUNCH_COUNT" \
   --section SpeedOfLight \
   --section MemoryWorkloadAnalysis \
@@ -126,7 +130,7 @@ echo "==================== KEY METRICS (full report: $OUT) ===================="
 grep -iE "Compute \(SM\) Throughput|Memory Throughput|DRAM Throughput|L2 Cache Throughput|L1/TEX Cache Throughput|Achieved Occupancy|Theoretical Occupancy|Block Limit Registers|Registers Per Thread|Stall Long Scoreboard|Stall MIO|Stall Wait|Stall Short|Eligible Warps Per Scheduler|Issued Warp Per Scheduler|Active Threads Per Warp|Duration|Waves Per SM" "$OUT" | head -60
 echo "========================================================================"
 if grep -qiE "Compute \(SM\) Throughput" "$OUT"; then
-  echo "OK: profile captured. Identify the iterate by the most-frequent / ~6-7us 'Duration' launch."
+  echo "OK: iterate profile captured after skipping the nine-color prepare sweep."
 else
   echo "WARNING: no SpeedOfLight rows (ncu rc=$NCU_RC). Likely ERR_NVGPUCTRPERM -- rerun with sudo. Tail of $OUT:"
   tail -25 "$OUT"

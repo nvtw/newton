@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · two-stage restart validation</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · Kapla contact layout</strong></div>
     </header>
 
     <section class="hero">
@@ -262,6 +262,18 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">RETAINED CANDIDATE · CONTACT LAYOUT</span><time>9 Jul</time></div>
+      <h2>Color-slot headers reduce Kapla's dependent contact loads</h2>
+      <p>The corrected Nsight Compute run identifies the dominant rigid-contact iterate as latency-bound rather than bandwidth-bound: 91 registers/thread, only about 8% scheduler cycles with an eligible warp, 56–61% long-scoreboard issue spacing, 26–30% DRAM throughput, and roughly 4% achieved occupancy.</p>
+      <ul>
+        <li>An opt-in single-world mass-splitting path now gathers ten hot contact-header fields into color-slot order once per rebuilt contact graph. PGS reads the packed view directly, while ingest, warm starting, coloring, and slot-cache construction retain the canonical columns.</li>
+        <li>The shipped 1×1 Kapla schedule remains fixed at 6 substeps, 10 PGS iterations, and 1 velocity iteration. Clean runs improve from about 68.0 to 69.0 FPS.</li>
+        <li>A 2×2 scene with 45,360 bricks improves 20.68 → 21.53 FPS (+4.1%); the measured final state is bit-identical in the paired run. The real-data Kapla CUDA-graph regression passes.</li>
+        <li>The packed buffer retains arbitrary contiguous <code>[first, count)</code> contact manifolds, including large mesh-generated groups. A linked chunk chain was not added: it would introduce another dependent pointer load into the exact bottleneck exposed by Nsight.</li>
+        <li>Rejected alternatives: six persistent blocks/SM overfit and regress several robot/tower scenes; dependency-wave scheduling is 42% slower with no extra overlap; a statically unrolled ≤5-contact solve regresses FPS and stability.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">VALIDATED CANDIDATE · TWO-STAGE RESTART</span><time>9 Jul</time></div>
       <h2>An earlier screen cuts clearly failed attempts to 63 seconds</h2>

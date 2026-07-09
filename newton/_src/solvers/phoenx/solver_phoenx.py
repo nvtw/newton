@@ -43,9 +43,11 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
     CONTACT_TIME_US_OFFSET,
+    RIGID_CONTACT_SOLVE_DWORDS,
     ContactColumnContainer,
     ContactViews,
     contact_column_container_zeros,
+    contact_pack_colored_headers,
     contact_pair_wrench_kernel,
     contact_per_contact_error_kernel,
     contact_per_contact_wrench_kernel,
@@ -589,6 +591,7 @@ class PhoenXWorld:
         multi_world_scheduler: str = "auto",
         max_thread_blocks: int | None = None,
         enable_body_pair_grouping: bool = False,
+        colored_contact_headers: bool = False,
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
@@ -663,6 +666,8 @@ class PhoenXWorld:
                 capture.
             max_thread_blocks: Cap on the single-world PGS persistent
                 grid; ``None`` auto-sizes. No effect on multi-world.
+            colored_contact_headers: Store rigid-contact column metadata in
+                color-slot order for the single-world mass-splitting solve.
             mass_splitting: Enable Tonge mass splitting -- coloring caps
                 at ``max_colored_partitions`` and the overflow bucket
                 is solved Jacobi-style on per-partition copy states.
@@ -693,6 +698,23 @@ class PhoenXWorld:
             )
         self.contact_friction_model = contact_friction_model
         self._contact_patch_enabled = contact_friction_model == "patch"
+        self._colored_contact_headers = bool(colored_contact_headers)
+        if self._colored_contact_headers and (
+            step_layout != "single_world"
+            or not mass_splitting
+            or solver_flavor != "standard"
+            or self._contact_patch_enabled
+            or enable_column_timers
+            or num_particles > 0
+            or num_cloth_triangles > 0
+            or num_cloth_bending > 0
+            or num_soft_tetrahedra > 0
+            or num_soft_hexahedra > 0
+        ):
+            raise NotImplementedError(
+                "colored_contact_headers currently requires single_world standard PGS with mass splitting "
+                "and rigid point-friction contacts, without column timers"
+            )
         if self._contact_patch_enabled and (
             mass_splitting
             or solver_flavor != "standard"
@@ -1217,6 +1239,15 @@ class PhoenXWorld:
                 device=self.device,
                 enable_patch_friction=self._contact_patch_enabled,
             )
+            self._contact_cols_packed = (
+                contact_column_container_zeros(
+                    self._constraint_capacity,
+                    device=self.device,
+                    data_dwords=RIGID_CONTACT_SOLVE_DWORDS,
+                )
+                if self._colored_contact_headers
+                else self._contact_cols
+            )
             self._enable_body_pair_grouping: bool = bool(enable_body_pair_grouping)
             self._ingest_scratch: IngestScratch | None = IngestScratch(
                 rigid_contact_max=self.rigid_contact_max,
@@ -1236,6 +1267,7 @@ class PhoenXWorld:
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
             self._contact_cols = contact_column_container_zeros(1, device=self.device)
+            self._contact_cols_packed = self._contact_cols
             self._ingest_scratch = None
             self._cid_of_contact_cur = None
             self._cid_of_contact_prev = None
@@ -2867,6 +2899,16 @@ class PhoenXWorld:
                 # dispatcher rebuilds the mass-splitting interaction graph
                 # here (no-op when mass splitting is disabled).
                 self._dispatcher.begin_step()
+                if self._colored_contact_headers:
+                    contact_pack_colored_headers(
+                        self._contact_cols,
+                        self._contact_cols_packed,
+                        self._partitioner.element_ids_by_color,
+                        self._num_active_constraints,
+                        self._contact_offset,
+                        self._constraint_capacity,
+                        device=self.device,
+                    )
 
         # Substep order: bias-on solve -> integrate -> bias-off relax. Reversing
         # would discard the positional bias's penetration recovery.
@@ -3957,7 +3999,7 @@ class PhoenXWorld:
             dim=self._singleworld_total_threads,
             inputs=[
                 self.constraints,
-                self._contact_cols,
+                self._contact_cols_packed if self._colored_contact_headers else self._contact_cols,
                 self.bodies,
                 self._particles_or_sentinel(),
                 idt,
@@ -4009,7 +4051,7 @@ class PhoenXWorld:
             dim=[1],
             inputs=[
                 self.constraints,
-                self._contact_cols,
+                self._contact_cols_packed if self._colored_contact_headers else self._contact_cols,
                 self.bodies,
                 self._particles_or_sentinel(),
                 idt,
@@ -4203,6 +4245,7 @@ class PhoenXWorld:
             **self._dispatch_specialization_flags(),
             "has_contacts": self.max_contact_columns > 0 and self._reduced_articulation is None,
             "has_mass_splitting": self.mass_splitting_enabled,
+            "packed_contact_headers": self._colored_contact_headers,
             "rigid_direct": self._singleworld_rigid_direct(),
             "patch_friction": self._contact_patch_enabled,
         }
@@ -4230,6 +4273,7 @@ class PhoenXWorld:
                 skip_joint_pgs=self._skip_all_joint_pgs(),
                 selective_joint_pgs=self._selective_joint_pgs_enabled(),
                 has_mass_splitting=False,
+                packed_contact_headers=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
                 rigid_direct=self._singleworld_rigid_direct(),
@@ -4246,6 +4290,7 @@ class PhoenXWorld:
                 skip_joint_pgs=self._skip_all_joint_pgs(),
                 selective_joint_pgs=self._selective_joint_pgs_enabled(),
                 has_mass_splitting=False,
+                packed_contact_headers=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
                 rigid_direct=self._singleworld_rigid_direct(),

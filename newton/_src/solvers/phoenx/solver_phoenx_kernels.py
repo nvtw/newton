@@ -1208,6 +1208,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
             has_mass_splitting=False,
+            packed_contact_headers=False,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             is_prepare=True,
@@ -1223,6 +1224,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
             has_mass_splitting=False,
+            packed_contact_headers=False,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             is_prepare=False,
@@ -1330,6 +1332,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 idt,
                                 sor_boost,
                                 cid,
+                                family_start + base,
                                 wp.int32(0),
                             )
                             base += tpw
@@ -1395,6 +1398,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             idt,
                             sor_boost,
                             cid,
+                            start + base,
                             wp.int32(0),
                         )
                     else:
@@ -1464,6 +1468,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     idt,
                                     sor_boost,
                                     cid,
+                                    family_start + base,
                                     wp.int32(0),
                                 )
                                 base += tpw
@@ -1533,6 +1538,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 idt,
                                 sor_boost,
                                 cid,
+                                start + base,
                                 wp.int32(0),
                             )
                         else:
@@ -1634,6 +1640,7 @@ def _make_fast_tail_relax_kernel(
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
             has_mass_splitting=False,
+            packed_contact_headers=False,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             is_prepare=False,
@@ -1749,6 +1756,7 @@ def _make_fast_tail_relax_kernel(
                                     idt,
                                     sor_boost,
                                     cid,
+                                    family_start + base,
                                     wp.int32(0),
                                 )
                                 base += tpw
@@ -1820,6 +1828,7 @@ def _make_fast_tail_relax_kernel(
                                 idt,
                                 sor_boost,
                                 cid,
+                                start + base,
                                 wp.int32(0),
                             )
                         else:
@@ -3131,6 +3140,7 @@ def _singleworld_color_range_from_cursor(
 def _make_singleworld_rigid_contact_dispatch_func(
     *,
     has_mass_splitting: bool,
+    packed_contact_headers: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
     is_prepare: bool,
@@ -3168,11 +3178,15 @@ def _make_singleworld_rigid_contact_dispatch_func(
             idt: wp.float32,
             sor_boost: wp.float32,
             local_cid: wp.int32,
+            colored_slot: wp.int32,
             parallel_id: wp.int32,
         ):
+            solve_cid = local_cid
+            if wp.static(packed_contact_headers):
+                solve_cid = colored_slot
             prepare_func(
                 contact_cols,
-                local_cid,
+                solve_cid,
                 bodies,
                 particles,
                 num_bodies,
@@ -3197,11 +3211,15 @@ def _make_singleworld_rigid_contact_dispatch_func(
             idt: wp.float32,
             sor_boost: wp.float32,
             local_cid: wp.int32,
+            colored_slot: wp.int32,
             parallel_id: wp.int32,
         ):
+            solve_cid = local_cid
+            if wp.static(packed_contact_headers):
+                solve_cid = colored_slot
             contact_cached_warmstart_lean(
                 contact_cols,
-                local_cid,
+                solve_cid,
                 bodies,
                 particles,
                 num_bodies,
@@ -3243,11 +3261,15 @@ def _make_singleworld_rigid_contact_dispatch_func(
             idt: wp.float32,
             sor_boost: wp.float32,
             local_cid: wp.int32,
+            colored_slot: wp.int32,
             parallel_id: wp.int32,
         ):
+            solve_cid = local_cid
+            if wp.static(packed_contact_headers):
+                solve_cid = colored_slot
             iterate_func(
                 contact_cols,
-                local_cid,
+                solve_cid,
                 bodies,
                 particles,
                 num_bodies,
@@ -3323,6 +3345,7 @@ def _make_singleworld_dispatch_func(
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
     has_mass_splitting: bool,
+    packed_contact_headers: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
     is_prepare: bool,
@@ -3338,6 +3361,7 @@ def _make_singleworld_dispatch_func(
 
     _dispatch_rigid_contact = _make_singleworld_rigid_contact_dispatch_func(
         has_mass_splitting=has_mass_splitting,
+        packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
@@ -3378,6 +3402,7 @@ def _make_singleworld_dispatch_func(
         idt: wp.float32,
         sor_boost: wp.float32,
         cid: wp.int32,
+        colored_slot: wp.int32,
         parallel_id: wp.int32,
     ):
         t0 = wp.uint64(0)
@@ -3443,6 +3468,7 @@ def _make_singleworld_dispatch_func(
                         idt,
                         sor_boost,
                         local_cid,
+                        colored_slot,
                         parallel_id,
                     )
             else:
@@ -3457,6 +3483,7 @@ def _make_singleworld_dispatch_func(
                     idt,
                     sor_boost,
                     local_cid,
+                    colored_slot,
                     parallel_id,
                 )
             dispatched = True
@@ -3607,6 +3634,7 @@ def _make_singleworld_rigid_direct_color_func(
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
     has_mass_splitting: bool,
+    packed_contact_headers: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
     is_prepare: bool,
@@ -3618,6 +3646,7 @@ def _make_singleworld_rigid_direct_color_func(
 
     _dispatch_rigid_contact = _make_singleworld_rigid_contact_dispatch_func(
         has_mass_splitting=has_mass_splitting,
+        packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
@@ -3722,6 +3751,7 @@ def _make_singleworld_rigid_direct_color_func(
                     idt,
                     sor_boost,
                     cid - num_joints,
+                    contact_start + base,
                     wp.int32(0),
                 )
                 base = base + stride
@@ -3742,6 +3772,7 @@ def _make_singleworld_persistent_kernel(
     skip_joint_pgs: bool = False,
     selective_joint_pgs: bool = False,
     has_mass_splitting: bool = True,
+    packed_contact_headers: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
@@ -3770,6 +3801,7 @@ def _make_singleworld_persistent_kernel(
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
+        packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
@@ -3784,6 +3816,7 @@ def _make_singleworld_persistent_kernel(
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
+        packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
@@ -3917,6 +3950,7 @@ def _make_singleworld_persistent_kernel(
                     idt,
                     sor_boost,
                     cid,
+                    start + t_slot,
                     parallel_id,
                 )
 
@@ -3939,6 +3973,7 @@ def _make_singleworld_fused_kernel(
     skip_joint_pgs: bool = False,
     selective_joint_pgs: bool = False,
     has_mass_splitting: bool = True,
+    packed_contact_headers: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
@@ -3960,6 +3995,7 @@ def _make_singleworld_fused_kernel(
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
+        packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
@@ -3974,6 +4010,7 @@ def _make_singleworld_fused_kernel(
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
+        packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
@@ -4098,6 +4135,7 @@ def _make_singleworld_fused_kernel(
                         idt,
                         sor_boost,
                         cid,
+                        start + t_slot,
                         parallel_id,
                     )
             _sync_threads()
@@ -4126,6 +4164,7 @@ def get_singleworld_kernel(
     skip_joint_pgs: bool = False,
     selective_joint_pgs: bool = False,
     has_mass_splitting: bool = True,
+    packed_contact_headers: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
@@ -4145,6 +4184,7 @@ def get_singleworld_kernel(
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
+        packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         rigid_direct=rigid_direct,
