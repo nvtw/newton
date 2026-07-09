@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · curriculum qualification</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · maximal convergence baseline</strong></div>
     </header>
 
     <section class="hero">
@@ -235,6 +235,7 @@
       <ul>
         <li>Pure PhoenX/PhoenX-RL environments now cover Ant, Humanoid, Go2, G1, H1, ANYmal-C, DR Legs hold-pose, and DR Legs walking, without IsaacLab runtime dependencies.</li>
         <li>Reduced, hybrid, and full-coordinate PhoenX are all eligible. Coordinate choice is an experimental variable, not an ideology; physical accuracy, stability, and the task gate decide.</li>
+        <li>A matched 512-world G1 contact diagnostic measures maximal coordinates at 891.8k steps/s versus 167.9k/s for the persistent reduced path (5.3× raw speed). This is not a quality-equivalent training comparison, but it makes robust maximal convergence a high-leverage target.</li>
         <li>The retained 923k/s steady-training result and solver profiles remain secondary diagnostics for explaining time-to-policy changes.</li>
         <li>G1, ANYmal, and closed-loop DR Legs hold now run under the fresh-process metric with paired train/gate seeds, consecutive held-out windows, strict JSON records, timeout/crash/miss censoring, and restart-cost uncertainty.</li>
       </ul>
@@ -262,6 +263,18 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag">ACTIVE · MAXIMAL GS CONVERGENCE</span><time>9 Jul</time></div>
+      <h2>A steady-window benchmark exposes the 100:1 propagation gap</h2>
+      <p>The new graph-captured heavy-on-light benchmark averages contact load over 120 settled frames and records RMS body speed, separation, and lateral drift. This avoids accepting a lucky instantaneous impulse sample from an oscillatory solve.</p>
+      <ul>
+        <li>At the G1-like 5 substeps × 2 PGS iterations, the heavy box falls from the stack and its supported-load error is 73.9%. At 5×4 the stack remains intact, but mean load error is still 45.8%.</li>
+        <li>8×4 reduces mean load error to 25.2%; 8×8 reaches <strong>3.3%</strong>, with 0.025 / 0.034 m/s bottom/top RMS speed and only 0.020 m maximum lateral drift.</li>
+        <li>The old 40×32 unit-test schedule is therefore far above the current convergence frontier, but ordinary RL-like budgets remain insufficient. Increasing substeps alone does not replace GS propagation in this case.</li>
+        <li>Split SOR at 1.2 reduced drift and some instantaneous residuals but did not materially improve the time-averaged load; it is rejected as a standalone fix.</li>
+        <li>The next experiment keeps deterministic colored Gauss–Seidel: use a support-aware preconditioner or targeted physical GS sweeps for difficult rows, then finish with ordinary unscaled sweeps. Momentum, energy, load transfer, arbitrary contact counts, and graph capture remain hard gates.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag">REJECTED · COMMAND CURRICULUM</span><time>9 Jul</time></div>
       <h2>Faster early learning did not produce policies sooner</h2>

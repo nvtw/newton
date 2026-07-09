@@ -1,0 +1,25 @@
+{
+  "schema": "phoenx_coordinate_speed_v1",
+  "date": "2026-07-09",
+  "device": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "scenario": "512 contact-enabled G1 worlds",
+  "settings": {
+    "layout": "multi_world",
+    "substeps": 5,
+    "solver_iterations": 2,
+    "velocity_iterations": 1,
+    "warmup_frames": 8,
+    "measure_frames": 32,
+    "reduced_articulation_path": "persistent"
+  },
+  "maximal": {
+    "environment_steps_per_second": 891781.6636725955,
+    "milliseconds_per_world_step": 0.0011213507080665153
+  },
+  "reduced": {
+    "environment_steps_per_second": 167880.17061053062,
+    "milliseconds_per_world_step": 0.005956629638648181
+  },
+  "maximal_speedup": 5.311, 
+  "qualification": "Raw simulation throughput only; policy quality and physical trajectories are not equivalent in this measurement."
+}

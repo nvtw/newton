@@ -103,6 +103,21 @@ python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_chunk_task_ac
 python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_unified_block_pipeline
 ```
 
+## High-mass-ratio convergence
+
+The maximal-coordinate convergence frontier uses a 100:1 heavy-on-light
+contact stack. It averages supported loads over a steady window and records
+RMS velocity, separation, and lateral drift, because one final-frame impulse
+sample can hide oscillatory under-convergence.
+
+```bash
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_high_mass_ratio
+```
+
+Use `--mass-ratios` and `--settings SUBSTEPSxITERATIONS` to widen the sweep.
+Every physics frame is CUDA-graph captured; diagnostic readback is excluded
+from the separately reported graph-replay throughput.
+
 ## Share an artefact
 
 To show someone the results, grab:
