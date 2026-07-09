@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · compact projector validated</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · articulated contact GS proven</strong></div>
     </header>
 
     <section class="hero">
@@ -228,6 +228,20 @@
     </section>
 
     <div class="section-label">Current state</div>
+    <article>
+      <div class="meta"><span class="tag good">BIG EXPERIMENT · GPU PRIMITIVES PASS</span><time>Latest evidence</time></div>
+      <h2>Articulation-aware contact GS is both exact and promising</h2>
+      <p>A new contact schedule keeps maximal body state but solves each contact with the exact joint-constrained mobility. Contact-only coloring treats an articulation as one graph node; after each contact color, one factored vector tree pass propagates all independent impulses. This preserves true Gauss&ndash;Seidel ordering without publishing a generalized response row per contact.</p>
+      <ul>
+        <li>The exact diagonal mobility recurrence and lowest-common-ancestor cross response match dense KKT blocks in 100 randomized trees to machine precision in double precision. Production-style float32 Warp kernels match dense results to approximately 4&times;10<sup>&minus;5</sup> in the deliberately ill-conditioned 29-body case.</li>
+        <li>Across 64 randomized trees at each ratio, two exact articulation-GS sweeps leave median contact residual 0.115 / 0.122 / 0.137 at 100:1 / 10,000:1 / 1,000,000:1. The current free-body-PGS-then-project split leaves 0.635 / 0.706 / 0.739.</li>
+        <li>Body-only coloring is mathematically invalid after joint propagation: its median residual exceeds 1 and can exceed 6. Articulation supernode coloring removes that race instead of hiding it with under-relaxation.</li>
+        <li>At 8,192 independent 29-body trees, all exact 6&times;6 body mobility blocks cost about 114 &micro;s and one arbitrary impulse-batch response costs about 90 &micro;s. The response reuses the factorization and is roughly 3.7&times; cheaper than rerunning the full projector.</li>
+        <li>A permanent CUDA-graph test covers two articulations in one world, arbitrary spatial impulses, and a same-articulation two-body contact row; factored response, mass-metric projection, and the LCA cross effective mass agree.</li>
+        <li><strong>Not integrated yet:</strong> structural joint preparation and contact-only coloring need separate graphs. Reusing the global graph after collapsing links would serialize G1's structural joints into 31 colors. The next implementation builds a transient contact-only articulation graph after collision detection and keeps the established path as fallback.</li>
+      </ul>
+      <p class="profile-note">Derivation and gates: <a href="docs/ARTICULATED_COLOR_GS.md">ARTICULATED_COLOR_GS.md</a>. Reproducible randomized convergence probe: <code>bench_articulated_color_gs</code>. This is not yet a training-throughput or policy-quality claim.</p>
+    </article>
     <article>
       <div class="meta"><span class="tag good">THROUGHPUT PARITY · QUALITY PENDING</span><time>Latest matched G1 evidence</time></div>
       <h2>Compact projected full coordinates erase the reduced-coordinate throughput deficit</h2>

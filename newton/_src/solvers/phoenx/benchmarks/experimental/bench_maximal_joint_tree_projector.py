@@ -65,6 +65,119 @@ def solve_spd6(a: wp.spatial_matrixf, b: wp.spatial_vectorf):
     return x
 
 
+@wp.func
+def inverse_spd6(a: wp.spatial_matrixf):
+    result = wp.spatial_matrixf(0.0)
+    for column in range(6):
+        basis = wp.spatial_vectorf(0.0)
+        basis[column] = wp.float32(1.0)
+        solution = solve_spd6(a, basis)
+        for row in range(6):
+            result[row, column] = solution[row]
+    return result
+
+
+@wp.kernel(enable_backward=False)
+def compute_diagonal_mobility(
+    body_count: wp.int32,
+    max_depth: wp.int32,
+    depth: wp.array[wp.int32],
+    parent: wp.array[wp.int32],
+    transform: wp.array2d[wp.spatial_matrixf],
+    motion: wp.array2d[wp.spatial_vectorf],
+    articulated: wp.array2d[wp.spatial_matrixf],
+    inv_d: wp.array2d[wp.float32],
+    conditional_map: wp.array2d[wp.spatial_matrixf],
+    mobility: wp.array2d[wp.spatial_matrixf],
+):
+    tid = wp.tid()
+    world = tid // wp.int32(32)
+    lane = tid - world * wp.int32(32)
+    identity = wp.spatial_matrixf(0.0)
+    for diagonal in range(6):
+        identity[diagonal, diagonal] = wp.float32(1.0)
+
+    if lane == wp.int32(0):
+        mobility[world, lane] = inverse_spd6(articulated[world, lane])
+        conditional_map[world, lane] = identity
+    sync_warp()
+
+    current_depth = wp.int32(1)
+    while current_depth <= max_depth:
+        if lane < body_count and depth[lane] == current_depth:
+            s = motion[world, lane]
+            conditional_mobility = inv_d[world, lane] * wp.outer(s, s)
+            mapping = (identity - conditional_mobility @ articulated[world, lane]) @ transform[world, lane]
+            conditional_map[world, lane] = mapping
+            parent_mobility = mobility[world, parent[lane]]
+            mobility[world, lane] = mapping @ parent_mobility @ wp.transpose(mapping) + conditional_mobility
+        sync_warp()
+        current_depth += wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def apply_factored_tree_impulse(
+    body_count: wp.int32,
+    max_depth: wp.int32,
+    depth: wp.array[wp.int32],
+    parent: wp.array[wp.int32],
+    child_start: wp.array[wp.int32],
+    child_index: wp.array[wp.int32],
+    transform: wp.array2d[wp.spatial_matrixf],
+    motion: wp.array2d[wp.spatial_vectorf],
+    articulated: wp.array2d[wp.spatial_matrixf],
+    inv_d: wp.array2d[wp.float32],
+    mobility: wp.array2d[wp.spatial_matrixf],
+    impulse: wp.array2d[wp.spatial_vectorf],
+    response_bias: wp.array2d[wp.spatial_vectorf],
+    parent_bias: wp.array2d[wp.spatial_vectorf],
+    response_velocity: wp.array2d[wp.spatial_vectorf],
+):
+    tid = wp.tid()
+    world = tid // wp.int32(32)
+    lane = tid - world * wp.int32(32)
+    if lane < body_count:
+        response_bias[world, lane] = wp.spatial_vectorf(0.0)
+        parent_bias[world, lane] = wp.spatial_vectorf(0.0)
+        response_velocity[world, lane] = wp.spatial_vectorf(0.0)
+    sync_warp()
+
+    current_depth = max_depth
+    while current_depth >= wp.int32(0):
+        if lane < body_count and depth[lane] == current_depth:
+            rhs = impulse[world, lane]
+            begin = child_start[lane]
+            end = child_start[lane + wp.int32(1)]
+            for cursor in range(begin, end):
+                rhs += parent_bias[world, child_index[cursor]]
+            response_bias[world, lane] = rhs
+            if lane != wp.int32(0):
+                s = motion[world, lane]
+                u = articulated[world, lane] @ s
+                projected_rhs = rhs - inv_d[world, lane] * wp.dot(s, rhs) * u
+                parent_bias[world, lane] = wp.transpose(transform[world, lane]) @ projected_rhs
+        sync_warp()
+        current_depth -= wp.int32(1)
+
+    if lane == wp.int32(0):
+        response_velocity[world, lane] = mobility[world, lane] @ response_bias[world, lane]
+    sync_warp()
+
+    current_depth = wp.int32(1)
+    while current_depth <= max_depth:
+        if lane < body_count and depth[lane] == current_depth:
+            parent_velocity = response_velocity[world, parent[lane]]
+            base = transform[world, lane] @ parent_velocity
+            s = motion[world, lane]
+            qd = inv_d[world, lane] * wp.dot(
+                s,
+                response_bias[world, lane] - articulated[world, lane] @ base,
+            )
+            response_velocity[world, lane] = base + qd * s
+        sync_warp()
+        current_depth += wp.int32(1)
+
+
 @wp.kernel(enable_backward=False)
 def project_revolute_trees(
     body_count: wp.int32,
@@ -252,14 +365,25 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
     parent_bias = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
     velocity_out = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
     reaction = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
+    conditional_map = wp.empty(shape, dtype=wp.spatial_matrixf, device=device)
+    mobility = wp.empty(shape, dtype=wp.spatial_matrixf, device=device)
+    impulses = rng.normal(size=(world_count, body_count, 6)).astype(np.float32)
+    impulse_wp = wp.array(impulses, dtype=wp.spatial_vectorf, device=device)
+    response_bias = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
+    response_parent_bias = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
+    response_velocity = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
+    depth_wp = wp.array(depth, device=device)
+    parent_wp = wp.array(parent, device=device)
+    child_start_wp = wp.array(child_start, device=device)
+    child_index_wp = wp.array(child_index, device=device)
     inputs = [
         body_count,
         int(depth.max()),
         True,
-        wp.array(depth, device=device),
-        wp.array(parent, device=device),
-        wp.array(child_start, device=device),
-        wp.array(child_index, device=device),
+        depth_wp,
+        parent_wp,
+        child_start_wp,
+        child_index_wp,
         transform_wp,
         motion_wp,
         offset_wp,
@@ -280,8 +404,90 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
         inputs=inputs,
         device=device,
     )
+    mobility_inputs = [
+        body_count,
+        int(depth.max()),
+        depth_wp,
+        parent_wp,
+        transform_wp,
+        motion_wp,
+        articulated,
+        inverse_d,
+        conditional_map,
+        mobility,
+    ]
+    wp.launch(
+        compute_diagonal_mobility,
+        dim=world_count * 32,
+        block_dim=32,
+        inputs=mobility_inputs,
+        device=device,
+    )
+    response_inputs = [
+        body_count,
+        int(depth.max()),
+        depth_wp,
+        parent_wp,
+        child_start_wp,
+        child_index_wp,
+        transform_wp,
+        motion_wp,
+        articulated,
+        inverse_d,
+        mobility,
+        impulse_wp,
+        response_bias,
+        response_parent_bias,
+        response_velocity,
+    ]
+    wp.launch(
+        apply_factored_tree_impulse,
+        dim=world_count * 32,
+        block_dim=32,
+        inputs=response_inputs,
+        device=device,
+    )
     actual = velocity_out.numpy()[0]
+    actual_mobility = mobility.numpy()[0]
+    actual_conditional_map = conditional_map.numpy()[0]
     expected, jacobian, mass_stacked = dense_oracle(parent, transforms, motion, masses[0], velocities[0])
+    dense_mobility = jacobian @ np.linalg.solve(jacobian.T @ mass_stacked @ jacobian, jacobian.T)
+    expected_response = (dense_mobility @ impulses[0].reshape(-1)).reshape(body_count, 6)
+    response_error = float(np.max(np.abs(response_velocity.numpy()[0] - expected_response)))
+    diagonal_mobility_error = max(
+        np.max(np.abs(actual_mobility[body] - dense_mobility[6 * body : 6 * body + 6, 6 * body : 6 * body + 6]))
+        for body in range(body_count)
+    )
+
+    def transfer_to_ancestor(body: int, ancestor: int) -> np.ndarray:
+        mapping = np.eye(6, dtype=np.float32)
+        path = []
+        while body != ancestor:
+            path.append(body)
+            body = int(parent[body])
+        for path_body in reversed(path):
+            mapping = actual_conditional_map[path_body] @ mapping
+        return mapping
+
+    cross_mobility_error = 0.0
+    for body_a in range(body_count):
+        ancestors_a = set()
+        cursor = body_a
+        while cursor >= 0:
+            ancestors_a.add(cursor)
+            cursor = int(parent[cursor])
+        for body_b in range(body_count):
+            cursor = body_b
+            while cursor not in ancestors_a:
+                cursor = int(parent[cursor])
+            lca = cursor
+            predicted = transfer_to_ancestor(body_a, lca) @ actual_mobility[lca] @ transfer_to_ancestor(body_b, lca).T
+            expected_cross = dense_mobility[
+                6 * body_a : 6 * body_a + 6,
+                6 * body_b : 6 * body_b + 6,
+            ]
+            cross_mobility_error = max(cross_mobility_error, float(np.max(np.abs(predicted - expected_cross))))
+
     correction = (actual - velocities[0]).reshape(-1)
     allowed_impulse = jacobian.T @ mass_stacked @ correction
     max_root_reaction = float(np.max(np.abs(reaction.numpy()[:, 0])))
@@ -294,6 +500,38 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
             inputs=inputs,
             device=device,
         )
+    with wp.ScopedCapture(device=device) as mobility_capture:
+        wp.launch(
+            compute_diagonal_mobility,
+            dim=world_count * 32,
+            block_dim=32,
+            inputs=mobility_inputs,
+            device=device,
+        )
+    with wp.ScopedCapture(device=device) as response_capture:
+        wp.launch(
+            apply_factored_tree_impulse,
+            dim=world_count * 32,
+            block_dim=32,
+            inputs=response_inputs,
+            device=device,
+        )
+    with wp.ScopedCapture(device=device) as combined_capture:
+        wp.launch(
+            project_revolute_trees,
+            dim=world_count * 32,
+            block_dim=32,
+            inputs=inputs,
+            device=device,
+        )
+        wp.launch(
+            compute_diagonal_mobility,
+            dim=world_count * 32,
+            block_dim=32,
+            inputs=mobility_inputs,
+            device=device,
+        )
+
     copy_out = wp.empty_like(velocity_out)
     with wp.ScopedCapture(device=device) as copy_capture:
         wp.launch(copy_velocity, dim=shape, inputs=[velocity_wp, copy_out], device=device)
@@ -310,6 +548,9 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
         return samples
 
     solve_us = time_graph(capture.graph)
+    mobility_us = time_graph(mobility_capture.graph)
+    response_us = time_graph(response_capture.graph)
+    combined_us = time_graph(combined_capture.graph)
     copy_us = time_graph(copy_capture.graph)
     return {
         "device": device.name,
@@ -317,10 +558,16 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
         "bodies": body_count,
         "max_depth": int(depth.max()),
         "max_dense_error": float(np.max(np.abs(actual - expected))),
+        "max_diagonal_mobility_error": float(diagonal_mobility_error),
+        "max_cross_mobility_error": float(cross_mobility_error),
+        "max_factored_response_error": response_error,
         "max_generalized_impulse": float(np.max(np.abs(allowed_impulse))),
         "max_root_reaction": max_root_reaction,
         "solve_us": solve_us,
         "median_solve_us": float(np.median(solve_us)),
+        "median_mobility_us": float(np.median(mobility_us)),
+        "median_factored_response_us": float(np.median(response_us)),
+        "median_project_plus_mobility_us": float(np.median(combined_us)),
         "median_copy_us": float(np.median(copy_us)),
     }
 

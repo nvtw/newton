@@ -10,7 +10,15 @@ import warp as wp
 
 import newton
 from newton._src.solvers.featherstone.kernels import transform_spatial_inertia
-from newton._src.solvers.phoenx.articulations.maximal_projector import MaximalTreeProjector
+from newton._src.solvers.phoenx.articulations.maximal_contact_response import (
+    MaximalContactResponse,
+    MaximalContactResponseData,
+    maximal_contact_pair_inverse_mass,
+)
+from newton._src.solvers.phoenx.articulations.maximal_projector import (
+    MaximalTreeProjector,
+    MaximalTreeProjectorData,
+)
 from newton._src.solvers.phoenx.articulations.maximal_projector_general import GeneralMaximalTreeProjector
 from newton._src.solvers.phoenx.articulations.reduced import (
     ReducedArticulationSystem,
@@ -35,8 +43,34 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _gather_reduced_contact_blocks_packed_kernel,
     _transpose_generalized_contact_response_kernel,
 )
-from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.body import BodyContainer, inertia_sym6_unpack_np
 from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_wrench_response
+
+
+@wp.kernel(enable_backward=False)
+def _evaluate_maximal_contact_pair_inverse_mass_kernel(
+    tree: MaximalTreeProjectorData,
+    response: MaximalContactResponseData,
+    bodies: BodyContainer,
+    body0: wp.int32,
+    point0: wp.vec3f,
+    direction0: wp.vec3f,
+    body1: wp.int32,
+    point1: wp.vec3f,
+    direction1: wp.vec3f,
+    result: wp.array[wp.float32],
+):
+    result[0] = maximal_contact_pair_inverse_mass(
+        tree,
+        response,
+        bodies,
+        body0,
+        point0,
+        direction0,
+        body1,
+        point1,
+        direction1,
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -1437,6 +1471,107 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(np.sum(reactions[:, 1:] * motion[:, 1:], axis=2)))), 2.0e-5)
         self.assertTrue(np.isfinite(state1.body_q.numpy()).all())
         self.assertTrue(np.isfinite(state1.body_qd.numpy()).all())
+
+    def test_maximal_contact_response_matches_projection_inside_graph(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("maximal contact-response tests require CUDA graph capture")
+
+        model = _make_translated_floating_pair(device, translation=3.0)
+        state0 = model.state()
+        state1 = model.state()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal_projected",
+            substeps=1,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        with wp.ScopedCapture(device=device) as initialize_capture:
+            solver.step(state0, state1, None, None, 1.0 / 1000.0)
+        wp.capture_launch(initialize_capture.graph)
+
+        projector = solver._maximal_tree_projector
+        self.assertIsInstance(projector, MaximalTreeProjector)
+        response = MaximalContactResponse(projector)
+        body_count = projector.data.body_count.numpy()
+        body_slot = projector.data.body_slot.numpy()
+        rng = np.random.default_rng(91)
+        impulses = np.zeros((*response.data.impulse.shape, 6), dtype=np.float32)
+        body_velocity = solver.world.bodies.velocity.numpy()
+        body_angular_velocity = solver.world.bodies.angular_velocity.numpy()
+        inverse_mass = solver.world.bodies.inverse_mass.numpy()
+        inverse_inertia = inertia_sym6_unpack_np(solver.world.bodies.inverse_inertia_world.numpy())
+        for articulation, count in enumerate(body_count):
+            for lane in range(int(count)):
+                slot = int(body_slot[articulation, lane])
+                impulse = rng.normal(size=6).astype(np.float32)
+                impulses[articulation, lane] = impulse
+                body_velocity[slot] = inverse_mass[slot] * impulse[:3]
+                body_angular_velocity[slot] = inverse_inertia[slot] @ impulse[3:]
+        response.data.impulse.assign(impulses)
+        solver.world.bodies.velocity.assign(body_velocity)
+        solver.world.bodies.angular_velocity.assign(body_angular_velocity)
+
+        with wp.ScopedCapture(device=device) as capture:
+            response.compute_mobility()
+            response.solve_impulses()
+            projector.project(use_bias=False)
+        wp.capture_launch(capture.graph)
+
+        factored = response.data.velocity.numpy()
+        projected = projector.data.velocity_out.numpy()
+        for articulation, count in enumerate(body_count):
+            np.testing.assert_allclose(
+                factored[articulation, :count],
+                projected[articulation, :count],
+                rtol=3.0e-5,
+                atol=3.0e-5,
+            )
+
+        pair_impulses = np.zeros_like(impulses)
+        slot0 = int(body_slot[0, 0])
+        slot1 = int(body_slot[0, 1])
+        positions = solver.world.bodies.position.numpy()
+        direction0 = np.array([0.3, -0.4, 0.5], dtype=np.float32)
+        direction1 = np.array([-0.2, 0.6, 0.1], dtype=np.float32)
+        point0 = positions[slot0] + np.array([0.1, -0.03, 0.07], dtype=np.float32)
+        point1 = positions[slot1] + np.array([-0.05, 0.08, -0.04], dtype=np.float32)
+        wrench0 = np.concatenate((direction0, np.cross(point0 - positions[slot0], direction0)))
+        wrench1 = np.concatenate((direction1, np.cross(point1 - positions[slot1], direction1)))
+        pair_impulses[0, 0] = wrench0
+        pair_impulses[0, 1] = wrench1
+        response.data.impulse.assign(pair_impulses)
+        pair_inverse_mass = wp.zeros(1, dtype=wp.float32, device=device)
+        with wp.ScopedCapture(device=device) as pair_capture:
+            response.compute_mobility()
+            wp.launch(
+                _evaluate_maximal_contact_pair_inverse_mass_kernel,
+                dim=1,
+                inputs=[
+                    projector.data,
+                    response.data,
+                    solver.world.bodies,
+                    slot0,
+                    wp.vec3f(*point0),
+                    wp.vec3f(*direction0),
+                    slot1,
+                    wp.vec3f(*point1),
+                    wp.vec3f(*direction1),
+                    pair_inverse_mass,
+                ],
+                device=device,
+            )
+            response.solve_impulses()
+        wp.capture_launch(pair_capture.graph)
+
+        pair_velocity = response.data.velocity.numpy()
+        expected_inverse_mass = np.dot(wrench0, pair_velocity[0, 0]) + np.dot(wrench1, pair_velocity[0, 1])
+        self.assertAlmostEqual(
+            float(pair_inverse_mass.numpy()[0]),
+            float(expected_inverse_mass),
+            delta=3.0e-5,
+        )
 
     def test_maximal_projected_mixed_tree_and_hybrid_fallback_inside_graph(self):
         device = wp.get_preferred_device()
