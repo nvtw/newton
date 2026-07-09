@@ -215,6 +215,7 @@ class BatchPPO:
         self.advantages = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.old_values = wp.zeros(count, dtype=wp.float32, device=self.device)
+        self.dones = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
         self._advantage_partials = wp.zeros((PPO_ADVANTAGE_PARTIAL_COUNT, 2), dtype=wp.float32, device=self.device)
         self.priority_weights = wp.ones(self.num_envs, dtype=wp.float32, device=self.device)
@@ -763,14 +764,19 @@ class TrainerPPO:
     def _set_update_sequence_shape(self, buffer: BufferRollout | BatchPPO) -> None:
         set_sequence_shape = getattr(self.actor.net, "set_sequence_shape", None)
         if set_sequence_shape is not None:
-            set_sequence_shape(buffer.num_steps, buffer.num_envs)
+            set_sequence_shape(buffer.num_steps, buffer.num_envs, buffer.dones)
 
     def _policy_update_reuse(
         self, obs: wp.array2d[wp.float32], buffer: BufferRollout | BatchPPO
     ) -> wp.array2d[wp.float32]:
         forward_sequence_reuse = getattr(self.actor.net, "forward_sequence_reuse", None)
         if forward_sequence_reuse is not None:
-            return forward_sequence_reuse(obs, num_steps=buffer.num_steps, num_envs=buffer.num_envs)
+            return forward_sequence_reuse(
+                obs,
+                num_steps=buffer.num_steps,
+                num_envs=buffer.num_envs,
+                dones=buffer.dones,
+            )
         return self.actor.net.forward_reuse(obs)
 
     def _value_reuse_for_update(self, buffer: BufferRollout | BatchPPO) -> wp.array2d[wp.float32]:
@@ -1038,6 +1044,7 @@ class TrainerPPO:
                     buffer.advantages,
                     buffer.returns,
                     buffer.old_values,
+                    buffer.dones,
                 ],
                 outputs=[
                     batch.obs,
@@ -1046,6 +1053,7 @@ class TrainerPPO:
                     batch.advantages,
                     batch.returns,
                     batch.old_values,
+                    batch.dones,
                 ],
                 device=self.device,
             )

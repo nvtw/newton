@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · articulated contact training measured</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · recurrent replay corrected</strong></div>
     </header>
 
     <section class="hero">
@@ -229,22 +229,31 @@
 
     <div class="section-label">Current state</div>
     <article>
-      <div class="meta"><span class="tag warn">PHYSICS EXPERIMENT &middot; TRAINING QUALITY REJECTS PROMOTION</span><time>Latest evidence</time></div>
-      <h2>Direct articulated-contact GS improves maximal physics, but reduced coordinates still win</h2>
-      <p>The new opt-in <code>maximal_articulated</code> path keeps maximal body coordinates, prepares and warm-starts the established hard-Hertz contacts, projects the joint tree exactly, and then solves contacts using the exact joint-constrained mobility. Normal and the coupled 2&times;2 friction block preserve sequential GS semantics but share one factored tree response per point.</p>
+      <div class="meta"><span class="tag warn">CORRECTNESS RETAINED &middot; METRIC GAIN UNPROVEN</span><time>Latest paired evidence</time></div>
+      <h2>Recurrent PPO now respects terminal episode boundaries</h2>
+      <p>Collection already cleared MinGRU state after a terminal transition, but PPO sequence replay previously treated the flat rollout as uninterrupted. Replay now resets the recurrent value at exactly the same boundary, cuts backward gradients there, and carries done masks through trajectory minibatches. The implementation remains deterministic and end-to-end CUDA-graph captured.</p>
       <ul>
-        <li>A concrete integration bug was found and fixed: the first prototype overwrote the standard contact effective-mass cache, so the following free-body relaxation pass applied articulated masses through the wrong operator. Exact mobility now has an isolated six-float symmetric contact-frame SoA and never contaminates standard PGS state.</li>
-        <li>The corrected 5-substep G1 screen matches projected maximal: median first termination 80.0 versus 80.5, p10 74.3 versus 76.1, and maximum active joint-anchor error 0.000149 m versus 0.000188 m.</li>
-        <li>At four substeps, the direct path materially improves the difficult screen: median 65 versus 51 and maximum anchor error 0.000742 m versus 0.0131 m. Three substeps remain unstable and are not being promoted.</li>
-        <li>The fallback-aware matched physics measurement reaches <strong>1.033M environment steps/s</strong> at four substeps versus <strong>1.034M/s</strong> for five-substep projected maximal. However, the proven reduced-coordinate 3&times;2 schedule reaches <strong>1.463M/s</strong>: best-versus-best, direct maximal remains 29.4% slower.</li>
-        <li>Across randomized trees, two exact articulation-GS sweeps leave median residual 0.115 / 0.122 / 0.137 at mass ratios 100:1 / 10,000:1 / 1,000,000:1, versus 0.635 / 0.706 / 0.739 for free-body PGS followed by projection.</li>
-        <li>Deterministic per-column ownership keeps unsupported articulation&ndash;articulation and external dynamic contacts on established colored PGS. Structural joints use a separate prepare-only ownership state: projector geometry is always refreshed, while redundant joint iterations are skipped.</li>
-        <li>New CUDA-graph gates pass for exact bilinear mobility, isolated contact-mobility storage, bitwise determinism, multiple articulations per world, single- and multi-world execution, and deterministic colored fallback for inter-articulation contacts.</li>
-        <li>The decisive paired seed-42 iteration-75 screen rejects promotion. Reduced 3&times;2 scores <strong>0.716</strong> with zero falls and passes the frozen 0.680 early gate; articulated maximal 4&times;2 scores 0.493 with four falls, while 5&times;2 improves to 0.565 with zero falls but still misses the gate.</li>
-        <li>The measured training-throughput numbers are cache-order biased because reduced compiled the shared RL kernels first. They do not rescue the candidate: it already loses the isolated physics bracket and, more importantly, policy quality.</li>
-        <li><strong>Current conclusion:</strong> retain this as an opt-in research path for exact high-mass-ratio contact convergence, but do not replace reduced coordinates or claim a time-to-policy breakthrough. The physically complete bias-free relaxation variant was also rejected: it scores 0.579 and runs at 0.728M environment steps/s (4&times;2), versus reduced 3&times;2 at 0.716 and 1.463M/s.</li>
+        <li>Focused CUDA graph coverage passes for forward reset, backward gradient isolation, minibatch gathering, finite-difference gradients, reproducible PPO updates, checkpoint/resume, and train-to-gate smoke.</li>
+        <li>The paired iteration-75 effect is mixed: seed 11 improves from 0.659 to 0.685, seed 42 remains comparable at 0.703, and seed 29 regresses from 0.674 to 0.644. An authoritative chunked seed-11 run still fails the second screen (0.742 at iteration 150; required 0.80).</li>
+        <li><strong>Decision:</strong> retain the correctness fix, but do not claim a faster time-to-policy. The official expected G1 cost remains 343.19 s.</li>
+        <li><strong>Next general candidate:</strong> replay the exact initial recurrent state of each rollout and compute bootstrap values without advancing persistent state. This removes the remaining collection/replay mismatch and enables a clean test of state persistence across rollout chunks.</li>
       </ul>
-      <p class="profile-note">Derivation and primitive gates: <a href="docs/ARTICULATED_COLOR_GS.md">ARTICULATED_COLOR_GS.md</a>. The final bias-free path passes focused single-/multi-world, bitwise-determinism, and inter-articulation-fallback CUDA graph gates. Broad CUDA graph suites pass except for one aggregate-suite graph-instantiation resource failure that passes alone; stacking, contact-force, soft-contact, and multi-world ordering suites are green. The retained <code>maximal_projected</code> and reduced paths remain unchanged.</p>
+    </article>
+    <article>
+      <div class="meta"><span class="tag warn">REJECTED &middot; MID-TRAINING BRANCH SELECTION</span><time>Latest evidence</time></div>
+      <h2>Continuation diversity rescues early screens, but not the qualified-policy gate</h2>
+      <p>A frozen diagnostic branched retained reduced-coordinate iteration-50 checkpoints by preserving policy and optimizer state while independently reseeding rollout, command, reset, and environment trajectories. Every fresh-process branch and evaluation was charged; selection used held-out fixed-command screens rather than training reward.</p>
+      <ul>
+        <li>A 3&times;3 cross of the existing iteration-75 policies shows genuine training variance: changing the gate seed moves battery performance by about 0.01, while changing the training seed moves it by 0.04&ndash;0.05 and preserves the policy ranking.</li>
+        <li>The eventual successful seed cannot be selected early: seed 42 is worst at iterations 25 and 50, then best at iteration 75. Naive early PBT selection would choose the wrong policy.</li>
+        <li>From the weak seed-11 iteration-50 checkpoint, one 27.17 s branch reaches 0.693 on its selection seed, but only 0.644&ndash;0.674 on four other seeds. This is evaluator overfit, not a robust rescue.</li>
+        <li>The strongest branch starts from seed 29: its five-seed mean improves to 0.683 at iteration 75 and to <strong>0.838</strong> at iteration 150, with zero falls. The frozen second-stage threshold is passed.</li>
+        <li>Full continuation still fails. Battery performance plateaus at 0.822&ndash;0.844 through iteration 325 versus the required 0.90. The angular fine-tune lowers roll/pitch RMS from 0.343 to 0.121, but leg-velocity RMS rises to 1.55 versus the 1.22 limit.</li>
+        <li>The charged incremental process times are 27.06 s for iteration 50&rarr;75, 60.24 s for 75&rarr;150, and 111.41 s for 150&rarr;325. No qualifying policy is produced, so branching cannot improve the expected-cost metric.</li>
+        <li><strong>Decision:</strong> reject branch-and-select and keep the reduced 3&times;2 recipe plus frozen two-stage restart as the 343.19 s baseline. The next candidate must improve learning dynamics or sample efficiency across seeds, not search continuation noise.</li>
+        <li>The separate <code>maximal_articulated</code> experiment remains an opt-in high-mass-ratio research path only: its physically complete 4&times;2 path runs at 0.728M environment steps/s and scores 0.579, versus reduced 3&times;2 at 1.463M/s and 0.716.</li>
+      </ul>
+      <p class="profile-note">Retained record: <a href="benchmarks/results/phoenx_g1_branch_select_20260709.json">phoenx_g1_branch_select_20260709.json</a>. No user profiling action is currently required.</p>
     </article>
     <article>
       <div class="meta"><span class="tag good">THROUGHPUT PARITY · QUALITY PENDING</span><time>Latest matched G1 evidence</time></div>

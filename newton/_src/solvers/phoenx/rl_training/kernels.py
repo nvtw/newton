@@ -224,6 +224,8 @@ def mingru_step_kernel(
 def mingru_sequence_forward_kernel(
     combined: wp.array2d[wp.float32],
     x: wp.array2d[wp.float32],
+    dones: wp.array[wp.float32],
+    use_dones: wp.int32,
     num_steps: wp.int32,
     num_envs: wp.int32,
     hidden_dim: wp.int32,
@@ -234,6 +236,8 @@ def mingru_sequence_forward_kernel(
     recurrent = wp.float32(0.0)
     for step in range(num_steps):
         row = step * num_envs + env
+        if use_dones != wp.int32(0) and step > wp.int32(0) and dones[row - num_envs] > wp.float32(0.5):
+            recurrent = wp.float32(0.0)
         hidden_pre = combined[row, hidden]
         gate_pre = combined[row, hidden_dim + hidden]
         proj_pre = combined[row, wp.int32(2) * hidden_dim + hidden]
@@ -252,6 +256,8 @@ def mingru_sequence_backward_kernel(
     x: wp.array2d[wp.float32],
     recurrent: wp.array2d[wp.float32],
     grad_out: wp.array2d[wp.float32],
+    dones: wp.array[wp.float32],
+    use_dones: wp.int32,
     num_steps: wp.int32,
     num_envs: wp.int32,
     hidden_dim: wp.int32,
@@ -263,8 +269,9 @@ def mingru_sequence_backward_kernel(
     for reverse_step in range(num_steps):
         step = num_steps - wp.int32(1) - reverse_step
         row = step * num_envs + env
+        reset_before = use_dones != wp.int32(0) and step > wp.int32(0) and dones[row - num_envs] > wp.float32(0.5)
         prev_recurrent = wp.float32(0.0)
-        if step > wp.int32(0):
+        if step > wp.int32(0) and not reset_before:
             prev_recurrent = recurrent[row - num_envs, hidden]
 
         hidden_pre = combined[row, hidden]
@@ -283,7 +290,10 @@ def mingru_sequence_backward_kernel(
 
         grad_gate = grad_recurrent * (candidate - prev_recurrent)
         grad_candidate = grad_recurrent * gate
-        grad_recurrent_next = grad_recurrent * (wp.float32(1.0) - gate)
+        if reset_before:
+            grad_recurrent_next = wp.float32(0.0)
+        else:
+            grad_recurrent_next = grad_recurrent * (wp.float32(1.0) - gate)
 
         grad_combined[row, hidden] = grad_candidate * _mingru_hidden_candidate_grad(hidden_pre)
         grad_combined[row, hidden_dim + hidden] = grad_gate * gate * (wp.float32(1.0) - gate)
@@ -1139,12 +1149,14 @@ def gather_trajectory_minibatch_kernel(
     advantages_src: wp.array[wp.float32],
     returns_src: wp.array[wp.float32],
     values_src: wp.array[wp.float32],
+    dones_src: wp.array[wp.float32],
     obs_dst: wp.array2d[wp.float32],
     actions_dst: wp.array2d[wp.float32],
     log_probs_dst: wp.array[wp.float32],
     advantages_dst: wp.array[wp.float32],
     returns_dst: wp.array[wp.float32],
     old_values_dst: wp.array[wp.float32],
+    dones_dst: wp.array[wp.float32],
 ):
     row, col = wp.tid()
     step = row / segment_count
@@ -1160,6 +1172,7 @@ def gather_trajectory_minibatch_kernel(
         advantages_dst[row] = advantages_src[src_row]
         returns_dst[row] = returns_src[src_row]
         old_values_dst[row] = values_src[src_row]
+        dones_dst[row] = dones_src[src_row]
 
 
 @wp.kernel

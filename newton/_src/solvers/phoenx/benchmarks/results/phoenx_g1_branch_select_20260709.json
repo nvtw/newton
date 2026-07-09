@@ -1,0 +1,58 @@
+{
+  "schema": "phoenx_g1_branch_select_v1",
+  "date": "2026-07-09",
+  "decision": "rejected",
+  "coordinate_mode": "reduced",
+  "schedule": "3 substeps, 2 solver iterations, 1 velocity iteration",
+  "branch_point_iteration": 50,
+  "branch_target_iteration": 75,
+  "branch_wall_seconds": [
+    28.2278,
+    27.1727,
+    27.1788,
+    27.0551
+  ],
+  "seed_11_branches": {
+    "same_seed_battery_perf": 0.648891,
+    "seed_10011_battery_perf_by_gate_seed": [
+      0.693471,
+      0.673516,
+      0.665628,
+      0.643612,
+      0.662129
+    ],
+    "seed_20011_battery_perf": 0.645894
+  },
+  "seed_29_branch": {
+    "continuation_seed": 10029,
+    "iteration_75_battery_perf_by_gate_seed": [
+      0.686732,
+      0.709494,
+      0.673641,
+      0.659146,
+      0.686781
+    ],
+    "iteration_150_battery_perf_by_gate_seed": [
+      0.84209,
+      0.836884,
+      0.825174,
+      0.86094,
+      0.825799
+    ],
+    "iteration_150_zero_falls": true,
+    "iteration_175_to_325_battery_perf_range": [
+      0.821135,
+      0.844146
+    ],
+    "iteration_325_ang_vel_xy_rms": 0.121476,
+    "iteration_325_leg_qvel_rms": 1.554314,
+    "pass_gate": false,
+    "incremental_wall_seconds": {
+      "iteration_50_to_75": 27.0551,
+      "iteration_75_to_150": 60.2416,
+      "iteration_150_to_325": 111.4147
+    }
+  },
+  "baseline_expected_seconds_to_success": 343.1915,
+  "reason": "Continuation reseeding produces meaningful diversity and can pass both early screens, but the best branch plateaus below the frozen full quality gate while adding charged process time."
+}

@@ -1519,12 +1519,15 @@ class TestG1PhoenXRL(unittest.TestCase):
         advantages_src = wp.array(advantages_np.reshape(-1), dtype=wp.float32, device=device)
         returns_src = wp.array(returns_np.reshape(-1), dtype=wp.float32, device=device)
         values_src = wp.array(values_np.reshape(-1), dtype=wp.float32, device=device)
+        dones_np = (np.arange(src_count) % 3 == 0).astype(np.float32)
+        dones_src = wp.array(dones_np, dtype=wp.float32, device=device)
         obs_dst = wp.zeros((sample_count, obs_dim), dtype=wp.float32, device=device)
         actions_dst = wp.zeros((sample_count, action_dim), dtype=wp.float32, device=device)
         log_probs_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
         advantages_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
         returns_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
         old_values_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
+        dones_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
         ratios_src_np = 600.0 + np.arange(sample_count, dtype=np.float32)
         ratios_src = wp.array(ratios_src_np, dtype=wp.float32, device=device)
         ratios_dst = wp.full(src_count, -1.0, dtype=wp.float32, device=device)
@@ -1554,8 +1557,17 @@ class TestG1PhoenXRL(unittest.TestCase):
                     advantages_src,
                     returns_src,
                     values_src,
+                    dones_src,
                 ],
-                outputs=[obs_dst, actions_dst, log_probs_dst, advantages_dst, returns_dst, old_values_dst],
+                outputs=[
+                    obs_dst,
+                    actions_dst,
+                    log_probs_dst,
+                    advantages_dst,
+                    returns_dst,
+                    old_values_dst,
+                    dones_dst,
+                ],
                 device=device,
             )
             wp.launch(
@@ -1587,6 +1599,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         )
         np.testing.assert_allclose(returns_dst.numpy(), returns_np.reshape(-1)[selected_rows_np], rtol=0.0, atol=0.0)
         np.testing.assert_allclose(old_values_dst.numpy(), values_np.reshape(-1)[selected_rows_np], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(dones_dst.numpy(), dones_np[selected_rows_np], rtol=0.0, atol=0.0)
 
         expected_ratios = np.full(src_count, -1.0, dtype=np.float32)
         expected_values = np.full(src_count, -1.0, dtype=np.float32)
@@ -2329,19 +2342,20 @@ class TestG1PhoenXRL(unittest.TestCase):
         grad_highway = wp.zeros_like(x)
         output = wp.zeros_like(x)
         recurrent_device = wp.zeros_like(x)
+        zero_dones = wp.zeros(1, dtype=wp.float32, device=device)
 
         with wp.ScopedCapture(device=device) as capture:
             wp.launch(
                 mingru_sequence_forward_kernel,
                 dim=(1, 1),
-                inputs=[combined, x, 2, 1, 1],
+                inputs=[combined, x, zero_dones, 0, 2, 1, 1],
                 outputs=[output, recurrent_device],
                 device=device,
             )
             wp.launch(
                 mingru_sequence_backward_kernel,
                 dim=(1, 1),
-                inputs=[combined, x, recurrent_device, grad_out, 2, 1, 1],
+                inputs=[combined, x, recurrent_device, grad_out, zero_dones, 0, 2, 1, 1],
                 outputs=[grad_combined, grad_highway],
                 device=device,
             )
@@ -2383,6 +2397,54 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertGreater(abs(float(expected_combined[0, 0])) + abs(float(expected_combined[0, 1])), 1.0e-4)
         np.testing.assert_allclose(grad_combined.numpy(), expected_combined, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(grad_highway.numpy(), expected_highway, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_mingru_done_boundary_resets_forward_and_cuts_backward_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX MinGRU done-boundary tests")
+        combined_np = np.asarray([[0.2, -0.4, 0.7], [-0.3, 0.5, -0.2]], dtype=np.float32)
+        x_np = np.asarray([[0.25], [-0.15]], dtype=np.float32)
+        combined = wp.array(combined_np, dtype=wp.float32, device=device)
+        x = wp.array(x_np, dtype=wp.float32, device=device)
+        dones = wp.array(np.asarray([1.0, 0.0], dtype=np.float32), dtype=wp.float32, device=device)
+        grad_out = wp.array(np.asarray([[0.0], [1.0]], dtype=np.float32), dtype=wp.float32, device=device)
+        output = wp.zeros_like(x)
+        recurrent = wp.zeros_like(x)
+        grad_combined = wp.zeros_like(combined)
+        grad_highway = wp.zeros_like(x)
+
+        single_combined = wp.array(combined_np[1:2], dtype=wp.float32, device=device)
+        single_x = wp.array(x_np[1:2], dtype=wp.float32, device=device)
+        single_output = wp.zeros_like(single_x)
+        single_recurrent = wp.zeros_like(single_x)
+        zero_dones = wp.zeros(1, dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                mingru_sequence_forward_kernel,
+                dim=(1, 1),
+                inputs=[combined, x, dones, 1, 2, 1, 1],
+                outputs=[output, recurrent],
+                device=device,
+            )
+            wp.launch(
+                mingru_sequence_backward_kernel,
+                dim=(1, 1),
+                inputs=[combined, x, recurrent, grad_out, dones, 1, 2, 1, 1],
+                outputs=[grad_combined, grad_highway],
+                device=device,
+            )
+            wp.launch(
+                mingru_sequence_forward_kernel,
+                dim=(1, 1),
+                inputs=[single_combined, single_x, zero_dones, 0, 1, 1, 1],
+                outputs=[single_output, single_recurrent],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(output.numpy()[1], single_output.numpy()[0], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(grad_combined.numpy()[0], 0.0, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(grad_highway.numpy()[0], 0.0, rtol=0.0, atol=0.0)
+        self.assertGreater(float(np.linalg.norm(grad_combined.numpy()[1])), 0.0)
 
     def test_puffer_mingru_backward_matches_finite_difference_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX MinGRU backward tests")
@@ -2610,6 +2672,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 dtype=np.float32,
             )
         )
+        buffer.dones.assign(np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
         mirror_map = rl.MirrorMapPPO(
             obs_src=(1, 0),
             obs_sign=(1.0, 1.0),
@@ -2666,7 +2729,10 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         with wp.ScopedCapture(device=device) as expected_capture:
             expected_out = trainer.actor.net.forward_sequence_reuse(
-                mirror_obs, num_steps=buffer.num_steps, num_envs=buffer.num_envs
+                mirror_obs,
+                num_steps=buffer.num_steps,
+                num_envs=buffer.num_envs,
+                dones=buffer.dones,
             )
         wp.capture_launch(expected_capture.graph)
         np.testing.assert_allclose(mirror_actual, expected_out.numpy(), rtol=0.0, atol=0.0)
