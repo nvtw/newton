@@ -358,10 +358,9 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
-            # Let the solver auto-size the single-world persistent grid to
-            # ``sm_count * 4`` blocks. The old hard pin of 256 under-filled
-            # large GPUs (e.g. 188-SM Blackwell -> 256 vs 752 blocks, ~2%
-            # achieved occupancy on the iterate); auto-sizing is ~+5% FPS.
+            # Let the solver auto-size the fixed single-world persistent grid.
+            # The packed contact path uses a wider grid to hide dependent-load
+            # latency; other paths retain the lower-pressure default.
             mass_splitting=ENABLE_MASS_SPLITTING and solver_flavor == "standard",
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,

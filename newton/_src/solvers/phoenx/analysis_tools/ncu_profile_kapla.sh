@@ -118,6 +118,7 @@ echo "=== running ncu (eager kapla, $LAUNCH_COUNT launches x a few passes; a cou
   --section MemoryWorkloadAnalysis \
   --section Occupancy \
   --section WarpStateStats \
+  --section SourceCounters \
   --section SchedulerStats \
   --section LaunchStats \
   "$PY" "$RUNNER" > "$OUT" 2>&1

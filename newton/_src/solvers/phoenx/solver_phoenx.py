@@ -485,10 +485,12 @@ def _singleworld_total_threads(
     constraint_capacity: int,
     device,
     max_thread_blocks: int | None = None,
+    cuda_blocks_per_sm: int = 4,
 ) -> int:
-    """Persistent grid size for the single-world PGS kernels: ``clamp(ceil(cap /
-    256), 32, 4 * sm_count)`` blocks of 256 threads. ``max_thread_blocks`` opts
-    out of the floor + SM cap and uses ``min(capacity_blocks, max_thread_blocks)``."""
+    """Size the fixed single-world persistent grid from capacity and SM count.
+
+    ``max_thread_blocks`` overrides the automatic ``cuda_blocks_per_sm`` cap.
+    """
     block_dim = _SINGLEWORLD_BLOCK_DIM
     capacity_blocks = (max(1, int(constraint_capacity)) + block_dim - 1) // block_dim
     if max_thread_blocks is not None:
@@ -498,7 +500,7 @@ def _singleworld_total_threads(
         return block_dim * num_blocks
     device_obj = wp.get_device(device)
     if device_obj.is_cuda:
-        max_blocks_limit = device_obj.sm_count * 4
+        max_blocks_limit = device_obj.sm_count * int(cuda_blocks_per_sm)
     else:
         max_blocks_limit = 256
     min_blocks = 32
@@ -1004,6 +1006,7 @@ class PhoenXWorld:
             self._constraint_capacity,
             self.device,
             max_thread_blocks=self._max_thread_blocks,
+            cuda_blocks_per_sm=12 if self._colored_contact_headers else 4,
         )
 
         # Head capture-while predicate. Persistent-grid sweep zeroes it on

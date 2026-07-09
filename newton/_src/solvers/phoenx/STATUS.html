@@ -132,6 +132,13 @@
       <p>Minimize wall-clock time from a zero-training process start to the first policy that passes a predeclared held-out quality gate, using only PhoenX physics and PhoenX RL. Solver speed, timestep size, stability, sample efficiency, curricula, population methods, and learner throughput are jointly optimized—but every cost is counted and every survivor must generalize across diverse tasks.</p>
     </section>
 
+    <section class="action-required" aria-label="Action required">
+      <div class="meta"><span class="tag">ACTION REQUIRED</span><time>One source-correlated iterate</time></div>
+      <strong>Run one bounded Nsight Compute source pass</strong>
+      <p>The post-layout counters are analyzed. One launch with source counters should identify the exact remaining long-scoreboard load, without profiling the full frame or repeating six kernels.</p>
+      <pre><code>sudo bash /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/analysis_tools/ncu_profile_kapla.sh 1 /tmp/phoenx_kapla_ncu_source.txt</code></pre>
+    </section>
+
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric">1 / 3</div><div class="label">paired G1 cold trials passing</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
@@ -269,9 +276,11 @@
       <ul>
         <li>An opt-in single-world mass-splitting path now gathers ten hot contact-header fields into color-slot order once per rebuilt contact graph. PGS reads the packed view directly, while ingest, warm starting, coloring, and slot-cache construction retain the canonical columns.</li>
         <li>The shipped 1×1 Kapla schedule remains fixed at 6 substeps, 10 PGS iterations, and 1 velocity iteration. Clean runs improve from about 68.0 to 69.0 FPS.</li>
+        <li>The packed iterate improves cache hit rates to roughly 62–64% in L1 and 50–51% in L2, but still has no eligible warp in 93% of scheduler cycles. A simple packed-path grid specialization uses 12 rather than 4 blocks/SM and raises end-to-end throughput to <strong>70.03 FPS</strong>; 16 and 20 blocks are slower.</li>
         <li>A 2×2 scene with 45,360 bricks improves 20.68 → 21.53 FPS (+4.1%); the measured final state is bit-identical in the paired run. The real-data Kapla CUDA-graph regression passes.</li>
         <li>The packed buffer retains arbitrary contiguous <code>[first, count)</code> contact manifolds, including large mesh-generated groups. A linked chunk chain was not added: it would introduce another dependent pointer load into the exact bottleneck exposed by Nsight.</li>
         <li>Rejected alternatives: six persistent blocks/SM overfit and regress several robot/tower scenes; dependency-wave scheduling is 42% slower with no extra overlap; a statically unrolled ≤5-contact solve regresses FPS and stability.</li>
+        <li>The larger convex-patch experiment also fails its gate: mass-splitting patch friction reaches 68.13 FPS versus 68.85 for packed point friction, while mean drift rises from about 0.016 m to 0.054 m. It was fully reverted.</li>
       </ul>
     </article>
     <article>
