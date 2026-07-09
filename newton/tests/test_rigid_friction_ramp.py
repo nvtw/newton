@@ -281,7 +281,9 @@ def test_friction_stopping_distance(test, device, solver_fn, rel_tol, v_final_ma
     contacts = collision_pipeline.contacts() if collision_pipeline is not None else None
 
     # Establish resting contacts so the measurement excludes landing impulses.
-    state_0, state_1 = simulate(solver, model, state_0, state_1, control, contacts, STOPPING_SETTLE_FRAMES)
+    state_0, state_1 = simulate(
+        solver, model, state_0, state_1, control, collision_pipeline, contacts, STOPPING_SETTLE_FRAMES
+    )
     initial_q = state_0.body_q.numpy().copy()
 
     qd = state_0.body_qd.numpy()
