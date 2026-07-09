@@ -1030,40 +1030,40 @@ def _rigid_contact_history_capture_requires_preallocation(test, device):
         pipeline = contacts = None
         if pipeline_first:
             pipeline = newton.CollisionPipeline(model, rigid_contact_max=rigid_contact_max, contact_matching="latest")
-            contacts = model.contacts(collision_pipeline=pipeline)
+            contacts = pipeline.contacts()
 
         solver = newton.solvers.SolverVBD(model, iterations=1, rigid_contact_history=True)
 
         if not pipeline_first:
             pipeline = newton.CollisionPipeline(model, rigid_contact_max=rigid_contact_max, contact_matching="latest")
-            contacts = model.contacts(collision_pipeline=pipeline)
+            contacts = pipeline.contacts()
 
         state_in = model.state()
         state_out = model.state()
         control = model.control()
         if rigid_contact_max > 0:
-            model.collide(state_in, contacts)
-        return model, solver, contacts, state_in, state_out, control
+            pipeline.collide(state_in, contacts)
+        return pipeline, solver, contacts, state_in, state_out, control
 
-    model, solver, contacts, state_in, state_out, control = make_scene(pipeline_first=False)
+    pipeline, solver, contacts, state_in, state_out, control = make_scene(pipeline_first=False)
     with test.assertRaisesRegex(RuntimeError, "contact history must be allocated before CUDA graph capture"):
         with wp.ScopedCapture(device=device):
             solver.step(state_in, state_out, control, contacts, 1.0e-3)
 
-    model, solver, contacts, state_in, state_out, control = make_scene(pipeline_first=True)
+    pipeline, solver, contacts, state_in, state_out, control = make_scene(pipeline_first=True)
     with wp.ScopedCapture(device=device) as capture:
         solver.step(state_in, state_out, control, contacts, 1.0e-3)
     test.assertIsNotNone(capture.graph)
 
-    model, solver, contacts, state_in, state_out, control = make_scene(pipeline_first=True, rigid_contact_max=0)
+    pipeline, solver, contacts, state_in, state_out, control = make_scene(pipeline_first=True, rigid_contact_max=0)
     with wp.ScopedCapture(device=device) as capture:
         solver.step(state_in, state_out, control, contacts, 1.0e-3)
     test.assertIsNotNone(capture.graph)
     test.assertIsNone(solver._prev_contact_lambda)
 
-    model, solver, contacts, state_in, state_out, control = make_scene(pipeline_first=False)
+    pipeline, solver, contacts, state_in, state_out, control = make_scene(pipeline_first=False)
     solver.step(state_in, state_out, control, contacts, 1.0e-3)
-    model.collide(state_out, contacts)
+    pipeline.collide(state_out, contacts)
     with wp.ScopedCapture(device=device) as capture:
         solver.step(state_out, state_in, control, contacts, 1.0e-3)
     test.assertIsNotNone(capture.graph)

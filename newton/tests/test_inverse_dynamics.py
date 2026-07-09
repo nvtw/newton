@@ -1677,7 +1677,8 @@ class TestCoriolisCompForce(TestInverseDynamicsBase):
         state = model.state()
         state_next = model.state()
         control = model.control()
-        contacts = model.contacts()
+        collision_pipeline = newton.CollisionPipeline(model)
+        contacts = collision_pipeline.contacts()
         inverse_dynamics = model.inverse_dynamics()
         solver = newton.solvers.SolverMuJoCo(model)
         dt = 1e-4
@@ -2340,7 +2341,8 @@ class TestManipulatorEquation(TestInverseDynamicsBase):
         state = model.state()
         state_next = model.state()
         control = model.control()
-        contacts = model.contacts()
+        collision_pipeline = newton.CollisionPipeline(model)
+        contacts = collision_pipeline.contacts()
         inverse_dynamics = model.inverse_dynamics()
         solvers = {
             "featherstone": newton.solvers.SolverFeatherstone(model),

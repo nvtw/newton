@@ -159,13 +159,14 @@ def _run(solver, model: newton.Model, n_steps: int = 30, dt: float = 1.0 / 60.0)
     """Run ``n_steps`` of simulation and return (body_q, particle_q)."""
     state_0 = model.state()
     state_1 = model.state()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model)
+    contacts = collision_pipeline.contacts()
     control = model.control()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
     for _ in range(n_steps):
         state_0.clear_forces()
-        model.collide(state_0, contacts)
+        collision_pipeline.collide(state_0, contacts)
         solver.step(state_0, state_1, control, contacts, dt)
         state_0, state_1 = state_1, state_0
 

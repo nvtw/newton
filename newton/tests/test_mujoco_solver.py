@@ -6046,7 +6046,8 @@ class TestMuJoCoConversion(unittest.TestCase):
         state_0 = model.state()
         state_1 = model.state()
         control = model.control()
-        contacts = model.contacts()
+        collision_pipeline = newton.CollisionPipeline(model)
+        contacts = collision_pipeline.contacts()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
 
         dt = 0.005
