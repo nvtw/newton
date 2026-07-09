@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · high-ratio mode isolated</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · maximal joint-tree breakthrough</strong></div>
     </header>
 
     <section class="hero">
@@ -264,21 +264,35 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag warn">PARTIAL WIN · NOT PRODUCTION READY</span><time>9 Jul</time></div>
-      <h2>Coupled support-tree solve replaces the normal-only dead end</h2>
-      <p>A graph-captured PhoenX prototype now implements deterministic two-pass normal shock propagation with exact omitted linear/angular wrench replay. Convex co-normal manifolds use a bounded 3×N normal-wrench block; arbitrary, nonconvex, varying-normal, or rank-deficient manifolds fall back to rows. Contact layers are rebuilt after contact detection rather than cached across changing frames.</p>
+      <div class="meta"><span class="tag good">BREAKTHROUGH PROTOTYPE · ROBOT PATH</span><time>9 Jul</time></div>
+      <h2>Topology-aware maximal projection stabilizes G1 at 5×2</h2>
+      <p>An isolated graph-captured prototype now projects maximal body velocities onto the persistent robot joint tree with a linear-time articulated recursion. A mass-weighted affine projection runs after the biased GS solve and a homogeneous projection runs after relaxation. Revolute motion remains free; only locked joint directions are corrected. Contacts, motors, limits, and loop rows remain in ordinary PhoenX GS.</p>
       <ul>
-        <li>At 5 substeps × 2 PGS iterations, the ordinary 100:1 stack falls. The prototype keeps it intact with 0.0% mean top/plane load error, 0.0052 / 0.0001 m/s bottom/top RMS speed, and 0.1 mm lateral drift.</li>
-        <li>At 400:1 it also transfers the exact mean load and remains vertically stable. The remaining 0.237 m/s bottom RMS is almost entirely horizontal: post-relax vertical RMS is 0.0075 m/s, while x/y RMS is 0.179 / 0.155 m/s.</li>
-        <li>The phase probe shows total horizontal momentum remains within about 2×10<sup>−6</sup> kg·m/s while relative slip is 0.179 / 0.155 m/s. Thus momentum conservation is excellent; a local frictional mode is converging poorly. Main PGS feeds the mode slightly, normal shock leaves it unchanged, and one relax sweep reduces it only slightly.</li>
-        <li>Four physically motivated variants were rejected: aggregate top-only tangent wrench, exact row-wise shock friction, existing convex patch friction combined with normal shock, and tangent-only true-mass PGS—even a single sweep through the production contact update diverges over time. Splitting normal and friction after changing the normal fixed point is not safe.</li>
-        <li>Existing PhoenX mass splitting is bit-identical to ordinary PGS in this control, including at batch size one. It does not provide the missing graph-wide effective mass.</li>
-        <li>A replacement formulation now solves normal and friction together: a full-rank sticking patch temporarily joins a grounded support subtree, so its exact patch wrench is the bottom-up spatial-momentum change of that subtree. This is an exact tree KKT solution, not fake mass or dominance. The wrench is accepted only if actual point forces reconstruct it inside every Coulomb cone; otherwise ordinary GS remains untouched.</li>
-        <li>In isolated 3-D tests, 100:1, 400:1, a 4096:1 chain, and a branched tree match dense KKT to 2.2×10<sup>−14</sup> or better. Of 250 randomized 1–8 body chains over six mass decades, 249 have a feasible point-force distribution; the cheap conservative minimum-norm gate retains 239. Accepted cases reconstruct to ≤2.7×10<sup>−12</sup> and never increase kinetic energy. Explicit sliding, separation, and tipping cases reject.</li>
-        <li>The graph-captured Warp solve/acceptance prototype processes 8,192 five-body trees in a 10.24 µs median replay on RTX PRO 6000 Blackwell, with 8,012/8,192 randomized trees accepted. This excludes contact-forest construction and PhoenX state publication, so it is a promising kernel-cost result—not end-to-end speed.</li>
-        <li>The rejected normal-only production hooks were removed. The retained artifact is an experimental benchmark plus a derivation/integration note. Next work is deterministic component-local forest construction, bias-free-relax publication, and broad physical validation in both single- and multi-world modes.</li>
+        <li>The mathematical recurrence matches a dense KKT projection across 1,000 randomized anchored/floating trees with 1–32 bodies, fixed/revolute/prismatic/ball subspaces, and six decades of mass/inertia. Maximum dense error is 2.3×10<sup>−7</sup>; allowed-coordinate impulse is 3.4×10<sup>−7</sup>; kinetic energy never increases.</li>
+        <li>Ordinary maximal G1 at 5 substeps × 2 PGS iterations terminates all 32 seeded exploration worlds by control step 2, with 0.254 m peak / 0.0338 m RMS anchor error. It measures 32.2k control-steps/s in the intentional-readback diagnostic.</li>
+        <li>With the new projection, the same 32 worlds survive all 50 steps. With recovered joint reactions also published to warm-start state, peak/RMS anchor error is 8.3×10<sup>−5</sup> / 1.5×10<sup>−6</sup> m, and the final locked-velocity residual remains around 10<sup>−7</sup>. Diagnostic throughput is 22.2k steps/s—about 69% of unsafe maximal while retaining near-hybrid closure.</li>
+        <li>Across two paired 200-step random-action seeds, projected maximal reaches 23.4–23.6k steps/s and median termination step 80. Reduced reaches 11.8–12.0k steps/s and median 93–94.5. Both eventually fall under this aggressive exploration; the prototype is about 2× faster in this matched bracket but still has a modest robustness gap.</li>
+        <li>The same free-root/revolute kernel generalizes without robot-specific tuning. On ANYmal, joint RMS error falls from 8.7×10<sup>−4</sup> to 4.3×10<sup>−7</sup> m with unchanged 3.1% termination incidence over 100 aggressive-action steps. On H1, RMS error falls from 3.1×10<sup>−2</sup> to 1.5×10<sup>−5</sup> m; both baseline and candidate eventually fall under the untrained random actions.</li>
+        <li>The current hybrid 5×2 path is stable but runs the full reduced factor/advance/publish pipeline plus maximal joint rows. Its short diagnostic measured only 2.6k steps/s. If the new method passes broad gates, replacing—not adding beside—this hybrid implementation is the clean integration.</li>
+        <li>The GPU prototype projects 8,192 branched 29-body revolute trees and recovers every joint reaction in 317 µs per graph replay. It uses one warp per articulation and supports many articulations in either one world or many worlds; matrix layout/shared-memory optimization remains open.</li>
+        <li>Persistent joint/body topology is preprocessed once. Frame-varying contact topology is never assumed static: support attachments will be rebuilt after collision detection and ambiguous contacts retain deterministic GS fallback.</li>
+        <li><strong>Not production-ready:</strong> the current code is free-root/revolute-only scratch code. It now publishes recovered reactions to warm-start state, but force reconstruction and long-horizon reporting still need permanent tests. ANYmal/H1, armature/motors, limits, closed loops, contacts, momentum/energy, arbitrary articulation sizes, deterministic single/multi-world execution, and end-to-end training remain mandatory gates.</li>
       </ul>
-      <p class="profile-note">Reference: <a href="https://doi.org/10.1145/3747867">Two-Pass Shock Propagation for Stable Stacking with Gauss-Seidel</a> (Xiong, Leach, Thomas, and Sueda, 2025). The new support-tree wrench recursion is a separate PhoenX research direction derived from subtree momentum balance. See <code>docs/SUPPORT_TREE_CONTACT_PRECONDITIONER.md</code> and the graph benchmark in <code>benchmarks/experimental/bench_support_tree_patch.py</code>.</p>
+      <p class="profile-note">This is the first experiment to combine near-maximal throughput with near-reduced joint closure at the production 5×2 schedule. No public or production solver path has changed yet.</p>
+    </article>
+    <article>
+      <div class="meta"><span class="tag warn">PROMISING PROTOTYPE · NOT PRODUCTION</span><time>9 Jul</time></div>
+      <h2>Exact target-wrench support solve closes the 400:1 stack gap</h2>
+      <p>The support-tree experiment now runs against real PhoenX contact rows after ordinary bias-free Gauss–Seidel relaxation. It computes the complete target patch wrench, redistributes that wrench to the actual contact points, and commits the correction only when every reconstructed point force lies inside its Coulomb cone. Production PhoenX remains unchanged while impact and topology-change gates are completed.</p>
+      <ul>
+        <li>At the difficult 5-substep × 2-PGS schedule, the actual 400:1 two-box stack now has zero measured residual body velocity and relative mean top/ground load errors of 1.5×10<sup>−7</sup> / 5.9×10<sup>−8</sup>. The preceding delta-only distribution left about 7% load error because an arbitrary warm-start distribution could make an otherwise feasible correction appear infeasible.</li>
+        <li>A 100 N lateral load is accepted for every sampled frame and remains static. Under 5000 N, the upper patch fails the cone gate and slides/separates; only the independently grounded lower component remains eligible. This is the required physical behavior, not an unconditional freeze.</li>
+        <li>The solve remains a preconditioned colored-GS path: ordinary PhoenX PGS establishes the nonlinear contact state, the exact tree correction handles a coupled sticking mode, and any rank, topology, normal-alignment, or friction failure leaves the ordinary GS result untouched.</li>
+        <li>A graph-captured dynamic prototype builds deterministic parent/level/component data and solves 1024 branched forests of 32 bodies in about 20.6 µs on RTX PRO 6000 Blackwell. The earlier solve-only result is 10.3 µs for 8192 five-body trees.</li>
+        <li>Contact connectivity is transient and will be rebuilt from the current collision result. Joint/body incidence is persistent and may be preprocessed once, but no contact parentage will be cached across collision frames. Multiple contact components are accepted or rejected independently.</li>
+        <li><strong>Still required:</strong> drop/impact and restitution behavior, opening/sliding contacts, changing manifolds, momentum/energy accounting, non-tree fallback, joints mixed with contacts, deterministic single- and multi-world execution, and end-to-end CUDA graph tests. No production integration will land before these gates pass.</li>
+      </ul>
+      <p class="profile-note">The retained derivation and idealized GPU oracle are in <code>docs/SUPPORT_TREE_CONTACT_PRECONDITIONER.md</code> and <code>benchmarks/experimental/bench_support_tree_patch.py</code>. The real-PhoenX integration remains an isolated scratch experiment.</p>
     </article>
     <article>
       <div class="meta"><span class="tag">ACTIVE · MAXIMAL GS CONVERGENCE</span><time>9 Jul</time></div>
