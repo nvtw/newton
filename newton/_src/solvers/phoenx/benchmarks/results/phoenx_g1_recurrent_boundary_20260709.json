@@ -1,0 +1,77 @@
+{
+  "coordinate_mode": "reduced",
+  "correctness_change": "Replay exact detached MinGRU state across rollout boundaries, cut terminal gradients, use read-only persistent bootstrap, and synchronize graph-leapfrog rollout trainer state.",
+  "cuda_graph_regressions": [
+    "preserved-state collection and read-only bootstrap",
+    "exact collection/replay values",
+    "nonzero initial-state finite-difference gradients",
+    "terminal reset and gradient cut",
+    "trajectory minibatch recurrent-state gather",
+    "mirror replay uses zero state",
+    "deterministic recurrent PPO update",
+    "graph-leapfrog state synchronization and checkpoint resume",
+    "train-to-gate smoke"
+  ],
+  "date": "2026-07-09",
+  "decision": {
+    "correctness_fix": "retained",
+    "official_expected_seconds_to_success": 343.1915,
+    "persistent_recurrence_training_mode": "rejected",
+    "reason": "Two paired development seeds regress or remain below frozen screens; no time-to-policy improvement is established."
+  },
+  "matched_default_throughput": {
+    "baseline_commit": "5c526af7",
+    "baseline_env_samples_per_s": 906124.9169072082,
+    "candidate_env_samples_per_s": 908385.0578954878,
+    "candidate_over_baseline_percent": 0.249433667593242,
+    "protocol": "8192 worlds, rollout 64, graph_leapfrog, 6 iterations, 2 warmup; mean iterations 2-4; detached worktree baseline on same machine"
+  },
+  "persistent_recurrence": {
+    "seed_11_gate_seed": 2000,
+    "seed_11_iteration_150_threshold": 0.8,
+    "seed_11_screen_battery_perf": [
+      {
+        "iteration": 25,
+        "value": 0.70592
+      },
+      {
+        "iteration": 50,
+        "value": 0.646235
+      },
+      {
+        "iteration": 75,
+        "value": 0.716246
+      },
+      {
+        "iteration": 100,
+        "value": 0.748103
+      },
+      {
+        "iteration": 125,
+        "value": 0.748232
+      },
+      {
+        "iteration": 150,
+        "value": 0.703271
+      }
+    ],
+    "seed_29_gate_seed": 3000,
+    "seed_29_iteration_75_threshold": 0.68,
+    "seed_29_screen_battery_perf": [
+      {
+        "iteration": 25,
+        "value": 0.611113
+      },
+      {
+        "iteration": 50,
+        "value": 0.607164
+      },
+      {
+        "iteration": 75,
+        "value": 0.627548
+      }
+    ]
+  },
+  "schedule": "3 substeps, 2 solver iterations, 1 velocity iteration",
+  "schema": "phoenx_g1_recurrent_boundary_v1"
+}

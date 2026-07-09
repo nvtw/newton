@@ -227,6 +227,7 @@ def _collect_ppo_rollout_impl(
 
     if reset_state_at_start:
         trainer.reset_rollout_state()
+    trainer.snapshot_rollout_state(buffer, use_state=not reset_state_at_start)
     obs = env.observe()
     max_cols = max(env.obs_dim, env.action_dim, 1)
     value_col = trainer.value_column
@@ -299,7 +300,10 @@ def _collect_ppo_rollout_impl(
         trainer.reset_rollout_state(dones)
         obs = next_obs
 
-    final_values = trainer.value_reuse(obs)
+    if reset_state_at_start:
+        final_values = trainer.value_reuse(obs)
+    else:
+        final_values = trainer.bootstrap_value_reuse(obs)
     wp.launch(
         rollout_store_bootstrap_values_kernel,
         dim=env.world_count,

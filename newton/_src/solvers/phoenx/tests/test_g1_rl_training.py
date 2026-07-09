@@ -75,6 +75,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     DENSE_TILE_OUT,
     PPO_LOG_STD_PARTIAL_BATCH,
     compute_puffer_vtrace_returns_kernel,
+    gather_trajectory_initial_state_kernel,
     gather_trajectory_minibatch_kernel,
     mingru_sequence_backward_kernel,
     mingru_sequence_forward_kernel,
@@ -1528,6 +1529,9 @@ class TestG1PhoenXRL(unittest.TestCase):
         returns_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
         old_values_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
         dones_dst = wp.zeros(sample_count, dtype=wp.float32, device=device)
+        initial_state_np = np.arange(2 * num_envs * 2, dtype=np.float32).reshape(2, num_envs, 2)
+        initial_state_src = wp.array(initial_state_np, dtype=wp.float32, device=device)
+        initial_state_dst = wp.zeros((2, segment_count, 2), dtype=wp.float32, device=device)
         ratios_src_np = 600.0 + np.arange(sample_count, dtype=np.float32)
         ratios_src = wp.array(ratios_src_np, dtype=wp.float32, device=device)
         ratios_dst = wp.full(src_count, -1.0, dtype=wp.float32, device=device)
@@ -1571,6 +1575,13 @@ class TestG1PhoenXRL(unittest.TestCase):
                 device=device,
             )
             wp.launch(
+                gather_trajectory_initial_state_kernel,
+                dim=initial_state_dst.shape,
+                inputs=[env_ids, initial_state_src],
+                outputs=[initial_state_dst],
+                device=device,
+            )
+            wp.launch(
                 scatter_trajectory_ratios_kernel,
                 dim=sample_count,
                 inputs=[env_ids, num_envs, segment_count, ratios_src],
@@ -1600,6 +1611,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(returns_dst.numpy(), returns_np.reshape(-1)[selected_rows_np], rtol=0.0, atol=0.0)
         np.testing.assert_allclose(old_values_dst.numpy(), values_np.reshape(-1)[selected_rows_np], rtol=0.0, atol=0.0)
         np.testing.assert_allclose(dones_dst.numpy(), dones_np[selected_rows_np], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(initial_state_dst.numpy(), initial_state_np[:, env_ids_np, :], rtol=0.0, atol=0.0)
 
         expected_ratios = np.full(src_count, -1.0, dtype=np.float32)
         expected_values = np.full(src_count, -1.0, dtype=np.float32)
@@ -2007,6 +2019,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         reset_expected = first_actions.numpy().copy()
         preserved_actions, _preserved_log_probs, _preserved_values = trainer.act_reuse(env.obs, seed=11)
         preserved_expected = preserved_actions.numpy().copy()
+        expected_state = trainer.actor.net.make_state_buffer(env.world_count)
+        trainer.actor.net.copy_state_to(expected_state)
         self.assertFalse(np.allclose(preserved_expected, reset_expected, rtol=1.0e-5, atol=1.0e-5))
 
         trainer.reset_rollout_state()
@@ -2018,7 +2032,10 @@ class TestG1PhoenXRL(unittest.TestCase):
             )
         wp.capture_launch(capture.graph)
 
+        actual_state = trainer.actor.net.make_state_buffer(env.world_count)
+        trainer.actor.net.copy_state_to(actual_state)
         np.testing.assert_allclose(buffer.actions.numpy(), preserved_expected, rtol=1.0e-5, atol=1.0e-5)
+        np.testing.assert_allclose(actual_state.numpy(), expected_state.numpy(), rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_array_equal(seed_counter.numpy(), np.array([12], dtype=np.int32))
 
     def test_recurrent_rollout_reset_keeps_update_replay_consistent_inside_graph(self) -> None:
@@ -2073,7 +2090,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         wp.capture_launch(capture.graph)
         preserved_values = buffer.values.numpy()[: buffer.num_samples].copy()
         preserved_replay_values = preserved_replay.numpy()[: buffer.num_samples, trainer.value_column].copy()
-        self.assertFalse(np.allclose(preserved_values, preserved_replay_values, rtol=1.0e-5, atol=1.0e-5))
+        np.testing.assert_allclose(preserved_values, preserved_replay_values, rtol=1.0e-6, atol=1.0e-6)
 
     def test_puffer_mingru_aligned_tiled_sequence_matches_numpy_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX tiled MinGRU forward tests")
@@ -2343,7 +2360,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         output = wp.zeros_like(x)
         recurrent_device = wp.zeros_like(x)
         zero_dones = wp.zeros(1, dtype=wp.float32, device=device)
-
         with wp.ScopedCapture(device=device) as capture:
             wp.launch(
                 mingru_sequence_forward_kernel,
@@ -2416,7 +2432,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         single_output = wp.zeros_like(single_x)
         single_recurrent = wp.zeros_like(single_x)
         zero_dones = wp.zeros(1, dtype=wp.float32, device=device)
-
         with wp.ScopedCapture(device=device) as capture:
             wp.launch(
                 mingru_sequence_forward_kernel,
@@ -2457,12 +2472,14 @@ class TestG1PhoenXRL(unittest.TestCase):
         decoder = np.asarray([[0.25], [-0.35]], dtype=np.float32)
         obs_np = np.asarray([[0.2, -0.1], [0.4, 0.3]], dtype=np.float32)
         upstream_np = np.asarray([[0.7], [-0.2]], dtype=np.float32)
+        initial_state_np = np.asarray([[[0.15, -0.25]]], dtype=np.float32)
         net.encoder_weight.assign(encoder)
         net.recurrent_weights[0].assign(recurrent)
         net.decoder_weight.assign(decoder)
         obs = wp.array(obs_np, dtype=wp.float32, device=device)
         upstream = wp.array(upstream_np, dtype=wp.float32, device=device)
-        net.set_sequence_shape(num_steps=2, num_envs=1)
+        initial_state = wp.array(initial_state_np, dtype=wp.float32, device=device)
+        net.set_sequence_shape(num_steps=2, num_envs=1, initial_state=initial_state)
         net.reserve_buffers(2)
 
         with wp.ScopedCapture(device=device) as capture:
@@ -2482,7 +2499,7 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         def loss(enc: np.ndarray, rec: np.ndarray, dec: np.ndarray) -> float:
             h = obs_np @ enc
-            state = np.zeros((1, 2), dtype=np.float32)
+            state = initial_state_np[0].copy()
             outputs = []
             for row in range(2):
                 combined = h[row : row + 1] @ rec
@@ -2656,9 +2673,8 @@ class TestG1PhoenXRL(unittest.TestCase):
     def test_puffer_mingru_mirror_forward_uses_zero_sequence_state(self) -> None:
         device = require_cuda_graph_capture("PhoenX recurrent mirror PPO tests")
         pufferlib_cu = _PUFFERLIB_G1_ROOT / "src" / "pufferlib.cu"
-        if not pufferlib_cu.is_file():
-            raise unittest.SkipTest(f"missing PufferLib G1 reference file: {pufferlib_cu}")
-        self.assertIn("puf_zero(&graph.mb_state_mir", pufferlib_cu.read_text())
+        if pufferlib_cu.is_file():
+            self.assertIn("puf_zero(&graph.mb_state_mir", pufferlib_cu.read_text())
 
         buffer = rl.BufferRollout(num_steps=2, num_envs=2, obs_dim=2, action_dim=2, device=device)
         buffer.obs.assign(
@@ -2700,6 +2716,9 @@ class TestG1PhoenXRL(unittest.TestCase):
             mirror_map=mirror_map,
         )
         trainer.reserve_update_buffers(buffer)
+        if buffer.initial_recurrent_state is None:
+            self.fail("recurrent rollout state was not reserved")
+        buffer.initial_recurrent_state.assign(np.full(buffer.initial_recurrent_state.shape, 0.35, dtype=np.float32))
         prime_obs = wp.array(
             np.asarray(
                 [
@@ -2722,7 +2741,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         trainer._set_update_sequence_shape(buffer)
         with wp.ScopedCapture(device=device) as mirror_capture:
             mirror_obs = trainer._mirrored_obs(buffer)
-            mirror_out = trainer._policy_update_reuse(mirror_obs, buffer)
+            mirror_out = trainer._policy_update_reuse(mirror_obs, buffer, use_initial_state=False)
         wp.capture_launch(mirror_capture.graph)
         mirror_actual = mirror_out.numpy().copy()
         np.testing.assert_allclose(trainer.actor.net._state.numpy(), state_before, rtol=0.0, atol=0.0)
@@ -5404,6 +5423,13 @@ class TestG1PhoenXRL(unittest.TestCase):
             solver_iterations=1,
             velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
             max_episode_steps=0,
+            min_base_height=-100.0,
+            min_upright_cos=-1.0,
+            max_abs_root_position=0.0,
+            max_abs_root_linear_velocity=0.0,
+            max_abs_root_angular_velocity=0.0,
+            max_abs_joint_position=0.0,
+            max_abs_joint_velocity=0.0,
             auto_reset=False,
         )
         ppo_config = rl.ConfigPPO(
@@ -5420,6 +5446,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             max_grad_norm=0.3,
             mirror_loss_coeff=0.25,
             shared_value_network=True,
+            policy_network="puffer_mingru",
             manual_actor_backward=True,
             manual_critic_backward=True,
             manual_mlp_weight_grad_dtype="bfloat16",
@@ -5439,6 +5466,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                     seed=29,
                     log_interval=0,
                     randomize_commands=True,
+                    reset_recurrent_state_on_rollout_start=False,
                     checkpoint_path=checkpoint_template,
                     checkpoint_interval=1,
                     readback_diagnostics=True,
@@ -5457,6 +5485,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(math.isfinite(result.history[-1].policy_loss))
             self.assertTrue(math.isfinite(result.history[-1].value_loss))
             self.assertGreater(result.history[-1].samples_per_second, 0.0)
+            self.assertGreater(float(np.linalg.norm(result.trainer.actor.net._state.numpy()[:, :2])), 0.0)
             for before, after in zip(result.trainer.actor.parameters(), restored.actor.parameters(), strict=True):
                 np.testing.assert_allclose(after.numpy(), before.numpy(), rtol=0.0, atol=0.0)
 
@@ -5471,6 +5500,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                     seed=29,
                     log_interval=0,
                     randomize_commands=False,
+                    reset_recurrent_state_on_rollout_start=False,
                     resume_checkpoint=f"{tmpdir}/g1_graph_2.npz",
                     checkpoint_path=checkpoint_template,
                     checkpoint_interval=1,

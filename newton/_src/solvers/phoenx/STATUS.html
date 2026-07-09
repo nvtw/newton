@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · recurrent replay corrected</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · recurrent state exact; persistence rejected</strong></div>
     </header>
 
     <section class="hero">
@@ -136,7 +136,7 @@
       <div class="card"><div class="metric">343 s</div><div class="label">preliminary expected G1 time-to-policy</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
       <div class="card"><div class="metric good">3 / 8</div><div class="label">tasks wired to process-level metric</div></div>
-      <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
+      <div class="card"><div class="metric">908k/s</div><div class="label">current matched steady-throughput diagnostic</div></div>
     </section>
 
     <p class="profile-note">The ready-cache rerun of the frozen G1 development bank contains one 215.58 s success and two iteration-75 rejections at 63.79 / 63.83 s. Expected restart cost remains 343.19 s. A command-curriculum candidate improved every early score but regressed final expected cost to 678.28 s, so it was rejected.</p>
@@ -228,6 +228,18 @@
     </section>
 
     <div class="section-label">Current state</div>
+    <article>
+      <div class="meta"><span class="tag warn">CORRECTNESS RETAINED &middot; TRAINING MODE REJECTED</span><time>Latest matched evidence</time></div>
+      <h2>Exact recurrent replay works, but persistence does not improve G1</h2>
+      <p>PPO now records the detached MinGRU state at each rollout boundary, replays from that exact state, cuts gradients at episode terminals, computes persistent-state bootstrap values without advancing hidden state, and synchronizes hidden state across the separate graph-leapfrog rollout trainer. The default reset-at-rollout path remains specialized and branch-free.</p>
+      <ul>
+        <li>Persistent recurrence is rejected on two paired development seeds. Seed 11 reaches 0.716 at iteration 75, peaks at 0.748, then falls to 0.703 at iteration 150 versus the required 0.80. Seed 29 reaches only 0.628 at iteration 75 versus the required 0.68.</li>
+        <li>A detached-worktree, same-machine bracket resolves the apparent speed regression: commit <code>5c526af7</code> measures 906.1k samples/s and the exact-state implementation measures 908.4k/s (+0.25%). This is performance-neutral, not a new speed claim.</li>
+        <li>The former 923k/s headline remains useful historical evidence but is outside today's matched bracket; the headline now shows the reproducible 908k/s diagnostic.</li>
+        <li>CUDA-graph regressions cover nonzero initial-state finite differences, terminal gradient isolation, minibatch state gather, mirror-state isolation, read-only bootstrap, deterministic PPO updates, graph-leapfrog state synchronization, checkpoint/resume, and train-to-gate smoke.</li>
+        <li><strong>Decision:</strong> retain the general correctness fix, keep rollout-start reset as the recipe default, reject persistent recurrence as a time-to-policy optimization, and leave the official expected G1 cost at 343.19 s.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag warn">CORRECTNESS RETAINED &middot; METRIC GAIN UNPROVEN</span><time>Latest paired evidence</time></div>
       <h2>Recurrent PPO now respects terminal episode boundaries</h2>

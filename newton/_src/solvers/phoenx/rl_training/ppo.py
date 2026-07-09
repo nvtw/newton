@@ -17,6 +17,7 @@ from .kernels import (
     compute_gae_kernel,
     compute_puffer_vtrace_returns_kernel,
     compute_vtrace_returns_kernel,
+    gather_trajectory_initial_state_kernel,
     gather_trajectory_minibatch_kernel,
     gaussian_entropy_kernel,
     mirror_2d_kernel,
@@ -216,6 +217,8 @@ class BatchPPO:
         self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.old_values = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.dones = wp.zeros(count, dtype=wp.float32, device=self.device)
+        self.initial_recurrent_state: wp.array3d[wp.float32] | None = None
+        self.use_initial_recurrent_state = False
         self.ratios = wp.ones(count, dtype=wp.float32, device=self.device)
         self._advantage_partials = wp.zeros((PPO_ADVANTAGE_PARTIAL_COUNT, 2), dtype=wp.float32, device=self.device)
         self.priority_weights = wp.ones(self.num_envs, dtype=wp.float32, device=self.device)
@@ -274,6 +277,8 @@ class BufferRollout:
         self.old_log_probs = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.rewards = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.dones = wp.zeros(count, dtype=wp.float32, device=self.device)
+        self.initial_recurrent_state: wp.array3d[wp.float32] | None = None
+        self.use_initial_recurrent_state = False
         self.successes = wp.zeros(count, dtype=wp.float32, device=self.device)
         self.values = wp.zeros((self.num_steps + 1) * self.num_envs, dtype=wp.float32, device=self.device)
         self.old_values = self.values
@@ -754,6 +759,40 @@ class TrainerPPO:
             raise RuntimeError("separate critic state was not initialized")
         return self.critic.forward_reuse(obs)
 
+    def bootstrap_value_reuse(self, obs: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+        """Evaluate bootstrap values without advancing recurrent rollout state."""
+
+        if self.shared_value_network:
+            forward_readonly = getattr(self.actor.net, "forward_reuse_readonly", None)
+            if forward_readonly is not None:
+                return forward_readonly(obs)
+            return self.actor.net.forward_reuse(obs)
+        if self.critic is None:
+            raise RuntimeError("separate critic state was not initialized")
+        return self.critic.forward_reuse(obs)
+
+    def _ensure_buffer_initial_state(self, buffer: BufferRollout | BatchPPO) -> None:
+        make_state_buffer = getattr(self.actor.net, "make_state_buffer", None)
+        if make_state_buffer is None:
+            return
+        state = buffer.initial_recurrent_state
+        if state is None or int(state.shape[1]) != buffer.num_envs:
+            buffer.initial_recurrent_state = make_state_buffer(buffer.num_envs)
+
+    def snapshot_rollout_state(self, buffer: BufferRollout, *, use_state: bool) -> None:
+        """Store the detached recurrent state used by the first rollout row."""
+
+        buffer.use_initial_recurrent_state = bool(use_state)
+        if not buffer.use_initial_recurrent_state:
+            return
+        self._ensure_buffer_initial_state(buffer)
+        if buffer.initial_recurrent_state is None:
+            return
+        copy_state_to = getattr(self.actor.net, "copy_state_to", None)
+        if copy_state_to is None:
+            raise RuntimeError("recurrent network cannot export rollout state")
+        copy_state_to(buffer.initial_recurrent_state)
+
     def reset_rollout_state(self, dones: wp.array[wp.float32] | None = None) -> None:
         """Reset recurrent rollout state when the selected policy has one."""
 
@@ -764,10 +803,19 @@ class TrainerPPO:
     def _set_update_sequence_shape(self, buffer: BufferRollout | BatchPPO) -> None:
         set_sequence_shape = getattr(self.actor.net, "set_sequence_shape", None)
         if set_sequence_shape is not None:
-            set_sequence_shape(buffer.num_steps, buffer.num_envs, buffer.dones)
+            set_sequence_shape(
+                buffer.num_steps,
+                buffer.num_envs,
+                buffer.dones,
+                buffer.initial_recurrent_state if buffer.use_initial_recurrent_state else None,
+            )
 
     def _policy_update_reuse(
-        self, obs: wp.array2d[wp.float32], buffer: BufferRollout | BatchPPO
+        self,
+        obs: wp.array2d[wp.float32],
+        buffer: BufferRollout | BatchPPO,
+        *,
+        use_initial_state: bool = True,
     ) -> wp.array2d[wp.float32]:
         forward_sequence_reuse = getattr(self.actor.net, "forward_sequence_reuse", None)
         if forward_sequence_reuse is not None:
@@ -776,6 +824,9 @@ class TrainerPPO:
                 num_steps=buffer.num_steps,
                 num_envs=buffer.num_envs,
                 dones=buffer.dones,
+                initial_state=(
+                    buffer.initial_recurrent_state if use_initial_state and buffer.use_initial_recurrent_state else None
+                ),
             )
         return self.actor.net.forward_reuse(obs)
 
@@ -870,6 +921,7 @@ class TrainerPPO:
 
         if buffer.obs_dim != self.obs_dim or buffer.action_dim != self.action_dim:
             raise ValueError("BufferRollout dimensions do not match trainer dimensions")
+        self._ensure_buffer_initial_state(buffer)
         update_rows = buffer.num_samples
         if self._uses_minibatch_replay(buffer):
             minibatch_size = int(self.config.minibatch_size)
@@ -1057,6 +1109,17 @@ class TrainerPPO:
                 ],
                 device=self.device,
             )
+            batch.use_initial_recurrent_state = buffer.use_initial_recurrent_state
+            if buffer.use_initial_recurrent_state:
+                if buffer.initial_recurrent_state is None or batch.initial_recurrent_state is None:
+                    raise RuntimeError("recurrent minibatch state was not reserved")
+                wp.launch(
+                    gather_trajectory_initial_state_kernel,
+                    dim=batch.initial_recurrent_state.shape,
+                    inputs=[self._minibatch_env_ids, buffer.initial_recurrent_state],
+                    outputs=[batch.initial_recurrent_state],
+                    device=self.device,
+                )
             if self.config.normalize_advantages:
                 batch.normalize_advantages()
             self._weight_minibatch_advantages(batch, use_priority)
@@ -1277,6 +1340,7 @@ class TrainerPPO:
                 device=self.device,
             )
             self._minibatch_env_ids = wp.zeros(int(segment_count), dtype=wp.int32, device=self.device)
+        self._ensure_buffer_initial_state(self._minibatch)
         return self._minibatch
 
     def _update_shared_manual(self, buffer: BufferRollout | BatchPPO, *, read_stats: bool = True) -> StatsPPOUpdate:
@@ -1287,7 +1351,7 @@ class TrainerPPO:
         mirror_obs = self._mirrored_obs(buffer)
         mirror_policy_out = None
         if mirror_obs is not None:
-            mirror_policy_out = self._policy_update_reuse(mirror_obs, buffer)
+            mirror_policy_out = self._policy_update_reuse(mirror_obs, buffer, use_initial_state=False)
 
         log_std_grad_partials, log_std_partial_count = self._ensure_actor_log_std_grad_partials(buffer.num_samples)
         wp.launch(

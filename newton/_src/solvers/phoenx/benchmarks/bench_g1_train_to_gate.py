@@ -362,6 +362,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 live_result.env.use_reset_seed_counter(None)
                 live_result.env.use_command_seed_counter(None)
                 live_result.env.reset()
+                live_result.trainer.reset_rollout_state()
             result = _train_g1_ppo_cycle(live_result, train_config)
         live_result = result
         train_seconds += time.perf_counter() - chunk_t0

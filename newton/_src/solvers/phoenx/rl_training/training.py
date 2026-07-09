@@ -986,6 +986,12 @@ def _copy_trainer_policy(dst: TrainerPPO, src: TrainerPPO) -> None:
         dst.critic.copy_from(src.critic)
 
 
+def _copy_trainer_rollout_state(dst: TrainerPPO, src: TrainerPPO, num_envs: int) -> None:
+    copy_state = getattr(dst.actor.net, "copy_state_from_network", None)
+    if copy_state is not None:
+        copy_state(src.actor.net, int(num_envs))
+
+
 def _make_g1_rollout_trainer(env: EnvG1PhoenX, trainer: TrainerPPO) -> TrainerPPO:
     rollout = TrainerPPO(
         obs_dim=env.obs_dim,
@@ -1000,6 +1006,7 @@ def _make_g1_rollout_trainer(env: EnvG1PhoenX, trainer: TrainerPPO) -> TrainerPP
         mirror_map=g1_mirror_map_ppo() if trainer.config.mirror_loss_coeff > 0.0 else None,
     )
     _copy_trainer_policy(rollout, trainer)
+    _copy_trainer_rollout_state(rollout, trainer, env.world_count)
     return rollout
 
 
@@ -1017,6 +1024,7 @@ def _make_anymal_rollout_trainer(env: EnvAnymalPhoenX, trainer: TrainerPPO) -> T
         mirror_map=anymal_mirror_map_ppo() if trainer.config.mirror_loss_coeff > 0.0 else None,
     )
     _copy_trainer_policy(rollout, trainer)
+    _copy_trainer_rollout_state(rollout, trainer, env.world_count)
     return rollout
 
 
@@ -1317,6 +1325,7 @@ def _train_g1_ppo_graph_leapfrog(
             metadata=checkpoint_metadata,
         )
 
+    _copy_trainer_rollout_state(trainer, rollout_trainer, env.world_count)
     return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffers[prev], history=history)
 
 
@@ -1445,6 +1454,7 @@ def _train_anymal_ppo_graph_leapfrog(
             _format_checkpoint_path(cfg.checkpoint_path, final_iteration), iteration=final_iteration
         )
 
+    _copy_trainer_rollout_state(trainer, rollout_trainer, env.world_count)
     return ResultTrainAnymalPPO(trainer=trainer, env=env, buffer=buffers[prev], history=history)
 
 

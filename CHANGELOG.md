@@ -92,6 +92,7 @@
 
 ### Fixed
 
+- Fix experimental PhoenX recurrent PPO replay to preserve the exact detached MinGRU state at rollout boundaries, avoid mutating persistent state during bootstrap evaluation, and synchronize recurrent state across graph-leapfrog trainers.
 - Fix experimental PhoenX recurrent PPO replay to reset MinGRU state and cut recurrent gradients at terminal episode boundaries, including trajectory minibatches and CUDA graph capture.
 - Fix experimental PhoenX G1 held-out evaluation to preserve fixed commands across fall resets and accumulate metrics in deterministic CUDA graphs without per-step host synchronization.
 - Fix the experimental PhoenX time-to-policy suite truncating G1 trials at the nanoG1 75M-sample comparison point instead of the frozen 170.39M-sample restart horizon.

@@ -23,6 +23,7 @@ from .kernels import (
     add_2d_kernel,
     copy_1d_kernel,
     copy_2d_kernel,
+    copy_mingru_state_kernel,
     dense_activation_grad_kernel,
     dense_bias_partial_grad_kernel,
     dense_bias_reduce_grad_kernel,
@@ -37,9 +38,12 @@ from .kernels import (
     fill_eps_seed_counter_kernel,
     gaussian_entropy_kernel,
     gaussian_log_prob_kernel,
+    mingru_sequence_backward_initial_kernel,
     mingru_sequence_backward_kernel,
+    mingru_sequence_forward_initial_kernel,
     mingru_sequence_forward_kernel,
     mingru_step_kernel,
+    mingru_step_readonly_kernel,
     reset_mingru_state_kernel,
     sample_gaussian_actions_kernel,
     soft_update_1d_kernel,
@@ -728,6 +732,7 @@ class PufferMinGRUNet:
         self._manual_steps = 1
         self._manual_envs = 0
         self._manual_dones: wp.array[wp.float32] | None = None
+        self._manual_initial_state: wp.array3d[wp.float32] | None = None
         self._manual_input: wp.array2d[wp.float32] | None = None
         self._manual_encoder_out: wp.array2d[wp.float32] | None = None
         self._manual_combined: list[wp.array2d[wp.float32]] = []
@@ -761,8 +766,9 @@ class PufferMinGRUNet:
         num_steps: int,
         num_envs: int,
         dones: wp.array[wp.float32] | None = None,
+        initial_state: wp.array3d[wp.float32] | None = None,
     ) -> None:
-        """Set the flat-row layout and episode boundaries for manual BPTT."""
+        """Set the flat-row layout, initial state, and episode boundaries for BPTT."""
 
         steps = int(num_steps)
         envs = int(num_envs)
@@ -770,9 +776,11 @@ class PufferMinGRUNet:
             raise ValueError("sequence shape must be positive")
         if dones is not None and int(dones.shape[0]) != steps * envs:
             raise ValueError("sequence done mask does not match the flat-row layout")
+        self._check_initial_state(initial_state, envs)
         self._manual_steps = steps
         self._manual_envs = envs
         self._manual_dones = dones
+        self._manual_initial_state = initial_state
 
     def reserve_forward_buffers(self, batch_size: int) -> None:
         """Reserve reusable no-grad forward buffers."""
@@ -787,6 +795,33 @@ class PufferMinGRUNet:
         self.reserve_forward_buffers(rows)
         self._ensure_manual_buffers(rows)
         self._ensure_forward_scratch(rows, "sequence")
+
+    def make_state_buffer(self, num_envs: int) -> wp.array3d[wp.float32]:
+        """Allocate detached recurrent state for one vectorized rollout boundary."""
+
+        envs = int(num_envs)
+        if envs <= 0:
+            raise ValueError("num_envs must be positive")
+        return wp.zeros((self.num_layers, envs, self.hidden_size), dtype=wp.float32, device=self.device)
+
+    def copy_state_to(self, dst: wp.array3d[wp.float32]) -> None:
+        """Copy persistent rollout state into detached storage."""
+
+        envs = int(dst.shape[1])
+        self._check_initial_state(dst, envs)
+        state = self._ensure_state(envs)
+        wp.launch(copy_mingru_state_kernel, dim=dst.shape, inputs=[state], outputs=[dst], device=self.device)
+
+    def copy_state_from_network(self, other: PufferMinGRUNet, num_envs: int) -> None:
+        """Copy the active environment prefix from another compatible network."""
+
+        if self.num_layers != other.num_layers or self.hidden_size != other.hidden_size:
+            raise ValueError("recurrent network state layouts do not match")
+        envs = int(num_envs)
+        src = other._ensure_state(envs)
+        dst = self._ensure_state(envs)
+        dim = (self.num_layers, envs, self.hidden_size)
+        wp.launch(copy_mingru_state_kernel, dim=dim, inputs=[src], outputs=[dst], device=self.device)
 
     def zero_state(self) -> None:
         """Clear all persistent rollout recurrent state."""
@@ -826,7 +861,15 @@ class PufferMinGRUNet:
         rows = self._check_input(x)
         scratch = self._ensure_forward_scratch(rows, "default")
         state = self._ensure_state(rows)
-        return self._forward_rollout(x, rows, scratch, state)
+        return self._forward_rollout(x, rows, scratch, state, update_state=True)
+
+    def forward_reuse_readonly(self, x: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+        """Evaluate from persistent rollout state without advancing it."""
+
+        rows = self._check_input(x)
+        scratch = self._ensure_forward_scratch(rows, "readonly")
+        state = self._ensure_state(rows)
+        return self._forward_rollout(x, rows, scratch, state, update_state=False)
 
     def forward_sequence_reuse(
         self,
@@ -835,8 +878,9 @@ class PufferMinGRUNet:
         num_steps: int,
         num_envs: int,
         dones: wp.array[wp.float32] | None = None,
+        initial_state: wp.array3d[wp.float32] | None = None,
     ) -> wp.array2d[wp.float32]:
-        """Evaluate a flat sequence from zero state, resetting at done boundaries."""
+        """Evaluate a flat sequence from detached state, resetting at done boundaries."""
 
         rows = self._check_input(x)
         steps = int(num_steps)
@@ -845,8 +889,9 @@ class PufferMinGRUNet:
             raise ValueError("sequence shape does not match input row count")
         if dones is not None and int(dones.shape[0]) != rows:
             raise ValueError("sequence done mask does not match the input row count")
+        self._check_initial_state(initial_state, envs)
         scratch = self._ensure_forward_scratch(rows, "sequence")
-        return self._forward_sequence(x, rows, steps, envs, scratch, dones)
+        return self._forward_sequence(x, rows, steps, envs, scratch, dones, initial_state)
 
     def forward_manual(self, x: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
         """Evaluate a sequence and retain activations for manual BPTT."""
@@ -870,21 +915,40 @@ class PufferMinGRUNet:
             combined = self._manual_combined[layer]
             out = self._manual_outputs[layer]
             self._linear_forward(h, weight, self._zero_combined, rows, combined)
-            wp.launch(
-                mingru_sequence_forward_kernel,
-                dim=(envs, self.hidden_size),
-                inputs=[
-                    combined,
-                    h,
-                    self._manual_dones if self._manual_dones is not None else self._zero_dones,
-                    int(self._manual_dones is not None),
-                    steps,
-                    envs,
-                    self.hidden_size,
-                ],
-                outputs=[out, self._manual_recurrent[layer]],
-                device=self.device,
-            )
+            if self._manual_initial_state is None:
+                wp.launch(
+                    mingru_sequence_forward_kernel,
+                    dim=(envs, self.hidden_size),
+                    inputs=[
+                        combined,
+                        h,
+                        self._manual_dones if self._manual_dones is not None else self._zero_dones,
+                        int(self._manual_dones is not None),
+                        steps,
+                        envs,
+                        self.hidden_size,
+                    ],
+                    outputs=[out, self._manual_recurrent[layer]],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    mingru_sequence_forward_initial_kernel,
+                    dim=(envs, self.hidden_size),
+                    inputs=[
+                        combined,
+                        h,
+                        self._manual_dones if self._manual_dones is not None else self._zero_dones,
+                        int(self._manual_dones is not None),
+                        self._manual_initial_state,
+                        layer,
+                        steps,
+                        envs,
+                        self.hidden_size,
+                    ],
+                    outputs=[out, self._manual_recurrent[layer]],
+                    device=self.device,
+                )
             h = out
         self._linear_forward(h, self.decoder_weight, self._zero_output, rows, self._manual_decoder_out)
         return self._manual_decoder_out
@@ -930,23 +994,44 @@ class PufferMinGRUNet:
             grad_highway = self._manual_grad_highway[layer]
             grad_projected = self._manual_grad_projected[layer]
             grad_x = self._manual_grad_inputs[layer]
-            wp.launch(
-                mingru_sequence_backward_kernel,
-                dim=(envs, self.hidden_size),
-                inputs=[
-                    self._manual_combined[layer],
-                    x_in,
-                    self._manual_recurrent[layer],
-                    grad_h,
-                    self._manual_dones if self._manual_dones is not None else self._zero_dones,
-                    int(self._manual_dones is not None),
-                    steps,
-                    envs,
-                    self.hidden_size,
-                ],
-                outputs=[grad_combined, grad_highway],
-                device=self.device,
-            )
+            if self._manual_initial_state is None:
+                wp.launch(
+                    mingru_sequence_backward_kernel,
+                    dim=(envs, self.hidden_size),
+                    inputs=[
+                        self._manual_combined[layer],
+                        x_in,
+                        self._manual_recurrent[layer],
+                        grad_h,
+                        self._manual_dones if self._manual_dones is not None else self._zero_dones,
+                        int(self._manual_dones is not None),
+                        steps,
+                        envs,
+                        self.hidden_size,
+                    ],
+                    outputs=[grad_combined, grad_highway],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    mingru_sequence_backward_initial_kernel,
+                    dim=(envs, self.hidden_size),
+                    inputs=[
+                        self._manual_combined[layer],
+                        x_in,
+                        self._manual_recurrent[layer],
+                        grad_h,
+                        self._manual_dones if self._manual_dones is not None else self._zero_dones,
+                        int(self._manual_dones is not None),
+                        self._manual_initial_state,
+                        layer,
+                        steps,
+                        envs,
+                        self.hidden_size,
+                    ],
+                    outputs=[grad_combined, grad_highway],
+                    device=self.device,
+                )
             self._zero_tail(grad_combined, rows, 3 * self.hidden_size)
             self._weight_grad(
                 x_in,
@@ -1036,6 +1121,15 @@ class PufferMinGRUNet:
         if rows <= 0:
             raise ValueError("batch size must be positive")
         return rows
+
+    def _check_initial_state(self, state: wp.array3d[wp.float32] | None, num_envs: int) -> None:
+        if state is None:
+            return
+        expected = (self.num_layers, int(num_envs), self.hidden_size)
+        if state.ndim != 3 or tuple(int(size) for size in state.shape) != expected:
+            raise ValueError(f"Expected recurrent state shape {expected}, got {tuple(state.shape)}")
+        if state.device != self.device:
+            raise ValueError("recurrent state must be on the network device")
 
     def _ensure_state(self, batch_size: int) -> wp.array3d[wp.float32]:
         rows = int(batch_size)
@@ -1150,6 +1244,8 @@ class PufferMinGRUNet:
         rows: int,
         scratch: _ForwardScratch,
         state: wp.array3d[wp.float32],
+        *,
+        update_state: bool,
     ) -> wp.array2d[wp.float32]:
         if scratch.encoder_out is None or scratch.decoder_out is None:
             raise RuntimeError("forward scratch was not initialized")
@@ -1159,13 +1255,22 @@ class PufferMinGRUNet:
             combined = scratch.combined[layer]
             out = scratch.outputs[layer]
             self._linear_forward(h, weight, self._zero_combined, rows, combined)
-            wp.launch(
-                mingru_step_kernel,
-                dim=(rows, self.hidden_size),
-                inputs=[combined, h, state, layer, self.hidden_size],
-                outputs=[out],
-                device=self.device,
-            )
+            if update_state:
+                wp.launch(
+                    mingru_step_kernel,
+                    dim=(rows, self.hidden_size),
+                    inputs=[combined, h, state, layer, self.hidden_size],
+                    outputs=[out],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    mingru_step_readonly_kernel,
+                    dim=(rows, self.hidden_size),
+                    inputs=[combined, h, state, layer, self.hidden_size],
+                    outputs=[out],
+                    device=self.device,
+                )
             h = out
         self._linear_forward(h, self.decoder_weight, self._zero_output, rows, scratch.decoder_out)
         return scratch.decoder_out[:rows]
@@ -1178,6 +1283,7 @@ class PufferMinGRUNet:
         envs: int,
         scratch: _ForwardScratch,
         dones: wp.array[wp.float32] | None,
+        initial_state: wp.array3d[wp.float32] | None,
     ) -> wp.array2d[wp.float32]:
         if scratch.encoder_out is None or scratch.decoder_out is None:
             raise RuntimeError("forward scratch was not initialized")
@@ -1187,21 +1293,40 @@ class PufferMinGRUNet:
             combined = scratch.combined[layer]
             out = scratch.outputs[layer]
             self._linear_forward(h, weight, self._zero_combined, rows, combined)
-            wp.launch(
-                mingru_sequence_forward_kernel,
-                dim=(envs, self.hidden_size),
-                inputs=[
-                    combined,
-                    h,
-                    dones if dones is not None else self._zero_dones,
-                    int(dones is not None),
-                    steps,
-                    envs,
-                    self.hidden_size,
-                ],
-                outputs=[out, scratch.recurrent[layer]],
-                device=self.device,
-            )
+            if initial_state is None:
+                wp.launch(
+                    mingru_sequence_forward_kernel,
+                    dim=(envs, self.hidden_size),
+                    inputs=[
+                        combined,
+                        h,
+                        dones if dones is not None else self._zero_dones,
+                        int(dones is not None),
+                        steps,
+                        envs,
+                        self.hidden_size,
+                    ],
+                    outputs=[out, scratch.recurrent[layer]],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    mingru_sequence_forward_initial_kernel,
+                    dim=(envs, self.hidden_size),
+                    inputs=[
+                        combined,
+                        h,
+                        dones if dones is not None else self._zero_dones,
+                        int(dones is not None),
+                        initial_state,
+                        layer,
+                        steps,
+                        envs,
+                        self.hidden_size,
+                    ],
+                    outputs=[out, scratch.recurrent[layer]],
+                    device=self.device,
+                )
             h = out
         self._linear_forward(h, self.decoder_weight, self._zero_output, rows, scratch.decoder_out)
         return scratch.decoder_out[:rows]
