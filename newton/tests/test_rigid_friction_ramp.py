@@ -83,6 +83,9 @@ class _Thresholds(NamedTuple):
 
 
 _DEFAULT_THRESHOLDS = _Thresholds(margin_deg=2.0, v_rest=0.10, eps_pos=0.02, min_slide=0.02)
+# MuJoCo Warp can switch contact regimes near the analytical critical angle;
+# keep those boundary cells out of this qualitative ramp oracle.
+_MUJOCO_WARP_THRESHOLDS = _Thresholds(margin_deg=5.0, v_rest=0.10, eps_pos=0.02, min_slide=0.02)
 # VBD's min_slide is loose: AVBD penalty-friction creeps borderline cells a few mm
 # in 0.25 s rather than sliding fully.
 _VBD_THRESHOLDS = _Thresholds(margin_deg=5.0, v_rest=0.12, eps_pos=0.10, min_slide=0.005)
@@ -367,7 +370,7 @@ _SOLVERS = {
         ),
         "mus": _DEFAULT_MUS,
         "angles_deg": _DEFAULT_ANGLES_DEG,
-        "thresholds": _DEFAULT_THRESHOLDS,
+        "thresholds": _MUJOCO_WARP_THRESHOLDS,
         "stopping_distance_rel_tol": 0.01,
         "stopping_distance_v_final_max": STOPPING_V_FINAL_MAX,
     },

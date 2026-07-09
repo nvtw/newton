@@ -1992,8 +1992,8 @@ captured region so it is replayed each frame:
                 state_0, state_1 = state_1, state_0
         graph = capture.graph
 
-    # Each frame:
-    wp.capture_launch(graph)
+        # Each frame:
+        wp.capture_launch(graph)
 
 .. _Solver Integration:
 
