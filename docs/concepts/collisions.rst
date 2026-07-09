@@ -512,6 +512,12 @@ Filter pairs are automatically populated in several cases:
 The resulting filter pairs are stored in :attr:`~Model.shape_collision_filter_pairs` as a set of
 ``(shape_index_a, shape_index_b)`` tuples (canonical order: ``a < b``).
 
+.. deprecated:: 1.4
+   Mutating this finalized-model set is deprecated; update
+   :attr:`~ModelBuilder.shape_collision_filter_pairs` before calling ``finalize()`` and rebuild the
+   model instead, because the precomputed :attr:`~Model.shape_contact_pairs` array is not rebuilt by
+   post-finalize filter edits.
+
 **USD Import Example**
 
 .. code-block:: python
@@ -1655,7 +1661,7 @@ Shape material properties control contact resolution. Configure via :class:`~Mod
      - :attr:`~ModelBuilder.ShapeConfig.kd`
      - :attr:`~Model.shape_material_kd`
    * - ``kf``
-     - Tangential friction response gain
+     - Contact friction gain
      - 1000.0
      - :attr:`~ModelBuilder.ShapeConfig.kf`
      - :attr:`~Model.shape_material_kf`
@@ -1970,11 +1976,11 @@ Performance
 - **Objects tunneling through each other?** Increase ``gap`` to detect contacts earlier, or increase substep count (decrease simulation ``dt``).
 - **Hydroelastic buffer overflow warnings?** Increase ``buffer_fraction`` in :class:`~geometry.HydroelasticSDF.Config`.
 
-**CUDA graph capture**
+**Graph capture**
 
-On CUDA devices, the simulation loop (including ``collide`` and ``solver.step``) can be
-captured into a CUDA graph with ``wp.ScopedCapture`` for reduced kernel launch overhead.
-Place ``collide`` inside the captured region so it is replayed each frame:
+The simulation loop (including ``collide`` and ``solver.step``) can be captured with
+``wp.ScopedCapture`` for reduced launch overhead. Place ``collide`` inside the
+captured region so it is replayed each frame:
 
 .. code-block:: python
 
@@ -2214,7 +2220,7 @@ See Also
 
 **Related documentation:**
 
-- :doc:`../api/newton_solvers` - Solver API reference (material property behavior per solver)
+- :ref:`Contact material support` - Material property behavior by solver
 - :doc:`custom_attributes` - USD custom attributes for collision properties
 - :doc:`usd_parsing` - USD import options including collision settings
 - :doc:`sites` - Non-colliding reference points

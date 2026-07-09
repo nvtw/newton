@@ -189,10 +189,9 @@ class Example:
     # ----------------------------------------------------------------------
     def capture(self):
         self.graph = None
-        if wp.get_device().is_cuda:
-            with wp.ScopedCapture() as cap:
-                self.simulate()
-            self.graph = cap.graph
+        with wp.ScopedCapture() as cap:
+            self.simulate()
+        self.graph = cap.graph
 
     @wp.kernel
     def transform_interpolate(
@@ -296,10 +295,8 @@ class Example:
             self._push_targets_from_gizmos()
             if self.graph:
                 wp.capture_launch(self.graph)
-            elif wp.get_device().is_cuda:
-                self.capture()
             else:
-                self.simulate()
+                self.capture()
             self.sim_time += self.frame_dt
         self.frame_index += 1
 
