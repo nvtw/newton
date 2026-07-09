@@ -239,6 +239,16 @@ class PortedExample:
     #: still legal skip the MIS loop. See
     #: :mod:`graph_coloring.warm_start` for the design.
     enable_warm_start_coloring: bool = False
+    #: Keyword arguments forwarded to :meth:`ModelBuilder.finalize`.
+    #: Closed-loop maximal-coordinate examples can set
+    #: ``{"skip_validation_joints": True}`` while keeping the shared
+    #: PhoenX stepping/rendering path.
+    finalize_kwargs: dict | None = None
+    #: Whether to initialize ``state.body_q`` / ``state.body_qd`` from
+    #: articulation FK. Loop-heavy scenes authored directly with
+    #: :meth:`ModelBuilder.add_link` should keep the finalized body
+    #: poses instead.
+    evaluate_fk: bool = True
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -289,7 +299,7 @@ class PortedExample:
         self._builder.default_shape_cfg = cfg
         pick_extents = self.build_scene(self._builder)
 
-        self.model = self._builder.finalize()
+        self.model = self._builder.finalize(**(self.finalize_kwargs or {}))
 
         if self.shape_pairs_max is not None:
             self.collision_pipeline = newton.CollisionPipeline(
@@ -308,8 +318,9 @@ class PortedExample:
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
         self.state = self.model.state()
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
-        self.model.body_q.assign(self.state.body_q)
+        if self.evaluate_fk:
+            newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
+            self.model.body_q.assign(self.state.body_q)
 
         num_phoenx_bodies = int(self.model.body_count) + 1
         bodies = body_container_zeros(num_phoenx_bodies, device=self.device)
@@ -353,8 +364,8 @@ class PortedExample:
         # PhoenX solver was running with ``num_joints=0``, so the chain
         # links were free-floating and only ever interacted via contacts
         # (visibly "not really connected"). The ``model_adapter`` snapshots
-        # body-local anchors from ``model.body_q``, which we just refreshed
-        # via ``eval_fk`` above.
+        # body-local anchors from ``model.body_q`` after the optional
+        # FK initialization path above.
         self._adbs = build_adbs_init_arrays(self.model, device=self.device)
         num_joints = self._adbs.num_joint_columns
         self.constraints = PhoenXWorld.make_constraint_container(
