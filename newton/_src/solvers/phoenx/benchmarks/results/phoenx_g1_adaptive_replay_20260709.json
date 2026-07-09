@@ -1,0 +1,151 @@
+{
+  "adaptive_replay": {
+    "replay_6_seed_29_screens": [
+      [
+        25,
+        0.59413
+      ],
+      [
+        50,
+        0.568794
+      ],
+      [
+        75,
+        0.708009
+      ],
+      [
+        100,
+        0.814557
+      ],
+      [
+        125,
+        0.751875
+      ],
+      [
+        150,
+        0.698147
+      ]
+    ],
+    "replay_6_to_1_screens": [
+      [
+        125,
+        0.795107
+      ],
+      [
+        150,
+        0.799743
+      ]
+    ],
+    "replay_6_to_2_screens": [
+      [
+        125,
+        0.786175
+      ],
+      [
+        150,
+        0.809359
+      ],
+      [
+        175,
+        0.800007
+      ],
+      [
+        215,
+        0.8262
+      ],
+      [
+        240,
+        0.8193
+      ],
+      [
+        265,
+        0.8138
+      ],
+      [
+        290,
+        0.8205
+      ],
+      [
+        315,
+        0.8056
+      ],
+      [
+        325,
+        0.8136
+      ]
+    ],
+    "replay_6_to_3_screens": [
+      [
+        125,
+        0.825667
+      ],
+      [
+        150,
+        0.831223
+      ],
+      [
+        175,
+        0.8233
+      ],
+      [
+        215,
+        0.8213
+      ],
+      [
+        240,
+        0.81
+      ],
+      [
+        265,
+        0.8412
+      ],
+      [
+        290,
+        0.8426
+      ],
+      [
+        315,
+        0.8418
+      ],
+      [
+        325,
+        0.8405
+      ]
+    ],
+    "replay_6_train_env_samples_per_s": 473371.33447294764
+  },
+  "controls": {
+    "retained_seed_29_iteration_75_battery_perf": 0.64419,
+    "seed_29_actor_lr_0_01_iteration_75_battery_perf": 0.631005,
+    "seed_29_standard_vtrace_iteration_75_battery_perf": 0.623124
+  },
+  "coordinate_mode": "reduced",
+  "date": "2026-07-09",
+  "decision": "rejected_for_primary_metric",
+  "learner_diagnostics": {
+    "finding": "Initial KL spikes do not separate the eventual successful seed 42 from failed seed 29; a hard KL cap is not justified.",
+    "seed_11_first5_kl_mean": 0.042687,
+    "seed_29_first5_kl_mean": 0.167449,
+    "seed_42_first5_kl_mean": 0.143784
+  },
+  "official_expected_seconds_to_success": 343.1915,
+  "post_training": {
+    "source_joint_acc_weight_minus_1e_7": {
+      "iteration_175_ang_vel_xy_rms": 0.052,
+      "iteration_175_battery_perf": 0.7958,
+      "iteration_175_leg_qvel_rms": 1.545,
+      "pass": false
+    },
+    "swa_125_150_175_full_gate": {
+      "action_jerk_rms": 0.2097785835318848,
+      "ang_vel_xy_rms": 0.30829712036005313,
+      "battery_falls": 0,
+      "battery_perf": 0.8540704408045858,
+      "leg_qvel_rms": 1.059235775889468,
+      "pass": false
+    }
+  },
+  "reason": "Extra replay converts seed 29's early frozen screens into passes, but every decay schedule plateaus below the 0.90 full battery gate; checkpoint averaging and source-matched acceleration regularization also fail the complete physical gate.",
+  "schedule": "3x2x1 acquisition; existing final phase unless noted",
+  "schema": "phoenx_g1_adaptive_replay_v1"
+}

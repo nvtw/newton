@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · recurrent alternatives measured</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · adaptive replay measured</strong></div>
     </header>
 
     <section class="hero">
@@ -228,6 +228,18 @@
     </section>
 
     <div class="section-label">Current state</div>
+    <article>
+      <div class="meta"><span class="tag warn">EARLY LEARNING WIN &middot; FULL GATE MISS</span><time>Latest systematic experiment</time></div>
+      <h2>Adaptive replay accelerates acquisition but not final G1 quality</h2>
+      <p>Successful and failed seed traces show that initial PPO KL is not a reliable discriminator: successful seed 42 and failed seed 29 both spike above 0.37, while failed seed 11 remains below 0.06. Halving the learning rate therefore has no principled advantage and scores only 0.631 on seed 29 at iteration 75.</p>
+      <ul>
+        <li>Increasing trajectory replay from 3 to 6 raises seed 29 from the retained 0.644 to 0.708 at iteration 75 and 0.815 at iteration 100, but lowers throughput to 473k/s and then overtrains to 0.698 by iteration 150.</li>
+        <li>Replay decay is real but incomplete: 6&rarr;3 reaches 0.831 at iteration 150 and plateaus near 0.84 through iteration 325; 6&rarr;2 reaches 0.809 then plateaus near 0.81&ndash;0.83; 6&rarr;1 misses the second screen by 0.000257.</li>
+        <li>Keeping three physics substeps preserves angular stability but not tracking or leg-speed quality. The IsaacLab-matched leg-acceleration weight of &minus;1e&minus;7 lowers angular RMS to 0.052 but leaves leg-speed RMS near 1.54 and reduces battery performance.</li>
+        <li>Equal checkpoint averaging improves the full-gate battery score to 0.854 and leg-speed RMS to 1.06, but still fails the 0.90 battery and 0.21 angular thresholds.</li>
+        <li><strong>Decision:</strong> reject this family for the primary metric. It is useful evidence that acquisition and final policy quality are separate bottlenecks, but the official expected G1 cost remains 343.19 s.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag warn">CORRECTNESS RETAINED &middot; TRAINING MODE REJECTED</span><time>Latest matched evidence</time></div>
       <h2>Exact recurrent replay works, but persistence does not improve G1</h2>
