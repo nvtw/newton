@@ -109,6 +109,7 @@ class Example:
             self.config.dvi.contact_jacobi_omega = self.dvi_contact_jacobi_omega
             self.config.dvi.contact_jacobi_relaxation = self.dvi_contact_jacobi_relaxation
             self.config.dvi.contact_block_preconditioner = self.dvi_contact_block_preconditioner
+            self.config.dvi.contact_warmstart_method = "key_and_position_with_net_force_backup"
         self.solver = newton.solvers.SolverKamino(self.model, config=self.config)
 
         # Set joint armature and viscous damping for better

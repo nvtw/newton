@@ -1117,7 +1117,8 @@ class TestDVISolver(unittest.TestCase):
         base_start = example.state_0.body_q.numpy()[0, :3].copy()
         contact_seen = False
         post_settle_penetration = []
-        for step_idx in range(160):
+        post_settle_xy = []
+        for step_idx in range(400):
             example.step()
             contact_seen = contact_seen or int(example.contacts.rigid_contact_count.numpy()[0]) > 0
             contacts_kamino = example.solver._contacts_kamino
@@ -1125,6 +1126,8 @@ class TestDVISolver(unittest.TestCase):
             if step_idx >= 40 and contact_count > 0:
                 gaps = contacts_kamino.gapfunc.numpy()[:contact_count, 3]
                 post_settle_penetration.append(float(max(0.0, -np.min(gaps))))
+            if step_idx >= 200:
+                post_settle_xy.append(example.state_0.body_q.numpy()[0, :2].copy())
 
         body_q = example.state_0.body_q.numpy()
         body_qd = example.state_0.body_qd.numpy()
@@ -1136,6 +1139,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertLess(float(np.linalg.norm(base_delta_xy)), 0.008)
         self.assertGreater(len(post_settle_penetration), 0)
         self.assertLess(float(np.percentile(post_settle_penetration, 95)), 0.0035)
+        self.assertLess(float(np.linalg.norm(post_settle_xy[-1] - post_settle_xy[0])), 5.0e-4)
 
     def test_11_dr_legs_dvi_contact_force_balances_weight(self):
         if not self.device.is_cuda:
