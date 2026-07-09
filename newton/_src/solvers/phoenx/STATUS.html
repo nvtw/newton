@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>4 July 2026 · CUDA-graph policy gates</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · two-stage restart validation</strong></div>
     </header>
 
     <section class="hero">
@@ -262,6 +262,18 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag good">VALIDATED CANDIDATE · TWO-STAGE RESTART</span><time>9 Jul</time></div>
+      <h2>An earlier screen cuts clearly failed attempts to 63 seconds</h2>
+      <p>The frozen restart policy now checks held-out tracking at 39.32M samples (iteration 75, threshold 0.68) before retaining the existing 78.64M-sample threshold of 0.80. Both checks use the same fixed-command CUDA-graph screen and charge actual process wall time.</p>
+      <ul>
+        <li>The known qualifying seed is already at 0.708 at iteration 75 and is retained. Confirmed failures score 0.659 (seed 11), 0.674 (seed 29), and 0.603 (seed 47), so they can be rejected about 50 seconds earlier.</li>
+        <li>Borderline seed 71 scores 0.687 and is deliberately retained by the conservative 0.68 threshold; it later fails at iteration 325. The abandoned 0.69 proposal was rejected because its margin against this unseen trajectory was too small.</li>
+        <li>On the new validation bank, seed 89 scores 0.493 and the complete fresh process exits at iteration 75 in <strong>63.46 s</strong>. This verifies process-level charging and stopping, not just helper logic.</li>
+        <li>The implementation accepts an ordered restart schedule, records every checked threshold in JSON, skips past checks when resuming, and retains the second-stage default. Fifteen protocol tests plus the CUDA graph train/checkpoint/gate smoke pass.</li>
+        <li>The headline remains 436.57 s until the original paired bank is rerun under this frozen schedule; no projected value is substituted for measured evidence.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED CANDIDATE · GRAPHED QUALITY GATE</span><time>4 Jul</time></div>
       <h2>Device-side evaluation cuts the full G1 gate to 3.44 seconds</h2>

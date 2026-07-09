@@ -5708,6 +5708,8 @@ class TestG1PhoenXRL(unittest.TestCase):
                 seeds_per_command=1,
                 diagnostic_steps=1,
                 no_screening=True,
+                early_reject_first_samples=0,
+                early_reject_first_min_battery_perf=0.68,
                 early_reject_samples=0,
                 early_reject_min_battery_perf=0.80,
                 diagnostic_world_count=1,
@@ -5805,8 +5807,9 @@ class TestG1PhoenXRL(unittest.TestCase):
 
             early_args = argparse.Namespace(**vars(args))
             early_args.no_screening = False
-            early_args.early_reject_samples = 2
-            early_args.early_reject_min_battery_perf = 2.0
+            early_args.early_reject_first_samples = 2
+            early_args.early_reject_first_min_battery_perf = 2.0
+            early_args.early_reject_samples = 0
             early_args.checkpoint_path = f"{tmpdir}/early_{{iteration:06d}}.npz"
             early_result = benchmark_train_to_gate(early_args)
             self.assertTrue(early_result["early_stopped"])

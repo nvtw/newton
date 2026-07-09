@@ -160,11 +160,11 @@ class TestTimeToPolicyProtocol(unittest.TestCase):
         self.assertTrue(_screen_promising(SimpleNamespace(battery_perf=0.0, battery_falls=0), args))
 
     def test_early_g1_screen_rejects_only_frozen_failures(self):
-        args = SimpleNamespace(early_reject_min_battery_perf=0.80, max_battery_falls=1)
+        args = SimpleNamespace(max_battery_falls=1)
 
-        self.assertTrue(_screen_rejects_early(SimpleNamespace(battery_perf=0.79, battery_falls=0), args))
-        self.assertFalse(_screen_rejects_early(SimpleNamespace(battery_perf=0.81, battery_falls=1), args))
-        self.assertTrue(_screen_rejects_early(SimpleNamespace(battery_perf=0.90, battery_falls=2), args))
+        self.assertTrue(_screen_rejects_early(SimpleNamespace(battery_perf=0.79, battery_falls=0), args, 0.80))
+        self.assertFalse(_screen_rejects_early(SimpleNamespace(battery_perf=0.81, battery_falls=1), args, 0.80))
+        self.assertTrue(_screen_rejects_early(SimpleNamespace(battery_perf=0.90, battery_falls=2), args, 0.80))
 
     def test_runner_owns_seed_and_output_arguments(self):
         for option in ("--seed", "--seed=12", "--json-output", "--required-consecutive-passes=3"):

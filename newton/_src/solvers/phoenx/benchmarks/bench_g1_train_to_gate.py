@@ -22,6 +22,7 @@ import json
 import math
 import time
 from dataclasses import asdict, replace
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -179,10 +180,25 @@ def _screen_promising(stats: rl.StatsEvaluateG1GatePPO, args: argparse.Namespace
     return stats.battery_falls <= int(args.max_battery_falls) and stats.battery_perf >= trigger_perf
 
 
-def _screen_rejects_early(stats: rl.StatsEvaluateG1GatePPO, args: argparse.Namespace) -> bool:
-    return stats.battery_falls > int(args.max_battery_falls) or stats.battery_perf < float(
-        args.early_reject_min_battery_perf
+def _screen_rejects_early(stats: rl.StatsEvaluateG1GatePPO, args: argparse.Namespace, min_battery_perf: float) -> bool:
+    return stats.battery_falls > int(args.max_battery_falls) or stats.battery_perf < float(min_battery_perf)
+
+
+def _early_reject_schedule(args: argparse.Namespace) -> tuple[tuple[int, float], ...]:
+    if bool(args.no_screening):
+        return ()
+    candidates = (
+        (int(args.early_reject_first_samples), float(args.early_reject_first_min_battery_perf)),
+        (int(args.early_reject_samples), float(args.early_reject_min_battery_perf)),
     )
+    schedule = tuple((samples, threshold) for samples, threshold in candidates if samples > 0)
+    if any(samples < 0 for samples, _threshold in candidates):
+        raise ValueError("early reject sample counts must be non-negative")
+    if any(not math.isfinite(threshold) for _samples, threshold in schedule):
+        raise ValueError("early reject thresholds must be finite")
+    if any(right[0] <= left[0] for left, right in pairwise(schedule)):
+        raise ValueError("early reject sample counts must be strictly increasing")
+    return schedule
 
 
 def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
@@ -215,8 +231,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     checkpoint_template = args.checkpoint_path or "/tmp/phoenx_g1_gate_{iteration}.npz"
     env_config = _make_env_config(args)
     ppo_config = _make_ppo_config(args)
-    if args.early_reject_samples < 0:
-        raise ValueError("early_reject_samples must be non-negative")
+    early_reject_schedule = _early_reject_schedule(args)
     command_curriculum_start = float(getattr(args, "command_curriculum_start", g1_recipe.COMMAND_CURRICULUM_START))
     command_curriculum_samples = int(getattr(args, "command_curriculum_samples", g1_recipe.COMMAND_CURRICULUM_SAMPLES))
     angular_fine_tune_start_samples = int(args.angular_fine_tune_start_samples)
@@ -248,9 +263,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     first_pass: dict[str, Any] | None = None
     live_result: rl.ResultTrainG1PPO | None = None
     pass_streak = 0
-    early_rejection_checked = (
-        bool(args.no_screening) or args.early_reject_samples <= 0 or start_samples >= args.early_reject_samples
-    )
+    early_rejection_index = sum(start_samples >= samples for samples, _threshold in early_reject_schedule)
     early_stopped = False
     early_stop: dict[str, Any] | None = None
     total_t0 = time.perf_counter()
@@ -387,13 +400,24 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 "total_wall_seconds": float(time.perf_counter() - total_t0),
             }
             screen_history.append(screen_entry)
-            if not early_rejection_checked and samples >= int(args.early_reject_samples):
-                early_rejection_checked = True
-                screen_entry["early_reject_checked"] = True
-                if _screen_rejects_early(screen_result.stats, args):
+            while (
+                early_rejection_index < len(early_reject_schedule)
+                and samples >= early_reject_schedule[early_rejection_index][0]
+            ):
+                check_samples, check_threshold = early_reject_schedule[early_rejection_index]
+                early_rejection_index += 1
+                check = {
+                    "samples": int(check_samples),
+                    "min_battery_perf": float(check_threshold),
+                    "rejected": _screen_rejects_early(screen_result.stats, args, check_threshold),
+                }
+                screen_entry.setdefault("early_reject_checks", []).append(check)
+                if check["rejected"]:
                     early_stopped = True
                     early_stop = screen_entry
                     break
+            if early_stopped:
+                break
             if not promising:
                 pass_streak = 0
                 continue
@@ -516,6 +540,12 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "max_iterations": int(args.max_iterations),
         "chunk_iterations": int(args.chunk_iterations),
         "reset_env_between_chunks": bool(args.reset_env_between_chunks),
+        "early_reject_schedule": [
+            {"samples": int(samples), "min_battery_perf": float(threshold)}
+            for samples, threshold in early_reject_schedule
+        ],
+        "early_reject_first_samples": int(args.early_reject_first_samples),
+        "early_reject_first_min_battery_perf": float(args.early_reject_first_min_battery_perf),
         "early_reject_samples": int(args.early_reject_samples),
         "early_reject_min_battery_perf": float(args.early_reject_min_battery_perf),
         "early_stopped": bool(early_stopped),
@@ -773,16 +803,28 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evaluate-only", action="store_true")
     parser.add_argument("--checkpoint-path", default=None)
     parser.add_argument(
+        "--early-reject-first-samples",
+        type=int,
+        default=75 * g1_recipe.WORLD_COUNT * g1_recipe.ROLLOUT_STEPS,
+        help="Apply the first frozen early-restart screen at this sample count; 0 disables it.",
+    )
+    parser.add_argument(
+        "--early-reject-first-min-battery-perf",
+        type=float,
+        default=0.68,
+        help="Restart an attempt below this score at the first early screen.",
+    )
+    parser.add_argument(
         "--early-reject-samples",
         type=int,
         default=150 * g1_recipe.WORLD_COUNT * g1_recipe.ROLLOUT_STEPS,
-        help="Apply the frozen early-restart screen once at or after this many environment samples; 0 disables it.",
+        help="Apply the second frozen early-restart screen at this sample count; 0 disables it.",
     )
     parser.add_argument(
         "--early-reject-min-battery-perf",
         type=float,
         default=0.80,
-        help="Restart an attempt whose one-shot early screen is below this tracking score.",
+        help="Restart an attempt below this score at the second early screen.",
     )
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)
