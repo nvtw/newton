@@ -487,6 +487,8 @@ def build_adbs_init_arrays(
             locked_ang = [_is_locked_dof(limit_lower, limit_upper, qd_start + n_lin + i) for i in range(n_ang)]
             classified_tag, classified_offset = _classify_d6_legacy_mode(n_lin, n_ang, locked_lin, locked_ang)
             if classified_tag is None:
+                if reduced_articulations and int(joint_articulation[j]) >= 0:
+                    continue
                 raise NotImplementedError(
                     f"D6 joint {j} cannot be reduced to a restored PhoenX joint "
                     f"({n_lin} linear axes / {n_ang} angular axes; "

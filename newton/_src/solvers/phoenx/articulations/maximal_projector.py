@@ -312,6 +312,7 @@ class MaximalTreeProjector:
         if articulation_count <= 0 or not model.device.is_cuda:
             return False
         starts = model.articulation_start.numpy()
+        joint_articulation = model.joint_articulation.numpy()
         joint_type = model.joint_type.numpy()
         joint_parent = model.joint_parent.numpy()
         joint_child = model.joint_child.numpy()
@@ -322,22 +323,24 @@ class MaximalTreeProjector:
         for articulation in range(articulation_count):
             start = int(starts[articulation])
             end = int(starts[articulation + 1])
-            if end - start < 2 or end - start > _WARP_SIZE:
+            owned_joints = [joint for joint in range(start, end) if int(joint_articulation[joint]) == articulation]
+            if len(owned_joints) < 2 or len(owned_joints) > _WARP_SIZE:
                 return False
-            root = int(joint_child[start])
+            root_joint = owned_joints[0]
+            root = int(joint_child[root_joint])
             if (
-                int(joint_type[start]) != int(JointType.FREE)
-                or int(joint_parent[start]) >= 0
+                int(joint_type[root_joint]) != int(JointType.FREE)
+                or int(joint_parent[root_joint]) >= 0
                 or root < 0
                 or root in claimed_bodies
                 or not np.isfinite(body_inv_mass[root])
                 or body_inv_mass[root] <= 0.0
-                or (joint_enabled is not None and not bool(joint_enabled[start]))
+                or (joint_enabled is not None and not bool(joint_enabled[root_joint]))
             ):
                 return False
             world = int(body_world[root])
             bodies = {root}
-            for joint in range(start + 1, end):
+            for joint in owned_joints[1:]:
                 if int(joint_type[joint]) != int(JointType.REVOLUTE):
                     return False
                 parent = int(joint_parent[joint])
@@ -373,6 +376,7 @@ class MaximalTreeProjector:
         self.launch_dim = self.articulation_count * _WARP_SIZE
 
         starts = model.articulation_start.numpy()
+        joint_articulation = model.joint_articulation.numpy()
         joint_parent = model.joint_parent.numpy()
         joint_child = model.joint_child.numpy()
         joint_to_cid_np = joint_to_cid.numpy()
@@ -389,11 +393,12 @@ class MaximalTreeProjector:
         for articulation in range(self.articulation_count):
             start = int(starts[articulation])
             end = int(starts[articulation + 1])
-            count = end - start
+            owned_joints = [joint for joint in range(start, end) if int(joint_articulation[joint]) == articulation]
+            count = len(owned_joints)
             body_count[articulation] = count
             body_to_lane: dict[int, int] = {}
             children: list[list[int]] = [[] for _ in range(count)]
-            for lane, joint in enumerate(range(start, end)):
+            for lane, joint in enumerate(owned_joints):
                 child = int(joint_child[joint])
                 joint_index[articulation, lane] = joint
                 body_slot[articulation, lane] = child + 1

@@ -16,6 +16,7 @@ import warp as wp
 import newton
 from newton._src.sim import BodyFlags, Contacts, Control, JointType, Model, ModelFlags, State
 from newton._src.solvers.phoenx.articulations.maximal_projector import MaximalTreeProjector
+from newton._src.solvers.phoenx.articulations.maximal_projector_general import GeneralMaximalTreeProjector
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation
 from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
@@ -162,8 +163,8 @@ class SolverPhoenX(SolverBase):
     Supports REVOLUTE / PRISMATIC (PD drive + limit), BALL, FIXED,
     CABLE (soft fixed with PD bend/twist; stretch DoF is rigid), FREE
     (no column), and D6 configurations reducible to those old ADBS modes
-    including universal joints with angular limits. DISTANCE and generic D6
-    raise at construction.
+    including universal joints with angular limits. Tree DISTANCE and generic
+    D6 joints are accepted when reduced ownership is active.
 
     Newton :class:`Picking` works out of the box: pick force/torque is
     added to ``state.body_f``, which :meth:`step` imports into PhoenX's
@@ -258,9 +259,11 @@ class SolverPhoenX(SolverBase):
                 added to the stator-side parent body and reflected through
                 ``joint_gear`` onto the rotor-side child body.
                 ``"maximal_projected"`` additionally applies an exact
-                mass-metric tree projection on supported CUDA robot forests,
-                with established hybrid fallback for other topologies.
-                ``"hybrid"`` retains the articulated-body preconditioner, and
+                mass-metric tree projection on supported CUDA robot forests.
+                Common anchored/floating mixed rigid joints use a general
+                projector; other topologies use pure reduced ownership without
+                redundant maximal joint rows. ``"hybrid"`` retains the
+                articulated-body preconditioner, and
                 ``"reduced"`` lets generalized coordinates own tree joints.
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
@@ -297,9 +300,16 @@ class SolverPhoenX(SolverBase):
         self.articulation_mode = articulation_mode
         self.reduced_articulation_path = reduced_articulation_path
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
-        self._maximal_tree_projector: MaximalTreeProjector | None = None
-        self._uses_maximal_tree_projector = articulation_mode == "maximal_projected" and (
-            MaximalTreeProjector.supports_model(model)
+        self._maximal_tree_projector: MaximalTreeProjector | GeneralMaximalTreeProjector | None = None
+        self._maximal_tree_projector_cls: type[MaximalTreeProjector] | type[GeneralMaximalTreeProjector] | None = None
+        if articulation_mode == "maximal_projected":
+            if MaximalTreeProjector.supports_model(model):
+                self._maximal_tree_projector_cls = MaximalTreeProjector
+            elif GeneralMaximalTreeProjector.supports_model(model):
+                self._maximal_tree_projector_cls = GeneralMaximalTreeProjector
+        self._uses_maximal_tree_projector = self._maximal_tree_projector_cls is not None
+        self._uses_reduced_joint_ownership = articulation_mode == "reduced" or (
+            articulation_mode == "maximal_projected" and not self._uses_maximal_tree_projector
         )
         self._phoenx_body_inv_inertia = (
             _build_maximal_motor_body_inv_inertia(model)
@@ -347,7 +357,7 @@ class SolverPhoenX(SolverBase):
             model,
             device=self.device,
             joint_friction_model=self._joint_friction_model,
-            reduced_articulations=self.articulation_mode == "reduced",
+            reduced_articulations=self._uses_reduced_joint_ownership,
         )
         num_joints = self._adbs.num_joint_columns
         num_particles = int(getattr(model, "particle_count", 0) or 0)
@@ -525,7 +535,8 @@ class SolverPhoenX(SolverBase):
             self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
 
         if self._uses_maximal_tree_projector:
-            self._maximal_tree_projector = MaximalTreeProjector(
+            assert self._maximal_tree_projector_cls is not None
+            self._maximal_tree_projector = self._maximal_tree_projector_cls(
                 model,
                 self._constraints,
                 self.bodies,
@@ -538,7 +549,7 @@ class SolverPhoenX(SolverBase):
             )
             joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
             joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
-            if self.articulation_mode == "reduced":
+            if self._uses_reduced_joint_ownership:
                 for joint, owned in enumerate(self._reduced_articulation.owned_joint_mask_np):
                     cid = int(joint_idx_to_cid[joint])
                     if owned and cid >= 0:
@@ -1046,7 +1057,7 @@ class SolverPhoenX(SolverBase):
                 self.model,
                 device=self.device,
                 joint_friction_model=self._joint_friction_model,
-                reduced_articulations=self.articulation_mode == "reduced",
+                reduced_articulations=self._uses_reduced_joint_ownership,
             )
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
@@ -1068,11 +1079,12 @@ class SolverPhoenX(SolverBase):
                 if self._reduced_articulation is not None:
                     self._reduced_articulation.system.refresh_inertial_properties()
         if joint_props_changed and self._uses_maximal_tree_projector:
-            if not MaximalTreeProjector.supports_model(self.model):
+            assert self._maximal_tree_projector_cls is not None
+            if not self._maximal_tree_projector_cls.supports_model(self.model):
                 raise RuntimeError(
                     "joint topology no longer supports the active maximal tree projector; rebuild SolverPhoenX"
                 )
-            self._maximal_tree_projector = MaximalTreeProjector(
+            self._maximal_tree_projector = self._maximal_tree_projector_cls(
                 self.model,
                 self._constraints,
                 self.bodies,

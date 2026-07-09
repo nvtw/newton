@@ -5,9 +5,11 @@
 The experimental `articulation_mode="maximal_projected"` path keeps
 PhoenX body state and transient contact handling in maximal coordinates while
 removing slow constraint propagation through a known acyclic joint graph.
-Eligible free-root revolute forests use the specialized projector; unsupported
-topologies retain the established hybrid implementation while the general
-motion-subspace kernel is developed.
+Eligible free-root revolute forests use a branch-light specialization.
+Anchored or floating trees mixing fixed, revolute, prismatic, ball, and
+reducible D6/universal joints use a fused general motion-subspace kernel.
+Other tree topologies use pure reduced ownership rather than redundantly
+running the old hybrid double path.
 
 Joint/body incidence is persistent and can be preprocessed. Contact incidence
 is not: contact attachments must be rebuilt after collision detection and must
@@ -69,9 +71,9 @@ r_i = M_i (v_i - v_i*) + sum_child X_child^T r_child.
 
 Optimality gives `S_i^T r_i = 0`: the projector applies no impulse along an
 allowed coordinate. A floating root has zero reaction, which is the momentum
-conservation condition. For a revolute joint, the reaction is decomposed into
-the same anchor-1 and anchor-2 impulses used by the existing ADBS row and added
-to its accumulated multipliers.
+conservation condition. Reactions are decomposed into the existing ADBS
+anchor/axial representation for fixed, revolute, prismatic, ball, and
+universal rows, then added to their accumulated multipliers.
 
 ## Current evidence
 
@@ -89,15 +91,20 @@ to its accumulated multipliers.
   training quality remains an open gate.
 - The same free-root/revolute path reduces joint error on ANYmal and H1 without
   robot-specific tuning.
-- The production adapter passes CUDA-graph tests for two independent
-  articulations in one world, exact reaction recovery, allowed-coordinate
-  orthogonality, floating momentum, and safe mixed-tree fallback.
+- Production CUDA-graph tests cover multiple articulations per world,
+  fixed/revolute/prismatic/ball mixtures, reducible D6 universal joints,
+  generic-D6 pure-reduced fallback, loop-joint exclusion, active rigid
+  contacts, exact reaction recovery, floating momentum, and bitwise
+  determinism.
 - Correcting stale world inertia on non-continuation state imports reduces the
   repeated floating-tree angular-momentum error from about `9.3e-3` to
   `8e-6` in both maximal and projected-maximal execution.
 - The retained ideal GPU benchmark processes 8,192 branched 29-body trees and
   recovers all reactions in about `325 us` per captured replay on RTX PRO 6000
-  Blackwell. This is not an end-to-end training number.
+  Blackwell. In a separate 512-world mixed-tree contact bracket with 6,656
+  contacts, projected maximal measures `338 us/step` versus `581 us` reduced
+  and `685 us` hybrid. Joint-only tiny trees still favor reduced ownership.
+  These are diagnostic, not end-to-end training numbers.
 
 Run the retained benchmark with:
 
@@ -112,7 +119,8 @@ hybrid backend, it must cover:
 
 - free and anchored roots; revolute, prismatic, ball, fixed, and supported D6
   trees; multiple articulations per world; and an arbitrary number of worlds;
-- clean loop-joint exclusion and ordinary GS fallback;
+- clean loop-joint exclusion and ordinary GS fallback (covered for floating
+  and anchored trees, including active rigid contacts);
 - motors, limits, friction, live armature/gear updates, and multiplier/force
   reporting;
 - mixed ordinary constraints and transient contacts, including topology
@@ -123,5 +131,6 @@ hybrid backend, it must cover:
 - successful paired-seed PhoenX-RL training with lower expected time to the
   frozen held-out policy gate.
 
-Unsupported configurations must retain the established solver path. No
-contact topology may be cached across collision frames.
+Unsupported configurations use the established pure reduced solver path;
+the explicit old hybrid mode remains available but is not the automatic
+fallback. No contact topology may be cached across collision frames.
