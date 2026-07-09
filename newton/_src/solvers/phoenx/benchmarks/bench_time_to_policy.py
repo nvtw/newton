@@ -37,6 +37,7 @@ from typing import Any
 _G1_MODULE = "newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate"
 _ANYMAL_MODULE = "newton._src.solvers.phoenx.benchmarks.bench_anymal_train_to_gate"
 _DR_LEGS_HOLD_MODULE = "newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate"
+_G1_FROZEN_TARGET_SAMPLES = 325 * 8192 * 64
 _CONTROLLED_CHILD_OPTIONS = (
     "--checkpoint-path",
     "--fail-on-miss",
@@ -48,6 +49,7 @@ _CONTROLLED_CHILD_OPTIONS = (
     "--required-consecutive-passes",
     "--seed",
     "--summary-path",
+    "--target-samples",
 )
 
 
@@ -228,6 +230,8 @@ def _child_command(
             "--json-output",
             str(result_path),
             "--fail-on-miss",
+            "--target-samples",
+            str(_G1_FROZEN_TARGET_SAMPLES),
             *forwarded_args,
         ]
     if task == "anymal":

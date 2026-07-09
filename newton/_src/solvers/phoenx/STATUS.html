@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · color-ordered contact rows</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · frozen G1 restart rerun</strong></div>
     </header>
 
     <section class="hero">
@@ -133,13 +133,13 @@
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric">1 / 3</div><div class="label">paired G1 cold trials passing</div></div>
+      <div class="card"><div class="metric">343 s</div><div class="label">preliminary expected G1 time-to-policy</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
       <div class="card"><div class="metric good">3 / 8</div><div class="label">tasks wired to process-level metric</div></div>
       <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
-    <p class="profile-note">The first three deterministic paired G1 outcomes contain one success and two frozen early rejections. Their post-optimization plug-in restart cost is 436.57 s; three trials still leave success probability and expected cost highly uncertain, so this is an initial baseline rather than a stable ranking.</p>
+    <p class="profile-note">The ready-cache rerun of the frozen G1 development bank contains one 215.58 s success and two iteration-75 rejections at 63.79 / 63.83 s. Expected restart cost is now 343.19 s, down 21.4% from 436.57 s. Three trials still leave success probability and expected cost highly uncertain.</p>
 
     <div class="section-label">Zero to qualified policy</div>
     <section class="work-profile" aria-label="Cold-start time to policy across training scenes">
@@ -153,9 +153,9 @@
           <tbody>
             <tr>
               <td>G1 · PhoenX</td>
-              <td class="number good">211.95 s</td>
-              <td class="number">436.57 s preliminary</td>
-              <td>1/3 paired seeds pass. Two attempts are rejected at iteration 150 in 112.54 / 112.07 s. Full success requires two consecutive held-out gates with zero falls.</td>
+              <td class="number good">215.58 s</td>
+              <td class="number">343.19 s preliminary</td>
+              <td>1/3 paired seeds pass. Seeds 11/2000 and 29/3000 reject at the frozen iteration-75 screen in 63.79 / 63.83 s. Full success requires two consecutive held-out gates with zero falls.</td>
             </tr>
             <tr>
               <td>ANYmal-C · PhoenX</td>
@@ -193,7 +193,7 @@
           </tbody>
         </table>
       </div>
-      <p class="profile-note">nanoG1 source: <a href="https://github.com/kingjulio8238/nanoG1">project README</a>, which states 58.9 s / about 59 s from scratch. The PhoenX expected value is the post-optimization plug-in estimate from only three paired seeds and must be tightened with more trials.</p>
+      <p class="profile-note">nanoG1 source: <a href="https://github.com/kingjulio8238/nanoG1">project README</a>, which states 58.9 s / about 59 s from scratch. PhoenX's preliminary expected cost is 5.83× that claim; its successful run is 3.66× slower. nanoG1 does not report a comparable varied-seed expectation.</p>
     </section>
 
     <div class="section-label">Steady-training GPU work profile</div>
@@ -277,15 +277,17 @@
       </ul>
     </article>
     <article>
-      <div class="meta"><span class="tag good">VALIDATED CANDIDATE · TWO-STAGE RESTART</span><time>9 Jul</time></div>
-      <h2>An earlier screen cuts clearly failed attempts to 63 seconds</h2>
+      <div class="meta"><span class="tag good">RETAINED · FROZEN TWO-STAGE RESTART</span><time>9 Jul</time></div>
+      <h2>Ready-cache paired rerun reaches 343.19 seconds expected cost</h2>
       <p>The frozen restart policy now checks held-out tracking at 39.32M samples (iteration 75, threshold 0.68) before retaining the existing 78.64M-sample threshold of 0.80. Both checks use the same fixed-command CUDA-graph screen and charge actual process wall time.</p>
       <ul>
         <li>The known qualifying seed is already at 0.708 at iteration 75 and is retained. Confirmed failures score 0.659 (seed 11), 0.674 (seed 29), and 0.603 (seed 47), so they can be rejected about 50 seconds earlier.</li>
         <li>Borderline seed 71 scores 0.687 and is deliberately retained by the conservative 0.68 threshold; it later fails at iteration 325. The abandoned 0.69 proposal was rejected because its margin against this unseen trajectory was too small.</li>
-        <li>On the new validation bank, seed 89 scores 0.493 and the complete fresh process exits at iteration 75 in <strong>63.46 s</strong>. This verifies process-level charging and stopping, not just helper logic.</li>
+        <li>The authoritative original bank rerun measures seed 42/1000 passing in <strong>215.58 s</strong>; seeds 11/2000 and 29/3000 reject at iteration 75 in <strong>63.79 / 63.83 s</strong>. With one success in three, expected restart cost is <strong>343.19 s</strong>, 21.4% below the previous 436.57 s headline.</li>
+        <li>One cleared-cache diagnostic spent roughly four extra minutes compiling current G1 kernels and stopped at the old 75M-sample child default. It is excluded from the ready-installation primary clock and retained as separate first-install/JIT evidence.</li>
+        <li>The generic suite adapter previously inherited that 75M-sample default, silently limiting G1 to 144 iterations although the frozen PhoenX horizon is 325. It now owns the 170.39M-sample horizon; a protocol regression asserts the child command.</li>
         <li>The implementation accepts an ordered restart schedule, records every checked threshold in JSON, skips past checks when resuming, and retains the second-stage default. Fifteen protocol tests plus the CUDA graph train/checkpoint/gate smoke pass.</li>
-        <li>The headline remains 436.57 s until the original paired bank is rerun under this frozen schedule; no projected value is substituted for measured evidence.</li>
+        <li>The success probability remains only 1/3 (Wilson 95% interval 0.061–0.792), and the three-trial bootstrap upper bound is unbounded. The 343.19 s value is measured but still preliminary, not a stable final ranking.</li>
       </ul>
     </article>
     <article>

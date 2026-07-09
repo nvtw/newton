@@ -167,7 +167,13 @@ class TestTimeToPolicyProtocol(unittest.TestCase):
         self.assertTrue(_screen_rejects_early(SimpleNamespace(battery_perf=0.90, battery_falls=2), args, 0.80))
 
     def test_runner_owns_seed_and_output_arguments(self):
-        for option in ("--seed", "--seed=12", "--json-output", "--required-consecutive-passes=3"):
+        for option in (
+            "--seed",
+            "--seed=12",
+            "--json-output",
+            "--required-consecutive-passes=3",
+            "--target-samples=75000000",
+        ):
             with self.subTest(option=option), self.assertRaises(ValueError):
                 _validate_forwarded_args([option])
 
@@ -186,6 +192,7 @@ class TestTimeToPolicyProtocol(unittest.TestCase):
         self.assertEqual(command[command.index("--seed") + 1], "11")
         self.assertEqual(command[command.index("--gate-seed") + 1], "1000")
         self.assertEqual(command[command.index("--required-consecutive-passes") + 1], "2")
+        self.assertEqual(command[command.index("--target-samples") + 1], str(325 * 8192 * 64))
         self.assertEqual(command[-2:], ["--world-count", "64"])
 
     def test_anymal_command_uses_frozen_forward_gate(self):

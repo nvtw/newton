@@ -1,0 +1,90 @@
+{
+  "schema": "phoenx_time_to_policy_v2",
+  "task": "g1",
+  "measurement": {
+    "date": "2026-07-09",
+    "device": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "cache_state": "ready persistent Warp kernel cache",
+    "training_state": "zero policy, optimizer, replay, normalization, and curriculum state",
+    "target_samples": 170393600,
+    "max_iterations": 325
+  },
+  "restart_policy": {
+    "cutoff_seconds": 360.0,
+    "required_consecutive_passes": 2,
+    "early_screens": [
+      {
+        "iteration": 75,
+        "samples": 39321600,
+        "min_battery_perf": 0.68
+      },
+      {
+        "iteration": 150,
+        "samples": 78643200,
+        "min_battery_perf": 0.8
+      }
+    ],
+    "failure_charging": "observed wall time for child-declared early rejection; cutoff otherwise"
+  },
+  "seed_protocol": {
+    "train_seeds": [
+      42,
+      11,
+      29
+    ],
+    "gate_seeds": [
+      1000,
+      2000,
+      3000
+    ],
+    "pairing": "ordered one-to-one"
+  },
+  "trials": [
+    {
+      "trial_index": 0,
+      "train_seed": 42,
+      "gate_seed": 1000,
+      "pass_gate": true,
+      "early_stopped": false,
+      "process_wall_seconds": 215.57594382200114,
+      "charged_seconds": 215.57594382200114
+    },
+    {
+      "trial_index": 1,
+      "train_seed": 11,
+      "gate_seed": 2000,
+      "pass_gate": false,
+      "early_stopped": true,
+      "process_wall_seconds": 63.78965252600028,
+      "charged_seconds": 63.78965252600028
+    },
+    {
+      "trial_index": 2,
+      "train_seed": 29,
+      "gate_seed": 3000,
+      "pass_gate": false,
+      "early_stopped": true,
+      "process_wall_seconds": 63.825912291998975,
+      "charged_seconds": 63.825912291998975
+    }
+  ],
+  "summary": {
+    "trial_count": 3,
+    "success_count": 1,
+    "success_probability": 0.3333333333333333,
+    "success_probability_wilson95": [
+      0.06149194472039621,
+      0.7923403991979522
+    ],
+    "mean_success_seconds": 215.57594382200114,
+    "mean_failure_seconds": 63.80778240899963,
+    "expected_attempts_to_success": 3.0,
+    "expected_seconds_to_success": 343.1915086400004,
+    "expected_seconds_bootstrap95": [
+      215.57594382200114,
+      null
+    ],
+    "bootstrap_samples": 2000,
+    "bootstrap_seed": 20260704
+  }
+}
