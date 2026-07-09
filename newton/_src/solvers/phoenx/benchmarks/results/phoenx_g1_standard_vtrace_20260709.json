@@ -1,0 +1,49 @@
+{
+  "candidate": "standard transition-aligned rollout storage and V-trace",
+  "coordinate_mode": "reduced",
+  "date": "2026-07-09",
+  "decision": "rejected",
+  "paired_screens": {
+    "seed_11_gate_2000": {
+      "candidate": [
+        [
+          25,
+          0.676916
+        ],
+        [
+          50,
+          0.587182
+        ],
+        [
+          75,
+          0.656226
+        ]
+      ],
+      "candidate_iteration_75_falls": 2,
+      "retained_iteration_75": 0.697,
+      "threshold_iteration_75": 0.68
+    },
+    "seed_29_gate_3000": {
+      "candidate": [
+        [
+          25,
+          0.633637
+        ],
+        [
+          50,
+          0.601875
+        ],
+        [
+          75,
+          0.623124
+        ]
+      ],
+      "retained_iteration_75": 0.64419,
+      "threshold_iteration_75": 0.68
+    }
+  },
+  "reason": "The standard alignment regresses both paired development seeds and turns seed 11 from an iteration-75 pass into a rejection.",
+  "retained": "PufferLib shifted reward/done layout and shifted V-trace",
+  "schedule": "3 substeps, 2 solver iterations, 1 velocity iteration",
+  "schema": "phoenx_g1_standard_vtrace_v1"
+}

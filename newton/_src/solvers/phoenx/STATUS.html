@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · recurrent state exact; persistence rejected</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · recurrent alternatives measured</strong></div>
     </header>
 
     <section class="hero">
@@ -237,7 +237,8 @@
         <li>A detached-worktree, same-machine bracket resolves the apparent speed regression: commit <code>5c526af7</code> measures 906.1k samples/s and the exact-state implementation measures 908.4k/s (+0.25%). This is performance-neutral, not a new speed claim.</li>
         <li>The former 923k/s headline remains useful historical evidence but is outside today's matched bracket; the headline now shows the reproducible 908k/s diagnostic.</li>
         <li>CUDA-graph regressions cover nonzero initial-state finite differences, terminal gradient isolation, minibatch state gather, mirror-state isolation, read-only bootstrap, deterministic PPO updates, graph-leapfrog state synchronization, checkpoint/resume, and train-to-gate smoke.</li>
-        <li><strong>Decision:</strong> retain the general correctness fix, keep rollout-start reset as the recipe default, reject persistent recurrence as a time-to-policy optimization, and leave the official expected G1 cost at 343.19 s.</li>
+        <li>A second general learner alternative also fails: standard transition-aligned V-trace scores 0.623 for seed 29 and 0.656 with two falls for seed 11 at iteration 75, versus retained shifted-layout scores of 0.644 and 0.697. PhoenX matches PufferLib's unusual shifted convention exactly; the standard alternative is removed rather than left as benchmark clutter.</li>
+        <li><strong>Decision:</strong> retain the general correctness fix and Puffer-shifted layout, keep rollout-start reset as the recipe default, reject both persistent recurrence and standard-aligned V-trace as time-to-policy optimizations, and leave the official expected G1 cost at 343.19 s.</li>
       </ul>
     </article>
     <article>
