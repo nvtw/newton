@@ -1285,7 +1285,113 @@ class TestReducedArticulation(unittest.TestCase):
         np.testing.assert_allclose(state0.body_q.numpy(), fk_state.body_q.numpy(), atol=2.0e-5)
         np.testing.assert_allclose(state0.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
 
-    def test_hybrid_maximal_floating_tree_conserves_momentum_under_graph_capture(self):
+    def test_maximal_imported_orientation_conserves_momentum_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("maximal articulation tests require CUDA graph capture")
+
+        model = _make_floating_tree(device)
+        state0 = model.state()
+        state1 = model.state()
+        q = state0.joint_q.numpy()
+        q[:3] = np.array([0.2, -0.1, 0.4], dtype=np.float32)
+        q[3:7] = np.asarray(wp.quat_rpy(0.2, -0.1, 0.3), dtype=np.float32)
+        q[7] = 0.45
+        qd = np.array([0.4, -0.2, 0.15, 0.3, -0.25, 0.2, 1.1], dtype=np.float32)
+        for state in (state0, state1):
+            state.joint_q.assign(q)
+            state.joint_qd.assign(qd)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        momentum_before = _total_momentum(model, state0)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal",
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(state0, state1, None, None, 1.0 / 1000.0)
+            solver.step(state1, state0, None, None, 1.0 / 1000.0)
+        for _ in range(128):
+            wp.capture_launch(capture.graph)
+
+        momentum_after = _total_momentum(model, state0)
+        momentum_error = momentum_after - momentum_before
+        linear_relative_error = np.linalg.norm(momentum_error[:3]) / np.linalg.norm(momentum_before[:3])
+        angular_relative_error = np.linalg.norm(momentum_error[3:]) / np.linalg.norm(momentum_before[3:])
+        self.assertLess(linear_relative_error, 2.0e-4)
+        self.assertLess(angular_relative_error, 2.0e-4)
+        self.assertTrue(np.isfinite(state0.joint_q.numpy()).all())
+        self.assertTrue(np.isfinite(state0.joint_qd.numpy()).all())
+
+    def test_maximal_projected_handles_multiple_articulations_in_one_world_inside_graph(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("hybrid articulation tests require CUDA graph capture")
+
+        model = _make_translated_floating_pair(device, translation=3.0)
+        state0 = model.state()
+        state1 = model.state()
+        qd = np.linspace(-0.35, 0.45, int(model.joint_dof_count), dtype=np.float32)
+        for state in (state0, state1):
+            state.joint_qd.assign(qd)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        momentum_before = _total_momentum(model, state0)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal_projected",
+            substeps=1,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        self.assertIsNotNone(solver._maximal_tree_projector)
+        self.assertIsNone(solver._reduced_articulation)
+        self.assertEqual(solver._maximal_tree_projector.articulation_count, 2)
+
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(state0, state1, None, None, 1.0 / 1000.0)
+        wp.capture_launch(capture.graph)
+
+        momentum_after = _total_momentum(model, state1)
+        np.testing.assert_allclose(momentum_after, momentum_before, rtol=2.0e-4, atol=2.0e-5)
+        projector = solver._maximal_tree_projector
+        reactions = projector.data.reaction.numpy()
+        motion = projector.data.motion.numpy()
+        self.assertLess(float(np.max(np.abs(reactions[:, 0]))), 2.0e-5)
+        self.assertLess(float(np.max(np.abs(np.sum(reactions[:, 1:] * motion[:, 1:], axis=2)))), 2.0e-5)
+        self.assertTrue(np.isfinite(state1.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state1.body_qd.numpy()).all())
+
+    def test_maximal_projected_mixed_tree_uses_established_fallback_inside_graph(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("hybrid articulation tests require CUDA graph capture")
+
+        for articulation_mode in ("maximal_projected", "hybrid"):
+            with self.subTest(articulation_mode=articulation_mode):
+                model = _make_mixed_tree(device)
+                state0 = model.state()
+                state1 = model.state()
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    articulation_mode=articulation_mode,
+                    substeps=1,
+                    solver_iterations=2,
+                    velocity_iterations=1,
+                )
+                self.assertIsNone(solver._maximal_tree_projector)
+                self.assertIsNotNone(solver._reduced_articulation)
+
+                with wp.ScopedCapture(device=device) as capture:
+                    solver.step(state0, state1, None, None, 1.0 / 1000.0)
+                wp.capture_launch(capture.graph)
+                self.assertTrue(np.isfinite(state1.body_q.numpy()).all())
+                self.assertTrue(np.isfinite(state1.body_qd.numpy()).all())
+
+    def test_maximal_projected_floating_tree_conserves_momentum_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
             self.skipTest("hybrid articulation tests require CUDA graph capture")
@@ -1306,7 +1412,7 @@ class TestReducedArticulation(unittest.TestCase):
         momentum_before = _total_momentum(model, state0)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="hybrid",
+            articulation_mode="maximal_projected",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,

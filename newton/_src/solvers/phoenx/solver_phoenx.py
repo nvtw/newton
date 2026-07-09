@@ -934,6 +934,7 @@ class PhoenXWorld:
             max(1, self.num_joints), dtype=wp.int32, device=self.device
         )
         self._reduced_articulation = None
+        self._maximal_tree_projector = None
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
         self._reduced_constraints_active_this_step = False

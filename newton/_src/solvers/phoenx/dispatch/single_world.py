@@ -45,21 +45,26 @@ class SingleWorldDispatcher:
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
+        if w._maximal_tree_projector is not None:
+            w._maximal_tree_projector.project(use_bias=True)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=False)
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
-        if w._constraint_capacity == 0 or w.velocity_iterations <= 0:
+        if w._constraint_capacity == 0:
             return
         if not w._regular_pgs_active_this_step:
             if w._reduced_constraints_active_this_step:
                 w._reduced_articulation.solve_constraints(w, idt, relax=True)
             return
-        _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
-        for _ in range(w.velocity_iterations):
-            w._partitioner.begin_sweep()
-            w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
+        if w.velocity_iterations > 0:
+            _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
+            for _ in range(w.velocity_iterations):
+                w._partitioner.begin_sweep()
+                w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
+        if w._maximal_tree_projector is not None:
+            w._maximal_tree_projector.project(use_bias=False)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=True)
 

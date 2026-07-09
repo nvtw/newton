@@ -12,6 +12,7 @@
 - Add `ConfigEnvG1PhoenX` scheduler knobs for `threads_per_world`, `multi_world_scheduler`, and `prepare_refresh_stride` so experimental G1 RL runs can benchmark PhoenX solver schedules without monkeypatching.
 - Add experimental `SolverPhoenX(articulation_mode="reduced")` support for linear-time reduced-coordinate articulation dynamics and rigid contacts through the common Newton `State` and `Control` API, including CUDA graph capture and multi-world execution.
 - Add experimental `SolverPhoenX(articulation_mode="hybrid")` support, keeping maximal PGS joint rows active while using the exact armature-aware articulated-body response as their preconditioner. This improves stiff robot training stability while preserving CUDA graph capture and multi-world execution.
+- Add experimental `SolverPhoenX(articulation_mode="maximal_projected")` support for exact mass-metric projection of eligible maximal-coordinate robot joint trees, including recovered warm-start reactions, CUDA graph capture, multiple articulations per world, and established hybrid fallback for unsupported topologies.
 - Add experimental pure-Warp `newton.rl` PPO and SAC training utilities, including a PhoenX Anymal sparse-target locomotion environment, deterministic evaluation metrics, and PPO checkpoint resume helpers.
 - Add manual critic-backward PPO controls for the experimental PhoenX G1 RL training path, including `ConfigPPO.manual_critic_backward` and `newton.rl train-g1-ppo --no-manual-critic-backward`.
 - Add strict walking validation metrics and configurable upright termination for the experimental PhoenX Anymal RL environment.
@@ -100,6 +101,7 @@
 - Fix experimental PhoenX G1 replacement foot boxes bypassing the MJCF no-self-collision filters, preventing unintended robot self-contacts during policy exploration.
 - Fix the experimental PhoenX G1 recipe to match nanoG1's 8192-world batch and full-range command distribution; the pinned build does not enable its optional command curriculum.
 - Fix maximal-coordinate PhoenX revolute armature by adding motor-side stator inertia to the parent and gear-reflected rotor inertia to the child, preserving rigid-body momentum and gyroscopic dynamics without auxiliary constraint rows.
+- Fix `SolverPhoenX` state imports leaving world-space inverse inertia at the previous orientation, which produced incorrect first-frame impulses and angular-momentum jumps after resets or externally modified poses.
 - Stabilize the full-coordinate PhoenX `robot_g1` example with a fine temporal schedule.
 - Fix reduced-coordinate PhoenX motion-subspace evaluation after the common Featherstone API gained configuration-dependent D6 angular axes.
 - Fix reduced-coordinate PhoenX FREE and DISTANCE descendants to preserve child-COM velocity under rotated anchors and accelerating parents, and accept tree DISTANCE joints through `articulation_mode="reduced"`.

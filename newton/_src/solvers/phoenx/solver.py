@@ -15,6 +15,7 @@ import warp as wp
 
 import newton
 from newton._src.sim import BodyFlags, Contacts, Control, JointType, Model, ModelFlags, State
+from newton._src.solvers.phoenx.articulations.maximal_projector import MaximalTreeProjector
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation
 from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
@@ -252,25 +253,28 @@ class SolverPhoenX(SolverBase):
                 threshold before being flagged sleeping. Default 30
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
-            articulation_mode: "maximal" keeps independent-body tree
+            articulation_mode: ``"maximal"`` keeps independent-body tree
                 dynamics and classic PhoenX PGS. Revolute ``joint_armature`` is
                 added to the stator-side parent body and reflected through
-                joint_gear onto the rotor-side child body. "hybrid" keeps the maximal
-                joint rows active while using the exact articulated-body response
-                as their preconditioner. "reduced" lets generalized coordinates
-                own tree joints.
+                ``joint_gear`` onto the rotor-side child body.
+                ``"maximal_projected"`` additionally applies an exact
+                mass-metric tree projection on supported CUDA robot forests,
+                with established hybrid fallback for other topologies.
+                ``"hybrid"`` retains the articulated-body preconditioner, and
+                ``"reduced"`` lets generalized coordinates own tree joints.
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
                 topology-proven cross-phase articulation fusion on CUDA.
         """
         super().__init__(model)
-        if articulation_mode not in ("maximal", "hybrid", "reduced"):
-            raise ValueError(f"articulation_mode must be 'maximal', 'hybrid', or 'reduced', got {articulation_mode!r}")
+        valid_articulation_modes = ("maximal", "maximal_projected", "hybrid", "reduced")
+        if articulation_mode not in valid_articulation_modes:
+            raise ValueError(f"articulation_mode must be one of {valid_articulation_modes}, got {articulation_mode!r}")
         if reduced_articulation_path not in ("reference", "persistent"):
             raise ValueError(
                 f"reduced_articulation_path must be 'reference' or 'persistent', got {reduced_articulation_path!r}"
             )
-        if articulation_mode == "maximal" and reduced_articulation_path != "reference":
+        if articulation_mode in ("maximal", "maximal_projected") and reduced_articulation_path != "reference":
             raise ValueError("reduced_articulation_path requires articulation_mode='hybrid' or 'reduced'")
         if contact_friction_model not in ("point", "patch"):
             raise ValueError(f"contact_friction_model must be 'point' or 'patch', got {contact_friction_model!r}")
@@ -280,19 +284,27 @@ class SolverPhoenX(SolverBase):
             raise ValueError(
                 "contact_friction_model='patch' currently requires solver_flavor='standard' and mass_splitting=False"
             )
-        if articulation_mode in ("hybrid", "reduced") and solver_flavor != "standard":
-            raise ValueError("hybrid/reduced articulations currently require solver_flavor='standard'")
-        if articulation_mode in ("hybrid", "reduced") and mass_splitting:
-            raise ValueError("hybrid/reduced articulation modes require mass_splitting=False")
-        if articulation_mode in ("hybrid", "reduced") and multi_world_scheduler.startswith("block_world"):
-            raise ValueError("hybrid/reduced articulation modes require the fast-tail multi-world scheduler")
-        if articulation_mode in ("hybrid", "reduced") and multi_world_scheduler == "auto":
+        if articulation_mode in ("maximal_projected", "hybrid", "reduced") and solver_flavor != "standard":
+            raise ValueError("projected/hybrid/reduced articulations currently require solver_flavor='standard'")
+        if articulation_mode in ("maximal_projected", "hybrid", "reduced") and mass_splitting:
+            raise ValueError("projected/hybrid/reduced articulation modes require mass_splitting=False")
+        if articulation_mode in ("maximal_projected", "hybrid", "reduced") and multi_world_scheduler.startswith(
+            "block_world"
+        ):
+            raise ValueError("projected/hybrid/reduced articulation modes require the fast-tail multi-world scheduler")
+        if articulation_mode in ("maximal_projected", "hybrid", "reduced") and multi_world_scheduler == "auto":
             multi_world_scheduler = "fast_tail"
         self.articulation_mode = articulation_mode
         self.reduced_articulation_path = reduced_articulation_path
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
+        self._maximal_tree_projector: MaximalTreeProjector | None = None
+        self._uses_maximal_tree_projector = articulation_mode == "maximal_projected" and (
+            MaximalTreeProjector.supports_model(model)
+        )
         self._phoenx_body_inv_inertia = (
-            _build_maximal_motor_body_inv_inertia(model) if articulation_mode == "maximal" else model.body_inv_inertia
+            _build_maximal_motor_body_inv_inertia(model)
+            if articulation_mode == "maximal" or self._uses_maximal_tree_projector
+            else model.body_inv_inertia
         )
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
         if velocity_readout not in valid_readouts:
@@ -512,7 +524,15 @@ class SolverPhoenX(SolverBase):
             adbs_kwargs = self._adbs.to_initialize_kwargs()
             self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
 
-        if self.articulation_mode in ("hybrid", "reduced") and int(model.articulation_count) > 0:
+        if self._uses_maximal_tree_projector:
+            self._maximal_tree_projector = MaximalTreeProjector(
+                model,
+                self._constraints,
+                self.bodies,
+                self._adbs.joint_idx_to_cid,
+            )
+            self.world._maximal_tree_projector = self._maximal_tree_projector
+        elif self.articulation_mode in ("maximal_projected", "hybrid", "reduced") and int(model.articulation_count) > 0:
             self._reduced_articulation = ReducedPhoenXArticulation(
                 model, self.bodies, execution_path=self.reduced_articulation_path
             )
@@ -1037,15 +1057,28 @@ class SolverPhoenX(SolverBase):
         # rebuilt joint rows above and does not mutate body inertia.
         body_refresh_mask = int(ModelFlags.BODY_INERTIAL_PROPERTIES | ModelFlags.BODY_PROPERTIES)
         body_properties_changed = bool(flags & body_refresh_mask)
-        maximal_joint_properties_changed = joint_props_changed and self.articulation_mode == "maximal"
-        reduced_joint_properties_changed = joint_props_changed and self.articulation_mode in ("hybrid", "reduced")
-        if self.articulation_mode == "maximal" and (body_properties_changed or joint_props_changed):
+        uses_maximal_mass = self.articulation_mode == "maximal" or self._uses_maximal_tree_projector
+        maximal_joint_properties_changed = joint_props_changed and uses_maximal_mass
+        reduced_joint_properties_changed = joint_props_changed and self._reduced_articulation is not None
+        if uses_maximal_mass and (body_properties_changed or joint_props_changed):
             self._phoenx_body_inv_inertia = _build_maximal_motor_body_inv_inertia(self.model)
         if body_properties_changed or maximal_joint_properties_changed or reduced_joint_properties_changed:
             if self.model.body_count > 0:
                 self._launch_init_phoenx_bodies(self.model)
-                if self.articulation_mode in ("hybrid", "reduced") and self._reduced_articulation is not None:
+                if self._reduced_articulation is not None:
                     self._reduced_articulation.system.refresh_inertial_properties()
+        if joint_props_changed and self._uses_maximal_tree_projector:
+            if not MaximalTreeProjector.supports_model(self.model):
+                raise RuntimeError(
+                    "joint topology no longer supports the active maximal tree projector; rebuild SolverPhoenX"
+                )
+            self._maximal_tree_projector = MaximalTreeProjector(
+                self.model,
+                self._constraints,
+                self.bodies,
+                self._adbs.joint_idx_to_cid,
+            )
+            self.world._maximal_tree_projector = self._maximal_tree_projector
         if flags & int(ModelFlags.SHAPE_PROPERTIES):
             if self.model.shape_material_mu is not None and self.model.shape_count > 0:
                 self._install_shape_materials()

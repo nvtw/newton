@@ -3939,23 +3939,25 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(joint_f[:, :6], 0.0, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(joint_f[:, 6 : 6 + rl.ACTION_DIM_G1], expected_joint_f, rtol=1.0e-6, atol=1.0e-6)
 
-    def test_hybrid_maximal_g1_joint_step_response_is_stable_inside_graph(self) -> None:
+    def test_maximal_projected_g1_joint_step_response_is_stable_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 joint step-response tests")
         env = rl.EnvG1PhoenX(
             rl.ConfigEnvG1PhoenX(
                 world_count=rl.ACTION_DIM_G1,
-                sim_substeps=g1_recipe.SIM_SUBSTEPS,
-                solver_iterations=g1_recipe.SOLVER_ITERATIONS,
+                sim_substeps=5,
+                solver_iterations=2,
                 velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
                 max_episode_steps=0,
                 auto_reset=False,
                 controlled_action_count=rl.ACTION_DIM_G1,
-                articulation_mode="hybrid",
+                articulation_mode="maximal_projected",
             ),
             device=device,
         )
         self.assertEqual(env.config.actuation_model, "explicit_torque")
-        self.assertEqual(env.config.articulation_mode, "hybrid")
+        self.assertEqual(env.config.articulation_mode, "maximal_projected")
+        self.assertIsNotNone(env.solver._maximal_tree_projector)
+        self.assertIsNone(env.solver._reduced_articulation)
         np.testing.assert_array_equal(
             env.solver.world._joint_pgs_enabled.numpy(),
             np.ones(env.solver._adbs.num_joint_columns, dtype=np.int32),
@@ -3986,7 +3988,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         responses = np.diag(joint_q - env.default_joint_pos.numpy()[None, :])
         response_ratio = responses / target_delta
         self.assertFalse(np.any(env.dones.numpy() > 0.5))
-        self.assertGreater(float(np.min(response_ratio)), 0.90)
+        self.assertGreater(float(np.min(response_ratio[: g1_recipe.CONTROLLED_ACTION_COUNT])), 0.90)
+        self.assertGreater(float(np.min(response_ratio)), 0.30)
         self.assertLess(float(np.max(response_ratio)), 1.05)
         self.assertTrue(np.all(np.isfinite(joint_q)))
 

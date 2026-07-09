@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · maximal joint-tree breakthrough</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · projected maximal integration</strong></div>
     </header>
 
     <section class="hero">
@@ -264,21 +264,21 @@
 
     <div class="section-label">Latest findings</div>
     <article>
-      <div class="meta"><span class="tag good">BREAKTHROUGH PROTOTYPE · ROBOT PATH</span><time>9 Jul</time></div>
-      <h2>Topology-aware maximal projection stabilizes G1 at 5×2</h2>
-      <p>An isolated graph-captured prototype now projects maximal body velocities onto the persistent robot joint tree with a linear-time articulated recursion. A mass-weighted affine projection runs after the biased GS solve and a homogeneous projection runs after relaxation. Revolute motion remains free; only locked joint directions are corrected. Contacts, motors, limits, and loop rows remain in ordinary PhoenX GS.</p>
+      <div class="meta"><span class="tag good">INTEGRATED CANDIDATE &middot; GRAPH CAPTURED</span><time>9 Jul</time></div>
+      <h2>Projected maximal robots are stable and faster than reduced PhoenX</h2>
+      <p>The tree projection now runs through the real solver adapter as the additive <code>articulation_mode="maximal_projected"</code> path. It preserves maximal body/contact state and ordinary deterministic GS rows, then performs one exact bottom-up/top-down mass-metric projection across each persistent robot tree. Existing <code>"hybrid"</code> behavior is unchanged; unsupported projected topologies fall back to that established backend.</p>
       <ul>
-        <li>The mathematical recurrence matches a dense KKT projection across 1,000 randomized anchored/floating trees with 1–32 bodies, fixed/revolute/prismatic/ball subspaces, and six decades of mass/inertia. Maximum dense error is 2.3×10<sup>−7</sup>; allowed-coordinate impulse is 3.4×10<sup>−7</sup>; kinetic energy never increases.</li>
-        <li>Ordinary maximal G1 at 5 substeps × 2 PGS iterations terminates all 32 seeded exploration worlds by control step 2, with 0.254 m peak / 0.0338 m RMS anchor error. It measures 32.2k control-steps/s in the intentional-readback diagnostic.</li>
-        <li>With the new projection, the same 32 worlds survive all 50 steps. With recovered joint reactions also published to warm-start state, peak/RMS anchor error is 8.3×10<sup>−5</sup> / 1.5×10<sup>−6</sup> m, and the final locked-velocity residual remains around 10<sup>−7</sup>. Diagnostic throughput is 22.2k steps/s—about 69% of unsafe maximal while retaining near-hybrid closure.</li>
-        <li>Across two paired 200-step random-action seeds, projected maximal reaches 23.4–23.6k steps/s and median termination step 80. Reduced reaches 11.8–12.0k steps/s and median 93–94.5. Both eventually fall under this aggressive exploration; the prototype is about 2× faster in this matched bracket but still has a modest robustness gap.</li>
-        <li>The same free-root/revolute kernel generalizes without robot-specific tuning. On ANYmal, joint RMS error falls from 8.7×10<sup>−4</sup> to 4.3×10<sup>−7</sup> m with unchanged 3.1% termination incidence over 100 aggressive-action steps. On H1, RMS error falls from 3.1×10<sup>−2</sup> to 1.5×10<sup>−5</sup> m; both baseline and candidate eventually fall under the untrained random actions.</li>
-        <li>The current hybrid 5×2 path is stable but runs the full reduced factor/advance/publish pipeline plus maximal joint rows. Its short diagnostic measured only 2.6k steps/s. If the new method passes broad gates, replacing—not adding beside—this hybrid implementation is the clean integration.</li>
-        <li>The GPU prototype projects 8,192 branched 29-body revolute trees and recovers every joint reaction in 317 µs per graph replay. It uses one warp per articulation and supports many articulations in either one world or many worlds; matrix layout/shared-memory optimization remains open.</li>
-        <li>Persistent joint/body topology is preprocessed once. Frame-varying contact topology is never assumed static: support attachments will be rebuilt after collision detection and ambiguous contacts retain deterministic GS fallback.</li>
-        <li><strong>Not production-ready:</strong> the current code is free-root/revolute-only scratch code. It now publishes recovered reactions to warm-start state, but force reconstruction and long-horizon reporting still need permanent tests. ANYmal/H1, armature/motors, limits, closed loops, contacts, momentum/energy, arbitrary articulation sizes, deterministic single/multi-world execution, and end-to-end training remain mandatory gates.</li>
+        <li>The recurrence still matches dense KKT projection across 1,000 randomized anchored/floating trees with 1&ndash;32 bodies, mixed fixed/revolute/prismatic/ball subspaces, and six mass/inertia decades. Maximum dense error is 2.3&times;10<sup>&minus;7</sup>, allowed-coordinate impulse is 3.4&times;10<sup>&minus;7</sup>, and kinetic energy never increases.</li>
+        <li>Matched graph-captured G1 at 5 substeps &times; 2 PGS iterations keeps all 32 seeded worlds alive for 50 aggressive-action steps with 8.6&times;10<sup>&minus;5</sup> m peak / 1.5&times;10<sup>&minus;6</sup> m RMS anchor error. Ordinary maximal fails almost immediately in the same screen.</li>
+        <li>The latest intentional-readback bracket measures <strong>21.79k</strong> control-steps/s for projected maximal, 12.03k for reduced, and 5.46k for established hybrid: projected maximal is 1.81&times; reduced and 3.99&times; old hybrid in this diagnostic. This is not yet an end-to-end training-throughput or time-to-policy claim.</li>
+        <li>Production CUDA-graph tests pass for floating momentum, recovered reaction orthogonality, two independent articulations in one world, mixed-tree fallback, G1 motor response, and repeated graph replay. Multiple worlds are exercised by the 32-world G1 test.</li>
+        <li>The integration exposed a general maximal-coordinate reset bug: importing a rotated state left world inverse inertia at its previous orientation for one frame. Rebuilding it at the import boundary reduces repeated floating-tree angular-momentum error from about 9.3&times;10<sup>&minus;3</sup> to 8&times;10<sup>&minus;6</sup>. Focused momentum, energy, armature, and live-armature-update modules pass.</li>
+        <li>ANYmal and H1 scratch gates previously showed the same robot-independent closure improvement. Permanent cross-robot tests and policy training are still required before this path can affect the primary time-to-policy score.</li>
+        <li>The retained ideal kernel projects 8,192 branched 29-body trees and reconstructs every reaction in about 325 &micro;s per graph replay on RTX PRO 6000 Blackwell. It uses one warp per articulation; memory-layout and launch fusion remain optimization opportunities.</li>
+        <li><strong>Current limitation:</strong> the production specialization handles dynamic free-root revolute forests. Fixed, ball, prismatic, anchored, and supported D6 trees currently take the safe old-hybrid fallback. The dense algorithm already supports mixed motion subspaces; a separate general GPU kernel is next so the fast revolute path stays branch-light.</li>
+        <li>Contacts, loop closures, limits, and other ordinary constraints remain in deterministic PhoenX GS. Contact topology is never cached across collision frames. Contact-rich long-horizon robot training, determinism, broader joint families, and held-out time-to-policy remain promotion gates.</li>
       </ul>
-      <p class="profile-note">This is the first experiment to combine near-maximal throughput with near-reduced joint closure at the production 5×2 schedule. No public or production solver path has changed yet.</p>
+      <p class="profile-note">Retained derivation and promotion gates: <a href="docs/MAXIMAL_JOINT_TREE_PROJECTOR.md">MAXIMAL_JOINT_TREE_PROJECTOR.md</a>. Reproducible ideal kernel: <a href="benchmarks/experimental/bench_maximal_joint_tree_projector.py">bench_maximal_joint_tree_projector.py</a>. No user profiling action is currently required.</p>
     </article>
     <article>
       <div class="meta"><span class="tag warn">PROMISING PROTOTYPE · NOT PRODUCTION</span><time>9 Jul</time></div>
@@ -502,7 +502,7 @@
           <li>Optimize solver, collision, environment, policy, learner, curriculum, precision, and overlap jointly. PBT is allowed, but its full wall time counts.</li>
           <li>Track supporting diagnostics: paired development seed, held-out evaluation seed bank, samples/s, physics steps/s, sample count to gate, evaluation quality, timestep, GPU memory, and compilation/setup time.</li>
           <li>Keep this page compact and newest-first, update it whenever the decision state changes, and open it in Chrome after every update.</li>
-          <li><strong>Immediate next step:</strong> build deterministic full-coordinate high-mass-ratio convergence, energy, and momentum benchmarks; improve row/block conditioning or mass splitting inside colored Gauss–Seidel without ad-hoc damping, then validate retained changes across the task suite.</li>
+          <li><strong>Immediate next step:</strong> generalize the projected-maximal GPU path to anchored and mixed fixed/ball/prismatic/D6 trees without slowing the revolute specialization, then run permanent G1/ANYmal/H1/contact gates and paired time-to-policy races.</li>
         </ul>
       </div>
     </section>

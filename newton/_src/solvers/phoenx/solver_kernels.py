@@ -33,6 +33,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
 )
+from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 
 __all__ = [
     "_apply_joint_control_kernel",
@@ -146,6 +147,8 @@ def _import_body_state_kernel(
     else:
         bodies.position[dst] = pose_origin
         bodies.orientation[dst] = rot
+        rotation = wp.quat_to_matrix(rot)
+        bodies.inverse_inertia_world[dst] = sym6_from_mat33(rotate_inertia(rotation, bodies.inverse_inertia[dst]))
         qd = body_qd[tid]
         bodies.velocity[dst] = wp.vec3f(qd[0], qd[1], qd[2])
         bodies.angular_velocity[dst] = wp.vec3f(qd[3], qd[4], qd[5])

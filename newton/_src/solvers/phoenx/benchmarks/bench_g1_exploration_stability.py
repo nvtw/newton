@@ -45,6 +45,7 @@ SETTINGS = {
         Setting("maximal_10x8_v1", "maximal", 10, 8, 1),
         Setting("maximal_20x4_v1", "maximal", 20, 4, 1),
         Setting("maximal_40x2_v1", "maximal", 40, 2, 1),
+        Setting("maximal_projected_5x2_v1", "maximal_projected", 5, 2, 1),
         Setting("hybrid_5x2_v1", "hybrid", 5, 2, 1),
         Setting("reduced_5x2_v1", "reduced", 5, 2, 1),
     )
