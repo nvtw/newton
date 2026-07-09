@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · mixed projected articulations</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · compact projector validated</strong></div>
     </header>
 
     <section class="hero">
@@ -229,13 +229,29 @@
 
     <div class="section-label">Current state</div>
     <article>
+      <div class="meta"><span class="tag good">THROUGHPUT PARITY · QUALITY PENDING</span><time>Latest matched G1 evidence</time></div>
+      <h2>Compact projected full coordinates erase the reduced-coordinate throughput deficit</h2>
+      <p>The exact projector now stores body mass, symmetric world inertia, and joint shift in 10 scalars per body instead of loading two full spatial matrices (72 scalars). It reconstructs the identical block-diagonal spatial mass and shift transform at use sites. At 8,192 worlds with the same 5-substep, 2-PGS-iteration graph-leapfrog schedule, fresh matched runs place projected maximal and reduced coordinates at approximately <strong>649k samples/s each</strong>; two preceding projected repeats measured 651&ndash;653k/s. The honest result is parity within run noise, after an 8.3% projected deficit before compaction.</p>
+      <ul>
+        <li>Physical stability is promising: a 75-iteration projected G1 run and its frozen held-out screen produced zero falls, while graph tests preserve closures, momentum, contacts, and bitwise determinism.</li>
+        <li>Policy quality is not yet sufficient: seed 42 reached held-out battery performance 0.643 versus the frozen 0.680 early gate; the retained reduced-coordinate seed-42 result at the same iteration is 0.708.</li>
+        <li>Reducing projected maximal from five to four or three substeps is not viable: long-horizon random-action tests terminate earlier and constraint error rises sharply.</li>
+        <li>Cross-mode checkpoint swaps confirm materially different coupled dynamics, while contact-free and grounded open-loop trajectories make projected maximal at least as close to the nanoG1 reference as reduced coordinates. There is no evidence of a basic projector correctness bug.</li>
+        <li>The compact representation plus four independent articulation warps per CUDA block improves the isolated graph-captured physics bracket from 920k to <strong>1.050M environment steps/s</strong> (+14.1%). The ordering and equations are unchanged.</li>
+        <li>Ten focused CUDA-graph gates pass after compaction: floating momentum, floating and contacting loops, mixed trees, D6, multiple articulations per world, bitwise determinism, and the G1 joint step response.</li>
+        <li>A production-scale Nsight trace of the former representation identified the exact projector recurrence as 36.9% of measured GPU kernel duration; gather and publish added 12.8%. The counter capture showed zero spilling, 33.3% register-limited occupancy, 72.7% L2 throughput, 48.6% LG-memory throttle, and only 4.45 active threads per warp.</li>
+        <li>Register/shuffle, one-thread-per-articulation, and four-articulations-per-warp sub-warp prototypes were measured and rejected: they were respectively unboundedly slow, 38% slower, and 7.7% slower. The retained layout preserves one warp per articulation and merely packs four independent warps into a block.</li>
+        <li>Promotion is still blocked by policy quality, not throughput: the existing projected seed-42 iteration-75 screen scores 0.643 versus the frozen 0.680 gate and the matched reduced result of 0.708. A bounded retraining race is required before this affects time-to-policy.</li>
+      </ul>
+    </article>
+    <article>
       <div class="meta"><span class="tag good">FOUNDATION READY</span><time>Known evidence</time></div>
       <h2>Training works; the authoritative measurement loop now runs</h2>
       <p>Reduced-coordinate PhoenX already trains a robust G1 walker from scratch: two independent 157.3M-sample runs pass the complete frozen-policy gate with zero falls and about 0.91 tracking. This proves feasibility, not optimal wall-clock convergence.</p>
       <ul>
         <li>Pure PhoenX/PhoenX-RL environments now cover Ant, Humanoid, Go2, G1, H1, ANYmal-C, DR Legs hold-pose, and DR Legs walking, without IsaacLab runtime dependencies.</li>
         <li>Reduced, hybrid, and full-coordinate PhoenX are all eligible. Coordinate choice is an experimental variable, not an ideology; physical accuracy, stability, and the task gate decide.</li>
-        <li>A matched 512-world G1 contact diagnostic measures maximal coordinates at 891.8k steps/s versus 167.9k/s for the persistent reduced path (5.3× raw speed). This is not a quality-equivalent training comparison, but it makes robust maximal convergence a high-leverage target.</li>
+        <li>The compact projected-maximal path now matches reduced-coordinate throughput at about 649k samples/s in the 8,192-world 5&times;2 benchmark. Production-scale held-out policy quality—not throughput alone—decides promotion.</li>
         <li>The retained 923k/s steady-training result and solver profiles remain secondary diagnostics for explaining time-to-policy changes.</li>
         <li>G1, ANYmal, and closed-loop DR Legs hold now run under the fresh-process metric with paired train/gate seeds, consecutive held-out windows, strict JSON records, timeout/crash/miss censoring, and restart-cost uncertainty.</li>
       </ul>
@@ -502,7 +518,7 @@
           <li>Optimize solver, collision, environment, policy, learner, curriculum, precision, and overlap jointly. PBT is allowed, but its full wall time counts.</li>
           <li>Track supporting diagnostics: paired development seed, held-out evaluation seed bank, samples/s, physics steps/s, sample count to gate, evaluation quality, timestep, GPU memory, and compilation/setup time.</li>
           <li>Keep this page compact and newest-first, update it whenever the decision state changes, and open it in Chrome after every update.</li>
-          <li><strong>Immediate next step:</strong> generalize the projected-maximal GPU path to anchored and mixed fixed/ball/prismatic/D6 trees without slowing the revolute specialization, then run permanent G1/ANYmal/H1/contact gates and paired time-to-policy races.</li>
+          <li><strong>Immediate next step:</strong> checkpoint the compact exact projected-maximal path, then prototype deterministic parallel tree contraction as a maximal-coordinate joint preconditioner. Test high mass ratios, mixed joints, contacts, loops, G1, ANYmal, and H1 before promotion.</li>
         </ul>
       </div>
     </section>

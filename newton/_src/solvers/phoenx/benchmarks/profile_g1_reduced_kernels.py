@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bounded Nsight profile driver for reduced-coordinate PhoenX G1 physics.
+"""Bounded Nsight profile driver for PhoenX G1 articulation physics.
 
 The CUDA profiler API excludes environment construction, kernel compilation,
 and graph capture. Only one to ten steady-state CUDA graph replays are visible
@@ -42,8 +42,14 @@ def _load_cudart() -> ctypes.CDLL:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--world-count", type=int, default=8192)
+    parser.add_argument(
+        "--articulation-mode",
+        choices=("reduced", "maximal_projected"),
+        default="reduced",
+    )
     parser.add_argument("--replays", type=int, choices=range(1, 11), default=5)
     parser.add_argument("--warmup-replays", type=int, default=2)
+    parser.add_argument("--projector-block-dim", type=int, choices=(32, 64, 128, 256), default=32)
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument("--velocity-iterations", type=int, default=1)
@@ -53,7 +59,7 @@ def main() -> int:
 
     device = wp.get_device(args.device)
     if not device.is_cuda or not wp.is_mempool_enabled(device):
-        raise RuntimeError("reduced G1 profiling requires CUDA with Warp mempool enabled")
+        raise RuntimeError("G1 articulation profiling requires CUDA with Warp mempool enabled")
     if args.warmup_replays < 0:
         raise ValueError("--warmup-replays must be non-negative")
 
@@ -63,7 +69,7 @@ def main() -> int:
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
-            articulation_mode="reduced",
+            articulation_mode=args.articulation_mode,
             actuation_model=g1_recipe.ACTUATION_MODEL,
             controlled_action_count=g1_recipe.CONTROLLED_ACTION_COUNT,
             parse_meshes=False,
@@ -75,6 +81,11 @@ def main() -> int:
         ),
         device=device,
     )
+    if args.articulation_mode == "maximal_projected":
+        projector = env.solver._maximal_tree_projector
+        if projector is None:
+            raise RuntimeError("maximal_projected profiling requires a supported maximal tree projector")
+        projector.block_dim = args.projector_block_dim
     actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
     steps_per_graph = 1 if args.sim_substeps % 2 == 0 else 2
     graph = rl.capture_env_steps(env, actions, steps_per_graph=steps_per_graph, warmup_steps=4)
@@ -97,12 +108,13 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "articulation_mode": "reduced",
+                "articulation_mode": args.articulation_mode,
                 "world_count": args.world_count,
                 "sim_substeps": args.sim_substeps,
                 "solver_iterations": args.solver_iterations,
                 "velocity_iterations": args.velocity_iterations,
                 "prepare_refresh_stride": args.prepare_refresh_stride,
+                "projector_block_dim": args.projector_block_dim,
                 "graph_replays": args.replays,
                 "steps_per_graph": steps_per_graph,
                 "profiled_env_steps": env_steps,

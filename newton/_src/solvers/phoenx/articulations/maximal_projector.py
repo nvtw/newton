@@ -9,7 +9,12 @@ import numpy as np
 import warp as wp
 
 from newton._src.sim import JointType, Model
-from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
+from newton._src.solvers.phoenx.body import (
+    BodyContainer,
+    inertia_sym6,
+    mat33_from_sym6,
+    sym6_from_mat33,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     read_vec3,
@@ -73,6 +78,29 @@ def _solve_spd6(a: wp.spatial_matrixf, b: wp.spatial_vectorf):
     return result
 
 
+@wp.func
+def _make_spatial_mass(body_mass: wp.float32, body_inertia: inertia_sym6):
+    result = wp.spatial_matrixf(0.0)
+    inertia = mat33_from_sym6(body_inertia)
+    for row in range(3):
+        result[row, row] = body_mass
+        for column in range(3):
+            result[row + wp.int32(3), column + wp.int32(3)] = inertia[row, column]
+    return result
+
+
+@wp.func
+def _make_spatial_shift_transform(shift: wp.vec3f):
+    result = wp.spatial_matrixf(0.0)
+    shift_matrix = wp.skew(shift)
+    for row in range(6):
+        result[row, row] = wp.float32(1.0)
+    for row in range(3):
+        for column in range(3):
+            result[row, column + wp.int32(3)] = shift_matrix[row, column]
+    return result
+
+
 @wp.struct
 class MaximalTreeProjectorData:
     body_count: wp.array[wp.int32]
@@ -83,10 +111,11 @@ class MaximalTreeProjectorData:
     parent: wp.array2d[wp.int32]
     child_start: wp.array2d[wp.int32]
     child_index: wp.array2d[wp.int32]
-    transform: wp.array2d[wp.spatial_matrixf]
+    shift: wp.array2d[wp.vec3f]
     motion: wp.array2d[wp.spatial_vectorf]
     affine_offset: wp.array2d[wp.spatial_vectorf]
-    mass: wp.array2d[wp.spatial_matrixf]
+    body_mass: wp.array2d[wp.float32]
+    body_inertia: wp.array2d[inertia_sym6]
     velocity_in: wp.array2d[wp.spatial_vectorf]
     articulated: wp.array2d[wp.spatial_matrixf]
     bias: wp.array2d[wp.spatial_vectorf]
@@ -113,35 +142,30 @@ def _gather_maximal_tree_kernel(
 
     joint = data.joint_index[articulation, lane]
     body = data.body_slot[articulation, lane]
-    inverse_mass = bodies.inverse_mass[body]
-    body_mass = wp.float32(1.0) / inverse_mass
-    inertia = wp.inverse(mat33_from_sym6(bodies.inverse_inertia_world[body]))
-    spatial_mass = wp.spatial_matrixf(0.0)
-    for row in range(3):
-        spatial_mass[row, row] = body_mass
-        for column in range(3):
-            spatial_mass[row + wp.int32(3), column + wp.int32(3)] = inertia[row, column]
-    data.mass[articulation, lane] = spatial_mass
-
     linear = bodies.velocity[body]
     angular = bodies.angular_velocity[body]
     data.velocity_in[articulation, lane] = wp.spatial_vectorf(
         linear[0], linear[1], linear[2], angular[0], angular[1], angular[2]
     )
+    if not use_bias:
+        # PhoenX freezes inertia and prepared joint geometry until relax ends.
+        data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
+        return
 
-    joint_transform = wp.spatial_matrixf(0.0)
-    for diagonal in range(6):
-        joint_transform[diagonal, diagonal] = wp.float32(1.0)
+    inverse_mass = bodies.inverse_mass[body]
+    body_mass = wp.float32(1.0) / inverse_mass
+    inertia = wp.inverse(mat33_from_sym6(bodies.inverse_inertia_world[body]))
+    data.body_mass[articulation, lane] = body_mass
+    data.body_inertia[articulation, lane] = sym6_from_mat33(inertia)
+
+    joint_shift = wp.vec3f(0.0)
     joint_motion = wp.spatial_vectorf(0.0)
     affine_offset = wp.spatial_vectorf(0.0)
     if lane > wp.int32(0):
         cid = joint_to_cid[joint]
         r_parent = read_vec3(constraints, _OFF_R1_B1, cid)
         r_child = read_vec3(constraints, _OFF_R1_B2, cid)
-        shift = wp.skew(r_child - r_parent)
-        for row in range(3):
-            for column in range(3):
-                joint_transform[row, column + wp.int32(3)] = shift[row, column]
+        joint_shift = r_child - r_parent
         axis = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
         linear_motion = wp.cross(r_child, axis)
         joint_motion = wp.spatial_vectorf(
@@ -172,7 +196,7 @@ def _gather_maximal_tree_kernel(
                 locked_angular[2],
             )
 
-    data.transform[articulation, lane] = joint_transform
+    data.shift[articulation, lane] = joint_shift
     data.motion[articulation, lane] = joint_motion
     data.affine_offset[articulation, lane] = affine_offset
 
@@ -186,9 +210,9 @@ def _project_maximal_tree_kernel(data: MaximalTreeProjectorData):
     max_depth = data.max_depth[articulation]
 
     if lane < body_count:
-        body_mass = data.mass[articulation, lane]
-        data.articulated[articulation, lane] = body_mass
-        data.bias[articulation, lane] = body_mass @ data.velocity_in[articulation, lane]
+        spatial_mass = _make_spatial_mass(data.body_mass[articulation, lane], data.body_inertia[articulation, lane])
+        data.articulated[articulation, lane] = spatial_mass
+        data.bias[articulation, lane] = spatial_mass @ data.velocity_in[articulation, lane]
         data.parent_articulated[articulation, lane] = wp.spatial_matrixf(0.0)
         data.parent_bias[articulation, lane] = wp.spatial_vectorf(0.0)
         data.inverse_d[articulation, lane] = wp.float32(0.0)
@@ -214,7 +238,7 @@ def _project_maximal_tree_kernel(data: MaximalTreeProjectorData):
                 data.inverse_d[articulation, lane] = reciprocal_d
                 projected = body_articulated - reciprocal_d * wp.outer(u, u)
                 projected_bias = body_bias - reciprocal_d * wp.dot(joint_motion, body_bias) * u
-                joint_transform = data.transform[articulation, lane]
+                joint_transform = _make_spatial_shift_transform(data.shift[articulation, lane])
                 offset = data.affine_offset[articulation, lane]
                 data.parent_articulated[articulation, lane] = (
                     wp.transpose(joint_transform) @ projected @ joint_transform
@@ -235,10 +259,8 @@ def _project_maximal_tree_kernel(data: MaximalTreeProjectorData):
     while current_depth <= max_depth:
         if lane < body_count and data.depth[articulation, lane] == current_depth:
             parent = data.parent[articulation, lane]
-            base = (
-                data.transform[articulation, lane] @ data.velocity_out[articulation, parent]
-                + data.affine_offset[articulation, lane]
-            )
+            joint_transform = _make_spatial_shift_transform(data.shift[articulation, lane])
+            base = joint_transform @ data.velocity_out[articulation, parent] + data.affine_offset[articulation, lane]
             joint_motion = data.motion[articulation, lane]
             joint_velocity = data.inverse_d[articulation, lane] * wp.dot(
                 joint_motion,
@@ -251,14 +273,14 @@ def _project_maximal_tree_kernel(data: MaximalTreeProjectorData):
     current_depth = max_depth
     while current_depth >= wp.int32(0):
         if lane < body_count and data.depth[articulation, lane] == current_depth:
-            impulse = data.mass[articulation, lane] @ (
-                data.velocity_out[articulation, lane] - data.velocity_in[articulation, lane]
-            )
+            spatial_mass = _make_spatial_mass(data.body_mass[articulation, lane], data.body_inertia[articulation, lane])
+            impulse = spatial_mass @ (data.velocity_out[articulation, lane] - data.velocity_in[articulation, lane])
             begin = data.child_start[articulation, lane]
             end = data.child_start[articulation, lane + wp.int32(1)]
             for cursor in range(begin, end):
                 child = data.child_index[articulation, cursor]
-                impulse += wp.transpose(data.transform[articulation, child]) @ data.reaction[articulation, child]
+                child_transform = _make_spatial_shift_transform(data.shift[articulation, child])
+                impulse += wp.transpose(child_transform) @ data.reaction[articulation, child]
             data.reaction[articulation, lane] = impulse
         _sync_warp()
         current_depth -= wp.int32(1)
@@ -374,6 +396,7 @@ class MaximalTreeProjector:
         self.joint_to_cid = joint_to_cid
         self.articulation_count = int(model.articulation_count)
         self.launch_dim = self.articulation_count * _WARP_SIZE
+        self.block_dim = _WARP_SIZE
 
         starts = model.articulation_start.numpy()
         joint_articulation = model.joint_articulation.numpy()
@@ -421,6 +444,8 @@ class MaximalTreeProjector:
             child_index[articulation, : len(flat_children)] = flat_children
             child_start[articulation, count + 1 :] = len(flat_children)
 
+        self.block_dim = 128 if self.articulation_count >= 512 else _WARP_SIZE
+
         device = model.device
         data = MaximalTreeProjectorData()
         data.body_count = wp.array(body_count, device=device)
@@ -431,10 +456,11 @@ class MaximalTreeProjector:
         data.parent = wp.array(parent, device=device)
         data.child_start = wp.array(child_start, device=device)
         data.child_index = wp.array(child_index, device=device)
-        data.transform = wp.empty(shape, dtype=wp.spatial_matrixf, device=device)
+        data.shift = wp.empty(shape, dtype=wp.vec3f, device=device)
         data.motion = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.affine_offset = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
-        data.mass = wp.empty(shape, dtype=wp.spatial_matrixf, device=device)
+        data.body_mass = wp.empty(shape, dtype=wp.float32, device=device)
+        data.body_inertia = wp.empty(shape, dtype=inertia_sym6, device=device)
         data.velocity_in = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.articulated = wp.empty(shape, dtype=wp.spatial_matrixf, device=device)
         data.bias = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
@@ -450,21 +476,21 @@ class MaximalTreeProjector:
         wp.launch(
             _gather_maximal_tree_kernel,
             dim=self.launch_dim,
-            block_dim=_WARP_SIZE,
+            block_dim=self.block_dim,
             inputs=[use_bias, self.joint_to_cid, self.constraints, self.bodies, self.data],
             device=self.model.device,
         )
         wp.launch(
             _project_maximal_tree_kernel,
             dim=self.launch_dim,
-            block_dim=_WARP_SIZE,
+            block_dim=self.block_dim,
             inputs=[self.data],
             device=self.model.device,
         )
         wp.launch(
             _publish_maximal_tree_kernel,
             dim=self.launch_dim,
-            block_dim=_WARP_SIZE,
+            block_dim=self.block_dim,
             inputs=[self.joint_to_cid, self.constraints, self.bodies, self.data],
             device=self.model.device,
         )

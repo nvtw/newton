@@ -3941,6 +3941,11 @@ class TestG1PhoenXRL(unittest.TestCase):
 
     def test_maximal_projected_g1_joint_step_response_is_stable_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 joint step-response tests")
+        train_to_gate_args = make_g1_train_to_gate_parser().parse_args(["--articulation-mode", "maximal_projected"])
+        example_args = train_g1_nanog1._make_parser().parse_args(["--articulation-mode", "maximal_projected"])
+        self.assertEqual(train_to_gate_args.articulation_mode, "maximal_projected")
+        self.assertEqual(example_args.articulation_mode, "maximal_projected")
+
         env = rl.EnvG1PhoenX(
             rl.ConfigEnvG1PhoenX(
                 world_count=rl.ACTION_DIM_G1,

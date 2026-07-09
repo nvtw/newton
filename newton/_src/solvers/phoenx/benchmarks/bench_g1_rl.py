@@ -164,7 +164,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument(
         "--articulation-mode",
-        choices=("maximal", "hybrid", "reduced"),
+        choices=("maximal", "maximal_projected", "hybrid", "reduced"),
         default="reduced",
         help="PhoenX articulation mode used by the environment-step benchmark.",
     )

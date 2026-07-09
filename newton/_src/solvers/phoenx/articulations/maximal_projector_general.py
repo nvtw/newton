@@ -164,6 +164,16 @@ def _gather_general_maximal_tree_thread(
 
     joint = data.joint_index[articulation, lane]
     body = data.body_slot[articulation, lane]
+    linear = bodies.velocity[body]
+    angular = bodies.angular_velocity[body]
+    data.velocity_in[articulation, lane] = wp.spatial_vectorf(
+        linear[0], linear[1], linear[2], angular[0], angular[1], angular[2]
+    )
+    if not use_bias:
+        # PhoenX freezes inertia and prepared joint geometry until relax ends.
+        data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
+        return
+
     body_mass = wp.float32(1.0) / bodies.inverse_mass[body]
     inertia = wp.inverse(mat33_from_sym6(bodies.inverse_inertia_world[body]))
     spatial_mass = wp.spatial_matrixf(0.0)
@@ -172,12 +182,6 @@ def _gather_general_maximal_tree_thread(
         for column in range(3):
             spatial_mass[row + wp.int32(3), column + wp.int32(3)] = inertia[row, column]
     data.mass[articulation, lane] = spatial_mass
-
-    linear = bodies.velocity[body]
-    angular = bodies.angular_velocity[body]
-    data.velocity_in[articulation, lane] = wp.spatial_vectorf(
-        linear[0], linear[1], linear[2], angular[0], angular[1], angular[2]
-    )
 
     joint_transform = wp.spatial_matrixf(0.0)
     for diagonal in range(6):

@@ -46,6 +46,10 @@ SETTINGS = {
         Setting("maximal_20x4_v1", "maximal", 20, 4, 1),
         Setting("maximal_40x2_v1", "maximal", 40, 2, 1),
         Setting("maximal_projected_5x2_v1", "maximal_projected", 5, 2, 1),
+        Setting("maximal_projected_4x2_v1", "maximal_projected", 4, 2, 1),
+        Setting("maximal_projected_3x2_v1", "maximal_projected", 3, 2, 1),
+        Setting("maximal_projected_4x1_v1", "maximal_projected", 4, 1, 1),
+        Setting("maximal_projected_3x1_v1", "maximal_projected", 3, 1, 1),
         Setting("hybrid_5x2_v1", "hybrid", 5, 2, 1),
         Setting("reduced_5x2_v1", "reduced", 5, 2, 1),
     )

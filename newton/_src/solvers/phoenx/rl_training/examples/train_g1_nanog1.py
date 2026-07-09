@@ -218,7 +218,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument(
         "--articulation-mode",
-        choices=("maximal", "hybrid", "reduced"),
+        choices=("maximal", "maximal_projected", "hybrid", "reduced"),
         default="reduced",
         help="PhoenX articulation dynamics mode (default: %(default)s)",
     )
