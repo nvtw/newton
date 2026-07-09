@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · maximal convergence baseline</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · high-ratio mode isolated</strong></div>
     </header>
 
     <section class="hero">
@@ -263,6 +263,23 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag warn">PARTIAL WIN · NOT PRODUCTION READY</span><time>9 Jul</time></div>
+      <h2>Coupled support-tree solve replaces the normal-only dead end</h2>
+      <p>A graph-captured PhoenX prototype now implements deterministic two-pass normal shock propagation with exact omitted linear/angular wrench replay. Convex co-normal manifolds use a bounded 3×N normal-wrench block; arbitrary, nonconvex, varying-normal, or rank-deficient manifolds fall back to rows. Contact layers are rebuilt after contact detection rather than cached across changing frames.</p>
+      <ul>
+        <li>At 5 substeps × 2 PGS iterations, the ordinary 100:1 stack falls. The prototype keeps it intact with 0.0% mean top/plane load error, 0.0052 / 0.0001 m/s bottom/top RMS speed, and 0.1 mm lateral drift.</li>
+        <li>At 400:1 it also transfers the exact mean load and remains vertically stable. The remaining 0.237 m/s bottom RMS is almost entirely horizontal: post-relax vertical RMS is 0.0075 m/s, while x/y RMS is 0.179 / 0.155 m/s.</li>
+        <li>The phase probe shows total horizontal momentum remains within about 2×10<sup>−6</sup> kg·m/s while relative slip is 0.179 / 0.155 m/s. Thus momentum conservation is excellent; a local frictional mode is converging poorly. Main PGS feeds the mode slightly, normal shock leaves it unchanged, and one relax sweep reduces it only slightly.</li>
+        <li>Four physically motivated variants were rejected: aggregate top-only tangent wrench, exact row-wise shock friction, existing convex patch friction combined with normal shock, and tangent-only true-mass PGS—even a single sweep through the production contact update diverges over time. Splitting normal and friction after changing the normal fixed point is not safe.</li>
+        <li>Existing PhoenX mass splitting is bit-identical to ordinary PGS in this control, including at batch size one. It does not provide the missing graph-wide effective mass.</li>
+        <li>A replacement formulation now solves normal and friction together: a full-rank sticking patch temporarily joins a grounded support subtree, so its exact patch wrench is the bottom-up spatial-momentum change of that subtree. This is an exact tree KKT solution, not fake mass or dominance. The wrench is accepted only if actual point forces reconstruct it inside every Coulomb cone; otherwise ordinary GS remains untouched.</li>
+        <li>In isolated 3-D tests, 100:1, 400:1, a 4096:1 chain, and a branched tree match dense KKT to 2.2×10<sup>−14</sup> or better. Of 250 randomized 1–8 body chains over six mass decades, 249 have a feasible point-force distribution; the cheap conservative minimum-norm gate retains 239. Accepted cases reconstruct to ≤2.7×10<sup>−12</sup> and never increase kinetic energy. Explicit sliding, separation, and tipping cases reject.</li>
+        <li>The graph-captured Warp solve/acceptance prototype processes 8,192 five-body trees in a 10.24 µs median replay on RTX PRO 6000 Blackwell, with 8,012/8,192 randomized trees accepted. This excludes contact-forest construction and PhoenX state publication, so it is a promising kernel-cost result—not end-to-end speed.</li>
+        <li>The rejected normal-only production hooks were removed. The retained artifact is an experimental benchmark plus a derivation/integration note. Next work is deterministic component-local forest construction, bias-free-relax publication, and broad physical validation in both single- and multi-world modes.</li>
+      </ul>
+      <p class="profile-note">Reference: <a href="https://doi.org/10.1145/3747867">Two-Pass Shock Propagation for Stable Stacking with Gauss-Seidel</a> (Xiong, Leach, Thomas, and Sueda, 2025). The new support-tree wrench recursion is a separate PhoenX research direction derived from subtree momentum balance. See <code>docs/SUPPORT_TREE_CONTACT_PRECONDITIONER.md</code> and the graph benchmark in <code>benchmarks/experimental/bench_support_tree_patch.py</code>.</p>
+    </article>
     <article>
       <div class="meta"><span class="tag">ACTIVE · MAXIMAL GS CONVERGENCE</span><time>9 Jul</time></div>
       <h2>A steady-window benchmark exposes the 100:1 propagation gap</h2>
