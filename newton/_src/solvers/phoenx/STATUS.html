@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · frozen G1 restart rerun</strong></div>
+      <div class="stamp">Last updated<br><strong>9 July 2026 · curriculum qualification</strong></div>
     </header>
 
     <section class="hero">
@@ -139,7 +139,7 @@
       <div class="card"><div class="metric">923k/s</div><div class="label">supporting steady-throughput diagnostic</div></div>
     </section>
 
-    <p class="profile-note">The ready-cache rerun of the frozen G1 development bank contains one 215.58 s success and two iteration-75 rejections at 63.79 / 63.83 s. Expected restart cost is now 343.19 s, down 21.4% from 436.57 s. Three trials still leave success probability and expected cost highly uncertain.</p>
+    <p class="profile-note">The ready-cache rerun of the frozen G1 development bank contains one 215.58 s success and two iteration-75 rejections at 63.79 / 63.83 s. Expected restart cost remains 343.19 s. A command-curriculum candidate improved every early score but regressed final expected cost to 678.28 s, so it was rejected.</p>
 
     <div class="section-label">Zero to qualified policy</div>
     <section class="work-profile" aria-label="Cold-start time to policy across training scenes">
@@ -262,6 +262,17 @@
     </article>
 
     <div class="section-label">Latest findings</div>
+    <article>
+      <div class="meta"><span class="tag">REJECTED · COMMAND CURRICULUM</span><time>9 Jul</time></div>
+      <h2>Faster early learning did not produce policies sooner</h2>
+      <p>A paired G1 candidate started with 50% command amplitude and reached the full command distribution over 50M samples. It was promoted from the cheap screen because all three iteration-75 scores improved, then evaluated unchanged against the complete frozen gate.</p>
+      <ul>
+        <li>Iteration-75 battery performance improved from 0.708 / 0.659 / 0.674 to <strong>0.761 / 0.710 / 0.700</strong> for seeds 42 / 11 / 29.</li>
+        <li>Final qualification reversed that apparent win: seed 42 missed through iteration 325, seed 11 passed in 204.92 s, and seed 29 was rejected by the second frozen screen in 113.37 s.</li>
+        <li>Success remained 1/3, while conservative failure charging increased expected restart cost from <strong>343.19 s to 678.28 s</strong>. The candidate is rejected and no training default changed.</li>
+        <li>This demonstrates why early reward or tracking alone cannot replace the held-out physical-quality gate. Future curricula must improve robust final acquisition, not merely simplify the first phase.</li>
+      </ul>
+    </article>
     <article>
       <div class="meta"><span class="tag good">RETAINED CANDIDATE · CONTACT ROW LAYOUT</span><time>9 Jul</time></div>
       <h2>Color-ordered contact rows move fixed Kapla to 74.9 FPS</h2>
@@ -445,7 +456,7 @@
           <li>Optimize solver, collision, environment, policy, learner, curriculum, precision, and overlap jointly. PBT is allowed, but its full wall time counts.</li>
           <li>Track supporting diagnostics: paired development seed, held-out evaluation seed bank, samples/s, physics steps/s, sample count to gate, evaluation quality, timestep, GPU memory, and compilation/setup time.</li>
           <li>Keep this page compact and newest-first, update it whenever the decision state changes, and open it in Chrome after every update.</li>
-          <li><strong>Immediate next step:</strong> freeze task gates, restart cutoffs, evaluation cadence, and sequential stopping rules; add a runner that records censored trials and estimates expected restart cost with uncertainty.</li>
+          <li><strong>Immediate next step:</strong> build deterministic full-coordinate high-mass-ratio convergence, energy, and momentum benchmarks; improve row/block conditioning or mass splitting inside colored Gauss–Seidel without ad-hoc damping, then validate retained changes across the task suite.</li>
         </ul>
       </div>
     </section>

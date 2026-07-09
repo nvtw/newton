@@ -1,0 +1,67 @@
+{
+  "schema": "phoenx_time_to_policy_v2",
+  "task": "g1",
+  "decision": "rejected",
+  "candidate": {
+    "command_curriculum_start": 0.5,
+    "command_curriculum_samples": 50000000
+  },
+  "measurement": {
+    "date": "2026-07-09",
+    "device": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "cache_state": "ready persistent Warp kernel cache",
+    "target_samples": 170393600,
+    "max_iterations": 325
+  },
+  "restart_policy": {
+    "cutoff_seconds": 360.0,
+    "required_consecutive_passes": 2,
+    "failure_charging": "observed wall time for child-declared early rejection; cutoff otherwise"
+  },
+  "seed_protocol": {
+    "train_seeds": [42, 11, 29],
+    "gate_seeds": [1000, 2000, 3000],
+    "pairing": "ordered one-to-one"
+  },
+  "iteration_75_screen": {
+    "baseline_battery_perf": [0.7077, 0.6591, 0.6735],
+    "candidate_battery_perf": [0.760557, 0.709619, 0.700367]
+  },
+  "trials": [
+    {
+      "train_seed": 42,
+      "gate_seed": 1000,
+      "pass_gate": false,
+      "early_stopped": false,
+      "process_wall_seconds": 218.44698632799918,
+      "charged_seconds": 360.0
+    },
+    {
+      "train_seed": 11,
+      "gate_seed": 2000,
+      "pass_gate": true,
+      "early_stopped": false,
+      "process_wall_seconds": 204.91587002099914,
+      "charged_seconds": 204.91587002099914
+    },
+    {
+      "train_seed": 29,
+      "gate_seed": 3000,
+      "pass_gate": false,
+      "early_stopped": true,
+      "process_wall_seconds": 113.36720162999882,
+      "charged_seconds": 113.36720162999882
+    }
+  ],
+  "summary": {
+    "trial_count": 3,
+    "success_count": 1,
+    "success_probability": 0.3333333333333333,
+    "mean_success_seconds": 204.91587002099914,
+    "mean_failure_seconds": 236.6836008149994,
+    "expected_attempts_to_success": 3.0,
+    "expected_seconds_to_success": 678.2830716509981,
+    "retained_baseline_expected_seconds_to_success": 343.1915086400004
+  },
+  "reason": "All paired seeds improved at the first screen, but final success remained one in three and expected restart cost regressed by 97.6%."
+}
