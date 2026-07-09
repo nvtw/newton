@@ -895,11 +895,9 @@ class DVISolverConfig:
     """
 
     contact_warmstart_method: Literal[
-        "reaction",
-        "net_force",
+        "key_and_position",
         "geom_pair_net_force",
-        "geom_pair_reaction",
-        "geom_pair_reaction_weighted",
+        "key_and_position_with_net_force_backup",
     ] = "geom_pair_net_force"
     """
     The contact warmstart method used when `warmstart_mode` is `containers`.
@@ -953,6 +951,16 @@ class DVISolverConfig:
             )
         PADMMWarmStartMode.from_string(self.warmstart_mode)
         WarmstarterContacts.Method.from_string(self.contact_warmstart_method)
+        implemented_contact_warmstart_methods = {
+            "key_and_position",
+            "geom_pair_net_force",
+            "key_and_position_with_net_force_backup",
+        }
+        if self.contact_warmstart_method not in implemented_contact_warmstart_methods:
+            raise ValueError(
+                f"DVI contact warmstart method is not implemented: {self.contact_warmstart_method}. "
+                f"Choose one of {sorted(implemented_contact_warmstart_methods)}."
+            )
 
     @override
     def __post_init__(self):

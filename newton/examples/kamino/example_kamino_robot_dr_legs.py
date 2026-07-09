@@ -32,7 +32,7 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
         dvi_contact_margin = 5.0e-4 if self.dynamics_solver == "dvi" else 1e-6
         self.dvi_contact_block_preconditioner = bool(getattr(args, "dvi_contact_block_preconditioner", False))
-        self.dvi_contact_jacobi_omega = float(getattr(args, "dvi_contact_jacobi_omega", 0.25))
+        self.dvi_contact_jacobi_omega = float(getattr(args, "dvi_contact_jacobi_omega", 0.45))
         self.dvi_contact_jacobi_relaxation = float(getattr(args, "dvi_contact_jacobi_relaxation", 0.9))
         self.viewer = viewer
         self.device = wp.get_device()
@@ -221,7 +221,7 @@ class Example:
         parser.add_argument(
             "--dvi-contact-jacobi-omega",
             type=float,
-            default=0.25,
+            default=0.45,
             help="Step size for Kamino DVI non-colored contact Jacobi and block-preconditioned contact updates.",
         )
         parser.add_argument(

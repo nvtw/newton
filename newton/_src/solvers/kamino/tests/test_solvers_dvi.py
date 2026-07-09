@@ -42,6 +42,7 @@ from newton._src.solvers.kamino._src.utils.benchmark.dvi_padmm_matrix import (
     make_matrix_scenarios,
     make_selected_solver_configs,
 )
+from newton._src.solvers.kamino._src.utils.benchmark.metrics import _reduce_solver_status
 from newton._src.solvers.kamino._src.utils.benchmark.render import render_solver_configs_table
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton._src.solvers.kamino.tests import setup_tests, test_context
@@ -219,7 +220,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(default_config.dvi.block_iterations, 16)
         self.assertEqual(default_config.dvi.contact_iterations, 2)
         self.assertEqual(default_config.dvi.bilateral_solve_period, 2)
-        self.assertEqual(default_config.dvi.contact_jacobi_omega, 0.25)
+        self.assertEqual(default_config.dvi.contact_jacobi_omega, 0.45)
         self.assertEqual(default_config.dvi.contact_jacobi_relaxation, 0.9)
 
         dense_config = SolverKamino.Config(
@@ -278,6 +279,29 @@ class TestDVISolver(unittest.TestCase):
             kamino_config.DVISolverConfig(contact_jacobi_omega=0.0)
         with self.assertRaises(ValueError):
             kamino_config.DVISolverConfig(contact_jacobi_relaxation=1.1)
+        for method in (
+            "key_and_position",
+            "geom_pair_net_force",
+            "key_and_position_with_net_force_backup",
+        ):
+            self.assertEqual(
+                kamino_config.DVISolverConfig(contact_warmstart_method=method).contact_warmstart_method, method
+            )
+        for method in ("reaction", "geom_pair_net_wrench"):
+            with self.assertRaises(ValueError):
+                kamino_config.DVISolverConfig(contact_warmstart_method=method)
+
+    def test_00a_multiworld_status_reduction_requires_all_worlds_converged(self):
+        status = np.array(
+            [(True, 2, 1.0e-5), (False, 7, 2.0e-3)],
+            dtype=[("converged", np.bool_), ("iterations", np.int32), ("r_d", np.float32)],
+        )
+
+        reduced = _reduce_solver_status(status)
+
+        self.assertFalse(reduced["converged"])
+        self.assertEqual(reduced["iterations"], 7)
+        self.assertAlmostEqual(reduced["r_d"], 2.0e-3)
 
     def test_01_dvi_solve_dense_dual_problem(self):
         builder = basics.build_boxes_fourbar()
@@ -315,6 +339,19 @@ class TestDVISolver(unittest.TestCase):
             warmstart=PADMMWarmStartMode.NONE,
         )
         solver.reset()
+        scratch = solver.data.state
+        for array in (
+            scratch.v_aug,
+            scratch.s,
+            scratch.scratch,
+            scratch.bilateral_rhs,
+            scratch.bilateral_solution,
+            scratch.bilateral_preconditioner,
+        ):
+            array.fill_(float("nan"))
+        scratch.bilateral_active_dim.fill_(-1)
+        scratch.contact_colors.fill_(-1)
+        scratch.contact_num_colors.fill_(-1)
         solver.coldstart()
         solver.solve(problem)
         _check_solution_matches_dual_problem(self, problem, solver)
@@ -986,7 +1023,7 @@ class TestDVISolver(unittest.TestCase):
             use_kamino_contacts=False,
             dynamics_solver="dvi",
             dvi_contact_block_preconditioner=False,
-            dvi_contact_jacobi_omega=0.25,
+            dvi_contact_jacobi_omega=0.45,
             dvi_contact_jacobi_relaxation=0.9,
         )
         example = Example(ViewerNull(num_frames=1), args)
@@ -1010,7 +1047,7 @@ class TestDVISolver(unittest.TestCase):
             use_kamino_contacts=True,
             dynamics_solver="dvi",
             dvi_contact_block_preconditioner=False,
-            dvi_contact_jacobi_omega=0.25,
+            dvi_contact_jacobi_omega=0.45,
             dvi_contact_jacobi_relaxation=0.9,
         )
         example = Example(ViewerNull(num_frames=1), args)
@@ -1065,7 +1102,7 @@ class TestDVISolver(unittest.TestCase):
             use_kamino_contacts=True,
             dynamics_solver="dvi",
             dvi_contact_block_preconditioner=False,
-            dvi_contact_jacobi_omega=0.25,
+            dvi_contact_jacobi_omega=0.45,
             dvi_contact_jacobi_relaxation=0.9,
         )
         example = Example(ViewerNull(num_frames=1), args)
@@ -1115,7 +1152,7 @@ class TestDVISolver(unittest.TestCase):
             use_kamino_contacts=True,
             dynamics_solver="dvi",
             dvi_contact_block_preconditioner=False,
-            dvi_contact_jacobi_omega=0.25,
+            dvi_contact_jacobi_omega=0.45,
             dvi_contact_jacobi_relaxation=0.9,
         )
         example = Example(ViewerNull(num_frames=1), args)
@@ -1328,7 +1365,7 @@ class TestDVISolver(unittest.TestCase):
         config.dvi.contact_jacobi_relaxation = 0.75
         config.dvi.bilateral_solve_period = 2
         config.dvi.warmstart_mode = "internal"
-        config.dvi.contact_warmstart_method = "reaction"
+        config.dvi.contact_warmstart_method = "key_and_position"
 
         datafile = _MiniHDF5File()
         save_solver_configs_to_hdf5({"DVI tuned": config}, datafile)
@@ -1348,7 +1385,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_jacobi_relaxation, 0.75)
         self.assertEqual(loaded_configs["DVI tuned"].dvi.bilateral_solve_period, 2)
         self.assertEqual(loaded_configs["DVI tuned"].dvi.warmstart_mode, "internal")
-        self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_warmstart_method, "reaction")
+        self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_warmstart_method, "key_and_position")
 
         datafile._values.pop("Solver/DVI tuned/dvi/warmstart_mode")
         datafile._values.pop("Solver/DVI tuned/dvi/contact_warmstart_method")

@@ -246,7 +246,6 @@ class DVISolver:
 
     def coldstart(self):
         """Prepare a cold-start solve."""
-        self._data.state.reset()
         self._data.solution.zero()
 
     def warmstart(
@@ -258,7 +257,6 @@ class DVISolver:
         contacts: ContactsKamino | None = None,
     ):
         """Prepare a warm-start solve."""
-        self._data.state.reset()
         self.set_contacts(contacts)
 
         match self._warmstart:

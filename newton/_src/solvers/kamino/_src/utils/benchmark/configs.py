@@ -358,7 +358,7 @@ def make_solver_config_sparse_dvi_dr_legs() -> tuple[str, SolverKaminoImpl.Confi
     config.dvi.block_iterations = 16
     config.dvi.contact_iterations = 2
     config.dvi.bilateral_solve_period = 2
-    config.dvi.contact_jacobi_omega = 0.25
+    config.dvi.contact_jacobi_omega = 0.45
     config.dvi.contact_jacobi_relaxation = 0.9
     # ------------------------------------------------------------------------------
     return name, config

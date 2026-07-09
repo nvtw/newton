@@ -28,6 +28,15 @@ __all__ = [
     "StatsInteger",
 ]
 
+
+def _reduce_solver_status(solver_status: np.ndarray) -> dict[str, Any]:
+    """Reduce per-world solver status using worst-case values."""
+    return {
+        name: solver_status[name].min() if name == "converged" else solver_status[name].max()
+        for name in solver_status.dtype.names
+    }
+
+
 ###
 # Types - Meta-Data
 ###
@@ -449,8 +458,7 @@ class BenchmarkMetrics:
         self.step_time[problem_idx, config_idx, step_idx] = step_time
         if self.solver_metrics is not None and solver is not None:
             # Extract PADMM solver status info - this is multiworld
-            solver_status_np = solver._solver_fd.data.status.numpy()
-            solver_status_np = {name: solver_status_np[name].max() for name in solver_status_np.dtype.names}
+            solver_status_np = _reduce_solver_status(solver._solver_fd.data.status.numpy())
             self.solver_metrics.padmm_converged[problem_idx, config_idx, step_idx] = solver_status_np["converged"]
             self.solver_metrics.padmm_iters[problem_idx, config_idx, step_idx] = solver_status_np["iterations"]
             self.solver_metrics.padmm_r_p[problem_idx, config_idx, step_idx] = solver_status_np["r_p"]

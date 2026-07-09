@@ -7,9 +7,9 @@ import unittest
 
 from newton._src.solvers.kamino.tests.test_solvers_dvi import TestDVISolver
 
-
 _DVI_SMOKE_TESTS = (
     "test_00_config_selection",
+    "test_00a_multiworld_status_reduction_requires_all_worlds_converged",
     "test_01_dvi_solve_dense_dual_problem",
     "test_02_public_solver_step_with_dvi",
     "test_03_dvi_solve_single_contact",

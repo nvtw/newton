@@ -266,7 +266,7 @@ class Example:
             config.solver.dvi.block_iterations = 4
             config.solver.dvi.contact_iterations = 2
             config.solver.dvi.bilateral_solve_period = 1
-            config.solver.dvi.contact_jacobi_omega = 0.25
+            config.solver.dvi.contact_jacobi_omega = 0.45
             config.solver.dvi.contact_jacobi_relaxation = 0.9
             config.solver.dvi.warmstart_mode = "containers"
             config.solver.dvi.contact_warmstart_method = "geom_pair_net_force"
