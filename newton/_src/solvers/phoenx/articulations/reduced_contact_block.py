@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import functools
+import os
+
 import numpy as np
 import warp as wp
 
@@ -77,6 +80,38 @@ _FALLBACK_BLOCK_DIM = 256
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 
 _INT64_MAX = 9223372036854775807
+
+
+def _packed_rows_mode_default() -> str:
+    """Storage/load mode for the packed contact Jacobian/response rows.
+
+    Default ``fp16x2``: rows stored as FP16 pairs loaded through aligned
+    uint32 words (retained 2026-07-10: +9.4% isolated contact phase, deviation
+    <= 3e-4 rel vs fp32, momentum/energy/Featherstone-parity and
+    far-translation tests pass; see docs/PERF_NOTES.md "FP16x2 packed contact
+    rows"). All accumulators, impulses, velocities, and effective masses stay
+    FP32 — only the streamed row storage is halved. Rows hold motion
+    subspaces, COM-relative levers, and articulated responses: O(1)-magnitude
+    difference/direction quantities, verified within FP16 range.
+
+    ``PHOENX_CONTACT_ROWS_FP16=0`` restores the exact FP32 path;
+    ``=1`` (naked fp16) and ``=3`` (fp16x4) are measured-inferior variants
+    kept for A/B only.
+
+    Default is still fp32: flipping to fp16x2 is approved (user, 2026-07-10)
+    but blocked on a test-fixture interaction in
+    ``test_generalized_contact_rows_match_aba_under_graph_capture`` — its
+    fp32-mode env pin does not take effect (arrays still allocate fp16 when
+    the default is 2); diagnose construction order, then flip.
+    """
+    value = os.environ.get("PHOENX_CONTACT_ROWS_FP16", "0").lower()
+    if value in ("0", "false", "fp32"):
+        return "fp32"
+    if value in ("2", "", "pairs", "x2", "fp16x2"):
+        return "fp16x2"
+    if value in ("3", "quads", "x4", "fp16x4"):
+        return "fp16x4"
+    return "fp16"
 
 
 def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, bool, bool]:
@@ -857,238 +892,365 @@ def _build_generalized_contact_rows_kernel(
         body_response[articulation, local_joint, row] = parent_delta
 
 
-@wp.func
-def _build_packed_generalized_row(
-    articulation: wp.int32,
-    row: wp.int32,
-    row_count: wp.int32,
-    packed_articulation: wp.int32,
-    packed_row: wp.int32,
-    data: ReducedArticulationData,
-    start: wp.int32,
-    end: wp.int32,
-    dof_start_articulation: wp.int32,
-    dof_count_articulation: wp.int32,
-    row_body: wp.array2d[wp.int32],
-    row_wrench: wp.array2d[wp.spatial_vector],
-    packed_jacobian: wp.array2d[wp.float32],
-    packed_response: wp.array2d[wp.float32],
-    joint_work: wp.array3d[wp.float32],
-    body_response: wp.array3d[wp.spatial_vector],
-) -> wp.float32:
-    source_body = row_body[packed_articulation, row]
-    source_wrench = row_wrench[packed_articulation, row]
-    path_start = data.body_path_start[source_body]
-    path_end = data.body_path_start[source_body + wp.int32(1)]
+_LOAD_SPATIAL_WIDE_SNIPPET = """
+    const unsigned long long* p = &arr.data[offset];
+    unsigned long long a0 = p[0];
+    unsigned long long a1 = p[1];
+    unsigned long long a2 = p[2];
+    union { unsigned long long u; float f[2]; } c;
+    wp::spatial_vectorf out;
+    c.u = a0; out[0] = c.f[0]; out[1] = c.f[1];
+    c.u = a1; out[2] = c.f[0]; out[3] = c.f[1];
+    c.u = a2; out[4] = c.f[0]; out[5] = c.f[1];
+    return out;
+"""
 
-    propagated_wrench = source_wrench
-    for reverse in range(path_end - path_start):
-        path_index = path_end - wp.int32(1) - reverse
-        joint = data.body_path_joint[path_index]
-        dof_start = data.joint_qd_start[joint]
-        dof_end = data.joint_qd_start[joint + wp.int32(1)]
-        dof_count = dof_end - dof_start
-        projected = _vec6(0.0)
-        reduced = _vec6(0.0)
-        for dof_row in range(6):
-            if wp.int32(dof_row) < dof_count:
-                dof = dof_start + wp.int32(dof_row)
-                projected[dof_row] = wp.dot(data.joint_s[dof], propagated_wrench)
-                joint_work[articulation, dof - dof_start_articulation, row] = projected[dof_row]
-                packed_jacobian[packed_row, dof - dof_start_articulation] = wp.dot(data.joint_s[dof], source_wrench)
-        for dof_row in range(6):
-            if wp.int32(dof_row) < dof_count:
-                for dof_column in range(6):
-                    if wp.int32(dof_column) < dof_count:
-                        reduced[dof_row] += (
-                            data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * projected[dof_column]
-                        )
-                propagated_wrench -= data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
 
-    inverse_mass = wp.float32(0.0)
-    # Parent-first joint ordering makes the root-to-leaf path a monotone cursor through this forward pass.
-    path_cursor = path_start
-    next_path_joint = wp.int32(-1)
-    if path_cursor < path_end:
-        next_path_joint = data.body_path_joint[path_cursor]
-    for joint in range(start, end):
-        local_joint = joint - start
-        on_source_path = joint == next_path_joint
-        parent = data.joint_parent[joint]
-        parent_delta = wp.spatial_vector()
-        if parent >= wp.int32(0):
-            parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
-        dof_start = data.joint_qd_start[joint]
-        dof_end = data.joint_qd_start[joint + wp.int32(1)]
-        dof_count = dof_end - dof_start
-        rhs = _vec6(0.0)
-        generalized_delta = _vec6(0.0)
-        for dof_row in range(6):
-            if wp.int32(dof_row) < dof_count:
-                dof = dof_start + wp.int32(dof_row)
-                rhs[dof_row] = -wp.dot(data.joint_u[dof], parent_delta)
-                if on_source_path:
-                    rhs[dof_row] += joint_work[articulation, dof - dof_start_articulation, row]
-        for dof_row in range(6):
-            if wp.int32(dof_row) < dof_count:
-                for dof_column in range(6):
-                    if wp.int32(dof_column) < dof_count:
-                        generalized_delta[dof_row] += (
-                            data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * rhs[dof_column]
-                        )
-                dof = dof_start + wp.int32(dof_row)
-                response_value = generalized_delta[dof_row]
-                if row_count > wp.int32(_RESPONSE_TILE):
-                    joint_work[articulation, dof - dof_start_articulation, row] = response_value
+@wp.func_native(_LOAD_SPATIAL_WIDE_SNIPPET)
+def _load_spatial_wide(arr: wp.array[wp.uint64], offset: wp.int32) -> wp.spatial_vector:
+    """Load a spatial vector as three aligned 8-byte words (bit-identical)."""
+    ...
+
+
+_STORE_SPATIAL_WIDE_SNIPPET = """
+    unsigned long long* p = &arr.data[offset];
+    union { unsigned long long u; float f[2]; } c;
+    c.f[0] = value[0]; c.f[1] = value[1]; p[0] = c.u;
+    c.f[0] = value[2]; c.f[1] = value[3]; p[1] = c.u;
+    c.f[0] = value[4]; c.f[1] = value[5]; p[2] = c.u;
+"""
+
+
+@wp.func_native(_STORE_SPATIAL_WIDE_SNIPPET)
+def _store_spatial_wide(arr: wp.array[wp.uint64], offset: wp.int32, value: wp.spatial_vector):
+    """Store a spatial vector as three aligned 8-byte words (bit-identical)."""
+    ...
+
+
+def _bind_rows_dtype_annotations(func, rows_dtype, *names):
+    """Bind row-array annotations to the variant dtype.
+
+    ``from __future__ import annotations`` stringizes annotations, and closure
+    variables that only appear in annotations are not captured, so the dtype
+    is patched in as a concrete type before the Warp decorator runs.
+    """
+    for name in names:
+        func.__annotations__[name] = wp.array2d[rows_dtype]
+    return func
+
+
+def _make_build_packed_rows_ops(fp16: bool, wide_body_response: bool = False):
+    """Packed row builder; ``fp16`` selects the FP16 row-storage variant.
+
+    ``wide_body_response`` routes the lane-strided ``body_response`` spatial
+    vectors (24 B stride per row lane) through three aligned 8-byte words
+    instead of six scalar 4-byte accesses — same values bit-identically,
+    half the load/store requests. 16-byte words are not safe here: row
+    offsets are odd multiples of 8 B without padding the element to 32 B.
+    """
+    _rows_dtype = wp.float16 if fp16 else wp.float32
+    wide = wide_body_response
+    module = wp.get_module(
+        "reduced_contact_rows_packed" + ("_fp16" if fp16 else "") + ("_wide" if wide else "")
+    )
+
+    def _build_packed_generalized_row(
+        articulation: wp.int32,
+        row: wp.int32,
+        row_count: wp.int32,
+        packed_articulation: wp.int32,
+        packed_row: wp.int32,
+        data: ReducedArticulationData,
+        start: wp.int32,
+        end: wp.int32,
+        dof_start_articulation: wp.int32,
+        dof_count_articulation: wp.int32,
+        row_body: wp.array2d[wp.int32],
+        row_wrench: wp.array2d[wp.spatial_vector],
+        packed_jacobian: wp.array2d[_rows_dtype],
+        packed_response: wp.array2d[_rows_dtype],
+        joint_work: wp.array3d[wp.float32],
+        body_response: wp.array3d[wp.spatial_vector],
+        body_response_wide: wp.array[wp.uint64],
+    ) -> wp.float32:
+        max_body = body_response.shape[1]
+        source_body = row_body[packed_articulation, row]
+        source_wrench = row_wrench[packed_articulation, row]
+        path_start = data.body_path_start[source_body]
+        path_end = data.body_path_start[source_body + wp.int32(1)]
+
+        propagated_wrench = source_wrench
+        for reverse in range(path_end - path_start):
+            path_index = path_end - wp.int32(1) - reverse
+            joint = data.body_path_joint[path_index]
+            dof_start = data.joint_qd_start[joint]
+            dof_end = data.joint_qd_start[joint + wp.int32(1)]
+            dof_count = dof_end - dof_start
+            projected = _vec6(0.0)
+            reduced = _vec6(0.0)
+            for dof_row in range(6):
+                if wp.int32(dof_row) < dof_count:
+                    dof = dof_start + wp.int32(dof_row)
+                    projected[dof_row] = wp.dot(data.joint_s[dof], propagated_wrench)
+                    joint_work[articulation, dof - dof_start_articulation, row] = projected[dof_row]
+                    packed_jacobian[packed_row, dof - dof_start_articulation] = _rows_dtype(
+                        wp.dot(data.joint_s[dof], source_wrench)
+                    )
+            for dof_row in range(6):
+                if wp.int32(dof_row) < dof_count:
+                    for dof_column in range(6):
+                        if wp.int32(dof_column) < dof_count:
+                            reduced[dof_row] += (
+                                data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * projected[dof_column]
+                            )
+                    propagated_wrench -= data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
+
+        inverse_mass = wp.float32(0.0)
+        # Parent-first joint ordering makes the root-to-leaf path a monotone cursor through this forward pass.
+        path_cursor = path_start
+        next_path_joint = wp.int32(-1)
+        if path_cursor < path_end:
+            next_path_joint = data.body_path_joint[path_cursor]
+        for joint in range(start, end):
+            local_joint = joint - start
+            on_source_path = joint == next_path_joint
+            parent = data.joint_parent[joint]
+            parent_delta = wp.spatial_vector()
+            if parent >= wp.int32(0):
+                if wp.static(wide):
+                    parent_joint = data.body_joint[parent] - start
+                    parent_delta = _load_spatial_wide(
+                        body_response_wide,
+                        ((articulation * max_body + parent_joint) * wp.int32(_MAX_ROWS) + row) * wp.int32(3),
+                    )
                 else:
-                    packed_response[packed_row, dof - dof_start_articulation] = response_value
-                if on_source_path:
-                    # The Jacobian row is nonzero only on the source path; the
-                    # recomputed dot matches the stored entry bit-exactly and
-                    # avoids a 144-byte-strided reload per DOF.
-                    inverse_mass += wp.dot(data.joint_s[dof], source_wrench) * response_value
-                parent_delta += data.joint_s[dof] * response_value
-        body_response[articulation, local_joint, row] = parent_delta
-        if on_source_path:
-            path_cursor += wp.int32(1)
-            next_path_joint = wp.int32(-1)
-            if path_cursor < path_end:
-                next_path_joint = data.body_path_joint[path_cursor]
+                    parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
+            dof_start = data.joint_qd_start[joint]
+            dof_end = data.joint_qd_start[joint + wp.int32(1)]
+            dof_count = dof_end - dof_start
+            rhs = _vec6(0.0)
+            generalized_delta = _vec6(0.0)
+            for dof_row in range(6):
+                if wp.int32(dof_row) < dof_count:
+                    dof = dof_start + wp.int32(dof_row)
+                    rhs[dof_row] = -wp.dot(data.joint_u[dof], parent_delta)
+                    if on_source_path:
+                        rhs[dof_row] += joint_work[articulation, dof - dof_start_articulation, row]
+            for dof_row in range(6):
+                if wp.int32(dof_row) < dof_count:
+                    for dof_column in range(6):
+                        if wp.int32(dof_column) < dof_count:
+                            generalized_delta[dof_row] += (
+                                data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * rhs[dof_column]
+                            )
+                    dof = dof_start + wp.int32(dof_row)
+                    response_value = generalized_delta[dof_row]
+                    if row_count > wp.int32(_RESPONSE_TILE):
+                        joint_work[articulation, dof - dof_start_articulation, row] = response_value
+                    else:
+                        packed_response[packed_row, dof - dof_start_articulation] = _rows_dtype(response_value)
+                    if on_source_path:
+                        # The Jacobian row is nonzero only on the source path; the
+                        # recomputed dot matches the stored entry bit-exactly and
+                        # avoids a 144-byte-strided reload per DOF.
+                        inverse_mass += wp.dot(data.joint_s[dof], source_wrench) * response_value
+                    parent_delta += data.joint_s[dof] * response_value
+            if wp.static(wide):
+                _store_spatial_wide(
+                    body_response_wide,
+                    ((articulation * max_body + local_joint) * wp.int32(_MAX_ROWS) + row) * wp.int32(3),
+                    parent_delta,
+                )
+            else:
+                body_response[articulation, local_joint, row] = parent_delta
+            if on_source_path:
+                path_cursor += wp.int32(1)
+                next_path_joint = wp.int32(-1)
+                if path_cursor < path_end:
+                    next_path_joint = data.body_path_joint[path_cursor]
 
-    return inverse_mass
+        return inverse_mass
 
-
-@wp.kernel(enable_backward=False, module="reduced_contact_rows_packed")
-def _build_packed_generalized_contact_rows_kernel(
-    bodies: BodyContainer,
-    enabled: wp.array[wp.int32],
-    point_count: wp.array[wp.int32],
-    row_body: wp.array2d[wp.int32],
-    row_wrench: wp.array2d[wp.spatial_vector],
-    point_contact: wp.array2d[wp.int32],
-    cc: ContactContainer,
-    max_page_count: wp.array[wp.int32],
-    page_index: wp.array[wp.int32],
-    prepare: wp.bool,
-    previous_row_body: wp.array[wp.int32],
-    packed_jacobian: wp.array2d[wp.float32],
-    packed_response: wp.array2d[wp.float32],
-    joint_work: wp.array3d[wp.float32],
-    body_response: wp.array3d[wp.spatial_vector],
-):
-    articulation, row = wp.tid()
-    data = bodies.reduced
-    start = data.articulation_start[articulation]
-    end = data.articulation_end[articulation]
-    dof_start_articulation = data.joint_qd_start[start]
-    dof_end_articulation = data.joint_qd_start[end]
-    dof_count_articulation = dof_end_articulation - dof_start_articulation
-    page = page_index[0]
-    storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
-    packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
-    row_count = wp.int32(3) * point_count[packed_articulation]
-    if enabled[articulation] == wp.int32(0) or dof_count_articulation > wp.int32(packed_jacobian.shape[1]):
-        return
-    if not prepare and (
-        page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
-    ):
-        return
-
-    if row >= row_count:
-        return
-    packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
-    previous_body = previous_row_body[packed_row]
-    if previous_body >= wp.int32(0):
-        previous_path_start = data.body_path_start[previous_body]
-        previous_path_end = data.body_path_start[previous_body + wp.int32(1)]
-        for path_index in range(previous_path_start, previous_path_end):
-            previous_joint = data.body_path_joint[path_index]
-            previous_dof_start = data.joint_qd_start[previous_joint]
-            previous_dof_end = data.joint_qd_start[previous_joint + wp.int32(1)]
-            for dof in range(previous_dof_start, previous_dof_end):
-                packed_jacobian[packed_row, dof - dof_start_articulation] = wp.float32(0.0)
-    previous_row_body[packed_row] = row_body[packed_articulation, row]
-
-    inverse_mass = _build_packed_generalized_row(
-        articulation,
-        row,
-        row_count,
-        packed_articulation,
-        packed_row,
-        data,
-        start,
-        end,
-        dof_start_articulation,
-        dof_count_articulation,
-        row_body,
-        row_wrench,
-        packed_jacobian,
-        packed_response,
-        joint_work,
-        body_response,
+    _build_packed_generalized_row = wp.func(
+        _bind_rows_dtype_annotations(_build_packed_generalized_row, _rows_dtype, "packed_jacobian", "packed_response")
     )
-    if inverse_mass > wp.float32(1.0e-12):
-        effective_mass = wp.float32(1.0) / inverse_mass
-        point = row // wp.int32(3)
-        axis = row - wp.int32(3) * point
-        contact = point_contact[packed_articulation, point]
-        if axis == wp.int32(0):
-            cc_set_eff_n(cc, contact, effective_mass)
-        elif axis == wp.int32(1):
-            cc_set_eff_t1(cc, contact, effective_mass)
+
+    def _build_packed_generalized_contact_rows_kernel(
+        bodies: BodyContainer,
+        enabled: wp.array[wp.int32],
+        point_count: wp.array[wp.int32],
+        row_body: wp.array2d[wp.int32],
+        row_wrench: wp.array2d[wp.spatial_vector],
+        point_contact: wp.array2d[wp.int32],
+        cc: ContactContainer,
+        max_page_count: wp.array[wp.int32],
+        page_index: wp.array[wp.int32],
+        prepare: wp.bool,
+        previous_row_body: wp.array[wp.int32],
+        packed_jacobian: wp.array2d[_rows_dtype],
+        packed_response: wp.array2d[_rows_dtype],
+        joint_work: wp.array3d[wp.float32],
+        body_response: wp.array3d[wp.spatial_vector],
+        body_response_wide: wp.array[wp.uint64],
+    ):
+        articulation, row = wp.tid()
+        data = bodies.reduced
+        start = data.articulation_start[articulation]
+        end = data.articulation_end[articulation]
+        dof_start_articulation = data.joint_qd_start[start]
+        dof_end_articulation = data.joint_qd_start[end]
+        dof_count_articulation = dof_end_articulation - dof_start_articulation
+        page = page_index[0]
+        storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
+        packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
+        row_count = wp.int32(3) * point_count[packed_articulation]
+        if enabled[articulation] == wp.int32(0) or dof_count_articulation > wp.int32(packed_jacobian.shape[1]):
+            return
+        if not prepare and (
+            page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
+        ):
+            return
+
+        if row >= row_count:
+            return
+        packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
+        previous_body = previous_row_body[packed_row]
+        if previous_body >= wp.int32(0):
+            previous_path_start = data.body_path_start[previous_body]
+            previous_path_end = data.body_path_start[previous_body + wp.int32(1)]
+            for path_index in range(previous_path_start, previous_path_end):
+                previous_joint = data.body_path_joint[path_index]
+                previous_dof_start = data.joint_qd_start[previous_joint]
+                previous_dof_end = data.joint_qd_start[previous_joint + wp.int32(1)]
+                for dof in range(previous_dof_start, previous_dof_end):
+                    packed_jacobian[packed_row, dof - dof_start_articulation] = _rows_dtype(0.0)
+        previous_row_body[packed_row] = row_body[packed_articulation, row]
+
+        inverse_mass = _build_packed_generalized_row(
+            articulation,
+            row,
+            row_count,
+            packed_articulation,
+            packed_row,
+            data,
+            start,
+            end,
+            dof_start_articulation,
+            dof_count_articulation,
+            row_body,
+            row_wrench,
+            packed_jacobian,
+            packed_response,
+            joint_work,
+            body_response,
+            body_response_wide,
+        )
+        if inverse_mass > wp.float32(1.0e-12):
+            effective_mass = wp.float32(1.0) / inverse_mass
+            point = row // wp.int32(3)
+            axis = row - wp.int32(3) * point
+            contact = point_contact[packed_articulation, point]
+            if axis == wp.int32(0):
+                cc_set_eff_n(cc, contact, effective_mass)
+            elif axis == wp.int32(1):
+                cc_set_eff_t1(cc, contact, effective_mass)
+            else:
+                cc_set_eff_t2(cc, contact, effective_mass)
+
+    return wp.kernel(enable_backward=False, module=module)(
+        _bind_rows_dtype_annotations(
+            _build_packed_generalized_contact_rows_kernel, _rows_dtype, "packed_jacobian", "packed_response"
+        )
+    )
+
+
+_BUILD_PACKED_ROWS_KERNELS = {(False, False): _make_build_packed_rows_ops(False)}
+_build_packed_generalized_contact_rows_kernel = _BUILD_PACKED_ROWS_KERNELS[(False, False)]
+
+
+def _get_build_packed_rows_kernel(fp16: bool, wide_body_response: bool = False):
+    key = (fp16, wide_body_response)
+    if key not in _BUILD_PACKED_ROWS_KERNELS:
+        _BUILD_PACKED_ROWS_KERNELS[key] = _make_build_packed_rows_ops(fp16, wide_body_response)
+    return _BUILD_PACKED_ROWS_KERNELS[key]
+
+
+def _make_transpose_response_kernel(fp16: bool):
+    _rows_dtype = wp.float16 if fp16 else wp.float32
+    module = wp.get_module("reduced_contact_response_transpose" + ("_fp16" if fp16 else ""))
+
+    def _transpose_generalized_contact_response_kernel(
+        bodies: BodyContainer,
+        enabled: wp.array[wp.int32],
+        point_count: wp.array[wp.int32],
+        page_index: wp.array[wp.int32],
+        max_page_count: wp.array[wp.int32],
+        prepare: wp.bool,
+        joint_work: wp.array3d[wp.float32],
+        packed_response: wp.array2d[_rows_dtype],
+    ):
+        tile, _lane = wp.tid()
+        page = page_index[0]
+        if not prepare and (
+            page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
+        ):
+            return
+        articulation = tile // wp.int32(_RESPONSE_TILES_PER_ARTICULATION)
+        local_tile = tile - articulation * wp.int32(_RESPONSE_TILES_PER_ARTICULATION)
+        dof_tile = local_tile // wp.int32(_RESPONSE_ROW_TILES)
+        row_tile = local_tile - dof_tile * wp.int32(_RESPONSE_ROW_TILES)
+        storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
+        packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
+        data = bodies.reduced
+        start = data.articulation_start[articulation]
+        end = data.articulation_end[articulation]
+        dof_count = data.joint_qd_start[end] - data.joint_qd_start[start]
+        row_count = wp.int32(3) * point_count[packed_articulation]
+        if (
+            enabled[articulation] == wp.int32(0)
+            or row_count <= wp.int32(_RESPONSE_TILE)
+            or dof_tile * wp.int32(_RESPONSE_TILE) >= dof_count
+            or row_tile * wp.int32(_RESPONSE_TILE) >= row_count
+        ):
+            return
+        source = wp.tile_load(
+            joint_work[articulation],
+            shape=(_RESPONSE_TILE, _RESPONSE_TILE),
+            offset=(dof_tile * wp.int32(_RESPONSE_TILE), row_tile * wp.int32(_RESPONSE_TILE)),
+            storage="shared",
+        )
+        if wp.static(fp16):
+            wp.tile_store(
+                packed_response,
+                wp.tile_astype(wp.tile_transpose(source), dtype=wp.float16),
+                offset=(
+                    packed_articulation * wp.int32(_MAX_ROWS) + row_tile * wp.int32(_RESPONSE_TILE),
+                    dof_tile * wp.int32(_RESPONSE_TILE),
+                ),
+            )
         else:
-            cc_set_eff_t2(cc, contact, effective_mass)
+            wp.tile_store(
+                packed_response,
+                wp.tile_transpose(source),
+                offset=(
+                    packed_articulation * wp.int32(_MAX_ROWS) + row_tile * wp.int32(_RESPONSE_TILE),
+                    dof_tile * wp.int32(_RESPONSE_TILE),
+                ),
+            )
+
+    return wp.kernel(enable_backward=False, module=module)(
+        _bind_rows_dtype_annotations(_transpose_generalized_contact_response_kernel, _rows_dtype, "packed_response")
+    )
 
 
-@wp.kernel(enable_backward=False, module="reduced_contact_response_transpose")
-def _transpose_generalized_contact_response_kernel(
-    bodies: BodyContainer,
-    enabled: wp.array[wp.int32],
-    point_count: wp.array[wp.int32],
-    page_index: wp.array[wp.int32],
-    max_page_count: wp.array[wp.int32],
-    prepare: wp.bool,
-    joint_work: wp.array3d[wp.float32],
-    packed_response: wp.array2d[wp.float32],
-):
-    tile, _lane = wp.tid()
-    page = page_index[0]
-    if not prepare and (
-        page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
-    ):
-        return
-    articulation = tile // wp.int32(_RESPONSE_TILES_PER_ARTICULATION)
-    local_tile = tile - articulation * wp.int32(_RESPONSE_TILES_PER_ARTICULATION)
-    dof_tile = local_tile // wp.int32(_RESPONSE_ROW_TILES)
-    row_tile = local_tile - dof_tile * wp.int32(_RESPONSE_ROW_TILES)
-    storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
-    packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
-    data = bodies.reduced
-    start = data.articulation_start[articulation]
-    end = data.articulation_end[articulation]
-    dof_count = data.joint_qd_start[end] - data.joint_qd_start[start]
-    row_count = wp.int32(3) * point_count[packed_articulation]
-    if (
-        enabled[articulation] == wp.int32(0)
-        or row_count <= wp.int32(_RESPONSE_TILE)
-        or dof_tile * wp.int32(_RESPONSE_TILE) >= dof_count
-        or row_tile * wp.int32(_RESPONSE_TILE) >= row_count
-    ):
-        return
-    source = wp.tile_load(
-        joint_work[articulation],
-        shape=(_RESPONSE_TILE, _RESPONSE_TILE),
-        offset=(dof_tile * wp.int32(_RESPONSE_TILE), row_tile * wp.int32(_RESPONSE_TILE)),
-        storage="shared",
-    )
-    wp.tile_store(
-        packed_response,
-        wp.tile_transpose(source),
-        offset=(
-            packed_articulation * wp.int32(_MAX_ROWS) + row_tile * wp.int32(_RESPONSE_TILE),
-            dof_tile * wp.int32(_RESPONSE_TILE),
-        ),
-    )
+_TRANSPOSE_RESPONSE_KERNELS = {False: _make_transpose_response_kernel(False)}
+_transpose_generalized_contact_response_kernel = _TRANSPOSE_RESPONSE_KERNELS[False]
+
+
+def _get_transpose_response_kernel(fp16: bool):
+    if fp16 not in _TRANSPOSE_RESPONSE_KERNELS:
+        _TRANSPOSE_RESPONSE_KERNELS[fp16] = _make_transpose_response_kernel(fp16)
+    return _TRANSPOSE_RESPONSE_KERNELS[fp16]
 
 
 @wp.func_native(
@@ -1111,10 +1273,62 @@ def _sync_contact_warp(): ...
 def _sync_contact_block(): ...
 
 
-def _make_solve_generalized_contact_tile_ops(max_dofs: int):
-    module = wp.get_module(f"reduced_contact_generalized_solve_{max_dofs}")
+_UNPACK_H2_SNIPPET = """
+    const wp::float16* h = reinterpret_cast<const wp::float16*>(&packed);
+    return wp::vec2f(wp::float32(h[0]), wp::float32(h[1]));
+"""
 
-    @wp.func
+
+@wp.func_native(_UNPACK_H2_SNIPPET)
+def _unpack_h2(packed: wp.uint32) -> wp.vec2:
+    """Unpack two consecutive FP16 row entries from one aligned 32-bit word."""
+    ...
+
+
+_UNPACK_H4_SNIPPET = """
+    const wp::float16* h = reinterpret_cast<const wp::float16*>(&packed);
+    return wp::vec4f(wp::float32(h[0]), wp::float32(h[1]), wp::float32(h[2]), wp::float32(h[3]));
+"""
+
+
+@wp.func_native(_UNPACK_H4_SNIPPET)
+def _unpack_h4(packed: wp.uint64) -> wp.vec4:
+    """Unpack four consecutive FP16 row entries from one aligned 64-bit word."""
+    ...
+
+
+_ROWS_MODE_DTYPES = {"fp32": wp.float32, "fp16": wp.float16, "fp16x2": wp.uint32, "fp16x4": wp.uint64}
+_ROWS_MODE_PACK = {"fp32": 1, "fp16": 1, "fp16x2": 2, "fp16x4": 4}
+_ROWS_MODE_VEC = {2: wp.vec2, 4: wp.vec4}
+_ROWS_MODE_UNPACK = {2: _unpack_h2, 4: _unpack_h4}
+
+
+def _rows_mode_delta_dtype(mode: str):
+    """Element dtype of the ``generalized_delta`` view used by the tile solve."""
+    return _ROWS_MODE_VEC.get(_ROWS_MODE_PACK[mode], wp.float32)
+
+
+def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
+    """Tile GS solve; ``mode`` selects the packed-row storage/load format.
+
+    ``fp32``: production layout. ``fp16``: naked FP16 rows (2-byte lane loads).
+    ``fp16x2``/``fp16x4``: FP16 rows viewed as uint32 pairs / uint64 quads so
+    every lane load is a full 4- or 8-byte word (fewer, wider load requests);
+    the generalized delta is carried as a vec2/vec4 tile and
+    ``generalized_delta_out`` is the matching aliased view. Row starts are
+    always 8-byte aligned because the DOF width is padded to a multiple of 4.
+    """
+    _rows_dtype = _ROWS_MODE_DTYPES[mode]
+    fp16 = mode == "fp16"
+    pack_factor = _ROWS_MODE_PACK[mode]
+    packed = pack_factor > 1
+    packed_width = max_dofs // pack_factor
+    _vec_dtype = _ROWS_MODE_VEC.get(pack_factor)
+    _unpack = _ROWS_MODE_UNPACK.get(pack_factor)
+    _delta_dtype = _vec_dtype if packed else wp.float32
+    suffix = "" if mode == "fp32" else f"_{mode}"
+    module = wp.get_module(f"reduced_contact_generalized_solve_{max_dofs}" + suffix)
+
     def _solve_generalized_contact_tile_device(
         articulation: wp.int32,
         lane: wp.int32,
@@ -1133,8 +1347,8 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         tangent0: wp.array2d[wp.vec3],
         row_velocity: wp.array2d[wp.float32],
         page_index: wp.array[wp.int32],
-        packed_jacobian: wp.array2d[wp.float32],
-        packed_response: wp.array2d[wp.float32],
+        packed_jacobian: wp.array2d[_rows_dtype],
+        packed_response: wp.array2d[_rows_dtype],
         bodies: BodyContainer,
         fuse_apply: wp.bool,
         max_depth: wp.int32,
@@ -1148,7 +1362,10 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         storage_page = wp.min(page_index[0], wp.int32(_CACHED_PAGE_COUNT - 1))
         packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
         # Reuse across every contact row; registers avoid shared-memory round trips.
-        generalized_delta = wp.tile_zeros(shape=max_dofs, dtype=wp.float32, storage="register")
+        if wp.static(packed):
+            generalized_delta = wp.tile_zeros(shape=packed_width, dtype=_vec_dtype, storage="register")
+        else:
+            generalized_delta = wp.tile_zeros(shape=max_dofs, dtype=wp.float32, storage="register")
         active_point_count = point_count[packed_articulation]
         if warmstart:
             for point_offset in range(active_point_count):
@@ -1161,15 +1378,53 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                     lambda0 = cc_get_normal_lambda(cc, contact)
                     lambda1 = cc_get_tangent1_lambda(cc, contact)
                     lambda2 = cc_get_tangent2_lambda(cc, contact)
-                broadcast0 = wp.tile_from_thread(shape=max_dofs, value=lambda0, thread_idx=0, storage="shared")
-                broadcast1 = wp.tile_from_thread(shape=max_dofs, value=lambda1, thread_idx=0, storage="shared")
-                broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
                 row = wp.int32(3) * point
                 packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
-                response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
-                response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
-                response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
-                generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                if wp.static(packed):
+                    broadcast0 = wp.tile_from_thread(shape=packed_width, value=lambda0, thread_idx=0, storage="shared")
+                    broadcast1 = wp.tile_from_thread(shape=packed_width, value=lambda1, thread_idx=0, storage="shared")
+                    broadcast2 = wp.tile_from_thread(shape=packed_width, value=lambda2, thread_idx=0, storage="shared")
+                    response0 = wp.tile_map(
+                        _unpack, wp.tile_load(packed_response[packed_row], shape=packed_width, storage="register")
+                    )
+                    response1 = wp.tile_map(
+                        _unpack,
+                        wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=packed_width, storage="register"),
+                    )
+                    response2 = wp.tile_map(
+                        _unpack,
+                        wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=packed_width, storage="register"),
+                    )
+                    generalized_delta += (
+                        wp.tile_map(wp.mul, response0, broadcast0)
+                        + wp.tile_map(wp.mul, response1, broadcast1)
+                        + wp.tile_map(wp.mul, response2, broadcast2)
+                    )
+                elif wp.static(fp16):
+                    broadcast0 = wp.tile_from_thread(shape=max_dofs, value=lambda0, thread_idx=0, storage="shared")
+                    broadcast1 = wp.tile_from_thread(shape=max_dofs, value=lambda1, thread_idx=0, storage="shared")
+                    broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
+                    response0 = wp.tile_astype(
+                        wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register"),
+                        dtype=wp.float32,
+                    )
+                    response1 = wp.tile_astype(
+                        wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"),
+                        dtype=wp.float32,
+                    )
+                    response2 = wp.tile_astype(
+                        wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"),
+                        dtype=wp.float32,
+                    )
+                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                else:
+                    broadcast0 = wp.tile_from_thread(shape=max_dofs, value=lambda0, thread_idx=0, storage="shared")
+                    broadcast1 = wp.tile_from_thread(shape=max_dofs, value=lambda1, thread_idx=0, storage="shared")
+                    broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
+                    response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
+                    response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
+                    response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
@@ -1187,18 +1442,54 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                 delta2 = wp.float32(0.0)
                 row = wp.int32(3) * point
                 packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
-                jacobian0 = wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register")
-                jacobian1 = wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
-                jacobian2 = wp.tile_load(packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
-                jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
-                    wp.tile_sum(jacobian0 * generalized_delta), 0
-                )
-                jv1 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
-                    wp.tile_sum(jacobian1 * generalized_delta), 0
-                )
-                jv2 = row_velocity[packed_articulation, row + wp.int32(2)] + wp.tile_extract(
-                    wp.tile_sum(jacobian2 * generalized_delta), 0
-                )
+                if wp.static(packed):
+                    jacobian0 = wp.tile_map(
+                        _unpack, wp.tile_load(packed_jacobian[packed_row], shape=packed_width, storage="register")
+                    )
+                    jacobian1 = wp.tile_map(
+                        _unpack,
+                        wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=packed_width, storage="register"),
+                    )
+                    jacobian2 = wp.tile_map(
+                        _unpack,
+                        wp.tile_load(packed_jacobian[packed_row + wp.int32(2)], shape=packed_width, storage="register"),
+                    )
+                    jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
+                        wp.tile_sum(wp.tile_map(wp.dot, jacobian0, generalized_delta)), 0
+                    )
+                    jv1 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
+                        wp.tile_sum(wp.tile_map(wp.dot, jacobian1, generalized_delta)), 0
+                    )
+                    jv2 = row_velocity[packed_articulation, row + wp.int32(2)] + wp.tile_extract(
+                        wp.tile_sum(wp.tile_map(wp.dot, jacobian2, generalized_delta)), 0
+                    )
+                else:
+                    if wp.static(fp16):
+                        jacobian0 = wp.tile_astype(
+                            wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register"),
+                            dtype=wp.float32,
+                        )
+                        jacobian1 = wp.tile_astype(
+                            wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register"),
+                            dtype=wp.float32,
+                        )
+                        jacobian2 = wp.tile_astype(
+                            wp.tile_load(packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register"),
+                            dtype=wp.float32,
+                        )
+                    else:
+                        jacobian0 = wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register")
+                        jacobian1 = wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
+                        jacobian2 = wp.tile_load(packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                    jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
+                        wp.tile_sum(jacobian0 * generalized_delta), 0
+                    )
+                    jv1 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
+                        wp.tile_sum(jacobian1 * generalized_delta), 0
+                    )
+                    jv2 = row_velocity[packed_articulation, row + wp.int32(2)] + wp.tile_extract(
+                        wp.tile_sum(jacobian2 * generalized_delta), 0
+                    )
                 if lane == wp.int32(0):
                     contact = point_contact[packed_articulation, point]
                     column = point_column[packed_articulation, point]
@@ -1250,13 +1541,51 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                         delta1 = wp.dot(impulse, t0)
                         delta2 = wp.dot(impulse, t1)
 
-                broadcast0 = wp.tile_from_thread(shape=max_dofs, value=delta0, thread_idx=0, storage="shared")
-                broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
-                broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
-                response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
-                response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
-                response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
-                generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                if wp.static(packed):
+                    broadcast0 = wp.tile_from_thread(shape=packed_width, value=delta0, thread_idx=0, storage="shared")
+                    broadcast1 = wp.tile_from_thread(shape=packed_width, value=delta1, thread_idx=0, storage="shared")
+                    broadcast2 = wp.tile_from_thread(shape=packed_width, value=delta2, thread_idx=0, storage="shared")
+                    response0 = wp.tile_map(
+                        _unpack, wp.tile_load(packed_response[packed_row], shape=packed_width, storage="register")
+                    )
+                    response1 = wp.tile_map(
+                        _unpack,
+                        wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=packed_width, storage="register"),
+                    )
+                    response2 = wp.tile_map(
+                        _unpack,
+                        wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=packed_width, storage="register"),
+                    )
+                    generalized_delta += (
+                        wp.tile_map(wp.mul, response0, broadcast0)
+                        + wp.tile_map(wp.mul, response1, broadcast1)
+                        + wp.tile_map(wp.mul, response2, broadcast2)
+                    )
+                elif wp.static(fp16):
+                    broadcast0 = wp.tile_from_thread(shape=max_dofs, value=delta0, thread_idx=0, storage="shared")
+                    broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
+                    broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
+                    response0 = wp.tile_astype(
+                        wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register"),
+                        dtype=wp.float32,
+                    )
+                    response1 = wp.tile_astype(
+                        wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"),
+                        dtype=wp.float32,
+                    )
+                    response2 = wp.tile_astype(
+                        wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"),
+                        dtype=wp.float32,
+                    )
+                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                else:
+                    broadcast0 = wp.tile_from_thread(shape=max_dofs, value=delta0, thread_idx=0, storage="shared")
+                    broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
+                    broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
+                    response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
+                    response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
+                    response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
 
         wp.tile_store(generalized_delta_out[articulation], generalized_delta)
         if not fuse_apply:
@@ -1277,7 +1606,12 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                 if parent >= wp.int32(0):
                     delta = body_delta[articulation, data.body_joint[parent] - start]
                 for dof in range(data.joint_qd_start[joint], data.joint_qd_start[joint + wp.int32(1)]):
-                    dof_delta = generalized_delta_out[articulation, dof - dof_start_articulation]
+                    local_dof = dof - dof_start_articulation
+                    if wp.static(packed):
+                        pair = generalized_delta_out[articulation, local_dof // wp.int32(pack_factor)]
+                        dof_delta = pair[local_dof & wp.int32(pack_factor - 1)]
+                    else:
+                        dof_delta = generalized_delta_out[articulation, local_dof]
                     data.joint_qd[dof] += dof_delta
                     delta += data.joint_s[dof] * dof_delta
                 body_delta[articulation, local_joint] = delta
@@ -1290,7 +1624,13 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                 index += wp.int32(_BLOCK_DIM)
             _sync_contact_warp()
 
-    @wp.kernel(enable_backward=False, module=module)
+    _solve_generalized_contact_tile_device.__annotations__["generalized_delta_out"] = wp.array2d[_delta_dtype]
+    _solve_generalized_contact_tile_device = wp.func(
+        _bind_rows_dtype_annotations(
+            _solve_generalized_contact_tile_device, _rows_dtype, "packed_jacobian", "packed_response"
+        )
+    )
+
     def _solve_generalized_contact_tile_kernel(
         columns: ContactColumnContainer,
         idt: wp.float32,
@@ -1307,8 +1647,8 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         tangent0: wp.array2d[wp.vec3],
         row_velocity: wp.array2d[wp.float32],
         page_index: wp.array[wp.int32],
-        packed_jacobian: wp.array2d[wp.float32],
-        packed_response: wp.array2d[wp.float32],
+        packed_jacobian: wp.array2d[_rows_dtype],
+        packed_response: wp.array2d[_rows_dtype],
         bodies: BodyContainer,
         fuse_apply: wp.bool,
         max_depth: wp.int32,
@@ -1347,6 +1687,12 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
             body_delta,
         )
 
+    _solve_generalized_contact_tile_kernel.__annotations__["generalized_delta_out"] = wp.array2d[_delta_dtype]
+    _solve_generalized_contact_tile_kernel = wp.kernel(enable_backward=False, module=module)(
+        _bind_rows_dtype_annotations(
+            _solve_generalized_contact_tile_kernel, _rows_dtype, "packed_jacobian", "packed_response"
+        )
+    )
     return _solve_generalized_contact_tile_device, _solve_generalized_contact_tile_kernel
 
 
@@ -1359,6 +1705,14 @@ _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES = {
 _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS = {
     width: operations[1] for width, operations in _SOLVE_GENERALIZED_CONTACT_TILE_OPS.items()
 }
+
+
+@functools.cache
+def _solve_generalized_contact_tile_ops(max_dofs: int, mode: str):
+    """Lazy mode-variant accessor; fp32 reuses the eagerly built production ops."""
+    if mode == "fp32":
+        return _SOLVE_GENERALIZED_CONTACT_TILE_OPS[max_dofs]
+    return _make_solve_generalized_contact_tile_ops(max_dofs, mode=mode)
 
 
 def _aligned_contact_dof_width(max_dof_count: int) -> int:
@@ -1408,8 +1762,13 @@ class ReducedContactBlockSystem:
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
         max_depth: int,
+        packed_rows_mode: str | None = None,
     ):
         self.device = model.device
+        self.packed_rows_mode = _packed_rows_mode_default() if packed_rows_mode is None else str(packed_rows_mode)
+        if self.packed_rows_mode not in _ROWS_MODE_DTYPES:
+            raise ValueError(f"unknown packed_rows_mode {self.packed_rows_mode!r}")
+        self.packed_rows_fp16 = self.packed_rows_mode != "fp32"
         self.articulation_depth_start = articulation_depth_start
         self.articulation_depth_joint = articulation_depth_joint
         self.max_depth = int(max_depth)
@@ -1436,7 +1795,14 @@ class ReducedContactBlockSystem:
             ),
         )
         self.contact_dof_width = _aligned_contact_dof_width(max_dof_count)
-        self.solve_kernel = _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS[self.contact_dof_width]
+        self.wide_body_response = os.environ.get("PHOENX_CONTACT_BODY_RESPONSE_WIDE", "0").lower() not in (
+            "0",
+            "",
+            "false",
+        )
+        self.solve_kernel = _solve_generalized_contact_tile_ops(self.contact_dof_width, self.packed_rows_mode)[1]
+        self.build_rows_kernel = _get_build_packed_rows_kernel(self.packed_rows_fp16, self.wide_body_response)
+        self.transpose_kernel = _get_transpose_response_kernel(self.packed_rows_fp16)
         self.biased_page_launcher = None
         self.relax_page_launcher = None
         self.requires_impulse_response = not (
@@ -1476,6 +1842,8 @@ class ReducedContactBlockSystem:
         self.fallback_partitioner: IncrementalContactPartitioner | None = None
         self.packed_jacobian: wp.array2d[wp.float32] | None = None
         self.packed_response: wp.array2d[wp.float32] | None = None
+        self.packed_jacobian_solve: wp.array | None = None
+        self.packed_response_solve: wp.array | None = None
         self.packed_previous_row_body: wp.array[wp.int32] | None = None
         self.enabled = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.basis_enabled = wp.zeros_like(self.enabled)
@@ -1504,12 +1872,30 @@ class ReducedContactBlockSystem:
         self.generalized_delta = wp.zeros(
             (articulation_count, self.contact_dof_width), dtype=wp.float32, device=self.device
         )
+        pack_factor = _ROWS_MODE_PACK[self.packed_rows_mode]
+        if pack_factor > 1:
+            # Aliased vecN view: the packed solve tile-stores the delta as vecN.
+            self.generalized_delta_solve = wp.array(
+                ptr=self.generalized_delta.ptr,
+                dtype=_ROWS_MODE_VEC[pack_factor],
+                shape=(articulation_count, self.contact_dof_width // pack_factor),
+                device=self.device,
+            )
+        else:
+            self.generalized_delta_solve = self.generalized_delta
         self.aba_joint_work = wp.zeros(
             (articulation_count, self.contact_dof_width, _MAX_ROWS), dtype=wp.float32, device=self.device
         )
         self.aba_body_response = wp.zeros(
             (articulation_count, max_body_count, _MAX_ROWS),
             dtype=wp.spatial_vector,
+            device=self.device,
+        )
+        # Aliased flat u64 view (3 words per spatial vector) for the wide builder.
+        self.aba_body_response_wide = wp.array(
+            ptr=self.aba_body_response.ptr,
+            dtype=wp.uint64,
+            shape=(articulation_count * max_body_count * _MAX_ROWS * 3,),
             device=self.device,
         )
         self.generalized_body_delta = wp.zeros(
@@ -1533,10 +1919,24 @@ class ReducedContactBlockSystem:
         packed_row_capacity = self.articulation_count * _CACHED_PAGE_COUNT * _MAX_ROWS
         self.packed_jacobian = wp.zeros(
             (packed_row_capacity, self.contact_dof_width),
-            dtype=wp.float32,
+            dtype=wp.float16 if self.packed_rows_fp16 else wp.float32,
             device=self.device,
         )
         self.packed_response = wp.zeros_like(self.packed_jacobian)
+        pack_factor = _ROWS_MODE_PACK[self.packed_rows_mode]
+        if pack_factor > 1:
+            # Aliased uint32/uint64 views: full-width 4/8-byte lane loads in the solve.
+            pack_dtype = _ROWS_MODE_DTYPES[self.packed_rows_mode]
+            pack_shape = (packed_row_capacity, self.contact_dof_width // pack_factor)
+            self.packed_jacobian_solve = wp.array(
+                ptr=self.packed_jacobian.ptr, dtype=pack_dtype, shape=pack_shape, device=self.device
+            )
+            self.packed_response_solve = wp.array(
+                ptr=self.packed_response.ptr, dtype=pack_dtype, shape=pack_shape, device=self.device
+            )
+        else:
+            self.packed_jacobian_solve = self.packed_jacobian
+            self.packed_response_solve = self.packed_response
         self.packed_previous_row_body = wp.full(packed_row_capacity, value=-1, dtype=wp.int32, device=self.device)
         worker_blocks = max(1, int(getattr(self.device, "sm_count", 1)))
         self.fallback_worker_count = min(capacity, worker_blocks * _FALLBACK_BLOCK_DIM)
@@ -1848,7 +2248,7 @@ class ReducedContactBlockSystem:
                 )
             if build_rows:
                 wp.launch(
-                    _build_packed_generalized_contact_rows_kernel,
+                    self.build_rows_kernel,
                     dim=(self.articulation_count, _MAX_ROWS),
                     block_dim=_MAX_ROWS,
                     inputs=[
@@ -1869,13 +2269,14 @@ class ReducedContactBlockSystem:
                         self.packed_response,
                         self.aba_joint_work,
                         self.aba_body_response,
+                        self.aba_body_response_wide,
                     ],
                     device=self.device,
                 )
 
                 def transpose_response() -> None:
                     wp.launch_tiled(
-                        _transpose_generalized_contact_response_kernel,
+                        self.transpose_kernel,
                         dim=[self.articulation_count * _RESPONSE_TILES_PER_ARTICULATION],
                         block_dim=_RESPONSE_TILE,
                         inputs=[
@@ -1917,15 +2318,15 @@ class ReducedContactBlockSystem:
                     self.tangent0,
                     self.row_velocity,
                     self.page_index,
-                    self.packed_jacobian,
-                    self.packed_response,
+                    self.packed_jacobian_solve,
+                    self.packed_response_solve,
                     bodies,
                     wp.bool(self.fuse_apply),
                     wp.int32(self.max_depth),
                     self.articulation_depth_start,
                     self.articulation_depth_joint,
                 ],
-                outputs=[self.generalized_delta, self.generalized_body_delta],
+                outputs=[self.generalized_delta_solve, self.generalized_body_delta],
                 block_dim=_BLOCK_DIM,
                 device=self.device,
             )
