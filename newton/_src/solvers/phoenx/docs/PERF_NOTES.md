@@ -4,7 +4,60 @@ Curated lessons-learned from past performance work on the PhoenX solver. Goal is
 
 This is **not** a substitute for `git log` — it's a hand-maintained shortlist of the load-bearing decisions and the dead ends.
 
+## Measured architecture laws (2026-07-10)
+
+Three contact-solve architectures were compared head-to-head on identical
+8192-world G1 snapshots (validated outputs, graph-captured reversed brackets):
+
+- **Global row streaming (production) wins at training scale.** On-chip
+  warp-per-world (rows in smem) loses 13% ex-gather at 8192 worlds (residency
+  ~3 worlds/SM at ~40 KB/world) though it wins 1.65x at 512 worlds; a
+  matrix-free solve (no response rows, one O(depth) tree pass per sweep) is
+  0.36x — each tree pass costs as much as a full dense sweep because one warp
+  walks a ~30-joint latency chain while production streams rows at full
+  occupancy. Law: *at high occupancy, streaming rows x nv is cheap; per-sweep
+  factorized-solve latency is expensive.* Oracles retained at
+  `benchmarks/experimental/bench_warp_world_contact_oracle.py` and
+  `bench_matrix_free_reduced_contacts.py`.
+- **Warp emits only scalar global loads for all vector types** (PTX-verified:
+  zero `ld.global.v2/v4` in any hot kernel; a vec6 access = 6 strided 4-byte
+  requests). Wide loads require aliased u64/uint4 views + a minimal
+  `wp.func_native` unpack (pattern in `reduced_contact_block.py`
+  `_load_spatial_wide`, proven bit-identical with `ld.global.v2.f32`). Where
+  it pays: gather-style per-cid accesses (classic fast-tail/block-world body
+  fields — follow-up in flight). Where it does not: the reduced row arrays at
+  8192 worlds are already sector-efficient (neighbor lanes share sectors);
+  wide-loading `body_response` measured +2.4% at 512 worlds, noise at 8192.
+- **Load-request count, not just bytes, is the lever on the contact phase**:
+  naked fp16 rows (same request count as fp32) gained nothing (0.98x); packed
+  fp16x2 (full 4-byte words) gained +9.4%; fp16x4/x8 add nothing because
+  pack>=2 already reaches one warp request per row load (x4 measured +8.3%,
+  slightly worse). fp16x2 is the packing optimum for this layout.
+
 ## Active wins
+
+### FP16x2 packed contact rows (2026-07-10) - retention in progress
+- `PHOENX_CONTACT_ROWS_FP16=2`: packed_jacobian/packed_response stored as
+  fp16 pairs in uint32 words (func_native `_unpack_h2`), all accumulators,
+  lambdas, velocities, effective masses FP32. Isolated contact phase +9.4%
+  at 8192-world G1 (2600 -> 2376 us); nsys inside real training confirms
+  build -11% / solve -4%. Deviation vs fp32 <= 3e-4 rel (rms 7.6e-6),
+  bit-stable replays, 56/58 reduced battery passes including long-horizon
+  momentum/energy and Featherstone parity, far-translation invariance passes
+  (rows are COM-relative).
+- Seed-lottery evidence: all five compared seeds match fp32 iteration-75
+  screens within 0.02, but 0/4 full-horizon draws passed the final 0.90 gate
+  (fp32's own rate is ~1/6-1/3; not statistically distinguishable). Retained
+  by explicit user decision on the physics evidence; expected-cost baseline
+  stays fp32-derived until successes accumulate under the new default.
+- Landing chores: fix `test_generalized_contact_rows_match_aba` (launches the
+  module-level fp32 kernel directly against fp16 arrays) and add a tolerance/
+  mode-guard for its exactness assertion; add an fp16-mode regression test;
+  flip default to mode 2 with fp32 opt-out.
+- Methodology lesson: any physics-affecting change (even 3e-4) re-rolls the
+  seed lottery. Iteration-75 screens are robust cross-physics comparators;
+  full-gate races are expensive and low-powered at n<=4 — budget them only
+  for candidates whose prize justifies it.
 
 ### Register-resident generalized contact delta (2026-07-03)
 - A user-assisted one-launch Nsight Compute report measured the reduced
@@ -380,44 +433,11 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 ## Designed, not yet implemented
 
 ### Multi-stream capture overlap for the reduced pipeline (design, 2026-07-03)
-- **Motivation (counter-backed):** advance/factor/publish/kinematics are
-  depth-synchronized tree kernels that each leave the GPU well under 35%
-  utilized while serialized in the captured graph (~30% of physics time).
-  The collision/ingest chain is memory-heavy and independent of them until
-  the contact row build.
-- **Verified structure** (`solver_phoenx.py step()` + `solver.py`): per
-  solver.step the sequence is import -> ingest_and_warmstart ->
-  build_schedule -> coloring -> [substep loop: begin_substep (kinematics +
-  factor + advance) -> integrate forces -> contact gather/rows/solve ->
-  integrate positions -> relax -> publish]. For the G1 recipe substeps=1,
-  so `begin_substep` (~410 us: kinematics 54 + factor 213 + advance 141)
-  can fork against ingest+schedule+coloring (~200 us) right after import,
-  with a join before the first contact gather (gather reads
-  `reduced.body_q_com` from kinematics; row build reads `joint_d_inv`/
-  `joint_u`/`joint_s` from factor).
-- **Sketch:** persistent side stream + wp.Event fork/join inside step();
-  skip `begin_substep` for substep 0 in the loop. Works eager and under
-  capture (events create parallel graph branches); leapfrog already proves
-  multi-stream capture in this codebase. Same kernels, disjoint arrays,
-  fixed intra-stream order => bit-identical.
-- **Open hazards to audit before coding:**
-  1. `_advance_reduced_articulations_warp_kernel` writes `public_body_qd`
-     and body velocities - confirm ingest/warm-start/coloring never read
-     `bodies.velocity` (classic warm-start and contact prepare do, but they
-     run after the join in-substep; check `_ingest_and_warmstart_contacts`
-     specifically).
-  2. `_kinematic_prepare_step` writes kinematic movers' velocities and
-     currently runs between ingest and the substep loop - it must stay
-     ordered against BOTH streams or be proven disjoint.
-  3. Gate the fork on: reduced articulation present, CUDA, no picking, no
-     sleeping, `reuse_partition=False`, and substep 0 only.
-  4. Multi-substep recipes (substeps>1) only overlap the first substep
-     unless collide/ingest also move inside the loop - fine for the
-     3x(1-substep) G1 recipe, neutral elsewhere.
-- Expected win if overlap is clean: O(100-150 us) of the ~810 us G1
-  solver.step hidden, i.e. up to ~10-15% physics; discount for SM
-  contention. Validate with bit-exact state hashes + the leapfrog trainer
-  (per the tiered-sort lesson, always test the non-default-stream path).
+- **Resolved 2026-07-10: implemented and REJECTED** — see "Substep-0
+  articulation/ingest multi-stream overlap" under *Tried and reverted*. The
+  design's ~10-15% estimate ignored memory-bandwidth contention between the
+  overlapped branches; measured end-to-end win was +1.6%. Full design details
+  removed (see git history of this file if ever needed).
 
 ## Experimental-only code
 
@@ -454,6 +474,42 @@ This is **not** a substitute for `git log` — it's a hand-maintained shortlist 
 - Use the production benchmark suite and the unified-block proxy benchmark for decisions that affect defaults. Re-enable actual-solve prototype modes only for isolated scheduler debugging with short timeouts.
 
 ## Tried and reverted
+
+### Reduced two-substep cold start (2026-07-10) - REJECTED
+- G1 recipe at sim_substeps=2 from scratch: paired iteration-75 screens
+  0.657 / 0.698 / 0.625 (vs 3x2's 0.708 / 0.659 / 0.674); the one screen
+  survivor (seed 11) missed the frozen 0.80 second screen at 0.785 with zero
+  falls. 0/3 full-path survivors vs 1/3 at 3x2 — expected cost cannot
+  improve. The retained 3->2 substep transition at 99.6M samples stands.
+- Related (same day): projected-maximal at 3 substeps has solved anchors via
+  the position-level tree projection (see MAXIMAL_JOINT_TREE_PROJECTOR.md)
+  but loses the training race decisively (0.255/0.390/0.403 vs
+  0.708/0.659/0.674); extra PGS iterations at 3 substeps are provably useless
+  (3x4/3x6/3x8 anchor RMS flat at 5.3-5.6e-2 pre-pass). Maximal-mode learning
+  failure is now narrowed to drive/actuation dynamics — contact convergence
+  and positional closure are both ruled out.
+
+### Substep-0 articulation/ingest multi-stream overlap (2026-07-10) - REJECTED
+- Implemented the designed side-stream fork (begin_substep split into factor /
+  advance halves, advance event-ordered after the contact warm-start gather —
+  the audit found that gather is the only pre-substep reader of articulated
+  ``bodies.velocity``), plus a ``begin_step_async`` variant hiding state
+  import + eval_fk + factor under ``model.collide``. Deterministic and
+  bit-identical to the serial path.
+- G1 shared-physics 8192-world brackets: in-step fork **-1.2%**, pre-collide
+  async **+1.6%**. Node-level nsys (``--cuda-graph-trace=node``; the default
+  graph granularity only shows eager warmup steps) confirms the captured graph
+  truly parallelizes the branches.
+- Both branches are memory-bound, so concurrency pays half its theoretical
+  ~13%: under overlap eval_fk slows 173 -> 320 us, local kinematics 44 -> 100,
+  factor 128 -> 160. Contact row build (884 us) + tile solve (~810 us) still
+  serialize after the join — ~61% of the 3.8 ms standing-pose step is
+  untouched by any front-section overlap.
+- Rejected and fully reverted: +1.6% does not justify a side stream, four
+  events, an async API contract (no state/control mutation between the calls),
+  and per-env wiring. Streams stay where they obviously pay (leapfrog
+  rollout/update/copy). Do not re-try front-section overlap; the lever on this
+  pipeline is making the row build / contact solve cheaper, not scheduling.
 
 ### Upper-triangle-only reduced factor correction (2026-07-03) - REJECTED
 - Reduced inertia is stored as 21 symmetric upper-triangle values, so two exact

@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>9 July 2026 · seed variance isolated</strong></div>
+      <div class="stamp">Last updated<br><strong>10 July 2026 · new direction: scene-specialized kernels</strong></div>
     </header>
 
     <section class="hero">
@@ -140,6 +140,7 @@
     </section>
 
     <p class="profile-note">The ready-cache rerun of the frozen G1 development bank contains one 215.58 s success and two iteration-75 rejections at 63.79 / 63.83 s. Expected restart cost remains 343.19 s. A command-curriculum candidate improved every early score but regressed final expected cost to 678.28 s, so it was rejected.</p>
+    <p class="profile-note"><strong>Progress check (10 Jul):</strong> not faster yet &mdash; the headline and the retained reduced 3&times;2 config (~950k samples/s) are unchanged; today&rsquo;s two speed candidates were measured and rejected (multi-stream overlap +1.6%; projected 3&times;2 fails the training screens despite solved anchors). Versus nanoG1 we are ~2.25&times; slower per physics step (&asymp;125&ndash;145 s vs 58.9 s under their weaker gate). What moved: three directions closed with data, the position-projection capability retained with a regression test, and the nanoG1 decomposition yields the first factor-2-class target with an existence proof &mdash; scene-specialized kernel codegen (topology baking + static contact pairs).</p>
 
     <div class="section-label">Zero to qualified policy</div>
     <section class="work-profile" aria-label="Cold-start time to policy across training scenes">
@@ -228,6 +229,62 @@
     </section>
 
     <div class="section-label">Current state</div>
+    <article>
+      <div class="meta"><span class="tag">NEW DIRECTION &middot; SCENE-SPECIALIZED KERNELS</span><time>10 Jul</time></div>
+      <h2>nanoG1 decomposed: the engine gap is 2.25&times; and it is topology baking</h2>
+      <p>A source-level read of the nanoG1 checkout separates its 5.83&times; headline advantage into accounting and engineering. Roughly 2&times; is gate definition and timing: one seed, one eval, one fall allowed, compile time excluded, 58.9 s computed post-hoc as samples&divide;throughput. Under that gate PhoenX would report roughly 125&ndash;145 s today. The true engine gap is per-physics-step cost: nanoG1 sustains ~6.4M physics steps/s in training versus PhoenX&rsquo;s ~2.85M (2.25&times;).</p>
+      <ul>
+        <li>nanoG1&rsquo;s speed is compile-time specialization, not better algorithms: the entire G1 model (topology, DOF offsets, joint types, gains) is baked as constants into warp-per-env staged kernels with shared-memory Hessian build+factor+solve fusion, and its contact system is a <strong>fixed five-pair list with zero broadphase</strong>. Its solver is MuJoCo Newton truncated to 2 iterations, pyramidal cones, no domain randomization (despite the README).</li>
+        <li>The learner recipe is already matched: PhoenX mirrors MinGRU, Muon, mirror loss 0.25, V-trace, replay ratio 3, and the batch shape. The samples-to-gate difference is mostly gate strictness, not learning quality.</li>
+        <li><strong>Scene-specialized kernels are rejected by directive</strong> (10 Jul): baking scene/robot topology into kernels is overfitting, even as generic codegen &mdash; PhoenX stays a general solver. The nanoG1 gap will be closed only as far as generic mechanisms allow.</li>
+        <li><strong>On-chip oracle measured (10 Jul): loses at scale, wins below saturation.</strong> A validated warp-per-world all-in-smem contact solve (deviation 1e-6, lambdas bitwise) measures 1.65&times; at 512 worlds and parity at 2,048, but 0.87&times; ex-gather at 8,192 &mdash; ~40 KB of on-chip rows per world caps residency at ~3 worlds/SM while the production phase kernels overlap across worlds. Retained as evidence (bench_warp_world_contact_oracle.py): locality alone cannot beat the row pipeline at training scale; <em>the O(rows&times;nv) response construction is the floor in both designs</em>.</li>
+        <li><strong>Matrix-free reduced contacts measured (10 Jul): rejected, 0.36&times; at 8,192 worlds.</strong> A validated prototype (warm start matches production to 2.4&times;10<sup>&minus;7</sup>; genuinely different from the July-3 matrix-free rejection &mdash; no response streaming at all, one O(depth) tree pass per sweep) needs &ge;12 Jacobi sweeps for production quality and each tree pass costs as much as a full production dense sweep: one warp per world walks a ~30-joint latency chain while production streams rows at full occupancy. Together with the on-chip oracle this closes the architecture question with a fundamental finding: <em>at high occupancy, streaming rows&times;nv is cheap; per-sweep factorized-solve latency is expensive. The row pipeline is the GPU-correct shape at training scale.</em></li>
+        <li><strong>Consequence &mdash; the remaining generic speed levers are byte-count and row-count, plus reliability:</strong> (1) compress the row stream; (2) build-time patch rows (~25&ndash;27% fewer rows, scoped); (3) seed reliability p=1/3&rarr;2/3 (halves the headline).</li>
+        <li><strong>FP16&times;2 packed rows measured (10 Jul): kernel win proven, training verdict deferred.</strong> Packed half-precision Jacobian/response storage (full-width aligned loads; naked fp16 rejected &mdash; the phase is load-request-bound) wins the isolated contact phase by <strong>+9.4%</strong> and is faster inside real training (nsys: build &minus;11%, solve &minus;4%), with deviations &le;3&times;10<sup>&minus;4</sup> and bit-stable replays. All three paired iteration-75 screens match fp32 (0.707/0.657/0.665 vs 0.708/0.659/0.674), but the full-horizon known-good seed missed the frozen iteration-290 check at 0.8872 vs 0.90 (fp32: 0.9261). Any physics change re-rolls the seed lottery, so one late miss is inconclusive; resolving it costs a multi-seed race that outweighs the ~2&ndash;3% end-to-end win today. Wider packing is a measured dead end (&times;4 slightly worse at +8.3% &mdash; pack&ge;2 already reaches one warp request per row load; &times;8 dominated), so fp16&times;2 is the family optimum. A four-seed full-horizon race found <strong>zero passes</strong> (42: 0.887 at the 290 check; 71: 0.734 at 150; 47/89 screen-rejected) while screen scores track fp32 within 0.02 on every comparable seed &mdash; no screen-level degradation, but zero successes means unresolved expected cost, so the family is <strong>parked, not retained</strong> (revisit when combined with patch rows or once seed reliability makes races cheap). Broadly useful finding banked: Warp emits only scalar loads for all vector types (PTX-verified); the bit-identical wide-load follow-up on the classic per-cid body-field path is now in progress &mdash; no race needed, gates are cross-scene brackets plus bit-identity.</li>
+        <li><strong>Two-substep cold start rejected</strong> (10 Jul): paired screens 0.657 / 0.698 / 0.625 &mdash; only seed 11 passed the iteration-75 screen, then missed the frozen 0.80 second screen at 0.785 (zero falls, steady climb, but the borderline-miss rule is frozen for a reason). 0/3 full-path survivors versus 1/3 at 3&times;2, so expected cost cannot improve. The retained 3&rarr;2 substep transition at 99.6M samples stands.</li>
+      </ul>
+      <p class="profile-note">nanoG1 source: /home/twidmer/Documents/git/nanoG1 at engine pin e3825cea; analysis 10 Jul.</p>
+    </article>
+    <article>
+      <div class="meta"><span class="tag warn">PHYSICS WIN RETAINED &middot; TRAINING RACE LOST</span><time>10 Jul</time></div>
+      <h2>Position projection fixes 3-substep anchors; learning gap is elsewhere</h2>
+      <p>A mass-metric position-level projection now runs after position integration on the free-root revolute projector path: the unchanged warp-per-tree recursion is applied to zero input twist with full current-pose anchor errors as affine targets (recomputed from body-local anchors; prepared fields are stale post-integrate), and the output twist is applied as a rigid displacement. Three Newton iterations handle the linearization residual (1&rarr;2&rarr;3 iterations: 1.1&times;10<sup>&minus;3</sup> &rarr; 2.0&times;10<sup>&minus;5</sup> &rarr; 1.9&times;10<sup>&minus;7</sup> RMS at 3&times;2). Velocities, momenta, and accumulated impulses are untouched; free-root projection applies zero net reaction, so COM and momentum are preserved &mdash; the momentum, physicality, and bitwise-determinism graph tests pass.</p>
+      <ul>
+        <li>Ladder anchors are solved: 3&times;2 anchor RMS improves 5.1&times;10<sup>&minus;2</sup> &rarr; <strong>1.9&times;10<sup>&minus;7</sup></strong>, 4&times;2 to 8.5&times;10<sup>&minus;8</sup>, 5&times;2 to 7.8&times;10<sup>&minus;8</sup> (all better than the previous 5&times;2 baseline of 3.3&times;10<sup>&minus;6</sup>).</li>
+        <li>Projected 3&times;2 measures <strong>57.3k</strong> diagnostic control-steps/s versus reduced 3&times;2 at <strong>37.4k</strong>: <strong>1.53&times; faster than the retained training schedule</strong> on the readback diagnostic.</li>
+        <li>Remaining gap is trajectory robustness, not joints: aggressive-noise median first termination is 50 for projected 3&times;2 versus 111 for reduced 3&times;2, and 4&times;2 with perfect anchors keeps its baseline termination (51). This screen is historically pessimistic for projected modes; the frozen training screen is the real gate.</li>
+        <li>Scope: revolute free-root specialization only; the general mixed-joint projector keeps prior behavior (documented no-op). The pass is fused into one kernel launch per call (gather + recursion + apply, three Newton iterations warp-locally; the dead reaction recursion is skipped): projected 3&times;2 training improves 727k &rarr; 744k samples/s, and a 2-iteration variant reaches 803k at 2.0&times;10<sup>&minus;5</sup> anchor RMS.</li>
+        <li>At 8,192-world training scale the earlier 64-world diagnostic reversed: reduced 3&times;2 measures <strong>950k</strong> env samples/s versus projected 3&times;2 at <strong>744k</strong> (0.78&times;). All nine projected CUDA-graph tests (momentum, physicality, bitwise determinism) pass with the pass active.</li>
+        <li><strong>Bounded paired-seed race: decisive loss.</strong> Projected 3&times;2 scores 0.255 / 0.390 / 0.403 at the frozen iteration-75 screen versus retained reduced 0.708 / 0.659 / 0.674 &mdash; all three seeds rejected at 0.68. Learning is unstable, not slow: seed 42 peaks 0.408 at iteration 25 then degrades to 0.255; roll/pitch angular RMS 3.3&ndash;3.5 with finite, non-exploding physics.</li>
+        <li><strong>Diagnosis narrows:</strong> with anchors at 1.9&times;10<sup>&minus;7</sup>, positional closure joins contact convergence (the 5&times;12 result, battery 0.154) as ruled-out causes of maximal-mode learning failure. The remaining suspect is drive/actuation dynamics &mdash; maximal PGS drive rows produce a softer, noisier control response than reduced coordinates&rsquo; implicit generalized drives (consistent with the old parity finding that drive boost &ldquo;does not remove the effective-mass and damping softness&rdquo;).</li>
+        <li><strong>Decision:</strong> per the pre-registered kill criterion, the projected-maximal retraining thread stops here. The position pass is retained as a physics-quality win for the opt-in maximal path (it is what makes 3&ndash;4-substep operation physically defensible at all; 5&times;2 anchors also improve 40&times;). Solver-speed work moves to build-time patch-reduced contact rows on the reduced path (measured ~31% generalized-row ceiling); any future maximal learning attempt should start from the drive formulation, not the solver.</li>
+      </ul>
+      <p class="profile-note">Implementation: maximal_projector.py (fused, no flags). Race records: /tmp/proj3x2_seed{42,11,29}.json. Ladder + brackets measured 10 Jul.</p>
+    </article>
+    <article>
+      <div class="meta"><span class="tag warn">DIAGNOSTIC &middot; SUBSTEP LADDER ROOT CAUSE</span><time>10 Jul</time></div>
+      <h2>Projected-maximal substep failure is positional, not convergence</h2>
+      <p>A fresh 200-step aggressive-action ladder reproduces the known cliff: projected 5&times;2 holds 3.3&times;10<sup>&minus;6</sup> RMS anchor error with noise-driven terminations (median step 80, matching reduced), while 4&times;2 degrades to 1.0&times;10<sup>&minus;3</sup> and 3&times;2 to 5.1&times;10<sup>&minus;2</sup> with terminations at step 11.</p>
+      <ul>
+        <li>Extra PGS iterations rescue nothing at 3 substeps: 3&times;4, 3&times;6, and 3&times;8 all saturate at 5.3&ndash;5.6&times;10<sup>&minus;2</sup> RMS anchor error, terminations stuck at step 13&ndash;14. At 4 substeps, 4&times;4 improves anchors 10&times; to 1.0&times;10<sup>&minus;4</sup> (terminations 51&rarr;64) but stays ~30&times; above the 5&times;2 reference.</li>
+        <li>Interpretation: reduced coordinates survive the same 6.67 ms substep because positions remain on the joint manifold by parametrization. Projected maximal projects velocities only; position recovery is a bounded Baumgarte bias, and at large substeps positional drift outruns it. Iteration count cannot fix that, which the flat 3&times;N curve confirms.</li>
+        <li><strong>Next candidate:</strong> a mass-metric position-level tree projection after position integration (one extra warp-per-tree pass per substep, deterministic, no scheduling changes) &mdash; the projected-maximal analogue of reduced coordinates' exact positional closure. Gates: anchor RMS back to ~10<sup>&minus;6</sup> at 3&times;2&ndash;3&times;4, momentum/energy tests, then the matched throughput bracket versus reduced 3&times;2.</li>
+      </ul>
+      <p class="profile-note">Ladder data: bench_g1_exploration_stability, 64 worlds, action seed 1234. Iterations probe settings 4&times;4 / 3&times;4 / 3&times;6 / 3&times;8 measured 10 Jul.</p>
+    </article>
+    <article>
+      <div class="meta"><span class="tag warn">REJECTED &middot; MULTI-STREAM STEP OVERLAP</span><time>10 Jul</time></div>
+      <h2>Hiding articulation setup under collision is contention-bound</h2>
+      <p>The long-designed reduced-pipeline overlap was implemented and measured: a side stream ran state import, forward kinematics, and the articulated factorization concurrently with collision + contact ingest, with the advance event-ordered after the contact warm-start gather &mdash; the audit confirmed that gather is the only pre-substep reader of articulated body velocities. The result is deterministic and bit-identical to the serial path.</p>
+      <ul>
+        <li>G1 shared-physics 8,192-world brackets: in-step fork <strong>&minus;1.2%</strong>, pre-collide async fork <strong>+1.6%</strong>. Node-level Nsight tracing of the captured graph confirms the branches genuinely run concurrently.</li>
+        <li>Both branches are memory-bound, so overlap pays half its theoretical ~13%: under concurrency eval_fk slows 173&rarr;320 &micro;s, local kinematics 44&rarr;100 &micro;s, factorization 128&rarr;160 &micro;s.</li>
+        <li>The dominant cost is untouched: contact row build (884 &micro;s) plus contact tile solves (~810 &micro;s) still serialize after the join &mdash; about 61% of the 3.8 ms standing-pose step.</li>
+        <li><strong>Decision:</strong> rejected and fully reverted. +1.6% does not justify a side stream, four events, an async API contract, and per-environment wiring. Streams remain only where they obviously pay (graph-leapfrog rollout/update overlap). The lever on this pipeline is making contact row construction and the contact solve cheaper, not scheduling.</li>
+        <li>Focus moves to the projected-maximal preconditioning track: deterministic parallel tree contraction plus the support-tree contact preconditioner, targeting fewer substeps at physical quality.</li>
+      </ul>
+      <p class="profile-note">Retained record: PERF_NOTES.md &ldquo;Substep-0 articulation/ingest multi-stream overlap&rdquo;. The 2026-07-03 overlap design entry is marked resolved. No user profiling action is currently required.</p>
+    </article>
     <article>
       <div class="meta"><span class="tag warn">DIAGNOSTIC &middot; INTERACTION IDENTIFIED</span><time>Latest paired evidence</time></div>
       <h2>G1 seed failures are not caused by initialization alone</h2>
@@ -540,6 +597,7 @@
           <li>One-pass ABA / pre-contact-only Coriolis: +6% physics but severe momentum drift.</li>
           <li>Compile-time velocity-only publish kernel: exact but +0.1% (neutral).</li>
           <li>Factor/contact multi-stream overlap: −2.7% training from GPU contention.</li>
+          <li>Substep-0 articulation/collision multi-stream overlap (incl. pre-collide async fork): bit-identical, genuinely concurrent, but memory-bandwidth contention caps it at +1.6% physics for a side stream + four events + async API; front-section scheduling cannot touch the row-build/solve critical path.</li>
           <li>Conditional empty-reset FK/observation: neutral in overlapped training and −1.7% in high-reset stepping; fully reverted.</li>
           <li>Always-transposed response rows: faster physics, −2.7% training.</li>
           <li>Early response-vector prefetch: +0.55% physics but −0.64% training from increased live-register pressure.</li>
