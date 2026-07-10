@@ -3000,6 +3000,11 @@ class PhoenXWorld:
             idt = wp.float32(1.0 / self.substep_dt)
             self._dispatcher.solve(idt)
             self._integrate_positions()
+            if self._maximal_tree_projector is not None:
+                # Position-level tree projection: pull post-integrate poses
+                # back onto the joint manifold so the prepare-time Baumgarte
+                # bias only has to absorb one substep of drift.
+                self._maximal_tree_projector.project_positions()
             if self._reduced_articulation is not None:
                 self._reduced_articulation.end_substep(
                     self.substep_dt,

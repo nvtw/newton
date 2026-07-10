@@ -26,12 +26,17 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_AXIS_WORLD,
     _OFF_BIAS1,
     _OFF_BIAS2,
+    _OFF_LA1_B1,
+    _OFF_LA1_B2,
+    _OFF_LA2_B1,
+    _OFF_LA2_B2,
     _OFF_R1_B1,
     _OFF_R1_B2,
     _OFF_R2_B2,
     _OFF_T1,
     _OFF_T2,
 )
+from newton._src.solvers.phoenx.solver_phoenx_kernels import _rotation_quaternion
 
 _WARP_SIZE = 32
 _SYNC_WARP_CUDA = """__syncwarp();"""
@@ -201,14 +206,104 @@ def _gather_maximal_tree_kernel(
     data.affine_offset[articulation, lane] = affine_offset
 
 
-@wp.kernel(enable_backward=False)
-def _project_maximal_tree_kernel(data: MaximalTreeProjectorData):
-    tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
-    body_count = data.body_count[articulation]
-    max_depth = data.max_depth[articulation]
+@wp.func
+def _gather_position_lane(
+    joint_to_cid: wp.array[wp.int32],
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    data: MaximalTreeProjectorData,
+    articulation: wp.int32,
+    lane: wp.int32,
+):
+    """Gather pass for the position-level projection (one lane, ``lane < body_count``).
 
+    Like :func:`_gather_maximal_tree_kernel` with ``use_bias=True`` except the
+    input twist is zero and the affine targets are the FULL position errors
+    recomputed at the CURRENT (post-integrate) pose from body-local anchors —
+    the prepared ``r1_b1`` / ``bias1`` fields are stale after integration.
+    """
+    joint = data.joint_index[articulation, lane]
+    body = data.body_slot[articulation, lane]
+    data.velocity_in[articulation, lane] = wp.spatial_vectorf(0.0)
+
+    inverse_mass = bodies.inverse_mass[body]
+    body_mass = wp.float32(1.0) / inverse_mass
+    inertia = wp.inverse(mat33_from_sym6(bodies.inverse_inertia_world[body]))
+    data.body_mass[articulation, lane] = body_mass
+    data.body_inertia[articulation, lane] = sym6_from_mat33(inertia)
+
+    joint_shift = wp.vec3f(0.0)
+    joint_motion = wp.spatial_vectorf(0.0)
+    affine_offset = wp.spatial_vectorf(0.0)
+    if lane > wp.int32(0):
+        cid = joint_to_cid[joint]
+        parent_body = data.body_slot[articulation, data.parent[articulation, lane]]
+        orientation1 = bodies.orientation[parent_body]
+        orientation2 = bodies.orientation[body]
+        position1 = bodies.position[parent_body]
+        position2 = bodies.position[body]
+        r1_b1 = wp.quat_rotate(orientation1, read_vec3(constraints, _OFF_LA1_B1, cid))
+        r1_b2 = wp.quat_rotate(orientation2, read_vec3(constraints, _OFF_LA1_B2, cid))
+        r2_b1 = wp.quat_rotate(orientation1, read_vec3(constraints, _OFF_LA2_B1, cid))
+        r2_b2 = wp.quat_rotate(orientation2, read_vec3(constraints, _OFF_LA2_B2, cid))
+        p1_b1 = position1 + r1_b1
+        p1_b2 = position2 + r1_b2
+        p2_b1 = position1 + r2_b1
+        p2_b2 = position2 + r2_b2
+
+        # Current-pose hinge axis: same anchor-pair construction the joint
+        # prepare pass uses for ``axis_world``.
+        hinge_vec = p2_b2 - p1_b2
+        hinge_len2 = wp.dot(hinge_vec, hinge_vec)
+        axis = wp.vec3f(1.0, 0.0, 0.0)
+        if hinge_len2 > wp.float32(1.0e-20):
+            axis = hinge_vec / wp.sqrt(hinge_len2)
+
+        joint_shift = r1_b2 - r1_b1
+        linear_motion = wp.cross(r1_b2, axis)
+        joint_motion = wp.spatial_vectorf(
+            linear_motion[0], linear_motion[1], linear_motion[2], axis[0], axis[1], axis[2]
+        )
+
+        # Full anchor errors — no Baumgarte scaling / cap.
+        target1 = p1_b1 - p1_b2
+        drift2 = p2_b2 - p2_b1
+        target2_tangent = wp.dot(drift2, axis) * axis - drift2
+        target1_tangent = target1 - wp.dot(target1, axis) * axis
+        tangent_delta = target2_tangent - target1_tangent
+        lever_length = wp.dot(r2_b2 - r1_b2, axis)
+        locked_angular = wp.vec3f(0.0, 0.0, 0.0)
+        if wp.abs(lever_length) > wp.float32(1.0e-8):
+            locked_angular = wp.cross(axis, tangent_delta) / lever_length
+        locked_linear = target1 + wp.cross(r1_b2, locked_angular)
+        affine_offset = wp.spatial_vectorf(
+            locked_linear[0],
+            locked_linear[1],
+            locked_linear[2],
+            locked_angular[0],
+            locked_angular[1],
+            locked_angular[2],
+        )
+
+    data.shift[articulation, lane] = joint_shift
+    data.motion[articulation, lane] = joint_motion
+    data.affine_offset[articulation, lane] = affine_offset
+
+
+@wp.func
+def _project_tree_velocities(
+    data: MaximalTreeProjectorData,
+    articulation: wp.int32,
+    lane: wp.int32,
+    body_count: wp.int32,
+    max_depth: wp.int32,
+):
+    """Warp-cooperative tree solve: articulated inertia recursion to ``velocity_out``.
+
+    All 32 lanes of the articulation's warp must call this together — the
+    ``lane < body_count`` guards sit INSIDE the depth loops with the warp syncs
+    outside so every lane reaches every :func:`_sync_warp`.
+    """
     if lane < body_count:
         spatial_mass = _make_spatial_mass(data.body_mass[articulation, lane], data.body_inertia[articulation, lane])
         data.articulated[articulation, lane] = spatial_mass
@@ -270,6 +365,16 @@ def _project_maximal_tree_kernel(data: MaximalTreeProjectorData):
         _sync_warp()
         current_depth += wp.int32(1)
 
+
+@wp.func
+def _project_tree_reactions(
+    data: MaximalTreeProjectorData,
+    articulation: wp.int32,
+    lane: wp.int32,
+    body_count: wp.int32,
+    max_depth: wp.int32,
+):
+    """Recover per-joint reaction impulses from ``velocity_out`` (velocity path only)."""
     current_depth = max_depth
     while current_depth >= wp.int32(0):
         if lane < body_count and data.depth[articulation, lane] == current_depth:
@@ -284,6 +389,17 @@ def _project_maximal_tree_kernel(data: MaximalTreeProjectorData):
             data.reaction[articulation, lane] = impulse
         _sync_warp()
         current_depth -= wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def _project_maximal_tree_kernel(data: MaximalTreeProjectorData):
+    tid = wp.tid()
+    articulation = tid // wp.int32(_WARP_SIZE)
+    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    body_count = data.body_count[articulation]
+    max_depth = data.max_depth[articulation]
+    _project_tree_velocities(data, articulation, lane, body_count, max_depth)
+    _project_tree_reactions(data, articulation, lane, body_count, max_depth)
 
 
 @wp.kernel(enable_backward=False)
@@ -322,6 +438,59 @@ def _publish_maximal_tree_kernel(
     lambda1 = linear - lambda2
     write_vec3(constraints, _OFF_ACC_IMP1, cid, read_vec3(constraints, _OFF_ACC_IMP1, cid) + lambda1)
     write_vec3(constraints, _OFF_ACC_IMP2, cid, read_vec3(constraints, _OFF_ACC_IMP2, cid) + lambda2)
+
+
+@wp.func
+def _apply_position_lane(
+    bodies: BodyContainer,
+    data: MaximalTreeProjectorData,
+    articulation: wp.int32,
+    lane: wp.int32,
+):
+    """Apply ``velocity_out`` as a position displacement twist (one lane).
+
+    Mirrors ``_integrate_velocities_kernel``'s pose update with ``dt = 1``.
+    Velocities and accumulated joint impulses stay untouched;
+    ``inverse_inertia_world`` refreshes later via ``_refresh_world_inertia``.
+    """
+    body = data.body_slot[articulation, lane]
+    displacement = data.velocity_out[articulation, lane]
+    linear = wp.vec3f(displacement[0], displacement[1], displacement[2])
+    angular = wp.vec3f(displacement[3], displacement[4], displacement[5])
+    bodies.position[body] = bodies.position[body] + linear
+    q_rot = _rotation_quaternion(angular, wp.float32(1.0))
+    bodies.orientation[body] = wp.normalize(q_rot * bodies.orientation[body])
+
+
+@wp.kernel(enable_backward=False)
+def _project_maximal_tree_positions_kernel(
+    joint_to_cid: wp.array[wp.int32],
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    data: MaximalTreeProjectorData,
+):
+    """Fused position-level projection: 3 Newton iterations in one launch.
+
+    Each iteration runs gather -> tree solve -> pose apply entirely
+    warp-locally (every body belongs to exactly one free-root tree), with
+    :func:`_sync_warp` between phases so iteration ``k+1`` reads the poses
+    written by iteration ``k``. The reaction recursion is skipped — the
+    position path never publishes joint impulses.
+    """
+    tid = wp.tid()
+    articulation = tid // wp.int32(_WARP_SIZE)
+    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    body_count = data.body_count[articulation]
+    max_depth = data.max_depth[articulation]
+
+    for _newton_iter in range(3):
+        if lane < body_count:
+            _gather_position_lane(joint_to_cid, constraints, bodies, data, articulation, lane)
+        _sync_warp()
+        _project_tree_velocities(data, articulation, lane, body_count, max_depth)
+        if lane < body_count:
+            _apply_position_lane(bodies, data, articulation, lane)
+        _sync_warp()
 
 
 class MaximalTreeProjector:
@@ -489,6 +658,26 @@ class MaximalTreeProjector:
         )
         wp.launch(
             _publish_maximal_tree_kernel,
+            dim=self.launch_dim,
+            block_dim=self.block_dim,
+            inputs=[self.joint_to_cid, self.constraints, self.bodies, self.data],
+            device=self.model.device,
+        )
+
+    def project_positions(self) -> None:
+        """Project post-integrate body poses back onto the joint manifold.
+
+        Runs the mass-metric tree recursion on a zero input twist with the
+        full current-pose anchor errors as affine targets, then applies the
+        resulting twist as a rigid displacement. Momentum-free for free-root
+        trees (zero net internal reaction); velocities are untouched. Three
+        Newton iterations: each pass solves the linearized manifold
+        projection, and the linearization residual dominates at large
+        per-substep drift (few substeps) — 3 iterations bring the G1 3-substep
+        anchor RMS from 5e-2 (no pass) to 2e-7.
+        """
+        wp.launch(
+            _project_maximal_tree_positions_kernel,
             dim=self.launch_dim,
             block_dim=self.block_dim,
             inputs=[self.joint_to_cid, self.constraints, self.bodies, self.data],

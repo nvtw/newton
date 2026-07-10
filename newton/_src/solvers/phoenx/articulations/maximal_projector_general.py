@@ -712,5 +712,14 @@ class GeneralMaximalTreeProjector:
             device=self.model.device,
         )
 
+    def project_positions(self) -> None:
+        """No-op: general (mixed-mode) trees keep prepare-time Baumgarte only.
+
+        The revolute-tree :class:`MaximalTreeProjector` runs a position-level
+        projection after integration; mirroring it here needs per-mode
+        current-pose locked-error reconstruction (ball / universal /
+        prismatic / fixed anchors), which is not yet ported.
+        """
+
 
 __all__ = ["GeneralMaximalTreeProjector", "GeneralMaximalTreeProjectorData"]

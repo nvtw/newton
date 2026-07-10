@@ -112,6 +112,30 @@ Run the retained benchmark with:
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.experimental.bench_maximal_joint_tree_projector --worlds 8192 --bodies 29 --replays 100
 ```
 
+## Position-level projection (2026-07-10, retained)
+
+After position integration, `project_positions()` runs the same mass-metric
+tree recursion on a zero input twist with the full current-pose anchor errors
+as affine targets (recomputed from body-local anchors; prepared constraint
+fields are stale post-integrate), applying the output twist as a rigid
+displacement. Three Newton iterations handle the linearization residual
+(G1 3x2 anchor RMS: 1 iter 1.1e-3, 2 iters 2.0e-5, 3 iters 1.9e-7). Fused
+into one kernel launch (gather + recursion + apply, warp-local; the reaction
+recursion is skipped — dead in the position path). Velocities, momenta, and
+accumulated impulses untouched; free-root projection applies zero net
+reaction, so COM and momentum are preserved. Regression test:
+`test_maximal_projected_position_projection_keeps_anchors_closed_at_three_substeps`
+(fails at 2.1e-3 anchor error without the pass).
+
+This makes 3-4-substep projected-maximal physically defensible (anchors
+better than the old 5x2 baseline), but does NOT fix maximal-mode G1
+learning: the paired training race at 3x2 lost decisively
+(0.255/0.390/0.403 vs reduced 0.708/0.659/0.674) with unstable
+peak-then-degrade trajectories. Contact convergence (5x12 result) and
+positional closure are now both ruled out; the remaining suspect is
+drive/actuation dynamics (maximal PGS drive rows vs reduced implicit
+generalized drives). Any future maximal learning attempt should start there.
+
 ## Promotion gates
 
 Before this mode is considered a general replacement for the established

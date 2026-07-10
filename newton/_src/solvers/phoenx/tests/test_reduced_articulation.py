@@ -3,6 +3,7 @@
 
 """CUDA graph tests for PhoenX reduced-coordinate articulations."""
 
+import os
 import unittest
 
 import numpy as np
@@ -450,6 +451,40 @@ def _make_floating_tree_builder():
 
 def _make_floating_tree(device):
     return _make_floating_tree_builder().finalize(device=device)
+
+
+def _make_driven_floating_tree(device):
+    """Free-root two-hinge chain with position drives on both hinges."""
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    root = builder.add_link(mass=2.0)
+    mid = builder.add_link(mass=1.0)
+    tip = builder.add_link(mass=0.5)
+    builder.add_shape_box(root, hx=0.25, hy=0.12, hz=0.1)
+    builder.add_shape_box(mid, hx=0.2, hy=0.1, hz=0.08)
+    builder.add_shape_box(tip, hx=0.15, hy=0.08, hz=0.06)
+    free_joint = builder.add_joint_free(parent=-1, child=root)
+    hinge_a = builder.add_joint_revolute(
+        parent=root,
+        child=mid,
+        axis=newton.Axis.Y,
+        parent_xform=wp.transform(wp.vec3(0.35, 0.0, 0.0), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(-0.25, 0.0, 0.0), wp.quat_identity()),
+        target_ke=200.0,
+        target_kd=6.0,
+        actuator_mode=newton.JointTargetMode.POSITION,
+    )
+    hinge_b = builder.add_joint_revolute(
+        parent=mid,
+        child=tip,
+        axis=newton.Axis.Z,
+        parent_xform=wp.transform(wp.vec3(0.25, 0.0, 0.0), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(-0.18, 0.0, 0.0), wp.quat_identity()),
+        target_ke=140.0,
+        target_kd=4.0,
+        actuator_mode=newton.JointTargetMode.POSITION,
+    )
+    builder.add_articulation([free_joint, hinge_a, hinge_b])
+    return builder.finalize(device=device), (hinge_a, hinge_b)
 
 
 def _make_translated_floating_pair(device, translation=4096.0):
@@ -2145,6 +2180,50 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertTrue(np.isfinite(state0.joint_q.numpy()).all())
         self.assertTrue(np.isfinite(state0.joint_qd.numpy()).all())
 
+    def test_maximal_projected_position_projection_keeps_anchors_closed_at_three_substeps(self):
+        # Regression test for the position-level tree projection
+        # (MaximalTreeProjector.project_positions): at 3 substeps x 2
+        # iterations a driven free-root tree accumulates ~5e-2 anchor RMS
+        # without the pass, ~2e-7 with it.
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("projected articulation tests require CUDA graph capture")
+
+        model, hinges = _make_driven_floating_tree(device)
+        state0 = model.state()
+        state1 = model.state()
+        newton.eval_fk(model, state0.joint_q, state0.joint_qd, state0)
+        control = model.control()
+
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal_projected",
+            substeps=3,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        dt = 1.0 / 60.0
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(state0, state1, control, None, dt)
+            solver.step(state1, state0, control, None, dt)
+
+        # Aggressive deterministic pseudo-random drive targets, rewritten
+        # into the captured control buffer before each graph launch.
+        rng = np.random.default_rng(seed=7)
+        schedule = rng.uniform(-1.5, 1.5, size=(50, len(hinges))).astype(np.float32)
+        qd_start = model.joint_qd_start.numpy()
+        hinge_coords = [int(qd_start[j]) for j in hinges]
+        target_buf = np.zeros(model.joint_dof_count, dtype=np.float32)
+        for frame_targets in schedule:
+            target_buf[hinge_coords] = frame_targets
+            control.joint_target_q.assign(target_buf)
+            wp.capture_launch(capture.graph)
+
+        self.assertTrue(np.isfinite(state0.body_q.numpy()).all())
+        errors = np.array([_loop_closure_error(model, state0, joint) for joint in hinges])
+        self.assertLess(float(errors.max()), 1.0e-4)
+        self.assertLess(float(np.sqrt(np.mean(errors**2))), 1.0e-5)
+
     def test_floating_internal_loop_conserves_momentum_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -2527,6 +2606,12 @@ class TestReducedArticulation(unittest.TestCase):
                 state1.body_qd.assign(state0.body_qd)
                 initial_q = state0.joint_q.numpy().copy()
 
+                # This test asserts exact row math against a dense ABA
+                # reference and launches the module-level fp32 row builder
+                # directly, so pin the exact fp32 storage mode; fp16 row
+                # storage is validated by deviation-bound and physics tests.
+                os.environ["PHOENX_CONTACT_ROWS_FP16"] = "0"
+                self.addCleanup(os.environ.pop, "PHOENX_CONTACT_ROWS_FP16", None)
                 solver = newton.solvers.SolverPhoenX(
                     model,
                     articulation_mode="reduced",
@@ -2675,6 +2760,7 @@ class TestReducedArticulation(unittest.TestCase):
                     block.packed_response,
                     block.aba_joint_work,
                     block.aba_body_response,
+                    block.aba_body_response_wide,
                 ],
                 device=device,
             )
