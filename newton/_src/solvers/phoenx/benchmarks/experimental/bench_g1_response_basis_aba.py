@@ -594,7 +594,13 @@ def main() -> int:
                 wp.bool(True),
                 block.packed_previous_row_body,
             ],
-            outputs=[block.packed_jacobian, block.packed_response, block.aba_joint_work, block.aba_body_response],
+            outputs=[
+                block.packed_jacobian,
+                block.packed_response,
+                block.aba_joint_work,
+                block.aba_body_response,
+                block.aba_body_response_wide,
+            ],
             device=device,
         )
 

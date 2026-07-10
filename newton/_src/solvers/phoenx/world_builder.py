@@ -24,6 +24,8 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
+    body_alloc_velocity_storage,
+    body_attach_wide_aliases,
     inertia_sym6,
     inertia_sym6_pack_np,
     reduced_articulation_data_zeros,
@@ -1049,8 +1051,9 @@ class WorldBuilder:
         # First _update_inertia launch rotates inverse_inertia_world into world space.
         c = BodyContainer()
         c.position = wp.array(positions, dtype=wp.vec3f, device=device)
-        c.velocity = wp.array(velocities, dtype=wp.vec3f, device=device)
-        c.angular_velocity = wp.array(angular_velocities, dtype=wp.vec3f, device=device)
+        c.velocity, c.angular_velocity, c.velocity_pair_u64 = body_alloc_velocity_storage(
+            n, device, velocities, angular_velocities
+        )
         c.orientation = wp.array(orientations, dtype=wp.quatf, device=device)
         # Builder bodies assume mesh origin == COM; meshed offsets must set body_com directly.
         c.body_com = wp.zeros(n, dtype=wp.vec3f, device=device)
@@ -1085,6 +1088,7 @@ class WorldBuilder:
         c.has_position_level_writers = wp.zeros(1, dtype=wp.int32, device=device)
         c.island_root = wp.full(n, value=-1, dtype=wp.int32, device=device)
         c.frames_below_threshold = wp.zeros(n, dtype=wp.int32, device=device)
+        body_attach_wide_aliases(c, n, device)
         return c
 
     def _pack_joint_arrays(self, device: wp.context.Device) -> dict:

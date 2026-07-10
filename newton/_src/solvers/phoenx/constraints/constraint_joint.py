@@ -25,7 +25,16 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
-from newton._src.solvers.phoenx.body import MOTION_STATIC, BodyContainer, body_set_access_mode, mat33_from_sym6
+from newton._src.solvers.phoenx.body import (
+    MOTION_STATIC,
+    BodyContainer,
+    body_load_inv_inertia_sym6,
+    body_load_orientation,
+    body_load_vw,
+    body_set_access_mode,
+    body_store_vw,
+    mat33_from_sym6,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
     ConstraintBodies,
@@ -866,14 +875,12 @@ def _ms_load_body_pair(
     """
     if copy_state.highest_index_in_use[0] == wp.int32(0):
         # Mass splitting disabled: direct SoA, no copy_state touch.
-        v1 = bodies.velocity[b1]
-        v2 = bodies.velocity[b2]
-        w1 = bodies.angular_velocity[b1]
-        w2 = bodies.angular_velocity[b2]
+        v1, w1 = body_load_vw(bodies, b1)
+        v2, w2 = body_load_vw(bodies, b2)
         inv_mass1 = bodies.inverse_mass[b1]
         inv_mass2 = bodies.inverse_mass[b2]
-        inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
-        inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
+        inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1))
+        inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2))
         return (
             v1,
             v2,
@@ -921,10 +928,8 @@ def _ms_store_body_pair(
     to ``bodies.*`` without the 4 ``write_*_unified`` calls.
     """
     if slot1 < wp.int32(0) and slot2 < wp.int32(0):
-        bodies.velocity[b1] = v1
-        bodies.velocity[b2] = v2
-        bodies.angular_velocity[b1] = w1
-        bodies.angular_velocity[b2] = w2
+        body_store_vw(bodies, b1, v1, w1)
+        body_store_vw(bodies, b2, v2, w2)
         return
     write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
     write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
@@ -1869,7 +1874,7 @@ def _d6_angular_limits_block(
     if count <= wp.int32(0):
         return w1, w2
 
-    orientation1 = bodies.orientation[b1]
+    orientation1 = body_load_orientation(bodies, b1)
     axis0 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(0)))
     axis1 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(1)))
     axis2 = wp.quat_rotate(orientation1, _d6_limit_axis_local(constraints, cid, base_offset, joint_mode, wp.int32(2)))
@@ -1980,8 +1985,8 @@ def _d6_prepare_rows_at(
     b1 = body_pair.b1
     b2 = body_pair.b2
 
-    orientation1 = bodies.orientation[b1]
-    orientation2 = bodies.orientation[b2]
+    orientation1 = body_load_orientation(bodies, b1)
+    orientation2 = body_load_orientation(bodies, b2)
     position1 = bodies.position[b1]
     position2 = bodies.position[b2]
     (

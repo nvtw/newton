@@ -15,7 +15,14 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
+from newton._src.solvers.phoenx.body import (
+    BodyContainer,
+    body_load_inv_inertia_sym6,
+    body_load_orientation,
+    body_load_vw,
+    body_store_vw,
+    mat33_from_sym6,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
     DEFAULT_HERTZ_CONTACT,
@@ -900,18 +907,16 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
         # fast-tail kernel, where mass splitting is rejected at construction
         # time. Use direct SoA reads (no slot lookup) so NVRTC doesn't compile
         # the unreachable ``read_*_unified`` slow path into the kernel binary.
-        v1 = bodies.velocity[b1]
-        v2 = bodies.velocity[b2]
-        w1 = bodies.angular_velocity[b1]
-        w2 = bodies.angular_velocity[b2]
+        v1, w1 = body_load_vw(bodies, b1)
+        v2, w2 = body_load_vw(bodies, b2)
         inv_mass1 = bodies.inverse_mass[b1]
         inv_mass2 = bodies.inverse_mass[b2]
-        inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
-        inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
+        inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1))
+        inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2))
 
         # Body pose for per-contact lever-arm recompute.
-        orientation1 = bodies.orientation[b1]
-        orientation2 = bodies.orientation[b2]
+        orientation1 = body_load_orientation(bodies, b1)
+        orientation2 = body_load_orientation(bodies, b2)
         body_com1 = bodies.body_com[b1]
         body_com2 = bodies.body_com[b2]
 
@@ -1036,10 +1041,8 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
             it += 1
 
         # Direct SoA writes -- fast-tail-only function (no mass splitting).
-        bodies.velocity[b1] = v1
-        bodies.velocity[b2] = v2
-        bodies.angular_velocity[b1] = w1
-        bodies.angular_velocity[b2] = w2
+        body_store_vw(bodies, b1, v1, w1)
+        body_store_vw(bodies, b2, v2, w2)
 
     return impl
 

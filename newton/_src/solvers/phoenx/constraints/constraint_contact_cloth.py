@@ -13,7 +13,15 @@ import warp as wp
 
 from newton._src.geometry.types import GeoType
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer, mat33_from_sym6
+from newton._src.solvers.phoenx.body import (
+    MOTION_DYNAMIC,
+    BodyContainer,
+    body_load_inv_inertia_sym6,
+    body_load_orientation,
+    body_load_vw,
+    body_store_vw,
+    mat33_from_sym6,
+)
 from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
@@ -397,8 +405,8 @@ def _make_contact_prepare_for_iteration_at(
             # get_state_index inlining + inv_factor multiplies entirely.
             # Sets ``slot1 = slot2 = -1`` so the warm-start scatter at the end
             # takes the matching fast-path writeback.
-            orientation1 = bodies.orientation[b1]
-            orientation2 = bodies.orientation[b2]
+            orientation1 = body_load_orientation(bodies, b1)
+            orientation2 = body_load_orientation(bodies, b2)
             position1 = bodies.position[b1]
             position2 = bodies.position[b2]
             body_com1 = bodies.body_com[b1]
@@ -409,8 +417,8 @@ def _make_contact_prepare_for_iteration_at(
                 slot2 = wp.int32(-1)
                 inv_mass1 = bodies.inverse_mass[b1]
                 inv_mass2 = bodies.inverse_mass[b2]
-                inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
-                inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
+                inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1))
+                inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2))
             else:
                 slot1 = contact_get_slot1(constraints, cid)
                 slot2 = contact_get_slot2(constraints, cid)
@@ -420,8 +428,8 @@ def _make_contact_prepare_for_iteration_at(
                 inv_factor2_f = wp.float32(inv_factor2)
                 inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
                 inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
-                inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * inv_factor1_f
-                inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * inv_factor2_f
+                inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1)) * inv_factor1_f
+                inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2)) * inv_factor2_f
             # Batched warm-start accumulators (one velocity scatter at end).
             total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
             total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
@@ -839,10 +847,8 @@ def _make_contact_prepare_for_iteration_at(
             # ``write_*_unified`` inlining for the rigid hot loop.
             if wp.static(not has_mass_splitting):
                 # Compile-time lean writeback: direct SoA only.
-                v1_cur = bodies.velocity[b1]
-                v2_cur = bodies.velocity[b2]
-                w1_cur = bodies.angular_velocity[b1]
-                w2_cur = bodies.angular_velocity[b2]
+                v1_cur, w1_cur = body_load_vw(bodies, b1)
+                v2_cur, w2_cur = body_load_vw(bodies, b2)
                 v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
                     v1_cur,
                     v2_cur,
@@ -856,15 +862,11 @@ def _make_contact_prepare_for_iteration_at(
                     total_ang_imp_on_b1,
                     total_ang_imp_on_b2,
                 )
-                bodies.velocity[b1] = v1_new
-                bodies.velocity[b2] = v2_new
-                bodies.angular_velocity[b1] = w1_new
-                bodies.angular_velocity[b2] = w2_new
+                body_store_vw(bodies, b1, v1_new, w1_new)
+                body_store_vw(bodies, b2, v2_new, w2_new)
             elif slot1 < wp.int32(0) and slot2 < wp.int32(0):
-                v1_cur = bodies.velocity[b1]
-                v2_cur = bodies.velocity[b2]
-                w1_cur = bodies.angular_velocity[b1]
-                w2_cur = bodies.angular_velocity[b2]
+                v1_cur, w1_cur = body_load_vw(bodies, b1)
+                v2_cur, w2_cur = body_load_vw(bodies, b2)
                 v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
                     v1_cur,
                     v2_cur,
@@ -878,10 +880,8 @@ def _make_contact_prepare_for_iteration_at(
                     total_ang_imp_on_b1,
                     total_ang_imp_on_b2,
                 )
-                bodies.velocity[b1] = v1_new
-                bodies.velocity[b2] = v2_new
-                bodies.angular_velocity[b1] = w1_new
-                bodies.angular_velocity[b2] = w2_new
+                body_store_vw(bodies, b1, v1_new, w1_new)
+                body_store_vw(bodies, b2, v2_new, w2_new)
             else:
                 if slot1 < wp.int32(0):
                     v1_cur = bodies.velocity[b1]
@@ -939,8 +939,8 @@ def contact_cached_warmstart_lean(
 
     inv_mass1 = bodies.inverse_mass[b1]
     inv_mass2 = bodies.inverse_mass[b2]
-    inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
-    inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
+    inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1))
+    inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2))
 
     total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
     total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
@@ -960,10 +960,8 @@ def contact_cached_warmstart_lean(
         total_ang_imp_on_b1 += wp.cross(r1, imp)
         total_ang_imp_on_b2 += wp.cross(r2, imp)
 
-    v1_cur = bodies.velocity[b1]
-    v2_cur = bodies.velocity[b2]
-    w1_cur = bodies.angular_velocity[b1]
-    w2_cur = bodies.angular_velocity[b2]
+    v1_cur, w1_cur = body_load_vw(bodies, b1)
+    v2_cur, w2_cur = body_load_vw(bodies, b2)
     v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
         v1_cur,
         v2_cur,
@@ -977,10 +975,8 @@ def contact_cached_warmstart_lean(
         total_ang_imp_on_b1,
         total_ang_imp_on_b2,
     )
-    bodies.velocity[b1] = v1_new
-    bodies.velocity[b2] = v2_new
-    bodies.angular_velocity[b1] = w1_new
-    bodies.angular_velocity[b2] = w2_new
+    body_store_vw(bodies, b1, v1_new, w1_new)
+    body_store_vw(bodies, b2, v2_new, w2_new)
 
 
 def _make_contact_iterate_at(
@@ -1075,14 +1071,12 @@ def _make_contact_iterate_at(
             # the graph build; no-slot endpoints are cached as ``(-1, 1)``.
             if wp.static(not has_mass_splitting):
                 # Compile-time lean: slot lookup dead-code-eliminated.
-                v1 = bodies.velocity[b1]
-                v2 = bodies.velocity[b2]
-                w1 = bodies.angular_velocity[b1]
-                w2 = bodies.angular_velocity[b2]
+                v1, w1 = body_load_vw(bodies, b1)
+                v2, w2 = body_load_vw(bodies, b2)
                 inv_mass1 = bodies.inverse_mass[b1]
                 inv_mass2 = bodies.inverse_mass[b2]
-                inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
-                inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2])
+                inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1))
+                inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2))
                 slot1 = wp.int32(-1)
                 slot2 = wp.int32(-1)
             else:
@@ -1486,10 +1480,8 @@ def _make_contact_iterate_at(
         if wp.static(not cloth_support):
             # Mass-splitting fast-path writeback (matches the load gate above).
             if wp.static(not has_mass_splitting) or (slot1 < wp.int32(0) and slot2 < wp.int32(0)):
-                bodies.velocity[b1] = v1
-                bodies.velocity[b2] = v2
-                bodies.angular_velocity[b1] = w1
-                bodies.angular_velocity[b2] = w2
+                body_store_vw(bodies, b1, v1, w1)
+                body_store_vw(bodies, b2, v2, w2)
             else:
                 write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
                 write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
