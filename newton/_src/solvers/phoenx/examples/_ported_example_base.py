@@ -555,7 +555,10 @@ class PortedExample:
                 raise AssertionError(f"non-finite values in {name}")
 
 
-def run_ported_example(example_factory: Callable[[object, object], PortedExample]) -> None:
+def run_ported_example(
+    example_factory: Callable[[object, object], PortedExample],
+    configure_parser: Callable[[object], None] | None = None,
+) -> None:
     """Standard ``__main__`` entry point: ``newton.examples.init`` ->
     factory -> ``newton.examples.run``. Subclasses use this to keep the
     entry-point boilerplate one line."""
@@ -575,6 +578,8 @@ def run_ported_example(example_factory: Callable[[object, object], PortedExample
             "equal max-colors times the configured substeps (default: 10)."
         ),
     )
+    if configure_parser is not None:
+        configure_parser(parser)
     viewer, args = newton.examples.init(parser)
     example = example_factory(viewer, args)
     if example.start_paused:

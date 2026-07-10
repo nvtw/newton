@@ -6,8 +6,9 @@
 #
 # Port of the PEEL SuspensionBridge test. Capsule-link main cables carry a
 # ball-jointed plank deck through vertical hanger ropes. The multiply
-# connected graph is solved directly in full coordinates, including cargo
-# dropped onto the center of the span.
+# connected graph can be solved directly in full coordinates or through
+# articulation trees with loop-closure constraints, including cargo dropped
+# onto the center of the span.
 #
 # Run: python -m newton._src.solvers.phoenx.examples.example_suspension_bridge
 ###########################################################################
@@ -57,9 +58,9 @@ def _xf(position) -> wp.transform:
 
 
 class Example(PortedExample):
-    sim_substeps = 25
-    solver_iterations = 10
-    velocity_iterations = 2
+    sim_substeps = 16
+    solver_iterations = 8
+    velocity_iterations = 1
     step_layout = "single_world"
     broad_phase = "sap"
     shape_pairs_max = 20000
@@ -68,9 +69,15 @@ class Example(PortedExample):
     finalize_kwargs: ClassVar[dict[str, bool]] = {"skip_validation_joints": True}
     evaluate_fk = False
 
+    def __init__(self, viewer, args):
+        self.coordinate_mode = str(getattr(args, "coordinate_mode", "full"))
+        self._articulation_joint_groups: list[list[int]] = []
+        super().__init__(viewer, args)
+
     def build_scene(self, builder: newton.ModelBuilder):
         builder.add_ground_plane(color=(0.70, 0.72, 0.74))
         self._extents: list[tuple[float, float, float] | None] = []
+        self._articulation_joint_groups = []
 
         plank_count = 14
         cargo_count = 4
@@ -135,7 +142,15 @@ class Example(PortedExample):
 
         self.planks: list[int] = []
         hinge_y = (-0.42 * plank_width, 0.42 * plank_width)
+        ramp_positions = {}
+        for end_index, x_sign in ((0, -1.0), (plank_count - 1, 1.0)):
+            ramp_position = np.array([x_sign * (0.5 * span + 0.85), 0.0, self.deck_z - 0.1])
+            self._add_box(builder, -1, (1.6, plank_width, 0.3), ramp_position, color=DECK_COLOR)
+            ramp_positions[end_index] = (x_sign, ramp_position)
+
         previous_plank = None
+        deck_tree_joints: list[int] = []
+        deck_loop_joints = []
         for index in range(plank_count):
             x = -0.5 * span + (index + 0.5) * plank_length
             plank = self._add_box(
@@ -148,7 +163,34 @@ class Example(PortedExample):
                 color=DECK_COLOR,
             )
             self.planks.append(plank)
-            if previous_plank is not None:
+            if self.coordinate_mode == "articulation" and index == 0:
+                x_sign, ramp_position = ramp_positions[0]
+                deck_tree_joints.append(
+                    builder.add_joint_ball(
+                        parent=-1,
+                        child=plank,
+                        parent_xform=_xf(ramp_position + np.array([-x_sign * 0.8, hinge_y[0], 0.1])),
+                        child_xform=_xf((x_sign * 0.5 * plank_length, hinge_y[0], 0.0)),
+                    )
+                )
+            if previous_plank is not None and self.coordinate_mode == "articulation":
+                deck_tree_joints.append(
+                    builder.add_joint_ball(
+                        parent=previous_plank,
+                        child=plank,
+                        parent_xform=_xf((0.5 * plank_length, hinge_y[0], 0.0)),
+                        child_xform=_xf((-0.5 * plank_length, hinge_y[0], 0.0)),
+                    )
+                )
+                deck_loop_joints.append(
+                    (
+                        previous_plank,
+                        plank,
+                        _xf((0.5 * plank_length, hinge_y[1], 0.0)),
+                        _xf((-0.5 * plank_length, hinge_y[1], 0.0)),
+                    )
+                )
+            elif previous_plank is not None:
                 for y in hinge_y:
                     builder.add_joint_ball(
                         parent=previous_plank,
@@ -158,17 +200,26 @@ class Example(PortedExample):
                     )
             previous_plank = plank
 
-        for end_index, x_sign in ((0, -1.0), (plank_count - 1, 1.0)):
+        for end_index, _x_sign in ((0, -1.0), (plank_count - 1, 1.0)):
             end_plank = self.planks[end_index]
-            ramp_position = np.array([x_sign * (0.5 * span + 0.85), 0.0, self.deck_z - 0.1])
-            self._add_box(builder, -1, (1.6, plank_width, 0.3), ramp_position, color=DECK_COLOR)
-            for y in hinge_y:
+            x_sign, ramp_position = ramp_positions[end_index]
+            for y_index, y in enumerate(hinge_y):
+                if self.coordinate_mode == "articulation" and end_index == 0 and y_index == 0:
+                    continue
                 builder.add_joint_ball(
                     parent=-1,
                     child=end_plank,
                     parent_xform=_xf(ramp_position + np.array([-x_sign * 0.8, y, 0.1])),
                     child_xform=_xf((x_sign * 0.5 * plank_length, y, 0.0)),
                 )
+
+        for parent, child, parent_xform, child_xform in deck_loop_joints:
+            builder.add_joint_ball(
+                parent=parent,
+                child=child,
+                parent_xform=parent_xform,
+                child_xform=child_xform,
+            )
 
         for side_index, y_sign in enumerate((-1.0, 1.0)):
             for plank_index in range(plank_count):
@@ -207,6 +258,12 @@ class Example(PortedExample):
                 color=CARGO_COLOR,
             )
             self.cargo.append(cargo)
+
+        if self.coordinate_mode == "articulation":
+            if deck_tree_joints:
+                self._articulation_joint_groups.append(deck_tree_joints)
+            for joints in sorted(self._articulation_joint_groups, key=min):
+                builder.add_articulation(sorted(joints))
 
         return self._extents
 
@@ -262,6 +319,7 @@ class Example(PortedExample):
         cfg = self._shape_cfg(density, collision_group=0, collide=False)
         links: list[int] = []
         midpoints: list[np.ndarray] = []
+        tree_joints: list[int] = []
         previous_body = None
         previous_far_anchor = None
         for point_a, point_b in pairwise(points):
@@ -287,19 +345,21 @@ class Example(PortedExample):
             if previous_body is None:
                 pin_body, pin_anchor = pin_start
                 parent_xform = _xf(points[0]) if pin_body == -1 else _xf(pin_anchor)
-                builder.add_joint_ball(
+                joint = builder.add_joint_ball(
                     parent=pin_body,
                     child=body,
                     parent_xform=parent_xform,
                     child_xform=near_anchor,
                 )
+                tree_joints.append(joint)
             else:
-                builder.add_joint_ball(
+                joint = builder.add_joint_ball(
                     parent=previous_body,
                     child=body,
                     parent_xform=_xf(previous_far_anchor),
                     child_xform=near_anchor,
                 )
+                tree_joints.append(joint)
 
             links.append(body)
             midpoints.append(midpoint)
@@ -315,6 +375,8 @@ class Example(PortedExample):
                 parent_xform=parent_xform,
                 child_xform=_xf(previous_far_anchor),
             )
+        if self.coordinate_mode == "articulation" and tree_joints:
+            self._articulation_joint_groups.append(tree_joints)
         return links, midpoints
 
     def configure_camera(self, viewer) -> None:
@@ -331,5 +393,17 @@ class Example(PortedExample):
             raise AssertionError(f"bridge cargo escaped below the scene: z={cargo_z}")
 
 
+def _configure_parser(parser) -> None:
+    parser.add_argument(
+        "--coordinate-mode",
+        choices=("full", "articulation"),
+        default="full",
+        help=(
+            "Author dynamic bridge bodies as full-coordinate constraints or as "
+            "articulation trees plus loop-closure constraints."
+        ),
+    )
+
+
 if __name__ == "__main__":
-    run_ported_example(Example)
+    run_ported_example(Example, _configure_parser)

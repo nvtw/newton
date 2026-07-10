@@ -32,6 +32,7 @@ CHAIN_DENSITY = 2.0
 FRAME_COLOR = (0.88, 0.32, 0.12)
 CHAIN_COLOR = (0.18, 0.54, 0.78)
 SUPPORT_COLOR = (0.48, 0.51, 0.56)
+FRAME_PICK_HALF_EXTENTS = (2.25, 1.10, 2.70)
 
 
 def _quat_z_to_dir(direction: np.ndarray) -> wp.quat:
@@ -56,14 +57,15 @@ def _xf(position) -> wp.transform:
 
 
 class Example(PortedExample):
-    sim_substeps = 40
-    solver_iterations = 10
-    velocity_iterations = 2
+    sim_substeps = 16
+    solver_iterations = 8
+    velocity_iterations = 1
     step_layout = "single_world"
     broad_phase = "explicit"
     default_friction = 0.7
     show_contacts = False
     evaluate_fk = False
+    start_paused = True
 
     def build_scene(self, builder: newton.ModelBuilder):
         builder.add_ground_plane(color=(0.74, 0.76, 0.79))
@@ -81,12 +83,13 @@ class Example(PortedExample):
         pos_bar = np.array([-0.20, 0.0, 4.84])
         pos_crossbar = np.array([1.30, 0.0, 4.84])
 
-        hook = self._add_box(builder, None, (0.32, 0.32, 0.32), pos_hook, 15.0, FRAME_COLOR)
-        arm = self._add_box(builder, None, (1.20, 0.34, 0.34), pos_arm, 15.0, FRAME_COLOR)
-        post = self._add_box(builder, None, (0.30, 0.30, 2.30), pos_post, 0.12, FRAME_COLOR)
-        bar = self._add_box(builder, None, (3.10, 0.30, 0.28), pos_bar, 0.12, FRAME_COLOR)
-        crossbar = self._add_box(builder, None, (0.30, 1.90, 0.26), pos_crossbar, 0.12, FRAME_COLOR)
-        self.frame_bodies = [hook, arm, post, bar, crossbar]
+        frame = self._add_box(builder, None, (0.32, 0.32, 0.32), pos_hook, 15.0, FRAME_COLOR)
+        self._add_box(builder, frame, (1.20, 0.34, 0.34), pos_arm - pos_hook, 15.0, FRAME_COLOR)
+        self._add_box(builder, frame, (0.30, 0.30, 2.30), pos_post - pos_hook, 0.12, FRAME_COLOR)
+        self._add_box(builder, frame, (3.10, 0.30, 0.28), pos_bar - pos_hook, 0.12, FRAME_COLOR)
+        self._add_box(builder, frame, (0.30, 1.90, 0.26), pos_crossbar - pos_hook, 0.12, FRAME_COLOR)
+        self._record_extent(frame, FRAME_PICK_HALF_EXTENTS)
+        self.frame_bodies = [frame]
 
         center_a = pos_static_arm + np.array([-0.82, 0.0, -0.15])
         center_b = pos_hook + np.array([0.0, 0.0, 0.16])
@@ -121,35 +124,19 @@ class Example(PortedExample):
         tree.append(
             builder.add_joint_ball(
                 parent=center_links[-1],
-                child=hook,
+                child=frame,
                 parent_xform=_xf((0.0, 0.0, 0.5 * center_lengths[-1])),
                 child_xform=_xf(center_b - pos_hook),
             )
         )
 
-        welds = (
-            (hook, pos_hook, arm, pos_arm, pos_hook + np.array([-0.18, 0.0, 0.0])),
-            (arm, pos_arm, post, pos_post, np.array([-1.62, 0.0, 2.30])),
-            (post, pos_post, bar, pos_bar, np.array([-1.62, 0.0, 4.78])),
-            (bar, pos_bar, crossbar, pos_crossbar, np.array([1.30, 0.0, 4.84])),
-        )
-        for parent, parent_pos, child, child_pos, anchor in welds:
-            tree.append(
-                builder.add_joint_fixed(
-                    parent=parent,
-                    child=child,
-                    parent_xform=_xf(anchor - parent_pos),
-                    child_xform=_xf(anchor - child_pos),
-                )
-            )
-
         loop_closers = []
         for links, lengths, outer_b, crossbar_anchor in outer_chains:
             tree.append(
                 builder.add_joint_ball(
-                    parent=crossbar,
+                    parent=frame,
                     child=links[0],
-                    parent_xform=_xf(crossbar_anchor),
+                    parent_xform=_xf(crossbar_anchor + pos_crossbar - pos_hook),
                     child_xform=_xf((0.0, 0.0, -0.5 * lengths[0])),
                 )
             )
@@ -192,9 +179,10 @@ class Example(PortedExample):
         density: float = 0.0,
         color=SUPPORT_COLOR,
     ) -> int:
-        if body is None:
+        created_body = body is None
+        if created_body:
             body = builder.add_link(xform=_xf(position))
-        xform = _xf(position) if body == -1 else None
+        xform = None if created_body else _xf(position)
         half_extents = tuple(0.5 * float(value) for value in full_extents)
         builder.add_shape_box(
             body,
