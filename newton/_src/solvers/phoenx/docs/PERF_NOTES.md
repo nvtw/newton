@@ -498,6 +498,27 @@ Three contact-solve architectures were compared head-to-head on identical
 
 ## Tried and reverted
 
+### Depth-major / level-synchronous batched ABA (2026-07-16) - REJECTED, refutes the occupancy hypothesis
+- Hypothesis: the reduced dynamics' 0.34 waves/SM under-occupancy is a
+  LAUNCH-GRANULARITY problem (one heavy warp per articulation) -> restructure to
+  one thread per joint batched across all articulations per tree depth, host-
+  unrolled over depth. Would target ~22% of training GPU (+3-6%).
+- M1 (local kinematics, cheapest forward pass): bit-EXACT vs baseline (max dev
+  0.0 on all topologies incl G1 8192), parity tests pass. But **2.2-2.3x SLOWER**
+  (85us vs 38us, solo GPU).
+- REFUTED, decisively: at 8192 worlds the baseline ALREADY has 512 blocks —
+  batching ACROSS articulations is what fills the machine. Per-depth splitting
+  STARVES each launch (depth-0 = 32 of 188 SMs) and pays a ~7us launch-latency
+  floor per depth x 11 depths (77us > baseline 38us). The occupancy limit is
+  **within-megakernel REGISTER PRESSURE (64-168 regs holding chain state), not
+  launch granularity.** The single-megakernel does all depths via intra-warp sync
+  with no relaunch — structurally optimal on GPU. The productive lever (if any)
+  is register/state COMPRESSION inside the megakernel (the vec6/wide-load
+  territory, cf feedback_phoenx_kapla_launch_count_noise), not relaunching.
+  Reverted. **Physics-throughput levers are now near-exhausted** (fp16x2 shipped;
+  everything structural rejected); the leverage on time-to-policy is the LEARNER
+  (seed reliability / p).
+
 ### Block Gauss-Seidel (Hessian cross-terms) on reduced path (2026-07-15) - REJECTED (fixable), low-EV for G1
 - Q: "can GS use Hessian info?" A: yes — block-projected-GS solves the full 3x3
   contact Delassus block (normal + 2 friction coupled) per sweep instead of scalar
