@@ -230,6 +230,17 @@
 
     <div class="section-label">Current state</div>
     <article>
+      <div class="meta"><span class="tag warn">SEED-VARIANCE &middot; EXPLORATION FIXES FAIL</span><time>15 Jul</time></div>
+      <h2>Standard RL exploration levers do not reduce G1 seed variance</h2>
+      <p>G1 training p(success)&asymp;1/3 (baseline 6-seed iter-75: mean 0.633, std 0.077, 2/6 pass 0.68 &mdash; replicated). PhoenX exploration is temporally-independent Gaussian with a collapsing global std and entropy coeff 1e-5, the textbook high-variance setup. Two established SOTA fixes were implemented and swept over 6 seeds:</p>
+      <ul>
+        <li><strong>Entropy floor + anneal</strong> (coeff 3e-3&rarr;1e-5, log_std_min &minus;1.0): <em>worse</em> &mdash; mean 0.605, std 0.116 (WIDER). Forcing exploration magnitude stops seeds committing to a gait.</li>
+        <li><strong>gSDE</strong> (Raffin 2021 correlated state-dependent noise): collapsed the spread (std 0.077&rarr;0.004) but by converging every seed to the same mediocre 0.492 (0/6 pass); a calibrated retry reached only 0.511. Correlated noise under-explores the walking basin here &mdash; consistency at the cost of the ceiling.</li>
+        <li><strong>Conclusion:</strong> seed variance is NOT an exploration-coverage problem that these standard levers fix; both lowered the mean. Per the prior diagnosis (interaction of init &times; exploration &times; update), the remaining suspect is the coupled <em>update</em> process (KL trust region / off-policy reuse), untested. Learner WIP reverted.</li>
+      </ul>
+      <p class="profile-note">Both exploration interventions rejected with 6-seed data. The one untested learner lever is update-side stability (KL-bounded early-stop, trim replay-ratio/epochs). Solver side is at its GPU-friendly ceiling (APGD, block-GS, iteration/substep reduction all rejected).</p>
+    </article>
+    <article>
       <div class="meta"><span class="tag">INNOVATION &middot; EXACT IMPLICIT MAXIMAL DRIVE</span><time>15 Jul</time></div>
       <h2>Diagnosed the maximal drive-softness &mdash; feasible ~2-line fix unlocks the 1.8&times; solver</h2>
       <p>After the incremental reduced-pipeline levers were exhausted (bandwidth, row-count, iteration reduction &mdash; the recipe is near-minimal), the real lever is the coordinate system: maximal does the same physics ~1.8&times; faster per step but fails G1 training on soft/laggy drives. A controlled diagnostic pinned the exact cause and the fix.</p>
