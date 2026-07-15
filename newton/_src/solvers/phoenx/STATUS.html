@@ -230,6 +230,17 @@
 
     <div class="section-label">Current state</div>
     <article>
+      <div class="meta"><span class="tag">INNOVATION &middot; EXACT IMPLICIT MAXIMAL DRIVE</span><time>15 Jul</time></div>
+      <h2>Diagnosed the maximal drive-softness &mdash; feasible ~2-line fix unlocks the 1.8&times; solver</h2>
+      <p>After the incremental reduced-pipeline levers were exhausted (bandwidth, row-count, iteration reduction &mdash; the recipe is near-minimal), the real lever is the coordinate system: maximal does the same physics ~1.8&times; faster per step but fails G1 training on soft/laggy drives. A controlled diagnostic pinned the exact cause and the fix.</p>
+      <ul>
+        <li><strong>Root cause (measured):</strong> the softness is not the drive row or joint coupling &mdash; single joints and pinned chains are mode-identical. It appears only on a FLOATING multi-link tree with explicit torque: distal rise time 480&thinsp;ms (maximal) vs 80&thinsp;ms (reduced) = 6&times; lag; maximal@2-iters collapses to 0.099 vs reduced 0.591, and does not converge even at 32 iterations. Reduced folds the implicit PD into the ABA factorization and solves it exactly per substep; the projector does an exact O(tree) solve but has NO drive term, leaving the drive to under-converged PGS.</li>
+        <li><strong>The fix is the exact analog of reduced&rsquo;s implicit PD, in the projector recursion:</strong> add the implicit-PD impedance to the driven-DOF diagonal of the joint block (<code>d_matrix[i,i] += dt&middot;kd + dt&sup2;&middot;ke</code>, mirroring reduced&rsquo;s <code>factor_diagonal += dt&middot;damping + dt&sup2;&middot;stiffness</code>) so it propagates through the articulated inertia the parent sees, plus the drive force in the top-down RHS. One exact recursion &rarr; identical crispness to reduced, zero iteration dependence. ~2 lines in the projector kernel + drive-input plumbing.</li>
+        <li><strong>Prototype in progress.</strong> Decider: does the implicit drive collapse the floating-base tracking gap from ~0.49&thinsp;rad to ~10<sup>&minus;3</sup> at 2 iterations? If yes &rarr; paired G1 training race (projected-maximal + crisp drives vs reduced). This is the path to a factor-scale training speedup, not a 1% shave.</li>
+      </ul>
+      <p class="profile-note">Genuine algorithmic innovation (exact implicit drive in the maximal tree projector), diagnosed and precisely located. Builds on the retained position-level tree projection. Session solver win so far: fp16x2 +1.06% (shipped).</p>
+    </article>
+    <article>
       <div class="meta"><span class="tag warn">DEFINITIVE REJECT &middot; PATCH ROWS</span><time>15 Jul</time></div>
       <h2>Row-count reduction is the wrong lever for the reduced contact solve</h2>
       <p>Build-time patch-reduced rows (P+2 coupled tangents per convex column instead of 3 per point) was pursued through three milestones after the earlier separate-phase attempt (which lost &minus;7.4%). It is now definitively rejected, with a clean architectural root cause.</p>
