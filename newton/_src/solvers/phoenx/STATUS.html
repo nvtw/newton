@@ -240,7 +240,11 @@
         <li><strong>Wide body-field loads rejected (11 Jul):</strong> lossless wide vectorized loads on the per-cid PGS-iterate body fields measured +1.4% dr_legs / +0.9% h1 isolated physics but <strong>neutral on G1 graph_leapfrog training</strong> (958.5k vs 957.8k, ABAB). G1 rollout is the critical path and those fields are ~4% of GPU. The <code>func_native</code> wide-load helpers are retained default-OFF for reuse.</li>
         <li><strong>Redirect to the bigger phase:</strong> the training GPU trace ranks ABA advance (8.6%) + factor (6.2%) &asymp; 15% &mdash; the wide-load experiment had missed it entirely (it hit the ~4% contact iterate). Now applying the same technique to the register-limited ABA warp kernels; the open question is whether wide-load unpack registers worsen occupancy. Then: color-ordered FP16 constraint stream, patch rows.</li>
       </ul>
-      <p class="profile-note">Committed on twidmer/phoenx-bandwidth-wins. Headline expected cost unchanged at 343.19 s (throughput win, not yet a seed-success win). Lesson reinforced: G1 training is rollout-bound; single sub-phase wins land near the ~1.5% bench-noise floor, so composability across phases is the path.</p>
+      <p class="profile-note">Committed on twidmer/phoenx-bandwidth-wins. Headline expected cost unchanged at 343.19 s (throughput win, not yet a seed-success win).</p>
+      <ul>
+        <li><strong>fp16x2 confirmed +1.06% on G1 training (11 Jul, clean 3&times; ABAB, no run overlap)</strong> &mdash; the first measured training-throughput win, not just isolated-phase. Coalescing constraint-reorder re-validated and rejected (h1 @2048 noise), matching the three wide-load rejections.</li>
+        <li><strong>Predictive model established:</strong> training gain &asymp; (isolated bandwidth win %) &times; (phase&rsquo;s GPU share %), because training is rollout-bound. This explains every result: constraint/ABA loads are L2-resident (small &times; hidden &rarr; sub-noise); the contact ROW stream is the one large bandwidth-bound phase (&asymp;11% GPU) where fp16 and row-count cuts land. Next: build-time patch rows (~25% fewer rows &rarr; predicted +1.5-2%, composes with fp16x2).</li>
+      </ul>
     </article>
     <article>
       <div class="meta"><span class="tag warn">REJECTED DIRECTION &middot; SCENE-SPECIALIZED KERNELS</span><time>10 Jul</time></div>

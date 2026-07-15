@@ -4,6 +4,29 @@ Curated lessons-learned from past performance work on the PhoenX solver. Goal is
 
 This is **not** a substitute for `git log` — it's a hand-maintained shortlist of the load-bearing decisions and the dead ends.
 
+## Training-throughput predictive model (2026-07-11)
+
+**training gain % ≈ (isolated bandwidth win %) × (phase's share of training GPU %).**
+G1 graph_leapfrog training is rollout-bound with physics on the critical path
+(rollout ~0.45 s/iter >> update ~0.14 s/iter, 96% union-busy), so a solver-phase
+win scales down by that phase's GPU share. Verified: fp16x2 rows = +9.4% on the
+contact-row phase (~11% of training GPU: build 5.9% + solve 4.9%) → predicted ~+1%,
+**measured +1.06% G1 training (clean, 3x ABAB: fp16x2 958.2-959.7k vs fp32
+947.6-949.7k, no overlap).** This is the first confirmed training-throughput win
+and the shipped default.
+
+Consequences for prioritization:
+- Only target phases that are BOTH large AND bandwidth-bound. Training GPU
+  ranking (trace): advance 8.6% > factor 6.2% > row build 5.9% > contact solve
+  4.9% > publish 4.5%.
+- Constraint-iterate body/joint fields and the ABA advance/factor inertia loads
+  are latency-hidden / L2-resident → width and coalescing wins there land
+  sub-noise (rejected, this session). The contact ROW stream (rows x nv, large
+  at 8192 worlds) is the one genuinely bandwidth-bound big phase → fp16 (shipped)
+  and row-count reduction (patch rows) land.
+- Composition is the path: each win is ~1%, so stack row-stream reducers
+  (fp16x2 shipped, patch rows next: ~25% fewer rows x 11% phase → ~+1.5-2%).
+
 ## Measured architecture laws (2026-07-10)
 
 Three contact-solve architectures were compared head-to-head on identical
@@ -493,6 +516,23 @@ Three contact-solve architectures were compared head-to-head on identical
   retained default-OFF because the color-ordered packed constraint stream
   reuses them on a *contiguous* stream, where the wide-load payoff should be
   larger (locality fixed, not just request width).
+- **Follow-up (same day): ABA advance+factor wide loads also REJECTED.** The
+  reduced spatial inertia (21-float sym mat66) padded to 22 floats (8B-aligned)
+  and read as 11x v2.f32 in the factor/advance warp kernels — the biggest
+  training GPU phase (~15%). Bit-identical, ZERO register regression / no
+  spill (the occupancy risk did not materialize; factor stayed 144 regs, PTX
+  gained 40x ld.global.v2.f32), but G1 training -0.22% (both ON runs below
+  both OFF). These kernels are latency-hidden / L2-resident under the
+  concurrent learner, NOT request-count-bound, and the +4B/body padding
+  offsets any saving. Reverted (not left in tree).
+- **Conclusion after three wide-load experiments (reduced rows, contact-iterate
+  body fields, ABA): the per-thread request-WIDTH axis is exhausted on the
+  reduced path** — all neutral-to-negative on G1 training. Cutting request
+  count at equal-or-greater bytes is a weak lever when loads are latency-hidden
+  or already sector-efficient. The remaining bandwidth levers are COALESCING
+  (access pattern — the NCU 5.1/32-bytes-per-sector problem, biggest and
+  untested at the layout-redesign level), byte reduction (fp16, shipped for
+  rows), and row-count reduction (patch rows).
 
 ### Reduced two-substep cold start (2026-07-10) - REJECTED
 - G1 recipe at sim_substeps=2 from scratch: paired iteration-75 screens
