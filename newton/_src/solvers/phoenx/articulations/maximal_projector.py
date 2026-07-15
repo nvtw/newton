@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import warp as wp
 
@@ -17,6 +19,8 @@ from newton._src.solvers.phoenx.body import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
+    read_float,
+    read_int,
     read_vec3,
     write_vec3,
 )
@@ -26,19 +30,36 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_AXIS_WORLD,
     _OFF_BIAS1,
     _OFF_BIAS2,
+    _OFF_DAMPING_DRIVE,
+    _OFF_DRIVE_MODE,
     _OFF_LA1_B1,
     _OFF_LA1_B2,
     _OFF_LA2_B1,
     _OFF_LA2_B2,
+    _OFF_PREVIOUS_QUATERNION_ANGLE,
     _OFF_R1_B1,
     _OFF_R1_B2,
     _OFF_R2_B2,
+    _OFF_REVOLUTION_COUNTER,
+    _OFF_STIFFNESS_DRIVE,
     _OFF_T1,
     _OFF_T2,
+    _OFF_TARGET,
+    _OFF_TARGET_VELOCITY,
+    DRIVE_MODE_POSITION,
 )
+from newton._src.solvers.phoenx.helpers.math_helpers import revolution_tracker_angle
 from newton._src.solvers.phoenx.solver_phoenx_kernels import _rotation_quaternion
 
 _WARP_SIZE = 32
+
+# See maximal_projector_general.py: opt-in exact implicit-PD drive.
+_PHOENX_MAXIMAL_IMPLICIT_DRIVE = os.environ.get("PHOENX_MAXIMAL_IMPLICIT_DRIVE", "0").lower() not in (
+    "0",
+    "",
+    "false",
+    "off",
+)
 _SYNC_WARP_CUDA = """__syncwarp();"""
 
 
@@ -129,11 +150,15 @@ class MaximalTreeProjectorData:
     parent_bias: wp.array2d[wp.spatial_vectorf]
     velocity_out: wp.array2d[wp.spatial_vectorf]
     reaction: wp.array2d[wp.spatial_vectorf]
+    drive_diag: wp.array2d[wp.float32]
+    drive_bias: wp.array2d[wp.float32]
 
 
 @wp.kernel(enable_backward=False)
 def _gather_maximal_tree_kernel(
     use_bias: wp.bool,
+    implicit_drive: wp.bool,
+    dt: wp.float32,
     joint_to_cid: wp.array[wp.int32],
     constraints: ConstraintContainer,
     bodies: BodyContainer,
@@ -152,6 +177,8 @@ def _gather_maximal_tree_kernel(
     data.velocity_in[articulation, lane] = wp.spatial_vectorf(
         linear[0], linear[1], linear[2], angular[0], angular[1], angular[2]
     )
+    data.drive_diag[articulation, lane] = wp.float32(0.0)
+    data.drive_bias[articulation, lane] = wp.float32(0.0)
     if not use_bias:
         # PhoenX freezes inertia and prepared joint geometry until relax ends.
         data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
@@ -200,6 +227,18 @@ def _gather_maximal_tree_kernel(
                 locked_angular[1],
                 locked_angular[2],
             )
+
+        if implicit_drive and read_int(constraints, _OFF_DRIVE_MODE, cid) == DRIVE_MODE_POSITION:
+            # Exact implicit-PD drive; see maximal_projector_general.py.
+            ke = read_float(constraints, _OFF_STIFFNESS_DRIVE, cid)
+            kd = read_float(constraints, _OFF_DAMPING_DRIVE, cid)
+            target_q = read_float(constraints, _OFF_TARGET, cid)
+            target_qd = read_float(constraints, _OFF_TARGET_VELOCITY, cid)
+            counter = read_int(constraints, _OFF_REVOLUTION_COUNTER, cid)
+            prev = read_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+            cumulative_angle = revolution_tracker_angle(counter, prev)
+            data.drive_diag[articulation, lane] = dt * kd + dt * dt * ke
+            data.drive_bias[articulation, lane] = dt * (ke * (target_q - cumulative_angle) + kd * target_qd)
 
     data.shift[articulation, lane] = joint_shift
     data.motion[articulation, lane] = joint_motion
@@ -297,6 +336,7 @@ def _project_tree_velocities(
     lane: wp.int32,
     body_count: wp.int32,
     max_depth: wp.int32,
+    implicit_drive: wp.bool,
 ):
     """Warp-cooperative tree solve: articulated inertia recursion to ``velocity_out``.
 
@@ -328,11 +368,16 @@ def _project_tree_velocities(
             data.bias[articulation, lane] = body_bias
             if lane != wp.int32(0):
                 joint_motion = data.motion[articulation, lane]
+                drive_diag = wp.float32(0.0)
+                drive_bias = wp.float32(0.0)
+                if implicit_drive:
+                    drive_diag = data.drive_diag[articulation, lane]
+                    drive_bias = data.drive_bias[articulation, lane]
                 u = body_articulated @ joint_motion
-                reciprocal_d = wp.float32(1.0) / wp.dot(joint_motion, u)
+                reciprocal_d = wp.float32(1.0) / (wp.dot(joint_motion, u) + drive_diag)
                 data.inverse_d[articulation, lane] = reciprocal_d
                 projected = body_articulated - reciprocal_d * wp.outer(u, u)
-                projected_bias = body_bias - reciprocal_d * wp.dot(joint_motion, body_bias) * u
+                projected_bias = body_bias - reciprocal_d * (wp.dot(joint_motion, body_bias) + drive_bias) * u
                 joint_transform = _make_spatial_shift_transform(data.shift[articulation, lane])
                 offset = data.affine_offset[articulation, lane]
                 data.parent_articulated[articulation, lane] = (
@@ -357,9 +402,15 @@ def _project_tree_velocities(
             joint_transform = _make_spatial_shift_transform(data.shift[articulation, lane])
             base = joint_transform @ data.velocity_out[articulation, parent] + data.affine_offset[articulation, lane]
             joint_motion = data.motion[articulation, lane]
-            joint_velocity = data.inverse_d[articulation, lane] * wp.dot(
-                joint_motion,
-                data.bias[articulation, lane] - data.articulated[articulation, lane] @ base,
+            drive_bias = wp.float32(0.0)
+            if implicit_drive:
+                drive_bias = data.drive_bias[articulation, lane]
+            joint_velocity = data.inverse_d[articulation, lane] * (
+                wp.dot(
+                    joint_motion,
+                    data.bias[articulation, lane] - data.articulated[articulation, lane] @ base,
+                )
+                + drive_bias
             )
             data.velocity_out[articulation, lane] = base + joint_velocity * joint_motion
         _sync_warp()
@@ -392,13 +443,13 @@ def _project_tree_reactions(
 
 
 @wp.kernel(enable_backward=False)
-def _project_maximal_tree_kernel(data: MaximalTreeProjectorData):
+def _project_maximal_tree_kernel(implicit_drive: wp.bool, data: MaximalTreeProjectorData):
     tid = wp.tid()
     articulation = tid // wp.int32(_WARP_SIZE)
     lane = tid - articulation * wp.int32(_WARP_SIZE)
     body_count = data.body_count[articulation]
     max_depth = data.max_depth[articulation]
-    _project_tree_velocities(data, articulation, lane, body_count, max_depth)
+    _project_tree_velocities(data, articulation, lane, body_count, max_depth, implicit_drive)
     _project_tree_reactions(data, articulation, lane, body_count, max_depth)
 
 
@@ -487,7 +538,7 @@ def _project_maximal_tree_positions_kernel(
         if lane < body_count:
             _gather_position_lane(joint_to_cid, constraints, bodies, data, articulation, lane)
         _sync_warp()
-        _project_tree_velocities(data, articulation, lane, body_count, max_depth)
+        _project_tree_velocities(data, articulation, lane, body_count, max_depth, wp.bool(False))
         if lane < body_count:
             _apply_position_lane(bodies, data, articulation, lane)
         _sync_warp()
@@ -638,22 +689,30 @@ class MaximalTreeProjector:
         data.parent_bias = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.velocity_out = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.reaction = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
+        data.drive_diag = wp.zeros(shape, dtype=wp.float32, device=device)
+        data.drive_bias = wp.zeros(shape, dtype=wp.float32, device=device)
         self.data = data
+        self.implicit_drive = _PHOENX_MAXIMAL_IMPLICIT_DRIVE
 
-    def project(self, *, use_bias: bool) -> None:
-        """Project body twists and publish the recovered joint reactions."""
+    def project(self, *, use_bias: bool, dt: float = 0.0) -> None:
+        """Project body twists and publish the recovered joint reactions.
+
+        See :class:`GeneralMaximalTreeProjector` for the opt-in implicit-PD
+        drive folded into the ``use_bias`` recursion.
+        """
+        implicit_drive = bool(self.implicit_drive and use_bias)
         wp.launch(
             _gather_maximal_tree_kernel,
             dim=self.launch_dim,
             block_dim=self.block_dim,
-            inputs=[use_bias, self.joint_to_cid, self.constraints, self.bodies, self.data],
+            inputs=[use_bias, implicit_drive, float(dt), self.joint_to_cid, self.constraints, self.bodies, self.data],
             device=self.model.device,
         )
         wp.launch(
             _project_maximal_tree_kernel,
             dim=self.launch_dim,
             block_dim=self.block_dim,
-            inputs=[self.data],
+            inputs=[implicit_drive, self.data],
             device=self.model.device,
         )
         wp.launch(

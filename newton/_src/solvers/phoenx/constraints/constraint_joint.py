@@ -22,7 +22,11 @@ Drive and limit share the same scalar row; limit always wins.
 
 from __future__ import annotations
 
+import os
+
 import warp as wp
+
+_SUPPRESS_PGS_DRIVE = os.environ.get("PHOENX_MAXIMAL_IMPLICIT_DRIVE", "0").lower() not in ("0", "", "false", "off")
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import (
@@ -1150,11 +1154,13 @@ def _axial_drive_limit_prepare_at(
     drive_C = float(0.0)
     if drive_mode == DRIVE_MODE_POSITION:
         drive_C = cumulative_value - target
-    if stiffness_drive > 0.0 or damping_drive > 0.0:
+    if (stiffness_drive > 0.0 or damping_drive > 0.0) and not wp.static(_SUPPRESS_PGS_DRIVE):
         gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
             stiffness_drive, damping_drive, drive_C, eff_inv, dt, drive_boost
         )
     else:
+        # When the maximal projector owns the exact implicit-PD drive, the PGS
+        # drive row is suppressed here so the drive is not applied twice.
         gamma_drive = wp.float32(0.0)
         bias_drive = wp.float32(0.0)
         eff_mass_drive_soft = wp.float32(0.0)

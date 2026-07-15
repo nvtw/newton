@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import ClassVar
 
 import numpy as np
@@ -31,22 +32,41 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_BIAS2,
     _OFF_BIAS3,
     _OFF_BIAS_LIMIT_BOX2D,
+    _OFF_DAMPING_DRIVE,
+    _OFF_DRIVE_MODE,
     _OFF_JOINT_MODE,
+    _OFF_PREVIOUS_QUATERNION_ANGLE,
     _OFF_R1_B1,
     _OFF_R1_B2,
     _OFF_R2_B2,
     _OFF_R3_B2,
+    _OFF_REVOLUTION_COUNTER,
+    _OFF_STIFFNESS_DRIVE,
     _OFF_T1,
     _OFF_T2,
+    _OFF_TARGET,
+    _OFF_TARGET_VELOCITY,
+    DRIVE_MODE_POSITION,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
 )
+from newton._src.solvers.phoenx.helpers.math_helpers import revolution_tracker_angle
 from newton._src.solvers.phoenx.model_adapter import _classify_d6_legacy_mode, _is_locked_dof
 
 _WARP_SIZE = 32
+
+# Prototype: exact implicit-PD drive folded into the maximal-tree projector
+# recursion (mirrors reduced.py's ``factor_diagonal[dof] += dt*damping +
+# dt*dt*stiffness``). Default OFF keeps the projector byte-identical.
+_PHOENX_MAXIMAL_IMPLICIT_DRIVE = os.environ.get("PHOENX_MAXIMAL_IMPLICIT_DRIVE", "0").lower() not in (
+    "0",
+    "",
+    "false",
+    "off",
+)
 
 
 @wp.func
@@ -146,12 +166,19 @@ class GeneralMaximalTreeProjectorData:
     parent_bias: wp.array2d[wp.spatial_vectorf]
     velocity_out: wp.array2d[wp.spatial_vectorf]
     reaction: wp.array2d[wp.spatial_vectorf]
+    # Implicit-PD drive (dof 0 of each joint). ``drive_diag`` is the implicit
+    # impedance ``dt*kd + dt*dt*ke`` added to D_i's diagonal; ``drive_bias`` is
+    # the applied generalized impulse ``dt*(ke*(target_q - q) + kd*target_qd)``.
+    drive_diag: wp.array2d[wp.float32]
+    drive_bias: wp.array2d[wp.float32]
 
 
 @wp.func
 def _gather_general_maximal_tree_thread(
     tid: wp.int32,
     use_bias: wp.bool,
+    implicit_drive: wp.bool,
+    dt: wp.float32,
     joint_to_cid: wp.array[wp.int32],
     constraints: ConstraintContainer,
     bodies: BodyContainer,
@@ -169,6 +196,8 @@ def _gather_general_maximal_tree_thread(
     data.velocity_in[articulation, lane] = wp.spatial_vectorf(
         linear[0], linear[1], linear[2], angular[0], angular[1], angular[2]
     )
+    data.drive_diag[articulation, lane] = wp.float32(0.0)
+    data.drive_bias[articulation, lane] = wp.float32(0.0)
     if not use_bias:
         # PhoenX freezes inertia and prepared joint geometry until relax ends.
         data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
@@ -227,6 +256,20 @@ def _gather_general_maximal_tree_thread(
                     locked_angular[1],
                     locked_angular[2],
                 )
+            if implicit_drive and read_int(constraints, _OFF_DRIVE_MODE, cid) == DRIVE_MODE_POSITION:
+                # Exact implicit-Euler PD folded into the joint block, mirroring
+                # reduced.py's ``factor_diagonal[dof] += dt*damping + dt*dt*ke``.
+                # Velocity-level analog: the current qd is carried by the
+                # momentum bias, so the RHS impulse needs only target terms.
+                ke = read_float(constraints, _OFF_STIFFNESS_DRIVE, cid)
+                kd = read_float(constraints, _OFF_DAMPING_DRIVE, cid)
+                target_q = read_float(constraints, _OFF_TARGET, cid)
+                target_qd = read_float(constraints, _OFF_TARGET_VELOCITY, cid)
+                counter = read_int(constraints, _OFF_REVOLUTION_COUNTER, cid)
+                prev = read_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+                cumulative_angle = revolution_tracker_angle(counter, prev)
+                data.drive_diag[articulation, lane] = dt * kd + dt * dt * ke
+                data.drive_bias[articulation, lane] = dt * (ke * (target_q - cumulative_angle) + kd * target_qd)
         elif mode == JOINT_MODE_PRISMATIC:
             dof_count = wp.int32(1)
             joint_motion = _set_motion_column(joint_motion, wp.int32(0), axis, wp.vec3f(0.0, 0.0, 0.0))
@@ -298,7 +341,9 @@ def _gather_general_maximal_tree_thread(
 
 
 @wp.func
-def _project_general_maximal_tree_thread(tid: wp.int32, data: GeneralMaximalTreeProjectorData):
+def _project_general_maximal_tree_thread(
+    tid: wp.int32, implicit_drive: wp.bool, data: GeneralMaximalTreeProjectorData
+):
     articulation = tid // wp.int32(_WARP_SIZE)
     lane = tid - articulation * wp.int32(_WARP_SIZE)
     body_count = data.body_count[articulation]
@@ -332,6 +377,11 @@ def _project_general_maximal_tree_thread(tid: wp.int32, data: GeneralMaximalTree
             if constrained:
                 dof_count = data.dof_count[articulation, lane]
                 motion = data.motion[articulation, lane]
+                drive_diag = wp.float32(0.0)
+                drive_bias = wp.float32(0.0)
+                if implicit_drive:
+                    drive_diag = data.drive_diag[articulation, lane]
+                    drive_bias = data.drive_bias[articulation, lane]
                 inverse_d = wp.mat33f(0.0)
                 u_columns = wp.spatial_matrixf(0.0)
                 d_matrix = wp.mat33f(0.0)
@@ -344,6 +394,10 @@ def _project_general_maximal_tree_thread(tid: wp.int32, data: GeneralMaximalTree
                         value = wp.dot(_motion_column(motion, j), u_i)
                         d_matrix[j, i] = value
                         d_matrix[i, j] = value
+                # Implicit-PD impedance on the driven dof (dof 0). This modifies
+                # both the down-pass joint velocity solve and the P_i = A - A S
+                # D^-1 S^T A elimination the parent sees.
+                d_matrix[0, 0] += drive_diag
 
                 if dof_count == wp.int32(1):
                     inverse_d[0, 0] = wp.float32(1.0) / d_matrix[0, 0]
@@ -366,6 +420,9 @@ def _project_general_maximal_tree_thread(tid: wp.int32, data: GeneralMaximalTree
                         coefficient = inverse_d[i, j]
                         bias_coefficient += coefficient * wp.dot(_motion_column(motion, j), body_bias)
                         projected -= coefficient * wp.outer(u_i, _motion_column(u_columns, j))
+                    # Propagate the drive impulse (applied at dof 0) up to the
+                    # parent as its 3rd-law reaction: -U D^-1 p_drive.
+                    bias_coefficient += inverse_d[i, 0] * drive_bias
                     projected_bias -= bias_coefficient * u_i
 
                 parent = data.parent[articulation, lane]
@@ -401,6 +458,8 @@ def _project_general_maximal_tree_thread(tid: wp.int32, data: GeneralMaximalTree
                 rhs = wp.vec3f(0.0, 0.0, 0.0)
                 for i in range(dof_count):
                     rhs[i] = wp.dot(_motion_column(motion, i), residual)
+                if implicit_drive:
+                    rhs[0] += data.drive_bias[articulation, lane]
                 generalized_velocity = data.inverse_d[articulation, lane] @ rhs
                 velocity = base
                 for i in range(dof_count):
@@ -494,15 +553,17 @@ def _publish_general_maximal_tree_thread(
 @wp.kernel(enable_backward=False)
 def _project_general_maximal_tree_fused_kernel(
     use_bias: wp.bool,
+    implicit_drive: wp.bool,
+    dt: wp.float32,
     joint_to_cid: wp.array[wp.int32],
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     data: GeneralMaximalTreeProjectorData,
 ):
     tid = wp.tid()
-    _gather_general_maximal_tree_thread(tid, use_bias, joint_to_cid, constraints, bodies, data)
+    _gather_general_maximal_tree_thread(tid, use_bias, implicit_drive, dt, joint_to_cid, constraints, bodies, data)
     _sync_warp()
-    _project_general_maximal_tree_thread(tid, data)
+    _project_general_maximal_tree_thread(tid, implicit_drive, data)
     _sync_warp()
     _publish_general_maximal_tree_thread(tid, joint_to_cid, constraints, bodies, data)
 
@@ -700,15 +761,31 @@ class GeneralMaximalTreeProjector:
         data.parent_bias = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.velocity_out = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.reaction = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
+        data.drive_diag = wp.zeros(shape, dtype=wp.float32, device=device)
+        data.drive_bias = wp.zeros(shape, dtype=wp.float32, device=device)
         self.data = data
+        self.implicit_drive = _PHOENX_MAXIMAL_IMPLICIT_DRIVE
 
-    def project(self, *, use_bias: bool) -> None:
-        """Project body twists and publish recovered native-joint reactions."""
+    def project(self, *, use_bias: bool, dt: float = 0.0) -> None:
+        """Project body twists and publish recovered native-joint reactions.
+
+        When ``PHOENX_MAXIMAL_IMPLICIT_DRIVE`` is set, the ``use_bias`` pass also
+        folds an exact implicit-PD joint drive into the mass-metric recursion.
+        """
+        implicit_drive = bool(self.implicit_drive and use_bias)
         wp.launch(
             _project_general_maximal_tree_fused_kernel,
             dim=self.launch_dim,
             block_dim=_WARP_SIZE,
-            inputs=[use_bias, self.joint_to_cid, self.constraints, self.bodies, self.data],
+            inputs=[
+                use_bias,
+                implicit_drive,
+                float(dt),
+                self.joint_to_cid,
+                self.constraints,
+                self.bodies,
+                self.data,
+            ],
             device=self.model.device,
         )
 
