@@ -475,6 +475,25 @@ Three contact-solve architectures were compared head-to-head on identical
 
 ## Tried and reverted
 
+### Wide vectorized loads for per-cid body fields (2026-07-11) - REJECTED standalone
+- Warp scalarizes all vector loads; `PHOENX_BODY_WIDE_LOADS` reroutes the
+  hot per-cid body reads (velocity+angular pair as one 24 B interleaved slot,
+  orientation as v4.f32, inverse_inertia_world sym6 as 3x v2.f32) through
+  aliased u64 views + `wp.func_native`. Bit-identical (verified), PTX shows
+  48x ld.global.v2.f32 + 6x v4.f32 in the fast-tail prepare+iterate.
+- Isolated physics is a real but small win: dr_legs @4096 +1.4%, h1 @4096
+  +0.9% (`all`; `vw` alone +0.6% both), consistent across repeats. But the
+  **G1 graph_leapfrog training bracket is neutral** (958.5k baseline vs
+  957.8k all, ABAB, -0.07%): G1 rollout is the critical path and body-field
+  loads are a small share there, especially after fp16x2 cut the dominant
+  contact cost. Wide loads only cut request COUNT at equal bytes (weaker than
+  the vec6 byte-shrink that bought +22%), and only help joint-dense scenes.
+- Rejected as a standalone (not worth a permanent BodyContainer layout change
+  for a sub-noise training delta). The `func_native` wide-load helpers are
+  retained default-OFF because the color-ordered packed constraint stream
+  reuses them on a *contiguous* stream, where the wide-load payoff should be
+  larger (locality fixed, not just request width).
+
 ### Reduced two-substep cold start (2026-07-10) - REJECTED
 - G1 recipe at sim_substeps=2 from scratch: paired iteration-75 screens
   0.657 / 0.698 / 0.625 (vs 3x2's 0.708 / 0.659 / 0.674); the one screen

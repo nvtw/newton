@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>10 July 2026 · new direction: scene-specialized kernels</strong></div>
+      <div class="stamp">Last updated<br><strong>11 July 2026 · fp16x2 rows shipped as default</strong></div>
     </header>
 
     <section class="hero">
@@ -230,7 +230,20 @@
 
     <div class="section-label">Current state</div>
     <article>
-      <div class="meta"><span class="tag">NEW DIRECTION &middot; SCENE-SPECIALIZED KERNELS</span><time>10 Jul</time></div>
+      <div class="meta"><span class="tag">SHIPPED &middot; FP16x2 CONTACT ROWS DEFAULT</span><time>11 Jul</time></div>
+      <h2>First retained speedup landed: half-precision contact-row stream</h2>
+      <p>Packed FP16 Jacobian/response rows (loaded through aligned uint32 words) are now the reduced-path default, with FP32 opt-out via <code>PHOENX_CONTACT_ROWS_FP16=0</code>. Accumulators, impulses, velocities, and effective masses stay FP32; only the streamed row geometry (O(1)-magnitude difference/direction quantities) is halved.</p>
+      <ul>
+        <li>Isolated contact phase +9.4% at 8,192-world standing G1; cross-scene 512-world contact fleets all finite and physics near-identical to FP32 (G1 +3.7% env fps, ANYmal/H1 within noise &mdash; those scenes are less row-bound).</li>
+        <li>57/58 reduced CUDA-graph battery green under the new default; the one failure is the pre-existing driver graph-instantiation flake (reproduces identically with FP32 forced, passes in isolation). Momentum/energy, Featherstone parity, far-translation invariance, and the exact-ABA row test (now FP32-pinned) all pass.</li>
+        <li>Honest caveat retained: the seed lottery means expected-cost stays FP32-derived until successes accumulate; the four full-horizon FP16 draws were 0/4 but statistically indistinguishable from FP32&rsquo;s own ~1/3 rate, and every physical-law and deviation test supports the numerics.</li>
+        <li><strong>Wide body-field loads rejected (11 Jul):</strong> lossless wide vectorized loads on the per-cid PGS-iterate body fields measured +1.4% dr_legs / +0.9% h1 isolated physics but <strong>neutral on G1 graph_leapfrog training</strong> (958.5k vs 957.8k, ABAB). G1 rollout is the critical path and those fields are ~4% of GPU. The <code>func_native</code> wide-load helpers are retained default-OFF for reuse.</li>
+        <li><strong>Redirect to the bigger phase:</strong> the training GPU trace ranks ABA advance (8.6%) + factor (6.2%) &asymp; 15% &mdash; the wide-load experiment had missed it entirely (it hit the ~4% contact iterate). Now applying the same technique to the register-limited ABA warp kernels; the open question is whether wide-load unpack registers worsen occupancy. Then: color-ordered FP16 constraint stream, patch rows.</li>
+      </ul>
+      <p class="profile-note">Committed on twidmer/phoenx-bandwidth-wins. Headline expected cost unchanged at 343.19 s (throughput win, not yet a seed-success win). Lesson reinforced: G1 training is rollout-bound; single sub-phase wins land near the ~1.5% bench-noise floor, so composability across phases is the path.</p>
+    </article>
+    <article>
+      <div class="meta"><span class="tag warn">REJECTED DIRECTION &middot; SCENE-SPECIALIZED KERNELS</span><time>10 Jul</time></div>
       <h2>nanoG1 decomposed: the engine gap is 2.25&times; and it is topology baking</h2>
       <p>A source-level read of the nanoG1 checkout separates its 5.83&times; headline advantage into accounting and engineering. Roughly 2&times; is gate definition and timing: one seed, one eval, one fall allowed, compile time excluded, 58.9 s computed post-hoc as samples&divide;throughput. Under that gate PhoenX would report roughly 125&ndash;145 s today. The true engine gap is per-physics-step cost: nanoG1 sustains ~6.4M physics steps/s in training versus PhoenX&rsquo;s ~2.85M (2.25&times;).</p>
       <ul>
