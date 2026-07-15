@@ -498,6 +498,22 @@ Three contact-solve architectures were compared head-to-head on identical
 
 ## Tried and reverted
 
+### Factor + kinematics refresh stride across substeps (2026-07-15) - REJECTED
+- Amortize the reduced ABA articulated-inertia factor (12.6% GPU) + local
+  kinematics (8.4%) across a control step's substeps, like prepare_refresh_stride
+  does for contacts. Freeze only config-dependent quantities (factor, motion
+  subspaces, anchors) on continuation substeps; keep forces/velocities/biases live.
+- stride=1 byte-identical; contact-free floating-tree momentum/energy essentially
+  unchanged at stride 2/3 (max|dq|~4e-5). BUT: isolated G1 physics (8192, contact,
+  substeps=3) stride=2 +1.4% (noise), **stride=3 NON-FINITE (NaN diverges)**.
+- Root cause: the reduced CONTACT-block solve builds its generalized response rows
+  directly from the factor (joint_d_inv/joint_u/joint_s). A stale factor makes the
+  contact response geometrically inconsistent with the current pose → PGS contact
+  iteration blows up. Only safe on contact-free articulations; G1 training is
+  contact-laden. The predicted +10-14% never materialized (stride-2 noise, stride-3
+  diverges). Reverted. (A "freeze only when a world has no active reduced contacts"
+  variant is possible but useless for contact-laden G1.)
+
 ### Build-time patch-reduced contact rows (2026-07-11/15) - DEFINITIVELY REJECTED
 - Third and most thorough attempt (after the 2026-07 separate-phase try that lost
   -7.4%). Emit P normal + 2 coupled tangent rows per eligible convex contact
