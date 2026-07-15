@@ -97,14 +97,8 @@ def _packed_rows_mode_default() -> str:
     ``PHOENX_CONTACT_ROWS_FP16=0`` restores the exact FP32 path;
     ``=1`` (naked fp16) and ``=3`` (fp16x4) are measured-inferior variants
     kept for A/B only.
-
-    Default is still fp32: flipping to fp16x2 is approved (user, 2026-07-10)
-    but blocked on a test-fixture interaction in
-    ``test_generalized_contact_rows_match_aba_under_graph_capture`` — its
-    fp32-mode env pin does not take effect (arrays still allocate fp16 when
-    the default is 2); diagnose construction order, then flip.
     """
-    value = os.environ.get("PHOENX_CONTACT_ROWS_FP16", "0").lower()
+    value = os.environ.get("PHOENX_CONTACT_ROWS_FP16", "2").lower()
     if value in ("0", "false", "fp32"):
         return "fp32"
     if value in ("2", "", "pairs", "x2", "fp16x2"):
