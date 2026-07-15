@@ -498,6 +498,28 @@ Three contact-solve architectures were compared head-to-head on identical
 
 ## Tried and reverted
 
+### Block Gauss-Seidel (Hessian cross-terms) on reduced path (2026-07-15) - REJECTED (fixable), low-EV for G1
+- Q: "can GS use Hessian info?" A: yes — block-projected-GS solves the full 3x3
+  contact Delassus block (normal + 2 friction coupled) per sweep instead of scalar
+  normal + decoupled friction, using the off-diagonals A01=Jn.M^-1.Jt0^T etc. It
+  uses more of the contact Hessian, stays GPU-friendly (register-local 3x3, no
+  factorization), and unlike APGD helps at LOW iteration counts.
+- **Key finding: the MAXIMAL (rigid-stack) path ALREADY implements this**
+  (maximal_contact_gs.py mobility[3,4,5] = inverse_nt0/nt1/t01, staggered
+  normal->coupled-2x2-friction). So the Hessian-in-GS win already exists where it
+  matters most (stiff/dense contacts). Only the reduced/G1-feet path lacked it.
+- Reduced-path prototype (PHOENX_BLOCK_GS) REJECTED as implemented: block-GS@2 is
+  WORSE than scalar@2 (residual 0.607 vs 0.330) and lands a physically worse fixed
+  point (0.29 vs 0.08 m/s residual contact velocity). Root cause is a consistency
+  BUG not a fundamental flaw: off-diagonals derived from the packed jacobian/response
+  tiles are numerically inconsistent with the builder's separately-computed diagonal
+  eff masses (cc_get_eff_*) -> non-SPD 3x3 -> spurious cone saturation. cross=0
+  recovers scalar exactly (machinery correct); even SPD tt-only lands wrong (0.180);
+  FP32 rules out precision. Fix (if revived): derive the ENTIRE 3x3 (incl diagonal)
+  from the same tile reductions, then re-run the convergence harness.
+- Low-EV for G1: foot contacts are light (block-GS benefit is biggest on stiff
+  stacks, already covered by the maximal path). Not adopted; byte-identical OFF.
+
 ### APGD / Nesterov-accelerated colored GS (2026-07-15) - REJECTED, structural
 - Anitescu-Tasora APGD (Nesterov momentum on the accumulated contact impulses
   between outer GS sweeps, O'Donoghue adaptive restart, static coeffs) to cut
