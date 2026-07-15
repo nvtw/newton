@@ -498,6 +498,35 @@ Three contact-solve architectures were compared head-to-head on identical
 
 ## Tried and reverted
 
+### Build-time patch-reduced contact rows (2026-07-11/15) - DEFINITIVELY REJECTED
+- Third and most thorough attempt (after the 2026-07 separate-phase try that lost
+  -7.4%). Emit P normal + 2 coupled tangent rows per eligible convex contact
+  column (P+2 instead of 3P) to shrink the bandwidth-bound row stream.
+- M1 (foundation, side-data): eligibility + descriptor, byte-identical, confirmed
+  **G1 is 100% patch-eligible** (foot-box vs ground plane) with **33% projected row
+  reduction** on the standing snapshot. Committed then reverted.
+- M2 (in-loop, per-articulation dual-dispatch): correct P+2C solve (box-on-plane
+  stable, momentum/energy pass, deviation <5e-3) but gated per-ARTICULATION
+  single-page → never activated on G1 (33 pts / 2 pages / 16 cols); ON paid pure
+  overhead -5.3% physics / -6.7% training from the dual-dispatch solve kernel's
+  register/occupancy bloat (both branches compiled in).
+- M3 (pure-patch fleet path): removed every M2 confound — fleet-level all-eligible
+  flag, per-COLUMN page-aware layout, pure single-purpose patch kernels (no classic
+  branch, no per-articulation decide), patch-aware transpose. Patch ACTIVATED on G1
+  (30.3% row reduction realized), default OFF byte-identical, correct. Still
+  **-35.3% isolated G1 physics** (1.401M vs 2.167M steps/s). Precomputing the
+  response diagonal changed nothing.
+- **Definitive root cause:** the row reduction is real and physically correct, but
+  realizing it requires a serial per-articulation emit pass + a DIVERGENT
+  column-iterating 2x2 coupled solve with data-dependent control flow. That maps
+  terribly to the warp-cooperative uniform-tile model the classic per-point solve
+  exploits. **Row-COUNT is the wrong lever for the reduced contact solve: the classic
+  uniform per-point tight-loop is structurally optimal on this hardware; fewer rows
+  don't help when the rows were cheap uniform tiles and the reduction demands
+  per-column branching.** Do not revisit patch/row-count reduction for the reduced
+  solver. (Contrast: fp16 byte-reduction on the SAME uniform rows works — +9.4%
+  phase — because it keeps the uniform tile structure.)
+
 ### Wide vectorized loads for per-cid body fields (2026-07-11) - REJECTED standalone
 - Warp scalarizes all vector loads; `PHOENX_BODY_WIDE_LOADS` reroutes the
   hot per-cid body reads (velocity+angular pair as one 24 B interleaved slot,

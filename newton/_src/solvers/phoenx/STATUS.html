@@ -230,6 +230,18 @@
 
     <div class="section-label">Current state</div>
     <article>
+      <div class="meta"><span class="tag warn">DEFINITIVE REJECT &middot; PATCH ROWS</span><time>15 Jul</time></div>
+      <h2>Row-count reduction is the wrong lever for the reduced contact solve</h2>
+      <p>Build-time patch-reduced rows (P+2 coupled tangents per convex column instead of 3 per point) was pursued through three milestones after the earlier separate-phase attempt (which lost &minus;7.4%). It is now definitively rejected, with a clean architectural root cause.</p>
+      <ul>
+        <li>The row reduction is <strong>real and physically correct</strong>: G1 is 100% patch-eligible, 30&ndash;33% fewer generalized rows realized, box-on-plane stable, momentum/energy pass, deviation vs per-point &lt; 5&times;10<sup>&minus;3</sup>, default OFF byte-identical.</li>
+        <li>But it costs <strong>&minus;35% isolated G1 physics</strong> (1.40M vs 2.17M steps/s) even in the pure-patch, fully-activated, single-purpose-kernel form (M3, which removed the M2 dual-dispatch occupancy bloat). Realizing the compact layout needs a serial per-articulation emit pass + a DIVERGENT column-iterating 2&times;2 coupled solve, which maps terribly to the warp-cooperative uniform-tile model.</li>
+        <li><strong>Finding:</strong> the classic uniform per-point tight-loop solve is structurally optimal on this hardware. Fewer rows don&rsquo;t help when the rows were cheap uniform tiles and the reduction demands per-column branching. Contrast fp16 byte-reduction on the SAME uniform rows (+9.4% phase) &mdash; it keeps the tile structure. All code reverted; fp16x2 stands.</li>
+        <li><strong>Post-fp16x2 profile (phase % of training GPU):</strong> ABA advance 16.6, contact row build 15.2, publish/momentum 12.6, factor 12.6, contact solve 10.4, kinematics 8.4, learner ~5&ndash;9; solver 82%, non-solver rollout only ~8.5%. Advance is a launch-bound depth-serial ABA dead end (0.34 waves/SM, grid 512, algorithmic parallelism ceiling); publish is already conditionally-minimal. The big phases are either structural dead ends or (contact stream) now shown row-count-immune.</li>
+      </ul>
+      <p class="profile-note">Session net: fp16x2 (+1.06% G1 training) is the banked win. The reduced-pipeline bandwidth/row levers are largely exhausted &mdash; the remaining wins are byte-level (taken) or blocked by the ABA launch-bound wall and the uniform-tile optimality of the contact solve. Bigger throughput needs a different attack (new solver formulation) or the seed-reliability headline lever.</p>
+    </article>
+    <article>
       <div class="meta"><span class="tag">SHIPPED &middot; FP16x2 CONTACT ROWS DEFAULT</span><time>11 Jul</time></div>
       <h2>First retained speedup landed: half-precision contact-row stream</h2>
       <p>Packed FP16 Jacobian/response rows (loaded through aligned uint32 words) are now the reduced-path default, with FP32 opt-out via <code>PHOENX_CONTACT_ROWS_FP16=0</code>. Accumulators, impulses, velocities, and effective masses stay FP32; only the streamed row geometry (O(1)-magnitude difference/direction quantities) is halved.</p>
