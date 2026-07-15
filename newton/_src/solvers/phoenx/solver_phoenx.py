@@ -2896,20 +2896,6 @@ class PhoenXWorld:
                         cid_of_contact=self._cid_of_contact_cur,
                         device=self.device,
                     )
-                # Reduced patch-row foundation (MILESTONE 1): classify eligible
-                # convex columns and project the P+2C row count as side data.
-                # Off by default; when on it writes only its own arrays and does
-                # not change emission, so the solve stays byte-identical.
-                block_system = self._reduced_articulation.contact_block_system
-                if block_system.patch_rows and shape_type is not None:
-                    block_system.measure_patch_rows(
-                        self._contact_cols,
-                        self._ingest_scratch.pair_source_idx,
-                        self._ingest_scratch.pair_shape_a,
-                        self._ingest_scratch.pair_shape_b,
-                        shape_type,
-                        self._ingest_scratch.num_contact_columns,
-                    )
             if (
                 self._partition_active_this_step
                 and self.solver_flavor == "standard"

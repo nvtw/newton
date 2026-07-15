@@ -57,7 +57,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_eff_t1,
     cc_set_eff_t2,
 )
-from newton._src.solvers.phoenx.constraints.contact_patch_friction import _shape_is_convex_for_contact_patch
 from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_velocity_update_no_soft_pd
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
@@ -107,120 +106,6 @@ def _packed_rows_mode_default() -> str:
     if value in ("3", "quads", "x4", "fp16x4"):
         return "fp16x4"
     return "fp16"
-
-
-def _patch_rows_default() -> bool:
-    """Resolve the build-time reduced patch-row flag (MILESTONE 1, foundation).
-
-    ``PHOENX_PATCH_ROWS=1`` turns on side-band classification of eligible convex
-    contact columns plus the projected reduced-row descriptor. The default OFF
-    path is byte-identical to baseline: no extra kernels run and no side arrays
-    are allocated. Even when ON, MILESTONE 1 only computes the descriptor and the
-    projected P+2C row count alongside the untouched 3-rows-per-point build/solve;
-    it does not yet change emission. See docs/REDUCED_PATCH_FRICTION.md.
-    """
-    value = os.environ.get("PHOENX_PATCH_ROWS", "0").lower()
-    return value in ("1", "true", "on", "yes", "patch")
-
-
-# Per-column patch-row descriptor field indices (side data, MILESTONE 1).
-_PATCH_DESC_ELIGIBLE = 0
-_PATCH_DESC_POINT_BASE = 1
-_PATCH_DESC_POINT_COUNT = 2
-_PATCH_DESC_COLUMN = 3
-_PATCH_DESC_ROW_BASE = 4
-_PATCH_DESC_WIDTH = 5
-
-
-@wp.kernel(enable_backward=False)
-def _classify_reduced_patch_eligibility_kernel(
-    pair_source: wp.array[wp.int32],
-    pair_shape_a: wp.array[wp.int32],
-    pair_shape_b: wp.array[wp.int32],
-    num_columns: wp.array[wp.int32],
-    shape_type: wp.array[wp.int32],
-    allow_shape_pair_columns: wp.int32,
-    column_eligible: wp.array[wp.int32],
-):
-    """Flag each contact column whose single shape pair is provably convex.
-
-    Mirrors :func:`classify_contact_patch_columns` for the reduced ingest path:
-    a coupled patch tangent block is admissible only when the column represents
-    exactly one shape pair (body-pair grouping off) and both shapes reduce to a
-    single convex contact patch.
-    """
-    column = wp.tid()
-    if column >= column_eligible.shape[0]:
-        return
-    eligible = wp.int32(0)
-    if column < num_columns[0] and allow_shape_pair_columns != wp.int32(0):
-        pair = pair_source[column]
-        shape_a = pair_shape_a[pair]
-        shape_b = pair_shape_b[pair]
-        if _shape_is_convex_for_contact_patch(shape_type[shape_a]) and _shape_is_convex_for_contact_patch(
-            shape_type[shape_b]
-        ):
-            eligible = wp.int32(1)
-    column_eligible[column] = eligible
-
-
-@wp.kernel(enable_backward=False)
-def _measure_reduced_patch_rows_kernel(
-    schedule_section_end: wp.array[wp.int32],
-    scheduled_column: wp.array[wp.int32],
-    columns: ContactColumnContainer,
-    column_eligible: wp.array[wp.int32],
-    column_descriptor: wp.array2d[wp.int32],
-    baseline_row_count: wp.array[wp.int32],
-    projected_row_count: wp.array[wp.int32],
-    eligible_columns: wp.array[wp.int32],
-    column_count: wp.array[wp.int32],
-):
-    """Project the P+2C reduced patch-row layout as side data (no emission).
-
-    For each scheduled column of the articulation this records a deterministic,
-    page-agnostic descriptor from which every patch row (point index, axis kind,
-    column id) is derivable, and accumulates the baseline (3P) versus projected
-    (P normals + 2 coupled tangents per eligible column, else 3P) row counts.
-    """
-    articulation = wp.tid()
-    start = wp.int32(0)
-    if articulation > wp.int32(0):
-        start = schedule_section_end[articulation - wp.int32(1)]
-    end = schedule_section_end[articulation]
-
-    point_base = wp.int32(0)
-    row_base = wp.int32(0)
-    baseline = wp.int32(0)
-    projected = wp.int32(0)
-    eligible_col = wp.int32(0)
-    active_col = wp.int32(0)
-    for index in range(start, end):
-        column = scheduled_column[index]
-        point_count = contact_get_contact_count(columns, column)
-        eligible = wp.int32(0)
-        if point_count > wp.int32(0):
-            eligible = column_eligible[column]
-        column_descriptor[index, _PATCH_DESC_ELIGIBLE] = eligible
-        column_descriptor[index, _PATCH_DESC_POINT_BASE] = point_base
-        column_descriptor[index, _PATCH_DESC_POINT_COUNT] = point_count
-        column_descriptor[index, _PATCH_DESC_COLUMN] = column
-        column_descriptor[index, _PATCH_DESC_ROW_BASE] = row_base
-        if point_count > wp.int32(0):
-            active_col += wp.int32(1)
-            baseline += wp.int32(3) * point_count
-            column_rows = wp.int32(3) * point_count
-            if eligible != wp.int32(0):
-                column_rows = point_count + wp.int32(2)
-                eligible_col += wp.int32(1)
-            projected += column_rows
-            row_base += column_rows
-            point_base += point_count
-
-    baseline_row_count[articulation] = baseline
-    projected_row_count[articulation] = projected
-    eligible_columns[articulation] = eligible_col
-    column_count[articulation] = active_col
 
 
 def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, bool, bool]:
@@ -1872,10 +1757,8 @@ class ReducedContactBlockSystem:
         articulation_depth_joint: wp.array[wp.int32],
         max_depth: int,
         packed_rows_mode: str | None = None,
-        patch_rows: bool | None = None,
     ):
         self.device = model.device
-        self.patch_rows = _patch_rows_default() if patch_rows is None else bool(patch_rows)
         self.packed_rows_mode = _packed_rows_mode_default() if packed_rows_mode is None else str(packed_rows_mode)
         if self.packed_rows_mode not in _ROWS_MODE_DTYPES:
             raise ValueError(f"unknown packed_rows_mode {self.packed_rows_mode!r}")
@@ -1956,15 +1839,6 @@ class ReducedContactBlockSystem:
         self.packed_jacobian_solve: wp.array | None = None
         self.packed_response_solve: wp.array | None = None
         self.packed_previous_row_body: wp.array[wp.int32] | None = None
-        # Reduced patch-row side data (MILESTONE 1). Allocated in
-        # ``configure_schedule`` only when ``patch_rows`` is on; ``None`` keeps
-        # the default path byte-identical.
-        self.patch_column_eligible: wp.array[wp.int32] | None = None
-        self.patch_column_descriptor: wp.array2d[wp.int32] | None = None
-        self.patch_baseline_row_count: wp.array[wp.int32] | None = None
-        self.patch_projected_row_count: wp.array[wp.int32] | None = None
-        self.patch_eligible_columns: wp.array[wp.int32] | None = None
-        self.patch_active_column_count: wp.array[wp.int32] | None = None
         self.enabled = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.basis_enabled = wp.zeros_like(self.enabled)
         self.direct_enabled = wp.zeros_like(self.enabled)
@@ -2079,72 +1953,6 @@ class ReducedContactBlockSystem:
             enable_warm_start=True,
         )
         self.fallback_partitioner.set_symmetric_sweep(True)
-        if self.patch_rows:
-            self.patch_column_eligible = wp.zeros(capacity, dtype=wp.int32, device=self.device)
-            self.patch_column_descriptor = wp.zeros(
-                (capacity, _PATCH_DESC_WIDTH), dtype=wp.int32, device=self.device
-            )
-            self.patch_baseline_row_count = wp.zeros(self.articulation_count, dtype=wp.int32, device=self.device)
-            self.patch_projected_row_count = wp.zeros_like(self.patch_baseline_row_count)
-            self.patch_eligible_columns = wp.zeros_like(self.patch_baseline_row_count)
-            self.patch_active_column_count = wp.zeros_like(self.patch_baseline_row_count)
-
-    def measure_patch_rows(
-        self,
-        columns: ContactColumnContainer,
-        pair_source: wp.array[wp.int32],
-        pair_shape_a: wp.array[wp.int32],
-        pair_shape_b: wp.array[wp.int32],
-        shape_type: wp.array[wp.int32],
-        num_columns: wp.array[wp.int32],
-    ) -> None:
-        """Classify eligible convex columns and project the P+2C reduced rows.
-
-        Side data only (MILESTONE 1): fills the per-column eligibility flag, the
-        per-scheduled-column patch-row descriptor, and per-articulation baseline
-        (3P) versus projected (P+2C) row counts. Must run after
-        :meth:`build_schedule`, which finalizes the deterministic column order
-        and (when partitioning) the reordered ``pair_source``. Does not touch the
-        emitted or solved rows, so results stay byte-identical to baseline.
-        """
-        if not self.patch_rows:
-            return
-        assert self.patch_column_eligible is not None
-        assert self.patch_column_descriptor is not None
-        assert self.schedule_section_end is not None
-        assert self.schedule_columns is not None
-        wp.launch(
-            _classify_reduced_patch_eligibility_kernel,
-            dim=self.schedule_capacity,
-            inputs=[
-                pair_source,
-                pair_shape_a,
-                pair_shape_b,
-                num_columns,
-                shape_type,
-                wp.int32(0 if self._body_pair_grouping else 1),
-            ],
-            outputs=[self.patch_column_eligible],
-            device=self.device,
-        )
-        wp.launch(
-            _measure_reduced_patch_rows_kernel,
-            dim=self.articulation_count,
-            inputs=[
-                self.schedule_section_end,
-                self.schedule_columns,
-                columns,
-                self.patch_column_eligible,
-            ],
-            outputs=[
-                self.patch_column_descriptor,
-                self.patch_baseline_row_count,
-                self.patch_projected_row_count,
-                self.patch_eligible_columns,
-                self.patch_active_column_count,
-            ],
-            device=self.device,
-        )
 
     def build_schedule(
         self,
