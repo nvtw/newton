@@ -498,6 +498,29 @@ Three contact-solve architectures were compared head-to-head on identical
 
 ## Tried and reverted
 
+### APGD / Nesterov-accelerated colored GS (2026-07-15) - REJECTED, structural
+- Anitescu-Tasora APGD (Nesterov momentum on the accumulated contact impulses
+  between outer GS sweeps, O'Donoghue adaptive restart, static coeffs) to cut
+  iteration count while staying GS-GPU-friendly (no factorization). Correct and
+  determinism/byte-identity-OFF verified.
+- FAILS for two structural reasons: (1) **zero benefit at 1-2 sweeps** — β₀=0 and
+  momentum lives between sweeps, so APGD@1 == plain@1 and APGD@2 == plain@2
+  bit-identical; the G1 recipe uses solver_iterations=2, exactly where APGD does
+  nothing. (2) **the nonsmooth Coulomb friction cone breaks the acceleration** at
+  higher sweep counts (diverges ~13x by @8); restart is dominated by normal
+  impulses and misses friction active-set thrash. The only real effect (smooth
+  normal-impulse subproblem converges faster at @4, matching plain@8 on Fn) is
+  above the 2-iter regime and offset by friction degradation.
+- **Broader conclusion:** nanoG1's 2-iteration convergence comes from its M-metric
+  Newton Hessian (GPU-unfriendly, already rejected 0.36x/0.87x). There is NO
+  GS-friendly way to buy that convergence: acceleration is inert at the low
+  iteration counts PhoenX already uses and unstable on friction above them. The
+  GPU-friendly GS solver is at its convergence ceiling. Generic solver-side
+  gap-closing to nanoG1 is therefore mostly unavailable; the leverage is on the
+  LEARNER (seed reliability + sample efficiency). Optional narrow follow-up:
+  normal-impulse-only momentum (leave friction plain) keeps the @4 normal win,
+  but still can't help below 2 iters. Prototype behind PHOENX_APGD, reverted.
+
 ### Recipe iteration reduction (2026-07-15) - REJECTED; recipe is near-minimal
 - G1 recipe is 3 substeps x 2 PGS x 1 velocity(relax) iter. Tested reducing each
   through the frozen gate (seed 42):
