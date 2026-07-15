@@ -498,6 +498,22 @@ Three contact-solve architectures were compared head-to-head on identical
 
 ## Tried and reverted
 
+### Recipe iteration reduction (2026-07-15) - REJECTED; recipe is near-minimal
+- G1 recipe is 3 substeps x 2 PGS x 1 velocity(relax) iter. Tested reducing each
+  through the frozen gate (seed 42):
+  - solver_iterations 2->1 (vel=1): fails the iter-75 screen (0.675 < 0.68) — the
+    PGS iterations are load-bearing.
+  - velocity_iterations 1->0: **+6.3% clean G1 training throughput** (1.019M vs
+    958k, ABAB) and holds the iter-75 screen (0.706, seed 11 even improves to
+    0.701), BUT the known-passing seed 42 then **fails the iteration-150 screen
+    (0.767 < 0.80** required; baseline 0.844). The bias-off relax pass provides
+    real long-horizon drift removal that the early screen doesn't reveal.
+  Conclusion: the recipe is near-minimal for quality; naive iteration reduction
+  can't hold the full frozen gate. (SOR over-relaxation to accelerate a reduced
+  iteration was not pursued — parameter tuning, not the target.) Lesson: an
+  iter-75 screen pass is necessary but NOT sufficient; the iter-150/0.80 screen is
+  where relax-removal is caught. This maps the recipe's quality floor precisely.
+
 ### Factor + kinematics refresh stride across substeps (2026-07-15) - REJECTED
 - Amortize the reduced ABA articulated-inertia factor (12.6% GPU) + local
   kinematics (8.4%) across a control step's substeps, like prepare_refresh_stride
