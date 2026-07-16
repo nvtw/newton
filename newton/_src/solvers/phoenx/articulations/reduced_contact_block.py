@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import functools
-import os
 
 import numpy as np
 import warp as wp
@@ -80,38 +79,6 @@ _FALLBACK_BLOCK_DIM = 256
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 
 _INT64_MAX = 9223372036854775807
-
-
-def _packed_rows_mode_default() -> str:
-    """Storage/load mode for the packed contact Jacobian/response rows.
-
-    Default ``fp16x2``: rows stored as FP16 pairs loaded through aligned
-    uint32 words (retained 2026-07-10: +9.4% isolated contact phase, deviation
-    <= 3e-4 rel vs fp32, momentum/energy/Featherstone-parity and
-    far-translation tests pass; see docs/PERF_NOTES.md "FP16x2 packed contact
-    rows"). All accumulators, impulses, velocities, and effective masses stay
-    FP32 — only the streamed row storage is halved. Rows hold motion
-    subspaces, COM-relative levers, and articulated responses: O(1)-magnitude
-    difference/direction quantities, verified within FP16 range.
-
-    ``PHOENX_CONTACT_ROWS_FP16=0`` restores the exact FP32 path;
-    ``=1`` (naked fp16) and ``=3`` (fp16x4) are measured-inferior variants
-    kept for A/B only.
-
-    Default is still fp32: flipping to fp16x2 is approved (user, 2026-07-10)
-    but blocked on a test-fixture interaction in
-    ``test_generalized_contact_rows_match_aba_under_graph_capture`` — its
-    fp32-mode env pin does not take effect (arrays still allocate fp16 when
-    the default is 2); diagnose construction order, then flip.
-    """
-    value = os.environ.get("PHOENX_CONTACT_ROWS_FP16", "0").lower()
-    if value in ("0", "false", "fp32"):
-        return "fp32"
-    if value in ("2", "", "pairs", "x2", "fp16x2"):
-        return "fp16x2"
-    if value in ("3", "quads", "x4", "fp16x4"):
-        return "fp16x4"
-    return "fp16"
 
 
 def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, bool, bool]:
@@ -1719,13 +1686,8 @@ class ReducedContactBlockSystem:
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
         max_depth: int,
-        packed_rows_mode: str | None = None,
     ):
         self.device = model.device
-        self.packed_rows_mode = _packed_rows_mode_default() if packed_rows_mode is None else str(packed_rows_mode)
-        if self.packed_rows_mode not in _ROWS_MODE_DTYPES:
-            raise ValueError(f"unknown packed_rows_mode {self.packed_rows_mode!r}")
-        self.packed_rows_fp16 = self.packed_rows_mode != "fp32"
         self.articulation_depth_start = articulation_depth_start
         self.articulation_depth_joint = articulation_depth_joint
         self.max_depth = int(max_depth)
@@ -1752,9 +1714,9 @@ class ReducedContactBlockSystem:
             ),
         )
         self.contact_dof_width = _aligned_contact_dof_width(max_dof_count)
-        self.solve_kernel = _solve_generalized_contact_tile_ops(self.contact_dof_width, self.packed_rows_mode)[1]
-        self.build_rows_kernel = _get_build_packed_rows_kernel(self.packed_rows_fp16)
-        self.transpose_kernel = _get_transpose_response_kernel(self.packed_rows_fp16)
+        self.solve_kernel = _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS[self.contact_dof_width]
+        self.build_rows_kernel = _build_packed_generalized_contact_rows_kernel
+        self.transpose_kernel = _transpose_generalized_contact_response_kernel
         self.biased_page_launcher = None
         self.relax_page_launcher = None
         self.requires_impulse_response = not (
@@ -1794,8 +1756,6 @@ class ReducedContactBlockSystem:
         self.fallback_partitioner: IncrementalContactPartitioner | None = None
         self.packed_jacobian: wp.array2d[wp.float32] | None = None
         self.packed_response: wp.array2d[wp.float32] | None = None
-        self.packed_jacobian_solve: wp.array | None = None
-        self.packed_response_solve: wp.array | None = None
         self.packed_previous_row_body: wp.array[wp.int32] | None = None
         self.enabled = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.basis_enabled = wp.zeros_like(self.enabled)
@@ -1825,17 +1785,6 @@ class ReducedContactBlockSystem:
         self.generalized_delta = wp.zeros(
             (articulation_count, self.contact_dof_width), dtype=wp.float32, device=self.device
         )
-        pack_factor = _ROWS_MODE_PACK[self.packed_rows_mode]
-        if pack_factor > 1:
-            # Aliased vecN view: the packed solve tile-stores the delta as vecN.
-            self.generalized_delta_solve = wp.array(
-                ptr=self.generalized_delta.ptr,
-                dtype=_ROWS_MODE_VEC[pack_factor],
-                shape=(articulation_count, self.contact_dof_width // pack_factor),
-                device=self.device,
-            )
-        else:
-            self.generalized_delta_solve = self.generalized_delta
         self.aba_joint_work = wp.zeros(
             (articulation_count, self.contact_dof_width, _MAX_ROWS), dtype=wp.float32, device=self.device
         )
@@ -1864,25 +1813,9 @@ class ReducedContactBlockSystem:
         self._body_pair_grouping = body_pair_grouping
         packed_row_capacity = self.articulation_count * _CACHED_PAGE_COUNT * _MAX_ROWS
         self.packed_jacobian = wp.zeros(
-            (packed_row_capacity, self.contact_dof_width),
-            dtype=wp.float16 if self.packed_rows_fp16 else wp.float32,
-            device=self.device,
+            (packed_row_capacity, self.contact_dof_width), dtype=wp.float32, device=self.device
         )
         self.packed_response = wp.zeros_like(self.packed_jacobian)
-        pack_factor = _ROWS_MODE_PACK[self.packed_rows_mode]
-        if pack_factor > 1:
-            # Aliased uint32/uint64 views: full-width 4/8-byte lane loads in the solve.
-            pack_dtype = _ROWS_MODE_DTYPES[self.packed_rows_mode]
-            pack_shape = (packed_row_capacity, self.contact_dof_width // pack_factor)
-            self.packed_jacobian_solve = wp.array(
-                ptr=self.packed_jacobian.ptr, dtype=pack_dtype, shape=pack_shape, device=self.device
-            )
-            self.packed_response_solve = wp.array(
-                ptr=self.packed_response.ptr, dtype=pack_dtype, shape=pack_shape, device=self.device
-            )
-        else:
-            self.packed_jacobian_solve = self.packed_jacobian
-            self.packed_response_solve = self.packed_response
         self.packed_previous_row_body = wp.full(packed_row_capacity, value=-1, dtype=wp.int32, device=self.device)
         worker_blocks = max(1, int(getattr(self.device, "sm_count", 1)))
         self.fallback_worker_count = min(capacity, worker_blocks * _FALLBACK_BLOCK_DIM)
@@ -2265,15 +2198,15 @@ class ReducedContactBlockSystem:
                     self.tangent0,
                     self.row_velocity,
                     self.page_index,
-                    self.packed_jacobian_solve,
-                    self.packed_response_solve,
+                    self.packed_jacobian,
+                    self.packed_response,
                     bodies,
                     wp.bool(self.fuse_apply),
                     wp.int32(self.max_depth),
                     self.articulation_depth_start,
                     self.articulation_depth_joint,
                 ],
-                outputs=[self.generalized_delta_solve, self.generalized_body_delta],
+                outputs=[self.generalized_delta, self.generalized_body_delta],
                 block_dim=_BLOCK_DIM,
                 device=self.device,
             )

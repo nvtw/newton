@@ -3,7 +3,6 @@
 
 """CUDA graph tests for PhoenX reduced-coordinate articulations."""
 
-import os
 import unittest
 
 import numpy as np
@@ -769,74 +768,6 @@ def _make_grounded_articulation_cluster(device, *, worlds=3, articulations_per_w
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     builder.replicate(cluster, world_count=worlds)
     return builder.finalize(device=device)
-
-
-def _capture_overflow_contact_run(device, mode, *, n_capture=12, dt=1.0 / 2000.0):
-    """Build a packed reduced-contact scene under a given FP16 row-storage mode
-    and capture an ``n_capture``-step ping-pong solve graph.
-
-    The scene is :func:`_make_contact_overflow_model` (one 6-DOF free body,
-    many spheres on a ground plane) which routes contacts through the packed
-    generalized contact-row block (``packed_jacobian``/``packed_response``) with
-    paging, i.e. exactly the FP16x2 storage path. Returns the solver artefacts
-    plus a ``reset`` closure that restores both state buffers to the captured
-    initial condition, so the same graph can be replayed deterministically.
-    """
-    prev = os.environ.get("PHOENX_CONTACT_ROWS_FP16")
-    os.environ["PHOENX_CONTACT_ROWS_FP16"] = mode
-    try:
-        model = _make_contact_overflow_model(device)
-        state = model.state()
-        output = model.state()
-        qd = state.joint_qd.numpy()
-        qd[2] = -0.3  # press the sphere pack into the ground plane
-        state.joint_qd.assign(qd)
-        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
-        # Seed the pong buffer with an identical valid initial condition.
-        output.joint_q.assign(state.joint_q.numpy())
-        output.joint_qd.assign(state.joint_qd.numpy())
-        output.body_q.assign(state.body_q.numpy())
-        output.body_qd.assign(state.body_qd.numpy())
-        solver = newton.solvers.SolverPhoenX(
-            model,
-            articulation_mode="reduced",
-            substeps=1,
-            solver_iterations=8,
-            velocity_iterations=1,
-        )
-    finally:
-        if prev is None:
-            os.environ.pop("PHOENX_CONTACT_ROWS_FP16", None)
-        else:
-            os.environ["PHOENX_CONTACT_ROWS_FP16"] = prev
-
-    block = solver._reduced_articulation.contact_block_system
-    contacts = model.contacts()
-    init = {name: getattr(state, name).numpy().copy() for name in ("joint_q", "joint_qd", "body_q", "body_qd")}
-
-    def reset():
-        for buf in (state, output):
-            buf.joint_q.assign(init["joint_q"])
-            buf.joint_qd.assign(init["joint_qd"])
-            buf.body_q.assign(init["body_q"])
-            buf.body_qd.assign(init["body_qd"])
-
-    with wp.ScopedCapture(device=device) as capture:
-        s_in, s_out = state, output
-        for _ in range(n_capture):
-            model.collide(s_in, contacts)
-            solver.step(s_in, s_out, None, contacts, dt)
-            s_in, s_out = s_out, s_in
-    final_state = state if n_capture % 2 == 0 else output
-    return {
-        "model": model,
-        "solver": solver,
-        "block": block,
-        "graph": capture.graph,
-        "init": init,
-        "reset": reset,
-        "final": final_state,
-    }
 
 
 def _make_mixed_reduced_maximal_ground_model(device):
@@ -2772,12 +2703,6 @@ class TestReducedArticulation(unittest.TestCase):
                 state1.body_qd.assign(state0.body_qd)
                 initial_q = state0.joint_q.numpy().copy()
 
-                # This test asserts exact row math against a dense ABA
-                # reference and launches the module-level fp32 row builder
-                # directly, so pin the exact fp32 storage mode; fp16 row
-                # storage is validated by deviation-bound and physics tests.
-                os.environ["PHOENX_CONTACT_ROWS_FP16"] = "0"
-                self.addCleanup(os.environ.pop, "PHOENX_CONTACT_ROWS_FP16", None)
                 solver = newton.solvers.SolverPhoenX(
                     model,
                     articulation_mode="reduced",
@@ -3844,75 +3769,6 @@ class TestReducedArticulation(unittest.TestCase):
             rtol=2.0e-6,
             atol=2.0e-6,
         )
-
-    def test_packed_fp16_contact_rows_match_fp32_and_replay_deterministically(self):
-        # Regression test for the shipped default packed FP16x2 contact-row
-        # storage (PHOENX_CONTACT_ROWS_FP16=2, commits c3146661/dea21ba4). Pins
-        # three properties against the FP32 path (=0) on a contact-rich reduced
-        # scene that routes through the packed generalized rows:
-        #   1. deviation of the FP16x2 generalized-velocity state vs FP32 is
-        #      small and bounded (not growing/garbage),
-        #   2. two graph-captured FP16x2 replays are bit-identical,
-        #   3. the contact-rich state stays finite.
-        # Fails if FP16 row storage were broken (mis-packed/mis-aligned loads):
-        # mis-packing gives O(0.1-1) deviation or NaN, and the replays would
-        # diverge. The "real contact work" assertion guards against a vacuous
-        # (all-zero) comparison. The deviation bound is scene-dependent: this
-        # paged sphere-pack stresses FP16 far more than standing G1 (~5e-3 here
-        # vs ~3e-4 on the shared-physics scene) and the greedy-coloring stir
-        # varies the contact config run-to-run, so the bound is set to robustly
-        # cap the working case (~1e-2) rather than sit on it -- a real
-        # regression is orders of magnitude larger.
-        device = wp.get_preferred_device()
-        if not device.is_cuda:
-            self.skipTest("reduced articulation tests require CUDA graph capture")
-
-        n_capture = 12
-
-        # FP32 reference trajectory.
-        ref = _capture_overflow_contact_run(device, "0", n_capture=n_capture)
-        self.assertEqual(ref["block"].packed_rows_mode, "fp32")
-        self.assertFalse(ref["block"].packed_rows_fp16)
-        wp.capture_launch(ref["graph"])
-        ref_qd = ref["final"].joint_qd.numpy().copy()
-
-        # FP16x2 (the shipped default) on the identical scene / initial state.
-        run = _capture_overflow_contact_run(device, "2", n_capture=n_capture)
-        block = run["block"]
-        self.assertEqual(block.packed_rows_mode, "fp16x2")
-        self.assertTrue(block.packed_rows_fp16)
-
-        # Replay A.
-        wp.capture_launch(run["graph"])
-        a_qd = run["final"].joint_qd.numpy().copy()
-        a_body_qd = run["final"].body_qd.numpy().copy()
-
-        # Replay B from the identical initial condition must be bit-identical.
-        run["reset"]()
-        wp.capture_launch(run["graph"])
-        b_qd = run["final"].joint_qd.numpy().copy()
-        b_body_qd = run["final"].body_qd.numpy().copy()
-
-        np.testing.assert_array_equal(a_qd, b_qd)
-        np.testing.assert_array_equal(a_body_qd, b_body_qd)
-
-        # Finiteness on the contact-rich scene.
-        self.assertTrue(np.isfinite(a_qd).all())
-        self.assertTrue(np.isfinite(a_body_qd).all())
-
-        # The contacts must have done real work, otherwise the deviation
-        # comparison below would be vacuous.
-        contact_work = float(np.linalg.norm(a_qd - run["init"]["joint_qd"]))
-        self.assertGreater(contact_work, 1.0e-2)
-
-        # FP16x2 must track FP32 within a bounded relative deviation. The bound
-        # (1.5e-2) robustly caps the working case (~5e-3 on this stress scene,
-        # config-dependent); mis-packed FP16 blows past it by orders of magnitude.
-        deviation = float(np.linalg.norm(a_qd - ref_qd)) / (float(np.linalg.norm(ref_qd)) + 1.0e-6)
-        self.assertLess(deviation, 1.5e-2)
-        # FP16 quantization is genuinely exercised (the paths are not identical),
-        # proving the deviation metric is real rather than trivially zero.
-        self.assertGreater(deviation, 0.0)
 
     def test_persistent_relax_publish_matches_reference_under_graph_capture(self):
         device = wp.get_preferred_device()

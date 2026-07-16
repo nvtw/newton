@@ -27,11 +27,9 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _POINTS_PER_PAGE,
-    _ROWS_MODE_DTYPES,
+    _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES,
     ReducedContactBlockSystem,
     _finalize_reduced_contact_rows_device,
-    _rows_mode_delta_dtype,
-    _solve_generalized_contact_tile_ops,
     _sync_contact_warp,
 )
 from newton._src.solvers.phoenx.articulations.reduced_loop import ReducedLoopSystem
@@ -3180,16 +3178,14 @@ def _make_advance_reduced_articulations_warp_kernel(
 
 
 @functools.cache
-def _make_biased_contact_advance_publish_kernel(max_dofs: int, rows_mode: str = "fp32"):
-    solve_device = _solve_generalized_contact_tile_ops(max_dofs, rows_mode)[0]
-    _rows_dtype = _ROWS_MODE_DTYPES[rows_mode]
-    _delta_dtype = _rows_mode_delta_dtype(rows_mode)
+def _make_biased_contact_advance_publish_kernel(max_dofs: int):
+    solve_device = _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES[max_dofs]
     advance_device = _make_advance_reduced_articulations_warp_ops(
         include_external=False, include_coriolis=True, capture_momentum=True, fuse_publish=True
     )[0]
-    suffix = "" if rows_mode == "fp32" else f"_{rows_mode}"
-    module = wp.get_module(f"reduced_contact_bias_advance_publish_{max_dofs}" + suffix)
+    module = wp.get_module(f"reduced_contact_bias_advance_publish_{max_dofs}")
 
+    @wp.kernel(enable_backward=False, module=module)
     def _biased_contact_advance_publish_kernel(
         columns: ContactColumnContainer,
         bodies: BodyContainer,
@@ -3206,8 +3202,8 @@ def _make_biased_contact_advance_publish_kernel(max_dofs: int, rows_mode: str = 
         row_velocity: wp.array2d[wp.float32],
         page_index: wp.array[wp.int32],
         max_page_count: wp.array[wp.int32],
-        packed_jacobian: wp.array2d[_rows_dtype],
-        packed_response: wp.array2d[_rows_dtype],
+        packed_jacobian: wp.array2d[wp.float32],
+        packed_response: wp.array2d[wp.float32],
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
@@ -3386,20 +3382,15 @@ def _make_biased_contact_advance_publish_kernel(max_dofs: int, rows_mode: str = 
         if articulation == wp.int32(0) and lane == wp.int32(0):
             advanced[0] = wp.int32(1)
 
-    for name in ("packed_jacobian", "packed_response"):
-        _biased_contact_advance_publish_kernel.__annotations__[name] = wp.array2d[_rows_dtype]
-    _biased_contact_advance_publish_kernel.__annotations__["generalized_delta"] = wp.array2d[_delta_dtype]
-    return wp.kernel(enable_backward=False, module=module)(_biased_contact_advance_publish_kernel)
+    return _biased_contact_advance_publish_kernel
 
 
 @functools.cache
-def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int, rows_mode: str = "fp32"):
-    solve_device = _solve_generalized_contact_tile_ops(max_dofs, rows_mode)[0]
-    _rows_dtype = _ROWS_MODE_DTYPES[rows_mode]
-    _delta_dtype = _rows_mode_delta_dtype(rows_mode)
-    suffix = "" if rows_mode == "fp32" else f"_{rows_mode}"
-    module = wp.get_module(f"reduced_contact_relax_publish_{max_dofs}" + suffix)
+def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int):
+    solve_device = _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES[max_dofs]
+    module = wp.get_module(f"reduced_contact_relax_publish_{max_dofs}")
 
+    @wp.kernel(enable_backward=False, module=module)
     def _relax_and_publish_reduced_contacts_kernel(
         columns: ContactColumnContainer,
         bodies: BodyContainer,
@@ -3418,8 +3409,8 @@ def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int, rows_mode: st
         row_velocity: wp.array2d[wp.float32],
         page_index: wp.array[wp.int32],
         max_page_count: wp.array[wp.int32],
-        packed_jacobian: wp.array2d[_rows_dtype],
-        packed_response: wp.array2d[_rows_dtype],
+        packed_jacobian: wp.array2d[wp.float32],
+        packed_response: wp.array2d[wp.float32],
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
@@ -3539,10 +3530,7 @@ def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int, rows_mode: st
                 body_qd,
             )
 
-    for name in ("packed_jacobian", "packed_response"):
-        _relax_and_publish_reduced_contacts_kernel.__annotations__[name] = wp.array2d[_rows_dtype]
-    _relax_and_publish_reduced_contacts_kernel.__annotations__["generalized_delta"] = wp.array2d[_delta_dtype]
-    return wp.kernel(enable_backward=False, module=module)(_relax_and_publish_reduced_contacts_kernel)
+    return _relax_and_publish_reduced_contacts_kernel
 
 
 @wp.func
@@ -4675,7 +4663,7 @@ class ReducedPhoenXArticulation:
         contact = self.contact_block_system
         assert contact.packed_jacobian is not None
         assert contact.packed_response is not None
-        kernel = _make_biased_contact_advance_publish_kernel(contact.contact_dof_width, contact.packed_rows_mode)
+        kernel = _make_biased_contact_advance_publish_kernel(contact.contact_dof_width)
         wp.launch_tiled(
             kernel,
             dim=[int(self.model.articulation_count)],
@@ -4696,12 +4684,12 @@ class ReducedPhoenXArticulation:
                 contact.row_velocity,
                 contact.page_index,
                 contact.max_page_count,
-                contact.packed_jacobian_solve,
-                contact.packed_response_solve,
+                contact.packed_jacobian,
+                contact.packed_response,
                 wp.int32(self.system.advance_max_depth),
                 self.system.advance_articulation_depth_start,
                 self.system.advance_articulation_depth_joint,
-                contact.generalized_delta_solve,
+                contact.generalized_delta,
                 contact.generalized_body_delta,
                 wp.int32(self.model.articulation_count),
                 self.system.advance_joint_parent_lane,
@@ -4768,7 +4756,7 @@ class ReducedPhoenXArticulation:
         contact = self.contact_block_system
         assert contact.packed_jacobian is not None
         assert contact.packed_response is not None
-        kernel = _make_relax_and_publish_reduced_contacts_kernel(contact.contact_dof_width, contact.packed_rows_mode)
+        kernel = _make_relax_and_publish_reduced_contacts_kernel(contact.contact_dof_width)
         wp.launch_tiled(
             kernel,
             dim=[int(self.model.articulation_count)],
@@ -4791,12 +4779,12 @@ class ReducedPhoenXArticulation:
                 contact.row_velocity,
                 contact.page_index,
                 contact.max_page_count,
-                contact.packed_jacobian_solve,
-                contact.packed_response_solve,
+                contact.packed_jacobian,
+                contact.packed_response,
                 wp.int32(self.system.advance_max_depth),
                 self.system.advance_articulation_depth_start,
                 self.system.advance_articulation_depth_joint,
-                contact.generalized_delta_solve,
+                contact.generalized_delta,
                 contact.generalized_body_delta,
                 wp.int32(self.model.articulation_count),
                 self.state.joint_q,
