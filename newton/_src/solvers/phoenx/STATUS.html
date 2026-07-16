@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>16 July 2026 · reduced pipeline counters reviewed</strong></div>
+      <div class="stamp">Last updated<br><strong>16 July 2026 · linear patch solve measured</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Latest Nsight Compute results">
@@ -213,8 +213,8 @@
             </tr>
             <tr>
               <td>Benchmark-only compact patch solve</td>
-              <td>Added an experimental compact central patch solve that uses per-point normal rows plus two averaged tangent rows per contact column. It computes dynamic scalar normal masses and 2&times;2 tangent effective masses from the compact packed fp16x2 rows. On 8192 G1 worlds, direct build+solve measured 424.2 &micro;s; compact central build+solve measured 318.3 &micro;s, a 1.33&times; contact-block speedup. The compact solve output is finite, but it is not compared to the point-friction solve because the friction model is intentionally different.</td>
-              <td><strong>Promoted only to a measured production probe.</strong> The benchmark proved row-count potential, but not production viability.</td>
+              <td>Added an experimental compact central patch solve that uses per-point normal rows plus two averaged tangent rows per contact column. It computes dynamic scalar normal masses and 2&times;2 tangent effective masses from the compact packed fp16x2 rows. Replacing repeated patch-prefix and full-page scans with linear contiguous-column walks cut the patch solve from 79.1 to 59.7 &micro;s. On 8192 G1 worlds, the repeated 50-replay result is 298.8 &micro;s compact build+solve versus 423.7 &micro;s direct point friction, a 1.42&times; contact-block speedup. The compact output remains finite and bit-identical to the earlier patch implementation, but the friction model intentionally differs from point friction.</td>
+              <td><strong>Retained as an experimental algorithm win.</strong> The linear solve removes the specific scan overhead that sank the first production probe. A fixed-page production port still needs shared-physics timing, patch-friction conservation tests, and G1 learning validation before changing the solver default.</td>
             </tr>
             <tr>
               <td>Publish scratch traffic removal</td>
@@ -224,7 +224,7 @@
             <tr>
               <td>Opt-in production compact patch rows</td>
               <td>Implemented a temporary <code>PHOENX_REDUCED_PATCH_ROWS=1</code> reduced-contact path with separate compact row buffers, compact row build, dynamic patch solve, and distributed tangent warm-start. It compiled and ran, but raw G1 shared physics regressed: 1.72M then 1.67M physics steps/s versus a same-tree baseline of 2.06M. Nsys showed compact rows cut row-build time, but added compaction and a scan-heavy compact solve erased the gain in the real two-page 34-contact G1 loop.</td>
-              <td><strong>Rejected and removed.</strong> A friction-model change is acceptable only if it is physically accurate and a large real speedup. This version was neither validated physically nor faster, so it was not retained. The next patch attempt must avoid per-solve column scans and launch overhead before any learning validation is worth running.</td>
+              <td><strong>Rejected and removed.</strong> A friction-model change is acceptable only if it is physically accurate and a large real speedup. This version was neither validated physically nor faster, so it was not retained. The linear benchmark follow-up now removes the per-solve column scans. The next production attempt must also avoid a separate global compaction phase before any learning validation is worth running.</td>
             </tr>
           </tbody>
         </table>

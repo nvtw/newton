@@ -411,6 +411,7 @@ def _solve_compact_central_patch_contact_kernel(
                 wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=lambda_n, thread_idx=0, storage="shared"),
             )
 
+        column_ordinal = wp.int32(0)
         for point_offset in range(active_point_count):
             point = wp.int32(point_offset)
             first_in_column = point == wp.int32(0)
@@ -420,26 +421,16 @@ def _solve_compact_central_patch_contact_kernel(
                 )
             if first_in_column:
                 column = point_column[packed_articulation, point]
-                column_ordinal = wp.int32(0)
-                for previous_offset in range(point):
-                    previous_point = wp.int32(previous_offset)
-                    previous_first = previous_point == wp.int32(0)
-                    if previous_point > wp.int32(0):
-                        previous_first = (
-                            point_column[packed_articulation, previous_point]
-                            != point_column[packed_articulation, previous_point - wp.int32(1)]
-                        )
-                    if previous_first:
-                        column_ordinal += wp.int32(1)
-
                 lambda_t = wp.vec2f(0.0, 0.0)
                 if lane == wp.int32(0):
-                    for column_point_offset in range(active_point_count):
-                        column_point = wp.int32(column_point_offset)
-                        if point_column[packed_articulation, column_point] == column:
-                            contact = point_contact[packed_articulation, column_point]
-                            lambda_t[0] += cc_get_tangent1_lambda(cc, contact)
-                            lambda_t[1] += cc_get_tangent2_lambda(cc, contact)
+                    column_point = point
+                    while (
+                        column_point < active_point_count and point_column[packed_articulation, column_point] == column
+                    ):
+                        contact = point_contact[packed_articulation, column_point]
+                        lambda_t[0] += cc_get_tangent1_lambda(cc, contact)
+                        lambda_t[1] += cc_get_tangent2_lambda(cc, contact)
+                        column_point += wp.int32(1)
                     patch_lambda[articulation, column_ordinal] = lambda_t
                 row = active_point_count + wp.int32(2) * column_ordinal
                 packed_row = packed_articulation * wp.int32(96) + row
@@ -463,6 +454,7 @@ def _solve_compact_central_patch_contact_kernel(
                     response2,
                     wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=lambda_t[1], thread_idx=0, storage="shared"),
                 )
+                column_ordinal += wp.int32(1)
 
     mass_coeff = wp.float32(1.0)
     impulse_coeff = wp.float32(0.0)
@@ -529,6 +521,7 @@ def _solve_compact_central_patch_contact_kernel(
                 wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=delta_n, thread_idx=0, storage="shared"),
             )
 
+        column_ordinal = wp.int32(0)
         for point_offset in range(active_point_count):
             point = wp.int32(point_offset)
             first_in_column = point == wp.int32(0)
@@ -540,18 +533,6 @@ def _solve_compact_central_patch_contact_kernel(
                 continue
 
             column = point_column[packed_articulation, point]
-            column_ordinal = wp.int32(0)
-            for previous_offset in range(point):
-                previous_point = wp.int32(previous_offset)
-                previous_first = previous_point == wp.int32(0)
-                if previous_point > wp.int32(0):
-                    previous_first = (
-                        point_column[packed_articulation, previous_point]
-                        != point_column[packed_articulation, previous_point - wp.int32(1)]
-                    )
-                if previous_first:
-                    column_ordinal += wp.int32(1)
-
             row = active_point_count + wp.int32(2) * column_ordinal
             packed_row = packed_articulation * wp.int32(96) + row
             jacobian1 = wp.tile_map(
@@ -585,15 +566,15 @@ def _solve_compact_central_patch_contact_kernel(
                 normal_load_sum = wp.float32(0.0)
                 bias_t = wp.vec2f(0.0, 0.0)
                 column_points = wp.int32(0)
-                for column_point_offset in range(active_point_count):
-                    column_point = wp.int32(column_point_offset)
-                    if point_column[packed_articulation, column_point] == column:
-                        contact = point_contact[packed_articulation, column_point]
-                        normal_load_sum += normal_load[articulation, column_point]
-                        if use_bias:
-                            bias_t[0] += cc_get_bias_t1(cc, contact)
-                            bias_t[1] += cc_get_bias_t2(cc, contact)
-                        column_points += wp.int32(1)
+                column_point = point
+                while column_point < active_point_count and point_column[packed_articulation, column_point] == column:
+                    contact = point_contact[packed_articulation, column_point]
+                    normal_load_sum += normal_load[articulation, column_point]
+                    if use_bias:
+                        bias_t[0] += cc_get_bias_t1(cc, contact)
+                        bias_t[1] += cc_get_bias_t2(cc, contact)
+                    column_points += wp.int32(1)
+                    column_point += wp.int32(1)
                 inv_count = wp.float32(1.0) / wp.float32(wp.max(column_points, wp.int32(1)))
                 bias_t *= inv_count
                 det = k00 * k11 - k01 * k01
@@ -630,6 +611,7 @@ def _solve_compact_central_patch_contact_kernel(
                 response2,
                 wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=delta_t[1], thread_idx=0, storage="shared"),
             )
+            column_ordinal += wp.int32(1)
 
     wp.tile_store(generalized_delta_out[articulation], generalized_delta)
 
