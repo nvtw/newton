@@ -4410,6 +4410,7 @@ class ReducedPhoenXArticulation:
             articulation_depth_start=self.system.advance_articulation_depth_start,
             articulation_depth_joint=self.system.advance_articulation_depth_joint,
             max_depth=self.system.advance_max_depth,
+            allow_patch_rows=execution_path != "persistent",
         )
         if execution_path == "persistent":
             self.contact_block_system.biased_page_launcher = self._launch_persistent_biased_page
