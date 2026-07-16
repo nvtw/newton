@@ -268,6 +268,91 @@ def _compact_first_point_patch_rows_kernel(
     ]
 
 
+@wp.kernel(enable_backward=False, module="experimental_g1_central_patch_rows")
+def _compact_central_patch_rows_kernel(
+    point_count: wp.array[wp.int32],
+    page_index: wp.array[wp.int32],
+    point_column: wp.array2d[wp.int32],
+    row_body_in: wp.array2d[wp.int32],
+    row_wrench_in: wp.array2d[wp.spatial_vector],
+    row_velocity_in: wp.array2d[wp.float32],
+    row_count_out: wp.array[wp.int32],
+    row_body_out: wp.array2d[wp.int32],
+    row_wrench_out: wp.array2d[wp.spatial_vector],
+    row_velocity_out: wp.array2d[wp.float32],
+):
+    articulation, lane = wp.tid()
+    storage_page = wp.min(page_index[0], wp.int32(1))
+    packed_articulation = articulation * wp.int32(2) + storage_page
+    active_count = point_count[packed_articulation]
+
+    column_count = wp.int32(0)
+    if lane == wp.int32(0):
+        for point_offset in range(active_count):
+            point = wp.int32(point_offset)
+            first_in_column = point == wp.int32(0)
+            if point > wp.int32(0):
+                first_in_column = (
+                    point_column[packed_articulation, point] != point_column[packed_articulation, point - wp.int32(1)]
+                )
+            if first_in_column:
+                column_count += wp.int32(1)
+        row_count_out[packed_articulation] = active_count + wp.int32(2) * column_count
+
+    if lane >= active_count:
+        return
+
+    source_row = wp.int32(3) * lane
+    row_body_out[packed_articulation, lane] = row_body_in[packed_articulation, source_row]
+    row_wrench_out[packed_articulation, lane] = row_wrench_in[packed_articulation, source_row]
+    row_velocity_out[packed_articulation, lane] = row_velocity_in[packed_articulation, source_row]
+
+    first_in_column = lane == wp.int32(0)
+    if lane > wp.int32(0):
+        first_in_column = (
+            point_column[packed_articulation, lane] != point_column[packed_articulation, lane - wp.int32(1)]
+        )
+    if not first_in_column:
+        return
+
+    column_ordinal = wp.int32(0)
+    for point_offset in range(lane):
+        point = wp.int32(point_offset)
+        previous_first = point == wp.int32(0)
+        if point > wp.int32(0):
+            previous_first = (
+                point_column[packed_articulation, point] != point_column[packed_articulation, point - wp.int32(1)]
+            )
+        if previous_first:
+            column_ordinal += wp.int32(1)
+
+    column = point_column[packed_articulation, lane]
+    tangent1_sum = wp.spatial_vector()
+    tangent2_sum = wp.spatial_vector()
+    velocity1_sum = wp.float32(0.0)
+    velocity2_sum = wp.float32(0.0)
+    column_points = wp.int32(0)
+    for point_offset in range(active_count):
+        point = wp.int32(point_offset)
+        if point_column[packed_articulation, point] == column:
+            row = wp.int32(3) * point
+            tangent1_sum += row_wrench_in[packed_articulation, row + wp.int32(1)]
+            tangent2_sum += row_wrench_in[packed_articulation, row + wp.int32(2)]
+            velocity1_sum += row_velocity_in[packed_articulation, row + wp.int32(1)]
+            velocity2_sum += row_velocity_in[packed_articulation, row + wp.int32(2)]
+            column_points += wp.int32(1)
+    inv_count = wp.float32(1.0) / wp.float32(wp.max(column_points, wp.int32(1)))
+    target_row = active_count + wp.int32(2) * column_ordinal
+    row_body_out[packed_articulation, target_row] = row_body_in[packed_articulation, source_row + wp.int32(1)]
+    row_wrench_out[packed_articulation, target_row] = tangent1_sum * inv_count
+    row_velocity_out[packed_articulation, target_row] = velocity1_sum * inv_count
+    row_body_out[packed_articulation, target_row + wp.int32(1)] = row_body_in[
+        packed_articulation, source_row + wp.int32(2)
+    ]
+    row_wrench_out[packed_articulation, target_row + wp.int32(1)] = tangent2_sum * inv_count
+    row_velocity_out[packed_articulation, target_row + wp.int32(1)] = velocity2_sum * inv_count
+
+
 @wp.kernel(enable_backward=False, module="experimental_g1_contact_basis_solve")
 def _solve_compressed_basis_contact_kernel(
     columns: ContactColumnContainer,
@@ -664,6 +749,11 @@ def main() -> int:
     compact_row_wrench = wp.zeros_like(block.row_wrench)
     compact_row_velocity = wp.zeros_like(block.row_velocity)
     compact_previous_row_body = wp.full(block.packed_previous_row_body.shape, value=-1, dtype=wp.int32, device=device)
+    central_row_count = wp.zeros_like(block.row_count)
+    central_row_body = wp.zeros_like(block.row_body)
+    central_row_wrench = wp.zeros_like(block.row_wrench)
+    central_row_velocity = wp.zeros_like(block.row_velocity)
+    central_previous_row_body = wp.full(block.packed_previous_row_body.shape, value=-1, dtype=wp.int32, device=device)
     basis_packed = wp.zeros((env.world_count * _BASIS, _PACKED_COLUMNS), dtype=wp.float32, device=device)
     basis_effective = wp.zeros((env.world_count * _BASIS, _BASIS), dtype=wp.float32, device=device)
     compressed_generalized_delta = wp.zeros((env.world_count, _DOFS), dtype=wp.float32, device=device)
@@ -744,6 +834,52 @@ def main() -> int:
                 block.page_index,
                 wp.bool(True),
                 compact_previous_row_body,
+            ],
+            outputs=[
+                block.packed_jacobian,
+                block.packed_response,
+                block.aba_joint_work,
+                block.aba_body_response,
+            ],
+            device=device,
+        )
+
+    def launch_central_patch_rows() -> None:
+        wp.launch(
+            _compact_central_patch_rows_kernel,
+            dim=(env.world_count, 32),
+            block_dim=32,
+            inputs=[
+                block.point_count,
+                block.page_index,
+                block.point_column,
+                block.row_body,
+                block.row_wrench,
+                block.row_velocity,
+            ],
+            outputs=[central_row_count, central_row_body, central_row_wrench, central_row_velocity],
+            device=device,
+        )
+
+    def launch_central_direct() -> None:
+        launch_central_patch_rows()
+        wp.launch(
+            block.build_rows_kernel,
+            dim=(env.world_count, 96),
+            block_dim=int(args.basis_block_dim),
+            inputs=[
+                env.solver.world.bodies,
+                block.enabled,
+                block.point_count,
+                central_row_count,
+                central_row_body,
+                central_row_wrench,
+                block.point_contact,
+                env.solver.world._contact_container,
+                block.max_page_count,
+                block.page_index,
+                wp.bool(True),
+                central_previous_row_body,
             ],
             outputs=[
                 block.packed_jacobian,
@@ -909,10 +1045,14 @@ def main() -> int:
     np.testing.assert_array_equal(basis_body.numpy(), basis_body_np)
     np.testing.assert_allclose(coefficients.numpy(), coefficients_np.reshape(-1, _BASIS), rtol=0.0, atol=0.0)
     launch_compact_patch_rows()
+    launch_central_patch_rows()
     wp.synchronize_device(device)
     compact_row_count_np = compact_row_count.numpy()[::2]
     compact_rows_mean = float(np.mean(compact_row_count_np))
     compact_rows_max = int(np.max(compact_row_count_np))
+    central_row_count_np = central_row_count.numpy()[::2]
+    central_rows_mean = float(np.mean(central_row_count_np))
+    central_rows_max = int(np.max(central_row_count_np))
     launch_direct()
     wp.synchronize_device(device)
     direct_jacobian = block.packed_jacobian.numpy().reshape(env.world_count * 2, 96, _DOFS)[::2, :_ROWS]
@@ -961,6 +1101,8 @@ def main() -> int:
     direct_us = _time_graph(device, launch_direct, int(args.replays))
     compact_us = _time_graph(device, launch_compact_patch_rows, int(args.replays))
     compact_direct_us = _time_graph(device, launch_compact_direct, int(args.replays))
+    central_us = _time_graph(device, launch_central_patch_rows, int(args.replays))
+    central_direct_us = _time_graph(device, launch_central_direct, int(args.replays))
     direct_solve_us = _time_graph(device, launch_direct_solve, int(args.replays))
     classify_us = _time_graph(device, launch_classify, int(args.replays))
     classify_parallel_us = _time_graph(device, launch_classify_parallel, int(args.replays))
@@ -1004,6 +1146,11 @@ def main() -> int:
                 "compact_first_point_patch_compact_us": compact_us,
                 "compact_first_point_patch_direct_us": compact_direct_us,
                 "compact_first_point_patch_projected_build_speedup": direct_us / compact_direct_us,
+                "compact_central_patch_rows_mean": central_rows_mean,
+                "compact_central_patch_rows_max": central_rows_max,
+                "compact_central_patch_compact_us": central_us,
+                "compact_central_patch_direct_us": central_direct_us,
+                "compact_central_patch_projected_build_speedup": direct_us / central_direct_us,
                 "direct_solve_us": direct_solve_us,
                 "direct_kernel_cpu_expansion_max_abs_error": direct_kernel_cpu_error,
                 "direct_total_us": direct_total_us,
