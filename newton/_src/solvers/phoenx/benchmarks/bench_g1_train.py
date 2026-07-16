@@ -16,6 +16,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -30,6 +31,15 @@ from newton._src.solvers.phoenx.rl_training import g1_recipe
 _NANOG1_REFERENCE_SOURCE = "unset; pass --nanog1-train-result or --nanog1-reference-env-sps"
 _RESULT_END_MARKER = "=== END RESULT ==="
 _NANOG1_TRAIN_MARKERS = ("=== nanoG1 RESULT ===",)
+
+
+def _load_cudart() -> ctypes.CDLL:
+    for name in ("libcudart.so", "libcudart.so.13", "libcudart.so.12"):
+        try:
+            return ctypes.CDLL(name)
+        except OSError:
+            pass
+    raise RuntimeError("CUDA runtime library not found; profiling requires CUDA")
 
 
 def _parse_hidden_layers(text: str) -> tuple[int, ...]:
@@ -292,7 +302,12 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         readback_diagnostics=bool(args.readback_diagnostics),
         execution_mode=str(args.execution_mode),
     )
+    cudart = _load_cudart() if bool(args.cuda_profiler_api) else None
+    if cudart is not None and cudart.cudaProfilerStart() != 0:
+        raise RuntimeError("cudaProfilerStart failed")
     result = rl.train_g1_ppo(config)
+    if cudart is not None and cudart.cudaProfilerStop() != 0:
+        raise RuntimeError("cudaProfilerStop failed")
     world = result.env.solver.world
     reduced = result.env.solver._reduced_articulation
     basis_enabled_count = None
@@ -361,6 +376,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "reset_recurrent_state_on_rollout_start": bool(args.reset_recurrent_state_on_rollout_start),
         "readback_diagnostics": bool(args.readback_diagnostics),
         "execution_mode": str(args.execution_mode),
+        "cuda_profiler_api": bool(args.cuda_profiler_api),
         "sim_substeps": int(args.sim_substeps),
         "solver_internal_substeps": int(world.substeps),
         "solver_iterations": int(args.solver_iterations),
@@ -597,6 +613,11 @@ def _parse_args() -> argparse.Namespace:
         choices=("eager", "graph_leapfrog"),
         default="graph_leapfrog",
         help="Use eager PPO or the experimental separate-graph rollout/update schedule.",
+    )
+    parser.add_argument(
+        "--cuda-profiler-api",
+        action="store_true",
+        help="Bracket the training call with cudaProfilerStart/Stop for nsys capture-range=cudaProfilerApi.",
     )
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=g1_recipe.SEED)

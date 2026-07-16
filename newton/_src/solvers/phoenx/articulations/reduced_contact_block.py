@@ -1046,8 +1046,9 @@ def _make_build_packed_rows_ops(fp16: bool):
         if row >= row_count:
             return
         packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
+        current_body = row_body[packed_articulation, row]
         previous_body = previous_row_body[packed_row]
-        if previous_body >= wp.int32(0):
+        if previous_body >= wp.int32(0) and previous_body != current_body:
             previous_path_start = data.body_path_start[previous_body]
             previous_path_end = data.body_path_start[previous_body + wp.int32(1)]
             for path_index in range(previous_path_start, previous_path_end):
@@ -1056,7 +1057,7 @@ def _make_build_packed_rows_ops(fp16: bool):
                 previous_dof_end = data.joint_qd_start[previous_joint + wp.int32(1)]
                 for dof in range(previous_dof_start, previous_dof_end):
                     packed_jacobian[packed_row, dof - dof_start_articulation] = _rows_dtype(0.0)
-        previous_row_body[packed_row] = row_body[packed_articulation, row]
+        previous_row_body[packed_row] = current_body
 
         inverse_mass = _build_packed_generalized_row(
             articulation,

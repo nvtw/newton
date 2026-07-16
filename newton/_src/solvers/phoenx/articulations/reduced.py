@@ -4584,7 +4584,7 @@ class ReducedPhoenXArticulation:
                 device=self.model.device,
             )
 
-    def _advance_and_publish_persistent(self, dt: float) -> None:
+    def _advance_and_publish_fused(self, dt: float) -> None:
         articulation_count = int(self.model.articulation_count)
         tile_width = self.system.advance_tile_width
         thread_count = ((articulation_count * tile_width + 31) // 32) * 32
@@ -4835,8 +4835,16 @@ class ReducedPhoenXArticulation:
             wp.capture_if(
                 self.contact_block_system.biased_advanced,
                 on_true=lambda: None,
-                on_false=lambda: self._advance_and_publish_persistent(dt),
+                on_false=lambda: self._advance_and_publish_fused(dt),
             )
+            return
+        if (
+            split_dynamics
+            and self.model.device.is_cuda
+            and self.system.use_warp_advance
+            and self.system.use_warp_publish
+        ):
+            self._advance_and_publish_fused(dt)
             return
         capture_inputs = [
             self.model.articulation_start,
