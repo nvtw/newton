@@ -127,6 +127,11 @@
       <div class="stamp">Last updated<br><strong>16 July 2026 · DOF-type factor split +2.82% physics; AMP rejected</strong></div>
     </header>
 
+    <section class="notify" style="border:1px solid #3a4152;background:#14181f;border-radius:10px;padding:16px 18px;margin:18px 0;">
+      <div style="font-weight:700;color:#9aa4b4;letter-spacing:.02em;">✓ ncu-driven contact-solve investigation complete — near ceiling</div>
+      <p style="margin:8px 0 0;color:#c4ccd8;">Contact kernels are <strong>latency-bound, not bandwidth-bound</strong> (scheduler idle 63–72%; all memory pipes &lt;50%) — why fp16x2 gave only ~1% (wrong axis). Two levers tested, both rejected: (1) <strong>occupancy cap</strong> — <code>__launch_bounds__(32,24)</code> takes solve 80→64 regs / 39→50% occ bit-identically, but solo A/B is only <strong>+0.43%</strong> (latency is dependency-chain, not occupancy) and banking it needs a global register cap validated only on G1 → scene-risk not worth it; reverted. (2) <strong>N-articulations/warp packing</strong> — impossible: the solve tile is 18/32 lanes wide, 2×18&gt;32. Conclusion: the contact solve is at its GPU-friendly ceiling for the reduced GS-on-uniform-tile design, like the reduced ABA. Profiling stays reusable: <code>sudo /home/twidmer/phoenx_prof/run_ncu.sh</code>.</p>
+    </section>
+
     <section class="hero">
       <strong>Primary goal</strong>
       <p>Minimize wall-clock time from a zero-training process start to the first policy that passes a predeclared held-out quality gate, using only PhoenX physics and PhoenX RL. Solver speed, timestep size, stability, sample efficiency, curricula, population methods, and learner throughput are jointly optimized—but every cost is counted and every survivor must generalize across diverse tasks.</p>

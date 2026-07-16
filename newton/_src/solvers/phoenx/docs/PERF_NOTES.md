@@ -1049,6 +1049,19 @@ Bit-identical (max_abs_diff 0.0), deterministic, graph-captured.
   (single ≤ unified−40), robust to toolchain drift. This catches the invert creeping
   back into the depth walk — invisible to correctness tests since the split is exact.
 
+## Contact kernels are latency-bound, not bandwidth-bound (ncu, 2026-07-16)
+
+Nsight Compute `--set full` (sm_120, eager G1 8192; repro `sudo /home/twidmer/phoenx_prof/run_ncu.sh`, which profiles the no-graph driver `eager_g1.py` — graph-node profiling crashes under both kernel- and application-replay) settled where the top two contact kernels actually bottleneck. Neither is memory- or compute-saturated:
+
+- `solve_generalized_contact_tile` (~19% GPU): Compute SOL 45%, DRAM 24%, L2 25%, L1 48%. **No-Eligible-warp 63%**, IPC 1.45/4. Occ 44.6%, 75-80 regs. Active threads/warp **14.1/32**, 871 divergent branches.
+- `build_packed_generalized_contact_rows` (~26.7% GPU): Compute SOL 33%, DRAM 34%, L2 35%, L1 43%. **No-Eligible 72%**, IPC 1.10/4. Occ 45%, 64 regs. Active threads/warp 17.3/32.
+
+The scheduler is starved (no eligible warp 63-72%), NOT bandwidth-bound. This is why fp16x2 rows only netted +1.06% — bandwidth was the wrong axis.
+
+**Occupancy lever REJECTED (scene-risk > +0.43%).** The solve is register-limited; a `__launch_bounds__(32,24)` cap takes it 80->64 regs, 39%->50% occ, bit-identical (SHA-identical joint_q/qd over 30 steps, graph-capture-safe, no *added* spill). But solo A/B (8192, reverse, 4x each, dead-flat) is only **+0.43%** full-step (~2.19M->2.20M steps/s). The solve's latency is dependency-chain (sequential GS iterations), not occupancy — extra warps barely help. Banking +0.43% would need a GLOBAL register cap on the solve module, validated only on G1; other robots' contact structure could spill/regress. Not worth the scene-risk or bloat. Env flag `PHOENX_SOLVE_LAUNCH_BOUNDS` prototyped and reverted.
+
+**Warp-packing (N articulations/warp) REJECTED by analysis.** Mapping is one 32-thread block (== 1 warp) per articulation. The solve tile is **18/32 lanes wide** (36 DOFs -> 18 fp16x2 elements), so 2 articulations (2x18=36) don't fit in 32 lanes; the only fillable lanes are the 1/32 scalar friction-cone projection, and reclaiming them needs segmented sub-warp reductions (breaks the uniform-tile model — cf patch-rows -35%). Because all G1 worlds are identical/lockstep, packing wins ONLY if the idle lanes are spatial (structural tile width) AND leave >=half the warp free — here the 18-wide tile leaves too little. Build kernel has 0 row-padding waste (every G1 = 96 rows); its 17/32 is inherent per-row reduced-coordinate tree-walk divergence. **Conclusion: the contact solve is at its GPU-friendly ceiling for the reduced GS-on-uniform-tile design, like the reduced ABA.**
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

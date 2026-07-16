@@ -77,3 +77,4 @@ docs/_static/viser/
 
 # PhoenX internal bug log
 newton/_src/solvers/phoenx/Bug.md
+.warp-cache/
