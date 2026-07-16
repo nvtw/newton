@@ -1599,6 +1599,161 @@ def concat_obs_action_kernel(
 
 
 @wp.kernel
+def sac_distributional_q_value_kernel(
+    logits: wp.array2d[wp.float32],
+    num_atoms: wp.int32,
+    v_min: wp.float32,
+    v_max: wp.float32,
+    values: wp.array2d[wp.float32],
+):
+    row = wp.tid()
+    max_logit = logits[row, 0]
+    for atom in range(1, num_atoms):
+        max_logit = wp.max(max_logit, logits[row, atom])
+    normalizer = wp.float32(0.0)
+    weighted_support = wp.float32(0.0)
+    delta = (v_max - v_min) / wp.float32(num_atoms - wp.int32(1))
+    for atom in range(num_atoms):
+        probability = wp.exp(logits[row, atom] - max_logit)
+        normalizer += probability
+        weighted_support += probability * (v_min + wp.float32(atom) * delta)
+    values[row, 0] = weighted_support / normalizer
+
+
+@wp.kernel
+def sac_distributional_projection_kernel(
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    logits1: wp.array2d[wp.float32],
+    logits2: wp.array2d[wp.float32],
+    next_log_probs: wp.array[wp.float32],
+    gamma: wp.float32,
+    alpha: wp.float32,
+    num_atoms: wp.int32,
+    v_min: wp.float32,
+    v_max: wp.float32,
+    targets1: wp.array2d[wp.float32],
+    targets2: wp.array2d[wp.float32],
+):
+    row, destination_atom = wp.tid()
+    max_logit1 = logits1[row, 0]
+    max_logit2 = logits2[row, 0]
+    for atom in range(1, num_atoms):
+        max_logit1 = wp.max(max_logit1, logits1[row, atom])
+        max_logit2 = wp.max(max_logit2, logits2[row, atom])
+    normalizer1 = wp.float32(0.0)
+    normalizer2 = wp.float32(0.0)
+    for atom in range(num_atoms):
+        normalizer1 += wp.exp(logits1[row, atom] - max_logit1)
+        normalizer2 += wp.exp(logits2[row, atom] - max_logit2)
+
+    delta = (v_max - v_min) / wp.float32(num_atoms - wp.int32(1))
+    bootstrap = wp.float32(1.0) - dones[row]
+    projected1 = wp.float32(0.0)
+    projected2 = wp.float32(0.0)
+    for source_atom in range(num_atoms):
+        support = v_min + wp.float32(source_atom) * delta
+        target_value = rewards[row] + gamma * bootstrap * (support - alpha * next_log_probs[row])
+        target_value = wp.min(wp.max(target_value, v_min), v_max)
+        position = (target_value - v_min) / delta
+        lower = wp.int32(wp.floor(position))
+        upper = wp.min(lower + wp.int32(1), num_atoms - wp.int32(1))
+        upper_weight = position - wp.float32(lower)
+        weight = wp.float32(0.0)
+        if destination_atom == lower:
+            weight += wp.float32(1.0) - upper_weight
+        if destination_atom == upper and upper != lower:
+            weight += upper_weight
+        probability1 = wp.exp(logits1[row, source_atom] - max_logit1) / normalizer1
+        probability2 = wp.exp(logits2[row, source_atom] - max_logit2) / normalizer2
+        projected1 += probability1 * weight
+        projected2 += probability2 * weight
+    targets1[row, destination_atom] = projected1
+    targets2[row, destination_atom] = projected2
+
+
+@wp.kernel
+def sac_distributional_critic_loss_backward_kernel(
+    logits1: wp.array2d[wp.float32],
+    logits2: wp.array2d[wp.float32],
+    targets1: wp.array2d[wp.float32],
+    targets2: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    num_atoms: wp.int32,
+    loss: wp.array[wp.float32],
+    logits1_grad: wp.array2d[wp.float32],
+    logits2_grad: wp.array2d[wp.float32],
+):
+    row = wp.tid()
+    max_logit1 = logits1[row, 0]
+    max_logit2 = logits2[row, 0]
+    for atom in range(1, num_atoms):
+        max_logit1 = wp.max(max_logit1, logits1[row, atom])
+        max_logit2 = wp.max(max_logit2, logits2[row, atom])
+    normalizer1 = wp.float32(0.0)
+    normalizer2 = wp.float32(0.0)
+    for atom in range(num_atoms):
+        normalizer1 += wp.exp(logits1[row, atom] - max_logit1)
+        normalizer2 += wp.exp(logits2[row, atom] - max_logit2)
+    log_normalizer1 = wp.log(normalizer1)
+    log_normalizer2 = wp.log(normalizer2)
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    row_loss = wp.float32(0.0)
+    for atom in range(num_atoms):
+        probability1 = wp.exp(logits1[row, atom] - max_logit1) / normalizer1
+        probability2 = wp.exp(logits2[row, atom] - max_logit2) / normalizer2
+        target1 = targets1[row, atom]
+        target2 = targets2[row, atom]
+        row_loss -= target1 * (logits1[row, atom] - max_logit1 - log_normalizer1)
+        row_loss -= target2 * (logits2[row, atom] - max_logit2 - log_normalizer2)
+        logits1_grad[row, atom] = (probability1 - target1) * inv_batch
+        logits2_grad[row, atom] = (probability2 - target2) * inv_batch
+    wp.atomic_add(loss, 0, row_loss * inv_batch)
+
+
+@wp.kernel
+def sac_distributional_actor_q_backward_kernel(
+    logits1: wp.array2d[wp.float32],
+    logits2: wp.array2d[wp.float32],
+    q1: wp.array2d[wp.float32],
+    q2: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    num_atoms: wp.int32,
+    v_min: wp.float32,
+    v_max: wp.float32,
+    average_critics: wp.bool,
+    logits1_grad: wp.array2d[wp.float32],
+    logits2_grad: wp.array2d[wp.float32],
+):
+    row, atom = wp.tid()
+    max_logit1 = logits1[row, 0]
+    max_logit2 = logits2[row, 0]
+    for source_atom in range(1, num_atoms):
+        max_logit1 = wp.max(max_logit1, logits1[row, source_atom])
+        max_logit2 = wp.max(max_logit2, logits2[row, source_atom])
+    normalizer1 = wp.float32(0.0)
+    normalizer2 = wp.float32(0.0)
+    for source_atom in range(num_atoms):
+        normalizer1 += wp.exp(logits1[row, source_atom] - max_logit1)
+        normalizer2 += wp.exp(logits2[row, source_atom] - max_logit2)
+    probability1 = wp.exp(logits1[row, atom] - max_logit1) / normalizer1
+    probability2 = wp.exp(logits2[row, atom] - max_logit2) / normalizer2
+    delta = (v_max - v_min) / wp.float32(num_atoms - wp.int32(1))
+    support = v_min + wp.float32(atom) * delta
+    scale1 = wp.float32(0.0)
+    scale2 = wp.float32(0.0)
+    if average_critics:
+        scale1 = -wp.float32(0.5) / wp.float32(batch_size)
+        scale2 = scale1
+    elif q1[row, 0] <= q2[row, 0]:
+        scale1 = -wp.float32(1.0) / wp.float32(batch_size)
+    else:
+        scale2 = -wp.float32(1.0) / wp.float32(batch_size)
+    logits1_grad[row, atom] = scale1 * probability1 * (support - q1[row, 0])
+    logits2_grad[row, atom] = scale2 * probability2 * (support - q2[row, 0])
+
+
+@wp.kernel
 def sac_q_target_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],

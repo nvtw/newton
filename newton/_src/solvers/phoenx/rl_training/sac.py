@@ -22,6 +22,10 @@ from .kernels import (
     sac_alpha_loss_kernel,
     sac_critic_loss_backward_kernel,
     sac_critic_loss_kernel,
+    sac_distributional_actor_q_backward_kernel,
+    sac_distributional_critic_loss_backward_kernel,
+    sac_distributional_projection_kernel,
+    sac_distributional_q_value_kernel,
     sac_q_target_kernel,
     sample_gaussian_actions_kernel,
     zero_scalar_kernel,
@@ -43,8 +47,13 @@ class ConfigSAC:
         initial_alpha: Initial entropy-temperature value.
         auto_alpha: Whether to tune entropy temperature automatically.
         target_entropy: Target action entropy. ``None`` uses ``-action_dim``.
-        update_steps: Gradient updates per call to :meth:`TrainerSAC.update`.
+        update_steps: Critic gradient updates per call to :meth:`TrainerSAC.update`.
+        policy_frequency: Number of critic updates between actor updates.
         average_critics: Average double-Q estimates instead of taking their minimum.
+        distributional_critic: Learn categorical return distributions instead of scalar Q-values.
+        distributional_atoms: Number of categorical return atoms.
+        distributional_v_min: Minimum categorical return support.
+        distributional_v_max: Maximum categorical return support.
         normalize_observations: Normalize observations with automatic running statistics.
         observation_clip: Absolute clipping bound after observation normalization.
     """
@@ -58,7 +67,12 @@ class ConfigSAC:
     auto_alpha: bool = True
     target_entropy: float | None = None
     update_steps: int = 1
+    policy_frequency: int = 1
     average_critics: bool = False
+    distributional_critic: bool = False
+    distributional_atoms: int = 101
+    distributional_v_min: float = -20.0
+    distributional_v_max: float = 20.0
     normalize_observations: bool = True
     observation_clip: float = 10.0
 
@@ -241,8 +255,17 @@ class TrainerSAC:
         self.device = wp.get_device(device)
         self.seed = int(seed)
         self._update_count = 0
+        self._gradient_update_count = 0
         if self.config.initial_alpha <= 0.0:
             raise ValueError("initial_alpha must be positive")
+        if self.config.update_steps < 1:
+            raise ValueError("update_steps must be positive")
+        if self.config.policy_frequency < 1:
+            raise ValueError("policy_frequency must be positive")
+        if self.config.distributional_atoms < 2:
+            raise ValueError("distributional_atoms must be at least 2")
+        if self.config.distributional_v_max <= self.config.distributional_v_min:
+            raise ValueError("distributional_v_max must be greater than distributional_v_min")
         self.target_entropy = (
             -float(self.action_dim) if self.config.target_entropy is None else float(self.config.target_entropy)
         )
@@ -258,13 +281,18 @@ class TrainerSAC:
             seed=self.seed,
         )
         q_input_dim = self.obs_dim + self.action_dim
-        self.critic1 = WarpMLP((q_input_dim, *hidden_layers, 1), activation="relu", device=self.device, seed=seed + 1)
-        self.critic2 = WarpMLP((q_input_dim, *hidden_layers, 1), activation="relu", device=self.device, seed=seed + 2)
+        q_output_dim = self.config.distributional_atoms if self.config.distributional_critic else 1
+        self.critic1 = WarpMLP(
+            (q_input_dim, *hidden_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 1
+        )
+        self.critic2 = WarpMLP(
+            (q_input_dim, *hidden_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 2
+        )
         self.target_critic1 = WarpMLP(
-            (q_input_dim, *hidden_layers, 1), activation="relu", device=self.device, seed=seed + 3
+            (q_input_dim, *hidden_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 3
         )
         self.target_critic2 = WarpMLP(
-            (q_input_dim, *hidden_layers, 1), activation="relu", device=self.device, seed=seed + 4
+            (q_input_dim, *hidden_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 4
         )
         self.target_critic1.copy_from(self.critic1)
         self.target_critic2.copy_from(self.critic2)
@@ -326,11 +354,13 @@ class TrainerSAC:
         alpha_loss = 0.0
         for i in range(int(self.config.update_steps)):
             critic_loss = self._update_critics(batch, seed=base_seed + 3 * i)
-            actor_loss = self._update_actor(batch, seed=base_seed + 3 * i + 1)
+            if self._gradient_update_count % int(self.config.policy_frequency) == 0:
+                actor_loss = self._update_actor(batch, seed=base_seed + 3 * i + 1)
             if self.config.auto_alpha:
                 alpha_loss = self._update_alpha(batch, seed=base_seed + 3 * i + 2)
             self.target_critic1.soft_update_from(self.critic1, self.config.tau)
             self.target_critic2.soft_update_from(self.critic2, self.config.tau)
+            self._gradient_update_count += 1
         self._update_count += 1
         return StatsSACUpdate(
             actor_loss=actor_loss,
@@ -414,23 +444,6 @@ class TrainerSAC:
         next_q_input = self._concat(batch.next_obs, next_actions, requires_grad=False)
         target_q1 = self.target_critic1.forward(next_q_input, requires_grad=False)
         target_q2 = self.target_critic2.forward(next_q_input, requires_grad=False)
-        targets = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
-        wp.launch(
-            sac_q_target_kernel,
-            dim=batch.batch_size,
-            inputs=[
-                batch.rewards,
-                batch.dones,
-                target_q1,
-                target_q2,
-                next_log_probs,
-                self.config.gamma,
-                self.alpha,
-                self.config.average_critics,
-            ],
-            outputs=[targets],
-            device=self.device,
-        )
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._critic_loss], device=self.device)
         q_input = self._concat(batch.obs, batch.actions, requires_grad=False)
@@ -438,20 +451,74 @@ class TrainerSAC:
         q2 = self.critic2.forward_manual(q_input)
         q1_grad = wp.empty_like(q1)
         q2_grad = wp.empty_like(q2)
-        wp.launch(
-            sac_critic_loss_kernel,
-            dim=batch.batch_size,
-            inputs=[q1, q2, targets, batch.batch_size],
-            outputs=[self._critic_loss],
-            device=self.device,
-        )
-        wp.launch(
-            sac_critic_loss_backward_kernel,
-            dim=batch.batch_size,
-            inputs=[q1, q2, targets, batch.batch_size],
-            outputs=[q1_grad, q2_grad],
-            device=self.device,
-        )
+        if self.config.distributional_critic:
+            atoms = int(self.config.distributional_atoms)
+            target_distribution1 = wp.zeros((batch.batch_size, atoms), dtype=wp.float32, device=self.device)
+            target_distribution2 = wp.zeros_like(target_distribution1)
+            wp.launch(
+                sac_distributional_projection_kernel,
+                dim=(batch.batch_size, atoms),
+                inputs=[
+                    batch.rewards,
+                    batch.dones,
+                    target_q1,
+                    target_q2,
+                    next_log_probs,
+                    self.config.gamma,
+                    self.alpha,
+                    atoms,
+                    self.config.distributional_v_min,
+                    self.config.distributional_v_max,
+                ],
+                outputs=[target_distribution1, target_distribution2],
+                device=self.device,
+            )
+            wp.launch(
+                sac_distributional_critic_loss_backward_kernel,
+                dim=batch.batch_size,
+                inputs=[
+                    q1,
+                    q2,
+                    target_distribution1,
+                    target_distribution2,
+                    batch.batch_size,
+                    atoms,
+                ],
+                outputs=[self._critic_loss, q1_grad, q2_grad],
+                device=self.device,
+            )
+        else:
+            targets = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
+            wp.launch(
+                sac_q_target_kernel,
+                dim=batch.batch_size,
+                inputs=[
+                    batch.rewards,
+                    batch.dones,
+                    target_q1,
+                    target_q2,
+                    next_log_probs,
+                    self.config.gamma,
+                    self.alpha,
+                    self.config.average_critics,
+                ],
+                outputs=[targets],
+                device=self.device,
+            )
+            wp.launch(
+                sac_critic_loss_kernel,
+                dim=batch.batch_size,
+                inputs=[q1, q2, targets, batch.batch_size],
+                outputs=[self._critic_loss],
+                device=self.device,
+            )
+            wp.launch(
+                sac_critic_loss_backward_kernel,
+                dim=batch.batch_size,
+                inputs=[q1, q2, targets, batch.batch_size],
+                outputs=[q1_grad, q2_grad],
+                device=self.device,
+            )
         self.critic1.backward_manual(q1_grad)
         self.critic2.backward_manual(q2_grad)
         loss = float(self._critic_loss.numpy()[0])
@@ -488,13 +555,50 @@ class TrainerSAC:
         q2 = self.critic2.forward_manual(q_input)
         q1_grad = wp.empty_like(q1)
         q2_grad = wp.empty_like(q2)
-        wp.launch(
-            sac_actor_q_backward_kernel,
-            dim=batch.batch_size,
-            inputs=[q1, q2, batch.batch_size, self.config.average_critics],
-            outputs=[q1_grad, q2_grad],
-            device=self.device,
-        )
+        if self.config.distributional_critic:
+            atoms = int(self.config.distributional_atoms)
+            q1_value = wp.empty((batch.batch_size, 1), dtype=wp.float32, device=self.device)
+            q2_value = wp.empty_like(q1_value)
+            for logits, values in ((q1, q1_value), (q2, q2_value)):
+                wp.launch(
+                    sac_distributional_q_value_kernel,
+                    dim=batch.batch_size,
+                    inputs=[
+                        logits,
+                        atoms,
+                        self.config.distributional_v_min,
+                        self.config.distributional_v_max,
+                    ],
+                    outputs=[values],
+                    device=self.device,
+                )
+            wp.launch(
+                sac_distributional_actor_q_backward_kernel,
+                dim=(batch.batch_size, atoms),
+                inputs=[
+                    q1,
+                    q2,
+                    q1_value,
+                    q2_value,
+                    batch.batch_size,
+                    atoms,
+                    self.config.distributional_v_min,
+                    self.config.distributional_v_max,
+                    self.config.average_critics,
+                ],
+                outputs=[q1_grad, q2_grad],
+                device=self.device,
+            )
+        else:
+            q1_value = q1
+            q2_value = q2
+            wp.launch(
+                sac_actor_q_backward_kernel,
+                dim=batch.batch_size,
+                inputs=[q1, q2, batch.batch_size, self.config.average_critics],
+                outputs=[q1_grad, q2_grad],
+                device=self.device,
+            )
         q_input_grad1 = wp.empty_like(q_input)
         q_input_grad2 = wp.empty_like(q_input)
         self.critic1.backward_manual(q1_grad, input_grad=q_input_grad1)
@@ -512,8 +616,8 @@ class TrainerSAC:
                 eps,
                 q_input_grad1,
                 q_input_grad2,
-                q1,
-                q2,
+                q1_value,
+                q2_value,
                 log_probs,
                 self.obs_dim,
                 self.action_dim,

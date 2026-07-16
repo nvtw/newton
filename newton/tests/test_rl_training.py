@@ -18,6 +18,8 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     ppo_actor_loss_backward_kernel,
     reduce_ppo_log_std_grad_kernel,
     sac_actor_q_backward_kernel,
+    sac_distributional_projection_kernel,
+    sac_distributional_q_value_kernel,
     sac_q_target_kernel,
     value_column_loss_grad_kernel,
     value_column_symmetry_loss_grad_kernel,
@@ -944,6 +946,39 @@ class TestReplayBufferSAC(unittest.TestCase):
 
 
 class TestTrainerSAC(unittest.TestCase):
+    def test_distributional_projection_preserves_mass_and_terminal_reward(self) -> None:
+        device = _rl_cuda_device()
+        logits = wp.zeros((2, 5), dtype=wp.float32, device=device)
+        rewards = wp.array([1.0, 0.0], dtype=wp.float32, device=device)
+        dones = wp.array([1.0, 0.0], dtype=wp.float32, device=device)
+        log_probs = wp.zeros(2, dtype=wp.float32, device=device)
+        targets1 = wp.zeros_like(logits)
+        targets2 = wp.zeros_like(logits)
+        values = wp.empty((2, 1), dtype=wp.float32, device=device)
+
+        wp.launch(
+            sac_distributional_projection_kernel,
+            dim=(2, 5),
+            inputs=[rewards, dones, logits, logits, log_probs, 1.0, 0.0, 5, -2.0, 2.0],
+            outputs=[targets1, targets2],
+            device=device,
+        )
+        wp.launch(
+            sac_distributional_q_value_kernel,
+            dim=2,
+            inputs=[logits, 5, -2.0, 2.0],
+            outputs=[values],
+            device=device,
+        )
+
+        expected_terminal = np.array([0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        expected_uniform = np.full(5, 0.2, dtype=np.float32)
+        np.testing.assert_allclose(targets1.numpy()[0], expected_terminal, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(targets1.numpy()[1], expected_uniform, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(targets2.numpy(), targets1.numpy(), rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(targets1.numpy().sum(axis=1), np.ones(2), rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(values.numpy(), np.zeros((2, 1)), rtol=0.0, atol=1.0e-6)
+
     def test_average_critics_uses_mean_for_targets_and_actor_gradients(self) -> None:
         device = _rl_cuda_device()
         q1 = wp.array([[1.0], [5.0]], dtype=wp.float32, device=device)
@@ -973,6 +1008,36 @@ class TestTrainerSAC(unittest.TestCase):
         np.testing.assert_allclose(targets.numpy(), np.array([1.0, 2.0], dtype=np.float32))
         np.testing.assert_allclose(q1_grad.numpy(), -0.25)
         np.testing.assert_allclose(q2_grad.numpy(), -0.25)
+
+    def test_policy_frequency_delays_actor_updates(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(19)
+        trainer = rl.TrainerSAC(
+            obs_dim=3,
+            action_dim=1,
+            hidden_layers=(8,),
+            config=rl.ConfigSAC(policy_frequency=2, normalize_observations=False),
+            device=device,
+            seed=23,
+        )
+        batch = rl.BatchSAC(
+            obs=wp.array(rng.normal(size=(16, 3)).astype(np.float32), dtype=wp.float32, device=device),
+            actions=wp.array(np.tanh(rng.normal(size=(16, 1))).astype(np.float32), dtype=wp.float32, device=device),
+            rewards=wp.array(rng.normal(size=16).astype(np.float32), dtype=wp.float32, device=device),
+            dones=wp.zeros(16, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(16, 3)).astype(np.float32), dtype=wp.float32, device=device),
+        )
+
+        trainer.update(batch, seed=1)
+        after_first = [parameter.numpy().copy() for parameter in trainer.actor.parameters()]
+        trainer.update(batch, seed=2)
+        after_second = [parameter.numpy().copy() for parameter in trainer.actor.parameters()]
+        trainer.update(batch, seed=3)
+        after_third = [parameter.numpy().copy() for parameter in trainer.actor.parameters()]
+
+        for first, second in zip(after_first, after_second, strict=True):
+            np.testing.assert_array_equal(first, second)
+        self.assertTrue(any(np.any(second != third) for second, third in zip(after_second, after_third, strict=True)))
 
     def test_observation_normalization_tracks_batch_moments(self) -> None:
         device = _rl_cuda_device()
@@ -1040,6 +1105,56 @@ class TestTrainerSAC(unittest.TestCase):
         self.assertGreater(target_delta, 0.0)
         self.assertGreater(actor_first_layer_delta, 0.0)
         self.assertGreater(critic_first_layer_delta, 0.0)
+
+    def test_distributional_sac_learns_known_continuous_control_optimum(self) -> None:
+        device = _rl_cuda_device()
+        seed = 3
+        rng = np.random.default_rng(seed)
+        world_count = 1024
+        trainer = rl.TrainerSAC(
+            obs_dim=2,
+            action_dim=1,
+            hidden_layers=(64, 64),
+            config=rl.ConfigSAC(
+                gamma=0.0,
+                initial_alpha=0.01,
+                target_entropy=0.0,
+                critic_lr=1.0e-3,
+                average_critics=True,
+                distributional_critic=True,
+            ),
+            device=device,
+            seed=seed,
+        )
+        replay = rl.BufferReplaySAC(capacity=65536, obs_dim=2, action_dim=1, batch_size=2048, device=device)
+        eval_obs_np = rng.uniform(-1.0, 1.0, (2048, 2)).astype(np.float32)
+        eval_target = np.tanh(1.2 * eval_obs_np[:, 0] - 0.7 * eval_obs_np[:, 1])
+        eval_obs = wp.array(eval_obs_np, dtype=wp.float32, device=device)
+        initial_actions = trainer.act(eval_obs, seed=0, deterministic=True)[0].numpy()[:, 0]
+        initial_mse = float(np.mean((initial_actions - eval_target) ** 2))
+
+        for update in range(100):
+            obs_np = rng.uniform(-1.0, 1.0, (world_count, 2)).astype(np.float32)
+            obs = wp.array(obs_np, dtype=wp.float32, device=device)
+            if update < 4:
+                actions_np = rng.uniform(-1.0, 1.0, (world_count, 1)).astype(np.float32)
+            else:
+                actions_np = trainer.act(obs, seed=seed * 1000 + update)[0].numpy()
+            target = np.tanh(1.2 * obs_np[:, 0] - 0.7 * obs_np[:, 1])
+            rewards_np = -((actions_np[:, 0] - target) ** 2)
+            replay.add_batch(
+                obs,
+                wp.array(actions_np, dtype=wp.float32, device=device),
+                wp.array(rewards_np, dtype=wp.float32, device=device),
+                wp.ones(world_count, dtype=wp.float32, device=device),
+                obs,
+            )
+            trainer.update(replay.sample(seed=update), seed=10000 + update)
+
+        learned_actions = trainer.act(eval_obs, seed=0, deterministic=True)[0].numpy()[:, 0]
+        learned_mse = float(np.mean((learned_actions - eval_target) ** 2))
+        self.assertGreater(initial_mse, 0.2)
+        self.assertLess(learned_mse, 0.05)
 
     def test_learns_known_continuous_control_optimum(self) -> None:
         device = _rl_cuda_device()
