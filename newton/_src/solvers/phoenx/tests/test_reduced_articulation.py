@@ -2849,12 +2849,6 @@ class TestReducedArticulation(unittest.TestCase):
 
         model = _make_branched_tree(device)
         state = model.state()
-        # This test launches the module-level fp32 row builder directly and
-        # asserts exact ABA-match, so pin fp32 row storage regardless of the
-        # default mode; fp16 storage is covered by the deviation-bound and
-        # physics-conservation tests.
-        os.environ["PHOENX_CONTACT_ROWS_FP16"] = "0"
-        self.addCleanup(os.environ.pop, "PHOENX_CONTACT_ROWS_FP16", None)
         solver = newton.solvers.SolverPhoenX(
             model,
             articulation_mode="reduced",
