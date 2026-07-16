@@ -105,20 +105,6 @@ def _get_sparse_delassus(problem: DualProblem) -> BlockSparseMatrixFreeDelassusO
     return delassus
 
 
-def solve_sparse(solver, problem: DualProblem) -> None:
-    """Compatibility wrapper for :meth:`SparseDVIPath.solve`."""
-    if solver._sparse_path is None:
-        raise RuntimeError("Sparse DVI path has not been allocated. Call `finalize()` first.")
-    solver._sparse_path.solve(problem)
-
-
-def prepare_sparse(solver, problem: DualProblem) -> None:
-    """Compatibility wrapper for :meth:`SparseDVIPath.prepare`."""
-    if solver._sparse_path is None:
-        raise RuntimeError("Sparse DVI path has not been allocated. Call `finalize()` first.")
-    solver._sparse_path.prepare(problem)
-
-
 def _solve_sparse_jacobi(path: SparseDVIPath, problem: DualProblem) -> None:
     state = path.data.state
     problem.delassus.diagonal(state.scratch)
@@ -479,7 +465,7 @@ def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) ->
 
     jacobian = problem.delassus.constraint_jacobian
     if path.bilateral_nzb_pairs is None:
-        raise RuntimeError("Sparse DVI topology is not prepared. Call `prepare_sparse()` before solving.")
+        raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
     wp.launch(
         kernel=_set_sparse_bilateral_diagonal,
         dim=(path.size.num_worlds, path.size.max_of_num_joint_cts),

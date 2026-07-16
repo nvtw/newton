@@ -30,33 +30,20 @@ Choosing a dynamics solver
 
 Kamino provides two forward-dynamics backends:
 
-* ``"padmm"`` is the default. It uses proximal ADMM, dense Jacobians and
-  dynamics by default, and the Euler integrator.
-* ``"dvi"`` is an opt-in projected solver. It defaults to matrix-free sparse
-  dynamics, sparse Jacobians, and the Moreau integrator. DVI does not support
-  dual preconditioning.
+* ``"padmm"`` (default): proximal ADMM, dense Jacobians/dynamics, Euler integrator.
+* ``"dvi"`` (opt-in): projected dual iterations, sparse defaults, Moreau integrator.
+  Dual preconditioning is not supported.
 
-DVI has been tuned primarily for contact-heavy rigid mechanisms. PADMM remains
-the more broadly validated choice. Select the backend when constructing the
-configuration so its dependent defaults are initialized consistently:
+Select the backend when constructing the configuration so dependent defaults
+initialize consistently:
 
 .. code-block:: python
 
    config = newton.solvers.SolverKamino.Config(dynamics_solver="dvi")
-   config.dvi.tolerance = 1.0e-4
    solver = newton.solvers.SolverKamino(model, config=config)
 
-Set both ``sparse_jacobian=False`` and ``sparse_dynamics=False`` to select the
-dense DVI path. DVI requires ``config.dynamics.preconditioning=False``.
-
-Warm-starting and diagnostics
------------------------------
-
-Both backends support cold starts, internally cached solutions, and
-container-based warm-starting. DVI defaults to contact matching with a net-force
-fallback to preserve individual resting-contact impulses.
-
-Set ``SolverKamino.Config.collect_solver_info=True`` to retain terminal
-per-world convergence diagnostics. DVI reports bilateral velocity, primal and
-dual cone-feasibility, and complementarity residuals; these are DVI residuals
-and should not be interpreted as PADMM primal and dual iteration residuals.
+DVI has been tuned primarily for contact-heavy rigid mechanisms; PADMM remains
+the more broadly validated choice. Set ``sparse_jacobian=False`` and
+``sparse_dynamics=False`` for dense DVI. With
+``collect_solver_info=True``, DVI stores terminal residual status that should
+not be interpreted as PADMM ADMM residuals.

@@ -94,28 +94,6 @@ def _reset_dvi_status(
 
 
 @wp.kernel
-def _capture_dvi_info(
-    # Inputs:
-    solver_status: wp.array[DVIStatus],
-    # Outputs:
-    info_status: wp.array[DVIStatus],
-    info_iterations: wp.array[int32],
-    info_r_p: wp.array[float32],
-    info_r_d: wp.array[float32],
-    info_r_c: wp.array[float32],
-    info_r_b: wp.array[float32],
-):
-    wid = wp.tid()
-    status = solver_status[wid]
-    info_status[wid] = status
-    info_iterations[wid] = status.iterations
-    info_r_p[wid] = status.r_p
-    info_r_d[wid] = status.r_d
-    info_r_c[wid] = status.r_c
-    info_r_b[wid] = status.r_b
-
-
-@wp.kernel
 def _copy_bilateral_block(
     # Inputs:
     problem_dim: wp.array[int32],

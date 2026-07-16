@@ -26,7 +26,6 @@ from ..common import (
 from .kernels import (
     _apply_dvi_contact_jacobi_delta,
     _build_bilateral_rhs,
-    _capture_dvi_info,
     _color_dvi_contacts,
     _compute_dvi_contact_block_inverse,
     _compute_dvi_contact_jacobi_delta,
@@ -439,21 +438,7 @@ class DVISolver:
         )
 
         if self._collect_info:
-            info = self._data.info
-            wp.launch(
-                kernel=_capture_dvi_info,
-                dim=self._size.num_worlds,
-                inputs=[
-                    self._data.status,
-                    info.status,
-                    info.iterations,
-                    info.r_p,
-                    info.r_d,
-                    info.r_c,
-                    info.r_b,
-                ],
-                device=self.device,
-            )
+            wp.copy(self._data.info.status, self._data.status)
 
         wp.launch(
             kernel=_unprecondition_dvi_solution,
