@@ -942,6 +942,32 @@ class TestReplayBufferSAC(unittest.TestCase):
 
 
 class TestTrainerSAC(unittest.TestCase):
+    def test_observation_normalization_tracks_batch_moments(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(7)
+        obs_np = np.column_stack(
+            (
+                rng.normal(2.0, 3.0, 8192),
+                rng.normal(-3.0, 0.5, 8192),
+            )
+        ).astype(np.float32)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        zeros = wp.zeros(8192, dtype=wp.float32, device=device)
+        trainer = rl.TrainerSAC(obs_dim=2, action_dim=1, hidden_layers=(8,), device=device)
+        batch = rl.BatchSAC(
+            obs=obs,
+            actions=wp.zeros((8192, 1), dtype=wp.float32, device=device),
+            rewards=zeros,
+            dones=zeros,
+            next_obs=obs,
+        )
+
+        normalized = trainer._normalize_batch(batch).obs.numpy()
+
+        np.testing.assert_allclose(trainer._obs_mean.numpy(), obs_np.mean(axis=0), rtol=0.0, atol=2.0e-3)
+        np.testing.assert_allclose(normalized.mean(axis=0), np.zeros(2), rtol=0.0, atol=2.0e-3)
+        np.testing.assert_allclose(normalized.std(axis=0), np.ones(2), rtol=0.0, atol=6.0e-3)
+
     def test_update_changes_networks_and_returns_finite_stats(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(5)

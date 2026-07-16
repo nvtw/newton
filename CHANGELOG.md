@@ -51,6 +51,7 @@
 
 ### Changed
 
+- Normalize experimental SAC observations with automatically tracked running moments by default, improving held-out PhoenX G1 tracking without reducing measured training throughput. Pass `ConfigSAC(normalize_observations=False)` to preserve raw observations.
 - Change the experimental PhoenX G1 train-to-gate benchmark to switch PPO replay ratio to 2.0 after the frozen 78.64M-sample screen, reducing the validated zero-training wall time while preserving the unchanged full gate. Pass `--late-replay-ratio 0` to disable the late replay schedule.
 - Improve reduced-coordinate PhoenX CUDA split-dynamics stepping by using the fused advance/publish path when safe and skipping redundant packed contact-row clearing for unchanged articulated bodies.
 - Change experimental PhoenX G1 RL defaults to use the reduced-articulation recipe path, recipe-aligned G1 env-step benchmark defaults, graph/no-readback G1 training benchmark defaults, and a 0.84 train-to-gate full-gate promotion screen. G1 training benchmark nanoG1 comparisons now require an explicit measured reference via `--nanog1-train-result` or `--nanog1-reference-env-sps` instead of document-derived defaults. Pass `articulation_mode="maximal"`, explicit benchmark `--sim-substeps`/`--steps-per-graph` values, `--execution-mode eager`, `--readback-diagnostics`, or `--screen-trigger-battery-perf 0.88` to preserve previous settings.

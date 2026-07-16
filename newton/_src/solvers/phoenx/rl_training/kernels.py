@@ -1517,6 +1517,73 @@ def normalize_from_stats_kernel(x: wp.array[wp.float32], stats: wp.array[wp.floa
 
 
 @wp.kernel
+def observation_moments_partial_kernel(
+    x: wp.array2d[wp.float32],
+    partial_count: wp.int32,
+    sums: wp.array2d[wp.float32],
+    sums_sq: wp.array2d[wp.float32],
+):
+    partial, col = wp.tid()
+    total = wp.float32(0.0)
+    total_sq = wp.float32(0.0)
+    row = partial
+    while row < x.shape[0]:
+        value = x[row, col]
+        total += value
+        total_sq += value * value
+        row += partial_count
+    sums[partial, col] = total
+    sums_sq[partial, col] = total_sq
+
+
+@wp.kernel
+def observation_moments_update_kernel(
+    sums: wp.array2d[wp.float32],
+    sums_sq: wp.array2d[wp.float32],
+    partial_count: wp.int32,
+    batch_count: wp.int32,
+    count: wp.array[wp.float32],
+    mean: wp.array[wp.float32],
+    m2: wp.array[wp.float32],
+):
+    col = wp.tid()
+    batch_sum = wp.float32(0.0)
+    batch_sum_sq = wp.float32(0.0)
+    for partial in range(partial_count):
+        batch_sum += sums[partial, col]
+        batch_sum_sq += sums_sq[partial, col]
+    n = wp.float32(batch_count)
+    batch_mean = batch_sum / n
+    batch_m2 = wp.max(batch_sum_sq - batch_sum * batch_mean, wp.float32(0.0))
+    old_count = count[0]
+    new_count = old_count + n
+    delta = batch_mean - mean[col]
+    mean[col] += delta * n / new_count
+    m2[col] += batch_m2 + delta * delta * old_count * n / new_count
+
+
+@wp.kernel
+def observation_count_update_kernel(batch_count: wp.int32, count: wp.array[wp.float32]):
+    count[0] += wp.float32(batch_count)
+
+
+@wp.kernel
+def normalize_observations_kernel(
+    x: wp.array2d[wp.float32],
+    mean: wp.array[wp.float32],
+    m2: wp.array[wp.float32],
+    count: wp.array[wp.float32],
+    clip: wp.float32,
+    out: wp.array2d[wp.float32],
+):
+    row, col = wp.tid()
+    denom = wp.max(count[0] - wp.float32(1.0), wp.float32(1.0))
+    inv_std = wp.float32(1.0) / wp.sqrt(m2[col] / denom + wp.float32(1.0e-6))
+    value = (x[row, col] - mean[col]) * inv_std
+    out[row, col] = wp.min(wp.max(value, -clip), clip)
+
+
+@wp.kernel
 def concat_obs_action_kernel(
     obs: wp.array2d[wp.float32],
     actions: wp.array2d[wp.float32],

@@ -12,6 +12,10 @@ from .kernels import (
     concat_obs_action_kernel,
     fill_eps_kernel,
     min_q_target_kernel,
+    normalize_observations_kernel,
+    observation_count_update_kernel,
+    observation_moments_partial_kernel,
+    observation_moments_update_kernel,
     replay_sample_kernel,
     replay_store_kernel,
     sac_actor_policy_backward_kernel,
@@ -40,6 +44,8 @@ class ConfigSAC:
         auto_alpha: Whether to tune entropy temperature automatically.
         target_entropy: Target action entropy. ``None`` uses ``-action_dim``.
         update_steps: Gradient updates per call to :meth:`TrainerSAC.update`.
+        normalize_observations: Normalize observations with automatic running statistics.
+        observation_clip: Absolute clipping bound after observation normalization.
     """
 
     gamma: float = 0.99
@@ -51,6 +57,8 @@ class ConfigSAC:
     auto_alpha: bool = True
     target_entropy: float | None = None
     update_steps: int = 1
+    normalize_observations: bool = True
+    observation_clip: float = 10.0
 
 
 @dataclass
@@ -273,6 +281,12 @@ class TrainerSAC:
         self._actor_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._critic_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._alpha_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
+        self._obs_mean = wp.zeros(self.obs_dim, dtype=wp.float32, device=self.device)
+        self._obs_m2 = wp.ones(self.obs_dim, dtype=wp.float32, device=self.device)
+        self._obs_count = wp.array([2.0], dtype=wp.float32, device=self.device)
+        self._obs_moment_partial_count = 128
+        self._obs_sums = wp.empty((self._obs_moment_partial_count, self.obs_dim), dtype=wp.float32, device=self.device)
+        self._obs_sums_sq = wp.empty_like(self._obs_sums)
 
     @property
     def alpha(self) -> float:
@@ -289,8 +303,9 @@ class TrainerSAC:
     ) -> tuple[wp.array, wp.array]:
         """Sample actions for environment interaction."""
 
+        normalized_obs = self._normalize_observations(obs)
         actions, log_probs, _policy_out = self.actor.sample(
-            obs, seed=seed, deterministic=deterministic, requires_grad=False
+            normalized_obs, seed=seed, deterministic=deterministic, requires_grad=False
         )
         return actions, log_probs
 
@@ -302,6 +317,7 @@ class TrainerSAC:
         if int(batch.actions.shape[1]) != self.action_dim:
             raise ValueError("Batch action dimensions do not match trainer")
 
+        batch = self._normalize_batch(batch)
         base_seed = self.seed + self._update_count * 9973 if seed is None else int(seed)
         actor_loss = 0.0
         critic_loss = 0.0
@@ -319,6 +335,57 @@ class TrainerSAC:
             critic_loss=critic_loss,
             alpha_loss=alpha_loss,
             alpha=self.alpha,
+        )
+
+    def _normalize_observations(self, obs: wp.array) -> wp.array:
+        if not self.config.normalize_observations:
+            return obs
+        normalized = wp.empty_like(obs)
+        wp.launch(
+            normalize_observations_kernel,
+            dim=obs.shape,
+            inputs=[obs, self._obs_mean, self._obs_m2, self._obs_count, float(self.config.observation_clip)],
+            outputs=[normalized],
+            device=self.device,
+        )
+        return normalized
+
+    def _normalize_batch(self, batch: BatchSAC) -> BatchSAC:
+        if not self.config.normalize_observations:
+            return batch
+        wp.launch(
+            observation_moments_partial_kernel,
+            dim=self._obs_sums.shape,
+            inputs=[batch.obs, self._obs_moment_partial_count],
+            outputs=[self._obs_sums, self._obs_sums_sq],
+            device=self.device,
+        )
+        wp.launch(
+            observation_moments_update_kernel,
+            dim=self.obs_dim,
+            inputs=[
+                self._obs_sums,
+                self._obs_sums_sq,
+                self._obs_moment_partial_count,
+                batch.batch_size,
+                self._obs_count,
+            ],
+            outputs=[self._obs_mean, self._obs_m2],
+            device=self.device,
+        )
+        wp.launch(
+            observation_count_update_kernel,
+            dim=1,
+            inputs=[batch.batch_size],
+            outputs=[self._obs_count],
+            device=self.device,
+        )
+        return BatchSAC(
+            obs=self._normalize_observations(batch.obs),
+            actions=batch.actions,
+            rewards=batch.rewards,
+            dones=batch.dones,
+            next_obs=self._normalize_observations(batch.next_obs),
         )
 
     def _concat(self, obs: wp.array, actions: wp.array, *, requires_grad: bool) -> wp.array:
