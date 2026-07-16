@@ -1223,7 +1223,7 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("register introspection requires a CUDA device")
         try:
-            from cuda.bindings import driver as _drv  # noqa: PLC0415  (optional, guarded)
+            from cuda.bindings import driver as _drv  # optional, guarded
 
             _num_regs_attr = _drv.CUfunction_attribute.CU_FUNC_ATTRIBUTE_NUM_REGS
         except Exception:
@@ -2873,6 +2873,7 @@ class TestReducedArticulation(unittest.TestCase):
         row_wrench[0, 0] = np.asarray(wrench, dtype=np.float32)
         block.enabled.assign(np.ones(block.enabled.shape, dtype=np.int32))
         block.point_count.assign(np.full(block.point_count.shape, _POINTS_PER_PAGE, dtype=np.int32))
+        block.row_count.assign(np.full(block.row_count.shape, 3 * _POINTS_PER_PAGE, dtype=np.int32))
         block.row_body.assign(row_body)
         block.row_wrench.assign(row_wrench)
         point_contact = np.arange(block.point_contact.size, dtype=np.int32).reshape(block.point_contact.shape)
@@ -2918,6 +2919,7 @@ class TestReducedArticulation(unittest.TestCase):
                     solver.bodies,
                     block.enabled,
                     block.point_count,
+                    block.row_count,
                     block.row_body,
                     block.row_wrench,
                     block.point_contact,
@@ -2943,6 +2945,7 @@ class TestReducedArticulation(unittest.TestCase):
                     solver.bodies,
                     block.enabled,
                     block.point_count,
+                    block.row_count,
                     block.page_index,
                     block.max_page_count,
                     wp.bool(True),

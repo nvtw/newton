@@ -507,6 +507,7 @@ def _gather_reduced_contact_blocks_kernel(
     total_point_count: wp.array[wp.int32],
     page_index: wp.array[wp.int32],
     point_count: wp.array[wp.int32],
+    row_count: wp.array[wp.int32],
     point_contact: wp.array2d[wp.int32],
     point_column: wp.array2d[wp.int32],
     point0: wp.array2d[wp.vec3],
@@ -530,7 +531,9 @@ def _gather_reduced_contact_blocks_kernel(
     remaining = total_point_count[articulation] - page_start
     count = wp.min(wp.max(remaining, wp.int32(0)), wp.int32(_POINTS_PER_PAGE))
     if lane == wp.int32(0):
-        point_count[packed_articulation] = count if enabled[articulation] != wp.int32(0) else wp.int32(0)
+        active_count = count if enabled[articulation] != wp.int32(0) else wp.int32(0)
+        point_count[packed_articulation] = active_count
+        row_count[packed_articulation] = wp.int32(3) * active_count
     if enabled[articulation] == wp.int32(0) or count <= wp.int32(0):
         return
 
@@ -626,6 +629,7 @@ def _gather_reduced_contact_blocks_packed_kernel(
     total_point_count: wp.array[wp.int32],
     page_index: wp.array[wp.int32],
     point_count: wp.array[wp.int32],
+    row_count: wp.array[wp.int32],
     point_contact: wp.array2d[wp.int32],
     point_column: wp.array2d[wp.int32],
     point0: wp.array2d[wp.vec3],
@@ -649,7 +653,9 @@ def _gather_reduced_contact_blocks_packed_kernel(
     remaining = total_point_count[articulation] - page_start
     count = wp.min(wp.max(remaining, wp.int32(0)), wp.int32(_POINTS_PER_PAGE))
     if lane == wp.int32(0):
-        point_count[packed_articulation] = count if enabled[articulation] != wp.int32(0) else wp.int32(0)
+        active_count = count if enabled[articulation] != wp.int32(0) else wp.int32(0)
+        point_count[packed_articulation] = active_count
+        row_count[packed_articulation] = wp.int32(3) * active_count
     if enabled[articulation] == wp.int32(0) or count <= wp.int32(0):
         return
 
@@ -1012,6 +1018,7 @@ def _make_build_packed_rows_ops(fp16: bool):
         bodies: BodyContainer,
         enabled: wp.array[wp.int32],
         point_count: wp.array[wp.int32],
+        row_count_array: wp.array[wp.int32],
         row_body: wp.array2d[wp.int32],
         row_wrench: wp.array2d[wp.spatial_vector],
         point_contact: wp.array2d[wp.int32],
@@ -1035,7 +1042,7 @@ def _make_build_packed_rows_ops(fp16: bool):
         page = page_index[0]
         storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
         packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
-        row_count = wp.int32(3) * point_count[packed_articulation]
+        row_count = row_count_array[packed_articulation]
         if enabled[articulation] == wp.int32(0) or dof_count_articulation > wp.int32(packed_jacobian.shape[1]):
             return
         if not prepare and (
@@ -1114,6 +1121,7 @@ def _make_transpose_response_kernel(fp16: bool):
         bodies: BodyContainer,
         enabled: wp.array[wp.int32],
         point_count: wp.array[wp.int32],
+        row_count_array: wp.array[wp.int32],
         page_index: wp.array[wp.int32],
         max_page_count: wp.array[wp.int32],
         prepare: wp.bool,
@@ -1136,7 +1144,7 @@ def _make_transpose_response_kernel(fp16: bool):
         start = data.articulation_start[articulation]
         end = data.articulation_end[articulation]
         dof_count = data.joint_qd_start[end] - data.joint_qd_start[start]
-        row_count = wp.int32(3) * point_count[packed_articulation]
+        row_count = row_count_array[packed_articulation]
         if (
             enabled[articulation] == wp.int32(0)
             or row_count <= wp.int32(_RESPONSE_TILE)
@@ -1797,6 +1805,7 @@ class ReducedContactBlockSystem:
         self.page_index = wp.zeros(1, dtype=wp.int32, device=self.device)
         packed_articulation_count = articulation_count * _CACHED_PAGE_COUNT
         self.point_count = wp.zeros(packed_articulation_count, dtype=wp.int32, device=self.device)
+        self.row_count = wp.zeros(packed_articulation_count, dtype=wp.int32, device=self.device)
         self.point_contact = wp.zeros((packed_articulation_count, _POINTS_PER_PAGE), dtype=wp.int32, device=self.device)
         self.point_column = wp.zeros_like(self.point_contact)
         self.point0 = wp.zeros((packed_articulation_count, _POINTS_PER_PAGE), dtype=wp.vec3, device=self.device)
@@ -2186,6 +2195,7 @@ class ReducedContactBlockSystem:
                         bodies,
                         self.enabled,
                         self.point_count,
+                        self.row_count,
                         self.row_body,
                         self.row_wrench,
                         self.point_contact,
@@ -2213,6 +2223,7 @@ class ReducedContactBlockSystem:
                             bodies,
                             self.enabled,
                             self.point_count,
+                            self.row_count,
                             self.page_index,
                             self.max_page_count,
                             wp.bool(prepare),
@@ -2303,6 +2314,7 @@ class ReducedContactBlockSystem:
                         ],
                         outputs=[
                             self.point_count,
+                            self.row_count,
                             self.point_contact,
                             self.point_column,
                             self.point0,
