@@ -1717,7 +1717,8 @@ class SolverVBD(SolverBase, CouplingInterface):
             state_in: Input state.
             state_out: Output state.
             control: Control inputs.
-            contacts: Contact data produced by :meth:`~newton.Model.collide` (rigid-rigid and rigid-particle contacts).
+            contacts: Contact data produced by :meth:`~newton.CollisionPipeline.collide` (rigid-rigid and
+                rigid-particle contacts), allocated with :meth:`~newton.CollisionPipeline.contacts`.
                 If None, rigid contact handling is skipped. Note that particle self-contact (if enabled) does not
                 depend on this argument.
             dt: Time step size.
