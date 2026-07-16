@@ -340,15 +340,15 @@ def _compact_central_patch_rows_kernel(
     velocity1_sum = wp.float32(0.0)
     velocity2_sum = wp.float32(0.0)
     column_points = wp.int32(0)
-    for point_offset in range(active_count):
-        point = wp.int32(point_offset)
-        if point_column[packed_articulation, point] == column:
-            row = wp.int32(3) * point
-            tangent1_sum += row_wrench_in[packed_articulation, row + wp.int32(1)]
-            tangent2_sum += row_wrench_in[packed_articulation, row + wp.int32(2)]
-            velocity1_sum += row_velocity_in[packed_articulation, row + wp.int32(1)]
-            velocity2_sum += row_velocity_in[packed_articulation, row + wp.int32(2)]
-            column_points += wp.int32(1)
+    point = lane
+    while point < active_count and point_column[packed_articulation, point] == column:
+        row = wp.int32(3) * point
+        tangent1_sum += row_wrench_in[packed_articulation, row + wp.int32(1)]
+        tangent2_sum += row_wrench_in[packed_articulation, row + wp.int32(2)]
+        velocity1_sum += row_velocity_in[packed_articulation, row + wp.int32(1)]
+        velocity2_sum += row_velocity_in[packed_articulation, row + wp.int32(2)]
+        column_points += wp.int32(1)
+        point += wp.int32(1)
     inv_count = wp.float32(1.0) / wp.float32(wp.max(column_points, wp.int32(1)))
     target_row = active_count + wp.int32(2) * column_ordinal
     row_body_out[packed_articulation, target_row] = row_body_in[packed_articulation, source_row + wp.int32(1)]
