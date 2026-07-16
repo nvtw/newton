@@ -124,12 +124,52 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>16 July 2026 · kernel validation + G1 policy gate</strong></div>
+      <div class="stamp">Last updated<br><strong>16 July 2026 · NCU-guided row-layout tests</strong></div>
     </header>
+
+    <section class="work-profile" aria-label="Latest Nsight Compute results">
+      <h2>Latest Nsight Compute results</h2>
+      <p><strong>The row-builder bottleneck is real, but the first scratch-layout fixes were slower end-to-end.</strong> User-run NCU reports captured the packed G1 contact-row builder and the reduced pipeline. The strongest signal is memory layout/coalescing in <code>_build_packed_generalized_contact_rows_kernel</code>, not arithmetic throughput.</p>
+      <div class="ttp-table-wrap">
+        <table class="ttp-table">
+          <thead>
+            <tr><th>Kernel / experiment</th><th>Measured facts</th><th>Decision</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Contact-row builder NCU</td>
+              <td>796.5 &micro;s single-kernel duration, 57.5% memory throughput, 31.2% SM throughput, 982.9 GB/s DRAM, 99.4 MB reads, 683.4 MB writes. NCU reports 72.8% excessive global sectors and only 5.4&ndash;6.1 useful bytes/sector on global accesses.</td>
+              <td><strong>Primary target.</strong> SASS attribution points at six uncoalesced float stores for the per-row body response scratch. The next retained win must reduce this traffic without increasing surrounding costs.</td>
+            </tr>
+            <tr>
+              <td>Reduced pipeline NCU</td>
+              <td>Factor: 89.0 &micro;s, SM-heavy at 68.7%. Advance: 174.8 &micro;s with low eligible warps/cycle. Contact solve: 618.2 &micro;s and 283.0 &micro;s for the two solve launches, about 50% SM throughput and much less sector waste than row build.</td>
+              <td>Secondary target. Solve/factor still matter, but the NCU data says row construction is the cleaner memory-layout target.</td>
+            </tr>
+            <tr>
+              <td>Body-response <code>vec4+vec2</code> scratch split</td>
+              <td>Passed focused row-builder parity tests, then measured 2.080M and 2.098M physics steps/s on shared G1 physics.</td>
+              <td><strong>Rejected.</strong> The restored retained baseline measured 2.105M physics steps/s, so aligned vector stores did not improve the full pipeline.</td>
+            </tr>
+            <tr>
+              <td>Body-response scalar component planes</td>
+              <td>Passed the same focused tests, then measured 1.964M physics steps/s.</td>
+              <td><strong>Rejected.</strong> Better coalescing on paper lost too much elsewhere, likely store instruction count/addressing/register pressure.</td>
+            </tr>
+            <tr>
+              <td>Body-response <code>vec3+vec3</code> scratch split</td>
+              <td>Passed the same focused tests, then measured 2.066M physics steps/s.</td>
+              <td><strong>Rejected.</strong> Lower stride than <code>spatial_vector</code> was still slower than the restored 2.105M baseline.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="profile-note">Re-run commands when needed: <code>sudo -E bash newton/_src/solvers/phoenx/benchmarks/profile_g1_contact_rows_ncu.sh /tmp/phoenx_g1_contact_rows_current</code> and <code>sudo -E bash newton/_src/solvers/phoenx/benchmarks/profile_g1_reduced_pipeline_ncu.sh /tmp/phoenx_g1_reduced_pipeline_current</code>.</p>
+    </section>
 
     <section class="work-profile" aria-label="Measured PhoenX G1 gap to nanoG1">
       <h2>Measured G1 gap to nanoG1</h2>
-      <p>PhoenX G1 is currently <strong>1.49x slower than local nanoG1 in validated steady training throughput</strong>: 0.9326M samples/s versus 1.3924M samples/s. The latest zero-training PhoenX run reaches a passing held-out policy in 192.65 s at 138.94M samples.</p>
+      <p>PhoenX G1 is currently <strong>1.49x slower than local nanoG1 in validated steady training throughput</strong>: 0.9326M samples/s versus 1.3924M samples/s. The latest zero-training PhoenX run reaches a passing held-out policy in 183.03 s at 138.94M samples after switching PPO replay ratio from 3.0 to 2.0 after the frozen 78.64M-sample screen.</p>
       <div class="ttp-table-wrap">
         <table class="ttp-table">
           <thead>
@@ -150,21 +190,22 @@
             </tr>
             <tr>
               <td>Zero-training policy result</td>
-              <td class="number">192.65 s<br>138.94M samples</td>
+              <td class="number">183.03 s<br>138.94M samples</td>
               <td class="number">58.9 s claim<br>75M samples claim</td>
-              <td><strong>3.27x slower wall time</strong> against nanoG1's published time-to-walk claim. This is not an equal quality gate; PhoenX is checked with the stricter held-out gate below.</td>
+              <td><strong>3.11x slower wall time</strong> against nanoG1's published time-to-walk claim. This is not an equal quality gate; PhoenX is checked with the stricter held-out gate below.</td>
             </tr>
             <tr>
               <td>Policy quality gate</td>
-              <td>Iteration 265 passes the full gate on seeds 1000 and 1001: 0 falls, battery performance 0.902 / 0.905. Checkpoint 240 fails. The faster 131k-minibatch setting is rejected because it fails the iteration-75 learning screen.</td>
+              <td>Iteration 265 passes the full gate on seeds 1000 and 1001: 0 falls, battery performance 0.924 / 0.920 with the late replay-ratio schedule. Checkpoint 240 still fails the full gate. The faster replay-ratio-from-start settings are rejected because they fail the iteration-75 learning screen.</td>
               <td>Local 20M nanoG1 run learns, but it is not a final pass-gate run.</td>
               <td>The speed comparison uses measured local throughput. Policy success is only claimed for the passing PhoenX full-gate runs.</td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p class="profile-note">Current retained protocol change: lower only the cheap full-gate promotion screen to 0.84. The full gate is unchanged; the lower screen simply catches the measured passing checkpoint at iteration 265 instead of waiting for later checkpoints.</p>
-      <p class="profile-note"><strong>Latest kernel validation:</strong> fused reference-path advance/publish plus packed contact-row reuse improved raw G1 stepping from 1.6466M to about 1.663M env/s and steady training from 0.9276M to 0.9326M samples/s. Physics tests pass; a fresh 75-iteration learning screen passes at 0.712 battery performance with zero falls; the known iteration-265 policy still passes the full gate at 0.902 battery performance with zero falls.</p>
+      <p class="profile-note">Current retained protocol changes: lower only the cheap full-gate promotion screen to 0.84, and switch PPO replay ratio from 3.0 to 2.0 after the frozen 78.64M-sample screen. The full gate is unchanged; the late replay switch is retained only because the zero-training run still passes the full gate on seeds 1000 and 1001.</p>
+      <p class="profile-note"><strong>Latest kernel validation:</strong> fused reference-path advance/publish plus packed contact-row reuse improved raw G1 stepping from 1.6466M to about 1.663M env/s and steady training from 0.9276M to 0.9326M samples/s. Physics tests pass; a fresh 75-iteration learning screen passes at 0.712 battery performance with zero falls; the late-replay iteration-265 policy passes full gates at 0.924 and 0.920 battery performance with zero falls.</p>
+      <p class="profile-note"><strong>Latest measured kernel profile:</strong> nsys ranks packed generalized contact-row construction at 25.7% and generalized contact tile solve at 21.1% of shared-physics GPU kernel time. User-run NCU confirms the row builder is memory-layout limited: 796.5 &micro;s, 57.5% memory throughput, 31.2% SM throughput, 72.8% excessive global sectors, and dominant uncoalesced body-response stores. Rejected measured candidates so far: 64-point pages (+0.8% isolated only), small-tail row branch (slower), vec4+vec2 body-response split (2.080M/2.098M physics steps/s), scalar component planes (1.964M physics steps/s), and vec3+vec3 split (2.066M physics steps/s). Restored baseline after reverting these candidates: 2.105M physics steps/s.</p>
       <p class="profile-note"><strong>Next useful work:</strong> keep accumulating measured generic kernel wins, but the likely bigger needle movers remain contact-row construction, reduced ABA/contact formulation changes, and rollout/physics fusion that applies beyond G1.</p>
     </section>
 
@@ -175,12 +216,12 @@
 
     <section class="metrics" aria-label="Current headline metrics">
       <div class="card"><div class="metric">1.49x</div><div class="label">slower validated training throughput</div></div>
-      <div class="card"><div class="metric">192.65 s</div><div class="label">zero-training PhoenX G1 pass</div></div>
+      <div class="card"><div class="metric">183.03 s</div><div class="label">zero-training PhoenX G1 pass</div></div>
       <div class="card"><div class="metric">138.94M</div><div class="label">samples to validated G1 policy</div></div>
       <div class="card"><div class="metric">67.0%</div><div class="label">PhoenX / nanoG1 training samples/s</div></div>
     </section>
 
-    <p class="profile-note"><strong>Latest zero-training run (16 Jul):</strong> the 0.84 promotion screen triggered full gates at iterations 150, 175, 240, and 265. The first three failed the unchanged full gate; iteration 265 passed in 192.65 s total wall time. The same checkpoint also passed a second held-out gate seed.</p>
+    <p class="profile-note"><strong>Latest zero-training run (16 Jul):</strong> the 0.84 promotion screen triggered full gates at iterations 150, 175, 215, 240, and 265. The first four failed the unchanged full gate; iteration 265 passed in 183.03 s total wall time with 0.924 battery performance and zero falls. The same checkpoint also passed held-out gate seed 1001 at 0.920 battery performance and zero falls.</p>
 
     <div class="section-label">Zero to qualified policy</div>
     <section class="work-profile" aria-label="Cold-start time to policy across training scenes">
@@ -194,7 +235,7 @@
           <tbody>
             <tr>
               <td>G1 · PhoenX</td>
-              <td class="number good">192.65 s</td>
+              <td class="number good">183.03 s</td>
               <td class="pending">Not recomputed for the 0.84 screen</td>
               <td>Latest zero-training run passes at iteration 265 / 138.94M samples. Checkpoint 240 fails the unchanged full gate; checkpoint 265 passes on held-out seeds 1000 and 1001 with zero falls.</td>
             </tr>

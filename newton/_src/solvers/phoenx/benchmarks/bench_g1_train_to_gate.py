@@ -232,6 +232,12 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     env_config = _make_env_config(args)
     ppo_config = _make_ppo_config(args)
     early_reject_schedule = _early_reject_schedule(args)
+    late_replay_ratio = None if args.late_replay_ratio is None else float(args.late_replay_ratio)
+    if late_replay_ratio is not None and late_replay_ratio <= 0.0:
+        late_replay_ratio = None
+    late_replay_start_samples = int(args.late_replay_start_samples)
+    if late_replay_ratio is not None and late_replay_start_samples <= 0:
+        raise ValueError("late_replay_start_samples must be positive when late_replay_ratio is set")
     command_curriculum_start = float(getattr(args, "command_curriculum_start", g1_recipe.COMMAND_CURRICULUM_START))
     command_curriculum_samples = int(getattr(args, "command_curriculum_samples", g1_recipe.COMMAND_CURRICULUM_SAMPLES))
     angular_fine_tune_start_samples = int(args.angular_fine_tune_start_samples)
@@ -305,6 +311,9 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
             chunk_iterations = angular_fine_tune_iteration - completed_iterations
         active_env_config = env_config
         active_ppo_config = ppo_config
+        current_samples = _samples_for_iteration(args, completed_iterations)
+        if late_replay_ratio is not None and current_samples >= late_replay_start_samples:
+            active_ppo_config = replace(active_ppo_config, replay_ratio=late_replay_ratio)
         if fine_tune_active:
             active_env_config = replace(
                 env_config,
@@ -358,6 +367,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 w_ang_vel_xy=active_env_config.w_ang_vel_xy,
             )
             live_result.trainer.config.lr_anneal_timesteps = active_ppo_config.lr_anneal_timesteps
+            live_result.trainer.config.replay_ratio = active_ppo_config.replay_ratio
             if bool(args.reset_env_between_chunks):
                 live_result.env.use_reset_seed_counter(None)
                 live_result.env.use_command_seed_counter(None)
@@ -369,7 +379,10 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         completed_iterations = int(result.trainer.iteration)
         checkpoint_path = _format_checkpoint_template(checkpoint_template, completed_iterations)
         resume_checkpoint = str(checkpoint_path)
-        train_history.extend(asdict(item) for item in result.history)
+        for item in result.history:
+            entry = asdict(item)
+            entry["replay_ratio"] = float(active_ppo_config.replay_ratio)
+            train_history.append(entry)
 
         if (
             angular_fine_tune_iteration > 0
@@ -540,6 +553,8 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "muon_momentum": float(args.muon_momentum),
         "max_iterations": int(args.max_iterations),
         "chunk_iterations": int(args.chunk_iterations),
+        "late_replay_ratio": None if late_replay_ratio is None else float(late_replay_ratio),
+        "late_replay_start_samples": int(late_replay_start_samples),
         "reset_env_between_chunks": bool(args.reset_env_between_chunks),
         "early_reject_schedule": [
             {"samples": int(samples), "min_battery_perf": float(threshold)}
@@ -621,6 +636,18 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mirror-loss-coeff", type=float, default=g1_recipe.MIRROR_LOSS_COEFF)
     parser.add_argument("--minibatch-size", type=int, default=g1_recipe.MINIBATCH_SIZE)
     parser.add_argument("--replay-ratio", type=float, default=g1_recipe.REPLAY_RATIO)
+    parser.add_argument(
+        "--late-replay-ratio",
+        type=float,
+        default=2.0,
+        help="Switch PPO replay_ratio to this value after --late-replay-start-samples; pass 0 to disable.",
+    )
+    parser.add_argument(
+        "--late-replay-start-samples",
+        type=int,
+        default=150 * g1_recipe.WORLD_COUNT * g1_recipe.ROLLOUT_STEPS,
+        help="Sample count at which --late-replay-ratio becomes active.",
+    )
     parser.add_argument("--priority-alpha", type=float, default=g1_recipe.PRIORITY_ALPHA)
     parser.add_argument("--priority-beta", type=float, default=g1_recipe.PRIORITY_BETA)
     parser.add_argument("--no-manual-actor-backward", action="store_true")
