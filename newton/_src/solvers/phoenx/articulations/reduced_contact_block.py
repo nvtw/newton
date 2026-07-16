@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import functools
-
 import numpy as np
 import warp as wp
 
@@ -877,10 +875,9 @@ def _bind_rows_dtype_annotations(func, rows_dtype, *names):
     return func
 
 
-def _make_build_packed_rows_ops(fp16: bool):
-    """Packed row builder; ``fp16`` selects the FP16 row-storage variant."""
-    _rows_dtype = wp.float16 if fp16 else wp.float32
-    module = wp.get_module("reduced_contact_rows_packed" + ("_fp16" if fp16 else ""))
+def _make_build_packed_rows_ops():
+    _rows_dtype = wp.float32
+    module = wp.get_module("reduced_contact_rows_packed")
 
     def _build_packed_generalized_row(
         articulation: wp.int32,
@@ -1076,19 +1073,12 @@ def _make_build_packed_rows_ops(fp16: bool):
     )
 
 
-_BUILD_PACKED_ROWS_KERNELS = {False: _make_build_packed_rows_ops(False)}
-_build_packed_generalized_contact_rows_kernel = _BUILD_PACKED_ROWS_KERNELS[False]
+_build_packed_generalized_contact_rows_kernel = _make_build_packed_rows_ops()
 
 
-def _get_build_packed_rows_kernel(fp16: bool):
-    if fp16 not in _BUILD_PACKED_ROWS_KERNELS:
-        _BUILD_PACKED_ROWS_KERNELS[fp16] = _make_build_packed_rows_ops(fp16)
-    return _BUILD_PACKED_ROWS_KERNELS[fp16]
-
-
-def _make_transpose_response_kernel(fp16: bool):
-    _rows_dtype = wp.float16 if fp16 else wp.float32
-    module = wp.get_module("reduced_contact_response_transpose" + ("_fp16" if fp16 else ""))
+def _make_transpose_response_kernel():
+    _rows_dtype = wp.float32
+    module = wp.get_module("reduced_contact_response_transpose")
 
     def _transpose_generalized_contact_response_kernel(
         bodies: BodyContainer,
@@ -1131,38 +1121,21 @@ def _make_transpose_response_kernel(fp16: bool):
             offset=(dof_tile * wp.int32(_RESPONSE_TILE), row_tile * wp.int32(_RESPONSE_TILE)),
             storage="shared",
         )
-        if wp.static(fp16):
-            wp.tile_store(
-                packed_response,
-                wp.tile_astype(wp.tile_transpose(source), dtype=wp.float16),
-                offset=(
-                    packed_articulation * wp.int32(_MAX_ROWS) + row_tile * wp.int32(_RESPONSE_TILE),
-                    dof_tile * wp.int32(_RESPONSE_TILE),
-                ),
-            )
-        else:
-            wp.tile_store(
-                packed_response,
-                wp.tile_transpose(source),
-                offset=(
-                    packed_articulation * wp.int32(_MAX_ROWS) + row_tile * wp.int32(_RESPONSE_TILE),
-                    dof_tile * wp.int32(_RESPONSE_TILE),
-                ),
-            )
+        wp.tile_store(
+            packed_response,
+            wp.tile_transpose(source),
+            offset=(
+                packed_articulation * wp.int32(_MAX_ROWS) + row_tile * wp.int32(_RESPONSE_TILE),
+                dof_tile * wp.int32(_RESPONSE_TILE),
+            ),
+        )
 
     return wp.kernel(enable_backward=False, module=module)(
         _bind_rows_dtype_annotations(_transpose_generalized_contact_response_kernel, _rows_dtype, "packed_response")
     )
 
 
-_TRANSPOSE_RESPONSE_KERNELS = {False: _make_transpose_response_kernel(False)}
-_transpose_generalized_contact_response_kernel = _TRANSPOSE_RESPONSE_KERNELS[False]
-
-
-def _get_transpose_response_kernel(fp16: bool):
-    if fp16 not in _TRANSPOSE_RESPONSE_KERNELS:
-        _TRANSPOSE_RESPONSE_KERNELS[fp16] = _make_transpose_response_kernel(fp16)
-    return _TRANSPOSE_RESPONSE_KERNELS[fp16]
+_transpose_generalized_contact_response_kernel = _make_transpose_response_kernel()
 
 
 @wp.func_native(
@@ -1185,61 +1158,9 @@ def _sync_contact_warp(): ...
 def _sync_contact_block(): ...
 
 
-_UNPACK_H2_SNIPPET = """
-    const wp::float16* h = reinterpret_cast<const wp::float16*>(&packed);
-    return wp::vec2f(wp::float32(h[0]), wp::float32(h[1]));
-"""
-
-
-@wp.func_native(_UNPACK_H2_SNIPPET)
-def _unpack_h2(packed: wp.uint32) -> wp.vec2:
-    """Unpack two consecutive FP16 row entries from one aligned 32-bit word."""
-    ...
-
-
-_UNPACK_H4_SNIPPET = """
-    const wp::float16* h = reinterpret_cast<const wp::float16*>(&packed);
-    return wp::vec4f(wp::float32(h[0]), wp::float32(h[1]), wp::float32(h[2]), wp::float32(h[3]));
-"""
-
-
-@wp.func_native(_UNPACK_H4_SNIPPET)
-def _unpack_h4(packed: wp.uint64) -> wp.vec4:
-    """Unpack four consecutive FP16 row entries from one aligned 64-bit word."""
-    ...
-
-
-_ROWS_MODE_DTYPES = {"fp32": wp.float32, "fp16": wp.float16, "fp16x2": wp.uint32, "fp16x4": wp.uint64}
-_ROWS_MODE_PACK = {"fp32": 1, "fp16": 1, "fp16x2": 2, "fp16x4": 4}
-_ROWS_MODE_VEC = {2: wp.vec2, 4: wp.vec4}
-_ROWS_MODE_UNPACK = {2: _unpack_h2, 4: _unpack_h4}
-
-
-def _rows_mode_delta_dtype(mode: str):
-    """Element dtype of the ``generalized_delta`` view used by the tile solve."""
-    return _ROWS_MODE_VEC.get(_ROWS_MODE_PACK[mode], wp.float32)
-
-
-def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
-    """Tile GS solve; ``mode`` selects the packed-row storage/load format.
-
-    ``fp32``: production layout. ``fp16``: naked FP16 rows (2-byte lane loads).
-    ``fp16x2``/``fp16x4``: FP16 rows viewed as uint32 pairs / uint64 quads so
-    every lane load is a full 4- or 8-byte word (fewer, wider load requests);
-    the generalized delta is carried as a vec2/vec4 tile and
-    ``generalized_delta_out`` is the matching aliased view. Row starts are
-    always 8-byte aligned because the DOF width is padded to a multiple of 4.
-    """
-    _rows_dtype = _ROWS_MODE_DTYPES[mode]
-    fp16 = mode == "fp16"
-    pack_factor = _ROWS_MODE_PACK[mode]
-    packed = pack_factor > 1
-    packed_width = max_dofs // pack_factor
-    _vec_dtype = _ROWS_MODE_VEC.get(pack_factor)
-    _unpack = _ROWS_MODE_UNPACK.get(pack_factor)
-    _delta_dtype = _vec_dtype if packed else wp.float32
-    suffix = "" if mode == "fp32" else f"_{mode}"
-    module = wp.get_module(f"reduced_contact_generalized_solve_{max_dofs}" + suffix)
+def _make_solve_generalized_contact_tile_ops(max_dofs: int):
+    _rows_dtype = wp.float32
+    module = wp.get_module(f"reduced_contact_generalized_solve_{max_dofs}")
 
     def _solve_generalized_contact_tile_device(
         articulation: wp.int32,
@@ -1274,10 +1195,7 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
         storage_page = wp.min(page_index[0], wp.int32(_CACHED_PAGE_COUNT - 1))
         packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
         # Reuse across every contact row; registers avoid shared-memory round trips.
-        if wp.static(packed):
-            generalized_delta = wp.tile_zeros(shape=packed_width, dtype=_vec_dtype, storage="register")
-        else:
-            generalized_delta = wp.tile_zeros(shape=max_dofs, dtype=wp.float32, storage="register")
+        generalized_delta = wp.tile_zeros(shape=max_dofs, dtype=wp.float32, storage="register")
         active_point_count = point_count[packed_articulation]
         if warmstart:
             for point_offset in range(active_point_count):
@@ -1292,55 +1210,13 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
                     lambda2 = cc_get_tangent2_lambda(cc, contact)
                 row = wp.int32(3) * point
                 packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
-                if wp.static(packed):
-                    broadcast0 = wp.tile_from_thread(shape=packed_width, value=lambda0, thread_idx=0, storage="shared")
-                    broadcast1 = wp.tile_from_thread(shape=packed_width, value=lambda1, thread_idx=0, storage="shared")
-                    broadcast2 = wp.tile_from_thread(shape=packed_width, value=lambda2, thread_idx=0, storage="shared")
-                    response0 = wp.tile_map(
-                        _unpack, wp.tile_load(packed_response[packed_row], shape=packed_width, storage="register")
-                    )
-                    response1 = wp.tile_map(
-                        _unpack,
-                        wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=packed_width, storage="register"),
-                    )
-                    response2 = wp.tile_map(
-                        _unpack,
-                        wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=packed_width, storage="register"),
-                    )
-                    generalized_delta += (
-                        wp.tile_map(wp.mul, response0, broadcast0)
-                        + wp.tile_map(wp.mul, response1, broadcast1)
-                        + wp.tile_map(wp.mul, response2, broadcast2)
-                    )
-                elif wp.static(fp16):
-                    broadcast0 = wp.tile_from_thread(shape=max_dofs, value=lambda0, thread_idx=0, storage="shared")
-                    broadcast1 = wp.tile_from_thread(shape=max_dofs, value=lambda1, thread_idx=0, storage="shared")
-                    broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
-                    response0 = wp.tile_astype(
-                        wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register"),
-                        dtype=wp.float32,
-                    )
-                    response1 = wp.tile_astype(
-                        wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"),
-                        dtype=wp.float32,
-                    )
-                    response2 = wp.tile_astype(
-                        wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"),
-                        dtype=wp.float32,
-                    )
-                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
-                else:
-                    broadcast0 = wp.tile_from_thread(shape=max_dofs, value=lambda0, thread_idx=0, storage="shared")
-                    broadcast1 = wp.tile_from_thread(shape=max_dofs, value=lambda1, thread_idx=0, storage="shared")
-                    broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
-                    response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
-                    response1 = wp.tile_load(
-                        packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
-                    )
-                    response2 = wp.tile_load(
-                        packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
-                    )
-                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                broadcast0 = wp.tile_from_thread(shape=max_dofs, value=lambda0, thread_idx=0, storage="shared")
+                broadcast1 = wp.tile_from_thread(shape=max_dofs, value=lambda1, thread_idx=0, storage="shared")
+                broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
+                response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
+                response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
+                response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
@@ -1358,58 +1234,18 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
                 delta2 = wp.float32(0.0)
                 row = wp.int32(3) * point
                 packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
-                if wp.static(packed):
-                    jacobian0 = wp.tile_map(
-                        _unpack, wp.tile_load(packed_jacobian[packed_row], shape=packed_width, storage="register")
-                    )
-                    jacobian1 = wp.tile_map(
-                        _unpack,
-                        wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=packed_width, storage="register"),
-                    )
-                    jacobian2 = wp.tile_map(
-                        _unpack,
-                        wp.tile_load(packed_jacobian[packed_row + wp.int32(2)], shape=packed_width, storage="register"),
-                    )
-                    jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
-                        wp.tile_sum(wp.tile_map(wp.dot, jacobian0, generalized_delta)), 0
-                    )
-                    jv1 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
-                        wp.tile_sum(wp.tile_map(wp.dot, jacobian1, generalized_delta)), 0
-                    )
-                    jv2 = row_velocity[packed_articulation, row + wp.int32(2)] + wp.tile_extract(
-                        wp.tile_sum(wp.tile_map(wp.dot, jacobian2, generalized_delta)), 0
-                    )
-                else:
-                    if wp.static(fp16):
-                        jacobian0 = wp.tile_astype(
-                            wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register"),
-                            dtype=wp.float32,
-                        )
-                        jacobian1 = wp.tile_astype(
-                            wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register"),
-                            dtype=wp.float32,
-                        )
-                        jacobian2 = wp.tile_astype(
-                            wp.tile_load(packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register"),
-                            dtype=wp.float32,
-                        )
-                    else:
-                        jacobian0 = wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register")
-                        jacobian1 = wp.tile_load(
-                            packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
-                        )
-                        jacobian2 = wp.tile_load(
-                            packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
-                        )
-                    jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
-                        wp.tile_sum(jacobian0 * generalized_delta), 0
-                    )
-                    jv1 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
-                        wp.tile_sum(jacobian1 * generalized_delta), 0
-                    )
-                    jv2 = row_velocity[packed_articulation, row + wp.int32(2)] + wp.tile_extract(
-                        wp.tile_sum(jacobian2 * generalized_delta), 0
-                    )
+                jacobian0 = wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register")
+                jacobian1 = wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
+                jacobian2 = wp.tile_load(packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
+                    wp.tile_sum(jacobian0 * generalized_delta), 0
+                )
+                jv1 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
+                    wp.tile_sum(jacobian1 * generalized_delta), 0
+                )
+                jv2 = row_velocity[packed_articulation, row + wp.int32(2)] + wp.tile_extract(
+                    wp.tile_sum(jacobian2 * generalized_delta), 0
+                )
                 if lane == wp.int32(0):
                     contact = point_contact[packed_articulation, point]
                     column = point_column[packed_articulation, point]
@@ -1461,55 +1297,13 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
                         delta1 = wp.dot(impulse, t0)
                         delta2 = wp.dot(impulse, t1)
 
-                if wp.static(packed):
-                    broadcast0 = wp.tile_from_thread(shape=packed_width, value=delta0, thread_idx=0, storage="shared")
-                    broadcast1 = wp.tile_from_thread(shape=packed_width, value=delta1, thread_idx=0, storage="shared")
-                    broadcast2 = wp.tile_from_thread(shape=packed_width, value=delta2, thread_idx=0, storage="shared")
-                    response0 = wp.tile_map(
-                        _unpack, wp.tile_load(packed_response[packed_row], shape=packed_width, storage="register")
-                    )
-                    response1 = wp.tile_map(
-                        _unpack,
-                        wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=packed_width, storage="register"),
-                    )
-                    response2 = wp.tile_map(
-                        _unpack,
-                        wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=packed_width, storage="register"),
-                    )
-                    generalized_delta += (
-                        wp.tile_map(wp.mul, response0, broadcast0)
-                        + wp.tile_map(wp.mul, response1, broadcast1)
-                        + wp.tile_map(wp.mul, response2, broadcast2)
-                    )
-                elif wp.static(fp16):
-                    broadcast0 = wp.tile_from_thread(shape=max_dofs, value=delta0, thread_idx=0, storage="shared")
-                    broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
-                    broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
-                    response0 = wp.tile_astype(
-                        wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register"),
-                        dtype=wp.float32,
-                    )
-                    response1 = wp.tile_astype(
-                        wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"),
-                        dtype=wp.float32,
-                    )
-                    response2 = wp.tile_astype(
-                        wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"),
-                        dtype=wp.float32,
-                    )
-                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
-                else:
-                    broadcast0 = wp.tile_from_thread(shape=max_dofs, value=delta0, thread_idx=0, storage="shared")
-                    broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
-                    broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
-                    response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
-                    response1 = wp.tile_load(
-                        packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
-                    )
-                    response2 = wp.tile_load(
-                        packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
-                    )
-                    generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                broadcast0 = wp.tile_from_thread(shape=max_dofs, value=delta0, thread_idx=0, storage="shared")
+                broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
+                broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
+                response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
+                response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
+                response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
 
         wp.tile_store(generalized_delta_out[articulation], generalized_delta)
         if not fuse_apply:
@@ -1531,11 +1325,7 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
                     delta = body_delta[articulation, data.body_joint[parent] - start]
                 for dof in range(data.joint_qd_start[joint], data.joint_qd_start[joint + wp.int32(1)]):
                     local_dof = dof - dof_start_articulation
-                    if wp.static(packed):
-                        pair = generalized_delta_out[articulation, local_dof // wp.int32(pack_factor)]
-                        dof_delta = pair[local_dof & wp.int32(pack_factor - 1)]
-                    else:
-                        dof_delta = generalized_delta_out[articulation, local_dof]
+                    dof_delta = generalized_delta_out[articulation, local_dof]
                     data.joint_qd[dof] += dof_delta
                     delta += data.joint_s[dof] * dof_delta
                 body_delta[articulation, local_joint] = delta
@@ -1548,7 +1338,7 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
                 index += wp.int32(_BLOCK_DIM)
             _sync_contact_warp()
 
-    _solve_generalized_contact_tile_device.__annotations__["generalized_delta_out"] = wp.array2d[_delta_dtype]
+    _solve_generalized_contact_tile_device.__annotations__["generalized_delta_out"] = wp.array2d[wp.float32]
     _solve_generalized_contact_tile_device = wp.func(
         _bind_rows_dtype_annotations(
             _solve_generalized_contact_tile_device, _rows_dtype, "packed_jacobian", "packed_response"
@@ -1611,7 +1401,7 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
             body_delta,
         )
 
-    _solve_generalized_contact_tile_kernel.__annotations__["generalized_delta_out"] = wp.array2d[_delta_dtype]
+    _solve_generalized_contact_tile_kernel.__annotations__["generalized_delta_out"] = wp.array2d[wp.float32]
     _solve_generalized_contact_tile_kernel = wp.kernel(enable_backward=False, module=module)(
         _bind_rows_dtype_annotations(
             _solve_generalized_contact_tile_kernel, _rows_dtype, "packed_jacobian", "packed_response"
@@ -1629,14 +1419,6 @@ _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES = {
 _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS = {
     width: operations[1] for width, operations in _SOLVE_GENERALIZED_CONTACT_TILE_OPS.items()
 }
-
-
-@functools.cache
-def _solve_generalized_contact_tile_ops(max_dofs: int, mode: str):
-    """Lazy mode-variant accessor; fp32 reuses the eagerly built production ops."""
-    if mode == "fp32":
-        return _SOLVE_GENERALIZED_CONTACT_TILE_OPS[max_dofs]
-    return _make_solve_generalized_contact_tile_ops(max_dofs, mode=mode)
 
 
 def _aligned_contact_dof_width(max_dof_count: int) -> int:
