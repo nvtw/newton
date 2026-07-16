@@ -489,9 +489,9 @@ class _TeleopMuJoCoBenchmark:
 
 
 class FastTeleopMuJoCo(_TeleopMuJoCoBenchmark):
-    """Pull-request smoke benchmarks for graph-captured teleop latency."""
+    """Pull-request smoke benchmarks across GPU and CPU execution modes."""
 
-    params: ClassVar[tuple[tuple[str, ...]]] = (("mjwarp_cuda_graph", "mjwarp_cpu_graph"),)
+    params: ClassVar[tuple[tuple[str, ...]]] = (tuple(_TELEOP_MODES),)
     repeat = 2
     num_frames = 120
     warmup_frames = 30
