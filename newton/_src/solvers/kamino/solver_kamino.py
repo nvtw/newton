@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         ConstraintStabilizationConfig,
         DVISolverConfig,
         ForwardKinematicsSolverConfig,
+        MaterialManagerConfig,
         PADMMSolverConfig,
     )
 
@@ -176,6 +177,13 @@ class SolverKamino(SolverBase, CouplingInterface):
         If `None`, default values will be used.
         """
 
+        materials: MaterialManagerConfig | None = None
+        """
+        Configurations for the material manager and material property mixing.
+        See :class:`MaterialManagerConfig` for more details.
+        If `None`, default values will be used.
+        """
+
         rotation_correction: Literal["twopi", "continuous", "none"] = "twopi"
         """
         The rotation correction mode to use for rotational DoFs.\n
@@ -239,6 +247,7 @@ class SolverKamino(SolverBase, CouplingInterface):
             config.CollisionDetectorConfig.register_custom_attributes(builder)
             config.PADMMSolverConfig.register_custom_attributes(builder)
             config.DVISolverConfig.register_custom_attributes(builder)
+            config.MaterialManagerConfig.register_custom_attributes(builder)
 
             # Register KaminoSceneAPI custom attributes for each individual solver-level configurations
             builder.add_custom_attribute(
@@ -293,6 +302,7 @@ class SolverKamino(SolverBase, CouplingInterface):
                 "padmm": config.PADMMSolverConfig,
                 "dvi": config.DVISolverConfig,
                 "fk": config.ForwardKinematicsSolverConfig,
+                "materials": config.MaterialManagerConfig,
             }
             for attr_name, config_cls in subconfigs.items():
                 nested_config = kwargs.get(attr_name, None)
@@ -349,6 +359,7 @@ class SolverKamino(SolverBase, CouplingInterface):
             self.dynamics.validate()
             self.padmm.validate()
             self.dvi.validate()
+            self.materials.validate()
 
             supported_dynamics_solvers = {"padmm", "dvi"}
             if self.dynamics_solver not in supported_dynamics_solvers:
@@ -421,6 +432,8 @@ class SolverKamino(SolverBase, CouplingInterface):
                     )
                 else:
                     self.dvi = config.DVISolverConfig()
+            if self.materials is None:
+                self.materials = config.MaterialManagerConfig()
 
             # Validate the config values after all default-initialization is done
             # to ensure that any inter-dependent parameters are properly checked.
@@ -875,6 +888,8 @@ class SolverKamino(SolverBase, CouplingInterface):
                 contacts_in=contacts,
                 contacts_out=self._contacts_kamino,
                 convert_forces=False,
+                friction_mix_mode=self._config.materials.friction_mix_mode,
+                restitution_mix_mode=self._config.materials.restitution_mix_mode,
             )
         # Otherwise, use Kamino's internal collision detector to generate contacts
         else:
@@ -934,8 +949,8 @@ class SolverKamino(SolverBase, CouplingInterface):
             self._update_joint_transforms()
 
         if flags & ModelFlags.JOINT_DOF_PROPERTIES:
-            # Joint limits (q_j_min, q_j_max, dq_j_max, tau_j_max) are direct
-            # references to Newton's arrays, so no copy needed.
+            # Kamino's joint limits (q_j_min, q_j_max, dq_j_max, tau_j_max) reference
+            # Newton's arrays directly, so no copy needed.
             pass
 
         if flags & ModelFlags.ACTUATOR_PROPERTIES:
