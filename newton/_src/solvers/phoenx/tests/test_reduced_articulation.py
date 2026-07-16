@@ -3735,9 +3735,8 @@ class TestReducedArticulation(unittest.TestCase):
             velocity_iterations=1,
         )
         block = solver._reduced_articulation.contact_block_system
-        if not block.patch_rows:
-            block.gather_kernel = _gather_reduced_contact_blocks_packed_kernel
-            block.gather_tile_width = _PACKED_GATHER_TILE_WIDTH
+        block.gather_kernel = _gather_reduced_contact_blocks_packed_kernel
+        block.gather_tile_width = _PACKED_GATHER_TILE_WIDTH
         contacts = model.contacts()
 
         with wp.ScopedCapture(device=device) as capture:

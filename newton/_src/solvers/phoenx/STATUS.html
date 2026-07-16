@@ -224,8 +224,8 @@
             </tr>
             <tr>
               <td>Opt-in production compact patch rows</td>
-              <td>The second <code>PHOENX_REDUCED_PATCH_ROWS=1</code> implementation emits compact rows directly during gather, keeps per-point normal rows, uses two averaged tangent rows per contact column, and applies the generalized delta inside the patch solve. Alternating 100-replay G1 runs measured 2.108M&ndash;2.113M physics steps/s versus 2.056M&ndash;2.094M for point friction, about 1.7% faster on the means while processing 34 instead of 33 contacts/world. Short training measured 0.9457M samples/s versus about 0.938M paired control.</td>
-              <td><strong>Promising opt-in candidate, not the default.</strong> Arbitrary multi-page contacts, dense-contact determinism, and momentum tests pass. A 12-iteration diagnostic run has finite PPO metrics and improves reward from -0.068 to -0.043. The 75-iteration learning screen records zero falls and 0.701 battery performance, clearing the predeclared 0.68 early-reject gate and remaining close to the 0.712 point-friction screen. It does not clear the stricter 0.84 promotion threshold, so a full policy-success run is still required.</td>
+              <td>Implemented a temporary <code>PHOENX_REDUCED_PATCH_ROWS=1</code> reduced-contact path with separate compact row buffers, compact row build, dynamic patch solve, and distributed tangent warm-start. It compiled and ran, but raw G1 shared physics regressed: 1.72M then 1.67M physics steps/s versus a same-tree baseline of 2.06M. Nsys showed compact rows cut row-build time, but added compaction and a scan-heavy compact solve erased the gain in the real two-page 34-contact G1 loop.</td>
+              <td><strong>Rejected and removed.</strong> A friction-model change is acceptable only if it is physically accurate and a large real speedup. This version was neither validated physically nor faster, so it was not retained. The linear benchmark follow-up now removes the per-solve column scans. The next production attempt must also avoid a separate global compaction phase before any learning validation is worth running.</td>
             </tr>
           </tbody>
         </table>
@@ -274,7 +274,7 @@
 
     <section class="work-profile" aria-label="Measured PhoenX G1 gap to nanoG1">
       <h2>Measured G1 gap to nanoG1</h2>
-      <p>PhoenX G1 is currently <strong>1.49x slower than local nanoG1 in validated steady training throughput</strong>: 0.9326M samples/s versus 1.3924M samples/s. The opt-in compact-patch candidate reaches 0.9457M samples/s, which would narrow the throughput gap to <strong>1.47x</strong>, but it has not passed the long policy gate yet. The latest zero-training validated PhoenX run reaches a passing held-out policy in 183.03 s at 138.94M samples.</p>
+      <p>PhoenX G1 is currently <strong>1.49x slower than local nanoG1 in validated steady training throughput</strong>: 0.9326M samples/s versus 1.3924M samples/s. The latest zero-training PhoenX run reaches a passing held-out policy in 183.03 s at 138.94M samples after switching PPO replay ratio from 3.0 to 2.0 after the frozen 78.64M-sample screen.</p>
       <div class="ttp-table-wrap">
         <table class="ttp-table">
           <thead>
@@ -286,12 +286,6 @@
               <td class="number">0.9326M samples/s<br>2.798M physics steps/s</td>
               <td class="number">1.3924M samples/s<br>6.962M physics steps/s</td>
               <td><strong>1.49x slower</strong> by samples/s. Physics-step rate is 40.2% of nanoG1 because PhoenX uses 3 substeps per action while nanoG1 uses 5.</td>
-            </tr>
-            <tr>
-              <td>Opt-in compact-patch training</td>
-              <td class="number">0.9457M samples/s<br>2.837M physics steps/s</td>
-              <td class="number">1.3924M samples/s<br>6.962M physics steps/s</td>
-              <td><strong>1.47x slower</strong> by samples/s, provisionally narrowing the validated 1.49x gap. The 75-iteration screen clears the 0.68 early learning gate with zero falls and 0.701 battery performance, but no full policy gate has passed with patch friction yet.</td>
             </tr>
             <tr>
               <td>Raw env stepping</td>
@@ -316,8 +310,8 @@
       </div>
       <p class="profile-note">Current retained protocol changes: lower only the cheap full-gate promotion screen to 0.84, and switch PPO replay ratio from 3.0 to 2.0 after the frozen 78.64M-sample screen. The full gate is unchanged; the late replay switch is retained only because the zero-training run still passes the full gate on seeds 1000 and 1001.</p>
       <p class="profile-note"><strong>Latest kernel validation:</strong> fused reference-path advance/publish plus packed contact-row reuse improved raw G1 stepping from 1.6466M to about 1.663M env/s and steady training from 0.9276M to 0.9326M samples/s. Fresh short baseline after row-count plumbing measured 0.9343M samples/s and 2.803M training physics steps/s. The latest retained publish-scratch change measured 2.082M and 2.107M raw physics steps/s after a same-session 2.077M baseline, and 0.9391M short-training samples/s. This is a small measured win, not a major gap closer. Physics tests pass; a fresh 75-iteration learning screen passes at 0.712 battery performance with zero falls; the late-replay iteration-265 policy passes full gates at 0.924 and 0.920 battery performance with zero falls.</p>
-      <p class="profile-note"><strong>Latest measured kernel profile:</strong> paired nsys shows why the direct compact layout now works. Row construction falls from about 318 to 209 &micro;s per launch and patch solve averages about 100 &micro;s versus 109 &micro;s for point friction. The first patch refresh cost 123 &micro;s and erased most of that gain; reusing per-lane velocity scratch removes duplicate body-velocity evaluation and raises raw G1 physics to 2.108M&ndash;2.113M steps/s. The remaining largest compact-contact target is still row construction.</p>
-      <p class="profile-note"><strong>Next useful work:</strong> continue the compact-patch candidate toward the full G1 policy gate, then profile its remaining 209 &micro;s row builder and roughly 100 &micro;s patch solve. Keep it opt-in unless policy quality succeeds and the training-throughput gain repeats.</p>
+      <p class="profile-note"><strong>Latest measured kernel profile:</strong> fresh nsys ranks packed generalized contact-row construction at 22.1%, fused advance/publish at 15.1%, contact solve at 14.0%, and standalone advance at 7.3% of shared-physics GPU kernel time. User-run NCU confirms the row builder is memory-layout limited: 796.5 &micro;s, 57.5% memory throughput, 31.2% SM throughput, 72.8% excessive global sectors, and dominant uncoalesced body-response stores. NCU also identifies advance as grid-underfilled at 0.30 waves/SM, but a targeted occupancy fix lost 0.37% in paired training and was rejected. Rejected row-layout and solver candidates remain documented in the table above. The larger reduced patch-friction candidate still has a measured 31.4% row-count ceiling, but its first production implementation regressed raw physics to 1.67&ndash;1.72M steps/s, so another patch attempt must remove compaction and scan overhead before learning validation.</p>
+      <p class="profile-note"><strong>Next useful work:</strong> keep accumulating measured generic kernel wins, but the likely bigger needle movers remain contact-row construction, reduced ABA/contact formulation changes, and rollout/physics fusion that applies beyond G1.</p>
     </section>
 
     <section class="hero">
