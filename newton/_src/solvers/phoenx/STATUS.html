@@ -124,19 +124,47 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>16 July 2026 · validated 32k G1 policy; 131k minibatch rejected</strong></div>
+      <div class="stamp">Last updated<br><strong>16 July 2026 · validated G1 policy at 138.94M samples</strong></div>
     </header>
 
-    <section class="notify" style="border:1px solid #3a4152;background:#14181f;border-radius:10px;padding:16px 18px;margin:18px 0;">
-      <div style="font-weight:700;color:#9aa4b4;letter-spacing:.02em;">Measured PhoenX vs local nanoG1 — same workstation, no Modal, same G1 class task</div>
-      <table style="margin:10px 0 6px;border-collapse:collapse;color:#c4ccd8;font-size:13px;">
-        <tr style="color:#8b97a8;text-align:left;"><th style="padding:2px 14px 2px 0;">metric</th><th style="padding:2px 14px 2px 0;">PhoenX</th><th style="padding:2px 14px 2px 0;">nanoG1</th><th style="padding:2px 0;">PhoenX vs nanoG1</th></tr>
-        <tr><td style="padding:2px 14px 2px 0;"><strong>Raw env stepping</strong></td><td style="padding:2px 14px 2px 0;">1.668M env/s, 5.00M physics/s (8192 worlds, 3 substeps)</td><td style="padding:2px 14px 2px 0;">1.65M env/s, 8.25M physics/s (8192 worlds, 5 substeps)</td><td>101% env-rate; 60.6% physics-rate</td></tr>
-        <tr><td style="padding:2px 14px 2px 0;"><strong>End-to-end PPO training</strong></td><td style="padding:2px 14px 2px 0;">0.9276M samples/s, 2.783M physics/s (validated 32k minibatch)</td><td style="padding:2px 14px 2px 0;">1.3924M samples/s, 6.962M physics/s from local PufferLib log</td><td>66.6% sample-rate; 40.0% physics-rate; 1.50x slower by samples/s</td></tr>
-        <tr><td style="padding:2px 14px 2px 0;"><strong>Policy quality</strong></td><td style="padding:2px 14px 2px 0;">validated 32k policy: iter 315 / 165.15M samples; full gates pass on seeds 1000 and 1001 with 0 falls and battery perf 0.924 / 0.925; 131k minibatch rejected after 0.491 iter-75 screen</td><td style="padding:2px 14px 2px 0;">local 20M nanoG1 run learns but is not a final pass gate</td><td>32k setting kept; full gate succeeds, 131k speed setting rejected</td></tr>
-      </table>
-      <p style="margin:6px 0 0;color:#c4ccd8;">These numbers are measured locally, not copied from old notes. The raw env-rate is now roughly at nanoG1's 8192-world rate, but nanoG1 does five physics substeps per action while the current PhoenX recipe uses three, so physics-step throughput is still lower. The training bottleneck is the rollout path: graph-leapfrog overlap hides most PPO update cost, but PhoenX still trails local nanoG1 training by <strong>33.4%</strong> in samples/s for the learning-safe setting. The faster 131k-minibatch run reached 1.0067M samples/s but failed the held-out learning screen, so it is not a valid default.</p>
-      <p style="margin:6px 0 0;color:#c4ccd8;"><strong>Direction:</strong> keep small kernel wins only when cheap, but prioritize larger changes with plausible factor-level impact: rollout/physics fusion, robot-generic topology planning/code generation, reduced contact/ABA formulation changes, or sample-efficiency improvements that pass the held-out gate. Any candidate that improves SPS but fails the G1 policy gate is rejected. Current action: keep the validated 32k minibatch, lower only the cheap full-gate promotion screen to 0.87 after a measured false negative, and look for factor-level changes rather than relying on minibatch or kernel micro-tuning.</p>
+    <section class="work-profile" aria-label="Measured PhoenX G1 gap to nanoG1">
+      <h2>Measured G1 gap to nanoG1</h2>
+      <p>PhoenX G1 is currently <strong>1.50x slower than local nanoG1 in validated steady training throughput</strong>: 0.9276M samples/s versus 1.3924M samples/s. The latest zero-training PhoenX run reaches a passing held-out policy in 192.65 s at 138.94M samples.</p>
+      <div class="ttp-table-wrap">
+        <table class="ttp-table">
+          <thead>
+            <tr><th>Question</th><th>PhoenX G1</th><th>nanoG1 reference</th><th>Current gap</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Validated training throughput</td>
+              <td class="number">0.9276M samples/s<br>2.783M physics steps/s</td>
+              <td class="number">1.3924M samples/s<br>6.962M physics steps/s</td>
+              <td><strong>1.50x slower</strong> by samples/s. Physics-step rate is 40.0% of nanoG1 because PhoenX uses 3 substeps per action while nanoG1 uses 5.</td>
+            </tr>
+            <tr>
+              <td>Raw env stepping</td>
+              <td class="number">1.668M env/s<br>5.00M physics steps/s</td>
+              <td class="number">1.65M env/s<br>8.25M physics steps/s</td>
+              <td>Env-rate is essentially tied at 8192 worlds. Physics-step rate is <strong>1.65x slower</strong>.</td>
+            </tr>
+            <tr>
+              <td>Zero-training policy result</td>
+              <td class="number">192.65 s<br>138.94M samples</td>
+              <td class="number">58.9 s claim<br>75M samples claim</td>
+              <td><strong>3.27x slower wall time</strong> against nanoG1's published time-to-walk claim. This is not an equal quality gate; PhoenX is checked with the stricter held-out gate below.</td>
+            </tr>
+            <tr>
+              <td>Policy quality gate</td>
+              <td>Iteration 265 passes the full gate on seeds 1000 and 1001: 0 falls, battery performance 0.902 / 0.905. Checkpoint 240 fails. The faster 131k-minibatch setting is rejected because it fails the iteration-75 learning screen.</td>
+              <td>Local 20M nanoG1 run learns, but it is not a final pass-gate run.</td>
+              <td>The speed comparison uses measured local throughput. Policy success is only claimed for the passing PhoenX full-gate runs.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="profile-note">Current retained protocol change: lower only the cheap full-gate promotion screen to 0.84. The full gate is unchanged; the lower screen simply catches the measured passing checkpoint at iteration 265 instead of waiting for later checkpoints.</p>
+      <p class="profile-note"><strong>Next useful work:</strong> small kernel wins are not enough for the remaining gap. The likely needle movers are rollout/physics fusion, robot-generic topology planning or code generation, a reduced contact/ABA formulation change, or a sample-efficiency change that still passes the full held-out gate.</p>
     </section>
 
     <section class="hero">
@@ -145,14 +173,13 @@
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric">165.15M</div><div class="label">samples to validated G1 policy</div></div>
-      <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
-      <div class="card"><div class="metric">66.6%</div><div class="label">validated PhoenX vs nanoG1 training samples/s</div></div>
-      <div class="card"><div class="metric">1.668M/s</div><div class="label">PhoenX raw G1 env stepping</div></div>
+      <div class="card"><div class="metric">1.50x</div><div class="label">slower validated training throughput</div></div>
+      <div class="card"><div class="metric">192.65 s</div><div class="label">zero-training PhoenX G1 pass</div></div>
+      <div class="card"><div class="metric">138.94M</div><div class="label">samples to validated G1 policy</div></div>
+      <div class="card"><div class="metric">66.6%</div><div class="label">PhoenX / nanoG1 training samples/s</div></div>
     </section>
 
-    <p class="profile-note">The ready-cache rerun of the frozen G1 development bank contains one 215.58 s success and two iteration-75 rejections at 63.79 / 63.83 s. Expected restart cost remains 343.19 s. A command-curriculum candidate improved every early score but regressed final expected cost to 678.28 s, so it was rejected.</p>
-    <p class="profile-note"><strong>Progress check (10 Jul):</strong> not faster yet &mdash; the headline and the retained reduced 3&times;2 config (~950k samples/s) are unchanged; today&rsquo;s two speed candidates were measured and rejected (multi-stream overlap +1.6%; projected 3&times;2 fails the training screens despite solved anchors). Versus nanoG1 we are ~2.25&times; slower per physics step (&asymp;125&ndash;145 s vs 58.9 s under their weaker gate). What moved: three directions closed with data, the position-projection capability retained with a regression test, and the nanoG1 decomposition yields the first factor-2-class target with an existence proof &mdash; scene-specialized kernel codegen (topology baking + static contact pairs).</p>
+    <p class="profile-note"><strong>Latest zero-training run (16 Jul):</strong> the 0.84 promotion screen triggered full gates at iterations 150, 175, 240, and 265. The first three failed the unchanged full gate; iteration 265 passed in 192.65 s total wall time. The same checkpoint also passed a second held-out gate seed.</p>
 
     <div class="section-label">Zero to qualified policy</div>
     <section class="work-profile" aria-label="Cold-start time to policy across training scenes">
@@ -166,9 +193,9 @@
           <tbody>
             <tr>
               <td>G1 · PhoenX</td>
-              <td class="number good">215.58 s</td>
-              <td class="number">343.19 s preliminary</td>
-              <td>1/3 paired seeds pass. Seeds 11/2000 and 29/3000 reject at the frozen iteration-75 screen in 63.79 / 63.83 s. Full success requires two consecutive held-out gates with zero falls.</td>
+              <td class="number good">192.65 s</td>
+              <td class="pending">Not recomputed for the 0.84 screen</td>
+              <td>Latest zero-training run passes at iteration 265 / 138.94M samples. Checkpoint 240 fails the unchanged full gate; checkpoint 265 passes on held-out seeds 1000 and 1001 with zero falls.</td>
             </tr>
             <tr>
               <td>ANYmal-C · PhoenX</td>
@@ -206,7 +233,7 @@
           </tbody>
         </table>
       </div>
-      <p class="profile-note">nanoG1 source: <a href="https://github.com/kingjulio8238/nanoG1">project README</a>, which states 58.9 s / about 59 s from scratch. PhoenX's preliminary expected cost is 5.83× that claim; its successful run is 3.66× slower. nanoG1 does not report a comparable varied-seed expectation.</p>
+      <p class="profile-note">nanoG1 source: <a href="https://github.com/kingjulio8238/nanoG1">project README</a>, which states 58.9 s / about 59 s from scratch. PhoenX's latest successful zero-training run is 3.27× slower than that claim. nanoG1 does not report a comparable varied-seed expectation, and the gates are not identical.</p>
     </section>
 
     <div class="section-label">Steady-training GPU work profile</div>
