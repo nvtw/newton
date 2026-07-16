@@ -166,7 +166,7 @@ Basic usage:
 
 .. testcode:: pipeline-basics
 
-    # Create a pipeline explicitly to choose broad phase mode
+    # Create a pipeline with the desired broad phase mode
     from newton import CollisionPipeline
 
     pipeline = CollisionPipeline(
@@ -2196,7 +2196,6 @@ See Also
 - :class:`~ModelBuilder.ShapeConfig` - Shape configuration options
 - :meth:`~ModelBuilder.ShapeConfig.configure_sdf` - Set SDF and hydroelastic options in one call
 - :class:`~geometry.HydroelasticSDF.Config` - Hydroelastic contact configuration
-- :meth:`~CollisionPipeline.contacts` - Allocate a contacts buffer for a custom pipeline
 - :meth:`~Mesh.build_sdf` - Precompute SDF for a mesh
 - :meth:`~ModelBuilder.approximate_meshes` - Replace mesh collision shapes with simpler geometry
 - :meth:`~ModelBuilder.replicate` - Stamp out multi-world copies of a template builder

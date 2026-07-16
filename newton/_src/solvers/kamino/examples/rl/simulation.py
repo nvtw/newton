@@ -47,9 +47,10 @@ class SimulatorFromNewton:
     model, state, control, and solver objects.
 
     When *use_newton_collisions* is ``True`` (required for heightfield /
-    mesh terrain), Newton's own :meth:`~newton.Model.collide` pipeline
-    runs each step and the resulting contacts are converted to Kamino
-    format via :func:`convert_contacts_newton_to_kamino`.
+    mesh terrain), Newton's :class:`~newton.CollisionPipeline` runs each
+    step via :meth:`~newton.CollisionPipeline.collide`, and the resulting
+    contacts are converted to Kamino format via
+    :func:`convert_contacts_newton_to_kamino`.
     """
 
     def __init__(
