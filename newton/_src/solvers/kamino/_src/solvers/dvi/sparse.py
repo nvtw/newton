@@ -40,6 +40,64 @@ _SPARSE_DELASSUS_ROWS_JOINTS = 0
 _SPARSE_DELASSUS_ROWS_UNILATERAL = 1
 
 
+class SparseDVIPath:
+    """Own workspace and operations for the sparse Kamino DVI solve path."""
+
+    def __init__(
+        self,
+        device: wp.DeviceLike,
+        size,
+        data,
+        bilateral_solver,
+        max_iterations: int,
+        max_block_iterations: int,
+        max_contact_iterations: int,
+        has_contact_block_preconditioner: bool,
+        has_unilateral_constraints: bool,
+        all_worlds_mask: wp.array[wp.bool],
+        should_solve_bilateral_after_block,
+    ):
+        """Initialize the sparse-path workspace references."""
+        self.device = device
+        self.size = size
+        self.data = data
+        self.bilateral_solver = bilateral_solver
+        self.max_iterations = max_iterations
+        self.max_block_iterations = max_block_iterations
+        self.max_contact_iterations = max_contact_iterations
+        self.has_contact_block_preconditioner = has_contact_block_preconditioner
+        self.has_unilateral_constraints = has_unilateral_constraints
+        self.all_worlds_mask = all_worlds_mask
+        self.should_solve_bilateral_after_block = should_solve_bilateral_after_block
+        self.bilateral_nzb_pairs: (
+            tuple[
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+                wp.array[wp.int32],
+            ]
+            | None
+        ) = None
+
+    def prepare(self, problem: DualProblem) -> None:
+        """Precompute host-derived sparse topology before the first solve."""
+        _get_sparse_delassus(problem)
+        if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
+            _build_sparse_bilateral_pairs(self, problem)
+
+    def solve(self, problem: DualProblem) -> None:
+        """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
+        if self.has_contact_block_preconditioner and self.size.max_of_max_contacts > 0:
+            _compute_sparse_contact_block_inverse(self, problem)
+
+        if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
+            _solve_sparse_with_bilateral_direct_block(self, problem)
+        else:
+            _solve_sparse_jacobi(self, problem)
+
+
 def _get_sparse_delassus(problem: DualProblem) -> BlockSparseMatrixFreeDelassusOperator:
     delassus = problem.delassus
     if not isinstance(delassus, BlockSparseMatrixFreeDelassusOperator):
@@ -48,36 +106,32 @@ def _get_sparse_delassus(problem: DualProblem) -> BlockSparseMatrixFreeDelassusO
 
 
 def solve_sparse(solver, problem: DualProblem) -> None:
-    """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
-    if solver._has_contact_block_preconditioner and solver._size.max_of_max_contacts > 0:
-        _compute_sparse_contact_block_inverse(solver, problem)
-
-    if solver._bilateral_solver is not None and solver._data.bilateral_operator is not None:
-        _solve_sparse_with_bilateral_direct_block(solver, problem)
-    else:
-        _solve_sparse_jacobi(solver, problem)
+    """Compatibility wrapper for :meth:`SparseDVIPath.solve`."""
+    if solver._sparse_path is None:
+        raise RuntimeError("Sparse DVI path has not been allocated. Call `finalize()` first.")
+    solver._sparse_path.solve(problem)
 
 
 def prepare_sparse(solver, problem: DualProblem) -> None:
-    """Precompute host-derived sparse topology before the first solve."""
-    _get_sparse_delassus(problem)
-    if solver._bilateral_solver is not None and solver._data.bilateral_operator is not None:
-        _build_sparse_bilateral_pairs(solver, problem)
+    """Compatibility wrapper for :meth:`SparseDVIPath.prepare`."""
+    if solver._sparse_path is None:
+        raise RuntimeError("Sparse DVI path has not been allocated. Call `finalize()` first.")
+    solver._sparse_path.prepare(problem)
 
 
-def _solve_sparse_jacobi(solver, problem: DualProblem) -> None:
-    state = solver._data.state
+def _solve_sparse_jacobi(path: SparseDVIPath, problem: DualProblem) -> None:
+    state = path.data.state
     problem.delassus.diagonal(state.scratch)
 
-    for iteration in range(solver._max_iterations):
+    for iteration in range(path.max_iterations):
         problem.delassus.matvec(
-            x=solver._data.solution.lambdas,
+            x=path.data.solution.lambdas,
             y=state.v_aug,
-            world_mask=solver.all_worlds_mask,
+            world_mask=path.all_worlds_mask,
         )
         wp.launch(
             kernel=_solve_dvi_sparse_jacobi_update,
-            dim=(solver._size.num_worlds, solver._size.max_of_max_total_cts),
+            dim=(path.size.num_worlds, path.size.max_of_max_total_cts),
             inputs=[
                 problem.data.dim,
                 problem.data.vio,
@@ -94,67 +148,67 @@ def _solve_sparse_jacobi(solver, problem: DualProblem) -> None:
                 state.v_aug,
                 state.contact_block_inv,
                 iteration,
-                solver._data.config,
-                solver._data.solution.lambdas,
+                path.data.config,
+                path.data.solution.lambdas,
             ],
-            device=solver.device,
+            device=path.device,
         )
 
     problem.delassus.matvec(
-        x=solver._data.solution.lambdas,
+        x=path.data.solution.lambdas,
         y=state.v_aug,
-        world_mask=solver.all_worlds_mask,
+        world_mask=path.all_worlds_mask,
     )
     wp.launch(
         kernel=_compute_dvi_sparse_solution_vectors,
-        dim=(solver._size.num_worlds, solver._size.max_of_max_total_cts),
+        dim=(path.size.num_worlds, path.size.max_of_max_total_cts),
         inputs=[
             problem.data.dim,
             problem.data.vio,
             problem.data.v_f,
             state.s,
             state.v_aug,
-            solver._data.solution.v_plus,
+            path.data.solution.v_plus,
         ],
-        device=solver.device,
+        device=path.device,
     )
     wp.launch(
         kernel=_set_dvi_sparse_status_iterations,
-        dim=solver._size.num_worlds,
+        dim=path.size.num_worlds,
         inputs=[
             problem.data.dim,
-            solver._data.config,
-            solver._data.status,
+            path.data.config,
+            path.data.status,
         ],
-        device=solver.device,
+        device=path.device,
     )
 
 
-def _compute_sparse_solution_vectors(solver, problem: DualProblem) -> None:
-    state = solver._data.state
+def _compute_sparse_solution_vectors(path: SparseDVIPath, problem: DualProblem) -> None:
+    state = path.data.state
     problem.delassus.matvec(
-        x=solver._data.solution.lambdas,
+        x=path.data.solution.lambdas,
         y=state.v_aug,
-        world_mask=solver.all_worlds_mask,
+        world_mask=path.all_worlds_mask,
     )
     wp.launch(
         kernel=_compute_dvi_sparse_solution_vectors,
-        dim=(solver._size.num_worlds, solver._size.max_of_max_total_cts),
+        dim=(path.size.num_worlds, path.size.max_of_max_total_cts),
         inputs=[
             problem.data.dim,
             problem.data.vio,
             problem.data.v_f,
             state.s,
             state.v_aug,
-            solver._data.solution.v_plus,
+            path.data.solution.v_plus,
         ],
-        device=solver.device,
+        device=path.device,
     )
 
 
-def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) -> None:
+def _sparse_delassus_matvec_rows_path(path: SparseDVIPath, problem: DualProblem, row_kind: int) -> None:
     delassus = _get_sparse_delassus(problem)
-    state = solver._data.state
+    state = path.data.state
     regularization = delassus.regularization
     transpose_matrix = delassus.transpose_operator_matrix
     body_space = delassus.body_space_scratch
@@ -167,9 +221,9 @@ def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) ->
 
     delassus.ATy_op(
         transpose_matrix,
-        solver._data.solution.lambdas,
+        path.data.solution.lambdas,
         body_space,
-        solver.all_worlds_mask,
+        path.all_worlds_mask,
     )
     state.v_aug.zero_()
     wp.launch(
@@ -189,27 +243,34 @@ def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) ->
             regularization,
             body_space,
             state.v_aug,
-            solver._data.solution.lambdas,
-            solver.all_worlds_mask,
+            path.data.solution.lambdas,
+            path.all_worlds_mask,
         ],
-        device=solver.device,
+        device=path.device,
     )
 
 
+def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) -> None:
+    """Compatibility wrapper for sparse Delassus row products."""
+    if solver._sparse_path is None:
+        raise RuntimeError("Sparse DVI path has not been allocated. Call `finalize()` first.")
+    _sparse_delassus_matvec_rows_path(solver._sparse_path, problem, row_kind)
+
+
 def _sparse_delassus_update_unilateral_rows(
-    solver,
+    path: SparseDVIPath,
     problem: DualProblem,
     block_iteration: int,
     contact_iteration: int,
 ) -> None:
-    if _sparse_delassus_update_unilateral_offsets(solver, problem, block_iteration, contact_iteration):
+    if _sparse_delassus_update_unilateral_offsets(path, problem, block_iteration, contact_iteration):
         return
 
-    state = solver._data.state
-    _sparse_delassus_matvec_rows(solver, problem, _SPARSE_DELASSUS_ROWS_UNILATERAL)
+    state = path.data.state
+    _sparse_delassus_matvec_rows_path(path, problem, _SPARSE_DELASSUS_ROWS_UNILATERAL)
     wp.launch(
         kernel=_solve_dvi_sparse_unilateral_jacobi_update,
-        dim=(solver._size.num_worlds, solver._size.max_of_max_total_cts),
+        dim=(path.size.num_worlds, path.size.max_of_max_total_cts),
         inputs=[
             problem.data.dim,
             problem.data.vio,
@@ -227,21 +288,21 @@ def _sparse_delassus_update_unilateral_rows(
             state.contact_block_inv,
             block_iteration,
             contact_iteration,
-            solver._data.config,
-            solver._data.solution.lambdas,
+            path.data.config,
+            path.data.solution.lambdas,
         ],
-        device=solver.device,
+        device=path.device,
     )
 
 
 def _sparse_delassus_update_unilateral_offsets(
-    solver,
+    path: SparseDVIPath,
     problem: DualProblem,
     block_iteration: int,
     contact_iteration: int,
 ) -> bool:
     delassus = _get_sparse_delassus(problem)
-    state = solver._data.state
+    state = path.data.state
     regularization = delassus.regularization
     transpose_matrix = delassus.transpose_operator_matrix
     body_space = delassus.body_space_scratch
@@ -264,9 +325,9 @@ def _sparse_delassus_update_unilateral_offsets(
 
     delassus.ATy_op(
         transpose_matrix,
-        solver._data.solution.lambdas,
+        path.data.solution.lambdas,
         body_space,
-        solver.all_worlds_mask,
+        path.all_worlds_mask,
     )
 
     if has_limits and has_contacts:
@@ -307,10 +368,10 @@ def _sparse_delassus_update_unilateral_offsets(
                 body_space,
                 block_iteration,
                 contact_iteration,
-                solver._data.config,
-                solver._data.solution.lambdas,
+                path.data.config,
+                path.data.solution.lambdas,
             ],
-            device=solver.device,
+            device=path.device,
         )
         return True
 
@@ -339,10 +400,10 @@ def _sparse_delassus_update_unilateral_offsets(
                 body_space,
                 block_iteration,
                 contact_iteration,
-                solver._data.config,
-                solver._data.solution.lambdas,
+                path.data.config,
+                path.data.solution.lambdas,
             ],
-            device=solver.device,
+            device=path.device,
         )
 
     if has_contacts:
@@ -373,20 +434,20 @@ def _sparse_delassus_update_unilateral_offsets(
                 state.contact_block_inv,
                 block_iteration,
                 contact_iteration,
-                solver._data.config,
-                solver._data.solution.lambdas,
+                path.data.config,
+                path.data.solution.lambdas,
             ],
-            device=solver.device,
+            device=path.device,
         )
 
     return True
 
 
-def _compute_sparse_contact_block_inverse(solver, problem: DualProblem) -> None:
+def _compute_sparse_contact_block_inverse(path: SparseDVIPath, problem: DualProblem) -> None:
     jacobian = problem.delassus.constraint_jacobian
     wp.launch(
         kernel=sparse_kernels._compute_sparse_contact_block_inverse,
-        dim=(solver._size.num_worlds, solver._size.max_of_max_contacts),
+        dim=(path.size.num_worlds, path.size.max_of_max_contacts),
         inputs=[
             problem.delassus.model.info.bodies_offset,
             problem.delassus.model.bodies.inv_m_i,
@@ -400,28 +461,28 @@ def _compute_sparse_contact_block_inverse(solver, problem: DualProblem) -> None:
             problem.data.cio,
             problem.data.vio,
             problem.data.P,
-            solver._data.config,
+            path.data.config,
             jacobian.max_of_num_nzb,
-            solver._data.state.contact_block_inv,
+            path.data.state.contact_block_inv,
         ],
-        device=solver.device,
+        device=path.device,
     )
 
 
-def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
-    operator = solver._data.bilateral_operator
-    state = solver._data.state
+def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) -> None:
+    operator = path.data.bilateral_operator
+    state = path.data.state
     operator.info.dim = operator.info.maxdim
     operator.mat.zero_()
     state.bilateral_preconditioner.zero_()
     problem.delassus.diagonal(state.scratch)
 
     jacobian = problem.delassus.constraint_jacobian
-    if solver._bilateral_nzb_pairs is None:
+    if path.bilateral_nzb_pairs is None:
         raise RuntimeError("Sparse DVI topology is not prepared. Call `prepare_sparse()` before solving.")
     wp.launch(
         kernel=_set_sparse_bilateral_diagonal,
-        dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),
+        dim=(path.size.num_worlds, path.size.max_of_num_joint_cts),
         inputs=[
             problem.data.njc,
             problem.data.vio,
@@ -431,9 +492,9 @@ def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
             operator.mat,
             state.bilateral_preconditioner,
         ],
-        device=solver.device,
+        device=path.device,
     )
-    pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j = solver._bilateral_nzb_pairs
+    pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j = path.bilateral_nzb_pairs
     if pair_wid.size > 0:
         wp.launch(
             kernel=_build_sparse_bilateral_block,
@@ -454,12 +515,12 @@ def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
                 state.bilateral_preconditioner,
                 operator.mat,
             ],
-            device=solver.device,
+            device=path.device,
         )
-    solver._bilateral_solver.compute(A=operator.mat)
+    path.bilateral_solver.compute(A=operator.mat)
 
 
-def _build_sparse_bilateral_pairs(solver, problem: DualProblem) -> None:
+def _build_sparse_bilateral_pairs(path: SparseDVIPath, problem: DualProblem) -> None:
     """Cache joint Jacobian block pairs that contribute to the bilateral matrix."""
     jacobian = problem.delassus.constraint_jacobian
     counts = problem.delassus.joint_constraint_nzb_count.numpy().tolist()
@@ -494,29 +555,31 @@ def _build_sparse_bilateral_pairs(solver, problem: DualProblem) -> None:
                     pair_i.append(nzb_i)
                     pair_j.append(nzb_j)
 
-    solver._bilateral_nzb_pairs = tuple(
-        wp.array(values, dtype=int32, device=solver.device)
+    path.bilateral_nzb_pairs = tuple(
+        wp.array(values, dtype=int32, device=path.device)
         for values in (pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j)
     )
 
 
-def _solve_sparse_bilateral_block(solver, problem: DualProblem, active_dim: wp.array[int32] | None = None) -> None:
-    operator = solver._data.bilateral_operator
-    state = solver._data.state
+def _solve_sparse_bilateral_block(
+    path: SparseDVIPath, problem: DualProblem, active_dim: wp.array[int32] | None = None
+) -> None:
+    operator = path.data.bilateral_operator
+    state = path.data.state
     wp.launch(
         kernel=_zero_bilateral_lambdas,
-        dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),
+        dim=(path.size.num_worlds, path.size.max_of_num_joint_cts),
         inputs=[
             problem.data.njc,
             problem.data.vio,
-            solver._data.solution.lambdas,
+            path.data.solution.lambdas,
         ],
-        device=solver.device,
+        device=path.device,
     )
-    _sparse_delassus_matvec_rows(solver, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
+    _sparse_delassus_matvec_rows_path(path, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
     wp.launch(
         kernel=_build_sparse_bilateral_rhs,
-        dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),
+        dim=(path.size.num_worlds, path.size.max_of_num_joint_cts),
         inputs=[
             problem.data.vio,
             problem.data.njc,
@@ -526,76 +589,76 @@ def _solve_sparse_bilateral_block(solver, problem: DualProblem, active_dim: wp.a
             state.bilateral_preconditioner,
             state.bilateral_rhs,
         ],
-        device=solver.device,
+        device=path.device,
     )
     full_dim = operator.info.dim
     if active_dim is not None:
         operator.info.dim = active_dim
     try:
-        solver._bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
+        path.bilateral_solver.solve(b=state.bilateral_rhs, x=state.bilateral_solution)
     finally:
         operator.info.dim = full_dim
     wp.launch(
         kernel=_scatter_bilateral_solution,
-        dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),
+        dim=(path.size.num_worlds, path.size.max_of_num_joint_cts),
         inputs=[
             problem.data.vio,
             problem.data.njc,
             operator.info.vio,
             state.bilateral_preconditioner,
             state.bilateral_solution,
-            solver._data.solution.lambdas,
+            path.data.solution.lambdas,
         ],
-        device=solver.device,
+        device=path.device,
     )
 
 
-def _solve_sparse_with_bilateral_direct_block(solver, problem: DualProblem) -> None:
-    state = solver._data.state
-    _factor_sparse_bilateral_block(solver, problem)
-    _solve_sparse_bilateral_block(solver, problem)
-    if not solver._has_unilateral_constraints:
-        _compute_sparse_solution_vectors(solver, problem)
+def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: DualProblem) -> None:
+    state = path.data.state
+    _factor_sparse_bilateral_block(path, problem)
+    _solve_sparse_bilateral_block(path, problem)
+    if not path.has_unilateral_constraints:
+        _compute_sparse_solution_vectors(path, problem)
         return
 
     wp.launch(
         kernel=_initialize_dvi_status,
-        dim=solver._size.num_worlds,
+        dim=path.size.num_worlds,
         inputs=[
-            solver._data.config,
-            solver._data.status,
+            path.data.config,
+            path.data.status,
         ],
-        device=solver.device,
+        device=path.device,
     )
     wp.launch(
         kernel=_set_dvi_bilateral_active_dim,
-        dim=solver._size.num_worlds,
+        dim=path.size.num_worlds,
         inputs=[
             problem.data.njc,
             problem.data.nl,
             problem.data.nc,
             state.bilateral_active_dim,
         ],
-        device=solver.device,
+        device=path.device,
     )
 
-    for block_iteration in range(solver._max_block_iterations):
-        for contact_iteration in range(solver._max_contact_iterations):
-            _sparse_delassus_update_unilateral_rows(solver, problem, block_iteration, contact_iteration)
+    for block_iteration in range(path.max_block_iterations):
+        for contact_iteration in range(path.max_contact_iterations):
+            _sparse_delassus_update_unilateral_rows(path, problem, block_iteration, contact_iteration)
 
-        if solver._should_solve_bilateral_after_block(block_iteration):
-            _solve_sparse_bilateral_block(solver, problem, active_dim=state.bilateral_active_dim)
+        if path.should_solve_bilateral_after_block(block_iteration):
+            _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
 
-    _solve_sparse_bilateral_block(solver, problem, active_dim=state.bilateral_active_dim)
+    _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
     wp.launch(
         kernel=_set_dvi_direct_status_iterations,
-        dim=solver._size.num_worlds,
+        dim=path.size.num_worlds,
         inputs=[
             problem.data.nl,
             problem.data.nc,
-            solver._data.config,
-            solver._data.status,
+            path.data.config,
+            path.data.status,
         ],
-        device=solver.device,
+        device=path.device,
     )
-    _compute_sparse_solution_vectors(solver, problem)
+    _compute_sparse_solution_vectors(path, problem)

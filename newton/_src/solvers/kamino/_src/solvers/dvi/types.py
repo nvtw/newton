@@ -25,7 +25,7 @@ class DVIConfigStruct:
     """On-device DVI solver configuration."""
 
     tolerance: float32
-    """Natural-map convergence tolerance."""
+    """Convergence tolerance for DVI feasibility and complementarity residuals."""
 
     regularization: float32
     """Diagonal regularization used by projected Gauss-Seidel updates."""
@@ -79,16 +79,36 @@ class DVIInfo:
     def __init__(self, size: SizeKamino | None = None):
         self.status: wp.array[DVIStatus] | None = None
         """Terminal DVI status, shape ``(num_worlds,)``."""
+        self.iterations: wp.array[int32] | None = None
+        """Projected sweeps used by each world, shape ``(num_worlds,)``."""
+        self.r_p: wp.array[float32] | None = None
+        """Primal cone-feasibility residual history, shape ``(num_worlds,)``."""
+        self.r_d: wp.array[float32] | None = None
+        """Dual/bilateral residual history, shape ``(num_worlds,)``."""
+        self.r_c: wp.array[float32] | None = None
+        """Complementarity residual history, shape ``(num_worlds,)``."""
+        self.r_b: wp.array[float32] | None = None
+        """Bilateral velocity residual history, shape ``(num_worlds,)``."""
         if size is not None:
             self.finalize(size)
 
     def finalize(self, size: SizeKamino) -> None:
         """Allocate diagnostic arrays for a model size."""
         self.status = wp.zeros(shape=(size.num_worlds,), dtype=DVIStatus)
+        self.iterations = wp.zeros(shape=(size.num_worlds,), dtype=int32)
+        self.r_p = wp.zeros(shape=(size.num_worlds,), dtype=float32)
+        self.r_d = wp.zeros(shape=(size.num_worlds,), dtype=float32)
+        self.r_c = wp.zeros(shape=(size.num_worlds,), dtype=float32)
+        self.r_b = wp.zeros(shape=(size.num_worlds,), dtype=float32)
 
     def zero(self) -> None:
         """Reset diagnostics to zero."""
         self.status.zero_()
+        self.iterations.zero_()
+        self.r_p.zero_()
+        self.r_d.zero_()
+        self.r_c.zero_()
+        self.r_b.zero_()
 
 
 class DVIState:

@@ -26,6 +26,7 @@ from ..common import (
 from .kernels import (
     _apply_dvi_contact_jacobi_delta,
     _build_bilateral_rhs,
+    _capture_dvi_info,
     _color_dvi_contacts,
     _compute_dvi_contact_block_inverse,
     _compute_dvi_contact_jacobi_delta,
@@ -45,7 +46,7 @@ from .kernels import (
     _solve_dvi_pgs,
     _unprecondition_dvi_solution,
 )
-from .sparse import prepare_sparse, solve_sparse
+from .sparse import SparseDVIPath
 from .types import DVIConfigStruct, DVIData, convert_config_to_struct
 
 wp.set_module_options({"enable_backward": False})
@@ -97,17 +98,7 @@ class DVISolver:
         self._has_contact_block_preconditioner: bool = False
         self._has_unilateral_constraints: bool = False
         self._contact_bid_AB: wp.array[wp.vec2i] | None = None
-        self._bilateral_nzb_pairs: (
-            tuple[
-                wp.array[wp.int32],
-                wp.array[wp.int32],
-                wp.array[wp.int32],
-                wp.array[wp.int32],
-                wp.array[wp.int32],
-                wp.array[wp.int32],
-            ]
-            | None
-        ) = None
+        self._sparse_path: SparseDVIPath | None = None
         self._all_worlds_mask: wp.array[wp.bool] | None = None
         self._device: wp.DeviceLike = None
 
@@ -181,13 +172,25 @@ class DVISolver:
         self._bilateral_solve_after_block = self._make_bilateral_solve_schedule(self._config)
         self._has_contact_block_preconditioner = any(c.contact_block_preconditioner for c in self._config)
         self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
-        self._bilateral_nzb_pairs = None
         self._data = DVIData(size=self._size, collect_info=self._collect_info, device=self._device)
         self._all_worlds_mask = wp.ones(shape=(self._size.num_worlds,), dtype=wp.bool, device=self._device)
         self._allocate_bilateral_solver(model)
+        self._sparse_path = SparseDVIPath(
+            device=self._device,
+            size=self._size,
+            data=self._data,
+            bilateral_solver=self._bilateral_solver,
+            max_iterations=self._max_iterations,
+            max_block_iterations=self._max_block_iterations,
+            max_contact_iterations=self._max_contact_iterations,
+            has_contact_block_preconditioner=self._has_contact_block_preconditioner,
+            has_unilateral_constraints=self._has_unilateral_constraints,
+            all_worlds_mask=self._all_worlds_mask,
+            should_solve_bilateral_after_block=self._should_solve_bilateral_after_block,
+        )
         self.set_contacts(contacts)
         if problem is not None and problem.sparse:
-            prepare_sparse(self, problem)
+            self._sparse_path.prepare(problem)
 
         configs = [convert_config_to_struct(c) for c in self._config]
         with wp.ScopedDevice(self._device):
@@ -330,9 +333,11 @@ class DVISolver:
         )
 
         if problem.sparse:
-            if self._bilateral_nzb_pairs is None:
-                prepare_sparse(self, problem)
-            solve_sparse(self, problem)
+            if self._sparse_path is None:
+                raise RuntimeError("Sparse DVI path has not been allocated. Call `finalize()` first.")
+            if self._sparse_path.bilateral_nzb_pairs is None:
+                self._sparse_path.prepare(problem)
+            self._sparse_path.solve(problem)
         elif self._has_contact_block_preconditioner and self._size.max_of_max_contacts > 0:
             wp.launch(
                 kernel=_compute_dvi_contact_block_inverse,
@@ -434,7 +439,21 @@ class DVISolver:
         )
 
         if self._collect_info:
-            wp.copy(self._data.info.status, self._data.status)
+            info = self._data.info
+            wp.launch(
+                kernel=_capture_dvi_info,
+                dim=self._size.num_worlds,
+                inputs=[
+                    self._data.status,
+                    info.status,
+                    info.iterations,
+                    info.r_p,
+                    info.r_d,
+                    info.r_c,
+                    info.r_b,
+                ],
+                device=self.device,
+            )
 
         wp.launch(
             kernel=_unprecondition_dvi_solution,

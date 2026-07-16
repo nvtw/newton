@@ -17,6 +17,8 @@ _DVI_QUALITY_TESTS = (
     "test_03b_dvi_contact_block_preconditioner_smoke",
     "test_03d2_dvi_direct_block_finishes_with_bilateral_solve",
     "test_03e_dvi_direct_block_no_unilateral_rows_reports_single_iteration",
+    "test_03f_dvi_bilateral_only_solve_resets_stale_status",
+    "test_03g_dvi_contact_coloring_separates_dynamic_conflicts",
     "test_03h_dvi_canonical_contact_solution_metrics",
     "test_03i_dvi_coldstart_is_repeatable",
     "test_04_dvi_solve_active_joint_limit",
@@ -26,6 +28,7 @@ _DVI_QUALITY_TESTS = (
     "test_07_dvi_singular_limit_rows_remain_finite",
     "test_08_public_solver_short_rollout_with_dvi",
     "test_08a_public_solver_heterogeneous_contact_rollout_with_dvi",
+    "test_12_dvi_opening_contact_releases_warmstarted_force",
     "test_12b_dvi_contact_recovery_speed_caps_bias",
 )
 
