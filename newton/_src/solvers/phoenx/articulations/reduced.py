@@ -1986,7 +1986,11 @@ def _finish_and_publish_reduced_warp_device(
                 )
             twist = wp.spatial_vector()
             if parent >= wp.int32(0):
-                parent_com_twist = body_qd[parent]
+                parent_slot = parent + wp.int32(1)
+                parent_com_twist = wp.spatial_vector(
+                    bodies.velocity[parent_slot],
+                    bodies.angular_velocity[parent_slot],
+                )
                 parent_omega = wp.spatial_bottom(parent_com_twist)
                 parent_com_position = wp.transform_get_translation(body_q_com[parent])
                 twist = wp.spatial_vector(
@@ -1998,7 +2002,6 @@ def _finish_and_publish_reduced_warp_device(
             omega = wp.spatial_bottom(twist)
             com_position = wp.transform_get_translation(body_q_com[child])
             com_twist = wp.spatial_vector(wp.spatial_top(twist) + wp.cross(omega, com_position), omega)
-            body_qd[child] = com_twist
             slot = child + wp.int32(1)
             bodies.velocity[slot] = wp.spatial_top(com_twist)
             bodies.angular_velocity[slot] = omega
@@ -2052,7 +2055,8 @@ def _finish_and_publish_reduced_warp_device(
             q_com = body_q_com[body]
             position = wp.transform_get_translation(q_com)
             rotation_quat = wp.transform_get_rotation(q_com)
-            twist = body_qd[body]
+            slot = body + wp.int32(1)
+            twist = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
             velocity = wp.spatial_top(twist)
             omega = wp.spatial_bottom(twist)
             body_omega = wp.quat_rotate_inv(rotation_quat, omega)
@@ -2122,9 +2126,11 @@ def _finish_and_publish_reduced_warp_device(
             body = joint_child[joint]
             position = wp.transform_get_translation(body_q_com[body])
             delta_v = delta_v_origin + wp.cross(delta_omega, position - origin)
-            corrected = body_qd[body] + wp.spatial_vector(delta_v, delta_omega)
-            body_qd[body] = corrected
             slot = body + wp.int32(1)
+            corrected = wp.spatial_vector(
+                bodies.velocity[slot] + delta_v,
+                bodies.angular_velocity[slot] + delta_omega,
+            )
             bodies.velocity[slot] = wp.spatial_top(corrected)
             bodies.angular_velocity[slot] = wp.spatial_bottom(corrected)
             joint += tile_width
@@ -2132,13 +2138,14 @@ def _finish_and_publish_reduced_warp_device(
 
         if lane == wp.int32(0):
             root = joint_child[start]
+            root_slot = root + wp.int32(1)
             dof_start = joint_qd_start[start]
             dof_end = joint_qd_start[start + wp.int32(1)]
             dof_count = dof_end - dof_start
             current_root_twist = wp.spatial_vector()
             for dof in range(dof_start, dof_end):
                 current_root_twist += joint_s_publish[dof] * joint_qd_local[dof]
-            corrected_root_twist = body_qd[root]
+            corrected_root_twist = wp.spatial_vector(bodies.velocity[root_slot], bodies.angular_velocity[root_slot])
             root_twist_delta = corrected_root_twist - current_root_twist
             gram = _mat66(0.0)
             projected = _vec6(0.0)
