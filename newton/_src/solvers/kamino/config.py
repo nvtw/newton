@@ -908,8 +908,12 @@ class DVISolverConfig:
     @override
     @staticmethod
     def register_custom_attributes(builder: ModelBuilder) -> None:
-        """Registers custom attributes for the DVI solver configurations."""
-        pass  # TODO: Add Kamino USD schema support for DVI-specific options.
+        """Register DVI custom attributes supported by the Kamino USD schema.
+
+        DVI-specific tuning options are currently Python-only. The shared
+        ``max_solver_iterations`` attribute is registered by
+        :class:`PADMMSolverConfig` and parsed by both dynamics solvers.
+        """
 
     @override
     @staticmethod
@@ -919,7 +923,14 @@ class DVISolverConfig:
         Args:
             model: The Newton model from which to parse configurations.
         """
-        return DVISolverConfig(**kwargs)
+        cfg = DVISolverConfig(**kwargs)
+        kamino_attrs = getattr(model, "kamino", None)
+        if kamino_attrs is not None and hasattr(kamino_attrs, "max_solver_iterations"):
+            max_iterations = int(kamino_attrs.max_solver_iterations.numpy()[0])
+            if max_iterations >= 0:
+                cfg.max_iterations = max_iterations
+        cfg.validate()
+        return cfg
 
     @override
     def validate(self) -> None:

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import unittest
 
 import numpy as np
@@ -33,19 +32,6 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
 )
 from newton._src.solvers.kamino._src.solvers.metrics import SolutionMetrics
 from newton._src.solvers.kamino._src.solvers.padmm.types import PADMMWarmStartMode
-from newton._src.solvers.kamino._src.utils.benchmark.configs import (
-    load_solver_configs_to_hdf5,
-    make_benchmark_configs,
-    make_dvi_padmm_benchmark_configs,
-    save_solver_configs_to_hdf5,
-)
-from newton._src.solvers.kamino._src.utils.benchmark.dvi_padmm_matrix import (
-    apply_dvi_overrides,
-    make_matrix_scenarios,
-    make_selected_solver_configs,
-)
-from newton._src.solvers.kamino._src.utils.benchmark.metrics import _reduce_solver_status
-from newton._src.solvers.kamino._src.utils.benchmark.render import render_solver_configs_table
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton._src.solvers.kamino.tests import setup_tests, test_context
 from newton._src.solvers.kamino.tests.test_solvers_padmm import TestSetup
@@ -55,6 +41,14 @@ from newton.tests.utils import basics as public_basics
 
 vec2f = wp.vec2f
 vec4f = wp.vec4f
+
+
+def _reduce_solver_status(status: np.ndarray) -> dict[str, object]:
+    """Reduce per-world status while requiring every world to converge."""
+    return {
+        name: bool(np.all(status[name])) if name == "converged" else np.max(status[name]).item()
+        for name in status.dtype.names
+    }
 
 
 def _check_solution_matches_dual_problem(testcase: unittest.TestCase, problem: DualProblem, solver: DVISolver):
@@ -180,65 +174,6 @@ def _evaluate_solution_metrics(test: TestSetup, solver: DVISolver) -> dict[str, 
     }
 
 
-class _MiniHDF5Dataset:
-    def __init__(self, value):
-        self._value = value
-
-    def __getitem__(self, key):
-        if key != ():
-            raise KeyError(key)
-        return self._value
-
-
-class _MiniHDF5Group:
-    def __init__(self, values: dict[str, object], prefix: str):
-        self._values = values
-        self._prefix = f"{prefix}/"
-
-    def keys(self):
-        names = set()
-        for path in self._values:
-            if path.startswith(self._prefix):
-                names.add(path.removeprefix(self._prefix).split("/", 1)[0])
-        return names
-
-
-class _MiniHDF5File:
-    def __init__(self):
-        self._values: dict[str, object] = {}
-
-    def __contains__(self, path: str):
-        return path in self._values or any(key.startswith(f"{path}/") for key in self._values)
-
-    def __getitem__(self, path: str):
-        if path in self._values:
-            return _MiniHDF5Dataset(self._values[path])
-        if path in self:
-            return _MiniHDF5Group(self._values, path)
-        raise KeyError(path)
-
-    def __setitem__(self, path: str, value):
-        self._values[path] = value
-
-
-class _EncodingCheckingStdout:
-    encoding = "cp1252"
-
-    def __init__(self):
-        self.output: list[str] = []
-
-    def write(self, text: str) -> int:
-        text.encode(self.encoding)
-        self.output.append(text)
-        return len(text)
-
-    def flush(self) -> None:
-        pass
-
-    def isatty(self) -> bool:
-        return True
-
-
 class TestDVISolver(unittest.TestCase):
     def setUp(self):
         if not test_context.setup_done:
@@ -335,6 +270,13 @@ class TestDVISolver(unittest.TestCase):
             with self.assertRaises(ValueError):
                 kamino_config.DVISolverConfig(contact_warmstart_method=method)
 
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        model_with_attrs = SimpleNamespace(
+            kamino=SimpleNamespace(max_solver_iterations=wp.array([37], dtype=wp.int32, device=self.device))
+        )
+        self.assertEqual(kamino_config.DVISolverConfig.from_model(model_with_attrs).max_iterations, 37)
+
     def test_00a_multiworld_status_reduction_requires_all_worlds_converged(self):
         status = np.array(
             [(True, 2, 1.0e-5), (False, 7, 2.0e-3)],
@@ -381,6 +323,7 @@ class TestDVISolver(unittest.TestCase):
             model=model,
             config=kamino_config.DVISolverConfig(max_iterations=1000, tolerance=1e-5, omega=1.0),
             warmstart=PADMMWarmStartMode.NONE,
+            collect_info=True,
         )
         solver.reset()
         scratch = solver.data.state
@@ -399,6 +342,7 @@ class TestDVISolver(unittest.TestCase):
         solver.coldstart()
         solver.solve(problem)
         _check_solution_matches_dual_problem(self, problem, solver)
+        np.testing.assert_array_equal(solver.data.info.status.numpy(), solver.data.status.numpy())
 
     def test_02_public_solver_step_with_dvi(self):
         builder = newton.ModelBuilder()
@@ -427,6 +371,7 @@ class TestDVISolver(unittest.TestCase):
         config = SolverKamino.Config(
             dynamics_solver="dvi",
             dvi=kamino_config.DVISolverConfig(max_iterations=500, tolerance=1e-5),
+            collect_solver_info=True,
         )
         solver = SolverKamino(model, config=config)
         state_in = model.state()
@@ -438,6 +383,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(body_qd)))
         self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
         self.assertFalse(solver._solver_kamino.config.dynamics.preconditioning)
+        self.assertIsNotNone(solver._solver_kamino.solver_fd.data.info)
 
     def test_03_dvi_solve_single_contact(self):
         builder = basics.build_box_on_plane()
@@ -517,7 +463,7 @@ class TestDVISolver(unittest.TestCase):
         solver.data.solution.lambdas.assign(lambdas)
 
         full = wp.zeros_like(problem.data.v_f)
-        problem.delassus.matvec(solver.data.solution.lambdas, full, solver.data.state.world_mask)
+        problem.delassus.matvec(solver.data.solution.lambdas, full, solver.all_worlds_mask)
         full_np = full.numpy()
 
         _sparse_delassus_matvec_rows(solver, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
@@ -1519,142 +1465,6 @@ class TestDVISolver(unittest.TestCase):
         problem_config = wp.array([config.to_struct()], dtype=DualProblemConfigStruct, device=self.device)
         np.testing.assert_allclose(contact_bias(-0.001), [0.0, 0.0, -0.0015], rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(contact_bias(-0.005), [0.0, 0.0, -0.02375], rtol=1e-6, atol=1e-6)
-
-    def test_13_benchmark_configs_include_dvi_dr_legs(self):
-        configs = make_benchmark_configs(include_default=False)
-        self.assertIn("Dense DVI Dr Legs", configs)
-        self.assertIn("Sparse DVI Dr Legs", configs)
-        config = configs["Dense DVI Dr Legs"]
-        self.assertEqual(config.dynamics_solver, "dvi")
-        self.assertEqual(config.integrator, "moreau")
-        self.assertFalse(config.sparse_jacobian)
-        self.assertFalse(config.sparse_dynamics)
-        self.assertEqual(config.dvi.warmstart_mode, "containers")
-        self.assertEqual(config.dvi.block_iterations, 32)
-        self.assertEqual(config.dvi.contact_iterations, 4)
-        self.assertEqual(config.dvi.bilateral_solve_period, 1)
-        self.assertEqual(config.dvi.contact_jacobi_omega, 0.3)
-        self.assertEqual(config.dvi.contact_jacobi_relaxation, 0.9)
-        self.assertFalse(config.dvi.contact_block_preconditioner)
-        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_net_force_backup")
-        self.assertEqual(config.constraints.gamma, 0.015)
-        self.assertEqual(config.constraints.contact_deep_recovery_gamma, 0.10)
-        self.assertEqual(config.constraints.contact_deep_recovery_threshold, 1.0e-3)
-        self.assertEqual(config.constraints.delta, 1.0e-6)
-        self.assertEqual(config.constraints.contact_recovery_speed, 1.0)
-        self.assertFalse(config.dynamics.preconditioning)
-
-        focused_configs = make_dvi_padmm_benchmark_configs()
-        self.assertEqual(set(focused_configs), {"PADMM accurate", "PADMM fast", "DVI"})
-        self.assertEqual(focused_configs["DVI"].dynamics_solver, "dvi")
-        self.assertTrue(focused_configs["DVI"].sparse_jacobian)
-        self.assertTrue(focused_configs["DVI"].sparse_dynamics)
-        self.assertEqual(focused_configs["DVI"].dvi.block_iterations, 16)
-        self.assertEqual(focused_configs["DVI"].dvi.contact_iterations, 2)
-        self.assertEqual(focused_configs["DVI"].dvi.bilateral_solve_period, 2)
-        self.assertEqual(focused_configs["PADMM fast"].dynamics_solver, "padmm")
-
-    def test_13b_dvi_benchmark_config_roundtrips_contact_controls(self):
-        focused_configs = make_dvi_padmm_benchmark_configs()
-        config = focused_configs["DVI"]
-        config.constraints.contact_deep_recovery_gamma = 0.07
-        config.constraints.contact_deep_recovery_threshold = 0.004
-        config.dvi.contact_block_preconditioner = True
-        config.dvi.contact_jacobi_omega = 0.25
-        config.dvi.contact_jacobi_relaxation = 0.75
-        config.dvi.bilateral_solve_period = 2
-        config.dvi.warmstart_mode = "internal"
-        config.dvi.contact_warmstart_method = "key_and_position"
-
-        datafile = _MiniHDF5File()
-        save_solver_configs_to_hdf5({"DVI tuned": config}, datafile)
-        self.assertEqual(float(datafile["Solver/DVI tuned/constraints/contact_deep_recovery_gamma"][()]), 0.07)
-        self.assertEqual(float(datafile["Solver/DVI tuned/constraints/contact_deep_recovery_threshold"][()]), 0.004)
-        self.assertTrue(bool(datafile["Solver/DVI tuned/dvi/contact_block_preconditioner"][()]))
-        self.assertEqual(float(datafile["Solver/DVI tuned/dvi/contact_jacobi_omega"][()]), 0.25)
-        self.assertEqual(float(datafile["Solver/DVI tuned/dvi/contact_jacobi_relaxation"][()]), 0.75)
-        self.assertEqual(int(datafile["Solver/DVI tuned/dvi/bilateral_solve_period"][()]), 2)
-
-        loaded_configs = load_solver_configs_to_hdf5(datafile)
-
-        self.assertTrue(loaded_configs["DVI tuned"].dvi.contact_block_preconditioner)
-        self.assertEqual(loaded_configs["DVI tuned"].constraints.contact_deep_recovery_gamma, 0.07)
-        self.assertEqual(loaded_configs["DVI tuned"].constraints.contact_deep_recovery_threshold, 0.004)
-        self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_jacobi_omega, 0.25)
-        self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_jacobi_relaxation, 0.75)
-        self.assertEqual(loaded_configs["DVI tuned"].dvi.bilateral_solve_period, 2)
-        self.assertEqual(loaded_configs["DVI tuned"].dvi.warmstart_mode, "internal")
-        self.assertEqual(loaded_configs["DVI tuned"].dvi.contact_warmstart_method, "key_and_position")
-
-        datafile._values.pop("Solver/DVI tuned/dvi/warmstart_mode")
-        datafile._values.pop("Solver/DVI tuned/dvi/contact_warmstart_method")
-        datafile._values.pop("Solver/DVI tuned/dvi/bilateral_solve_period")
-        loaded_legacy_configs = load_solver_configs_to_hdf5(datafile)
-        dvi_defaults = kamino_config.DVISolverConfig()
-
-        self.assertEqual(
-            loaded_legacy_configs["DVI tuned"].dvi.bilateral_solve_period,
-            dvi_defaults.bilateral_solve_period,
-        )
-        self.assertEqual(loaded_legacy_configs["DVI tuned"].dvi.warmstart_mode, dvi_defaults.warmstart_mode)
-        self.assertEqual(
-            loaded_legacy_configs["DVI tuned"].dvi.contact_warmstart_method,
-            dvi_defaults.contact_warmstart_method,
-        )
-
-    def test_13c_dvi_benchmark_render_is_windows_console_safe(self):
-        focused_configs = make_dvi_padmm_benchmark_configs()
-        stdout = _EncodingCheckingStdout()
-
-        with contextlib.redirect_stdout(stdout):
-            render_solver_configs_table(
-                configs={"DVI": focused_configs["DVI"]},
-                groups=["solver", "dvi"],
-                to_console=True,
-            )
-
-        self.assertGreater(len("".join(stdout.output)), 0)
-
-    def test_14_dvi_padmm_matrix_planning(self):
-        scenarios = make_matrix_scenarios(
-            problem="dr_legs",
-            world_counts=[1, 4],
-            contact_states=["contact", "no-contact"],
-            cuda_graph_modes=["off", "on"],
-        )
-        self.assertEqual(len(scenarios), 8)
-        self.assertEqual(scenarios[0].name, "dr_legs/contact/worlds=1/graph=off")
-        self.assertTrue(scenarios[0].ground)
-        self.assertTrue(scenarios[1].ground)
-        self.assertTrue(scenarios[1].use_cuda_graph)
-        self.assertFalse(scenarios[2].ground)
-
-        selected_configs = make_selected_solver_configs(["dvi", "padmm-fast"])
-        self.assertEqual(list(selected_configs), ["DVI", "PADMM fast"])
-
-        from types import SimpleNamespace  # noqa: PLC0415
-
-        padmm_block_iterations = selected_configs["PADMM fast"].dvi.block_iterations
-        args = SimpleNamespace(
-            dvi_block_iterations=5,
-            dvi_contact_iterations=6,
-            dvi_bilateral_solve_period=2,
-            dvi_contact_jacobi_omega=0.4,
-            dvi_contact_jacobi_relaxation=0.8,
-            dvi_contact_block_preconditioner=True,
-        )
-        apply_dvi_overrides(selected_configs, args)
-
-        self.assertEqual(selected_configs["DVI"].dvi.block_iterations, 5)
-        self.assertEqual(selected_configs["DVI"].dvi.contact_iterations, 6)
-        self.assertEqual(selected_configs["DVI"].dvi.bilateral_solve_period, 2)
-        self.assertEqual(selected_configs["DVI"].dvi.contact_jacobi_omega, 0.4)
-        self.assertEqual(selected_configs["DVI"].dvi.contact_jacobi_relaxation, 0.8)
-        self.assertTrue(selected_configs["DVI"].dvi.contact_block_preconditioner)
-        self.assertEqual(selected_configs["PADMM fast"].dvi.block_iterations, padmm_block_iterations)
-
-        with self.assertRaises(ValueError):
-            make_matrix_scenarios("dr_legs", [0], ["contact"], ["off"])
 
 
 if __name__ == "__main__":

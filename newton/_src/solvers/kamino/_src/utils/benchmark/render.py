@@ -81,9 +81,9 @@ def _render_table_to_console_and_file(
             console.print(table, crop=False)
     if to_console:
         console = Console(width=max_width)
-        console.rule(characters="-")
+        console.rule()
         console.print(table, crop=False)
-        console.rule(characters="-")
+        console.rule()
 
 
 def _format_cell(x, fmt):
@@ -144,7 +144,6 @@ def render_table(
         title=title,
         show_header=True,
         box=box.SIMPLE_HEAVY,
-        safe_box=True,
         show_lines=True,
         pad_edge=True,
     )
@@ -199,7 +198,6 @@ def render_subcolumn_table(
         title=title,
         show_header=True,
         box=box.SIMPLE_HEAVY,
-        safe_box=True,
         show_lines=True,
         pad_edge=True,
     )
@@ -277,7 +275,6 @@ def render_subcolumn_metrics_table(
         title=title,
         header_style="bold cyan",
         box=box.SIMPLE_HEAVY,
-        safe_box=True,
         show_lines=False,
         pad_edge=True,
     )
@@ -335,13 +332,10 @@ def render_solver_configs_table(
         path: The file path to save the rendered table as a text file. If None, the table is not saved to a file.
         groups: A list of groups to include in the table. If None, "sparse", "linear" and "padmm" are used.
             Supported groups include:
-            - "cts": Constraint parameters (alpha, beta, gamma, delta, recovery speed, preconditioning)
-            - "solver": Active solver and integration settings (dynamics_solver, integrator)
+            - "cts": Constraint parameters (alpha, beta, gamma, delta, preconditioning)
             - "sparse": Sparse representation settings (sparse, sparse_jacobian)
             - "linear": Linear solver settings (type, kwargs)
             - "padmm": PADMM settings (max_iterations, primal_tol, dual_tol, etc)
-            - "dvi": DVI settings (max_iterations, tolerance, regularization, omega, block/contact iterations,
-              bilateral solve period, contact block preconditioning)
             - "warmstart": Warmstarting settings (mode, contact_method)
         to_console: If True, also prints the table to the console.
 
@@ -364,25 +358,20 @@ def render_solver_configs_table(
         title="Solver Configurations Summary",
         show_header=True,
         box=box.SIMPLE_HEAVY,
-        safe_box=True,
         show_lines=True,
         pad_edge=True,
     )
 
-    # If no groups are specified, default to showing solver type, sparsity, linear solver, and PADMM settings.
+    # If no groups are specified, default to showing sparsity, linear solver and PADMM settings
     if groups is None:
-        groups = ["solver", "sparse", "linear", "padmm", "dvi"]
+        groups = ["sparse", "linear", "padmm"]
 
     # Add the first column for configuration names
     _add_table_column_group(table, "Solver Configuration", ["Name"], color="white", justify="left")
 
     # Add groups of columns based on the specified groups to include in the table
-    if "solver" in groups:
-        _add_table_column_group(table, "Solver", ["type", "integrator"], color="white")
     if "cts" in groups:
-        _add_table_column_group(
-            table, "Constraints", ["alpha", "beta", "gamma", "delta", "recovery", "precond"], color="green"
-        )
+        _add_table_column_group(table, "Constraints", ["alpha", "beta", "gamma", "delta", "precond"], color="green")
     if "sparse" in groups:
         _add_table_column_group(table, "Representation", ["sparse_jacobian", "sparse_dynamics"], color="yellow")
     if "linear" in groups:
@@ -406,32 +395,12 @@ def render_solver_configs_table(
             ],
             color="cyan",
         )
-    if "dvi" in groups:
-        _add_table_column_group(
-            table,
-            "DVI",
-            [
-                "max_iterations",
-                "tol",
-                "reg",
-                "omega",
-                "block_iter",
-                "contact_iter",
-                "bilateral_period",
-                "contact_jacobi_omega",
-                "contact_jacobi_relax",
-                "contact_block_precond",
-            ],
-            color="cyan",
-        )
     if "warmstart" in groups:
         _add_table_column_group(table, "Warmstarting", ["mode", "contact_method"], color="blue")
 
     # Add rows for each configuration
     for name, cfg in configs.items():
         cfg_row = []
-        if "solver" in groups:
-            cfg_row.extend([cfg.dynamics_solver, cfg.integrator])
         if "cts" in groups:
             cfg_row.extend(
                 [
@@ -439,7 +408,6 @@ def render_solver_configs_table(
                     f"{cfg.constraints.beta}",
                     f"{cfg.constraints.gamma}",
                     f"{cfg.constraints.delta}",
-                    f"{cfg.constraints.contact_recovery_speed}",
                     str(cfg.dynamics.preconditioning),
                 ]
             )
@@ -468,26 +436,8 @@ def render_solver_configs_table(
                     str(cfg.padmm.use_acceleration),
                 ]
             )
-        if "dvi" in groups:
-            cfg_row.extend(
-                [
-                    str(cfg.dvi.max_iterations),
-                    f"{cfg.dvi.tolerance:.0e}",
-                    f"{cfg.dvi.regularization:.0e}",
-                    f"{cfg.dvi.omega}",
-                    str(cfg.dvi.block_iterations),
-                    str(cfg.dvi.contact_iterations),
-                    str(cfg.dvi.bilateral_solve_period),
-                    f"{cfg.dvi.contact_jacobi_omega}",
-                    f"{cfg.dvi.contact_jacobi_relaxation}",
-                    str(cfg.dvi.contact_block_preconditioner),
-                ]
-            )
         if "warmstart" in groups:
-            if cfg.dynamics_solver == "dvi":
-                cfg_row.extend([cfg.dvi.warmstart_mode, cfg.dvi.contact_warmstart_method])
-            else:
-                cfg_row.extend([cfg.padmm.warmstart_mode, cfg.padmm.contact_warmstart_method])
+            cfg_row.extend([cfg.padmm.warmstart_mode, cfg.padmm.contact_warmstart_method])
         table.add_row(name, *cfg_row)
 
     # Render the table to the console and/or save to file
@@ -531,7 +481,6 @@ def render_problem_dimensions_table(
         title="Problem Dimensions Summary",
         show_header=True,
         box=box.SIMPLE_HEAVY,
-        safe_box=True,
         show_lines=True,
         pad_edge=True,
     )

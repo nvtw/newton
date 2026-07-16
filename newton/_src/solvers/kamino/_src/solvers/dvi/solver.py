@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""DVI-style projected solver for Kamino's dual dynamics system."""
+"""Projected DVI solver for Kamino dual forward-dynamics problems."""
 
 from __future__ import annotations
 
@@ -16,13 +16,13 @@ from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
 from ...linalg import DenseLinearOperatorData, DenseSquareMultiLinearInfo, LLTBlockedSolver
-from ..padmm.kernels import (
-    _apply_dual_preconditioner_to_solution,
-    _warmstart_contact_constraints,
-    _warmstart_joint_constraints,
-    _warmstart_limit_constraints,
+from ..common import (
+    WarmStartMode,
+    apply_dual_preconditioner_to_solution,
+    warmstart_contact_constraints,
+    warmstart_joint_constraints,
+    warmstart_limit_constraints,
 )
-from ..padmm.types import PADMMWarmStartMode
 from .kernels import (
     _apply_dvi_contact_jacobi_delta,
     _build_bilateral_rhs,
@@ -45,7 +45,7 @@ from .kernels import (
     _solve_dvi_pgs,
     _unprecondition_dvi_solution,
 )
-from .sparse import solve_sparse
+from .sparse import prepare_sparse, solve_sparse
 from .types import DVIConfigStruct, DVIData, convert_config_to_struct
 
 wp.set_module_options({"enable_backward": False})
@@ -54,19 +54,38 @@ float32 = wp.float32
 
 
 class DVISolver:
-    """Projected Gauss-Seidel DVI solver for Kamino ``DualProblem`` systems."""
+    """Solve Kamino dual problems with projected DVI iterations.
+
+    Bilateral constraints are solved as a direct block when available, while
+    limits and frictional contacts use projected Gauss-Seidel, Jacobi, or
+    graph-colored updates. Dense and matrix-free sparse problems share the
+    same solution, warm-start, status, and diagnostics contract.
+    """
 
     Config = DVISolverConfig
 
     def __init__(
         self,
         model: ModelKamino | None = None,
+        contacts: ContactsKamino | None = None,
+        problem: DualProblem | None = None,
         config: list[DVISolver.Config] | DVISolver.Config | None = None,
-        warmstart: PADMMWarmStartMode = PADMMWarmStartMode.NONE,
+        warmstart: WarmStartMode = WarmStartMode.NONE,
         collect_info: bool = False,
     ):
+        """Initialize a DVI solver and optionally allocate it for a model.
+
+        Args:
+            model: Model that determines solver allocation sizes.
+            contacts: Contact topology used for graph-colored contact updates.
+            problem: Optional sparse problem used to precompute topology outside
+                the first simulation step.
+            config: One DVI config or one config per world.
+            warmstart: Source used to initialize constraint impulses.
+            collect_info: Whether to retain terminal per-world diagnostics.
+        """
         self._config: list[DVISolver.Config] = []
-        self._warmstart: PADMMWarmStartMode = PADMMWarmStartMode.NONE
+        self._warmstart: WarmStartMode = WarmStartMode.NONE
         self._collect_info: bool = False
         self._size: SizeKamino | None = None
         self._data: DVIData | None = None
@@ -89,10 +108,18 @@ class DVISolver:
             ]
             | None
         ) = None
+        self._all_worlds_mask: wp.array[wp.bool] | None = None
         self._device: wp.DeviceLike = None
 
         if model is not None:
-            self.finalize(model=model, config=config, warmstart=warmstart, collect_info=collect_info)
+            self.finalize(
+                model=model,
+                contacts=contacts,
+                problem=problem,
+                config=config,
+                warmstart=warmstart,
+                collect_info=collect_info,
+            )
 
     @property
     def config(self) -> list[DVISolver.Config]:
@@ -116,14 +143,30 @@ class DVISolver:
         """Device on which solver data is allocated."""
         return self._device
 
+    @property
+    def all_worlds_mask(self) -> wp.array[wp.bool]:
+        """Boolean mask selecting every world for sparse operator products."""
+        return self._all_worlds_mask
+
     def finalize(
         self,
         model: ModelKamino,
+        contacts: ContactsKamino | None = None,
+        problem: DualProblem | None = None,
         config: list[DVISolver.Config] | DVISolver.Config | None = None,
-        warmstart: PADMMWarmStartMode = PADMMWarmStartMode.NONE,
+        warmstart: WarmStartMode = WarmStartMode.NONE,
         collect_info: bool = False,
     ):
-        """Allocate DVI solver data for ``model``."""
+        """Allocate solver data and precompute model-dependent topology.
+
+        Args:
+            model: Model that determines solver allocation sizes.
+            contacts: Contact topology used for graph-colored contact updates.
+            problem: Optional sparse problem used to precompute topology.
+            config: One DVI config or one config per world.
+            warmstart: Source used to initialize constraint impulses.
+            collect_info: Whether to retain terminal per-world diagnostics.
+        """
         if model is None or not isinstance(model, ModelKamino):
             raise ValueError("A model of type `ModelKamino` must be provided.")
 
@@ -139,8 +182,12 @@ class DVISolver:
         self._has_contact_block_preconditioner = any(c.contact_block_preconditioner for c in self._config)
         self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
         self._bilateral_nzb_pairs = None
-        self._data = DVIData(size=self._size, device=self._device)
+        self._data = DVIData(size=self._size, collect_info=self._collect_info, device=self._device)
+        self._all_worlds_mask = wp.ones(shape=(self._size.num_worlds,), dtype=wp.bool, device=self._device)
         self._allocate_bilateral_solver(model)
+        self.set_contacts(contacts)
+        if problem is not None and problem.sparse:
+            prepare_sparse(self, problem)
 
         configs = [convert_config_to_struct(c) for c in self._config]
         with wp.ScopedDevice(self._device):
@@ -226,6 +273,8 @@ class DVISolver:
     def reset(self, problem: DualProblem | None = None, world_mask: wp.array[wp.bool] | None = None):
         """Reset scratch state and cached solution data."""
         self._data.state.reset()
+        if self._data.info is not None:
+            self._data.info.zero()
         if world_mask is None:
             self._data.solution.zero()
         else:
@@ -246,6 +295,7 @@ class DVISolver:
 
     def coldstart(self):
         """Prepare a cold-start solve."""
+        self._data.state.reset()
         self._data.solution.zero()
 
     def warmstart(
@@ -257,14 +307,15 @@ class DVISolver:
         contacts: ContactsKamino | None = None,
     ):
         """Prepare a warm-start solve."""
+        self._data.state.reset()
         self.set_contacts(contacts)
 
         match self._warmstart:
-            case PADMMWarmStartMode.NONE:
+            case WarmStartMode.NONE:
                 self._data.solution.zero()
-            case PADMMWarmStartMode.INTERNAL:
+            case WarmStartMode.INTERNAL:
                 self._warmstart_from_solution(problem)
-            case PADMMWarmStartMode.CONTAINERS:
+            case WarmStartMode.CONTAINERS:
                 self._warmstart_from_containers(problem, model, data, limits, contacts)
             case _:
                 raise ValueError(f"Invalid warmstart mode: {self._warmstart}")
@@ -279,6 +330,8 @@ class DVISolver:
         )
 
         if problem.sparse:
+            if self._bilateral_nzb_pairs is None:
+                prepare_sparse(self, problem)
             solve_sparse(self, problem)
         elif self._has_contact_block_preconditioner and self._size.max_of_max_contacts > 0:
             wp.launch(
@@ -379,6 +432,9 @@ class DVISolver:
             ],
             device=self.device,
         )
+
+        if self._collect_info:
+            wp.copy(self._data.info.status, self._data.status)
 
         wp.launch(
             kernel=_unprecondition_dvi_solution,
@@ -626,7 +682,7 @@ class DVISolver:
 
     def _warmstart_from_solution(self, problem: DualProblem):
         wp.launch(
-            kernel=_apply_dual_preconditioner_to_solution,
+            kernel=apply_dual_preconditioner_to_solution,
             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
             inputs=[
                 problem.data.dim,
@@ -649,7 +705,7 @@ class DVISolver:
         self._data.solution.zero()
         if model.size.sum_of_num_joints > 0:
             wp.launch(
-                kernel=_warmstart_joint_constraints,
+                kernel=warmstart_joint_constraints,
                 dim=model.size.sum_of_num_joints,
                 inputs=[
                     model.time.dt,
@@ -670,7 +726,7 @@ class DVISolver:
             )
         if limits is not None and limits.model_max_limits_host > 0:
             wp.launch(
-                kernel=_warmstart_limit_constraints,
+                kernel=warmstart_limit_constraints,
                 dim=limits.model_max_limits_host,
                 inputs=[
                     model.time.dt,
@@ -690,7 +746,7 @@ class DVISolver:
             )
         if contacts is not None and contacts.model_max_contacts_host > 0:
             wp.launch(
-                kernel=_warmstart_contact_constraints,
+                kernel=warmstart_contact_constraints,
                 dim=contacts.model_max_contacts_host,
                 inputs=[
                     model.time.dt,

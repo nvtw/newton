@@ -9,6 +9,15 @@ import warp as wp
 
 from ...core.math import FLOAT32_EPS
 from ..padmm.math import project_to_coulomb_cone, project_to_coulomb_dual_cone
+from .projections import (
+    contact_trace_preconditioner as _contact_trace_preconditioner,
+)
+from .projections import (
+    project_contact_block_update as _project_contact_block_update,
+)
+from .projections import (
+    project_contact_diagonal_update as _project_contact_diagonal_update,
+)
 from .types import DVIConfigStruct, DVIStatus
 
 wp.set_module_options({"enable_backward": False})
@@ -55,50 +64,6 @@ def _contact_velocity_aug(
     v_n = _compute_row_velocity(ncts, mio, vio, ccio + 2, D, v_f, lambdas)
     vt_norm = wp.sqrt(v_t0 * v_t0 + v_t1 * v_t1)
     return vec3f(v_t0, v_t1, v_n + mu[cio + cid] * vt_norm)
-
-
-@wp.func
-def _project_contact_diagonal_update(
-    lambda_old: vec3f,
-    v_c: vec3f,
-    D_diag: vec3f,
-    regularization: float32,
-    omega: float32,
-    mu: float32,
-) -> vec3f:
-    lambda_arg = lambda_old
-    if D_diag.x > FLOAT32_EPS:
-        lambda_arg.x = lambda_old.x - omega * v_c.x / (D_diag.x + regularization)
-    if D_diag.y > FLOAT32_EPS:
-        lambda_arg.y = lambda_old.y - omega * v_c.y / (D_diag.y + regularization)
-    if D_diag.z > FLOAT32_EPS:
-        lambda_arg.z = lambda_old.z - omega * v_c.z / (D_diag.z + regularization)
-    return project_to_coulomb_cone(lambda_arg, mu)
-
-
-@wp.func
-def _project_contact_block_update(
-    lambda_old: vec3f,
-    v_c: vec3f,
-    D_diag: vec3f,
-    D_block_inv: mat33f,
-    regularization: float32,
-    omega: float32,
-    mu: float32,
-) -> vec3f:
-    inv_diag_norm = wp.abs(D_block_inv[0, 0]) + wp.abs(D_block_inv[1, 1]) + wp.abs(D_block_inv[2, 2])
-    lambda_arg = lambda_old
-    if inv_diag_norm > FLOAT32_EPS:
-        lambda_arg = lambda_old - omega * (D_block_inv * v_c)
-    else:
-        return _project_contact_diagonal_update(lambda_old, v_c, D_diag, regularization, omega, mu)
-    return project_to_coulomb_cone(lambda_arg, mu)
-
-
-@wp.func
-def _contact_trace_preconditioner(D_diag: vec3f) -> vec3f:
-    D_eff = (D_diag.x + D_diag.y + D_diag.z) / float32(3.0)
-    return vec3f(D_eff, D_eff, D_eff)
 
 
 @wp.kernel

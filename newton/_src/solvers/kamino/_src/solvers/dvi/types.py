@@ -10,7 +10,7 @@ import warp as wp
 from ....config import DVISolverConfig
 from ...core.size import SizeKamino
 from ...linalg import DenseLinearOperatorData
-from ..padmm.types import PADMMSolution
+from ..common import DualSolution
 
 wp.set_module_options({"enable_backward": False})
 
@@ -57,19 +57,38 @@ class DVIConfigStruct:
 
 @wp.struct
 class DVIStatus:
-    """Per-world DVI solver status.
-
-    Field names intentionally match :class:`PADMMStatus` so existing benchmark
-    code can read either solver through the same status path.
-    """
+    """Per-world DVI convergence status."""
 
     converged: int32
+    """Whether all DVI feasibility and complementarity residuals satisfy tolerance."""
     iterations: int32
-    """Projected iteration count; direct-bilateral solves report block sweeps."""
+    """Projected sweeps; direct-bilateral solves report block/contact sweeps."""
     r_p: float32
+    """Primal cone-feasibility residual."""
     r_d: float32
+    """Maximum dual cone-feasibility and bilateral velocity residual."""
     r_c: float32
+    """Complementarity residual."""
     r_b: float32
+    """Bilateral constraint-space velocity residual."""
+
+
+class DVIInfo:
+    """Optional terminal convergence diagnostics for each simulated world."""
+
+    def __init__(self, size: SizeKamino | None = None):
+        self.status: wp.array[DVIStatus] | None = None
+        """Terminal DVI status, shape ``(num_worlds,)``."""
+        if size is not None:
+            self.finalize(size)
+
+    def finalize(self, size: SizeKamino) -> None:
+        """Allocate diagnostic arrays for a model size."""
+        self.status = wp.zeros(shape=(size.num_worlds,), dtype=DVIStatus)
+
+    def zero(self) -> None:
+        """Reset diagnostics to zero."""
+        self.status.zero_()
 
 
 class DVIState:
@@ -77,6 +96,7 @@ class DVIState:
 
     def __init__(self, size: SizeKamino | None = None):
         self.sigma: wp.array[vec2f] | None = None
+        """Zero proximal terms used when evaluating shared solution metrics."""
         self.v_aug: wp.array[float32] | None = None
         self.s: wp.array[float32] | None = None
         self.scratch: wp.array[float32] | None = None
@@ -87,7 +107,6 @@ class DVIState:
         self.contact_block_inv: wp.array[mat33f] | None = None
         self.contact_colors: wp.array[int32] | None = None
         self.contact_num_colors: wp.array[int32] | None = None
-        self.world_mask: wp.array[wp.bool] | None = None
         if size is not None:
             self.finalize(size)
 
@@ -104,7 +123,6 @@ class DVIState:
         self.contact_block_inv = wp.zeros(max(1, size.sum_of_max_contacts), dtype=mat33f)
         self.contact_colors = wp.full(max(1, size.sum_of_max_contacts), -1, dtype=int32)
         self.contact_num_colors = wp.zeros(max(1, size.num_worlds), dtype=int32)
-        self.world_mask = wp.full(max(1, size.num_worlds), True, dtype=wp.bool)
 
     def reset(self):
         """Reset scratch arrays to zero."""
@@ -127,23 +145,26 @@ class DVIData:
     def __init__(
         self,
         size: SizeKamino | None = None,
+        collect_info: bool = False,
         device: wp.DeviceLike = None,
     ):
         self.config: wp.array[DVIConfigStruct] | None = None
         self.status: wp.array[DVIStatus] | None = None
         self.state: DVIState | None = None
-        self.solution: PADMMSolution | None = None
+        self.solution: DualSolution | None = None
+        self.info: DVIInfo | None = None
         self.bilateral_operator: DenseLinearOperatorData | None = None
         if size is not None:
-            self.finalize(size=size, device=device)
+            self.finalize(size=size, collect_info=collect_info, device=device)
 
-    def finalize(self, size: SizeKamino, device: wp.DeviceLike = None):
+    def finalize(self, size: SizeKamino, collect_info: bool = False, device: wp.DeviceLike = None):
         """Allocate DVI data arrays."""
         with wp.ScopedDevice(device):
             self.config = wp.zeros(shape=(size.num_worlds,), dtype=DVIConfigStruct)
             self.status = wp.zeros(shape=(size.num_worlds,), dtype=DVIStatus)
             self.state = DVIState(size)
-            self.solution = PADMMSolution(size)
+            self.solution = DualSolution(size)
+            self.info = DVIInfo(size) if collect_info else None
             self.bilateral_operator = None
 
 

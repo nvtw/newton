@@ -22,6 +22,7 @@ from newton._src.solvers.kamino._src.utils.control import AnimationJointReferenc
 from newton._src.solvers.kamino._src.utils.io.usd import USDImporter
 from newton._src.solvers.kamino._src.utils.sim import SimulationLogger, Simulator, ViewerKamino
 from newton._src.solvers.kamino.examples import get_examples_output_path, run_headless
+from newton._src.solvers.kamino.solver_kamino import SolverKamino
 
 ###
 # Module configs
@@ -230,9 +231,9 @@ class Example:
 
         # Set solver config
         config = Simulator.Config()
+        config.solver = SolverKamino.Config(dynamics_solver=dynamics_solver)
         config.dt = self.sim_dt
         config.collision_detector.pipeline = "unified"  # Select from {"primitive", "unified"}
-        config.solver.dynamics_solver = dynamics_solver
         config.solver.sparse_jacobian = dynamics_solver == "dvi"
         config.solver.sparse_dynamics = dynamics_solver == "dvi"
         config.solver.integrator = "moreau"  # Select from {"euler", "moreau"}

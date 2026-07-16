@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from ...dynamics.delassus import BlockSparseMatrixFreeDelassusOperator
 from ...dynamics.dual import DualProblem
 from . import sparse_kernels
 from .kernels import (
@@ -39,6 +40,13 @@ _SPARSE_DELASSUS_ROWS_JOINTS = 0
 _SPARSE_DELASSUS_ROWS_UNILATERAL = 1
 
 
+def _get_sparse_delassus(problem: DualProblem) -> BlockSparseMatrixFreeDelassusOperator:
+    delassus = problem.delassus
+    if not isinstance(delassus, BlockSparseMatrixFreeDelassusOperator):
+        raise TypeError("Sparse DVI requires a `BlockSparseMatrixFreeDelassusOperator`.")
+    return delassus
+
+
 def solve_sparse(solver, problem: DualProblem) -> None:
     """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
     if solver._has_contact_block_preconditioner and solver._size.max_of_max_contacts > 0:
@@ -50,6 +58,13 @@ def solve_sparse(solver, problem: DualProblem) -> None:
         _solve_sparse_jacobi(solver, problem)
 
 
+def prepare_sparse(solver, problem: DualProblem) -> None:
+    """Precompute host-derived sparse topology before the first solve."""
+    _get_sparse_delassus(problem)
+    if solver._bilateral_solver is not None and solver._data.bilateral_operator is not None:
+        _build_sparse_bilateral_pairs(solver, problem)
+
+
 def _solve_sparse_jacobi(solver, problem: DualProblem) -> None:
     state = solver._data.state
     problem.delassus.diagonal(state.scratch)
@@ -58,7 +73,7 @@ def _solve_sparse_jacobi(solver, problem: DualProblem) -> None:
         problem.delassus.matvec(
             x=solver._data.solution.lambdas,
             y=state.v_aug,
-            world_mask=state.world_mask,
+            world_mask=solver.all_worlds_mask,
         )
         wp.launch(
             kernel=_solve_dvi_sparse_jacobi_update,
@@ -88,7 +103,7 @@ def _solve_sparse_jacobi(solver, problem: DualProblem) -> None:
     problem.delassus.matvec(
         x=solver._data.solution.lambdas,
         y=state.v_aug,
-        world_mask=state.world_mask,
+        world_mask=solver.all_worlds_mask,
     )
     wp.launch(
         kernel=_compute_dvi_sparse_solution_vectors,
@@ -120,7 +135,7 @@ def _compute_sparse_solution_vectors(solver, problem: DualProblem) -> None:
     problem.delassus.matvec(
         x=solver._data.solution.lambdas,
         y=state.v_aug,
-        world_mask=state.world_mask,
+        world_mask=solver.all_worlds_mask,
     )
     wp.launch(
         kernel=_compute_dvi_sparse_solution_vectors,
@@ -137,43 +152,24 @@ def _compute_sparse_solution_vectors(solver, problem: DualProblem) -> None:
     )
 
 
-def _sparse_delassus_regularization(problem: DualProblem) -> wp.array[wp.float32] | None:
-    combined_regularization = getattr(problem.delassus, "_combined_regularization", None)
-    if combined_regularization is not None:
-        return combined_regularization
-    return getattr(problem.delassus, "_eta", None)
-
-
 def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) -> None:
-    delassus = problem.delassus
+    delassus = _get_sparse_delassus(problem)
     state = solver._data.state
-    regularization = _sparse_delassus_regularization(problem)
-    transpose_matrix = getattr(delassus, "_transpose_op_matrix", None)
-    body_space = getattr(delassus, "_vec_temp_body_space", None)
-    bsm = getattr(delassus, "bsm", None)
+    regularization = delassus.regularization
+    transpose_matrix = delassus.transpose_operator_matrix
+    body_space = delassus.body_space_scratch
+    bsm = delassus.bsm
+    if bsm is None or delassus.ATy_op is None:
+        raise RuntimeError("Sparse DVI row products require initialized Delassus sparse operators.")
 
-    if (
-        regularization is None
-        or transpose_matrix is None
-        or body_space is None
-        or bsm is None
-        or getattr(delassus, "ATy_op", None) is None
-    ):
-        delassus.matvec(
-            x=solver._data.solution.lambdas,
-            y=state.v_aug,
-            world_mask=state.world_mask,
-        )
-        return
-
-    if getattr(delassus, "_needs_update", False):
+    if delassus.needs_update:
         delassus.update()
 
     delassus.ATy_op(
         transpose_matrix,
         solver._data.solution.lambdas,
         body_space,
-        state.world_mask,
+        solver.all_worlds_mask,
     )
     state.v_aug.zero_()
     wp.launch(
@@ -194,7 +190,7 @@ def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) ->
             body_space,
             state.v_aug,
             solver._data.solution.lambdas,
-            state.world_mask,
+            solver.all_worlds_mask,
         ],
         device=solver.device,
     )
@@ -244,38 +240,33 @@ def _sparse_delassus_update_unilateral_offsets(
     block_iteration: int,
     contact_iteration: int,
 ) -> bool:
-    delassus = problem.delassus
+    delassus = _get_sparse_delassus(problem)
     state = solver._data.state
-    regularization = _sparse_delassus_regularization(problem)
-    transpose_matrix = getattr(delassus, "_transpose_op_matrix", None)
-    body_space = getattr(delassus, "_vec_temp_body_space", None)
-    bsm = getattr(delassus, "bsm", None)
-    jacobians = getattr(delassus, "_jacobians", None)
-    limits = getattr(delassus, "_limits", None)
-    contacts = getattr(delassus, "_contacts", None)
-    limit_offsets = getattr(jacobians, "_J_cts_limit_nzb_offsets", None)
-    contact_offsets = getattr(jacobians, "_J_cts_contact_nzb_offsets", None)
-    has_limits = limits is not None and limits.model_max_limits_host > 0 and limit_offsets is not None
-    has_contacts = contacts is not None and contacts.model_max_contacts_host > 0 and contact_offsets is not None
+    regularization = delassus.regularization
+    transpose_matrix = delassus.transpose_operator_matrix
+    body_space = delassus.body_space_scratch
+    bsm = delassus.bsm
+    jacobians = delassus.jacobians
+    limits = delassus.limits
+    contacts = delassus.contacts
+    limit_offsets = jacobians.limit_constraint_nzb_offsets
+    contact_offsets = jacobians.contact_constraint_nzb_offsets
+    has_limits = limits is not None and limits.model_max_limits_host > 0
+    has_contacts = contacts is not None and contacts.model_max_contacts_host > 0
 
-    if (
-        regularization is None
-        or transpose_matrix is None
-        or body_space is None
-        or bsm is None
-        or getattr(delassus, "ATy_op", None) is None
-        or not (has_limits or has_contacts)
-    ):
+    if not (has_limits or has_contacts):
         return False
+    if bsm is None or delassus.ATy_op is None:
+        raise RuntimeError("Sparse DVI offset updates require initialized Delassus sparse operators.")
 
-    if getattr(delassus, "_needs_update", False):
+    if delassus.needs_update:
         delassus.update()
 
     delassus.ATy_op(
         transpose_matrix,
         solver._data.solution.lambdas,
         body_space,
-        state.world_mask,
+        solver.all_worlds_mask,
     )
 
     if has_limits and has_contacts:
@@ -427,7 +418,7 @@ def _factor_sparse_bilateral_block(solver, problem: DualProblem) -> None:
 
     jacobian = problem.delassus.constraint_jacobian
     if solver._bilateral_nzb_pairs is None:
-        _build_sparse_bilateral_pairs(solver, problem)
+        raise RuntimeError("Sparse DVI topology is not prepared. Call `prepare_sparse()` before solving.")
     wp.launch(
         kernel=_set_sparse_bilateral_diagonal,
         dim=(solver._size.num_worlds, solver._size.max_of_num_joint_cts),

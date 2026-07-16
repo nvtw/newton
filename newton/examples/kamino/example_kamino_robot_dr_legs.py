@@ -73,8 +73,10 @@ class Example:
         self.model.rigid_contact_max = 72 * self.world_count
 
         # Create the Kamino solver for the given model
-        self.config = newton.solvers.SolverKamino.Config.from_model(self.model)
-        self.config.dynamics_solver = self.dynamics_solver
+        self.config = newton.solvers.SolverKamino.Config.from_model(
+            self.model,
+            dynamics_solver=self.dynamics_solver,
+        )
         self.config.use_fk_solver = True
         self.config.use_collision_detector = self.use_kamino_contacts
         self.config.dynamics.linear_solver_type = self.linear_solver_type
