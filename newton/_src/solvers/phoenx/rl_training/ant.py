@@ -74,6 +74,11 @@ def ant_observe_reward_kernel(
     min_height: wp.float32,
     max_height: wp.float32,
     min_upright_cos: wp.float32,
+    max_abs_root_position: wp.float32,
+    max_abs_root_linear_velocity: wp.float32,
+    max_abs_root_angular_velocity: wp.float32,
+    max_abs_joint_position: wp.float32,
+    max_abs_joint_velocity: wp.float32,
     forward_reward_weight: wp.float32,
     healthy_reward: wp.float32,
     ctrl_cost_weight: wp.float32,
@@ -127,6 +132,35 @@ def ant_observe_reward_kernel(
             bad_state = wp.int32(1)
         if height < min_height or height > max_height or upright < min_upright_cos:
             bad_state = wp.int32(1)
+        for j in range(3):
+            root_position = joint_q[q_base + j]
+            root_linear_velocity = joint_qd[qd_base + j]
+            root_angular_velocity = joint_qd[qd_base + wp.int32(3) + j]
+            if (
+                not wp.isfinite(root_position)
+                or not wp.isfinite(root_linear_velocity)
+                or not wp.isfinite(root_angular_velocity)
+                or (max_abs_root_position > wp.float32(0.0) and wp.abs(root_position) > max_abs_root_position)
+                or (
+                    max_abs_root_linear_velocity > wp.float32(0.0)
+                    and wp.abs(root_linear_velocity) > max_abs_root_linear_velocity
+                )
+                or (
+                    max_abs_root_angular_velocity > wp.float32(0.0)
+                    and wp.abs(root_angular_velocity) > max_abs_root_angular_velocity
+                )
+            ):
+                bad_state = wp.int32(1)
+        for j in range(ACTION_DIM_ANT):
+            joint_position = joint_q[q_base + wp.int32(7) + j]
+            joint_velocity = joint_qd[qd_base + wp.int32(6) + j]
+            if (
+                not wp.isfinite(joint_position)
+                or not wp.isfinite(joint_velocity)
+                or (max_abs_joint_position > wp.float32(0.0) and wp.abs(joint_position) > max_abs_joint_position)
+                or (max_abs_joint_velocity > wp.float32(0.0) and wp.abs(joint_velocity) > max_abs_joint_velocity)
+            ):
+                bad_state = wp.int32(1)
 
         ctrl_cost = wp.float32(0.0)
         action_rate_cost = wp.float32(0.0)
@@ -147,7 +181,9 @@ def ant_observe_reward_kernel(
             - angular_cost_weight * angular_cost
             - vertical_cost_weight * vertical_cost
         )
-        if bad_state != wp.int32(0) or not wp.isfinite(reward):
+        if not wp.isfinite(reward):
+            bad_state = wp.int32(1)
+        if bad_state != wp.int32(0):
             reward = termination_reward
 
         done = wp.float32(0.0)
@@ -225,6 +261,11 @@ class ConfigEnvAntPhoenX:
     min_height: float = 0.25
     max_height: float = 1.4
     min_upright_cos: float = 0.0
+    max_abs_root_position: float = 100.0
+    max_abs_root_linear_velocity: float = 50.0
+    max_abs_root_angular_velocity: float = 100.0
+    max_abs_joint_position: float = 20.0
+    max_abs_joint_velocity: float = 200.0
     forward_reward_weight: float = 1.0
     healthy_reward: float = 1.0
     ctrl_cost_weight: float = 0.05
@@ -253,6 +294,15 @@ class EnvAntPhoenX:
             raise ValueError("world_count must be positive")
         if int(self.config.sim_substeps) <= 0:
             raise ValueError("sim_substeps must be positive")
+        for name in (
+            "max_abs_root_position",
+            "max_abs_root_linear_velocity",
+            "max_abs_root_angular_velocity",
+            "max_abs_joint_position",
+            "max_abs_joint_velocity",
+        ):
+            if float(getattr(self.config, name)) < 0.0:
+                raise ValueError(f"{name} must be non-negative")
 
         self.model = self._build_model()
         self.coord_stride = int(self.model.joint_coord_count) // self.world_count
@@ -334,6 +384,11 @@ class EnvAntPhoenX:
                 float(self.config.min_height),
                 float(self.config.max_height),
                 float(self.config.min_upright_cos),
+                float(self.config.max_abs_root_position),
+                float(self.config.max_abs_root_linear_velocity),
+                float(self.config.max_abs_root_angular_velocity),
+                float(self.config.max_abs_joint_position),
+                float(self.config.max_abs_joint_velocity),
                 float(self.config.forward_reward_weight),
                 float(self.config.healthy_reward),
                 float(self.config.ctrl_cost_weight),
@@ -540,6 +595,11 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         min_height=float(args.min_height),
         max_height=float(args.max_height),
         min_upright_cos=float(args.min_upright_cos),
+        max_abs_root_position=float(args.max_abs_root_position),
+        max_abs_root_linear_velocity=float(args.max_abs_root_linear_velocity),
+        max_abs_root_angular_velocity=float(args.max_abs_root_angular_velocity),
+        max_abs_joint_position=float(args.max_abs_joint_position),
+        max_abs_joint_velocity=float(args.max_abs_joint_velocity),
         forward_reward_weight=float(args.forward_reward_weight),
         healthy_reward=float(args.healthy_reward),
         ctrl_cost_weight=float(args.ctrl_cost_weight),
@@ -719,6 +779,11 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-height", type=float, default=0.25)
     parser.add_argument("--max-height", type=float, default=1.4)
     parser.add_argument("--min-upright-cos", type=float, default=0.0)
+    parser.add_argument("--max-abs-root-position", type=float, default=100.0)
+    parser.add_argument("--max-abs-root-linear-velocity", type=float, default=50.0)
+    parser.add_argument("--max-abs-root-angular-velocity", type=float, default=100.0)
+    parser.add_argument("--max-abs-joint-position", type=float, default=20.0)
+    parser.add_argument("--max-abs-joint-velocity", type=float, default=200.0)
     parser.add_argument("--ground-friction", type=float, default=1.5)
     parser.add_argument("--joint-noise", type=float, default=0.03)
     parser.add_argument("--velocity-noise", type=float, default=0.05)
