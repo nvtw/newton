@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>16 July 2026 · NCU-guided row-layout tests</strong></div>
+      <div class="stamp">Last updated<br><strong>16 July 2026 · NCU-guided row/basis tests</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Latest Nsight Compute results">
@@ -160,6 +160,11 @@
               <td>Body-response <code>vec3+vec3</code> scratch split</td>
               <td>Passed the same focused tests, then measured 2.066M physics steps/s.</td>
               <td><strong>Rejected.</strong> Lower stride than <code>spatial_vector</code> was still slower than the restored 2.105M baseline.</td>
+            </tr>
+            <tr>
+              <td>Unit-wrench response basis on current fp16x2 rows</td>
+              <td>Refreshed <code>bench_g1_response_basis_aba</code> against the current production row mode. Direct build+solve measured 422.8 &micro;s. Compressed basis prepare+solve measured 449.7 &micro;s; adaptive row materialization measured 360.6 &micro;s versus 341.5 &micro;s direct build alone.</td>
+              <td><strong>Rejected for production.</strong> The basis idea is a real larger algorithmic candidate, but current measured fp16x2 production already beats it end-to-end on the optimistic two-foot G1 case.</td>
             </tr>
           </tbody>
         </table>
@@ -205,7 +210,7 @@
       </div>
       <p class="profile-note">Current retained protocol changes: lower only the cheap full-gate promotion screen to 0.84, and switch PPO replay ratio from 3.0 to 2.0 after the frozen 78.64M-sample screen. The full gate is unchanged; the late replay switch is retained only because the zero-training run still passes the full gate on seeds 1000 and 1001.</p>
       <p class="profile-note"><strong>Latest kernel validation:</strong> fused reference-path advance/publish plus packed contact-row reuse improved raw G1 stepping from 1.6466M to about 1.663M env/s and steady training from 0.9276M to 0.9326M samples/s. Physics tests pass; a fresh 75-iteration learning screen passes at 0.712 battery performance with zero falls; the late-replay iteration-265 policy passes full gates at 0.924 and 0.920 battery performance with zero falls.</p>
-      <p class="profile-note"><strong>Latest measured kernel profile:</strong> nsys ranks packed generalized contact-row construction at 25.7% and generalized contact tile solve at 21.1% of shared-physics GPU kernel time. User-run NCU confirms the row builder is memory-layout limited: 796.5 &micro;s, 57.5% memory throughput, 31.2% SM throughput, 72.8% excessive global sectors, and dominant uncoalesced body-response stores. Rejected measured candidates so far: 64-point pages (+0.8% isolated only), small-tail row branch (slower), vec4+vec2 body-response split (2.080M/2.098M physics steps/s), scalar component planes (1.964M physics steps/s), vec3+vec3 split (2.066M physics steps/s), leaf-joint body-response store elision (raw physics +1.4%, but same-command 8-iteration training A/B regressed from 0.937M to 0.919M samples/s), and final-joint-only store elision (2.086M/2.099M physics steps/s). Restored baseline after reverting rejected candidates: 2.105M physics steps/s.</p>
+      <p class="profile-note"><strong>Latest measured kernel profile:</strong> nsys ranks packed generalized contact-row construction at 25.7% and generalized contact tile solve at 21.1% of shared-physics GPU kernel time. User-run NCU confirms the row builder is memory-layout limited: 796.5 &micro;s, 57.5% memory throughput, 31.2% SM throughput, 72.8% excessive global sectors, and dominant uncoalesced body-response stores. Rejected measured candidates so far: 64-point pages (+0.8% isolated only), small-tail row branch (slower), vec4+vec2 body-response split (2.080M/2.098M physics steps/s), scalar component planes (1.964M physics steps/s), vec3+vec3 split (2.066M physics steps/s), leaf-joint body-response store elision (raw physics +1.4%, but same-command 8-iteration training A/B regressed from 0.937M to 0.919M samples/s), final-joint-only store elision (2.086M/2.099M physics steps/s), prepare_refresh_stride=2 in short training (0.933M samples/s versus 0.937M baseline), and unit-wrench response bases on current fp16x2 rows (compressed total 449.7 &micro;s versus 422.8 &micro;s direct). Restored baseline after reverting rejected production candidates: 2.105M physics steps/s.</p>
       <p class="profile-note"><strong>Next useful work:</strong> keep accumulating measured generic kernel wins, but the likely bigger needle movers remain contact-row construction, reduced ABA/contact formulation changes, and rollout/physics fusion that applies beyond G1.</p>
     </section>
 

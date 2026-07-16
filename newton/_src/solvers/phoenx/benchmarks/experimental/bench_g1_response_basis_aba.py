@@ -19,7 +19,6 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     DEFAULT_HERTZ_CONTACT,
     ContactColumnContainer,
     ContactContainer,
-    _build_packed_generalized_contact_rows_kernel,
     cc_get_bias,
     cc_get_bias_t1,
     cc_get_bias_t2,
@@ -137,6 +136,34 @@ def _synthesize_split_tile_kernel(
         storage="shared",
     )
     result = wp.tile_matmul(coefficients_tile, basis_tile)
+    packed_row = articulation * wp.int32(2 * 96)
+    if output_kind == wp.int32(0):
+        wp.tile_store(jacobian, result, offset=(packed_row, 0))
+    else:
+        wp.tile_store(response, result, offset=(packed_row, 0))
+
+
+@wp.kernel(enable_backward=False, module="experimental_g1_contact_basis_synthesis_split_fp16")
+def _synthesize_split_tile_fp16_kernel(
+    coefficients: wp.array2d[wp.float32],
+    basis: wp.array2d[wp.float32],
+    jacobian: wp.array2d[wp.float16],
+    response: wp.array2d[wp.float16],
+):
+    articulation, output_kind = wp.tid()
+    coefficients_tile = wp.tile_load(
+        coefficients,
+        shape=(_ROWS, _BASIS),
+        offset=(articulation * _ROWS, 0),
+        storage="shared",
+    )
+    basis_tile = wp.tile_load(
+        basis,
+        shape=(_BASIS, _DOFS),
+        offset=(articulation * _BASIS, output_kind * _DOFS),
+        storage="shared",
+    )
+    result = wp.tile_astype(wp.tile_matmul(coefficients_tile, basis_tile), dtype=wp.float16)
     packed_row = articulation * wp.int32(2 * 96)
     if output_kind == wp.int32(0):
         wp.tile_store(jacobian, result, offset=(packed_row, 0))
@@ -364,6 +391,34 @@ def _synthesize_split_tile_96_kernel(
         wp.tile_store(response, result, offset=(packed_row, 0))
 
 
+@wp.kernel(enable_backward=False, module="experimental_g1_contact_basis_synthesis_split_96_fp16")
+def _synthesize_split_tile_96_fp16_kernel(
+    coefficients: wp.array2d[wp.float32],
+    basis: wp.array2d[wp.float32],
+    jacobian: wp.array2d[wp.float16],
+    response: wp.array2d[wp.float16],
+):
+    articulation, output_kind = wp.tid()
+    coefficients_tile = wp.tile_load(
+        coefficients,
+        shape=(96, _BASIS),
+        offset=(articulation * wp.int32(96), 0),
+        storage="shared",
+    )
+    basis_tile = wp.tile_load(
+        basis,
+        shape=(_BASIS, _DOFS),
+        offset=(articulation * _BASIS, output_kind * _DOFS),
+        storage="shared",
+    )
+    result = wp.tile_astype(wp.tile_matmul(coefficients_tile, basis_tile), dtype=wp.float16)
+    packed_row = articulation * wp.int32(2 * 96)
+    if output_kind == wp.int32(0):
+        wp.tile_store(jacobian, result, offset=(packed_row, 0))
+    else:
+        wp.tile_store(response, result, offset=(packed_row, 0))
+
+
 @wp.kernel(enable_backward=False, module="experimental_g1_contact_basis_scatter")
 def _scatter_basis_kernel(
     synthesized: wp.array2d[wp.float32],
@@ -578,7 +633,7 @@ def main() -> int:
 
     def launch_direct() -> None:
         wp.launch(
-            _build_packed_generalized_contact_rows_kernel,
+            block.build_rows_kernel,
             dim=(env.world_count, 96),
             block_dim=int(args.basis_block_dim),
             inputs=[
@@ -682,21 +737,22 @@ def main() -> int:
                 block.tangent0,
                 block.row_velocity,
                 block.page_index,
-                block.packed_jacobian,
-                block.packed_response,
+                block.packed_jacobian_solve,
+                block.packed_response_solve,
                 env.solver.world.bodies,
                 wp.bool(False),
                 wp.int32(block.max_depth),
                 block.articulation_depth_start,
                 block.articulation_depth_joint,
             ],
-            outputs=[block.generalized_delta, block.generalized_body_delta],
+            outputs=[block.generalized_delta_solve, block.generalized_body_delta],
             device=device,
         )
 
     def launch_synthesis_split_96() -> None:
+        kernel = _synthesize_split_tile_96_fp16_kernel if block.packed_rows_fp16 else _synthesize_split_tile_96_kernel
         wp.launch_tiled(
-            _synthesize_split_tile_96_kernel,
+            kernel,
             dim=[env.world_count, 2],
             block_dim=128,
             inputs=[coefficients_96, basis_packed],
@@ -714,8 +770,9 @@ def main() -> int:
         )
 
     def launch_synthesis_split() -> None:
+        kernel = _synthesize_split_tile_fp16_kernel if block.packed_rows_fp16 else _synthesize_split_tile_kernel
         wp.launch_tiled(
-            _synthesize_split_tile_kernel,
+            kernel,
             dim=[env.world_count, 2],
             block_dim=64,
             inputs=[coefficients, basis_packed],
