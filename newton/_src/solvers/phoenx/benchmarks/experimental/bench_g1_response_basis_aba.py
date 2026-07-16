@@ -599,7 +599,6 @@ def main() -> int:
                 block.packed_response,
                 block.aba_joint_work,
                 block.aba_body_response,
-                block.aba_body_response_wide,
             ],
             device=device,
         )

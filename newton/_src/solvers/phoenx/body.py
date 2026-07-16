@@ -3,8 +3,6 @@
 One ``wp.array`` per field, indexed by body id. All fields are float32.
 """
 
-import os
-
 import numpy as np
 import warp as wp
 
@@ -20,13 +18,9 @@ __all__ = [
     "MOTION_DYNAMIC",
     "MOTION_KINEMATIC",
     "MOTION_STATIC",
-    "WIDE_LOADS_QUAT",
-    "WIDE_LOADS_SYM6",
-    "WIDE_LOADS_VW",
     "BodyContainer",
     "ReducedArticulationData",
     "body_alloc_velocity_storage",
-    "body_attach_wide_aliases",
     "body_container_zeros",
     "body_load_inv_inertia_sym6",
     "body_load_orientation",
@@ -39,43 +33,6 @@ __all__ = [
     "mat33_from_sym6",
     "sym6_from_mat33",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Wide (multi-word) loads for the per-cid gather-style body reads in the
-# multi-world fast-tail / block-world constraint kernels. Warp emits only
-# scalar 4-byte loads for vector types; aliasing the underlying buffers as
-# 8/16-byte words and loading via minimal ``wp.func_native`` snippets cuts
-# the load-request count 2-4x while reading the exact same bytes
-# (bit-identical results). Opt-in via ``PHOENX_BODY_WIDE_LOADS`` so A/B
-# comparisons run the untouched baseline by default:
-#
-# * ``vw``   -- velocity + angular_velocity interleaved per body into one
-#               24 B slot (three 8-byte words). This is the only field that
-#               needs a storage-layout change (two separate 12 B vec3 arrays
-#               cannot be 8-byte aligned per element); ``velocity`` /
-#               ``angular_velocity`` stay valid as strided vec3 views, so
-#               every non-wide reader / writer is unchanged.
-# * ``quat`` -- orientation as one 16-byte load (pure alias, no layout change).
-# * ``sym6`` -- inverse_inertia_world as three 8-byte words (pure alias).
-#
-# ``PHOENX_BODY_WIDE_LOADS=1`` (or ``all``) enables everything; a comma list
-# (e.g. ``vw,quat``) enables a subset.
-def _parse_wide_load_fields() -> frozenset[str]:
-    raw = os.environ.get("PHOENX_BODY_WIDE_LOADS", "").strip().lower()
-    if raw in ("", "0"):
-        return frozenset()
-    if raw in ("1", "all"):
-        return frozenset({"vw", "quat", "sym6"})
-    return frozenset(item.strip() for item in raw.split(",") if item.strip())
-
-
-_WIDE_LOAD_FIELDS = _parse_wide_load_fields()
-#: Debug: interleaved (v, w) layout without the wide kernel loads.
-_WIDE_VW_LAYOUT_ONLY: bool = "vwlayout" in _WIDE_LOAD_FIELDS
-WIDE_LOADS_VW: bool = "vw" in _WIDE_LOAD_FIELDS
-WIDE_LOADS_QUAT: bool = "quat" in _WIDE_LOAD_FIELDS
-WIDE_LOADS_SYM6: bool = "sym6" in _WIDE_LOAD_FIELDS
 
 
 # Motion types (mirrors Jitter2 ``MotionType``).
@@ -128,77 +85,6 @@ def inertia_sym6_unpack_np(s: np.ndarray) -> np.ndarray:
     out[..., 0, 2] = out[..., 2, 0] = s[..., 4]
     out[..., 1, 2] = out[..., 2, 1] = s[..., 5]
     return out
-
-
-# --- Wide-load native primitives (see PHOENX_BODY_WIDE_LOADS above) --------
-# Layout contract for ``_load_vw_wide`` / ``_store_vw_wide``: word ``3*b``
-# holds (vx, vy), ``3*b+1`` holds (vz, wx), ``3*b+2`` holds (wy, wz).
-
-_LOAD_VW_WIDE_SNIPPET = """
-    const unsigned long long* p = &arr.data[3 * b];
-    unsigned long long a0 = p[0];
-    unsigned long long a1 = p[1];
-    unsigned long long a2 = p[2];
-    union { unsigned long long u; float f[2]; } c;
-    wp::spatial_vectorf out;
-    c.u = a0; out[0] = c.f[0]; out[1] = c.f[1];
-    c.u = a1; out[2] = c.f[0]; out[3] = c.f[1];
-    c.u = a2; out[4] = c.f[0]; out[5] = c.f[1];
-    return out;
-"""
-
-
-@wp.func_native(_LOAD_VW_WIDE_SNIPPET)
-def _load_vw_wide(arr: wp.array[wp.uint64], b: wp.int32) -> wp.spatial_vector:
-    """Load body ``b``'s (velocity, angular_velocity) as three 8-byte words."""
-    ...
-
-
-_STORE_VW_WIDE_SNIPPET = """
-    unsigned long long* p = &arr.data[3 * b];
-    union { unsigned long long u; float f[2]; } c;
-    c.f[0] = v[0]; c.f[1] = v[1]; p[0] = c.u;
-    c.f[0] = v[2]; c.f[1] = w[0]; p[1] = c.u;
-    c.f[0] = w[1]; c.f[1] = w[2]; p[2] = c.u;
-"""
-
-
-@wp.func_native(_STORE_VW_WIDE_SNIPPET)
-def _store_vw_wide(arr: wp.array[wp.uint64], b: wp.int32, v: wp.vec3f, w: wp.vec3f):
-    """Store body ``b``'s (velocity, angular_velocity) as three 8-byte words."""
-    ...
-
-
-_LOAD_QUAT_WIDE_SNIPPET = """
-    const float4 q = *reinterpret_cast<const float4*>(&arr.data[2 * b]);
-    return wp::quatf(q.x, q.y, q.z, q.w);
-"""
-
-
-@wp.func_native(_LOAD_QUAT_WIDE_SNIPPET)
-def _load_quat_wide(arr: wp.array[wp.uint64], b: wp.int32) -> wp.quatf:
-    """Load body ``b``'s orientation as one 16-byte word."""
-    ...
-
-
-_LOAD_SYM6_WIDE_SNIPPET = """
-    const unsigned long long* p = &arr.data[3 * b];
-    unsigned long long a0 = p[0];
-    unsigned long long a1 = p[1];
-    unsigned long long a2 = p[2];
-    union { unsigned long long u; float f[2]; } c;
-    wp::vec_t<6, float> out;
-    c.u = a0; out[0] = c.f[0]; out[1] = c.f[1];
-    c.u = a1; out[2] = c.f[0]; out[3] = c.f[1];
-    c.u = a2; out[4] = c.f[0]; out[5] = c.f[1];
-    return out;
-"""
-
-
-@wp.func_native(_LOAD_SYM6_WIDE_SNIPPET)
-def _load_sym6_wide(arr: wp.array[wp.uint64], b: wp.int32) -> inertia_sym6:
-    """Load body ``b``'s packed symmetric inertia as three 8-byte words."""
-    ...
 
 
 @wp.struct
@@ -342,20 +228,6 @@ class BodyContainer:
     #: island build (so the live ``set_nr`` covers awake bodies only).
     island_root: wp.array[wp.int32]
 
-    #: Aliased wide views for the per-cid gather loads in the constraint hot
-    #: path (see the ``PHOENX_BODY_WIDE_LOADS`` note at the top of this
-    #: module). Never read unless the matching flag is enabled at import
-    #: time; small dummies otherwise.
-    #:
-    #: ``velocity_pair_u64``: 8-byte word view of the interleaved
-    #: (velocity, angular_velocity) buffer -- only meaningful when
-    #: :data:`WIDE_LOADS_VW` picked the interleaved layout at allocation.
-    velocity_pair_u64: wp.array[wp.uint64]
-    #: 8-byte word view aliasing :attr:`orientation` (2 words per quat).
-    orientation_u64: wp.array[wp.uint64]
-    #: 8-byte word view aliasing :attr:`inverse_inertia_world` (3 words each).
-    inverse_inertia_world_u64: wp.array[wp.uint64]
-
     #: Per-body counter: number of consecutive frames the body's island
     #: has had its max-velocity score below
     #: :attr:`PhoenXWorld.sleeping_velocity_threshold`. Reset to 0 the
@@ -369,107 +241,48 @@ class BodyContainer:
     frames_below_threshold: wp.array[wp.int32]
 
 
-def _alias_u64(parent: wp.array, count: int) -> wp.array:
-    """8-byte word view over ``parent``'s buffer (keeps ``parent`` alive)."""
-    alias = wp.array(ptr=parent.ptr, dtype=wp.uint64, shape=(count,), device=parent.device)
-    alias._ref = parent
-    return alias
-
-
 def body_alloc_velocity_storage(
     num_bodies: int,
     device: wp.DeviceLike = None,
     velocities: np.ndarray | None = None,
     angular_velocities: np.ndarray | None = None,
-) -> tuple[wp.array, wp.array, wp.array]:
-    """Allocate ``(velocity, angular_velocity, velocity_pair_u64)``.
-
-    Default layout: two contiguous vec3 arrays plus a dummy pair view.
-    With :data:`WIDE_LOADS_VW` the pair is interleaved per body into one
-    2N-element vec3 buffer (24 B, 8-byte aligned slots); ``velocity`` and
-    ``angular_velocity`` become strided views into it so all existing
-    readers / writers observe identical values, and ``velocity_pair_u64``
-    aliases the buffer for the wide load / store primitives.
+) -> tuple[wp.array, wp.array]:
+    """Allocate ``(velocity, angular_velocity)`` as two contiguous vec3 arrays.
 
     Both :class:`BodyContainer` construction sites (this module and
     ``world_builder``) must allocate through this helper.
     """
-    if (not WIDE_LOADS_VW and not _WIDE_VW_LAYOUT_ONLY) or num_bodies == 0:
-        if velocities is None:
-            vel = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
-            ang = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
-        else:
-            vel = wp.array(velocities, dtype=wp.vec3f, device=device)
-            ang = wp.array(angular_velocities, dtype=wp.vec3f, device=device)
-        return vel, ang, wp.zeros(3, dtype=wp.uint64, device=device)
     if velocities is None:
-        buf = wp.zeros(2 * num_bodies, dtype=wp.vec3f, device=device)
+        vel = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
+        ang = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     else:
-        interleaved = np.empty((2 * num_bodies, 3), dtype=np.float32)
-        interleaved[0::2] = np.asarray(velocities, dtype=np.float32)
-        interleaved[1::2] = np.asarray(angular_velocities, dtype=np.float32)
-        buf = wp.array(interleaved, dtype=wp.vec3f, device=device)
-    itemsize = 12  # vec3f
-    vel = wp.array(ptr=buf.ptr, dtype=wp.vec3f, shape=(num_bodies,), strides=(2 * itemsize,), device=buf.device)
-    vel._ref = buf
-    ang = wp.array(
-        ptr=buf.ptr + itemsize, dtype=wp.vec3f, shape=(num_bodies,), strides=(2 * itemsize,), device=buf.device
-    )
-    ang._ref = buf
-    return vel, ang, _alias_u64(buf, 3 * num_bodies)
-
-
-def body_attach_wide_aliases(c: BodyContainer, num_bodies: int, device: wp.DeviceLike = None) -> None:
-    """Set the ``orientation_u64`` / ``inverse_inertia_world_u64`` aliases.
-
-    Pure views over the already-allocated contiguous buffers (16 B quat ->
-    2 words, 24 B sym6 -> 3 words); dummies when the container is empty.
-    Call after ``orientation`` and ``inverse_inertia_world`` are set.
-    """
-    if num_bodies == 0:
-        c.orientation_u64 = wp.zeros(2, dtype=wp.uint64, device=device)
-        c.inverse_inertia_world_u64 = wp.zeros(3, dtype=wp.uint64, device=device)
-        return
-    c.orientation_u64 = _alias_u64(c.orientation, 2 * num_bodies)
-    c.inverse_inertia_world_u64 = _alias_u64(c.inverse_inertia_world, 3 * num_bodies)
+        vel = wp.array(velocities, dtype=wp.vec3f, device=device)
+        ang = wp.array(angular_velocities, dtype=wp.vec3f, device=device)
+    return vel, ang
 
 
 @wp.func
 def body_load_vw(bodies: BodyContainer, b: wp.int32):
-    """Load ``(velocity, angular_velocity)`` for body ``b`` (hot per-cid path).
-
-    Wide path (:data:`WIDE_LOADS_VW`): three 8-byte loads from the
-    interleaved pair buffer -- bit-identical to the scalar path.
-    """
-    if wp.static(WIDE_LOADS_VW):
-        vw = _load_vw_wide(bodies.velocity_pair_u64, b)
-        return wp.vec3f(vw[0], vw[1], vw[2]), wp.vec3f(vw[3], vw[4], vw[5])
+    """Load ``(velocity, angular_velocity)`` for body ``b`` (hot per-cid path)."""
     return bodies.velocity[b], bodies.angular_velocity[b]
 
 
 @wp.func
 def body_store_vw(bodies: BodyContainer, b: wp.int32, v: wp.vec3f, w: wp.vec3f):
     """Store ``(velocity, angular_velocity)`` for body ``b``; pairs :func:`body_load_vw`."""
-    if wp.static(WIDE_LOADS_VW):
-        _store_vw_wide(bodies.velocity_pair_u64, b, v, w)
-        return
     bodies.velocity[b] = v
     bodies.angular_velocity[b] = w
 
 
 @wp.func
 def body_load_orientation(bodies: BodyContainer, b: wp.int32) -> wp.quatf:
-    """Load body ``b``'s orientation (one 16-byte load under :data:`WIDE_LOADS_QUAT`)."""
-    if wp.static(WIDE_LOADS_QUAT):
-        return _load_quat_wide(bodies.orientation_u64, b)
+    """Load body ``b``'s orientation."""
     return bodies.orientation[b]
 
 
 @wp.func
 def body_load_inv_inertia_sym6(bodies: BodyContainer, b: wp.int32) -> inertia_sym6:
-    """Load body ``b``'s packed world inverse inertia (three 8-byte loads under :data:`WIDE_LOADS_SYM6`)."""
-    if wp.static(WIDE_LOADS_SYM6):
-        return _load_sym6_wide(bodies.inverse_inertia_world_u64, b)
+    """Load body ``b``'s packed world inverse inertia."""
     return bodies.inverse_inertia_world[b]
 
 
@@ -481,7 +294,7 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     """
     c = BodyContainer()
     c.position = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
-    c.velocity, c.angular_velocity, c.velocity_pair_u64 = body_alloc_velocity_storage(num_bodies, device)
+    c.velocity, c.angular_velocity = body_alloc_velocity_storage(num_bodies, device)
     c.orientation = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.body_com = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.inverse_inertia_world = wp.zeros(num_bodies, dtype=inertia_sym6, device=device)
@@ -507,7 +320,6 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.has_position_level_writers = wp.zeros(1, dtype=wp.int32, device=device)
     c.island_root = wp.full(num_bodies, value=-1, dtype=wp.int32, device=device)
     c.frames_below_threshold = wp.zeros(num_bodies, dtype=wp.int32, device=device)
-    body_attach_wide_aliases(c, num_bodies, device)
     return c
 
 

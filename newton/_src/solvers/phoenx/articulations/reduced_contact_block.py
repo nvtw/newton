@@ -886,41 +886,6 @@ def _build_generalized_contact_rows_kernel(
         body_response[articulation, local_joint, row] = parent_delta
 
 
-_LOAD_SPATIAL_WIDE_SNIPPET = """
-    const unsigned long long* p = &arr.data[offset];
-    unsigned long long a0 = p[0];
-    unsigned long long a1 = p[1];
-    unsigned long long a2 = p[2];
-    union { unsigned long long u; float f[2]; } c;
-    wp::spatial_vectorf out;
-    c.u = a0; out[0] = c.f[0]; out[1] = c.f[1];
-    c.u = a1; out[2] = c.f[0]; out[3] = c.f[1];
-    c.u = a2; out[4] = c.f[0]; out[5] = c.f[1];
-    return out;
-"""
-
-
-@wp.func_native(_LOAD_SPATIAL_WIDE_SNIPPET)
-def _load_spatial_wide(arr: wp.array[wp.uint64], offset: wp.int32) -> wp.spatial_vector:
-    """Load a spatial vector as three aligned 8-byte words (bit-identical)."""
-    ...
-
-
-_STORE_SPATIAL_WIDE_SNIPPET = """
-    unsigned long long* p = &arr.data[offset];
-    union { unsigned long long u; float f[2]; } c;
-    c.f[0] = value[0]; c.f[1] = value[1]; p[0] = c.u;
-    c.f[0] = value[2]; c.f[1] = value[3]; p[1] = c.u;
-    c.f[0] = value[4]; c.f[1] = value[5]; p[2] = c.u;
-"""
-
-
-@wp.func_native(_STORE_SPATIAL_WIDE_SNIPPET)
-def _store_spatial_wide(arr: wp.array[wp.uint64], offset: wp.int32, value: wp.spatial_vector):
-    """Store a spatial vector as three aligned 8-byte words (bit-identical)."""
-    ...
-
-
 def _bind_rows_dtype_annotations(func, rows_dtype, *names):
     """Bind row-array annotations to the variant dtype.
 
@@ -933,20 +898,10 @@ def _bind_rows_dtype_annotations(func, rows_dtype, *names):
     return func
 
 
-def _make_build_packed_rows_ops(fp16: bool, wide_body_response: bool = False):
-    """Packed row builder; ``fp16`` selects the FP16 row-storage variant.
-
-    ``wide_body_response`` routes the lane-strided ``body_response`` spatial
-    vectors (24 B stride per row lane) through three aligned 8-byte words
-    instead of six scalar 4-byte accesses — same values bit-identically,
-    half the load/store requests. 16-byte words are not safe here: row
-    offsets are odd multiples of 8 B without padding the element to 32 B.
-    """
+def _make_build_packed_rows_ops(fp16: bool):
+    """Packed row builder; ``fp16`` selects the FP16 row-storage variant."""
     _rows_dtype = wp.float16 if fp16 else wp.float32
-    wide = wide_body_response
-    module = wp.get_module(
-        "reduced_contact_rows_packed" + ("_fp16" if fp16 else "") + ("_wide" if wide else "")
-    )
+    module = wp.get_module("reduced_contact_rows_packed" + ("_fp16" if fp16 else ""))
 
     def _build_packed_generalized_row(
         articulation: wp.int32,
@@ -965,9 +920,7 @@ def _make_build_packed_rows_ops(fp16: bool, wide_body_response: bool = False):
         packed_response: wp.array2d[_rows_dtype],
         joint_work: wp.array3d[wp.float32],
         body_response: wp.array3d[wp.spatial_vector],
-        body_response_wide: wp.array[wp.uint64],
     ) -> wp.float32:
-        max_body = body_response.shape[1]
         source_body = row_body[packed_articulation, row]
         source_wrench = row_wrench[packed_articulation, row]
         path_start = data.body_path_start[source_body]
@@ -1011,14 +964,7 @@ def _make_build_packed_rows_ops(fp16: bool, wide_body_response: bool = False):
             parent = data.joint_parent[joint]
             parent_delta = wp.spatial_vector()
             if parent >= wp.int32(0):
-                if wp.static(wide):
-                    parent_joint = data.body_joint[parent] - start
-                    parent_delta = _load_spatial_wide(
-                        body_response_wide,
-                        ((articulation * max_body + parent_joint) * wp.int32(_MAX_ROWS) + row) * wp.int32(3),
-                    )
-                else:
-                    parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
+                parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
             dof_start = data.joint_qd_start[joint]
             dof_end = data.joint_qd_start[joint + wp.int32(1)]
             dof_count = dof_end - dof_start
@@ -1049,14 +995,7 @@ def _make_build_packed_rows_ops(fp16: bool, wide_body_response: bool = False):
                         # avoids a 144-byte-strided reload per DOF.
                         inverse_mass += wp.dot(data.joint_s[dof], source_wrench) * response_value
                     parent_delta += data.joint_s[dof] * response_value
-            if wp.static(wide):
-                _store_spatial_wide(
-                    body_response_wide,
-                    ((articulation * max_body + local_joint) * wp.int32(_MAX_ROWS) + row) * wp.int32(3),
-                    parent_delta,
-                )
-            else:
-                body_response[articulation, local_joint, row] = parent_delta
+            body_response[articulation, local_joint, row] = parent_delta
             if on_source_path:
                 path_cursor += wp.int32(1)
                 next_path_joint = wp.int32(-1)
@@ -1085,7 +1024,6 @@ def _make_build_packed_rows_ops(fp16: bool, wide_body_response: bool = False):
         packed_response: wp.array2d[_rows_dtype],
         joint_work: wp.array3d[wp.float32],
         body_response: wp.array3d[wp.spatial_vector],
-        body_response_wide: wp.array[wp.uint64],
     ):
         articulation, row = wp.tid()
         data = bodies.reduced
@@ -1137,7 +1075,6 @@ def _make_build_packed_rows_ops(fp16: bool, wide_body_response: bool = False):
             packed_response,
             joint_work,
             body_response,
-            body_response_wide,
         )
         if inverse_mass > wp.float32(1.0e-12):
             effective_mass = wp.float32(1.0) / inverse_mass
@@ -1158,15 +1095,14 @@ def _make_build_packed_rows_ops(fp16: bool, wide_body_response: bool = False):
     )
 
 
-_BUILD_PACKED_ROWS_KERNELS = {(False, False): _make_build_packed_rows_ops(False)}
-_build_packed_generalized_contact_rows_kernel = _BUILD_PACKED_ROWS_KERNELS[(False, False)]
+_BUILD_PACKED_ROWS_KERNELS = {False: _make_build_packed_rows_ops(False)}
+_build_packed_generalized_contact_rows_kernel = _BUILD_PACKED_ROWS_KERNELS[False]
 
 
-def _get_build_packed_rows_kernel(fp16: bool, wide_body_response: bool = False):
-    key = (fp16, wide_body_response)
-    if key not in _BUILD_PACKED_ROWS_KERNELS:
-        _BUILD_PACKED_ROWS_KERNELS[key] = _make_build_packed_rows_ops(fp16, wide_body_response)
-    return _BUILD_PACKED_ROWS_KERNELS[key]
+def _get_build_packed_rows_kernel(fp16: bool):
+    if fp16 not in _BUILD_PACKED_ROWS_KERNELS:
+        _BUILD_PACKED_ROWS_KERNELS[fp16] = _make_build_packed_rows_ops(fp16)
+    return _BUILD_PACKED_ROWS_KERNELS[fp16]
 
 
 def _make_transpose_response_kernel(fp16: bool):
@@ -1416,8 +1352,12 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
                     broadcast1 = wp.tile_from_thread(shape=max_dofs, value=lambda1, thread_idx=0, storage="shared")
                     broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
                     response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
-                    response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
-                    response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                    response1 = wp.tile_load(
+                        packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
+                    )
+                    response2 = wp.tile_load(
+                        packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
+                    )
                     generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
@@ -1473,8 +1413,12 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
                         )
                     else:
                         jacobian0 = wp.tile_load(packed_jacobian[packed_row], shape=max_dofs, storage="register")
-                        jacobian1 = wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
-                        jacobian2 = wp.tile_load(packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                        jacobian1 = wp.tile_load(
+                            packed_jacobian[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
+                        )
+                        jacobian2 = wp.tile_load(
+                            packed_jacobian[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
+                        )
                     jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
                         wp.tile_sum(jacobian0 * generalized_delta), 0
                     )
@@ -1577,8 +1521,12 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int, mode: str = "fp32"):
                     broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
                     broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
                     response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
-                    response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
-                    response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
+                    response1 = wp.tile_load(
+                        packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register"
+                    )
+                    response2 = wp.tile_load(
+                        packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register"
+                    )
                     generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
 
         wp.tile_store(generalized_delta_out[articulation], generalized_delta)
@@ -1789,13 +1737,8 @@ class ReducedContactBlockSystem:
             ),
         )
         self.contact_dof_width = _aligned_contact_dof_width(max_dof_count)
-        self.wide_body_response = os.environ.get("PHOENX_CONTACT_BODY_RESPONSE_WIDE", "0").lower() not in (
-            "0",
-            "",
-            "false",
-        )
         self.solve_kernel = _solve_generalized_contact_tile_ops(self.contact_dof_width, self.packed_rows_mode)[1]
-        self.build_rows_kernel = _get_build_packed_rows_kernel(self.packed_rows_fp16, self.wide_body_response)
+        self.build_rows_kernel = _get_build_packed_rows_kernel(self.packed_rows_fp16)
         self.transpose_kernel = _get_transpose_response_kernel(self.packed_rows_fp16)
         self.biased_page_launcher = None
         self.relax_page_launcher = None
@@ -1883,13 +1826,6 @@ class ReducedContactBlockSystem:
         self.aba_body_response = wp.zeros(
             (articulation_count, max_body_count, _MAX_ROWS),
             dtype=wp.spatial_vector,
-            device=self.device,
-        )
-        # Aliased flat u64 view (3 words per spatial vector) for the wide builder.
-        self.aba_body_response_wide = wp.array(
-            ptr=self.aba_body_response.ptr,
-            dtype=wp.uint64,
-            shape=(articulation_count * max_body_count * _MAX_ROWS * 3,),
             device=self.device,
         )
         self.generalized_body_delta = wp.zeros(
@@ -2263,7 +2199,6 @@ class ReducedContactBlockSystem:
                         self.packed_response,
                         self.aba_joint_work,
                         self.aba_body_response,
-                        self.aba_body_response_wide,
                     ],
                     device=self.device,
                 )
