@@ -1576,6 +1576,77 @@ def sac_actor_loss_kernel(
 
 
 @wp.kernel
+def sac_critic_loss_backward_kernel(
+    q1: wp.array2d[wp.float32],
+    q2: wp.array2d[wp.float32],
+    targets: wp.array[wp.float32],
+    batch_size: wp.int32,
+    q1_grad: wp.array2d[wp.float32],
+    q2_grad: wp.array2d[wp.float32],
+):
+    i = wp.tid()
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    q1_grad[i, 0] = (q1[i, 0] - targets[i]) * inv_batch
+    q2_grad[i, 0] = (q2[i, 0] - targets[i]) * inv_batch
+
+
+@wp.kernel
+def sac_actor_q_backward_kernel(
+    q1: wp.array2d[wp.float32],
+    q2: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    q1_grad: wp.array2d[wp.float32],
+    q2_grad: wp.array2d[wp.float32],
+):
+    i = wp.tid()
+    grad = -wp.float32(1.0) / wp.float32(batch_size)
+    q1_grad[i, 0] = grad if q1[i, 0] <= q2[i, 0] else wp.float32(0.0)
+    q2_grad[i, 0] = grad if q2[i, 0] < q1[i, 0] else wp.float32(0.0)
+
+
+@wp.kernel
+def sac_actor_policy_backward_kernel(
+    policy_out: wp.array2d[wp.float32],
+    eps: wp.array2d[wp.float32],
+    q_input_grad1: wp.array2d[wp.float32],
+    q_input_grad2: wp.array2d[wp.float32],
+    q1: wp.array2d[wp.float32],
+    q2: wp.array2d[wp.float32],
+    log_probs: wp.array[wp.float32],
+    obs_dim: wp.int32,
+    action_dim: wp.int32,
+    batch_size: wp.int32,
+    alpha: wp.float32,
+    log_std_min: wp.float32,
+    log_std_max: wp.float32,
+    loss: wp.array[wp.float32],
+    policy_out_grad: wp.array2d[wp.float32],
+):
+    row = wp.tid()
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    wp.atomic_add(loss, 0, (alpha * log_probs[row] - wp.min(q1[row, 0], q2[row, 0])) * inv_batch)
+    for action in range(action_dim):
+        mean = policy_out[row, action]
+        raw_log_std = policy_out[row, action_dim + action]
+        log_std = _clip(raw_log_std, log_std_min, log_std_max)
+        std_eps = wp.exp(log_std) * eps[row, action]
+        value = wp.tanh(mean + std_eps)
+        action_grad = q_input_grad1[row, obs_dim + action] + q_input_grad2[row, obs_dim + action]
+        correction_grad = (
+            wp.float32(2.0)
+            * value
+            * (wp.float32(1.0) - value * value)
+            / (wp.float32(1.0) - value * value + wp.float32(TANH_EPS))
+        )
+        pre_grad = action_grad * (wp.float32(1.0) - value * value) + alpha * inv_batch * correction_grad
+        policy_out_grad[row, action] = pre_grad
+        log_std_grad = wp.float32(0.0)
+        if raw_log_std >= log_std_min and raw_log_std <= log_std_max:
+            log_std_grad = pre_grad * std_eps - alpha * inv_batch
+        policy_out_grad[row, action_dim + action] = log_std_grad
+
+
+@wp.kernel
 def sac_alpha_loss_kernel(
     log_probs: wp.array[wp.float32],
     log_alpha: wp.array[wp.float32],

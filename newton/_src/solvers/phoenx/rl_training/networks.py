@@ -365,13 +365,22 @@ class WarpMLP:
             and int(weight.shape[1]) % DENSE_TILE_OUT == 0
         )
 
-    def backward_manual(self, output_grad: wp.array2d[wp.float32]) -> None:
-        """Backpropagate from an output gradient into parameter gradients."""
+    def backward_manual(
+        self,
+        output_grad: wp.array2d[wp.float32],
+        *,
+        input_grad: wp.array2d[wp.float32] | None = None,
+    ) -> None:
+        """Backpropagate into parameter gradients and optionally the network input."""
 
         if self._manual_input is None or not self._manual_outputs:
             raise RuntimeError("forward_manual() must be called before backward_manual()")
         if int(output_grad.shape[0]) < self._manual_batch_size or int(output_grad.shape[1]) != self.output_dim:
             raise ValueError("Manual MLP output gradient shape does not match the last forward pass")
+        if input_grad is not None and (
+            int(input_grad.shape[0]) < self._manual_batch_size or int(input_grad.shape[1]) != self.input_dim
+        ):
+            raise ValueError("Manual MLP input gradient shape does not match the last forward pass")
 
         rows = self._manual_batch_size
         grad_y = output_grad
@@ -476,8 +485,10 @@ class WarpMLP:
                     outputs=[weight.grad, bias.grad],
                     device=self.device,
                 )
-            if layer > 0:
-                grad_y = self._manual_output_grads[layer - 1]
+            if layer > 0 or input_grad is not None:
+                grad_y = self._manual_output_grads[layer - 1] if layer > 0 else input_grad
+                if grad_y is None:
+                    raise RuntimeError("Missing manual MLP input-gradient buffer")
                 if self.device.is_cuda:
                     if self.manual_weight_grad_dtype == "bfloat16":
                         grad_pre_bf16 = self._manual_bf16_pre_grads[layer]

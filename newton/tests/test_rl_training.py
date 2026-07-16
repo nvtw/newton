@@ -134,7 +134,9 @@ class TestRolloutBuffer(unittest.TestCase):
             buffer.normalize_advantages()
         wp.capture_launch(capture.graph)
 
-        expected = (advantages_np - float(np.mean(advantages_np))) / float(np.sqrt(np.var(advantages_np, ddof=1) + 1.0e-8))
+        expected = (advantages_np - float(np.mean(advantages_np))) / float(
+            np.sqrt(np.var(advantages_np, ddof=1) + 1.0e-8)
+        )
         np.testing.assert_allclose(buffer.advantages.numpy(), expected, rtol=2.0e-6, atol=2.0e-6)
 
     def test_reward_done_success_sums_are_graph_capturable(self) -> None:
@@ -973,9 +975,56 @@ class TestTrainerSAC(unittest.TestCase):
         self.assertTrue(math.isfinite(stats.critic_loss))
         self.assertTrue(math.isfinite(stats.alpha_loss))
         self.assertGreater(stats.alpha, 0.0)
+        actor_first_layer_delta = float(np.max(np.abs(trainer.actor.net.weights[0].numpy() - actor_before[0])))
+        critic_first_layer_delta = float(np.max(np.abs(trainer.critic1.weights[0].numpy() - critic_before[0])))
         self.assertGreater(actor_delta, 0.0)
         self.assertGreater(critic_delta, 0.0)
         self.assertGreater(target_delta, 0.0)
+        self.assertGreater(actor_first_layer_delta, 0.0)
+        self.assertGreater(critic_first_layer_delta, 0.0)
+
+    def test_learns_known_continuous_control_optimum(self) -> None:
+        device = _rl_cuda_device()
+        seed = 11
+        rng = np.random.default_rng(seed)
+        world_count = 1024
+        trainer = rl.TrainerSAC(
+            obs_dim=2,
+            action_dim=1,
+            hidden_layers=(64, 64),
+            config=rl.ConfigSAC(gamma=0.0, initial_alpha=0.01, target_entropy=0.0, critic_lr=1.0e-3),
+            device=device,
+            seed=seed,
+        )
+        replay = rl.BufferReplaySAC(capacity=65536, obs_dim=2, action_dim=1, batch_size=2048, device=device)
+        eval_obs_np = rng.uniform(-1.0, 1.0, (2048, 2)).astype(np.float32)
+        eval_target = np.tanh(1.2 * eval_obs_np[:, 0] - 0.7 * eval_obs_np[:, 1])
+        eval_obs = wp.array(eval_obs_np, dtype=wp.float32, device=device)
+        initial_actions = trainer.act(eval_obs, seed=0, deterministic=True)[0].numpy()[:, 0]
+        initial_mse = float(np.mean((initial_actions - eval_target) ** 2))
+
+        for update in range(100):
+            obs_np = rng.uniform(-1.0, 1.0, (world_count, 2)).astype(np.float32)
+            obs = wp.array(obs_np, dtype=wp.float32, device=device)
+            if update < 4:
+                actions_np = rng.uniform(-1.0, 1.0, (world_count, 1)).astype(np.float32)
+            else:
+                actions_np = trainer.act(obs, seed=seed * 1000 + update)[0].numpy()
+            target = np.tanh(1.2 * obs_np[:, 0] - 0.7 * obs_np[:, 1])
+            rewards_np = -((actions_np[:, 0] - target) ** 2)
+            replay.add_batch(
+                obs,
+                wp.array(actions_np, dtype=wp.float32, device=device),
+                wp.array(rewards_np, dtype=wp.float32, device=device),
+                wp.ones(world_count, dtype=wp.float32, device=device),
+                obs,
+            )
+            trainer.update(replay.sample(seed=update), seed=10000 + update)
+
+        learned_actions = trainer.act(eval_obs, seed=0, deterministic=True)[0].numpy()[:, 0]
+        learned_mse = float(np.mean((learned_actions - eval_target) ** 2))
+        self.assertGreater(initial_mse, 0.2)
+        self.assertLess(learned_mse, 0.02)
 
 
 if __name__ == "__main__":

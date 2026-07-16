@@ -10,12 +10,16 @@ import warp as wp
 
 from .kernels import (
     concat_obs_action_kernel,
+    fill_eps_kernel,
     min_q_target_kernel,
     replay_sample_kernel,
     replay_store_kernel,
-    sac_actor_loss_kernel,
+    sac_actor_policy_backward_kernel,
+    sac_actor_q_backward_kernel,
     sac_alpha_loss_kernel,
+    sac_critic_loss_backward_kernel,
     sac_critic_loss_kernel,
+    sample_gaussian_actions_kernel,
     zero_scalar_kernel,
 )
 from .networks import GaussianActor, WarpMLP
@@ -360,45 +364,100 @@ class TrainerSAC:
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._critic_loss], device=self.device)
         q_input = self._concat(batch.obs, batch.actions, requires_grad=False)
-        with wp.Tape() as tape:
-            q1 = self.critic1.forward(q_input, requires_grad=True)
-            q2 = self.critic2.forward(q_input, requires_grad=True)
-            wp.launch(
-                sac_critic_loss_kernel,
-                dim=batch.batch_size,
-                inputs=[q1, q2, targets, batch.batch_size],
-                outputs=[self._critic_loss],
-                device=self.device,
-            )
-        tape.backward(self._critic_loss)
+        q1 = self.critic1.forward_manual(q_input)
+        q2 = self.critic2.forward_manual(q_input)
+        q1_grad = wp.empty_like(q1)
+        q2_grad = wp.empty_like(q2)
+        wp.launch(
+            sac_critic_loss_kernel,
+            dim=batch.batch_size,
+            inputs=[q1, q2, targets, batch.batch_size],
+            outputs=[self._critic_loss],
+            device=self.device,
+        )
+        wp.launch(
+            sac_critic_loss_backward_kernel,
+            dim=batch.batch_size,
+            inputs=[q1, q2, targets, batch.batch_size],
+            outputs=[q1_grad, q2_grad],
+            device=self.device,
+        )
+        self.critic1.backward_manual(q1_grad)
+        self.critic2.backward_manual(q2_grad)
         loss = float(self._critic_loss.numpy()[0])
         self.critic1_optimizer.step()
         self.critic2_optimizer.step()
-        tape.zero()
         return loss
 
     def _update_actor(self, batch: BatchSAC, *, seed: int) -> float:
-        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._actor_loss], device=self.device)
-        with wp.Tape() as tape:
-            actions, log_probs, _policy_out = self.actor.sample(
-                batch.obs, seed=seed, deterministic=False, requires_grad=True
-            )
-            q_input = self._concat(batch.obs, actions, requires_grad=True)
-            q1 = self.critic1.forward(q_input, requires_grad=True)
-            q2 = self.critic2.forward(q_input, requires_grad=True)
-            wp.launch(
-                sac_actor_loss_kernel,
-                dim=batch.batch_size,
-                inputs=[q1, q2, log_probs, batch.batch_size, self.alpha],
-                outputs=[self._actor_loss],
-                device=self.device,
-            )
-        tape.backward(self._actor_loss)
-        loss = float(self._actor_loss.numpy()[0])
-        self.actor_optimizer.step()
+        policy_out = self.actor.net.forward_manual(batch.obs)
+        actions = wp.empty((batch.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
+        log_probs = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
+        eps = wp.empty((batch.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
+        wp.launch(fill_eps_kernel, dim=eps.shape, inputs=[int(seed)], outputs=[eps], device=self.device)
+        wp.launch(
+            sample_gaussian_actions_kernel,
+            dim=batch.batch_size,
+            inputs=[
+                policy_out,
+                self.actor.log_std,
+                eps,
+                self.action_dim,
+                int(self.actor.state_dependent_std),
+                int(self.actor.squash),
+                0,
+                self.actor.log_std_min,
+                self.actor.log_std_max,
+            ],
+            outputs=[actions, log_probs],
+            device=self.device,
+        )
+
+        q_input = self._concat(batch.obs, actions, requires_grad=False)
+        q1 = self.critic1.forward_manual(q_input)
+        q2 = self.critic2.forward_manual(q_input)
+        q1_grad = wp.empty_like(q1)
+        q2_grad = wp.empty_like(q2)
+        wp.launch(
+            sac_actor_q_backward_kernel,
+            dim=batch.batch_size,
+            inputs=[q1, q2, batch.batch_size],
+            outputs=[q1_grad, q2_grad],
+            device=self.device,
+        )
+        q_input_grad1 = wp.empty_like(q_input)
+        q_input_grad2 = wp.empty_like(q_input)
+        self.critic1.backward_manual(q1_grad, input_grad=q_input_grad1)
+        self.critic2.backward_manual(q2_grad, input_grad=q_input_grad2)
         self.critic1_optimizer.zero_grad()
         self.critic2_optimizer.zero_grad()
-        tape.zero()
+
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._actor_loss], device=self.device)
+        policy_out_grad = wp.empty_like(policy_out)
+        wp.launch(
+            sac_actor_policy_backward_kernel,
+            dim=batch.batch_size,
+            inputs=[
+                policy_out,
+                eps,
+                q_input_grad1,
+                q_input_grad2,
+                q1,
+                q2,
+                log_probs,
+                self.obs_dim,
+                self.action_dim,
+                batch.batch_size,
+                self.alpha,
+                self.actor.log_std_min,
+                self.actor.log_std_max,
+            ],
+            outputs=[self._actor_loss, policy_out_grad],
+            device=self.device,
+        )
+        self.actor.net.backward_manual(policy_out_grad)
+        loss = float(self._actor_loss.numpy()[0])
+        self.actor_optimizer.step()
         return loss
 
     def _update_alpha(self, batch: BatchSAC, *, seed: int) -> float:
