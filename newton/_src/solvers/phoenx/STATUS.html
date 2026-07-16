@@ -25,35 +25,32 @@
       min-height: 100vh;
       color: var(--ink);
       font: 17px/1.58 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background:
-        radial-gradient(circle at 10% -10%, #dce9ff 0, transparent 30rem),
-        radial-gradient(circle at 95% 5%, #e5faf3 0, transparent 27rem),
-        #f7f9fc;
+      background: #f7f9fc;
     }
     main { width: min(1120px, calc(100% - 34px)); margin: auto; padding: 46px 0 72px; }
     header { display: flex; justify-content: space-between; align-items: end; gap: 28px; margin-bottom: 24px; }
-    h1 { margin: 4px 0 0; font-size: clamp(2.5rem, 6vw, 4.6rem); line-height: .92; letter-spacing: -.065em; }
-    h2 { margin: 0 0 10px; font-size: 1.34rem; letter-spacing: -.025em; }
+    h1 { margin: 4px 0 0; font-size: 2.2rem; line-height: 1.1; letter-spacing: 0; }
+    h2 { margin: 0 0 10px; font-size: 1.34rem; letter-spacing: 0; }
     h3 { margin: 0 0 6px; font-size: 1rem; }
     p { margin: 7px 0; }
     ul { margin: 9px 0 0; padding-left: 20px; }
     li + li { margin-top: 5px; }
     code { color: #1748a6; background: var(--blue-soft); padding: 2px 5px; border-radius: 5px; }
-    .eyebrow { color: var(--blue); font-size: .75rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+    .eyebrow { color: var(--blue); font-size: .75rem; font-weight: 800; letter-spacing: 0; text-transform: uppercase; }
     .stamp { color: var(--muted); text-align: right; white-space: nowrap; font-size: .92rem; }
     .hero, .card, article, .next {
       border: 1px solid var(--line);
       background: var(--panel);
       box-shadow: var(--shadow);
     }
-    .hero { padding: 21px 23px; border-radius: 20px; margin-bottom: 16px; }
+    .hero { padding: 21px 23px; border-radius: 8px; margin-bottom: 16px; }
     .hero strong { color: var(--blue); }
     .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0 20px; }
-    .card { padding: 18px; border-radius: 17px; }
+    .card { padding: 18px; border-radius: 8px; }
     .work-profile + .work-profile { margin-top: 16px; }
-    .metric { font-size: 1.7rem; font-weight: 780; letter-spacing: -.045em; line-height: 1.05; }
+    .metric { font-size: 1.7rem; font-weight: 780; letter-spacing: 0; line-height: 1.05; }
     .label { margin-top: 7px; color: var(--muted); font-size: .84rem; }
-    .work-profile { padding: 21px 23px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); box-shadow: var(--shadow); }
+    .work-profile { padding: 21px 23px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: var(--shadow); }
     .work-bar { display: flex; height: 22px; margin: 15px 0 13px; overflow: hidden; border-radius: 999px; background: #edf1f6; }
     .work-bar span { min-width: 3px; }
     .work-physics { width: 73%; background: #2563eb; }
@@ -75,27 +72,38 @@
     .work-item strong { display: block; color: var(--ink); font-size: .94rem; }
     .work-item i { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; }
     .profile-note { margin-top: 12px; color: var(--muted); font-size: .78rem; }
-    .ttp-table-wrap { overflow-x: auto; margin-top: 14px; border: 1px solid var(--line); border-radius: 14px; }
+    .ttp-table-wrap { overflow-x: auto; margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; }
     .ttp-table { width: 100%; border-collapse: collapse; min-width: 800px; background: rgba(255, 255, 255, .7); }
     .ttp-table th, .ttp-table td { padding: 13px 15px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-    .ttp-table th { color: var(--muted); background: #f8faff; font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+    .ttp-table th { color: var(--muted); background: #f8faff; font-size: .75rem; letter-spacing: 0; text-transform: uppercase; }
     .ttp-table tr:last-child td { border-bottom: 0; }
     .ttp-table td:first-child { font-weight: 760; white-space: nowrap; }
     .ttp-table .number { font-variant-numeric: tabular-nums; white-space: nowrap; }
     .ttp-table .pending { color: var(--muted); }
     .good { color: var(--green); }
-    .section-label { margin: 30px 3px 9px; color: var(--muted); font-size: .75rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
-    article { padding: 22px 23px; border-radius: 18px; margin-top: 12px; }
+    .bad { color: #b42318; }
+    .summary-lead { max-width: 850px; margin-bottom: 18px; }
+    .gap-list { border-top: 1px solid var(--line); }
+    .gap-row { display: grid; grid-template-columns: 1.25fr .8fr .8fr 1fr; gap: 18px; align-items: center; padding: 15px 0; border-bottom: 1px solid var(--line); }
+    .gap-row strong, .gap-row span { min-width: 0; }
+    .ratio { font-size: 1.35rem; font-weight: 780; font-variant-numeric: tabular-nums; }
+    .meter { height: 8px; margin-top: 7px; overflow: hidden; background: #e9edf3; border-radius: 4px; }
+    .meter span { display: block; height: 100%; background: var(--blue); }
+    .verdict { margin-top: 18px; padding: 15px 17px; border-left: 4px solid #b42318; background: #fff4f2; }
+    .verdict.good-verdict { border-left-color: var(--green); background: var(--green-soft); }
+    .compact-note { color: var(--muted); font-size: .88rem; }
+    .section-label { margin: 30px 3px 9px; color: var(--muted); font-size: .75rem; font-weight: 800; letter-spacing: 0; text-transform: uppercase; }
+    article { padding: 22px 23px; border-radius: 8px; margin-top: 12px; }
     .meta { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 7px; color: var(--muted); font-size: .84rem; }
     .tag { display: inline-flex; padding: 3px 9px; border-radius: 999px; color: #1748a6; background: var(--blue-soft); font-weight: 750; }
     .tag.good { color: var(--green); background: var(--green-soft); }
     .tag.warn { color: var(--amber); background: var(--amber-soft); }
-    .next { display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; padding: 23px; border-radius: 18px; }
+    .next { display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; padding: 23px; border-radius: 8px; }
     .muted { color: var(--muted); }
     .action-required {
       position: relative; isolation: isolate; overflow: hidden;
-      margin: 18px 0; padding: 24px; border: 2px solid #f59e0b; border-radius: 20px;
-      background: linear-gradient(135deg, #fff8df 0%, #ffedb5 58%, #ffe29a 100%);
+      margin: 18px 0; padding: 24px; border: 2px solid #f59e0b; border-radius: 8px;
+      background: #fff1c7;
       box-shadow: 0 18px 45px rgba(180, 83, 9, .18), 0 0 0 6px rgba(245, 158, 11, .10);
     }
     .action-required::before {
@@ -114,7 +122,7 @@
       overflow-wrap: inherit; word-break: inherit;
     }
     footer { margin-top: 24px; color: var(--muted); font-size: .84rem; text-align: center; }
-    @media (max-width: 820px) { .metrics { grid-template-columns: repeat(2, 1fr); } .work-legend, .solver-legend { grid-template-columns: repeat(3, 1fr); } .next { grid-template-columns: 1fr; } }
+    @media (max-width: 820px) { .metrics { grid-template-columns: repeat(2, 1fr); } .work-legend, .solver-legend { grid-template-columns: repeat(3, 1fr); } .next { grid-template-columns: 1fr; } .gap-row { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 560px) { header { display: block; } .stamp { margin-top: 13px; text-align: left; } .metrics, .work-legend { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -125,9 +133,53 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>16 July 2026 &middot; overlap and learning sweep</strong></div>
+      <div class="stamp">Last updated<br><strong>16 July 2026 &middot; measured G1 comparison</strong></div>
     </header>
 
+    <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
+      <h2>How far PhoenX is behind nanoG1</h2>
+      <p class="summary-lead">The short answer: <strong>PhoenX is still behind on the validated end-to-end result.</strong> Raw environment stepping is tied, but each PhoenX physics substep costs more and the validated PPO recipe needs more wall time to produce a qualified policy. The experimental two-substep recipe can exceed nanoG1 throughput, but it has not yet matched the retained recipe's learning reliability.</p>
+      <div class="gap-list" role="table" aria-label="Measured speed comparison">
+        <div class="gap-row" role="row">
+          <strong role="cell">Raw physics throughput</strong>
+          <span role="cell">PhoenX<br><b>4.99M steps/s</b></span>
+          <span role="cell">nanoG1<br><b>8.25M steps/s</b></span>
+          <span role="cell"><span class="ratio bad">1.65x slower</span><div class="meter" aria-label="PhoenX reaches 60.5 percent of nanoG1"><span style="width:60.5%"></span></div></span>
+        </div>
+        <div class="gap-row" role="row">
+          <strong role="cell">Validated PPO training throughput</strong>
+          <span role="cell">PhoenX<br><b>0.9326M samples/s</b></span>
+          <span role="cell">nanoG1<br><b>1.3924M samples/s</b></span>
+          <span role="cell"><span class="ratio bad">1.49x slower</span><div class="meter" aria-label="PhoenX reaches 67 percent of nanoG1"><span style="width:67%"></span></div></span>
+        </div>
+        <div class="gap-row" role="row">
+          <strong role="cell">Zero training to qualified policy</strong>
+          <span role="cell">PhoenX<br><b>183.03 s</b></span>
+          <span role="cell">nanoG1 claim<br><b>58.9 s</b></span>
+          <span role="cell"><span class="ratio bad">3.11x slower</span><div class="meter" aria-label="PhoenX reaches 32.2 percent of nanoG1 time-to-policy performance"><span style="width:32.2%"></span></div></span>
+        </div>
+        <div class="gap-row" role="row">
+          <strong role="cell">Fast experimental PPO recipe</strong>
+          <span role="cell">PhoenX<br><b>1.680M samples/s</b></span>
+          <span role="cell">nanoG1<br><b>1.3924M samples/s</b></span>
+          <span role="cell"><span class="ratio good">1.21x faster</span><div class="meter" aria-label="PhoenX reaches 121 percent of nanoG1"><span style="width:100%;background:#087f5b"></span></div></span>
+        </div>
+      </div>
+      <p class="compact-note"><strong>Interpretation:</strong> the 1.680M result is not the headline because only one of two tested seeds passed the unchanged full policy gate. The 0.9326M result is slower but belongs to the validated staged recipe. Comparisons use measured local nanoG1 throughput; the 58.9 s time-to-walk number is nanoG1's published claim and does not use the same quality gate.</p>
+    </section>
+
+    <section class="work-profile" aria-label="Current learning validation">
+      <h2>Does PhoenX training actually learn?</h2>
+      <div class="verdict good-verdict">
+        <strong>PPO: yes, validated.</strong> A zero-training PhoenX run produced a G1 policy in 183.03 s. The checkpoint passed the unchanged held-out gate on seeds 1000 and 1001 with zero falls and battery performance 0.924 / 0.920.
+      </div>
+      <div class="verdict">
+        <strong>SAC on G1: learning signal is real, walking is not solved.</strong> Fixing full-network backpropagation and adding GPU running observation normalization improved deterministic held-out tracking from 0.00729 to 0.1311 in a controlled seed-11 A/B. Averaged double-Q raised it again to 0.1970. Seed 29 also improved from 0.0590 to 0.0680. However, every current 64-world, 200-step G1 evaluation had a 100% fall fraction, so SAC is not yet a successful G1 policy.
+      </div>
+      <p class="compact-note">SAC correctness evidence: all actor and critic layers now update; a known continuous-control optimum converges on three seeds to about 0.0010-0.0012 MSE; Anymal reward and critic loss improve in online robot training; observation-moment, averaged-Q arithmetic, replay, full-network update, and known-optimum regression tests pass. The measured SAC loop runs about 417-419k environment steps/s in this eager 8192-world protocol, which is not directly comparable to graph-overlapped PPO or nanoG1 throughput.</p>
+    </section>
+
+    <div class="section-label">Detailed measurements and experiment history</div>
     <section class="work-profile" aria-label="Latest Nsight Compute results">
       <h2>Latest Nsight Compute results</h2>
       <p><strong>The row-builder bottleneck is real, but the first scratch-layout fixes were slower end-to-end.</strong> User-run NCU reports captured the packed G1 contact-row builder and the reduced pipeline. The strongest signal is memory layout/coalescing in <code>_build_packed_generalized_contact_rows_kernel</code>, not arithmetic throughput.</p>
@@ -178,9 +230,9 @@
               <td><strong>Rejected.</strong> Lower stride than <code>spatial_vector</code> was still slower than the restored 2.105M baseline.</td>
             </tr>
             <tr>
-              <td>Unit-wrench response basis on current fp16x2 rows</td>
+              <td>Historical unit-wrench basis on FP16x2 candidate rows</td>
               <td>Refreshed <code>bench_g1_response_basis_aba</code> against the current production row mode. Direct build+solve measured 422.8 &micro;s. Compressed basis prepare+solve measured 449.7 &micro;s; adaptive row materialization measured 360.6 &micro;s versus 341.5 &micro;s direct build alone.</td>
-              <td><strong>Rejected for production.</strong> The basis idea is a real larger algorithmic candidate, but current measured fp16x2 production already beats it end-to-end on the optimistic two-foot G1 case.</td>
+              <td><strong>Rejected for production.</strong> The basis idea is a real larger algorithmic candidate, but the then-current FP16x2 candidate beat it end-to-end; both paths were later removed on the optimistic two-foot G1 case.</td>
             </tr>
             <tr>
               <td>Static one-iteration relax solve specialization</td>
@@ -417,7 +469,7 @@
     <div class="section-label">Current state</div>
     <article>
       <div class="meta"><span class="tag good">PHYSICS WIN &middot; DOF-TYPE FACTOR SPLIT</span><time>16 Jul</time></div>
-      <h2>Occupancy unlock: split the factor by joint-DOF-type &mdash; +2.82% physics, the biggest lever since fp16x2</h2>
+      <h2>Occupancy unlock: split the factor by joint-DOF-type &mdash; +2.82% physics, the largest retained physics lever in this sweep</h2>
       <p>The depth-major ABA rejection established the 50%-of-GPU reduced-dynamics phase is <strong>register-bound, not launch-bound</strong> (factor kernel 144 regs &rarr; ~22% occupancy). Followed that pointer to a clean, generic win.</p>
       <ul>
         <li><strong>Localized the register wall:</strong> the single-DOF revolute path needs only 64 regs (50% occ), but the one free-base lane&rsquo;s 6&times;6 SPD invert adds +80, dragging the whole warp to 144/22%. Every in-place reduction rejected with compile-time data (Schur 3&times;3-block invert 149, in-place Cholesky 147, recompute 148 &mdash; all &gt; 144): the peak is the multi-DOF branch&rsquo;s aggregate output footprint, not the invert internals. Solve-not-invert also rejected (the inverse is reused as a matrix across advance/impulse-response/contact-solve). Only physically removing the branch helps.</li>
@@ -426,7 +478,7 @@
         <li><strong>Critical fix:</strong> the companion roots kernel must launch <code>block_dim=32</code> &mdash; the default 256 packs the few heavy 6&times;6 roots onto ~16 blocks and stalls (~2.5&times;), regressing 4096 by &minus;36%. With 32 it spreads across SMs and the split is a strict win at both counts (no world-count gate).</li>
         <li><strong>Exact + tested:</strong> bit-identical to the unified kernel (max_abs_diff 0.0 across 40 floating-base articulations, graph-captured, deterministic); new CUDA-graph regression test pins split==unified; floating-base momentum/energy + Featherstone-parity battery passes.</li>
       </ul>
-      <p class="profile-note">Data-directed physics innovation: depth-major &rarr; register-bound diagnosis &rarr; localized to the free-base lane &rarr; in-place reformulations (incl. Schur) ruled out with compile-time data &rarr; DOF-split. Awaiting user go to commit. Session banked physics: fp16x2 +1.06% and now factor-split +2.82%.</p>
+      <p class="profile-note">Data-directed physics innovation: depth-major &rarr; register-bound diagnosis &rarr; localized to the free-base lane &rarr; in-place reformulations (incl. Schur) ruled out with compile-time data &rarr; DOF-split. Awaiting user go to commit. The factor split remains the retained physics win; the marginal FP16 contact-row path was later removed.</p>
     </article>
     <article>
       <div class="meta"><span class="tag warn">BIG-SWING REJECT &middot; AMP MOTION PRIOR</span><time>16 Jul</time></div>
@@ -437,7 +489,7 @@
         <li><strong>Mechanism (textbook style-vs-task tension):</strong> AMP slashes falls (seed 42: 8&rarr;0, 47: 19&rarr;0) and smooths gait (leg_qvel_rms ~0.08 vs baseline ~0.25&ndash;0.53) &mdash; the policy visibly walks <em>more like the reference</em> &mdash; but velocity-command tracking (the gate metric) drops (mean lin-vel error 0.399&rarr;0.459). The discriminator rewards looking-like-reference, which pulls off the commanded velocities. Anneal&rsquo;s pure-style start destabilized seeds 29 (4&rarr;330 falls) and 71 (44&rarr;118) as easily as it helped seed 89.</li>
         <li><strong>Silver lining (documented):</strong> AMP is a real robustness / variance-reduction / fall-cutting prior (std 0.100&rarr;0.055&ndash;0.075) &mdash; it would help a robustness-gated task. G1&rsquo;s gate is tracking-dominated, so it is not the lever here. Code + reproducible reference/scripts persisted (out of /tmp); nothing committed.</li>
       </ul>
-      <p class="profile-note">Three seed-reliability approaches now closed with 6-seed data: entropy floor, gSDE, and AMP. Walking must be discovered <em>and tracked</em>; a style prior guides toward reference-like motion but trades away the command-tracking the gate scores. The p lever remains open; physics-throughput is where this session banked (fp16x2, factor-split).</p>
+      <p class="profile-note">Three seed-reliability approaches now closed with 6-seed data: entropy floor, gSDE, and AMP. Walking must be discovered <em>and tracked</em>; a style prior guides toward reference-like motion but trades away the command-tracking the gate scores. The p lever remains open; the retained physics result from this sweep is the factor split; FP16 rows were later removed.</p>
     </article>
     <article>
       <div class="meta"><span class="tag warn">SEED-VARIANCE &middot; EXPLORATION FIXES FAIL</span><time>15 Jul</time></div>
@@ -461,9 +513,9 @@
         <li><strong>Projected-maximal now TRAINS G1 (2 seeds).</strong> With crisp drives (constraint_drive, iter-75 screen): maxproj 0.580/0.560 (s42/s11) vs same-actuation reduced 0.631/0.641 &mdash; versus <strong>0.255</strong> with the old soft drives. Drive softness WAS the dominant blocker (0.255&rarr;~0.57), a genuine scientific result: the maximal path is now trainable at all.</li>
         <li><strong>Trainability confirmed at ~parity (3 seeds).</strong> maxproj+implicit-drive 0.580/0.560/0.593 (mean 0.578) vs same-actuation reduced 0.631/0.641/0.538 (mean 0.603) &mdash; ~96%, within seed noise (seed 29 maxproj beats reduced). Drive softness, not contacts, was the blocker.</li>
         <li><strong>But the trainable mode&rsquo;s throughput ceiling is only 1.12&times;.</strong> Clean physics (8192 G1): reduced 2.1M, <em>projected</em>-maximal 2.4M = <strong>1.12&times;</strong>; the factor-scale 2.36&times; belongs to PURE maximal (non-articulated independent bodies) which cannot train a robot. The tree-projection step that makes maximal trainable also eats most of its speed advantage. So the innovation is real and correct but caps at ~10% physics for G1 &mdash; not the factor-scale win hoped, and offset by a constraint_drive actuation tax (both arms ~0.60 vs 0.707 explicit_torque). Net G1 time-to-policy: ~neutral unless the actuation quality is recovered.</li>
-        <li><strong>Retained:</strong> the crisp implicit-drive algorithm (committed, opt-in) &mdash; a genuine unblock of maximal trainability, with more upside on contact-rich robots where maximal&rsquo;s per-step edge is larger than G1&rsquo;s 1.12&times;. Session banked win: fp16x2 +1.06%.</li>
+        <li><strong>Retained:</strong> the crisp implicit-drive algorithm (committed, opt-in) &mdash; a genuine unblock of maximal trainability, with more upside on contact-rich robots where maximal&rsquo;s per-step edge is larger than G1&rsquo;s 1.12&times;. The marginal FP16 contact-row path was later removed.</li>
       </ul>
-      <p class="profile-note">Genuine algorithmic innovation (exact implicit drive in the maximal tree projector), diagnosed, built, and shown to unlock G1 training (0.255&rarr;0.580). Builds on the retained position-level tree projection. Session solver win so far: fp16x2 +1.06% (shipped) plus this trainability breakthrough.</p>
+      <p class="profile-note">Genuine algorithmic innovation (exact implicit drive in the maximal tree projector), diagnosed, built, and shown to unlock G1 training (0.255&rarr;0.580). Builds on the retained position-level tree projection. The projected-maximal trainability breakthrough is retained; the marginal FP16 contact-row path was later removed.</p>
     </article>
     <article>
       <div class="meta"><span class="tag warn">DEFINITIVE REJECT &middot; PATCH ROWS</span><time>15 Jul</time></div>
@@ -472,26 +524,19 @@
       <ul>
         <li>The row reduction is <strong>real and physically correct</strong>: G1 is 100% patch-eligible, 30&ndash;33% fewer generalized rows realized, box-on-plane stable, momentum/energy pass, deviation vs per-point &lt; 5&times;10<sup>&minus;3</sup>, default OFF byte-identical.</li>
         <li>But it costs <strong>&minus;35% isolated G1 physics</strong> (1.40M vs 2.17M steps/s) even in the pure-patch, fully-activated, single-purpose-kernel form (M3, which removed the M2 dual-dispatch occupancy bloat). Realizing the compact layout needs a serial per-articulation emit pass + a DIVERGENT column-iterating 2&times;2 coupled solve, which maps terribly to the warp-cooperative uniform-tile model.</li>
-        <li><strong>Finding:</strong> the classic uniform per-point tight-loop solve is structurally optimal on this hardware. Fewer rows don&rsquo;t help when the rows were cheap uniform tiles and the reduction demands per-column branching. Contrast fp16 byte-reduction on the SAME uniform rows (+9.4% phase) &mdash; it keeps the tile structure. All code reverted; fp16x2 stands.</li>
-        <li><strong>Post-fp16x2 profile (phase % of training GPU):</strong> ABA advance 16.6, contact row build 15.2, publish/momentum 12.6, factor 12.6, contact solve 10.4, kinematics 8.4, learner ~5&ndash;9; solver 82%, non-solver rollout only ~8.5%. Advance is a launch-bound depth-serial ABA dead end (0.34 waves/SM, grid 512, algorithmic parallelism ceiling); publish is already conditionally-minimal. The big phases are either structural dead ends or (contact stream) now shown row-count-immune.</li>
+        <li><strong>Finding:</strong> the classic uniform per-point tight-loop solve is structurally optimal on this hardware. Fewer rows don&rsquo;t help when the rows were cheap uniform tiles and the reduction demands per-column branching. Contrast fp16 byte-reduction on the SAME uniform rows (+9.4% phase) &mdash; it keeps the tile structure. All code reverted; production remains on FP32 rows.</li>
+        <li><strong>Historical post-FP16x2 profile (phase % of training GPU):</strong> ABA advance 16.6, contact row build 15.2, publish/momentum 12.6, factor 12.6, contact solve 10.4, kinematics 8.4, learner ~5&ndash;9; solver 82%, non-solver rollout only ~8.5%. Advance is a launch-bound depth-serial ABA dead end (0.34 waves/SM, grid 512, algorithmic parallelism ceiling); publish is already conditionally-minimal. The big phases are either structural dead ends or (contact stream) now shown row-count-immune.</li>
       </ul>
-      <p class="profile-note">Session net: fp16x2 (+1.06% G1 training) is the banked win. The reduced-pipeline bandwidth/row levers are largely exhausted &mdash; the remaining wins are byte-level (taken) or blocked by the ABA launch-bound wall and the uniform-tile optimality of the contact solve. Bigger throughput needs a different attack (new solver formulation) or the seed-reliability headline lever.</p>
+      <p class="profile-note">Session net: the 1.06% FP16 training gain was later judged too small and removed. The reduced-pipeline bandwidth/row levers are largely exhausted &mdash; the remaining wins are byte-level (taken) or blocked by the ABA launch-bound wall and the uniform-tile optimality of the contact solve. Bigger throughput needs a different attack (new solver formulation) or the seed-reliability headline lever.</p>
     </article>
     <article>
-      <div class="meta"><span class="tag">SHIPPED &middot; FP16x2 CONTACT ROWS DEFAULT</span><time>11 Jul</time></div>
-      <h2>First retained speedup landed: half-precision contact-row stream</h2>
-      <p>Packed FP16 Jacobian/response rows (loaded through aligned uint32 words) are now the reduced-path default, with FP32 opt-out via <code>PHOENX_CONTACT_ROWS_FP16=0</code>. Accumulators, impulses, velocities, and effective masses stay FP32; only the streamed row geometry (O(1)-magnitude difference/direction quantities) is halved.</p>
+      <div class="meta"><span class="tag warn">REMOVED &middot; FP16 CONTACT ROWS</span><time>16 Jul</time></div>
+      <h2>FP16 contact rows were not worth keeping</h2>
+      <p>Packed FP16 rows improved the isolated contact phase by 9.4%, but the measured end-to-end G1 training gain was only 1.06%. That is too small for a second row format, alias buffers, native unpack helpers, and an additional numerical validation burden.</p>
       <ul>
-        <li>Isolated contact phase +9.4% at 8,192-world standing G1; cross-scene 512-world contact fleets all finite and physics near-identical to FP32 (G1 +3.7% env fps, ANYmal/H1 within noise &mdash; those scenes are less row-bound).</li>
-        <li>57/58 reduced CUDA-graph battery green under the new default; the one failure is the pre-existing driver graph-instantiation flake (reproduces identically with FP32 forced, passes in isolation). Momentum/energy, Featherstone parity, far-translation invariance, and the exact-ABA row test (now FP32-pinned) all pass.</li>
-        <li>Honest caveat retained: the seed lottery means expected-cost stays FP32-derived until successes accumulate; the four full-horizon FP16 draws were 0/4 but statistically indistinguishable from FP32&rsquo;s own ~1/3 rate, and every physical-law and deviation test supports the numerics.</li>
-        <li><strong>Wide body-field loads rejected (11 Jul):</strong> lossless wide vectorized loads on the per-cid PGS-iterate body fields measured +1.4% dr_legs / +0.9% h1 isolated physics but <strong>neutral on G1 graph_leapfrog training</strong> (958.5k vs 957.8k, ABAB). G1 rollout is the critical path and those fields are ~4% of GPU. The <code>func_native</code> wide-load helpers are retained default-OFF for reuse.</li>
-        <li><strong>Redirect to the bigger phase:</strong> the training GPU trace ranks ABA advance (8.6%) + factor (6.2%) &asymp; 15% &mdash; the wide-load experiment had missed it entirely (it hit the ~4% contact iterate). Now applying the same technique to the register-limited ABA warp kernels; the open question is whether wide-load unpack registers worsen occupancy. Then: color-ordered FP16 constraint stream, patch rows.</li>
-      </ul>
-      <p class="profile-note">Committed on twidmer/phoenx-bandwidth-wins. Headline expected cost unchanged at 343.19 s (throughput win, not yet a seed-success win).</p>
-      <ul>
-        <li><strong>fp16x2 confirmed +1.06% on G1 training (11 Jul, clean 3&times; ABAB, no run overlap)</strong> &mdash; the first measured training-throughput win, not just isolated-phase. Coalescing constraint-reorder re-validated and rejected (h1 @2048 noise), matching the three wide-load rejections.</li>
-        <li><strong>Predictive model established:</strong> training gain &asymp; (isolated bandwidth win %) &times; (phase&rsquo;s GPU share %), because training is rollout-bound. This explains every result: constraint/ABA loads are L2-resident (small &times; hidden &rarr; sub-noise); the contact ROW stream is the one large bandwidth-bound phase (&asymp;11% GPU) where fp16 and row-count cuts land. Next: build-time patch rows (~25% fewer rows &rarr; predicted +1.5-2%, composes with fp16x2).</li>
+        <li>The operational FP16 switches and buffers were reverted first; the remaining unreachable FP16 builders, transpose variants, reinterpret helpers, and packed solve branches were then deleted.</li>
+        <li>Production reduced contacts are FP32 only. BF16 learner matrix contractions remain separate because they target tensor-core policy training rather than contact physics.</li>
+        <li>Graph-captured generalized-row ABA parity and persistent relax/publish reference tests pass after complete removal.</li>
       </ul>
     </article>
     <article>
