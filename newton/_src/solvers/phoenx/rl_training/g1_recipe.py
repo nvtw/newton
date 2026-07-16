@@ -94,6 +94,8 @@ RIGID_CONTACT_MAX_PER_WORLD = 32
 THREADS_PER_WORLD: int | str = "auto"
 MULTI_WORLD_SCHEDULER = "auto"
 PREPARE_REFRESH_STRIDE: int | str = "auto"
+ARTICULATION_MODE = "reduced"
+REDUCED_ARTICULATION_PATH = "reference"
 
 TRAIN_ITERATIONS = 100
 ROLLOUT_STEPS = 64
@@ -230,6 +232,8 @@ def default_g1_env_config(**overrides: Any):
         "threads_per_world": THREADS_PER_WORLD,
         "multi_world_scheduler": MULTI_WORLD_SCHEDULER,
         "prepare_refresh_stride": PREPARE_REFRESH_STRIDE,
+        "articulation_mode": ARTICULATION_MODE,
+        "reduced_articulation_path": REDUCED_ARTICULATION_PATH,
     }
     values.update(overrides)
     return ConfigEnvG1PhoenX(**values)

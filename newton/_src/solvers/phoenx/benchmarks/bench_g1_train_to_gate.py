@@ -839,7 +839,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--screen-trigger-battery-perf",
         type=float,
-        default=0.88,
+        default=0.87,
         help="Run the full held-out gate once the cheap screen reaches this battery score.",
     )
     parser.add_argument("--diagnostic-world-count", type=int, default=1)

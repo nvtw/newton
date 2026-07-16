@@ -51,6 +51,7 @@
 
 ### Changed
 
+- Change experimental PhoenX G1 RL defaults to use the reduced-articulation recipe path, recipe-aligned G1 env-step benchmark defaults, graph/no-readback G1 training benchmark defaults, and a 0.87 train-to-gate full-gate promotion screen. G1 training benchmark nanoG1 comparisons now require an explicit measured reference via `--nanog1-train-result` or `--nanog1-reference-env-sps` instead of document-derived defaults. Pass `articulation_mode="maximal"`, explicit benchmark `--sim-substeps`/`--steps-per-graph` values, `--execution-mode eager`, `--readback-diagnostics`, or `--screen-trigger-battery-perf 0.88` to preserve previous settings.
 - Change experimental PhoenX G1 train-to-gate restarts to use frozen held-out screens at 39.32M and 78.64M samples, rejecting clearly weak attempts earlier while preserving the final quality gate.
 - Switch the experimental PhoenX G1 train-to-gate final phase from three 6.67 ms physics steps to two 10 ms steps after 99,614,720 samples, preserving the hard-Hertz contact and PGS schedule while reducing validated total time-to-gate. Pass `--angular-fine-tune-start-samples 0` to disable both final-phase timestep and regularization changes.
 - Change experimental PhoenX G1 RL defaults to the validated 6.67 ms schedule (`sim_substeps=3`) and strengthen angular-command tracking to 2.5, increasing graph-leapfrog training throughput while retaining repeatable full walking-gate success. Pass `--sim-substeps 4 --w-track-ang 1.25` to preserve the previous 5 ms recipe.

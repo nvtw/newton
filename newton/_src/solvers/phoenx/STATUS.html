@@ -124,12 +124,19 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>16 July 2026 · DOF-type factor split +2.82% physics; AMP rejected</strong></div>
+      <div class="stamp">Last updated<br><strong>16 July 2026 · validated 32k G1 policy; 131k minibatch rejected</strong></div>
     </header>
 
     <section class="notify" style="border:1px solid #3a4152;background:#14181f;border-radius:10px;padding:16px 18px;margin:18px 0;">
-      <div style="font-weight:700;color:#9aa4b4;letter-spacing:.02em;">✓ ncu-driven contact-solve investigation complete — near ceiling</div>
-      <p style="margin:8px 0 0;color:#c4ccd8;">Contact kernels are <strong>latency-bound, not bandwidth-bound</strong> (scheduler idle 63–72%; all memory pipes &lt;50%) — why fp16x2 gave only ~1% (wrong axis). Two levers tested, both rejected: (1) <strong>occupancy cap</strong> — <code>__launch_bounds__(32,24)</code> takes solve 80→64 regs / 39→50% occ bit-identically, but solo A/B is only <strong>+0.43%</strong> (latency is dependency-chain, not occupancy) and banking it needs a global register cap validated only on G1 → scene-risk not worth it; reverted. (2) <strong>N-articulations/warp packing</strong> — impossible: the solve tile is 18/32 lanes wide, 2×18&gt;32. Conclusion: the contact solve is at its GPU-friendly ceiling for the reduced GS-on-uniform-tile design, like the reduced ABA. Profiling stays reusable: <code>sudo /home/twidmer/phoenx_prof/run_ncu.sh</code>.</p>
+      <div style="font-weight:700;color:#9aa4b4;letter-spacing:.02em;">Measured PhoenX vs local nanoG1 — same workstation, no Modal, same G1 class task</div>
+      <table style="margin:10px 0 6px;border-collapse:collapse;color:#c4ccd8;font-size:13px;">
+        <tr style="color:#8b97a8;text-align:left;"><th style="padding:2px 14px 2px 0;">metric</th><th style="padding:2px 14px 2px 0;">PhoenX</th><th style="padding:2px 14px 2px 0;">nanoG1</th><th style="padding:2px 0;">PhoenX vs nanoG1</th></tr>
+        <tr><td style="padding:2px 14px 2px 0;"><strong>Raw env stepping</strong></td><td style="padding:2px 14px 2px 0;">1.668M env/s, 5.00M physics/s (8192 worlds, 3 substeps)</td><td style="padding:2px 14px 2px 0;">1.65M env/s, 8.25M physics/s (8192 worlds, 5 substeps)</td><td>101% env-rate; 60.6% physics-rate</td></tr>
+        <tr><td style="padding:2px 14px 2px 0;"><strong>End-to-end PPO training</strong></td><td style="padding:2px 14px 2px 0;">0.9276M samples/s, 2.783M physics/s (validated 32k minibatch)</td><td style="padding:2px 14px 2px 0;">1.3924M samples/s, 6.962M physics/s from local PufferLib log</td><td>66.6% sample-rate; 40.0% physics-rate; 1.50x slower by samples/s</td></tr>
+        <tr><td style="padding:2px 14px 2px 0;"><strong>Policy quality</strong></td><td style="padding:2px 14px 2px 0;">validated 32k policy: iter 315 / 165.15M samples; full gates pass on seeds 1000 and 1001 with 0 falls and battery perf 0.924 / 0.925; 131k minibatch rejected after 0.491 iter-75 screen</td><td style="padding:2px 14px 2px 0;">local 20M nanoG1 run learns but is not a final pass gate</td><td>32k setting kept; full gate succeeds, 131k speed setting rejected</td></tr>
+      </table>
+      <p style="margin:6px 0 0;color:#c4ccd8;">These numbers are measured locally, not copied from old notes. The raw env-rate is now roughly at nanoG1's 8192-world rate, but nanoG1 does five physics substeps per action while the current PhoenX recipe uses three, so physics-step throughput is still lower. The training bottleneck is the rollout path: graph-leapfrog overlap hides most PPO update cost, but PhoenX still trails local nanoG1 training by <strong>33.4%</strong> in samples/s for the learning-safe setting. The faster 131k-minibatch run reached 1.0067M samples/s but failed the held-out learning screen, so it is not a valid default.</p>
+      <p style="margin:6px 0 0;color:#c4ccd8;"><strong>Direction:</strong> keep small kernel wins only when cheap, but prioritize larger changes with plausible factor-level impact: rollout/physics fusion, robot-generic topology planning/code generation, reduced contact/ABA formulation changes, or sample-efficiency improvements that pass the held-out gate. Any candidate that improves SPS but fails the G1 policy gate is rejected. Current action: keep the validated 32k minibatch, lower only the cheap full-gate promotion screen to 0.87 after a measured false negative, and look for factor-level changes rather than relying on minibatch or kernel micro-tuning.</p>
     </section>
 
     <section class="hero">
@@ -138,10 +145,10 @@
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric">343 s</div><div class="label">preliminary expected G1 time-to-policy</div></div>
+      <div class="card"><div class="metric">165.15M</div><div class="label">samples to validated G1 policy</div></div>
       <div class="card"><div class="metric good">8</div><div class="label">pure-PhoenX task families available</div></div>
-      <div class="card"><div class="metric good">3 / 8</div><div class="label">tasks wired to process-level metric</div></div>
-      <div class="card"><div class="metric">908k/s</div><div class="label">current matched steady-throughput diagnostic</div></div>
+      <div class="card"><div class="metric">66.6%</div><div class="label">validated PhoenX vs nanoG1 training samples/s</div></div>
+      <div class="card"><div class="metric">1.668M/s</div><div class="label">PhoenX raw G1 env stepping</div></div>
     </section>
 
     <p class="profile-note">The ready-cache rerun of the frozen G1 development bank contains one 215.58 s success and two iteration-75 rejections at 63.79 / 63.83 s. Expected restart cost remains 343.19 s. A command-curriculum candidate improved every early score but regressed final expected cost to 678.28 s, so it was rejected.</p>

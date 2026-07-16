@@ -33,7 +33,7 @@ _NANOG1_RESULT_END = "=== END RESULT ==="
 
 
 def _default_steps_per_graph(sim_substeps: int) -> int:
-    return 1 if int(sim_substeps) % 2 == 0 else 2
+    return 1 if int(sim_substeps) % 2 == 0 else 4
 
 
 def benchmark_phoenx(
@@ -43,8 +43,10 @@ def benchmark_phoenx(
     solver_iterations: int,
     velocity_iterations: int,
     articulation_mode: str,
+    reduced_articulation_path: str,
     actuation_model: str,
     parse_meshes: bool,
+    auto_reset: bool,
     measure_replays: int,
     warmup_steps: int,
     steps_per_graph: int | None,
@@ -63,8 +65,10 @@ def benchmark_phoenx(
         solver_iterations=int(solver_iterations),
         velocity_iterations=int(velocity_iterations),
         articulation_mode=str(articulation_mode),
+        reduced_articulation_path=str(reduced_articulation_path),
         actuation_model=str(actuation_model),
         parse_meshes=bool(parse_meshes),
+        auto_reset=bool(auto_reset),
     )
     env = rl.EnvG1PhoenX(cfg, device=dev)
     actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=env.device)
@@ -98,8 +102,10 @@ def benchmark_phoenx(
         "solver_iterations": int(solver_iterations),
         "velocity_iterations": int(velocity_iterations),
         "articulation_mode": str(articulation_mode),
+        "reduced_articulation_path": str(reduced_articulation_path),
         "actuation_model": str(actuation_model),
         "parse_meshes": bool(parse_meshes),
+        "auto_reset": bool(auto_reset),
         "warmup_steps": int(warmup_steps),
         "measure_replays": int(measure_replays),
         "steps_per_graph": graph_steps,
@@ -158,8 +164,8 @@ def _compare(phoenx: dict[str, Any], nanog1: dict[str, Any] | None) -> dict[str,
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--world-count", type=int, default=4096)
-    parser.add_argument("--sim-substeps", type=int, default=5)
+    parser.add_argument("--world-count", type=int, default=g1_recipe.WORLD_COUNT)
+    parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument(
@@ -169,12 +175,19 @@ def _parse_args() -> argparse.Namespace:
         help="PhoenX articulation mode used by the environment-step benchmark.",
     )
     parser.add_argument(
+        "--reduced-articulation-path",
+        choices=("reference", "persistent"),
+        default=g1_recipe.REDUCED_ARTICULATION_PATH,
+        help="Reduced articulation execution path used by the environment-step benchmark.",
+    )
+    parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
         default=g1_recipe.ACTUATION_MODEL,
         help="G1 actuator path used in the graph-captured env-step benchmark.",
     )
     parser.add_argument("--parse-meshes", action="store_true")
+    parser.add_argument("--no-auto-reset", action="store_true")
     parser.add_argument("--measure-replays", type=int, default=64)
     parser.add_argument("--warmup-steps", type=int, default=4)
     parser.add_argument("--steps-per-graph", type=int, default=None)
@@ -196,8 +209,10 @@ def main() -> int:
         solver_iterations=args.solver_iterations,
         velocity_iterations=args.velocity_iterations,
         articulation_mode=args.articulation_mode,
+        reduced_articulation_path=args.reduced_articulation_path,
         actuation_model=args.actuation_model,
         parse_meshes=args.parse_meshes,
+        auto_reset=not bool(args.no_auto_reset),
         measure_replays=args.measure_replays,
         warmup_steps=args.warmup_steps,
         steps_per_graph=args.steps_per_graph,

@@ -87,7 +87,7 @@ def main() -> int:
             raise RuntimeError("maximal_projected profiling requires a supported maximal tree projector")
         projector.block_dim = args.projector_block_dim
     actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
-    steps_per_graph = 1 if args.sim_substeps % 2 == 0 else 2
+    steps_per_graph = 1 if args.sim_substeps % 2 == 0 else 4
     graph = rl.capture_env_steps(env, actions, steps_per_graph=steps_per_graph, warmup_steps=4)
     for _ in range(args.warmup_replays):
         wp.capture_launch(graph)

@@ -27,9 +27,7 @@ import warp as wp
 import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 
-_NANOG1_TRAIN_ENV_SPS = 1_276_000.0
-_NANOG1_TRAIN_PHYSICS_SPS = 6_380_000.0
-_NANOG1_REFERENCE_SOURCE = "nanoG1 6dee587 RESULTS.md measured steady SPS"
+_NANOG1_REFERENCE_SOURCE = "unset; pass --nanog1-train-result or --nanog1-reference-env-sps"
 _RESULT_END_MARKER = "=== END RESULT ==="
 _NANOG1_TRAIN_MARKERS = ("=== nanoG1 RESULT ===",)
 
@@ -138,20 +136,44 @@ def _load_nanog1_train_result(path: Path) -> dict[str, Any]:
     return _json_from_result_text(path.read_text(encoding="utf-8"), markers=_NANOG1_TRAIN_MARKERS, path=path)
 
 
-def _nanog1_training_reference(args: argparse.Namespace) -> tuple[float, float, str]:
-    env_sps = _NANOG1_TRAIN_ENV_SPS
-    physics_sps = _NANOG1_TRAIN_PHYSICS_SPS
+def _pufferlib_steady_sps(blob: dict[str, Any], path: Path) -> float:
+    metrics = blob.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ValueError(f"{path} is missing PufferLib 'metrics'")
+    sps_values = metrics.get("SPS")
+    if not isinstance(sps_values, list) or not sps_values:
+        raise ValueError(f"{path} is missing non-empty PufferLib metrics.SPS")
+    sps = np.asarray(sps_values, dtype=np.float64)
+    agent_steps = metrics.get("agent_steps")
+    if isinstance(agent_steps, list) and len(agent_steps) == len(sps_values):
+        steps = np.asarray(agent_steps, dtype=np.float64)
+        keep = np.ones(len(steps), dtype=bool)
+        keep[1:] = steps[1:] != steps[:-1]
+        sps = sps[keep]
+    if sps.size > 1:
+        sps = sps[1:]
+    value = float(np.mean(sps))
+    if value <= 0.0 or not np.isfinite(value):
+        raise ValueError(f"{path} has invalid PufferLib steady SPS: {value}")
+    return value
+
+
+def _nanog1_training_reference(args: argparse.Namespace) -> tuple[float | None, float | None, str]:
+    env_sps: float | None = None
+    physics_sps: float | None = None
     source = _NANOG1_REFERENCE_SOURCE
 
     if args.nanog1_train_result is not None:
         result_path = Path(args.nanog1_train_result)
         blob = _load_nanog1_train_result(result_path)
         steady_sps = blob.get("steady_sps")
-        if steady_sps is None:
-            raise ValueError(f"{result_path} is missing nanoG1 train.py 'steady_sps'")
-        env_sps = float(steady_sps)
+        env_sps = _pufferlib_steady_sps(blob, result_path) if steady_sps is None else float(steady_sps)
         physics_value = blob.get("physics_steps_per_s")
-        physics_sps = float(physics_value) if physics_value is not None else env_sps * float(args.sim_substeps)
+        physics_sps = (
+            float(physics_value)
+            if physics_value is not None
+            else env_sps * float(args.nanog1_reference_physics_substeps)
+        )
         source = str(result_path)
         gpu = blob.get("gpu")
         if gpu:
@@ -168,10 +190,12 @@ def _nanog1_training_reference(args: argparse.Namespace) -> tuple[float, float, 
             raise ValueError("--nanog1-reference-physics-sps must be positive")
         source = args.nanog1_reference_source
     elif args.nanog1_reference_env_sps is not None:
-        physics_sps = env_sps * float(args.sim_substeps)
+        physics_sps = env_sps * float(args.nanog1_reference_physics_substeps)
 
-    if env_sps <= 0.0 or physics_sps <= 0.0:
-        raise ValueError("nanoG1 reference throughput must be positive")
+    if env_sps is not None and env_sps <= 0.0:
+        raise ValueError("nanoG1 reference env throughput must be positive")
+    if physics_sps is not None and physics_sps <= 0.0:
+        raise ValueError("nanoG1 reference physics throughput must be positive")
     return env_sps, physics_sps, source
 
 
@@ -265,7 +289,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         target_angle_max=float(args.target_angle_max),
         reset_recurrent_state_on_rollout_start=bool(args.reset_recurrent_state_on_rollout_start),
         squash_actions=bool(args.squash_actions),
-        readback_diagnostics=not bool(args.no_readback_diagnostics),
+        readback_diagnostics=bool(args.readback_diagnostics),
         execution_mode=str(args.execution_mode),
     )
     result = rl.train_g1_ppo(config)
@@ -294,6 +318,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
     env_sps = float(np.mean(warm_sps))
     physics_sps = env_sps * float(args.sim_substeps)
     nanog1_env_sps, nanog1_physics_sps, nanog1_source = _nanog1_training_reference(args)
+    phoenx_over_nanog1 = None if nanog1_env_sps is None else env_sps / nanog1_env_sps
+    phoenx_slowdown = None if nanog1_env_sps is None else nanog1_env_sps / env_sps
     return {
         "engine": "phoenx_g1_warp_ppo",
         "metric": "full collect-update training throughput",
@@ -333,7 +359,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "command_curriculum_start": float(args.command_curriculum_start),
         "command_curriculum_samples": int(args.command_curriculum_samples),
         "reset_recurrent_state_on_rollout_start": bool(args.reset_recurrent_state_on_rollout_start),
-        "readback_diagnostics": not bool(args.no_readback_diagnostics),
+        "readback_diagnostics": bool(args.readback_diagnostics),
         "execution_mode": str(args.execution_mode),
         "sim_substeps": int(args.sim_substeps),
         "solver_internal_substeps": int(world.substeps),
@@ -385,8 +411,8 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "nanog1_reference_source": nanog1_source,
         "nanog1_reference_env_samples_per_s": nanog1_env_sps,
         "nanog1_reference_physics_steps_per_s": nanog1_physics_sps,
-        "phoenx_over_nanog1_train_ratio": env_sps / nanog1_env_sps,
-        "phoenx_train_slowdown_vs_nanog1": nanog1_env_sps / env_sps,
+        "phoenx_over_nanog1_train_ratio": phoenx_over_nanog1,
+        "phoenx_train_slowdown_vs_nanog1": phoenx_slowdown,
         "history": [asdict(item) for item in history],
     }
 
@@ -555,13 +581,21 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--no-readback-diagnostics",
-        action="store_true",
-        help="Skip host diagnostic readbacks during the measured train loop.",
+        dest="readback_diagnostics",
+        action="store_false",
+        help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--readback-diagnostics",
+        dest="readback_diagnostics",
+        action="store_true",
+        help="Include host diagnostic readbacks during the measured train loop.",
+    )
+    parser.set_defaults(readback_diagnostics=False)
     parser.add_argument(
         "--execution-mode",
         choices=("eager", "graph_leapfrog"),
-        default="eager",
+        default="graph_leapfrog",
         help="Use eager PPO or the experimental separate-graph rollout/update schedule.",
     )
     parser.add_argument("--device", default=None)
@@ -589,6 +623,12 @@ def _parse_args() -> argparse.Namespace:
         "--nanog1-reference-source",
         default="manual nanoG1 training reference",
         help="Source label used when --nanog1-reference-*-sps overrides are supplied.",
+    )
+    parser.add_argument(
+        "--nanog1-reference-physics-substeps",
+        type=float,
+        default=5.0,
+        help="Physics substeps per nanoG1 env sample when deriving physics steps/s from env samples/s.",
     )
     return parser.parse_args()
 
