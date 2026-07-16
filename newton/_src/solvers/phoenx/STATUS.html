@@ -50,6 +50,7 @@
     .hero strong { color: var(--blue); }
     .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0 20px; }
     .card { padding: 18px; border-radius: 17px; }
+    .work-profile + .work-profile { margin-top: 16px; }
     .metric { font-size: 1.7rem; font-weight: 780; letter-spacing: -.045em; line-height: 1.05; }
     .label { margin-top: 7px; color: var(--muted); font-size: .84rem; }
     .work-profile { padding: 21px 23px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); box-shadow: var(--shadow); }
@@ -124,7 +125,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>16 July 2026 &middot; production patch path beats control</strong></div>
+      <div class="stamp">Last updated<br><strong>16 July 2026 &middot; overlap and learning sweep</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Latest Nsight Compute results">
@@ -232,6 +233,45 @@
       <p class="profile-note">Re-run commands when needed: <code>sudo -E bash newton/_src/solvers/phoenx/benchmarks/profile_g1_contact_rows_ncu.sh /tmp/phoenx_g1_contact_rows_current</code> and <code>sudo -E bash newton/_src/solvers/phoenx/benchmarks/profile_g1_reduced_pipeline_ncu.sh /tmp/phoenx_g1_reduced_pipeline_current</code>.</p>
     </section>
 
+    <section class="work-profile" aria-label="Latest overlap and training recipe results">
+      <h2>Latest overlap and training results</h2>
+      <p>The fastest configuration now exceeds nanoG1 in steady samples per second and produces a passing policy, but it is not yet reliable enough across seeds to replace the staged recipe. The table separates throughput from learning quality.</p>
+      <div class="ttp-table-wrap">
+        <table class="ttp-table">
+          <thead>
+            <tr><th>Experiment</th><th>Measured result</th><th>Learning evidence</th><th>Decision</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Two substeps + replay 2</td>
+              <td class="number">1.680M samples/s<br><strong class="good">1.21x nanoG1</strong></td>
+              <td>Seed 42 passes the unchanged full gate at iteration 300: 0 falls, 0.912 battery performance, 0.166 angular RMS, and 0.170 action jerk. Seed 11 learns stable locomotion but does not pass by iteration 300.</td>
+              <td><strong>Successful experimental path.</strong> Keep available and continue reliability work; do not replace the staged default on a 1/2 full-gate result.</td>
+            </tr>
+            <tr>
+              <td>Two substeps + replay 2.5</td>
+              <td class="number">1.454M samples/s<br><strong class="good">1.04x nanoG1</strong></td>
+              <td>Seed 42 remains stable but reaches only about 0.79 battery performance by iteration 300.</td>
+              <td><strong>Reject as a recipe.</strong> Faster update throughput does not preserve the required sample efficiency.</td>
+            </tr>
+            <tr>
+              <td>Staged 3&rarr;2 substeps, replay 3&rarr;2</td>
+              <td class="number">183.63 s cold wall time<br>138.94M samples</td>
+              <td>Passes the unchanged full gate at iteration 265 with 0 falls and 0.924 battery performance.</td>
+              <td><strong>Retain.</strong> Fix the phase transition so late replay 2 remains active; wall time is statistically unchanged from 183.03 s.</td>
+            </tr>
+            <tr>
+              <td>More rollout/update overlap</td>
+              <td class="number">Current graph overlap: +11.2%<br>18.8% of update hidden</td>
+              <td>Independent graph workload only; policy semantics are unchanged.</td>
+              <td><strong>Scheduler variants rejected.</strong> High-priority rollout regresses overlap by 1.7%; bounded 160-block learner forward regresses concurrent throughput by 13%.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="profile-note">Local nanoG1 reference: 1.3924M samples/s. The 1.680M result is a steady concurrent workload measurement, not a claim that PhoenX already matches nanoG1 time to policy. PhoenX still needs more samples and has seed-dependent convergence.</p>
+    </section>
+
     <section class="work-profile" aria-label="Measured PhoenX G1 gap to nanoG1">
       <h2>Measured G1 gap to nanoG1</h2>
       <p>PhoenX G1 is currently <strong>1.49x slower than local nanoG1 in validated steady training throughput</strong>: 0.9326M samples/s versus 1.3924M samples/s. The opt-in compact-patch candidate reaches 0.9457M samples/s, which would narrow the throughput gap to <strong>1.47x</strong>, but it has not passed the long policy gate yet. The latest zero-training validated PhoenX run reaches a passing held-out policy in 183.03 s at 138.94M samples.</p>
@@ -267,7 +307,7 @@
             </tr>
             <tr>
               <td>Policy quality gate</td>
-              <td>Iteration 265 passes the full gate on seeds 1000 and 1001: 0 falls, battery performance 0.924 / 0.920 with the late replay-ratio schedule. Checkpoint 240 still fails the full gate. The faster replay-ratio-from-start settings are rejected because they fail the iteration-75 learning screen.</td>
+              <td>Iteration 265 passes the full gate on seeds 1000 and 1001: 0 falls, battery performance 0.924 / 0.920 with the late replay-ratio schedule. Checkpoint 240 still fails the full gate. Replay 2 from the start can pass by iteration 300, but its 1/2 seed result is not reliable enough to replace the staged recipe.</td>
               <td>Local 20M nanoG1 run learns, but it is not a final pass-gate run.</td>
               <td>The speed comparison uses measured local throughput. Policy success is only claimed for the passing PhoenX full-gate runs.</td>
             </tr>

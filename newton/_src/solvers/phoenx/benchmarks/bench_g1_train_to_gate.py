@@ -321,7 +321,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
                 w_ang_vel_xy=float(args.angular_fine_tune_w_ang_vel_xy),
             )
             active_ppo_config = replace(
-                ppo_config,
+                active_ppo_config,
                 lr_anneal_timesteps=int(args.angular_fine_tune_lr_anneal_timesteps),
             )
         train_config = rl.ConfigTrainG1PPO(

@@ -5833,6 +5833,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             defaults.update(vars(args))
             defaults["articulation_mode"] = "reduced"
             defaults["angular_fine_tune_start_samples"] = 2
+            defaults["late_replay_ratio"] = 2.0
+            defaults["late_replay_start_samples"] = 2
             defaults["final_phase_sim_substeps"] = 2
             args = argparse.Namespace(**defaults)
             result = benchmark_train_to_gate(args)
@@ -5844,6 +5846,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 self.assertEqual(checkpoint["metadata_g1_env_solver_iterations"].item(), 1)
                 self.assertTrue(checkpoint["metadata_g1_env_randomize_commands_on_reset"].item())
                 self.assertEqual(checkpoint["metadata_g1_train_execution_mode"].item(), "graph_leapfrog")
+            self.assertEqual(restored.config.replay_ratio, 2.0)
             eval_args = argparse.Namespace(**vars(args))
             eval_args.evaluate_only = True
             eval_args.resume_checkpoint = str(checkpoint_path)
