@@ -204,6 +204,22 @@ def _build_basis_effective_matrix_kernel(
     )
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    const unsigned mask = __ballot_sync(0xffffffffu, value);
+    const unsigned lower = mask & ((1u << (threadIdx.x & 31)) - 1u);
+    return wp::vec2i(__popc(lower), __popc(mask));
+#else
+    return wp::vec2i(0, 0);
+#endif
+"""
+)
+def _warp_bool_prefix_count(value: wp.bool) -> wp.vec2i:
+    """Return the exclusive prefix and total count of true lanes."""
+    ...
+
+
 @wp.kernel(enable_backward=False, module="experimental_g1_compact_patch_rows")
 def _compact_first_point_patch_rows_kernel(
     point_count: wp.array[wp.int32],
@@ -222,18 +238,14 @@ def _compact_first_point_patch_rows_kernel(
     packed_articulation = articulation * wp.int32(2) + storage_page
     active_count = point_count[packed_articulation]
 
-    column_count = wp.int32(0)
+    first_in_column = lane < active_count and lane == wp.int32(0)
+    if lane > wp.int32(0) and lane < active_count:
+        first_in_column = (
+            point_column[packed_articulation, lane] != point_column[packed_articulation, lane - wp.int32(1)]
+        )
+    column_counts = _warp_bool_prefix_count(first_in_column)
     if lane == wp.int32(0):
-        for point_offset in range(active_count):
-            point = wp.int32(point_offset)
-            first_in_column = point == wp.int32(0)
-            if point > wp.int32(0):
-                first_in_column = (
-                    point_column[packed_articulation, point] != point_column[packed_articulation, point - wp.int32(1)]
-                )
-            if first_in_column:
-                column_count += wp.int32(1)
-        row_count_out[packed_articulation] = active_count + wp.int32(2) * column_count
+        row_count_out[packed_articulation] = active_count + wp.int32(2) * column_counts[1]
 
     if lane >= active_count:
         return
@@ -243,24 +255,10 @@ def _compact_first_point_patch_rows_kernel(
     row_wrench_out[packed_articulation, lane] = row_wrench_in[packed_articulation, source_row]
     row_velocity_out[packed_articulation, lane] = row_velocity_in[packed_articulation, source_row]
 
-    first_in_column = lane == wp.int32(0)
-    if lane > wp.int32(0):
-        first_in_column = (
-            point_column[packed_articulation, lane] != point_column[packed_articulation, lane - wp.int32(1)]
-        )
     if not first_in_column:
         return
 
-    column_ordinal = wp.int32(0)
-    for point_offset in range(lane):
-        point = wp.int32(point_offset)
-        previous_first = point == wp.int32(0)
-        if point > wp.int32(0):
-            previous_first = (
-                point_column[packed_articulation, point] != point_column[packed_articulation, point - wp.int32(1)]
-            )
-        if previous_first:
-            column_ordinal += wp.int32(1)
+    column_ordinal = column_counts[0]
     target_row = active_count + wp.int32(2) * column_ordinal
     row_body_out[packed_articulation, target_row] = row_body_in[packed_articulation, source_row + wp.int32(1)]
     row_wrench_out[packed_articulation, target_row] = row_wrench_in[packed_articulation, source_row + wp.int32(1)]
@@ -294,18 +292,14 @@ def _compact_central_patch_rows_kernel(
     packed_articulation = articulation * wp.int32(2) + storage_page
     active_count = point_count[packed_articulation]
 
-    column_count = wp.int32(0)
+    first_in_column = lane < active_count and lane == wp.int32(0)
+    if lane > wp.int32(0) and lane < active_count:
+        first_in_column = (
+            point_column[packed_articulation, lane] != point_column[packed_articulation, lane - wp.int32(1)]
+        )
+    column_counts = _warp_bool_prefix_count(first_in_column)
     if lane == wp.int32(0):
-        for point_offset in range(active_count):
-            point = wp.int32(point_offset)
-            first_in_column = point == wp.int32(0)
-            if point > wp.int32(0):
-                first_in_column = (
-                    point_column[packed_articulation, point] != point_column[packed_articulation, point - wp.int32(1)]
-                )
-            if first_in_column:
-                column_count += wp.int32(1)
-        row_count_out[packed_articulation] = active_count + wp.int32(2) * column_count
+        row_count_out[packed_articulation] = active_count + wp.int32(2) * column_counts[1]
 
     if lane >= active_count:
         return
@@ -315,24 +309,10 @@ def _compact_central_patch_rows_kernel(
     row_wrench_out[packed_articulation, lane] = row_wrench_in[packed_articulation, source_row]
     row_velocity_out[packed_articulation, lane] = row_velocity_in[packed_articulation, source_row]
 
-    first_in_column = lane == wp.int32(0)
-    if lane > wp.int32(0):
-        first_in_column = (
-            point_column[packed_articulation, lane] != point_column[packed_articulation, lane - wp.int32(1)]
-        )
     if not first_in_column:
         return
 
-    column_ordinal = wp.int32(0)
-    for point_offset in range(lane):
-        point = wp.int32(point_offset)
-        previous_first = point == wp.int32(0)
-        if point > wp.int32(0):
-            previous_first = (
-                point_column[packed_articulation, point] != point_column[packed_articulation, point - wp.int32(1)]
-            )
-        if previous_first:
-            column_ordinal += wp.int32(1)
+    column_ordinal = column_counts[0]
 
     column = point_column[packed_articulation, lane]
     tangent1_sum = wp.spatial_vector()
@@ -991,12 +971,18 @@ def main() -> int:
     block.page_index.assign(np.asarray([0], dtype=np.int32))
 
     point_count = block.point_count.numpy()[::2]
+    point_column = block.point_column.numpy()[::2]
     row_body = block.row_body.numpy()[::2]
     row_wrench = block.row_wrench.numpy()[::2]
+    row_velocity = block.row_velocity.numpy()[::2]
     if np.any(point_count != 8):
         raise RuntimeError(f"expected the common eight-point G1 page, got {np.unique(point_count).tolist()}")
     basis_body_np = np.full((env.world_count, 2), -1, dtype=np.int32)
     coefficients_np = np.zeros((env.world_count, _ROWS, _BASIS), dtype=np.float32)
+    central_row_count_expected = np.zeros(env.world_count, dtype=np.int32)
+    central_row_body_expected = np.zeros((env.world_count, 96), dtype=np.int32)
+    central_row_wrench_expected = np.zeros((env.world_count, 96, 6), dtype=np.float32)
+    central_row_velocity_expected = np.zeros((env.world_count, 96), dtype=np.float32)
     for articulation in range(env.world_count):
         bodies = np.unique(row_body[articulation, :_ROWS])
         if bodies.size != 2:
@@ -1005,6 +991,40 @@ def main() -> int:
         for row in range(_ROWS):
             slot = int(np.nonzero(bodies == row_body[articulation, row])[0][0])
             coefficients_np[articulation, row, slot * 6 : slot * 6 + 6] = row_wrench[articulation, row]
+
+        count = int(point_count[articulation])
+        normal_source = 3 * np.arange(count)
+        central_row_body_expected[articulation, :count] = row_body[articulation, normal_source]
+        central_row_wrench_expected[articulation, :count] = row_wrench[articulation, normal_source]
+        central_row_velocity_expected[articulation, :count] = row_velocity[articulation, normal_source]
+        point = 0
+        patch = 0
+        while point < count:
+            column = point_column[articulation, point]
+            end = point + 1
+            while end < count and point_column[articulation, end] == column:
+                end += 1
+            target = count + 2 * patch
+            points = np.arange(point, end)
+            tangent0_source = 3 * points + 1
+            tangent1_source = tangent0_source + 1
+            central_row_body_expected[articulation, target] = row_body[articulation, tangent0_source[0]]
+            central_row_body_expected[articulation, target + 1] = row_body[articulation, tangent1_source[0]]
+            central_row_wrench_expected[articulation, target] = np.mean(
+                row_wrench[articulation, tangent0_source], axis=0, dtype=np.float32
+            )
+            central_row_wrench_expected[articulation, target + 1] = np.mean(
+                row_wrench[articulation, tangent1_source], axis=0, dtype=np.float32
+            )
+            central_row_velocity_expected[articulation, target] = np.mean(
+                row_velocity[articulation, tangent0_source], dtype=np.float32
+            )
+            central_row_velocity_expected[articulation, target + 1] = np.mean(
+                row_velocity[articulation, tangent1_source], dtype=np.float32
+            )
+            point = end
+            patch += 1
+        central_row_count_expected[articulation] = count + 2 * patch
 
     basis_body = wp.empty((env.world_count, 2), dtype=wp.int32, device=device)
     coefficients = wp.empty((env.world_count * _ROWS, _BASIS), dtype=wp.float32, device=device)
@@ -1350,6 +1370,30 @@ def main() -> int:
     central_row_count_np = central_row_count.numpy()[::2]
     central_rows_mean = float(np.mean(central_row_count_np))
     central_rows_max = int(np.max(central_row_count_np))
+    np.testing.assert_array_equal(central_row_count_np, central_row_count_expected)
+    central_active = np.arange(96)[None, :] < central_row_count_expected[:, None]
+    central_row_body_np = central_row_body.numpy()[::2]
+    central_row_wrench_np = central_row_wrench.numpy()[::2]
+    central_row_velocity_np = central_row_velocity.numpy()[::2]
+    np.testing.assert_array_equal(central_row_body_np[central_active], central_row_body_expected[central_active])
+    np.testing.assert_allclose(
+        central_row_wrench_np[central_active],
+        central_row_wrench_expected[central_active],
+        rtol=2.0e-6,
+        atol=2.0e-6,
+    )
+    np.testing.assert_allclose(
+        central_row_velocity_np[central_active],
+        central_row_velocity_expected[central_active],
+        rtol=2.0e-6,
+        atol=2.0e-6,
+    )
+    central_row_wrench_max_abs_error = float(
+        np.max(np.abs(central_row_wrench_np[central_active] - central_row_wrench_expected[central_active]))
+    )
+    central_row_velocity_max_abs_error = float(
+        np.max(np.abs(central_row_velocity_np[central_active] - central_row_velocity_expected[central_active]))
+    )
     launch_direct()
     wp.synchronize_device(device)
     direct_jacobian = block.packed_jacobian.numpy().reshape(env.world_count * 2, 96, _DOFS)[::2, :_ROWS]
@@ -1456,6 +1500,8 @@ def main() -> int:
                 "compact_first_point_patch_projected_build_speedup": direct_us / compact_direct_us,
                 "compact_central_patch_rows_mean": central_rows_mean,
                 "compact_central_patch_rows_max": central_rows_max,
+                "compact_central_patch_row_velocity_max_abs_error": central_row_velocity_max_abs_error,
+                "compact_central_patch_row_wrench_max_abs_error": central_row_wrench_max_abs_error,
                 "compact_central_patch_compact_us": central_us,
                 "compact_central_patch_direct_us": central_direct_us,
                 "compact_central_patch_projected_build_speedup": direct_us / central_direct_us,
