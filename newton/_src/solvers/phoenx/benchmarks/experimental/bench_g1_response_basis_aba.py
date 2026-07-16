@@ -19,6 +19,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     DEFAULT_HERTZ_CONTACT,
     ContactColumnContainer,
     ContactContainer,
+    _unpack_h2,
     cc_get_bias,
     cc_get_bias_t1,
     cc_get_bias_t2,
@@ -42,10 +43,17 @@ from newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_response_basis_
     _synthesize_tile_kernel,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_block import (
+    BLOCK_LAMBDA_INF,
+    block_solve_accumulated_inverse_bounded_1,
+)
+from newton._src.solvers.phoenx.constraints.contact_container import cc_set_normal_lambda
+from newton._src.solvers.phoenx.constraints.contact_patch_friction import contact_patch_project_velocity_update
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 _BASIS_GROUP = 16
+_PACKED_SOLVE_WIDTH = _DOFS // 2
 
 
 @wp.kernel(enable_backward=False, module="experimental_g1_contact_basis_classify")
@@ -351,6 +359,279 @@ def _compact_central_patch_rows_kernel(
     ]
     row_wrench_out[packed_articulation, target_row + wp.int32(1)] = tangent2_sum * inv_count
     row_velocity_out[packed_articulation, target_row + wp.int32(1)] = velocity2_sum * inv_count
+
+
+@wp.kernel(enable_backward=False, module="experimental_g1_compact_central_patch_solve")
+def _solve_compact_central_patch_contact_kernel(
+    columns: ContactColumnContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    cc: ContactContainer,
+    iterations: wp.int32,
+    use_bias: wp.bool,
+    warmstart: wp.bool,
+    enabled: wp.array[wp.int32],
+    point_count: wp.array[wp.int32],
+    point_contact: wp.array2d[wp.int32],
+    point_column: wp.array2d[wp.int32],
+    row_velocity: wp.array2d[wp.float32],
+    page_index: wp.array[wp.int32],
+    packed_jacobian: wp.array2d[wp.uint32],
+    packed_response: wp.array2d[wp.uint32],
+    patch_lambda: wp.array2d[wp.vec2],
+    normal_load: wp.array2d[wp.float32],
+    generalized_delta_out: wp.array2d[wp.vec2],
+):
+    articulation, lane = wp.tid()
+    if enabled[articulation] == wp.int32(0):
+        return
+
+    storage_page = wp.min(page_index[0], wp.int32(1))
+    packed_articulation = articulation * wp.int32(2) + storage_page
+    active_point_count = point_count[packed_articulation]
+    generalized_delta = wp.tile_zeros(shape=_PACKED_SOLVE_WIDTH, dtype=wp.vec2, storage="register")
+
+    if warmstart:
+        for point_offset in range(active_point_count):
+            point = wp.int32(point_offset)
+            contact = wp.int32(0)
+            lambda_n = wp.float32(0.0)
+            if lane == wp.int32(0):
+                contact = point_contact[packed_articulation, point]
+                lambda_n = cc_get_normal_lambda(cc, contact)
+            row = point
+            packed_row = packed_articulation * wp.int32(96) + row
+            response = wp.tile_map(
+                _unpack_h2,
+                wp.tile_load(packed_response[packed_row], shape=_PACKED_SOLVE_WIDTH, storage="register"),
+            )
+            generalized_delta += wp.tile_map(
+                wp.mul,
+                response,
+                wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=lambda_n, thread_idx=0, storage="shared"),
+            )
+
+        for point_offset in range(active_point_count):
+            point = wp.int32(point_offset)
+            first_in_column = point == wp.int32(0)
+            if point > wp.int32(0):
+                first_in_column = (
+                    point_column[packed_articulation, point] != point_column[packed_articulation, point - wp.int32(1)]
+                )
+            if first_in_column:
+                column = point_column[packed_articulation, point]
+                column_ordinal = wp.int32(0)
+                for previous_offset in range(point):
+                    previous_point = wp.int32(previous_offset)
+                    previous_first = previous_point == wp.int32(0)
+                    if previous_point > wp.int32(0):
+                        previous_first = (
+                            point_column[packed_articulation, previous_point]
+                            != point_column[packed_articulation, previous_point - wp.int32(1)]
+                        )
+                    if previous_first:
+                        column_ordinal += wp.int32(1)
+
+                lambda_t = wp.vec2f(0.0, 0.0)
+                if lane == wp.int32(0):
+                    for column_point_offset in range(active_point_count):
+                        column_point = wp.int32(column_point_offset)
+                        if point_column[packed_articulation, column_point] == column:
+                            contact = point_contact[packed_articulation, column_point]
+                            lambda_t[0] += cc_get_tangent1_lambda(cc, contact)
+                            lambda_t[1] += cc_get_tangent2_lambda(cc, contact)
+                    patch_lambda[articulation, column_ordinal] = lambda_t
+                row = active_point_count + wp.int32(2) * column_ordinal
+                packed_row = packed_articulation * wp.int32(96) + row
+                response1 = wp.tile_map(
+                    _unpack_h2,
+                    wp.tile_load(packed_response[packed_row], shape=_PACKED_SOLVE_WIDTH, storage="register"),
+                )
+                response2 = wp.tile_map(
+                    _unpack_h2,
+                    wp.tile_load(
+                        packed_response[packed_row + wp.int32(1)], shape=_PACKED_SOLVE_WIDTH, storage="register"
+                    ),
+                )
+                generalized_delta += wp.tile_map(
+                    wp.mul,
+                    response1,
+                    wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=lambda_t[0], thread_idx=0, storage="shared"),
+                )
+                generalized_delta += wp.tile_map(
+                    wp.mul,
+                    response2,
+                    wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=lambda_t[1], thread_idx=0, storage="shared"),
+                )
+
+    mass_coeff = wp.float32(1.0)
+    impulse_coeff = wp.float32(0.0)
+    if use_bias:
+        _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
+        )
+
+    for iteration in range(iterations):
+        for point_offset in range(active_point_count):
+            point = wp.int32(point_offset)
+            if (iteration & wp.int32(1)) != wp.int32(0):
+                point = active_point_count - wp.int32(1) - wp.int32(point_offset)
+            row = point
+            packed_row = packed_articulation * wp.int32(96) + row
+            jacobian = wp.tile_map(
+                _unpack_h2,
+                wp.tile_load(packed_jacobian[packed_row], shape=_PACKED_SOLVE_WIDTH, storage="register"),
+            )
+            response = wp.tile_map(
+                _unpack_h2,
+                wp.tile_load(packed_response[packed_row], shape=_PACKED_SOLVE_WIDTH, storage="register"),
+            )
+            jv = row_velocity[packed_articulation, row] + wp.tile_extract(
+                wp.tile_sum(wp.tile_map(wp.dot, jacobian, generalized_delta)), 0
+            )
+            inverse_mass = wp.tile_extract(wp.tile_sum(wp.tile_map(wp.dot, jacobian, response)), 0)
+            delta_n = wp.float32(0.0)
+            if lane == wp.int32(0):
+                contact = point_contact[packed_articulation, point]
+                column = point_column[packed_articulation, point]
+                bias = cc_get_bias(cc, contact)
+                speculative = bias > wp.float32(0.0)
+                normal_load[articulation, point] = wp.float32(0.0)
+                if not (speculative and not use_bias) and inverse_mass > wp.float32(1.0e-12):
+                    if not use_bias:
+                        bias = wp.float32(0.0)
+                    row_mass_coeff = mass_coeff
+                    row_impulse_coeff = impulse_coeff
+                    if speculative:
+                        row_mass_coeff = wp.float32(1.0)
+                        row_impulse_coeff = wp.float32(0.0)
+                    effective_mass = wp.float32(1.0) / inverse_mass
+                    lambda_old = cc_get_normal_lambda(cc, contact)
+                    normal_update = block_solve_accumulated_inverse_bounded_1(
+                        effective_mass,
+                        jv + bias,
+                        lambda_old,
+                        row_mass_coeff,
+                        row_impulse_coeff,
+                        sor_boost,
+                        wp.float32(0.0),
+                        BLOCK_LAMBDA_INF,
+                    )
+                    cc_set_normal_lambda(cc, contact, normal_update.lambda_new)
+                    delta_n = normal_update.delta
+                    load = normal_update.lambda_new + row_mass_coeff * effective_mass * bias * sor_boost
+                    normal_load[articulation, point] = wp.clamp(load, wp.float32(0.0), normal_update.lambda_new)
+                    if speculative and bias > idt * wp.float32(0.002):
+                        normal_load[articulation, point] = wp.float32(0.0)
+            generalized_delta += wp.tile_map(
+                wp.mul,
+                response,
+                wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=delta_n, thread_idx=0, storage="shared"),
+            )
+
+        for point_offset in range(active_point_count):
+            point = wp.int32(point_offset)
+            first_in_column = point == wp.int32(0)
+            if point > wp.int32(0):
+                first_in_column = (
+                    point_column[packed_articulation, point] != point_column[packed_articulation, point - wp.int32(1)]
+                )
+            if not first_in_column:
+                continue
+
+            column = point_column[packed_articulation, point]
+            column_ordinal = wp.int32(0)
+            for previous_offset in range(point):
+                previous_point = wp.int32(previous_offset)
+                previous_first = previous_point == wp.int32(0)
+                if previous_point > wp.int32(0):
+                    previous_first = (
+                        point_column[packed_articulation, previous_point]
+                        != point_column[packed_articulation, previous_point - wp.int32(1)]
+                    )
+                if previous_first:
+                    column_ordinal += wp.int32(1)
+
+            row = active_point_count + wp.int32(2) * column_ordinal
+            packed_row = packed_articulation * wp.int32(96) + row
+            jacobian1 = wp.tile_map(
+                _unpack_h2,
+                wp.tile_load(packed_jacobian[packed_row], shape=_PACKED_SOLVE_WIDTH, storage="register"),
+            )
+            jacobian2 = wp.tile_map(
+                _unpack_h2,
+                wp.tile_load(packed_jacobian[packed_row + wp.int32(1)], shape=_PACKED_SOLVE_WIDTH, storage="register"),
+            )
+            response1 = wp.tile_map(
+                _unpack_h2,
+                wp.tile_load(packed_response[packed_row], shape=_PACKED_SOLVE_WIDTH, storage="register"),
+            )
+            response2 = wp.tile_map(
+                _unpack_h2,
+                wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=_PACKED_SOLVE_WIDTH, storage="register"),
+            )
+            jv1 = row_velocity[packed_articulation, row] + wp.tile_extract(
+                wp.tile_sum(wp.tile_map(wp.dot, jacobian1, generalized_delta)), 0
+            )
+            jv2 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
+                wp.tile_sum(wp.tile_map(wp.dot, jacobian2, generalized_delta)), 0
+            )
+            k00 = wp.tile_extract(wp.tile_sum(wp.tile_map(wp.dot, jacobian1, response1)), 0)
+            k01 = wp.tile_extract(wp.tile_sum(wp.tile_map(wp.dot, jacobian1, response2)), 0)
+            k11 = wp.tile_extract(wp.tile_sum(wp.tile_map(wp.dot, jacobian2, response2)), 0)
+
+            delta_t = wp.vec2f(0.0, 0.0)
+            if lane == wp.int32(0):
+                normal_load_sum = wp.float32(0.0)
+                bias_t = wp.vec2f(0.0, 0.0)
+                column_points = wp.int32(0)
+                for column_point_offset in range(active_point_count):
+                    column_point = wp.int32(column_point_offset)
+                    if point_column[packed_articulation, column_point] == column:
+                        contact = point_contact[packed_articulation, column_point]
+                        normal_load_sum += normal_load[articulation, column_point]
+                        if use_bias:
+                            bias_t[0] += cc_get_bias_t1(cc, contact)
+                            bias_t[1] += cc_get_bias_t2(cc, contact)
+                        column_points += wp.int32(1)
+                inv_count = wp.float32(1.0) / wp.float32(wp.max(column_points, wp.int32(1)))
+                bias_t *= inv_count
+                det = k00 * k11 - k01 * k01
+                effective = wp.mat22f(0.0, 0.0, 0.0, 0.0)
+                if det > wp.float32(1.0e-12):
+                    inv_det = wp.float32(1.0) / det
+                    effective = wp.mat22f(
+                        k11 * inv_det,
+                        -k01 * inv_det,
+                        -k01 * inv_det,
+                        k00 * inv_det,
+                    )
+                mu_static = contact_get_friction(columns, column)
+                mu_dynamic = contact_get_friction_dynamic(columns, column)
+                tangent_update = contact_patch_project_velocity_update(
+                    patch_lambda[articulation, column_ordinal],
+                    wp.vec2f(jv1, jv2),
+                    bias_t,
+                    effective,
+                    normal_load_sum,
+                    mu_static,
+                    mu_dynamic,
+                    sor_boost,
+                )
+                patch_lambda[articulation, column_ordinal] = tangent_update.lambda_new
+                delta_t = tangent_update.delta
+            generalized_delta += wp.tile_map(
+                wp.mul,
+                response1,
+                wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=delta_t[0], thread_idx=0, storage="shared"),
+            )
+            generalized_delta += wp.tile_map(
+                wp.mul,
+                response2,
+                wp.tile_from_thread(shape=_PACKED_SOLVE_WIDTH, value=delta_t[1], thread_idx=0, storage="shared"),
+            )
+
+    wp.tile_store(generalized_delta_out[articulation], generalized_delta)
 
 
 @wp.kernel(enable_backward=False, module="experimental_g1_contact_basis_solve")
@@ -723,6 +1004,8 @@ def main() -> int:
     block = reduced.contact_block_system
     if block.packed_jacobian is None or block.packed_response is None:
         raise RuntimeError("reduced contact buffers were not initialized")
+    if block.packed_rows_mode != "fp16x2":
+        raise RuntimeError("compact central patch solve benchmark currently expects PHOENX_CONTACT_ROWS_FP16=fp16x2")
     block.page_index.assign(np.asarray([0], dtype=np.int32))
 
     point_count = block.point_count.numpy()[::2]
@@ -757,10 +1040,14 @@ def main() -> int:
     basis_packed = wp.zeros((env.world_count * _BASIS, _PACKED_COLUMNS), dtype=wp.float32, device=device)
     basis_effective = wp.zeros((env.world_count * _BASIS, _BASIS), dtype=wp.float32, device=device)
     compressed_generalized_delta = wp.zeros((env.world_count, _DOFS), dtype=wp.float32, device=device)
+    central_patch_lambda = wp.zeros((env.world_count, 32), dtype=wp.vec2, device=device)
+    central_normal_load = wp.zeros((env.world_count, 32), dtype=wp.float32, device=device)
+    central_generalized_delta = wp.zeros((env.world_count, _PACKED_SOLVE_WIDTH), dtype=wp.vec2, device=device)
     source_cc = env.solver.world._contact_container
     direct_cc = ContactContainer()
     compressed_cc = ContactContainer()
-    for target in (direct_cc, compressed_cc):
+    central_cc = ContactContainer()
+    for target in (direct_cc, compressed_cc, central_cc):
         target.impulses = wp.clone(source_cc.impulses)
         target.prev_impulses = wp.clone(source_cc.prev_impulses)
         target.lambdas = wp.clone(source_cc.lambdas)
@@ -1009,6 +1296,34 @@ def main() -> int:
             device=device,
         )
 
+    def launch_central_patch_solve() -> None:
+        wp.launch_tiled(
+            _solve_compact_central_patch_contact_kernel,
+            dim=[env.world_count],
+            block_dim=32,
+            inputs=[
+                env.solver.world._contact_cols,
+                wp.float32(250.0),
+                wp.float32(env.solver.world.sor_boost),
+                central_cc,
+                wp.int32(2),
+                wp.bool(True),
+                wp.bool(True),
+                block.enabled,
+                block.point_count,
+                block.point_contact,
+                block.point_column,
+                central_row_velocity,
+                block.page_index,
+                block.packed_jacobian_solve,
+                block.packed_response_solve,
+                central_patch_lambda,
+                central_normal_load,
+            ],
+            outputs=[central_generalized_delta],
+            device=device,
+        )
+
     def launch_synthesis_split_96() -> None:
         kernel = _synthesize_split_tile_96_fp16_kernel if block.packed_rows_fp16 else _synthesize_split_tile_96_kernel
         wp.launch_tiled(
@@ -1079,9 +1394,14 @@ def main() -> int:
     launch_direct()
     launch_direct_solve()
     launch_compressed_solve()
+    launch_central_direct()
+    launch_central_patch_solve()
     wp.synchronize_device(device)
     direct_generalized_delta = block.generalized_delta.numpy()[:, :_DOFS]
     compressed_generalized_delta_np = compressed_generalized_delta.numpy()
+    central_generalized_delta_np = central_generalized_delta.numpy()
+    compact_central_patch_solve_isfinite = bool(np.isfinite(central_generalized_delta_np).all())
+    compact_central_patch_solve_linf = float(np.max(np.abs(central_generalized_delta_np)))
     generalized_delta_error = float(np.max(np.abs(compressed_generalized_delta_np - direct_generalized_delta)))
     impulse_error = float(np.max(np.abs(compressed_cc.impulses.numpy() - direct_cc.impulses.numpy())))
     point_contact_np = block.point_contact.numpy()[::2, : _ROWS // 3]
@@ -1103,7 +1423,12 @@ def main() -> int:
     compact_direct_us = _time_graph(device, launch_compact_direct, int(args.replays))
     central_us = _time_graph(device, launch_central_patch_rows, int(args.replays))
     central_direct_us = _time_graph(device, launch_central_direct, int(args.replays))
+    launch_direct()
+    wp.synchronize_device(device)
     direct_solve_us = _time_graph(device, launch_direct_solve, int(args.replays))
+    launch_central_direct()
+    wp.synchronize_device(device)
+    compact_central_patch_solve_us = _time_graph(device, launch_central_patch_solve, int(args.replays))
     classify_us = _time_graph(device, launch_classify, int(args.replays))
     classify_parallel_us = _time_graph(device, launch_classify_parallel, int(args.replays))
     basis_us = _time_graph(device, launch_basis, int(args.replays))
@@ -1118,6 +1443,7 @@ def main() -> int:
     compressed_prepare_total_us = classify_parallel_us + basis_us + basis_effective_us
     compressed_total_us = compressed_prepare_total_us + compressed_solve_us
     direct_total_us = direct_us + direct_solve_us
+    compact_central_patch_total_us = central_direct_us + compact_central_patch_solve_us
     print(
         json.dumps(
             {
@@ -1151,6 +1477,11 @@ def main() -> int:
                 "compact_central_patch_compact_us": central_us,
                 "compact_central_patch_direct_us": central_direct_us,
                 "compact_central_patch_projected_build_speedup": direct_us / central_direct_us,
+                "compact_central_patch_solve_isfinite": compact_central_patch_solve_isfinite,
+                "compact_central_patch_solve_linf": compact_central_patch_solve_linf,
+                "compact_central_patch_solve_us": compact_central_patch_solve_us,
+                "compact_central_patch_total_projected_speedup": direct_total_us / compact_central_patch_total_us,
+                "compact_central_patch_total_us": compact_central_patch_total_us,
                 "direct_solve_us": direct_solve_us,
                 "direct_kernel_cpu_expansion_max_abs_error": direct_kernel_cpu_error,
                 "direct_total_us": direct_total_us,
