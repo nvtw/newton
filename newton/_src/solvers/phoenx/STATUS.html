@@ -124,7 +124,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>11 July 2026 · fp16x2 rows shipped as default</strong></div>
+      <div class="stamp">Last updated<br><strong>16 July 2026 · DOF-type factor split +2.82% physics; AMP rejected</strong></div>
     </header>
 
     <section class="hero">
@@ -229,6 +229,30 @@
     </section>
 
     <div class="section-label">Current state</div>
+    <article>
+      <div class="meta"><span class="tag good">PHYSICS WIN &middot; DOF-TYPE FACTOR SPLIT</span><time>16 Jul</time></div>
+      <h2>Occupancy unlock: split the factor by joint-DOF-type &mdash; +2.82% physics, the biggest lever since fp16x2</h2>
+      <p>The depth-major ABA rejection established the 50%-of-GPU reduced-dynamics phase is <strong>register-bound, not launch-bound</strong> (factor kernel 144 regs &rarr; ~22% occupancy). Followed that pointer to a clean, generic win.</p>
+      <ul>
+        <li><strong>Localized the register wall:</strong> the single-DOF revolute path needs only 64 regs (50% occ), but the one free-base lane&rsquo;s 6&times;6 SPD invert adds +80, dragging the whole warp to 144/22%. Every in-place reduction rejected with compile-time data (Schur 3&times;3-block invert 149, in-place Cholesky 147, recompute 148 &mdash; all &gt; 144): the peak is the multi-DOF branch&rsquo;s aggregate output footprint, not the invert internals. Solve-not-invert also rejected (the inverse is reused as a matrix across advance/impulse-response/contact-solve). Only physically removing the branch helps.</li>
+        <li><strong>The split:</strong> single-DOF joints reduce in a lean 64-reg / 50%-occ depth-walk kernel; the 6&times;6 root invert defers to a companion launch. Generic DOF-count dispatch (mirrors the existing revolute specialization), active only when every multi-DOF joint is an articulation root; mid-chain multi-DOF safely falls back. No scene identity baked in.</li>
+        <li><strong>Measured (solo GPU, reverse A/B, drop trial0, 8 trials):</strong> factor kernel 112.6&rarr;69.3&thinsp;&micro;s = <strong>1.62&times; (+38.4%)</strong> @8192, 1.30&times; @4096. Full-step graph_leapfrog: <strong>+2.82%</strong> @8192, +1.28% @4096 (every ON sample &gt; every OFF sample). Occupancy 22&rarr;50% converted. Biggest physics lever measured this campaign (fp16x2 was +1.06%).</li>
+        <li><strong>Critical fix:</strong> the companion roots kernel must launch <code>block_dim=32</code> &mdash; the default 256 packs the few heavy 6&times;6 roots onto ~16 blocks and stalls (~2.5&times;), regressing 4096 by &minus;36%. With 32 it spreads across SMs and the split is a strict win at both counts (no world-count gate).</li>
+        <li><strong>Exact + tested:</strong> bit-identical to the unified kernel (max_abs_diff 0.0 across 40 floating-base articulations, graph-captured, deterministic); new CUDA-graph regression test pins split==unified; floating-base momentum/energy + Featherstone-parity battery passes.</li>
+      </ul>
+      <p class="profile-note">Data-directed physics innovation: depth-major &rarr; register-bound diagnosis &rarr; localized to the free-base lane &rarr; in-place reformulations (incl. Schur) ruled out with compile-time data &rarr; DOF-split. Awaiting user go to commit. Session banked physics: fp16x2 +1.06% and now factor-split +2.82%.</p>
+    </article>
+    <article>
+      <div class="meta"><span class="tag warn">BIG-SWING REJECT &middot; AMP MOTION PRIOR</span><time>16 Jul</time></div>
+      <h2>AMP does not lift p / time-to-policy on G1 &mdash; the gate is tracking-dominated</h2>
+      <p>The user-chosen big swing &mdash; Adversarial Motion Priors (Peng 2021), motion-prior RL to fix seed reliability &mdash; was built end-to-end (discriminator to 0.999 held-out accuracy, LSGAN + style reward + DeepMimic anneal, CUDA-graph-safe, deterministic) and evaluated decisively. Clean reject on the primary metric.</p>
+      <ul>
+        <li><strong>6-seed iter-75 screen, within-run baseline mean 0.583.</strong> NO AMP arm beats it: w_style 0.5=0.525, 0.3=0.512, 0.2=0.529, 0.1=0.582, anneal(1.0&rarr;0)=0.542. As w&rarr;0 it converges to baseline; no weight exceeds it. 0/6 pass the 0.90 gate in every arm.</li>
+        <li><strong>Mechanism (textbook style-vs-task tension):</strong> AMP slashes falls (seed 42: 8&rarr;0, 47: 19&rarr;0) and smooths gait (leg_qvel_rms ~0.08 vs baseline ~0.25&ndash;0.53) &mdash; the policy visibly walks <em>more like the reference</em> &mdash; but velocity-command tracking (the gate metric) drops (mean lin-vel error 0.399&rarr;0.459). The discriminator rewards looking-like-reference, which pulls off the commanded velocities. Anneal&rsquo;s pure-style start destabilized seeds 29 (4&rarr;330 falls) and 71 (44&rarr;118) as easily as it helped seed 89.</li>
+        <li><strong>Silver lining (documented):</strong> AMP is a real robustness / variance-reduction / fall-cutting prior (std 0.100&rarr;0.055&ndash;0.075) &mdash; it would help a robustness-gated task. G1&rsquo;s gate is tracking-dominated, so it is not the lever here. Code + reproducible reference/scripts persisted (out of /tmp); nothing committed.</li>
+      </ul>
+      <p class="profile-note">Three seed-reliability approaches now closed with 6-seed data: entropy floor, gSDE, and AMP. Walking must be discovered <em>and tracked</em>; a style prior guides toward reference-like motion but trades away the command-tracking the gate scores. The p lever remains open; physics-throughput is where this session banked (fp16x2, factor-split).</p>
+    </article>
     <article>
       <div class="meta"><span class="tag warn">SEED-VARIANCE &middot; EXPLORATION FIXES FAIL</span><time>15 Jul</time></div>
       <h2>Standard RL exploration levers do not reduce G1 seed variance</h2>

@@ -1013,6 +1013,42 @@ If you ever see a graph-captured PhoenX scene where bodies appear to be on rails
   reduced occupancy and loaded unused rows; the existing repeated row loads
   are already served effectively by cache.
 
+## Reduced factor: DOF-type split (KEPT, +2.82% physics, 2026-07-16)
+
+The reduced articulated-body factor kernel was register-bound: `ptxas -v` and the
+driver (`CU_FUNC_ATTRIBUTE_NUM_REGS`) both report **144 regs / ~22% occupancy** on
+sm_120. Attribution: the single-DOF revolute path needs only **64 regs (50% occ)**,
+but the one free-base lane's 6×6 SPD invert adds ~80, dragging the whole warp's
+allocation to 144. This is the depth-major rejection's "register-bound not
+launch-bound" finding, localized.
+
+**In-place register reduction is impossible — all rejected with compile-time data:**
+Schur 3×3-block invert 149, in-place Cholesky 147, recompute-inertia 148, symmetric
+packing already shipped — every variant ≥ 144. The peak is NOT the invert's internal
+factorization; it is the multi-DOF branch's *aggregate* working set (36-entry inverse
+output + `inertia` + correction accumulation all live). Solve-not-invert also fails:
+`joint_d_inv` is reused as a matrix across advance/impulse-response/contact-solve, not
+applied to one fixed RHS. **Only physically removing the branch lowers the peak.**
+
+**The split (generic DOF-count dispatch, mirrors `_use_revolute_specialization`):**
+single-DOF joints reduce in a `wp.static`-pruned 64-reg / 50%-occ depth-walk kernel
+(`_factor_reduced_singledof_warp_kernel`); the 6×6 root invert defers to a companion
+launch (`_factor_reduced_multidof_kernel`). Gated on `_use_factor_dof_split` — active
+only when every multi-DOF joint is an articulation root (depth 0), whose reduced
+inertia the depth walk never consumes; else falls back to the unified 144-reg kernel.
+Bit-identical (max_abs_diff 0.0), deterministic, graph-captured.
+
+- **Measured (solo GPU, reverse A/B, drop trial0, 8 trials):** factor kernel
+  112.6→69.3 µs = **1.62× (+38.4%)** @8192, 1.30× @4096. Full-step graph_leapfrog
+  **+2.82%** @8192, +1.28% @4096. Biggest physics lever since fp16x2 (+1.06%).
+- **CRITICAL:** the companion launch MUST use `block_dim=32`. Default 256 packs the
+  few heavy 6×6 roots onto ~16 blocks and stalls (~2.5×), regressing 4096 by −36%.
+  With 32 the roots spread across SMs (~20 µs) and the split wins at every world count.
+- **Register regression guard:** `test_single_dof_factor_kernel_stays_register_lean`
+  queries the driver's `NUM_REGS` for both kernels and asserts the *relative* gap
+  (single ≤ unified−40), robust to toolchain drift. This catches the invert creeping
+  back into the depth walk — invisible to correctness tests since the split is exact.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

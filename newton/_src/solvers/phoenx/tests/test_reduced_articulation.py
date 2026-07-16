@@ -28,6 +28,8 @@ from newton._src.solvers.phoenx.articulations.maximal_projector_general import G
 from newton._src.solvers.phoenx.articulations.reduced import (
     ReducedArticulationSystem,
     _capture_reduced_momentum_warp_kernel,
+    _factor_reduced_singledof_warp_kernel,
+    _factor_reduced_warp_kernel,
     _flush_deferred_articulation,
     _pack_transformed_body_inertia,
     _unpack_symmetric_mat66,
@@ -1152,6 +1154,102 @@ class TestReducedArticulation(unittest.TestCase):
         h += np.diag(model.joint_armature.numpy())
         expected = np.linalg.solve(h.astype(np.float64), tau_np.astype(np.float64))
         np.testing.assert_allclose(result.numpy(), expected, rtol=2.0e-4, atol=2.0e-5)
+
+    def test_factor_dof_split_matches_unified_kernel_under_graph_capture(self):
+        # The DOF-type factor split defers the 6x6 root invert to a companion
+        # launch so the depth-walk kernel keeps only the lean single-DOF register
+        # set (144->64 regs, 22%->50% occupancy). The split must stay bit-identical
+        # to the unified kernel; a floating base activates it.
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        # The warp factor path (and thus the split) only engages past
+        # _WARP_FACTOR_MIN_ARTICULATIONS; replicate a floating tree past it.
+        articulation_count = 40
+        blueprint = _make_floating_tree_builder()
+        builder = newton.ModelBuilder(gravity=-9.81, up_axis=newton.Axis.Z)
+        for articulation in range(articulation_count):
+            builder.add_builder(
+                blueprint,
+                xform=wp.transform(wp.vec3(2.0 * articulation, 0.0, 0.0), wp.quat_identity()),
+            )
+        model = builder.finalize(device=device)
+
+        state = model.state()
+        q = state.joint_q.numpy().reshape(articulation_count, 8)
+        for articulation in range(articulation_count):
+            q[articulation, 0:3] = np.asarray([0.15 * articulation, -0.1, 0.35], dtype=np.float32)
+            q[articulation, 3:7] = np.asarray(
+                wp.quat_rpy(0.1 * articulation, -0.15, 0.2 * articulation), dtype=np.float32
+            )
+            q[articulation, 7] = 0.2 * articulation
+        state.joint_q.assign(q.reshape(-1))
+        state.joint_qd.assign(np.linspace(-0.3, 0.4, int(model.joint_dof_count), dtype=np.float32))
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        system = ReducedArticulationSystem(model)
+        # A free-joint root is a multi-DOF root, so the split path is selected.
+        self.assertTrue(system.use_warp_factor)
+        self.assertTrue(system._use_factor_dof_split)
+        self.assertEqual(system._factor_multidof_count, articulation_count)
+
+        def factor_captured():
+            system.factor(state)  # warm-up compile + populate before capture
+            with wp.ScopedCapture(device=device) as capture:
+                system.factor(state)
+            wp.capture_launch(capture.graph)
+            return (
+                system.joint_d_inv.numpy().copy(),
+                system.reduced_inertia.numpy().copy(),
+                system.joint_u_matrix.numpy().copy(),
+            )
+
+        split_d_inv, split_inertia, split_u = factor_captured()
+        system._use_factor_dof_split = False
+        unified_d_inv, unified_inertia, unified_u = factor_captured()
+
+        np.testing.assert_array_equal(split_d_inv, unified_d_inv)
+        np.testing.assert_array_equal(split_inertia, unified_inertia)
+        np.testing.assert_array_equal(split_u, unified_u)
+
+    def test_single_dof_factor_kernel_stays_register_lean(self):
+        # The split exists purely to keep the single-DOF depth-walk kernel off the
+        # 6x6 root invert, whose live registers halve occupancy. That is invisible
+        # to correctness tests (the split is bit-identical), so guard it directly.
+        # Assert the relative gap vs the unified kernel, not an absolute count, so
+        # the test is robust to toolchain drift (both measured with one driver).
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("register introspection requires a CUDA device")
+        try:
+            from cuda.bindings import driver as _drv  # noqa: PLC0415  (optional, guarded)
+
+            _num_regs_attr = _drv.CUfunction_attribute.CU_FUNC_ATTRIBUTE_NUM_REGS
+        except Exception:
+            self.skipTest("cuda-python driver bindings unavailable")
+
+        def kernel_num_regs(kernel, module_name):
+            module = wp.get_module(module_name)
+            module.load(device)
+            hooks = getattr(module, "get_kernel_hooks", None)
+            if hooks is None:
+                self.skipTest("Warp get_kernel_hooks unavailable")
+            forward = hooks(kernel, device).forward
+            err, value = _drv.cuFuncGetAttribute(_num_regs_attr, _drv.CUfunction(int(forward)))
+            self.assertEqual(int(err), 0)
+            return int(value)
+
+        single_regs = kernel_num_regs(_factor_reduced_singledof_warp_kernel, "reduced_factor_singledof")
+        unified_regs = kernel_num_regs(_factor_reduced_warp_kernel, "reduced_factor")
+        # The 6x6 SPD invert adds ~80 registers; keep the single-DOF kernel well
+        # clear of it. A regression that lets the invert back into the depth walk
+        # collapses this gap.
+        self.assertLessEqual(
+            single_regs,
+            unified_regs - 40,
+            f"single-DOF factor kernel register regression: {single_regs} vs unified {unified_regs}",
+        )
 
     def test_continued_state_matches_full_import_under_graph_capture(self):
         device = wp.get_preferred_device()

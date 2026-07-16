@@ -862,11 +862,8 @@ def _compute_reduced_local_kinematics_warp_kernel(
 
 
 @wp.func
-def _factor_reduced_warp_device(
-    thread: wp.int32,
-    max_depth: wp.int32,
-    articulation_depth_start: wp.array2d[wp.int32],
-    articulation_depth_joint: wp.array[wp.int32],
+def _factor_reduced_multidof_at(
+    joint: wp.int32,
     joint_child: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
     factor_diagonal: wp.array[wp.float32],
@@ -878,75 +875,50 @@ def _factor_reduced_warp_device(
     joint_u: wp.array[wp.spatial_vector],
     joint_d_inv: wp.array2d[wp.float32],
 ):
-    articulation = thread // wp.int32(32)
-    lane = thread - articulation * wp.int32(32)
+    """Articulated-body reduction for one multi-DOF joint (block 6x6 inverse)."""
+    child = joint_child[joint]
+    inertia = _unpack_symmetric_mat66(body_i_s[child])
+    for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
+        descendant_joint = child_joint[child_index]
+        inertia += _unpack_symmetric_mat66(reduced_inertia[joint_child[descendant_joint]])
 
-    for reverse_depth in range(max_depth + wp.int32(1)):
-        depth = max_depth - reverse_depth
-        index = articulation_depth_start[articulation, depth] + lane
-        depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
-        while index < depth_end:
-            joint = articulation_depth_joint[index]
-            child = joint_child[joint]
-            inertia = _unpack_symmetric_mat66(body_i_s[child])
-            for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
-                descendant_joint = child_joint[child_index]
-                inertia += _unpack_symmetric_mat66(reduced_inertia[joint_child[descendant_joint]])
+    dof_start = joint_qd_start[joint]
+    dof_end = joint_qd_start[joint + wp.int32(1)]
+    dof_count = dof_end - dof_start
+    d = _mat66(0.0)
+    for column in range(_MAX_JOINT_DOF):
+        if wp.int32(column) < dof_count:
+            dof = dof_start + wp.int32(column)
+            u = inertia * joint_s[dof]
+            joint_u[dof] = u
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    d[row, column] = wp.dot(joint_s[dof_start + wp.int32(row)], u)
+            d[column, column] += factor_diagonal[dof]
 
-            dof_start = joint_qd_start[joint]
-            dof_end = joint_qd_start[joint + wp.int32(1)]
-            dof_count = dof_end - dof_start
-            reduced = inertia
-            if dof_count == wp.int32(1):
-                dof = dof_start
-                u = inertia * joint_s[dof]
-                joint_u[dof] = u
-                d_inv_scalar = wp.float32(1.0) / wp.max(
-                    wp.dot(joint_s[dof], u) + factor_diagonal[dof], wp.float32(1.0e-20)
-                )
-                joint_d_inv[dof, 0] = d_inv_scalar
-                for row in range(6):
-                    for column in range(6):
-                        reduced[row, column] -= u[row] * d_inv_scalar * u[column]
-            elif dof_count > wp.int32(1):
-                d = _mat66(0.0)
-                for column in range(_MAX_JOINT_DOF):
-                    if wp.int32(column) < dof_count:
-                        dof = dof_start + wp.int32(column)
-                        u = inertia * joint_s[dof]
-                        joint_u[dof] = u
-                        for row in range(_MAX_JOINT_DOF):
-                            if wp.int32(row) < dof_count:
-                                d[row, column] = wp.dot(joint_s[dof_start + wp.int32(row)], u)
-                        d[column, column] += factor_diagonal[dof]
+    d_inv = _invert_spd(d, dof_count)
+    for row in range(_MAX_JOINT_DOF):
+        if wp.int32(row) < dof_count:
+            for column in range(_MAX_JOINT_DOF):
+                joint_d_inv[dof_start + wp.int32(row), column] = d_inv[row, column]
 
-                d_inv = _invert_spd(d, dof_count)
-                for row in range(_MAX_JOINT_DOF):
-                    if wp.int32(row) < dof_count:
-                        for column in range(_MAX_JOINT_DOF):
-                            joint_d_inv[dof_start + wp.int32(row), column] = d_inv[row, column]
-
-                for row in range(6):
-                    for column in range(6):
-                        correction = wp.float32(0.0)
-                        for a in range(_MAX_JOINT_DOF):
-                            if wp.int32(a) < dof_count:
-                                u_a = joint_u[dof_start + wp.int32(a)]
-                                for b in range(_MAX_JOINT_DOF):
-                                    if wp.int32(b) < dof_count:
-                                        u_b = joint_u[dof_start + wp.int32(b)]
-                                        correction += u_a[row] * d_inv[a, b] * u_b[column]
-                        reduced[row, column] -= correction
-            reduced_inertia[child] = _pack_symmetric_mat66(reduced)
-            index += wp.int32(32)
-        _sync_reduced_warp()
+    for row in range(6):
+        for column in range(6):
+            correction = wp.float32(0.0)
+            for a in range(_MAX_JOINT_DOF):
+                if wp.int32(a) < dof_count:
+                    u_a = joint_u[dof_start + wp.int32(a)]
+                    for b in range(_MAX_JOINT_DOF):
+                        if wp.int32(b) < dof_count:
+                            u_b = joint_u[dof_start + wp.int32(b)]
+                            correction += u_a[row] * d_inv[a, b] * u_b[column]
+            inertia[row, column] -= correction
+    reduced_inertia[child] = _pack_symmetric_mat66(inertia)
 
 
-@wp.kernel(enable_backward=False, module="reduced_factor")
-def _factor_reduced_warp_kernel(
-    max_depth: wp.int32,
-    articulation_depth_start: wp.array2d[wp.int32],
-    articulation_depth_joint: wp.array[wp.int32],
+@wp.kernel(enable_backward=False, module="reduced_factor_multidof")
+def _factor_reduced_multidof_kernel(
+    multidof_joint: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
     factor_diagonal: wp.array[wp.float32],
@@ -958,11 +930,13 @@ def _factor_reduced_warp_kernel(
     joint_u: wp.array[wp.spatial_vector],
     joint_d_inv: wp.array2d[wp.float32],
 ):
-    _factor_reduced_warp_device(
-        wp.tid(),
-        max_depth,
-        articulation_depth_start,
-        articulation_depth_joint,
+    """Factor the deferred multi-DOF (root) joints, one thread per joint.
+
+    Kept out of the depth-walk kernel so its 6x6 SPD inverse does not inflate
+    that kernel's register footprint; see :func:`_make_factor_reduced_warp_kernel`.
+    """
+    _factor_reduced_multidof_at(
+        multidof_joint[wp.tid()],
         joint_child,
         joint_qd_start,
         factor_diagonal,
@@ -974,6 +948,147 @@ def _factor_reduced_warp_kernel(
         joint_u,
         joint_d_inv,
     )
+
+
+def _make_factor_reduced_warp_kernel(single_dof_only: bool):
+    """Build the reverse-depth articulated-body factorization kernel.
+
+    The per-joint articulated-inertia reduction reduces one warp lane per joint
+    across a depth-serial tree walk. Single-DOF joints need only a rank-1
+    downdate, but multi-DOF joints (e.g. a floating base) carry a 6x6 SPD
+    inverse whose live registers roughly double the kernel's footprint and halve
+    achieved occupancy. When ``single_dof_only`` that branch is compile-time
+    removed, so the kernel keeps only the single-DOF working set; the deferred
+    multi-DOF joints are then factored by :func:`_factor_reduced_multidof_kernel`
+    in a companion launch. The split is only correct when every multi-DOF joint
+    is an articulation root (depth 0), whose reduced inertia the depth walk never
+    consumes.
+    """
+    module = wp.get_module("reduced_factor_singledof" if single_dof_only else "reduced_factor")
+
+    @wp.func
+    def _factor_reduced_warp_device(
+        thread: wp.int32,
+        max_depth: wp.int32,
+        articulation_depth_start: wp.array2d[wp.int32],
+        articulation_depth_joint: wp.array[wp.int32],
+        joint_child: wp.array[wp.int32],
+        joint_qd_start: wp.array[wp.int32],
+        factor_diagonal: wp.array[wp.float32],
+        joint_s: wp.array[wp.spatial_vector],
+        child_start: wp.array[wp.int32],
+        child_joint: wp.array[wp.int32],
+        body_i_s: wp.array[_sym_mat66],
+        reduced_inertia: wp.array[_sym_mat66],
+        joint_u: wp.array[wp.spatial_vector],
+        joint_d_inv: wp.array2d[wp.float32],
+    ):
+        articulation = thread // wp.int32(32)
+        lane = thread - articulation * wp.int32(32)
+
+        for reverse_depth in range(max_depth + wp.int32(1)):
+            depth = max_depth - reverse_depth
+            index = articulation_depth_start[articulation, depth] + lane
+            depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+            while index < depth_end:
+                joint = articulation_depth_joint[index]
+                child = joint_child[joint]
+                inertia = _unpack_symmetric_mat66(body_i_s[child])
+                for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
+                    descendant_joint = child_joint[child_index]
+                    inertia += _unpack_symmetric_mat66(reduced_inertia[joint_child[descendant_joint]])
+
+                dof_start = joint_qd_start[joint]
+                dof_end = joint_qd_start[joint + wp.int32(1)]
+                dof_count = dof_end - dof_start
+                if dof_count == wp.int32(1):
+                    dof = dof_start
+                    u = inertia * joint_s[dof]
+                    joint_u[dof] = u
+                    d_inv_scalar = wp.float32(1.0) / wp.max(
+                        wp.dot(joint_s[dof], u) + factor_diagonal[dof], wp.float32(1.0e-20)
+                    )
+                    joint_d_inv[dof, 0] = d_inv_scalar
+                    # In-place rank-1 downdate: u is already stored, so no live
+                    # copy of the articulated inertia is needed (bit-identical).
+                    for row in range(6):
+                        for column in range(6):
+                            inertia[row, column] -= u[row] * d_inv_scalar * u[column]
+                else:
+                    if wp.static(not single_dof_only):
+                        if dof_count > wp.int32(1):
+                            d = _mat66(0.0)
+                            for column in range(_MAX_JOINT_DOF):
+                                if wp.int32(column) < dof_count:
+                                    dof = dof_start + wp.int32(column)
+                                    u = inertia * joint_s[dof]
+                                    joint_u[dof] = u
+                                    for row in range(_MAX_JOINT_DOF):
+                                        if wp.int32(row) < dof_count:
+                                            d[row, column] = wp.dot(joint_s[dof_start + wp.int32(row)], u)
+                                    d[column, column] += factor_diagonal[dof]
+
+                            d_inv = _invert_spd(d, dof_count)
+                            for row in range(_MAX_JOINT_DOF):
+                                if wp.int32(row) < dof_count:
+                                    for column in range(_MAX_JOINT_DOF):
+                                        joint_d_inv[dof_start + wp.int32(row), column] = d_inv[row, column]
+
+                            for row in range(6):
+                                for column in range(6):
+                                    correction = wp.float32(0.0)
+                                    for a in range(_MAX_JOINT_DOF):
+                                        if wp.int32(a) < dof_count:
+                                            u_a = joint_u[dof_start + wp.int32(a)]
+                                            for b in range(_MAX_JOINT_DOF):
+                                                if wp.int32(b) < dof_count:
+                                                    u_b = joint_u[dof_start + wp.int32(b)]
+                                                    correction += u_a[row] * d_inv[a, b] * u_b[column]
+                                    inertia[row, column] -= correction
+                    # In single-DOF-only mode a multi-DOF joint leaves a defined
+                    # (pre-reduction) entry here; its companion launch overwrites it.
+                reduced_inertia[child] = _pack_symmetric_mat66(inertia)
+                index += wp.int32(32)
+            _sync_reduced_warp()
+
+    @wp.kernel(enable_backward=False, module=module)
+    def _factor_reduced_warp_kernel(
+        max_depth: wp.int32,
+        articulation_depth_start: wp.array2d[wp.int32],
+        articulation_depth_joint: wp.array[wp.int32],
+        joint_child: wp.array[wp.int32],
+        joint_qd_start: wp.array[wp.int32],
+        factor_diagonal: wp.array[wp.float32],
+        joint_s: wp.array[wp.spatial_vector],
+        child_start: wp.array[wp.int32],
+        child_joint: wp.array[wp.int32],
+        body_i_s: wp.array[_sym_mat66],
+        reduced_inertia: wp.array[_sym_mat66],
+        joint_u: wp.array[wp.spatial_vector],
+        joint_d_inv: wp.array2d[wp.float32],
+    ):
+        _factor_reduced_warp_device(
+            wp.tid(),
+            max_depth,
+            articulation_depth_start,
+            articulation_depth_joint,
+            joint_child,
+            joint_qd_start,
+            factor_diagonal,
+            joint_s,
+            child_start,
+            child_joint,
+            body_i_s,
+            reduced_inertia,
+            joint_u,
+            joint_d_inv,
+        )
+
+    return _factor_reduced_warp_kernel
+
+
+_factor_reduced_warp_kernel = _make_factor_reduced_warp_kernel(False)
+_factor_reduced_singledof_warp_kernel = _make_factor_reduced_warp_kernel(True)
 
 
 @wp.func
@@ -3616,6 +3731,30 @@ class ReducedArticulationSystem:
         self.factor_child_start = wp.array(child_start_np, device=self.device)
         self.factor_child_joint = wp.array(np.asarray(child_joint_list, dtype=np.int32), device=self.device)
 
+        # DOF-type factor split: single-DOF joints reduce via a rank-1 downdate,
+        # but multi-DOF joints (e.g. a floating base) carry a 6x6 SPD inverse that
+        # roughly doubles the depth-walk kernel's live registers and halves its
+        # occupancy. Defer those joints to a companion launch so the depth walk
+        # keeps only the lean single-DOF register set. Correct only when every
+        # multi-DOF joint is an articulation root (depth 0), whose reduced inertia
+        # the depth walk never consumes; otherwise fall back to the unified kernel.
+        joint_qd_start_np = model.joint_qd_start.numpy()
+        multidof_joints = [
+            int(joint)
+            for joint in tree_joint_np
+            if int(joint_qd_start_np[joint + 1]) - int(joint_qd_start_np[joint]) > 1
+        ]
+        self._factor_multidof_count = len(multidof_joints)
+        multidof_all_roots = all(int(joint_depth_np[joint]) == 0 for joint in multidof_joints)
+        self._use_factor_dof_split = bool(
+            self.use_warp_factor and self._factor_multidof_count > 0 and multidof_all_roots
+        )
+        self.factor_multidof_joint = (
+            wp.array(np.asarray(multidof_joints, dtype=np.int32), device=self.device)
+            if self._factor_multidof_count > 0
+            else None
+        )
+
         self.body_x_com = wp.empty(body_count, dtype=wp.transform, device=self.device)
         self.body_q_com = wp.empty(body_count, dtype=wp.transform, device=self.device)
         self.body_q_local = wp.empty(body_count, dtype=wp.transform, device=self.device)
@@ -3783,8 +3922,11 @@ class ReducedArticulationSystem:
         if not factorize:
             return
         if self.use_warp_factor:
+            depth_walk_kernel = (
+                _factor_reduced_singledof_warp_kernel if self._use_factor_dof_split else _factor_reduced_warp_kernel
+            )
             wp.launch(
-                _factor_reduced_warp_kernel,
+                depth_walk_kernel,
                 dim=int(self.model.articulation_count) * 32,
                 block_dim=32,
                 inputs=[
@@ -3806,6 +3948,32 @@ class ReducedArticulationSystem:
                 ],
                 device=self.device,
             )
+            if self._use_factor_dof_split:
+                # Companion launch factors the deferred multi-DOF root joints,
+                # whose descendants the depth walk already reduced. block_dim=32
+                # spreads the few heavy roots across many SMs; the default 256
+                # packs them onto a handful of blocks and stalls (measured ~2.5x).
+                wp.launch(
+                    _factor_reduced_multidof_kernel,
+                    dim=self._factor_multidof_count,
+                    block_dim=32,
+                    inputs=[
+                        self.factor_multidof_joint,
+                        self.model.joint_child,
+                        self.model.joint_qd_start,
+                        self.joint_factor_diagonal,
+                        self.joint_s,
+                        self.factor_child_start,
+                        self.factor_child_joint,
+                        self.body_i_s,
+                        self.reduced_inertia,
+                    ],
+                    outputs=[
+                        self.joint_u_matrix,
+                        self.joint_d_inv,
+                    ],
+                    device=self.device,
+                )
         else:
             for depth_offset, depth_count in reversed(self.factor_depth_ranges):
                 wp.launch(
