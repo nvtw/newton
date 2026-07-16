@@ -1599,7 +1599,7 @@ def concat_obs_action_kernel(
 
 
 @wp.kernel
-def min_q_target_kernel(
+def sac_q_target_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
     q1: wp.array2d[wp.float32],
@@ -1607,11 +1607,14 @@ def min_q_target_kernel(
     next_log_probs: wp.array[wp.float32],
     gamma: wp.float32,
     alpha: wp.float32,
+    average_critics: wp.bool,
     targets: wp.array[wp.float32],
 ):
     i = wp.tid()
-    min_q = wp.min(q1[i, 0], q2[i, 0])
-    targets[i] = rewards[i] + gamma * (wp.float32(1.0) - dones[i]) * (min_q - alpha * next_log_probs[i])
+    q = wp.min(q1[i, 0], q2[i, 0])
+    if average_critics:
+        q = wp.float32(0.5) * (q1[i, 0] + q2[i, 0])
+    targets[i] = rewards[i] + gamma * (wp.float32(1.0) - dones[i]) * (q - alpha * next_log_probs[i])
 
 
 @wp.kernel
@@ -1662,13 +1665,19 @@ def sac_actor_q_backward_kernel(
     q1: wp.array2d[wp.float32],
     q2: wp.array2d[wp.float32],
     batch_size: wp.int32,
+    average_critics: wp.bool,
     q1_grad: wp.array2d[wp.float32],
     q2_grad: wp.array2d[wp.float32],
 ):
     i = wp.tid()
     grad = -wp.float32(1.0) / wp.float32(batch_size)
-    q1_grad[i, 0] = grad if q1[i, 0] <= q2[i, 0] else wp.float32(0.0)
-    q2_grad[i, 0] = grad if q2[i, 0] < q1[i, 0] else wp.float32(0.0)
+    if average_critics:
+        grad *= wp.float32(0.5)
+        q1_grad[i, 0] = grad
+        q2_grad[i, 0] = grad
+    else:
+        q1_grad[i, 0] = grad if q1[i, 0] <= q2[i, 0] else wp.float32(0.0)
+        q2_grad[i, 0] = grad if q2[i, 0] < q1[i, 0] else wp.float32(0.0)
 
 
 @wp.kernel
@@ -1686,12 +1695,16 @@ def sac_actor_policy_backward_kernel(
     alpha: wp.float32,
     log_std_min: wp.float32,
     log_std_max: wp.float32,
+    average_critics: wp.bool,
     loss: wp.array[wp.float32],
     policy_out_grad: wp.array2d[wp.float32],
 ):
     row = wp.tid()
     inv_batch = wp.float32(1.0) / wp.float32(batch_size)
-    wp.atomic_add(loss, 0, (alpha * log_probs[row] - wp.min(q1[row, 0], q2[row, 0])) * inv_batch)
+    q = wp.min(q1[row, 0], q2[row, 0])
+    if average_critics:
+        q = wp.float32(0.5) * (q1[row, 0] + q2[row, 0])
+    wp.atomic_add(loss, 0, (alpha * log_probs[row] - q) * inv_batch)
     for action in range(action_dim):
         mean = policy_out[row, action]
         raw_log_std = policy_out[row, action_dim + action]

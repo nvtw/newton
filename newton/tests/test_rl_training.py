@@ -17,6 +17,8 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     mirrored_action_mse_grad_kernel,
     ppo_actor_loss_backward_kernel,
     reduce_ppo_log_std_grad_kernel,
+    sac_actor_q_backward_kernel,
+    sac_q_target_kernel,
     value_column_loss_grad_kernel,
     value_column_symmetry_loss_grad_kernel,
     value_loss_grad_kernel,
@@ -942,6 +944,36 @@ class TestReplayBufferSAC(unittest.TestCase):
 
 
 class TestTrainerSAC(unittest.TestCase):
+    def test_average_critics_uses_mean_for_targets_and_actor_gradients(self) -> None:
+        device = _rl_cuda_device()
+        q1 = wp.array([[1.0], [5.0]], dtype=wp.float32, device=device)
+        q2 = wp.array([[3.0], [1.0]], dtype=wp.float32, device=device)
+        rewards = wp.array([0.0, 2.0], dtype=wp.float32, device=device)
+        dones = wp.array([0.0, 1.0], dtype=wp.float32, device=device)
+        log_probs = wp.zeros(2, dtype=wp.float32, device=device)
+        targets = wp.empty(2, dtype=wp.float32, device=device)
+        q1_grad = wp.empty_like(q1)
+        q2_grad = wp.empty_like(q2)
+
+        wp.launch(
+            sac_q_target_kernel,
+            dim=2,
+            inputs=[rewards, dones, q1, q2, log_probs, 0.5, 0.0, True],
+            outputs=[targets],
+            device=device,
+        )
+        wp.launch(
+            sac_actor_q_backward_kernel,
+            dim=2,
+            inputs=[q1, q2, 2, True],
+            outputs=[q1_grad, q2_grad],
+            device=device,
+        )
+
+        np.testing.assert_allclose(targets.numpy(), np.array([1.0, 2.0], dtype=np.float32))
+        np.testing.assert_allclose(q1_grad.numpy(), -0.25)
+        np.testing.assert_allclose(q2_grad.numpy(), -0.25)
+
     def test_observation_normalization_tracks_batch_moments(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(7)

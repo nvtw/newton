@@ -11,7 +11,6 @@ import warp as wp
 from .kernels import (
     concat_obs_action_kernel,
     fill_eps_kernel,
-    min_q_target_kernel,
     normalize_observations_kernel,
     observation_count_update_kernel,
     observation_moments_partial_kernel,
@@ -23,6 +22,7 @@ from .kernels import (
     sac_alpha_loss_kernel,
     sac_critic_loss_backward_kernel,
     sac_critic_loss_kernel,
+    sac_q_target_kernel,
     sample_gaussian_actions_kernel,
     zero_scalar_kernel,
 )
@@ -44,6 +44,7 @@ class ConfigSAC:
         auto_alpha: Whether to tune entropy temperature automatically.
         target_entropy: Target action entropy. ``None`` uses ``-action_dim``.
         update_steps: Gradient updates per call to :meth:`TrainerSAC.update`.
+        average_critics: Average double-Q estimates instead of taking their minimum.
         normalize_observations: Normalize observations with automatic running statistics.
         observation_clip: Absolute clipping bound after observation normalization.
     """
@@ -57,6 +58,7 @@ class ConfigSAC:
     auto_alpha: bool = True
     target_entropy: float | None = None
     update_steps: int = 1
+    average_critics: bool = False
     normalize_observations: bool = True
     observation_clip: float = 10.0
 
@@ -414,7 +416,7 @@ class TrainerSAC:
         target_q2 = self.target_critic2.forward(next_q_input, requires_grad=False)
         targets = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
         wp.launch(
-            min_q_target_kernel,
+            sac_q_target_kernel,
             dim=batch.batch_size,
             inputs=[
                 batch.rewards,
@@ -424,6 +426,7 @@ class TrainerSAC:
                 next_log_probs,
                 self.config.gamma,
                 self.alpha,
+                self.config.average_critics,
             ],
             outputs=[targets],
             device=self.device,
@@ -488,7 +491,7 @@ class TrainerSAC:
         wp.launch(
             sac_actor_q_backward_kernel,
             dim=batch.batch_size,
-            inputs=[q1, q2, batch.batch_size],
+            inputs=[q1, q2, batch.batch_size, self.config.average_critics],
             outputs=[q1_grad, q2_grad],
             device=self.device,
         )
@@ -518,6 +521,7 @@ class TrainerSAC:
                 self.alpha,
                 self.actor.log_std_min,
                 self.actor.log_std_max,
+                self.config.average_critics,
             ],
             outputs=[self._actor_loss, policy_out_grad],
             device=self.device,
