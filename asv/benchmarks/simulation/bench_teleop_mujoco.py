@@ -35,6 +35,7 @@ from newton import JointTargetMode
 def _write_robot_targets(
     joint_q_ik: wp.array2d[wp.float32],
     nominal_joint_q: wp.array[wp.float32],
+    arm_joint_mask: wp.array[wp.int32],
     previous_joint_target_q: wp.array[wp.float32],
     dt: wp.float32,
     joint_target_q: wp.array[wp.float32],
@@ -42,7 +43,7 @@ def _write_robot_targets(
 ):
     i = wp.tid()
     q = nominal_joint_q[i]
-    if (i >= 15 and i < 22) or (i >= 29 and i < 36):
+    if arm_joint_mask[i] != 0:
         q = joint_q_ik[0, i]
 
     qd = 1.5 * (q - previous_joint_target_q[i]) / dt
@@ -55,6 +56,7 @@ def _write_robot_targets(
 class _TeleopMode:
     device: str
     mujoco_backend: str
+    use_graph: bool = False
     requires_cuda: bool = False
     requires_cuda_graph: bool = False
 
@@ -63,9 +65,11 @@ _TELEOP_MODES = {
     "mjwarp_cuda_graph": _TeleopMode(
         device="cuda:0",
         mujoco_backend="warp",
+        use_graph=True,
         requires_cuda=True,
         requires_cuda_graph=True,
     ),
+    "mjwarp_cpu_graph": _TeleopMode(device="cpu", mujoco_backend="warp", use_graph=True),
     "mjwarp_cpu_eager": _TeleopMode(device="cpu", mujoco_backend="warp"),
     "mujoco_cpu_eager": _TeleopMode(device="cpu", mujoco_backend="cpu"),
 }
@@ -163,6 +167,11 @@ class _TeleopLoop:
         }
 
         self.nominal_joint_q = wp.clone(self.model.joint_q)
+        self.arm_joint_mask = wp.array(
+            [int(i in self.arm_joint_indices) for i in range(self.model.joint_coord_count)],
+            dtype=wp.int32,
+            device=self.device,
+        )
         self.previous_joint_target_q = wp.empty(self.model.joint_coord_count, dtype=wp.float32, device=self.device)
         self._setup_ik()
         wp.copy(self.control.joint_target_q, self.model.joint_q)
@@ -186,14 +195,14 @@ class _TeleopLoop:
             self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
 
         self.graph_ik = None
-        if self.device.is_cuda:
-            with wp.ScopedCapture() as capture:
+        if mode.use_graph:
+            with wp.ScopedCapture(device=self.device) as capture:
                 self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=16)
             self.graph_ik = capture.graph
 
         self.graph_sim = None
-        if self.device.is_cuda and mode.mujoco_backend == "warp":
-            with wp.ScopedCapture() as capture:
+        if mode.use_graph and mode.mujoco_backend == "warp":
+            with wp.ScopedCapture(device=self.device) as capture:
                 self._simulate()
             self.graph_sim = capture.graph
 
@@ -335,7 +344,13 @@ class _TeleopLoop:
         wp.launch(
             _write_robot_targets,
             dim=self.model_ik.joint_coord_count,
-            inputs=[self.joint_q_ik, self.nominal_joint_q, self.previous_joint_target_q, self.frame_dt],
+            inputs=[
+                self.joint_q_ik,
+                self.nominal_joint_q,
+                self.arm_joint_mask,
+                self.previous_joint_target_q,
+                self.frame_dt,
+            ],
             outputs=[self.control.joint_target_q, self.control.joint_target_qd],
             device=self.device,
         )
@@ -474,9 +489,9 @@ class _TeleopMuJoCoBenchmark:
 
 
 class FastTeleopMuJoCo(_TeleopMuJoCoBenchmark):
-    """Pull-request smoke benchmarks for GPU teleop latency."""
+    """Pull-request smoke benchmarks for graph-captured teleop latency."""
 
-    params: ClassVar[tuple[tuple[str, ...]]] = (("mjwarp_cuda_graph",),)
+    params: ClassVar[tuple[tuple[str, ...]]] = (("mjwarp_cuda_graph", "mjwarp_cpu_graph"),)
     repeat = 2
     num_frames = 120
     warmup_frames = 30
