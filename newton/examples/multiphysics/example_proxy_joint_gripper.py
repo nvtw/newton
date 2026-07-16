@@ -300,7 +300,6 @@ class Example:
         return np.min(particle_q, axis=0), np.max(particle_q, axis=0)
 
     def simulate(self) -> None:
-        self._update_gripper_target()
         self.collision_pipeline.collide(self.state_0, self.contacts)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
