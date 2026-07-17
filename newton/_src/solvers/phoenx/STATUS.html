@@ -133,7 +133,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; wider G1 learner tiles</strong></div>
+      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; unified fleet contact scheduling</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
@@ -220,6 +220,42 @@
         <strong>Measured wall-clock result:</strong> the slower-seed 1000-update run fell from roughly 245 s in FP32 to 142.5 s with BF16 split-K, about 42% less training time for the same sample count.
       </div>
       <p class="compact-note"><strong>Why this does not change the G1 headline:</strong> Ant uses the optimized <code>WarpMLP</code> path. The retained G1 recipe uses <code>puffer_mingru</code>, so the Ant MLP optimization does not transfer directly. Tiled Muon and the wider dense layout separately raise G1 to 1.020M samples/s; G1 remains 1.37x behind nanoG1.</p>
+    </section>
+
+    <section class="work-profile" aria-label="Unified Humanoid fallback contact scheduling">
+      <h2>Humanoid training is 3.4x faster without a scene-specific solver</h2>
+      <p class="summary-lead">Nsight Systems showed that reduced-articulation fallback contacts consumed 82.4% of Humanoid GPU work: every solver sweep launched once per contact color, reaching about 57 serial launches as self-contact increased. PhoenX already stores these contacts in independent per-world runs. The retained fleet path solves each run sequentially in one launch while preserving the existing contact columns, friction, warm start, and Gauss&ndash;Seidel order.</p>
+      <div class="ttp-table-wrap">
+        <table class="ttp-table">
+          <thead>
+            <tr><th>Measurement</th><th>Before</th><th>Retained fleet path</th><th>Result</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>End-to-end PPO throughput</td>
+              <td class="number">33.9k samples/s</td>
+              <td class="number">114.3&ndash;117.5k samples/s</td>
+              <td><strong class="good">3.37&ndash;3.47x faster</strong></td>
+            </tr>
+            <tr>
+              <td>Fallback kernel time in matched trace</td>
+              <td class="number">12.45 s</td>
+              <td class="number">3.05 s</td>
+              <td><strong class="good">4.09x less GPU work</strong></td>
+            </tr>
+            <tr>
+              <td>26.2M-transition learning diagnostic</td>
+              <td class="pending">Not previously qualified</td>
+              <td>Reward 2.509, success 0.610, falls 1.39%</td>
+              <td><strong class="good">Learning progresses</strong>; full gate pending</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="verdict good-verdict">
+        <strong>Unified physics is preserved.</strong> CUDA-graph regressions are bit-identical against the colored solver for both articulated self-contact and direct reduced-articulation/maximal-rigid contact. Small fleets and large individual scenes retain colored parallelism; sufficiently large independent fleets select the per-world path automatically. Momentum, determinism, and high-degree overflow regressions pass.
+      </div>
+      <p class="compact-note"><strong>Scope:</strong> this is generic reduced-contact scheduling, with no robot names, topology constants, or task assumptions. It does not change the current G1 headline because G1&rsquo;s ground contacts are owned by the generalized articulation block and do not enter this fallback path. A rejected nested multi-sweep fusion fell to 46.5k samples/s and was removed.</p>
     </section>
 
     <section class="work-profile" aria-label="Current learning validation">
@@ -432,10 +468,10 @@
     </section>
 
     <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric">1.49x</div><div class="label">slower validated training throughput</div></div>
+      <div class="card"><div class="metric">1.37x</div><div class="label">slower validated G1 training throughput</div></div>
       <div class="card"><div class="metric">183.03 s</div><div class="label">zero-training PhoenX G1 pass</div></div>
       <div class="card"><div class="metric">138.94M</div><div class="label">samples to validated G1 policy</div></div>
-      <div class="card"><div class="metric">67.0%</div><div class="label">PhoenX / nanoG1 training samples/s</div></div>
+      <div class="card"><div class="metric">73.3%</div><div class="label">PhoenX / nanoG1 G1 training samples/s</div></div>
     </section>
 
     <p class="profile-note"><strong>Latest zero-training run (16 Jul):</strong> the 0.84 promotion screen triggered full gates at iterations 150, 175, 215, 240, and 265. The first four failed the unchanged full gate; iteration 265 passed in 183.03 s total wall time with 0.924 battery performance and zero falls. The same checkpoint also passed held-out gate seed 1001 at 0.920 battery performance and zero falls.</p>
@@ -472,7 +508,7 @@
               <td>Ant · PhoenX</td><td class="pending">No qualified policy yet</td><td class="pending">Unresolved</td><td>Measured 400-iteration run completes in 59.11 s at 0.911M samples/s but fails with 64/64 falls and 79.3/300 mean survival. Finite state explosions now terminate and reset; the broader learning regression remains open.</td>
             </tr>
             <tr>
-              <td>Humanoid · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>
+              <td>Humanoid · PhoenX</td><td class="pending">No qualified gate yet</td><td class="pending">Unresolved</td><td>A 26.2M-transition diagnostic sustains 117.5k samples/s, reaches reward 2.509 and success 0.610, and lowers falls to 1.39%. A frozen cold-process locomotion gate is still required.</td>
             </tr>
             <tr>
               <td>Go2 · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>

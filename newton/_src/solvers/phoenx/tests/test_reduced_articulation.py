@@ -770,45 +770,55 @@ def _make_grounded_articulation_cluster(device, *, worlds=3, articulations_per_w
     return builder.finalize(device=device)
 
 
-def _make_mixed_reduced_maximal_ground_model(device):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+def _make_mixed_reduced_maximal_ground_model(device, *, worlds=1, interacting=False):
+    blueprint = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, restitution=0.0)
-    reduced_body = builder.add_link(mass=1.0)
-    maximal_body = builder.add_link(
-        xform=wp.transform(wp.vec3(1.0, 0.0, 0.19), wp.quat_identity()),
+    reduced_x = -0.19 if interacting else -1.0
+    maximal_x = 0.19 if interacting else 1.0
+    reduced_body = blueprint.add_link(mass=1.0)
+    maximal_body = blueprint.add_link(
+        xform=wp.transform(wp.vec3(maximal_x, 0.0, 0.19), wp.quat_identity()),
         mass=1.0,
     )
-    builder.add_shape_sphere(reduced_body, radius=0.2, cfg=shape_cfg)
-    builder.add_shape_sphere(maximal_body, radius=0.2, cfg=shape_cfg)
-    free_joint = builder.add_joint_free(parent=-1, child=reduced_body)
-    builder.add_articulation([free_joint])
-    builder.joint_q[-7:] = [-1.0, 0.0, 0.19, 0.0, 0.0, 0.0, 1.0]
-    builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1))
+    blueprint.add_shape_sphere(reduced_body, radius=0.2, cfg=shape_cfg)
+    blueprint.add_shape_sphere(maximal_body, radius=0.2, cfg=shape_cfg)
+    free_joint = blueprint.add_joint_free(parent=-1, child=reduced_body)
+    blueprint.add_articulation([free_joint])
+    blueprint.joint_q[-7:] = [reduced_x, 0.0, 0.19, 0.0, 0.0, 0.0, 1.0]
+    blueprint.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1))
+    if worlds == 1:
+        return blueprint.finalize(device=device)
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder.replicate(blueprint, world_count=worlds)
     return builder.finalize(device=device)
 
 
-def _make_self_contact_model(device):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
-    root = builder.add_link(mass=2.0)
-    middle = builder.add_link(mass=1.0)
-    tip = builder.add_link(mass=1.5)
+def _make_self_contact_model(device, worlds=1):
+    blueprint = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    root = blueprint.add_link(mass=2.0)
+    middle = blueprint.add_link(mass=1.0)
+    tip = blueprint.add_link(mass=1.5)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, restitution=0.0)
-    builder.add_shape_sphere(root, radius=0.2, cfg=shape_cfg)
-    builder.add_shape_sphere(tip, radius=0.2, cfg=shape_cfg)
-    free_joint = builder.add_joint_free(parent=-1, child=root)
-    middle_joint = builder.add_joint_revolute(
+    blueprint.add_shape_sphere(root, radius=0.2, cfg=shape_cfg)
+    blueprint.add_shape_sphere(tip, radius=0.2, cfg=shape_cfg)
+    free_joint = blueprint.add_joint_free(parent=-1, child=root)
+    middle_joint = blueprint.add_joint_revolute(
         parent=root,
         child=middle,
         axis=newton.Axis.Z,
         parent_xform=wp.transform(wp.vec3(0.2, 0.0, 0.0), wp.quat_identity()),
     )
-    tip_joint = builder.add_joint_revolute(
+    tip_joint = blueprint.add_joint_revolute(
         parent=middle,
         child=tip,
         axis=newton.Axis.Z,
         parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
     )
-    builder.add_articulation([free_joint, middle_joint, tip_joint])
+    blueprint.add_articulation([free_joint, middle_joint, tip_joint])
+    if worlds == 1:
+        return blueprint.finalize(device=device)
+    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder.replicate(blueprint, world_count=worlds)
     return builder.finalize(device=device)
 
 
@@ -3429,6 +3439,108 @@ class TestReducedArticulation(unittest.TestCase):
         fk_state = model.state()
         newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
         np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
+
+    def test_world_serial_fallback_matches_colored_solver_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_self_contact_model(device, worlds=4)
+        state_colored = model.state()
+        output_colored = model.state()
+        state_serial = model.state()
+        output_serial = model.state()
+        qd = state_colored.joint_qd.numpy().reshape(4, -1)
+        qd[:, 0] = np.array([0.4, -0.2, 0.1, -0.3], dtype=np.float32)
+        qd[:, 6] = np.array([-0.3, 0.25, -0.15, 0.2], dtype=np.float32)
+        state_colored.joint_qd.assign(qd.reshape(-1))
+        state_serial.joint_qd.assign(qd.reshape(-1))
+        newton.eval_fk(model, state_colored.joint_q, state_colored.joint_qd, state_colored)
+        newton.eval_fk(model, state_serial.joint_q, state_serial.joint_qd, state_serial)
+
+        solver_colored = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        solver_serial = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        colored_block = solver_colored._reduced_articulation.contact_block_system
+        serial_block = solver_serial._reduced_articulation.contact_block_system
+        colored_block._solve_fallback_by_world = False
+        serial_block._solve_fallback_by_world = True
+        contacts_colored = model.contacts()
+        contacts_serial = model.contacts()
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state_colored, contacts_colored)
+            solver_colored.step(state_colored, output_colored, None, contacts_colored, 1.0 / 2000.0)
+            model.collide(state_serial, contacts_serial)
+            solver_serial.step(state_serial, output_serial, None, contacts_serial, 1.0 / 2000.0)
+        wp.capture_launch(capture.graph)
+
+        self.assertGreater(int(colored_block.fallback_count.numpy()[0]), 0)
+        self.assertEqual(int(serial_block.fallback_count.numpy()[0]), 0)
+        np.testing.assert_array_equal(output_serial.joint_q.numpy(), output_colored.joint_q.numpy())
+        np.testing.assert_array_equal(output_serial.joint_qd.numpy(), output_colored.joint_qd.numpy())
+        np.testing.assert_array_equal(output_serial.body_q.numpy(), output_colored.body_q.numpy())
+        np.testing.assert_array_equal(output_serial.body_qd.numpy(), output_colored.body_qd.numpy())
+
+    def test_world_serial_fallback_matches_colored_mixed_body_contacts(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_mixed_reduced_maximal_ground_model(device, worlds=4, interacting=True)
+        state_colored = model.state()
+        output_colored = model.state()
+        state_serial = model.state()
+        output_serial = model.state()
+        newton.eval_fk(model, state_colored.joint_q, state_colored.joint_qd, state_colored)
+        newton.eval_fk(model, state_serial.joint_q, state_serial.joint_qd, state_serial)
+
+        solver_colored = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        solver_serial = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        colored_block = solver_colored._reduced_articulation.contact_block_system
+        serial_block = solver_serial._reduced_articulation.contact_block_system
+        colored_block._solve_fallback_by_world = False
+        serial_block._solve_fallback_by_world = True
+        contacts_colored = model.contacts()
+        contacts_serial = model.contacts()
+
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state_colored, contacts_colored)
+            solver_colored.step(state_colored, output_colored, None, contacts_colored, 1.0 / 2000.0)
+            model.collide(state_serial, contacts_serial)
+            solver_serial.step(state_serial, output_serial, None, contacts_serial, 1.0 / 2000.0)
+        wp.capture_launch(capture.graph)
+
+        self.assertGreaterEqual(int(contacts_colored.rigid_contact_count.numpy()[0]), 12)
+        self.assertGreater(int(colored_block.fallback_count.numpy()[0]), 0)
+        self.assertEqual(int(serial_block.fallback_count.numpy()[0]), 0)
+        np.testing.assert_array_equal(output_serial.joint_q.numpy(), output_colored.joint_q.numpy())
+        np.testing.assert_array_equal(output_serial.joint_qd.numpy(), output_colored.joint_qd.numpy())
+        np.testing.assert_array_equal(output_serial.body_q.numpy(), output_colored.body_q.numpy())
+        np.testing.assert_array_equal(output_serial.body_qd.numpy(), output_colored.body_qd.numpy())
 
     def test_reduced_contacts_honor_prepare_refresh_stride_under_graph_capture(self):
         device = wp.get_preferred_device()

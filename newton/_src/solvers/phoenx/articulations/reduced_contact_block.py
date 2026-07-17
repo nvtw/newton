@@ -373,6 +373,38 @@ def _solve_fallback_contact_color_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _solve_fallback_contact_world_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    articulation_count: wp.int32,
+    schedule_section_end: wp.array[wp.int32],
+    scheduled_column: wp.array[wp.int32],
+    sweep_direction: wp.array[wp.int32],
+    phase: wp.int32,
+    use_bias: wp.bool,
+):
+    world = wp.tid()
+    section = articulation_count + world
+    start = schedule_section_end[section - wp.int32(1)]
+    end = schedule_section_end[section]
+    if sweep_direction[0] == wp.int32(0):
+        for index in range(start, end):
+            _solve_fallback_contact_column(
+                columns, bodies, idt, sor_boost, cc, contacts, scheduled_column[index], phase, use_bias
+            )
+    else:
+        for reverse in range(end - start):
+            index = end - wp.int32(1) - reverse
+            _solve_fallback_contact_column(
+                columns, bodies, idt, sor_boost, cc, contacts, scheduled_column[index], phase, use_bias
+            )
+
+
+@wp.kernel(enable_backward=False)
 def _count_reduced_contact_pages_kernel(
     schedule_section_end: wp.array[wp.int32],
     scheduled_column: wp.array[wp.int32],
@@ -1525,6 +1557,7 @@ class ReducedContactBlockSystem:
         self.schedule_capacity = 0
         self.schedule_world_count = 0
         self.fallback_worker_count = 1
+        self._solve_fallback_by_world = False
         self.schedule_keys: wp.array[wp.int64] | None = None
         self.schedule_columns: wp.array[wp.int32] | None = None
         self.schedule_section_end: wp.array[wp.int32] | None = None
@@ -1601,6 +1634,7 @@ class ReducedContactBlockSystem:
         self.packed_previous_row_body = wp.full(packed_row_capacity, value=-1, dtype=wp.int32, device=self.device)
         worker_blocks = max(1, int(getattr(self.device, "sm_count", 1)))
         self.fallback_worker_count = min(capacity, worker_blocks * _FALLBACK_BLOCK_DIM)
+        self._solve_fallback_by_world = world_count >= worker_blocks
         self.schedule_keys = wp.empty(2 * capacity, dtype=wp.int64, device=self.device)
         self.schedule_columns = wp.empty(2 * capacity, dtype=wp.int32, device=self.device)
         self.schedule_section_end = wp.zeros(self.articulation_count + world_count, dtype=wp.int32, device=self.device)
@@ -1729,7 +1763,7 @@ class ReducedContactBlockSystem:
         assert self.fallback_count is not None
         assert self.fallback_column is not None
         assert self.fallback_element is not None
-        if self._skip_fallback_coloring:
+        if self._skip_fallback_coloring or self._solve_fallback_by_world:
             self.fallback_count.zero_()
             return
         wp.launch(
@@ -1803,6 +1837,30 @@ class ReducedContactBlockSystem:
 
         def sweep(phase: int) -> None:
             partitioner.begin_sweep()
+            if self._solve_fallback_by_world:
+                assert self.schedule_section_end is not None
+                assert self.schedule_columns is not None
+                wp.launch(
+                    _solve_fallback_contact_world_kernel,
+                    dim=self.schedule_world_count,
+                    block_dim=32,
+                    inputs=[
+                        columns,
+                        bodies,
+                        idt,
+                        wp.float32(sor_boost),
+                        cc,
+                        contacts,
+                        wp.int32(self.articulation_count),
+                        self.schedule_section_end,
+                        self.schedule_columns,
+                        partitioner.sweep_direction,
+                        wp.int32(phase),
+                        wp.bool(use_bias),
+                    ],
+                    device=self.device,
+                )
+                return
 
             def solve_color() -> None:
                 wp.launch(
