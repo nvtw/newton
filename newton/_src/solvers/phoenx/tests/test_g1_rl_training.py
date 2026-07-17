@@ -5723,6 +5723,35 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(joint_qd))), 100.0)
         self.assertTrue(np.isfinite(env.step_rewards.numpy()).all())
 
+    def test_default_g1_collides_once_per_frame_inside_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 collide-once regression tests")
+        env_config = g1_recipe.default_g1_env_config(
+            world_count=2,
+            sim_substeps=3,
+            max_episode_steps=0,
+            auto_reset=False,
+            randomize_commands_on_reset=False,
+            command_resample_steps=0,
+            parse_visuals=False,
+        )
+        env = rl.EnvG1PhoenX(env_config, device=device)
+        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+        original_collide = env.model.collide
+        collide_calls = 0
+
+        def counted_collide(state, contacts):
+            nonlocal collide_calls
+            collide_calls += 1
+            return original_collide(state, contacts)
+
+        env.model.collide = counted_collide
+        with wp.ScopedCapture(device=device) as capture:
+            env.step(actions)
+        self.assertEqual(collide_calls, 1)
+        wp.capture_launch(capture.graph)
+        self.assertTrue(np.isfinite(env.state_0.joint_q.numpy()).all())
+        self.assertTrue(np.isfinite(env.state_0.joint_qd.numpy()).all())
+
     def test_block_owned_g1_contacts_skip_redundant_impulse_response(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 block contact response regression tests")
         env = rl.EnvG1PhoenX(

@@ -3166,11 +3166,12 @@ class EnvG1PhoenX:
         substeps = int(self.config.sim_substeps)
         sub_dt = float(self.config.frame_dt) / float(substeps)
         explicit_torque = str(self.config.actuation_model) == "explicit_torque"
+        self.model.collide(self.state_0, self.contacts)
         for substep in range(substeps):
             self.state_0.clear_forces()
-            self.model.collide(self.state_0, self.contacts)
             if explicit_torque or substep == substeps - 1:
                 self._gather_actuator_force(scatter_joint_f=explicit_torque)
+            self.solver.reuse_partition = substep > 0
             self.solver.step(
                 self.state_0,
                 self.state_1,
