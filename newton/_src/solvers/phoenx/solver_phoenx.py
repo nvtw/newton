@@ -4465,7 +4465,7 @@ class PhoenXWorld:
 
     def _singleworld_rigid_direct(self) -> bool:
         """Use typed rigid loops in single-world PGS kernels."""
-        if self.step_layout != "single_world" or self.mass_splitting_enabled or self._reduced_articulation is not None:
+        if self.step_layout != "single_world" or self._reduced_articulation is not None:
             return False
         if (
             self.num_cloth_triangles > 0

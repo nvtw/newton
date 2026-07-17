@@ -51,6 +51,29 @@ def _offset_packed_impulses(contacts: ContactContainer, total: wp.array[wp.int32
 
 @unittest.skipUnless(wp.is_cuda_available(), "colored contact-row tests require CUDA graph capture")
 class TestColoredContactRows(unittest.TestCase):
+    def test_mass_split_rigid_scene_uses_direct_regular_colors(self) -> None:
+        """Mass splitting keeps typed dispatch outside the overflow color."""
+        scene = _PhoenXScene(
+            fps=120,
+            substeps=2,
+            solver_iterations=2,
+            velocity_iterations=1,
+            step_layout="single_world",
+            mass_splitting=True,
+            colored_contact_headers=True,
+            colored_contact_rows=True,
+            max_colored_partitions=8,
+            mass_splitting_batch_size=1,
+        )
+        scene.add_ground_plane()
+        scene.add_box((0.0, 0.0, 0.55), (0.5, 0.5, 0.5))
+        scene.finalize()
+
+        self.assertTrue(scene.world.mass_splitting_enabled)
+        self.assertTrue(scene.world._singleworld_rigid_direct())
+        scene.step()
+        self.assertTrue(np.isfinite(scene.bodies.position.numpy()).all())
+
     def test_zero_velocity_iterations_restores_canonical_rows(self) -> None:
         """The solve-only scatter path runs when the relax phase is disabled."""
         scene = _PhoenXScene(
