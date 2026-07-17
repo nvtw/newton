@@ -28,8 +28,8 @@ from newton.viewer import ViewerNull
 class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
     """Primitive Kapla contacts must settle after graph-captured stepping."""
 
-    def test_tower_has_no_hidden_damping_or_camera_collider(self) -> None:
-        """The tower must run undamped and without hidden contact geometry."""
+    def test_tower_starts_clear_and_settles_without_jitter(self) -> None:
+        """The undamped tower and camera collider must settle without jitter."""
         example = example_kapla_tower.Example(
             ViewerNull(),
             SimpleNamespace(solver="classic", max_colors=10),
@@ -39,9 +39,38 @@ class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
 
         self.assertEqual(example.world.get_global_linear_damping(), 0.0)
         self.assertEqual(example.world.get_global_angular_damping(), 0.0)
-        self.assertIsNone(example._camera_body_newton_id)
+        self.assertIsNotNone(example._camera_body_newton_id)
         self.assertIsNotNone(example.picking)
-        self.assertEqual(example.model.body_count, sum(len(cell) for cell in example._brick_newton_ids))
+        self.assertEqual(example.model.body_count, sum(len(cell) for cell in example._brick_newton_ids) + 1)
+
+        camera_pos = np.asarray(example._camera_collider_initial_pos)
+        brick_centres = POSITIONS * GLOBAL_SCALING
+        brick_radius = 0.5 * GLOBAL_SCALING * np.linalg.norm(BRICK_FULL_EXTENTS)
+        centre_clearance = np.linalg.norm(brick_centres - camera_pos, axis=1).min()
+        self.assertGreater(centre_clearance, brick_radius + example_kapla_tower.CAMERA_COLLIDER_RADIUS)
+
+        for _ in range(300 - example.frame_index):
+            example.step()
+
+        brick_count = sum(len(cell) for cell in example._brick_newton_ids)
+        positions = example.bodies.position.numpy()[1 : 1 + brick_count]
+        position_min = positions.copy()
+        position_max = positions.copy()
+        speed_squared_sum = np.zeros(brick_count, dtype=np.float64)
+        sample_count = 100
+        for _ in range(sample_count):
+            example.step()
+            positions = example.bodies.position.numpy()[1 : 1 + brick_count]
+            velocities = example.bodies.velocity.numpy()[1 : 1 + brick_count]
+            position_min = np.minimum(position_min, positions)
+            position_max = np.maximum(position_max, positions)
+            speed_squared_sum += np.sum(velocities * velocities, axis=1)
+
+        position_span = np.linalg.norm(position_max - position_min, axis=1)
+        stationary = position_span < 0.01
+        rms_speed = np.sqrt(speed_squared_sum / sample_count)
+        self.assertGreater(np.count_nonzero(stationary), int(0.9 * brick_count))
+        self.assertLess(float(np.median(rms_speed[stationary])), 0.007)
 
     def test_reduced_kapla_slice_settles_after_speculative_contacts(self) -> None:
         """A real-data Kapla slice must not keep moving after settle.

@@ -90,9 +90,9 @@ class TestMultiWorldFastTailSolveContract(unittest.TestCase):
             with self.subTest(factory=factory.__name__):
                 self.assertIn(reverse_index, inspect.getsource(factory))
 
-    def test_single_world_alternating_color_order_is_default(self) -> None:
+    def test_single_world_forward_color_order_is_default(self) -> None:
         parameter = inspect.signature(solver_phoenx.PhoenXWorld).parameters["symmetric_color_sweep"]
-        self.assertIs(parameter.default, True)
+        self.assertIs(parameter.default, False)
 
     def test_ordered_solve_dispatch_uses_selected_inner_sweeps(self) -> None:
         source = textwrap.dedent(inspect.getsource(solver_phoenx_kernels._make_fast_tail_prepare_plus_iterate_kernel))

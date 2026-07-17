@@ -105,9 +105,9 @@ TOWER_GRID_DIMS: tuple[int, int] = (1, 1)
 # each other's SAP lists during settling.
 TOWER_GRID_SPACING: tuple[float, float] = (9.0, 9.0)
 
-# Ray picking applies forces directly and must not add hidden contact geometry.
-# Enable only for explicit camera fly-through interaction experiments.
-CAMERA_COLLIDER_ENABLED: bool = False
+# Ray picking applies forces directly; the camera collider provides physical
+# fly-through interaction and starts clear of the tower.
+CAMERA_COLLIDER_ENABLED: bool = True
 CAMERA_COLLIDER_RADIUS: float = 0.4
 # Newton-side mass density only; PhoenX-side inverse mass is zeroed
 # right after init so the value just needs to be finite.
@@ -219,7 +219,7 @@ class Example:
         self._camera_body_newton_id: int | None = None
         # Must match the ``viewer.set_camera`` pos below so the first
         # frame doesn't slam the collider into the tower.
-        self._camera_collider_initial_pos: tuple[float, float, float] = (1.2, 0.0, 0.4)
+        self._camera_collider_initial_pos: tuple[float, float, float] = (1.2, 0.75, 0.4)
         if CAMERA_COLLIDER_ENABLED:
             cam_cfg = newton.ModelBuilder.ShapeConfig(
                 density=CAMERA_COLLIDER_DENSITY,
@@ -375,7 +375,7 @@ class Example:
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(
-            pos=wp.vec3(1.2, 0.0, 0.4),
+            pos=wp.vec3(*self._camera_collider_initial_pos),
             pitch=-12.0,
             yaw=180.0,
         )

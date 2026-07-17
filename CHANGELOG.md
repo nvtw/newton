@@ -80,7 +80,7 @@
 - Reuse bounded reduced-coordinate PhoenX contact geometry during velocity relaxation, recomputing velocity-dependent rows while retaining exact overflow paging and hard-Hertz contact behavior.
 - Schedule experimental reduced-coordinate PhoenX ABA advance with topology-sized 8-, 16-, or 32-lane warp groups, increasing parallelism across independent narrow articulations while retaining full-warp execution for wide trees.
 - Reject cable joints and D6 angular limits in experimental simple PhoenX instead of solving different equations; use `solver_flavor="standard"` for these constraints.
-- Alternate PhoenX PGS color traversal direction between iterations to reduce ordering bias without changing constraint equations or CUDA graph capture.
+- Allow opt-in alternating PhoenX PGS color traversal through `symmetric_color_sweep` without changing constraint equations or CUDA graph capture.
 - Change PhoenX cable bend constraints to a physically damped angular Schur block coupled with the point attachment, so high stiffness approaches the revolute lock without SOR or additional constraint storage.
 - Change experimental PhoenX G1 RL actuation to explicit clamped PD torques matching nanoG1/MuJoCo; pass `actuation_model="constraint_drive"` or `--actuation-model constraint_drive` to use the previous implicit PhoenX drive-row formulation.
 - Change experimental PhoenX G1 RL defaults to the validated 5 ms schedule (`sim_substeps=4`, two position iterations, and one velocity iteration), strengthen action-rate and roll/pitch regularization, apply the validated final angular-stability phase in the train-to-gate benchmark, and embed the complete G1 environment and training recipe in new checkpoints. Pass `--sim-substeps 10 --solver-iterations 8 --velocity-iterations 2 --w-action-rate -0.01 --w-ang-vel-xy -1.3 --angular-fine-tune-start-samples 0` to preserve the previous defaults.
@@ -106,9 +106,9 @@
 - Fix experimental PhoenX Ant rollouts to terminate and reset non-finite or physically exploded states instead of retaining corrupted simulation state.
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
 
-- Fix PhoenX Gauss-Seidel Kapla scenes gaining unbounded rotational energy or persistent vibration after contact and inertia optimizations.
+- Fix persistent vibration in single-world PhoenX Gauss-Seidel stacks by restoring forward-only color traversal as the default; alternating traversal remains opt-in.
 - Fix PhoenX torque-free anisotropic rotation to preserve angular momentum and rotational energy with an implicit midpoint update.
-- Fix the PhoenX Kapla tower example adding a hidden camera contact collider that continuously disturbed nearby bricks; ray picking remains available.
+- Fix the PhoenX Kapla tower camera collider initially overlapping the tower by moving the initial camera pose clear of the bricks.
 - Fix experimental PhoenX recurrent PPO replay to preserve the exact detached MinGRU state at rollout boundaries, avoid mutating persistent state during bootstrap evaluation, and synchronize recurrent state across graph-leapfrog trainers.
 - Fix experimental PhoenX recurrent PPO replay to reset MinGRU state and cut recurrent gradients at terminal episode boundaries, including trajectory minibatches and CUDA graph capture.
 - Fix experimental PhoenX G1 held-out evaluation to preserve fixed commands across fall resets and accumulate metrics in deterministic CUDA graphs without per-step host synchronization.

@@ -612,7 +612,7 @@ class PhoenXWorld:
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
-        symmetric_color_sweep: bool = True,
+        symmetric_color_sweep: bool = False,
         # Defaults tuned for contact-heavy rigid scenes (Kapla, stacks).
         # cache-stir knobs break the warm-start colouring lock-in;
         # capture_while + speculative are perf wins with no quality
