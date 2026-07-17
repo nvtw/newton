@@ -83,8 +83,12 @@ GROUND_HEIGHT: float = 0.35 * GLOBAL_SCALING
 # Single-world layout wins on the dense ~11k-body contact pool.
 USE_BIG_WORLD_MODE: bool = True
 STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
-USE_COLORED_CONTACT_HEADERS: bool = True
-USE_COLORED_CONTACT_ROWS: bool = True
+USE_COLORED_CONTACT_HEADERS: bool = False
+USE_COLORED_CONTACT_ROWS: bool = False
+
+# Per-substep damping retained after the overlap-settle warmup. A small passive
+# decay prevents overflow-partition ordering noise from becoming visible motion.
+POST_WARMUP_DAMPING: float = 0.01
 
 # Tonge mass splitting (C# PhoenX default). When ``True`` the
 # partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
@@ -359,9 +363,9 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
-            # Let the solver auto-size the fixed single-world persistent grid.
-            # The packed contact path uses a wider grid to hide dependent-load
-            # latency; other paths retain the lower-pressure default.
+            # Preserve the validated Gauss-Seidel launch geometry. Larger
+            # persistent grids amplify ordering noise in the overflow partition.
+            max_thread_blocks=256,
             mass_splitting=ENABLE_MASS_SPLITTING and solver_flavor == "standard",
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
@@ -557,8 +561,8 @@ class Example:
         # Release the warm-up damping pin once we're past the settle.
         # Toggling the device-side slot is capture-safe; no recapture.
         if self.frame_index == self.WARMUP_FRAMES:
-            self.world.set_global_linear_damping(0.0)
-            self.world.set_global_angular_damping(0.0)
+            self.world.set_global_linear_damping(POST_WARMUP_DAMPING)
+            self.world.set_global_angular_damping(POST_WARMUP_DAMPING)
         self._update_camera_collider()
         if self.graph is not None:
             wp.capture_launch(self.graph)
@@ -630,6 +634,12 @@ class Example:
         tower_radius = float(np.linalg.norm(POSITIONS[:, :2], axis=1).max())
         tower_tolerance = 4.0 * tower_radius * GLOBAL_SCALING
         positions = self.bodies.position.numpy()
+        velocities = self.bodies.velocity.numpy()[1:]
+        angular_velocities = self.bodies.angular_velocity.numpy()[1:]
+        max_speed = float(np.linalg.norm(velocities, axis=1).max())
+        max_angular_speed = float(np.linalg.norm(angular_velocities, axis=1).max())
+        assert max_speed < 0.5, f"tower still moving: max |v|={max_speed:.3f} m/s"
+        assert max_angular_speed < 5.0, f"tower still rotating: max |w|={max_angular_speed:.3f} rad/s"
         for cell_index, cell_ids in enumerate(self._brick_newton_ids):
             cx, cy = self._cell_centres_xy[cell_index]
             for newton_idx in cell_ids:

@@ -105,6 +105,7 @@
 - Fix experimental PhoenX PPO adaptive KL increasing the learning rate when measured KL is exactly zero.
 - Fix experimental PhoenX Ant rollouts to terminate and reset non-finite or physically exploded states instead of retaining corrupted simulation state.
 
+- Fix PhoenX Gauss-Seidel Kapla scenes gaining unbounded rotational energy or persistent vibration after contact and inertia optimizations.
 - Fix experimental PhoenX recurrent PPO replay to preserve the exact detached MinGRU state at rollout boundaries, avoid mutating persistent state during bootstrap evaluation, and synchronize recurrent state across graph-leapfrog trainers.
 - Fix experimental PhoenX recurrent PPO replay to reset MinGRU state and cut recurrent gradients at terminal episode boundaries, including trajectory minibatches and CUDA graph capture.
 - Fix experimental PhoenX G1 held-out evaluation to preserve fixed commands across fall resets and accumulate metrics in deterministic CUDA graphs without per-step host synchronization.

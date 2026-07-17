@@ -12,13 +12,16 @@ the unit-test suite.
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.examples import example_kapla_square_tower
 from newton._src.solvers.phoenx.examples.example_kapla_tower import BRICK_DENSITY, GLOBAL_SCALING, GROUND_HEIGHT
 from newton._src.solvers.phoenx.examples.kapla_tower_data import BRICK_FULL_EXTENTS, ORIENTATIONS, POSITIONS
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
+from newton.viewer import ViewerNull
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX Kapla regression tests require CUDA graph capture")
@@ -43,8 +46,8 @@ class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
             friction=0.5,
             step_layout="single_world",
             mass_splitting=True,
-            colored_contact_headers=True,
-            colored_contact_rows=True,
+            colored_contact_headers=False,
+            colored_contact_rows=False,
             max_colored_partitions=8,
             mass_splitting_batch_size=1,
         )
@@ -67,7 +70,7 @@ class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
 
         scene.finalize()
 
-        for _ in range(150):
+        for _ in range(300):
             scene.step()
         self.assertIsNotNone(scene._graph)
 
@@ -84,6 +87,39 @@ class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
             5.0,
             f"Kapla slice did not settle: max |w|={max_angular_speed:.3f} rad/s",
         )
+
+    def test_thrown_square_tower_does_not_gain_unbounded_spin(self) -> None:
+        """An off-axis throw must not inject energy into anisotropic planks."""
+        example = example_kapla_square_tower.Example(
+            ViewerNull(),
+            SimpleNamespace(grid_side=1, show_contacts=False),
+        )
+        target = example._tower_plank_newton_ids[0][len(example._tower_plank_newton_ids[0]) // 2] + 1
+        peak_angular_speed = 0.0
+        peak_radius = 0.0
+
+        for frame in range(240):
+            if 100 <= frame < 124:
+                force = example.bodies.force.numpy()
+                torque = example.bodies.torque.numpy()
+                force[target] = (150.0, 55.5, 0.0)
+                torque[target] = (0.0, 15.0, 7.5)
+                example.bodies.force.assign(force)
+                example.bodies.torque.assign(torque)
+            example.step()
+            if frame % 10 == 0 or frame == 239:
+                positions = example.bodies.position.numpy()[1:]
+                angular_velocities = example.bodies.angular_velocity.numpy()[1:]
+                mask = np.arange(len(positions)) != target - 1
+                self.assertTrue(np.isfinite(positions).all())
+                peak_angular_speed = max(
+                    peak_angular_speed,
+                    float(np.linalg.norm(angular_velocities[mask], axis=1).max()),
+                )
+                peak_radius = max(peak_radius, float(np.linalg.norm(positions[mask, :2], axis=1).max()))
+
+        self.assertLess(peak_angular_speed, 500.0)
+        self.assertLess(peak_radius, 12.0)
 
 
 if __name__ == "__main__":
