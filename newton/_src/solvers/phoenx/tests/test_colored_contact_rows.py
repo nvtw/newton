@@ -22,6 +22,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_contact_first,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
+    CC_LOCAL_ANCHOR_DWORDS,
+    CC_LOCAL_ANCHOR_FIRST_ROW,
     ContactContainer,
     contact_container_zeros,
     contact_solve_container_zeros,
@@ -41,12 +43,15 @@ def _set_contact_ranges(
 
 
 @wp.kernel(enable_backward=False)
-def _offset_packed_impulses(contacts: ContactContainer, total: wp.array[wp.int32]):
+def _offset_packed_state(contacts: ContactContainer, total: wp.array[wp.int32]):
     k = wp.tid()
     if k >= total[0]:
         return
     for row in range(3):
         contacts.impulses[row, k] += wp.float32(10000.0)
+    for i in range(CC_LOCAL_ANCHOR_DWORDS):
+        row = wp.int32(CC_LOCAL_ANCHOR_FIRST_ROW + i)
+        contacts.lambdas[row, k] += wp.float32(20000.0)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "colored contact-row tests require CUDA graph capture")
@@ -75,7 +80,7 @@ class TestColoredContactRows(unittest.TestCase):
         self.assertTrue(np.isfinite(scene.bodies.position.numpy()).all())
 
     def test_zero_velocity_iterations_restores_canonical_rows(self) -> None:
-        """The solve-only scatter path runs when the relax phase is disabled."""
+        """Step-level packed state works when the relax phase is disabled."""
         scene = _PhoenXScene(
             fps=60,
             substeps=4,
@@ -195,7 +200,7 @@ class TestColoredContactRows(unittest.TestCase):
                 row_capacity,
                 device=device,
             )
-            wp.launch(_offset_packed_impulses, dim=row_capacity, inputs=[packed, total], device=device)
+            wp.launch(_offset_packed_state, dim=row_capacity, inputs=[packed, total], device=device)
             contact_scatter_colored_rows(
                 packed,
                 source,
@@ -213,12 +218,19 @@ class TestColoredContactRows(unittest.TestCase):
         np.testing.assert_array_equal(total.numpy(), np.array([21], dtype=np.int32))
         np.testing.assert_array_equal(source_indices.numpy()[:21], expected_order)
         np.testing.assert_array_equal(offsets.numpy(), np.array([0, 1, 1, 8], dtype=np.int32))
-        np.testing.assert_array_equal(packed.lambdas.numpy()[:, :21], lambda_np[:6, expected_order])
-        np.testing.assert_array_equal(packed.derived.numpy()[:, :21], derived_np[:15, expected_order])
+        expected_packed_lambdas = lambda_np[:, expected_order].copy()
+        expected_packed_lambdas[CC_LOCAL_ANCHOR_FIRST_ROW : CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS] += (
+            20000.0
+        )
+        np.testing.assert_array_equal(packed.lambdas.numpy()[:, :21], expected_packed_lambdas)
+        np.testing.assert_array_equal(packed.derived.numpy()[:, :21], derived_np[:, expected_order])
 
         expected_impulses = impulse_np.copy()
         expected_impulses[:, :21] += 10000.0
         np.testing.assert_array_equal(source.impulses.numpy(), expected_impulses)
+        expected_lambdas = lambda_np.copy()
+        expected_lambdas[CC_LOCAL_ANCHOR_FIRST_ROW : CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS, :21] += 20000.0
+        np.testing.assert_array_equal(source.lambdas.numpy(), expected_lambdas)
 
 
 if __name__ == "__main__":

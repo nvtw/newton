@@ -37,6 +37,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_count2,
     contact_get_friction,
     contact_get_friction_dynamic,
+    contact_get_original_contact_first,
     contact_get_side0_counts_extra,
     contact_get_side0_kind,
     contact_get_side0_nodes_extra,
@@ -312,6 +313,7 @@ def _make_contact_prepare_for_iteration_at(
     has_mass_splitting: bool = True,
     has_soft_contact_pd: bool = True,
     patch_friction: bool = False,
+    packed_rows: bool = False,
 ):
     @wp.func
     def impl(
@@ -336,7 +338,8 @@ def _make_contact_prepare_for_iteration_at(
         warm-start impulse. Rigid path batches the warm-start scatter;
         cloth-aware scatters per-side via endpoint helpers.
         """
-        _ = base_offset
+        if wp.static(not packed_rows):
+            _ = base_offset
 
         b1 = body_pair.b1
         b2 = body_pair.b2
@@ -437,6 +440,9 @@ def _make_contact_prepare_for_iteration_at(
 
         for i in range(contact_count):
             k = contact_first + i
+            source_k = k
+            if wp.static(packed_rows):
+                source_k = base_offset + i
 
             if wp.static(patch_friction):
                 if use_patch:
@@ -446,8 +452,8 @@ def _make_contact_prepare_for_iteration_at(
             n = cc_get_normal(cc, k)
             t1_dir = cc_get_tangent1(cc, k)
             t2_dir = wp.cross(n, t1_dir)
-            margin0 = contacts.rigid_contact_margin0[k]
-            margin1 = contacts.rigid_contact_margin1[k]
+            margin0 = contacts.rigid_contact_margin0[source_k]
+            margin1 = contacts.rigid_contact_margin1[source_k]
 
             if wp.static(cloth_support):
                 bary0 = cc_get_side0_bary(cc, k)
@@ -636,7 +642,7 @@ def _make_contact_prepare_for_iteration_at(
             # saturation. Cloth contacts regenerate anchors each frame.
             if wp.static(not cloth_support):
                 drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
-                fresh_n = contacts.rigid_contact_normal[k]
+                fresh_n = contacts.rigid_contact_normal[source_k]
                 normal_aligned = wp.dot(n, fresh_n)
                 lam_t1_prev = cc_get_tangent1_lambda(cc, k)
                 lam_t2_prev = cc_get_tangent2_lambda(cc, k)
@@ -648,8 +654,8 @@ def _make_contact_prepare_for_iteration_at(
                     cone_margin * fric_limit_prev
                 )
                 if drift_sq > slip_threshold * slip_threshold or normal_aligned < wp.float32(0.95) or coulomb_saturated:
-                    fresh_lp0 = contacts.rigid_contact_point0[k]
-                    fresh_lp1 = contacts.rigid_contact_point1[k]
+                    fresh_lp0 = contacts.rigid_contact_point0[source_k]
+                    fresh_lp1 = contacts.rigid_contact_point1[source_k]
                     cc_set_local_p0(cc, k, fresh_lp0)
                     cc_set_local_p1(cc, k, fresh_lp1)
                     if coulomb_saturated:
@@ -717,9 +723,9 @@ def _make_contact_prepare_for_iteration_at(
                     k_n = wp.float32(0.0)
                     c_n = wp.float32(0.0)
                     if stiffness_arr_len > k:
-                        k_n = contacts.rigid_contact_stiffness[k]
+                        k_n = contacts.rigid_contact_stiffness[source_k]
                     if damping_arr_len > k:
-                        c_n = contacts.rigid_contact_damping[k]
+                        c_n = contacts.rigid_contact_damping[source_k]
                     if (
                         (k_n > wp.float32(0.0) or c_n > wp.float32(0.0))
                         and eff_n > wp.float32(0.0)
@@ -1498,6 +1504,12 @@ contact_prepare_for_iteration_at = _make_contact_prepare_for_iteration_at(cloth_
 contact_prepare_for_iteration_at_no_soft_pd = _make_contact_prepare_for_iteration_at(
     cloth_support=False, has_soft_contact_pd=False
 )
+contact_prepare_for_iteration_at_packed_rows = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, packed_rows=True
+)
+contact_prepare_for_iteration_at_packed_rows_no_soft_pd = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_soft_contact_pd=False, packed_rows=True
+)
 contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(
     cloth_support=False, has_mass_splitting=False
 )
@@ -1606,6 +1618,72 @@ def contact_prepare_for_iteration_no_soft_pd(
         constraints,
         cid,
         0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_packed_rows(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    source_first = contact_get_original_contact_first(constraints, cid)
+    contact_prepare_for_iteration_at_packed_rows(
+        constraints,
+        cid,
+        source_first,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_packed_rows_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    source_first = contact_get_original_contact_first(constraints, cid)
+    contact_prepare_for_iteration_at_packed_rows_no_soft_pd(
+        constraints,
+        cid,
+        source_first,
         bodies,
         particles,
         num_bodies,

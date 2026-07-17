@@ -20,6 +20,8 @@ __all__ = [
     "CC_DERIVED_DWORDS_PER_CONTACT",
     "CC_DWORDS_PER_CONTACT",
     "CC_IMPULSE_DWORDS_PER_CONTACT",
+    "CC_LOCAL_ANCHOR_DWORDS",
+    "CC_LOCAL_ANCHOR_FIRST_ROW",
     "ContactContainer",
     "cc_get_bias",
     "cc_get_bias_t1",
@@ -84,6 +86,10 @@ CC_IMPULSE_DWORDS_PER_CONTACT: int = 3
 #: + side1_bary(3). The two ``bary`` slots are populated by contact ingest when
 #: a side is a cloth triangle; rigid sides leave them at zero.
 CC_DWORDS_PER_CONTACT: int = 18
+
+#: Local anchors are the only manifold rows prepare may update after ingest.
+CC_LOCAL_ANCHOR_FIRST_ROW: int = 6
+CC_LOCAL_ANCHOR_DWORDS: int = 6
 
 #: 16 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias +
 #: pd_eff_soft + r0(3) + r1(3). pd_* are non-zero only for soft contacts (user
@@ -561,12 +567,11 @@ def contact_solve_container_zeros(
     cc = ContactContainer()
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_impulses = wp.zeros((1, 1), dtype=wp.float32, device=device)
-    # Iterate reads normal + tangent1; local anchors stay in the canonical
-    # prepare container.
-    cc.lambdas = wp.zeros((6, n), dtype=wp.float32, device=device)
+    # Prepare, iterate, and relax share this color-ordered state across
+    # every substep, including manifold anchors needed by prepare.
+    cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_lambdas = wp.zeros((1, 1), dtype=wp.float32, device=device)
-    # Iterate reads through r1 (row 14); start_gap belongs to prepare.
-    cc.derived = wp.zeros((15, n), dtype=wp.float32, device=device)
+    cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     return cc
 
 

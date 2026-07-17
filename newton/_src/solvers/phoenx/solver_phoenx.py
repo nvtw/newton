@@ -681,8 +681,8 @@ class PhoenXWorld:
                 grid; ``None`` auto-sizes. No effect on multi-world.
             colored_contact_headers: Store rigid-contact column metadata in
                 color-slot order for the single-world mass-splitting solve.
-            colored_contact_rows: Store hot rigid-contact iterate rows in
-                color-slot order. Requires colored_contact_headers.
+            colored_contact_rows: Store rigid-contact solve state in color-slot
+                order across every substep. Requires colored_contact_headers.
             mass_splitting: Enable Tonge mass splitting -- coloring caps
                 at ``max_colored_partitions`` and the overflow bucket
                 is solved Jacobi-style on per-partition copy states.
@@ -2972,6 +2972,11 @@ class PhoenXWorld:
                             device=self.device,
                         )
 
+        # Keep complete contact solve state in color order across every
+        # substep. Prepare maps immutable Newton inputs through the canonical
+        # range stored in each packed column and updates packed state in place.
+        self._gather_colored_contact_rows()
+
         # Substep order: bias-on solve -> integrate -> bias-off relax. Reversing
         # would discard the positional bias's penetration recovery.
         inv_n = 1.0 / float(self.substeps)
@@ -3041,6 +3046,9 @@ class PhoenXWorld:
                     device=self.device,
                 )
 
+        # Contact matching and the next ingest use canonical order, so publish
+        # final persistent state once after every substep has completed.
+        self._scatter_colored_contact_rows()
         self._update_inertia_and_clear_forces()
 
     def _ingest_and_warmstart_contacts(self, contacts, shape_body, shape_type=None) -> None:

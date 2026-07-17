@@ -32,7 +32,11 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     soft_constraint_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
+    CC_DERIVED_DWORDS_PER_CONTACT,
+    CC_DWORDS_PER_CONTACT,
     CC_IMPULSE_DWORDS_PER_CONTACT,
+    CC_LOCAL_ANCHOR_DWORDS,
+    CC_LOCAL_ANCHOR_FIRST_ROW,
     ContactContainer,
     cc_get_bias,
     cc_get_bias_t1,
@@ -87,6 +91,7 @@ __all__ = [
     "contact_get_count2",
     "contact_get_friction",
     "contact_get_friction_dynamic",
+    "contact_get_original_contact_first",
     "contact_get_side0_counts_extra",
     "contact_get_side0_kind",
     "contact_get_side0_nodes_extra",
@@ -285,6 +290,12 @@ def _col_read_float(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int3
     return read2d_f32(c.data, off, local_cid)
 
 
+@wp.func
+def contact_get_original_contact_first(c: ContactColumnContainer, local_cid: wp.int32) -> wp.int32:
+    """Return the canonical first-contact index stored in a packed header."""
+    return _col_read_int(c, wp.int32(_OFF_ORIGINAL_CONTACT_FIRST), local_cid)
+
+
 @wp.kernel(enable_backward=False)
 def _contact_pack_colored_headers_kernel(
     source: ContactColumnContainer,
@@ -384,9 +395,9 @@ def _contact_gather_colored_rows_kernel(
         packed_headers.data[_OFF_CONTACT_FIRST, slot] = reinterpret_int_as_float(destination_k)
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         destination.impulses[row, destination_k] = source.impulses[row, source_k]
-    for row in range(6):
+    for row in range(CC_DWORDS_PER_CONTACT):
         destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
-    for row in range(15):
+    for row in range(CC_DERIVED_DWORDS_PER_CONTACT):
         destination.derived[row, destination_k] = source.derived[row, source_k]
 
 
@@ -410,6 +421,9 @@ def _contact_scatter_colored_rows_kernel(
         packed_headers.data[_OFF_CONTACT_FIRST, slot] = reinterpret_int_as_float(original_first)
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         destination.impulses[row, destination_k] = source.impulses[row, source_k]
+    for i in range(CC_LOCAL_ANCHOR_DWORDS):
+        row = wp.int32(CC_LOCAL_ANCHOR_FIRST_ROW + i)
+        destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
 
 
 def contact_pack_colored_headers(

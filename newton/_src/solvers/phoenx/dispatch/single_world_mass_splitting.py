@@ -54,12 +54,15 @@ class SingleWorldMassSplittingDispatcher:
         # average so the iterate phase starts from converged slot values.
         if w._refresh_prepare_this_substep():
             w._partitioner.begin_sweep()
-            w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+            w._singleworld_head_plus_tail_sweep(
+                prepare_head,
+                prepare_fused,
+                idt,
+                contact_container=w._contact_container_solve if w._colored_contact_rows else None,
+            )
             w._mass_splitting_average_and_broadcast(inv_dt)
         else:
             w._run_cached_prepare_bookkeeping(idt)
-        w._gather_colored_contact_rows()
-
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(
@@ -74,8 +77,6 @@ class SingleWorldMassSplittingDispatcher:
         # integrate_positions then advances bodies with the post-PGS
         # velocity.
         w._mass_splitting_writeback(already_averaged=True)
-        if w.velocity_iterations <= 0:
-            w._scatter_colored_contact_rows()
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
@@ -102,7 +103,6 @@ class SingleWorldMassSplittingDispatcher:
         # Second writeback after relax: relax also routes through slots,
         # so the next substep would see stale body.velocity otherwise.
         w._mass_splitting_writeback(already_averaged=True)
-        w._scatter_colored_contact_rows()
 
 
 __all__ = ["SingleWorldMassSplittingDispatcher"]

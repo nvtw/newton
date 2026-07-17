@@ -55,20 +55,20 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         prepare_head, _, iterate_head, _, _, _ = w._singleworld_kernels()
         if w._refresh_prepare_this_substep():
             w._partitioner.begin_sweep()
-            self._unrolled_sweep(prepare_head, idt)
+            self._unrolled_sweep(
+                prepare_head,
+                idt,
+                w._contact_container_solve if w._colored_contact_rows else None,
+            )
             w._mass_splitting_average_and_broadcast(inv_dt)
         else:
             w._run_cached_prepare_bookkeeping(idt)
-        w._gather_colored_contact_rows()
-
         for _ in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             self._unrolled_sweep(iterate_head, idt, w._contact_container_solve)
             w._mass_splitting_average_and_broadcast(inv_dt)
 
         w._mass_splitting_writeback(already_averaged=True)
-        if w.velocity_iterations <= 0:
-            w._scatter_colored_contact_rows()
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
@@ -83,7 +83,6 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._mass_splitting_average_and_broadcast(inv_dt)
 
         w._mass_splitting_writeback(already_averaged=True)
-        w._scatter_colored_contact_rows()
 
 
 __all__ = ["SingleWorldMassSplittingUnrolledDispatcher"]

@@ -74,6 +74,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_prepare_for_iteration_lean,
     contact_prepare_for_iteration_lean_no_soft_pd,
     contact_prepare_for_iteration_no_soft_pd,
+    contact_prepare_for_iteration_packed_rows,
+    contact_prepare_for_iteration_packed_rows_no_soft_pd,
     contact_prepare_for_iteration_patch_lean,
     contact_prepare_for_iteration_patch_lean_no_soft_pd,
 )
@@ -3170,9 +3172,16 @@ def _make_singleworld_rigid_contact_dispatch_func(
                 else contact_prepare_for_iteration_patch_lean_no_soft_pd
             )
         elif has_mass_splitting:
-            prepare_func = (
-                contact_prepare_for_iteration if has_soft_contact_pd else contact_prepare_for_iteration_no_soft_pd
-            )
+            if packed_contact_headers:
+                prepare_func = (
+                    contact_prepare_for_iteration_packed_rows
+                    if has_soft_contact_pd
+                    else contact_prepare_for_iteration_packed_rows_no_soft_pd
+                )
+            else:
+                prepare_func = (
+                    contact_prepare_for_iteration if has_soft_contact_pd else contact_prepare_for_iteration_no_soft_pd
+                )
         else:
             prepare_func = (
                 contact_prepare_for_iteration_lean
