@@ -133,12 +133,12 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; tiled Muon G1 optimization</strong></div>
+      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; wider G1 learner tiles</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
       <h2>How far PhoenX is behind nanoG1</h2>
-      <p class="summary-lead"><strong>Current G1 training is 30.5% lower-throughput than nanoG1:</strong> PhoenX sustains 0.9671M samples/s, or 69.5% of nanoG1's measured 1.3924M samples/s. Equivalently, nanoG1 is 1.44x as fast. Raw PhoenX physics reaches 60.5% of nanoG1. The faster experimental PhoenX recipe is listed separately because it has not passed the same multi-seed reliability bar.</p>
+      <p class="summary-lead"><strong>Current G1 training is 26.7% lower-throughput than nanoG1:</strong> PhoenX sustains 1.020M samples/s, or 73.3% of nanoG1's measured 1.3924M samples/s. Equivalently, nanoG1 is 1.37x as fast. Raw PhoenX physics reaches 60.5% of nanoG1. The faster experimental PhoenX recipe is listed separately because it has not passed the same multi-seed reliability bar.</p>
       <div class="gap-list" role="table" aria-label="Measured speed comparison">
         <div class="gap-row" role="row">
           <strong role="cell">Raw physics throughput</strong>
@@ -148,9 +148,9 @@
         </div>
         <div class="gap-row" role="row">
           <strong role="cell">Current PPO training throughput</strong>
-          <span role="cell">PhoenX<br><b>0.9671M samples/s</b></span>
+          <span role="cell">PhoenX<br><b>1.020M samples/s</b></span>
           <span role="cell">nanoG1<br><b>1.3924M samples/s</b></span>
-          <span role="cell"><span class="ratio bad">1.44x slower</span><div class="meter" aria-label="PhoenX reaches 69.5 percent of nanoG1"><span style="width:69.5%"></span></div></span>
+          <span role="cell"><span class="ratio bad">1.37x slower</span><div class="meter" aria-label="PhoenX reaches 73.3 percent of nanoG1"><span style="width:73.3%"></span></div></span>
         </div>
         <div class="gap-row" role="row">
           <strong role="cell">Zero training to qualified policy</strong>
@@ -165,7 +165,16 @@
           <span role="cell"><span class="ratio good">1.21x faster</span><div class="meter" aria-label="PhoenX reaches 121 percent of nanoG1"><span style="width:100%;background:#087f5b"></span></div></span>
         </div>
       </div>
-      <p class="compact-note"><strong>Interpretation:</strong> the 1.680M result is not the headline because only one of two tested seeds passed the unchanged full policy gate. The 0.9671M result uses the validated staged recipe with tiled FP32 Muon matrix operations. Comparisons use measured local nanoG1 throughput; the 58.9 s time-to-walk number is nanoG1's published claim and does not use the same quality gate.</p>
+      <p class="compact-note"><strong>Interpretation:</strong> the 1.680M result is not the headline because only one of two tested seeds passed the unchanged full policy gate. The 1.020M result uses the validated staged recipe with tiled FP32 Muon and wider dense matrix tiles. Comparisons use measured local nanoG1 throughput; the 58.9 s time-to-walk number is nanoG1's published claim and does not use the same quality gate.</p>
+    </section>
+
+    <section class="work-profile" aria-label="Wider dense G1 learner tiles">
+      <h2>Wider dense tiles add another 6% G1 throughput</h2>
+      <p class="summary-lead">The dominant learner kernel reused each 128x16 input tile across only 16 output columns. A bounded 16 / 32 / 64-column sweep found that 32 columns provides the best general tradeoff: matched graph-leapfrog G1 throughput rises from 0.9631M to 1.0198&ndash;1.0238M samples/s, while 64 columns is slightly slower and 64-row batch tiles regress by 5.9%.</p>
+      <div class="verdict good-verdict">
+        <strong>Retained after correctness and learning checks.</strong> Four CUDA-graph tests cover recurrent sequence parity, BF16 backward contractions, complete PPO train/save/load, and BF16 forward parity. A fresh 39.3M-sample G1 run reaches 0.712 battery performance with zero falls, above the frozen 0.680 early gate.
+      </div>
+      <p class="compact-note"><strong>Current result:</strong> the conservative repeated rate is 1.020M samples/s, 73.3% of local nanoG1. The remaining gap is 1.37x. This layout keeps the 16-wide contraction dimension for broad shape coverage and avoids a marginal 0.5% 32-wide contraction gain that would change reduction grouping.</p>
     </section>
 
     <section class="work-profile" aria-label="Tiled Muon G1 optimization">
@@ -174,7 +183,7 @@
       <div class="verdict good-verdict">
         <strong>Retained after paired learning checks.</strong> Three tiled runs reach 0.668 / 0.686 / 0.673 battery performance at 39.3M samples with zero falls. Their scalar controls reach 0.703 / 0.702 / 0.651. At 78.6M samples, tiled seed 29 reaches 0.791 versus 0.780 for scalar, again with zero falls. The optimization changes floating-point reduction order but does not show a systematic learning regression.
       </div>
-      <p class="compact-note"><strong>Remaining gap:</strong> PhoenX now delivers 69.5% of nanoG1 training throughput, up from 67.0%. This closes about 7.6% of the previous throughput deficit; nanoG1 remains 1.44x faster. Three CUDA-graph Muon reference/layout tests pass, including the real 128x384 recurrent weight shape.</p>
+      <p class="compact-note"><strong>Contribution:</strong> tiled Muon first raised PhoenX to 69.5% of nanoG1. The wider dense tile above builds on it and raises the current result to 73.3%. Three CUDA-graph Muon reference/layout tests pass, including the real 128x384 recurrent weight shape.</p>
     </section>
 
     <section class="work-profile" aria-label="Ant PPO optimization and learning validation">
@@ -210,7 +219,7 @@
       <div class="verdict good-verdict">
         <strong>Measured wall-clock result:</strong> the slower-seed 1000-update run fell from roughly 245 s in FP32 to 142.5 s with BF16 split-K, about 42% less training time for the same sample count.
       </div>
-      <p class="compact-note"><strong>Why this does not change the G1 headline:</strong> Ant uses the optimized <code>WarpMLP</code> path. The retained G1 recipe uses <code>puffer_mingru</code>, so the Ant MLP optimization does not transfer directly. The new tiled Muon path separately raises G1 to 0.9671M samples/s; G1 remains 1.44x behind nanoG1.</p>
+      <p class="compact-note"><strong>Why this does not change the G1 headline:</strong> Ant uses the optimized <code>WarpMLP</code> path. The retained G1 recipe uses <code>puffer_mingru</code>, so the Ant MLP optimization does not transfer directly. Tiled Muon and the wider dense layout separately raise G1 to 1.020M samples/s; G1 remains 1.37x behind nanoG1.</p>
     </section>
 
     <section class="work-profile" aria-label="Current learning validation">

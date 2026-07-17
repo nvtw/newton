@@ -16,7 +16,7 @@ ACTIVATION_ELU = 3
 
 DENSE_TILE_BATCH = 128
 DENSE_TILE_IN = 16
-DENSE_TILE_OUT = 16
+DENSE_TILE_OUT = 32
 DENSE_TILE_BLOCK_DIM = 256
 DENSE_BIAS_TILE_BATCH = 256
 # Split-K factor for the weight gradient. The weight matrices are small
