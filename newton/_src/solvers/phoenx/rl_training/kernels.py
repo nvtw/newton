@@ -2186,7 +2186,7 @@ def ppo_adaptive_kl_lr_scale_kernel(
     kl = approx_kl[0]
     if kl > wp.float32(2.0) * target_kl:
         new_scale = wp.max(old_scale / adjustment_factor, min_lr_ratio)
-    elif kl < wp.float32(0.5) * target_kl:
+    elif kl > wp.float32(0.0) and kl < wp.float32(0.5) * target_kl:
         new_scale = wp.min(old_scale * adjustment_factor, max_lr_ratio)
     ratio = new_scale / wp.max(old_scale, wp.float32(1.0e-12))
     adaptive_lr_scale[0] = new_scale

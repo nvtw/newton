@@ -690,6 +690,10 @@ class TestTrainerPPO(unittest.TestCase):
         self.assertAlmostEqual(float(trainer.actor_optimizer.lr_scale.numpy()[0]), expected_reduced, places=6)
         self.assertAlmostEqual(float(trainer.critic_optimizer.lr_scale.numpy()[0]), expected_reduced, places=6)
 
+        trainer._approx_kl.assign(np.array([0.0], dtype=np.float32))
+        trainer._adapt_lr_to_kl()
+        self.assertAlmostEqual(float(trainer._adaptive_lr_scale.numpy()[0]), expected_reduced, places=6)
+
         trainer._approx_kl.assign(np.array([0.001], dtype=np.float32))
         trainer._adapt_lr_to_kl()
         self.assertAlmostEqual(float(trainer._adaptive_lr_scale.numpy()[0]), 1.0, places=6)

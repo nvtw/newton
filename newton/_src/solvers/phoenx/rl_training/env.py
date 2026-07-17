@@ -235,11 +235,14 @@ def _collect_ppo_rollout_impl(
     if puffer_layout and (not hasattr(env, "step_rewards") or not hasattr(env, "step_dones")):
         raise TypeError("Puffer V-trace rollout collection requires env.step_rewards and env.step_dones")
     for step in range(buffer.num_steps):
+        policy_obs = trainer.prepare_observations(obs, update_stats=True)
         if seed_counter is None:
-            actions, log_probs, values = trainer.act_reuse(obs, seed=int(seed) + step)
+            actions, log_probs, values = trainer.act_reuse(
+                policy_obs, seed=int(seed) + step, observations_prepared=True
+            )
         else:
             actions, log_probs, values = trainer.act_reuse_seed_counter(
-                obs, seed_counter=seed_counter, seed_offset=step
+                policy_obs, seed_counter=seed_counter, seed_offset=step, observations_prepared=True
             )
         if puffer_layout:
             wp.launch(
@@ -250,7 +253,7 @@ def _collect_ppo_rollout_impl(
                     env.world_count,
                     env.obs_dim,
                     env.action_dim,
-                    obs,
+                    policy_obs,
                     actions,
                     log_probs,
                     values,
@@ -279,7 +282,7 @@ def _collect_ppo_rollout_impl(
                     env.world_count,
                     env.obs_dim,
                     env.action_dim,
-                    obs,
+                    policy_obs,
                     actions,
                     log_probs,
                     values,
@@ -300,10 +303,11 @@ def _collect_ppo_rollout_impl(
         trainer.reset_rollout_state(dones)
         obs = next_obs
 
+    final_policy_obs = trainer.prepare_observations(obs)
     if reset_state_at_start:
-        final_values = trainer.value_reuse(obs)
+        final_values = trainer.value_reuse(final_policy_obs, observations_prepared=True)
     else:
-        final_values = trainer.bootstrap_value_reuse(obs)
+        final_values = trainer.bootstrap_value_reuse(final_policy_obs, observations_prepared=True)
     wp.launch(
         rollout_store_bootstrap_values_kernel,
         dim=env.world_count,

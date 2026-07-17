@@ -48,53 +48,73 @@ def _checkpoint_path(pattern: str, iteration: int) -> Path:
     return Path(pattern.format(iteration=int(iteration)))
 
 
+def make_env(
+    args: argparse.Namespace, *, world_count: int | None = None, auto_reset: bool = True
+) -> rl.EnvHumanoidPhoenX:
+    return rl.EnvHumanoidPhoenX(
+        rl.ConfigEnvHumanoidPhoenX(
+            world_count=int(args.world_count if world_count is None else world_count),
+            sim_substeps=int(args.sim_substeps),
+            solver_iterations=int(args.solver_iterations),
+            velocity_iterations=int(args.velocity_iterations),
+            max_episode_steps=900 if auto_reset else 0,
+            auto_reset=auto_reset,
+        ),
+        device=args.device,
+    )
+
+
+def build_ppo_config(args: argparse.Namespace, sample_count: int) -> rl.ConfigPPO:
+    return rl.ConfigPPO(
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_ratio=0.2,
+        entropy_coeff=0.0,
+        value_loss_coeff=1.0,
+        value_clip_range=0.2,
+        adaptive_kl_target=0.008,
+        actor_lr=float(args.learning_rate),
+        critic_lr=float(args.learning_rate),
+        train_epochs=int(args.train_epochs),
+        minibatch_size=max(sample_count // 4, 1),
+        normalize_advantages=True,
+        normalize_observations=True,
+        observation_clip=10.0,
+        max_grad_norm=1.0,
+        manual_actor_backward=True,
+        manual_critic_backward=True,
+    )
+
+
+def make_trainer(args: argparse.Namespace, env: rl.EnvHumanoidPhoenX, ppo_config: rl.ConfigPPO) -> rl.TrainerPPO:
+    if args.resume_checkpoint is not None:
+        trainer = rl.load_ppo_checkpoint(args.resume_checkpoint, config=ppo_config, device=env.device)
+        if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
+            raise ValueError("Checkpoint dimensions do not match Humanoid")
+        return trainer
+    return rl.TrainerPPO(
+        obs_dim=env.obs_dim,
+        action_dim=env.action_dim,
+        hidden_layers=tuple(int(width) for width in args.hidden_layers),
+        config=ppo_config,
+        device=env.device,
+        seed=int(args.seed),
+        squash_actions=True,
+        activation="elu",
+        log_std_init=0.0,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _make_parser().parse_args(argv)
     device = wp.get_device(args.device)
     if not device.is_cuda or not wp.is_mempool_enabled(device):
         raise RuntimeError("Humanoid training requires a CUDA device with Warp memory pooling enabled")
 
-    env = rl.EnvHumanoidPhoenX(
-        rl.ConfigEnvHumanoidPhoenX(
-            world_count=int(args.world_count),
-            sim_substeps=int(args.sim_substeps),
-            solver_iterations=int(args.solver_iterations),
-            velocity_iterations=int(args.velocity_iterations),
-        ),
-        device=device,
-    )
+    env = make_env(args)
     sample_count = int(args.world_count) * int(args.rollout_steps)
-    ppo_config = rl.ConfigPPO(
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_ratio=0.2,
-        entropy_coeff=0.0,
-        value_loss_coeff=1.0,
-        actor_lr=float(args.learning_rate),
-        critic_lr=float(args.learning_rate),
-        train_epochs=int(args.train_epochs),
-        minibatch_size=max(sample_count // 4, 1),
-        normalize_advantages=True,
-        max_grad_norm=1.0,
-        manual_actor_backward=True,
-        manual_critic_backward=True,
-    )
-    if args.resume_checkpoint is None:
-        trainer = rl.TrainerPPO(
-            obs_dim=env.obs_dim,
-            action_dim=env.action_dim,
-            hidden_layers=tuple(int(width) for width in args.hidden_layers),
-            config=ppo_config,
-            device=device,
-            seed=int(args.seed),
-            squash_actions=True,
-            activation="elu",
-            log_std_init=0.0,
-        )
-    else:
-        trainer = rl.load_ppo_checkpoint(args.resume_checkpoint, config=ppo_config, device=device)
-        if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
-            raise ValueError("Checkpoint dimensions do not match Humanoid")
+    ppo_config = build_ppo_config(args, sample_count)
+    trainer = make_trainer(args, env, ppo_config)
 
     buffer = rl.BufferRollout(
         num_steps=int(args.rollout_steps),

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add opt-in running observation normalization to experimental `ConfigPPO`, including graph-captured rollout moments and checkpointed statistics.
 - Add opt-in averaged double-Q targets and actor objectives to experimental `ConfigSAC`, matching the FastSAC estimator used for massively parallel humanoid training.
 - Add experimental `SolverPhoenX(contact_friction_model="patch")` for maximal rigid PGS scenes. It preserves every point normal while coupling convex shape-pair friction into one central 2D Coulomb block with full tangent effective-mass coupling, contact-matched world-space warm starting, CUDA graph capture, and conservative point-friction fallback for raw meshes, heightfields, and compound body-pair columns.
 - Add `SolverPhoenX(solver_flavor="simple")`, an experimental rigid-body flavor that replaces graph-colored block PGS with fixed-capacity, one-thread-per-scalar-equation Jacobi rows and atomic body-delta accumulation and copy-free mass splitting that normalizes arbitrary row fan-in while conserving momentum. `jacobi_max_colors` defaults to 10 and scales the effective Jacobi substep count without constructing a constraint graph. Matched normal and tangent contact multipliers, together with stable Cartesian joint-row multipliers, persist as Jacobi initial guesses.
@@ -97,6 +98,7 @@
 
 ### Fixed
 
+- Fix experimental PhoenX PPO adaptive KL increasing the learning rate when measured KL is exactly zero.
 - Fix experimental PhoenX Ant rollouts to terminate and reset non-finite or physically exploded states instead of retaining corrupted simulation state.
 
 - Fix experimental PhoenX recurrent PPO replay to preserve the exact detached MinGRU state at rollout boundaries, avoid mutating persistent state during bootstrap evaluation, and synchronize recurrent state across graph-leapfrog trainers.

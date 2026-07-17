@@ -26,6 +26,10 @@ from .kernels import (
     mirrored_action_mse_grad_kernel,
     mirrored_action_mse_loss_kernel,
     normalize_from_stats_kernel,
+    normalize_observations_kernel,
+    observation_count_update_kernel,
+    observation_moments_partial_kernel,
+    observation_moments_update_kernel,
     pack_ppo_update_stats_kernel,
     ppo_actor_loss_backward_kernel,
     ppo_actor_loss_kernel,
@@ -147,6 +151,9 @@ class ConfigPPO:
         normalize_advantages: Whether to normalize advantages in-place before
             updating. With minibatch replay this normalizes each sampled
             minibatch.
+        normalize_observations: Normalize policy observations with automatic
+            running statistics collected during rollouts.
+        observation_clip: Absolute clipping bound after observation normalization.
         reward_clip: Absolute reward clamp used before advantage/return
             computation. A value less than or equal to zero disables clipping.
         puffer_vtrace_advantage: Use PufferLib's shifted V-trace scan for
@@ -196,6 +203,8 @@ class ConfigPPO:
     vtrace_rho_clip: float = 0.0
     vtrace_c_clip: float = 0.0
     normalize_advantages: bool = True
+    normalize_observations: bool = False
+    observation_clip: float = 10.0
     reward_clip: float = 0.0
     puffer_vtrace_advantage: bool = False
     max_grad_norm: float = 0.0
@@ -557,6 +566,13 @@ class TrainerPPO:
             [self.config.mirror_loss_coeff], dtype=wp.float32, device=self.device, requires_grad=False
         )
         self._adaptive_lr_scale = wp.array([1.0], dtype=wp.float32, device=self.device, requires_grad=False)
+        self._obs_mean = wp.zeros(self.obs_dim, dtype=wp.float32, device=self.device)
+        self._obs_m2 = wp.ones(self.obs_dim, dtype=wp.float32, device=self.device)
+        self._obs_count = wp.array([2.0], dtype=wp.float32, device=self.device)
+        self._obs_moment_partial_count = 128
+        self._obs_sums = wp.empty((self._obs_moment_partial_count, self.obs_dim), dtype=wp.float32, device=self.device)
+        self._obs_sums_sq = wp.empty_like(self._obs_sums)
+        self._normalized_rollout_obs: wp.array2d[wp.float32] | None = None
 
     @property
     def iteration(self) -> int:
@@ -623,6 +639,9 @@ class TrainerPPO:
         for dst, src in zip(self.actor.parameters(), other.actor.parameters(), strict=True):
             wp.copy(dst, src)
         wp.copy(self.actor.log_std, other.actor.log_std)
+        wp.copy(self._obs_mean, other._obs_mean)
+        wp.copy(self._obs_m2, other._obs_m2)
+        wp.copy(self._obs_count, other._obs_count)
         # Copy critic weights (if separate)
         if self.critic is not None and other.critic is not None:
             for dst, src in zip(self.critic.parameters(), other.critic.parameters(), strict=True):
@@ -667,6 +686,9 @@ class TrainerPPO:
             "seed": np.asarray(self.seed, dtype=np.int64),
             "iteration": np.asarray(self.iteration if iteration is None else int(iteration), dtype=np.int64),
             "adaptive_lr_scale": self._adaptive_lr_scale.numpy(),
+            "obs_mean": self._obs_mean.numpy(),
+            "obs_m2": self._obs_m2.numpy(),
+            "obs_count": self._obs_count.numpy(),
         }
         for key, value in asdict(self.config).items():
             data[f"config_{key}"] = np.asarray(value)
@@ -732,6 +754,10 @@ class TrainerPPO:
                 _unpack_optimizer(data, "critic_optimizer", trainer.critic_optimizer)
             if "adaptive_lr_scale" in data:
                 trainer._adaptive_lr_scale.assign(data["adaptive_lr_scale"])
+            if "obs_mean" in data:
+                trainer._obs_mean.assign(data["obs_mean"])
+                trainer._obs_m2.assign(data["obs_m2"])
+                trainer._obs_count.assign(data["obs_count"])
             if "iteration" in data:
                 trainer.iteration = max(int(data["iteration"]), 0)
         return trainer
@@ -776,11 +802,69 @@ class TrainerPPO:
             )
             _unpack_policy_network(data, "actor", trainer.actor.net)
             trainer.actor.log_std.assign(data["actor_log_std"])
+            if "obs_mean" in data:
+                trainer._obs_mean.assign(data["obs_mean"])
+                trainer._obs_m2.assign(data["obs_m2"])
+                trainer._obs_count.assign(data["obs_count"])
             if not trainer.shared_value_network:
                 if trainer.critic is None:
                     raise RuntimeError("separate critic state was not initialized")
                 _unpack_policy_network(data, "critic", trainer.critic)
         return trainer
+
+    def prepare_observations(
+        self, obs: wp.array2d[wp.float32], *, update_stats: bool = False
+    ) -> wp.array2d[wp.float32]:
+        """Return policy observations, updating running moments when requested."""
+
+        if not self.config.normalize_observations:
+            return obs
+        if int(obs.shape[1]) != self.obs_dim:
+            raise ValueError("Observation dimensions do not match trainer")
+        if update_stats:
+            wp.launch(
+                observation_moments_partial_kernel,
+                dim=self._obs_sums.shape,
+                inputs=[obs, self._obs_moment_partial_count],
+                outputs=[self._obs_sums, self._obs_sums_sq],
+                device=self.device,
+            )
+            wp.launch(
+                observation_moments_update_kernel,
+                dim=self.obs_dim,
+                inputs=[
+                    self._obs_sums,
+                    self._obs_sums_sq,
+                    self._obs_moment_partial_count,
+                    int(obs.shape[0]),
+                    self._obs_count,
+                ],
+                outputs=[self._obs_mean, self._obs_m2],
+                device=self.device,
+            )
+            wp.launch(
+                observation_count_update_kernel,
+                dim=1,
+                inputs=[int(obs.shape[0])],
+                outputs=[self._obs_count],
+                device=self.device,
+            )
+        if self._normalized_rollout_obs is None or self._normalized_rollout_obs.shape != obs.shape:
+            self._normalized_rollout_obs = wp.empty_like(obs)
+        wp.launch(
+            normalize_observations_kernel,
+            dim=obs.shape,
+            inputs=[
+                obs,
+                self._obs_mean,
+                self._obs_m2,
+                self._obs_count,
+                float(self.config.observation_clip),
+            ],
+            outputs=[self._normalized_rollout_obs],
+            device=self.device,
+        )
+        return self._normalized_rollout_obs
 
     @property
     def value_column(self) -> int:
@@ -788,18 +872,26 @@ class TrainerPPO:
 
         return self.action_dim if self.shared_value_network else 0
 
-    def value_reuse(self, obs: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+    def value_reuse(
+        self, obs: wp.array2d[wp.float32], *, observations_prepared: bool = False
+    ) -> wp.array2d[wp.float32]:
         """Evaluate values into persistent no-grad buffers."""
 
+        if not observations_prepared:
+            obs = self.prepare_observations(obs)
         if self.shared_value_network:
             return self.actor.net.forward_reuse(obs)
         if self.critic is None:
             raise RuntimeError("separate critic state was not initialized")
         return self.critic.forward_reuse(obs)
 
-    def bootstrap_value_reuse(self, obs: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+    def bootstrap_value_reuse(
+        self, obs: wp.array2d[wp.float32], *, observations_prepared: bool = False
+    ) -> wp.array2d[wp.float32]:
         """Evaluate bootstrap values without advancing recurrent rollout state."""
 
+        if not observations_prepared:
+            obs = self.prepare_observations(obs)
         if self.shared_value_network:
             forward_readonly = getattr(self.actor.net, "forward_reuse_readonly", None)
             if forward_readonly is not None:
@@ -871,7 +963,7 @@ class TrainerPPO:
     def _value_reuse_for_update(self, buffer: BufferRollout | BatchPPO) -> wp.array2d[wp.float32]:
         if self.shared_value_network:
             return self._policy_update_reuse(buffer.obs, buffer)
-        return self.value_reuse(buffer.obs)
+        return self.value_reuse(buffer.obs, observations_prepared=True)
 
     def act(
         self,
@@ -879,6 +971,7 @@ class TrainerPPO:
         *,
         seed: int,
         deterministic: bool = False,
+        observations_prepared: bool = False,
     ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
         """Sample actions and evaluate values for rollout collection.
 
@@ -891,6 +984,8 @@ class TrainerPPO:
             Tuple ``(actions, log_probs, values)``.
         """
 
+        if not observations_prepared:
+            obs = self.prepare_observations(obs)
         actions, log_probs, policy_out = self.actor.sample(
             obs, seed=seed, deterministic=deterministic, requires_grad=False
         )
@@ -907,9 +1002,12 @@ class TrainerPPO:
         *,
         seed: int,
         deterministic: bool = False,
+        observations_prepared: bool = False,
     ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
         """Sample actions and values into persistent no-grad buffers."""
 
+        if not observations_prepared:
+            obs = self.prepare_observations(obs)
         actions, log_probs, policy_out = self.actor.sample_reuse(obs, seed=seed, deterministic=deterministic)
         if self.shared_value_network:
             return actions, log_probs, policy_out
@@ -925,9 +1023,12 @@ class TrainerPPO:
         seed_counter: wp.array[wp.int32],
         seed_offset: int = 0,
         deterministic: bool = False,
+        observations_prepared: bool = False,
     ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
         """Sample actions and values using a graph-replay-safe device seed counter."""
 
+        if not observations_prepared:
+            obs = self.prepare_observations(obs)
         actions, log_probs, policy_out = self.actor.sample_reuse_seed_counter(
             obs, seed_counter=seed_counter, seed_offset=int(seed_offset), deterministic=deterministic
         )
@@ -960,6 +1061,13 @@ class TrainerPPO:
         if buffer.obs_dim != self.obs_dim or buffer.action_dim != self.action_dim:
             raise ValueError("BufferRollout dimensions do not match trainer dimensions")
         self._ensure_buffer_initial_state(buffer)
+        if self.config.normalize_observations and (
+            self._normalized_rollout_obs is None
+            or self._normalized_rollout_obs.shape != (buffer.num_envs, self.obs_dim)
+        ):
+            self._normalized_rollout_obs = wp.empty(
+                (buffer.num_envs, self.obs_dim), dtype=wp.float32, device=self.device
+            )
         update_rows = buffer.num_samples
         if self._uses_minibatch_replay(buffer):
             minibatch_size = int(self.config.minibatch_size)

@@ -133,7 +133,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; selective lean Warp kernels</strong></div>
+      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; Humanoid physical learning gate</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
@@ -240,7 +240,7 @@
     </section>
 
     <section class="work-profile" aria-label="Unified Humanoid fallback contact scheduling">
-      <h2>Humanoid training is 3.4x faster without a scene-specific solver</h2>
+      <h2>Humanoid physics is fast; policy qualification is still open</h2>
       <p class="summary-lead">Nsight Systems showed that reduced-articulation fallback contacts consumed 82.4% of Humanoid GPU work: every solver sweep launched once per contact color, reaching about 57 serial launches as self-contact increased. PhoenX already stores these contacts in independent per-world runs. The retained fleet path solves each run sequentially in one launch while preserving the existing contact columns, friction, warm start, and Gauss&ndash;Seidel order.</p>
       <div class="ttp-table-wrap">
         <table class="ttp-table">
@@ -261,10 +261,22 @@
               <td><strong class="good">4.09x less GPU work</strong></td>
             </tr>
             <tr>
-              <td>26.2M-transition learning diagnostic</td>
-              <td class="pending">Not previously qualified</td>
-              <td>Reward 2.509, success 0.610, falls 1.39%</td>
-              <td><strong class="good">Learning progresses</strong>; full gate pending</td>
+              <td>Old 26.2M rollout diagnostic</td>
+              <td class="pending">No physical gate</td>
+              <td>Reward 2.509, success 0.610, rollout dones 1.39%</td>
+              <td><strong class="bad">Not a qualified policy.</strong> Deterministic evaluation falls after 67/600 steps.</td>
+            </tr>
+            <tr>
+              <td>Captured physical gate</td>
+              <td class="number">&gt;300 s timeout</td>
+              <td class="number">20.5 s for 64 &times; 600 steps</td>
+              <td>Device-side accumulation removes per-step host synchronization.</td>
+            </tr>
+            <tr>
+              <td>RSL-aligned PPO screen</td>
+              <td>Raw observations; adaptive KL could increase LR at KL=0</td>
+              <td class="number">124.4k samples/s<br>13.1M samples</td>
+              <td>Normalization is throughput-neutral and survival reaches 116/600 steps, but <strong class="bad">the walking gate still fails</strong>.</td>
             </tr>
           </tbody>
         </table>
@@ -273,6 +285,7 @@
         <strong>Unified physics is preserved.</strong> CUDA-graph regressions are bit-identical against the colored solver for both articulated self-contact and direct reduced-articulation/maximal-rigid contact. Small fleets and large individual scenes retain colored parallelism; sufficiently large independent fleets select the per-world path automatically. Momentum, determinism, and high-degree overflow regressions pass.
       </div>
       <p class="compact-note"><strong>Scope:</strong> this is generic reduced-contact scheduling, with no robot names, topology constants, or task assumptions. It does not change the current G1 headline because G1&rsquo;s ground contacts are owned by the generalized articulation block and do not enter this fallback path. A rejected nested multi-sweep fusion fell to 46.5k samples/s and was removed.</p>
+      <p class="compact-note"><strong>Learning status:</strong> the mraksha/RSL-RL contract now includes clipped values, actor/critic running observation normalization, and adaptive KL. A scheduler bug was fixed so exactly zero KL no longer raises the learning rate. The corrected iteration-100 policy is finite and improves survival, but does not yet sustain locomotion; the mraksha recipe allows 1000 updates, so the next step is continuation under the frozen physical gate rather than reward-only claims.</p>
     </section>
 
     <section class="work-profile" aria-label="Current learning validation">
