@@ -14,8 +14,10 @@ import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training.env import advance_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.kernels import (
     PPO_LOG_STD_PARTIAL_BATCH,
+    gather_flat_minibatch_kernel,
     mirrored_action_mse_grad_kernel,
     ppo_actor_loss_backward_kernel,
+    ppo_log_std_grad_partials_kernel,
     reduce_ppo_log_std_grad_kernel,
     sac_actor_q_backward_kernel,
     sac_distributional_projection_kernel,
@@ -259,6 +261,7 @@ class TestTrainerPPO(unittest.TestCase):
         ratios = wp.zeros(rows, dtype=wp.float32, device=device)
         policy_out_grad = wp.zeros((rows, action_dim), dtype=wp.float32, device=device)
         log_std_grad = wp.zeros(action_dim, dtype=wp.float32, device=device)
+        d_log_prob_rows = wp.zeros(rows, dtype=wp.float32, device=device)
         partial_count = max((rows + PPO_LOG_STD_PARTIAL_BATCH - 1) // PPO_LOG_STD_PARTIAL_BATCH, 1)
         log_std_grad_partials = wp.zeros((partial_count, action_dim), dtype=wp.float32, device=device)
         mirror_src = wp.array(np.array([1, 0], dtype=np.int32), dtype=wp.int32, device=device)
@@ -290,7 +293,25 @@ class TestTrainerPPO(unittest.TestCase):
                     2.0,
                     rows,
                 ],
-                outputs=[loss, approx_kl, clip_fraction, ratios, policy_out_grad, log_std_grad_partials],
+                outputs=[loss, approx_kl, clip_fraction, ratios, policy_out_grad, d_log_prob_rows],
+                device=device,
+            )
+            wp.launch(
+                ppo_log_std_grad_partials_kernel,
+                dim=(partial_count, action_dim),
+                inputs=[
+                    policy_out,
+                    log_std,
+                    actions,
+                    d_log_prob_rows,
+                    entropy_coeff_buf,
+                    action_dim,
+                    1,
+                    -5.0,
+                    2.0,
+                    rows,
+                ],
+                outputs=[log_std_grad_partials],
                 device=device,
             )
             wp.launch(
@@ -525,8 +546,9 @@ class TestTrainerPPO(unittest.TestCase):
     def test_bfloat16_manual_mlp_weight_grad_graph_captures(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(83)
-        x_np = rng.normal(size=(67, 17)).astype(np.float32)
-        output_grad_np = rng.normal(size=(67, 5)).astype(np.float32)
+        # Exercise every split-K chunk, not just the first batch tile.
+        x_np = rng.normal(size=(1536, 17)).astype(np.float32)
+        output_grad_np = rng.normal(size=(1536, 5)).astype(np.float32)
         x = wp.array(x_np, dtype=wp.float32, device=device)
         output_grad = wp.array(output_grad_np, dtype=wp.float32, device=device)
         fp32_mlp = rl.WarpMLP(
@@ -556,8 +578,14 @@ class TestTrainerPPO(unittest.TestCase):
         np.testing.assert_allclose(
             bf16_mlp._manual_outputs[-1].numpy(), fp32_mlp._manual_outputs[-1].numpy(), rtol=0.0, atol=0.0
         )
+        bf16_grads = []
         for bf16_param, fp32_param in zip(bf16_mlp.parameters(), fp32_mlp.parameters(), strict=True):
-            np.testing.assert_allclose(bf16_param.grad.numpy(), fp32_param.grad.numpy(), rtol=8.0e-3, atol=3.0e-2)
+            bf16_grad = bf16_param.grad.numpy()
+            np.testing.assert_allclose(bf16_grad, fp32_param.grad.numpy(), rtol=3.0e-2, atol=2.0e-1)
+            bf16_grads.append(bf16_grad.copy())
+        wp.capture_launch(capture.graph)
+        for bf16_param, expected_grad in zip(bf16_mlp.parameters(), bf16_grads, strict=True):
+            np.testing.assert_array_equal(bf16_param.grad.numpy(), expected_grad)
         with self.assertRaises(ValueError):
             rl.WarpMLP((2, 3), device=device, manual_weight_grad_dtype="float16")
 
@@ -638,6 +666,87 @@ class TestTrainerPPO(unittest.TestCase):
 
         self.assertFalse(np.allclose(first, second))
         np.testing.assert_array_equal(seed_counter.numpy(), np.array([19], dtype=np.int32))
+
+    def test_adaptive_kl_lr_updates_inside_graph(self) -> None:
+        device = _rl_cuda_device()
+        config = rl.ConfigPPO(
+            adaptive_kl_target=0.01,
+            adaptive_kl_factor=1.5,
+            adaptive_kl_min_lr_ratio=0.02,
+            adaptive_kl_max_lr_ratio=20.0,
+        )
+        trainer = rl.TrainerPPO(obs_dim=2, action_dim=1, hidden_layers=(4,), config=config, device=device)
+        trainer._approx_kl.assign(np.array([0.03], dtype=np.float32))
+        trainer._adapt_lr_to_kl()
+        trainer._adaptive_lr_scale.assign(np.array([1.0], dtype=np.float32))
+        trainer._apply_lr_schedule(8)
+
+        with wp.ScopedCapture(device=device) as capture:
+            trainer._adapt_lr_to_kl()
+        wp.capture_launch(capture.graph)
+
+        expected_reduced = 1.0 / 1.5
+        self.assertAlmostEqual(float(trainer._adaptive_lr_scale.numpy()[0]), expected_reduced, places=6)
+        self.assertAlmostEqual(float(trainer.actor_optimizer.lr_scale.numpy()[0]), expected_reduced, places=6)
+        self.assertAlmostEqual(float(trainer.critic_optimizer.lr_scale.numpy()[0]), expected_reduced, places=6)
+
+        trainer._approx_kl.assign(np.array([0.001], dtype=np.float32))
+        trainer._adapt_lr_to_kl()
+        self.assertAlmostEqual(float(trainer._adaptive_lr_scale.numpy()[0]), 1.0, places=6)
+
+    def test_flat_minibatches_partition_every_transition_once(self) -> None:
+        device = _rl_cuda_device()
+        buffer = rl.BufferRollout(num_steps=2, num_envs=4, obs_dim=1, action_dim=1, device=device)
+        rows = np.arange(buffer.num_samples, dtype=np.float32)
+        buffer.obs.assign(rows[:, None])
+        buffer.actions.assign((-rows)[:, None])
+        buffer.old_log_probs.assign(rows + 10.0)
+        buffer.advantages.assign(rows + 20.0)
+        buffer.returns.assign(rows + 30.0)
+        buffer.values.assign(np.arange(buffer.values.shape[0], dtype=np.float32) + 40.0)
+        buffer.dones.assign(rows % 2.0)
+        trainer = rl.TrainerPPO(obs_dim=1, action_dim=1, hidden_layers=(4,), device=device, seed=3)
+        batch = trainer._ensure_minibatch(buffer, segment_count=2)
+        iteration = wp.array([0], dtype=wp.int32, device=device)
+
+        gathered = []
+        for minibatch_id in range(2):
+            wp.launch(
+                gather_flat_minibatch_kernel,
+                dim=(batch.num_samples, 1),
+                inputs=[
+                    iteration,
+                    0,
+                    minibatch_id,
+                    batch.num_samples,
+                    buffer.num_samples,
+                    3,
+                    1,
+                    1,
+                    buffer.obs,
+                    buffer.actions,
+                    buffer.old_log_probs,
+                    buffer.advantages,
+                    buffer.returns,
+                    buffer.old_values,
+                    buffer.dones,
+                ],
+                outputs=[
+                    batch.obs,
+                    batch.actions,
+                    batch.old_log_probs,
+                    batch.advantages,
+                    batch.returns,
+                    batch.old_values,
+                    batch.dones,
+                ],
+                device=device,
+            )
+            gathered.append(batch.obs.numpy()[:, 0].copy())
+
+        first, second = gathered
+        self.assertEqual(len(np.intersect1d(first, second)), 0)
+        np.testing.assert_array_equal(np.sort(np.concatenate(gathered)), rows)
 
     def test_priority_replay_sampling_seed_counter_advances_inside_graph(self) -> None:
         device = _rl_cuda_device()

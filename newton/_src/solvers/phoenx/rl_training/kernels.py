@@ -1254,6 +1254,49 @@ def weight_trajectory_advantages_kernel(
 
 
 @wp.kernel
+def gather_flat_minibatch_kernel(
+    iteration_counter: wp.array[wp.int32],
+    epoch: wp.int32,
+    minibatch_id: wp.int32,
+    minibatch_size: wp.int32,
+    src_num_samples: wp.int32,
+    permutation_stride: wp.int32,
+    obs_dim: wp.int32,
+    action_dim: wp.int32,
+    obs_src: wp.array2d[wp.float32],
+    actions_src: wp.array2d[wp.float32],
+    log_probs_src: wp.array[wp.float32],
+    advantages_src: wp.array[wp.float32],
+    returns_src: wp.array[wp.float32],
+    values_src: wp.array[wp.float32],
+    dones_src: wp.array[wp.float32],
+    obs_dst: wp.array2d[wp.float32],
+    actions_dst: wp.array2d[wp.float32],
+    log_probs_dst: wp.array[wp.float32],
+    advantages_dst: wp.array[wp.float32],
+    returns_dst: wp.array[wp.float32],
+    old_values_dst: wp.array[wp.float32],
+    dones_dst: wp.array[wp.float32],
+):
+    row, col = wp.tid()
+    global_row = minibatch_id * minibatch_size + row
+    offset64 = (
+        wp.int64(iteration_counter[0]) * wp.int64(1103515245) + wp.int64(epoch) * wp.int64(12345) + wp.int64(1013904223)
+    ) % wp.int64(src_num_samples)
+    src_row = wp.int32((wp.int64(global_row) * wp.int64(permutation_stride) + offset64) % wp.int64(src_num_samples))
+    if col < obs_dim:
+        obs_dst[row, col] = obs_src[src_row, col]
+    if col < action_dim:
+        actions_dst[row, col] = actions_src[src_row, col]
+    if col == 0:
+        log_probs_dst[row] = log_probs_src[src_row]
+        advantages_dst[row] = advantages_src[src_row]
+        returns_dst[row] = returns_src[src_row]
+        old_values_dst[row] = values_src[src_row]
+        dones_dst[row] = dones_src[src_row]
+
+
+@wp.kernel
 def gather_trajectory_minibatch_kernel(
     env_ids: wp.array[wp.int32],
     src_num_envs: wp.int32,
@@ -2125,12 +2168,41 @@ def optimizer_step_count_kernel(step_count: wp.array[wp.int32]):
 
 
 @wp.kernel
+def ppo_adaptive_kl_lr_scale_kernel(
+    approx_kl: wp.array[wp.float32],
+    target_kl: wp.float32,
+    adjustment_factor: wp.float32,
+    min_lr_ratio: wp.float32,
+    max_lr_ratio: wp.float32,
+    has_separate_critic: wp.int32,
+    adaptive_lr_scale: wp.array[wp.float32],
+    actor_lr_scale: wp.array[wp.float32],
+    critic_lr_scale: wp.array[wp.float32],
+):
+    if target_kl <= wp.float32(0.0) or adjustment_factor <= wp.float32(1.0):
+        return
+    old_scale = adaptive_lr_scale[0]
+    new_scale = old_scale
+    kl = approx_kl[0]
+    if kl > wp.float32(2.0) * target_kl:
+        new_scale = wp.max(old_scale / adjustment_factor, min_lr_ratio)
+    elif kl < wp.float32(0.5) * target_kl:
+        new_scale = wp.min(old_scale * adjustment_factor, max_lr_ratio)
+    ratio = new_scale / wp.max(old_scale, wp.float32(1.0e-12))
+    adaptive_lr_scale[0] = new_scale
+    actor_lr_scale[0] = actor_lr_scale[0] * ratio
+    if has_separate_critic != wp.int32(0):
+        critic_lr_scale[0] = critic_lr_scale[0] * ratio
+
+
+@wp.kernel
 def ppo_lr_scale_kernel(
     iteration: wp.array[wp.int32],
     num_samples: wp.int32,
     anneal_lr: wp.int32,
     anneal_timesteps: wp.int32,
     min_lr_ratio: wp.float32,
+    adaptive_lr_scale: wp.array[wp.float32],
     actor_lr_scale: wp.array[wp.float32],
     critic_lr_scale: wp.array[wp.float32],
 ):
@@ -2142,6 +2214,7 @@ def ppo_lr_scale_kernel(
         scale = min_ratio + wp.float32(0.5) * (wp.float32(1.0) - min_ratio) * (
             wp.float32(1.0) + wp.cos(wp.float32(3.141592653589793) * progress)
         )
+    scale = scale * adaptive_lr_scale[0]
     actor_lr_scale[0] = scale
     critic_lr_scale[0] = scale
 

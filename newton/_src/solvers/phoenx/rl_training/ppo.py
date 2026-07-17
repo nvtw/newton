@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from .kernels import (
     compute_gae_kernel,
     compute_puffer_vtrace_returns_kernel,
     compute_vtrace_returns_kernel,
+    gather_flat_minibatch_kernel,
     gather_trajectory_initial_state_kernel,
     gather_trajectory_minibatch_kernel,
     gaussian_entropy_kernel,
@@ -27,6 +29,7 @@ from .kernels import (
     pack_ppo_update_stats_kernel,
     ppo_actor_loss_backward_kernel,
     ppo_actor_loss_kernel,
+    ppo_adaptive_kl_lr_scale_kernel,
     ppo_log_std_grad_partials_kernel,
     ppo_lr_scale_kernel,
     reduce_ppo_log_std_grad_kernel,
@@ -74,6 +77,19 @@ class MirrorMapPPO:
     action_sign: tuple[float, ...]
 
 
+def _coprime_permutation_stride(count: int, seed: int) -> int:
+    if count <= 1:
+        return 1
+    stride = (int(seed) * 1103515245 + 12345) % count
+    if stride == 0:
+        stride = 1
+    while math.gcd(stride, count) != 1:
+        stride += 1
+        if stride == count:
+            stride = 1
+    return stride
+
+
 @dataclass
 class ConfigPPO:
     """Configuration for :class:`TrainerPPO`.
@@ -94,6 +110,11 @@ class ConfigPPO:
             anneals toward ``min_lr_ratio``. A value less than or equal to zero
             disables annealing.
         min_lr_ratio: Final learning-rate ratio for cosine annealing.
+        adaptive_kl_target: Target policy KL for device-side learning-rate
+            adaptation. A value less than or equal to zero disables adaptation.
+        adaptive_kl_factor: Multiplicative learning-rate adjustment factor.
+        adaptive_kl_min_lr_ratio: Minimum adaptive ratio relative to the base learning rate.
+        adaptive_kl_max_lr_ratio: Maximum adaptive ratio relative to the base learning rate.
         optimizer: Optimizer implementation, either ``"adam"`` or ``"muon"``.
         optimizer_eps: Numerical stabilizer for the selected optimizer.
         optimizer_weight_decay: Decoupled weight decay for the selected optimizer.
@@ -155,6 +176,10 @@ class ConfigPPO:
     anneal_lr: bool = False
     lr_anneal_timesteps: int = 0
     min_lr_ratio: float = 0.0
+    adaptive_kl_target: float = 0.0
+    adaptive_kl_factor: float = 1.5
+    adaptive_kl_min_lr_ratio: float = 0.02
+    adaptive_kl_max_lr_ratio: float = 20.0
     optimizer: str = "adam"
     optimizer_eps: float = 1.0e-8
     optimizer_weight_decay: float = 0.0
@@ -435,6 +460,14 @@ class TrainerPPO:
         self.device = wp.get_device(device)
         self.shared_value_network = bool(self.config.shared_value_network)
         self.policy_network = _normalize_policy_network(self.config.policy_network)
+        if self.config.adaptive_kl_target > 0.0:
+            if self.config.adaptive_kl_factor <= 1.0:
+                raise ValueError("adaptive_kl_factor must be greater than one")
+            if (
+                self.config.adaptive_kl_min_lr_ratio <= 0.0
+                or self.config.adaptive_kl_max_lr_ratio < self.config.adaptive_kl_min_lr_ratio
+            ):
+                raise ValueError("adaptive KL learning-rate ratio bounds are invalid")
         if self.shared_value_network and not (self.config.manual_actor_backward and self.config.manual_critic_backward):
             raise ValueError("shared_value_network currently requires manual actor and critic backward")
         if self.policy_network != "mlp" and not self.shared_value_network:
@@ -523,6 +556,7 @@ class TrainerPPO:
         self._mirror_loss_coeff_buf = wp.array(
             [self.config.mirror_loss_coeff], dtype=wp.float32, device=self.device, requires_grad=False
         )
+        self._adaptive_lr_scale = wp.array([1.0], dtype=wp.float32, device=self.device, requires_grad=False)
 
     @property
     def iteration(self) -> int:
@@ -594,6 +628,7 @@ class TrainerPPO:
             for dst, src in zip(self.critic.parameters(), other.critic.parameters(), strict=True):
                 wp.copy(dst, src)
         # Reset optimizer state
+        self._adaptive_lr_scale.assign(np.asarray([1.0], dtype=np.float32))
         self.actor_optimizer.step_count = 0
         for m in self.actor_optimizer.m:
             m.zero_()
@@ -631,6 +666,7 @@ class TrainerPPO:
             "log_std_init": np.asarray(self.log_std_init, dtype=np.float32),
             "seed": np.asarray(self.seed, dtype=np.int64),
             "iteration": np.asarray(self.iteration if iteration is None else int(iteration), dtype=np.int64),
+            "adaptive_lr_scale": self._adaptive_lr_scale.numpy(),
         }
         for key, value in asdict(self.config).items():
             data[f"config_{key}"] = np.asarray(value)
@@ -694,6 +730,8 @@ class TrainerPPO:
                     raise RuntimeError("separate critic state was not initialized")
                 _unpack_policy_network(data, "critic", trainer.critic)
                 _unpack_optimizer(data, "critic_optimizer", trainer.critic_optimizer)
+            if "adaptive_lr_scale" in data:
+                trainer._adaptive_lr_scale.assign(data["adaptive_lr_scale"])
             if "iteration" in data:
                 trainer.iteration = max(int(data["iteration"]), 0)
         return trainer
@@ -1005,6 +1043,7 @@ class TrainerPPO:
             else:
                 policy_loss, approx_kl, clip_fraction = self._update_actor(buffer, read_stats=epoch_read_stats)
                 value_loss = self._update_critic(buffer, read_stats=epoch_read_stats)
+            self._adapt_lr_to_kl()
         wp.launch(
             seed_counter_increment_kernel,
             dim=1,
@@ -1031,8 +1070,34 @@ class TrainerPPO:
                 int(bool(self.config.anneal_lr)),
                 int(self.config.lr_anneal_timesteps),
                 float(self.config.min_lr_ratio),
+                self._adaptive_lr_scale,
             ],
             outputs=[self.actor_optimizer.lr_scale, critic_lr_scale],
+            device=self.device,
+        )
+
+    def _adapt_lr_to_kl(self) -> None:
+        if self.config.adaptive_kl_target <= 0.0:
+            return
+        critic_lr_scale = (
+            self.critic_optimizer.lr_scale if self.critic_optimizer is not None else self.actor_optimizer.lr_scale
+        )
+        wp.launch(
+            ppo_adaptive_kl_lr_scale_kernel,
+            dim=1,
+            inputs=[
+                self._approx_kl,
+                float(self.config.adaptive_kl_target),
+                float(self.config.adaptive_kl_factor),
+                float(self.config.adaptive_kl_min_lr_ratio),
+                float(self.config.adaptive_kl_max_lr_ratio),
+                int(self.critic_optimizer is not None),
+            ],
+            outputs=[
+                self._adaptive_lr_scale,
+                self.actor_optimizer.lr_scale,
+                critic_lr_scale,
+            ],
             device=self.device,
         )
 
@@ -1055,7 +1120,17 @@ class TrainerPPO:
         )
 
         use_vtrace = self._uses_vtrace_replay()
-        use_priority = False if use_vtrace else self._prepare_trajectory_priority_weights(buffer)
+        use_flat_minibatches = (
+            self.policy_network == "mlp"
+            and not use_vtrace
+            and float(self.config.priority_alpha) <= 0.0
+            and buffer.num_samples % minibatch_size == 0
+        )
+        use_priority = (
+            False if use_flat_minibatches or use_vtrace else self._prepare_trajectory_priority_weights(buffer)
+        )
+        batches_per_epoch = buffer.num_samples // minibatch_size if use_flat_minibatches else 0
+        permutation_stride = _coprime_permutation_stride(buffer.num_samples, self.seed)
         max_cols = max(self.obs_dim, self.action_dim, 1)
         policy_loss = 0.0
         value_loss = 0.0
@@ -1066,51 +1141,86 @@ class TrainerPPO:
             if use_vtrace:
                 self._compute_vtrace_returns(buffer)
                 use_priority = self._prepare_trajectory_priority_weights(buffer)
-            if seed_counter is None:
-                self._sample_minibatch_env_ids(
-                    buffer,
-                    batch,
-                    seed=self.seed + 1000003 * self.iteration + minibatch_id,
-                    use_priority=use_priority,
+            if use_flat_minibatches:
+                epoch = minibatch_id // batches_per_epoch
+                epoch_minibatch_id = minibatch_id - epoch * batches_per_epoch
+                wp.launch(
+                    gather_flat_minibatch_kernel,
+                    dim=(batch.num_samples, max_cols),
+                    inputs=[
+                        self._iteration_counter,
+                        epoch,
+                        epoch_minibatch_id,
+                        minibatch_size,
+                        buffer.num_samples,
+                        permutation_stride,
+                        self.obs_dim,
+                        self.action_dim,
+                        buffer.obs,
+                        buffer.actions,
+                        buffer.old_log_probs,
+                        buffer.advantages,
+                        buffer.returns,
+                        buffer.old_values,
+                        buffer.dones,
+                    ],
+                    outputs=[
+                        batch.obs,
+                        batch.actions,
+                        batch.old_log_probs,
+                        batch.advantages,
+                        batch.returns,
+                        batch.old_values,
+                        batch.dones,
+                    ],
+                    device=self.device,
                 )
             else:
-                self._sample_minibatch_env_ids_seed_counter(
-                    buffer,
-                    batch,
-                    seed_counter=seed_counter,
-                    seed_offset=minibatch_id,
-                    use_priority=use_priority,
+                if seed_counter is None:
+                    self._sample_minibatch_env_ids(
+                        buffer,
+                        batch,
+                        seed=self.seed + 1000003 * self.iteration + minibatch_id,
+                        use_priority=use_priority,
+                    )
+                else:
+                    self._sample_minibatch_env_ids_seed_counter(
+                        buffer,
+                        batch,
+                        seed_counter=seed_counter,
+                        seed_offset=minibatch_id,
+                        use_priority=use_priority,
+                    )
+                wp.launch(
+                    gather_trajectory_minibatch_kernel,
+                    dim=(batch.num_samples, max_cols),
+                    inputs=[
+                        self._minibatch_env_ids,
+                        buffer.num_envs,
+                        segment_count,
+                        self.obs_dim,
+                        self.action_dim,
+                        buffer.obs,
+                        buffer.actions,
+                        buffer.old_log_probs,
+                        buffer.advantages,
+                        buffer.returns,
+                        buffer.old_values,
+                        buffer.dones,
+                    ],
+                    outputs=[
+                        batch.obs,
+                        batch.actions,
+                        batch.old_log_probs,
+                        batch.advantages,
+                        batch.returns,
+                        batch.old_values,
+                        batch.dones,
+                    ],
+                    device=self.device,
                 )
-            wp.launch(
-                gather_trajectory_minibatch_kernel,
-                dim=(batch.num_samples, max_cols),
-                inputs=[
-                    self._minibatch_env_ids,
-                    buffer.num_envs,
-                    segment_count,
-                    self.obs_dim,
-                    self.action_dim,
-                    buffer.obs,
-                    buffer.actions,
-                    buffer.old_log_probs,
-                    buffer.advantages,
-                    buffer.returns,
-                    buffer.old_values,
-                    buffer.dones,
-                ],
-                outputs=[
-                    batch.obs,
-                    batch.actions,
-                    batch.old_log_probs,
-                    batch.advantages,
-                    batch.returns,
-                    batch.old_values,
-                    batch.dones,
-                ],
-                device=self.device,
-            )
-            batch.use_initial_recurrent_state = buffer.use_initial_recurrent_state
-            if buffer.use_initial_recurrent_state:
+            batch.use_initial_recurrent_state = buffer.use_initial_recurrent_state and not use_flat_minibatches
+            if batch.use_initial_recurrent_state:
                 if buffer.initial_recurrent_state is None or batch.initial_recurrent_state is None:
                     raise RuntimeError("recurrent minibatch state was not reserved")
                 wp.launch(
@@ -1122,7 +1232,8 @@ class TrainerPPO:
                 )
             if self.config.normalize_advantages:
                 batch.normalize_advantages()
-            self._weight_minibatch_advantages(batch, use_priority)
+            if not use_flat_minibatches:
+                self._weight_minibatch_advantages(batch, use_priority)
             if self.shared_value_network:
                 stats = self._update_shared_manual(batch, read_stats=minibatch_read_stats)
                 policy_loss = stats.policy_loss
@@ -1135,6 +1246,7 @@ class TrainerPPO:
                 self._scatter_minibatch_ratios(buffer, batch, segment_count)
             if not self.shared_value_network:
                 value_loss = self._update_critic(batch, read_stats=minibatch_read_stats)
+            self._adapt_lr_to_kl()
             if use_vtrace:
                 self._scatter_minibatch_values(buffer, batch, segment_count)
 

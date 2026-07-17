@@ -27,7 +27,9 @@ from .ppo import BufferRollout, ConfigPPO, TrainerPPO, load_ppo_checkpoint
 
 ACTION_DIM_ANT = 8
 OBS_DIM_ANT = 34
+OBS_DIM_ANT_MRAKSHA = 36
 _DEFAULT_ANT_Q = (0.0, 1.0, 0.0, -1.0, 0.0, -1.0, 0.0, 1.0)
+_MRAKSHA_ANT_Q = (0.0, np.pi / 4.0, 0.0, -np.pi / 4.0, 0.0, -np.pi / 4.0, 0.0, np.pi / 4.0)
 
 
 @wp.func
@@ -44,6 +46,12 @@ def _quat_rotate_inverse_xyzw(qx: wp.float32, qy: wp.float32, qz: wp.float32, qw
     return a - b + c
 
 
+@wp.func
+def _quat_rotate_xyzw(qx: wp.float32, qy: wp.float32, qz: wp.float32, qw: wp.float32, v: wp.vec3) -> wp.vec3:
+    q = wp.vec3(qx, qy, qz)
+    return v + wp.float32(2.0) * wp.cross(q, wp.cross(q, v) + qw * v)
+
+
 @wp.kernel(enable_backward=False)
 def ant_apply_actions_kernel(
     actions: wp.array2d[wp.float32],
@@ -56,9 +64,10 @@ def ant_apply_actions_kernel(
     if col < dof_stride:
         joint_f[world * dof_stride + col] = wp.float32(0.0)
     if col < ACTION_DIM_ANT:
-        action = _clip_float(actions[world, col], wp.float32(-1.0), wp.float32(1.0))
-        current_actions[world, col] = action
-        joint_f[world * dof_stride + wp.int32(6) + col] = action * torque_limit
+        raw_action = actions[world, col]
+        applied_action = _clip_float(raw_action, wp.float32(-1.0), wp.float32(1.0))
+        current_actions[world, col] = raw_action
+        joint_f[world * dof_stride + wp.int32(6) + col] = applied_action * torque_limit
 
 
 @wp.kernel(enable_backward=False)
@@ -130,7 +139,7 @@ def ant_observe_reward_kernel(
         bad_state = wp.int32(0)
         if not wp.isfinite(height):
             bad_state = wp.int32(1)
-        if height < min_height or height > max_height or upright < min_upright_cos:
+        if height < min_height or (max_height > wp.float32(0.0) and height > max_height) or upright < min_upright_cos:
             bad_state = wp.int32(1)
         for j in range(3):
             root_position = joint_q[q_base + j]
@@ -202,6 +211,179 @@ def ant_observe_reward_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def ant_observe_reward_mraksha_kernel(
+    joint_q: wp.array[wp.float32],
+    joint_qd: wp.array[wp.float32],
+    current_actions: wp.array2d[wp.float32],
+    joint_limit_lower: wp.array[wp.float32],
+    joint_limit_upper: wp.array[wp.float32],
+    coord_stride: wp.int32,
+    dof_stride: wp.int32,
+    episode_steps: wp.array[wp.int32],
+    max_episode_steps: wp.int32,
+    min_height: wp.float32,
+    max_abs_root_position: wp.float32,
+    max_abs_root_linear_velocity: wp.float32,
+    max_abs_root_angular_velocity: wp.float32,
+    max_abs_joint_position: wp.float32,
+    max_abs_joint_velocity: wp.float32,
+    heading_weight: wp.float32,
+    up_weight: wp.float32,
+    energy_cost_scale: wp.float32,
+    actions_cost_scale: wp.float32,
+    alive_reward_scale: wp.float32,
+    dof_velocity_scale: wp.float32,
+    termination_reward: wp.float32,
+    target_velocity: wp.float32,
+    physics_dt: wp.float32,
+    previous_root_x: wp.array[wp.float32],
+    obs: wp.array2d[wp.float32],
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    successes: wp.array[wp.float32],
+    forward_velocities: wp.array[wp.float32],
+):
+    world, col = wp.tid()
+    q_base = world * coord_stride
+    qd_base = world * dof_stride
+
+    qx = joint_q[q_base + wp.int32(3)]
+    qy = joint_q[q_base + wp.int32(4)]
+    qz = joint_q[q_base + wp.int32(5)]
+    qw = joint_q[q_base + wp.int32(6)]
+    lin_w = wp.vec3(joint_qd[qd_base], joint_qd[qd_base + wp.int32(1)], joint_qd[qd_base + wp.int32(2)])
+    ang_w = wp.vec3(
+        joint_qd[qd_base + wp.int32(3)],
+        joint_qd[qd_base + wp.int32(4)],
+        joint_qd[qd_base + wp.int32(5)],
+    )
+    lin_b = _quat_rotate_inverse_xyzw(qx, qy, qz, qw, lin_w)
+    ang_b = _quat_rotate_inverse_xyzw(qx, qy, qz, qw, ang_w)
+    heading_w = _quat_rotate_xyzw(qx, qy, qz, qw, wp.vec3(1.0, 0.0, 0.0))
+    up_w = _quat_rotate_xyzw(qx, qy, qz, qw, wp.vec3(0.0, 1.0, 0.0))
+    yaw = wp.atan2(-heading_w[2], heading_w[0])
+    roll = wp.atan2(up_w[2], up_w[1])
+    up_proj = _clip_float(up_w[1], wp.float32(-1.0), wp.float32(1.0))
+    heading_proj = _clip_float(heading_w[0], wp.float32(-1.0), wp.float32(1.0))
+
+    value = wp.float32(0.0)
+    if col == wp.int32(0):
+        value = joint_q[q_base + wp.int32(1)]
+    elif col < wp.int32(4):
+        value = lin_b[col - wp.int32(1)]
+    elif col < wp.int32(7):
+        value = ang_b[col - wp.int32(4)]
+    elif col == wp.int32(7):
+        value = yaw
+    elif col == wp.int32(8):
+        value = roll
+    elif col == wp.int32(9):
+        value = -yaw
+    elif col == wp.int32(10):
+        value = up_proj
+    elif col == wp.int32(11):
+        value = heading_proj
+    elif col < wp.int32(20):
+        dof = qd_base + wp.int32(6) + col - wp.int32(12)
+        q = joint_q[q_base + wp.int32(7) + col - wp.int32(12)]
+        lo = joint_limit_lower[dof]
+        hi = joint_limit_upper[dof]
+        value = wp.float32(2.0) * (q - lo) / wp.max(hi - lo, wp.float32(1.0e-6)) - wp.float32(1.0)
+    elif col < wp.int32(28):
+        value = dof_velocity_scale * joint_qd[qd_base + wp.int32(6) + col - wp.int32(20)]
+    elif col < wp.int32(36):
+        value = current_actions[world, col - wp.int32(28)]
+    obs[world, col] = _clip_float(value, wp.float32(-100.0), wp.float32(100.0))
+
+    if col == wp.int32(0):
+        height = joint_q[q_base + wp.int32(1)]
+        bad_state = wp.int32(0)
+        if not wp.isfinite(height) or height < min_height:
+            bad_state = wp.int32(1)
+        for j in range(3):
+            root_position = joint_q[q_base + j]
+            root_linear_velocity = joint_qd[qd_base + j]
+            root_angular_velocity = joint_qd[qd_base + wp.int32(3) + j]
+            if (
+                not wp.isfinite(root_position)
+                or not wp.isfinite(root_linear_velocity)
+                or not wp.isfinite(root_angular_velocity)
+                or (max_abs_root_position > wp.float32(0.0) and wp.abs(root_position) > max_abs_root_position)
+                or (
+                    max_abs_root_linear_velocity > wp.float32(0.0)
+                    and wp.abs(root_linear_velocity) > max_abs_root_linear_velocity
+                )
+                or (
+                    max_abs_root_angular_velocity > wp.float32(0.0)
+                    and wp.abs(root_angular_velocity) > max_abs_root_angular_velocity
+                )
+            ):
+                bad_state = wp.int32(1)
+
+        actions_cost = wp.float32(0.0)
+        electricity_cost = wp.float32(0.0)
+        dof_at_limit_cost = wp.float32(0.0)
+        for j in range(ACTION_DIM_ANT):
+            dof = qd_base + wp.int32(6) + j
+            q = joint_q[q_base + wp.int32(7) + j]
+            qd = joint_qd[dof]
+            scaled_q = wp.float32(2.0) * (q - joint_limit_lower[dof]) / wp.max(
+                joint_limit_upper[dof] - joint_limit_lower[dof], wp.float32(1.0e-6)
+            ) - wp.float32(1.0)
+            action = current_actions[world, j]
+            actions_cost = actions_cost + action * action
+            electricity_cost = electricity_cost + wp.abs(action * qd * dof_velocity_scale)
+            if scaled_q > wp.float32(0.98):
+                dof_at_limit_cost = dof_at_limit_cost + wp.float32(1.0)
+            if (
+                not wp.isfinite(q)
+                or not wp.isfinite(qd)
+                or (max_abs_joint_position > wp.float32(0.0) and wp.abs(q) > max_abs_joint_position)
+                or (max_abs_joint_velocity > wp.float32(0.0) and wp.abs(qd) > max_abs_joint_velocity)
+            ):
+                bad_state = wp.int32(1)
+
+        heading_reward = heading_weight
+        if heading_proj <= wp.float32(0.8):
+            heading_reward = heading_weight * heading_proj / wp.float32(0.8)
+        up_reward = wp.float32(0.0)
+        if up_proj > wp.float32(0.93):
+            up_reward = up_weight
+
+        root_x = joint_q[q_base]
+        progress_reward = (root_x - previous_root_x[world]) / physics_dt
+        previous_root_x[world] = root_x
+        reward = (
+            progress_reward
+            + alive_reward_scale
+            + up_reward
+            + heading_reward
+            - actions_cost_scale * actions_cost
+            - energy_cost_scale * electricity_cost
+            - dof_at_limit_cost
+        )
+        if not wp.isfinite(reward):
+            bad_state = wp.int32(1)
+        if bad_state != wp.int32(0):
+            reward = termination_reward
+
+        done = wp.float32(0.0)
+        if bad_state != wp.int32(0):
+            done = wp.float32(1.0)
+        if max_episode_steps > wp.int32(0) and episode_steps[world] >= max_episode_steps:
+            done = wp.float32(1.0)
+        forward_vel = lin_w[0]
+        success = wp.float32(0.0)
+        if bad_state == wp.int32(0) and forward_vel >= target_velocity and up_proj > wp.float32(0.8):
+            success = wp.float32(1.0)
+
+        rewards[world] = reward
+        dones[world] = done
+        successes[world] = success
+        forward_velocities[world] = forward_vel
+
+
+@wp.kernel(enable_backward=False)
 def ant_increment_episode_steps_kernel(episode_steps: wp.array[wp.int32]):
     world = wp.tid()
     episode_steps[world] = episode_steps[world] + wp.int32(1)
@@ -219,6 +401,7 @@ def ant_reset_done_worlds_kernel(
     velocity_noise: wp.float32,
     joint_q: wp.array[wp.float32],
     joint_qd: wp.array[wp.float32],
+    previous_root_x: wp.array[wp.float32],
     episode_steps: wp.array[wp.int32],
     previous_actions: wp.array2d[wp.float32],
     current_actions: wp.array2d[wp.float32],
@@ -244,6 +427,7 @@ def ant_reset_done_worlds_kernel(
         previous_actions[world, col] = wp.float32(0.0)
         current_actions[world, col] = wp.float32(0.0)
     if col == wp.int32(0):
+        previous_root_x[world] = default_joint_q[world * coord_stride]
         episode_steps[world] = wp.int32(0)
 
 
@@ -256,6 +440,7 @@ class ConfigEnvAntPhoenX:
     sim_substeps: int = 4
     solver_iterations: int = 8
     velocity_iterations: int = 1
+    articulation_mode: str = "maximal"
     torque_limit: float = 15.0
     max_episode_steps: int = 500
     min_height: float = 0.25
@@ -277,6 +462,15 @@ class ConfigEnvAntPhoenX:
     joint_noise: float = 0.03
     velocity_noise: float = 0.05
     ground_friction: float = 1.5
+    task_profile: str = "legacy"
+    joint_damping: float | None = None
+    joint_armature: float | None = None
+    contact_gap: float | None = None
+    heading_weight: float = 0.5
+    up_weight: float = 0.1
+    energy_cost_scale: float = 0.05
+    actions_cost_scale: float = 0.005
+    dof_velocity_scale: float = 0.2
     auto_reset: bool = True
 
 
@@ -294,6 +488,9 @@ class EnvAntPhoenX:
             raise ValueError("world_count must be positive")
         if int(self.config.sim_substeps) <= 0:
             raise ValueError("sim_substeps must be positive")
+        if self.config.task_profile not in ("legacy", "mraksha"):
+            raise ValueError("task_profile must be 'legacy' or 'mraksha'")
+        self.obs_dim = OBS_DIM_ANT_MRAKSHA if self.config.task_profile == "mraksha" else OBS_DIM_ANT
         for name in (
             "max_abs_root_position",
             "max_abs_root_linear_velocity",
@@ -314,6 +511,7 @@ class EnvAntPhoenX:
             substeps=1,
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
+            articulation_mode=str(self.config.articulation_mode),
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -331,6 +529,7 @@ class EnvAntPhoenX:
         self.step_dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_forward_velocities = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.previous_root_x = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self._reset_seed = 0
         self.sim_time = 0.0
         self.reset()
@@ -350,11 +549,19 @@ class EnvAntPhoenX:
             enable_self_collisions=False,
             parse_mujoco_options=False,
         )
-        ant_builder.joint_q[:3] = [0.0, 0.70, 0.0]
-        ant_builder.joint_q[7:15] = list(_DEFAULT_ANT_Q)
+        if self.config.task_profile == "mraksha":
+            ant_builder.joint_q[:3] = [0.0, 0.5, 0.0]
+            ant_builder.joint_q[7:15] = list(_MRAKSHA_ANT_Q)
+        else:
+            ant_builder.joint_q[:3] = [0.0, 0.70, 0.0]
+            ant_builder.joint_q[7:15] = list(_DEFAULT_ANT_Q)
         for dof in range(6, 14):
             ant_builder.joint_target_mode[dof] = int(newton.JointTargetMode.EFFORT)
             ant_builder.joint_effort_limit[dof] = float(self.config.torque_limit)
+            if self.config.joint_damping is not None:
+                ant_builder.joint_damping[dof] = float(self.config.joint_damping)
+            if self.config.joint_armature is not None:
+                ant_builder.joint_armature[dof] = float(self.config.joint_armature)
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
         for _ in range(self.world_count):
@@ -363,44 +570,89 @@ class EnvAntPhoenX:
         builder.default_shape_cfg.kd = 1.0e2
         builder.default_shape_cfg.kf = 1.0e3
         builder.default_shape_cfg.mu = float(self.config.ground_friction)
+        if self.config.contact_gap is not None:
+            for shape in range(len(builder.shape_gap)):
+                builder.shape_gap[shape] = float(self.config.contact_gap)
+            builder.default_shape_cfg.gap = float(self.config.contact_gap)
         builder.add_ground_plane()
         model = builder.finalize(device=self.device)
         model.set_gravity((0.0, -9.81, 0.0))
         return model
 
     def observe(self) -> wp.array:
-        wp.launch(
-            ant_observe_reward_kernel,
-            dim=(self.world_count, self.obs_dim),
-            inputs=[
-                self.state_0.joint_q,
-                self.state_0.joint_qd,
-                self.current_actions,
-                self.previous_actions,
-                self.coord_stride,
-                self.dof_stride,
-                self.episode_steps,
-                int(self.config.max_episode_steps),
-                float(self.config.min_height),
-                float(self.config.max_height),
-                float(self.config.min_upright_cos),
-                float(self.config.max_abs_root_position),
-                float(self.config.max_abs_root_linear_velocity),
-                float(self.config.max_abs_root_angular_velocity),
-                float(self.config.max_abs_joint_position),
-                float(self.config.max_abs_joint_velocity),
-                float(self.config.forward_reward_weight),
-                float(self.config.healthy_reward),
-                float(self.config.ctrl_cost_weight),
-                float(self.config.action_rate_cost_weight),
-                float(self.config.angular_cost_weight),
-                float(self.config.vertical_cost_weight),
-                float(self.config.termination_reward),
-                float(self.config.target_velocity),
-            ],
-            outputs=[self.obs, self.rewards, self.dones, self.successes, self.forward_velocities],
-            device=self.device,
-        )
+        if self.config.task_profile == "mraksha":
+            wp.launch(
+                ant_observe_reward_mraksha_kernel,
+                dim=(self.world_count, self.obs_dim),
+                inputs=[
+                    self.state_0.joint_q,
+                    self.state_0.joint_qd,
+                    self.current_actions,
+                    self.model.joint_limit_lower,
+                    self.model.joint_limit_upper,
+                    self.coord_stride,
+                    self.dof_stride,
+                    self.episode_steps,
+                    int(self.config.max_episode_steps),
+                    float(self.config.min_height),
+                    float(self.config.max_abs_root_position),
+                    float(self.config.max_abs_root_linear_velocity),
+                    float(self.config.max_abs_root_angular_velocity),
+                    float(self.config.max_abs_joint_position),
+                    float(self.config.max_abs_joint_velocity),
+                    float(self.config.heading_weight),
+                    float(self.config.up_weight),
+                    float(self.config.energy_cost_scale),
+                    float(self.config.actions_cost_scale),
+                    float(self.config.healthy_reward),
+                    float(self.config.dof_velocity_scale),
+                    float(self.config.termination_reward),
+                    float(self.config.target_velocity),
+                    float(self.config.frame_dt) / float(self.config.sim_substeps),
+                ],
+                outputs=[
+                    self.previous_root_x,
+                    self.obs,
+                    self.rewards,
+                    self.dones,
+                    self.successes,
+                    self.forward_velocities,
+                ],
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                ant_observe_reward_kernel,
+                dim=(self.world_count, self.obs_dim),
+                inputs=[
+                    self.state_0.joint_q,
+                    self.state_0.joint_qd,
+                    self.current_actions,
+                    self.previous_actions,
+                    self.coord_stride,
+                    self.dof_stride,
+                    self.episode_steps,
+                    int(self.config.max_episode_steps),
+                    float(self.config.min_height),
+                    float(self.config.max_height),
+                    float(self.config.min_upright_cos),
+                    float(self.config.max_abs_root_position),
+                    float(self.config.max_abs_root_linear_velocity),
+                    float(self.config.max_abs_root_angular_velocity),
+                    float(self.config.max_abs_joint_position),
+                    float(self.config.max_abs_joint_velocity),
+                    float(self.config.forward_reward_weight),
+                    float(self.config.healthy_reward),
+                    float(self.config.ctrl_cost_weight),
+                    float(self.config.action_rate_cost_weight),
+                    float(self.config.angular_cost_weight),
+                    float(self.config.vertical_cost_weight),
+                    float(self.config.termination_reward),
+                    float(self.config.target_velocity),
+                ],
+                outputs=[self.obs, self.rewards, self.dones, self.successes, self.forward_velocities],
+                device=self.device,
+            )
         return self.obs
 
     def reset(self) -> wp.array:
@@ -409,6 +661,7 @@ class EnvAntPhoenX:
         self.control.joint_f.zero_()
         self.current_actions.zero_()
         self.previous_actions.zero_()
+        self.previous_root_x.zero_()
         self.episode_steps.zero_()
         self.dones.zero_()
         self.successes.zero_()
@@ -435,6 +688,7 @@ class EnvAntPhoenX:
             outputs=[
                 self.state_0.joint_q,
                 self.state_0.joint_qd,
+                self.previous_root_x,
                 self.episode_steps,
                 self.previous_actions,
                 self.current_actions,
@@ -503,8 +757,10 @@ def _make_trainer(args: argparse.Namespace, env: EnvAntPhoenX) -> TrainerPPO:
         clip_ratio=float(args.clip_ratio),
         entropy_coeff=float(args.entropy_coeff),
         value_loss_coeff=float(args.value_loss_coeff),
+        value_clip_range=float(args.value_clip_range),
         actor_lr=float(args.learning_rate),
         critic_lr=float(args.learning_rate),
+        adaptive_kl_target=float(args.desired_kl),
         train_epochs=int(args.train_epochs),
         minibatch_size=int(args.minibatch_size),
         replay_ratio=float(args.replay_ratio),
@@ -513,6 +769,8 @@ def _make_trainer(args: argparse.Namespace, env: EnvAntPhoenX) -> TrainerPPO:
         max_grad_norm=float(args.max_grad_norm),
         manual_actor_backward=not bool(args.disable_manual_backward),
         manual_critic_backward=not bool(args.disable_manual_backward),
+        manual_mlp_weight_grad_dtype=str(args.manual_mlp_weight_grad_dtype),
+        manual_mlp_forward_dtype=str(args.manual_mlp_forward_dtype),
     )
     if args.resume_checkpoint is not None:
         trainer = load_ppo_checkpoint(args.resume_checkpoint, config=ppo_config, device=env.device)
@@ -526,7 +784,7 @@ def _make_trainer(args: argparse.Namespace, env: EnvAntPhoenX) -> TrainerPPO:
         config=ppo_config,
         device=env.device,
         seed=int(args.seed),
-        squash_actions=True,
+        squash_actions=bool(args.squash_actions),
         activation=str(args.activation),
         log_std_init=float(args.log_std_init),
     )
@@ -590,6 +848,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
+        articulation_mode=str(args.articulation_mode),
         torque_limit=float(args.torque_limit),
         max_episode_steps=int(args.max_episode_steps),
         min_height=float(args.min_height),
@@ -611,6 +870,15 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         joint_noise=float(args.joint_noise),
         velocity_noise=float(args.velocity_noise),
         ground_friction=float(args.ground_friction),
+        task_profile=str(args.task_profile),
+        joint_damping=float(args.joint_damping) if args.joint_damping is not None else None,
+        joint_armature=float(args.joint_armature) if args.joint_armature is not None else None,
+        contact_gap=float(args.contact_gap) if args.contact_gap is not None else None,
+        heading_weight=float(args.heading_weight),
+        up_weight=float(args.up_weight),
+        energy_cost_scale=float(args.energy_cost_scale),
+        actions_cost_scale=float(args.actions_cost_scale),
+        dof_velocity_scale=float(args.dof_velocity_scale),
     )
     env = EnvAntPhoenX(env_config, device=args.device)
     trainer = _make_trainer(args, env)
@@ -756,9 +1024,10 @@ def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=8123)
-    parser.add_argument("--world-count", type=int, default=2048)
-    parser.add_argument("--iterations", type=int, default=120)
-    parser.add_argument("--rollout-steps", type=int, default=64)
+    parser.add_argument("--task-profile", choices=("legacy", "mraksha"), default="mraksha")
+    parser.add_argument("--world-count", type=int, default=4096)
+    parser.add_argument("--iterations", type=int, default=1000)
+    parser.add_argument("--rollout-steps", type=int, default=32)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--execution-mode", choices=("graph", "eager"), default="graph")
     parser.add_argument("--checkpoint-path", default=None)
@@ -770,48 +1039,66 @@ def _make_parser() -> argparse.ArgumentParser:
         "--eval-only", action="store_true", help="Load --resume-checkpoint and run deterministic no-reset eval only."
     )
 
-    parser.add_argument("--frame-dt", type=float, default=1.0 / 50.0)
-    parser.add_argument("--sim-substeps", type=int, default=4)
+    parser.add_argument("--frame-dt", type=float, default=1.0 / 60.0)
+    parser.add_argument("--sim-substeps", type=int, default=2)
     parser.add_argument("--solver-iterations", type=int, default=8)
+    parser.add_argument(
+        "--articulation-mode",
+        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        default="reduced",
+    )
     parser.add_argument("--velocity-iterations", type=int, default=1)
-    parser.add_argument("--torque-limit", type=float, default=15.0)
-    parser.add_argument("--max-episode-steps", type=int, default=500)
-    parser.add_argument("--min-height", type=float, default=0.25)
-    parser.add_argument("--max-height", type=float, default=1.4)
-    parser.add_argument("--min-upright-cos", type=float, default=0.0)
+    parser.add_argument("--torque-limit", type=float, default=7.5)
+    parser.add_argument("--max-episode-steps", type=int, default=900)
+    parser.add_argument("--min-height", type=float, default=0.31)
+    parser.add_argument("--max-height", type=float, default=0.0)
+    parser.add_argument("--min-upright-cos", type=float, default=-1.0)
     parser.add_argument("--max-abs-root-position", type=float, default=100.0)
     parser.add_argument("--max-abs-root-linear-velocity", type=float, default=50.0)
     parser.add_argument("--max-abs-root-angular-velocity", type=float, default=100.0)
     parser.add_argument("--max-abs-joint-position", type=float, default=20.0)
     parser.add_argument("--max-abs-joint-velocity", type=float, default=200.0)
-    parser.add_argument("--ground-friction", type=float, default=1.5)
-    parser.add_argument("--joint-noise", type=float, default=0.03)
-    parser.add_argument("--velocity-noise", type=float, default=0.05)
+    parser.add_argument("--ground-friction", type=float, default=1.0)
+    parser.add_argument("--joint-noise", type=float, default=0.0)
+    parser.add_argument("--velocity-noise", type=float, default=0.0)
+    parser.add_argument("--joint-damping", type=float, default=0.1)
+    parser.add_argument("--joint-armature", type=float, default=0.05)
+    parser.add_argument("--contact-gap", type=float, default=0.005)
 
     parser.add_argument("--forward-reward-weight", type=float, default=1.0)
-    parser.add_argument("--healthy-reward", type=float, default=1.0)
+    parser.add_argument("--healthy-reward", type=float, default=0.5)
     parser.add_argument("--ctrl-cost-weight", type=float, default=0.05)
     parser.add_argument("--action-rate-cost-weight", type=float, default=0.002)
     parser.add_argument("--angular-cost-weight", type=float, default=0.02)
     parser.add_argument("--vertical-cost-weight", type=float, default=0.02)
-    parser.add_argument("--termination-reward", type=float, default=-1.0)
+    parser.add_argument("--termination-reward", type=float, default=-2.0)
     parser.add_argument("--target-velocity", type=float, default=0.7)
+    parser.add_argument("--heading-weight", type=float, default=0.5)
+    parser.add_argument("--up-weight", type=float, default=0.1)
+    parser.add_argument("--energy-cost-scale", type=float, default=0.05)
+    parser.add_argument("--actions-cost-scale", type=float, default=0.005)
+    parser.add_argument("--dof-velocity-scale", type=float, default=0.2)
 
-    parser.add_argument("--hidden-layers", type=int, nargs="+", default=[128, 64, 32])
+    parser.add_argument("--hidden-layers", type=int, nargs="+", default=[400, 200, 100])
     parser.add_argument("--activation", choices=("relu", "elu", "tanh"), default="elu")
-    parser.add_argument("--log-std-init", type=float, default=-0.5)
-    parser.add_argument("--learning-rate", type=float, default=3.0e-4)
+    parser.add_argument("--squash-actions", action="store_true")
+    parser.add_argument("--log-std-init", type=float, default=0.0)
+    parser.add_argument("--learning-rate", type=float, default=5.0e-4)
+    parser.add_argument("--desired-kl", type=float, default=0.0)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-ratio", type=float, default=0.2)
-    parser.add_argument("--entropy-coeff", type=float, default=1.0e-3)
+    parser.add_argument("--entropy-coeff", type=float, default=0.0)
     parser.add_argument("--value-loss-coeff", type=float, default=1.0)
+    parser.add_argument("--value-clip-range", type=float, default=0.2)
     parser.add_argument("--train-epochs", type=int, default=4)
-    parser.add_argument("--minibatch-size", type=int, default=0)
-    parser.add_argument("--replay-ratio", type=float, default=0.0)
+    parser.add_argument("--minibatch-size", type=int, default=32768)
+    parser.add_argument("--replay-ratio", type=float, default=5.0)
     parser.add_argument("--reward-clip", type=float, default=0.0)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--disable-manual-backward", action="store_true")
+    parser.add_argument("--manual-mlp-weight-grad-dtype", choices=("float32", "bfloat16"), default="bfloat16")
+    parser.add_argument("--manual-mlp-forward-dtype", choices=("float32", "bfloat16"), default="bfloat16")
 
     parser.add_argument("--eval-world-count", type=int, default=64)
     parser.add_argument("--eval-steps", type=int, default=500)

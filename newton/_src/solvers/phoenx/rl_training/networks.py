@@ -57,7 +57,6 @@ from .kernels_bf16 import (
     dense_forward_bf16_tiled_kernel,
     dense_input_grad_bf16_tiled_kernel,
     dense_weight_grad_bf16_splitk_tiled_kernel,
-    dense_weight_grad_bf16_tiled_kernel,
 )
 
 _BF16_FORWARD_MIN_BATCH = 16_384
@@ -429,15 +428,24 @@ class WarpMLP:
                         outputs=[grad_pre_bf16],
                         device=self.device,
                     )
+                    weight_grad_partials = self._manual_weight_grad_partials[layer]
                     wp.launch_tiled(
-                        dense_weight_grad_bf16_tiled_kernel,
+                        dense_weight_grad_bf16_splitk_tiled_kernel,
                         dim=(
                             _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
                             _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
+                            DENSE_WEIGHT_GRAD_KCHUNKS,
                         ),
                         inputs=[x_bf16, grad_pre_bf16, rows],
-                        outputs=[weight.grad],
+                        outputs=[weight_grad_partials],
                         block_dim=DENSE_TILE_BLOCK_DIM,
+                        device=self.device,
+                    )
+                    wp.launch(
+                        dense_weight_grad_reduce_kernel,
+                        dim=(int(weight.shape[0]), int(weight.shape[1])),
+                        inputs=[weight_grad_partials, DENSE_WEIGHT_GRAD_KCHUNKS],
+                        outputs=[weight.grad],
                         device=self.device,
                     )
                 else:

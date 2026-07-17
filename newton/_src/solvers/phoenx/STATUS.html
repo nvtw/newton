@@ -133,12 +133,12 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>16 July 2026 &middot; measured G1 comparison</strong></div>
+      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; Ant learning and PPO kernels</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
       <h2>How far PhoenX is behind nanoG1</h2>
-      <p class="summary-lead">The short answer: <strong>PhoenX is still behind on the validated end-to-end result.</strong> Raw environment stepping is tied, but each PhoenX physics substep costs more and the validated PPO recipe needs more wall time to produce a qualified policy. The experimental two-substep recipe can exceed nanoG1 throughput, but it has not yet matched the retained recipe's learning reliability.</p>
+      <p class="summary-lead"><strong>Validated G1 training is 33.0% lower-throughput than nanoG1:</strong> PhoenX sustains 0.9326M samples/s, or 67.0% of nanoG1's measured 1.3924M samples/s. Equivalently, nanoG1 is 1.49x as fast. Raw PhoenX physics reaches 60.5% of nanoG1. The faster experimental PhoenX recipe is listed separately because it has not passed the same multi-seed reliability bar.</p>
       <div class="gap-list" role="table" aria-label="Measured speed comparison">
         <div class="gap-row" role="row">
           <strong role="cell">Raw physics throughput</strong>
@@ -168,6 +168,42 @@
       <p class="compact-note"><strong>Interpretation:</strong> the 1.680M result is not the headline because only one of two tested seeds passed the unchanged full policy gate. The 0.9326M result is slower but belongs to the validated staged recipe. Comparisons use measured local nanoG1 throughput; the 58.9 s time-to-walk number is nanoG1's published claim and does not use the same quality gate.</p>
     </section>
 
+    <section class="work-profile" aria-label="Ant PPO optimization and learning validation">
+      <h2>Ant now learns reliably, and PPO is 75% faster</h2>
+      <p class="summary-lead">The mraksha-compatible Ant task now uses reduced coordinates and exact task observations, rewards, reset pose, raw-action accounting, and current-action timing. Measurement then identified the MLP learner as the bottleneck. BF16 tensor-core forward/backward plus deterministic eight-way split-K weight gradients raised end-to-end training throughput from 0.536M to 0.938&ndash;0.942M samples/s.</p>
+      <div class="ttp-table-wrap">
+        <table class="ttp-table">
+          <thead>
+            <tr><th>Configuration</th><th>Throughput</th><th>Deterministic no-reset result</th><th>Decision</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>FP32 MLP baseline</td>
+              <td class="number">0.536M samples/s</td>
+              <td>Both retained seeds eventually survive 900/900 steps.</td>
+              <td>Correct reference; superseded for this Ant recipe.</td>
+            </tr>
+            <tr>
+              <td>BF16, serial weight gradient</td>
+              <td class="number">0.664M samples/s<br><strong class="good">+23.9%</strong></td>
+              <td>Seed 8123: 29.85 m at 2.00 m/s. Seed 8124: 28.97 m at 1.94 m/s.</td>
+              <td>Learning passes, but profiling found a serial reduction bottleneck.</td>
+            </tr>
+            <tr>
+              <td>BF16 + split-K</td>
+              <td class="number">0.938&ndash;0.942M samples/s<br><strong class="good">+75.4%</strong></td>
+              <td>Seed 8123: 30.92 m at 2.07 m/s after 300 updates. Seed 8124: 29.84 m at 2.00 m/s after 1000 updates. All 64 worlds survive 900 steps in both runs.</td>
+              <td><strong class="good">Retained.</strong> Numerical, graph replay, and two-seed learning gates pass.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="verdict good-verdict">
+        <strong>Measured wall-clock result:</strong> the slower-seed 1000-update run fell from roughly 245 s in FP32 to 142.5 s with BF16 split-K, about 42% less training time for the same sample count.
+      </div>
+      <p class="compact-note"><strong>Why this does not change the G1 headline:</strong> Ant uses the optimized <code>WarpMLP</code> path. The retained G1 recipe uses <code>puffer_mingru</code>; a fresh matched G1 graph-leapfrog check measured 0.9255M samples/s, consistent with the existing 0.9326M validated result. G1 remains 1.49x behind nanoG1 by validated throughput.</p>
+    </section>
+
     <section class="work-profile" aria-label="Current learning validation">
       <h2>Does PhoenX training actually learn?</h2>
       <div class="verdict good-verdict">
@@ -180,8 +216,9 @@
       <div class="verdict">
         <strong>Official-architecture FastSAC probe: fast enough to investigate, not yet a working robot learner.</strong> A direct Torch parity probe used Holosoma's 512-wide LayerNorm/SiLU actor, 768-wide double C51 critics, zero-initialized stochastic heads, BF16 autocast, AdamW, observation normalization, eight critic updates, delayed actor updates, and Polyak targets. It sustained 176.8k samples/s on PhoenX, but after 8.19M samples deterministic tracking was 0.1335 and all 64 evaluation robots fell. The simpler Warp C51 path remains safer at the same horizon: 0.0867 tracking with 63/64 survivors, but it only stands. No FastSAC or FastTD3 variant is promoted until it produces commanded locomotion across seeds.</div>
       <p class="compact-note"><strong>Measured algorithm decisions:</strong> scalar FastTD3 reached 176.2k samples/s, 0.1196 tracking, and 64/64 falls. Distributional TD3 reached about 152k steady samples/s, 0.1393 tracking, and 64/64 falls. Restricting the critic to the 12 actively controlled joints improved throughput by 3.5% but collapsed tracking to 0.0030. Weakening the action-rate penalty, zero-initializing TD3, and increasing network width also failed. These experiments were removed rather than left as unvalidated production options.</p>
-      <div class="verdict">
-        <strong>Ant currently fails the learning gate despite passing environment tests.</strong> A current 400-iteration maximal-coordinate PPO run sustained 0.911M samples/s but all 64 deterministic evaluation robots fell; mean survival was 79.3/300 steps and alive-only forward velocity was 0.151 m/s. A directly executed historical commit remains a useful regression anchor: at iteration 99 it had sane 0.625 m/s rollout velocity and 0.253 reported KL at 344k samples/s, while current eager PPO reaches 10.34 m/s and 3.14 KL at 422k samples/s. The historical environment also started with a known projected-gravity/reset defect and used an older Warp build, so this proves a current-stack regression but does not isolate it to PPO.</div>
+      <div class="verdict good-verdict">
+        <strong>Ant PPO: yes, validated across two seeds.</strong> Reduced-coordinate training produces stable locomotion from zero while maximal coordinates still fail the deterministic gate even with more solver iterations. The retained BF16 split-K recipe sustains about 0.94M samples/s; both seeds keep all 64 evaluation robots alive for 900 steps and move about 30 m at roughly 2.0 m/s.
+      </div>
     </section>
 
     <div class="section-label">Detailed measurements and experiment history</div>
