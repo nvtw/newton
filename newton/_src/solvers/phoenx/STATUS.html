@@ -133,7 +133,7 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; unified fleet contact scheduling</strong></div>
+      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; selective lean Warp kernels</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
@@ -166,6 +166,23 @@
         </div>
       </div>
       <p class="compact-note"><strong>Interpretation:</strong> the 1.680M result is not the headline because only one of two tested seeds passed the unchanged full policy gate. The 1.020M result uses the validated staged recipe with tiled FP32 Muon and wider dense matrix tiles. Comparisons use measured local nanoG1 throughput; the 58.9 s time-to-walk number is nanoG1's published claim and does not use the same quality gate.</p>
+    </section>
+
+    <section class="work-profile" aria-label="Selective Warp grid-stride results">
+      <h2>Five lean kernels add 1% physics throughput</h2>
+      <p class="summary-lead">Warp grid-stride execution was measured per kernel instead of enabled or disabled by assumption. Turning it off for every PhoenX kernel regressed shared G1 physics by about 2.1%. Nsight Systems graph-node traces identified five ordinary kernels where the lean launch path sharply reduced work or register pressure; keeping only those five raises the matched shared G1 benchmark from 1.410M to an average 1.424M physics steps/s.</p>
+      <div class="ttp-table-wrap">
+        <table class="ttp-table">
+          <thead><tr><th>Configuration</th><th>Physics result</th><th>Training result</th><th>Decision</th></tr></thead>
+          <tbody>
+            <tr><td>Lean launch on all PhoenX kernels</td><td class="number"><strong class="bad">about 2.1% slower</strong></td><td class="number">about +0.6%, below noise</td><td>Rejected and removed.</td></tr>
+            <tr><td>Tiled contact row and solve kernels</td><td class="number">-1.0% / -0.1%</td><td>Not advanced.</td><td>Keep Warp default.</td></tr>
+            <tr><td>Five profile-selected kernels</td><td class="number">1.410M &rarr; 1.424M<br><strong class="good">about +1.0%</strong></td><td class="number">1.014M &rarr; 1.013M samples/s</td><td><strong class="good">Retained.</strong> Training is neutral.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="verdict good-verdict"><strong>Why these five:</strong> reduced factor improved 22%, grouped-contact classification 50%, finish/publish 13%, pair-start scatter 21%, and pair-count construction 14%. The dominant gather kernel became 20% slower with the blanket setting.</div>
+      <p class="compact-note"><strong>Validation:</strong> 75 tests passed together; the recurring CUDA graph-instantiation case passed alone, for 76/76 effective coverage. The G1 headline remains 1.020M samples/s because training throughput did not improve.</p>
     </section>
 
     <section class="work-profile" aria-label="Wider dense G1 learner tiles">

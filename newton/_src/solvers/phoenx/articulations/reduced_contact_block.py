@@ -236,7 +236,7 @@ def _classify_reduced_contact_columns_kernel(
     wp.atomic_add(section_end, group, wp.int32(1))
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, grid_stride=False)
 def _classify_grouped_reduced_contact_columns_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,

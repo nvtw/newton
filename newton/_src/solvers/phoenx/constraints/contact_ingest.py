@@ -472,7 +472,7 @@ def _body_pair_filtered(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, grid_stride=False)
 def _scatter_pair_starts_kernel(
     rigid_contact_count: wp.array[wp.int32],
     pair_boundary: wp.array[wp.int32],
@@ -520,7 +520,7 @@ def _scatter_pair_starts_kernel(
         pair_columns[tid] = wp.int32(0)
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, grid_stride=False)
 def _pair_counts_and_columns_kernel(
     rigid_contact_count: wp.array[wp.int32],
     rigid_contact_max: wp.int32,

@@ -1049,7 +1049,7 @@ def _make_factor_reduced_warp_kernel(single_dof_only: bool):
                 index += wp.int32(32)
             _sync_reduced_warp()
 
-    @wp.kernel(enable_backward=False, module=module)
+    @wp.kernel(enable_backward=False, module=module, grid_stride=False)
     def _factor_reduced_warp_kernel(
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
@@ -2173,7 +2173,7 @@ def _finish_and_publish_reduced_warp_device(
             joint_qd_public[dof_start + wp.int32(5)] += delta_omega_joint[2]
 
 
-@wp.kernel(enable_backward=False, module="reduced_publish")
+@wp.kernel(enable_backward=False, module="reduced_publish", grid_stride=False)
 def _finish_and_publish_reduced_warp_kernel(
     articulation_count: wp.int32,
     tile_width: wp.int32,

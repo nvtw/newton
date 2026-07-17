@@ -59,6 +59,20 @@ Three contact-solve architectures were compared head-to-head on identical
 
 ## Active wins
 
+### Selective lean Warp launches (2026-07-17)
+- An all-PhoenX `grid_stride=False` bracket regressed shared G1 physics by
+  about 2.1%; the dominant contact gather became 20.5% slower. The blanket
+  change was removed.
+- Graph-node traces selected five sharp winners: reduced factor 22%, grouped
+  contact classification 50%, finish/publish 13%, pair-start scatter 21%, and
+  pair-count construction 14%. The selective set improves reversed shared-G1
+  brackets from 1.410M to an average 1.424M steps/s, about +1.0%. G1 training
+  remains neutral at 1.013M versus 1.014M samples/s.
+- Tiled row build regressed 1.0% and tiled contact solve was unchanged (-0.1%).
+  Select by measurement, not by whether a kernel uses tile operations.
+- Reduced/contact coverage is effectively 76/76: 75 passed together and the
+  recurring CUDA graph-instantiation case passed alone.
+
 ### FP16x2 packed contact rows (2026-07-10) - retention in progress
 - `PHOENX_CONTACT_ROWS_FP16=2`: packed_jacobian/packed_response stored as
   fp16 pairs in uint32 words (func_native `_unpack_h2`), all accumulators,
