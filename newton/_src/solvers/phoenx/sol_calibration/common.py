@@ -24,6 +24,30 @@ class BenchmarkResult:
     median: float
     unit: str
     median_ms: float
+    theoretical: float | None
+
+
+@dataclasses.dataclass(frozen=True)
+class HardwareLimits:
+    """Published hardware throughput ceilings."""
+
+    memory_gbps: float | None
+    fp32_gflops: float | None
+    bf16_tensor_gflops: float | None
+
+
+_KNOWN_HARDWARE_LIMITS = {
+    "NVIDIA RTX PRO 6000 Blackwell Workstation Edition": HardwareLimits(
+        memory_gbps=1792.0,
+        fp32_gflops=125_000.0,
+        bf16_tensor_gflops=503_800.0,
+    ),
+}
+
+
+def get_hardware_limits(device: wp.context.Device) -> HardwareLimits:
+    """Return published limits for ``device``, if known."""
+    return _KNOWN_HARDWARE_LIMITS.get(device.name, HardwareLimits(None, None, None))
 
 
 def require_cuda(device_name: str) -> wp.context.Device:
@@ -79,6 +103,7 @@ def throughput_result(
     unit: str,
     best_ms: float,
     median_ms: float,
+    theoretical: float | None = None,
 ) -> BenchmarkResult:
     """Build a result whose work rate is expressed per second."""
     scale = 1.0e-3
@@ -91,6 +116,7 @@ def throughput_result(
         median=work_per_launch / (median_ms * scale),
         unit=unit,
         median_ms=median_ms,
+        theoretical=theoretical,
     )
 
 
@@ -98,7 +124,17 @@ def print_report(results: Sequence[BenchmarkResult]) -> None:
     """Print calibration results as compact category tables."""
     for category in dict.fromkeys(result.category for result in results):
         rows = [result for result in results if result.category == category]
-        headers = ("Workload", "Layout", "Problem", "Peak", "Median", "Unit", "Median ms")
+        headers = (
+            "Workload",
+            "Layout",
+            "Problem",
+            "Peak",
+            "Median",
+            "Theoretical",
+            "% theoretical",
+            "Unit",
+            "Median ms",
+        )
         rendered = [
             (
                 row.workload,
@@ -106,6 +142,8 @@ def print_report(results: Sequence[BenchmarkResult]) -> None:
                 row.problem_size,
                 f"{row.peak:,.2f}",
                 f"{row.median:,.2f}",
+                f"{row.theoretical:,.2f}" if row.theoretical is not None else "n/a",
+                f"{100.0 * row.peak / row.theoretical:.1f}%" if row.theoretical is not None else "n/a",
                 row.unit,
                 f"{row.median_ms:,.3f}",
             )
@@ -116,5 +154,5 @@ def print_report(results: Sequence[BenchmarkResult]) -> None:
         print("  ".join(headers[i].ljust(widths[i]) for i in range(len(headers))))
         print("  ".join("-" * width for width in widths))
         for row in rendered:
-            cells = [row[i].rjust(widths[i]) if i >= 3 and i != 5 else row[i].ljust(widths[i]) for i in range(len(row))]
+            cells = [row[i].rjust(widths[i]) if i >= 3 and i != 7 else row[i].ljust(widths[i]) for i in range(len(row))]
             print("  ".join(cells))

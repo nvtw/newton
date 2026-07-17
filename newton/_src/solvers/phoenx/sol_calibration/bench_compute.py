@@ -11,7 +11,7 @@ import gc
 
 import warp as wp
 
-from .common import BenchmarkResult, print_report, require_cuda, throughput_result, time_cuda_graph
+from .common import BenchmarkResult, get_hardware_limits, print_report, require_cuda, throughput_result, time_cuda_graph
 
 
 @wp.kernel
@@ -76,9 +76,12 @@ def run(
     warmup: int = 5,
     repetitions: int = 20,
     trials: int = 5,
+    theoretical_gflops: float | None = None,
 ) -> list[BenchmarkResult]:
     """Run compute-heavy kernels representative of physics workloads."""
     device = require_cuda(device_name)
+    if theoretical_gflops is None:
+        theoretical_gflops = get_hardware_limits(device).fp32_gflops
     output = wp.empty(elements, dtype=wp.float32, device=device)
     cases = (
         ("independent FMA", _fma_kernel, elements * iterations * 16.0 / 1.0e9, "GFLOP/s"),
@@ -104,6 +107,7 @@ def run(
                 unit=unit,
                 best_ms=best_ms,
                 median_ms=median_ms,
+                theoretical=theoretical_gflops if unit == "GFLOP/s" else None,
             )
         )
     del output

@@ -11,7 +11,7 @@ import gc
 
 import warp as wp
 
-from .common import BenchmarkResult, print_report, require_cuda, throughput_result, time_cuda_graph
+from .common import BenchmarkResult, get_hardware_limits, print_report, require_cuda, throughput_result, time_cuda_graph
 
 
 @wp.kernel
@@ -19,6 +19,12 @@ def _init_indices(indices: wp.array[wp.int32], mask: int):
     tid = wp.tid()
     # An odd multiplier permutes a power-of-two range while separating adjacent lanes.
     indices[tid] = (tid * 8191) & mask
+
+
+@wp.kernel
+def _gather_bfloat16(src: wp.array[wp.bfloat16], indices: wp.array[wp.int32], dst: wp.array[wp.bfloat16]):
+    tid = wp.tid()
+    dst[tid] = src[indices[tid]]
 
 
 @wp.kernel
@@ -40,6 +46,7 @@ def _gather_vec4(src: wp.array[wp.vec4f], indices: wp.array[wp.int32], dst: wp.a
 
 
 _LAYOUTS = (
+    ("bfloat16", wp.bfloat16, 2, _gather_bfloat16),
     ("float", wp.float32, 4, _gather_float),
     ("vec2", wp.vec2f, 8, _gather_vec2),
     ("vec4", wp.vec4f, 16, _gather_vec4),
@@ -57,11 +64,14 @@ def run(
     warmup: int = 5,
     repetitions: int = 20,
     trials: int = 5,
+    theoretical_gbps: float | None = None,
 ) -> list[BenchmarkResult]:
     """Run indexed gather benchmarks for all supported layouts."""
     if not _is_power_of_two(array_mib):
         raise ValueError("array_mib must be a power of two so the index mapping is a permutation")
     device = require_cuda(device_name)
+    if theoretical_gbps is None:
+        theoretical_gbps = get_hardware_limits(device).memory_gbps
     array_bytes = array_mib * 1024 * 1024
     results: list[BenchmarkResult] = []
     for name, dtype, element_bytes, kernel in _LAYOUTS:
@@ -89,6 +99,7 @@ def run(
                 unit="GB/s",
                 best_ms=best_ms,
                 median_ms=median_ms,
+                theoretical=theoretical_gbps,
             )
         )
         del src, dst, indices
