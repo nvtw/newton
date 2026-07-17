@@ -1152,6 +1152,47 @@ class TestTrainerSAC(unittest.TestCase):
             np.testing.assert_array_equal(first, second)
         self.assertTrue(any(np.any(second != third) for second, third in zip(after_second, after_third, strict=True)))
 
+    def test_update_without_stats_matches_readback_update(self) -> None:
+        device = _rl_cuda_device()
+        rng = np.random.default_rng(29)
+        config = rl.ConfigSAC(normalize_observations=False)
+        with_stats = rl.TrainerSAC(obs_dim=4, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=31)
+        without_stats = rl.TrainerSAC(
+            obs_dim=4, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=31
+        )
+        batch = rl.BatchSAC(
+            obs=wp.array(rng.normal(size=(16, 4)).astype(np.float32), dtype=wp.float32, device=device),
+            actions=wp.array(np.tanh(rng.normal(size=(16, 2))).astype(np.float32), dtype=wp.float32, device=device),
+            rewards=wp.array(rng.normal(size=16).astype(np.float32), dtype=wp.float32, device=device),
+            dones=wp.zeros(16, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(16, 4)).astype(np.float32), dtype=wp.float32, device=device),
+        )
+
+        stats = with_stats.update(batch, seed=37)
+        skipped = without_stats.update(batch, seed=37, read_stats=False)
+
+        self.assertTrue(all(math.isfinite(value) for value in stats.__dict__.values()))
+        self.assertEqual(tuple(skipped.__dict__.values()), (0.0, 0.0, 0.0, 0.0))
+        networks_with = (
+            with_stats.actor,
+            with_stats.critic1,
+            with_stats.critic2,
+            with_stats.target_critic1,
+            with_stats.target_critic2,
+        )
+        networks_without = (
+            without_stats.actor,
+            without_stats.critic1,
+            without_stats.critic2,
+            without_stats.target_critic1,
+            without_stats.target_critic2,
+        )
+        for left, right in zip(networks_with, networks_without, strict=True):
+            for left_param, right_param in zip(left.parameters(), right.parameters(), strict=True):
+                np.testing.assert_array_equal(left_param.numpy(), right_param.numpy())
+        np.testing.assert_array_equal(with_stats.log_alpha.numpy(), without_stats.log_alpha.numpy())
+        np.testing.assert_array_equal(with_stats._alpha.numpy(), without_stats._alpha.numpy())
+
     def test_observation_normalization_tracks_batch_moments(self) -> None:
         device = _rl_cuda_device()
         rng = np.random.default_rng(7)

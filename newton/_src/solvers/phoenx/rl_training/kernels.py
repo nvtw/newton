@@ -158,6 +158,25 @@ def adam_step_prepare_kernel(
 
 
 @wp.kernel
+def sac_refresh_alpha_kernel(log_alpha: wp.array[wp.float32], alpha: wp.array[wp.float32]):
+    alpha[0] = wp.exp(log_alpha[0])
+
+
+@wp.kernel
+def pack_sac_update_stats_kernel(
+    actor_loss: wp.array[wp.float32],
+    critic_loss: wp.array[wp.float32],
+    alpha_loss: wp.array[wp.float32],
+    alpha: wp.array[wp.float32],
+    stats: wp.array[wp.float32],
+):
+    stats[0] = actor_loss[0]
+    stats[1] = critic_loss[0]
+    stats[2] = alpha_loss[0]
+    stats[3] = alpha[0]
+
+
+@wp.kernel
 def seed_counter_increment_kernel(counter: wp.array[wp.int32], delta: wp.int32):
     modulus = wp.int64(2147483647)
     value = (wp.int64(counter[0]) + wp.int64(delta)) % modulus
@@ -1716,6 +1735,58 @@ def sac_distributional_projection_kernel(
 
 
 @wp.kernel
+def sac_distributional_projection_device_alpha_kernel(
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    logits1: wp.array2d[wp.float32],
+    logits2: wp.array2d[wp.float32],
+    next_log_probs: wp.array[wp.float32],
+    gamma: wp.float32,
+    alpha: wp.array[wp.float32],
+    num_atoms: wp.int32,
+    v_min: wp.float32,
+    v_max: wp.float32,
+    targets1: wp.array2d[wp.float32],
+    targets2: wp.array2d[wp.float32],
+):
+    row, destination_atom = wp.tid()
+    max_logit1 = logits1[row, 0]
+    max_logit2 = logits2[row, 0]
+    for atom in range(1, num_atoms):
+        max_logit1 = wp.max(max_logit1, logits1[row, atom])
+        max_logit2 = wp.max(max_logit2, logits2[row, atom])
+    normalizer1 = wp.float32(0.0)
+    normalizer2 = wp.float32(0.0)
+    for atom in range(num_atoms):
+        normalizer1 += wp.exp(logits1[row, atom] - max_logit1)
+        normalizer2 += wp.exp(logits2[row, atom] - max_logit2)
+
+    delta = (v_max - v_min) / wp.float32(num_atoms - wp.int32(1))
+    bootstrap = wp.float32(1.0) - dones[row]
+    projected1 = wp.float32(0.0)
+    projected2 = wp.float32(0.0)
+    for source_atom in range(num_atoms):
+        support = v_min + wp.float32(source_atom) * delta
+        target_value = rewards[row] + gamma * bootstrap * (support - alpha[0] * next_log_probs[row])
+        target_value = wp.min(wp.max(target_value, v_min), v_max)
+        position = (target_value - v_min) / delta
+        lower = wp.int32(wp.floor(position))
+        upper = wp.min(lower + wp.int32(1), num_atoms - wp.int32(1))
+        upper_weight = position - wp.float32(lower)
+        weight = wp.float32(0.0)
+        if destination_atom == lower:
+            weight += wp.float32(1.0) - upper_weight
+        if destination_atom == upper and upper != lower:
+            weight += upper_weight
+        probability1 = wp.exp(logits1[row, source_atom] - max_logit1) / normalizer1
+        probability2 = wp.exp(logits2[row, source_atom] - max_logit2) / normalizer2
+        projected1 += probability1 * weight
+        projected2 += probability2 * weight
+    targets1[row, destination_atom] = projected1
+    targets2[row, destination_atom] = projected2
+
+
+@wp.kernel
 def sac_distributional_critic_loss_backward_kernel(
     logits1: wp.array2d[wp.float32],
     logits2: wp.array2d[wp.float32],
@@ -1813,6 +1884,25 @@ def sac_q_target_kernel(
     if average_critics:
         q = wp.float32(0.5) * (q1[i, 0] + q2[i, 0])
     targets[i] = rewards[i] + gamma * (wp.float32(1.0) - dones[i]) * (q - alpha * next_log_probs[i])
+
+
+@wp.kernel
+def sac_q_target_device_alpha_kernel(
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    q1: wp.array2d[wp.float32],
+    q2: wp.array2d[wp.float32],
+    next_log_probs: wp.array[wp.float32],
+    gamma: wp.float32,
+    alpha: wp.array[wp.float32],
+    average_critics: wp.bool,
+    targets: wp.array[wp.float32],
+):
+    i = wp.tid()
+    q = wp.min(q1[i, 0], q2[i, 0])
+    if average_critics:
+        q = wp.float32(0.5) * (q1[i, 0] + q2[i, 0])
+    targets[i] = rewards[i] + gamma * (wp.float32(1.0) - dones[i]) * (q - alpha[0] * next_log_probs[i])
 
 
 @wp.kernel
@@ -1921,6 +2011,52 @@ def sac_actor_policy_backward_kernel(
         log_std_grad = wp.float32(0.0)
         if raw_log_std >= log_std_min and raw_log_std <= log_std_max:
             log_std_grad = pre_grad * std_eps - alpha * inv_batch
+        policy_out_grad[row, action_dim + action] = log_std_grad
+
+
+@wp.kernel
+def sac_actor_policy_backward_device_alpha_kernel(
+    policy_out: wp.array2d[wp.float32],
+    eps: wp.array2d[wp.float32],
+    q_input_grad1: wp.array2d[wp.float32],
+    q_input_grad2: wp.array2d[wp.float32],
+    q1: wp.array2d[wp.float32],
+    q2: wp.array2d[wp.float32],
+    log_probs: wp.array[wp.float32],
+    obs_dim: wp.int32,
+    action_dim: wp.int32,
+    batch_size: wp.int32,
+    alpha: wp.array[wp.float32],
+    log_std_min: wp.float32,
+    log_std_max: wp.float32,
+    average_critics: wp.bool,
+    loss: wp.array[wp.float32],
+    policy_out_grad: wp.array2d[wp.float32],
+):
+    row = wp.tid()
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    q = wp.min(q1[row, 0], q2[row, 0])
+    if average_critics:
+        q = wp.float32(0.5) * (q1[row, 0] + q2[row, 0])
+    wp.atomic_add(loss, 0, (alpha[0] * log_probs[row] - q) * inv_batch)
+    for action in range(action_dim):
+        mean = policy_out[row, action]
+        raw_log_std = policy_out[row, action_dim + action]
+        log_std = _clip(raw_log_std, log_std_min, log_std_max)
+        std_eps = wp.exp(log_std) * eps[row, action]
+        value = wp.tanh(mean + std_eps)
+        action_grad = q_input_grad1[row, obs_dim + action] + q_input_grad2[row, obs_dim + action]
+        correction_grad = (
+            wp.float32(2.0)
+            * value
+            * (wp.float32(1.0) - value * value)
+            / (wp.float32(1.0) - value * value + wp.float32(TANH_EPS))
+        )
+        pre_grad = action_grad * (wp.float32(1.0) - value * value) + alpha[0] * inv_batch * correction_grad
+        policy_out_grad[row, action] = pre_grad
+        log_std_grad = wp.float32(0.0)
+        if raw_log_std >= log_std_min and raw_log_std <= log_std_max:
+            log_std_grad = pre_grad * std_eps - alpha[0] * inv_batch
         policy_out_grad[row, action_dim + action] = log_std_grad
 
 

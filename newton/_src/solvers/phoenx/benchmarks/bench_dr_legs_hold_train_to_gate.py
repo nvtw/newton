@@ -36,6 +36,68 @@ def _apply_translation_kick_kernel(
     body_qd[body] = wp.spatial_vector(wp.spatial_top(velocity) + delta, wp.spatial_bottom(velocity))
 
 
+@wp.kernel(enable_backward=False)
+def _accumulate_hold_gate_kernel(
+    body_q: wp.array[wp.transform],
+    actions: wp.array2d[wp.float32],
+    dones: wp.array[wp.float32],
+    successes: wp.array[wp.float32],
+    initial_xy: wp.array2d[wp.float32],
+    body_stride: wp.int32,
+    alive: wp.array[wp.int32],
+    survival_steps: wp.array[wp.int32],
+    success_sum: wp.array[wp.float32],
+    min_height: wp.array[wp.float32],
+    max_height: wp.array[wp.float32],
+    min_upright: wp.array[wp.float32],
+    max_drift: wp.array[wp.float32],
+    action_sq_sum: wp.array[wp.float32],
+    finite: wp.array[wp.int32],
+):
+    world = wp.tid()
+    if alive[world] == wp.int32(0):
+        return
+    pelvis = body_q[world * body_stride]
+    position = wp.transform_get_translation(pelvis)
+    rotation = wp.transform_get_rotation(pelvis)
+    upright = wp.float32(1.0) - wp.float32(2.0) * (rotation[0] * rotation[0] + rotation[1] * rotation[1])
+    dx = position[0] - initial_xy[world, 0]
+    dy = position[1] - initial_xy[world, 1]
+    drift = wp.sqrt(dx * dx + dy * dy)
+    success_sum[world] = success_sum[world] + successes[world]
+    min_height[world] = wp.min(min_height[world], position[2])
+    max_height[world] = wp.max(max_height[world], position[2])
+    min_upright[world] = wp.min(min_upright[world], upright)
+    max_drift[world] = wp.max(max_drift[world], drift)
+    survival_steps[world] = survival_steps[world] + wp.int32(1)
+
+    action = wp.int32(0)
+    while action < actions.shape[1]:
+        value = actions[world, action]
+        action_sq_sum[world] = action_sq_sum[world] + value * value
+        if not wp.isfinite(value):
+            finite[world] = wp.int32(0)
+        action = action + wp.int32(1)
+    body_local = wp.int32(0)
+    while body_local < body_stride:
+        transform = body_q[world * body_stride + body_local]
+        body_position = wp.transform_get_translation(transform)
+        body_rotation = wp.transform_get_rotation(transform)
+        if (
+            not wp.isfinite(body_position[0])
+            or not wp.isfinite(body_position[1])
+            or not wp.isfinite(body_position[2])
+            or not wp.isfinite(body_rotation[0])
+            or not wp.isfinite(body_rotation[1])
+            or not wp.isfinite(body_rotation[2])
+            or not wp.isfinite(body_rotation[3])
+        ):
+            finite[world] = wp.int32(0)
+        body_local = body_local + wp.int32(1)
+    if dones[world] > wp.float32(0.5):
+        alive[world] = wp.int32(0)
+
+
 @dataclass(frozen=True)
 class StatsEvaluateDrLegsHold:
     """No-reset physical hold-pose metrics."""
@@ -132,53 +194,67 @@ def evaluate_hold(
     )
     trainer.reset_rollout_state()
     initial_q = env.state_0.body_q.numpy().reshape(env.world_count, env.body_stride, 7)
-    initial_xy = initial_q[:, 0, :2].copy()
-    first_done = np.full(env.world_count, -1, dtype=np.int32)
-    success_sum = 0.0
-    alive_samples = 0
-    min_height = math.inf
-    max_height = -math.inf
-    min_upright = math.inf
-    max_drift = 0.0
-    action_sq_sum = 0.0
-    action_count = 0
-    finite = True
+    initial_xy_np = initial_q[:, 0, :2].copy()
+    initial_xy = wp.array(initial_xy_np, dtype=wp.float32, device=env.device)
+    alive = wp.ones(env.world_count, dtype=wp.int32, device=env.device)
+    survival_steps = wp.zeros(env.world_count, dtype=wp.int32, device=env.device)
+    success_sum = wp.zeros(env.world_count, dtype=wp.float32, device=env.device)
+    min_height = wp.full(env.world_count, math.inf, dtype=wp.float32, device=env.device)
+    max_height = wp.full(env.world_count, -math.inf, dtype=wp.float32, device=env.device)
+    min_upright = wp.full(env.world_count, math.inf, dtype=wp.float32, device=env.device)
+    max_drift = wp.zeros(env.world_count, dtype=wp.float32, device=env.device)
+    action_sq_sum = wp.zeros(env.world_count, dtype=wp.float32, device=env.device)
+    finite = wp.ones(env.world_count, dtype=wp.int32, device=env.device)
 
+    trainer.reserve_buffers(env.world_count)
+    graphs = []
+    graph_count = 2 if int(env.config.sim_substeps) % 2 else 1
+    for _ in range(graph_count):
+        with wp.ScopedCapture(device=env.device) as capture:
+            actions, _log_probs, _values = trainer.act_reuse(obs, seed=gate_seed, deterministic=True)
+            env.step(actions)
+            wp.launch(
+                _accumulate_hold_gate_kernel,
+                dim=env.world_count,
+                inputs=[
+                    env.state_0.body_q,
+                    actions,
+                    env.step_dones,
+                    env.step_successes,
+                    initial_xy,
+                    env.body_stride,
+                ],
+                outputs=[
+                    alive,
+                    survival_steps,
+                    success_sum,
+                    min_height,
+                    max_height,
+                    min_upright,
+                    max_drift,
+                    action_sq_sum,
+                    finite,
+                ],
+                device=env.device,
+            )
+        graphs.append(capture.graph)
     for step in range(int(args.eval_steps)):
-        alive = first_done < 0
-        actions, _log_probs, _values = trainer.act(obs, seed=gate_seed + step, deterministic=True)
-        obs, _rewards, dones = env.step(actions)
-        action_values = actions.numpy()
-        done_values = dones.numpy() > 0.5
-        body_q = env.state_0.body_q.numpy().reshape(env.world_count, env.body_stride, 7)
-        pelvis = body_q[:, 0]
-        upright = 1.0 - 2.0 * (pelvis[:, 3] * pelvis[:, 3] + pelvis[:, 4] * pelvis[:, 4])
-        drift = np.linalg.norm(pelvis[:, :2] - initial_xy, axis=1)
-        finite = finite and bool(np.isfinite(body_q).all()) and bool(np.isfinite(action_values).all())
-        if np.any(alive):
-            success_sum += float(np.sum(env.step_successes.numpy()[alive]))
-            alive_samples += int(np.sum(alive))
-            min_height = min(min_height, float(np.min(pelvis[alive, 2])))
-            max_height = max(max_height, float(np.max(pelvis[alive, 2])))
-            min_upright = min(min_upright, float(np.min(upright[alive])))
-            max_drift = max(max_drift, float(np.max(drift[alive])))
-            action_sq_sum += float(np.sum(action_values[alive] * action_values[alive]))
-            action_count += int(np.sum(alive)) * env.action_dim
-        first_done[(first_done < 0) & done_values] = step + 1
+        wp.capture_launch(graphs[step % graph_count])
 
-    survival_steps = np.where(first_done >= 0, first_done, int(args.eval_steps))
+    survival = survival_steps.numpy()
+    alive_samples = int(np.sum(survival))
     return StatsEvaluateDrLegsHold(
         steps=int(args.eval_steps),
-        fall_fraction=float(np.mean(first_done >= 0)),
-        survival_fraction=float(np.mean(survival_steps)) / float(max(int(args.eval_steps), 1)),
-        mean_success=success_sum / float(max(alive_samples, 1)),
-        min_pelvis_height=min_height,
-        max_pelvis_height=max_height,
-        min_upright_cos=min_upright,
-        max_horizontal_drift=max_drift,
-        mean_action_rms=math.sqrt(action_sq_sum / float(max(action_count, 1))),
+        fall_fraction=float(np.mean(alive.numpy() == 0)),
+        survival_fraction=float(np.mean(survival)) / float(max(int(args.eval_steps), 1)),
+        mean_success=float(np.sum(success_sum.numpy())) / float(max(alive_samples, 1)),
+        min_pelvis_height=float(np.min(min_height.numpy())),
+        max_pelvis_height=float(np.max(max_height.numpy())),
+        min_upright_cos=float(np.min(min_upright.numpy())),
+        max_horizontal_drift=float(np.max(max_drift.numpy())),
+        mean_action_rms=math.sqrt(float(np.sum(action_sq_sum.numpy())) / float(max(alive_samples * env.action_dim, 1))),
         max_anchor_residual=_max_anchor_residual(env),
-        finite=finite,
+        finite=bool(np.all(finite.numpy() != 0)),
     )
 
 

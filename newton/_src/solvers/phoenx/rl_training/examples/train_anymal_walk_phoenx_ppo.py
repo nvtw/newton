@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
+import warp as wp
 
 import newton.rl as rl
 
@@ -398,6 +399,117 @@ def _quat_rotate_xyzw(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     )
 
 
+@wp.kernel(enable_backward=False)
+def _accumulate_anymal_evaluation_kernel(
+    obs: wp.array2d[wp.float32],
+    joint_q: wp.array[wp.float32],
+    joint_qd: wp.array[wp.float32],
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    lab_to_mujoco: wp.array[wp.int32],
+    default_joint_pos: wp.array[wp.float32],
+    command: wp.vec4,
+    coord_stride: wp.int32,
+    dof_stride: wp.int32,
+    action_dim: wp.int32,
+    action_obs_offset: wp.int32,
+    joint_vel_obs_offset: wp.int32,
+    action_scale: wp.float32,
+    actuator_ke: wp.float32,
+    actuator_kd: wp.float32,
+    target_base_height: wp.float32,
+    lin_sigma_sq: wp.float32,
+    yaw_sigma_sq: wp.float32,
+    height_sigma_sq: wp.float32,
+    alive: wp.array[wp.int32],
+    survival_steps: wp.array[wp.int32],
+    reward_sum: wp.array[wp.float32],
+    done_sum: wp.array[wp.float32],
+    tracking_sum: wp.array[wp.float32],
+    velocity_tracking_sum: wp.array[wp.float32],
+    yaw_tracking_sum: wp.array[wp.float32],
+    forward_sum: wp.array[wp.float32],
+    forward_error_sum: wp.array[wp.float32],
+    lateral_abs_sum: wp.array[wp.float32],
+    yaw_error_sum: wp.array[wp.float32],
+    height_error_sum: wp.array[wp.float32],
+    height_sum: wp.array[wp.float32],
+    action_sq_sum: wp.array[wp.float32],
+    action_rate_sq_sum: wp.array[wp.float32],
+    joint_speed_sq_sum: wp.array[wp.float32],
+    power_proxy_sum: wp.array[wp.float32],
+    previous_actions: wp.array2d[wp.float32],
+    previous_xy: wp.array2d[wp.float32],
+    last_alive_xy: wp.array2d[wp.float32],
+    path_length: wp.array[wp.float32],
+):
+    world = wp.tid()
+    reward_sum[world] = reward_sum[world] + rewards[world]
+    done_sum[world] = done_sum[world] + dones[world]
+    if alive[world] == wp.int32(0):
+        return
+
+    q_base = world * coord_stride
+    qd_base = world * dof_stride
+    x = joint_q[q_base]
+    y = joint_q[q_base + wp.int32(1)]
+    dx = x - previous_xy[world, 0]
+    dy = y - previous_xy[world, 1]
+    path_length[world] = path_length[world] + wp.sqrt(dx * dx + dy * dy)
+    previous_xy[world, 0] = x
+    previous_xy[world, 1] = y
+    last_alive_xy[world, 0] = x
+    last_alive_xy[world, 1] = y
+
+    vx = obs[world, 0]
+    vy = obs[world, 1]
+    yaw_rate = obs[world, 5]
+    vel_x_error = vx - command[0]
+    vel_y_error = vy - command[1]
+    yaw_error = yaw_rate - command[2]
+    height = joint_q[q_base + wp.int32(2)]
+    height_error = height - (target_base_height + command[3])
+    vel_perf = wp.exp(-(vel_x_error * vel_x_error + vel_y_error * vel_y_error) / lin_sigma_sq)
+    yaw_perf = wp.exp(-(yaw_error * yaw_error) / yaw_sigma_sq)
+    height_perf = wp.exp(-(height_error * height_error) / height_sigma_sq)
+    command_speed_sq = command[0] * command[0] + command[1] * command[1]
+    speed_quality = wp.float32(1.0)
+    if command_speed_sq > wp.float32(1.0e-6):
+        speed_quality = wp.clamp((vx * command[0] + vy * command[1]) / command_speed_sq, 0.0, 1.0)
+
+    tracking_sum[world] = tracking_sum[world] + vel_perf * yaw_perf * height_perf * speed_quality
+    velocity_tracking_sum[world] = velocity_tracking_sum[world] + vel_perf
+    yaw_tracking_sum[world] = yaw_tracking_sum[world] + yaw_perf
+    forward_sum[world] = forward_sum[world] + vx
+    forward_error_sum[world] = forward_error_sum[world] + wp.abs(vel_x_error)
+    lateral_abs_sum[world] = lateral_abs_sum[world] + wp.abs(vel_y_error)
+    yaw_error_sum[world] = yaw_error_sum[world] + wp.abs(yaw_error)
+    height_error_sum[world] = height_error_sum[world] + wp.abs(height_error)
+    height_sum[world] = height_sum[world] + height
+    survival_steps[world] = survival_steps[world] + wp.int32(1)
+
+    lab_joint = wp.int32(0)
+    while lab_joint < action_dim:
+        action = obs[world, action_obs_offset + lab_joint]
+        action_rate = action - previous_actions[world, lab_joint]
+        joint_speed = obs[world, joint_vel_obs_offset + lab_joint]
+        action_sq_sum[world] = action_sq_sum[world] + action * action
+        action_rate_sq_sum[world] = action_rate_sq_sum[world] + action_rate * action_rate
+        joint_speed_sq_sum[world] = joint_speed_sq_sum[world] + joint_speed * joint_speed
+        previous_actions[world, lab_joint] = action
+
+        model_joint = lab_to_mujoco[lab_joint]
+        target = default_joint_pos[model_joint] + action_scale * action
+        joint_position = joint_q[q_base + wp.int32(7) + model_joint]
+        joint_velocity = joint_qd[qd_base + wp.int32(6) + model_joint]
+        tau_proxy = actuator_ke * (target - joint_position) - actuator_kd * joint_velocity
+        power_proxy_sum[world] = power_proxy_sum[world] + wp.abs(tau_proxy * joint_velocity)
+        lab_joint = lab_joint + wp.int32(1)
+
+    if dones[world] > wp.float32(0.5):
+        alive[world] = wp.int32(0)
+
+
 def evaluate_checkpoint(
     trainer: rl.TrainerPPO,
     args: argparse.Namespace,
@@ -426,134 +538,138 @@ def evaluate_checkpoint(
     trainer.reset_rollout_state()
     q0 = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
     start_xy = q0[:, 0:2].copy()
-    previous_xy = start_xy.copy()
-    last_alive_xy = start_xy.copy()
     forward_w = _quat_rotate_xyzw(
         q0[:, 3:7], np.tile(np.asarray((1.0, 0.0, 0.0), dtype=np.float32), (env.world_count, 1))
     )
-    first_done_step = np.full(env.world_count, -1, dtype=np.int32)
-    reward_sum = 0.0
-    done_sum = 0.0
-    tracking_sum = 0.0
-    velocity_tracking_sum = 0.0
-    yaw_tracking_sum = 0.0
-    forward_error_sum = 0.0
-    lateral_abs_sum = 0.0
-    yaw_error_sum = 0.0
-    height_error_sum = 0.0
-    height_sum = 0.0
-    forward_sum = 0.0
-    alive_count = 0
-    action_sq_sum = 0.0
-    action_rate_sq_sum = 0.0
-    joint_speed_sq_sum = 0.0
-    power_proxy_sum = 0.0
-    action_count = 0
-    previous_actions_np = np.zeros((env.world_count, env.action_dim), dtype=np.float32)
-    lab_to_mujoco_np = env.lab_to_mujoco.numpy().astype(np.int32)
-    default_joint_pos_np = env.default_joint_pos.numpy()
-    action_scale = float(env.config.action_scale)
-    actuator_ke = float(env.config.actuator_ke)
-    actuator_kd = float(env.config.actuator_kd)
-    path_length = np.zeros(env.world_count, dtype=np.float64)
-    command_np = np.asarray(eval_command, dtype=np.float32)
+    command_wp = wp.vec4(*eval_command)
+    alive = wp.ones(env.world_count, dtype=wp.int32, device=env.device)
+    survival_steps = wp.zeros(env.world_count, dtype=wp.int32, device=env.device)
+    scalar_sums = [wp.zeros(env.world_count, dtype=wp.float32, device=env.device) for _ in range(16)]
+    (
+        reward_sum,
+        done_sum,
+        tracking_sum,
+        velocity_tracking_sum,
+        yaw_tracking_sum,
+        forward_sum,
+        forward_error_sum,
+        lateral_abs_sum,
+        yaw_error_sum,
+        height_error_sum,
+        height_sum,
+        action_sq_sum,
+        action_rate_sq_sum,
+        joint_speed_sq_sum,
+        power_proxy_sum,
+        path_length,
+    ) = scalar_sums
+    previous_actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=env.device)
+    previous_xy = wp.array(start_xy, dtype=wp.float32, device=env.device)
+    last_alive_xy = wp.array(start_xy, dtype=wp.float32, device=env.device)
     lin_sigma_sq = max(float(env.config.lin_vel_tracking_sigma) ** 2, 1.0e-6)
     yaw_sigma_sq = max(float(env.config.yaw_rate_tracking_sigma) ** 2, 1.0e-6)
     height_sigma_sq = max(float(env.config.base_height_tracking_sigma) ** 2, 1.0e-6)
+
+    trainer.reserve_buffers(env.world_count)
     t0 = time.perf_counter()
+    graphs = []
+    graph_count = 2 if int(env.config.sim_substeps) % 2 else 1
+    for _ in range(graph_count):
+        with wp.ScopedCapture(device=env.device) as capture:
+            actions, _log_probs, _values = trainer.act_reuse(obs, seed=int(args.seed) + 90_000, deterministic=True)
+            env.step(actions)
+            wp.launch(
+                _accumulate_anymal_evaluation_kernel,
+                dim=env.world_count,
+                inputs=[
+                    env.obs,
+                    env.state_0.joint_q,
+                    env.state_0.joint_qd,
+                    env.step_rewards,
+                    env.step_dones,
+                    env.lab_to_mujoco,
+                    env.default_joint_pos,
+                    command_wp,
+                    env.coord_stride,
+                    env.dof_stride,
+                    env.action_dim,
+                    rl.ACTION_OBS_OFFSET_ANYMAL,
+                    rl.JOINT_VEL_OBS_OFFSET_ANYMAL,
+                    float(env.config.action_scale),
+                    float(env.config.actuator_ke),
+                    float(env.config.actuator_kd),
+                    float(env.config.target_base_height),
+                    lin_sigma_sq,
+                    yaw_sigma_sq,
+                    height_sigma_sq,
+                ],
+                outputs=[
+                    alive,
+                    survival_steps,
+                    reward_sum,
+                    done_sum,
+                    tracking_sum,
+                    velocity_tracking_sum,
+                    yaw_tracking_sum,
+                    forward_sum,
+                    forward_error_sum,
+                    lateral_abs_sum,
+                    yaw_error_sum,
+                    height_error_sum,
+                    height_sum,
+                    action_sq_sum,
+                    action_rate_sq_sum,
+                    joint_speed_sq_sum,
+                    power_proxy_sum,
+                    previous_actions,
+                    previous_xy,
+                    last_alive_xy,
+                    path_length,
+                ],
+                device=env.device,
+            )
+        graphs.append(capture.graph)
     for step in range(int(args.eval_steps)):
-        alive_before = first_done_step < 0
-        actions, _log_probs, _values = trainer.act(obs, seed=int(args.seed) + 90_000 + step, deterministic=True)
-        obs, rewards, dones = env.step(actions)
-        done_np = dones.numpy() > 0.5
-        reward_sum += float(np.mean(rewards.numpy()))
-        done_sum += float(np.mean(done_np))
-        obs_np = obs.numpy()
-        q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
-        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
-        xy = q[:, 0:2].copy()
-        if np.any(alive_before):
-            alive_idx = alive_before
-            path_length[alive_idx] += np.linalg.norm(xy[alive_idx] - previous_xy[alive_idx], axis=1)
-            last_alive_xy[alive_idx] = xy[alive_idx]
-            lin_alive = obs_np[alive_idx, 0:2]
-            yaw_alive = obs_np[alive_idx, 5]
-            vel_err = lin_alive - command_np[None, 0:2]
-            yaw_err = yaw_alive - float(command_np[2])
-            height_alive = q[alive_idx, 2]
-            height_err = height_alive - (float(env.config.target_base_height) + float(command_np[3]))
-            vel_perf = np.exp(-np.sum(vel_err * vel_err, axis=1) / lin_sigma_sq)
-            yaw_perf = np.exp(-(yaw_err * yaw_err) / yaw_sigma_sq)
-            height_perf = np.exp(-(height_err * height_err) / height_sigma_sq)
-            command_speed_sq = float(command_np[0] * command_np[0] + command_np[1] * command_np[1])
-            if command_speed_sq > 1.0e-6:
-                speed_quality = np.clip(np.sum(lin_alive * command_np[None, 0:2], axis=1) / command_speed_sq, 0.0, 1.0)
-            else:
-                speed_quality = np.ones(lin_alive.shape[0], dtype=np.float32)
-            tracking_sum += float(np.sum(vel_perf * yaw_perf * height_perf * speed_quality))
-            velocity_tracking_sum += float(np.sum(vel_perf))
-            yaw_tracking_sum += float(np.sum(yaw_perf))
-            forward_sum += float(np.sum(lin_alive[:, 0]))
-            forward_error_sum += float(np.sum(np.abs(lin_alive[:, 0] - float(command_np[0]))))
-            lateral_abs_sum += float(np.sum(np.abs(lin_alive[:, 1] - float(command_np[1]))))
-            yaw_error_sum += float(np.sum(np.abs(yaw_err)))
-            height_error_sum += float(np.sum(np.abs(height_err)))
-            height_sum += float(np.sum(height_alive))
-            action_alive = obs_np[alive_idx, rl.ACTION_OBS_OFFSET_ANYMAL : rl.ACTION_OBS_OFFSET_ANYMAL + env.action_dim]
-            previous_action_alive = previous_actions_np[alive_idx]
-            joint_speed_alive = obs_np[
-                alive_idx, rl.JOINT_VEL_OBS_OFFSET_ANYMAL : rl.JOINT_VEL_OBS_OFFSET_ANYMAL + env.action_dim
-            ]
-            action_sq_sum += float(np.sum(action_alive * action_alive))
-            action_rate = action_alive - previous_action_alive
-            action_rate_sq_sum += float(np.sum(action_rate * action_rate))
-            joint_speed_sq_sum += float(np.sum(joint_speed_alive * joint_speed_alive))
-            power_proxy = np.zeros(action_alive.shape[0], dtype=np.float64)
-            for lab_joint, model_joint in enumerate(lab_to_mujoco_np):
-                target = default_joint_pos_np[model_joint] + action_scale * action_alive[:, lab_joint]
-                joint_q = q[alive_idx, 7 + model_joint]
-                joint_qd = qd[alive_idx, 6 + model_joint]
-                tau_proxy = actuator_ke * (target - joint_q) - actuator_kd * joint_qd
-                power_proxy += np.abs(tau_proxy * joint_qd)
-            power_proxy_sum += float(np.sum(power_proxy))
-            action_count += int(action_alive.size)
-            alive_count += int(np.sum(alive_idx))
-        previous_actions_np = obs_np[
-            :, rl.ACTION_OBS_OFFSET_ANYMAL : rl.ACTION_OBS_OFFSET_ANYMAL + env.action_dim
-        ].copy()
-        previous_xy = xy
-        first_done_step[(first_done_step < 0) & done_np] = step + 1
+        wp.capture_launch(graphs[step % graph_count])
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
-    survival_steps = np.where(first_done_step >= 0, first_done_step, int(args.eval_steps))
+
+    survival = survival_steps.numpy()
+    alive_count = int(np.sum(survival))
     alive_den = float(max(alive_count, 1))
-    displacement = last_alive_xy - start_xy
+    total_samples = env.world_count * int(args.eval_steps)
+    action_count = alive_count * env.action_dim
+    displacement = last_alive_xy.numpy() - start_xy
     displacement_forward = np.sum(displacement * forward_w[:, :2], axis=1)
+
+    def total(value: wp.array[wp.float32]) -> float:
+        return float(np.sum(value.numpy()))
+
     return StatsEvaluateAnymalWalk(
         steps=int(args.eval_steps),
         command=eval_command,
-        mean_reward=reward_sum / float(args.eval_steps),
-        mean_done=done_sum / float(args.eval_steps),
-        fall_fraction=float(np.mean(first_done_step >= 0)),
-        mean_survival_steps=float(np.mean(survival_steps)),
-        survival_fraction=float(np.mean(survival_steps)) / float(max(int(args.eval_steps), 1)),
-        mean_tracking_perf=tracking_sum / alive_den,
-        mean_velocity_tracking_perf=velocity_tracking_sum / alive_den,
-        mean_yaw_tracking_perf=yaw_tracking_sum / alive_den,
-        mean_forward_velocity=forward_sum / alive_den,
-        mean_abs_forward_velocity_error=forward_error_sum / alive_den,
-        mean_abs_lateral_velocity=lateral_abs_sum / alive_den,
-        mean_abs_yaw_rate_error=yaw_error_sum / alive_den,
-        mean_base_height=height_sum / alive_den,
-        mean_abs_base_height_error=height_error_sum / alive_den,
+        mean_reward=total(reward_sum) / float(max(total_samples, 1)),
+        mean_done=total(done_sum) / float(max(total_samples, 1)),
+        fall_fraction=float(np.mean(alive.numpy() == 0)),
+        mean_survival_steps=float(np.mean(survival)),
+        survival_fraction=float(np.mean(survival)) / float(max(int(args.eval_steps), 1)),
+        mean_tracking_perf=total(tracking_sum) / alive_den,
+        mean_velocity_tracking_perf=total(velocity_tracking_sum) / alive_den,
+        mean_yaw_tracking_perf=total(yaw_tracking_sum) / alive_den,
+        mean_forward_velocity=total(forward_sum) / alive_den,
+        mean_abs_forward_velocity_error=total(forward_error_sum) / alive_den,
+        mean_abs_lateral_velocity=total(lateral_abs_sum) / alive_den,
+        mean_abs_yaw_rate_error=total(yaw_error_sum) / alive_den,
+        mean_base_height=total(height_sum) / alive_den,
+        mean_abs_base_height_error=total(height_error_sum) / alive_den,
         mean_displacement_forward=float(np.mean(displacement_forward)),
         mean_displacement_x=float(np.mean(displacement[:, 0])),
         mean_displacement_y=float(np.mean(displacement[:, 1])),
-        mean_path_length=float(np.mean(path_length)),
-        mean_action_rms=float(math.sqrt(action_sq_sum / float(max(action_count, 1)))),
-        mean_action_rate_rms=float(math.sqrt(action_rate_sq_sum / float(max(action_count, 1)))),
-        mean_joint_speed_rms=float(math.sqrt(joint_speed_sq_sum / float(max(action_count, 1)))),
-        mean_power_proxy=power_proxy_sum / alive_den,
-        samples_per_second=float(env.world_count * int(args.eval_steps)) / elapsed,
+        mean_path_length=float(np.mean(path_length.numpy())),
+        mean_action_rms=math.sqrt(total(action_sq_sum) / float(max(action_count, 1))),
+        mean_action_rate_rms=math.sqrt(total(action_rate_sq_sum) / float(max(action_count, 1))),
+        mean_joint_speed_rms=math.sqrt(total(joint_speed_sq_sum) / float(max(action_count, 1))),
+        mean_power_proxy=total(power_proxy_sum) / alive_den,
+        samples_per_second=float(total_samples) / elapsed,
     )
 
 

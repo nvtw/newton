@@ -731,6 +731,35 @@ class EnvAntPhoenX:
         return self.obs, self.step_rewards, self.step_dones
 
 
+@wp.kernel(enable_backward=False)
+def ant_accumulate_evaluation_kernel(
+    joint_q: wp.array[wp.float32],
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    successes: wp.array[wp.float32],
+    forward_velocities: wp.array[wp.float32],
+    coord_stride: wp.int32,
+    alive: wp.array[wp.int32],
+    survival_steps: wp.array[wp.int32],
+    reward_sum: wp.array[wp.float32],
+    done_sum: wp.array[wp.float32],
+    success_sum: wp.array[wp.float32],
+    forward_sum: wp.array[wp.float32],
+    last_alive_x: wp.array[wp.float32],
+):
+    world = wp.tid()
+    reward_sum[world] = reward_sum[world] + rewards[world]
+    done_sum[world] = done_sum[world] + dones[world]
+    if alive[world] == wp.int32(0):
+        return
+    success_sum[world] = success_sum[world] + successes[world]
+    forward_sum[world] = forward_sum[world] + forward_velocities[world]
+    last_alive_x[world] = joint_q[world * coord_stride]
+    survival_steps[world] = survival_steps[world] + wp.int32(1)
+    if dones[world] > wp.float32(0.5):
+        alive[world] = wp.int32(0)
+
+
 @dataclass(frozen=True)
 class StatsEvaluateAntPPO:
     steps: int
@@ -801,43 +830,64 @@ def evaluate_ant_ppo(
     trainer.reset_rollout_state()
     q0 = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
     start_x = q0[:, 0].copy()
-    last_alive_x = start_x.copy()
-    first_done_step = np.full(env.world_count, -1, dtype=np.int32)
-    reward_sum = 0.0
-    done_sum = 0.0
-    success_sum = 0.0
-    forward_sum = 0.0
-    alive_sample_count = 0
+    alive = wp.ones(env.world_count, dtype=wp.int32, device=env.device)
+    survival_steps = wp.zeros(env.world_count, dtype=wp.int32, device=env.device)
+    reward_sum = wp.zeros(env.world_count, dtype=wp.float32, device=env.device)
+    done_sum = wp.zeros(env.world_count, dtype=wp.float32, device=env.device)
+    success_sum = wp.zeros(env.world_count, dtype=wp.float32, device=env.device)
+    forward_sum = wp.zeros(env.world_count, dtype=wp.float32, device=env.device)
+    last_alive_x = wp.array(start_x, dtype=wp.float32, device=env.device)
+
+    # Preallocate policy reuse buffers before capture.
+    trainer.reserve_buffers(env.world_count)
     t0 = time.perf_counter()
+    graphs = []
+    graph_count = 2 if int(env.config.sim_substeps) % 2 else 1
+    for _ in range(graph_count):
+        with wp.ScopedCapture(device=env.device) as capture:
+            actions, _log_probs, _values = trainer.act_reuse(obs, seed=int(args.seed) + 10_000, deterministic=True)
+            env.step(actions)
+            wp.launch(
+                ant_accumulate_evaluation_kernel,
+                dim=env.world_count,
+                inputs=[
+                    env.state_0.joint_q,
+                    env.step_rewards,
+                    env.step_dones,
+                    env.step_successes,
+                    env.step_forward_velocities,
+                    env.coord_stride,
+                ],
+                outputs=[
+                    alive,
+                    survival_steps,
+                    reward_sum,
+                    done_sum,
+                    success_sum,
+                    forward_sum,
+                    last_alive_x,
+                ],
+                device=env.device,
+            )
+        graphs.append(capture.graph)
     for step in range(int(args.eval_steps)):
-        alive_before = first_done_step < 0
-        actions, _log_probs, _values = trainer.act(obs, seed=int(args.seed) + 10_000 + step, deterministic=True)
-        obs, rewards, dones = env.step(actions)
-        done_np = dones.numpy() > 0.5
-        reward_sum += float(np.mean(rewards.numpy()))
-        done_sum += float(np.mean(done_np))
-        step_successes = env.step_successes.numpy()
-        step_forward = env.step_forward_velocities.numpy()
-        if np.any(alive_before):
-            success_sum += float(np.sum(step_successes[alive_before]))
-            forward_sum += float(np.sum(step_forward[alive_before]))
-            alive_sample_count += int(np.sum(alive_before))
-            q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
-            last_alive_x[alive_before] = q[alive_before, 0]
-        first_done_step[(first_done_step < 0) & done_np] = step + 1
+        wp.capture_launch(graphs[step % graph_count])
     elapsed = max(time.perf_counter() - t0, 1.0e-12)
-    survival_steps = np.where(first_done_step >= 0, first_done_step, int(args.eval_steps))
+
+    survival = survival_steps.numpy()
+    alive_sample_count = int(np.sum(survival))
+    total_samples = env.world_count * int(args.eval_steps)
     alive_den = float(max(alive_sample_count, 1))
     return StatsEvaluateAntPPO(
         steps=int(args.eval_steps),
-        mean_reward=reward_sum / float(args.eval_steps),
-        mean_done=done_sum / float(args.eval_steps),
-        fall_fraction=float(np.mean(first_done_step >= 0)),
-        mean_survival_steps=float(np.mean(survival_steps)),
-        mean_forward_velocity=forward_sum / alive_den,
-        mean_displacement_x=float(np.mean(last_alive_x - start_x)),
-        mean_success=success_sum / alive_den,
-        samples_per_second=float(env.world_count * int(args.eval_steps)) / elapsed,
+        mean_reward=float(np.sum(reward_sum.numpy())) / float(max(total_samples, 1)),
+        mean_done=float(np.sum(done_sum.numpy())) / float(max(total_samples, 1)),
+        fall_fraction=float(np.mean(alive.numpy() == 0)),
+        mean_survival_steps=float(np.mean(survival)),
+        mean_forward_velocity=float(np.sum(forward_sum.numpy())) / alive_den,
+        mean_displacement_x=float(np.mean(last_alive_x.numpy() - start_x)),
+        mean_success=float(np.sum(success_sum.numpy())) / alive_den,
+        samples_per_second=float(total_samples) / elapsed,
     )
 
 

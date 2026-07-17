@@ -297,6 +297,44 @@
         <strong>SAC on G1: stable standing now works; commanded walking does not.</strong> Scalar SAC with normalization and averaged double-Q reaches 0.1970 deterministic tracking on seed 11, but all 64 evaluation robots fall. The FastSAC-style C51 critic and delayed actor schedule changes that failure mode: after 8.19M samples, 63/64 robots survive the 200-step deterministic evaluation. Tracking is only 0.0867, however, and remains 0.0871 after 16.38M samples, so the policy has learned to stand rather than walk.
       </div>
       <p class="compact-note"><strong>Cost and rejected directions:</strong> scalar SAC runs at about 417k environment steps/s; eight C51 critic updates per environment step reduce this to about 168k. A direct command-progress reward raises tracking to 0.1226 but causes 26.6% falls. Official-style phase-height shaping reaches 0.0973 with 10.9% falls, and adding privileged linear velocity reaches only 0.0729 with 18.8% falls. None is retained as a default. CUDA regressions cover full-network updates, observation moments, averaged-Q arithmetic, C51 projection mass and terminal returns, delayed actor updates, replay, and learning a known continuous-control optimum.</p>
+      <div class="verdict good-verdict">
+        <strong>Host synchronization audit: qualification is much cheaper; SAC updates are modestly faster.</strong> Scene gates now accumulate metrics on the GPU and read back once. Odd-substep scenes capture both state-buffer phases, with matched eager/captured regressions preventing stale-state speedups. SAC entropy temperature is device-resident and <code>read_stats=False</code> removes all loss/temperature readbacks from the update.
+      </div>
+      <div class="ttp-table-wrap">
+        <table class="ttp-table">
+          <thead>
+            <tr><th>Path</th><th>Measured result</th><th>What it means</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Humanoid physical gate</td>
+              <td class="number">&gt;14.6x faster</td>
+              <td>64 &times; 600 deterministic qualification drops from a &gt;300 s timeout to 20.5 s.</td>
+            </tr>
+            <tr>
+              <td>Ant physical gate</td>
+              <td class="number">3.48x warm-loop speedup</td>
+              <td>Metrics match the known 900-step walking policy; first-use graph compilation is excluded.</td>
+            </tr>
+            <tr>
+              <td>DR Legs hold gate</td>
+              <td class="number">1.58x faster</td>
+              <td>All gate metrics match the eager evaluator.</td>
+            </tr>
+            <tr>
+              <td>ANYmal odd-substep gate</td>
+              <td class="number">1.12x end-to-end<br>about 3.5x loop throughput</td>
+              <td>All metrics match eager evaluation; the two-phase graph handles host-swapped state buffers.</td>
+            </tr>
+            <tr>
+              <td>SAC update, batch 2048</td>
+              <td class="number">48.36 ms &rarr; 46.74 ms / 20 updates</td>
+              <td>3.5% completed-work speedup with no statistics readback; learning tests and exact parameter parity pass.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="compact-note"><strong>Scope:</strong> the first four rows accelerate policy qualification, not environment rollout or PPO optimization. They shorten reliable train-to-gate experiments but must not be reported as training-throughput gains. The SAC row is a real update-path gain and removes at least five host waits per update, although the large-batch kernel work dominates wall time.</p>
       <div class="verdict">
         <strong>Official-architecture FastSAC probe: fast enough to investigate, not yet a working robot learner.</strong> A direct Torch parity probe used Holosoma's 512-wide LayerNorm/SiLU actor, 768-wide double C51 critics, zero-initialized stochastic heads, BF16 autocast, AdamW, observation normalization, eight critic updates, delayed actor updates, and Polyak targets. It sustained 176.8k samples/s on PhoenX, but after 8.19M samples deterministic tracking was 0.1335 and all 64 evaluation robots fell. The simpler Warp C51 path remains safer at the same horizon: 0.0867 tracking with 63/64 survivors, but it only stands. No FastSAC or FastTD3 variant is promoted until it produces commanded locomotion across seeds.</div>
       <p class="compact-note"><strong>Measured algorithm decisions:</strong> scalar FastTD3 reached 176.2k samples/s, 0.1196 tracking, and 64/64 falls. Distributional TD3 reached about 152k steady samples/s, 0.1393 tracking, and 64/64 falls. Restricting the critic to the 12 actively controlled joints improved throughput by 3.5% but collapsed tracking to 0.0030. Weakening the action-rate penalty, zero-initializing TD3, and increasing network width also failed. These experiments were removed rather than left as unvalidated production options.</p>

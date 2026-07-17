@@ -15,18 +15,20 @@ from .kernels import (
     observation_count_update_kernel,
     observation_moments_partial_kernel,
     observation_moments_update_kernel,
+    pack_sac_update_stats_kernel,
     replay_sample_kernel,
     replay_store_kernel,
-    sac_actor_policy_backward_kernel,
+    sac_actor_policy_backward_device_alpha_kernel,
     sac_actor_q_backward_kernel,
     sac_alpha_loss_kernel,
     sac_critic_loss_backward_kernel,
     sac_critic_loss_kernel,
     sac_distributional_actor_q_backward_kernel,
     sac_distributional_critic_loss_backward_kernel,
-    sac_distributional_projection_kernel,
+    sac_distributional_projection_device_alpha_kernel,
     sac_distributional_q_value_kernel,
-    sac_q_target_kernel,
+    sac_q_target_device_alpha_kernel,
+    sac_refresh_alpha_kernel,
     sample_gaussian_actions_kernel,
     zero_scalar_kernel,
 )
@@ -311,6 +313,9 @@ class TrainerSAC:
         self._actor_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._critic_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._alpha_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
+        self._alpha = wp.array([float(self.config.initial_alpha)], dtype=wp.float32, device=self.device)
+        self._update_stats = wp.empty(4, dtype=wp.float32, device=self.device)
+        self._update_stats_host = wp.empty(4, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
         self._obs_mean = wp.zeros(self.obs_dim, dtype=wp.float32, device=self.device)
         self._obs_m2 = wp.ones(self.obs_dim, dtype=wp.float32, device=self.device)
         self._obs_count = wp.array([2.0], dtype=wp.float32, device=self.device)
@@ -322,7 +327,7 @@ class TrainerSAC:
     def alpha(self) -> float:
         """Current SAC entropy-temperature value."""
 
-        return float(np.exp(float(self.log_alpha.numpy()[0])))
+        return float(self._alpha.numpy()[0])
 
     def act(
         self,
@@ -339,8 +344,39 @@ class TrainerSAC:
         )
         return actions, log_probs
 
-    def update(self, batch: BatchSAC, *, seed: int | None = None) -> StatsSACUpdate:
-        """Update actor, critics, targets, and entropy temperature."""
+    def copy_update_stats_to_host(self) -> wp.array[wp.float32]:
+        """Copy compact SAC update statistics into pinned host storage."""
+
+        wp.launch(
+            pack_sac_update_stats_kernel,
+            dim=1,
+            inputs=[self._actor_loss, self._critic_loss, self._alpha_loss, self._alpha],
+            outputs=[self._update_stats],
+            device=self.device,
+        )
+        wp.copy(self._update_stats_host, self._update_stats, count=4)
+        return self._update_stats_host
+
+    def _read_update_stats(self) -> StatsSACUpdate:
+        stats_host = self.copy_update_stats_to_host()
+        if self.device.is_cuda:
+            wp.synchronize_device(self.device)
+        stats = stats_host.numpy()
+        return StatsSACUpdate(
+            actor_loss=float(stats[0]),
+            critic_loss=float(stats[1]),
+            alpha_loss=float(stats[2]),
+            alpha=float(stats[3]),
+        )
+
+    def update(self, batch: BatchSAC, *, seed: int | None = None, read_stats: bool = True) -> StatsSACUpdate:
+        """Update actor, critics, targets, and entropy temperature.
+
+        Args:
+            batch: Transition batch to train on.
+            seed: Random seed. Uses a deterministic update counter when omitted.
+            read_stats: Whether to synchronize and return scalar diagnostics.
+        """
 
         if int(batch.obs.shape[1]) != self.obs_dim or int(batch.next_obs.shape[1]) != self.obs_dim:
             raise ValueError("Batch observation dimensions do not match trainer")
@@ -349,25 +385,21 @@ class TrainerSAC:
 
         batch = self._normalize_batch(batch)
         base_seed = self.seed + self._update_count * 9973 if seed is None else int(seed)
-        actor_loss = 0.0
-        critic_loss = 0.0
-        alpha_loss = 0.0
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._actor_loss], device=self.device)
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._alpha_loss], device=self.device)
         for i in range(int(self.config.update_steps)):
-            critic_loss = self._update_critics(batch, seed=base_seed + 3 * i)
+            self._update_critics(batch, seed=base_seed + 3 * i)
             if self._gradient_update_count % int(self.config.policy_frequency) == 0:
-                actor_loss = self._update_actor(batch, seed=base_seed + 3 * i + 1)
+                self._update_actor(batch, seed=base_seed + 3 * i + 1)
             if self.config.auto_alpha:
-                alpha_loss = self._update_alpha(batch, seed=base_seed + 3 * i + 2)
+                self._update_alpha(batch, seed=base_seed + 3 * i + 2)
             self.target_critic1.soft_update_from(self.critic1, self.config.tau)
             self.target_critic2.soft_update_from(self.critic2, self.config.tau)
             self._gradient_update_count += 1
         self._update_count += 1
-        return StatsSACUpdate(
-            actor_loss=actor_loss,
-            critic_loss=critic_loss,
-            alpha_loss=alpha_loss,
-            alpha=self.alpha,
-        )
+        if read_stats:
+            return self._read_update_stats()
+        return StatsSACUpdate(actor_loss=0.0, critic_loss=0.0, alpha_loss=0.0, alpha=0.0)
 
     def _normalize_observations(self, obs: wp.array) -> wp.array:
         if not self.config.normalize_observations:
@@ -437,7 +469,7 @@ class TrainerSAC:
         )
         return out
 
-    def _update_critics(self, batch: BatchSAC, *, seed: int) -> float:
+    def _update_critics(self, batch: BatchSAC, *, seed: int) -> None:
         next_actions, next_log_probs, _policy_out = self.actor.sample(
             batch.next_obs, seed=seed, deterministic=False, requires_grad=False
         )
@@ -456,7 +488,7 @@ class TrainerSAC:
             target_distribution1 = wp.zeros((batch.batch_size, atoms), dtype=wp.float32, device=self.device)
             target_distribution2 = wp.zeros_like(target_distribution1)
             wp.launch(
-                sac_distributional_projection_kernel,
+                sac_distributional_projection_device_alpha_kernel,
                 dim=(batch.batch_size, atoms),
                 inputs=[
                     batch.rewards,
@@ -465,7 +497,7 @@ class TrainerSAC:
                     target_q2,
                     next_log_probs,
                     self.config.gamma,
-                    self.alpha,
+                    self._alpha,
                     atoms,
                     self.config.distributional_v_min,
                     self.config.distributional_v_max,
@@ -490,7 +522,7 @@ class TrainerSAC:
         else:
             targets = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
             wp.launch(
-                sac_q_target_kernel,
+                sac_q_target_device_alpha_kernel,
                 dim=batch.batch_size,
                 inputs=[
                     batch.rewards,
@@ -499,7 +531,7 @@ class TrainerSAC:
                     target_q2,
                     next_log_probs,
                     self.config.gamma,
-                    self.alpha,
+                    self._alpha,
                     self.config.average_critics,
                 ],
                 outputs=[targets],
@@ -521,12 +553,10 @@ class TrainerSAC:
             )
         self.critic1.backward_manual(q1_grad)
         self.critic2.backward_manual(q2_grad)
-        loss = float(self._critic_loss.numpy()[0])
         self.critic1_optimizer.step()
         self.critic2_optimizer.step()
-        return loss
 
-    def _update_actor(self, batch: BatchSAC, *, seed: int) -> float:
+    def _update_actor(self, batch: BatchSAC, *, seed: int) -> None:
         policy_out = self.actor.net.forward_manual(batch.obs)
         actions = wp.empty((batch.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
         log_probs = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
@@ -609,7 +639,7 @@ class TrainerSAC:
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._actor_loss], device=self.device)
         policy_out_grad = wp.empty_like(policy_out)
         wp.launch(
-            sac_actor_policy_backward_kernel,
+            sac_actor_policy_backward_device_alpha_kernel,
             dim=batch.batch_size,
             inputs=[
                 policy_out,
@@ -622,7 +652,7 @@ class TrainerSAC:
                 self.obs_dim,
                 self.action_dim,
                 batch.batch_size,
-                self.alpha,
+                self._alpha,
                 self.actor.log_std_min,
                 self.actor.log_std_max,
                 self.config.average_critics,
@@ -631,11 +661,9 @@ class TrainerSAC:
             device=self.device,
         )
         self.actor.net.backward_manual(policy_out_grad)
-        loss = float(self._actor_loss.numpy()[0])
         self.actor_optimizer.step()
-        return loss
 
-    def _update_alpha(self, batch: BatchSAC, *, seed: int) -> float:
+    def _update_alpha(self, batch: BatchSAC, *, seed: int) -> None:
         _actions, log_probs, _policy_out = self.actor.sample(
             batch.obs, seed=seed, deterministic=False, requires_grad=False
         )
@@ -649,7 +677,12 @@ class TrainerSAC:
                 device=self.device,
             )
         tape.backward(self._alpha_loss)
-        loss = float(self._alpha_loss.numpy()[0])
         self.alpha_optimizer.step()
+        wp.launch(
+            sac_refresh_alpha_kernel,
+            dim=1,
+            inputs=[self.log_alpha],
+            outputs=[self._alpha],
+            device=self.device,
+        )
         tape.zero()
-        return loss
