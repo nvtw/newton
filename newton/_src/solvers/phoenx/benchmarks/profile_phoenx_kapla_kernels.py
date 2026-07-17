@@ -52,13 +52,19 @@ def _check_nsys() -> str:
     return path
 
 
-def _run_worker_script(out_dir: pathlib.Path, mass_splitting: bool, frames: int) -> pathlib.Path:
+def _run_worker_script(
+    out_dir: pathlib.Path,
+    mass_splitting: bool,
+    frames: int,
+    grid_side: int,
+) -> pathlib.Path:
     """Write a tiny worker that runs Kapla for ``frames`` captured-graph steps,
     then nsys-profile that worker. Returns the .nsys-rep path."""
     nsys = _check_nsys()
     worker = out_dir / "run_kapla_worker.py"
     label = "on" if mass_splitting else "off"
     worker.write_text(
+        "import ctypes\n"
         "import warp as wp\n"
         "wp.init()\n"
         "from newton._src.solvers.phoenx.examples import example_kapla_tower as ek\n"
@@ -77,22 +83,27 @@ def _run_worker_script(out_dir: pathlib.Path, mass_splitting: bool, frames: int)
         "class A: pass\n"
         "\n"
         f"ek.ENABLE_MASS_SPLITTING = {mass_splitting!r}\n"
-        "ek.TOWER_GRID_DIMS = (1, 1)\n"
+        f"ek.TOWER_GRID_DIMS = ({grid_side}, {grid_side})\n"
         "ex = ek.Example(V(), A())\n"
         "# Warmup: damping released after WARMUP_FRAMES, then a few more so\n"
         "# the steady state stabilises.\n"
         "for _ in range(40):\n"
         "    ex.step()\n"
         "wp.synchronize_device(ex.device)\n"
+        'cudart = ctypes.CDLL("libcudart.so")\n'
+        "cudart.cudaProfilerStart()\n"
         f"for _ in range({frames}):\n"
         "    ex.step()\n"
         "wp.synchronize_device(ex.device)\n"
+        "cudart.cudaProfilerStop()\n"
     )
     rep = out_dir / f"kapla_{label}"
     cmd = [
         nsys,
         "profile",
         "--trace=cuda",
+        "--capture-range=cudaProfilerApi",
+        "--capture-range-end=stop",
         "--cuda-graph-trace=node",
         f"--output={rep}",
         "--force-overwrite=true",
@@ -185,6 +196,7 @@ def _print_diff(rows_a: list[dict], rows_b: list[dict], label_a: str, label_b: s
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--frames", type=int, default=100, help="Steady-state frames after warmup (default 100).")
+    p.add_argument("--grid-side", type=int, default=1, help="Square tower-grid side length (default 1).")
     p.add_argument("--top-n", type=int, default=_TOP_N, help="Top-N kernels to print (default %(default)s).")
     p.add_argument("--mass-splitting", choices=["on", "off"], default="on", help="Default config when not diffing.")
     p.add_argument("--diff", action="store_true", help="Run mass-splitting on AND off, print a delta table.")
@@ -196,9 +208,9 @@ def main(argv: list[str] | None = None) -> int:
         tmp_path = pathlib.Path(tmp)
         if args.diff:
             print(f"[profile] {args.label_a}: running {args.frames} steady-state frames...")
-            rep_a = _run_worker_script(tmp_path, mass_splitting=False, frames=args.frames)
+            rep_a = _run_worker_script(tmp_path, mass_splitting=False, frames=args.frames, grid_side=args.grid_side)
             print(f"[profile] {args.label_b}: running {args.frames} steady-state frames...")
-            rep_b = _run_worker_script(tmp_path, mass_splitting=True, frames=args.frames)
+            rep_b = _run_worker_script(tmp_path, mass_splitting=True, frames=args.frames, grid_side=args.grid_side)
             rows_a = _parse_kernel_stats(rep_a)
             rows_b = _parse_kernel_stats(rep_b)
             _print_table(rows_a, args.label_a, args.top_n)
@@ -208,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
             ms = args.mass_splitting == "on"
             label = args.mass_splitting
             print(f"[profile] {label}: running {args.frames} steady-state frames...")
-            rep = _run_worker_script(tmp_path, mass_splitting=ms, frames=args.frames)
+            rep = _run_worker_script(tmp_path, mass_splitting=ms, frames=args.frames, grid_side=args.grid_side)
             rows = _parse_kernel_stats(rep)
             _print_table(rows, label, args.top_n)
     return 0
