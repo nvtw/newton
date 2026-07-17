@@ -28,8 +28,8 @@ from newton.viewer import ViewerNull
 class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
     """Primitive Kapla contacts must settle after graph-captured stepping."""
 
-    def test_tower_releases_warmup_damping(self) -> None:
-        """The tower must run undamped after its overlap warmup."""
+    def test_tower_has_no_hidden_damping_or_camera_collider(self) -> None:
+        """The tower must run undamped and without hidden contact geometry."""
         example = example_kapla_tower.Example(
             ViewerNull(),
             SimpleNamespace(solver="classic", max_colors=10),
@@ -39,6 +39,9 @@ class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
 
         self.assertEqual(example.world.get_global_linear_damping(), 0.0)
         self.assertEqual(example.world.get_global_angular_damping(), 0.0)
+        self.assertIsNone(example._camera_body_newton_id)
+        self.assertIsNotNone(example.picking)
+        self.assertEqual(example.model.body_count, sum(len(cell) for cell in example._brick_newton_ids))
 
     def test_reduced_kapla_slice_settles_after_speculative_contacts(self) -> None:
         """A real-data Kapla slice must not keep moving after settle.

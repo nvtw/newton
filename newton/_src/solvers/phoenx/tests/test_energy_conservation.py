@@ -182,8 +182,8 @@ class TestEnergyConservation(unittest.TestCase):
                     f"peak_omega={peak_omega:.4f} -- spurious damping",
                 )
 
-    def test_torque_free_asymmetric_body_remains_bounded(self) -> None:
-        """Explicit anisotropic rotation must remain bounded without energy gain."""
+    def test_torque_free_asymmetric_body_conserves_momentum_and_energy(self) -> None:
+        """Implicit midpoint rotation must preserve torque-free invariants."""
         device = wp.get_preferred_device()
         inverse_inertia = ((1.0, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.25))
         inertia_body = np.diag((1.0, 2.0, 4.0))
@@ -222,10 +222,10 @@ class TestEnergyConservation(unittest.TestCase):
         angular_momentum_final = inertia_world_final @ omega_final
         momentum_error = np.linalg.norm(angular_momentum_final - angular_momentum_initial)
         momentum_scale = np.linalg.norm(angular_momentum_initial)
-        self.assertLess(momentum_error / momentum_scale, 0.03)
+        self.assertLess(momentum_error / momentum_scale, 2.0e-4)
 
         energy_final = 0.5 * float(omega_final @ angular_momentum_final)
-        self.assertLess(abs(energy_final - energy_initial) / energy_initial, 0.03)
+        self.assertLess(abs(energy_final - energy_initial) / energy_initial, 2.0e-4)
 
 
 if __name__ == "__main__":

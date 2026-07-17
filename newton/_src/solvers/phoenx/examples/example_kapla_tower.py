@@ -105,11 +105,9 @@ TOWER_GRID_DIMS: tuple[int, int] = (1, 1)
 # each other's SAP lists during settling.
 TOWER_GRID_SPACING: tuple[float, float] = (9.0, 9.0)
 
-# Invisible kinematic sphere parented to the camera. PhoenX's
-# inferred-velocity path on :data:`MOTION_KINEMATIC` bodies turns
-# fly-throughs into impulses on the bricks. Sphere (rotation-
-# invariant) so we don't need to track camera orientation.
-CAMERA_COLLIDER_ENABLED: bool = True
+# Ray picking applies forces directly and must not add hidden contact geometry.
+# Enable only for explicit camera fly-through interaction experiments.
+CAMERA_COLLIDER_ENABLED: bool = False
 CAMERA_COLLIDER_RADIUS: float = 0.4
 # Newton-side mass density only; PhoenX-side inverse mass is zeroed
 # right after init so the value just needs to be finite.

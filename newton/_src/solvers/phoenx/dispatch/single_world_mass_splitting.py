@@ -82,6 +82,11 @@ class SingleWorldMassSplittingDispatcher:
         if w._constraint_capacity == 0 or w.velocity_iterations <= 0:
             return
 
+        # Pose integration updates anisotropic angular velocity and world
+        # inertia on the body state. Refresh every copy before relaxation so
+        # the split rows cannot overwrite that torque-free update with stale
+        # pre-integrate velocities.
+        w._mass_splitting_broadcast()
         inv_dt = 1.0 / w.substep_dt
         _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
         for _ in range(w.velocity_iterations):

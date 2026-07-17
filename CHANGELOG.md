@@ -107,6 +107,8 @@
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
 
 - Fix PhoenX Gauss-Seidel Kapla scenes gaining unbounded rotational energy or persistent vibration after contact and inertia optimizations.
+- Fix PhoenX torque-free anisotropic rotation to preserve angular momentum and rotational energy with an implicit midpoint update.
+- Fix the PhoenX Kapla tower example adding a hidden camera contact collider that continuously disturbed nearby bricks; ray picking remains available.
 - Fix experimental PhoenX recurrent PPO replay to preserve the exact detached MinGRU state at rollout boundaries, avoid mutating persistent state during bootstrap evaluation, and synchronize recurrent state across graph-leapfrog trainers.
 - Fix experimental PhoenX recurrent PPO replay to reset MinGRU state and cut recurrent gradients at terminal episode boundaries, including trajectory minibatches and CUDA graph capture.
 - Fix experimental PhoenX G1 held-out evaluation to preserve fixed commands across fall resets and accumulate metrics in deterministic CUDA graphs without per-step host synchronization.

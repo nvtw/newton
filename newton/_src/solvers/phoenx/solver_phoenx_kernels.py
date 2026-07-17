@@ -2809,8 +2809,26 @@ def _integrate_velocities_kernel(
         return
 
     bodies.position[i] = bodies.position[i] + bodies.velocity[i] * dt
-    q_rot = _rotation_quaternion(bodies.angular_velocity[i], dt)
-    bodies.orientation[i] = wp.normalize(q_rot * bodies.orientation[i])
+
+    # Integrate torque-free rotation with an implicit midpoint update. Contact
+    # and external impulses have already changed omega, so preserve their
+    # resulting world angular momentum while the anisotropic inertia rotates.
+    q0 = bodies.orientation[i]
+    inv_inertia0 = mat33_from_sym6(bodies.inverse_inertia_world[i])
+    angular_momentum = wp.inverse(inv_inertia0) * bodies.angular_velocity[i]
+    omega_mid = bodies.angular_velocity[i]
+    for _ in range(3):
+        q_half = wp.normalize(_rotation_quaternion(omega_mid, dt * wp.float32(0.5)) * q0)
+        r_half = wp.quat_to_matrix(q_half)
+        inv_inertia_half = rotate_inertia(r_half, bodies.inverse_inertia[i])
+        omega_mid = inv_inertia_half * angular_momentum
+
+    q1 = wp.normalize(_rotation_quaternion(omega_mid, dt) * q0)
+    r1 = wp.quat_to_matrix(q1)
+    inv_inertia1 = rotate_inertia(r1, bodies.inverse_inertia[i])
+    bodies.orientation[i] = q1
+    bodies.inverse_inertia_world[i] = sym6_from_mat33(inv_inertia1)
+    bodies.angular_velocity[i] = inv_inertia1 * angular_momentum
 
 
 @wp.kernel(enable_backward=False)
