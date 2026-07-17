@@ -54,6 +54,8 @@
 
 ### Changed
 
+- Improve `BroadPhaseSAP` performance on anisotropic scenes with denser projection-axis coverage and longer best-axis reuse.
+
 - Default experimental PhoenX ANYmal and G1 robot training examples to CUDA graph-leapfrog execution; pass `--execution-mode eager` for diagnostic launch-by-launch execution.
 - Allow experimental `TrainerSAC.update(read_stats=False)` to keep entropy temperature and loss diagnostics device-side without host synchronization.
 - Normalize experimental SAC observations with automatically tracked running moments by default, improving held-out PhoenX G1 tracking without reducing measured training throughput. Pass `ConfigSAC(normalize_observations=False)` to preserve raw observations.

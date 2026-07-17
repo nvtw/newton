@@ -2159,6 +2159,14 @@ class TestBroadPhase(unittest.TestCase):
         found = {tuple(pair) for pair in pairs.numpy()[: int(pair_count.numpy()[0])]}
         self.assertIn((0, 1), found)
 
+    def test_sap_direction_search_covers_horizontal_15_degree_steps(self):
+        sap_bp = BroadPhaseSAP(np.array([0], dtype=np.int32))
+        directions = sap_bp.direction_candidates.numpy()
+        horizontal = directions[np.abs(directions[:, 2]) < 1.0e-6]
+        angles = np.sort(np.mod(np.arctan2(horizontal[:, 1], horizontal[:, 0]), np.pi))
+        gaps = np.diff(np.concatenate((angles, angles[:1] + np.pi)))
+        self.assertLessEqual(float(gaps.max()), np.deg2rad(15.1))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)
