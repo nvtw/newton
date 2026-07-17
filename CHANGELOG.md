@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fix `ViewerUSD` texture consumers observing partially written PNGs by publishing generated textures atomically (#3288)
 - Fix `ModelBuilder.add_usd()` requiring the optional `mujoco` package when handling `MjcActuator` prims, including during default MJC equality conversion.
 - Fix Style3D solver divergence caused by isolated vertices.
 - Fix the `diffsim_bear` example crashing with its default CUDA configuration and diverging after a few training iterations.
