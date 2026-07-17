@@ -21,7 +21,7 @@ from newton._src.solvers.kamino.tests import setup_tests, test_context
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _test_control_callback(
     model_dt: wp.array[wp.float32],
     data_time: wp.array[wp.float32],

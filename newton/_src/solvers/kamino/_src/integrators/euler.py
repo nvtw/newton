@@ -90,7 +90,7 @@ def euler_semi_implicit_with_logmap(
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _integrate_semi_implicit_euler_inplace(
     # Inputs:
     alpha: float,

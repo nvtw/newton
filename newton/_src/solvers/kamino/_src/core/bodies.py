@@ -372,7 +372,7 @@ def transform_body_inertial_properties(
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _update_body_inertias(
     # Inputs:
     model_bodies_i_I_i_in: wp.array[wp.mat33f],
@@ -398,7 +398,7 @@ def _update_body_inertias(
     state_bodies_inv_I_i_out[bid] = inv_I_i
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _update_body_wrenches(
     # Inputs
     state_bodies_w_a_i_in: wp.array[wp.spatial_vectorf],
@@ -426,7 +426,7 @@ def _update_body_wrenches(
     state_bodies_w_i_out[bid] = w_i
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _convert_body_origin_to_com(
     # Inputs
     world_mask: wp.array[wp.bool],  # None also supported
@@ -453,7 +453,7 @@ def _convert_body_origin_to_com(
     body_q_com[bid] = wp.transformf(body_r + r_com, body_rot)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _convert_body_com_to_origin(
     # Inputs
     world_mask: wp.array[wp.bool],  # None also supported
@@ -480,7 +480,7 @@ def _convert_body_com_to_origin(
     body_q[bid] = wp.transformf(body_r_com - r_com, body_rot)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _convert_base_origin_to_com(
     # Inputs
     base_joint_index: wp.array[wp.int32],
@@ -505,7 +505,7 @@ def _convert_base_origin_to_com(
         base_q_com[wid] = wp.transformf(wp.transform_get_translation(q) + r_com, rot)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _convert_geom_offset_origin_to_com(
     # Inputs
     body_com: wp.array[wp.vec3f],

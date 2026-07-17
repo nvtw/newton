@@ -1351,7 +1351,7 @@ def plane_cylinder(
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _primitive_narrowphase(
     # Inputs
     default_gap: wp.float32,

@@ -151,7 +151,7 @@ def upper_triangular_indices_from_index(index: int, mat_size: int):
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _build_delassus_elementwise_dense(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -231,7 +231,7 @@ def _build_delassus_elementwise_dense(
         delassus_D[dmio + ncts * j + i] = D_ij
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _build_delassus_elementwise_sparse(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -316,7 +316,7 @@ def _build_delassus_elementwise_sparse(
         wp.atomic_add(delassus_D, dmio + ncts * ct_j + ct_i, D_ij)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _add_joint_armature_diagonal_regularization_dense(
     # Inputs:
     model_info_num_joint_dynamic_cts: wp.array[wp.int32],
@@ -351,7 +351,7 @@ def _add_joint_armature_diagonal_regularization_dense(
     delassus_D[dmio + ncts * tid + tid] += inv_m_j
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _regularize_delassus_diagonal_dense(
     # Inputs:
     delassus_dim: wp.array[wp.int32],
@@ -377,7 +377,7 @@ def _regularize_delassus_diagonal_dense(
     delassus_D[mio + dim * tid + tid] += eta[vio + tid]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _merge_inv_mass_matrix_kernel(
     model_info_bodies_offset: wp.array[wp.int32],
     model_bodies_inv_m_i: wp.array[wp.float32],
@@ -439,7 +439,7 @@ def _make_merge_preconditioner_kernel(block_type: BlockDType):
     elif len(block_shape) == 1:
         block_shape = (1, block_shape[0])
 
-    @wp.kernel
+    @wp.kernel(grid_stride=False, enable_backward=False)
     def merge_preconditioner_kernel(
         # Inputs:
         num_nzb: wp.array[wp.int32],
@@ -480,7 +480,7 @@ def _make_merge_preconditioner_kernel(block_type: BlockDType):
     return merge_preconditioner_kernel
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _add_armature_regularization_sparse(
     # Inputs:
     model_info_num_joint_dynamic_cts: wp.array[wp.int32],
@@ -513,7 +513,7 @@ def _add_armature_regularization_sparse(
     combined_regularization[vec_id] += inv_m_j
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _add_armature_regularization_preconditioned_sparse(
     # Inputs:
     model_info_num_joint_dynamic_cts: wp.array[wp.int32],
@@ -550,7 +550,7 @@ def _add_armature_regularization_preconditioned_sparse(
     combined_regularization[vec_id] += p * p * inv_m_j
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _compute_block_sparse_delassus_diagonal(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -610,7 +610,7 @@ def _compute_block_sparse_delassus_diagonal(
     wp.atomic_add(diag, vec_start[world_id] + row, diag_kk)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _add_matrix_diag_product(
     model_data_num_total_cts: wp.array[wp.int32],
     row_start: wp.array[wp.int32],
@@ -635,7 +635,7 @@ def _add_matrix_diag_product(
     y[idx] += alpha * d[idx] * x[idx]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _scale_row_vector_kernel(
     # Matrix data:
     matrix_dims: wp.array2d[wp.int32],
@@ -664,7 +664,7 @@ def _scale_row_vector_kernel(
 def _make_block_sparse_gemv_regularization_kernel(alpha: wp.float32):
     # Note: this kernel factory allows to optimize for the common case alpha = 1.0. In use cases where
     # alpha changes over time, this would need to be revisited (to avoid multiple recompilations)
-    @wp.kernel
+    @wp.kernel(grid_stride=False, enable_backward=False)
     def _block_sparse_gemv_regularization_kernel(
         # Matrix data:
         dims: wp.array2d[wp.int32],

@@ -35,7 +35,7 @@ wp.set_module_options({"enable_backward": False})
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _pd_control_callback(
     # Inputs:
     decimation: wp.int32,

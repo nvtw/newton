@@ -69,7 +69,7 @@ _OBS_NAMES = [
 ]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _compute_bipedal_obs_core(
     obs: wp.array[wp.float32],
     q_i: wp.array[wp.float32],
@@ -248,7 +248,7 @@ _OBS_NAMES = [
 ]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _compute_bipedal_obs_core(
     obs: wp.array[wp.float32],
     q_i: wp.array[wp.float32],

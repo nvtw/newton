@@ -57,7 +57,7 @@ wp.set_module_options({"enable_backward": False})
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _invalidate_keys_from_select_worlds(
     world_id: wp.array[wp.int32],
     keys: wp.array[wp.uint64],
@@ -70,7 +70,7 @@ def _invalidate_keys_from_select_worlds(
         keys[tid] = uint64_sentinel_value()
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _warmstart_limits_by_matched_jid_dof_key(
     # Inputs - Previous:
     sorted_limit_keys_old: wp.array[wp.uint64],
@@ -123,7 +123,7 @@ def _warmstart_limits_by_matched_jid_dof_key(
         limit_velocity_new[lid] = wp.max(velocity_old, 0.0)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _warmstart_contacts_by_matched_geom_pair_key_and_position(
     # Inputs - Common:
     tolerance: wp.float32,
@@ -233,7 +233,7 @@ def _warmstart_contacts_by_matched_geom_pair_key_and_position(
     contact_velocity_new[cid] = target_velocity
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _warmstart_contacts_from_geom_pair_net_force(
     # Inputs - Common:
     scaling: wp.float32,
@@ -363,7 +363,7 @@ def _warmstart_contacts_from_geom_pair_net_force(
     contact_velocity_new[cid] = target_velocity
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _warmstart_contacts_by_matched_geom_pair_key_and_position_with_net_force_backup(
     # Inputs - Common:
     tolerance: wp.float32,

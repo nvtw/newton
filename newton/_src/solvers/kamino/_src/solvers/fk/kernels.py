@@ -101,7 +101,7 @@ def read_quat_from_array(array: wp.array[wp.float32], offset: int, normalize: bo
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _reset_state(
     # Inputs
     num_bodies: wp.array[wp.int32],
@@ -129,7 +129,7 @@ def _reset_state(
         bodies_q_flat[state_id_tot] = bodies_q_0_flat[state_id_tot]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _reset_state_base_q(
     # Inputs
     base_joint_id: wp.array[wp.int32],
@@ -203,7 +203,7 @@ def _reset_state_base_q(
         bodies_q[rb_id_tot] = wp.transform_multiply(transform_tot, body_q_0)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_fk_actuated_dofs_or_coords(
     # Inputs
     model_base_dofs: wp.array[wp.float32],
@@ -283,7 +283,7 @@ def _joint_transform_to_coords(
         wp.static(_make_typed_joint_transform_to_coords_func(JointDoFType.UNIVERSAL))(pos_rel, q_rel, offset, output)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_actuator_coords(
     num_joints: wp.array[wp.int32],
     first_joint_id: wp.array[wp.int32],
@@ -375,7 +375,7 @@ def _correct_joint_quaternion(quat: wp.vec4f, quat_ref: wp.vec4f) -> wp.vec4f:
     return quat
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _correct_actuator_coords(
     # Inputs
     actuated_coord_offsets: wp.array[wp.int32],
@@ -456,7 +456,7 @@ def _correct_actuator_coords(
         assert False, "Unexpected actuator dof type"  # noqa: B011
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_incremental_target_actuator_coords(
     # Inputs
     world_actuated_coord_offsets: wp.array[wp.int32],
@@ -531,7 +531,7 @@ def mul_mask_float(mask: wp.int32, value: wp.float32) -> wp.float32:
 
 @cache
 def create_eval_min_num_iterations_kernel(TILE_SIZE: int):
-    @wp.kernel(module="unique", enable_backward=False)
+    @wp.kernel(grid_stride=False, module="unique", enable_backward=False)
     def _eval_min_num_iterations(
         # Inputs
         world_actuated_coord_offsets: wp.array[wp.int32],
@@ -578,7 +578,7 @@ def create_eval_min_num_iterations_kernel(TILE_SIZE: int):
     return _eval_min_num_iterations
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _initialize_jacobian_update_masks(
     # Inputs
     newton_mask: wp.array[wp.bool],
@@ -608,7 +608,7 @@ def _initialize_jacobian_update_masks(
     jacobian_late_update_mask[wd_id] = newton_flag and min_it > 0
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_target_relative_transformations(
     # Inputs
     joints_dof_type: wp.array[wp.int32],
@@ -705,7 +705,7 @@ def _eval_target_relative_transformations(
         target_rel_transforms[jt_id] = wp.transformf(t, q)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_unit_quaternion_constraints(
     # Inputs
     num_bodies: wp.array[wp.int32],
@@ -747,7 +747,7 @@ def create_eval_joint_constraints_kernel(has_universal_joints: bool):
     or not (these joints need a separate handling)
     """
 
-    @wp.kernel
+    @wp.kernel(grid_stride=False, enable_backward=False)
     def _eval_joint_constraints(
         # Inputs
         num_joints: wp.array[wp.int32],
@@ -874,7 +874,7 @@ def create_eval_joint_constraints_kernel(has_universal_joints: bool):
     return _eval_joint_constraints
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_unit_quaternion_constraints_jacobian(
     # Inputs
     num_bodies: wp.array[wp.int32],
@@ -913,7 +913,7 @@ def _eval_unit_quaternion_constraints_jacobian(
         constraints_jacobian[wd_id, rb_id_loc, state_offset + 3] = 2.0 * q.w
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_unit_quaternion_constraints_sparse_jacobian(
     # Inputs
     num_bodies: wp.array[wp.int32],
@@ -961,7 +961,7 @@ def create_eval_joint_constraints_jacobian_kernel(has_universal_joints: bool):
     or not (these joints need a separate handling)
     """
 
-    @wp.kernel
+    @wp.kernel(grid_stride=False, enable_backward=False)
     def _eval_joint_constraints_jacobian(
         # Inputs
         num_joints: wp.array[wp.int32],
@@ -1126,7 +1126,7 @@ def create_eval_joint_constraints_sparse_jacobian_kernel(has_universal_joints: b
     (these joints need a separate handling)
     """
 
-    @wp.kernel
+    @wp.kernel(grid_stride=False, enable_backward=False)
     def _eval_joint_constraints_sparse_jacobian(
         # Inputs
         num_joints: wp.array[wp.int32],
@@ -1303,7 +1303,7 @@ def create_2d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
         """
         return wp.min(x, 1.0)
 
-    @wp.kernel(module=module)
+    @wp.kernel(grid_stride=False, module=module, enable_backward=False)
     def _eval_pattern_T_pattern(
         # Inputs
         sparsity_pattern: wp.array3d[wp.float32],
@@ -1354,7 +1354,7 @@ def create_2d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
             tile_out_3d_clipped = wp.tile_map(clip_to_one, tile_out_3d)
             wp.tile_store(pattern_T_pattern, tile_out_3d_clipped, offset=(wd_id, i * TILE_SIZE_VRS, j * TILE_SIZE_VRS))
 
-    @wp.kernel(module=module)
+    @wp.kernel(grid_stride=False, module=module, enable_backward=False)
     def _eval_jacobian_T_jacobian(
         # Inputs
         constraints_jacobian: wp.array3d[wp.float32],
@@ -1407,7 +1407,7 @@ def create_2d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
             tile_out_3d = wp.tile_reshape(tile_out, (1, TILE_SIZE_VRS, TILE_SIZE_VRS))
             wp.tile_store(jacobian_T_jacobian, tile_out_3d, offset=(wd_id, i * TILE_SIZE_VRS, j * TILE_SIZE_VRS))
 
-    @wp.kernel(module=module)
+    @wp.kernel(grid_stride=False, module=module, enable_backward=False)
     def _eval_jacobian_T_constraints(
         # Inputs
         constraints_jacobian: wp.array3d[wp.float32],
@@ -1494,7 +1494,7 @@ def create_1d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
 
     TILE_SIZE = TILE_SIZE_VRS if use_regularization else TILE_SIZE_CTS
 
-    @wp.kernel(module=module)
+    @wp.kernel(grid_stride=False, module=module, enable_backward=False)
     def _eval_max_residual(
         # Inputs
         residual: wp.array2d[wp.float32],
@@ -1532,7 +1532,7 @@ def create_1d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
                         if check_val == curr_val:
                             break
 
-    @wp.kernel(module=module)
+    @wp.kernel(grid_stride=False, module=module, enable_backward=False)
     def _eval_merit_function(
         # Inputs
         constraints: wp.array2d[wp.float32],
@@ -1557,7 +1557,7 @@ def create_1d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
             if tid == 0:
                 wp.atomic_add(merit_function_val, wd_id, segment_error)
 
-    @wp.kernel(module=module)
+    @wp.kernel(grid_stride=False, module=module, enable_backward=False)
     def _eval_regularizer(
         # Inputs
         first_body_id: wp.array[wp.int32],
@@ -1599,7 +1599,7 @@ def create_1d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
         if tid == 0:
             wp.atomic_add(merit_function_val, wd_id, 0.5 * reg_weight * reg)
 
-    @wp.kernel(module=module)
+    @wp.kernel(grid_stride=False, module=module, enable_backward=False)
     def _eval_merit_function_gradient(
         # Inputs
         step: wp.array2d[wp.float32],
@@ -1630,7 +1630,7 @@ def create_1d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
     return _eval_max_residual, _eval_merit_function, _eval_regularizer, _eval_merit_function_gradient
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_rhs(
     # Inputs
     grad: wp.array2d[wp.float32],
@@ -1650,7 +1650,7 @@ def _eval_rhs(
         rhs[wd_id, state_id_loc] = -grad[wd_id, state_id_loc]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _add_regularizer_to_diagonal(
     # Inputs
     reg_weight: wp.float32,
@@ -1674,7 +1674,7 @@ def _add_regularizer_to_diagonal(
         A[wd_id, row_id, row_id] = A[wd_id, row_id, row_id] + reg_weight
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_regularizer_gradient(
     # Inputs
     num_bodies: wp.array[wp.int32],
@@ -1710,7 +1710,7 @@ def _eval_regularizer_gradient(
     gradient[wd_id, state_id_loc] += reg_weight * (bodies_q_flat[state_id] - bodies_q_ref_flat[state_id])
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_linear_combination(
     # Inputs
     alpha: wp.float32,
@@ -1740,7 +1740,7 @@ def _eval_linear_combination(
         z[wd_id, row_id] = alpha * x[wd_id, row_id] + beta * y[wd_id, row_id]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_stepped_state(
     # Inputs
     num_bodies: wp.array[wp.int32],
@@ -1772,7 +1772,7 @@ def _eval_stepped_state(
         bodies_q_alpha_flat[state_id_tot] = bodies_q_0_flat[state_id_tot] + alpha[wd_id] * step[wd_id, state_id_loc]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _apply_line_search_step(
     # Inputs
     num_bodies: wp.array[wp.int32],
@@ -1801,7 +1801,7 @@ def _apply_line_search_step(
         bodies_q[rb_id_tot] = bodies_q_alpha[rb_id_tot]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _line_search_check(
     # Inputs
     val_0: wp.array[wp.float32],
@@ -1845,7 +1845,7 @@ def _line_search_check(
         wp.atomic_max(line_search_loop_condition, 0, wp.int32(continue_loop_world))
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _newton_check(
     # Inputs
     max_residual: wp.array[wp.float32],
@@ -1907,7 +1907,7 @@ def _newton_check(
         wp.atomic_max(newton_loop_condition, 0, wp.int32(newton_continue_world))
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_target_constraint_velocities(
     # Inputs
     num_joints: wp.array[wp.int32],
@@ -1980,7 +1980,7 @@ def _eval_target_constraint_velocities(
             assert False, "Unexpected actuator dof type"  # noqa: B011
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _correct_universal_constraint_velocities(
     # Inputs
     num_joints: wp.array[wp.int32],
@@ -2058,7 +2058,7 @@ def _correct_universal_constraint_velocities(
         target_cts_u[wd_id, offset_cts_j + 5] = omega[2]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_body_velocities(
     # Inputs
     num_bodies: wp.array[wp.int32],
@@ -2107,7 +2107,7 @@ def _eval_body_velocities(
         bodies_u[rb_id_tot][5] = omega[2]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _update_cg_tolerance_kernel(
     # Input
     max_residual: wp.array[wp.float32],

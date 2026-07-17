@@ -93,7 +93,7 @@ def moreau_jean_semi_implicit_with_logmap(
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _integrate_moreau_jean_first_inplace(
     # Inputs:
     model_dt: wp.array[wp.float32],
@@ -127,7 +127,7 @@ def _integrate_moreau_jean_first_inplace(
     bodies_q[tid] = q_i_m
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _integrate_moreau_jean_second_inplace(
     # Inputs:
     alpha: float,

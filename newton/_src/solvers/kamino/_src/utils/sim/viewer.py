@@ -27,7 +27,7 @@ from .simulator import Simulator
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def compute_contact_box_transforms(
     # Kamino contact data
     position_A: wp.array[wp.vec3],  # Contact position on body A
@@ -87,7 +87,7 @@ def compute_contact_box_transforms(
         colors[i] = wp.vec3(0.5, 0.5, 0.5)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def compute_contact_force_arrows(
     # Kamino contact data
     position_A: wp.array[wp.vec3],

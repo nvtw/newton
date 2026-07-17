@@ -214,7 +214,7 @@ def uint64_sentinel_value() -> wp.uint64: ...
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _prepare_key_sort(
     # Inputs:
     num_active_keys: wp.array[wp.int32],

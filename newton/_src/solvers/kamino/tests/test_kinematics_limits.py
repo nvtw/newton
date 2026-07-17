@@ -40,7 +40,7 @@ Q_X_J_MAX = 0.25 * math.pi
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _set_joint_follower_body_state(
     model_joint_bid_B: wp.array[wp.int32],
     model_joint_bid_F: wp.array[wp.int32],

@@ -43,7 +43,7 @@ class CartpoleActions:
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _test_control_callback(
     state_t: wp.array[wp.float32],
     control_tau_j: wp.array[wp.float32],

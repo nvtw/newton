@@ -192,7 +192,7 @@ def build_dynamic_static_sphere_scene(
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _compute_contact_frame_znorm(
     # Inputs:
     normal: wp.array[wp.vec3f],
@@ -203,7 +203,7 @@ def _compute_contact_frame_znorm(
     frame[tid] = make_contact_frame_znorm(normal[tid])
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _compute_contact_frame_xnorm(
     # Inputs:
     normal: wp.array[wp.vec3f],
@@ -214,7 +214,7 @@ def _compute_contact_frame_xnorm(
     frame[tid] = make_contact_frame_xnorm(normal[tid])
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _compute_contact_mode(
     # Inputs:
     velocity: wp.array[wp.vec3f],

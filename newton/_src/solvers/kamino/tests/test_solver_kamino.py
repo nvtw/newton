@@ -38,7 +38,7 @@ from newton._src.solvers.kamino.tests.utils.sampling import sample_world_mask
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _test_control_callback(
     model_dt: wp.array[wp.float32],
     data_time: wp.array[wp.float32],

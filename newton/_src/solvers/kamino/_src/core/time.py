@@ -141,7 +141,7 @@ class TimeData:
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _advance_time(
     # Inputs
     dt: wp.array[wp.float32],

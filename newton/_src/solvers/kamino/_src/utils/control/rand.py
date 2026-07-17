@@ -76,7 +76,7 @@ class RandomJointControllerData:
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _generate_random_control_inputs(
     # Inputs
     controller_seed: int,

@@ -24,7 +24,7 @@ import warp as wp
 _Z_AXIS = wp.constant(wp.vec3(0.0, 0.0, 1.0))
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _quat_to_projected_yaw_kernel(
     q: wp.array[wp.float32],
     yaw: wp.array[wp.float32],
@@ -52,7 +52,7 @@ def quat_to_projected_yaw(q: torch.Tensor) -> torch.Tensor:
     return yaw.view(-1, 1)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _yaw_apply_2d_kernel(
     yaw: wp.array[wp.float32],
     v: wp.array[wp.float32],

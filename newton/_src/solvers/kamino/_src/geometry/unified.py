@@ -262,7 +262,7 @@ def _compute_collision_radius(geo_type: wp.int32, scale: wp.vec3f) -> wp.float32
     return radius
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _convert_geom_data_kamino_to_newton(
     # Inputs:
     default_gap: wp.float32,
@@ -299,7 +299,7 @@ def _convert_geom_data_kamino_to_newton(
     shape_collision_radius[gid] = _compute_collision_radius(type, scale)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _update_geom_poses_and_compute_aabbs(
     # Inputs:
     geom_type: wp.array[wp.int32],

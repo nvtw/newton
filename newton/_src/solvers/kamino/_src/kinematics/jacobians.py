@@ -409,7 +409,7 @@ def compute_intermediate_body_frame_universal_joint(
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _build_joint_jacobians_dense(
     # Inputs
     model_info_bodies_offset: wp.array[wp.int32],
@@ -515,7 +515,7 @@ def _build_joint_jacobians_dense(
     store_joint_dofs_jacobian_dense(dof_type, J_jdof_row_start, nbd, bio, bid_B, bid_F, JT_B_j, JT_F_j, jac_dofs_data)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _configure_jacobians_sparse(
     # Input:
     model_num_joint_cts: wp.array[wp.int32],
@@ -529,7 +529,7 @@ def _configure_jacobians_sparse(
     jac_cts_rows[world_id] = model_num_joint_cts[world_id] + num_limits[world_id] + 3 * num_contacts[world_id]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _build_joint_jacobians_sparse(
     # Inputs
     model_joints_dof_type: wp.array[wp.int32],
@@ -626,7 +626,7 @@ def _build_joint_jacobians_sparse(
     )
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _build_limit_jacobians_dense(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -699,7 +699,7 @@ def _build_limit_jacobians_dense(
             jacobian_cts_data[cts_kj + i] = side_l * jacobian_dofs_data[act_kj + i]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _build_limit_jacobians_sparse(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -773,7 +773,7 @@ def _build_limit_jacobians_sparse(
         jacobian_cts_nzb_coords[jac_cts_nzb_idx + 1, 1] = 6 * (body_id_B_l - body_index_offset)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _build_contact_jacobians_dense(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -854,7 +854,7 @@ def _build_contact_jacobians_dense(
                 jacobian_cts_data[kj + i] = JT_c_A_k[i, j]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _build_contact_jacobians_sparse(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -955,7 +955,7 @@ def store_col_major_jacobian_block(
             nzb_values[nzb_id_i][j, 0] = block[j, i]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _update_col_major_joint_jacobians(
     # Inputs
     model_joints_num_dynamic_cts: wp.array[wp.int32],
@@ -1032,7 +1032,7 @@ def _update_col_major_joint_jacobians(
                 )
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _update_col_major_limit_jacobians(
     # Inputs
     limits_model_num: wp.array[wp.int32],
@@ -1114,7 +1114,7 @@ def _update_col_major_limit_jacobians(
         )
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _update_col_major_contact_jacobians(
     # Inputs:
     contacts_model_num: wp.array[wp.int32],

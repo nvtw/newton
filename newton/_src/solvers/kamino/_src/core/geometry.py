@@ -395,7 +395,7 @@ class GeometriesData:
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _update_geometries_state(
     # Inputs:
     geom_bid: wp.array[wp.int32],

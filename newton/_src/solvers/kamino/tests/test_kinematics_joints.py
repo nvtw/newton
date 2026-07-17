@@ -45,7 +45,7 @@ ROT_RES = (np.sin(ROT_RES_ANGLE) / ROT_RES_ANGLE) * ROT_RES_VEC
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _set_joint_follower_body_state(
     model_joint_bid_F: wp.array[wp.int32],
     model_joint_B_r_Bj: wp.array[wp.vec3f],

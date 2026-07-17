@@ -601,7 +601,7 @@ class BlockSparseMatrices(Generic[BlockScalarType, IndexType, BlockType]):
 
 @functools.cache
 def _make_masked_zero_kernel(block_type: BlockDType, index_dtype: IntType):
-    @wp.kernel
+    @wp.kernel(grid_stride=False, enable_backward=False)
     def masked_zero_kernel(
         # Inputs
         nzb_start: wp.array[Any],  # wp.array[index_dtype],
@@ -624,7 +624,7 @@ def _make_masked_zero_kernel(block_type: BlockDType, index_dtype: IntType):
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _copy_square_dims_kernel(
     src_dim: wp.array[wp.int32],
     dst_dims: wp.array2d[wp.int32],
@@ -643,7 +643,7 @@ def _make_dense_to_bsm_detect_kernel(block_size: int):
     Note: Dense matrices use canonical compact storage where stride = active dim (not maxdim).
     """
 
-    @wp.kernel
+    @wp.kernel(grid_stride=False, enable_backward=False)
     def kernel(
         # Dense matrix info
         dense_dim: wp.array[wp.int32],
@@ -702,7 +702,7 @@ def _make_dense_to_bsm_copy_kernel(block_size: int):
 
     mat_type = wp.types.matrix(shape=(block_size, block_size), dtype=wp.float32)
 
-    @wp.kernel
+    @wp.kernel(grid_stride=False, enable_backward=False)
     def kernel(
         # Dense matrix info
         dense_dim: wp.array[wp.int32],

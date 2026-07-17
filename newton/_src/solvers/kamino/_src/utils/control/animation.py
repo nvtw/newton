@@ -137,7 +137,7 @@ class AnimationJointReferenceData:
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _advance_animation_frame(
     # Inputs
     time_steps: wp.array[wp.int32],
@@ -187,7 +187,7 @@ def _advance_animation_frame(
 
 
 # TODO: Make the 2D arrays as flattened 1D arrays to handle arbitrary layouts
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _extract_animation_references(
     # Inputs
     num_actuated_joint_dofs: wp.array[wp.int32],

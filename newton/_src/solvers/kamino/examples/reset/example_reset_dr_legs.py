@@ -27,7 +27,7 @@ from newton._src.solvers.kamino.solver_kamino import SolverKamino
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _test_control_callback(
     sim_has_started_resets: wp.array[wp.bool],
     sim_reset_index: wp.array[wp.int32],

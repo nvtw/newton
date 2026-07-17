@@ -302,7 +302,7 @@ J_DV_J = wp.vec3f(0.0)
 J_DOMEGA_J = wp.vec3f(0.0)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _set_fourbar_body_states(
     model_joint_bid_B: wp.array[wp.int32],
     model_joint_bid_F: wp.array[wp.int32],

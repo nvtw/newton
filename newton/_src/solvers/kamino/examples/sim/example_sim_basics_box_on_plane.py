@@ -30,7 +30,7 @@ wp.set_module_options({"enable_backward": False})
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _control_callback(
     model_body_wid: wp.array[wp.int32],
     contact_world_num_active: wp.array[wp.int32],

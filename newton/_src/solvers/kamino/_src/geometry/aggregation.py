@@ -39,7 +39,7 @@ wp.set_module_options({"enable_backward": False})
 ###
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _aggregate_contact_force_per_body(
     # Inputs:
     model_info_bodies_start: wp.array[wp.int32],  # Per-world bodies start index
@@ -113,7 +113,7 @@ def _aggregate_contact_force_per_body(
         wp.atomic_max(body_contact_flag, world_idx, body_B_in_world, wp.int32(1))
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _aggregate_static_contact_flag_per_body(
     # Inputs:
     model_info_bodies_start: wp.array[wp.int32],  # Per-world bodies start index
@@ -172,7 +172,7 @@ def _aggregate_static_contact_flag_per_body(
         wp.atomic_max(static_contact_flag, world_idx, body_B_in_world, wp.int32(1))
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _aggregate_contact_force_per_body_geom(
     # Inputs:
     model_info_geoms_start: wp.array[wp.int32],  # Offset to convert global geom ID to per-world index
@@ -246,7 +246,7 @@ def _aggregate_contact_force_per_body_geom(
         wp.atomic_max(geom_contact_flag, world_idx, world_geom_B, wp.int32(1))
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _aggregate_body_pair_contact_flag_per_world(
     # Input: Kamino ContactsData
     wid: wp.array[wp.int32],  # world index per contact

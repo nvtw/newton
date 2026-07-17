@@ -197,7 +197,7 @@ def _compute_and_write_joint_coords_and_vel(
         wp.static(make_compute_and_write_joint_vel(JointDoFType.UNIVERSAL))(q_j, u_j, dofs_offset, joint_u)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _get_base_q_from_joint_q_and_body_q(
     # Inputs:
     model_base_joint_index: wp.array[wp.int32],
@@ -238,7 +238,7 @@ def _get_base_q_from_joint_q_and_body_q(
             base_q[wid] = state_body_q[base_body_id]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _get_base_u_from_joint_u_and_body_u(
     # Inputs:
     model_base_joint_index: wp.array[wp.int32],
@@ -278,7 +278,7 @@ def _get_base_u_from_joint_u_and_body_u(
             base_u[wid] = state_body_u[base_body_id]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _set_body_q(
     # Inputs:
     body_world_id: wp.array[wp.int32],
@@ -294,7 +294,7 @@ def _set_body_q(
     body_q_out[body_id] = body_q_in[body_id]
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _reset_joints_state_from_bodies_state(
     # Inputs
     joint_world_id: wp.array[wp.int32],
@@ -364,7 +364,7 @@ def _reset_joints_state_from_bodies_state(
         joint_lambda[cts_offset + i] = 0.0
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _reset_body_velocities(
     # Inputs
     body_world_id: wp.array[wp.int32],
@@ -384,7 +384,7 @@ def _reset_body_velocities(
     body_u[body_id] = wp.spatial_vectorf(0.0)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _reset_body_wrenches(
     # Inputs
     body_world_id: wp.array[wp.int32],
@@ -406,7 +406,7 @@ def _reset_body_wrenches(
     body_w_e[body_id] = wp.spatial_vectorf(0.0)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _reset_time_of_select_worlds(
     # Inputs:
     world_mask: wp.array[wp.bool],
@@ -426,7 +426,7 @@ def _reset_time_of_select_worlds(
     data_steps[wid] = 0
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _eval_floating_base_relative_transform(
     # Inputs:
     model_base_joint_index: wp.array[wp.int32],
@@ -520,7 +520,7 @@ def _eval_floating_base_relative_transform(
     rel_velocity[wid] = wp.spatial_vectorf(*v_rel, *omega_rel)
 
 
-@wp.kernel
+@wp.kernel(grid_stride=False, enable_backward=False)
 def _apply_floating_base_transform(
     # Inputs:
     model_base_body_index: wp.array[wp.int32],
