@@ -76,6 +76,36 @@ class TestColoredContactRows(unittest.TestCase):
         self.assertTrue(np.isfinite(scene.bodies.position.numpy()).all())
         self.assertTrue(np.isfinite(scene.bodies.velocity.numpy()).all())
 
+    def test_packed_rows_match_canonical_stack(self) -> None:
+        """Packed headers and rows must preserve canonical stack dynamics."""
+
+        def run(*, packed: bool) -> tuple[np.ndarray, np.ndarray]:
+            scene = _PhoenXScene(
+                fps=120,
+                substeps=6,
+                solver_iterations=6,
+                velocity_iterations=1,
+                step_layout="single_world",
+                mass_splitting=True,
+                colored_contact_headers=packed,
+                colored_contact_rows=packed,
+                max_thread_blocks=384,
+                max_colored_partitions=8,
+                mass_splitting_batch_size=1,
+            )
+            scene.add_ground_plane()
+            for i in range(4):
+                scene.add_box((0.03 * (i % 2), 0.0, 0.21 + 0.4 * i), (0.4, 0.25, 0.2))
+            scene.finalize()
+            for _ in range(120):
+                scene.step()
+            return scene.bodies.position.numpy(), scene.bodies.velocity.numpy()
+
+        canonical_position, canonical_velocity = run(packed=False)
+        packed_position, packed_velocity = run(packed=True)
+        np.testing.assert_allclose(packed_position, canonical_position, rtol=1.0e-4, atol=1.0e-5)
+        np.testing.assert_allclose(packed_velocity, canonical_velocity, rtol=1.0e-4, atol=1.0e-5)
+
     def test_arbitrary_contact_counts_round_trip_in_graph(self) -> None:
         """Interleaved columns with 1, 7, and 13 contacts have no row cap."""
         device = wp.get_device("cuda:0")

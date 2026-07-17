@@ -46,8 +46,9 @@ class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
             friction=0.5,
             step_layout="single_world",
             mass_splitting=True,
-            colored_contact_headers=False,
-            colored_contact_rows=False,
+            colored_contact_headers=True,
+            colored_contact_rows=True,
+            max_thread_blocks=384,
             max_colored_partitions=8,
             mass_splitting_batch_size=1,
         )

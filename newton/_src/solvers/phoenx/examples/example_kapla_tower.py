@@ -83,8 +83,8 @@ GROUND_HEIGHT: float = 0.35 * GLOBAL_SCALING
 # Single-world layout wins on the dense ~11k-body contact pool.
 USE_BIG_WORLD_MODE: bool = True
 STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
-USE_COLORED_CONTACT_HEADERS: bool = False
-USE_COLORED_CONTACT_ROWS: bool = False
+USE_COLORED_CONTACT_HEADERS: bool = True
+USE_COLORED_CONTACT_ROWS: bool = True
 
 # Per-substep damping retained after the overlap-settle warmup. A small passive
 # decay prevents overflow-partition ordering noise from becoming visible motion.
@@ -363,9 +363,10 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
-            # Preserve the validated Gauss-Seidel launch geometry. Larger
-            # persistent grids amplify ordering noise in the overflow partition.
-            max_thread_blocks=256,
+            # A 384-block persistent grid recovers the packed-row throughput
+            # without the overflow-partition vibration seen with the larger
+            # automatic grid used by packed contact headers.
+            max_thread_blocks=384,
             mass_splitting=ENABLE_MASS_SPLITTING and solver_flavor == "standard",
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,

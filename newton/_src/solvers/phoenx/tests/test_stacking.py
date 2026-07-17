@@ -87,6 +87,7 @@ class _PhoenXScene:
         mass_splitting: bool = False,
         colored_contact_headers: bool = False,
         colored_contact_rows: bool = False,
+        max_thread_blocks: int | None = None,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
         solver_flavor: str = "standard",
@@ -105,6 +106,7 @@ class _PhoenXScene:
         self.mass_splitting = bool(mass_splitting)
         self.colored_contact_headers = bool(colored_contact_headers)
         self.colored_contact_rows = bool(colored_contact_rows)
+        self.max_thread_blocks = max_thread_blocks
         self.max_colored_partitions = int(max_colored_partitions)
         self.mass_splitting_batch_size = int(mass_splitting_batch_size)
         self.solver_flavor = solver_flavor
@@ -349,6 +351,7 @@ class _PhoenXScene:
             mass_splitting=self.mass_splitting,
             colored_contact_headers=self.colored_contact_headers,
             colored_contact_rows=self.colored_contact_rows,
+            max_thread_blocks=self.max_thread_blocks,
             max_colored_partitions=self.max_colored_partitions,
             mass_splitting_batch_size=self.mass_splitting_batch_size,
             solver_flavor=self.solver_flavor,
