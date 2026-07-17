@@ -957,6 +957,7 @@ class SolverPhoenX(SolverBase):
         dt: float,
         *,
         state_is_continuation: bool = False,
+        state_kinematics_valid: bool = False,
     ) -> None:
         """Advance the simulation state by one time step.
 
@@ -972,6 +973,9 @@ class SolverPhoenX(SolverBase):
                 solvers then preserve their authoritative state while still
                 importing forces and controls. Defaults to ``False``; use
                 ``False`` after changing any kinematic state array.
+            state_kinematics_valid: Whether ``state_in.body_q`` and
+                ``state_in.body_qd`` already match its generalized state.
+                Defaults to ``False``.
         """
         if control is None:
             # Alias Model per-DOF arrays (no clone). Matches XPBD/Featherstone.
@@ -997,6 +1001,7 @@ class SolverPhoenX(SolverBase):
                 state_in,
                 control,
                 state_is_continuation=continue_reduced_state,
+                state_kinematics_valid=state_kinematics_valid,
             )
 
         # FD readout snapshots the imported (state_in-aligned) pose so the

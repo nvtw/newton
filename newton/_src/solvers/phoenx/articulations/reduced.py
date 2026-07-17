@@ -4419,13 +4419,18 @@ class ReducedPhoenXArticulation:
         control: Control,
         *,
         state_is_continuation: bool = False,
+        state_kinematics_valid: bool = False,
     ) -> None:
         """Import common generalized state and controls into stable graph buffers."""
         if not state_is_continuation:
             wp.copy(self.state.joint_q, state.joint_q)
             wp.copy(self.state.joint_qd, state.joint_qd)
-            eval_fk(self.model, self.state.joint_q, self.state.joint_qd, self.state)
-            self.sync_bodies()
+            if state_kinematics_valid:
+                wp.copy(self.state.body_q, state.body_q)
+                wp.copy(self.state.body_qd, state.body_qd)
+            else:
+                eval_fk(self.model, self.state.joint_q, self.state.joint_qd, self.state)
+                self.sync_bodies()
         wp.copy(self.state.body_f, state.body_f)
         wp.copy(self.control.joint_f, control.joint_f)
         wp.copy(self.control.joint_target_q, control.joint_target_q)

@@ -497,10 +497,18 @@ class EnvHumanoidPhoenX:
             device=self.device,
         )
         sub_dt = float(self.config.frame_dt) / float(self.config.sim_substeps)
-        for _ in range(int(self.config.sim_substeps)):
+        for substep in range(int(self.config.sim_substeps)):
             self.state_0.clear_forces()
             self.model.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
+            self.solver.step(
+                self.state_0,
+                self.state_1,
+                self.control,
+                self.contacts,
+                sub_dt,
+                state_is_continuation=substep > 0,
+                state_kinematics_valid=True,
+            )
             self.state_0, self.state_1 = self.state_1, self.state_0
         wp.launch(
             humanoid_increment_steps_kernel, dim=self.world_count, outputs=[self.episode_steps], device=self.device

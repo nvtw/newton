@@ -709,10 +709,18 @@ class EnvAntPhoenX:
 
         substeps = int(self.config.sim_substeps)
         sub_dt = float(self.config.frame_dt) / float(substeps)
-        for _ in range(substeps):
+        for substep in range(substeps):
             self.state_0.clear_forces()
             self.model.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
+            self.solver.step(
+                self.state_0,
+                self.state_1,
+                self.control,
+                self.contacts,
+                sub_dt,
+                state_is_continuation=substep > 0,
+                state_kinematics_valid=True,
+            )
             self.state_0, self.state_1 = self.state_1, self.state_0
 
         wp.launch(

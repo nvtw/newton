@@ -3105,6 +3105,56 @@ class TestReducedArticulation(unittest.TestCase):
             atol=2.0e-6,
         )
 
+    def test_valid_kinematics_import_matches_fk_import_under_graph_capture(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        model = _make_branched_tree(device)
+        state_fk = model.state()
+        state_valid = model.state()
+        qd = np.linspace(-0.35, 0.45, int(model.joint_dof_count), dtype=np.float32)
+        for state in (state_fk, state_valid):
+            state.joint_qd.assign(qd)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        output_fk = model.state()
+        output_valid = model.state()
+        control = model.control()
+        control.joint_f.assign(np.linspace(0.4, -0.3, int(model.joint_dof_count), dtype=np.float32))
+        solver_fk = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+        )
+        solver_valid = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="reduced",
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+        )
+        dt = 1.0 / 240.0
+
+        with wp.ScopedCapture(device=device) as capture:
+            solver_fk.step(state_fk, output_fk, control, None, dt)
+            solver_valid.step(
+                state_valid,
+                output_valid,
+                control,
+                None,
+                dt,
+                state_kinematics_valid=True,
+            )
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(output_valid.joint_q.numpy(), output_fk.joint_q.numpy(), rtol=0.0, atol=2.0e-6)
+        np.testing.assert_allclose(output_valid.joint_qd.numpy(), output_fk.joint_qd.numpy(), rtol=0.0, atol=2.0e-6)
+        np.testing.assert_allclose(output_valid.body_q.numpy(), output_fk.body_q.numpy(), rtol=0.0, atol=2.0e-6)
+        np.testing.assert_allclose(output_valid.body_qd.numpy(), output_fk.body_qd.numpy(), rtol=0.0, atol=2.0e-6)
+
     def test_warp_advance_matches_serial_on_branched_tree_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

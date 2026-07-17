@@ -650,7 +650,15 @@ class EnvDrLegsPhoenX:
             if substep % refresh == 0:
                 self.model.collide(self.state_0, self.contacts)
             self.solver.reuse_partition = substep % refresh != 0
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
+            self.solver.step(
+                self.state_0,
+                self.state_1,
+                self.control,
+                self.contacts,
+                sub_dt,
+                state_is_continuation=substep > 0,
+                state_kinematics_valid=True,
+            )
             self.state_0, self.state_1 = self.state_1, self.state_0
         wp.launch(
             dr_legs_publish_joint_state_kernel,

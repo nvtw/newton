@@ -736,7 +736,15 @@ class EnvH1PhoenX:
         for substep in range(int(self.config.sim_substeps)):
             self.state_0.clear_forces()
             self.solver.reuse_partition = substep > 0
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
+            self.solver.step(
+                self.state_0,
+                self.state_1,
+                self.control,
+                self.contacts,
+                sub_dt,
+                state_is_continuation=substep > 0,
+                state_kinematics_valid=True,
+            )
             self.state_0, self.state_1 = self.state_1, self.state_0
         self.observe()
         wp.copy(self.step_rewards, self.rewards)

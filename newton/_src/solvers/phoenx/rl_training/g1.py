@@ -3178,6 +3178,7 @@ class EnvG1PhoenX:
                 self.contacts,
                 sub_dt,
                 state_is_continuation=substep > 0,
+                state_kinematics_valid=True,
             )
             self.state_0, self.state_1 = self.state_1, self.state_0
 

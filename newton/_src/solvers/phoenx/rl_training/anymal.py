@@ -938,7 +938,15 @@ class EnvAnymalPhoenX:
             # substep and reuse that colouring on the rest (the solver still
             # re-projects contact anchors from the live pose each substep).
             self.solver.reuse_partition = collide_once and sub > 0
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
+            self.solver.step(
+                self.state_0,
+                self.state_1,
+                self.control,
+                self.contacts,
+                sub_dt,
+                state_is_continuation=sub > 0,
+                state_kinematics_valid=True,
+            )
             self.state_0, self.state_1 = self.state_1, self.state_0
 
         wp.launch(
