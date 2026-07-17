@@ -898,7 +898,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-phase", type=int, default=0)
     parser.add_argument("--phase-count", type=int, default=None)
     parser.add_argument("--allow-gate-failure", action="store_true")
-    parser.add_argument("--execution-mode", choices=("eager", "graph_leapfrog"), default="eager")
+    parser.add_argument("--execution-mode", choices=("eager", "graph_leapfrog"), default="graph_leapfrog")
 
     parser.add_argument("--command-x", type=float, default=0.6)
     parser.add_argument("--command-y", type=float, default=0.0)

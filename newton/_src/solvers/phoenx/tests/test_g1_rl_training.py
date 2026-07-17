@@ -54,7 +54,11 @@ from newton._src.solvers.phoenx.experimental.nanog1_import import (
 from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
-from newton._src.solvers.phoenx.rl_training.examples import train_g1_nanog1
+from newton._src.solvers.phoenx.rl_training.examples import (
+    train_g1_command_curriculum,
+    train_g1_curriculum,
+    train_g1_nanog1,
+)
 from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
     G1_FOOT_CONTACT_METRIC_ACTIVE_NORMAL_COUNT,
     G1_FOOT_CONTACT_METRIC_ACTIVE_TANGENT_COUNT,
@@ -681,6 +685,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         cli_defaults = train_g1_nanog1._make_parser().parse_args([])
         self.assertEqual(cli_defaults.command_curriculum_start, g1_recipe.COMMAND_CURRICULUM_START)
         self.assertEqual(cli_defaults.command_curriculum_samples, g1_recipe.COMMAND_CURRICULUM_SAMPLES)
+        self.assertEqual(train_g1_curriculum._make_parser().parse_args([]).execution_mode, "graph_leapfrog")
+        self.assertEqual(train_g1_command_curriculum._make_parser().parse_args([]).execution_mode, "graph_leapfrog")
 
     def test_nanog1_mirror_map_matches_pinned_pufferlib(self) -> None:
         mirror_path = _PUFFERLIB_G1_ROOT / "ocean" / "g1gpu" / "g1_mirror.h"

@@ -12,6 +12,7 @@ import warp as wp
 
 import newton.rl as rl
 from newton._src.solvers.phoenx.rl_training.examples import train_anymal_full_control_curriculum as anymal_curriculum
+from newton._src.solvers.phoenx.rl_training.examples import train_anymal_walk_phoenx_ppo as anymal_walk
 from newton._src.solvers.phoenx.rl_training.reward_functions import (
     command_progress_2d,
     fall_indicator,
@@ -35,6 +36,10 @@ def reward_functions_smoke_kernel(out: wp.array[wp.float32]):
 
 
 class TestAnymalPhoenXRL(unittest.TestCase):
+    def test_robot_runners_default_to_graph_capture(self) -> None:
+        self.assertEqual(anymal_curriculum._make_parser().parse_args([]).execution_mode, "graph_leapfrog")
+        self.assertEqual(anymal_walk._make_parser().parse_args([]).execution_mode, "graph_leapfrog")
+
     def test_full_control_curriculum_phase_env_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX Anymal RL tests")
         phases = anymal_curriculum.build_full_control_curriculum()

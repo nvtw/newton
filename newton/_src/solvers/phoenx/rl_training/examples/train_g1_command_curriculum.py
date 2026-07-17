@@ -469,7 +469,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ground-friction", type=float, default=0.4)
     parser.add_argument("--foot-box-xy-scale", type=float, default=g1_recipe.FOOT_BOX_XY_SCALE)
     parser.add_argument("--rigid-contact-max-per-world", type=int, default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
-    parser.add_argument("--execution-mode", choices=("eager", "graph_leapfrog"), default="eager")
+    parser.add_argument("--execution-mode", choices=("eager", "graph_leapfrog"), default="graph_leapfrog")
     parser.add_argument("--no-readback-diagnostics", action="store_true")
 
     parser.add_argument("--actor-lr", type=float, default=None)

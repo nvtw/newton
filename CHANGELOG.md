@@ -53,6 +53,7 @@
 
 ### Changed
 
+- Default experimental PhoenX ANYmal and G1 robot training examples to CUDA graph-leapfrog execution; pass `--execution-mode eager` for diagnostic launch-by-launch execution.
 - Allow experimental `TrainerSAC.update(read_stats=False)` to keep entropy temperature and loss diagnostics device-side without host synchronization.
 - Normalize experimental SAC observations with automatically tracked running moments by default, improving held-out PhoenX G1 tracking without reducing measured training throughput. Pass `ConfigSAC(normalize_observations=False)` to preserve raw observations.
 - Change the experimental PhoenX G1 train-to-gate benchmark to switch PPO replay ratio to 2.0 after the frozen 78.64M-sample screen, reducing the validated zero-training wall time while preserving the unchanged full gate. Pass `--late-replay-ratio 0` to disable the late replay schedule.
