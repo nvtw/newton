@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.examples import example_kapla_square_tower
+from newton._src.solvers.phoenx.examples import example_kapla_square_tower, example_kapla_tower
 from newton._src.solvers.phoenx.examples.example_kapla_tower import BRICK_DENSITY, GLOBAL_SCALING, GROUND_HEIGHT
 from newton._src.solvers.phoenx.examples.kapla_tower_data import BRICK_FULL_EXTENTS, ORIENTATIONS, POSITIONS
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
@@ -27,6 +27,18 @@ from newton.viewer import ViewerNull
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX Kapla regression tests require CUDA graph capture")
 class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
     """Primitive Kapla contacts must settle after graph-captured stepping."""
+
+    def test_tower_releases_warmup_damping(self) -> None:
+        """The tower must run undamped after its overlap warmup."""
+        example = example_kapla_tower.Example(
+            ViewerNull(),
+            SimpleNamespace(solver="classic", max_colors=10),
+        )
+        for _ in range(example.WARMUP_FRAMES + 1):
+            example.step()
+
+        self.assertEqual(example.world.get_global_linear_damping(), 0.0)
+        self.assertEqual(example.world.get_global_angular_damping(), 0.0)
 
     def test_reduced_kapla_slice_settles_after_speculative_contacts(self) -> None:
         """A real-data Kapla slice must not keep moving after settle.

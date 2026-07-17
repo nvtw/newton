@@ -104,6 +104,7 @@
 
 - Fix experimental PhoenX PPO adaptive KL increasing the learning rate when measured KL is exactly zero.
 - Fix experimental PhoenX Ant rollouts to terminate and reset non-finite or physically exploded states instead of retaining corrupted simulation state.
+- Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
 
 - Fix PhoenX Gauss-Seidel Kapla scenes gaining unbounded rotational energy or persistent vibration after contact and inertia optimizations.
 - Fix experimental PhoenX recurrent PPO replay to preserve the exact detached MinGRU state at rollout boundaries, avoid mutating persistent state during bootstrap evaluation, and synchronize recurrent state across graph-leapfrog trainers.

@@ -86,10 +86,6 @@ STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 USE_COLORED_CONTACT_HEADERS: bool = True
 USE_COLORED_CONTACT_ROWS: bool = True
 
-# Per-substep damping retained after the overlap-settle warmup. A small passive
-# decay prevents overflow-partition ordering noise from becoming visible motion.
-POST_WARMUP_DAMPING: float = 0.01
-
 # Tonge mass splitting (C# PhoenX default). When ``True`` the
 # partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
 # colours and any remainder goes to an overflow bucket solved with
@@ -562,8 +558,8 @@ class Example:
         # Release the warm-up damping pin once we're past the settle.
         # Toggling the device-side slot is capture-safe; no recapture.
         if self.frame_index == self.WARMUP_FRAMES:
-            self.world.set_global_linear_damping(POST_WARMUP_DAMPING)
-            self.world.set_global_angular_damping(POST_WARMUP_DAMPING)
+            self.world.set_global_linear_damping(0.0)
+            self.world.set_global_angular_damping(0.0)
         self._update_camera_collider()
         if self.graph is not None:
             wp.capture_launch(self.graph)

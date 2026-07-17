@@ -376,9 +376,9 @@ class _PhoenXScene:
     def _capture_graph(self) -> None:
         """Record the per-frame pipeline into a CUDA graph.
 
-        Called lazily by :meth:`step`. Runs :meth:`_simulate` once
-        eagerly (so every kernel involved compiles before capture
-        begins), then records a second invocation into the graph.
+        Called lazily by :meth:`step`. The eager :meth:`_simulate` compiles
+        every kernel and is the first public step; the captured invocation is
+        recorded for subsequent calls without advancing simulation state.
         """
         # Warm-up launch: compiles every kernel Warp might touch.
         self._simulate()
@@ -437,7 +437,8 @@ class _PhoenXScene:
     def step(self) -> None:
         if self._graph is None:
             self._capture_graph()
-        wp.capture_launch(self._graph)
+        else:
+            wp.capture_launch(self._graph)
 
     # -- state queries --
 
@@ -653,12 +654,17 @@ class TestPhoenXSolverStacking(unittest.TestCase):
             scene.step()
 
         pos = scene.body_position(body)
+        velocity = scene.body_velocity(body)
         t = n_frames * scene.frame_dt
         expected_z = 50.0 - 0.5 * _G * t * t
-        # Allow 3% tolerance for integrator drift across 30 frames.
+        expected_vz = -_G * t
+        # Velocity integration is exact for constant gravity; position has
+        # the expected small semi-implicit Euler truncation error.
+        self.assertAlmostEqual(float(velocity[2]), expected_vz, delta=1.0e-4)
         self.assertAlmostEqual(float(pos[2]), expected_z, delta=abs(expected_z) * 0.03)
         # XY should stay zero -- no force sideways.
         self.assertLess(float(np.hypot(pos[0], pos[1])), 1e-3)
+        self.assertLess(float(np.hypot(velocity[0], velocity[1])), 1e-6)
 
     # ------------------------------------------------------------------
     # Single box on plane
