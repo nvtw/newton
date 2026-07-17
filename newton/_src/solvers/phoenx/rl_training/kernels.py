@@ -2328,6 +2328,97 @@ def muon_ns_wide_kernel(
     dst[i, j] = coeff_a * x[i, j] + total
 
 
+MUON_TILE = 16
+MUON_TILE_BLOCK_DIM = 256
+
+
+@wp.kernel
+def muon_gram_wide_tiled_kernel(
+    x: wp.array2d[wp.float32],
+    cols: wp.int32,
+    gram: wp.array2d[wp.float32],
+):
+    row_tile, col_tile = wp.tid()
+    total = wp.tile_zeros(shape=(MUON_TILE, MUON_TILE), dtype=wp.float32)
+    inner_tiles = cols // wp.int32(MUON_TILE)
+    for tile in range(inner_tiles):
+        x_row = wp.tile_load(
+            x,
+            shape=(MUON_TILE, MUON_TILE),
+            offset=(row_tile * MUON_TILE, tile * MUON_TILE),
+        )
+        x_col = wp.tile_load(
+            x,
+            shape=(MUON_TILE, MUON_TILE),
+            offset=(col_tile * MUON_TILE, tile * MUON_TILE),
+        )
+        wp.tile_matmul(x_row, wp.tile_transpose(x_col), total)
+    wp.tile_store(gram, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+
+
+@wp.kernel
+def muon_poly_tiled_kernel(
+    gram: wp.array2d[wp.float32],
+    coeff_b: wp.float32,
+    coeff_c: wp.float32,
+    poly: wp.array2d[wp.float32],
+):
+    row_tile, col_tile = wp.tid()
+    total = wp.tile_zeros(shape=(MUON_TILE, MUON_TILE), dtype=wp.float32)
+    inner_tiles = gram.shape[0] // wp.int32(MUON_TILE)
+    for tile in range(inner_tiles):
+        lhs = wp.tile_load(
+            gram,
+            shape=(MUON_TILE, MUON_TILE),
+            offset=(row_tile * MUON_TILE, tile * MUON_TILE),
+        )
+        rhs = wp.tile_load(
+            gram,
+            shape=(MUON_TILE, MUON_TILE),
+            offset=(tile * MUON_TILE, col_tile * MUON_TILE),
+        )
+        wp.tile_matmul(lhs, rhs, total)
+    gram_tile = wp.tile_load(
+        gram,
+        shape=(MUON_TILE, MUON_TILE),
+        offset=(row_tile * MUON_TILE, col_tile * MUON_TILE),
+    )
+    total = coeff_c * total + coeff_b * gram_tile
+    wp.tile_store(poly, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+
+
+@wp.kernel
+def muon_ns_wide_tiled_kernel(
+    x: wp.array2d[wp.float32],
+    poly: wp.array2d[wp.float32],
+    coeff_a: wp.float32,
+    rows: wp.int32,
+    dst: wp.array2d[wp.float32],
+):
+    row_tile, col_tile = wp.tid()
+    total = wp.tile_zeros(shape=(MUON_TILE, MUON_TILE), dtype=wp.float32)
+    inner_tiles = rows // wp.int32(MUON_TILE)
+    for tile in range(inner_tiles):
+        poly_tile = wp.tile_load(
+            poly,
+            shape=(MUON_TILE, MUON_TILE),
+            offset=(row_tile * MUON_TILE, tile * MUON_TILE),
+        )
+        x_tile = wp.tile_load(
+            x,
+            shape=(MUON_TILE, MUON_TILE),
+            offset=(tile * MUON_TILE, col_tile * MUON_TILE),
+        )
+        wp.tile_matmul(poly_tile, x_tile, total)
+    source = wp.tile_load(
+        x,
+        shape=(MUON_TILE, MUON_TILE),
+        offset=(row_tile * MUON_TILE, col_tile * MUON_TILE),
+    )
+    total = total + coeff_a * source
+    wp.tile_store(dst, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+
+
 @wp.kernel
 def muon_step_2d_kernel(
     param: wp.array2d[wp.float32],

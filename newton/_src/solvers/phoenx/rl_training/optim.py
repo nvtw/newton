@@ -7,6 +7,8 @@ import numpy as np
 import warp as wp
 
 from .kernels import (
+    MUON_TILE,
+    MUON_TILE_BLOCK_DIM,
     OPTIMIZER_GRAD_PARTIAL_COUNT,
     adam_step_1d_kernel,
     adam_step_2d_kernel,
@@ -15,11 +17,14 @@ from .kernels import (
     grad_sumsq_partials_2d_kernel,
     muon_gram_tall_kernel,
     muon_gram_wide_kernel,
+    muon_gram_wide_tiled_kernel,
     muon_nesterov_2d_kernel,
     muon_normalize_2d_kernel,
     muon_ns_tall_kernel,
     muon_ns_wide_kernel,
+    muon_ns_wide_tiled_kernel,
     muon_poly_kernel,
+    muon_poly_tiled_kernel,
     muon_step_1d_kernel,
     muon_step_2d_kernel,
     optimizer_step_count_kernel,
@@ -385,6 +390,9 @@ class Muon:
                 use_tall_kernels = cols <= rows
                 logical_rows = cols
                 logical_cols = rows
+            use_tiled_wide = (
+                not use_tall_kernels and rows % MUON_TILE == 0 and cols % MUON_TILE == 0 and rows >= MUON_TILE
+            )
             for coeff_a, coeff_b, coeff_c in NS_COEFFS:
                 if use_tall_kernels:
                     wp.launch(
@@ -402,6 +410,31 @@ class Muon:
                         dim=param.shape,
                         inputs=[src, poly, coeff_a, cols],
                         outputs=[dst],
+                        device=param.device,
+                    )
+                elif use_tiled_wide:
+                    wp.launch_tiled(
+                        muon_gram_wide_tiled_kernel,
+                        dim=(rows // MUON_TILE, rows // MUON_TILE),
+                        inputs=[src, cols],
+                        outputs=[gram],
+                        block_dim=MUON_TILE_BLOCK_DIM,
+                        device=param.device,
+                    )
+                    wp.launch_tiled(
+                        muon_poly_tiled_kernel,
+                        dim=(rows // MUON_TILE, rows // MUON_TILE),
+                        inputs=[gram, coeff_b, coeff_c],
+                        outputs=[poly],
+                        block_dim=MUON_TILE_BLOCK_DIM,
+                        device=param.device,
+                    )
+                    wp.launch_tiled(
+                        muon_ns_wide_tiled_kernel,
+                        dim=(rows // MUON_TILE, cols // MUON_TILE),
+                        inputs=[src, poly, coeff_a, rows],
+                        outputs=[dst],
+                        block_dim=MUON_TILE_BLOCK_DIM,
                         device=param.device,
                     )
                 else:

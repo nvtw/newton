@@ -1280,6 +1280,40 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertFalse(optimizer.matrix_transpose)
         self.assertEqual(optimizer.step_count, 1)
 
+    def test_pufferlib_muon_tiled_wide_matrix_matches_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 tiled Muon parity tests")
+        rng = np.random.default_rng(20260717)
+        param_np = rng.uniform(-0.05, 0.05, (128, 384)).astype(np.float32)
+        grad_np = rng.uniform(-0.1, 0.1, (128, 384)).astype(np.float32)
+        param = wp.array(param_np, dtype=wp.float32, device=device, requires_grad=True)
+        param.grad.assign(grad_np)
+        optimizer = rl.Muon(
+            [param],
+            lr=0.02,
+            momentum=0.9,
+            eps=1.0e-12,
+            weight_decay=0.01,
+            max_grad_norm=0.3,
+        )
+
+        with wp.ScopedCapture(device=device) as capture:
+            optimizer.step()
+        wp.capture_launch(capture.graph)
+
+        expected_params, expected_momentum = _muon_reference_step(
+            [param_np],
+            [grad_np],
+            [np.zeros_like(param_np)],
+            lr=0.02,
+            mu=0.9,
+            eps=1.0e-12,
+            weight_decay=0.01,
+            max_grad_norm=0.3,
+        )
+        np.testing.assert_allclose(param.numpy(), expected_params[0], rtol=3.0e-5, atol=3.0e-5)
+        np.testing.assert_allclose(optimizer.m[0].numpy(), expected_momentum[0], rtol=2.0e-6, atol=2.0e-6)
+        np.testing.assert_array_equal(param.grad.numpy(), np.zeros_like(param_np))
+
     def test_pufferlib_muon_matches_warp_mlp_transposed_weight_layout(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 Muon WarpMLP layout parity tests")
         muon_py = _PUFFERLIB_ROOT / "pufferlib" / "muon.py"
