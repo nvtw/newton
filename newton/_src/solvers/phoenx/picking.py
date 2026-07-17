@@ -220,8 +220,8 @@ def _raycast_obb_kernel(
     out_tri: wp.array[wp.int32],
     lock: wp.array[wp.int32],
 ):
-    """Per-body OBB raycast. Bodies with non-positive half_extents are skipped
-    (marker for non-pickable bodies like the world anchor).
+    """Per-body OBB raycast. Bodies with non-positive half-extents or zero
+    inverse mass are skipped because they cannot respond to a picking force.
 
     Shares ``out_dist`` + ``lock`` with :func:`_raycast_cloth_tri_kernel`
     so the two raycasts produce a single closest hit across both
@@ -233,6 +233,11 @@ def _raycast_obb_kernel(
 
     he = half_extents[bid]
     if he[0] <= 0.0 or he[1] <= 0.0 or he[2] <= 0.0:
+        return
+    # Static and kinematic bodies cannot respond to the picking force. In
+    # particular, this prevents a camera-attached collider from intercepting
+    # every ray cast from the camera position.
+    if bodies.inverse_mass[bid] <= 0.0:
         return
 
     pos = bodies.position[bid]

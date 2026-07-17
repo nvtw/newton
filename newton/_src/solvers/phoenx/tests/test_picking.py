@@ -24,7 +24,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_lame_from_youngs_poisson_plane_stress,
 )
@@ -33,7 +33,7 @@ from newton._src.solvers.phoenx.picking import Picking
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
-def _build_scene(device):
+def _build_scene(device, *, kinematic_occluder: bool = False):
     """Tiny cloth + cube + ground scene matched to ``example_cloth_hanging``.
 
     Returns ``(model, world, picking, half_extents, cube_body_idx)``.
@@ -47,6 +47,14 @@ def _build_scene(device):
         mass=1.0,
     )
     builder.add_shape_box(cube_body, hx=cube_size, hy=cube_size, hz=cube_size)
+
+    occluder_body = None
+    if kinematic_occluder:
+        occluder_body = builder.add_body(
+            xform=wp.transform(p=wp.vec3(2.0, 0.0, 4.0), q=wp.quat_identity()),
+            mass=1.0,
+        )
+        builder.add_shape_box(occluder_body, hx=0.2, hy=0.2, hz=0.2)
 
     tri_ka, tri_ke = cloth_lame_from_youngs_poisson_plane_stress(5.0e8, 0.3)
     # Flat 2x2 cloth at z=1 in the y-z plane, centred at x=0.
@@ -93,6 +101,14 @@ def _build_scene(device):
         ],
         device=device,
     )
+    if occluder_body is not None:
+        occluder_slot = occluder_body + 1
+        motion_type = bodies.motion_type.numpy()
+        motion_type[occluder_slot] = int(MOTION_KINEMATIC)
+        bodies.motion_type.assign(motion_type)
+        inverse_mass = bodies.inverse_mass.numpy()
+        inverse_mass[occluder_slot] = 0.0
+        bodies.inverse_mass.assign(inverse_mass)
 
     constraints = PhoenXWorld.make_constraint_container(
         num_joints=0, num_cloth_triangles=int(model.tri_count), device=device
@@ -114,6 +130,8 @@ def _build_scene(device):
 
     half_extents_np = np.zeros((num_phoenx_bodies, 3), dtype=np.float32)
     half_extents_np[cube_body + 1] = (cube_size, cube_size, cube_size)
+    if occluder_body is not None:
+        half_extents_np[occluder_body + 1] = (0.2, 0.2, 0.2)
     half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=device)
     picking = Picking(world, half_extents, model=model, particles=world.particles)
     return model, world, picking, half_extents, cube_body
@@ -135,6 +153,15 @@ class TestPicking(unittest.TestCase):
         picking.release()
         self.assertFalse(picking.is_picking())
         self.assertEqual(int(picking._pick_body.numpy()[0]), -1)
+        self.assertEqual(int(picking._pick_tri.numpy()[0]), -1)
+
+    def test_rigid_pick_skips_kinematic_camera_collider(self):
+        """A camera-attached kinematic collider must not intercept picking."""
+        device = wp.get_preferred_device()
+        _, _, picking, _, cube_body = _build_scene(device, kinematic_occluder=True)
+        picking.pick(np.array([2.0, 0.0, 5.0], dtype=np.float32), np.array([0.0, 0.0, -1.0], dtype=np.float32))
+        self.assertTrue(picking.is_picking())
+        self.assertEqual(int(picking._pick_body.numpy()[0]), cube_body + 1)
         self.assertEqual(int(picking._pick_tri.numpy()[0]), -1)
 
     def test_cloth_pick_latches_triangle(self):
