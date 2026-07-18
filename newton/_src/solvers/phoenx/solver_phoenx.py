@@ -1233,12 +1233,6 @@ class PhoenXWorld:
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
         # Greedy per-world scratch. overflow flag is surfaced via step_report
         # but not raised mid-step (fallback is to flip _use_greedy_coloring off).
-        self._per_world_greedy_color_count: wp.array2d[wp.int32] = wp.zeros(
-            (nw, int(GREEDY_MAX_COLORS)), dtype=wp.int32, device=self.device
-        )
-        self._per_world_greedy_color_offsets: wp.array2d[wp.int32] = wp.zeros(
-            (nw, int(GREEDY_MAX_COLORS)), dtype=wp.int32, device=self.device
-        )
         self._per_world_greedy_color_family_count: wp.array2d[wp.int32] = wp.zeros(
             (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
             dtype=wp.int32,
@@ -3764,9 +3758,9 @@ class PhoenXWorld:
         wp.copy(self._world_csr_offsets, self._per_world_element_offsets)
         if self._use_greedy_coloring:
             self._per_world_greedy_overflow.zero_()
-            wp.launch_tiled(
+            wp.launch(
                 _per_world_greedy_coloring_kernel,
-                dim=[nw],
+                dim=nw,
                 inputs=[
                     self._per_world_element_offsets,
                     self._per_world_element_count,
@@ -3775,13 +3769,10 @@ class PhoenXWorld:
                     self._element_family,
                     self._partitioner._adjacency_section_end_indices,
                     self._partitioner._vertex_to_adjacent_elements,
-                    self._partitioner._packed_priorities,
                     int(GREEDY_MAX_COLORS),
                 ],
                 outputs=[
                     self._per_world_assigned,
-                    self._per_world_greedy_color_count,
-                    self._per_world_greedy_color_offsets,
                     self._per_world_greedy_color_family_count,
                     self._per_world_greedy_color_family_offsets,
                     self._world_element_ids_by_color,
@@ -3790,7 +3781,6 @@ class PhoenXWorld:
                     self._world_num_colors,
                     self._per_world_greedy_overflow,
                 ],
-                block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
                 device=self.device,
             )
             self._maybe_fallback_from_per_world_greedy_overflow(nw)

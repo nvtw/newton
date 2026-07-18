@@ -67,3 +67,48 @@ trace, median times included 528.4 us for per-world coloring, 267.6 us for
 contact matching, 208.6 us for warm-start gather, 140.0 us for current-to-prev
 state copy, and 130.1 us for sorted-state save. These costs explain most of the
 remaining gap to mini PhoenX.
+
+
+## F2 — one deterministic greedy thread per world
+
+The block-cooperative Jones-Plassmann colorer used 64 GPU threads, MIS rounds,
+block barriers, and atomic histogram/scatter operations for every small world.
+Mini C1 demonstrated that tens of thousands of RL worlds provide the required
+parallelism and that each tiny graph is cheaper to color serially. F2 therefore
+uses one deterministic smallest-free-color thread per world. It retains the
+same generic 1--8 endpoint interaction representation and family-grouped CSR;
+it is not restricted to contacts or a particular joint type.
+
+The serial owner initializes only color buckets it actually uses. Two
+`[world, 64]` histogram/cursor scratch planes and the unused priority input were
+removed. An attempted exact-priority selection variant is rejected: its
+quadratic local search regressed the 8K robot frame to 1.355 ms.
+
+Controlled 32K stack Nsight runs used 30 captured replays. The old and new
+final contact counts were 1,176,795 and 1,146,880, a 2.5% workload difference.
+
+| Metric | F1 block/MIS | F2 serial greedy | Change |
+| :--- | ---: | ---: | ---: |
+| Coloring kernel median | 528.41 us | **83.20 us** | **-84.3%** |
+| Captured frame | 3.880 ms | **3.211 ms** | **-17.2%** |
+| World-steps/s | 8.445 M | **10.206 M** | **+20.9%** |
+| Logical minimum bandwidth | 426.9 GB/s | **503.0 GB/s** | **+17.8%** |
+| Sequential DRAM roofline | 28.7% | **33.8%** | +5.1 points |
+| Random vec4 roofline | 41.2% | **48.5%** | +7.3 points |
+
+The bandwidth model deliberately reuses the mini C2 lower bound of 352 unique
+bytes/contact-iteration. It understates full-PhoenX traffic from matching,
+warm-start state, ingest, and sorting and is not a hardware-counter reading.
+Estimated contact-row compute is 0.643 TFLOP/s, or 0.73% of measured FP32 FMA.
+
+The longer 200-replay 32K run reaches **3.086 ms** and **10.618 M
+world-steps/s**, 1.30x the F0 baseline. Its final settled manifold has fewer
+contacts than F0, so the controlled profiler comparison above is the accepted
+performance claim. It is 7.7% slower than mini C2 sticky at 2.866 ms, but that
+cross-solver comparison also ends with different manifolds.
+
+Physics qualification passed 11 multi-world/color/contact/stacking/friction
+tests plus 41 tests covering mixed joint modes, basic joints, chain
+convergence, prismatic, ball-socket, and fixed constraints. The deterministic
+color order changes floating-point trajectories, as any PGS reorder does; the
+throughput result is accepted only with the preceding behavioral coverage.
