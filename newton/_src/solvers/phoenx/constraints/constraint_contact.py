@@ -51,9 +51,11 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_pd_bias,
     cc_get_pd_eff_soft,
     cc_get_pd_gamma,
+    cc_get_start_gap,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_set_start_gap,
 )
 from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
     ContactPatchFriction,
@@ -402,6 +404,31 @@ def _contact_gather_colored_rows_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _contact_gather_colored_rigid_rows_kernel(
+    source: ContactContainer,
+    destination: ContactContainer,
+    packed_headers: ContactColumnContainer,
+    offsets: wp.array[wp.int32],
+    source_indices: wp.array[wp.int32],
+    slots: wp.array[wp.int32],
+    total: wp.array[wp.int32],
+):
+    """Gather only persistent rigid rows; prepare overwrites all other derived state."""
+    destination_k = wp.tid()
+    if destination_k >= total[0]:
+        return
+    source_k = source_indices[destination_k]
+    slot = slots[destination_k]
+    if destination_k == offsets[slot]:
+        packed_headers.data[_OFF_CONTACT_FIRST, slot] = reinterpret_int_as_float(destination_k)
+    for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
+        destination.impulses[row, destination_k] = source.impulses[row, source_k]
+    for row in range(CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS):
+        destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
+    cc_set_start_gap(destination, destination_k, cc_get_start_gap(source, source_k))
+
+
+@wp.kernel(enable_backward=False)
 def _contact_scatter_colored_rows_kernel(
     source: ContactContainer,
     destination: ContactContainer,
@@ -503,10 +530,12 @@ def contact_gather_colored_rows(
     total: wp.array[wp.int32],
     row_capacity: int,
     device: wp.DeviceLike = None,
+    *,
+    rigid_only: bool = False,
 ) -> None:
     """Gather iterate rows and switch packed headers to color-order indices."""
     wp.launch(
-        _contact_gather_colored_rows_kernel,
+        _contact_gather_colored_rigid_rows_kernel if rigid_only else _contact_gather_colored_rows_kernel,
         dim=max(1, int(row_capacity)),
         inputs=[
             source,

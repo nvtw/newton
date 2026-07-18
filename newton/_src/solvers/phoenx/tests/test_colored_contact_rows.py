@@ -199,6 +199,7 @@ class TestColoredContactRows(unittest.TestCase):
                 total,
                 row_capacity,
                 device=device,
+                rigid_only=True,
             )
             wp.launch(_offset_packed_state, dim=row_capacity, inputs=[packed, total], device=device)
             contact_scatter_colored_rows(
@@ -218,12 +219,17 @@ class TestColoredContactRows(unittest.TestCase):
         np.testing.assert_array_equal(total.numpy(), np.array([21], dtype=np.int32))
         np.testing.assert_array_equal(source_indices.numpy()[:21], expected_order)
         np.testing.assert_array_equal(offsets.numpy(), np.array([0, 1, 1, 8], dtype=np.int32))
-        expected_packed_lambdas = lambda_np[:, expected_order].copy()
+        expected_packed_lambdas = np.zeros_like(lambda_np[:, expected_order])
+        expected_packed_lambdas[: CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS] = lambda_np[
+            : CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS, expected_order
+        ]
         expected_packed_lambdas[CC_LOCAL_ANCHOR_FIRST_ROW : CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS] += (
             20000.0
         )
         np.testing.assert_array_equal(packed.lambdas.numpy()[:, :21], expected_packed_lambdas)
-        np.testing.assert_array_equal(packed.derived.numpy()[:, :21], derived_np[:, expected_order])
+        expected_packed_derived = np.zeros_like(derived_np[:, expected_order])
+        expected_packed_derived[-1] = derived_np[-1, expected_order]
+        np.testing.assert_array_equal(packed.derived.numpy()[:, :21], expected_packed_derived)
 
         expected_impulses = impulse_np.copy()
         expected_impulses[:, :21] += 10000.0

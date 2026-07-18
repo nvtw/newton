@@ -4280,6 +4280,7 @@ class PhoenXWorld:
             self._contact_row_total,
             self.rigid_contact_max,
             device=self.device,
+            rigid_only=self._singleworld_rigid_direct(),
         )
 
     def _scatter_colored_contact_rows(self) -> None:
