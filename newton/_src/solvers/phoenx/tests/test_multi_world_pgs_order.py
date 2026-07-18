@@ -16,6 +16,8 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx import solver_phoenx, solver_phoenx_kernels
+from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
 from newton._src.solvers.phoenx.solver_phoenx import _choose_fast_tail_solve_schedule
 from newton._src.solvers.phoenx.tests.test_robot_policy_parity import (
     _g1_29dof_yaml,
@@ -57,6 +59,88 @@ def _wp_int32_arg_expr(node: ast.AST) -> str | None:
     ):
         return None
     return ast.unparse(node)
+
+
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "PhoenX world bucketing tests run on CUDA only.",
+)
+class TestMultiWorldStableBucketing(unittest.TestCase):
+    def test_monotone_run_merge_matches_stable_world_sort(self) -> None:
+        device = wp.get_preferred_device()
+        world_ids = np.array([2, 0, 1, 1, -1, 3, 0, 2, 1, 0, 3, -1, 2, 2, 0], dtype=np.int32)
+        element_count = len(world_ids)
+        element_dtype = np.dtype({"names": ["bodies"], "formats": ["8i4"], "offsets": [0], "itemsize": 32})
+        host_elements = np.zeros(element_count, dtype=element_dtype)
+        host_elements["bodies"][:] = -1
+        for cid, world_id in enumerate(world_ids):
+            if world_id >= 0:
+                host_elements["bodies"][cid, 0] = cid
+
+        elements = wp.array(
+            host_elements,
+            dtype=ElementInteractionData,
+            device=device,
+        )
+        num_elements = wp.array([element_count], dtype=wp.int32, device=device)
+        bodies = body_container_zeros(element_count, device=device)
+        bodies.world_id.assign(np.maximum(world_ids, 0))
+        particle_world = wp.zeros(1, dtype=wp.int32, device=device)
+        counts = wp.zeros(4, dtype=wp.int32, device=device)
+        shifted = wp.zeros(5, dtype=wp.int32, device=device)
+        offsets = wp.zeros(5, dtype=wp.int32, device=device)
+        run_flags = wp.zeros(element_count, dtype=wp.int32, device=device)
+        run_ids = wp.zeros(element_count, dtype=wp.int32, device=device)
+        run_starts = wp.zeros(element_count, dtype=wp.int32, device=device)
+        num_runs = wp.zeros(1, dtype=wp.int32, device=device)
+        output = wp.full(element_count, -1, dtype=wp.int32, device=device)
+
+        wp.launch(
+            solver_phoenx_kernels._count_and_mark_world_runs_kernel,
+            dim=element_count,
+            inputs=[
+                elements,
+                num_elements,
+                bodies,
+                particle_world,
+                wp.int32(element_count),
+            ],
+            outputs=[counts, shifted, run_flags],
+            device=device,
+        )
+        wp.utils.array_scan(shifted, offsets, inclusive=True)
+        wp.utils.array_scan(run_flags, run_ids, inclusive=True)
+        wp.launch(
+            solver_phoenx_kernels._scatter_monotone_world_run_starts_kernel,
+            dim=element_count,
+            inputs=[num_elements, run_flags, run_ids],
+            outputs=[run_starts, num_runs],
+            device=device,
+        )
+        wp.launch(
+            solver_phoenx_kernels._merge_monotone_world_runs_kernel,
+            dim=4,
+            inputs=[
+                elements,
+                bodies,
+                particle_world,
+                wp.int32(element_count),
+                wp.int32(4),
+                offsets,
+                num_elements,
+                run_starts,
+                num_runs,
+            ],
+            outputs=[output],
+            device=device,
+        )
+
+        expected = [
+            cid for world_id in range(4) for cid, element_world in enumerate(world_ids) if element_world == world_id
+        ]
+        np.testing.assert_array_equal(offsets.numpy(), np.array([0, 4, 7, 11, 13], dtype=np.int32))
+        np.testing.assert_array_equal(output.numpy()[: len(expected)], np.asarray(expected, dtype=np.int32))
+        self.assertEqual(int(num_runs.numpy()[0]), 8)
 
 
 class TestMultiWorldColoringContract(unittest.TestCase):

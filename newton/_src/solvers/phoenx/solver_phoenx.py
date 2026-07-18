@@ -131,7 +131,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
 from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
     FixedIterationLubyPartitioner,
 )
-from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int
 from newton._src.solvers.phoenx.islands.island_builder import (
     MAX_BODIES_PER_INTERACTION,
     UnionFindIslandBuilder,
@@ -185,15 +184,15 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _PER_WORLD_FAST_FAMILIES,
     _STRAGGLER_BLOCK_DIM,
-    _build_scatter_keys_kernel,
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
     _constraints_to_elements_kernel,
-    _count_elements_per_world_kernel,
+    _count_and_mark_world_runs_kernel,
     _integrate_velocities_kernel,
     _kinematic_interpolate_substep_kernel,
     _kinematic_prepare_step_kernel,
+    _merge_monotone_world_runs_kernel,
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
@@ -203,6 +202,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _reduce_constraint_time_us_kernel,
     _reduce_contact_time_us_kernel,
     _reduce_total_colours_kernel,
+    _scatter_monotone_world_run_starts_kernel,
     _set_kinematic_pose_batch_kernel,
     _zero_constraint_time_us_kernel,
     _zero_contact_time_us_kernel,
@@ -1223,13 +1223,13 @@ class PhoenXWorld:
         self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._world_num_colors: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
 
-        # Per-world JP scratch. _per_world_elements / _per_world_scatter_keys
-        # are 2*cap (radix-sort ping-pong); _per_world_assigned is 1-based
-        # colour (0 = unassigned).
+        # Per-world coloring scratch. The first/second halves hold the stable
+        # world stream/run starts and run flags/scanned run ids, respectively.
+        # _per_world_assigned is 1-based colour (0 = unassigned).
         self._per_world_element_count: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
         self._per_world_element_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._per_world_elements: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
-        self._per_world_scatter_keys: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
+        self._per_world_run_scan: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
         self._per_world_node_color_mask: wp.array[wp.uint64] = wp.zeros(
             max(1, self.num_bodies + self.num_particles), dtype=wp.uint64, device=self.device
@@ -3708,16 +3708,22 @@ class PhoenXWorld:
         )
 
     def _build_per_world_coloring(self) -> None:
-        """Parallel per-world JP coloring: count -> scan -> stable bucket sort
-        -> one block per world runs JP MIS. Reuses partitioner adjacency CSR
-        (worlds are disjoint after static-null-out)."""
+        """Build deterministic per-world streams and color each world.
+
+        The CID stream is split into monotone world-id runs and stable-merged
+        in original order. Worlds are disjoint after static-null-out.
+        """
         nw = self.num_worlds
         cap = self._constraint_capacity
 
         self._per_world_element_count.zero_()
         self._world_totals_shifted.zero_()
+        run_flags = self._per_world_run_scan[:cap]
+        run_ids = self._per_world_run_scan[cap:]
+        run_starts = self._per_world_elements[cap:]
+        num_runs = self._world_totals_shifted[:1]
         wp.launch(
-            _count_elements_per_world_kernel,
+            _count_and_mark_world_runs_kernel,
             dim=cap,
             inputs=[
                 self._elements,
@@ -3726,37 +3732,39 @@ class PhoenXWorld:
                 self._particle_world_id,
                 wp.int32(self.num_bodies),
             ],
-            outputs=[self._per_world_element_count, self._world_totals_shifted],
+            outputs=[self._per_world_element_count, self._world_totals_shifted, run_flags],
             device=self.device,
         )
 
         wp.utils.array_scan(self._world_totals_shifted, self._per_world_element_offsets, inclusive=True)
 
-        # Stable sort scatter (deterministic; replaces atomic-cursor scatter).
+        # Stable linear bucketing without a global radix sort. Split the CID
+        # stream at every world-id decrease, then merge those monotone runs in
+        # original order so each world receives the same stable CID sequence.
+        wp.utils.array_scan(run_flags, run_ids, inclusive=True)
         wp.launch(
-            _build_scatter_keys_kernel,
+            _scatter_monotone_world_run_starts_kernel,
             dim=cap,
+            inputs=[self._num_active_constraints, run_flags, run_ids],
+            outputs=[run_starts, num_runs],
+            device=self.device,
+        )
+        wp.launch(
+            _merge_monotone_world_runs_kernel,
+            dim=nw,
             inputs=[
                 self._elements,
-                self._num_active_constraints,
                 self.bodies,
                 self._particle_world_id,
                 wp.int32(self.num_bodies),
-                wp.int32(cap),
+                wp.int32(nw),
+                self._per_world_element_offsets,
+                self._num_active_constraints,
+                run_starts,
+                num_runs,
             ],
-            outputs=[self._per_world_scatter_keys, self._per_world_elements],
+            outputs=[self._per_world_elements],
             device=self.device,
-        )
-        # The scatter key is the world id (< num_worlds); cap the radix passes
-        # to just the bits that range spans (e.g. 2 passes for <=64k worlds
-        # instead of the full 4). The INT32_MAX tail sentinel still sorts last
-        # because its low end_bit bits exceed any world id, so the grouping is
-        # identical to a full-width sort.
-        sort_variable_length_int(
-            self._per_world_scatter_keys,
-            self._per_world_elements,
-            self._num_active_constraints,
-            end_bit=max(1, int(self.num_worlds).bit_length()),
         )
 
         # Per-world JP/greedy clears assigned flags for each active world.

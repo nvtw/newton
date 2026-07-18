@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import time
 
@@ -134,17 +135,24 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
     for _ in range(args.warmup):
         wp.capture_launch(capture.graph)
     wp.synchronize_device(device)
+    cudart = None
+    if args.cuda_profiler_range:
+        cudart = ctypes.CDLL("libcudart.so")
+        cudart.cudaProfilerStart()
     start = time.perf_counter()
     for _ in range(args.replays):
         wp.capture_launch(capture.graph)
     wp.synchronize_device(device)
     elapsed = time.perf_counter() - start
+    if cudart is not None:
+        cudart.cudaProfilerStop()
 
     poses = state_0.body_q.numpy()
     velocities = state_0.body_qd.numpy()
     if not np.isfinite(poses).all() or not np.isfinite(velocities).all():
         raise RuntimeError("mini benchmark produced non-finite state")
     stats = solver.stats() if args.solver == "mini" else None
+    world_id_runs = None if args.solver == "mini" else int(solver.world._world_totals_shifted.numpy()[0])
     contacts_per_step = int(contacts.rigid_contact_count.numpy()[0])
     joint_types = model.joint_type.numpy() if model.joint_count else np.empty(0, dtype=np.int32)
     revolute_constraints = int(np.count_nonzero(joint_types == int(newton.JointType.REVOLUTE)))
@@ -196,6 +204,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         "device": device.name,
         "scene": args.scene,
         "worlds": args.worlds,
+        "world_id_runs": world_id_runs,
         "bodies_per_world": args.bodies_per_world,
         "contacts_per_step": contacts_per_step,
         "substeps": args.substeps,
@@ -249,6 +258,11 @@ def main() -> None:
     parser.add_argument("--settle-steps", type=int, default=30)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--replays", type=int, default=200)
+    parser.add_argument(
+        "--cuda-profiler-range",
+        action="store_true",
+        help="Bracket only timed graph replays with cudaProfilerStart/Stop for nsys.",
+    )
     args = parser.parse_args()
     if args.phoenx_threads_per_world != "auto":
         args.phoenx_threads_per_world = int(args.phoenx_threads_per_world)

@@ -163,15 +163,15 @@ __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
     "_PER_WORLD_FAST_FAMILIES",
     "_STRAGGLER_BLOCK_DIM",
-    "_build_scatter_keys_kernel",
     "_choose_fast_tail_worlds_per_block",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
     "_constraints_to_elements_kernel",
-    "_count_elements_per_world_kernel",
+    "_count_and_mark_world_runs_kernel",
     "_integrate_velocities_kernel",
     "_kinematic_interpolate_substep_kernel",
     "_kinematic_prepare_step_kernel",
+    "_merge_monotone_world_runs_kernel",
     "_per_world_jp_coloring_kernel",
     "_phoenx_apply_forces_and_gravity_kernel",
     "_phoenx_apply_global_damping_kernel",
@@ -354,7 +354,7 @@ def _element_world_id(
 
 
 @wp.kernel(enable_backward=False)
-def _count_elements_per_world_kernel(
+def _count_and_mark_world_runs_kernel(
     elements: wp.array[ElementInteractionData],
     num_elements: wp.array[wp.int32],
     bodies: BodyContainer,
@@ -363,51 +363,113 @@ def _count_elements_per_world_kernel(
     # out
     world_element_count: wp.array[wp.int32],  # [nw]
     world_element_offsets_shifted: wp.array[wp.int32],  # [nw+1], will be inclusive-scanned
+    run_flags: wp.array[wp.int32],  # [constraint_capacity]
 ):
-    """Atomic per-world element count. Writes raw count + shifted form so a
-    single inclusive scan produces (exclusive prefix, total)."""
+    """Count elements per world and mark nondecreasing world-id runs."""
     tid = wp.tid()
     n = num_elements[0]
     if tid == wp.int32(0):
         world_element_offsets_shifted[0] = wp.int32(0)
     if tid >= n:
+        run_flags[tid] = wp.int32(0)
         return
-    w = _element_world_id(elements[tid], bodies, particle_world_id, num_bodies)
-    if w < wp.int32(0):
+
+    world_id = _element_world_id(elements[tid], bodies, particle_world_id, num_bodies)
+    run_flags[tid] = wp.int32(0)
+    if tid == wp.int32(0):
+        run_flags[tid] = wp.int32(1)
+    else:
+        previous_world_id = _element_world_id(elements[tid - wp.int32(1)], bodies, particle_world_id, num_bodies)
+        if world_id < previous_world_id:
+            run_flags[tid] = wp.int32(1)
+
+    if world_id < wp.int32(0):
         return
-    wp.atomic_add(world_element_count, w, wp.int32(1))
-    wp.atomic_add(world_element_offsets_shifted, w + wp.int32(1), wp.int32(1))
+    wp.atomic_add(world_element_count, world_id, wp.int32(1))
+    wp.atomic_add(world_element_offsets_shifted, world_id + wp.int32(1), wp.int32(1))
 
 
 @wp.kernel(enable_backward=False)
-def _build_scatter_keys_kernel(
-    elements: wp.array[ElementInteractionData],
+def _scatter_monotone_world_run_starts_kernel(
     num_elements: wp.array[wp.int32],
+    run_flags: wp.array[wp.int32],
+    run_ids: wp.array[wp.int32],
+    run_starts: wp.array[wp.int32],
+    num_runs: wp.array[wp.int32],
+):
+    """Scatter scanned run boundaries and record the run count."""
+    tid = wp.tid()
+    n = num_elements[0]
+    if n == wp.int32(0):
+        if tid == wp.int32(0):
+            run_starts[0] = wp.int32(0)
+            num_runs[0] = wp.int32(0)
+        return
+    if tid >= n:
+        return
+    if run_flags[tid] != wp.int32(0):
+        run_starts[run_ids[tid] - wp.int32(1)] = tid
+    if tid == n - wp.int32(1):
+        num_runs[0] = run_ids[tid]
+
+
+@wp.func
+def _lower_bound_element_world(
+    elements: wp.array[ElementInteractionData],
     bodies: BodyContainer,
     particle_world_id: wp.array[wp.int32],
     num_bodies: wp.int32,
-    cap: wp.int32,
-    # out (size ``2 * cap`` -- ping-pong buffer for ``radix_sort_pairs``)
-    keys: wp.array[wp.int32],
-    values: wp.array[wp.int32],
+    start: wp.int32,
+    end: wp.int32,
+    target_world: wp.int32,
+) -> wp.int32:
+    lo = start
+    hi = end
+    while lo < hi:
+        mid = lo + (hi - lo) / wp.int32(2)
+        world_id = _element_world_id(elements[mid], bodies, particle_world_id, num_bodies)
+        if world_id < target_world:
+            lo = mid + wp.int32(1)
+        else:
+            hi = mid
+    return lo
+
+
+@wp.kernel(enable_backward=False)
+def _merge_monotone_world_runs_kernel(
+    elements: wp.array[ElementInteractionData],
+    bodies: BodyContainer,
+    particle_world_id: wp.array[wp.int32],
+    num_bodies: wp.int32,
+    num_worlds: wp.int32,
+    world_element_offsets: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    run_starts: wp.array[wp.int32],
+    num_runs: wp.array[wp.int32],
+    world_elements: wp.array[wp.int32],
 ):
-    """(key=world_id, value=cid) pairs for the per-world scatter sort.
-    Inactive/tail entries get key=INT32_MAX so they sort to the end."""
-    tid = wp.tid()
-    if tid >= cap:
+    """Stable-merge monotone CID runs into deterministic world buckets."""
+    world_id = wp.tid()
+    if world_id >= num_worlds:
         return
-    n = num_elements[0]
-    if tid >= n:
-        keys[tid] = wp.int32(2147483647)
-        values[tid] = wp.int32(-1)
-        return
-    w = _element_world_id(elements[tid], bodies, particle_world_id, num_bodies)
-    if w < wp.int32(0):
-        keys[tid] = wp.int32(2147483647)
-        values[tid] = wp.int32(-1)
-        return
-    keys[tid] = w
-    values[tid] = tid
+    output = world_element_offsets[world_id]
+    run_count = num_runs[0]
+    run = wp.int32(0)
+    while run < run_count:
+        start = run_starts[run]
+        end = num_elements[0]
+        if run + wp.int32(1) < run_count:
+            end = run_starts[run + wp.int32(1)]
+        first = _lower_bound_element_world(elements, bodies, particle_world_id, num_bodies, start, end, world_id)
+        last = _lower_bound_element_world(
+            elements, bodies, particle_world_id, num_bodies, first, end, world_id + wp.int32(1)
+        )
+        cid = first
+        while cid < last:
+            world_elements[output] = cid
+            output += wp.int32(1)
+            cid += wp.int32(1)
+        run += wp.int32(1)
 
 
 @wp.func

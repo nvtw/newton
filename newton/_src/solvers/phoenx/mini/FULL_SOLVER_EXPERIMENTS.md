@@ -210,6 +210,88 @@ variants, multi-world ordering, colored contacts, stacking/friction, mixed
 joint modes, chain convergence, prismatic, ball-socket, and fixed constraints.
 
 
+## F5 — phase-split control (rejected)
+
+Mini compiles preparation and PGS iteration as separate kernels, while the
+full block-world scheduler fuses both dispatchers. A generic compile-time phase
+prototype reused the existing joint/contact implementations and launched one
+prepare kernel followed by one iterate kernel. This tested register pressure
+and instruction-cache footprint without introducing a joint-specific solver.
+
+Two 3,000-replay runs per variant on the stable 8K mixed robot measured:
+
+| Variant | Runs | Median | Change |
+| :--- | ---: | ---: | ---: |
+| Fused prepare + iterate | 511.88, 513.66 us | 512.77 us | baseline |
+| Separate prepare / iterate | 510.94, 512.82 us | 511.88 us | -0.17% |
+
+The difference is below run variance. Any smaller phase kernels are offset by
+the extra graph launch, so this hypothesis is rejected and leaves no solver
+path behind. The result also narrows the representation work: an Nsight range
+on the same workload attributes about 194 us to full prepare/iterate versus
+about 146 us for mini preparation plus solve, while full world bucketing
+performs two additional radix passes costing about 21 us/frame. Removing or
+shrinking actual state and scheduling traffic is more promising than
+rearranging the same dispatcher code.
+
+
+## F6 — stable monotone-run world bucketing
+
+The unified CID stream is already piecewise world-monotone: model constraint
+families are world-grouped and Newton contacts arrive sorted by shape pair. The
+stable global world sort nevertheless performed two additional CUB radix
+passes on the 8K robot and moved the entire active stream through ping-pong
+buffers. F6 marks every world-id decrease, scans those run flags, and has one
+thread per world stable-merge the monotone runs with binary searches. Original
+CID order is preserved exactly within each world; inactive elements are
+excluded correctly and arbitrarily interleaved input remains supported. No
+atomic scatter or joint-specific path is
+introduced. Existing two-capacity radix scratch is reused for flags, run ids,
+run starts, and output, so allocation size does not grow.
+
+A detached worktree at commit `11899d34` provided an immediate source-bracketed
+control under the same GPU clock state. Both variants used 3,000 captured
+replays, sticky matching, 32,768 contact points, 65,536 revolute constraints,
+one substep, and four iterations:
+
+| Metric | F4/S2 radix control | F6 run merge | Change |
+| :--- | ---: | ---: | ---: |
+| Frame | 498.96 us | **474.57 us** | **-4.89%** |
+| World-steps/s | 16.418 M | **17.262 M** | **+5.14%** |
+| Useful-work bandwidth | 302.62 GB/s | **318.17 GB/s** | **+5.14%** |
+| Sequential bandwidth roofline | 20.32% | **21.37%** | +1.05 points |
+| Random-vec4 roofline | 29.19% | **30.69%** | +1.50 points |
+| FP32 FMA roofline | 0.494% | **0.519%** | +0.025 points |
+
+The benchmark now reports `world_id_runs`; this robot stream has two runs
+(joints and contacts). Against mini C4 at 344.65 us, full PhoenX narrows from
+about 1.45x in the bracketed control to **1.38x**.
+
+The same immediate bracket on the 32K above-L2 stack retained exactly 688,128
+contact points:
+
+| Metric | Radix control | F6 run merge | Change |
+| :--- | ---: | ---: | ---: |
+| Frame | 2.995 ms | **2.756 ms** | **-7.98%** |
+| World-steps/s | 10.942 M | **11.891 M** | **+8.67%** |
+| Useful-work bandwidth | 323.53 GB/s | **351.58 GB/s** | **+8.67%** |
+| Sequential bandwidth roofline | 21.73% | **23.61%** | +1.88 points |
+| Random-vec4 roofline | 31.20% | **33.91%** | +2.71 points |
+| FP32 FMA roofline | 0.471% | **0.512%** | +0.041 points |
+
+Nsight confirms the two world-bucketing radix passes disappear; the three
+remaining radix passes belong to Newton contact sorting/matching. A follow-on
+fused the 19.04 us run merge into the 24.23 us serial colorer, but the fused
+kernel measured 43.01 us. It rearranged rather than removed work, so the
+prototype is rejected and the simpler shared merge remains.
+
+Qualification passes an adversarial eight-run stable-order test, multi-world
+cloth particle ownership, world isolation, a 1,024-world stress scene,
+cached-prepare contacts, and representative ball-socket, revolute-limit, and
+prismatic-drive/limit tests. The adversarial test compares the exact output
+against a CPU stable world sort rather than merely checking finite physics.
+
+
 ## S0 — large single-world Kapla baseline
 
 The F2--F4 changes target independent-world ownership and block-world output;
