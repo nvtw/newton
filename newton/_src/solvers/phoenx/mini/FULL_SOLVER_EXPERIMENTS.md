@@ -112,3 +112,55 @@ tests plus 41 tests covering mixed joint modes, basic joints, chain
 convergence, prismatic, ball-socket, and fixed constraints. The deterministic
 color order changes floating-point trajectories, as any PGS reorder does; the
 throughput result is accepted only with the preceding behavioral coverage.
+
+## F3 — direct endpoint color ownership
+
+F2 still rebuilt a global adjacency CSR every step and then made each serial
+world owner walk that scattered CSR to discover forbidden colors. Mini colors
+directly from endpoint ownership. F3 applies that exact idea to the full
+solver: one 64-bit color mask is stored per unified body/particle node, and the
+world owner ORs the masks of an element's 1--8 endpoints. It clears only nodes
+touched by that world and stamps the selected bit back to those endpoints.
+The representation remains generic across all constraint families.
+
+The direct multi-world greedy path no longer launches adjacency clear, count,
+scan, store, or incremental-loop initialization. The single-world algorithms
+still build adjacency. If a multi-world graph exceeds 64 colors, the existing
+JP fallback first rebuilds adjacency and remains correct rather than consuming
+stale data.
+
+A controlled 8K robot A/B toggled only the now-unnecessary adjacency reset.
+Both variants used direct-mask coloring, 500 captured replays, sticky matching,
+32,768 final contacts, and 65,536 revolute constraints:
+
+| Variant | Frame | World-steps/s | Change |
+| :--- | ---: | ---: | ---: |
+| Rebuild unused adjacency | 535.20 us | 15.306 M | baseline |
+| Direct ownership only | **515.88 us** | **15.880 M** | **+3.75%** |
+
+The accepted full result represents 292.70 GB/s of useful prepared-row work:
+**19.66%** of sequential bandwidth, **28.23%** of random-vec4 bandwidth, and
+**48.01%** of random-scalar bandwidth. Estimated useful row compute is 0.419
+TFLOP/s, or **0.477%** of FP32 FMA peak. These are lower bounds: full-PhoenX
+matching, ingest, sorting, and scheduling bytes are deliberately excluded.
+
+On the identical current harness, tuned mini C4 sticky takes 344.65 us and
+reaches 438.11 GB/s, 29.42% of sequential bandwidth, 42.26% of random-vec4
+bandwidth, and 0.715% of FP32 peak. Full PhoenX is now 1.50x slower on this
+stable mixed contact/revolute scene; its remaining gap is no longer adjacency
+construction.
+
+The 32K above-L2 stack takes 2.971 ms over the standard 200 replays, or 11.028
+M world-steps/s. Its final 688,128-contact manifold gives a 326.09 GB/s useful
+work lower bound, 21.90% of sequential bandwidth, 31.45% of random-vec4
+bandwidth, and 0.475% of FP32 peak. A same-harness mini run takes 2.731 ms but
+ends with 1,026,090 contacts. Frame time and processed-contact rate are both
+reported because reordered PGS trajectories make the settled manifolds
+non-identical; the 9% frame-time gap alone is not a clean solver-throughput
+comparison.
+
+Nsight confirms the direct run contains element rebuilding, world bucketing,
+coloring, contact preparation, and the complete PGS solve, while the unused
+adjacency kernels are absent. Physics qualification passes 52 selected tests
+covering multi-world ordering, colored contacts, stacking/friction, mixed joint
+modes, chain convergence, prismatic, ball-socket, and fixed constraints.

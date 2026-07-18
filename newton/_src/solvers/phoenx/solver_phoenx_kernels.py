@@ -120,7 +120,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_side1_bary,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
-    GREEDY_MAX_COLORS,
     MAX_BODIES,
     ElementInteractionData,
     _lowest_set_bit,
@@ -570,8 +569,7 @@ def _per_world_greedy_coloring_kernel(
     # graph data
     elements: wp.array[ElementInteractionData],
     element_family: wp.array[wp.int32],
-    adjacency_end: wp.array[wp.int32],  # [num_bodies]
-    vertex_to_elements: wp.array[wp.int32],  # [cap * MAX_BODIES]
+    node_color_mask: wp.array[wp.uint64],  # one 64-color bit mask per body/particle
     max_colors: wp.int32,  # = GREEDY_MAX_COLORS, kept for parity with JP variant
     # scratch (caller zeros each step)
     assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
@@ -604,29 +602,27 @@ def _per_world_greedy_coloring_kernel(
     # avoided because each world owns and immediately consumes this slice.
     offset = wp.int32(0)
     while offset < count:
-        assigned[world_elements[base + offset]] = wp.int32(0)
+        eid = world_elements[base + offset]
+        assigned[eid] = wp.int32(0)
+        for j in range(MAX_BODIES):
+            node = elements[eid].bodies[j]
+            if node < wp.int32(0):
+                break
+            node_color_mask[node] = wp.uint64(0)
         offset += wp.int32(1)
 
     num_colors = wp.int32(0)
     offset = wp.int32(0)
     while offset < count:
         eid = world_elements[base + offset]
-        forbidden_mask = wp.int64(0)
+        forbidden_mask = wp.uint64(0)
         for j in range(MAX_BODIES):
-            b = elements[eid].bodies[j]
-            if b < wp.int32(0):
+            node = elements[eid].bodies[j]
+            if node < wp.int32(0):
                 break
-            adj_start = wp.int32(0)
-            if b > wp.int32(0):
-                adj_start = adjacency_end[b - wp.int32(1)]
-            adj_end_b = adjacency_end[b]
-            for k in range(adj_start, adj_end_b):
-                neighbor = vertex_to_elements[k]
-                neighbor_color = assigned[neighbor] - wp.int32(1)
-                if neighbor_color >= wp.int32(0) and neighbor_color < GREEDY_MAX_COLORS:
-                    forbidden_mask |= wp.int64(1) << wp.int64(neighbor_color)
+            forbidden_mask |= node_color_mask[node]
 
-        color = _lowest_set_bit(forbidden_mask ^ _PER_WORLD_FREE_COLOR_FLIP)
+        color = _lowest_set_bit(wp.int64(forbidden_mask) ^ _PER_WORLD_FREE_COLOR_FLIP)
         if color < wp.int32(0) or color >= max_colors:
             overflow_flag[0] = wp.int32(1)
             assigned[eid] = wp.int32(-1)
@@ -646,6 +642,12 @@ def _per_world_greedy_coloring_kernel(
                 num_colors = color + wp.int32(1)
 
             assigned[eid] = color + wp.int32(1)
+            color_bit = wp.uint64(1) << wp.uint64(color)
+            for j in range(MAX_BODIES):
+                node = elements[eid].bodies[j]
+                if node < wp.int32(0):
+                    break
+                node_color_mask[node] |= color_bit
             family = _element_fast_family(element_family[eid])
             family_slot = color * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
             color_family_count[w, family_slot] += wp.int32(1)

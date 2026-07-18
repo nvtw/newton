@@ -170,9 +170,12 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         estimated_flops = (contacts_per_step * 1100 + revolute_constraints * 1500) * iteration_scale
         roofline_model = "C1 contact/revolute algorithmic lower bound; no GPU counters"
     else:
-        logical_bytes = None
-        estimated_flops = None
-        roofline_model = "not modeled for PhoenX"
+        # Use the same prepared-row lower bound as mini C4 so full/mini
+        # throughput is compared on identical useful physics work. This omits
+        # full-PhoenX matching, ingest, sorting, and scheduling traffic.
+        logical_bytes = (contacts_per_step * 352 + revolute_constraints * 400) * iteration_scale
+        estimated_flops = (contacts_per_step * 450 + revolute_constraints * 600) * iteration_scale
+        roofline_model = "prepared contact/revolute useful-work lower bound; no GPU counters"
     logical_min_gbps = logical_bytes / elapsed / 1.0e9 if logical_bytes is not None else None
     estimated_tflops = estimated_flops / elapsed / 1.0e12 if estimated_flops is not None else None
     return {

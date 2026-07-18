@@ -66,6 +66,17 @@ class TestMultiWorldColoringContract(unittest.TestCase):
         launch_idx = source.index("_per_world_greedy_coloring_kernel")
         self.assertLess(clear_idx, launch_idx)
 
+    def test_direct_greedy_path_skips_adjacency_but_fallback_rebuilds_it(self) -> None:
+        step_source = inspect.getsource(solver_phoenx.PhoenXWorld.step)
+        self.assertIn(
+            'if self.step_layout == "single_world" or not self._use_greedy_coloring:',
+            step_source,
+        )
+        fallback_source = inspect.getsource(solver_phoenx.PhoenXWorld._maybe_fallback_from_per_world_greedy_overflow)
+        reset_idx = fallback_source.index("self._partitioner.reset")
+        fallback_idx = fallback_source.index("_per_world_jp_coloring_kernel")
+        self.assertLess(reset_idx, fallback_idx)
+
 
 class TestMultiWorldFastTailSolveContract(unittest.TestCase):
     def test_solve_schedule_traverses_all_colors_per_iteration(self) -> None:

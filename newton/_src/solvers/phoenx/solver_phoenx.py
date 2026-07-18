@@ -1231,6 +1231,9 @@ class PhoenXWorld:
         self._per_world_elements: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
         self._per_world_scatter_keys: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
+        self._per_world_node_color_mask: wp.array[wp.uint64] = wp.zeros(
+            max(1, self.num_bodies + self.num_particles), dtype=wp.uint64, device=self.device
+        )
         # Greedy per-world scratch. overflow flag is surfaced via step_report
         # but not raised mid-step (fallback is to flip _use_greedy_coloring off).
         self._per_world_greedy_color_family_count: wp.array2d[wp.int32] = wp.zeros(
@@ -2927,7 +2930,8 @@ class PhoenXWorld:
             self._dispatcher.begin_step()
         elif self._constraint_capacity > 0 and self._partition_active_this_step:
             if not reuse_partition:
-                self._partitioner.reset(self._elements, self._num_active_constraints)
+                if self.step_layout == "single_world" or not self._use_greedy_coloring:
+                    self._partitioner.reset(self._elements, self._num_active_constraints)
                 if self.step_layout == "single_world":
                     compute_family_starts = self._singleworld_needs_family_starts()
                     if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
@@ -3679,6 +3683,7 @@ class PhoenXWorld:
         if int(flag.numpy()[0]) == 0:
             return
         self._use_greedy_coloring = False
+        self._partitioner.reset(self._elements, self._num_active_constraints)
         wp.launch_tiled(
             _per_world_jp_coloring_kernel,
             dim=[nw],
@@ -3767,8 +3772,7 @@ class PhoenXWorld:
                     self._per_world_elements,
                     self._elements,
                     self._element_family,
-                    self._partitioner._adjacency_section_end_indices,
-                    self._partitioner._vertex_to_adjacent_elements,
+                    self._per_world_node_color_mask,
                     int(GREEDY_MAX_COLORS),
                 ],
                 outputs=[
