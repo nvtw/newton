@@ -55,6 +55,7 @@
 ### Changed
 
 - Improve `BroadPhaseSAP` performance on anisotropic scenes with denser projection-axis coverage and longer best-axis reuse.
+- Scale the PhoenX Kapla example's persistent contact grid with GPU SM count to hide contact-state load latency without changing solver results.
 
 - Default experimental PhoenX ANYmal and G1 robot training examples to CUDA graph-leapfrog execution; pass `--execution-mode eager` for diagnostic launch-by-launch execution.
 - Allow experimental `TrainerSAC.update(read_stats=False)` to keep entropy temperature and loss diagnostics device-side without host synchronization.

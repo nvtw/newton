@@ -357,10 +357,9 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
-            # A 384-block persistent grid recovers the packed-row throughput
-            # without the overflow-partition vibration seen with the larger
-            # automatic grid used by packed contact headers.
-            max_thread_blocks=384,
+            # Scale the latency-hiding grid with the GPU. Color-ordered rows
+            # make its result independent of launch geometry.
+            max_thread_blocks=8 * self.device.sm_count,
             mass_splitting=ENABLE_MASS_SPLITTING and solver_flavor == "standard",
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,

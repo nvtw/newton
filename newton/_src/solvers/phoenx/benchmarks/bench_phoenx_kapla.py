@@ -95,7 +95,11 @@ class _HeadlessViewer:
         pass
 
     def set_camera(self, **kwargs):
-        pass
+        pos = kwargs.get("pos")
+        if pos is not None:
+            self.camera.pos.x = float(pos[0])
+            self.camera.pos.y = float(pos[1])
+            self.camera.pos.z = float(pos[2])
 
     def begin_frame(self, t):
         pass

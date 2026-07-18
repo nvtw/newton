@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.benchmarks.bench_phoenx_kapla import _HeadlessViewer
 from newton._src.solvers.phoenx.examples import example_kapla_square_tower, example_kapla_tower
 from newton._src.solvers.phoenx.examples.example_kapla_tower import BRICK_DENSITY, GLOBAL_SCALING, GROUND_HEIGHT
 from newton._src.solvers.phoenx.examples.kapla_tower_data import BRICK_FULL_EXTENTS, ORIENTATIONS, POSITIONS
@@ -27,6 +28,16 @@ from newton.viewer import ViewerNull
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX Kapla regression tests require CUDA graph capture")
 class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
     """Primitive Kapla contacts must settle after graph-captured stepping."""
+
+    def test_benchmark_camera_tracks_configured_collider_position(self) -> None:
+        viewer = _HeadlessViewer()
+        viewer.set_camera(pos=wp.vec3(1.2, 0.75, 0.4))
+        np.testing.assert_allclose(
+            (viewer.camera.pos.x, viewer.camera.pos.y, viewer.camera.pos.z),
+            (1.2, 0.75, 0.4),
+            rtol=0.0,
+            atol=1.0e-6,
+        )
 
     def test_tower_starts_clear_and_settles_without_jitter(self) -> None:
         """The undamped tower and camera collider must settle without jitter."""
@@ -42,6 +53,7 @@ class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
         self.assertIsNotNone(example._camera_body_newton_id)
         self.assertIsNotNone(example.picking)
         self.assertEqual(example.model.body_count, sum(len(cell) for cell in example._brick_newton_ids) + 1)
+        self.assertEqual(example.world._max_thread_blocks, 8 * example.device.sm_count)
 
         camera_pos = np.asarray(example._camera_collider_initial_pos)
         brick_centres = POSITIONS * GLOBAL_SCALING
