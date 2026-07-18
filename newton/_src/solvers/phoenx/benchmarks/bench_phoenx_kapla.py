@@ -100,6 +100,7 @@ class BenchResult:
     fp32_peak_percent: float
     roofline_basis: str
     blocks_per_sm: int
+    colored_contact_layout: bool
 
 
 class _HeadlessViewer:
@@ -147,6 +148,7 @@ def _run_one(
     measured_frames: int,
     grid_dims: tuple[int, int],
     blocks_per_sm: int,
+    colored_contact_layout: bool,
 ) -> BenchResult:
     """Build the scene, run warmup + steady-state, return measurements."""
     # Import here so the module loads cheap (parser help, etc.).
@@ -154,6 +156,8 @@ def _run_one(
 
     ek.TOWER_GRID_DIMS = grid_dims
     ek.ENABLE_MASS_SPLITTING = mass_splitting
+    ek.USE_COLORED_CONTACT_HEADERS = colored_contact_layout
+    ek.USE_COLORED_CONTACT_ROWS = colored_contact_layout
 
     if mass_splitting and prepare_refresh_stride != 1:
         raise ValueError("prepare_refresh_stride > 1 is only supported with --mass-splitting off")
@@ -215,6 +219,7 @@ def _run_one(
         fp32_peak_percent=100.0 * estimated_tflops / _FP32_TFLOPS,
         roofline_basis="352 B and 450 FLOP per final contact-point iteration; useful-work estimate, no GPU counters",
         blocks_per_sm=blocks_per_sm,
+        colored_contact_layout=colored_contact_layout,
     )
 
 
@@ -330,6 +335,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--grid", type=int, default=1, help="Tower grid edge length (default 1 = 1x1).")
     p.add_argument("--blocks-per-sm", type=int, default=8, help="Persistent-grid blocks per GPU SM.")
+    p.add_argument(
+        "--colored-contact-layout",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Use color-ordered contact headers and rows; auto enables them with mass splitting.",
+    )
     p.add_argument("--write-baseline", action="store_true", help="Persist results as the new baseline.")
     p.add_argument("--check", action="store_true", help="Compare to baseline; exit nonzero on regression.")
     p.add_argument("--json", action="store_true", help="Print results as JSON instead of a table.")
@@ -354,6 +365,11 @@ def main(argv: list[str] | None = None) -> int:
     results: list[BenchResult] = []
     grid_dims = (args.grid, args.grid)
     for cfg in configs:
+        colored_contact_layout = (
+            cfg["mass_splitting"] if args.colored_contact_layout == "auto" else args.colored_contact_layout == "on"
+        )
+        if colored_contact_layout and not cfg["mass_splitting"]:
+            p.error("--colored-contact-layout on requires --mass-splitting on")
         r = _run_one(
             mass_splitting=cfg["mass_splitting"],
             substeps=cfg["substeps"],
@@ -363,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
             measured_frames=args.frames,
             grid_dims=grid_dims,
             blocks_per_sm=args.blocks_per_sm,
+            colored_contact_layout=colored_contact_layout,
         )
         results.append(r)
         if not args.json:

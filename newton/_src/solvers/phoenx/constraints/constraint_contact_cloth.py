@@ -1013,12 +1013,11 @@ def _make_contact_iterate_at(
         Sequential Gauss-Seidel within the pair; per-contact normal row
         first (clamp lam_n >= 0), then two tangent rows under the
         two-regime circular Coulomb cone. ``use_bias=False`` is the
-        relax pass; speculative normal rows always keep the gap bias.
+        relax pass; speculative normal rows always keep the gap bias. The
+        dispatchers exclude reduced-owned columns before calling this
+        single-sweep path; their multi-sweep path keeps its explicit guard.
         """
         _ = base_offset
-
-        if constraints.articulation_owner[cid] >= wp.int32(0):
-            return
 
         b1 = body_pair.b1
         b2 = body_pair.b2

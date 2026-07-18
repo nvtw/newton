@@ -83,6 +83,8 @@ def _run_worker_script(
         "class A: pass\n"
         "\n"
         f"ek.ENABLE_MASS_SPLITTING = {mass_splitting!r}\n"
+        f"ek.USE_COLORED_CONTACT_HEADERS = {mass_splitting!r}\n"
+        f"ek.USE_COLORED_CONTACT_ROWS = {mass_splitting!r}\n"
         f"ek.TOWER_GRID_DIMS = ({grid_side}, {grid_side})\n"
         "ex = ek.Example(V(), A())\n"
         "# Warmup: damping released after WARMUP_FRAMES, then a few more so\n"

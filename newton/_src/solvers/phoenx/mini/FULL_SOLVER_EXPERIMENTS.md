@@ -245,3 +245,65 @@ around 76.7--76.9 FPS. The existing 8-block launch lies on the plateau, so no
 scene-size launch heuristic is added. The next accepted single-world change
 must improve both 1x1 and 2x2, preserve the contact trajectory within the
 physics tolerances, and report both frame time and useful work.
+
+
+## S1 — color-ordered contact locality control
+
+A source-identical A/B toggled the existing color-ordered contact headers and
+rows while keeping mass splitting, PGS iteration count, collision, and final
+contact manifolds fixed. This measures the single-world representation lever
+rather than attributing old locality work to F2--F4.
+
+| Scene | Canonical contact order | Color order | Change |
+| :--- | ---: | ---: | ---: |
+| Kapla 1x1 | 67.19 FPS | **76.74 FPS** | **+14.2%** |
+| Kapla 2x2 above L2 | 21.37 FPS | **33.16 FPS** | **+55.2%** |
+
+The 2x2 useful-work rate rises from about 900.5 to 1,397.2 GB/s, or 60.5% to
+93.8% of the measured sequential bandwidth ceiling. This is the strongest
+large-single-world evidence so far: color-slot packing converts scattered PGS
+row access into a near-streaming workload, and its advantage grows rather than
+shrinks when the working set leaves L2. Future full-solver representations
+should extend this one generic packed stream instead of adding joint-type or
+scene-specific solve paths.
+
+A follow-on removed the per-point row-to-column slot map. Packed headers keep
+both canonical and colored first-contact indices, so in principle the solver
+header could remain colored between frames. The change removed a 4 MB map and
+about 20 MB/frame of map write/read traffic in 2x2. A bracketed source A/B,
+however, measured 1x1 76.82 -> 76.36 FPS (-0.6%) and 2x2 33.08 -> 33.25 FPS
+(+0.5%). The trade is below the noise floor and fails the requirement that
+both cache-resident and above-L2 scenes improve. The prototype is rejected and
+leaves no solver code behind.
+
+
+## S2 — eliminate unreachable contact-owner loads
+
+The single-sweep contact iterate read ``articulation_owner[cid]`` before every
+column solve. That guard was unreachable work: the single-world and fast-tail
+factory flags compile classic contacts out when a reduced articulation owns
+the contact pipeline, while block-world/multi-sweep dispatch uses a different
+entry point that retains its explicit ownership guard. The only callers of the
+single-sweep wrappers are the shared single-world dispatcher functions, so the
+load and branch can be removed once from the common contact implementation;
+no joint-type or scene-specific path is introduced.
+
+A source-bracketed Kapla measurement with identical contact counts gives:
+
+| Scene | S1 | S2 | Change | S2 useful-work bandwidth |
+| :--- | ---: | ---: | ---: | ---: |
+| Kapla 1x1 | 76.82 FPS | **78.92 FPS** | **+2.7%** | 835.20 GB/s (56.1% sequential) |
+| Kapla 2x2 above L2 | 33.08 FPS | **34.40 FPS** | **+4.0%** | 1,449.55 GB/s (**97.3% sequential**) |
+
+The 2x2 estimate is now within 2.7% of the independently measured sequential
+bandwidth ceiling. Its estimated useful contact compute is 1.85 TFLOP/s, or
+2.11% of FP32 peak; the workload remains bandwidth-shaped. Nsight confirms the
+dominant persistent kernel falls from about 5.75 to 5.50 us per launch (-4.3%)
+and another sweep variant from 5.94 to 5.30 us (-10.8%); collision kernels are
+unchanged.
+
+Physics qualification passes 12 CUDA-graph tests: color-ordered row round-trip
+and stack parity, the long reduced Kapla regression, maximal-contact fallback,
+world-serial mixed contacts, and both cloth/reduced ownership-disjointness
+cases. Those mixed tests directly exercise the ownership invariant rather than
+only checking a rigid tower for finite values.
