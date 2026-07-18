@@ -31,6 +31,7 @@
 - Reject incompatible custom attribute and frequency definitions before composing `ModelBuilder` instances.
 - Fix `cloth_franka` example rendering particles at simulation scale (cm) instead of viewer scale (m)
 - Fix `ModelBuilder` merges to accept array-valued transform fields and plain-list particle color groups.
+- Fix `SensorTiledCamera` deformable triangle rendering to respect per-particle world indices.
 
 ## [1.4.0] - 2026-07-16
 
