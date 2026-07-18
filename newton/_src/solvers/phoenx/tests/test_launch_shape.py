@@ -29,6 +29,7 @@ import warp as wp
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _STRAGGLER_BLOCK_DIM,
     get_fast_tail_kernel,
+    get_singleworld_kernel,
 )
 from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
 
@@ -78,6 +79,21 @@ def _collect_launches(world, *, step_dt: float = 1.0 / 60.0) -> list[dict]:
     with patch("warp.launch", spy), patch("newton._src.solvers.phoenx.solver_phoenx.wp.launch", spy):
         world.step(dt=step_dt, contacts=None, shape_body=None)
     return captured
+
+
+class TestPhoenXSingleWorldLaunchMetadata(unittest.TestCase):
+    """Compile-time launch properties of the single-world solver."""
+
+    def test_persistent_kernels_disable_generated_grid_stride(self) -> None:
+        """The persistent kernels already implement their own stride loop."""
+        for phase in ("prepare", "iterate", "relax"):
+            kernel = get_singleworld_kernel(
+                phase=phase,
+                fused=False,
+                revolute_only=True,
+                cloth_support=False,
+            )
+            self.assertIs(kernel.options.get("grid_stride"), False)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX launch-shape tests require CUDA")

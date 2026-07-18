@@ -3852,7 +3852,7 @@ def _make_singleworld_persistent_kernel(
         enable_column_timers=enable_column_timers,
     )
 
-    @wp.kernel(enable_backward=False, module="unique")
+    @wp.kernel(enable_backward=False, module="unique", grid_stride=False)
     def kernel(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,

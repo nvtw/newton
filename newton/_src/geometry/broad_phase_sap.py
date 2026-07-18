@@ -368,7 +368,7 @@ def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any):
 
     _module = f"sap_broadphase_{filter_func.__name__}_{filter_data_type.__name__}"
 
-    @wp.kernel(enable_backward=False, module=_module)
+    @wp.kernel(enable_backward=False, module=_module, grid_stride=False)
     def kernel(
         shape_bounding_box_lower: wp.array[wp.vec3],
         shape_bounding_box_upper: wp.array[wp.vec3],

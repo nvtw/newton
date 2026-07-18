@@ -2167,6 +2167,10 @@ class TestBroadPhase(unittest.TestCase):
         gaps = np.diff(np.concatenate((angles, angles[:1] + np.pi)))
         self.assertLessEqual(float(gaps.max()), np.deg2rad(15.1))
 
+    def test_sap_sweep_disables_generated_grid_stride(self):
+        sap_bp = BroadPhaseSAP(np.array([0], dtype=np.int32))
+        self.assertIs(sap_bp._kernel.options.get("grid_stride"), False)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)
