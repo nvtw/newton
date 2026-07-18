@@ -208,3 +208,40 @@ family-group flag sped up block-world but repeatedly regressed fast-tail to
 Physics qualification passes 53 selected tests spanning both scheduler
 variants, multi-world ordering, colored contacts, stacking/friction, mixed
 joint modes, chain convergence, prismatic, ball-socket, and fixed constraints.
+
+
+## S0 — large single-world Kapla baseline
+
+The F2--F4 changes target independent-world ownership and block-world output;
+they are not expected to improve one large connected island. A separate
+single-world baseline now prevents multi-world wins from hiding a Kapla
+regression. The production-style case has 6 substeps, 10 PGS iterations, two
+physics ticks per reported frame, mass splitting, point friction, and the
+Newton SAP/narrow-phase/matching pipeline.
+
+| Scene | Bodies | Final points / columns | Colors | Frame | Useful-work bandwidth | Sequential roofline | Random-vec4 roofline | FP32 roofline |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Canonical 1x1 | 11,341 | 250,847 / 72,022 | 9 | 12.948 ms (77.23 FPS) | 818.32 GB/s | 54.95% | 78.93% | 1.19% |
+| Above-L2 2x2 | 45,361 | 997,472 / 287,150 | 9 | 29.957 ms (33.38 FPS) | 1,406.47 GB/s | **94.45%** | 135.65% | 2.05% |
+
+These are algorithmic useful-work estimates, not GPU-counter readings: 352
+bytes and 450 FLOP per final contact-point iteration, using the final contact
+count as an approximation for the measured trajectory. Exceeding the
+random-vec4 microbenchmark is possible because contact columns reuse body
+state and mass-splitting slots across several points. The 2x2 sequential
+percentage is the meaningful upper comparison: at 94.45%, wholesale extra
+row traffic cannot plausibly help.
+
+Nsight Systems shows why the recent multi-world coloring work does not move
+Kapla. On 1x1, persistent prepare/iterate/relax plus mass-splitting averaging
+consume about 71% of GPU time; coloring histogram/scatter and speculative
+coloring are about 1%. On 2x2 the solver kernels are about 58%, SAP 8.6%,
+narrow phase 6.3%, radix sorting 5.7%, and contact matching 2.1%. Collision and
+sorting therefore become material as the working set leaves L2.
+
+A controlled persistent-grid sweep at 1x1 tested 4, 6, 8, 10, and 12
+one-warp blocks per SM. Four blocks measured 75.12 FPS; 6--12 blocks were flat
+around 76.7--76.9 FPS. The existing 8-block launch lies on the plateau, so no
+scene-size launch heuristic is added. The next accepted single-world change
+must improve both 1x1 and 2x2, preserve the contact trajectory within the
+physics tolerances, and report both frame time and useful work.

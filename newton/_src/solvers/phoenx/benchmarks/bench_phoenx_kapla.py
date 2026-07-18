@@ -64,6 +64,13 @@ _FPS_TOLERANCE: float = 0.05
 # +50 % from the recorded baseline before failing.
 _DRIFT_TOLERANCE: float = 0.50
 
+# RTX PRO 6000 Blackwell ceilings measured by mini/bench_hardware_roofline.py.
+_SEQUENTIAL_GBPS: float = 1489.14
+_RANDOM_VEC4_GBPS: float = 1036.82
+_FP32_TFLOPS: float = 87.810
+_CONTACT_ITERATION_BYTES: float = 352.0
+_CONTACT_ITERATION_FLOPS: float = 450.0
+
 
 @dataclass
 class BenchResult:
@@ -81,6 +88,18 @@ class BenchResult:
     max_z: float
     min_z: float
     finite: bool
+    body_count: int
+    contact_points: int
+    contact_columns: int
+    num_colors: int
+    frame_ms: float
+    logical_min_gbps: float
+    sequential_bandwidth_percent: float
+    random_vec4_bandwidth_percent: float
+    estimated_tflops: float
+    fp32_peak_percent: float
+    roofline_basis: str
+    blocks_per_sm: int
 
 
 class _HeadlessViewer:
@@ -127,6 +146,7 @@ def _run_one(
     warmup_frames: int,
     measured_frames: int,
     grid_dims: tuple[int, int],
+    blocks_per_sm: int,
 ) -> BenchResult:
     """Build the scene, run warmup + steady-state, return measurements."""
     # Import here so the module loads cheap (parser help, etc.).
@@ -139,6 +159,7 @@ def _run_one(
         raise ValueError("prepare_refresh_stride > 1 is only supported with --mass-splitting off")
 
     ex = ek.Example(_HeadlessViewer(), _HeadlessArgs())
+    ex.world._singleworld_total_threads = blocks_per_sm * ex.device.sm_count * 32
     ex.world.solver_iterations = solver_iterations
     ex.world.substeps = substeps
     ex.world.prepare_refresh_stride = prepare_refresh_stride
@@ -164,6 +185,11 @@ def _run_one(
     fps = measured_frames / elapsed
     drift = np.linalg.norm(pos_end - pos_start, axis=1)
     zs = pos_end[1:, 2]  # slot 0 is the static world anchor
+    report = ex.world.step_report()
+    contact_points = int(ex.contacts.rigid_contact_count.numpy()[0])
+    iteration_rate = contact_points * solver_iterations * substeps * ex.steps_per_frame * fps
+    logical_min_gbps = iteration_rate * _CONTACT_ITERATION_BYTES / 1.0e9
+    estimated_tflops = iteration_rate * _CONTACT_ITERATION_FLOPS / 1.0e12
     return BenchResult(
         mass_splitting=mass_splitting,
         substeps=substeps,
@@ -177,6 +203,18 @@ def _run_one(
         max_z=float(zs.max()),
         min_z=float(zs.min()),
         finite=bool(np.isfinite(pos_end).all()),
+        body_count=int(ex.model.body_count),
+        contact_points=contact_points,
+        contact_columns=report.num_contact_columns,
+        num_colors=report.num_colors,
+        frame_ms=1000.0 / fps,
+        logical_min_gbps=logical_min_gbps,
+        sequential_bandwidth_percent=100.0 * logical_min_gbps / _SEQUENTIAL_GBPS,
+        random_vec4_bandwidth_percent=100.0 * logical_min_gbps / _RANDOM_VEC4_GBPS,
+        estimated_tflops=estimated_tflops,
+        fp32_peak_percent=100.0 * estimated_tflops / _FP32_TFLOPS,
+        roofline_basis="352 B and 450 FLOP per final contact-point iteration; useful-work estimate, no GPU counters",
+        blocks_per_sm=blocks_per_sm,
     )
 
 
@@ -185,6 +223,8 @@ def _format_row(r: BenchResult) -> str:
     return (
         f"  {label:<24} fps={r.fps:6.2f}  drift mean={r.mean_drift_m:.4f}m "
         f"max={r.max_drift_m:.4f}m  z=[{r.min_z:.3f}, {r.max_z:.3f}]  "
+        f"contacts={r.contact_points}/{r.contact_columns} colors={r.num_colors} "
+        f"BW={r.logical_min_gbps:.1f}GB/s ({r.sequential_bandwidth_percent:.1f}% seq) "
         f"finite={r.finite}"
     )
 
@@ -289,10 +329,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p.add_argument("--grid", type=int, default=1, help="Tower grid edge length (default 1 = 1x1).")
+    p.add_argument("--blocks-per-sm", type=int, default=8, help="Persistent-grid blocks per GPU SM.")
     p.add_argument("--write-baseline", action="store_true", help="Persist results as the new baseline.")
     p.add_argument("--check", action="store_true", help="Compare to baseline; exit nonzero on regression.")
     p.add_argument("--json", action="store_true", help="Print results as JSON instead of a table.")
     args = p.parse_args(argv)
+
+    if args.blocks_per_sm < 1:
+        p.error("--blocks-per-sm must be >= 1")
 
     if args.prepare_refresh_stride != 1 and args.mass_splitting != "off":
         p.error("--prepare-refresh-stride > 1 requires --mass-splitting off")
@@ -318,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
             warmup_frames=args.warmup,
             measured_frames=args.frames,
             grid_dims=grid_dims,
+            blocks_per_sm=args.blocks_per_sm,
         )
         results.append(r)
         if not args.json:
