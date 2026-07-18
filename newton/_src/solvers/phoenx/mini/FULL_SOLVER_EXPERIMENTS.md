@@ -292,6 +292,67 @@ prismatic-drive/limit tests. The adversarial test compares the exact output
 against a CPU stable world sort rather than merely checking finite physics.
 
 
+## F7 — sparse optional revolute rows
+
+Matched CUDA-graph-node profiles isolate the remaining mixed-workload solver
+gap. At 8K worlds, full PhoenX's fused prepare/iterate kernel had a 177.01 us
+median, while mini's packed prepare and solve medians summed to 146.13 us
+(41.87 + 104.26 us). A contact-only control then showed that full PhoenX was
+already slightly faster per solved contact: 1.582 versus 1.548 billion
+constraint-iterations/s. The actionable gap was therefore the richer joint
+path, not contact packing.
+
+The register-cached revolute loop read drive coefficients, accumulated drive
+impulse, friction state, inverse axial mass, and the world hinge axis for every
+joint. It also evaluated the axial relative velocity and applied two
+inverse-inertia matrix products every sweep. Those operations are physically
+inactive when drive mode is off, no limit is clamped, and axial friction is
+zero. F7 derives one data-driven activity condition from the existing union
+fields, loads optional payload only for active rows, and skips the zero axial
+solve for passive hinges. There is no new solver variant, joint-specific
+sidecar, allocation, or change to the coupled five-row hinge lock. Driven,
+limited, and frictional hinges retain the original equations.
+
+An immediate alternating source bracket at 8K worlds used 3,000 graph replays,
+32,768 contacts, 65,536 revolute constraints, one substep, and four PGS
+iterations:
+
+| Metric | F6 control | F7 sparse rows | Change |
+| :--- | ---: | ---: | ---: |
+| Frame | 474.58 us | **470.00 us** | **-0.97%** |
+| World-steps/s | 17.261 M | **17.430 M** | **+0.98%** |
+| Useful-work bandwidth | 318.16 GB/s | **321.27 GB/s** | **+0.98%** |
+| Sequential bandwidth roofline | 21.37% | **21.57%** | +0.21 points |
+| Random-vec4 roofline | 30.69% | **30.99%** | +0.30 points |
+| FP32 FMA roofline | 0.519% | **0.524%** | +0.005 points |
+
+The final-source node profile reduces the fused solver median from 177.01 to
+**172.67 us (-2.45%)**. Unrelated coloring and run-merge medians remain within
+0.1%, locating the change in the intended kernel. Against the recorded mini C4
+reference at 344.65 us, full PhoenX narrows from 1.38x to about **1.36x**.
+
+At 32K mixed worlds, the prepared joint and body streams exceed L2. A final
+1,000-replay source bracket keeps exactly 131,072 contacts and 262,144 joints:
+
+| Metric | F6 control | F7 sparse rows | Change |
+| :--- | ---: | ---: | ---: |
+| Frame | 1.639 ms | **1.601 ms** | **-2.29%** |
+| World-steps/s | 19.994 M | **20.463 M** | **+2.35%** |
+| Useful-work bandwidth | 368.52 GB/s | **377.17 GB/s** | **+2.35%** |
+| Sequential bandwidth roofline | 24.75% | **25.33%** | +0.58 points |
+| Random-vec4 roofline | 35.54% | **36.38%** | +0.84 points |
+| FP32 FMA roofline | 0.601% | **0.615%** | +0.014 points |
+
+Physics qualification passes 13 tests covering the multi-world G1 driven-joint
+parity case across fast-tail and both block-world sizes, joint drive/friction
+composition, revolute limits, passive hinges, cached prepare, and coupled-chain
+convergence. The exact G1 active-drive test also passes again after the final
+axis-load hoist. The representation lesson is to keep mode payload in one
+shared union but make optional row traffic proportional to active features;
+allocating or reading the full union in every PGS iteration defeats the compact
+layout.
+
+
 ## S0 — large single-world Kapla baseline
 
 The F2--F4 changes target independent-world ownership and block-world output;

@@ -2924,23 +2924,29 @@ def _revolute_iterate_at_multi(
     acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
     acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
 
-    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
+    n_hat = wp.vec3f(0.0, 0.0, 0.0)
     clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
 
     # ---- Axial drive + limit constants -------------------------------
     drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
-    max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
-    # ``max_lambda_drive`` derived from ``max_force_drive * dt`` -- see
-    # the revolute iterate for rationale.
-    max_lambda_drive = max_force_drive * (wp.float32(1.0) / idt)
-    bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
-    gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
-    eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
-    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
-
     drive_active = drive_mode != DRIVE_MODE_OFF
-    if eff_mass_drive_soft <= wp.float32(0.0):
-        drive_active = False
+    max_force_drive = wp.float32(0.0)
+    max_lambda_drive = wp.float32(0.0)
+    bias_drive = wp.float32(0.0)
+    gamma_drive = wp.float32(0.0)
+    eff_mass_drive_soft = wp.float32(0.0)
+    acc_drive = wp.float32(0.0)
+    if drive_active:
+        eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
+        drive_active = eff_mass_drive_soft > wp.float32(0.0)
+        if drive_active:
+            max_force_drive = read_float(constraints, base_offset + _OFF_MAX_FORCE_DRIVE, cid)
+            # ``max_lambda_drive`` derived from ``max_force_drive * dt`` -- see
+            # the revolute iterate for rationale.
+            max_lambda_drive = max_force_drive * (wp.float32(1.0) / idt)
+            bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
+            gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
+            acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
 
     acc_limit = wp.float32(0.0)
     pd_mode_limit = False
@@ -2952,21 +2958,23 @@ def _revolute_iterate_at_multi(
     mc_limit = wp.float32(0.0)
     ic_limit = wp.float32(0.0)
     friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
-    acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
-    eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+    acc_friction = wp.float32(0.0)
+    eff_inv_friction = wp.float32(0.0)
     max_lambda_friction = friction * (wp.float32(1.0) / idt)
     friction_active = friction > wp.float32(0.0)
-    if eff_inv_friction <= wp.float32(0.0) or max_lambda_friction <= wp.float32(0.0):
-        friction_active = False
     gamma_friction = wp.float32(0.0)
     eff_mass_friction = wp.float32(0.0)
     if friction_active:
-        slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
-        slip_scale = read_float(constraints, base_offset + _OFF_FRICTION_SLIP_SCALE, cid)
-        if slip_scale > wp.float32(0.0):
-            slip_velocity = slip_scale * eff_inv_friction * friction
-        gamma_friction = slip_velocity / max_lambda_friction
-        eff_mass_friction = wp.float32(1.0) / (eff_inv_friction + gamma_friction)
+        eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+        friction_active = eff_inv_friction > wp.float32(0.0) and max_lambda_friction > wp.float32(0.0)
+        if friction_active:
+            acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+            slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
+            slip_scale = read_float(constraints, base_offset + _OFF_FRICTION_SLIP_SCALE, cid)
+            if slip_scale > wp.float32(0.0):
+                slip_velocity = slip_scale * eff_inv_friction * friction
+            gamma_friction = slip_velocity / max_lambda_friction
+            eff_mass_friction = wp.float32(1.0) / (eff_inv_friction + gamma_friction)
 
     limit_active = clamp != _CLAMP_NONE
     if limit_active:
@@ -2985,6 +2993,9 @@ def _revolute_iterate_at_multi(
             bias_box = read_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid)
             mc_limit = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
             ic_limit = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
+
+    if drive_active or limit_active or friction_active:
+        n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
 
     # ---- Sweep loop (all state register-resident) --------------------
     it = wp.int32(0)
@@ -3030,52 +3041,54 @@ def _revolute_iterate_at_multi(
         acc1 = acc1 + lam1
         acc2_world = acc2_world + lam2_world
 
-        # Axial drive + limit scalar PGS
-        jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
+        # A passive revolute has no axial row. Avoid loading and executing
+        # optional drive/limit/friction work in that common case.
+        if drive_active or limit_active or friction_active:
+            jv_axial = wp.dot(n_hat, angular_velocity1 - angular_velocity2)
 
-        lam_drive = wp.float32(0.0)
-        if drive_active:
-            lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
-            lam_drive = lam_drive * sor_boost
-            old_acc = acc_drive
-            acc_drive = acc_drive + lam_drive
-            if max_force_drive > wp.float32(0.0):
-                acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
-            lam_drive = acc_drive - old_acc
+            lam_drive = wp.float32(0.0)
+            if drive_active:
+                lam_drive = -eff_mass_drive_soft * (jv_axial - bias_drive + gamma_drive * acc_drive)
+                lam_drive = lam_drive * sor_boost
+                old_acc = acc_drive
+                acc_drive = acc_drive + lam_drive
+                if max_force_drive > wp.float32(0.0):
+                    acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
+                lam_drive = acc_drive - old_acc
 
-        lam_limit = wp.float32(0.0)
-        if limit_active:
-            if pd_mode_limit:
-                if pd_mass > wp.float32(0.0):
-                    lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
-            else:
-                if eff_axial > wp.float32(0.0):
-                    lam_unsoft = -eff_axial * (jv_axial + bias_box)
-                    lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
-            lam_limit = lam_limit * sor_boost
-            old_acc_l = acc_limit
-            acc_limit = acc_limit + lam_limit
-            if clamp == _CLAMP_MAX:
-                acc_limit = wp.max(wp.float32(0.0), acc_limit)
-            else:
-                acc_limit = wp.min(wp.float32(0.0), acc_limit)
-            lam_limit = acc_limit - old_acc_l
+            lam_limit = wp.float32(0.0)
+            if limit_active:
+                if pd_mode_limit:
+                    if pd_mass > wp.float32(0.0):
+                        lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
+                else:
+                    if eff_axial > wp.float32(0.0):
+                        lam_unsoft = -eff_axial * (jv_axial + bias_box)
+                        lam_limit = mc_limit * lam_unsoft - ic_limit * acc_limit
+                lam_limit = lam_limit * sor_boost
+                old_acc_l = acc_limit
+                acc_limit = acc_limit + lam_limit
+                if clamp == _CLAMP_MAX:
+                    acc_limit = wp.max(wp.float32(0.0), acc_limit)
+                else:
+                    acc_limit = wp.min(wp.float32(0.0), acc_limit)
+                lam_limit = acc_limit - old_acc_l
 
-        lam_friction = wp.float32(0.0)
-        if friction_active:
-            lam_friction = -eff_mass_friction * (jv_axial + gamma_friction * acc_friction)
-            lam_friction = lam_friction * sor_boost
-            old_acc_f = acc_friction
-            acc_friction = wp.clamp(
-                acc_friction + lam_friction,
-                -max_lambda_friction,
-                max_lambda_friction,
-            )
-            lam_friction = acc_friction - old_acc_f
+            lam_friction = wp.float32(0.0)
+            if friction_active:
+                lam_friction = -eff_mass_friction * (jv_axial + gamma_friction * acc_friction)
+                lam_friction = lam_friction * sor_boost
+                old_acc_f = acc_friction
+                acc_friction = wp.clamp(
+                    acc_friction + lam_friction,
+                    -max_lambda_friction,
+                    max_lambda_friction,
+                )
+                lam_friction = acc_friction - old_acc_f
 
-        axial_lam = lam_drive + lam_limit + lam_friction
-        angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
-        angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
+            axial_lam = lam_drive + lam_limit + lam_friction
+            angular_velocity1 = angular_velocity1 + inv_inertia1 @ (n_hat * axial_lam)
+            angular_velocity2 = angular_velocity2 - inv_inertia2 @ (n_hat * axial_lam)
 
         it += 1
 
