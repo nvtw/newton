@@ -24,6 +24,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_LOCAL_ANCHOR_DWORDS,
     CC_LOCAL_ANCHOR_FIRST_ROW,
+    CC_RIGID_DWORDS_PER_CONTACT,
     ContactContainer,
     contact_container_zeros,
     contact_solve_container_zeros,
@@ -149,7 +150,7 @@ class TestColoredContactRows(unittest.TestCase):
 
         row_capacity = 24
         source = contact_container_zeros(row_capacity, device=device)
-        packed = contact_solve_container_zeros(row_capacity, device=device)
+        packed = contact_solve_container_zeros(row_capacity, device=device, rigid_only=True)
         impulse_np = np.arange(3 * row_capacity, dtype=np.float32).reshape(3, row_capacity)
         lambda_np = (1000.0 + np.arange(18 * row_capacity, dtype=np.float32)).reshape(18, row_capacity)
         derived_np = (2000.0 + np.arange(16 * row_capacity, dtype=np.float32)).reshape(16, row_capacity)
@@ -219,10 +220,8 @@ class TestColoredContactRows(unittest.TestCase):
         np.testing.assert_array_equal(total.numpy(), np.array([21], dtype=np.int32))
         np.testing.assert_array_equal(source_indices.numpy()[:21], expected_order)
         np.testing.assert_array_equal(offsets.numpy(), np.array([0, 1, 1, 8], dtype=np.int32))
-        expected_packed_lambdas = np.zeros_like(lambda_np[:, expected_order])
-        expected_packed_lambdas[: CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS] = lambda_np[
-            : CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS, expected_order
-        ]
+        self.assertEqual(packed.lambdas.shape[0], CC_RIGID_DWORDS_PER_CONTACT)
+        expected_packed_lambdas = lambda_np[:CC_RIGID_DWORDS_PER_CONTACT, expected_order].copy()
         expected_packed_lambdas[CC_LOCAL_ANCHOR_FIRST_ROW : CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS] += (
             20000.0
         )

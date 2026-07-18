@@ -37,6 +37,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_IMPULSE_DWORDS_PER_CONTACT,
     CC_LOCAL_ANCHOR_DWORDS,
     CC_LOCAL_ANCHOR_FIRST_ROW,
+    CC_RIGID_DWORDS_PER_CONTACT,
     ContactContainer,
     cc_get_bias,
     cc_get_bias_t1,
@@ -423,7 +424,7 @@ def _contact_gather_colored_rigid_rows_kernel(
         packed_headers.data[_OFF_CONTACT_FIRST, slot] = reinterpret_int_as_float(destination_k)
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         destination.impulses[row, destination_k] = source.impulses[row, source_k]
-    for row in range(CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS):
+    for row in range(CC_RIGID_DWORDS_PER_CONTACT):
         destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
     cc_set_start_gap(destination, destination_k, cc_get_start_gap(source, source_k))
 

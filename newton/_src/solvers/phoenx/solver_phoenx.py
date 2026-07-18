@@ -1275,7 +1275,11 @@ class PhoenXWorld:
             # Packed headers use the same dynamic solver-ownership metadata.
             self._contact_cols_packed.articulation_owner = self._contact_cols.articulation_owner
             self._contact_container_solve = (
-                contact_solve_container_zeros(self.rigid_contact_max, device=self.device)
+                contact_solve_container_zeros(
+                    self.rigid_contact_max,
+                    device=self.device,
+                    rigid_only=self._singleworld_rigid_direct(),
+                )
                 if self._colored_contact_rows
                 else self._contact_container
             )
