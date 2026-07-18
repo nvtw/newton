@@ -194,7 +194,6 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _integrate_velocities_kernel,
     _kinematic_interpolate_substep_kernel,
     _kinematic_prepare_step_kernel,
-    _per_world_greedy_coloring_kernel,
     _per_world_jp_coloring_kernel,
     _phoenx_apply_forces_and_gravity_kernel,
     _phoenx_apply_global_damping_kernel,
@@ -209,6 +208,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _zero_contact_time_us_kernel,
     get_block_world_kernel,
     get_fast_tail_kernel,
+    get_per_world_greedy_coloring_kernel,
     get_singleworld_kernel,
     pack_body_xforms_kernel,
 )
@@ -3764,7 +3764,7 @@ class PhoenXWorld:
         if self._use_greedy_coloring:
             self._per_world_greedy_overflow.zero_()
             wp.launch(
-                _per_world_greedy_coloring_kernel,
+                get_per_world_greedy_coloring_kernel(self._multi_world_scheduler != "block_world"),
                 dim=nw,
                 inputs=[
                     self._per_world_element_offsets,

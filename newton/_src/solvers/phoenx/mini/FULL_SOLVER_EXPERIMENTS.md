@@ -164,3 +164,47 @@ coloring, contact preparation, and the complete PGS solve, while the unused
 adjacency kernels are absent. Physics qualification passes 52 selected tests
 covering multi-world ordering, colored contacts, stacking/friction, mixed joint
 modes, chain convergence, prismatic, ball-socket, and fixed constraints.
+
+## F4 — scheduler-shaped color output
+
+The shared greedy colorer always built three family sub-prefixes per color even
+when the selected block-world scheduler consumed only the color prefix. F4
+keeps one source algorithm and one data representation but compiles its family
+grouping choice through a cached kernel factory. Fast-tail retains joint,
+contact, and deformable family grouping. Block-world writes one stable bucket
+per color and avoids the unused family loads, counters, prefix loops, and
+scatter arithmetic.
+
+The controlled 8K mixed contact/revolute profile keeps the fused solve
+unchanged at 190.0 us and reduces coloring from 35.58 us to **24.61 us**
+(**-30.8%**). A 1,000-replay stable-manifold run improves:
+
+| Metric | F3 | F4 | Change |
+| :--- | ---: | ---: | ---: |
+| Frame | 515.88 us | **506.30 us** | **-1.86%** |
+| World-steps/s | 15.880 M | **16.180 M** | **+1.89%** |
+| Useful-work bandwidth | 292.70 GB/s | **298.23 GB/s** | **+1.89%** |
+| Sequential bandwidth roofline | 19.66% | **20.03%** | +0.37 points |
+| Random-vec4 roofline | 28.23% | **28.76%** | +0.53 points |
+| FP32 FMA roofline | 0.477% | **0.486%** | +0.009 points |
+
+The same current mini C4 sticky result is 344.65 us, so full PhoenX is now
+1.47x slower on this stable workload. The remaining gap is dominated by the
+physically richer full prepare/solve and state pipeline, not coloring.
+
+The compile-time family-grouped 32K fast-tail run takes 2.986 ms with the same
+688,128 final contacts as F3's 2.971 ms. Its 0.5% difference is within observed
+run variance; useful-work lower bounds are 324.44 GB/s, 21.79% of sequential
+bandwidth, 31.29% of random-vec4 bandwidth, and 0.472% of FP32 peak.
+
+Two related hypotheses are rejected and leave no code behind. Removing the
+rigid joint iterate's redundant-looking access-mode checks regressed the stable
+robot from 515.88 us to 521.32 us, likely through less favorable generated-code
+scheduling. Lazy per-node color epochs removed the mask-clear pass but added
+8 bytes per node and measured 516.13 us, statistically neutral. A first runtime
+family-group flag sped up block-world but repeatedly regressed fast-tail to
+2.996--3.000 ms; the accepted cached factory removes that runtime branch.
+
+Physics qualification passes 53 selected tests spanning both scheduler
+variants, multi-world ordering, colored contacts, stacking/friction, mixed
+joint modes, chain convergence, prismatic, ball-socket, and fixed constraints.

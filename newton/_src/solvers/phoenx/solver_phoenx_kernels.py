@@ -172,7 +172,6 @@ __all__ = [
     "_integrate_velocities_kernel",
     "_kinematic_interpolate_substep_kernel",
     "_kinematic_prepare_step_kernel",
-    "_per_world_greedy_coloring_kernel",
     "_per_world_jp_coloring_kernel",
     "_phoenx_apply_forces_and_gravity_kernel",
     "_phoenx_apply_global_damping_kernel",
@@ -187,6 +186,7 @@ __all__ = [
     "_zero_contact_time_us_kernel",
     "get_block_world_kernel",
     "get_fast_tail_kernel",
+    "get_per_world_greedy_coloring_kernel",
     "get_singleworld_kernel",
     "pack_body_xforms_kernel",
 ]
@@ -560,130 +560,148 @@ def _per_world_jp_coloring_kernel(
 _PER_WORLD_FREE_COLOR_FLIP = wp.constant(wp.int64(-1))
 
 
-@wp.kernel(enable_backward=False, module="unique")
-def _per_world_greedy_coloring_kernel(
-    # per-world bucketing (input from the two kernels above)
-    world_element_offsets: wp.array[wp.int32],  # [nw+1] (exclusive prefix of counts)
-    world_element_count: wp.array[wp.int32],  # [nw] (raw per-world count)
-    world_elements: wp.array[wp.int32],  # [total] flat cid stream, sorted by world
-    # graph data
-    elements: wp.array[ElementInteractionData],
-    element_family: wp.array[wp.int32],
-    node_color_mask: wp.array[wp.uint64],  # one 64-color bit mask per body/particle
-    max_colors: wp.int32,  # = GREEDY_MAX_COLORS, kept for parity with JP variant
-    # scratch (caller zeros each step)
-    assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
-    color_family_count: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
-    color_family_offsets: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
-    # outputs
-    world_element_ids_by_color: wp.array[wp.int32],  # [total] sorted-by-colour per world
-    world_color_starts: wp.array2d[wp.int32],  # [nw, MAX_COLORS+1] per-world prefix
-    world_color_family_starts: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
-    world_num_colors: wp.array[wp.int32],  # [nw]
-    overflow_flag: wp.array[wp.int32],  # [1] set if any world exceeds GREEDY_MAX_COLORS
-):
-    """Deterministic smallest-free-color greedy pass, one thread per world.
+@functools.cache
+def get_per_world_greedy_coloring_kernel(group_families: bool):
+    """Build the shared world-greedy colorer with optional family grouping."""
 
-    RL workloads provide enough worlds to saturate the GPU without exposing
-    the tiny graph inside each world as a cooperative block. Serial ownership
-    removes MIS rounds, block barriers, and atomics while preserving parallel
-    PGS correctness between body-disjoint colors.
-    """
-    w = wp.tid()
-    base = world_element_offsets[w]
-    count = world_element_count[w]
+    @wp.kernel(enable_backward=False, module="unique")
+    def kernel(
+        # per-world bucketing (input from the two kernels above)
+        world_element_offsets: wp.array[wp.int32],  # [nw+1] (exclusive prefix of counts)
+        world_element_count: wp.array[wp.int32],  # [nw] (raw per-world count)
+        world_elements: wp.array[wp.int32],  # [total] flat cid stream, sorted by world
+        # graph data
+        elements: wp.array[ElementInteractionData],
+        element_family: wp.array[wp.int32],
+        node_color_mask: wp.array[wp.uint64],  # one 64-color bit mask per body/particle
+        max_colors: wp.int32,  # = GREEDY_MAX_COLORS, kept for parity with JP variant
+        # scratch (caller zeros each step)
+        assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
+        color_family_count: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
+        color_family_offsets: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
+        # outputs
+        world_element_ids_by_color: wp.array[wp.int32],  # [total] sorted-by-colour per world
+        world_color_starts: wp.array2d[wp.int32],  # [nw, MAX_COLORS+1] per-world prefix
+        world_color_family_starts: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
+        world_num_colors: wp.array[wp.int32],  # [nw]
+        overflow_flag: wp.array[wp.int32],  # [1] set if any world exceeds GREEDY_MAX_COLORS
+    ):
+        """Deterministic smallest-free-color greedy pass, one thread per world.
 
-    if count == 0:
-        world_num_colors[w] = wp.int32(0)
-        world_color_starts[w, 0] = wp.int32(0)
-        return
+        RL workloads provide enough worlds to saturate the GPU without exposing
+        the tiny graph inside each world as a cooperative block. Serial ownership
+        removes MIS rounds, block barriers, and atomics while preserving parallel
+        PGS correctness between body-disjoint colors.
+        """
+        w = wp.tid()
+        base = world_element_offsets[w]
+        count = world_element_count[w]
 
-    # Only active elements need reset; full-capacity clears are deliberately
-    # avoided because each world owns and immediately consumes this slice.
-    offset = wp.int32(0)
-    while offset < count:
-        eid = world_elements[base + offset]
-        assigned[eid] = wp.int32(0)
-        for j in range(MAX_BODIES):
-            node = elements[eid].bodies[j]
-            if node < wp.int32(0):
-                break
-            node_color_mask[node] = wp.uint64(0)
-        offset += wp.int32(1)
+        if count == 0:
+            world_num_colors[w] = wp.int32(0)
+            world_color_starts[w, 0] = wp.int32(0)
+            return
 
-    num_colors = wp.int32(0)
-    offset = wp.int32(0)
-    while offset < count:
-        eid = world_elements[base + offset]
-        forbidden_mask = wp.uint64(0)
-        for j in range(MAX_BODIES):
-            node = elements[eid].bodies[j]
-            if node < wp.int32(0):
-                break
-            forbidden_mask |= node_color_mask[node]
-
-        color = _lowest_set_bit(wp.int64(forbidden_mask) ^ _PER_WORLD_FREE_COLOR_FLIP)
-        if color < wp.int32(0) or color >= max_colors:
-            overflow_flag[0] = wp.int32(1)
-            assigned[eid] = wp.int32(-1)
-        else:
-            # Smallest-free greedy produces a contiguous color range. Initialize
-            # a bucket exactly once when its first element appears.
-            if color >= num_colors:
-                c = num_colors
-                while c <= color:
-                    family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
-                    for f in range(_PER_WORLD_FAST_FAMILIES):
-                        family_slot = family_base + wp.int32(f)
-                        color_family_count[w, family_slot] = wp.int32(0)
-                        color_family_offsets[w, family_slot] = wp.int32(0)
-                        world_color_family_starts[w, family_slot] = wp.int32(0)
-                    c += wp.int32(1)
-                num_colors = color + wp.int32(1)
-
-            assigned[eid] = color + wp.int32(1)
-            color_bit = wp.uint64(1) << wp.uint64(color)
+        # Only active elements need reset; full-capacity clears are deliberately
+        # avoided because each world owns and immediately consumes this slice.
+        offset = wp.int32(0)
+        while offset < count:
+            eid = world_elements[base + offset]
+            assigned[eid] = wp.int32(0)
             for j in range(MAX_BODIES):
                 node = elements[eid].bodies[j]
                 if node < wp.int32(0):
                     break
-                node_color_mask[node] |= color_bit
-            family = _element_fast_family(element_family[eid])
-            family_slot = color * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
-            color_family_count[w, family_slot] += wp.int32(1)
-        offset += wp.int32(1)
+                node_color_mask[node] = wp.uint64(0)
+            offset += wp.int32(1)
 
-    # Build color/family prefixes, retaining one mutable cursor per family for
-    # the deterministic scatter below.
-    running = wp.int32(0)
-    color = wp.int32(0)
-    while color < num_colors:
-        world_color_starts[w, color] = running
-        family_base = color * wp.int32(_PER_WORLD_FAST_FAMILIES)
-        family_running = wp.int32(0)
-        for f in range(_PER_WORLD_FAST_FAMILIES):
-            family_slot = family_base + wp.int32(f)
-            family_start = running + family_running
-            color_family_offsets[w, family_slot] = family_start
-            world_color_family_starts[w, family_slot] = family_start
-            family_running += color_family_count[w, family_slot]
-        running += family_running
-        color += wp.int32(1)
-    world_color_starts[w, num_colors] = running
-    world_num_colors[w] = num_colors
+        num_colors = wp.int32(0)
+        offset = wp.int32(0)
+        while offset < count:
+            eid = world_elements[base + offset]
+            forbidden_mask = wp.uint64(0)
+            for j in range(MAX_BODIES):
+                node = elements[eid].bodies[j]
+                if node < wp.int32(0):
+                    break
+                forbidden_mask |= node_color_mask[node]
 
-    # Stable world/cid order inside every family bucket.
-    offset = wp.int32(0)
-    while offset < count:
-        eid = world_elements[base + offset]
-        color = assigned[eid] - wp.int32(1)
-        if color >= wp.int32(0):
-            family = _element_fast_family(element_family[eid])
-            family_slot = color * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
-            local_slot = color_family_offsets[w, family_slot]
-            color_family_offsets[w, family_slot] = local_slot + wp.int32(1)
-            world_element_ids_by_color[base + local_slot] = eid
-        offset += wp.int32(1)
+            color = _lowest_set_bit(wp.int64(forbidden_mask) ^ _PER_WORLD_FREE_COLOR_FLIP)
+            if color < wp.int32(0) or color >= max_colors:
+                overflow_flag[0] = wp.int32(1)
+                assigned[eid] = wp.int32(-1)
+            else:
+                # Smallest-free greedy produces a contiguous color range. Initialize
+                # a bucket exactly once when its first element appears.
+                if color >= num_colors:
+                    c = num_colors
+                    while c <= color:
+                        family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+                        family_count = wp.int32(1)
+                        if wp.static(group_families):
+                            family_count = wp.int32(_PER_WORLD_FAST_FAMILIES)
+                        for f in range(_PER_WORLD_FAST_FAMILIES):
+                            if wp.int32(f) < family_count:
+                                family_slot = family_base + wp.int32(f)
+                                color_family_count[w, family_slot] = wp.int32(0)
+                                color_family_offsets[w, family_slot] = wp.int32(0)
+                                world_color_family_starts[w, family_slot] = wp.int32(0)
+                        c += wp.int32(1)
+                    num_colors = color + wp.int32(1)
+
+                assigned[eid] = color + wp.int32(1)
+                color_bit = wp.uint64(1) << wp.uint64(color)
+                for j in range(MAX_BODIES):
+                    node = elements[eid].bodies[j]
+                    if node < wp.int32(0):
+                        break
+                    node_color_mask[node] |= color_bit
+                family = wp.int32(0)
+                if wp.static(group_families):
+                    family = _element_fast_family(element_family[eid])
+                family_slot = color * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
+                color_family_count[w, family_slot] += wp.int32(1)
+            offset += wp.int32(1)
+
+        # Build color/family prefixes, retaining one mutable cursor per family for
+        # the deterministic scatter below.
+        running = wp.int32(0)
+        color = wp.int32(0)
+        while color < num_colors:
+            world_color_starts[w, color] = running
+            family_base = color * wp.int32(_PER_WORLD_FAST_FAMILIES)
+            family_count = wp.int32(1)
+            if wp.static(group_families):
+                family_count = wp.int32(_PER_WORLD_FAST_FAMILIES)
+            family_running = wp.int32(0)
+            for f in range(_PER_WORLD_FAST_FAMILIES):
+                if wp.int32(f) < family_count:
+                    family_slot = family_base + wp.int32(f)
+                    family_start = running + family_running
+                    color_family_offsets[w, family_slot] = family_start
+                    world_color_family_starts[w, family_slot] = family_start
+                    family_running += color_family_count[w, family_slot]
+            running += family_running
+            color += wp.int32(1)
+        world_color_starts[w, num_colors] = running
+        world_num_colors[w] = num_colors
+
+        # Stable world/cid order inside every family bucket.
+        offset = wp.int32(0)
+        while offset < count:
+            eid = world_elements[base + offset]
+            color = assigned[eid] - wp.int32(1)
+            if color >= wp.int32(0):
+                family = wp.int32(0)
+                if wp.static(group_families):
+                    family = _element_fast_family(element_family[eid])
+                family_slot = color * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
+                local_slot = color_family_offsets[w, family_slot]
+                color_family_offsets[w, family_slot] = local_slot + wp.int32(1)
+                world_element_ids_by_color[base + local_slot] = eid
+            offset += wp.int32(1)
+
+    return kernel
 
 
 # Fast-path single-block-per-world dispatchers. Each block walks its world's

@@ -63,7 +63,7 @@ class TestMultiWorldColoringContract(unittest.TestCase):
     def test_per_world_greedy_overflow_flag_is_cleared_before_build(self) -> None:
         source = inspect.getsource(solver_phoenx.PhoenXWorld._build_per_world_coloring)
         clear_idx = source.index("self._per_world_greedy_overflow.zero_()")
-        launch_idx = source.index("_per_world_greedy_coloring_kernel")
+        launch_idx = source.index("get_per_world_greedy_coloring_kernel")
         self.assertLess(clear_idx, launch_idx)
 
     def test_direct_greedy_path_skips_adjacency_but_fallback_rebuilds_it(self) -> None:
