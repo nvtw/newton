@@ -49,10 +49,12 @@ __all__ = [
     "constraint_get_body2",
     "constraint_get_type",
     "constraint_read_multiplier",
+    "constraint_read_multiplier_vec3",
     "constraint_set_body1",
     "constraint_set_body2",
     "constraint_set_type",
     "constraint_write_multiplier",
+    "constraint_write_multiplier_vec3",
     "pd_coefficients",
     "read_float",
     "read_int",
@@ -226,6 +228,27 @@ def constraint_read_multiplier(c: ConstraintContainer, off: wp.int32, cid: wp.in
 @wp.func
 def constraint_write_multiplier(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.float32):
     write2d_f32(c.multipliers, off, cid, v)
+
+
+@wp.func
+def constraint_read_multiplier_vec3(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.vec3f:
+    return wp.vec3f(
+        read2d_f32(c.multipliers, off + wp.int32(0), cid),
+        read2d_f32(c.multipliers, off + wp.int32(1), cid),
+        read2d_f32(c.multipliers, off + wp.int32(2), cid),
+    )
+
+
+@wp.func
+def constraint_write_multiplier_vec3(
+    c: ConstraintContainer,
+    off: wp.int32,
+    cid: wp.int32,
+    v: wp.vec3f,
+):
+    write2d_f32(c.multipliers, off + wp.int32(0), cid, v[0])
+    write2d_f32(c.multipliers, off + wp.int32(1), cid, v[1])
+    write2d_f32(c.multipliers, off + wp.int32(2), cid, v[2])
 
 
 @wp.func

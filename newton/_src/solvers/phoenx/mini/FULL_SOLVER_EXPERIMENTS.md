@@ -353,6 +353,97 @@ allocating or reading the full union in every PGS iteration defeats the compact
 layout.
 
 
+## F8 — final body-state export fusion (rejected)
+
+The default Newton state export followed PhoenX's final per-body damping,
+world-inertia refresh, and force clear. A prototype extended that existing
+kernel to optionally write ``body_q`` and ``body_qd`` after the final updates,
+then removed the standalone export launch. Direct ``PhoenXWorld`` callers used
+the same kernel with export disabled; finite-difference and substep-average
+readouts retained their existing exporters.
+
+An immediate source bracket measured 482.76 -> 480.42 us at 8K mixed worlds
+(**+0.49% throughput**) and 1.5999 -> 1.5969 ms at 32K worlds (**+0.19%**).
+The saved launch and shared body reads are too small relative to the collision,
+scheduling, and PGS pipeline. The implementation required three internal step
+arguments, two graph-stable placeholder allocations, and alternate-readout
+routing, so it fails the no-bloat threshold. The prototype is fully reverted.
+The next representation change must target joint-row or scheduling traffic
+that scales with constraints rather than a once-per-frame body export.
+
+
+## F9 - cooperative merge and basis reconstruction (rejected)
+
+Two small traffic controls were measured and fully reverted. First, the
+monotone-run world merge assigned 2, 4, 8, or 16 cooperative lanes to each
+world while preserving exact stable CID order. Their 8K kernel medians were
+18.02, 17.79, 17.92, and 18.24 us versus 19.15 us for one lane. Four lanes
+therefore saved 7.1% inside the merge kernel, but duplicated binary searches
+erased it end to end: 480.41 -> 480.74 us at 8K and 1.5976 -> 1.6004 ms at
+32K. The scalar owner remains simpler and faster at frame scope.
+
+Second, the revolute loop reconstructed its deterministic tangent basis from
+the cached world axis, replacing six tangent scalar loads with three axis
+loads. Cheap-looking arithmetic still increased register/instruction pressure:
+the immediate 8K bracket regressed 479.21 -> 486.71 us (**-1.54%
+throughput**). This prototype is also fully reverted. The controls reinforce
+that useful traffic must be removed without adding per-thread setup to the
+already register-heavy joint loop.
+
+
+## F10 - family-aliased mutable joint state
+
+The unified joint record mixed read-mostly prepared geometry/Schur data with
+nine mutable warm-start dwords: two shared vec3 impulses plus drive, limit, and
+friction scalars. PhoenX already allocated one generic 12-dword multiplier
+sidecar per constraint for family-aliased mutable state. F10 uses its exact
+capacity for joint impulses: shared anchors at slots 0--5, the mode-exclusive
+third anchor at 6--8, and axial drive/limit/friction at 9--11. No array,
+constraint-type sidecar, feature flag, or solver path is added.
+
+All joint modes and both maximal-tree projectors now use the same generic
+accessors. Removing the dead fields shrinks the unified joint record from 126
+to **117 dwords (468 B), -7.14%**. More importantly, the hot loop no longer
+mixes stores to the large prepared record: mutable state has a compact base
+pointer and family-local working set.
+
+An immediate source bracket used the committed F7 worktree as control, 3,000
+captured replays, 32,768 contacts, 65,536 revolute constraints, one substep,
+and four PGS iterations:
+
+| Metric | F7 control | F10 compact state | Change |
+| :--- | ---: | ---: | ---: |
+| Frame | 480.339 us | **465.280 us** | **-3.14%** |
+| World-steps/s | 17.055 M | **17.607 M** | **+3.24%** |
+| Useful-work bandwidth | 314.35 GB/s | **324.52 GB/s** | **+3.24%** |
+| Sequential bandwidth roofline | 21.11% | **21.79%** | +0.68 points |
+| Random-vec4 roofline | 30.32% | **31.30%** | +0.98 points |
+| Random-scalar roofline | 51.57% | **53.24%** | +1.67 points |
+| FP32 FMA roofline | 0.513% | **0.529%** | +0.016 points |
+
+The final graph-node profile reduces fused prepare/iterate from F7's 172.67 us
+to **168.70 us (-2.30%)** while coloring remains 24.35 us. A clock-adjacent
+current mini/full pair measures 360.28 and 468.07 us, respectively, narrowing
+the stable mixed-workload gap to about **1.30x**.
+
+At 32K worlds the immediate result is neutral within observed clock variance:
+1.5961 ms control versus 1.5985 ms compact state (-0.15% throughput). The
+working set already exceeds L2, and the sidecar does not reduce the number of
+hot multiplier loads/stores; F10 is accepted for the clear 8K/compiler-cache
+win, smaller representation, and absence of an above-L2 material regression,
+not as a 32K speedup claim.
+
+Qualification passes 62 selected tests covering every revolute/prismatic
+drive and limit mode, joint friction/stiction, ball, fixed, cable, a 30-link
+chain, general and specialized maximal-tree projection, multi-world loops, and
+the G1 drive-coefficient graph check. The existing poisoned G1 reset test still
+fails after the subsequent step because body 0's deliberately poisoned angular
+velocity remains nonfinite; the committed F7 control fails identically. Its
+new sidecar checks are finite immediately after reset and after the step, so
+that pre-existing reduced-mode body-reset defect is recorded but is not
+attributed to F10.
+
+
 ## S0 — large single-world Kapla baseline
 
 The F2--F4 changes target independent-world ownership and block-world output;

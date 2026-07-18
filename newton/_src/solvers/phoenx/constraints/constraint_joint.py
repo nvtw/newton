@@ -45,7 +45,11 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     assert_constraint_header,
     constraint_bodies_make,
+    constraint_read_multiplier,
+    constraint_read_multiplier_vec3,
     constraint_set_type,
+    constraint_write_multiplier,
+    constraint_write_multiplier_vec3,
     pd_coefficients,
     read_float,
     read_int,
@@ -232,7 +236,7 @@ class ActuatedDoubleBallSocketData:
 
     Union over revolute / prismatic / ball-socket / fixed / cable.
     Mode-specific Schur caches live in dedicated slots; the rest is
-    shared. ~80 dwords (~320 B per joint). See field-level ``#:``
+    shared. 117 dwords (468 B per joint). See field-level ``#:``
     comments for individual slot semantics.
     """
 
@@ -278,17 +282,15 @@ class ActuatedDoubleBallSocketData:
     # Mode-specific extras, same alias trick. 16 dwords sized for the
     # larger (prismatic) layout.
     #
-    # Prismatic (16 used): [0..2] local_anchor3_b1, [3..5] local_anchor3_b2,
-    #     [6..8] r3_b1, [9..11] r3_b2, [12..14] accumulated_impulse3,
-    #     [15] bias3.
+    # Prismatic (13 used): [0..2] local_anchor3_b1, [3..5] local_anchor3_b2,
+    #     [6..8] r3_b1, [9..11] r3_b2, [15] bias3. Dwords [12..14]
+    #     are free here; the third impulse lives in the multiplier sidecar.
     # Revolute  (6 used, 10 unused tail):
     #     [0..3] inv_initial_orientation (quat),
     #     [4] revolution_counter, [5] previous_quaternion_angle.
     mode_extras: wp.types.vector(length=16, dtype=wp.float32)
-    # Warm-start accumulated impulses for the shared anchors. The
-    # third (prismatic-only) impulse moved into ``mode_extras`` above.
-    accumulated_impulse1: wp.vec3f
-    accumulated_impulse2: wp.vec3f
+    # Mutable warm-start impulses live in the family-aliased
+    # ``ConstraintContainer.multipliers`` sidecar.
 
     # ---- Actuator + limit block --------------------------------------
     # Body-1-local joint axis snapshot. Used by revolute for a
@@ -367,10 +369,6 @@ class ActuatedDoubleBallSocketData:
     clamp: wp.int32
     # Cached world-frame joint axis from the most recent prepare-pass.
     axis_world: wp.vec3f
-    accumulated_impulse_drive: wp.float32
-    accumulated_impulse_limit: wp.float32
-    accumulated_impulse_friction: wp.float32
-
     #: Opt-in per-column wall-clock accumulator (microseconds). See
     #: :func:`constraint_accumulate_time_us`.
     time_us: wp.float32
@@ -436,7 +434,6 @@ _OFF_LA3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_LA3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 3)
 _OFF_R3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
 _OFF_R3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
-_OFF_ACC_IMP3 = wp.constant(int(_OFF_MODE_EXTRAS) + 12)
 _OFF_BIAS3 = wp.constant(int(_OFF_MODE_EXTRAS) + 15)
 # Revolute / universal fields, dwords 0..5 of mode_extras (10 unused tail):
 _OFF_INV_INITIAL_ORIENTATION = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
@@ -462,9 +459,6 @@ _OFF_CABLE_K22_INV_11 = wp.constant(int(_OFF_S_INV) + 3)
 _OFF_CABLE_GAMMA_BEND = wp.constant(int(_OFF_S_INV) + 4)
 _OFF_CABLE_M_TWIST_SOFT = wp.constant(int(_OFF_S_INV) + 5)
 _OFF_CABLE_GAMMA_TWIST = wp.constant(int(_OFF_S_INV) + 6)
-
-_OFF_ACC_IMP1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse1"))
-_OFF_ACC_IMP2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse2"))
 
 _OFF_AXIS_LOCAL1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_local1"))
 _OFF_REST_LENGTH = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "rest_length"))
@@ -498,9 +492,13 @@ _OFF_PD_BETA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 1)
 _OFF_PD_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
 _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
-_OFF_ACC_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_drive"))
-_OFF_ACC_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_limit"))
-_OFF_ACC_FRICTION = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "accumulated_impulse_friction"))
+# Family-aliased mutable state in ConstraintContainer.multipliers.
+_MUL_ACC_IMP1 = wp.constant(wp.int32(0))
+_MUL_ACC_IMP2 = wp.constant(wp.int32(3))
+_MUL_ACC_IMP3 = wp.constant(wp.int32(6))
+_MUL_ACC_DRIVE = wp.constant(wp.int32(9))
+_MUL_ACC_LIMIT = wp.constant(wp.int32(10))
+_MUL_ACC_FRICTION = wp.constant(wp.int32(11))
 ADBS_TIME_US_OFFSET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "time_us"))
 
 #: Total dword count of one unified joint constraint.
@@ -645,8 +643,8 @@ def actuated_double_ball_socket_initialize_kernel(
     write_vec3(constraints, _OFF_T2, cid, zero3)
     write_vec3(constraints, _OFF_BIAS1, cid, zero3)
     write_vec3(constraints, _OFF_BIAS2, cid, zero3)
-    write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
-    write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, zero3)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, zero3)
 
     # ``mode_extras`` block is mode-aliased: REVOLUTE / UNIVERSAL store the
     # twist-tracker scratch (inv_initial_orientation, revolution_counter,
@@ -658,7 +656,7 @@ def actuated_double_ball_socket_initialize_kernel(
         write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
         write_vec3(constraints, _OFF_R3_B1, cid, zero3)
         write_vec3(constraints, _OFF_R3_B2, cid, zero3)
-        write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
+        constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, 0.0)
     else:
         # REVOLUTE / BALL_SOCKET / UNIVERSAL: zero out the anchor-3 slots
@@ -715,9 +713,9 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_LIMIT_CACHE + 2, cid, 0.0)
     write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
-    write_float(constraints, _OFF_ACC_DRIVE, cid, 0.0)
-    write_float(constraints, _OFF_ACC_LIMIT, cid, 0.0)
-    write_float(constraints, _OFF_ACC_FRICTION, cid, 0.0)
+    constraint_write_multiplier(constraints, _MUL_ACC_DRIVE, cid, 0.0)
+    constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
+    constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
 
     if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
         count = d6_limit_count[tid]
@@ -794,7 +792,7 @@ def _adbs_clear_reset_worlds_kernel(
     if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED or mode == JOINT_MODE_CABLE:
         write_vec3(constraints, _OFF_R3_B1, cid, zero3)
         write_vec3(constraints, _OFF_R3_B2, cid, zero3)
-        write_vec3(constraints, _OFF_ACC_IMP3, cid, zero3)
+        constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, wp.float32(0.0))
     else:
         write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, wp.int32(0))
@@ -802,8 +800,8 @@ def _adbs_clear_reset_worlds_kernel(
         if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
             write_vec3(constraints, _OFF_D6_LIMIT_EFF_INV, cid, zero3)
 
-    write_vec3(constraints, _OFF_ACC_IMP1, cid, zero3)
-    write_vec3(constraints, _OFF_ACC_IMP2, cid, zero3)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, zero3)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, zero3)
     write_float(constraints, _OFF_EFF_INV_AXIAL, cid, wp.float32(0.0))
     write_float(constraints, _OFF_BIAS_DRIVE, cid, wp.float32(0.0))
     write_float(constraints, _OFF_GAMMA_DRIVE, cid, wp.float32(0.0))
@@ -813,9 +811,9 @@ def _adbs_clear_reset_worlds_kernel(
     write_float(constraints, _OFF_LIMIT_CACHE + 2, cid, wp.float32(0.0))
     write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, zero3)
-    write_float(constraints, _OFF_ACC_DRIVE, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_ACC_LIMIT, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_ACC_FRICTION, cid, wp.float32(0.0))
+    constraint_write_multiplier(constraints, _MUL_ACC_DRIVE, cid, wp.float32(0.0))
+    constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, wp.float32(0.0))
+    constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
 
 
 def actuated_double_ball_socket_clear_reset_worlds(
@@ -996,7 +994,7 @@ def _axial_drive_limit_iterate(
     bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
     gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
     eff_mass_drive_soft = read_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid)
-    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
+    acc_drive = constraint_read_multiplier(constraints, _MUL_ACC_DRIVE, cid)
 
     # ---- Drive row ----------------------------------------------------
     # The drive row is a PD spring-damper only; prepare writes
@@ -1022,14 +1020,14 @@ def _axial_drive_limit_iterate(
         if max_force_drive > 0.0:
             acc_drive = wp.clamp(acc_drive, -max_lambda_drive, max_lambda_drive)
         lam_drive = acc_drive - old_acc
-        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
+        constraint_write_multiplier(constraints, _MUL_ACC_DRIVE, cid, acc_drive)
 
     # ---- Limit row ----------------------------------------------------
     lam_limit = float(0.0)
     if clamp != _CLAMP_NONE:
         stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
         damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
-        acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+        acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
         pd_mode_limit = stiffness_limit > 0.0 or damping_limit > 0.0
         if pd_mode_limit:
             # Jitter2 PD: same iterate form as the drive row. ``beta``
@@ -1065,12 +1063,12 @@ def _axial_drive_limit_iterate(
         else:
             acc_limit = wp.min(0.0, acc_limit)
         lam_limit = acc_limit - old_acc
-        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
+        constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, acc_limit)
 
     # ---- Coulomb friction row -----------------------------------------
     lam_friction = float(0.0)
     friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
-    acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+    acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
     if friction > 0.0:
         eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
         max_lambda_friction = friction * (wp.float32(1.0) / idt)
@@ -1091,9 +1089,9 @@ def _axial_drive_limit_iterate(
             )
             lam_friction = acc_friction - old_acc_friction
             if store_friction:
-                write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
+                constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, acc_friction)
     elif friction <= 0.0:
-        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
+        constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
 
     return lam_drive + lam_limit + lam_friction
 
@@ -1200,16 +1198,16 @@ def _axial_drive_limit_prepare_at(
 
     # Warm-start: sum of drive + limit accumulated impulses, with
     # ``acc_limit`` forcibly zeroed when the limit is inactive.
-    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
-    acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+    acc_drive = constraint_read_multiplier(constraints, _MUL_ACC_DRIVE, cid)
+    acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
     if clamp == _CLAMP_NONE:
         acc_limit = 0.0
-        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
-    acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+        constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
+    acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
     friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
     if friction <= 0.0:
         acc_friction = 0.0
-        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
+        constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
     return acc_drive + acc_limit + acc_friction
 
 
@@ -1391,7 +1389,7 @@ def _d6_solve_anchor1_at(
     else:
         bias1 = wp.vec3f(0.0, 0.0, 0.0)
 
-    acc1_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    acc1_world = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid)
     jv1 = _d6_anchor_relative_velocity(velocity1, angular_velocity1, velocity2, angular_velocity2, r1_b1, r1_b2)
 
     if solve_kind == _D6_ROW_SOLVE_SOFT3:
@@ -1409,7 +1407,7 @@ def _d6_solve_anchor1_at(
     angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ lam1)
     velocity2 = velocity2 + inv_mass2 * lam1
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1_world + lam1)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, acc1_world + lam1)
 
     return velocity1, angular_velocity1, velocity2, angular_velocity2
 
@@ -1444,7 +1442,7 @@ def _d6_solve_anchor2_tangent_at(
     cr2_b1 = wp.skew(r2_b1)
     cr2_b2 = wp.skew(r2_b2)
 
-    acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc2_world = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid)
     acc2_t1 = wp.dot(t1, acc2_world)
     acc2_t2 = wp.dot(t2, acc2_world)
 
@@ -1487,7 +1485,7 @@ def _d6_solve_anchor2_tangent_at(
     angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr2_b1 @ lam2_world)
     velocity2 = velocity2 + inv_mass2 * lam2_world
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr2_b2 @ lam2_world)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world + lam2_world)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, acc2_world + lam2_world)
 
     return velocity1, angular_velocity1, velocity2, angular_velocity2
 
@@ -1547,8 +1545,8 @@ def _d6_solve_rigid_swing_coupled_at(
             bias2 = read_vec3(constraints, base_offset + _OFF_BIAS2, cid) * (wp.float32(1.0) - asymptotic_weight)
     bias2_tan = wp.vec2f(bias2[0], bias2[1])
 
-    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc1 = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid)
+    acc2_world = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid)
     acc2_tan = wp.vec2f(wp.dot(t1, acc2_world), wp.dot(t2, acc2_world))
 
     jv1 = -velocity1 + cr1_b1 @ angular_velocity1 + velocity2 - cr1_b2 @ angular_velocity2
@@ -1589,8 +1587,8 @@ def _d6_solve_rigid_swing_coupled_at(
     velocity2 = velocity2 + inv_mass2 * total_lin
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr1_b2 @ lam1 + cr2_b2 @ lam2_world)
 
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1 + lam1)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world + lam2_world)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, acc1 + lam1)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, acc2_world + lam2_world)
 
     return velocity1, angular_velocity1, velocity2, angular_velocity2
 
@@ -1650,9 +1648,9 @@ def _d6_solve_prismatic_coupled_at(
         bias2 = wp.vec3f(0.0, 0.0, 0.0)
         bias3 = wp.float32(0.0)
 
-    acc_imp1_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    acc_imp2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-    acc_imp3_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid)
+    acc_imp1_world = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid)
+    acc_imp2_world = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid)
+    acc_imp3_world = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid)
     acc4 = wp.vec4f(
         wp.dot(t1, acc_imp1_world),
         wp.dot(t2, acc_imp1_world),
@@ -1695,9 +1693,9 @@ def _d6_solve_prismatic_coupled_at(
         cr1_b2 @ lam1_world + cr2_b2 @ lam2_world + cr3_b2 @ lam3_world
     )
 
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc_imp1_world + lam1_world)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc_imp2_world + lam2_world)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc_imp3_world + lam3_world)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, acc_imp1_world + lam1_world)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, acc_imp2_world + lam2_world)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, acc_imp3_world + lam3_world)
 
     return velocity1, angular_velocity1, velocity2, angular_velocity2
 
@@ -1731,7 +1729,7 @@ def _d6_solve_anchor3_scalar_at(
     cr3_b1 = wp.skew(r3_b1)
     cr3_b2 = wp.skew(r3_b2)
 
-    acc3_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid)
+    acc3_world = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid)
     acc3_scalar = wp.dot(t2, acc3_world)
 
     jv3_world = _d6_anchor_relative_velocity(velocity1, angular_velocity1, velocity2, angular_velocity2, r3_b1, r3_b2)
@@ -1759,7 +1757,7 @@ def _d6_solve_anchor3_scalar_at(
     angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr3_b1 @ lam3_world)
     velocity2 = velocity2 + inv_mass2 * lam3_world
     angular_velocity2 = angular_velocity2 + inv_inertia2 @ (cr3_b2 @ lam3_world)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3_world + lam3_world)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, acc3_world + lam3_world)
 
     return velocity1, angular_velocity1, velocity2, angular_velocity2
 
@@ -1847,7 +1845,7 @@ def _d6_angular_limits_prepare_at(
     write_vec3(constraints, base_offset + _OFF_BIAS2, cid, wp.vec3f(bias0, bias1, bias2))
     write_vec3(constraints, base_offset + _OFF_D6_LIMIT_EFF_INV, cid, wp.vec3f(eff0, eff1, eff2))
 
-    old_acc = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    old_acc = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid)
     acc = wp.vec3f(0.0, 0.0, 0.0)
     if bias0 != wp.float32(0.0):
         acc = acc + wp.dot(axis0, old_acc) * axis0
@@ -1855,7 +1853,7 @@ def _d6_angular_limits_prepare_at(
         acc = acc + wp.dot(axis1, old_acc) * axis1
     if bias2 != wp.float32(0.0):
         acc = acc + wp.dot(axis2, old_acc) * axis2
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, acc)
     angular_velocity1 = angular_velocity1 + inv_inertia1 @ acc
     angular_velocity2 = angular_velocity2 - inv_inertia2 @ acc
     return angular_velocity1, angular_velocity2
@@ -1887,7 +1885,7 @@ def _d6_angular_limits_block(
 
     bias = read_vec3(constraints, base_offset + _OFF_BIAS2, cid)
     eff_inv = read_vec3(constraints, base_offset + _OFF_D6_LIMIT_EFF_INV, cid)
-    acc = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid)
     old0 = wp.float32(0.0)
     old1 = wp.float32(0.0)
     old2 = wp.float32(0.0)
@@ -1930,7 +1928,7 @@ def _d6_angular_limits_block(
 
     delta = (new0 - old0) * axis0 + (new1 - old1) * axis1 + (new2 - old2) * axis2
     new_acc = new0 * axis0 + new1 * axis1 + new2 * axis2
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, new_acc)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, new_acc)
     w1 = w1 + ii1 @ delta
     w2 = w2 - ii2 @ delta
     return w1, w2
@@ -2097,7 +2095,7 @@ def _d6_prepare_rows_at(
         write_vec6(constraints, base_offset + _OFF_A1_INV_S6, cid, inv_sym3(sym6_from_mat33_upper(a1)))
         write_vec3(constraints, base_offset + _OFF_BIAS1, cid, (p1_b2 - p1_b1) * bias_rate)
 
-    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
+    acc1 = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid)
 
     if is_prismatic:
         # ---- PRISMATIC: COUPLED 4+1 Schur ----------------------------
@@ -2170,11 +2168,11 @@ def _d6_prepare_rows_at(
         # Reproject + apply positional warm-start (tangent at a1/a2,
         # scalar along t2 at a3).
         acc1w = _d6_reproject_tangent_impulse(acc1, t1, t2)
-        acc2w = _d6_reproject_tangent_impulse(read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid), t1, t2)
-        acc3w = _d6_reproject_scalar_impulse(read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid), t2)
-        write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1w)
-        write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2w)
-        write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3w)
+        acc2w = _d6_reproject_tangent_impulse(constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid), t1, t2)
+        acc3w = _d6_reproject_scalar_impulse(constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid), t2)
+        constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, acc1w)
+        constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, acc2w)
+        constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, acc3w)
         total_linear = acc1w + acc2w + acc3w
         velocity1 = velocity1 - inv_mass1 * total_linear
         angular_velocity1 = angular_velocity1 - inv_inertia1 @ (cr1_b1 @ acc1w + cr2_b1 @ acc2w + cr3_b1 @ acc3w)
@@ -2254,8 +2252,8 @@ def _d6_prepare_rows_at(
             )
         write_vec3(constraints, base_offset + _OFF_S_INV_S3, cid, inv_sym2(wp.vec3f(s00, s01, s11)))
 
-        acc2w = _d6_reproject_tangent_impulse(read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid), t1, t2)
-        write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2w)
+        acc2w = _d6_reproject_tangent_impulse(constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid), t1, t2)
+        constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, acc2w)
         acc3w = wp.vec3f(0.0, 0.0, 0.0)
         cr3_b1 = wp.skew(r3_b1)
         cr3_b2 = wp.skew(r3_b2)
@@ -2283,8 +2281,8 @@ def _d6_prepare_rows_at(
             write_float(constraints, base_offset + _OFF_CABLE_GAMMA_TWIST, cid, gamma_twist)
             drift3 = p3_b2 - p3_b1
             write_float(constraints, base_offset + _OFF_BIAS3, cid, wp.dot(t2, drift3) * bias_factor_twist * idt)
-            acc3w = _d6_reproject_scalar_impulse(read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid), t2)
-            write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3w)
+            acc3w = _d6_reproject_scalar_impulse(constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid), t2)
+            constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, acc3w)
         elif has_twist:
             b33 = _d6_metric_anchor_block(inv_mass1, inv_mass2, inv_inertia1, inv_inertia2, r3_b1, r3_b2, r3_b1, r3_b2)
             d_scalar = _d6_project_scalar_block(b33, t2)
@@ -2295,8 +2293,8 @@ def _d6_prepare_rows_at(
             write_float(constraints, base_offset + _OFF_S_SCALAR_INV, cid, s_scalar_inv)
             drift3 = p3_b2 - p3_b1
             write_float(constraints, base_offset + _OFF_BIAS3, cid, wp.dot(t2, drift3) * bias_rate)
-            acc3w = _d6_reproject_scalar_impulse(read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid), t2)
-            write_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid, acc3w)
+            acc3w = _d6_reproject_scalar_impulse(constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid), t2)
+            constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, acc3w)
 
         total_linear = acc1 + acc2w + acc3w
         velocity1 = velocity1 - inv_mass1 * total_linear
@@ -2390,9 +2388,9 @@ def _d6_prepare_rows_at(
     # wrench helpers and cross-mode reads see a clean column (CABLE /
     # FIXED match the prior per-mode behavior).
     if is_cable or has_twist:
-        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, 0.0)
-        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
+        constraint_write_multiplier(constraints, _MUL_ACC_DRIVE, cid, 0.0)
+        constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
+        constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
         write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, 0.0)
         write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
 
@@ -2921,8 +2919,8 @@ def _revolute_iterate_at_multi(
     mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF, cid)
     impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF, cid)
 
-    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    acc2_world = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
+    acc1 = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid)
+    acc2_world = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid)
 
     n_hat = wp.vec3f(0.0, 0.0, 0.0)
     clamp = read_int(constraints, base_offset + _OFF_CLAMP, cid)
@@ -2946,7 +2944,7 @@ def _revolute_iterate_at_multi(
             max_lambda_drive = max_force_drive * (wp.float32(1.0) / idt)
             bias_drive = read_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid)
             gamma_drive = read_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid)
-            acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
+            acc_drive = constraint_read_multiplier(constraints, _MUL_ACC_DRIVE, cid)
 
     acc_limit = wp.float32(0.0)
     pd_mode_limit = False
@@ -2968,7 +2966,7 @@ def _revolute_iterate_at_multi(
         eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
         friction_active = eff_inv_friction > wp.float32(0.0) and max_lambda_friction > wp.float32(0.0)
         if friction_active:
-            acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+            acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
             slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
             slip_scale = read_float(constraints, base_offset + _OFF_FRICTION_SLIP_SCALE, cid)
             if slip_scale > wp.float32(0.0):
@@ -2978,7 +2976,7 @@ def _revolute_iterate_at_multi(
 
     limit_active = clamp != _CLAMP_NONE
     if limit_active:
-        acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
+        acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
         stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
         damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
         pd_mode_limit = stiffness_limit > wp.float32(0.0) or damping_limit > wp.float32(0.0)
@@ -3108,16 +3106,16 @@ def _revolute_iterate_at_multi(
         angular_velocity2,
     )
 
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid, acc1)
-    write_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid, acc2_world)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, acc1)
+    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, acc2_world)
     if drive_active:
-        write_float(constraints, base_offset + _OFF_ACC_DRIVE, cid, acc_drive)
+        constraint_write_multiplier(constraints, _MUL_ACC_DRIVE, cid, acc_drive)
     if limit_active:
-        write_float(constraints, base_offset + _OFF_ACC_LIMIT, cid, acc_limit)
+        constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, acc_limit)
     if friction_active and use_bias:
-        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, acc_friction)
+        constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, acc_friction)
     elif friction <= wp.float32(0.0):
-        write_float(constraints, base_offset + _OFF_ACC_FRICTION, cid, 0.0)
+        constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
 
 
 @wp.func
@@ -3226,16 +3224,16 @@ def actuated_double_ball_socket_world_wrench_at(
     block, so only the anchor-1 impulse contributes.
     """
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
-    acc1 = read_vec3(constraints, base_offset + _OFF_ACC_IMP1, cid)
-    acc2 = read_vec3(constraints, base_offset + _OFF_ACC_IMP2, cid)
-    acc3 = read_vec3(constraints, base_offset + _OFF_ACC_IMP3, cid)
+    acc1 = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid)
+    acc2 = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid)
+    acc3 = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid)
     r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
     r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
     r3_b2 = read_vec3(constraints, base_offset + _OFF_R3_B2, cid)
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    acc_drive = read_float(constraints, base_offset + _OFF_ACC_DRIVE, cid)
-    acc_limit = read_float(constraints, base_offset + _OFF_ACC_LIMIT, cid)
-    acc_friction = read_float(constraints, base_offset + _OFF_ACC_FRICTION, cid)
+    acc_drive = constraint_read_multiplier(constraints, _MUL_ACC_DRIVE, cid)
+    acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
+    acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
     acc_axial = acc_drive + acc_limit + acc_friction
 
     if joint_mode == JOINT_MODE_REVOLUTE:

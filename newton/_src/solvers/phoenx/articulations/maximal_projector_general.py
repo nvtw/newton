@@ -16,17 +16,19 @@ from newton._src.solvers.phoenx.articulations.maximal_projector import _solve_sp
 from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
+    constraint_read_multiplier,
+    constraint_read_multiplier_vec3,
+    constraint_write_multiplier,
+    constraint_write_multiplier_vec3,
     read_float,
     read_int,
     read_vec3,
-    write_float,
-    write_vec3,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    _OFF_ACC_IMP1,
-    _OFF_ACC_IMP2,
-    _OFF_ACC_IMP3,
-    _OFF_ACC_LIMIT,
+    _MUL_ACC_IMP1,
+    _MUL_ACC_IMP2,
+    _MUL_ACC_IMP3,
+    _MUL_ACC_LIMIT,
     _OFF_AXIS_WORLD,
     _OFF_BIAS1,
     _OFF_BIAS2,
@@ -341,9 +343,7 @@ def _gather_general_maximal_tree_thread(
 
 
 @wp.func
-def _project_general_maximal_tree_thread(
-    tid: wp.int32, implicit_drive: wp.bool, data: GeneralMaximalTreeProjectorData
-):
+def _project_general_maximal_tree_thread(tid: wp.int32, implicit_drive: wp.bool, data: GeneralMaximalTreeProjectorData):
     articulation = tid // wp.int32(_WARP_SIZE)
     lane = tid - articulation * wp.int32(_WARP_SIZE)
     body_count = data.body_count[articulation]
@@ -518,11 +518,11 @@ def _publish_general_maximal_tree_thread(
     if mode == JOINT_MODE_UNIVERSAL:
         axis = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
         locked_torque = angular - wp.cross(r1, linear)
-        write_float(
+        constraint_write_multiplier(
             constraints,
-            _OFF_ACC_LIMIT,
+            _MUL_ACC_LIMIT,
             cid,
-            read_float(constraints, _OFF_ACC_LIMIT, cid) - wp.dot(axis, locked_torque),
+            constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid) - wp.dot(axis, locked_torque),
         )
     elif mode == JOINT_MODE_REVOLUTE:
         r2 = read_vec3(constraints, _OFF_R2_B2, cid)
@@ -543,11 +543,26 @@ def _publish_general_maximal_tree_thread(
         lambda3 = coefficients[2] * tangent2
         lambda1 = linear - lambda2 - lambda3
 
-    write_vec3(constraints, _OFF_ACC_IMP1, cid, read_vec3(constraints, _OFF_ACC_IMP1, cid) + lambda1)
+    constraint_write_multiplier_vec3(
+        constraints,
+        _MUL_ACC_IMP1,
+        cid,
+        constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid) + lambda1,
+    )
     if mode != JOINT_MODE_BALL_SOCKET and mode != JOINT_MODE_UNIVERSAL:
-        write_vec3(constraints, _OFF_ACC_IMP2, cid, read_vec3(constraints, _OFF_ACC_IMP2, cid) + lambda2)
+        constraint_write_multiplier_vec3(
+            constraints,
+            _MUL_ACC_IMP2,
+            cid,
+            constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid) + lambda2,
+        )
     if mode == JOINT_MODE_FIXED or mode == JOINT_MODE_PRISMATIC:
-        write_vec3(constraints, _OFF_ACC_IMP3, cid, read_vec3(constraints, _OFF_ACC_IMP3, cid) + lambda3)
+        constraint_write_multiplier_vec3(
+            constraints,
+            _MUL_ACC_IMP3,
+            cid,
+            constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid) + lambda3,
+        )
 
 
 @wp.kernel(enable_backward=False)

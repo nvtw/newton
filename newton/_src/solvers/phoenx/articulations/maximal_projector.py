@@ -19,14 +19,15 @@ from newton._src.solvers.phoenx.body import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
+    constraint_read_multiplier_vec3,
+    constraint_write_multiplier_vec3,
     read_float,
     read_int,
     read_vec3,
-    write_vec3,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    _OFF_ACC_IMP1,
-    _OFF_ACC_IMP2,
+    _MUL_ACC_IMP1,
+    _MUL_ACC_IMP2,
     _OFF_AXIS_WORLD,
     _OFF_BIAS1,
     _OFF_BIAS2,
@@ -487,8 +488,18 @@ def _publish_maximal_tree_kernel(
     if wp.abs(lever_length) > wp.float32(1.0e-8):
         lambda2 = wp.cross(torque_after_r1, axis) / lever_length
     lambda1 = linear - lambda2
-    write_vec3(constraints, _OFF_ACC_IMP1, cid, read_vec3(constraints, _OFF_ACC_IMP1, cid) + lambda1)
-    write_vec3(constraints, _OFF_ACC_IMP2, cid, read_vec3(constraints, _OFF_ACC_IMP2, cid) + lambda2)
+    constraint_write_multiplier_vec3(
+        constraints,
+        _MUL_ACC_IMP1,
+        cid,
+        constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid) + lambda1,
+    )
+    constraint_write_multiplier_vec3(
+        constraints,
+        _MUL_ACC_IMP2,
+        cid,
+        constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid) + lambda2,
+    )
 
 
 @wp.func
