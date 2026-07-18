@@ -18,7 +18,6 @@ import warp as wp
 from newton._src.solvers.phoenx.body import (
     BodyContainer,
     body_load_inv_inertia_sym6,
-    body_load_orientation,
     body_load_vw,
     body_store_vw,
     mat33_from_sym6,
@@ -52,6 +51,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_pd_bias,
     cc_get_pd_eff_soft,
     cc_get_pd_gamma,
+    cc_get_r0,
+    cc_get_r1,
     cc_get_start_gap,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
@@ -958,12 +959,6 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
         inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1))
         inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2))
 
-        # Body pose for per-contact lever-arm recompute.
-        orientation1 = body_load_orientation(bodies, b1)
-        orientation2 = body_load_orientation(bodies, b2)
-        body_com1 = bodies.body_com[b1]
-        body_com2 = bodies.body_com[b2]
-
         it = wp.int32(0)
         while it < num_sweeps:
             for i in range(contact_count):
@@ -972,12 +967,8 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                 n = cc_get_normal(cc, k)
                 t1_dir = cc_get_tangent1(cc, k)
                 t2_dir = wp.cross(n, t1_dir)
-                local_p0 = cc_get_local_p0(cc, k)
-                local_p1 = cc_get_local_p1(cc, k)
-                margin0 = contacts.rigid_contact_margin0[k]
-                margin1 = contacts.rigid_contact_margin1[k]
-                r1 = wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
-                r2 = wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+                r1 = cc_get_r0(cc, k)
+                r2 = cc_get_r1(cc, k)
                 eff_n = cc_get_eff_n(cc, k)
                 eff_t1 = cc_get_eff_t1(cc, k)
                 eff_t2 = cc_get_eff_t2(cc, k)
