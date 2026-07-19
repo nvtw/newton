@@ -23,6 +23,34 @@ fourth lane as a small real win. It does not prove that narrowing the prepared
 arm arrays is faster; that alignment/traffic tradeoff is the next isolated
 experiment.
 
+## M2 — narrow prepared lever arms (rejected, 2026-07-19)
+
+Changing prepared arm/mass records from aligned vec4 to vec3 removed eight
+bytes/constraint. It was neutral at 8K and regressed the 32K robot median from
+1.31215 to 1.33605 ms (**-1.79% throughput**). Twelve-byte gather alignment
+cost more than the saved traffic. Keep aligned vec4 records.
+
+## M3 — subwarp world packing (accepted, 2026-07-19)
+
+The robot graph uses at most five constraints/color, so one warp/world wastes
+most lanes. M3 permits logical 8- and 16-thread worlds, launches logical widths
+up to 32 in 128-thread physical blocks, and uses masked warp barriers between
+PGS colors. At width eight this packs four worlds/warp and 16 worlds/block.
+
+Alternating exact-source bracket, sticky robot scene:
+
+| Worlds | M1 width 32 | M3 width 8 | Throughput | Useful bandwidth | Sequential / random-vec4 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 8,192 | 354.180 us | **295.708 us** | **+19.77%** | 426.32 -> **510.63 GB/s** | 28.63 / 41.12% -> **34.28 / 49.25%** |
+| 32,768 | 1.31769 ms | **1.19879 ms** | **+9.92%** | 458.37 -> **503.83 GB/s** | 30.78 / 44.21% -> **33.83 / 48.59%** |
+
+Width 16 was intermediate (316.49 us at 8K). Packing two or four 32-thread
+worlds/block helped slightly; eight regressed. Contact-only width eight was
+about 1.4% slower, so M3 remains an explicit topology experiment rather than a
+universal default. Three mini tests pass, explicit width-eight runs have zero
+overflow, and width 32 versus width eight produced bit-identical poses and
+velocities after 60 deterministic steps.
+
 This is an append-only scientific ledger. Failed qualifications and rejected
 results remain visible.
 

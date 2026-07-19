@@ -18,6 +18,26 @@ __syncthreads();
 def _block_sync(): ...
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+__syncwarp();
+#endif
+"""
+)
+def _warp_sync(): ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+__syncwarp(mask);
+#endif
+"""
+)
+def _warp_sync_mask(mask: wp.uint32): ...
+
+
 @wp.func
 def _xyz(value: wp.vec4) -> wp.vec3:
     return wp.vec3(value[0], value[1], value[2])

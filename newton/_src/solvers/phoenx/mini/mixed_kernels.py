@@ -12,6 +12,8 @@ from .packed_kernels import (
     _mul_world_inertia,
     _prepare_packed_contact,
     _solve_packed_contact,
+    _warp_sync,
+    _warp_sync_mask,
     _xyz,
 )
 
@@ -420,6 +422,24 @@ def solve_mixed_constraints_kernel(
                         angular_velocity,
                     )
                 slot += block_dim
-            _block_sync()
+            if block_dim == wp.int32(8):
+                warp_lane = tid & wp.int32(31)
+                sync_mask = wp.uint32(0x000000FF)
+                if warp_lane >= wp.int32(24):
+                    sync_mask = wp.uint32(0xFF000000)
+                elif warp_lane >= wp.int32(16):
+                    sync_mask = wp.uint32(0x00FF0000)
+                elif warp_lane >= wp.int32(8):
+                    sync_mask = wp.uint32(0x0000FF00)
+                _warp_sync_mask(sync_mask)
+            elif block_dim == wp.int32(16):
+                sync_mask = wp.uint32(0x0000FFFF)
+                if (tid & wp.int32(31)) >= wp.int32(16):
+                    sync_mask = wp.uint32(0xFFFF0000)
+                _warp_sync_mask(sync_mask)
+            elif block_dim == wp.int32(32):
+                _warp_sync()
+            else:
+                _block_sync()
             color += wp.int32(1)
         iteration += wp.int32(1)

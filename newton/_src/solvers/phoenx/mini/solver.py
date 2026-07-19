@@ -156,8 +156,8 @@ class MiniSolver(SolverBase):
         c = self.config
         if c.substeps < 1 or c.iterations < 1:
             raise ValueError("MiniSolver substeps and iterations must be positive")
-        if c.block_dim not in (32, 64, 128, 256):
-            raise ValueError("MiniSolver block_dim must be one of 32, 64, 128, or 256")
+        if c.block_dim not in (8, 16, 32, 64, 128, 256):
+            raise ValueError("MiniSolver block_dim must be one of 8, 16, 32, 64, 128, or 256")
         if c.max_colors < 1 or c.max_colors > 64:
             raise ValueError("MiniSolver max_colors must be in [1, 64]")
         if c.max_constraints_per_world < 1:
@@ -334,6 +334,7 @@ class MiniSolver(SolverBase):
                     device=self.model.device,
                 )
                 joint_act = control.joint_act if control is not None else self._joint_act
+                mixed_block_dim = 128 if self.config.block_dim <= 32 else self.config.block_dim
                 wp.launch(
                     prepare_mixed_constraints_kernel,
                     dim=self._world_count * self.config.block_dim,
@@ -391,7 +392,7 @@ class MiniSolver(SolverBase):
                         self._packed_joint_mass4,
                         self._packed_joint_motor,
                     ],
-                    block_dim=self.config.block_dim,
+                    block_dim=mixed_block_dim,
                     device=self.model.device,
                 )
                 wp.launch(
@@ -426,7 +427,7 @@ class MiniSolver(SolverBase):
                         self._inertia2,
                     ],
                     outputs=[self._linear_velocity, self._angular_velocity],
-                    block_dim=self.config.block_dim,
+                    block_dim=mixed_block_dim,
                     device=self.model.device,
                 )
                 wp.launch(
