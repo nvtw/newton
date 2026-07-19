@@ -27,7 +27,9 @@ def _make_stacks(world_count: int, bodies_per_world: int = 4):
 class TestMiniSolver(unittest.TestCase):
     def test_packed_contact_stack_remains_finite(self) -> None:
         model = _make_stacks(32)
-        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", rigid_contact_max=32 * 32, deterministic=True)
+        pipeline = newton.CollisionPipeline(
+            model, broad_phase="nxn", rigid_contact_max=32 * 32, deterministic=True, _deterministic_world_major=True
+        )
         contacts = pipeline.contacts()
         solver = MiniSolver(
             model,
@@ -53,7 +55,9 @@ class TestMiniSolver(unittest.TestCase):
     def test_interleaved_subwarp_is_bitwise_equivalent(self) -> None:
         model = _make_stacks(16)
         pipelines = [
-            newton.CollisionPipeline(model, broad_phase="nxn", rigid_contact_max=16 * 32, deterministic=True)
+            newton.CollisionPipeline(
+                model, broad_phase="nxn", rigid_contact_max=16 * 32, deterministic=True, _deterministic_world_major=True
+            )
             for _ in range(2)
         ]
         contacts = [pipeline.contacts() for pipeline in pipelines]
@@ -86,7 +90,9 @@ class TestMiniSolver(unittest.TestCase):
 
     def test_colored_buckets_have_no_body_conflicts(self) -> None:
         model = _make_stacks(16)
-        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", rigid_contact_max=16 * 32, deterministic=True)
+        pipeline = newton.CollisionPipeline(
+            model, broad_phase="nxn", rigid_contact_max=16 * 32, deterministic=True, _deterministic_world_major=True
+        )
         contacts = pipeline.contacts()
         solver = MiniSolver(
             model,
@@ -130,6 +136,7 @@ class TestMiniSolver(unittest.TestCase):
             broad_phase="nxn",
             rigid_contact_max=8 * 32,
             deterministic=True,
+            _deterministic_world_major=True,
         )
         contacts = pipeline.contacts()
         state = model.state()

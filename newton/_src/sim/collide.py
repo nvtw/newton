@@ -658,6 +658,7 @@ class CollisionPipeline:
         sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
         shape_pairs_max: int | None = None,
         deterministic: bool = False,
+        _deterministic_world_major: bool = False,
         contact_matching: Literal["disabled", "latest", "sticky"] = "disabled",
         contact_matching_pos_threshold: float = 0.0005,
         contact_matching_normal_dot_threshold: float = 0.995,
@@ -1083,6 +1084,10 @@ class CollisionPipeline:
                     compact_sort_subkey_bits,
                     compact_sort_key_bits,
                 ) = compact_sort_config
+                if not _deterministic_world_major:
+                    compact_sort_shape_world = None
+                    compact_sort_world_count = 0
+                    compact_sort_rank_count = 0
 
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs

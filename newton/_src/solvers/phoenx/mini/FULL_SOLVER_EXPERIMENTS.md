@@ -705,3 +705,24 @@ Per-frame gather/scatter costs exceed the repeated-access locality gain. The
 entire prototype was removed. Revisit color-major storage only if ingest or
 color construction writes final physical order directly, avoiding an explicit
 per-frame permutation.
+
+
+## F16 - mini world-striping transfer (rejected for full)
+
+Fixed-state 32K stack, 1,048,576 contacts, one substep, four iterations.
+Mini requires world-major collision runs; applying that order to unchanged full
+PhoenX regressed 2.480 to 2.525 ms (-1.8%), so it is now mini-only. Full
+production returns to pair-major at 2.459 ms; mini remains 1.374 ms and 72.2%
+of the 1,489.14 GB/s sequential roof.
+
+A no-copy `(local pair, world, point)` collision order improved the full fused
+prepare/PGS kernel from 319 to 294 us (+8.5% throughput), proving the solver
+benefits from striping. End-to-end fell 2.472 to 2.714 ms (-9.8%): deterministic
+gather rose 188 to 289 us, matching about 200 to 306 us, and world-run merge
+21 to 65 us. An exact-source A/B/A/B attempt to fuse sticky replay into claim
+resolution also regressed 2.487 to 2.509 ms (-0.9%). Both prototypes were
+removed.
+
+Conclusion: do not reorder canonical contacts or widen matching kernels. A
+future transfer must construct a narrow solver-local striped cache directly
+while leaving collision, matching, and canonical persistent state coalesced.
