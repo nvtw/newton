@@ -635,3 +635,23 @@ fast-tail8; G1, H1, and DR-Legs remain outside the F12 gate. Fast-tail8 and
 block-world produced bit-identical poses and velocities after 60 deterministic
 contact+revolute steps. Forty-five scheduler, launch-shape, and invariant tests
 pass.
+
+
+## F13 - coalesced node-color mask reset
+
+The full colorer already uses M4-style uint64 masks, but reset each node once
+per incident constraint from one serial world thread. F13 replaces those
+repeated scattered stores with one coalesced mask clear before coloring. It
+adds no allocation, solver path, or color-order change.
+
+Alternating exact-source A/B/A/B robot bracket after F12:
+
+| Worlds | F12 scattered reset | F13 coalesced reset | Throughput gain |
+| ---: | ---: | ---: | ---: |
+| 8,192 | 367.41 us | **364.78 us** | **+0.72%** |
+| 32,768 | 934.92 us | **929.84 us** | **+0.55%** |
+
+At 32K, useful-work bandwidth rises from about 646.0 to **649.6 GB/s**
+(43.38% to **43.62%** of sequential DRAM; 62.31% to **62.65%** of
+random-vec4). Forty-five focused tests pass. Color output, poses, and
+velocities are bit-identical after 60 deterministic steps.

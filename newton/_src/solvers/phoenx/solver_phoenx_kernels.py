@@ -670,11 +670,6 @@ def get_per_world_greedy_coloring_kernel(group_families: bool):
         while offset < count:
             eid = world_elements[base + offset]
             assigned[eid] = wp.int32(0)
-            for j in range(MAX_BODIES):
-                node = elements[eid].bodies[j]
-                if node < wp.int32(0):
-                    break
-                node_color_mask[node] = wp.uint64(0)
             offset += wp.int32(1)
 
         num_colors = wp.int32(0)

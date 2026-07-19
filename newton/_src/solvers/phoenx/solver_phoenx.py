@@ -3780,6 +3780,7 @@ class PhoenXWorld:
         wp.copy(self._world_csr_offsets, self._per_world_element_offsets)
         if self._use_greedy_coloring:
             self._per_world_greedy_overflow.zero_()
+            self._per_world_node_color_mask.zero_()
             wp.launch(
                 get_per_world_greedy_coloring_kernel(self._multi_world_scheduler != "block_world"),
                 dim=nw,
