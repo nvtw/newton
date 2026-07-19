@@ -22,6 +22,7 @@ __all__ = [
     "CC_IMPULSE_DWORDS_PER_CONTACT",
     "CC_LOCAL_ANCHOR_DWORDS",
     "CC_LOCAL_ANCHOR_FIRST_ROW",
+    "CC_PREV_DWORDS_PER_CONTACT",
     "CC_RIGID_DWORDS_PER_CONTACT",
     "ContactContainer",
     "cc_get_bias",
@@ -90,6 +91,9 @@ CC_DWORDS_PER_CONTACT: int = 18
 
 #: Rigid contacts use frame directions and two local anchors, but no barycentrics.
 CC_RIGID_DWORDS_PER_CONTACT: int = 12
+
+#: Previous-frame matching needs directions and anchors, never cloth barycentrics.
+CC_PREV_DWORDS_PER_CONTACT: int = CC_RIGID_DWORDS_PER_CONTACT
 
 #: Local anchors are the only manifold rows prepare may update after ingest.
 CC_LOCAL_ANCHOR_FIRST_ROW: int = 6
@@ -170,7 +174,7 @@ def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer, valid_c
         return
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         cc.prev_impulses[row, k] = cc.impulses[row, k]
-    for row in range(CC_DWORDS_PER_CONTACT):
+    for row in range(CC_PREV_DWORDS_PER_CONTACT):
         cc.prev_lambdas[row, k] = cc.lambdas[row, k]
 
 
@@ -207,6 +211,7 @@ def _contact_container_clear_reset_worlds_kernel(
         cc.prev_impulses[row, k] = wp.float32(0.0)
     for row in range(CC_DWORDS_PER_CONTACT):
         cc.lambdas[row, k] = wp.float32(0.0)
+    for row in range(CC_PREV_DWORDS_PER_CONTACT):
         cc.prev_lambdas[row, k] = wp.float32(0.0)
     for row in range(CC_DERIVED_DWORDS_PER_CONTACT):
         cc.derived[row, k] = wp.float32(0.0)
@@ -557,7 +562,7 @@ def contact_container_zeros(
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
-    cc.prev_lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.prev_lambdas = wp.zeros((CC_PREV_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     return cc
 

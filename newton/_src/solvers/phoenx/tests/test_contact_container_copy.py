@@ -11,6 +11,7 @@ import warp as wp
 from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DWORDS_PER_CONTACT,
     CC_IMPULSE_DWORDS_PER_CONTACT,
+    CC_PREV_DWORDS_PER_CONTACT,
     contact_container_copy_current_to_prev,
     contact_container_zeros,
 )
@@ -32,7 +33,8 @@ class TestContactContainerCopy(unittest.TestCase):
         cc.lambdas.assign(lambdas)
         # prev starts non-zero so an out-of-range write would be visible.
         cc.prev_impulses.assign(np.full_like(impulses, -7.0))
-        cc.prev_lambdas.assign(np.full_like(lambdas, -7.0))
+        prev_lambdas_initial = np.full((CC_PREV_DWORDS_PER_CONTACT, capacity), -7.0, dtype=np.float32)
+        cc.prev_lambdas.assign(prev_lambdas_initial)
         valid_count = wp.array([valid], dtype=wp.int32, device=device)
 
         with wp.ScopedCapture(device=device) as capture:
@@ -43,7 +45,7 @@ class TestContactContainerCopy(unittest.TestCase):
         prev_lambdas = cc.prev_lambdas.numpy()
         # Live slots copied exactly.
         np.testing.assert_array_equal(prev_impulses[:, :valid], impulses[:, :valid])
-        np.testing.assert_array_equal(prev_lambdas[:, :valid], lambdas[:, :valid])
+        np.testing.assert_array_equal(prev_lambdas[:, :valid], lambdas[:CC_PREV_DWORDS_PER_CONTACT, :valid])
         # Inactive tail left untouched.
         self.assertTrue(np.all(prev_impulses[:, valid:] == -7.0))
         self.assertTrue(np.all(prev_lambdas[:, valid:] == -7.0))

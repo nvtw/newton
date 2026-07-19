@@ -748,3 +748,27 @@ At 32K stack scale, steady matching falls about 200 to 74 us, gather 188 to
 166 us, and replay 90 to 72 us. Forty CPU/CUDA matching tests, both 500-step
 deterministic pipeline tests, compact-sort CUDA-graph parity, and five mini
 solver tests pass.
+
+
+## F18 - narrow previous contact state
+
+Previous-frame matching reads only the 12 rigid manifold rows: normal,
+tangent, and two anchors. Cloth barycentrics are current-frame data, so storing
+and copying their six rows in ``prev_lambdas`` was dead traffic. F18 narrows
+that array from 18 to 12 rows without adding a solver path or branch. This
+saves 24 MiB of persistent storage and 48 MiB of copy traffic per 1,048,576
+contact slots.
+
+Exact-source fixed-input RTX PRO 6000 results, one substep, four iterations:
+
+| Workload | F17 | F18 | Throughput gain | F18 useful bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| 8K stack, 262,144 contacts | 624.55 us | **612.00 us** | **+2.1%** | 603.11 GB/s (40.5% sequential) |
+| 32K stack, 1,048,576 contacts | 2.306 ms | **2.271 ms** | **+1.5%** | 650.06 GB/s (43.7% sequential) |
+| 32K robot, 131,072 contacts + 262,144 revolute | 868.64 us | 872.91 us | -0.5% (noise-scale) | 691.91 GB/s (46.5% sequential) |
+
+The mixed scene has one eighth as many contacts, so the expected frame gain is
+below timing noise. Contact-copy, cloth partitioning/public step, multi-world
+warm-start isolation, rigid settling, margins, and bitwise determinism tests
+pass. The 60-frame cloth settling test exceeded the four-minute local timeout;
+the faster cloth ingest/partition and public-step coverage passed.
