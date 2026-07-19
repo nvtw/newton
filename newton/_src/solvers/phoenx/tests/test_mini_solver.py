@@ -126,6 +126,47 @@ class TestMiniSolver(unittest.TestCase):
                             used_bodies.add(body)
         self.assertEqual(solver.stats().overflow_constraints, 0)
 
+    def test_schedule_reuse_is_bitwise_equivalent(self) -> None:
+        model = _make_stacks(16)
+        pipelines = [
+            newton.CollisionPipeline(
+                model,
+                broad_phase="nxn",
+                rigid_contact_max=16 * 32,
+                contact_matching="sticky",
+                deterministic=True,
+                _deterministic_world_major=True,
+            )
+            for _ in range(2)
+        ]
+        contacts = [pipeline.contacts() for pipeline in pipelines]
+        solvers = [
+            MiniSolver(
+                model,
+                MiniSolverConfig(
+                    substeps=1,
+                    iterations=4,
+                    max_constraints_per_world=64,
+                    reuse_schedule=reuse,
+                ),
+            )
+            for reuse in (False, True)
+        ]
+        states = [(model.state(), model.state()) for _ in solvers]
+        control = model.control()
+
+        for _ in range(40):
+            for index, (pipeline, solver) in enumerate(zip(pipelines, solvers, strict=True)):
+                state_0, state_1 = states[index]
+                pipeline.collide(state_0, contacts[index])
+                state_0.clear_forces()
+                solver.step(state_0, state_1, control, contacts[index], 1.0 / 120.0)
+                states[index] = (state_1, state_0)
+
+        np.testing.assert_array_equal(states[0][0].body_q.numpy(), states[1][0].body_q.numpy())
+        np.testing.assert_array_equal(states[0][0].body_qd.numpy(), states[1][0].body_qd.numpy())
+        self.assertEqual(int(solvers[1]._contact_topology_stable.numpy()[0]), 1)
+
     def test_mixed_schedule_is_deterministic(self) -> None:
         from newton._src.solvers.phoenx.mini.benchmark import _make_robot_model  # noqa: PLC0415
 

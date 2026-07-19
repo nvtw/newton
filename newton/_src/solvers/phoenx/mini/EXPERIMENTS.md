@@ -406,8 +406,8 @@ to occupy the GPU. Graph-colored C2 remains accepted.
 
 1. Test a hybrid matrix-free C5 that reconstructs tangent/effective mass in
    the hot loop to trade cheap FLOPs for fewer stream bytes/contact.
-2. Reuse the static revolute topology and its coloring across frames; only
-   dynamic contacts should be gathered and colored.
+2. Transfer C5 to full PhoenX with exact packed endpoint keys and safe
+   CUDA-graph conditional boundaries.
 3. Replace the rejected dynamic shared tile with a warp-shuffle or native CUDA
    body cache only if compile time and register count remain bounded.
 4. Add warm start as a separate convergence/throughput checkpoint; do not pay
@@ -417,3 +417,31 @@ to occupy the GPU. Graph-colored C2 remains accepted.
 
 A capability remains optional when it regresses throughput unless correctness
 or convergence repays the cost.
+
+
+
+## C5 - reuse unchanged constraint topology, accepted experiment
+
+Deterministic contact sorting often changes contact points while preserving the
+ordered shape-pair stream and therefore the constraint graph. C5 compares that
+stream with the previous frame, then uses a CUDA graph conditional to retain
+the existing world buckets and coloring when the count and every shape pair
+are unchanged. Any topology change takes the original full rebuild. The
+predicate is exact, scene-independent, and disabled by default while the
+stronger endpoint-key form is transferred to full PhoenX.
+
+RTX PRO 6000 exact-source medians, 32K worlds, sticky matching, one substep,
+four iterations:
+
+| Workload | Rebuild every frame | C5 reuse | Throughput gain | C5 useful bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| Stack, 1,048,576 contacts | 1.667 ms | **1.572 ms** | **+6.0%** | 939.46 GB/s (63.1% sequential, 90.6% random-vec4) |
+| Robot, 131,072 contacts + 262,144 revolute | 1.116 ms | **1.038 ms** | **+7.5%** | 581.99 GB/s (39.1% sequential, 56.1% random-vec4) |
+
+The exact comparison costs 13.9 us; predicate setup and conditional dispatch
+bring total detection to 17.3 us. Stable frames omit the 85.3 us color, 14.4 us
+world-run mark, and 8.5 us gather kernels. A 40-step evolving stack is bitwise
+identical with reuse enabled and disabled, proving both stable reuse and dirty
+fallback. The full PhoenX transfer should compare packed graph endpoints, not
+shape ids, so joints, live mass/node changes, and compound rigid contacts share
+one invalidation rule.

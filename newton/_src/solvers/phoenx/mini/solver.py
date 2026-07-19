@@ -17,10 +17,12 @@ from .kernels import (
     color_world_constraints_kernel,
     gather_sorted_contact_world_runs_kernel,
     gather_sorted_mixed_world_runs_kernel,
+    initialize_contact_topology_stable_kernel,
     integrate_poses_kernel,
     integrate_velocities_kernel,
     mark_sorted_contact_world_runs_kernel,
     solve_worlds_kernel,
+    validate_contact_topology_stable_kernel,
 )
 from .mixed_kernels import prepare_mixed_constraints_kernel, solve_mixed_constraints_kernel
 from .packed_kernels import (
@@ -51,6 +53,7 @@ class MiniSolverConfig:
     angular_damping: float = 0.05
     shared_body_cache: bool = False
     solve_layout: str = "colored"
+    reuse_schedule: bool = False
 
 
 @dataclass(frozen=True)
@@ -107,6 +110,13 @@ class MiniSolver(SolverBase):
         self._world_contact_start = wp.empty(world_count, dtype=wp.int32, device=model.device)
         self._world_contact_end = wp.empty(world_count, dtype=wp.int32, device=model.device)
         self._world_run_count = wp.zeros(world_count, dtype=wp.int32, device=model.device)
+        self._previous_contact_count = wp.array([-1], dtype=wp.int32, device=model.device)
+        self._previous_contact_shape0 = wp.empty(contact_capacity, dtype=wp.int32, device=model.device)
+        self._previous_contact_shape1 = wp.empty(contact_capacity, dtype=wp.int32, device=model.device)
+        self._contact_topology_stable = wp.zeros(1, dtype=wp.int32, device=model.device)
+        self._reuse_schedule_enabled = (
+            self.config.reuse_schedule and model.device.is_cuda and wp.is_conditional_graph_supported()
+        )
         joint_buckets = [[] for _ in range(world_count)]
         if model.joint_count:
             joint_types = model.joint_type.numpy()
@@ -209,6 +219,40 @@ class MiniSolver(SolverBase):
                 raise NotImplementedError(f"MiniSolver supports only revolute joints; found joint types {unsupported}")
 
     def _build_schedule(self, contacts: Contacts, *, color: bool) -> None:
+        if not self._reuse_schedule_enabled:
+            self._build_schedule_full(contacts, color=color)
+            return
+        wp.launch(
+            initialize_contact_topology_stable_kernel,
+            dim=1,
+            inputs=[
+                contacts.rigid_contact_count,
+                wp.int32(contacts.rigid_contact_match_index.shape[0]),
+                self._previous_contact_count,
+            ],
+            outputs=[self._contact_topology_stable],
+            device=self.model.device,
+        )
+        wp.launch(
+            validate_contact_topology_stable_kernel,
+            dim=contacts.rigid_contact_max,
+            inputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                self._previous_contact_shape0,
+                self._previous_contact_shape1,
+            ],
+            outputs=[self._contact_topology_stable],
+            device=self.model.device,
+        )
+        wp.capture_if(
+            self._contact_topology_stable,
+            on_true=lambda: None,
+            on_false=lambda: self._build_schedule_full(contacts, color=color),
+        )
+
+    def _build_schedule_full(self, contacts: Contacts, *, color: bool) -> None:
         c = self.config
         model = self.model
         self._world_constraint_count.zero_()

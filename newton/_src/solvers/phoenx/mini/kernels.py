@@ -658,6 +658,39 @@ def _contact_world(
 
 
 @wp.kernel(enable_backward=False)
+def initialize_contact_topology_stable_kernel(
+    contact_count: wp.array[wp.int32],
+    match_capacity: wp.int32,
+    previous_count: wp.array[wp.int32],
+    topology_stable: wp.array[wp.int32],
+):
+    count = wp.min(contact_count[0], match_capacity)
+    topology_stable[0] = wp.int32(count == previous_count[0])
+    previous_count[0] = count
+
+
+@wp.kernel(enable_backward=False)
+def validate_contact_topology_stable_kernel(
+    contact_count: wp.array[wp.int32],
+    shape0: wp.array[wp.int32],
+    shape1: wp.array[wp.int32],
+    previous_shape0: wp.array[wp.int32],
+    previous_shape1: wp.array[wp.int32],
+    topology_stable: wp.array[wp.int32],
+):
+    contact = wp.tid()
+    count = wp.min(contact_count[0], wp.int32(shape0.shape[0]))
+    if contact >= count:
+        return
+    current_shape0 = shape0[contact]
+    current_shape1 = shape1[contact]
+    if previous_shape0[contact] != current_shape0 or previous_shape1[contact] != current_shape1:
+        wp.atomic_min(topology_stable, 0, wp.int32(0))
+    previous_shape0[contact] = current_shape0
+    previous_shape1[contact] = current_shape1
+
+
+@wp.kernel(enable_backward=False)
 def mark_sorted_contact_world_runs_kernel(
     contact_count: wp.array[wp.int32],
     contact_shape0: wp.array[wp.int32],

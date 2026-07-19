@@ -112,6 +112,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
                 max_constraints_per_color=args.max_constraints_per_color,
                 shared_body_cache=args.shared_body_cache,
                 solve_layout=args.solve_layout,
+                reuse_schedule=args.reuse_schedule,
             ),
         )
     else:
@@ -267,6 +268,7 @@ def main() -> None:
     parser.add_argument("--block-dim", type=int, default=16)
     parser.add_argument("--shared-body-cache", action="store_true")
     parser.add_argument("--solve-layout", choices=("colored", "serial_world"), default="colored")
+    parser.add_argument("--reuse-schedule", action="store_true")
     parser.add_argument("--phoenx-threads-per-world", choices=("auto", "8", "16", "32"), default="auto")
     parser.add_argument("--phoenx-scheduler", choices=("auto", "fast_tail", "block_world"), default="auto")
     parser.add_argument("--max-colors", type=int, default=64)
