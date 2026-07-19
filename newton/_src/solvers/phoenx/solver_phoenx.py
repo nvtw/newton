@@ -2911,25 +2911,6 @@ class PhoenXWorld:
                         cid_of_contact=self._cid_of_contact_cur,
                         device=self.device,
                     )
-            if (
-                self._partition_active_this_step
-                and self.solver_flavor == "standard"
-                and self._ingest_scratch is not None
-            ):
-                # Contacts begin after the joint + cloth-tri + cloth-bending
-                # + soft-tet blocks in the cid space. Contact cids are compacted
-                # every step, so use the stable shape-pair key for contact
-                # priority tie-breaks; otherwise lower-world contact count changes
-                # perturb colouring and PGS order in later worlds.
-                self._partitioner.set_costs_from_contact_pairs(
-                    self._contact_offset,
-                    self._ingest_scratch.num_contact_columns,
-                    self._contact_cols,
-                    self._ingest_scratch.pair_source_idx,
-                    self._ingest_scratch.pair_shape_a,
-                    self._ingest_scratch.pair_shape_b,
-                )
-
             if self._partition_active_this_step and self.solver_flavor == "standard":
                 self._rebuild_elements()
         # Kinematic prepare BEFORE the sleeping pass: the per-island
@@ -3287,9 +3268,16 @@ class PhoenXWorld:
             )
 
     def _rebuild_elements(self) -> None:
-        """Project active constraints into the partitioner's element view."""
+        """Project active constraints and coloring priorities in one pass."""
         if self._constraint_capacity == 0:
             return
+        pair_source_idx = self._element_family
+        pair_shape_a = self._element_family
+        pair_shape_b = self._element_family
+        if self._ingest_scratch is not None:
+            pair_source_idx = self._ingest_scratch.pair_source_idx
+            pair_shape_a = self._ingest_scratch.pair_shape_a
+            pair_shape_b = self._ingest_scratch.pair_shape_b
         wp.launch(
             _constraints_to_elements_kernel,
             dim=self._constraint_capacity,
@@ -3306,8 +3294,13 @@ class PhoenXWorld:
                 wp.int32(self.num_soft_tetrahedra),
                 wp.int32(self.num_soft_hexahedra),
                 wp.int32(self.num_bodies),
+                pair_source_idx,
+                pair_shape_a,
+                pair_shape_b,
+                self._partitioner._random_values,
                 self._elements,
                 self._element_family,
+                self._partitioner._packed_priorities,
             ],
             device=self.device,
         )

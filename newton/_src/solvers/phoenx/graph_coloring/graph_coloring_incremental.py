@@ -236,56 +236,6 @@ def _fill_packed_priorities_from_contacts_kernel(
     packed_priorities[tid] = (cost << wp.int32(24)) | rand
 
 
-@wp.func
-def _stable_contact_pair_priority(shape_a: wp.int32, shape_b: wp.int32) -> wp.int32:
-    """24-bit deterministic hash for a contact shape pair."""
-    lo = shape_a
-    hi = shape_b
-    if lo > hi:
-        lo = shape_b
-        hi = shape_a
-
-    h = (lo + wp.int32(1)) * wp.int32(73856093)
-    h = h ^ ((hi + wp.int32(1)) * wp.int32(19349663))
-    h = h ^ (h >> wp.int32(13))
-    h = h * wp.int32(83492791)
-    return h & wp.int32(0x00FFFFFF)
-
-
-@wp.kernel(enable_backward=False, module="unique")
-def _fill_packed_priorities_from_contact_pairs_kernel(
-    packed_priorities: wp.array[wp.int32],
-    random_values: wp.array[wp.int32],
-    contact_cols: ContactColumnContainer,
-    num_contact_columns: wp.array[wp.int32],
-    pair_source_idx: wp.array[wp.int32],
-    pair_shape_a: wp.array[wp.int32],
-    pair_shape_b: wp.array[wp.int32],
-    num_joints: wp.int32,
-):
-    """Refresh priorities using stable contact shape-pair tie-breaks.
-
-    Dynamic contact compaction can shift every later world's contact cid
-    when an earlier world gains or loses contacts. Using ``random_values[cid]``
-    for contact tie-breaks makes otherwise identical later worlds receive
-    different JP/greedy colour order. Shape ids are model-stable, so hashing
-    the owning shape pair keeps contact priorities invariant under unrelated
-    lower-world contact-count changes.
-    """
-    tid = wp.tid()
-    local_cid = tid - num_joints
-    if local_cid >= wp.int32(0) and local_cid < num_contact_columns[0]:
-        p = pair_source_idx[local_cid]
-        cost = contact_get_contact_count(contact_cols, local_cid)
-        if cost > wp.int32(255):
-            cost = wp.int32(255)
-        rand = _stable_contact_pair_priority(pair_shape_a[p], pair_shape_b[p])
-    else:
-        cost = wp.int32(0)
-        rand = random_values[tid] & wp.int32(0x00FFFFFF)
-    packed_priorities[tid] = (cost << wp.int32(24)) | rand
-
-
 class IncrementalContactPartitioner:
     """JP partitioner with two modes.
 
@@ -531,32 +481,6 @@ class IncrementalContactPartitioner:
                 self._random_values,
                 contact_cols,
                 num_contact_columns,
-                wp.int32(num_joints),
-            ],
-            device=self._packed_priorities.device,
-        )
-
-    def set_costs_from_contact_pairs(
-        self,
-        num_joints: int,
-        num_contact_columns: wp.array[wp.int32],
-        contact_cols: ContactColumnContainer,
-        pair_source_idx: wp.array[wp.int32],
-        pair_shape_a: wp.array[wp.int32],
-        pair_shape_b: wp.array[wp.int32],
-    ) -> None:
-        """Refresh priorities with contact tie-breaks keyed by shape pair."""
-        wp.launch(
-            _fill_packed_priorities_from_contact_pairs_kernel,
-            dim=self.max_num_interactions,
-            inputs=[
-                self._packed_priorities,
-                self._random_values,
-                contact_cols,
-                num_contact_columns,
-                pair_source_idx,
-                pair_shape_a,
-                pair_shape_b,
                 wp.int32(num_joints),
             ],
             device=self._packed_priorities.device,

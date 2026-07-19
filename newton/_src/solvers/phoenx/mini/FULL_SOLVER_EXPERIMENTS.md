@@ -852,3 +852,39 @@ dominates Kapla.
 Rigid determinism, stacking, contact force, patch, compound, colored-row,
 speculative, soft-contact, multi-world isolation, rigid-cloth, bit-exact cloth,
 Kapla, bunny, and all 40 collision-matching tests pass.
+
+
+
+## F22 - fuse contact coloring priorities
+
+Element projection already reads each contact column and its owning shape pair.
+F22 writes the deterministic coloring priority in that pass and deletes the
+standalone contact-priority kernel and API. This removes 58 net source lines
+and adds no scheduler or scene-specific path.
+
+Exact-source fixed-input RTX PRO 6000 medians, one substep, four iterations:
+
+| Workload | F21 | F22 | Throughput gain | F22 useful bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| 8K stack, 262,144 contacts | 582.39 us | **566.64 us** | **+2.8%** | 651.38 GB/s (43.7% sequential, 62.8% random-vec4) |
+| 32K stack, 1,048,576 contacts | 2.141 ms | **2.091 ms** | **+2.4%** | 706.10 GB/s (47.4% sequential, 68.1% random-vec4) |
+| 32K robot, 131,072 contacts + 262,144 revolute | 933.36 us | **915.84 us** | **+1.9%** | 659.48 GB/s (44.3% sequential, 63.6% random-vec4) |
+
+Nsight confirms that the old 55 us priority kernel is absent while fused
+element projection remains 38.8 us, essentially its former 38 us cost. The
+32K contact workload remains staging/latency limited rather than FP32 limited:
+its useful-work estimate is 0.91 TFLOP/s, 1.0% of the 87.810 TFLOP/s roof.
+
+An exact-source, equal-trajectory-age check also corrects the noisy evolving
+Kapla comparison above. At 45K bodies, F21 takes 22.645 ms versus S2's 24.576
+ms with four substeps (+8.5%), and 27.813 ms versus 29.992 ms with six (+7.8%).
+The six-substep useful-work estimate is 1,499.96 GB/s, 100.7% of the measured
+sequential-copy roof; this is an algorithmic lower-bound estimate, not a GPU
+counter. Large single worlds are therefore already near the bandwidth roof in
+this configuration. The principal remaining opportunity is above-L2
+multi-world staging, which reaches only about 47% of sequential or 68% of the
+random-vec4 roof.
+
+Fixed-Luby coloring, rigid determinism, multi-world PGS ordering, compound
+grouping, patch friction, soft contacts, cloth contact partitioning,
+speculative coloring, and Kapla regression tests pass.

@@ -2571,6 +2571,21 @@ def _element_data_compact8(
     return element_interaction_data_make(s0, s1, s2, s3, s4, s5, s6, s7)
 
 
+@wp.func
+def _stable_contact_pair_priority(shape_a: wp.int32, shape_b: wp.int32) -> wp.int32:
+    """Return a model-stable 24-bit priority for a contact shape pair."""
+    lo = shape_a
+    hi = shape_b
+    if lo > hi:
+        lo = shape_b
+        hi = shape_a
+    h = (lo + wp.int32(1)) * wp.int32(73856093)
+    h = h ^ ((hi + wp.int32(1)) * wp.int32(19349663))
+    h = h ^ (h >> wp.int32(13))
+    h = h * wp.int32(83492791)
+    return h & wp.int32(0x00FFFFFF)
+
+
 @wp.kernel(enable_backward=False, module="unique")
 def _constraints_to_elements_kernel(
     constraints: ConstraintContainer,
@@ -2585,8 +2600,13 @@ def _constraints_to_elements_kernel(
     num_soft_tetrahedra: wp.int32,
     num_soft_hexahedra: wp.int32,
     num_bodies: wp.int32,
+    pair_source_idx: wp.array[wp.int32],
+    pair_shape_a: wp.array[wp.int32],
+    pair_shape_b: wp.array[wp.int32],
+    random_values: wp.array[wp.int32],
     elements: wp.array[ElementInteractionData],
     element_family: wp.array[wp.int32],
+    packed_priorities: wp.array[wp.int32],
 ):
     """Project active constraints into ElementInteractionData. Static bodies
     collapse to -1; the dynamic body compacts to slot 0.
@@ -2603,6 +2623,7 @@ def _constraints_to_elements_kernel(
     n = num_constraints[0]
     if tid >= n:
         return
+    packed_priorities[tid] = random_values[tid] & wp.int32(0x00FFFFFF)
     if tid < num_joints:
         element_family[tid] = wp.int32(0)
         b1 = constraint_get_body1(constraints, tid)
@@ -2691,6 +2712,10 @@ def _constraints_to_elements_kernel(
 
     contact_first = contact_get_contact_first(contact_cols, local_cid)
     contact_count = contact_get_contact_count(contact_cols, local_cid)
+    priority_cost = wp.min(contact_count, wp.int32(255))
+    pair = pair_source_idx[local_cid]
+    priority_rand = _stable_contact_pair_priority(pair_shape_a[pair], pair_shape_b[pair])
+    packed_priorities[tid] = (priority_cost << wp.int32(24)) | priority_rand
     side0_use0 = bool(True)
     side0_use1 = bool(True)
     side0_use2 = bool(True)
