@@ -75,17 +75,15 @@ points, offsets, and normal consumed by :meth:`replay_matched`.
 
 Per-frame call order (inside :class:`~newton.CollisionPipeline`)::
 
-    matcher.match(...)  # before ContactSorter.sort_full()
-    sorter.sort_full(...)  # match_index is permuted with contacts
+    sorter.sort_full(...)  # canonical current-frame stream
+    matcher.match(...)  # match canonical current against sorted history
     matcher.replay_matched(...)  # sticky-only; overwrite matched rows
     matcher.build_report(...)  # optional; must precede save_sorted_state
     matcher.save_sorted_state(...)  # after sorting, replay, and report
 
-The ordering matters: ``save_sorted_state`` overwrites ``_prev_count`` with
-the current frame's count, while ``build_report`` reads the *old*
-``_prev_count`` to bound the broken-contact enumeration, and sticky
-``replay_matched`` must see the post-sort ``match_index`` and the pre-save
-``_prev_*`` buffers it reads from.
+The ordering matters: matching and replay consume the previous-frame state;
+``build_report`` also reads its count. ``save_sorted_state`` must run last
+because it replaces that history with the current canonical stream.
 """
 
 from __future__ import annotations
@@ -206,7 +204,7 @@ class _MatchData:
     prev_normal: wp.array[wp.vec3]
     prev_count: wp.array[wp.int32]
 
-    # Current frame (unsorted).
+    # Current frame (canonical in CollisionPipeline; arbitrary for direct callers).
     new_keys: wp.array[wp.int64]
     new_point0: wp.array[wp.vec3]
     new_point1: wp.array[wp.vec3]
@@ -778,16 +776,17 @@ class ContactMatcher:
         *,
         device: Devicelike = None,
     ) -> None:
-        """Match current unsorted contacts against last frame's sorted contacts.
+        """Match current contacts against the previous sorted contacts.
 
-        Must be called **before** :meth:`ContactSorter.sort_full`.
+        :class:`CollisionPipeline` calls this after deterministic sorting so
+        current and previous pair searches are warp-coherent.
 
         Distance is measured between world-space contact midpoints
         (``0.5 * (world(point0) + world(point1))``) so the metric is symmetric
         in shape 0 / shape 1.
 
         Args:
-            sort_keys: Current frame's unsorted int64 sort keys.
+            sort_keys: Current-frame int64 sort keys.
             contact_count: Single-element int array with active contact count.
             point0: Body-frame contact points on shape 0 (current frame).
             point1: Body-frame contact points on shape 1 (current frame).

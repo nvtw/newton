@@ -1627,28 +1627,6 @@ class CollisionPipeline:
             device=self.device,
         )
 
-        # Match contacts against previous frame before sorting.
-        if self._contact_matcher is not None:
-            if contacts.rigid_contact_match_index is None:
-                raise ValueError(
-                    "CollisionPipeline has contact_matching enabled but the "
-                    "Contacts buffer was created without contact_matching. "
-                    "Use pipeline.contacts() to create a compatible buffer."
-                )
-            self._contact_matcher.match(
-                sort_keys=self._sort_key_array,
-                contact_count=contacts.rigid_contact_count,
-                point0=writer_data.out_point0,
-                point1=writer_data.out_point1,
-                shape0=writer_data.out_shape0,
-                shape1=writer_data.out_shape1,
-                normal=writer_data.out_normal,
-                body_q=state.body_q,
-                shape_body=shape_body if shape_body is not None else model.shape_body,
-                match_index_out=sort_buffer.match_index,
-                device=self.device,
-            )
-
         if self.deterministic and self._contact_sorter is not None:
             self._contact_sorter.sort_full(
                 self._sort_key_array,
@@ -1666,8 +1644,30 @@ class CollisionPipeline:
                 stiffness=contacts.rigid_contact_stiffness,
                 damping=contacts.rigid_contact_damping,
                 friction=contacts.rigid_contact_friction,
-                match_index=contacts.rigid_contact_match_index,
+                match_index=None,
                 source_is_buffer=True,
+                device=self.device,
+            )
+
+        # Match the canonical current stream directly; no match-index permutation.
+        if self._contact_matcher is not None:
+            if contacts.rigid_contact_match_index is None:
+                raise ValueError(
+                    "CollisionPipeline has contact_matching enabled but the "
+                    "Contacts buffer was created without contact_matching. "
+                    "Use pipeline.contacts() to create a compatible buffer."
+                )
+            self._contact_matcher.match(
+                sort_keys=self._contact_sorter.sorted_keys_view,
+                contact_count=contacts.rigid_contact_count,
+                point0=contacts.rigid_contact_point0,
+                point1=contacts.rigid_contact_point1,
+                shape0=contacts.rigid_contact_shape0,
+                shape1=contacts.rigid_contact_shape1,
+                normal=contacts.rigid_contact_normal,
+                body_q=state.body_q,
+                shape_body=shape_body if shape_body is not None else model.shape_body,
+                match_index_out=contacts.rigid_contact_match_index,
                 device=self.device,
             )
 

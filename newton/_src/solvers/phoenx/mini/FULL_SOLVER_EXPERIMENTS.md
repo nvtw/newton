@@ -726,3 +726,25 @@ removed.
 Conclusion: do not reorder canonical contacts or widen matching kernels. A
 future transfer must construct a narrow solver-local striped cache directly
 while leaving collision, matching, and canonical persistent state coalesced.
+
+
+## F17 - match the canonical current stream
+
+Contact matching previously ran on narrow-phase slots, then its result was
+permuted by deterministic gather. F17 sorts first and matches the canonical
+current stream directly. This removes match-index gather traffic and makes
+current/previous pair searches and sticky replay warp-coherent. No array,
+solver path, contact order, or matching rule changes.
+
+Fixed-input RTX PRO 6000 exact-source brackets, one substep, four iterations:
+
+| Workload | Control | F17 | Throughput gain | F17 useful bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| 8K stack, 262,144 contacts | 654.96 us | **633.32 us** | **+3.4%** | 582.80 GB/s (39.1% sequential) |
+| 32K stack, 1,048,576 contacts | 2.471 ms | **2.318 ms** | **+6.6%** | 636.87 GB/s (42.8% sequential) |
+| 32K robot, 131,072 contacts + 262,144 revolute | 949.08 us | **943.50 us** | **+0.6%** | 640.15 GB/s (43.0% sequential) |
+
+At 32K stack scale, steady matching falls about 200 to 74 us, gather 188 to
+166 us, and replay 90 to 72 us. Forty CPU/CUDA matching tests, both 500-step
+deterministic pipeline tests, compact-sort CUDA-graph parity, and five mini
+solver tests pass.
