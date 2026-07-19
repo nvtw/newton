@@ -72,6 +72,27 @@ steps. An 8K profile attributes 23.9% of kernel time to solve, 13.2% to CUB
 contact sorts, 11.3% to prepare, and 6.4% to coloring. Sorting is now the
 largest non-solver target.
 
+## M5 — one lane per world (rejected, 2026-07-19)
+
+M5 tested whether transposing execution across thousands of worlds would make
+corresponding contact/body vec4 loads coalesce. The existing `serial_world`
+path changes constraint order; a temporary `striped_world` kernel preserved
+the color-major prepared rows and PGS color order while changing only thread
+mapping. Both assign one CUDA lane to each world.
+
+Matched 32,768-world above-L2 runs, 200 captured replays:
+
+| Layout | Frame | Constraint iterations/s | Useful bandwidth | Sequential / random-vec4 / FP32 |
+| --- | ---: | ---: | ---: | ---: |
+| Colored subwarp | **1.949 ms** | **2.139 B** | **752.8 GB/s** | **50.6 / 72.6 / 1.10%** |
+| Serial world order | 2.281 ms | 1.844 B | 649.0 GB/s | 43.6 / 62.6 / 0.94% |
+| Color-preserving striped | 2.500 ms | 1.668 B | 587.2 GB/s | 39.4 / 56.6 / 0.85% |
+
+World striping loses 28.3% frame throughput and 22.0% normalized constraint
+throughput. Contact manifolds are not aligned enough across worlds to recover
+the lost within-color parallelism. The striped prototype was removed. Future
+coalescing experiments must retain subwarp parallelism.
+
 This is an append-only scientific ledger. Failed qualifications and rejected
 results remain visible.
 
