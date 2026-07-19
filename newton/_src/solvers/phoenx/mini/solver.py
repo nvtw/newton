@@ -15,10 +15,11 @@ from newton._src.solvers.solver import SolverBase
 
 from .kernels import (
     color_world_constraints_kernel,
-    gather_contact_constraints_kernel,
-    gather_revolute_constraints_kernel,
+    gather_sorted_contact_world_runs_kernel,
+    gather_sorted_mixed_world_runs_kernel,
     integrate_poses_kernel,
     integrate_velocities_kernel,
+    mark_sorted_contact_world_runs_kernel,
     solve_worlds_kernel,
 )
 from .mixed_kernels import prepare_mixed_constraints_kernel, solve_mixed_constraints_kernel
@@ -40,7 +41,7 @@ class MiniSolverConfig:
 
     substeps: int = 4
     iterations: int = 4
-    block_dim: int = 32
+    block_dim: int = 16
     max_colors: int = 64
     max_constraints_per_world: int = 256
     max_constraints_per_color: int = 32
@@ -103,6 +104,26 @@ class MiniSolver(SolverBase):
         contact_capacity = max(1, int(model.rigid_contact_max))
         self._world_count = world_count
         self._world_constraint_count = wp.zeros(world_count, dtype=wp.int32, device=model.device)
+        self._world_contact_start = wp.empty(world_count, dtype=wp.int32, device=model.device)
+        self._world_contact_end = wp.empty(world_count, dtype=wp.int32, device=model.device)
+        self._world_run_count = wp.zeros(world_count, dtype=wp.int32, device=model.device)
+        joint_buckets = [[] for _ in range(world_count)]
+        if model.joint_count:
+            joint_types = model.joint_type.numpy()
+            joint_enabled = model.joint_enabled.numpy()
+            joint_world = model.joint_world.numpy()
+            for joint, (joint_type, enabled, world) in enumerate(
+                zip(joint_types, joint_enabled, joint_world, strict=True)
+            ):
+                if enabled and int(joint_type) == int(JointType.REVOLUTE):
+                    joint_buckets[max(0, int(world))].append(joint)
+        joint_counts = np.asarray([len(bucket) for bucket in joint_buckets], dtype=np.int32)
+        joint_offsets = np.empty(world_count + 1, dtype=np.int32)
+        joint_offsets[0] = 0
+        np.cumsum(joint_counts, out=joint_offsets[1:])
+        joint_indices = np.asarray([joint for bucket in joint_buckets for joint in bucket], dtype=np.int32)
+        self._world_joint_offset = wp.array(joint_offsets, dtype=wp.int32, device=model.device)
+        self._world_joint = wp.array(joint_indices, dtype=wp.int32, device=model.device)
         self._world_constraints = wp.empty(world_count * capacity, dtype=wp.int32, device=model.device)
         self._world_num_colors = wp.zeros(world_count, dtype=wp.int32, device=model.device)
         self._world_color_count = wp.zeros(world_count * self.config.max_colors, dtype=wp.int32, device=model.device)
@@ -117,7 +138,13 @@ class MiniSolver(SolverBase):
         self._lambda_n = wp.zeros(contact_capacity, dtype=wp.float32, device=model.device)
         self._lambda_t1 = wp.zeros(contact_capacity, dtype=wp.float32, device=model.device)
         self._lambda_t2 = wp.zeros(contact_capacity, dtype=wp.float32, device=model.device)
-        packed_capacity = world_count * capacity
+        self._packed_worlds_per_tile = 1
+        if self._packed_contacts and self._shared_solve_kernel is None and self.config.block_dim <= 32:
+            self._packed_worlds_per_tile = 32 // self.config.block_dim
+        padded_world_count = (
+            (world_count + self._packed_worlds_per_tile - 1) // self._packed_worlds_per_tile
+        ) * self._packed_worlds_per_tile
+        packed_capacity = padded_world_count * capacity
         self._world_color_offset = wp.zeros(world_count * self.config.max_colors, dtype=wp.int32, device=model.device)
         self._linear_velocity = wp.empty(model.body_count, dtype=wp.vec4, device=model.device)
         self._angular_velocity = wp.empty(model.body_count, dtype=wp.vec4, device=model.device)
@@ -185,6 +212,7 @@ class MiniSolver(SolverBase):
         c = self.config
         model = self.model
         self._world_constraint_count.zero_()
+        self._world_run_count.zero_()
         self._world_num_colors.zero_()
         self._world_color_count.zero_()
         self._body_color_mask.zero_()
@@ -194,21 +222,8 @@ class MiniSolver(SolverBase):
             self._lambda_n.zero_()
             self._lambda_t1.zero_()
             self._lambda_t2.zero_()
-        if self._has_revolute:
-            wp.launch(
-                gather_revolute_constraints_kernel,
-                dim=model.joint_count,
-                inputs=[
-                    model.joint_type,
-                    model.joint_enabled,
-                    model.joint_world,
-                    c.max_constraints_per_world,
-                ],
-                outputs=[self._world_constraint_count, self._world_constraints, self._gather_overflow],
-                device=model.device,
-            )
         wp.launch(
-            gather_contact_constraints_kernel,
+            mark_sorted_contact_world_runs_kernel,
             dim=contacts.rigid_contact_max,
             inputs=[
                 contacts.rigid_contact_count,
@@ -216,11 +231,38 @@ class MiniSolver(SolverBase):
                 contacts.rigid_contact_shape1,
                 model.shape_body,
                 model.body_world,
-                c.max_constraints_per_world,
             ],
-            outputs=[self._world_constraint_count, self._world_constraints, self._gather_overflow],
+            outputs=[self._world_contact_start, self._world_contact_end, self._world_run_count],
             device=model.device,
         )
+        if self._has_revolute:
+            wp.launch(
+                gather_sorted_mixed_world_runs_kernel,
+                dim=self._world_count,
+                inputs=[
+                    c.max_constraints_per_world,
+                    self._world_joint_offset,
+                    self._world_joint,
+                    self._world_contact_start,
+                    self._world_contact_end,
+                    self._world_run_count,
+                ],
+                outputs=[self._world_constraint_count, self._world_constraints, self._gather_overflow],
+                device=model.device,
+            )
+        else:
+            wp.launch(
+                gather_sorted_contact_world_runs_kernel,
+                dim=self._world_count,
+                inputs=[
+                    c.max_constraints_per_world,
+                    self._world_contact_start,
+                    self._world_contact_end,
+                    self._world_run_count,
+                ],
+                outputs=[self._world_constraint_count, self._world_constraints, self._gather_overflow],
+                device=model.device,
+            )
         if color:
             wp.launch(
                 color_world_constraints_kernel,
@@ -522,6 +564,7 @@ class MiniSolver(SolverBase):
                         dim=self._world_count * self.config.block_dim,
                         inputs=[
                             self.config.block_dim,
+                            self._packed_worlds_per_tile,
                             self.config.max_constraints_per_world,
                             self.config.max_colors,
                             self.config.max_constraints_per_color,
@@ -557,7 +600,7 @@ class MiniSolver(SolverBase):
                             self._packed_effective_mass,
                             self._packed_impulse,
                         ],
-                        block_dim=self.config.block_dim,
+                        block_dim=128 if self._packed_worlds_per_tile > 1 else self.config.block_dim,
                         device=self.model.device,
                     )
                     if self._shared_solve_kernel is not None:
@@ -594,6 +637,7 @@ class MiniSolver(SolverBase):
                             dim=self._world_count * self.config.block_dim,
                             inputs=[
                                 self.config.block_dim,
+                                self._packed_worlds_per_tile,
                                 self.config.max_constraints_per_world,
                                 self.config.max_colors,
                                 self.config.max_constraints_per_color,
@@ -613,7 +657,7 @@ class MiniSolver(SolverBase):
                                 self._packed_impulse,
                             ],
                             outputs=[self._linear_velocity, self._angular_velocity],
-                            block_dim=self.config.block_dim,
+                            block_dim=128 if self._packed_worlds_per_tile > 1 else self.config.block_dim,
                             device=self.model.device,
                         )
                 wp.launch(

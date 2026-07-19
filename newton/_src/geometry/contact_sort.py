@@ -48,6 +48,10 @@ def _prepare_compact_sort(
     sort_keys_src: wp.array[wp.int64],
     shape_rank: wp.array[wp.int32],
     shape_pair_base: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    world_count: wp.int32,
+    rank_count: wp.int32,
+    world_major: wp.int32,
     prefix_shape_count: wp.int32,
     suffix_shape_start: wp.int32,
     subkey_bits: wp.int32,
@@ -63,9 +67,18 @@ def _prepare_compact_sort(
         subkey_mask = (wp.int32(1) << subkey_bits) - wp.int32(1)
         subkey = wp.int32(full_key & wp.int64(0x7FFFFF))
         shape_b_rank = shape_rank[shape_b]
-        if shape_a < prefix_shape_count or shape_a >= suffix_shape_start:
-            shape_b_rank = shape_b
-        pair_rank = shape_pair_base[shape_a] + shape_b_rank
+        pair_rank = wp.int32(0)
+        if world_major != wp.int32(0):
+            world = shape_world[shape_a]
+            if world < wp.int32(0):
+                world = shape_world[shape_b]
+            if world < wp.int32(0):
+                world = world_count
+            pair_rank = (world * rank_count + shape_rank[shape_a]) * rank_count + shape_b_rank
+        else:
+            if shape_a < prefix_shape_count or shape_a >= suffix_shape_start:
+                shape_b_rank = shape_b
+            pair_rank = shape_pair_base[shape_a] + shape_b_rank
         sort_keys_dst[tid] = (pair_rank << subkey_bits) | (subkey & subkey_mask)
         sort_indices[tid] = wp.int32(tid)
     else:
@@ -274,6 +287,9 @@ class ContactSorter:
         per_contact_shape_properties: bool = False,
         compact_shape_rank: wp.array[wp.int32] | None = None,
         compact_shape_pair_base: wp.array[wp.int32] | None = None,
+        compact_shape_world: wp.array[wp.int32] | None = None,
+        compact_world_count: int = 0,
+        compact_rank_count: int = 0,
         compact_prefix_shape_count: int = 0,
         compact_suffix_shape_start: int = 0,
         compact_subkey_bits: int = 0,
@@ -292,6 +308,12 @@ class ContactSorter:
             self._sort_keys_copy = wp.zeros(2 * capacity, dtype=wp.int64)
             self._compact_shape_rank = compact_shape_rank
             self._compact_shape_pair_base = compact_shape_pair_base
+            self._compact_shape_world = (
+                compact_shape_world if compact_shape_world is not None else wp.zeros(0, dtype=wp.int32)
+            )
+            self._compact_world_count = int(compact_world_count)
+            self._compact_rank_count = int(compact_rank_count)
+            self._compact_world_major = compact_shape_world is not None
             self._compact_prefix_shape_count = int(compact_prefix_shape_count)
             self._compact_suffix_shape_start = int(compact_suffix_shape_start)
             self._compact_subkey_bits = int(compact_subkey_bits)
@@ -538,6 +560,10 @@ class ContactSorter:
                     sort_keys,
                     self._compact_shape_rank,
                     self._compact_shape_pair_base,
+                    self._compact_shape_world,
+                    self._compact_world_count,
+                    self._compact_rank_count,
+                    1 if self._compact_world_major else 0,
                     self._compact_prefix_shape_count,
                     self._compact_suffix_shape_start,
                     self._compact_subkey_bits,

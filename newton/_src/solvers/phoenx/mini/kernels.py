@@ -637,59 +637,126 @@ def append_contact_constraints_kernel(
     wp.atomic_add(overflow, 0, wp.int32(1))
 
 
-@wp.kernel(enable_backward=False)
-def gather_revolute_constraints_kernel(
-    joint_type: wp.array[wp.int32],
-    joint_enabled: wp.array[wp.bool],
-    joint_world: wp.array[wp.int32],
-    capacity: wp.int32,
-    world_constraint_count: wp.array[wp.int32],
-    world_constraints: wp.array[wp.int32],
-    overflow: wp.array[wp.int32],
-):
-    joint = wp.tid()
-    if not joint_enabled[joint] or joint_type[joint] != JointType.REVOLUTE:
-        return
-    world = wp.max(joint_world[joint], wp.int32(0))
-    slot = wp.atomic_add(world_constraint_count, world, wp.int32(1))
-    if slot < capacity:
-        world_constraints[world * capacity + slot] = -joint - wp.int32(1)
+@wp.func
+def _contact_world(
+    contact: wp.int32,
+    contact_shape0: wp.array[wp.int32],
+    contact_shape1: wp.array[wp.int32],
+    shape_body: wp.array[wp.int32],
+    body_world: wp.array[wp.int32],
+) -> wp.int32:
+    shape_a = contact_shape0[contact]
+    shape_b = contact_shape1[contact]
+    body = wp.int32(-1)
+    if shape_a >= wp.int32(0):
+        body = shape_body[shape_a]
+    if body < wp.int32(0) and shape_b >= wp.int32(0):
+        body = shape_body[shape_b]
+    if body >= wp.int32(0):
+        return wp.max(body_world[body], wp.int32(0))
+    return wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)
-def gather_contact_constraints_kernel(
+def mark_sorted_contact_world_runs_kernel(
     contact_count: wp.array[wp.int32],
     contact_shape0: wp.array[wp.int32],
     contact_shape1: wp.array[wp.int32],
     shape_body: wp.array[wp.int32],
     body_world: wp.array[wp.int32],
+    world_contact_start: wp.array[wp.int32],
+    world_contact_end: wp.array[wp.int32],
+    world_run_count: wp.array[wp.int32],
+):
+    contact = wp.tid()
+    count = contact_count[0]
+    if contact >= count:
+        return
+    world = _contact_world(contact, contact_shape0, contact_shape1, shape_body, body_world)
+    previous_world = wp.int32(-1)
+    if contact > wp.int32(0):
+        previous_world = _contact_world(contact - wp.int32(1), contact_shape0, contact_shape1, shape_body, body_world)
+    if previous_world != world:
+        world_contact_start[world] = contact
+        wp.atomic_add(world_run_count, world, wp.int32(1))
+
+    next_world = wp.int32(-1)
+    if contact + wp.int32(1) < count:
+        next_world = _contact_world(contact + wp.int32(1), contact_shape0, contact_shape1, shape_body, body_world)
+    if next_world != world:
+        world_contact_end[world] = contact + wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def gather_sorted_mixed_world_runs_kernel(
     capacity: wp.int32,
+    world_joint_offset: wp.array[wp.int32],
+    world_joint: wp.array[wp.int32],
+    world_contact_start: wp.array[wp.int32],
+    world_contact_end: wp.array[wp.int32],
+    world_run_count: wp.array[wp.int32],
     world_constraint_count: wp.array[wp.int32],
     world_constraints: wp.array[wp.int32],
     overflow: wp.array[wp.int32],
 ):
-    contact = wp.tid()
-    if contact >= contact_count[0]:
+    world = wp.tid()
+    joint_begin = world_joint_offset[world]
+    joint_end = world_joint_offset[world + wp.int32(1)]
+    joint_count = joint_end - joint_begin
+
+    contact_count = wp.int32(0)
+    runs = world_run_count[world]
+    if runs == wp.int32(1):
+        contact_count = world_contact_end[world] - world_contact_start[world]
+    elif runs != wp.int32(0):
+        wp.atomic_add(overflow, 0, runs)
+
+    total = joint_count + contact_count
+    world_constraint_count[world] = total
+    if total > capacity:
+        wp.atomic_add(overflow, 0, total - capacity)
+        total = capacity
+
+    slot = wp.int32(0)
+    while slot < joint_count and slot < total:
+        world_constraints[world * capacity + slot] = -world_joint[joint_begin + slot] - wp.int32(1)
+        slot += wp.int32(1)
+    contact_start = world_contact_start[world]
+    while slot < total:
+        world_constraints[world * capacity + slot] = contact_start + slot - joint_count + wp.int32(1)
+        slot += wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def gather_sorted_contact_world_runs_kernel(
+    capacity: wp.int32,
+    world_contact_start: wp.array[wp.int32],
+    world_contact_end: wp.array[wp.int32],
+    world_run_count: wp.array[wp.int32],
+    world_constraint_count: wp.array[wp.int32],
+    world_constraints: wp.array[wp.int32],
+    overflow: wp.array[wp.int32],
+):
+    world = wp.tid()
+    runs = world_run_count[world]
+    if runs == wp.int32(0):
+        world_constraint_count[world] = wp.int32(0)
         return
-    shape_a = contact_shape0[contact]
-    shape_b = contact_shape1[contact]
-    body_a = wp.int32(-1)
-    body_b = wp.int32(-1)
-    if shape_a >= wp.int32(0):
-        body_a = shape_body[shape_a]
-    if shape_b >= wp.int32(0):
-        body_b = shape_body[shape_b]
-    if body_a == body_b:
+    if runs != wp.int32(1):
+        wp.atomic_add(overflow, 0, runs)
+        world_constraint_count[world] = wp.int32(0)
         return
-    world = wp.int32(-1)
-    if body_a >= wp.int32(0):
-        world = body_world[body_a]
-    elif body_b >= wp.int32(0):
-        world = body_world[body_b]
-    world = wp.max(world, wp.int32(0))
-    slot = wp.atomic_add(world_constraint_count, world, wp.int32(1))
-    if slot < capacity:
-        world_constraints[world * capacity + slot] = contact + wp.int32(1)
+
+    start = world_contact_start[world]
+    count = world_contact_end[world] - start
+    world_constraint_count[world] = count
+    if count > capacity:
+        wp.atomic_add(overflow, 0, count - capacity)
+        count = capacity
+    slot = wp.int32(0)
+    while slot < count:
+        world_constraints[world * capacity + slot] = start + slot + wp.int32(1)
+        slot += wp.int32(1)
 
 
 @wp.kernel(enable_backward=False)

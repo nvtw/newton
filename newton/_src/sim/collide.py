@@ -99,7 +99,7 @@ def _primitive_compact_sort_config(
     has_heightfields: bool,
     hydroelastic_sdf: HydroelasticSDF | None,
     device: wp.DeviceLike,
-) -> tuple[wp.array[wp.int32], wp.array[wp.int32], int, int, int, int] | None:
+) -> tuple[wp.array[wp.int32], wp.array[wp.int32], wp.array[wp.int32], int, int, int, int, int] | None:
     """Build a lossless int32 contact-sort rank for primitive-only worlds."""
     if extra_shape_count != 0 or has_meshes or has_heightfields or hydroelastic_sdf is not None:
         return None
@@ -138,12 +138,9 @@ def _primitive_compact_sort_config(
         )
 
     shape_count = int(model.shape_count)
-    pair_rank_count = 0
-    for shape_a in range(shape_count):
-        if shape_a < prefix_global_count or shape_a >= suffix_global_start:
-            pair_rank_count += shape_count
-        else:
-            pair_rank_count += rank_count
+    # World-major ranks make all contacts of a replicated world contiguous,
+    # including contacts against shared global shapes.
+    pair_rank_count = (world_count + 1) * rank_count * rank_count
     pair_rank_bits = max(1, (pair_rank_count - 1).bit_length())
     # GJK/MPR manifolds use three low bits even for primitive geometry.
     subkey_bits = 3
@@ -162,6 +159,9 @@ def _primitive_compact_sort_config(
     return (
         wp.array(shape_rank, dtype=wp.int32, device=device),
         wp.array(shape_pair_base, dtype=wp.int32, device=device),
+        model.shape_world,
+        world_count,
+        rank_count,
         prefix_global_count,
         suffix_global_start,
         subkey_bits,
@@ -808,6 +808,9 @@ class CollisionPipeline:
 
         compact_sort_shape_rank = None
         compact_sort_shape_pair_base = None
+        compact_sort_shape_world = None
+        compact_sort_world_count = 0
+        compact_sort_rank_count = 0
         compact_sort_prefix_shape_count = 0
         compact_sort_suffix_shape_start = 0
         compact_sort_subkey_bits = 0
@@ -1061,6 +1064,9 @@ class CollisionPipeline:
             if compact_sort_config is None:
                 compact_sort_shape_rank = None
                 compact_sort_shape_pair_base = None
+                compact_sort_shape_world = None
+                compact_sort_world_count = 0
+                compact_sort_rank_count = 0
                 compact_sort_prefix_shape_count = 0
                 compact_sort_suffix_shape_start = 0
                 compact_sort_subkey_bits = 0
@@ -1069,6 +1075,9 @@ class CollisionPipeline:
                 (
                     compact_sort_shape_rank,
                     compact_sort_shape_pair_base,
+                    compact_sort_shape_world,
+                    compact_sort_world_count,
+                    compact_sort_rank_count,
                     compact_sort_prefix_shape_count,
                     compact_sort_suffix_shape_start,
                     compact_sort_subkey_bits,
@@ -1158,6 +1167,9 @@ class CollisionPipeline:
                 per_contact_shape_properties=per_contact_props,
                 compact_shape_rank=compact_sort_shape_rank,
                 compact_shape_pair_base=compact_sort_shape_pair_base,
+                compact_shape_world=compact_sort_shape_world,
+                compact_world_count=compact_sort_world_count,
+                compact_rank_count=compact_sort_rank_count,
                 compact_prefix_shape_count=compact_sort_prefix_shape_count,
                 compact_suffix_shape_start=compact_sort_suffix_shape_start,
                 compact_subkey_bits=compact_sort_subkey_bits,

@@ -39,6 +39,31 @@ def _warp_sync_mask(mask: wp.uint32): ...
 
 
 @wp.func
+def _packed_world_index(
+    world: wp.int32,
+    offset: wp.int32,
+    capacity: wp.int32,
+    worlds_per_tile: wp.int32,
+) -> wp.int32:
+    tile = world // worlds_per_tile
+    world_in_tile = world - tile * worlds_per_tile
+    return tile * worlds_per_tile * capacity + offset * worlds_per_tile + world_in_tile
+
+
+@wp.func
+def _sync_logical_world(block_dim: wp.int32, tid: wp.int32):
+    if block_dim < wp.int32(32):
+        warp_lane = tid & wp.int32(31)
+        first_lane = warp_lane - warp_lane % block_dim
+        mask = ((wp.uint32(1) << wp.uint32(block_dim)) - wp.uint32(1)) << wp.uint32(first_lane)
+        _warp_sync_mask(mask)
+    elif block_dim == wp.int32(32):
+        _warp_sync()
+    else:
+        _block_sync()
+
+
+@wp.func
 def _xyz(value: wp.vec4) -> wp.vec3:
     return wp.vec3(value[0], value[1], value[2])
 
@@ -168,6 +193,7 @@ def compute_color_offsets_kernel(
 @wp.kernel(enable_backward=False)
 def prepare_packed_contacts_kernel(
     block_dim: wp.int32,
+    worlds_per_tile: wp.int32,
     capacity: wp.int32,
     max_colors: wp.int32,
     color_capacity: wp.int32,
@@ -257,7 +283,7 @@ def prepare_packed_contacts_kernel(
             if material_count > wp.int32(0):
                 mu /= wp.float32(material_count)
 
-            packed = world * capacity + world_color_offset[color_index] + slot
+            packed = _packed_world_index(world, world_color_offset[color_index] + slot, capacity, worlds_per_tile)
             body_pair[packed] = wp.vec4i(body_a, body_b, 0, 0)
             normal_bias[packed] = wp.vec4(normal[0], normal[1], normal[2], bias)
             tangent_mu[packed] = wp.vec4(tangent1[0], tangent1[1], tangent1[2], mu)
@@ -283,6 +309,7 @@ def prepare_packed_contacts_kernel(
 @wp.kernel(enable_backward=False)
 def solve_packed_contacts_kernel(
     block_dim: wp.int32,
+    worlds_per_tile: wp.int32,
     capacity: wp.int32,
     max_colors: wp.int32,
     color_capacity: wp.int32,
@@ -315,7 +342,7 @@ def solve_packed_contacts_kernel(
             count = wp.min(world_color_count[color_index], color_capacity)
             slot = lane
             while slot < count:
-                packed = world * capacity + world_color_offset[color_index] + slot
+                packed = _packed_world_index(world, world_color_offset[color_index] + slot, capacity, worlds_per_tile)
                 bodies = body_pair[packed]
                 body_a = bodies[0]
                 body_b = bodies[1]
@@ -395,7 +422,7 @@ def solve_packed_contacts_kernel(
                     angular_velocity[body_b] = wp.vec4(angular_b[0], angular_b[1], angular_b[2], 0.0)
                 impulse[packed] = wp.vec4(new_n, new_t1, new_t2, 0.0)
                 slot += block_dim
-            _block_sync()
+            _sync_logical_world(block_dim, wp.int32(tid))
             color += wp.int32(1)
         iteration += wp.int32(1)
 

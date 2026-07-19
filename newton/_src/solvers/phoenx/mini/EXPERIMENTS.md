@@ -94,7 +94,7 @@ the lost within-color parallelism. The striped prototype was removed. Future
 coalescing experiments must retain subwarp parallelism.
 
 
-## M6  deterministic direct-to-sorter collision output (accepted, 2026-07-19)
+## M6 - deterministic direct-to-sorter collision output (accepted, 2026-07-19)
 
 M6 corrects the benchmark methodology: mini now always enables deterministic
 collision sorting. Earlier max-mode measurements did not pay that required
@@ -119,6 +119,49 @@ shares are solve 34.7%, prepare 15.8%, narrow phase 14.7%, canonical gather
 11.7%, coloring 5.3%, and radix sort 4.6%. Forty matching tests pass on CPU and
 CUDA; five deterministic graph-capture tests, including 500-step latest and
 sticky runs, pass on CUDA.
+
+
+
+## M7 - world-major deterministic scheduling and interleaved rows (accepted, 2026-07-19)
+
+M7 uses the required canonical collision sort as solver preparation. Primitive
+multi-world keys are now ordered by world, local shape pair, and subkey, so
+contacts against shared ground remain in the same run as local contacts.
+Mini marks run boundaries, appends construction-time stable revolute lists,
+and colors canonical constraints without atomic slot allocation. Multiple
+runs are diagnosed as overflow rather than solved nondeterministically.
+
+Contact-only prepared rows are tiled across adjacent worlds. The qualified
+16-lane layout places two logical worlds in each warp, interleaves their
+corresponding vec4 rows, and uses independent masked barriers between PGS
+colors. It preserves per-world constraint, color, and arithmetic order.
+Mixed revolute/contact worlds use the same deterministic schedule and the
+16-lane default, without a separate solver mode.
+
+The new --fixed-state benchmark restores identical state inside each graph
+replay. Exact-source M6/M7 brackets therefore process identical contacts:
+
+| Workload | M6 | M7 | Throughput | Useful bandwidth |
+| :--- | ---: | ---: | ---: | ---: |
+| 8K stack, 262,144 contacts | 525.53 us | **414.93 us** | **+26.7%** | 702.3 -> **889.5 GB/s** |
+| 32K stack, 1,048,576 contacts | 1.67731 ms | **1.38237 ms** | **+21.3%** | 880.2 -> **1,068.0 GB/s** |
+| 8K robot, 32,768 contacts + 65,536 joints | 299.16 us | **257.81 us** | **+16.0%** | 504.7 -> **585.7 GB/s** |
+
+The 32K medians combine three 200-replay runs per revision. M7 reaches **71.7%
+of sequential DRAM**, **103.0% of random-vec4 gather**, and 1.55% of FP32
+peak. Exceeding the random-vec4 calibration is evidence that interleaving made
+the hot loads more coalesced; it is still below sequential DRAM.
+
+Matched Nsight medians show solve falling 575.4 to **322.7 us** (-43.9%) and
+prepare 249.6 to **178.1 us** (-28.6%). Canonical ordering also reduces the
+fixed stack from 12 to 8 greedy colors. Deterministic run marking/gather costs
+21.5 us versus the old atomic gather's 15.6 us; the 5.9 us cost is dominated
+by the hot-loop savings.
+
+Five mini tests pass. The 32- and 16-lane paths produce bit-identical poses and
+velocities after 30 deterministic steps; mixed schedules repeat bit-identically
+across ten rebuilds. Stack state stays finite and revolute anchor error remains
+bounded, with zero gather/color overflow.
 
 
 This is an append-only scientific ledger. Failed qualifications and rejected

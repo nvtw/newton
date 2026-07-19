@@ -96,6 +96,9 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
         newton.eval_fk(model, model.joint_q, model.joint_qd, state_1)
     control = model.control()
+    reset_state = model.state()
+    if args.scene == "robot":
+        newton.eval_fk(model, model.joint_q, model.joint_qd, reset_state)
     if args.solver == "mini":
         solver = MiniSolver(
             model,
@@ -124,6 +127,9 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         )
 
     def step() -> None:
+        if args.fixed_state:
+            wp.copy(state_0.body_q, reset_state.body_q)
+            wp.copy(state_0.body_qd, reset_state.body_qd)
         pipeline.collide(state_0, contacts)
         state_0.clear_forces()
         solver.step(state_0, state_1, control, contacts, args.dt)
@@ -154,7 +160,11 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
     if not np.isfinite(poses).all() or not np.isfinite(velocities).all():
         raise RuntimeError("mini benchmark produced non-finite state")
     stats = solver.stats() if args.solver == "mini" else None
-    world_id_runs = None if args.solver == "mini" else int(solver.world._world_totals_shifted.numpy()[0])
+    world_id_runs = (
+        int(solver._world_run_count.numpy().sum())
+        if args.solver == "mini"
+        else int(solver.world._world_totals_shifted.numpy()[0])
+    )
     phoenx_scheduler = None if args.solver == "mini" else solver.world._multi_world_scheduler
     phoenx_tpw = None if args.solver == "mini" else int(solver.world._tpw_choice.numpy()[0])
     contacts_per_step = int(contacts.rigid_contact_count.numpy()[0])
@@ -209,6 +219,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         "roofline_basis": roofline_model,
         "device": device.name,
         "scene": args.scene,
+        "fixed_state": args.fixed_state,
         "worlds": args.worlds,
         "world_id_runs": world_id_runs,
         "bodies_per_world": args.bodies_per_world,
@@ -252,7 +263,7 @@ def main() -> None:
     parser.add_argument("--max-constraints-per-world", type=int, default=128)
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--iterations", type=int, default=4)
-    parser.add_argument("--block-dim", type=int, default=32)
+    parser.add_argument("--block-dim", type=int, default=16)
     parser.add_argument("--shared-body-cache", action="store_true")
     parser.add_argument("--solve-layout", choices=("colored", "serial_world"), default="colored")
     parser.add_argument("--phoenx-threads-per-world", choices=("auto", "8", "16", "32"), default="auto")
@@ -262,6 +273,11 @@ def main() -> None:
     parser.add_argument("--broad-phase", choices=("nxn", "sap", "explicit"), default="nxn")
     parser.add_argument("--contact-matching", choices=("auto", "disabled", "latest", "sticky"), default="auto")
     parser.add_argument("--dt", type=float, default=1.0 / 60.0)
+    parser.add_argument(
+        "--fixed-state",
+        action="store_true",
+        help="Restore identical poses and velocities inside every captured frame.",
+    )
     parser.add_argument("--settle-steps", type=int, default=30)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--replays", type=int, default=200)
