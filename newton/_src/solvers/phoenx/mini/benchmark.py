@@ -87,6 +87,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         broad_phase=args.broad_phase,
         rigid_contact_max=args.worlds * args.max_contacts_per_world,
         contact_matching=contact_matching,
+        deterministic=True,
     )
     contacts = pipeline.contacts()
     state_0 = model.state()

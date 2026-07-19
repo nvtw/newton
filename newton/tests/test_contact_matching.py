@@ -78,7 +78,7 @@ def test_stable_scene_identity_match(test, device):
     This is the strongest possible invariant: each sorted contact maps to the
     same sorted position in the previous frame.  It verifies binary search,
     position/normal threshold acceptance, sort permutation of match_index,
-    and the save-then-match round-trip through the sorter's scratch buffers.
+    and the save-then-match round-trip through the matcher's history buffers.
     """
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
@@ -678,7 +678,6 @@ def test_tie_break_invariant_under_unsorted_permutation(test, device):
     :meth:`ContactMatcher.replay_matched`.
     """
     from newton._src.geometry.contact_match import ContactMatcher  # noqa: PLC0415
-    from newton._src.geometry.contact_sort import ContactSorter  # noqa: PLC0415
 
     def py_key(shape_a, shape_b, sub):
         return ((shape_a & 0xFFFFF) << 43) | ((shape_b & 0xFFFFF) << 23) | (sub & 0x7FFFFF)
@@ -688,10 +687,8 @@ def test_tie_break_invariant_under_unsorted_permutation(test, device):
 
     capacity = 16
     with wp.ScopedDevice(device):
-        sorter = ContactSorter(capacity=capacity, device=device)
         matcher = ContactMatcher(
             capacity=capacity,
-            sorter=sorter,
             pos_threshold=0.001,
             normal_dot_threshold=0.9,
             sticky=False,
@@ -714,8 +711,8 @@ def test_tie_break_invariant_under_unsorted_permutation(test, device):
             """Run match with new contacts in the given list order."""
             matcher._prev_sorted_keys.assign(prev_keys)
             matcher._prev_count.assign(np.array([1], dtype=np.int32))
-            sorter.scratch_pos_world.assign(prev_pos)
-            sorter.scratch_normal.assign(prev_norm)
+            matcher._prev_pos_world.assign(prev_pos)
+            matcher._prev_normal.assign(prev_norm)
 
             n = len(order)
             sk = np.full(capacity, np.iinfo(np.int64).max, dtype=np.int64)

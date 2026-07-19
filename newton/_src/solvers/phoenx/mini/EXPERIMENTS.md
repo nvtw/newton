@@ -93,6 +93,34 @@ throughput. Contact manifolds are not aligned enough across worlds to recover
 the lost within-color parallelism. The striped prototype was removed. Future
 coalescing experiments must retain subwarp parallelism.
 
+
+## M6  deterministic direct-to-sorter collision output (accepted, 2026-07-19)
+
+M6 corrects the benchmark methodology: mini now always enables deterministic
+collision sorting. Earlier max-mode measurements did not pay that required
+cost and remain useful only for comparing their isolated solver variants.
+
+A 32K deterministic baseline took 2.27171 ms. Narrow phase wrote the canonical
+contact arrays, then sorting backed up 13 columns and gathered the permutation.
+M6 writes the unsorted record directly into the sorter's existing source
+storage and gathers once. Contact matching owns separate prior midpoint/normal
+buffers (+24 bytes/contact only when matching is enabled), so the collision
+pipeline retains one general canonical deterministic output order.
+
+Three clean 200-replay candidates were 2.18414, 2.16529, and 2.17127 ms:
+**2.17127 ms median, +4.63% throughput**. Useful-work bandwidth changes from
+636.4 to **665.8 GB/s**, or 42.7 to **44.7%** of sequential peak and 61.4 to
+**64.2%** of random-vec4 peak. Estimated FP32 use is 0.97% of peak. An 8K
+deterministic run takes 635.77 us and reaches 650.5 GB/s (43.7% sequential,
+62.7% random-vec4).
+
+Nsight confirms the full-record backup kernel is absent. The new kernel-time
+shares are solve 34.7%, prepare 15.8%, narrow phase 14.7%, canonical gather
+11.7%, coloring 5.3%, and radix sort 4.6%. Forty matching tests pass on CPU and
+CUDA; five deterministic graph-capture tests, including 500-step latest and
+sticky runs, pass on CUDA.
+
+
 This is an append-only scientific ledger. Failed qualifications and rejected
 results remain visible.
 

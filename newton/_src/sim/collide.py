@@ -1175,7 +1175,6 @@ class CollisionPipeline:
         if matching_enabled:
             self._contact_matcher = ContactMatcher(
                 rigid_contact_max,
-                sorter=self._contact_sorter,
                 pos_threshold=contact_matching_pos_threshold,
                 normal_dot_threshold=contact_matching_normal_dot_threshold,
                 contact_report=contact_report,
@@ -1555,20 +1554,25 @@ class CollisionPipeline:
         writer_data.shape_body = shape_body if shape_body is not None else model.shape_body
         writer_data.shape_gap = shape_gap
         writer_data.contact_count = contacts.rigid_contact_count
-        writer_data.out_shape0 = contacts.rigid_contact_shape0
-        writer_data.out_shape1 = contacts.rigid_contact_shape1
-        writer_data.out_point0 = contacts.rigid_contact_point0
-        writer_data.out_point1 = contacts.rigid_contact_point1
-        writer_data.out_offset0 = contacts.rigid_contact_offset0
-        writer_data.out_offset1 = contacts.rigid_contact_offset1
-        writer_data.out_normal = contacts.rigid_contact_normal
-        writer_data.out_margin0 = contacts.rigid_contact_margin0
-        writer_data.out_margin1 = contacts.rigid_contact_margin1
-        writer_data.out_tids = contacts.rigid_contact_tids
+        # Deterministic collision writes the unsorted record directly into the
+        # sorter's source buffer. The radix permutation then needs one gather,
+        # rather than a full-record backup followed by a gather.
+        sort_buffer = self._contact_sorter.full_buffer if self._contact_sorter is not None else None
+        writer_data.out_shape0 = sort_buffer.shape0 if sort_buffer is not None else contacts.rigid_contact_shape0
+        writer_data.out_shape1 = sort_buffer.shape1 if sort_buffer is not None else contacts.rigid_contact_shape1
+        writer_data.out_point0 = sort_buffer.point0 if sort_buffer is not None else contacts.rigid_contact_point0
+        writer_data.out_point1 = sort_buffer.point1 if sort_buffer is not None else contacts.rigid_contact_point1
+        writer_data.out_offset0 = sort_buffer.offset0 if sort_buffer is not None else contacts.rigid_contact_offset0
+        writer_data.out_offset1 = sort_buffer.offset1 if sort_buffer is not None else contacts.rigid_contact_offset1
+        writer_data.out_normal = sort_buffer.normal if sort_buffer is not None else contacts.rigid_contact_normal
+        writer_data.out_margin0 = sort_buffer.margin0 if sort_buffer is not None else contacts.rigid_contact_margin0
+        writer_data.out_margin1 = sort_buffer.margin1 if sort_buffer is not None else contacts.rigid_contact_margin1
+        writer_data.out_tids = sort_buffer.tids if sort_buffer is not None else contacts.rigid_contact_tids
 
-        writer_data.out_stiffness = contacts.rigid_contact_stiffness
-        writer_data.out_damping = contacts.rigid_contact_damping
-        writer_data.out_friction = contacts.rigid_contact_friction
+        has_buffered_props = sort_buffer is not None and sort_buffer.stiffness.shape[0] > 0
+        writer_data.out_stiffness = sort_buffer.stiffness if has_buffered_props else contacts.rigid_contact_stiffness
+        writer_data.out_damping = sort_buffer.damping if has_buffered_props else contacts.rigid_contact_damping
+        writer_data.out_friction = sort_buffer.friction if has_buffered_props else contacts.rigid_contact_friction
         if self.deterministic and contacts.rigid_contact_max != self._sort_key_array.shape[0]:
             raise ValueError(
                 f"Contacts buffer capacity ({contacts.rigid_contact_max}) does not match the "
@@ -1617,14 +1621,14 @@ class CollisionPipeline:
             self._contact_matcher.match(
                 sort_keys=self._sort_key_array,
                 contact_count=contacts.rigid_contact_count,
-                point0=contacts.rigid_contact_point0,
-                point1=contacts.rigid_contact_point1,
-                shape0=contacts.rigid_contact_shape0,
-                shape1=contacts.rigid_contact_shape1,
-                normal=contacts.rigid_contact_normal,
+                point0=writer_data.out_point0,
+                point1=writer_data.out_point1,
+                shape0=writer_data.out_shape0,
+                shape1=writer_data.out_shape1,
+                normal=writer_data.out_normal,
                 body_q=state.body_q,
                 shape_body=shape_body if shape_body is not None else model.shape_body,
-                match_index_out=contacts.rigid_contact_match_index,
+                match_index_out=sort_buffer.match_index,
                 device=self.device,
             )
 
@@ -1646,6 +1650,7 @@ class CollisionPipeline:
                 damping=contacts.rigid_contact_damping,
                 friction=contacts.rigid_contact_friction,
                 match_index=contacts.rigid_contact_match_index,
+                source_is_buffer=True,
                 device=self.device,
             )
 

@@ -14,6 +14,8 @@ are filled with ``0x7FFFFFFFFFFFFFFF`` so they sort to the end.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import warp as wp
 
 from ..core.types import Devicelike
@@ -232,6 +234,26 @@ def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], coun
         data.match_index[i] = data.match_index_buf[p]
 
 
+@dataclass(frozen=True, slots=True)
+class _FullContactBuffer:
+    """Unsorted full contact record owned by the deterministic sorter."""
+
+    shape0: wp.array[wp.int32]
+    shape1: wp.array[wp.int32]
+    point0: wp.array[wp.vec3]
+    point1: wp.array[wp.vec3]
+    offset0: wp.array[wp.vec3]
+    offset1: wp.array[wp.vec3]
+    normal: wp.array[wp.vec3]
+    margin0: wp.array[float]
+    margin1: wp.array[float]
+    tids: wp.array[wp.int32]
+    stiffness: wp.array[float]
+    damping: wp.array[float]
+    friction: wp.array[float]
+    match_index: wp.array[wp.int32]
+
+
 class ContactSorter:
     """Sort contact arrays into a deterministic canonical order.
 
@@ -308,6 +330,22 @@ class ContactSorter:
                 self._full_damping_buf = wp.zeros(0, dtype=float)
                 self._full_friction_buf = wp.zeros(0, dtype=float)
             self._full_match_index_buf = wp.zeros(capacity, dtype=wp.int32)
+            self._full_buffer = _FullContactBuffer(
+                shape0=self._full_shape0_buf,
+                shape1=self._full_shape1_buf,
+                point0=self._full_point0_buf,
+                point1=self._full_point1_buf,
+                offset0=self._full_offset0_buf,
+                offset1=self._full_offset1_buf,
+                normal=self._full_normal_buf,
+                margin0=self._full_margin0_buf,
+                margin1=self._full_margin1_buf,
+                tids=self._full_tids_buf,
+                stiffness=self._full_stiffness_buf,
+                damping=self._full_damping_buf,
+                friction=self._full_friction_buf,
+                match_index=self._full_match_index_buf,
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -339,7 +377,7 @@ class ContactSorter:
             contact_penetration: float penetration depths.
             contact_tangent: Optional vec3 tangent array.
             match_index: Optional int32 array of per-contact match indices
-                from :class:`ContactMatcher`.  When provided, the array is
+                from :class:`ContactMatcher`. When provided, the array is
                 permuted alongside the other contact fields during sorting.
             device: Device to launch on.
         """
@@ -390,6 +428,7 @@ class ContactSorter:
         damping: wp.array | None = None,
         friction: wp.array | None = None,
         match_index: wp.array | None = None,
+        source_is_buffer: bool = False,
         device: Devicelike = None,
     ) -> None:
         """Sort contacts written through the full collide.py writer.
@@ -413,8 +452,10 @@ class ContactSorter:
             damping: Optional float per-contact damping.
             friction: Optional float per-contact friction.
             match_index: Optional int32 array of per-contact match indices
-                from :class:`ContactMatcher`.  When provided, the array is
+                from :class:`ContactMatcher`. When provided, the array is
                 permuted alongside the other contact fields during sorting.
+            source_is_buffer: Whether the unsorted record was written directly
+                to :attr:`full_buffer`. Skips the backup pass when true.
             device: Device to launch on.
         """
         n = self._capacity
@@ -462,8 +503,14 @@ class ContactSorter:
         data.has_shape_props = 1 if has_props else 0
         data.has_match_index = 1 if has_match else 0
 
-        wp.launch(_backup_full_kernel, dim=n, inputs=[data, contact_count], device=device)
+        if not source_is_buffer:
+            wp.launch(_backup_full_kernel, dim=n, inputs=[data, contact_count], device=device)
         wp.launch(_gather_full_kernel, dim=n, inputs=[data, self._sort_indices, contact_count], device=device)
+
+    @property
+    def full_buffer(self) -> _FullContactBuffer:
+        """Unsorted contact record usable as a narrow-phase destination."""
+        return self._full_buffer
 
     @property
     def sorted_keys_view(self) -> wp.array:
@@ -474,33 +521,6 @@ class ContactSorter:
         ``sorted_keys_view[:contact_count]``.
         """
         return self._sort_keys_copy[: self._capacity]
-
-    @property
-    def scratch_pos_world(self) -> wp.array:
-        """Shared scratch buffer for external cross-frame world-space positions.
-
-        Sized ``capacity`` :class:`wp.vec3`.  Reserved for use by
-        :class:`~newton._src.geometry.contact_match.ContactMatcher`, which
-        repurposes the sorter's unused ``point0`` scratch between frames to
-        store the previous frame's world-space contact positions.
-
-        .. note::
-            The buffer is **only idle between frames** — i.e. between the end
-            of one :meth:`sort_full` call and the start of the next.  Writes
-            outside that window will corrupt the next sort.  Do not write to
-            this buffer unless you are implementing cross-frame state that
-            coordinates with the pipeline's per-frame call order.
-        """
-        return self._full_point0_buf
-
-    @property
-    def scratch_normal(self) -> wp.array:
-        """Shared scratch buffer for external cross-frame world-space normals.
-
-        Sized ``capacity`` :class:`wp.vec3`.  Companion to
-        :attr:`scratch_pos_world`; see that property for usage constraints.
-        """
-        return self._full_normal_buf
 
     # ------------------------------------------------------------------
     # Internal helpers

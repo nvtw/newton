@@ -1593,7 +1593,6 @@ def test_compact_contact_sort_pipeline_selection(test, device):
     )
     full_sorter = ContactSorter(64, device=device)
     full_pipeline._contact_sorter = full_sorter
-    full_pipeline._contact_matcher._sorter = full_sorter
 
     state = model.state()
     contacts = pipeline.contacts()
