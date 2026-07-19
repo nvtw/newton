@@ -118,6 +118,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
             contact_friction_model="point",
             step_layout="multi_world",
             threads_per_world=args.phoenx_threads_per_world,
+            multi_world_scheduler=args.phoenx_scheduler,
             articulation_mode="maximal",
         )
 
@@ -153,6 +154,8 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         raise RuntimeError("mini benchmark produced non-finite state")
     stats = solver.stats() if args.solver == "mini" else None
     world_id_runs = None if args.solver == "mini" else int(solver.world._world_totals_shifted.numpy()[0])
+    phoenx_scheduler = None if args.solver == "mini" else solver.world._multi_world_scheduler
+    phoenx_tpw = None if args.solver == "mini" else int(solver.world._tpw_choice.numpy()[0])
     contacts_per_step = int(contacts.rigid_contact_count.numpy()[0])
     joint_types = model.joint_type.numpy() if model.joint_count else np.empty(0, dtype=np.int32)
     revolute_constraints = int(np.count_nonzero(joint_types == int(newton.JointType.REVOLUTE)))
@@ -199,6 +202,8 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         if args.solver == "mini"
         else "phoenx-baseline",
         "solver": args.solver,
+        "phoenx_scheduler": phoenx_scheduler,
+        "phoenx_threads_per_world": phoenx_tpw,
         "contact_matching": contact_matching,
         "roofline_basis": roofline_model,
         "device": device.name,
@@ -250,6 +255,7 @@ def main() -> None:
     parser.add_argument("--shared-body-cache", action="store_true")
     parser.add_argument("--solve-layout", choices=("colored", "serial_world"), default="colored")
     parser.add_argument("--phoenx-threads-per-world", choices=("auto", "8", "16", "32"), default="auto")
+    parser.add_argument("--phoenx-scheduler", choices=("auto", "fast_tail", "block_world"), default="auto")
     parser.add_argument("--max-colors", type=int, default=64)
     parser.add_argument("--max-constraints-per-color", type=int, default=32)
     parser.add_argument("--broad-phase", choices=("nxn", "sap", "explicit"), default="nxn")

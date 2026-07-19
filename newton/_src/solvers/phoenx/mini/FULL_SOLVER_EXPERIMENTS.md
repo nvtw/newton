@@ -602,3 +602,36 @@ and stack parity, the long reduced Kapla regression, maximal-contact fallback,
 world-serial mixed contacts, and both cloth/reduced ownership-disjointness
 cases. Those mixed tests directly exercise the ownership invariant rather than
 only checking a rigid tower for finite values.
+
+
+## F12 - subwarp auto-scheduling for small rigid worlds
+
+Mini showed that graph-colored PGS worlds with narrow colors should share a
+warp instead of receiving one CTA each. Full PhoenX already had both
+graph-stable schedulers, so F12 changes only construction-time selection:
+joint-bearing worlds with at most 32 joints and 96 contact-column capacity per
+world use fast-tail with eight lanes/world. Denser robots retain block-world.
+The 96-column bound includes PhoenX sizing overhead; the measured eight-body
+scene has 80 columns/world.
+
+Controlled A/B/A/B replay bracket, RTX PRO 6000, sticky matching, eight-body
+revolute/contact robot, one substep, four iterations, 30 settle steps, 20
+warm-up steps:
+
+| Worlds | Control block-world | F12 fast-tail8 | Throughput gain |
+| ---: | ---: | ---: | ---: |
+| 8,192 | 449.06 us | **367.05 us** | **+22.3%** |
+| 32,768 | 1,282.87 us | **941.86 us** | **+36.2%** |
+
+At 32K worlds, deliberately above L2, useful-work bandwidth rises from about
+471 to **641 GB/s**: 31.6% to **43.1%** of sequential DRAM and 45.4% to
+**61.8%** of random-vec4 bandwidth. Estimated FP32 use is only **1.05%**, so
+the remaining limit is irregular memory latency/traffic, not arithmetic.
+
+The boundary is topology-dependent. A 64-body chain is 11% slower on
+fast-tail8 and stays on block-world. A real G1 4,096-world tournament
+(substeps=4, iterations=8) measured block-world32 12.2% faster than
+fast-tail8; G1, H1, and DR-Legs remain outside the F12 gate. Fast-tail8 and
+block-world produced bit-identical poses and velocities after 60 deterministic
+contact+revolute steps. Forty-five scheduler, launch-shape, and invariant tests
+pass.

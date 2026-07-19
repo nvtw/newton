@@ -131,6 +131,15 @@ class TestThreadsPerWorldPicker(unittest.TestCase):
 
         self.assertEqual(
             _choose_initial_threads_per_world(
+                num_worlds=8 * sm_count,
+                num_joints=32 * 8 * sm_count,
+                max_contact_columns=96 * 8 * sm_count,
+                sm_count=sm_count,
+            ),
+            (False, 8),
+        )
+        self.assertEqual(
+            _choose_initial_threads_per_world(
                 num_worlds=saturated_worlds,
                 num_joints=23 * saturated_worlds,
                 max_contact_columns=320 * saturated_worlds,

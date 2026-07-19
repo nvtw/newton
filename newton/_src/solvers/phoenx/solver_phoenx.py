@@ -308,12 +308,15 @@ def _choose_initial_threads_per_world(
         return False, 16
 
     if tpw_auto:
+        sparse_joint_contact_world = 0.0 < joints_per_world <= 32.0 and contacts_capacity_per_world <= 96.0
         small_joint_world = 0.0 < joints_per_world <= 64.0 and contacts_capacity_per_world <= 512.0
         dense_joint_world = joints_per_world > 64.0
         dense_contact_only_world = num_joints == 0 and contacts_capacity_per_world > 256.0
         simple_saturated_joint_contact_world = (
             worlds >= 16 * sm and 0.0 < joints_per_world <= 32.0 and 128.0 <= contacts_capacity_per_world <= 384.0
         )
+        if sparse_joint_contact_world:
+            return False, 8
         if simple_saturated_joint_contact_world:
             return False, 8
         if small_joint_world:
@@ -368,6 +371,12 @@ def _choose_multi_world_scheduler(
     if joints_per_world == 0.0:
         if contacts_per_world >= 512.0:
             return "block_world", 128
+        return "fast_tail", 128
+
+    # Small contact-light robots do not carry enough bounded row work to fill
+    # one CTA per world. Mini subwarp and full-solver brackets agree that
+    # packing these worlds wins until the articulation becomes dense.
+    if joints_per_world <= 32.0 and contacts_per_world <= 96.0:
         return "fast_tail", 128
 
     # Joint-bearing fleets (humanoids, quadrupeds, articulations) suffer
