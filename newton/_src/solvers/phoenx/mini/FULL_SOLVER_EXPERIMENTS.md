@@ -655,3 +655,53 @@ At 32K, useful-work bandwidth rises from about 646.0 to **649.6 GB/s**
 (43.38% to **43.62%** of sequential DRAM; 62.31% to **62.65%** of
 random-vec4). Forty-five focused tests pass. Color output, poses, and
 velocities are bit-identical after 60 deterministic steps.
+
+
+## F14 - compact-articulation fleet scheduling
+
+The old auto policy sent every non-sparse joint fleet above 512 worlds to
+block-world. A 4,096-world, 32-replay tournament disproved that rule:
+
+| Scene | Fast-tail8 | Block-world32 | Winner / throughput gain |
+| --- | ---: | ---: | ---: |
+| H1 | **47.634 ms** | 59.441 ms | fast-tail, **+24.8%** |
+| G1 | 71.887 ms | **63.144 ms** | block-world, **+13.8%** |
+| DR Legs | 50.655 ms | **48.022 ms** | block-world, **+5.5%** |
+| ANYmal | **98.672 ms** | 169.446 ms | fast-tail, **+71.7%** |
+
+F14 keeps both generic schedulers and changes only construction-time topology
+selection. At 4,096 or more worlds, articulations with at most 20 joints/world
+use fast-tail; the lane selector also chooses eight lanes/world for these
+fully occupied fleets up to 512 contact columns/world. Denser G1 and DR Legs
+remain block-world.
+
+Production-auto verification (16 replays) resolves H1 to fast-tail8 at
+23.484 ms and ANYmal to fast-tail8 at 47.876 ms. Normalizing the prior
+block-world measurements to 16 replays gives 29.721 and 84.723 ms: **+26.6%**
+and **+76.9%** throughput. Eleven selector and multi-world PGS-order unittests
+pass. The scheduler changes launch geometry only; constraint and color order
+are unchanged.
+
+No defensible bandwidth/FLOP percentage is reported for these robot frames:
+the full solver lacks a robot-specific logical-byte/operation model and GPU
+performance counters are permission-blocked. The calibrated hardware roofs
+remain 1,489.14 GB/s sequential, 1,036.82 GB/s random-vec4, and 87.810 TFLOP/s.
+
+## F15 - explicit color-major contact copies (rejected)
+
+The older C# PhoenX physically sorted persistent contacts by color. Full
+PhoenX already had the required packed-header/row mapping for single-world
+mass splitting, so a temporary multi-world experiment reused it without
+changing collision ingest or PGS order. Matched H1 4,096-world fast-tail8,
+16-replay results:
+
+| Layout | Time | Throughput change |
+| --- | ---: | ---: |
+| Canonical contact storage | **23.130 ms** | baseline |
+| Color-major headers only | 23.534 ms | **-1.7%** |
+| Color-major headers and persistent rows | 24.433 ms | **-5.3%** |
+
+Per-frame gather/scatter costs exceed the repeated-access locality gain. The
+entire prototype was removed. Revisit color-major storage only if ingest or
+color construction writes final physical order directly, avoiding an explicit
+per-frame permutation.

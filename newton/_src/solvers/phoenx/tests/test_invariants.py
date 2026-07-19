@@ -166,10 +166,7 @@ class TestSelectionHeuristics(unittest.TestCase):
             ),
             ("block_world", 128),
         )
-        # Joint-bearing but contact-light fleet (dr_legs-like: 38 joints +
-        # 30 contacts/world). One block per world fixes fast-tail lane
-        # underfill regardless of contact density -- measured +18% env_fps on
-        # dr_legs@4096 (ncu: latency-bound, ~12/32 active threads/warp).
+        # Wider articulations retain one block per world.
         self.assertEqual(
             _choose_multi_world_scheduler(
                 block_world_supported=True,
@@ -208,6 +205,28 @@ class TestSelectionHeuristics(unittest.TestCase):
             ),
             ("fast_tail", 128),
         )
+        # Fully occupied compact-articulation fleets benefit from subwarp
+        # packing even when contact capacity is high.
+        for joints_per_world, contacts_per_world in ((19, 320), (12, 450)):
+            self.assertEqual(
+                _choose_multi_world_scheduler(
+                    block_world_supported=True,
+                    num_worlds=4096,
+                    num_joints=4096 * joints_per_world,
+                    max_contact_columns=4096 * contacts_per_world,
+                ),
+                ("fast_tail", 128),
+            )
+        self.assertEqual(
+            _choose_multi_world_scheduler(
+                block_world_supported=True,
+                num_worlds=4096,
+                num_joints=4096 * 43,
+                max_contact_columns=4096 * 510,
+            ),
+            ("block_world", 32),
+        )
+
         self.assertEqual(
             _choose_multi_world_scheduler(
                 block_world_supported=True,

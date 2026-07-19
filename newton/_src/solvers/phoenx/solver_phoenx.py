@@ -313,7 +313,12 @@ def _choose_initial_threads_per_world(
         dense_joint_world = joints_per_world > 64.0
         dense_contact_only_world = num_joints == 0 and contacts_capacity_per_world > 256.0
         simple_saturated_joint_contact_world = (
-            worlds >= 16 * sm and 0.0 < joints_per_world <= 32.0 and 128.0 <= contacts_capacity_per_world <= 384.0
+            worlds >= 16 * sm
+            and 0.0 < joints_per_world <= 32.0
+            and (
+                128.0 <= contacts_capacity_per_world <= 384.0
+                or (joints_per_world <= 20.0 and contacts_capacity_per_world <= 512.0)
+            )
         )
         if sparse_joint_contact_world:
             return False, 8
@@ -379,14 +384,13 @@ def _choose_multi_world_scheduler(
     if joints_per_world <= 32.0 and contacts_per_world <= 96.0:
         return "fast_tail", 128
 
-    # Joint-bearing fleets (humanoids, quadrupeds, articulations) suffer
-    # fast-tail lane underfill: the per-world colour loops diverge across the
-    # worlds packed into one block, idling lanes (ncu on dr_legs@4096 showed
-    # only ~12/32 active threads/warp at 25% occupancy -- latency-bound). One
-    # 32-thread block per world keeps the same colouring / PGS row order while
-    # giving each world a full CTA scheduler slot, restoring lane utilisation.
-    # Measured wins across H1/G1/DR-Legs/Anymal (+12-19% env_fps); applies
-    # regardless of contact density once the fleet is large and non-sparse.
+    # At full RL-fleet occupancy, compact articulations keep fast-tail's
+    # subwarp packing busy; dedicating a CTA to every world wastes lanes.
+    if num_worlds >= 4096 and joints_per_world <= 20.0:
+        return "fast_tail", 128
+
+    # Wider articulations underfill fast-tail lane groups. A 32-thread block
+    # per world restores lane utilization while preserving PGS row order.
     if num_worlds >= 512:
         return "block_world", 32
 
