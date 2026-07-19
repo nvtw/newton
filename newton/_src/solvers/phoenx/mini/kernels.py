@@ -704,7 +704,7 @@ def color_world_constraints_kernel(
     shape_body: wp.array[wp.int32],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
-    body_color_owner: wp.array[wp.int32],
+    body_color_mask: wp.array[wp.uint64],
     world_num_colors: wp.array[wp.int32],
     world_color_count: wp.array[wp.int32],
     color_constraints: wp.array[wp.int32],
@@ -730,19 +730,20 @@ def color_world_constraints_kernel(
             body_a = joint_parent[joint]
             body_b = joint_child[joint]
 
+        used_colors = wp.uint64(0)
+        if body_a >= wp.int32(0):
+            used_colors = used_colors | body_color_mask[body_a]
+        if body_b >= wp.int32(0) and body_b != body_a:
+            used_colors = used_colors | body_color_mask[body_b]
+
         color = wp.int32(0)
         while color < max_colors:
-            free_a = body_a < wp.int32(0) or body_color_owner[body_a * max_colors + color] == wp.int32(-1)
-            free_b = (
-                body_b < wp.int32(0)
-                or body_b == body_a
-                or body_color_owner[body_b * max_colors + color] == wp.int32(-1)
-            )
-            if free_a and free_b:
+            color_bit = wp.uint64(1) << wp.uint64(color)
+            if (used_colors & color_bit) == wp.uint64(0):
                 if body_a >= wp.int32(0):
-                    body_color_owner[body_a * max_colors + color] = slot
+                    body_color_mask[body_a] = body_color_mask[body_a] | color_bit
                 if body_b >= wp.int32(0) and body_b != body_a:
-                    body_color_owner[body_b * max_colors + color] = slot
+                    body_color_mask[body_b] = body_color_mask[body_b] | color_bit
                 _store_colored_constraint(
                     world,
                     color,

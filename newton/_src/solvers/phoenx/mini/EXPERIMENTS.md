@@ -51,6 +51,27 @@ universal default. Three mini tests pass, explicit width-eight runs have zero
 overflow, and width 32 versus width eight produced bit-identical poses and
 velocities after 60 deterministic steps.
 
+## M4 — per-body color bitmasks (accepted, 2026-07-19)
+
+The serial greedy colorer stored one int owner for every body/color pair and
+cleared that plane every substep. M4 stores the same used-color set as one
+uint64/body. Scratch and reset traffic fall 32x (64 MiB to 2 MiB at 32K
+eight-body worlds), while smallest-free-color order is unchanged.
+
+Alternating exact-source bracket using M3 width eight:
+
+| Worlds | M3 owner plane | M4 bitmask | Throughput | Useful bandwidth | Sequential / random-vec4 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 8,192 | 294.834 us | **270.364 us** | **+9.05%** | 512.14 -> **558.00 GB/s** | 34.39 / 49.40% -> **37.50 / 53.87%** |
+| 32,768 | 1.19845 ms | **1.13645 ms** | **+5.46%** | 503.99 -> **531.46 GB/s** | 33.84 / 48.61% -> **35.69 / 51.26%** |
+
+The 8K contact-only stack median also improves from 764.20 to 704.06 us
+(**+8.54%**), with under 0.4% contact-count variation. Three mini tests pass;
+color buckets/counts, poses, and velocities are bit-identical after 60 robot
+steps. An 8K profile attributes 23.9% of kernel time to solve, 13.2% to CUB
+contact sorts, 11.3% to prepare, and 6.4% to coloring. Sorting is now the
+largest non-solver target.
+
 This is an append-only scientific ledger. Failed qualifications and rejected
 results remain visible.
 

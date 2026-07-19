@@ -111,9 +111,7 @@ class MiniSolver(SolverBase):
             dtype=wp.int32,
             device=model.device,
         )
-        self._body_color_owner = wp.full(
-            max(1, model.body_count * self.config.max_colors), -1, dtype=wp.int32, device=model.device
-        )
+        self._body_color_mask = wp.zeros(max(1, model.body_count), dtype=wp.uint64, device=model.device)
         self._overflow = wp.zeros(1, dtype=wp.int32, device=model.device)
         self._gather_overflow = wp.zeros(1, dtype=wp.int32, device=model.device)
         self._lambda_n = wp.zeros(contact_capacity, dtype=wp.float32, device=model.device)
@@ -189,7 +187,7 @@ class MiniSolver(SolverBase):
         self._world_constraint_count.zero_()
         self._world_num_colors.zero_()
         self._world_color_count.zero_()
-        self._body_color_owner.fill_(-1)
+        self._body_color_mask.zero_()
         self._overflow.zero_()
         self._gather_overflow.zero_()
         if not self._packed_contacts and not self._packed_mixed:
@@ -240,7 +238,7 @@ class MiniSolver(SolverBase):
                     self._joint_child,
                 ],
                 outputs=[
-                    self._body_color_owner,
+                    self._body_color_mask,
                     self._world_num_colors,
                     self._world_color_count,
                     self._color_constraints,
