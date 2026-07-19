@@ -314,23 +314,29 @@ def solve_packed_contacts_kernel(
                 angular_a = wp.vec3(0.0)
                 linear_b = wp.vec3(0.0)
                 angular_b = wp.vec3(0.0)
+                inverse_mass_a = wp.float32(0.0)
+                inverse_mass_b = wp.float32(0.0)
                 if body_a >= wp.int32(0):
-                    linear_a = _xyz(linear_velocity[body_a])
+                    packed_linear_a = linear_velocity[body_a]
+                    linear_a = _xyz(packed_linear_a)
+                    inverse_mass_a = packed_linear_a[3]
                     angular_a = _xyz(angular_velocity[body_a])
                 if body_b >= wp.int32(0):
-                    linear_b = _xyz(linear_velocity[body_b])
+                    packed_linear_b = linear_velocity[body_b]
+                    linear_b = _xyz(packed_linear_b)
+                    inverse_mass_b = packed_linear_b[3]
                     angular_b = _xyz(angular_velocity[body_b])
 
                 relative = linear_b + wp.cross(angular_b, arm_b) - linear_a - wp.cross(angular_a, arm_a)
                 new_n = wp.max(lambdas[0] - mass[0] * (wp.dot(relative, normal) + nb[3]), wp.float32(0.0))
                 delta = new_n - lambdas[0]
                 if body_a >= wp.int32(0):
-                    linear_a -= normal * (delta * ama[3])
+                    linear_a -= normal * (delta * inverse_mass_a)
                     angular_a -= _mul_world_inertia(
                         body_a, wp.cross(arm_a, normal) * delta, inertia0, inertia1, inertia2
                     )
                 if body_b >= wp.int32(0):
-                    linear_b += normal * (delta * amb[3])
+                    linear_b += normal * (delta * inverse_mass_b)
                     angular_b += _mul_world_inertia(
                         body_b, wp.cross(arm_b, normal) * delta, inertia0, inertia1, inertia2
                     )
@@ -340,12 +346,12 @@ def solve_packed_contacts_kernel(
                 new_t1 = wp.clamp(lambdas[1] - mass[1] * wp.dot(relative, tangent1), -limit, limit)
                 delta = new_t1 - lambdas[1]
                 if body_a >= wp.int32(0):
-                    linear_a -= tangent1 * (delta * ama[3])
+                    linear_a -= tangent1 * (delta * inverse_mass_a)
                     angular_a -= _mul_world_inertia(
                         body_a, wp.cross(arm_a, tangent1) * delta, inertia0, inertia1, inertia2
                     )
                 if body_b >= wp.int32(0):
-                    linear_b += tangent1 * (delta * amb[3])
+                    linear_b += tangent1 * (delta * inverse_mass_b)
                     angular_b += _mul_world_inertia(
                         body_b, wp.cross(arm_b, tangent1) * delta, inertia0, inertia1, inertia2
                     )
@@ -354,18 +360,18 @@ def solve_packed_contacts_kernel(
                 new_t2 = wp.clamp(lambdas[2] - mass[2] * wp.dot(relative, tangent2), -limit, limit)
                 delta = new_t2 - lambdas[2]
                 if body_a >= wp.int32(0):
-                    linear_a -= tangent2 * (delta * ama[3])
+                    linear_a -= tangent2 * (delta * inverse_mass_a)
                     angular_a -= _mul_world_inertia(
                         body_a, wp.cross(arm_a, tangent2) * delta, inertia0, inertia1, inertia2
                     )
-                    linear_velocity[body_a] = wp.vec4(linear_a[0], linear_a[1], linear_a[2], ama[3])
+                    linear_velocity[body_a] = wp.vec4(linear_a[0], linear_a[1], linear_a[2], inverse_mass_a)
                     angular_velocity[body_a] = wp.vec4(angular_a[0], angular_a[1], angular_a[2], 0.0)
                 if body_b >= wp.int32(0):
-                    linear_b += tangent2 * (delta * amb[3])
+                    linear_b += tangent2 * (delta * inverse_mass_b)
                     angular_b += _mul_world_inertia(
                         body_b, wp.cross(arm_b, tangent2) * delta, inertia0, inertia1, inertia2
                     )
-                    linear_velocity[body_b] = wp.vec4(linear_b[0], linear_b[1], linear_b[2], amb[3])
+                    linear_velocity[body_b] = wp.vec4(linear_b[0], linear_b[1], linear_b[2], inverse_mass_b)
                     angular_velocity[body_b] = wp.vec4(angular_b[0], angular_b[1], angular_b[2], 0.0)
                 impulse[packed] = wp.vec4(new_n, new_t1, new_t2, 0.0)
                 slot += block_dim
@@ -461,6 +467,8 @@ def make_solve_packed_contacts_shared_kernel(bodies_per_world: int):
                     angular_a = wp.vec3(0.0)
                     linear_b = wp.vec3(0.0)
                     angular_b = wp.vec3(0.0)
+                    inverse_mass_a = wp.float32(0.0)
+                    inverse_mass_b = wp.float32(0.0)
                     row0_a = wp.vec4(0.0)
                     row1_a = wp.vec4(0.0)
                     row2_a = wp.vec4(0.0)
@@ -468,13 +476,17 @@ def make_solve_packed_contacts_shared_kernel(bodies_per_world: int):
                     row1_b = wp.vec4(0.0)
                     row2_b = wp.vec4(0.0)
                     if body_a >= wp.int32(0):
-                        linear_a = _xyz(wp.tile_extract(linear_tile, local_a))
+                        packed_linear_a = wp.tile_extract(linear_tile, local_a)
+                        linear_a = _xyz(packed_linear_a)
+                        inverse_mass_a = packed_linear_a[3]
                         angular_a = _xyz(wp.tile_extract(angular_tile, local_a))
                         row0_a = wp.tile_extract(inertia0_tile, local_a)
                         row1_a = wp.tile_extract(inertia1_tile, local_a)
                         row2_a = wp.tile_extract(inertia2_tile, local_a)
                     if body_b >= wp.int32(0):
-                        linear_b = _xyz(wp.tile_extract(linear_tile, local_b))
+                        packed_linear_b = wp.tile_extract(linear_tile, local_b)
+                        linear_b = _xyz(packed_linear_b)
+                        inverse_mass_b = packed_linear_b[3]
                         angular_b = _xyz(wp.tile_extract(angular_tile, local_b))
                         row0_b = wp.tile_extract(inertia0_tile, local_b)
                         row1_b = wp.tile_extract(inertia1_tile, local_b)
@@ -487,10 +499,10 @@ def make_solve_packed_contacts_shared_kernel(bodies_per_world: int):
                     )
                     delta = new_n - lambdas[0]
                     if body_a >= wp.int32(0):
-                        linear_a -= normal * (delta * ama[3])
+                        linear_a -= normal * (delta * inverse_mass_a)
                         angular_a -= _mul_inertia_rows(row0_a, row1_a, row2_a, wp.cross(arm_a, normal) * delta)
                     if body_b >= wp.int32(0):
-                        linear_b += normal * (delta * amb[3])
+                        linear_b += normal * (delta * inverse_mass_b)
                         angular_b += _mul_inertia_rows(row0_b, row1_b, row2_b, wp.cross(arm_b, normal) * delta)
 
                     limit = tm[3] * new_n
@@ -498,26 +510,26 @@ def make_solve_packed_contacts_shared_kernel(bodies_per_world: int):
                     new_t1 = wp.clamp(lambdas[1] - mass[1] * wp.dot(relative, tangent1), -limit, limit)
                     delta = new_t1 - lambdas[1]
                     if body_a >= wp.int32(0):
-                        linear_a -= tangent1 * (delta * ama[3])
+                        linear_a -= tangent1 * (delta * inverse_mass_a)
                         angular_a -= _mul_inertia_rows(row0_a, row1_a, row2_a, wp.cross(arm_a, tangent1) * delta)
                     if body_b >= wp.int32(0):
-                        linear_b += tangent1 * (delta * amb[3])
+                        linear_b += tangent1 * (delta * inverse_mass_b)
                         angular_b += _mul_inertia_rows(row0_b, row1_b, row2_b, wp.cross(arm_b, tangent1) * delta)
 
                     relative = linear_b + wp.cross(angular_b, arm_b) - linear_a - wp.cross(angular_a, arm_a)
                     new_t2 = wp.clamp(lambdas[2] - mass[2] * wp.dot(relative, tangent2), -limit, limit)
                     delta = new_t2 - lambdas[2]
                     if body_a >= wp.int32(0):
-                        linear_a -= tangent2 * (delta * ama[3])
+                        linear_a -= tangent2 * (delta * inverse_mass_a)
                         angular_a -= _mul_inertia_rows(row0_a, row1_a, row2_a, wp.cross(arm_a, tangent2) * delta)
                     if body_b >= wp.int32(0):
-                        linear_b += tangent2 * (delta * amb[3])
+                        linear_b += tangent2 * (delta * inverse_mass_b)
                         angular_b += _mul_inertia_rows(row0_b, row1_b, row2_b, wp.cross(arm_b, tangent2) * delta)
 
                     wp.tile_scatter_masked(
                         linear_tile,
                         local_a,
-                        wp.vec4(linear_a[0], linear_a[1], linear_a[2], ama[3]),
+                        wp.vec4(linear_a[0], linear_a[1], linear_a[2], inverse_mass_a),
                         body_a >= wp.int32(0),
                     )
                     wp.tile_scatter_masked(
@@ -529,7 +541,7 @@ def make_solve_packed_contacts_shared_kernel(bodies_per_world: int):
                     wp.tile_scatter_masked(
                         linear_tile,
                         local_b,
-                        wp.vec4(linear_b[0], linear_b[1], linear_b[2], amb[3]),
+                        wp.vec4(linear_b[0], linear_b[1], linear_b[2], inverse_mass_b),
                         body_b >= wp.int32(0),
                     )
                     wp.tile_scatter_masked(
@@ -742,21 +754,27 @@ def _solve_packed_contact(
     angular_a = wp.vec3(0.0)
     linear_b = wp.vec3(0.0)
     angular_b = wp.vec3(0.0)
+    inverse_mass_a = wp.float32(0.0)
+    inverse_mass_b = wp.float32(0.0)
     if body_a >= wp.int32(0):
-        linear_a = _xyz(linear_velocity[body_a])
+        packed_linear_a = linear_velocity[body_a]
+        linear_a = _xyz(packed_linear_a)
+        inverse_mass_a = packed_linear_a[3]
         angular_a = _xyz(angular_velocity[body_a])
     if body_b >= wp.int32(0):
-        linear_b = _xyz(linear_velocity[body_b])
+        packed_linear_b = linear_velocity[body_b]
+        linear_b = _xyz(packed_linear_b)
+        inverse_mass_b = packed_linear_b[3]
         angular_b = _xyz(angular_velocity[body_b])
 
     relative = linear_b + wp.cross(angular_b, arm_b) - linear_a - wp.cross(angular_a, arm_a)
     new_n = wp.max(lambdas[0] - mass[0] * (wp.dot(relative, normal) + nb[3]), wp.float32(0.0))
     delta = new_n - lambdas[0]
     if body_a >= wp.int32(0):
-        linear_a -= normal * (delta * ama[3])
+        linear_a -= normal * (delta * inverse_mass_a)
         angular_a -= _mul_world_inertia(body_a, wp.cross(arm_a, normal) * delta, inertia0, inertia1, inertia2)
     if body_b >= wp.int32(0):
-        linear_b += normal * (delta * amb[3])
+        linear_b += normal * (delta * inverse_mass_b)
         angular_b += _mul_world_inertia(body_b, wp.cross(arm_b, normal) * delta, inertia0, inertia1, inertia2)
 
     limit = tm[3] * new_n
@@ -764,24 +782,24 @@ def _solve_packed_contact(
     new_t1 = wp.clamp(lambdas[1] - mass[1] * wp.dot(relative, tangent1), -limit, limit)
     delta = new_t1 - lambdas[1]
     if body_a >= wp.int32(0):
-        linear_a -= tangent1 * (delta * ama[3])
+        linear_a -= tangent1 * (delta * inverse_mass_a)
         angular_a -= _mul_world_inertia(body_a, wp.cross(arm_a, tangent1) * delta, inertia0, inertia1, inertia2)
     if body_b >= wp.int32(0):
-        linear_b += tangent1 * (delta * amb[3])
+        linear_b += tangent1 * (delta * inverse_mass_b)
         angular_b += _mul_world_inertia(body_b, wp.cross(arm_b, tangent1) * delta, inertia0, inertia1, inertia2)
 
     relative = linear_b + wp.cross(angular_b, arm_b) - linear_a - wp.cross(angular_a, arm_a)
     new_t2 = wp.clamp(lambdas[2] - mass[2] * wp.dot(relative, tangent2), -limit, limit)
     delta = new_t2 - lambdas[2]
     if body_a >= wp.int32(0):
-        linear_a -= tangent2 * (delta * ama[3])
+        linear_a -= tangent2 * (delta * inverse_mass_a)
         angular_a -= _mul_world_inertia(body_a, wp.cross(arm_a, tangent2) * delta, inertia0, inertia1, inertia2)
-        linear_velocity[body_a] = wp.vec4(linear_a[0], linear_a[1], linear_a[2], ama[3])
+        linear_velocity[body_a] = wp.vec4(linear_a[0], linear_a[1], linear_a[2], inverse_mass_a)
         angular_velocity[body_a] = wp.vec4(angular_a[0], angular_a[1], angular_a[2], 0.0)
     if body_b >= wp.int32(0):
-        linear_b += tangent2 * (delta * amb[3])
+        linear_b += tangent2 * (delta * inverse_mass_b)
         angular_b += _mul_world_inertia(body_b, wp.cross(arm_b, tangent2) * delta, inertia0, inertia1, inertia2)
-        linear_velocity[body_b] = wp.vec4(linear_b[0], linear_b[1], linear_b[2], amb[3])
+        linear_velocity[body_b] = wp.vec4(linear_b[0], linear_b[1], linear_b[2], inverse_mass_b)
         angular_velocity[body_b] = wp.vec4(angular_b[0], angular_b[1], angular_b[2], 0.0)
     impulse[packed] = wp.vec4(new_n, new_t1, new_t2, 0.0)
 

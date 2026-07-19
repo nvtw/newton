@@ -150,10 +150,15 @@ def _solve_packed_revolute(
     mass4 = row_mass4[packed][0]
     linear_a = wp.vec3(0.0)
     angular_a = wp.vec3(0.0)
-    linear_b = _xyz(linear_velocity[body_b])
+    inverse_mass_a = wp.float32(0.0)
+    packed_linear_b = linear_velocity[body_b]
+    linear_b = _xyz(packed_linear_b)
+    inverse_mass_b = packed_linear_b[3]
     angular_b = _xyz(angular_velocity[body_b])
     if body_a >= wp.int32(0):
-        linear_a = _xyz(linear_velocity[body_a])
+        packed_linear_a = linear_velocity[body_a]
+        linear_a = _xyz(packed_linear_a)
+        inverse_mass_a = packed_linear_a[3]
         angular_a = _xyz(angular_velocity[body_a])
 
     row = wp.int32(0)
@@ -178,11 +183,11 @@ def _solve_packed_revolute(
             relative = linear_b + wp.cross(angular_b, arm_b) - linear_a - wp.cross(angular_a, arm_a)
             impulse_value = -mass * (wp.dot(relative, direction) + data[3])
             if body_a >= wp.int32(0):
-                linear_a -= direction * (impulse_value * ama[3])
+                linear_a -= direction * (impulse_value * inverse_mass_a)
                 angular_a -= _mul_world_inertia(
                     body_a, wp.cross(arm_a, direction) * impulse_value, inertia0, inertia1, inertia2
                 )
-            linear_b += direction * (impulse_value * amb[3])
+            linear_b += direction * (impulse_value * inverse_mass_b)
             angular_b += _mul_world_inertia(
                 body_b, wp.cross(arm_b, direction) * impulse_value, inertia0, inertia1, inertia2
             )
@@ -196,10 +201,10 @@ def _solve_packed_revolute(
     motor_impulse = _xyz(motor[packed])
     if body_a >= wp.int32(0):
         angular_a -= _mul_world_inertia(body_a, motor_impulse, inertia0, inertia1, inertia2)
-        linear_velocity[body_a] = wp.vec4(linear_a[0], linear_a[1], linear_a[2], ama[3])
+        linear_velocity[body_a] = wp.vec4(linear_a[0], linear_a[1], linear_a[2], inverse_mass_a)
         angular_velocity[body_a] = wp.vec4(angular_a[0], angular_a[1], angular_a[2], 0.0)
     angular_b += _mul_world_inertia(body_b, motor_impulse, inertia0, inertia1, inertia2)
-    linear_velocity[body_b] = wp.vec4(linear_b[0], linear_b[1], linear_b[2], amb[3])
+    linear_velocity[body_b] = wp.vec4(linear_b[0], linear_b[1], linear_b[2], inverse_mass_b)
     angular_velocity[body_b] = wp.vec4(angular_b[0], angular_b[1], angular_b[2], 0.0)
 
 

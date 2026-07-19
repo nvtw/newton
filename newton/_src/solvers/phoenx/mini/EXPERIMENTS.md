@@ -1,5 +1,28 @@
 # PhoenX Mini Throughput Experiments
 
+## M1 — consume inverse mass from packed velocity (2026-07-19)
+
+Parent: `5650e6a7`. Hardware and roofline denominators are those below. The
+candidate keeps the prepared constraint layout unchanged, but reads inverse
+mass from the already-loaded `linear_velocity.w` instead of `arm_mass.w` in
+all packed contact and revolute solves.
+
+Robot scene, sticky matching, eight bodies/world, one substep, four PGS
+iterations. An alternating source bracket used 3,000 replays at 8K worlds and
+1,000 replays at 32K worlds. Each median combines two runs:
+
+| Worlds | Control | Candidate | Throughput | Useful bandwidth | Sequential / random-vec4 roofline |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 8,192 | 360.537 us | **359.150 us** | **+0.386%** | 418.81 -> **420.42 GB/s** | 28.12 / 40.39% -> **28.23 / 40.55%** |
+| 32,768 | 1.33277 ms | **1.31839 ms** | **+1.091%** | 453.18 -> **458.12 GB/s** | 30.43 / 43.71% -> **30.76 / 44.19%** |
+
+Both scales had finite state and zero gather/color overflow. The three focused
+mini unittests pass. A separate deterministic 64-world robot run produced
+bit-identical poses and velocities after 60 steps. This qualifies the packed
+fourth lane as a small real win. It does not prove that narrowing the prepared
+arm arrays is faster; that alignment/traffic tradeoff is the next isolated
+experiment.
+
 This is an append-only scientific ledger. Failed qualifications and rejected
 results remain visible.
 
