@@ -23,6 +23,7 @@ __all__ = [
     "CONSTRAINT_BODY1_OFFSET",
     "CONSTRAINT_BODY2_OFFSET",
     "CONSTRAINT_MULTIPLIER_DWORDS",
+    "CONSTRAINT_MULTIPLIER_VEC4S",
     "CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET",
     "CONSTRAINT_TYPE_CLOTH_BENDING",
     "CONSTRAINT_TYPE_CLOTH_TRIANGLE",
@@ -145,9 +146,10 @@ def assert_constraint_header(struct_type: object) -> None:
 #: every constraint type that uses mass-splitting slot routing.
 SLOT_CACHE_MAX_BODIES: int = 8
 
-#: Width of the per-cid mutable multiplier sidecar. This is intentionally
-#: generic storage: constraint-family modules define their own row mapping.
+#: Logical scalar width of the per-cid mutable multiplier sidecar. Constraint
+#: families define their own mapping into three aligned vec4 groups.
 CONSTRAINT_MULTIPLIER_DWORDS: int = 12
+CONSTRAINT_MULTIPLIER_VEC4S: int = CONSTRAINT_MULTIPLIER_DWORDS // 4
 
 
 @wp.struct
@@ -164,8 +166,8 @@ class ConstraintContainer:
     """
 
     data: wp.array2d[wp.float32]
-    #: Mutable accumulated multipliers, separated from read-mostly prepared data.
-    multipliers: wp.array2d[wp.float32]
+    #: Mutable accumulated multipliers, packed as three vec4 groups per constraint.
+    multipliers: wp.array2d[wp.vec4f]
     #: Per-cid slot cache: ``slot_cache[cid, v]`` is the slot index for
     #: vertex ``v`` of constraint ``cid`` under the parallel-id that
     #: vertex's iterate will see (parallel_id = 0 for regular colours,
@@ -187,7 +189,7 @@ def constraint_container_zeros(
     """Allocate a zero-initialised :class:`ConstraintContainer`."""
     c = ConstraintContainer()
     c.data = wp.zeros((num_dwords, num_constraints), dtype=wp.float32, device=device)
-    c.multipliers = wp.zeros((CONSTRAINT_MULTIPLIER_DWORDS, max(num_constraints, 1)), dtype=wp.float32, device=device)
+    c.multipliers = wp.zeros((CONSTRAINT_MULTIPLIER_VEC4S, max(num_constraints, 1)), dtype=wp.vec4f, device=device)
     # Cache starts at the no-slot fallback so reads before the first
     # build hit the same direct-storage path as ``get_state_index``'s
     # mass-splitting-disabled fast path.
@@ -222,21 +224,25 @@ def write_float(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.floa
 
 @wp.func
 def constraint_read_multiplier(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.float32:
-    return read2d_f32(c.multipliers, off, cid)
+    group = off >> wp.int32(2)
+    lane = off & wp.int32(3)
+    return c.multipliers[group, cid][lane]
 
 
 @wp.func
 def constraint_write_multiplier(c: ConstraintContainer, off: wp.int32, cid: wp.int32, v: wp.float32):
-    write2d_f32(c.multipliers, off, cid, v)
+    group = off >> wp.int32(2)
+    lane = off & wp.int32(3)
+    packed = c.multipliers[group, cid]
+    packed[lane] = v
+    c.multipliers[group, cid] = packed
 
 
 @wp.func
 def constraint_read_multiplier_vec3(c: ConstraintContainer, off: wp.int32, cid: wp.int32) -> wp.vec3f:
-    return wp.vec3f(
-        read2d_f32(c.multipliers, off + wp.int32(0), cid),
-        read2d_f32(c.multipliers, off + wp.int32(1), cid),
-        read2d_f32(c.multipliers, off + wp.int32(2), cid),
-    )
+    # Vector mappings begin at an aligned group; its w lane is family-aliased scalar state.
+    packed = c.multipliers[off >> wp.int32(2), cid]
+    return wp.vec3f(packed[0], packed[1], packed[2])
 
 
 @wp.func
@@ -246,9 +252,9 @@ def constraint_write_multiplier_vec3(
     cid: wp.int32,
     v: wp.vec3f,
 ):
-    write2d_f32(c.multipliers, off + wp.int32(0), cid, v[0])
-    write2d_f32(c.multipliers, off + wp.int32(1), cid, v[1])
-    write2d_f32(c.multipliers, off + wp.int32(2), cid, v[2])
+    group = off >> wp.int32(2)
+    packed = c.multipliers[group, cid]
+    c.multipliers[group, cid] = wp.vec4f(v[0], v[1], v[2], packed[3])
 
 
 @wp.func
@@ -526,8 +532,8 @@ def _constraint_container_clear_reset_worlds_kernel(
     ):
         return
 
-    for row in range(CONSTRAINT_MULTIPLIER_DWORDS):
-        constraints.multipliers[row, cid] = wp.float32(0.0)
+    for group in range(CONSTRAINT_MULTIPLIER_VEC4S):
+        constraints.multipliers[group, cid] = wp.vec4f(0.0)
 
 
 def constraint_container_clear_reset_worlds(

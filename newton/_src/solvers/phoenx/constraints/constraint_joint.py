@@ -492,12 +492,13 @@ _OFF_PD_BETA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 1)
 _OFF_PD_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
 _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
-# Family-aliased mutable state in ConstraintContainer.multipliers.
+# Family-aliased mutable state in three aligned vec4 groups: impulse.xyz and
+# its correlated drive/limit/friction scalar in w.
 _MUL_ACC_IMP1 = wp.constant(wp.int32(0))
-_MUL_ACC_IMP2 = wp.constant(wp.int32(3))
-_MUL_ACC_IMP3 = wp.constant(wp.int32(6))
-_MUL_ACC_DRIVE = wp.constant(wp.int32(9))
-_MUL_ACC_LIMIT = wp.constant(wp.int32(10))
+_MUL_ACC_DRIVE = wp.constant(wp.int32(3))
+_MUL_ACC_IMP2 = wp.constant(wp.int32(4))
+_MUL_ACC_LIMIT = wp.constant(wp.int32(7))
+_MUL_ACC_IMP3 = wp.constant(wp.int32(8))
 _MUL_ACC_FRICTION = wp.constant(wp.int32(11))
 ADBS_TIME_US_OFFSET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "time_us"))
 

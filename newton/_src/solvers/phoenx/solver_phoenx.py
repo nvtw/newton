@@ -63,7 +63,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_views_make,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_MULTIPLIER_DWORDS,
+    CONSTRAINT_MULTIPLIER_VEC4S,
     ConstraintContainer,
     constraint_container_zeros,
 )
@@ -1556,9 +1556,9 @@ class PhoenXWorld:
             f"PhoenXWorld.make_constraint_container() to build it"
         )
         actual_multiplier_shape = self.constraints.multipliers.shape
-        assert actual_multiplier_shape == (CONSTRAINT_MULTIPLIER_DWORDS, expected_constraint_cols), (
+        assert actual_multiplier_shape == (CONSTRAINT_MULTIPLIER_VEC4S, expected_constraint_cols), (
             f"ConstraintContainer.multipliers has shape {actual_multiplier_shape}, expected "
-            f"({CONSTRAINT_MULTIPLIER_DWORDS}, {expected_constraint_cols}); use "
+            f"({CONSTRAINT_MULTIPLIER_VEC4S}, {expected_constraint_cols}); use "
             f"PhoenXWorld.make_constraint_container() to build it"
         )
 

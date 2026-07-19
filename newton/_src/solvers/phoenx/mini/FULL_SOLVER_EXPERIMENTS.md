@@ -444,6 +444,67 @@ that pre-existing reduced-mode body-reset defect is recorded but is not
 attributed to F10.
 
 
+## F11 - vec4-packed generic multiplier sidecar
+
+F10 still stored its twelve mutable multiplier dwords as twelve independent
+scalar planes. A joint impulse vector therefore issued three plane loads and
+stores even though its components are always consumed together. F11 changes
+the same generic 48-byte sidecar into three vec4 planes. Each joint maps an
+impulse to xyz and its correlated axial scalar to w: drive with the first
+impulse, limit with the second, and friction with the mode-exclusive third.
+Scalar deformable families retain logical dword offsets through generic
+read-modify-write accessors. No bytes, arrays, feature flags, or solver paths
+are added.
+
+An alternating source bracket against detached F10 used the stable robot
+workload, sticky matching, one substep, four PGS iterations, and 3,000 replays
+at 8K worlds. Medians combine two candidate and two control runs:
+
+| Metric | F10 scalar planes | F11 vec4 planes | Change |
+| :--- | ---: | ---: | ---: |
+| Frame | 488.89 us | **442.53 us** | **-9.48%** |
+| World-steps/s | 16.756 M | **18.512 M** | **+10.48%** |
+| Useful-work bandwidth | 308.85 GB/s | **341.21 GB/s** | **+10.48%** |
+| Sequential bandwidth roofline | 20.74% | **22.91%** | +2.17 points |
+| Random-vec4 roofline | 29.79% | **32.91%** | +3.12 points |
+| FP32 FMA roofline | 0.504% | **0.557%** | +0.053 points |
+
+The above-L2 32K bracket uses 1,000 replays, 131,072 contacts, and 262,144
+revolute constraints. Two candidate runs surround the control:
+
+| Metric | F10 scalar planes | F11 vec4 planes | Change |
+| :--- | ---: | ---: | ---: |
+| Frame | 1.595 ms | **1.282 ms** | **-19.62%** |
+| World-steps/s | 20.542 M | **25.558 M** | **+24.42%** |
+| Useful-work bandwidth | 378.63 GB/s | **471.08 GB/s** | **+24.42%** |
+| Sequential bandwidth roofline | 25.43% | **31.63%** | +6.20 points |
+| Random-vec4 roofline | 36.52% | **45.44%** | +8.92 points |
+| FP32 FMA roofline | 0.618% | **0.768%** | +0.150 points |
+
+The unchanged byte count and stronger above-L2 result identify memory
+instruction shape and coalescing, rather than cache footprint, as the cause.
+With identical sticky contact matching, current mini measures 368.34 us at 8K
+and 1.337 ms at 32K. Full PhoenX remains 20.1% slower in the cache-resident
+case, where general scheduling has a fixed cost, but is **4.1% faster than
+mini above L2**. With mini's default disabled matching it measures 1.193 ms,
+leaving full 7.5% slower while doing the additional production work.
+
+Contact-only Kapla is intentionally unaffected. A source bracket gives 79.00
+-> 79.24 FPS (+0.3%) for 1x1 and 33.04 -> 33.50 FPS (+1.4%) for 2x2, with
+bit-identical drift, extrema, contact counts, and colors. The 2x2 candidate
+still reaches 1,411.31 GB/s, **94.77% of sequential bandwidth**.
+
+Qualification passes 96 sampled tests spanning all joint modes, drives,
+limits, friction, fixed and cable joints, scalar and block deformables, cloth,
+maximal and general loop projectors, and the G1 implicit-drive graph check.
+The known G1 poisoned-reset test again fails only after stepping because its
+poisoned body angular velocity survives reduced-mode reset; all three packed
+multiplier groups are finite, and detached F10 has the identical body failure.
+The experiment's central lesson is that equal byte counts are not equal memory
+systems: grouping always-coaccessed scalars into aligned vector transactions
+can matter more than shrinking a schema.
+
+
 ## S0 — large single-world Kapla baseline
 
 The F2--F4 changes target independent-world ownership and block-world output;

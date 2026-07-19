@@ -24,7 +24,7 @@ from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
 )
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_MULTIPLIER_DWORDS,
+    CONSTRAINT_MULTIPLIER_VEC4S,
     ConstraintContainer,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
@@ -354,8 +354,8 @@ def _poison_adbs_reset_runtime_state_kernel(
     for row in range(6):
         constraints.data[_OFF_R3_B1 + row, cid] = poison
     constraints.data[_OFF_BIAS3, cid] = poison
-    for row in range(CONSTRAINT_MULTIPLIER_DWORDS):
-        constraints.multipliers[row, cid] = poison
+    for group in range(CONSTRAINT_MULTIPLIER_VEC4S):
+        constraints.multipliers[group, cid] = wp.vec4f(poison)
     constraints.data[_OFF_EFF_INV_AXIAL, cid] = poison
     constraints.data[_OFF_BIAS_DRIVE, cid] = poison
     constraints.data[_OFF_GAMMA_DRIVE, cid] = poison
@@ -411,9 +411,11 @@ def _adbs_runtime_nonfinite_flags_kernel(
             bad = wp.int32(1)
     if not wp.isfinite(constraints.data[_OFF_PREVIOUS_QUATERNION_ANGLE, cid]):
         bad = wp.int32(1)
-    for row in range(CONSTRAINT_MULTIPLIER_DWORDS):
-        if not wp.isfinite(constraints.multipliers[row, cid]):
-            bad = wp.int32(1)
+    for group in range(CONSTRAINT_MULTIPLIER_VEC4S):
+        packed = constraints.multipliers[group, cid]
+        for lane in range(4):
+            if not wp.isfinite(packed[lane]):
+                bad = wp.int32(1)
     if not wp.isfinite(constraints.data[_OFF_EFF_INV_AXIAL, cid]):
         bad = wp.int32(1)
     if not wp.isfinite(constraints.data[_OFF_BIAS_DRIVE, cid]):
@@ -4193,7 +4195,8 @@ class TestG1PhoenXRL(unittest.TestCase):
         gamma = data[int(_OFF_GAMMA_DRIVE), cids]
         bias = data[int(_OFF_BIAS_DRIVE), cids]
         eff_mass_soft = data[int(_OFF_EFF_MASS_DRIVE_SOFT), cids]
-        acc_drive = multipliers[int(_MUL_ACC_DRIVE), cids]
+        drive_offset = int(_MUL_ACC_DRIVE)
+        acc_drive = multipliers[drive_offset // 4, cids, drive_offset % 4]
 
         kp = env.actuator_ke.numpy()[None, :]
         kd = env.actuator_kd.numpy()[None, :]
