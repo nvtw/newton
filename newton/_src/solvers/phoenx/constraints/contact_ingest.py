@@ -769,14 +769,12 @@ _PREV_ANCHOR_PEN_MAX: float = 0.01
 
 @wp.kernel(enable_backward=False)
 def _contact_warmstart_gather_kernel(
-    pair_source_idx: wp.array[wp.int32],
-    pair_first: wp.array[wp.int32],
-    pair_count: wp.array[wp.int32],
-    pair_shape_a: wp.array[wp.int32],
-    pair_shape_b: wp.array[wp.int32],
+    pair_id: wp.array[wp.int32],
+    pair_col_offset: wp.array[wp.int32],
+    pair_columns: wp.array[wp.int32],
+    max_contact_columns: wp.int32,
     rigid_contact_match_index: wp.array[wp.int32],
     prev_cid_of_contact: wp.array[wp.int32],
-    num_contact_columns: wp.array[wp.int32],
     reuse_contact_indices: wp.array[wp.int32],
     carry_impulses: wp.int32,
     bodies: BodyContainer,
@@ -785,7 +783,7 @@ def _contact_warmstart_gather_kernel(
 ):
     """Seed this frame's ``cc`` slots from the prev frame (PhoenX model).
 
-    One thread per output column. For each contact ``k`` in the range:
+    One thread per canonical contact; filtered or overflowed columns exit early.
 
     * Matched (``prev_k = rigid_contact_match_index[k] >= 0``) and prev
       anchor still describes the contact accurately: carry the prev
@@ -807,16 +805,17 @@ def _contact_warmstart_gather_kernel(
     still points to the previous collide result, so the gather uses the
     current contact index directly.
     """
-    tid = wp.tid()
-    if tid >= num_contact_columns[0]:
+    k = wp.tid()
+    contact_count = _clamp_contact_count(contacts.rigid_contact_count, pair_id.shape[0])
+    if k >= contact_count:
         return
 
-    p = pair_source_idx[tid]
-    count = pair_count[p]
-    start_contact = pair_first[p]
+    p = pair_id[k] - wp.int32(1)
+    if p < wp.int32(0) or pair_columns[p] == wp.int32(0) or pair_col_offset[p] >= max_contact_columns:
+        return
 
-    sa = pair_shape_a[p]
-    sb = pair_shape_b[p]
+    sa = contacts.rigid_contact_shape0[k]
+    sb = contacts.rigid_contact_shape1[k]
     b1 = contacts.shape_body[sa]
     b2 = contacts.shape_body[sb]
 
@@ -831,123 +830,117 @@ def _contact_warmstart_gather_kernel(
     w1 = bodies.angular_velocity[b1]
     w2 = bodies.angular_velocity[b2]
 
-    use_identity_match = reuse_contact_indices[0] != wp.int32(0)
+    prev_k = rigid_contact_match_index[k]
+    if reuse_contact_indices[0] != wp.int32(0):
+        prev_k = k
+    prev_valid = wp.int32(0)
+    if prev_k >= 0:
+        if prev_cid_of_contact[prev_k] >= 0:
+            prev_valid = wp.int32(1)
 
-    for i in range(count):
-        k = start_contact + i
+    fresh_local_p0 = contacts.rigid_contact_point0[k]
+    fresh_local_p1 = contacts.rigid_contact_point1[k]
+    fresh_n = contacts.rigid_contact_normal[k]
 
-        prev_k = rigid_contact_match_index[k]
-        if use_identity_match:
-            prev_k = k
-        prev_valid = wp.int32(0)
-        if prev_k >= 0:
-            if prev_cid_of_contact[prev_k] >= 0:
-                prev_valid = wp.int32(1)
+    # The narrow phase gives anchors in each body's *origin* frame
+    # but :attr:`BodyContainer.position` is the body *COM*; subtract
+    # ``body_com`` when building the world-space lever arm so
+    # asymmetric meshes (bunny, nut) don't appear shifted by
+    # ``|body_com|`` relative to where the narrow phase saw them.
+    fresh_r1 = wp.quat_rotate(q1, fresh_local_p0 - body_com1)
+    fresh_r2 = wp.quat_rotate(q2, fresh_local_p1 - body_com2)
+    fresh_p1_world = x1 + fresh_r1
+    fresh_p2_world = x2 + fresh_r2
+    fresh_gap = wp.dot(fresh_p2_world - fresh_p1_world, fresh_n) - (
+        contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
+    )
+    cc_set_start_gap(cc, k, fresh_gap)
 
-        fresh_local_p0 = contacts.rigid_contact_point0[k]
-        fresh_local_p1 = contacts.rigid_contact_point1[k]
-        fresh_n = contacts.rigid_contact_normal[k]
+    if prev_valid == wp.int32(1):
+        prev_n = cc_get_prev_normal(cc, prev_k)
+        prev_lp0 = cc_get_prev_local_p0(cc, prev_k)
+        prev_lp1 = cc_get_prev_local_p1(cc, prev_k)
+        prev_r1 = wp.quat_rotate(q1, prev_lp0 - body_com1)
+        prev_r2 = wp.quat_rotate(q2, prev_lp1 - body_com2)
+        prev_p1_world = x1 + prev_r1
+        prev_p2_world = x2 + prev_r2
+        prev_penetration = -wp.dot(prev_p2_world - prev_p1_world, prev_n)
+        fresh_penetration = -fresh_gap
 
-        # The narrow phase gives anchors in each body's *origin* frame
-        # but :attr:`BodyContainer.position` is the body *COM*; subtract
-        # ``body_com`` when building the world-space lever arm so
-        # asymmetric meshes (bunny, nut) don't appear shifted by
-        # ``|body_com|`` relative to where the narrow phase saw them.
-        fresh_r1 = wp.quat_rotate(q1, fresh_local_p0 - body_com1)
-        fresh_r2 = wp.quat_rotate(q2, fresh_local_p1 - body_com2)
-        fresh_p1_world = x1 + fresh_r1
-        fresh_p2_world = x2 + fresh_r2
-        fresh_gap = wp.dot(fresh_p2_world - fresh_p1_world, fresh_n) - (
-            contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
-        )
-        cc_set_start_gap(cc, k, fresh_gap)
+        if fresh_gap > wp.float32(0.0):
+            dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
+            fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
+            cc_set_normal_lambda(cc, k, wp.float32(0.0))
+            cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+            cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+            cc_set_normal(cc, k, fresh_n)
+            cc_set_tangent1(cc, k, fresh_t1)
+            cc_set_local_p0(cc, k, fresh_local_p0)
+            cc_set_local_p1(cc, k, fresh_local_p1)
+            return
 
-        if prev_valid == wp.int32(1):
-            prev_n = cc_get_prev_normal(cc, prev_k)
-            prev_lp0 = cc_get_prev_local_p0(cc, prev_k)
-            prev_lp1 = cc_get_prev_local_p1(cc, prev_k)
-            prev_r1 = wp.quat_rotate(q1, prev_lp0 - body_com1)
-            prev_r2 = wp.quat_rotate(q2, prev_lp1 - body_com2)
-            prev_p1_world = x1 + prev_r1
-            prev_p2_world = x2 + prev_r2
-            prev_penetration = -wp.dot(prev_p2_world - prev_p1_world, prev_n)
-            fresh_penetration = -fresh_gap
+        # Absolute staleness: the prev anchor sits more than
+        # :data:`_PREV_ANCHOR_PEN_MAX` below the fresh contact
+        # surface. The body must have rotated enough between frames
+        # that the saved body-local point is now well below where
+        # the contact actually is -- reseating to the fresh anchor
+        # is the only way to keep the Baumgarte bias bounded.
+        prev_too_deep = prev_penetration > wp.float32(_PREV_ANCHOR_PEN_MAX)
 
-            if fresh_gap > wp.float32(0.0):
-                dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
-                fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
-                cc_set_normal_lambda(cc, k, wp.float32(0.0))
-                cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
-                cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
-                cc_set_normal(cc, k, fresh_n)
-                cc_set_tangent1(cc, k, fresh_t1)
-                cc_set_local_p0(cc, k, fresh_local_p0)
-                cc_set_local_p1(cc, k, fresh_local_p1)
-                continue
+        if prev_too_deep or fresh_penetration > prev_penetration:
+            # Prev anchors are stale -- overwrite geometry but carry
+            # impulses forward in the fresh basis.
+            dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
+            fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
 
-            # Absolute staleness: the prev anchor sits more than
-            # :data:`_PREV_ANCHOR_PEN_MAX` below the fresh contact
-            # surface. The body must have rotated enough between frames
-            # that the saved body-local point is now well below where
-            # the contact actually is -- reseating to the fresh anchor
-            # is the only way to keep the Baumgarte bias bounded.
-            prev_too_deep = prev_penetration > wp.float32(_PREV_ANCHOR_PEN_MAX)
+            prev_t1 = cc_get_prev_tangent1(cc, prev_k)
+            prev_t2 = wp.cross(prev_n, prev_t1)
+            fresh_t2 = wp.cross(fresh_n, fresh_t1)
+            prev_friction_imp = (
+                cc_get_prev_tangent1_lambda(cc, prev_k) * prev_t1 + cc_get_prev_tangent2_lambda(cc, prev_k) * prev_t2
+            )
 
-            if prev_too_deep or fresh_penetration > prev_penetration:
-                # Prev anchors are stale -- overwrite geometry but carry
-                # impulses forward in the fresh basis.
-                dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
-                fresh_t1 = _build_tangent1_from_velocity(fresh_n, dv)
-
-                prev_t1 = cc_get_prev_tangent1(cc, prev_k)
-                prev_t2 = wp.cross(prev_n, prev_t1)
-                fresh_t2 = wp.cross(fresh_n, fresh_t1)
-                prev_friction_imp = (
-                    cc_get_prev_tangent1_lambda(cc, prev_k) * prev_t1
-                    + cc_get_prev_tangent2_lambda(cc, prev_k) * prev_t2
-                )
-
-                if carry_impulses != wp.int32(0):
-                    cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
-                    cc_set_tangent1_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t1))
-                    cc_set_tangent2_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t2))
-                else:
-                    cc_set_normal_lambda(cc, k, wp.float32(0.0))
-                    cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
-                    cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
-                cc_set_normal(cc, k, fresh_n)
-                cc_set_tangent1(cc, k, fresh_t1)
-                cc_set_local_p0(cc, k, fresh_local_p0)
-                cc_set_local_p1(cc, k, fresh_local_p1)
-                continue
-
-            # Prev frame still describes the contact accurately --
-            # carry the full PhoenX state forward (sticky path).
             if carry_impulses != wp.int32(0):
                 cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
-                cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
-                cc_set_tangent2_lambda(cc, k, cc_get_prev_tangent2_lambda(cc, prev_k))
+                cc_set_tangent1_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t1))
+                cc_set_tangent2_lambda(cc, k, wp.dot(prev_friction_imp, fresh_t2))
             else:
                 cc_set_normal_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
-            cc_set_normal(cc, k, prev_n)
-            cc_set_tangent1(cc, k, cc_get_prev_tangent1(cc, prev_k))
-            cc_set_local_p0(cc, k, prev_lp0)
-            cc_set_local_p1(cc, k, prev_lp1)
-            continue
+            cc_set_normal(cc, k, fresh_n)
+            cc_set_tangent1(cc, k, fresh_t1)
+            cc_set_local_p0(cc, k, fresh_local_p0)
+            cc_set_local_p1(cc, k, fresh_local_p1)
+            return
 
-        # New contact -- PhoenX ``Initialize``.
-        dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
-        t1 = _build_tangent1_from_velocity(fresh_n, dv)
+        # Prev frame still describes the contact accurately --
+        # carry the full PhoenX state forward (sticky path).
+        if carry_impulses != wp.int32(0):
+            cc_set_normal_lambda(cc, k, cc_get_prev_normal_lambda(cc, prev_k))
+            cc_set_tangent1_lambda(cc, k, cc_get_prev_tangent1_lambda(cc, prev_k))
+            cc_set_tangent2_lambda(cc, k, cc_get_prev_tangent2_lambda(cc, prev_k))
+        else:
+            cc_set_normal_lambda(cc, k, wp.float32(0.0))
+            cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+            cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+        cc_set_normal(cc, k, prev_n)
+        cc_set_tangent1(cc, k, cc_get_prev_tangent1(cc, prev_k))
+        cc_set_local_p0(cc, k, prev_lp0)
+        cc_set_local_p1(cc, k, prev_lp1)
+        return
 
-        cc_set_normal_lambda(cc, k, wp.float32(0.0))
-        cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
-        cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
-        cc_set_normal(cc, k, fresh_n)
-        cc_set_tangent1(cc, k, t1)
-        cc_set_local_p0(cc, k, fresh_local_p0)
-        cc_set_local_p1(cc, k, fresh_local_p1)
+    # New contact -- PhoenX ``Initialize``.
+    dv = (v2 + wp.cross(w2, fresh_r2)) - (v1 + wp.cross(w1, fresh_r1))
+    t1 = _build_tangent1_from_velocity(fresh_n, dv)
+
+    cc_set_normal_lambda(cc, k, wp.float32(0.0))
+    cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+    cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+    cc_set_normal(cc, k, fresh_n)
+    cc_set_tangent1(cc, k, t1)
+    cc_set_local_p0(cc, k, fresh_local_p0)
+    cc_set_local_p1(cc, k, fresh_local_p1)
 
 
 @wp.kernel(enable_backward=False)
@@ -1323,6 +1316,7 @@ def gather_contact_warmstart(
     """Copy prev-frame state into ``cc`` for matched contacts; initialise
     PhoenX-style for unmatched contacts.
 
+    Launched contact-major so canonical SOA state is accessed coalesced.
     Called after contact history is copied into ``cc.prev_*`` but before
     :func:`contact_prepare_for_iteration_at`. Set ``carry_impulses=False`` to
     reuse matched contact geometry while cold-starting cross-frame impulse
@@ -1330,16 +1324,14 @@ def gather_contact_warmstart(
     """
     wp.launch(
         kernel=_contact_warmstart_gather_kernel,
-        dim=max(1, scratch.max_contact_columns),
+        dim=max(1, scratch.rigid_contact_max),
         inputs=[
-            scratch.pair_source_idx,
-            scratch.pair_first,
-            scratch.pair_count,
-            scratch.pair_shape_a,
-            scratch.pair_shape_b,
+            scratch.pair_id,
+            scratch.pair_col_offset,
+            scratch.pair_columns,
+            wp.int32(scratch.max_contact_columns),
             rigid_contact_match_index,
             prev_cid_of_contact,
-            scratch.num_contact_columns,
             reuse_contact_indices,
             wp.int32(1 if carry_impulses else 0),
             bodies,

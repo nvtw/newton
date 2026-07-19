@@ -772,3 +772,27 @@ below timing noise. Contact-copy, cloth partitioning/public step, multi-world
 warm-start isolation, rigid settling, margins, and bitwise determinism tests
 pass. The 60-frame cloth settling test exceeded the four-minute local timeout;
 the faster cloth ingest/partition and public-step coverage passed.
+
+
+## F19 - contact-major warm-start gather
+
+The old gather assigned one thread per contact column and looped over its
+points. Across a warp, canonical SOA accesses were therefore separated by the
+column width. F19 replaces it with one thread per canonical contact. Filtering,
+column-capacity gating, rigid, cloth, and compound grouping use the same
+kernel. The replacement removes seven net source lines and adds no path.
+
+Exact-source RTX PRO 6000 medians, one substep, four iterations:
+
+| Workload | F18 | F19 | Throughput gain | F19 useful bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| 8K stack, 262,144 contacts | 621.55 us | **597.15 us** | **+4.1%** | 618.10 GB/s (41.5% sequential) |
+| 32K stack, 1,048,576 contacts | 2.293 ms | **2.234 ms** | **+2.6%** | 660.86 GB/s (44.4% sequential) |
+| 32K robot, 131,072 contacts + 262,144 revolute | 872.66 us | 874.36 us | -0.2% (noise-scale) | 690.77 GB/s (46.4% sequential) |
+| 45K-body single-world Kapla, evolving | 42.239 ms | 42.159 ms | +0.2% | 654.99 GB/s (44.0% sequential) |
+
+Nsight reduces the warm-start gather median from 231.30 to **174.18 us**
+(-24.7%). The 32K F19 median reaches 63.7% of the measured random-vec4 roof;
+the frame remains below 1% of FP32 peak. Twenty-five extended-contact tests
+and 20 multi-shape/physics/determinism tests pass, covering filtered pairs,
+capacity tails, compound grouping, patch friction, cloth, and CUDA graphs.
