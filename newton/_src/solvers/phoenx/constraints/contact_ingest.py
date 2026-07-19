@@ -779,6 +779,8 @@ def _contact_warmstart_gather_kernel(
     carry_impulses: wp.int32,
     bodies: BodyContainer,
     contacts: ContactViews,
+    cid_base: wp.int32,
+    cid_of_contact: wp.array[wp.int32],
     cc: ContactContainer,
 ):
     """Seed this frame's ``cc`` slots from the prev frame (PhoenX model).
@@ -813,6 +815,7 @@ def _contact_warmstart_gather_kernel(
     p = pair_id[k] - wp.int32(1)
     if p < wp.int32(0) or pair_columns[p] == wp.int32(0) or pair_col_offset[p] >= max_contact_columns:
         return
+    cid_of_contact[k] = cid_base + pair_col_offset[p]
 
     sa = contacts.rigid_contact_shape0[k]
     sb = contacts.rigid_contact_shape1[k]
@@ -1308,6 +1311,8 @@ def gather_contact_warmstart(
     reuse_contact_indices: wp.array,
     bodies: BodyContainer,
     contacts: ContactViews,
+    cid_base: int,
+    cid_of_contact: wp.array,
     cc: ContactContainer,
     device: wp.DeviceLike = None,
     *,
@@ -1316,7 +1321,8 @@ def gather_contact_warmstart(
     """Copy prev-frame state into ``cc`` for matched contacts; initialise
     PhoenX-style for unmatched contacts.
 
-    Launched contact-major so canonical SOA state is accessed coalesced.
+    Launched contact-major so canonical SOA state is accessed coalesced and
+    stamps the accepted contact-to-column map without a second pass.
     Called after contact history is copied into ``cc.prev_*`` but before
     :func:`contact_prepare_for_iteration_at`. Set ``carry_impulses=False`` to
     reuse matched contact geometry while cold-starting cross-frame impulse
@@ -1336,7 +1342,8 @@ def gather_contact_warmstart(
             wp.int32(1 if carry_impulses else 0),
             bodies,
             contacts,
+            wp.int32(cid_base),
         ],
-        outputs=[cc],
+        outputs=[cid_of_contact, cc],
         device=device,
     )

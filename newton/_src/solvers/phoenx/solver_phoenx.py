@@ -3230,6 +3230,8 @@ class PhoenXWorld:
             reuse_contact_indices=self._reuse_contact_indices,
             bodies=self.bodies,
             contacts=self._contact_views,
+            cid_base=self._contact_offset,
+            cid_of_contact=self._cid_of_contact_cur,
             cc=self._contact_container,
             device=self.device,
             # Cross-frame contact impulses can keep a nearly quiet stack above
@@ -3283,13 +3285,6 @@ class PhoenXWorld:
                 outputs=[self._contact_container],
                 device=self.device,
             )
-
-        stamp_forward_contact_map(
-            cid_base=self._contact_offset,
-            scratch=self._ingest_scratch,
-            cid_of_contact=self._cid_of_contact_cur,
-            device=self.device,
-        )
 
     def _rebuild_elements(self) -> None:
         """Project active constraints into the partitioner's element view."""

@@ -796,3 +796,24 @@ Nsight reduces the warm-start gather median from 231.30 to **174.18 us**
 the frame remains below 1% of FP32 peak. Twenty-five extended-contact tests
 and 20 multi-shape/physics/determinism tests pass, covering filtered pairs,
 capacity tails, compound grouping, patch friction, cloth, and CUDA graphs.
+
+
+## F20 - fuse the forward contact map
+
+F19 already reads each accepted pair offset. F20 writes the contact-to-column
+history map there and removes the standalone stamp launch from normal ingest.
+The existing restamp remains only after reduced/deformable ownership
+repartitions columns. No ordering, representation, or solver path changes.
+
+Exact-source RTX PRO 6000 results, one substep, four iterations:
+
+| Workload | F19 | F20 | Throughput gain | F20 useful bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| 8K stack, 262,144 contacts | 606.58 us | **595.98 us** | **+1.8%** | 619.32 GB/s (41.6% sequential) |
+| 32K stack, 1,048,576 contacts | 2.225 ms | **2.220 ms** | +0.2% | 664.95 GB/s (44.7% sequential) |
+| 32K robot, 131,072 contacts + 262,144 revolute | 881.31 us | 885.60 us | -0.5% (noise-scale) | 681.99 GB/s (45.8% sequential) |
+
+Nsight removes the 23.52 us stamp kernel. Gather changes from 174.18 to
+166.72 us, so the measured sequence falls 197.70 to **166.72 us** (-15.7%).
+Forty capacity/filter, compound, patch, cloth, multi-world, and multi-shape
+tests pass.
