@@ -165,7 +165,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
     world_id_runs = (
         int(solver._world_run_count.numpy().sum())
         if args.solver == "mini"
-        else int(solver.world._world_totals_shifted.numpy()[0])
+        else int(solver.world._per_world_num_runs.numpy()[0])
     )
     phoenx_scheduler = None if args.solver == "mini" else solver.world._multi_world_scheduler
     phoenx_tpw = None if args.solver == "mini" else int(solver.world._tpw_choice.numpy()[0])

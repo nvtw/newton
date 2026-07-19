@@ -168,6 +168,7 @@ __all__ = [
     "_constraint_gather_wrenches_kernel",
     "_constraints_to_elements_kernel",
     "_count_and_mark_world_runs_kernel",
+    "_initialize_rigid_topology_rebuild_kernel",
     "_integrate_velocities_kernel",
     "_kinematic_interpolate_substep_kernel",
     "_kinematic_prepare_step_kernel",
@@ -2571,6 +2572,34 @@ def _element_data_compact8(
     return element_interaction_data_make(s0, s1, s2, s3, s4, s5, s6, s7)
 
 
+@wp.kernel(enable_backward=False)
+def _initialize_rigid_topology_rebuild_kernel(
+    num_constraints: wp.array[wp.int32],
+    previous_num_constraints: wp.array[wp.int32],
+    topology_rebuild: wp.array[wp.int32],
+):
+    n = num_constraints[0]
+    rebuild = wp.int32(0)
+    if previous_num_constraints[0] != n:
+        rebuild = wp.int32(1)
+    previous_num_constraints[0] = n
+    topology_rebuild[0] = rebuild
+
+
+@wp.func
+def _record_rigid_topology(
+    tid: wp.int32,
+    body0: wp.int32,
+    body1: wp.int32,
+    previous_topology: wp.array[wp.int64],
+    topology_rebuild: wp.array[wp.int32],
+):
+    key = (wp.int64(body0) << wp.int64(32)) | (wp.int64(body1) & wp.int64(0xFFFFFFFF))
+    if previous_topology[tid] != key:
+        wp.atomic_max(topology_rebuild, 0, wp.int32(1))
+    previous_topology[tid] = key
+
+
 @wp.func
 def _stable_contact_pair_priority(shape_a: wp.int32, shape_b: wp.int32) -> wp.int32:
     """Return a model-stable 24-bit priority for a contact shape pair."""
@@ -2604,9 +2633,12 @@ def _constraints_to_elements_kernel(
     pair_shape_a: wp.array[wp.int32],
     pair_shape_b: wp.array[wp.int32],
     random_values: wp.array[wp.int32],
+    track_rigid_topology: wp.int32,
     elements: wp.array[ElementInteractionData],
     element_family: wp.array[wp.int32],
     packed_priorities: wp.array[wp.int32],
+    previous_topology: wp.array[wp.int64],
+    topology_rebuild: wp.array[wp.int32],
 ):
     """Project active constraints into ElementInteractionData. Static bodies
     collapse to -1; the dynamic body compacts to slot 0.
@@ -2631,6 +2663,8 @@ def _constraints_to_elements_kernel(
         b1 = _rigid_graph_node(b1, bodies)
         b2 = _rigid_graph_node(b2, bodies)
         elements[tid] = _element_data_compact2(b1, b2)
+        if track_rigid_topology != wp.int32(0):
+            _record_rigid_topology(tid, b1, b2, previous_topology, topology_rebuild)
         return
     if tid < num_joints + num_cloth_triangles:
         element_family[tid] = wp.int32(2)
@@ -2763,6 +2797,8 @@ def _constraints_to_elements_kernel(
     # tet-tet = 4+4; tet-cloth = 4+3; tet-rigid = 4+1; cloth-cloth =
     # 3+3; cloth-rigid = 3+1; rigid-rigid = 1+1.
     elements[tid] = _element_data_compact8(b1, b2, e0a, e0b, e0c, e1a, e1b, e1c)
+    if track_rigid_topology != wp.int32(0):
+        _record_rigid_topology(tid, b1, b2, previous_topology, topology_rebuild)
 
 
 @wp.kernel(enable_backward=False)

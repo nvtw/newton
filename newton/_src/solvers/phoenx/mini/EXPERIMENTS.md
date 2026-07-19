@@ -445,3 +445,38 @@ identical with reuse enabled and disabled, proving both stable reuse and dirty
 fallback. The full PhoenX transfer should compare packed graph endpoints, not
 shape ids, so joints, live mass/node changes, and compound rigid contacts share
 one invalidation rule.
+
+## F23 - reuse stable rigid coloring in full PhoenX
+
+Full PhoenX now compares one packed 64-bit graph-endpoint key per active rigid
+constraint while projecting constraints. If the count and every endpoint pair
+match, a CUDA graph conditional retains the deterministic world buckets and
+greedy coloring. Any change executes the original build. The optimization is
+disabled for single-world, deformable, nonstandard, unsupported-conditional,
+and greedy-overflow fallback paths.
+
+RTX PRO 6000 exact-source fixed-state results, sticky matching, one substep,
+four iterations:
+
+| Workload | F22 rebuild | F23 reuse | Throughput gain | F23 useful bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| 32K worlds x 8-body stack | 2.081 ms | **1.992 ms** | **+4.5%** | 740.5 GB/s (49.7% sequential, 71.4% random-vec4) |
+| 8K worlds x 30-link robot | 896.7 us | **791.7 us** | **+13.3%** | 555.0 GB/s (37.3% sequential, 53.5% random-vec4) |
+
+Each table entry is the median of two interleaved candidate/control samples.
+A 4K-world stack spot check improved 361.46 to 325.49 us (+11.1%). The smaller
+case benefits more because skipped scheduling has a larger fixed-cost share.
+
+A captured-graph regression forces both the dirty and stable branches while
+comparing every evolving pose and velocity bitwise against rebuilding every
+frame. Risk-weighted validation also covers deterministic replay, compound
+contacts, contact isolation, basic joint types, cloth fallback, and randomized
+partitioner stress. These passed as 31 isolated unittests. One combined-process
+run passed 21 tests before a host allocator crash; isolated reruns passed, so
+large mixed-module runs should remain separate until that test-harness issue is
+understood.
+
+This does not mean PhoenX uses 100% of DRAM bandwidth. The percentages are a
+useful-physics lower bound, not hardware counters; collision, matching, history,
+and preparation remain outside it. F23 removes about 90 us of stable-frame
+schedule work and is most valuable where topology persists.

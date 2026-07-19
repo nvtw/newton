@@ -18,6 +18,7 @@ import newton
 from newton._src.solvers.phoenx import solver_phoenx, solver_phoenx_kernels
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
+from newton._src.solvers.phoenx.mini.benchmark import _make_stack_model
 from newton._src.solvers.phoenx.solver_phoenx import _choose_fast_tail_solve_schedule
 from newton._src.solvers.phoenx.tests.test_robot_policy_parity import (
     _g1_29dof_yaml,
@@ -145,7 +146,7 @@ class TestMultiWorldStableBucketing(unittest.TestCase):
 
 class TestMultiWorldColoringContract(unittest.TestCase):
     def test_per_world_greedy_overflow_flag_is_cleared_before_build(self) -> None:
-        source = inspect.getsource(solver_phoenx.PhoenXWorld._build_per_world_coloring)
+        source = inspect.getsource(solver_phoenx.PhoenXWorld._finish_per_world_coloring)
         clear_idx = source.index("self._per_world_greedy_overflow.zero_()")
         launch_idx = source.index("get_per_world_greedy_coloring_kernel")
         self.assertLess(clear_idx, launch_idx)
@@ -225,6 +226,66 @@ class TestMultiWorldFastTailSolveContract(unittest.TestCase):
 )
 class TestMultiWorldPgsOrder(unittest.TestCase):
     """Multi-world and single-world must mean the same PGS iterations."""
+
+    def test_stable_rigid_coloring_matches_forced_rebuild(self) -> None:
+        """Cached coloring must preserve an evolving deterministic solve."""
+        device = wp.get_preferred_device()
+
+        def make_sim(reuse_coloring: bool):
+            model = _make_stack_model(16, 4, str(device))
+            pipeline = newton.CollisionPipeline(
+                model,
+                rigid_contact_max=16 * 32,
+                contact_matching="sticky",
+                deterministic=True,
+            )
+            contacts = pipeline.contacts()
+            state_0 = model.state()
+            state_1 = model.state()
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                substeps=1,
+                solver_iterations=4,
+                velocity_iterations=0,
+                contact_friction_model="point",
+                step_layout="multi_world",
+                articulation_mode="maximal",
+            )
+            solver.world._reuse_rigid_coloring = reuse_coloring
+            return model, pipeline, contacts, state_0, state_1, solver, model.control()
+
+        def step(sim) -> None:
+            _model, pipeline, contacts, state_0, state_1, solver, control = sim
+            pipeline.collide(state_0, contacts)
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, contacts, 1.0 / 60.0)
+            wp.copy(state_0.body_q, state_1.body_q)
+            wp.copy(state_0.body_qd, state_1.body_qd)
+
+        cached = make_sim(True)
+        rebuilt = make_sim(False)
+        step(cached)
+        step(rebuilt)
+        graphs = []
+        for sim in (cached, rebuilt):
+            with wp.ScopedCapture(device=device) as capture:
+                step(sim)
+            graphs.append(capture.graph)
+
+        # Force the first replay down the rebuild branch; later unchanged
+        # frames exercise the cached branch in the same captured graph.
+        cached[-2].world._previous_topology_count.assign([-1])
+        dirty_frames = []
+        for _ in range(12):
+            for graph in graphs:
+                wp.capture_launch(graph)
+
+            dirty_frames.append(int(cached[-2].world._topology_rebuild.numpy()[0]))
+            np.testing.assert_array_equal(cached[3].body_q.numpy(), rebuilt[3].body_q.numpy())
+            np.testing.assert_array_equal(cached[3].body_qd.numpy(), rebuilt[3].body_qd.numpy())
+
+        self.assertIn(1, dirty_frames)
+        self.assertIn(0, dirty_frames)
 
     def test_g1_contact_drive_matches_single_world(self) -> None:
         """Catch color-local multi-sweeps in contact/joint scenes."""

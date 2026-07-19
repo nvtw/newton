@@ -190,6 +190,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _constraint_gather_wrenches_kernel,
     _constraints_to_elements_kernel,
     _count_and_mark_world_runs_kernel,
+    _initialize_rigid_topology_rebuild_kernel,
     _integrate_velocities_kernel,
     _kinematic_interpolate_substep_kernel,
     _kinematic_prepare_step_kernel,
@@ -1057,6 +1058,24 @@ class PhoenXWorld:
         self._element_family: wp.array[wp.int32] = wp.zeros(
             self._constraint_capacity, dtype=wp.int32, device=self.device
         )
+        self._reuse_rigid_coloring = bool(
+            self.solver_flavor == "standard"
+            and PHOENX_USE_GREEDY_COLORING
+            and self.step_layout != "single_world"
+            and self.device.is_cuda
+            and wp.is_conditional_graph_supported()
+            and self.num_particles == 0
+            and self.num_cloth_triangles == 0
+            and self.num_cloth_bending == 0
+            and self.num_soft_tetrahedra == 0
+            and self.num_soft_hexahedra == 0
+        )
+        topology_capacity = self._constraint_capacity if self._reuse_rigid_coloring else 1
+        self._previous_rigid_topology: wp.array[wp.int64] = wp.empty(
+            topology_capacity, dtype=wp.int64, device=self.device
+        )
+        self._previous_topology_count: wp.array[wp.int32] = wp.array([-1], dtype=wp.int32, device=self.device)
+        self._topology_rebuild: wp.array[wp.int32] = wp.ones(1, dtype=wp.int32, device=self.device)
         # Joints + cloth tris + cloth bending + soft tets are the
         # only active cids until the first contact ingest. Bending +
         # tets are populated by their respective ``populate_*`` methods.
@@ -1235,6 +1254,7 @@ class PhoenXWorld:
         self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         # Sized nw+1 so the inclusive scan output lands in world_csr_offsets.
         self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+        self._per_world_num_runs: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
         self._world_num_colors: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
 
         # Per-world coloring scratch. The first/second halves hold the stable
@@ -3278,6 +3298,17 @@ class PhoenXWorld:
             pair_source_idx = self._ingest_scratch.pair_source_idx
             pair_shape_a = self._ingest_scratch.pair_shape_a
             pair_shape_b = self._ingest_scratch.pair_shape_b
+        if self._reuse_rigid_coloring:
+            wp.launch(
+                _initialize_rigid_topology_rebuild_kernel,
+                dim=1,
+                inputs=[
+                    self._num_active_constraints,
+                    self._previous_topology_count,
+                ],
+                outputs=[self._topology_rebuild],
+                device=self.device,
+            )
         wp.launch(
             _constraints_to_elements_kernel,
             dim=self._constraint_capacity,
@@ -3298,9 +3329,12 @@ class PhoenXWorld:
                 pair_shape_a,
                 pair_shape_b,
                 self._partitioner._random_values,
+                wp.int32(1 if self._reuse_rigid_coloring else 0),
                 self._elements,
                 self._element_family,
                 self._partitioner._packed_priorities,
+                self._previous_rigid_topology,
+                self._topology_rebuild,
             ],
             device=self.device,
         )
@@ -3685,6 +3719,7 @@ class PhoenXWorld:
         if int(flag.numpy()[0]) == 0:
             return
         self._use_greedy_coloring = False
+        self._reuse_rigid_coloring = False
         self._partitioner.reset(self._elements, self._num_active_constraints)
         wp.launch_tiled(
             _per_world_jp_coloring_kernel,
@@ -3722,8 +3757,6 @@ class PhoenXWorld:
         self._world_totals_shifted.zero_()
         run_flags = self._per_world_run_scan[:cap]
         run_ids = self._per_world_run_scan[cap:]
-        run_starts = self._per_world_elements[cap:]
-        num_runs = self._world_totals_shifted[:1]
         wp.launch(
             _count_and_mark_world_runs_kernel,
             dim=cap,
@@ -3744,6 +3777,25 @@ class PhoenXWorld:
         # stream at every world-id decrease, then merge those monotone runs in
         # original order so each world receives the same stable CID sequence.
         wp.utils.array_scan(run_flags, run_ids, inclusive=True)
+        if self._reuse_rigid_coloring:
+            wp.capture_if(
+                self._topology_rebuild,
+                on_true=self._finish_per_world_coloring,
+                on_false=None,
+            )
+        else:
+            self._finish_per_world_coloring()
+        if self._use_greedy_coloring:
+            self._maybe_fallback_from_per_world_greedy_overflow(nw)
+
+    def _finish_per_world_coloring(self) -> None:
+        """Merge deterministic world streams and color changed topology."""
+        nw = self.num_worlds
+        cap = self._constraint_capacity
+        run_flags = self._per_world_run_scan[:cap]
+        run_ids = self._per_world_run_scan[cap:]
+        run_starts = self._per_world_elements[cap:]
+        num_runs = self._per_world_num_runs
         wp.launch(
             _scatter_monotone_world_run_starts_kernel,
             dim=cap,
@@ -3798,7 +3850,6 @@ class PhoenXWorld:
                 ],
                 device=self.device,
             )
-            self._maybe_fallback_from_per_world_greedy_overflow(nw)
         else:
             # Round-equals-colour JP. Cost-biased priorities: contacts use
             # contact_count, joints stay at cost 0.
