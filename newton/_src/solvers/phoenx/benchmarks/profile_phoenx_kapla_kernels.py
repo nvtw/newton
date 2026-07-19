@@ -57,6 +57,7 @@ def _run_worker_script(
     mass_splitting: bool,
     frames: int,
     grid_side: int,
+    warmup_frames: int,
 ) -> pathlib.Path:
     """Write a tiny worker that runs Kapla for ``frames`` captured-graph steps,
     then nsys-profile that worker. Returns the .nsys-rep path."""
@@ -89,7 +90,7 @@ def _run_worker_script(
         "ex = ek.Example(V(), A())\n"
         "# Warmup: damping released after WARMUP_FRAMES, then a few more so\n"
         "# the steady state stabilises.\n"
-        "for _ in range(40):\n"
+        f"for _ in range({warmup_frames}):\n"
         "    ex.step()\n"
         "wp.synchronize_device(ex.device)\n"
         'cudart = ctypes.CDLL("libcudart.so")\n'
@@ -198,6 +199,7 @@ def _print_diff(rows_a: list[dict], rows_b: list[dict], label_a: str, label_b: s
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--frames", type=int, default=100, help="Steady-state frames after warmup (default 100).")
+    p.add_argument("--warmup", type=int, default=40, help="Frames before profiling (default 40).")
     p.add_argument("--grid-side", type=int, default=1, help="Square tower-grid side length (default 1).")
     p.add_argument("--top-n", type=int, default=_TOP_N, help="Top-N kernels to print (default %(default)s).")
     p.add_argument("--mass-splitting", choices=["on", "off"], default="on", help="Default config when not diffing.")
@@ -210,9 +212,13 @@ def main(argv: list[str] | None = None) -> int:
         tmp_path = pathlib.Path(tmp)
         if args.diff:
             print(f"[profile] {args.label_a}: running {args.frames} steady-state frames...")
-            rep_a = _run_worker_script(tmp_path, mass_splitting=False, frames=args.frames, grid_side=args.grid_side)
+            rep_a = _run_worker_script(
+                tmp_path, mass_splitting=False, frames=args.frames, grid_side=args.grid_side, warmup_frames=args.warmup
+            )
             print(f"[profile] {args.label_b}: running {args.frames} steady-state frames...")
-            rep_b = _run_worker_script(tmp_path, mass_splitting=True, frames=args.frames, grid_side=args.grid_side)
+            rep_b = _run_worker_script(
+                tmp_path, mass_splitting=True, frames=args.frames, grid_side=args.grid_side, warmup_frames=args.warmup
+            )
             rows_a = _parse_kernel_stats(rep_a)
             rows_b = _parse_kernel_stats(rep_b)
             _print_table(rows_a, args.label_a, args.top_n)
@@ -222,7 +228,9 @@ def main(argv: list[str] | None = None) -> int:
             ms = args.mass_splitting == "on"
             label = args.mass_splitting
             print(f"[profile] {label}: running {args.frames} steady-state frames...")
-            rep = _run_worker_script(tmp_path, mass_splitting=ms, frames=args.frames, grid_side=args.grid_side)
+            rep = _run_worker_script(
+                tmp_path, mass_splitting=ms, frames=args.frames, grid_side=args.grid_side, warmup_frames=args.warmup
+            )
             rows = _parse_kernel_stats(rep)
             _print_table(rows, label, args.top_n)
     return 0

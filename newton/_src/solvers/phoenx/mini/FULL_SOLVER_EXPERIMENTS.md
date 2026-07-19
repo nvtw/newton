@@ -817,3 +817,38 @@ Nsight removes the 23.52 us stamp kernel. Gather changes from 174.18 to
 166.72 us, so the measured sequence falls 197.70 to **166.72 us** (-15.7%).
 Forty capacity/filter, compound, patch, cloth, multi-world, and multi-shape
 tests pass.
+
+
+## F21 - remove duplicate previous contact geometry
+
+Sticky collision matching already publishes canonical current geometry. PhoenX
+therefore no longer stores a second copy of previous local anchors or rebuilds
+stale/fresh manifolds during warm-start. Previous state is now six rows
+(normal+tangent) instead of twelve; one contact-major kernel carries impulses
+and projects friction only when the normal basis changes. The old accessors and
+branches were deleted: the two solver files shrink by 85 net lines.
+
+Exact-source RTX PRO 6000 medians, one substep, four iterations:
+
+| Workload | F20 | F21 | Throughput gain | F21 useful bandwidth |
+| ---: | ---: | ---: | ---: | ---: |
+| 8K stack, 262,144 contacts | 597.24 us | **575.62 us** | **+3.8%** | 641.22 GB/s (43.1% sequential, 61.9% random-vec4) |
+| 32K stack, 1,048,576 contacts | 2.218 ms | **2.082 ms** | **+6.5%** | 709.1 GB/s (47.6% sequential, 68.4% random-vec4) |
+| 32K robot, 131,072 contacts + 262,144 revolute | 862.76 us | **853.45 us** | **+1.1%** | 707.70 GB/s (47.5% sequential, 68.3% random-vec4) |
+
+At 32K, the useful-work estimate is 0.91 TFLOP/s, 1.0% of the 87.810
+TFLOP/s FP32 roof. The narrower history saves 24 MiB of storage and 48 MiB of
+read+write copy traffic per 1,048,576 contact slots. Nsight reduces warm-start
+gather 166.72 to 146.75 us and history copy 91.74 to 63.36 us.
+
+The 45K-body 2x2 Kapla trajectory is chaotic enough that long A/B runs diverge
+in color distribution and downstream solve time. The first four frames have
+nearly identical work (one contact difference out of 1.08M) and F21 is 3.1%
+faster, while 40-frame-warm profiles can reverse after trajectories diverge.
+The profiler now exposes `--warmup` so kernel comparisons can state trajectory
+age. This change alone is not a large-single-world lever; persistent PGS still
+dominates Kapla.
+
+Rigid determinism, stacking, contact force, patch, compound, colored-row,
+speculative, soft-contact, multi-world isolation, rigid-cloth, bit-exact cloth,
+Kapla, bunny, and all 40 collision-matching tests pass.

@@ -38,8 +38,6 @@ __all__ = [
     "cc_get_pd_bias",
     "cc_get_pd_eff_soft",
     "cc_get_pd_gamma",
-    "cc_get_prev_local_p0",
-    "cc_get_prev_local_p1",
     "cc_get_prev_normal",
     "cc_get_prev_normal_lambda",
     "cc_get_prev_tangent1",
@@ -92,8 +90,8 @@ CC_DWORDS_PER_CONTACT: int = 18
 #: Rigid contacts use frame directions and two local anchors, but no barycentrics.
 CC_RIGID_DWORDS_PER_CONTACT: int = 12
 
-#: Previous-frame matching needs directions and anchors, never cloth barycentrics.
-CC_PREV_DWORDS_PER_CONTACT: int = CC_RIGID_DWORDS_PER_CONTACT
+#: Previous-frame warm-start needs only the normal and tangent basis.
+CC_PREV_DWORDS_PER_CONTACT: int = 6
 
 #: Local anchors are the only manifold rows prepare may update after ingest.
 CC_LOCAL_ANCHOR_FIRST_ROW: int = 6
@@ -398,24 +396,6 @@ def cc_get_prev_tangent1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
         read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_X, k),
         read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_Y, k),
         read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_Z, k),
-    )
-
-
-@wp.func
-def cc_get_prev_local_p0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
-    return wp.vec3f(
-        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P0_X, k),
-        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P0_Y, k),
-        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P0_Z, k),
-    )
-
-
-@wp.func
-def cc_get_prev_local_p1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
-    return wp.vec3f(
-        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P1_X, k),
-        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P1_Y, k),
-        read2d_f32(cc.prev_lambdas, _CC_OFF_LOCAL_P1_Z, k),
     )
 
 
