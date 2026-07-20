@@ -38,7 +38,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -76,7 +76,7 @@ class RandomJointControllerData:
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _generate_random_control_inputs(
     # Inputs
     controller_seed: int,

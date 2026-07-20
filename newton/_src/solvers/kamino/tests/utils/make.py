@@ -48,7 +48,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -302,7 +302,7 @@ J_DV_J = wp.vec3f(0.0)
 J_DOMEGA_J = wp.vec3f(0.0)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _set_fourbar_body_states(
     model_joint_bid_B: wp.array[wp.int32],
     model_joint_bid_F: wp.array[wp.int32],

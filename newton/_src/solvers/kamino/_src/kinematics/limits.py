@@ -36,7 +36,7 @@ __all__ = ["LimitsKamino", "LimitsKaminoData"]
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -450,7 +450,7 @@ def detect_active_dof_limit(
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _detect_active_joint_configuration_limits(
     model_joint_wid: wp.array[wp.int32],
     model_joint_dof_type: wp.array[wp.int32],

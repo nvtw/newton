@@ -23,11 +23,17 @@ from ...utils import logger as msg
 from .simulator import Simulator
 
 ###
+# Module configs
+###
+
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
+
+###
 # Kernels
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def compute_contact_box_transforms(
     # Kamino contact data
     position_A: wp.array[wp.vec3],  # Contact position on body A
@@ -87,7 +93,7 @@ def compute_contact_box_transforms(
         colors[i] = wp.vec3(0.5, 0.5, 0.5)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def compute_contact_force_arrows(
     # Kamino contact data
     position_A: wp.array[wp.vec3],

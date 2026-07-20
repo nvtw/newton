@@ -48,7 +48,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -1351,7 +1351,7 @@ def plane_cylinder(
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _primitive_narrowphase(
     # Inputs
     default_gap: wp.float32,

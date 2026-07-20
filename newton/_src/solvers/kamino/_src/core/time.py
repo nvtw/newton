@@ -27,7 +27,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -141,7 +141,7 @@ class TimeData:
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _advance_time(
     # Inputs
     dt: wp.array[wp.float32],

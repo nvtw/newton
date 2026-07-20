@@ -23,11 +23,17 @@ from newton._src.solvers.kamino.examples import get_examples_output_path, run_he
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 
 ###
+# Module configs
+###
+
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
+
+###
 # Kernels
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _test_control_callback(
     sim_has_started_resets: wp.array[wp.bool],
     sim_reset_index: wp.array[wp.int32],

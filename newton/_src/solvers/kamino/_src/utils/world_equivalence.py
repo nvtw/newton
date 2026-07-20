@@ -23,7 +23,7 @@ __all__ = ["DiscreteSignature", "compute_equivalence_classes"]
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -115,7 +115,7 @@ def comparison_value(value: wp.int32, delta: wp.int32, ignore_negative: wp.bool)
     return value - delta
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def equivalence_mask_kernel(
     data: wp.array[wp.int32],
     world_offset: wp.array[wp.int32],
@@ -154,7 +154,7 @@ def equivalence_mask_kernel(
             return
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def hash_kernel(
     data: wp.array[wp.int32],
     world_offset: wp.array[wp.int32],

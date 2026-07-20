@@ -66,7 +66,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -74,7 +74,7 @@ wp.set_module_options({"enable_backward": False})
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _reset_solver_data(
     # Outputs:
     world_mask: wp.array[wp.bool],
@@ -104,7 +104,7 @@ def _reset_solver_data(
     v_plus[thread_offset] = 0.0
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _warmstart_desaxce_correction(
     problem_nc: wp.array[wp.int32],
     problem_cio: wp.array[wp.int32],
@@ -151,7 +151,7 @@ def _warmstart_desaxce_correction(
     solver_z[ccio_k + 2] = vn + mu * vt_norm
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _warmstart_joint_constraints(
     # Inputs:
     model_time_dt: wp.array[wp.float32],
@@ -202,7 +202,7 @@ def _warmstart_joint_constraints(
         z_0[kin_cts_row_start_j + j] = 0.0
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _warmstart_limit_constraints(
     # Inputs:
     model_time_dt: wp.array[wp.float32],
@@ -262,7 +262,7 @@ def _warmstart_limit_constraints(
     z_0[vio_l] = v_plus_l
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _warmstart_contact_constraints(
     # Inputs:
     model_time_dt: wp.array[wp.float32],
@@ -345,7 +345,7 @@ def make_initialize_solver_kernel(use_acceleration: bool = False):
         The kernel function to initialize the PADMM solver.
     """
 
-    @wp.kernel(grid_stride=False, enable_backward=False)
+    @wp.kernel
     def _initialize_solver(
         # Inputs:
         solver_config: wp.array[PADMMConfigStruct],
@@ -414,7 +414,7 @@ def make_initialize_solver_kernel(use_acceleration: bool = False):
 
 
 def make_update_proximal_regularization_kernel(method: PADMMPenaltyUpdate):
-    @wp.kernel(grid_stride=False, enable_backward=False)
+    @wp.kernel
     def _update_proximal_regularization(
         # Inputs:
         solver_config: wp.array[PADMMConfigStruct],
@@ -454,7 +454,7 @@ def make_update_proximal_regularization_kernel(method: PADMMPenaltyUpdate):
     return _update_proximal_regularization
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _update_delassus_proximal_regularization(
     # Inputs:
     problem_dim: wp.array[wp.int32],
@@ -487,7 +487,7 @@ def _update_delassus_proximal_regularization(
     D[mio + ncts * tid + tid] += sigma[0] - sigma[1]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _update_delassus_proximal_regularization_sparse(
     # Inputs:
     problem_dim: wp.array[wp.int32],
@@ -523,7 +523,7 @@ def _update_delassus_proximal_regularization_sparse(
     delassus_eta[mio + tid] = solver_config[wid].eta + solver_penalty[wid].rho
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_desaxce_correction(
     # Inputs:
     problem_nc: wp.array[wp.int32],
@@ -575,7 +575,7 @@ def _compute_desaxce_correction(
     solver_s[ccio_k + 2] = problem_mu[cio_k] * vt_norm
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_velocity_bias(
     # Inputs:
     problem_dim: wp.array[wp.int32],
@@ -639,7 +639,7 @@ def make_desaxce_correction_and_velocity_bias_kernel(has_contacts: bool, collect
         collect_info: Whether to persist the De Saxce correction to solver_s.
     """
 
-    @wp.kernel(grid_stride=False, module="unique", enable_backward=False)
+    @wp.kernel(module="unique", module_options={"enable_backward": False, "default_grid_stride": False})
     def _compute_desaxce_correction_and_velocity_bias(
         # Inputs:
         problem_dim: wp.array[wp.int32],
@@ -703,7 +703,7 @@ def make_desaxce_correction_and_velocity_bias_kernel(has_contacts: bool, collect
     return _compute_desaxce_correction_and_velocity_bias
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_projection_argument(
     # Inputs
     problem_dim: wp.array[wp.int32],
@@ -745,7 +745,7 @@ def _compute_projection_argument(
     solver_y[thread_offset] = x - (1.0 / rho) * z_hat
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _project_to_feasible_cone(
     # Inputs:
     problem_nl: wp.array[wp.int32],
@@ -819,7 +819,7 @@ def make_update_dual_variables_and_compute_primal_dual_residuals(use_acceleratio
         The kernel function to update dual variables and compute residuals.
     """
 
-    @wp.kernel(grid_stride=False, enable_backward=False)
+    @wp.kernel
     def _update_dual_variables_and_compute_primal_dual_residuals(
         # Inputs:
         problem_dim: wp.array[wp.int32],
@@ -905,7 +905,7 @@ def _make_project_dual_convergence_accel_kernel(reduction_size: int):
     acceleration state, then cache the current iterates for the next iteration.
     """
 
-    @wp.kernel(grid_stride=False, module="unique", enable_backward=False)
+    @wp.kernel(module="unique", module_options={"enable_backward": False, "default_grid_stride": False})
     def _project_dual_convergence_accel(
         # Inputs:
         problem_dim: wp.array[wp.int32],
@@ -1174,7 +1174,7 @@ def _make_project_dual_convergence_accel_kernel(reduction_size: int):
     return _project_dual_convergence_accel
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_complementarity_residuals(
     # Inputs:
     problem_nl: wp.array[wp.int32],
@@ -1276,7 +1276,7 @@ def _make_compute_infnorm_residuals_kernel(tile_size: int, n_cts_max: int, n_u_m
     num_tiles_cts = (n_cts_max + tile_size - 1) // tile_size
     num_tiles_u = (n_u_max + tile_size - 1) // tile_size
 
-    @wp.kernel(grid_stride=False, module="unique", enable_backward=False)
+    @wp.kernel(module="unique", module_options={"enable_backward": False, "default_grid_stride": False})
     def _compute_infnorm_residuals(
         # Inputs:
         problem_nl: wp.array[wp.int32],
@@ -1428,7 +1428,7 @@ def make_collect_solver_info_kernel(use_acceleration: bool):
         The kernel function to collect solver convergence information.
     """
 
-    @wp.kernel(grid_stride=False, enable_backward=False)
+    @wp.kernel
     def _collect_solver_convergence_info(
         # Inputs:
         problem_nl: wp.array[wp.int32],
@@ -1614,7 +1614,7 @@ def make_collect_solver_info_kernel_sparse(use_acceleration: bool):
         The kernel function to collect solver convergence information.
     """
 
-    @wp.kernel(grid_stride=False, enable_backward=False)
+    @wp.kernel
     def _collect_solver_convergence_info_sparse(
         # Inputs:
         problem_nl: wp.array[wp.int32],
@@ -1782,7 +1782,7 @@ def make_collect_solver_info_kernel_sparse(use_acceleration: bool):
     return _collect_solver_convergence_info_sparse
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _apply_dual_preconditioner_to_state(
     # Inputs:
     problem_dim: wp.array[wp.int32],
@@ -1823,7 +1823,7 @@ def _apply_dual_preconditioner_to_state(
     solver_z[v_i] = (1.0 / P_i) * z_i
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _apply_dual_preconditioner_to_solution(
     # Inputs:
     problem_dim: wp.array[wp.int32],
@@ -1861,7 +1861,7 @@ def _apply_dual_preconditioner_to_solution(
     solution_v_plus[v_i] = P_i * v_plus_i
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_final_desaxce_correction(
     problem_nc: wp.array[wp.int32],
     problem_cio: wp.array[wp.int32],
@@ -1905,7 +1905,7 @@ def _compute_final_desaxce_correction(
     solver_s[ccio_k + 2] = problem_mu[cio + cid] * vt_norm
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_solution_vectors(
     # Inputs:
     problem_dim: wp.array[wp.int32],

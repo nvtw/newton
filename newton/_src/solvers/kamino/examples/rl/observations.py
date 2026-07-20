@@ -14,6 +14,12 @@ from newton._src.solvers.kamino._src.utils.sim import Simulator
 from newton._src.solvers.kamino.examples.rl.simulation import RigidBodySim
 from newton._src.solvers.kamino.examples.rl.utils import StackedIndices, periodic_encoding
 
+###
+# Module configs
+###
+
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
+
 # ---------------------------------------------------------------------------
 # Warp helpers for BipedalObservation
 # ---------------------------------------------------------------------------
@@ -69,7 +75,7 @@ _OBS_NAMES = [
 ]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_bipedal_obs_core(
     obs: wp.array[wp.float32],
     q_i: wp.array[wp.float32],
@@ -248,7 +254,7 @@ _OBS_NAMES = [
 ]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_bipedal_obs_core(
     obs: wp.array[wp.float32],
     q_i: wp.array[wp.float32],

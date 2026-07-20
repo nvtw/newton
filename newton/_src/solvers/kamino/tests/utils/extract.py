@@ -14,6 +14,12 @@ from ..._src.kinematics.jacobians import DenseSystemJacobians, SparseSystemJacob
 from ..._src.kinematics.limits import LimitsKamino
 
 ###
+# Module configs
+###
+
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
+
+###
 # Helper functions
 ###
 
@@ -222,7 +228,7 @@ def extract_delassus_sparse(
     vec_query = wp.empty((sum_max_cts,), dtype=wp.float32, device=delassus._device)
     vec_response = wp.empty((sum_max_cts,), dtype=wp.float32, device=delassus._device)
 
-    @wp.kernel(grid_stride=False, enable_backward=False)
+    @wp.kernel
     def _set_unit_entry(
         # Inputs:
         index: int,

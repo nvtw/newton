@@ -188,11 +188,17 @@ def build_dynamic_static_sphere_scene(
 
 
 ###
+# Module configs
+###
+
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
+
+###
 # Kernels
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_contact_frame_znorm(
     # Inputs:
     normal: wp.array[wp.vec3f],
@@ -203,7 +209,7 @@ def _compute_contact_frame_znorm(
     frame[tid] = make_contact_frame_znorm(normal[tid])
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_contact_frame_xnorm(
     # Inputs:
     normal: wp.array[wp.vec3f],
@@ -214,7 +220,7 @@ def _compute_contact_frame_xnorm(
     frame[tid] = make_contact_frame_xnorm(normal[tid])
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_contact_mode(
     # Inputs:
     velocity: wp.array[wp.vec3f],

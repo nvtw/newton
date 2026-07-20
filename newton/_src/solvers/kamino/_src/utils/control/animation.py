@@ -32,7 +32,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -137,7 +137,7 @@ class AnimationJointReferenceData:
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _advance_animation_frame(
     # Inputs
     time_steps: wp.array[wp.int32],
@@ -187,7 +187,7 @@ def _advance_animation_frame(
 
 
 # TODO: Make the 2D arrays as flattened 1D arrays to handle arbitrary layouts
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _extract_animation_references(
     # Inputs
     num_actuated_joint_dofs: wp.array[wp.int32],

@@ -17,11 +17,17 @@ from newton._src.solvers.kamino.examples import print_progress_bar
 from newton._src.solvers.kamino.tests import setup_tests, test_context
 
 ###
+# Module configs
+###
+
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
+
+###
 # Kernels
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _test_control_callback(
     model_dt: wp.array[wp.float32],
     data_time: wp.array[wp.float32],

@@ -34,11 +34,17 @@ from newton._src.solvers.kamino.tests import setup_tests, test_context
 from newton._src.solvers.kamino.tests.utils.sampling import sample_world_mask
 
 ###
+# Module configs
+###
+
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
+
+###
 # Kernels
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _test_control_callback(
     model_dt: wp.array[wp.float32],
     data_time: wp.array[wp.float32],

@@ -31,7 +31,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -285,7 +285,7 @@ def make_unilateral_constraints_info(
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _update_constraints_info(
     # Inputs:
     model_info_num_joint_cts: wp.array[wp.int32],
@@ -326,7 +326,7 @@ def _update_constraints_info(
     data_info_contact_cts_group_offset[wid] = ccgo
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _unpack_joint_constraint_solutions(
     # Inputs:
     model_time_inv_dt: wp.array[wp.float32],
@@ -366,7 +366,7 @@ def _unpack_joint_constraint_solutions(
         joint_lambda_j[joint_kin_cts_start_j + j] = inv_dt * lambdas[kin_cts_row_start_j + j]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _unpack_limit_constraint_solutions(
     # Inputs:
     model_time_inv_dt: wp.array[wp.float32],
@@ -415,7 +415,7 @@ def _unpack_limit_constraint_solutions(
     limit_velocity[lid] = v_plus_l
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _unpack_contact_constraint_solutions(
     # Inputs:
     model_time_inv_dt: wp.array[wp.float32],

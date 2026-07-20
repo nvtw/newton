@@ -42,7 +42,7 @@ __all__ = ["IntegratorMoreauJean"]
 ###
 
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -93,7 +93,7 @@ def moreau_jean_semi_implicit_with_logmap(
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _integrate_moreau_jean_first_inplace(
     # Inputs:
     model_dt: wp.array[wp.float32],
@@ -127,7 +127,7 @@ def _integrate_moreau_jean_first_inplace(
     bodies_q[tid] = q_i_m
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _integrate_moreau_jean_second_inplace(
     # Inputs:
     alpha: float,

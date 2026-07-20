@@ -24,7 +24,7 @@ from newton._src.solvers.kamino.tests import setup_tests, test_context
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -40,7 +40,7 @@ Q_X_J_MAX = 0.25 * math.pi
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _set_joint_follower_body_state(
     model_joint_bid_B: wp.array[wp.int32],
     model_joint_bid_F: wp.array[wp.int32],

@@ -22,7 +22,7 @@ from newton._src.solvers.kamino.tests import setup_tests, test_context
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 ###
 # Constants
@@ -45,7 +45,7 @@ ROT_RES = (np.sin(ROT_RES_ANGLE) / ROT_RES_ANGLE) * ROT_RES_VEC
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _set_joint_follower_body_state(
     model_joint_bid_F: wp.array[wp.int32],
     model_joint_B_r_Bj: wp.array[wp.vec3f],

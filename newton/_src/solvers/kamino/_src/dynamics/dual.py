@@ -85,7 +85,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -366,7 +366,7 @@ def gravity_plus_coriolis_wrench_split(
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_nonlinear_generalized_force(
     # Inputs:
     model_time_dt: wp.array[wp.float32],
@@ -408,7 +408,7 @@ def _build_nonlinear_generalized_force(
     problem_h[bid] = dt * h_i
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_generalized_free_velocity(
     # Inputs:
     model_time_dt: wp.array[wp.float32],
@@ -461,7 +461,7 @@ def _build_generalized_free_velocity(
     problem_u_f[bid] = screw(v_f_i, omega_f_i)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_free_velocity_bias_joint_dynamics(
     # Inputs:
     model_joints_wid: wp.array[wp.int32],
@@ -490,7 +490,7 @@ def _build_free_velocity_bias_joint_dynamics(
         problem_v_b[cts_row_start_j + j] = -data_joints_dq_b_j[bias_row_start_j + j]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_free_velocity_bias_joint_kinematics(
     # Inputs:
     model_time_inv_dt: wp.array[wp.float32],
@@ -529,7 +529,7 @@ def _build_free_velocity_bias_joint_kinematics(
         problem_v_b[cts_row_start_j + j] = c_b * data_joints_r_j[res_row_start_j + j]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_free_velocity_bias_limits(
     # Inputs:
     model_time_inv_dt: wp.array[wp.float32],
@@ -572,7 +572,7 @@ def _build_free_velocity_bias_limits(
     problem_v_b[lcio_l] = config.beta * inv_dt * wp.min(0.0, r_q)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_free_velocity_bias_contacts(
     # Inputs:
     model_time_inv_dt: wp.array[wp.float32],
@@ -660,7 +660,7 @@ def _build_free_velocity_bias_contacts(
     problem_mu[cio_k] = mu_k
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_free_velocity(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -736,7 +736,7 @@ def _build_free_velocity(
     problem_v_f[cts_offset] = v_f_j + v_b_j
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_free_velocity_sparse(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -795,7 +795,7 @@ def _build_free_velocity_sparse(
     wp.atomic_add(problem_v_f, thread_offset, v_f_j)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_dual_preconditioner_all_constraints(
     # Inputs:
     problem_config: wp.array[DualProblemConfigStruct],
@@ -859,7 +859,7 @@ def _build_dual_preconditioner_all_constraints(
             problem_P[vio + tid + 2] = P_k
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _build_dual_preconditioner_all_constraints_sparse(
     # Inputs:
     problem_config: wp.array[DualProblemConfigStruct],
@@ -918,7 +918,7 @@ def _build_dual_preconditioner_all_constraints_sparse(
             problem_P[vio + tid + 2] = P_k
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _apply_dual_preconditioner_to_matrix(
     # Inputs:
     problem_dim: wp.array[wp.int32],
@@ -966,7 +966,7 @@ def _apply_dual_preconditioner_to_matrix(
     X[m_ij] = P_i * (P_j * X_ij)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _apply_dual_preconditioner_to_vector(
     # Inputs:
     problem_dim: wp.array[wp.int32],

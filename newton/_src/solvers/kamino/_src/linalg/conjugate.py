@@ -21,7 +21,7 @@ from .sparse_operator import BlockSparseLinearOperators
 from .types import IndexType, ScalarType
 
 # No need to auto-generate adjoint code for linear solvers
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 # based on the warp.optim.linear implementation
 
@@ -202,7 +202,7 @@ class BatchedLinearOperator(Generic[ScalarType, IndexType]):
 # ---------------
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def check_termination(
     maxiter: wp.array[int],
     loop_granularity: int,
@@ -230,7 +230,7 @@ def check_termination(
         batch_condition[0] = 1
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _cg_kernel_1(
     tol: wp.array[Any],
     resid: wp.array[Any],
@@ -254,7 +254,7 @@ def _cg_kernel_1(
     r[idx] = r[idx] - alpha * Ap[idx]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _cg_kernel_2(
     tol: wp.array[Any],
     resid_new: wp.array[Any],
@@ -277,7 +277,7 @@ def _cg_kernel_2(
     p[idx] = z[idx] + beta * p[idx]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _cr_kernel_1(
     tol: wp.array[Any],
     resid: wp.array[Any],
@@ -304,7 +304,7 @@ def _cr_kernel_1(
     z[idx] = z[idx] - alpha * y[idx]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _cr_kernel_2(
     tol: wp.array[Any],
     resid: wp.array[Any],
@@ -415,7 +415,7 @@ def less_than_op(i: wp.int32, threshold: wp.int32) -> wp.float32:
 def make_dot_kernel(tile_size: int, maxdim: int):
     num_tiles = (maxdim + tile_size - 1) // tile_size
 
-    @wp.kernel(grid_stride=False, enable_backward=False)
+    @wp.kernel
     def dot(
         a: wp.array2d[Any],
         b: wp.array2d[Any],
@@ -456,7 +456,7 @@ def make_dot_kernel(tile_size: int, maxdim: int):
     return dot
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def dot_sequential(
     a: wp.array2d[Any],
     b: wp.array2d[Any],
@@ -491,7 +491,7 @@ def dot_sequential(
         n = n // 2
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _initialize_tolerance_kernel(
     rtol: wp.array[Any], atol: wp.array[Any], b_norm_sq: wp.array[Any], atol_sq: wp.array[Any]
 ):
@@ -500,7 +500,7 @@ def _initialize_tolerance_kernel(
     atol_sq[world] = wp.max(r * r * b_norm_sq[world], a * a)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def make_jacobi_preconditioner(
     A: wp.array[Any],
     world_dims: wp.array[wp.int32],

@@ -47,11 +47,17 @@ __all__ = [
 
 
 ###
+# Module configs
+###
+
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
+
+###
 # Kernels
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def world_max_contacts_kernel(
     # Inputs:
     max_contacts_per_pair: int,
@@ -90,7 +96,7 @@ def world_max_contacts_kernel(
     wp.atomic_add(world_max_contacts, world_id, num_contacts)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def rigid_bodies_indexing_kernel(
     # Inputs:
     model_body_world_start: wp.array[wp.int32],
@@ -124,7 +130,7 @@ def rigid_bodies_indexing_kernel(
     world_body_dof_offset[world_id] = 6 * model_body_world_start[world_id]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def joint_conversion_kernel(
     # Inputs:
     model_joint_world: wp.array[wp.int32],
@@ -205,7 +211,7 @@ def joint_conversion_kernel(
     joint_num_cts[joint_id] = joint_num_dynamic_cts[joint_id] + joint_num_kinematic_cts[joint_id]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def joint_frame_conversion_kernel(
     # Inputs:
     model_joint_parent: wp.array[wp.int32],
@@ -261,7 +267,7 @@ def joint_frame_conversion_kernel(
     joint_X_F[joint_id] = X_F_j
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def joint_indexing_kernel(
     # Inputs:
     model_joint_world_start: wp.array[wp.int32],
@@ -383,7 +389,7 @@ def joint_indexing_kernel(
     num_joint_passive_dofs[world_id] = num_passive_dofs
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _globalize_joint_offsets(
     # Inputs:
     joint_world: wp.array[wp.int32],
@@ -420,7 +426,7 @@ def _globalize_joint_offsets(
     joint_kinematic_cts_start[jid] += world_kinematic_cts_offset[w]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def geometry_conversion_kernel(
     # Inputs:
     model_shape_world: wp.array[wp.int32],
@@ -457,7 +463,7 @@ def geometry_conversion_kernel(
         geom_material[shape_id] = -1
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def target_dofs_to_coords_conversion_kernel(
     # Inputs
     model_joints_dof_type: wp.array[wp.int32],
@@ -501,7 +507,7 @@ def target_dofs_to_coords_conversion_kernel(
             joint_target_coords[quat_offset + k] = quat[k]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def target_coords_to_dofs_conversion_kernel(
     # Inputs
     model_joints_dof_type: wp.array[wp.int32],
@@ -546,7 +552,7 @@ def target_coords_to_dofs_conversion_kernel(
             joint_target_dofs[angles_offset + k] = angles[k]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def write_coeff_kernel(a: wp.array[wp.int32], idx: int, v: int):
     """Helper kernel writing a single array coefficient"""
     a[idx] = v

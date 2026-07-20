@@ -45,7 +45,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -766,7 +766,7 @@ def make_compute_joints_data_kernel(correction: JointCorrectionMode = JointCorre
     Generates the kernel to compute the joint states based on the current body states.
     """
 
-    @wp.kernel(grid_stride=False, enable_backward=False)
+    @wp.kernel
     def _compute_joints_data(
         # Inputs:
         model_time_dt: wp.array[wp.float32],
@@ -892,7 +892,7 @@ def make_compute_joints_data_kernel(correction: JointCorrectionMode = JointCorre
     return _compute_joints_data
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _extract_actuators_state_from_joints(
     # Inputs:
     world_mask: wp.array[wp.bool],
@@ -939,7 +939,7 @@ def _extract_actuators_state_from_joints(
         actuator_u[ad_start + j] = joint_u[jd_start + j]
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _extract_joints_state_from_actuators(
     # Inputs:
     world_mask: wp.array[wp.bool],

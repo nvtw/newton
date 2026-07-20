@@ -34,7 +34,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -76,7 +76,7 @@ class PIDControllerData:
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _reset_jointspace_pid_references(
     # Inputs
     model_joints_wid: wp.array[wp.int32],
@@ -125,7 +125,7 @@ def _reset_jointspace_pid_references(
         controller_dq_j_ref[actuator_dof_index] = dq_j
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_jointspace_pid_control(
     # Inputs
     model_joints_wid: wp.array[wp.int32],

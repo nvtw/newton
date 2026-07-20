@@ -35,7 +35,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -470,7 +470,7 @@ def add_active_pair(
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _update_geometries_state_and_aabb(
     # Inputs:
     default_gap: wp.float32,
@@ -513,7 +513,7 @@ def _update_geometries_state_and_aabb(
     geom_aabb[gid] = aabb_g
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _update_geometries_state_and_bs(
     # Inputs:
     default_gap: wp.float32,
@@ -556,7 +556,7 @@ def _update_geometries_state_and_bs(
     geom_bs_radius[gid] = bs_g
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _nxn_broadphase_aabb(
     # Inputs:
     geom_sid: wp.array[wp.int32],
@@ -625,7 +625,7 @@ def _nxn_broadphase_aabb(
         )
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _nxn_broadphase_bs(
     # Inputs:
     geom_sid: wp.array[wp.int32],

@@ -25,7 +25,7 @@ from newton.tests import get_kamino_basics_asset
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -33,7 +33,7 @@ wp.set_module_options({"enable_backward": False})
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _pd_control_callback(
     state_t: wp.array[wp.float32],
     control_q_j_ref: wp.array[wp.float32],
@@ -91,7 +91,7 @@ def _pd_control_callback(
         control_tau_j_ref[jid] = 0.0
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _torque_control_callback(
     state_t: wp.array[wp.float32],
     control_tau_j: wp.array[wp.float32],

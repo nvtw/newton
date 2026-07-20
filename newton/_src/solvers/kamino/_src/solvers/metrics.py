@@ -113,7 +113,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -588,7 +588,7 @@ def compute_vector_difference_infnorm(
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_eom_residual(
     # Inputs
     model_time_dt: wp.array[wp.float32],
@@ -644,7 +644,7 @@ def _compute_eom_residual(
         wp.atomic_exch(metric_r_eom_argmax, wp.int32(wid), argmax_key)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_joint_kinematics_residual_dense(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -711,7 +711,7 @@ def _compute_joint_kinematics_residual_dense(
         wp.atomic_exch(metric_r_kinematics_argmax, wid, argmax_key)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_joint_kinematics_residual_sparse(
     # Inputs:
     model_info_joint_kinematic_cts_offset: wp.array[wp.int32],
@@ -771,7 +771,7 @@ def _compute_joint_kinematics_residual_sparse(
         wp.atomic_exch(metric_r_kinematics_argmax, wid, argmax_key)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_cts_joints_residual(
     # Inputs:
     model_info_joint_kinematic_cts_offset: wp.array[wp.int32],
@@ -810,7 +810,7 @@ def _compute_cts_joints_residual(
         wp.atomic_exch(metric_r_cts_joints_argmax, wid, argmax_key)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_cts_limits_residual(
     # Inputs:
     limit_model_num_limits: wp.array[wp.int32],
@@ -847,7 +847,7 @@ def _compute_cts_limits_residual(
         wp.atomic_exch(metric_r_cts_limits_argmax, wid, argmax_key)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_cts_contacts_residual(
     # Inputs:
     contact_model_num_contacts: wp.array[wp.int32],
@@ -882,7 +882,7 @@ def _compute_cts_contacts_residual(
         wp.atomic_exch(metric_r_cts_contacts_argmax, wid, wcid)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_dual_problem_metrics(
     # Inputs:
     problem_nl: wp.array[wp.int32],
@@ -983,7 +983,7 @@ def _compute_dual_problem_metrics(
     metric_f_ccp[wid] = f_ccp
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_dual_problem_metrics_sparse(
     # Inputs:
     problem_nl: wp.array[wp.int32],

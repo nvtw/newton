@@ -30,7 +30,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -38,7 +38,7 @@ wp.set_module_options({"enable_backward": False})
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_joint_dof_body_wrenches_dense(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -110,7 +110,7 @@ def _compute_joint_dof_body_wrenches_dense(
         wp.atomic_add(data_bodies_w_a, bid_B_j, w_j_B)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_joint_dof_body_wrenches_sparse(
     # Inputs:
     model_joints_num_dynamic_cts: wp.array[wp.int32],
@@ -163,7 +163,7 @@ def _compute_joint_dof_body_wrenches_sparse(
         wp.atomic_add(data_bodies_w_a, bid_B_j, w_j_B)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_joint_cts_body_wrenches_dense(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -265,7 +265,7 @@ def _compute_joint_cts_body_wrenches_dense(
         wp.atomic_add(data_bodies_w_j, bid_B_j, w_j_B)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_limit_cts_body_wrenches_dense(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -352,7 +352,7 @@ def _compute_limit_cts_body_wrenches_dense(
         wp.atomic_add(data_bodies_w_l, bid_B, w_l_B)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_contact_cts_body_wrenches_dense(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
@@ -442,7 +442,7 @@ def _compute_contact_cts_body_wrenches_dense(
         wp.atomic_add(data_bodies_w_c, bid_A, w_c_A)
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _compute_cts_body_wrenches_sparse(
     # Inputs:
     model_time_inv_dt: wp.array[wp.float32],

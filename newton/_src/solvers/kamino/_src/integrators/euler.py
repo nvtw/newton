@@ -39,7 +39,7 @@ __all__ = ["IntegratorEuler"]
 ###
 
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -90,7 +90,7 @@ def euler_semi_implicit_with_logmap(
 ###
 
 
-@wp.kernel(grid_stride=False, enable_backward=False)
+@wp.kernel
 def _integrate_semi_implicit_euler_inplace(
     # Inputs:
     alpha: float,
