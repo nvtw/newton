@@ -1104,3 +1104,20 @@ contact. Warm-start gather fell 82.8 to 66.7 us (-19.5%). Matched frame gains:
 Fixed-scene useful bandwidth rose from 59.9% to 60.6% of sequential DRAM and
 86.1% to 87.1% of random-vec4 roof. A FREE-joint force/import fusion saved a
 launch but only 0.4% overall because import grew; removed to avoid a heuristic.
+
+
+## J37 - fused column and graph staging, rejected
+
+Ordinary maximal-rigid scenes deferred contact-column materialization into the
+existing graph-element kernel, removing a 39.3 us launch without changing PGS.
+Matched 32K-world gains were only 0.62% fixed (1.630 to 1.620 ms) and 0.48%
+evolving (1.898 to 1.889 ms): the element kernel absorbed nearly all packing
+work. Removed; launch fusion helps only when it also eliminates data movement.
+
+
+## J38 - vec4 inverse-mass lane, retained in mini only
+
+Mini already packs `(vx, vy, vz, invMass)` in one vec4. An isolated 32K-world
+A/B added a separate inverse-mass load while leaving all other traffic fixed:
+1.3933 ms packed versus 1.3990 ms separate (+0.41% for packing). Directionally
+useful, but too small to justify rewriting full PhoenX body storage alone.
