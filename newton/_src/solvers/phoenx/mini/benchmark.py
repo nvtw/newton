@@ -18,6 +18,12 @@ import newton
 from .solver import MiniSolver, MiniSolverConfig
 
 
+@wp.kernel(enable_backward=False)
+def _count_topology_rebuild_kernel(rebuild: wp.array[wp.int32], samples: wp.array[wp.int32]):
+    samples[0] = samples[0] + rebuild[0]
+    samples[1] = samples[1] + wp.int32(1)
+
+
 def _make_stack_model(world_count: int, bodies_per_world: int, device: str):
     template = newton.ModelBuilder(up_axis=newton.Axis.Z)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.6)
@@ -127,6 +133,11 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
             multi_world_scheduler=args.phoenx_scheduler,
             articulation_mode="maximal",
         )
+        if args.disable_phoenx_color_reuse:
+            solver.world._reuse_rigid_coloring = False
+    topology_samples = (
+        wp.zeros(2, dtype=wp.int32, device=device) if args.track_topology_rebuilds and args.solver == "phoenx" else None
+    )
 
     def step() -> None:
         if args.fixed_state:
@@ -135,6 +146,14 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         pipeline.collide(state_0, contacts)
         state_0.clear_forces()
         solver.step(state_0, state_1, control, contacts, args.dt)
+        if topology_samples is not None:
+            wp.launch(
+                _count_topology_rebuild_kernel,
+                dim=1,
+                inputs=[solver.world._topology_rebuild],
+                outputs=[topology_samples],
+                device=device,
+            )
         wp.copy(state_0.body_q, state_1.body_q)
         wp.copy(state_0.body_qd, state_1.body_qd)
 
@@ -145,6 +164,8 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
     for _ in range(args.warmup):
         wp.capture_launch(capture.graph)
     wp.synchronize_device(device)
+    if topology_samples is not None:
+        topology_samples.zero_()
     cudart = None
     if args.cuda_profiler_range:
         cudart = ctypes.CDLL("libcudart.so")
@@ -170,6 +191,12 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
     phoenx_scheduler = None if args.solver == "mini" else solver.world._multi_world_scheduler
     phoenx_tpw = None if args.solver == "mini" else int(solver.world._tpw_choice.numpy()[0])
     contacts_per_step = int(contacts.rigid_contact_count.numpy()[0])
+    topology_counts = topology_samples.numpy() if topology_samples is not None else None
+    topology_rebuild_percent = (
+        100.0 * int(topology_counts[0]) / int(topology_counts[1])
+        if topology_counts is not None and int(topology_counts[1]) > 0
+        else None
+    )
     joint_types = model.joint_type.numpy() if model.joint_count else np.empty(0, dtype=np.int32)
     revolute_constraints = int(np.count_nonzero(joint_types == int(newton.JointType.REVOLUTE)))
     world_steps = args.worlds * args.replays
@@ -222,6 +249,8 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         "device": device.name,
         "scene": args.scene,
         "fixed_state": args.fixed_state,
+        "phoenx_color_reuse": None if args.solver == "mini" else solver.world._reuse_rigid_coloring,
+        "topology_rebuild_percent": topology_rebuild_percent,
         "worlds": args.worlds,
         "world_id_runs": world_id_runs,
         "bodies_per_world": args.bodies_per_world,
@@ -271,6 +300,12 @@ def main() -> None:
     parser.add_argument("--reuse-schedule", action="store_true")
     parser.add_argument("--phoenx-threads-per-world", choices=("auto", "8", "16", "32"), default="auto")
     parser.add_argument("--phoenx-scheduler", choices=("auto", "fast_tail", "block_world"), default="auto")
+    parser.add_argument("--disable-phoenx-color-reuse", action="store_true")
+    parser.add_argument(
+        "--track-topology-rebuilds",
+        action="store_true",
+        help="Add one diagnostic kernel per frame; do not use its timing as a qualified result.",
+    )
     parser.add_argument("--max-colors", type=int, default=64)
     parser.add_argument("--max-constraints-per-color", type=int, default=32)
     parser.add_argument("--broad-phase", choices=("nxn", "sap", "explicit"), default="nxn")

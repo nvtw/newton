@@ -480,3 +480,24 @@ This does not mean PhoenX uses 100% of DRAM bandwidth. The percentages are a
 useful-physics lower bound, not hardware counters; collision, matching, history,
 and preparation remain outside it. F23 removes about 90 us of stable-frame
 schedule work and is most valuable where topology persists.
+
+## F24 - contact-frame and validator experiments, rejected
+
+RTX PRO 6000 controlled experiments found no safe full-solver win:
+
+- Rebuilding the tangent deterministically and deleting frame history improved
+  the fixed 32K stack 3.4%, but half-scale stack speed reached 0.815 m/s.
+- Delaying body-velocity loads for reused tangents reduced warm-start gather
+  152.11 to 150.75 us (0.9%) but left the frame neutral (1.991 vs 1.987 ms).
+- Above-L2 frame codec medians for 4.19M frames were 259.82 us direct,
+  199.88 us oct4, and 182.54 us quaternion-xyz. Oct4 error stayed below
+  7.6e-7, yet full-solver half-scale drift reached 0.049 m; orthogonalization
+  worsened maximum speed to 1.464 m/s. Quaternion-xyz error reached 1.02e-3.
+- A bit-exact lean endpoint validator was neutral on the 32K stack (1.994 vs
+  1.991 ms) and regressed the mixed robot (788.44 vs 779.11 us). Moving the
+  two world scans inside the dirty conditional is unsupported because their
+  child graph contains allocation nodes.
+
+No solver code was retained. Previous history remains normal+tangent1; tangent2
+is reconstructed by cross product. The next contact-staging decision requires
+the requested Nsight Compute counters, not more source-level load guesses.
