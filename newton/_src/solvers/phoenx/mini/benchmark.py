@@ -191,6 +191,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
     phoenx_scheduler = None if args.solver == "mini" else solver.world._multi_world_scheduler
     phoenx_tpw = None if args.solver == "mini" else int(solver.world._tpw_choice.numpy()[0])
     contacts_per_step = int(contacts.rigid_contact_count.numpy()[0])
+    candidate_pairs_per_step = int(pipeline.broad_phase_pair_count.numpy()[0])
     topology_counts = topology_samples.numpy() if topology_samples is not None else None
     topology_rebuild_percent = (
         100.0 * int(topology_counts[0]) / int(topology_counts[1])
@@ -255,6 +256,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         "world_id_runs": world_id_runs,
         "bodies_per_world": args.bodies_per_world,
         "contacts_per_step": contacts_per_step,
+        "candidate_pairs_per_step": candidate_pairs_per_step,
         "substeps": args.substeps,
         "iterations": args.iterations,
         "block_dim": args.block_dim,

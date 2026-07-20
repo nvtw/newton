@@ -1143,4 +1143,28 @@ blocks/SM; Warp grid-strides over live work instead of scheduling the full
 warm-start 71.36 to 63.09 us (-21.7 us combined). Fixed 32K worlds improved
 1.6993 to 1.6627 ms (+2.20%, 59.63% sequential / 85.64% random-vec4 roof).
 Changing 32K worlds was neutral (-0.36%) with identical 1.114M contacts; an
-11,341-body Kapla run was also neutral. The change is six launch lines, keeps
+11,341-body Kapla run was also neutral. The change is six launch lines and
+keeps contact outputs unchanged.
+
+
+## J41 - pair-first deterministic contact generation, rejected
+
+At 524,288 candidate pairs, 2.10M contact slots, 1.114M live contacts,
+and a 96-byte record, contact sort + gather took 292.0 us. Pair sort plus
+scan/compaction took 242.0 us: only 50.0 us local gain (1.21x), because the
+full-record compaction alone cost 164.9 us. Direct ordered writes have a
+233.3 us ceiling but need a safe deterministic variable-output prefix across
+primitive, GJK, mesh, SDF, and hydroelastic paths. Do not complicate the
+general CollisionPipeline until record relocation can be eliminated.
+
+
+## J42 - packed vec4 contact-sort source, rejected
+
+A flat mini kernel favored six vec4 planes over five vec3 + eight scalar
+planes: 209.5 versus 271.2 us (+29.4%). The full pipeline contradicted it.
+Fixed 32K worlds regressed 1.585 to 1.704 ms (-7.0%). Node medians showed
+GJK 200.7 to 194.3 us and primitive 56.0 to 51.7 us, but gather 88.6 to
+173.9 us and matching 83.9 to 126.4 us. Warp's production struct lowering
+avoids the flat control's many-parameter penalty; the synthetic layout result
+did not preserve the real interface/cache sequence. Production prototype
+removed.
