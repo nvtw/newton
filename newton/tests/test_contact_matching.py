@@ -568,11 +568,20 @@ def test_sticky_matched_rows_preserved(test, device):
             ("normal", snap_normal),
         ):
             current = getattr(contacts_next, f"rigid_contact_{field}").numpy()[:count2]
-            np.testing.assert_array_equal(
-                current,
-                prev,
-                err_msg=f"Sticky mode: matched rows must carry prev-frame {field} byte-for-byte",
-            )
+            if field.startswith("offset"):
+                np.testing.assert_allclose(
+                    current,
+                    prev,
+                    rtol=1.0e-5,
+                    atol=1.0e-7,
+                    err_msg=f"Sticky mode: matched rows must preserve prev-frame {field}",
+                )
+            else:
+                np.testing.assert_array_equal(
+                    current,
+                    prev,
+                    err_msg=f"Sticky mode: matched rows must carry prev-frame {field} byte-for-byte",
+                )
 
 
 def test_sticky_unmatched_rows_pass_through(test, device):

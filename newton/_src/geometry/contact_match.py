@@ -14,6 +14,7 @@ from __future__ import annotations
 import warp as wp
 
 from ..core.types import Devicelike
+from .contact_reduction_global import encode_oct
 from .contact_sort import SORT_KEY_SENTINEL
 
 MATCH_NOT_FOUND = wp.constant(wp.int32(-1))
@@ -355,8 +356,8 @@ class _SaveStateData:
     dst_normal: wp.array[wp.vec3]
     dst_point0: wp.array[wp.vec3]
     dst_point1: wp.array[wp.vec3]
-    dst_offset0: wp.array[wp.vec3]
-    dst_offset1: wp.array[wp.vec3]
+    dst_offset0: wp.array[wp.vec2]
+    dst_offset1: wp.array[wp.vec2]
     save_sticky: int
     dst_count: wp.array[wp.int32]
 
@@ -407,8 +408,8 @@ def _save_sorted_state_kernel(data: _SaveStateData):
         if data.save_sticky != 0:
             data.dst_point0[i] = p0
             data.dst_point1[i] = p1
-            data.dst_offset0[i] = data.src_offset0[i]
-            data.dst_offset1[i] = data.src_offset1[i]
+            data.dst_offset0[i] = encode_oct(data.src_offset0[i])
+            data.dst_offset1[i] = encode_oct(data.src_offset1[i])
 
 
 # ------------------------------------------------------------------
@@ -511,6 +512,7 @@ class ContactMatcher:
             # non-deterministic narrow-phase slot assignment -- see
             # ``_pack_claim``).
             self._prev_claim = wp.empty(capacity, dtype=wp.int64)
+            self._oct_offset_dummy = wp.zeros(1, dtype=wp.vec2)
 
             # Contact report (optional).
             self._has_report = contact_report
@@ -520,15 +522,15 @@ class ContactMatcher:
                 # Dummy single-element array so the Warp struct is always valid.
                 self._prev_was_matched = wp.zeros(1, dtype=wp.int32)
 
-            # Sticky mode also preserves the body-frame point/offset pairs
+            # Sticky mode preserves body-frame points and oct-encoded offset directions
             # consumed after sorting. Shape indices, margins, and per-shape
             # properties are key-derived or constant for a matched contact.
             self._sticky = sticky
             if sticky:
                 self._prev_point0 = wp.zeros(capacity, dtype=wp.vec3)
                 self._prev_point1 = wp.zeros(capacity, dtype=wp.vec3)
-                self._prev_offset0 = wp.zeros(capacity, dtype=wp.vec3)
-                self._prev_offset1 = wp.zeros(capacity, dtype=wp.vec3)
+                self._prev_offset0 = wp.zeros(capacity, dtype=wp.vec2)
+                self._prev_offset1 = wp.zeros(capacity, dtype=wp.vec2)
             else:
                 self._prev_point0 = None
                 self._prev_point1 = None
@@ -669,7 +671,7 @@ class ContactMatcher:
 
     @property
     def sticky_history_arrays(self) -> tuple[wp.array, wp.array, wp.array, wp.array, wp.array]:
-        """Previous canonical sticky points, offsets, and normals."""
+        """Previous sticky points, oct-encoded offset directions, and normals."""
         if not self._sticky:
             raise ValueError("sticky history requires sticky matching")
         return (
@@ -714,8 +716,8 @@ class ContactMatcher:
         data.dst_normal = self._prev_normal
         data.dst_point0 = self._prev_point0 if self._sticky else sorted_point0
         data.dst_point1 = self._prev_point1 if self._sticky else sorted_point1
-        data.dst_offset0 = self._prev_offset0 if self._sticky else sorted_offset0
-        data.dst_offset1 = self._prev_offset1 if self._sticky else sorted_offset1
+        data.dst_offset0 = self._prev_offset0 if self._sticky else self._oct_offset_dummy
+        data.dst_offset1 = self._prev_offset1 if self._sticky else self._oct_offset_dummy
         data.save_sticky = 1 if self._sticky else 0
         data.dst_count = self._prev_count
 

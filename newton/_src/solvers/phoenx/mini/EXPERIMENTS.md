@@ -1121,3 +1121,15 @@ Mini already packs `(vx, vy, vz, invMass)` in one vec4. An isolated 32K-world
 A/B added a separate inverse-mass load while leaving all other traffic fixed:
 1.3933 ms packed versus 1.3990 ms separate (+0.41% for packing). Directionally
 useful, but too small to justify rewriting full PhoenX body storage alone.
+
+
+## J39 - compact sticky offset history, accepted
+
+Sticky matching now stores each local offset direction as octahedral vec2 and
+reconstructs magnitude from the existing contact margin; points and normals
+remain unchanged. Adjacent RTX PRO 6000 graph traces reduced save + gather from
+196.1 to 176.2 us (-19.9 us). Matched results: fixed 32K worlds 1.6351 to
+1.6161 ms (+1.18%, 61.35% sequential / 88.11% random-vec4 roof); evolving
+32K worlds was neutral (-0.19%) with the identical 1.114M contacts; an 8,192-body
+single world improved 1.4887 to 1.4747 ms (+0.95%). Full CPU/CUDA matching,
+PhoenX ordering, Kapla stability, and momentum tests passed.

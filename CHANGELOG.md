@@ -54,6 +54,7 @@
 
 ### Changed
 
+- Store sticky collision offset directions in octahedral vec2 history and reconstruct their magnitudes from contact margins.
 - Reduce PhoenX contact warm-start traffic by loading local anchors only when contact reuse or stale-anchor correction requires them.
 - Improve `BroadPhaseSAP` performance on anisotropic scenes with denser projection-axis coverage and longer best-axis reuse.
 - Scale the PhoenX Kapla example's persistent contact grid with GPU SM count to hide contact-state load latency without changing solver results.

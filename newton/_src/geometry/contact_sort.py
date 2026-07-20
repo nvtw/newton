@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import warp as wp
 
 from ..core.types import Devicelike
+from .contact_reduction_global import decode_oct
 
 # Sentinel key for unused contact slots.  ``radix_sort_pairs`` treats
 # keys as signed int64, so ``0x7FFF…`` (max positive int64) sorts last.
@@ -194,8 +195,8 @@ class _FullContactArrays:
     match_index_buf: wp.array[wp.int32]
     sticky_prev_point0: wp.array[wp.vec3]
     sticky_prev_point1: wp.array[wp.vec3]
-    sticky_prev_offset0: wp.array[wp.vec3]
-    sticky_prev_offset1: wp.array[wp.vec3]
+    sticky_prev_offset0: wp.array[wp.vec2]
+    sticky_prev_offset1: wp.array[wp.vec2]
     sticky_prev_normal: wp.array[wp.vec3]
     sticky_match_index: wp.array[wp.int32]
     has_shape_props: int
@@ -242,8 +243,8 @@ def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], coun
         previous = data.sticky_match_index[i]
         data.point0[i] = data.sticky_prev_point0[previous]
         data.point1[i] = data.sticky_prev_point1[previous]
-        data.offset0[i] = data.sticky_prev_offset0[previous]
-        data.offset1[i] = data.sticky_prev_offset1[previous]
+        data.offset0[i] = decode_oct(data.sticky_prev_offset0[previous]) * data.margin0_buf[p]
+        data.offset1[i] = decode_oct(data.sticky_prev_offset1[previous]) * data.margin1_buf[p]
         data.normal[i] = data.sticky_prev_normal[previous]
     else:
         data.point0[i] = data.point0_buf[p]
@@ -354,6 +355,7 @@ class ContactSorter:
             self._full_point1_buf = wp.zeros(capacity, dtype=wp.vec3)
             self._full_offset0_buf = wp.zeros(capacity, dtype=wp.vec3)
             self._full_offset1_buf = wp.zeros(capacity, dtype=wp.vec3)
+            self._sticky_oct_offset_dummy = wp.zeros(1, dtype=wp.vec2)
             self._full_normal_buf = wp.zeros(capacity, dtype=wp.vec3)
             self._full_margin0_buf = wp.zeros(capacity, dtype=float)
             self._full_margin1_buf = wp.zeros(capacity, dtype=float)
@@ -503,8 +505,8 @@ class ContactSorter:
             sort_prepared: Whether :meth:`prepare_full_sort` has already run.
             sticky_prev_point0: Optional previous canonical points on shape 0.
             sticky_prev_point1: Optional previous canonical points on shape 1.
-            sticky_prev_offset0: Optional previous canonical offsets on shape 0.
-            sticky_prev_offset1: Optional previous canonical offsets on shape 1.
+            sticky_prev_offset0: Optional oct-encoded previous offset direction on shape 0.
+            sticky_prev_offset1: Optional oct-encoded previous offset direction on shape 1.
             sticky_prev_normal: Optional previous canonical contact normals.
             sticky_match_index: Optional canonical indices into sticky history.
             device: Device to launch on.
@@ -565,8 +567,12 @@ class ContactSorter:
         data.match_index_buf = self._full_match_index_buf
         data.sticky_prev_point0 = sticky_prev_point0 if sticky_prev_point0 is not None else self._full_point0_buf
         data.sticky_prev_point1 = sticky_prev_point1 if sticky_prev_point1 is not None else self._full_point1_buf
-        data.sticky_prev_offset0 = sticky_prev_offset0 if sticky_prev_offset0 is not None else self._full_offset0_buf
-        data.sticky_prev_offset1 = sticky_prev_offset1 if sticky_prev_offset1 is not None else self._full_offset1_buf
+        data.sticky_prev_offset0 = (
+            sticky_prev_offset0 if sticky_prev_offset0 is not None else self._sticky_oct_offset_dummy
+        )
+        data.sticky_prev_offset1 = (
+            sticky_prev_offset1 if sticky_prev_offset1 is not None else self._sticky_oct_offset_dummy
+        )
         data.sticky_prev_normal = sticky_prev_normal if sticky_prev_normal is not None else self._full_normal_buf
         data.sticky_match_index = sticky_match_index if sticky_match_index is not None else self._full_match_index_buf
         data.has_shape_props = 1 if has_props else 0
