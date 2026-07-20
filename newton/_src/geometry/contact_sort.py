@@ -192,8 +192,14 @@ class _FullContactArrays:
     damping_buf: wp.array[float]
     friction_buf: wp.array[float]
     match_index_buf: wp.array[wp.int32]
+    sticky_point0: wp.array[wp.vec3]
+    sticky_point1: wp.array[wp.vec3]
+    sticky_offset0: wp.array[wp.vec3]
+    sticky_offset1: wp.array[wp.vec3]
+    sticky_normal: wp.array[wp.vec3]
     has_shape_props: int
     has_match_index: int
+    has_sticky_overlay: int
 
 
 @wp.kernel(enable_backward=False)
@@ -231,11 +237,18 @@ def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], coun
         data.sorted_keys[i] = data.sort_keys[p]
     data.shape0[i] = data.shape0_buf[p]
     data.shape1[i] = data.shape1_buf[p]
-    data.point0[i] = data.point0_buf[p]
-    data.point1[i] = data.point1_buf[p]
-    data.offset0[i] = data.offset0_buf[p]
-    data.offset1[i] = data.offset1_buf[p]
-    data.normal[i] = data.normal_buf[p]
+    if data.has_sticky_overlay != 0:
+        data.point0[i] = data.sticky_point0[i]
+        data.point1[i] = data.sticky_point1[i]
+        data.offset0[i] = data.sticky_offset0[i]
+        data.offset1[i] = data.sticky_offset1[i]
+        data.normal[i] = data.sticky_normal[i]
+    else:
+        data.point0[i] = data.point0_buf[p]
+        data.point1[i] = data.point1_buf[p]
+        data.offset0[i] = data.offset0_buf[p]
+        data.offset1[i] = data.offset1_buf[p]
+        data.normal[i] = data.normal_buf[p]
     data.margin0[i] = data.margin0_buf[p]
     data.margin1[i] = data.margin1_buf[p]
     data.tids[i] = data.tids_buf[p]
@@ -451,6 +464,12 @@ class ContactSorter:
         friction: wp.array | None = None,
         match_index: wp.array | None = None,
         source_is_buffer: bool = False,
+        sort_prepared: bool = False,
+        sticky_point0: wp.array | None = None,
+        sticky_point1: wp.array | None = None,
+        sticky_offset0: wp.array | None = None,
+        sticky_offset1: wp.array | None = None,
+        sticky_normal: wp.array | None = None,
         device: Devicelike = None,
     ) -> None:
         """Sort contacts written through the full collide.py writer.
@@ -481,10 +500,15 @@ class ContactSorter:
             device: Device to launch on.
         """
         n = self._capacity
-        self._sort_and_permute(sort_keys, contact_count, device=device)
+        if not sort_prepared:
+            self.prepare_full_sort(sort_keys, contact_count, device=device)
 
         has_props = self._has_shape_props
         has_match = match_index is not None and match_index.shape[0] > 0
+        sticky_arrays = (sticky_point0, sticky_point1, sticky_offset0, sticky_offset1, sticky_normal)
+        has_sticky_overlay = sticky_point0 is not None
+        if has_sticky_overlay != all(array is not None for array in sticky_arrays):
+            raise ValueError("all sticky overlay arrays must be provided together")
 
         data = _FullContactArrays()
         data.sort_keys = sort_keys
@@ -522,12 +546,27 @@ class ContactSorter:
         data.damping_buf = self._full_damping_buf
         data.friction_buf = self._full_friction_buf
         data.match_index_buf = self._full_match_index_buf
+        data.sticky_point0 = sticky_point0 if sticky_point0 is not None else self._full_point0_buf
+        data.sticky_point1 = sticky_point1 if sticky_point1 is not None else self._full_point1_buf
+        data.sticky_offset0 = sticky_offset0 if sticky_offset0 is not None else self._full_offset0_buf
+        data.sticky_offset1 = sticky_offset1 if sticky_offset1 is not None else self._full_offset1_buf
+        data.sticky_normal = sticky_normal if sticky_normal is not None else self._full_normal_buf
         data.has_shape_props = 1 if has_props else 0
         data.has_match_index = 1 if has_match else 0
+        data.has_sticky_overlay = 1 if has_sticky_overlay else 0
 
         if not source_is_buffer:
             wp.launch(_backup_full_kernel, dim=n, inputs=[data, contact_count], device=device)
         wp.launch(_gather_full_kernel, dim=n, inputs=[data, self._sort_indices, contact_count], device=device)
+
+    def prepare_full_sort(self, sort_keys: wp.array, contact_count: wp.array, *, device: Devicelike = None) -> None:
+        """Prepare the canonical permutation without gathering the full record."""
+        self._sort_and_permute(sort_keys, contact_count, device=device)
+
+    @property
+    def sort_indices_view(self) -> wp.array:
+        """Canonical-index to source-index permutation for the latest sort."""
+        return self._sort_indices[: self._capacity]
 
     @property
     def full_buffer(self) -> _FullContactBuffer:

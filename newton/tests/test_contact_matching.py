@@ -511,17 +511,8 @@ def test_contact_report_requires_matching(test, device):
 # ---------------------------------------------------------------------------
 
 
-def test_sticky_matched_rows_replayed(test, device):
-    """STICKY mode: matched rows carry exact previous-frame geometry even when
-    the narrow phase's fresh output differs on a perturbed second frame.
-
-    Frame 2 perturbs the bodies slightly (less than the match threshold) so
-    the narrow phase produces a different-but-close contact record.  Sticky
-    replay must overwrite ``point0``/``point1``/``offset0``/``offset1`` with
-    the previous frame's values, so after frame 2 those columns equal the
-    frame-1 snapshot even though the narrow phase would have produced
-    something slightly different.
-    """
+def test_sticky_matched_rows_preserved(test, device):
+    """STICKY mode preserves prior geometry across alternating buffers."""
     with wp.ScopedDevice(device):
         model, state = _build_simple_scene(device)
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="sticky")
@@ -552,9 +543,10 @@ def test_sticky_matched_rows_replayed(test, device):
         _collide_once(pipeline_fresh, state, contacts_fresh)
         fresh_point0 = contacts_fresh.rigid_contact_point0.numpy()[:count1]
 
-        count2 = _collide_once(pipeline, state, contacts)
+        contacts_next = pipeline.contacts()
+        count2 = _collide_once(pipeline, state, contacts_next)
         test.assertEqual(count1, count2)
-        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        match_idx = contacts_next.rigid_contact_match_index.numpy()[:count2]
         test.assertTrue(
             np.all(match_idx >= 0),
             f"All perturbed contacts should still match. Unique: {np.unique(match_idx)}",
@@ -567,7 +559,7 @@ def test_sticky_matched_rows_replayed(test, device):
             "Precondition: perturbation must change fresh narrow-phase point0",
         )
 
-        # Sticky contract: replayed fields equal the frame-1 snapshot.
+        # Sticky contract: preserved fields equal the frame-1 snapshot.
         for field, prev in (
             ("point0", snap_point0),
             ("point1", snap_point1),
@@ -575,7 +567,7 @@ def test_sticky_matched_rows_replayed(test, device):
             ("offset1", snap_offset1),
             ("normal", snap_normal),
         ):
-            current = getattr(contacts, f"rigid_contact_{field}").numpy()[:count2]
+            current = getattr(contacts_next, f"rigid_contact_{field}").numpy()[:count2]
             np.testing.assert_array_equal(
                 current,
                 prev,
@@ -587,7 +579,7 @@ def test_sticky_unmatched_rows_pass_through(test, device):
     """STICKY mode: unmatched rows keep the current frame's narrow-phase data.
 
     Add a new sphere to the scene in frame 2.  Its contacts have
-    match_index < 0, so sticky replay must NOT overwrite them — their
+    match_index < 0, so sticky preservation must not overwrite them — their
     shape indices must reflect the newly added shape.
     """
     with wp.ScopedDevice(device):
@@ -674,8 +666,8 @@ def test_tie_break_invariant_under_unsorted_permutation(test, device):
     Regression test: previously the tie-break used the unsorted ``tid``,
     which made the winner depend on the (non-deterministic) slot order;
     in sticky mode this leaked observable non-determinism into the
-    contact buffer because only the winner's row is overwritten by
-    :meth:`ContactMatcher.replay_matched`.
+    contact buffer because only the deterministic winner may use prior sticky
+    geometry.
     """
     from newton._src.geometry.contact_match import ContactMatcher  # noqa: PLC0415
 
@@ -824,7 +816,10 @@ add_function_test(
 )
 
 add_function_test(
-    TestContactMatchingSticky, "test_sticky_matched_rows_replayed", test_sticky_matched_rows_replayed, devices=devices
+    TestContactMatchingSticky,
+    "test_sticky_matched_rows_preserved",
+    test_sticky_matched_rows_preserved,
+    devices=devices,
 )
 add_function_test(
     TestContactMatchingSticky,

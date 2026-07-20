@@ -1188,6 +1188,7 @@ class CollisionPipeline:
         self.contact_matching = contact_matching
         self._matching_enabled = matching_enabled
         self._matching_sticky = matching_sticky
+        self._previous_sticky_contacts = None
         self.contact_report = contact_report
         if matching_enabled:
             self._contact_matcher = ContactMatcher(
@@ -1559,6 +1560,7 @@ class CollisionPipeline:
         :meth:`_generate_soft_contacts` separately.
         """
         model = self.model
+        previous_sticky_contacts = self._previous_sticky_contacts or contacts
 
         # Create ContactWriterData struct for custom contact writing
         writer_data = ContactWriterData()
@@ -1628,28 +1630,33 @@ class CollisionPipeline:
         )
 
         if self.deterministic and self._contact_sorter is not None:
-            self._contact_sorter.sort_full(
-                self._sort_key_array,
-                contacts.rigid_contact_count,
-                shape0=contacts.rigid_contact_shape0,
-                shape1=contacts.rigid_contact_shape1,
-                point0=contacts.rigid_contact_point0,
-                point1=contacts.rigid_contact_point1,
-                offset0=contacts.rigid_contact_offset0,
-                offset1=contacts.rigid_contact_offset1,
-                normal=contacts.rigid_contact_normal,
-                margin0=contacts.rigid_contact_margin0,
-                margin1=contacts.rigid_contact_margin1,
-                tids=contacts.rigid_contact_tids,
-                stiffness=contacts.rigid_contact_stiffness,
-                damping=contacts.rigid_contact_damping,
-                friction=contacts.rigid_contact_friction,
-                match_index=None,
-                source_is_buffer=True,
-                device=self.device,
-            )
+            sort_kwargs = {
+                "sort_keys": self._sort_key_array,
+                "contact_count": contacts.rigid_contact_count,
+                "shape0": contacts.rigid_contact_shape0,
+                "shape1": contacts.rigid_contact_shape1,
+                "point0": contacts.rigid_contact_point0,
+                "point1": contacts.rigid_contact_point1,
+                "offset0": contacts.rigid_contact_offset0,
+                "offset1": contacts.rigid_contact_offset1,
+                "normal": contacts.rigid_contact_normal,
+                "margin0": contacts.rigid_contact_margin0,
+                "margin1": contacts.rigid_contact_margin1,
+                "tids": contacts.rigid_contact_tids,
+                "stiffness": contacts.rigid_contact_stiffness,
+                "damping": contacts.rigid_contact_damping,
+                "friction": contacts.rigid_contact_friction,
+                "match_index": None,
+                "source_is_buffer": True,
+                "device": self.device,
+            }
+            if self._matching_sticky:
+                self._contact_sorter.prepare_full_sort(
+                    self._sort_key_array, contacts.rigid_contact_count, device=self.device
+                )
+            else:
+                self._contact_sorter.sort_full(**sort_kwargs)
 
-        # Match the canonical current stream directly; no match-index permutation.
         if self._contact_matcher is not None:
             if contacts.rigid_contact_match_index is None:
                 raise ValueError(
@@ -1657,41 +1664,60 @@ class CollisionPipeline:
                     "Contacts buffer was created without contact_matching. "
                     "Use pipeline.contacts() to create a compatible buffer."
                 )
+            match_point0 = sort_buffer.point0 if self._matching_sticky else contacts.rigid_contact_point0
+            match_point1 = sort_buffer.point1 if self._matching_sticky else contacts.rigid_contact_point1
+            match_shape0 = sort_buffer.shape0 if self._matching_sticky else contacts.rigid_contact_shape0
+            match_shape1 = sort_buffer.shape1 if self._matching_sticky else contacts.rigid_contact_shape1
+            match_normal = sort_buffer.normal if self._matching_sticky else contacts.rigid_contact_normal
             self._contact_matcher.match(
-                sort_keys=self._contact_sorter.sorted_keys_view,
+                sort_keys=self._sort_key_array if self._matching_sticky else self._contact_sorter.sorted_keys_view,
                 contact_count=contacts.rigid_contact_count,
-                point0=contacts.rigid_contact_point0,
-                point1=contacts.rigid_contact_point1,
-                shape0=contacts.rigid_contact_shape0,
-                shape1=contacts.rigid_contact_shape1,
-                normal=contacts.rigid_contact_normal,
+                point0=match_point0,
+                point1=match_point1,
+                shape0=match_shape0,
+                shape1=match_shape1,
+                normal=match_normal,
                 body_q=state.body_q,
                 shape_body=shape_body if shape_body is not None else model.shape_body,
                 match_index_out=contacts.rigid_contact_match_index,
+                canonical_to_source=self._contact_sorter.sort_indices_view if self._matching_sticky else None,
                 device=self.device,
             )
 
-        # Sticky mode: overwrite matched rows with the saved previous-frame
-        # contact geometry.  Must run after sort_full (so match_index points at
-        # the sorted prev-frame layout *and* we target the final sorted rows)
-        # and before save_sorted_state (we save the record we actually used
-        # this frame, carrying the sticky history forward).
         if self._matching_sticky:
-            self._contact_matcher.replay_matched(
+            self._contact_matcher.build_sticky_overlay(
                 contact_count=contacts.rigid_contact_count,
                 match_index=contacts.rigid_contact_match_index,
-                point0=contacts.rigid_contact_point0,
-                point1=contacts.rigid_contact_point1,
-                offset0=contacts.rigid_contact_offset0,
-                offset1=contacts.rigid_contact_offset1,
-                normal=contacts.rigid_contact_normal,
-                shape0=contacts.rigid_contact_shape0,
-                shape1=contacts.rigid_contact_shape1,
-                margin0=contacts.rigid_contact_margin0,
-                margin1=contacts.rigid_contact_margin1,
+                canonical_to_source=self._contact_sorter.sort_indices_view,
+                previous_point0=previous_sticky_contacts.rigid_contact_point0,
+                previous_point1=previous_sticky_contacts.rigid_contact_point1,
+                previous_offset0=previous_sticky_contacts.rigid_contact_offset0,
+                previous_offset1=previous_sticky_contacts.rigid_contact_offset1,
+                previous_normal=previous_sticky_contacts.rigid_contact_normal,
+                current_point0=sort_buffer.point0,
+                current_point1=sort_buffer.point1,
+                current_offset0=sort_buffer.offset0,
+                current_offset1=sort_buffer.offset1,
+                current_normal=sort_buffer.normal,
+                current_shape0=sort_buffer.shape0,
+                current_shape1=sort_buffer.shape1,
+                current_margin0=sort_buffer.margin0,
+                current_margin1=sort_buffer.margin1,
                 body_q=state.body_q,
                 shape_body=writer_data.shape_body,
                 device=self.device,
+            )
+            sticky_point0, sticky_point1, sticky_offset0, sticky_offset1, sticky_normal = (
+                self._contact_matcher.sticky_overlay_arrays
+            )
+            self._contact_sorter.sort_full(
+                **sort_kwargs,
+                sort_prepared=True,
+                sticky_point0=sticky_point0,
+                sticky_point1=sticky_point1,
+                sticky_offset0=sticky_offset0,
+                sticky_offset1=sticky_offset1,
+                sticky_normal=sticky_normal,
             )
 
         # Build the contact report before saving state, because save
@@ -1713,14 +1739,6 @@ class CollisionPipeline:
                     contacts.rigid_contact_broken_count,
                     device=self.device,
                 )
-            sticky_offsets: dict[str, wp.array] = (
-                {
-                    "sorted_offset0": contacts.rigid_contact_offset0,
-                    "sorted_offset1": contacts.rigid_contact_offset1,
-                }
-                if self._matching_sticky
-                else {}
-            )
             self._contact_matcher.save_sorted_state(
                 sorted_keys=self._contact_sorter.sorted_keys_view,
                 contact_count=contacts.rigid_contact_count,
@@ -1736,7 +1754,6 @@ class CollisionPipeline:
                 # ``model.shape_body``.
                 shape_body=self.unified_shape_body if self.extra_shape_count > 0 else model.shape_body,
                 device=self.device,
-                **sticky_offsets,
             )
 
         # Differentiable contact augmentation: reconstruct world-space contact
@@ -1748,6 +1765,9 @@ class CollisionPipeline:
                 shape_body=model.shape_body,
                 device=self.device,
             )
+
+        if self._matching_sticky:
+            self._previous_sticky_contacts = contacts
 
     def _generate_soft_contacts(self, state: State, contacts: Contacts, soft_contact_margin: float) -> None:
         """Generate particle-vs-shape soft contacts.

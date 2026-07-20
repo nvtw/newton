@@ -701,3 +701,24 @@ At 4M matched contacts the overlay moves a 1.396 TB/s logical rate, 93.7% of
 measured sequential DRAM. It remains neutral when every row is fresh, so it
 does not rely on stable topology for safety. Transfer requires matching before
 canonical gather and retaining only key/midpoint/normal matcher history.
+
+## J10 - canonical sticky overlay in full PhoenX
+
+The mini layout transferred without a PhoenX-specific solver path. Sticky
+matching now builds one coalesced canonical geometry overlay before the
+existing deterministic gather. The old full-record sticky save and replay
+path was removed. Alternating contact buffers remain supported.
+
+Adjacent exact-source RTX PRO 6000 results, one substep, four iterations:
+
+| Workload | Control | Overlay | Throughput gain | Overlay useful roofline |
+| --- | ---: | ---: | ---: | ---: |
+| 32K x 8 fixed stack, 1,048,576 contacts | 2.004 ms | **1.908 ms** | **+5.0%** | 770--777 GB/s; 51.7--52.2% sequential, 74.3--75.0% random-vec4, 1.1% FP32 |
+| 32K x 8 evolving stack, 655,360 contacts | 2.180 ms | **2.136 ms** | **+2.1%** | 432.1 GB/s; 29.0% sequential, 41.7% random-vec4, 0.63% FP32 |
+| 512-body single-world stack | 277.02 us | 278.37 us | -0.5% (noise guardrail) | useful-work lower bound |
+
+The changing-state runs finish with identical contact counts. The default
+midpoint breaking threshold remains 0.5 mm; sticky geometry is reused only
+while the fresh narrow-phase gap is non-positive. All 40 matching tests and
+five deterministic pipeline tests pass, including 500-step sticky CUDA graph
+execution and alternating contact buffers.
