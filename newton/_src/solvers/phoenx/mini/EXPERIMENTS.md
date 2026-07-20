@@ -634,3 +634,70 @@ Determinism (6 tests), compound fallback (5), ingest edge cases (4), and mixed
 joint/material behavior (18) pass. The broad multi-world module was stopped
 after producing no progress for 60 seconds; the 32K and evolving 8K workloads
 exercise the changed multi-world path directly.
+
+## J5 - defer contact-history permutation, rejected
+
+Keeping history in the previous canonical order and applying the match
+permutation at its consumer avoids a copy only in appearance: it turns the
+next read into a gather. A 1M-contact mini probe covering the nine retained
+history floats was neutral for identity matches (18.804 versus 18.776 us,
+1.002x) and slightly slower for within-manifold reorder (19.715 versus
+19.791 us, 0.996x). Fixed contacts were 100% identity, but an evolving 8K
+stack was 0% identity, so an identity shortcut would overfit stable topology.
+No code was retained.
+
+## J6 - fuse contact-column packing into run materialization, rejected
+
+The direct-run boundary thread also wrote the contact-column header, removing
+the 37 us column-pack kernel. It improved the fixed 32K stack only 0.88%
+(1.9133 to 1.8965 ms) and regressed the evolving 8K stack 1.0% (553.76 to
+559.30 us), with identical final contact counts. Concentrating material and
+header gathers in the serial boundary thread loses enough parallel memory
+latency hiding to erase the saved pass when contacts change. No code was
+retained.
+
+## J7 - replace pipeline sticky replay with PhoenX history, rejected
+
+Newton's deterministic latest matching measures the upper bound from
+removing sticky replay: fixed 32K improved 1.891 to 1.722 ms (+9.8%), and an
+above-L2 evolving 32K stack improved 1.984 to 1.891 ms (+4.9%). Native PhoenX
+anchor carry with 1 mm, 10 mm, match-only, and the exact fresh-gap gate all
+changed the settled topology (1.11--1.28M versus 1.05M contacts). Sticky also
+carries its own matching history forward; copying only solver anchors is not
+equivalent. The prototype was removed.
+
+## J8 - cache sticky replay's fresh-gap gate, rejected
+
+The match kernel already transforms both current contact points to world
+space. Caching its exact penetration gap made replay a pure history copy:
+replay fell 77.1 to 55.9 us, while match rose 73.4 to 78.3 us. The fixed 32K
+frame improved only 1.915 to 1.901 ms (+0.8%); dynamic gain is smaller. One
+extra float/contact and API plumbing are not worthwhile. The prototype was
+removed. A larger sticky win must eliminate duplicated history fields/passes,
+not shift arithmetic between kernels.
+
+## J9 - canonical sticky overlay, accepted in mini
+
+Sticky matching stores five vec3 history fields even though the previous
+canonical contact buffer already contains them. A first pre-gather replay
+wrote through the random sort permutation: 1.38x faster at 1M contacts, but
+3.1x slower at 4M once random writes escaped L2. It was rejected.
+
+The accepted layout reuses that history allocation as a canonical overlay.
+Matched rows read the prior canonical buffer; fresh rows gather sort scratch;
+both write the overlay coalesced. The final gather then reads the overlay
+coalesced. This can replace sticky replay plus sticky save without extra
+storage. Isolated RTX PRO 6000 results:
+
+| Contacts | Fresh rows | Current lifecycle | Canonical overlay | Speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,048,576 | 0% | 247.86 us | 57.28 us | 4.33x |
+| 4,194,304 | 0% | 2,309.80 us | 721.09 us | 3.20x |
+| 4,194,304 | 10% | 2,580.80 us | 860.55 us | 3.00x |
+| 4,194,304 | 50% | 2,508.59 us | 1,406.98 us | 1.78x |
+| 4,194,304 | 100% | 1,954.62 us | 1,954.87 us | 1.00x |
+
+At 4M matched contacts the overlay moves a 1.396 TB/s logical rate, 93.7% of
+measured sequential DRAM. It remains neutral when every row is fresh, so it
+does not rely on stable topology for safety. Transfer requires matching before
+canonical gather and retaining only key/midpoint/normal matcher history.
