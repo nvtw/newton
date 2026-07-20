@@ -116,7 +116,7 @@ def _make_rcm_batch_kernels(dtype):
     """
     module_name = f"rcm_batch_kernels_{getattr(dtype, '__name__', str(dtype))}"
     module = wp.get_module(module_name)
-    wp.set_module_options({"enable_backward": False, "default_grid_stride": False}, module=module)
+    module.options.update({"enable_backward": False, "default_grid_stride": False})
 
     @wp.kernel(module=module)
     def init_and_degree_kernel(
@@ -324,7 +324,7 @@ def _make_rcm_batch_fused_tile_kernel(dtype, max_dim: int):
     """Create a native-free tiled RCM kernel using shared tiles."""
     module_name = f"rcm_batch_fused_tile_kernels_{getattr(dtype, '__name__', str(dtype))}_{max_dim}"
     module = wp.get_module(module_name)
-    wp.set_module_options({"enable_backward": False, "default_grid_stride": False}, module=module)
+    module.options.update({"enable_backward": False, "default_grid_stride": False})
 
     @wp.kernel(module=module)
     def fused_rcm_tile_kernel(
