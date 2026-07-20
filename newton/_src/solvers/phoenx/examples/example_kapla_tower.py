@@ -86,11 +86,11 @@ STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 USE_COLORED_CONTACT_HEADERS: bool = True
 USE_COLORED_CONTACT_ROWS: bool = True
 
-# Retain 24 true GS colors, then mass-split only the dense tail. On the
-# 45k-body 2x2 scene, 14 iterations is 21.7% faster than 30-color PGS
-# at 10 iterations while improving drift and linear residuals.
+# The 8-color hybrid is the measured throughput default. A 24-color,
+# 14-iteration policy was more accurate than pure PGS but 2.4x slower
+# than this prior hybrid on the same 1x1 workload.
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 24
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 8
 
 # Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
 # on the origin. ``(1, 1)`` reproduces the original scene; bigger
@@ -145,7 +145,7 @@ class Example:
         self.sim_time = 0.0
         self.frame_index: int = 0
         self.sim_substeps = 6
-        self.solver_iterations = 1 if self.solver_mode == "jacobi" else (14 if ENABLE_MASS_SPLITTING else 6)
+        self.solver_iterations = 1 if self.solver_mode == "jacobi" else (10 if ENABLE_MASS_SPLITTING else 6)
         self.velocity_iterations = 1
 
         self._build_scene()

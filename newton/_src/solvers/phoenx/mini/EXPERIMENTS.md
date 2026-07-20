@@ -1030,6 +1030,14 @@ adding branches to generic body access.
 
 ## J33 - conservative hybrid on a 45k-body single world, accepted
 
+**Correction (2026-07-20): rejected as a default.** The comparison below used
+30-color PGS as its control instead of the existing 8-color/10-iteration
+hybrid. At the first-bad commit boundary, the existing policy ran 81.64 FPS on
+1x1 Kapla versus 34.25 FPS for 24 colors/14 iterations (-58.1%). The example
+is restored to 8/10; the public wrapper is restored to its prior 12-color
+default. The quality/performance data below remains useful only as a comparison
+against pure PGS.
+
 A 2x2 Kapla grid (45,361 bodies, ~978k points, 60 warmup + 120 measured)
 validated a safer 24-GS-color + split-tail configuration. Dynamic-body-only
 residuals exclude static/kinematic benchmark bodies.

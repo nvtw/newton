@@ -223,7 +223,7 @@ class SolverPhoenX(SolverBase):
         max_thread_blocks: int | None = None,
         velocity_readout: str = "substep_end",
         mass_splitting: bool = False,
-        max_colored_partitions: int = 24,
+        max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
         partitioner_algorithm: str = "greedy",
         enable_warm_start_coloring: bool = True,
@@ -278,7 +278,7 @@ class SolverPhoenX(SolverBase):
                 ``"finite_difference"``, or ``"substep_average"``.
             mass_splitting: Enable the graph-colored mass-splitting tail.
             max_colored_partitions: True GS colors retained before the
-                mass-splitting tail. Defaults to 24.
+                mass-splitting tail. Defaults to 12.
             partitioner_algorithm: ``"greedy"`` (default) or
                 ``"luby_fixed"`` (single-world only).
             enable_warm_start_coloring: Reuse previous-frame colour
