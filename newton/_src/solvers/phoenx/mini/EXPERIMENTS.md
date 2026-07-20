@@ -1304,3 +1304,28 @@ versus 1,590.8 GB/s (106.8%, 153.4%), 2.248 TF/s (2.56%). Values above 100%
 reflect cache reuse in the algorithmic lower-bound model, not DRAM counters.
 World-contiguous body order is superior; production staging could only worsen
 the result.
+
+
+## J51 - warp-distributed register body cache, rejected
+
+One logical subwarp kept each small world’s body velocities in owner-lane
+registers and used deterministic shuffles for exact colored-GS endpoint reads
+and updates. On the fixed 32K stack, baseline was 1.4411 ms (1,024.5 GB/s;
+68.8% sequential, 98.8% random-vec4, 1.49% FP32). The existing shared cache
+was 1.3241 ms (+8.8%; 74.9%, 107.5%, 1.62%). Full register caching took
+1.6955 ms (-15.0%; 58.5%, 84.0%, 1.27%); caching velocity only took 1.6151
+ms (-10.8%; 61.4%, 88.2%, 1.33%). Shuffle fanout and update routing exceeded
+the saved traffic. Rejected before physics qualification; implementation removed.
+
+
+## J52 - FP16 immutable contact rows, rejected
+
+An opt-in mini backend narrowed five immutable contact vec4 records from 80 to
+40 bytes while retaining FP32 bodies, impulses, and arithmetic. At 32K fixed
+stack worlds, end-to-end time regressed 1.4302 to 1.5030 ms (-4.8%); useful
+throughput fell from 1,032.3 to 982.3 GB/s (69.3% to 66.0% sequential, 99.6%
+to 94.7% random-vec4) and 1.50% to 1.43% FP32. CUDA graph-node medians showed
+the half-row solve was only 6.1% faster (321.65 to 303.04 us), while conversion
+cost 73.79 us. Eliminating conversion predicts about +0.7% frame throughput;
+even free half-sized prepare stores bound the gain below roughly 3%. This does
+not justify lossy physics or a second prepare representation. Removed.
