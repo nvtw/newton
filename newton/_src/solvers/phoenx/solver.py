@@ -54,6 +54,40 @@ from newton._src.solvers.solver import SolverBase
 __all__ = ["SolverPhoenX"]
 
 
+_AUTO_SINGLE_WORLD_MIN_BODIES = 512
+
+
+def _resolve_auto_step_layout(
+    *,
+    step_layout: str,
+    num_worlds: int,
+    body_count: int,
+    has_joints: bool,
+    has_deformables: bool,
+    has_shapes: bool,
+    solver_flavor: str,
+    contact_friction_model: str,
+    articulation_mode: str,
+) -> str:
+    """Resolve the model-facing PhoenX scheduler policy."""
+    if step_layout not in ("auto", "multi_world", "single_world"):
+        raise ValueError("step_layout must be auto, multi_world, or single_world")
+
+    large_rigid_contact_world = (
+        num_worlds == 1
+        and body_count >= _AUTO_SINGLE_WORLD_MIN_BODIES
+        and not has_joints
+        and not has_deformables
+        and has_shapes
+        and solver_flavor == "standard"
+        and contact_friction_model == "point"
+        and articulation_mode == "maximal"
+    )
+    if step_layout == "auto":
+        return "single_world" if large_rigid_contact_world else "multi_world"
+    return step_layout
+
+
 def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     """Tight rigid_contact_max from shape_contact_pair_count * 5 (CPP) * 2 (safety).
     None when pair count is unavailable (caller falls back to Newton's default)."""
@@ -183,13 +217,13 @@ class SolverPhoenX(SolverBase):
         joint_friction_model: str = "hard",
         contact_friction_model: str = "point",
         default_friction: float = 0.5,
-        step_layout: str = "multi_world",
+        step_layout: str = "auto",
         threads_per_world: int | str = "auto",
         multi_world_scheduler: str = "auto",
         max_thread_blocks: int | None = None,
         velocity_readout: str = "substep_end",
         mass_splitting: bool = False,
-        max_colored_partitions: int = 12,
+        max_colored_partitions: int = 24,
         mass_splitting_batch_size: int = 8,
         partitioner_algorithm: str = "greedy",
         enable_warm_start_coloring: bool = True,
@@ -229,8 +263,10 @@ class SolverPhoenX(SolverBase):
                 solver would require. The simple Jacobi flavor uses
                 ``substeps * jacobi_max_colors`` substeps. Defaults to 10.
             default_friction: Fallback when Contacts/shapes carry no material.
-            step_layout: ``"multi_world"`` (many small worlds) or
-                ``"single_world"`` (a few big worlds).
+            step_layout: ``"auto"`` keeps the multi-world scheduler except
+                for one rigid contact-only world with at least 512 bodies,
+                where it selects ``"single_world"``. Explicit
+                ``"multi_world"`` and ``"single_world"`` override the policy.
             threads_per_world: ``"auto"`` / 32 / 16 / 8 (multi-world).
             multi_world_scheduler: Static multi-world scheduler policy.
                 ``"auto"`` is the default performance policy and resolves
@@ -240,6 +276,9 @@ class SolverPhoenX(SolverBase):
             max_thread_blocks: Optional cap on the single-world PGS grid.
             velocity_readout: ``"substep_end"`` (default, bit-faithful),
                 ``"finite_difference"``, or ``"substep_average"``.
+            mass_splitting: Enable the graph-colored mass-splitting tail.
+            max_colored_partitions: True GS colors retained before the
+                mass-splitting tail. Defaults to 24.
             partitioner_algorithm: ``"greedy"`` (default) or
                 ``"luby_fixed"`` (single-world only).
             enable_warm_start_coloring: Reuse previous-frame colour
@@ -276,6 +315,25 @@ class SolverPhoenX(SolverBase):
                 topology-proven cross-phase articulation fusion on CUDA.
         """
         super().__init__(model)
+        gravity_np = self._read_model_gravity_np(model)
+        num_worlds = max(1, int(gravity_np.shape[0]))
+        has_deformables = any(
+            int(getattr(model, field, 0) or 0) > 0
+            for field in ("particle_count", "tri_count", "edge_count", "tet_count")
+        )
+        joint_types = model.joint_type.numpy() if int(model.joint_count) > 0 else np.empty(0, dtype=np.int32)
+        has_constraint_joints = bool(np.any(joint_types != int(JointType.FREE)))
+        step_layout = _resolve_auto_step_layout(
+            step_layout=step_layout,
+            num_worlds=num_worlds,
+            body_count=int(model.body_count),
+            has_joints=has_constraint_joints,
+            has_deformables=has_deformables,
+            has_shapes=int(model.shape_count) > 0,
+            solver_flavor=solver_flavor,
+            contact_friction_model=contact_friction_model,
+            articulation_mode=articulation_mode,
+        )
         valid_articulation_modes = ("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced")
         if articulation_mode not in valid_articulation_modes:
             raise ValueError(f"articulation_mode must be one of {valid_articulation_modes}, got {articulation_mode!r}")
@@ -445,8 +503,6 @@ class SolverPhoenX(SolverBase):
             model.rigid_contact_max = max(1000, 8 * (int(model.shape_count) + deformable_shapes))
         rigid_contact_max = int(model.rigid_contact_max)
 
-        gravity_np = self._read_model_gravity_np(model)
-        num_worlds = max(1, int(gravity_np.shape[0]))
         gravity_tuples = [tuple(float(x) for x in row) for row in gravity_np]
         if len(gravity_tuples) == 1:
             gravity_arg = gravity_tuples[0]

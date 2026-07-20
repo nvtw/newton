@@ -1045,3 +1045,25 @@ residual rose 2.55 to 3.09 rad/s (+21%). Cap 16 was faster (+41.5%) but had
 large velocity outliers, so it remains rejected as a general large-world
 setting. The Kapla example now uses cap 24 and 14 iterations. Roofline values
 are useful-work estimates; >100% random-vec4 indicates reuse, not DRAM traffic.
+
+
+## J34 - automatic scheduler policy, accepted
+
+RTX PRO 6000 layout sweeps selected one conservative default: one rigid,
+contact-only world uses the single-world scheduler from 512 bodies; multi-world,
+jointed, deformable, and smaller scenes retain multi-world. Explicit overrides
+remain available. Tower-grid frame times (8 PGS iterations):
+
+| Bodies | Multi-world | Single-world | Single gain |
+| ---: | ---: | ---: | ---: |
+| 128 | 0.737 ms | 1.017 ms | -27.5% |
+| 512 | 1.538 ms | 1.119 ms | +37.4% |
+| 2,048 | 1.922 ms | 1.083 ms | +77.4% |
+| 4,608 | 3.869 ms | 1.151 ms | +236.2% |
+
+The final automatic 512-body result was 1.122 ms (+37.0% versus the old
+default). H1, G1, and a 480-body jointed G1 scene favored multi-world, so they
+are excluded. Automatic 24-color/14-iteration hybrid was rejected: versus
+classic single-world PGS it regressed 36.6%, 42.0%, 44.5%, and 39.8% at 512,
+2,048, 4,608, and 8,192 bodies. Hybrid benefit depends on graph structure, not
+body count; keep it explicit until a cheap graph-derived policy is validated.
