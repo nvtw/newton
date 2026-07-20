@@ -1067,3 +1067,21 @@ are excluded. Automatic 24-color/14-iteration hybrid was rejected: versus
 classic single-world PGS it regressed 36.6%, 42.0%, 44.5%, and 39.8% at 512,
 2,048, 4,608, and 8,192 bodies. Hybrid benefit depends on graph structure, not
 body count; keep it explicit until a cheap graph-derived policy is validated.
+
+
+## J35 - classic-PGS color-ordered rows, rejected
+
+A minimal prototype uncoupled the existing solver-local colored contact stream
+from mass splitting; canonical collision and matching order stayed unchanged.
+RTX PRO 6000 tower-grid frames, one substep and eight classic PGS iterations:
+
+| Bodies | Canonical rows | Colored rows | Throughput |
+| ---: | ---: | ---: | ---: |
+| 512 | 1.122 ms | 1.013 ms | +10.8% |
+| 2,048 | 1.083 ms | 1.124 ms | -3.6% |
+| 8,192 | 1.321 ms | 1.327 ms | -0.5% |
+
+The staging cost wins at the crossover but loses once the classic solver is
+already efficient. The prior large Kapla gains therefore do not justify a
+universal classic-PGS row layout. Removed completely; packed rows remain part
+of the explicit hybrid path.
