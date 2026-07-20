@@ -29,7 +29,10 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.contact_ingest import (
+    IngestScratch,
     _contact_pair_boundary_kernel,
+    _mark_valid_shape_pair_runs_kernel,
+    _materialize_valid_shape_pair_runs_kernel,
     _pair_counts_and_columns_kernel,
     _scatter_pair_starts_kernel,
 )
@@ -181,6 +184,77 @@ class TestContactIngestLargeShapeCount(unittest.TestCase):
         np.testing.assert_array_equal(result["pair_shape_b"], expected_sb)
         np.testing.assert_array_equal(result["pair_first"], expected_first)
         np.testing.assert_array_equal(result["pair_count"], expected_counts)
+
+    def test_tiled_compaction_across_block_boundaries(self) -> None:
+        """Block-local ids plus block prefixes preserve global run order."""
+        device = wp.get_preferred_device()
+        pairs = [(shape, shape + 1000, 2) for shape in range(300)]
+        shape0_np, shape1_np, count = _synthesize_sorted_contacts(pairs)
+        capacity = 640
+        shape0_pad = np.zeros(capacity, dtype=np.int32)
+        shape1_pad = np.zeros(capacity, dtype=np.int32)
+        shape0_pad[:count] = shape0_np
+        shape1_pad[:count] = shape1_np
+        shape0 = wp.array(shape0_pad, dtype=wp.int32, device=device)
+        shape1 = wp.array(shape1_pad, dtype=wp.int32, device=device)
+        contact_count = wp.array([count], dtype=wp.int32, device=device)
+        shape_body_np = np.arange(1301, dtype=np.int32)
+        shape_body_np[1128] = 128  # Self-pair exactly at contact/block boundary 256.
+        shape_body = wp.array(shape_body_np, dtype=wp.int32, device=device)
+        filter_keys = wp.array([200 * 1301 + 1200], dtype=wp.int64, device=device)
+        scratch = IngestScratch(capacity, capacity, device=device)
+        cid_of_contact = wp.full(capacity, -2, dtype=wp.int32, device=device)
+        num_active = wp.zeros(1, dtype=wp.int32, device=device)
+        blocks = (capacity + 255) // 256
+
+        wp.launch_tiled(
+            _mark_valid_shape_pair_runs_kernel,
+            dim=blocks,
+            inputs=[contact_count, shape0, shape1, shape_body, 1301, filter_keys, 1],
+            outputs=[scratch.pair_boundary, scratch.pair_id, scratch.pair_block_count, cid_of_contact],
+            block_dim=256,
+            device=device,
+        )
+        wp.utils.array_scan(scratch.pair_block_count, scratch.pair_block_prefix, inclusive=True)
+        wp.launch(
+            _materialize_valid_shape_pair_runs_kernel,
+            dim=capacity,
+            inputs=[
+                contact_count,
+                shape0,
+                shape1,
+                scratch.pair_boundary,
+                scratch.pair_id,
+                scratch.pair_block_prefix,
+                blocks,
+                256,
+                capacity,
+                7,
+            ],
+            outputs=[
+                scratch.pair_first,
+                scratch.pair_count,
+                scratch.pair_shape_a,
+                scratch.pair_shape_b,
+                scratch.pair_source_idx,
+                cid_of_contact,
+                scratch.num_pairs,
+                scratch.num_contact_columns,
+                num_active,
+            ],
+            device=device,
+        )
+
+        kept = np.delete(np.arange(300), [128, 200])
+        expected_cids = np.full(count, -1, dtype=np.int32)
+        for column, pair in enumerate(kept):
+            expected_cids[2 * pair : 2 * pair + 2] = 7 + column
+        self.assertEqual(int(scratch.num_contact_columns.numpy()[0]), 298)
+        self.assertEqual(int(num_active.numpy()[0]), 305)
+        np.testing.assert_array_equal(scratch.pair_first.numpy()[:298], 2 * kept)
+        np.testing.assert_array_equal(scratch.pair_count.numpy()[:298], np.full(298, 2))
+        np.testing.assert_array_equal(cid_of_contact.numpy()[:count], expected_cids)
+        np.testing.assert_array_equal(cid_of_contact.numpy()[count:], np.full(capacity - count, -1))
 
     def test_single_pair_single_contact(self) -> None:
         """Edge case: one contact for one pair. Pair 0 runs [0, 1)."""

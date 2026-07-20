@@ -1190,3 +1190,28 @@ streams and body states are bit-identical to CUB coloring. First-step graph
 capture, multi-world isolation, TPW scheduling, momentum, and explicit
 single-world joint/contact tests pass. Sleeping, deformables, single-world,
 and non-greedy paths retain the prior implementation.
+
+
+## J44 - tiled deterministic contact compaction, accepted
+
+Ordinary PhoenX contact ingest now scans valid shape-pair boundaries inside
+256-contact blocks, then scans only the block counts. Stable block prefixes
+preserve the exact global column order. CollisionPipeline and compound
+body-pair grouping are unchanged.
+
+At 2.10M contact capacity / 1.05M live contacts, mark + scan + materialize fell
+from 86.5 to 36.4 us (-50.1 us). Matched RTX PRO 6000 results:
+
+| Workload | Control | Candidate | Gain |
+| --- | ---: | ---: | ---: |
+| 32K stack, fixed | 1.5175 ms | **1.4734 ms** | **+3.0%** |
+| 32K stack, evolving | 1.8461 ms | **1.7758 ms** | **+4.0%** |
+| 8K revolute robots, sparse contacts | 245.28 us | 244.69 us | +0.2% |
+| 45K-body compound Kapla | 45.30 FPS | 45.45 FPS | +0.3% |
+
+Fixed-stack useful throughput is 1,002.1 GB/s: 67.3% of sequential DRAM,
+96.6% of random-vec4 bandwidth, and 1.46% of FP32 peak. Full PhoenX is tied
+with current mini on the identical fixed workload (1.473 vs 1.477 ms) and is
+far faster when topology evolves. Contact columns, colors, stack/robot body
+states, and the Kapla stability metrics are identical. A 640-slot regression
+covers deterministic IDs and cid mapping across two block boundaries.
