@@ -785,3 +785,46 @@ The evolving 32K workload retained exactly 819,200 final contacts and measured
 2.093 versus 2.088 ms (-0.3%, noise). The dense 512-body, 2x2 Kapla guardrail
 reduced profiled GPU work about 0.4%. Matching (40) and broad physics,
 determinism, isolation, and mesh-contact tests (54) pass.
+
+
+## J14 - persistent active-count history save, rejected
+
+A 4-block/SM persistent save raised the 1M-contact save kernel from 97.2 to
+105.0 us and measured 1.783 versus 1.780 ms end to end. The broad streaming
+grid needs its latency hiding; active-count gating already removes tail traffic.
+
+## J15 - precomputed contact midpoint/gap stream, rejected
+
+Streaming a narrow-phase midpoint/gap into matching removed duplicate body
+transforms: matching fell 84.2 to 64.1 us. The extra collision output and cache
+pollution raised GJK 200.8 to 213.8 us, gather 98.8 to 112.8 us, and save 97.2
+to 104.0 us. The frame regressed from 1.7800 to 1.7844 ms. Recompute is cheaper
+than another full contact stream.
+
+## J16 - narrower graph metadata, rejected
+
+Two-body-only graph elements improved element projection 37.25 to 34.91 us and
+run merge 22.50 to 19.74 us, but coloring rose 50.59 to 56.29 us and run marking
+24.19 to 28.96 us; the frame was neutral. Packing world id into the existing
+family word halved merge (22.50 to 10.82 us) but raised coloring to 56.99 us and
+marking to 28.38 us, for only a noisy 0.5% frame change. Generic graph width is
+not the next representation lever.
+
+## J17 - moderate fused-PGS register cap, rejected
+
+The contact-only fused kernel uses 168 registers/thread. A moderate
+`launch_bounds=(256, 2)` cap (about 128 registers, unlike the earlier severe
+64-register G1 control) measured 1.800 versus 1.780 ms on the fixed 32K-world
+workload (-1.1% throughput). The spill/latency cost still exceeds added
+occupancy; no cap remains.
+
+## J18 - conditional coloring scans, active lead
+
+An evolving 32K-world run reached 1,212,416 contacts while reporting 0 topology
+rebuilds across 120 frames: contact geometry/count changed, but the deterministic
+body-pair graph remained reusable. PhoenX nevertheless executes two global
+world-stream scans before its existing CUDA conditional. The trace measures
+about 25.5 us per CUB scan plus 24.2 us for count/mark, roughly 75 us/frame.
+Moving CUB scans directly into the conditional is illegal because their graph
+contains allocation nodes. Next test: an allocation-free tiled hierarchical
+scan in mini, then transfer only if rebuild frames stay competitive.
