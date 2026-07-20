@@ -51,6 +51,50 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         self.assertEqual(llt.dtype, wp.float32)
         self.assertEqual(llt.device, self.default_device)
 
+    def test_cached_permutation_with_changed_sparsity(self):
+        """Cached RCM remains correct when the numeric sparsity pattern changes."""
+        n = 96
+        rng = np.random.default_rng(self.seed)
+
+        def make_banded_spd(width):
+            matrix = np.zeros((n, n), dtype=np.float32)
+            for offset in range(1, width + 1):
+                values = rng.uniform(-0.2, 0.2, n - offset).astype(np.float32)
+                rows = np.arange(n - offset)
+                matrix[rows, rows + offset] = values
+                matrix[rows + offset, rows] = values
+            matrix[np.diag_indices(n)] = np.sum(np.abs(matrix), axis=1) + 1.0
+            return matrix
+
+        matrix_1 = make_banded_spd(2)
+        matrix_2 = make_banded_spd(9)
+        rhs_np = rng.standard_normal(n).astype(np.float32)
+
+        info = DenseSquareMultiLinearInfo()
+        info.finalize(dimensions=[n], dtype=wp.float32, device=self.default_device)
+        matrix_wp = wp.array(matrix_1.reshape(-1), dtype=wp.float32, device=self.default_device)
+        rhs_wp = wp.array(rhs_np, dtype=wp.float32, device=self.default_device)
+        result_wp = wp.zeros(n, dtype=wp.float32, device=self.default_device)
+        operator = DenseLinearOperatorData(info=info, mat=matrix_wp)
+        solver = LLTBlockedRCMSolver(
+            operator=operator,
+            block_size=32,
+            factorize_block_dim=256,
+            reuse_permutation=True,
+            parallel_factorization=True,
+            device=self.default_device,
+        )
+
+        solver.compute(matrix_wp)
+        permutation_1 = solver.P.numpy()
+        matrix_wp.assign(matrix_2.reshape(-1))
+        solver.compute(matrix_wp)
+        solver.solve(rhs_wp, result_wp)
+
+        np.testing.assert_array_equal(solver.P.numpy(), permutation_1)
+        expected = np.linalg.solve(matrix_2, rhs_np)
+        np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-3, atol=1.0e-4)
+
     def test_01_single_problem_dims_all_active(self):
         """
         Test the blocked LLT solver on a single small problem.

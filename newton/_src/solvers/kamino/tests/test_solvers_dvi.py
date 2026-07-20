@@ -191,6 +191,8 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(default_config.dvi.block_iterations, 16)
         self.assertEqual(default_config.dvi.contact_iterations, 2)
         self.assertEqual(default_config.dvi.bilateral_solve_period, 2)
+        self.assertEqual(default_config.dvi.bilateral_solver_type, "LLTB")
+        self.assertEqual(default_config.dvi.bilateral_solver_kwargs, {})
         self.assertEqual(default_config.dvi.contact_jacobi_omega, 0.45)
         self.assertEqual(default_config.dvi.contact_jacobi_relaxation, 0.9)
 
@@ -249,6 +251,7 @@ class TestDVISolver(unittest.TestCase):
             {"block_iterations": 0},
             {"contact_iterations": 0},
             {"bilateral_solve_period": 0},
+            {"bilateral_solver_type": "invalid"},
             {"contact_jacobi_omega": 0.0},
             {"contact_jacobi_omega": 2.1},
             {"contact_jacobi_relaxation": 0.0},

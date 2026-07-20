@@ -47,3 +47,18 @@ the more broadly validated choice. Set ``sparse_jacobian=False`` and
 ``sparse_dynamics=False`` for dense DVI. With
 ``collect_solver_info=True``, DVI stores terminal residual status that should
 not be interpreted as PADMM ADMM residuals.
+
+For large bilateral systems, opt into RCM-reordered factorization explicitly:
+
+.. code-block:: python
+
+   config.dvi.bilateral_solver_type = "LLTBRCM"
+   config.dvi.bilateral_solver_kwargs = {
+       "block_size": 32,
+       "reuse_permutation": True,
+       "parallel_factorization": True,
+   }
+
+The cached permutation remains mathematically valid when matrix values or
+sparsity change and is recomputed automatically if the active dimension
+changes. Keep the default ``"LLTB"`` solver for small systems.

@@ -101,6 +101,8 @@ def allocate_rcm_batch_scratch(total_vec: int, num_blocks: int, device) -> dict:
         "order_buf": wp.empty(total_vec, dtype=wp.int32, device=device),
         "head": wp.empty(num_blocks, dtype=wp.int32, device=device),
         "root": wp.empty(num_blocks, dtype=wp.int32, device=device),
+        "permutation_valid": wp.zeros(num_blocks, dtype=wp.int32, device=device),
+        "permutation_dim": wp.zeros(num_blocks, dtype=wp.int32, device=device),
     }
 
 
@@ -329,17 +331,22 @@ def _make_rcm_batch_fused_tile_kernel(dtype, max_dim: int):
         num_blocks: int,
         max_bfs_iters: int,
         tol: dtype,  # type: ignore[valid-type]
+        reuse_permutation: bool,
         A: wp.array[dtype],  # type: ignore[valid-type]
         dims: wp.array[wp.int32],
         mio: wp.array[wp.int32],
         vio: wp.array[wp.int32],
         perm: wp.array[wp.int32],
+        permutation_valid: wp.array[wp.int32],
+        permutation_dim: wp.array[wp.int32],
     ):
         b, lane = wp.tid()
         if b >= num_blocks:
             return
-
         n_b = dims[b]
+        if reuse_permutation and permutation_valid[b] != int(0) and permutation_dim[b] == n_b:
+            return
+
         if n_b > max_dim:
             return
 
@@ -406,6 +413,10 @@ def _make_rcm_batch_fused_tile_kernel(dtype, max_dim: int):
 
             perm[vb + (n_b - int(1) - cm_pos)] = lane
 
+        if lane == 0:
+            permutation_valid[b] = int(1)
+            permutation_dim[b] = n_b
+
     return fused_rcm_tile_kernel
 
 
@@ -444,6 +455,7 @@ def create_rcm_batch_launch(
     tol: float = 0.0,
     max_bfs_iters: int | None = None,
     use_cuda_graph: bool = True,
+    reuse_permutation: bool = False,
     device=None,
     stream=None,
 ) -> Callable[[], None]:
@@ -487,11 +499,14 @@ def create_rcm_batch_launch(
                 num_blocks,
                 int(max_bfs_iters),
                 float(tol),
+                bool(reuse_permutation),
                 A_flat,
                 dims,
                 mio,
                 vio,
                 perm_flat,
+                scratch["permutation_valid"],
+                scratch["permutation_dim"],
             ],
             device=device,
             stream=stream,
