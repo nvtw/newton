@@ -2244,7 +2244,7 @@ class Model:
         """
         Create and return a :class:`Contacts` object for this model.
 
-        .. deprecated:: 1.4
+        .. deprecated:: 1.5
 
             Create a :class:`CollisionPipeline` and call
             :meth:`CollisionPipeline.contacts` instead.
@@ -2285,7 +2285,7 @@ class Model:
         Generate contact points for the particles and rigid bodies in the model using the default collision
         pipeline.
 
-        .. deprecated:: 1.4
+        .. deprecated:: 1.5
 
             Create a :class:`CollisionPipeline` and call
             :meth:`CollisionPipeline.collide` instead.
