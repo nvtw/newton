@@ -993,3 +993,55 @@ balance, overflow momentum, and soft-body bit-exact determinism passed. Treat
 16/14 as a qualified Kapla option, not a universal default until other large
 single-world scenes confirm convergence. Always compare mass splitting at
 matched residual quality; equal iteration counts are misleading.
+
+## J30 - split full-PhoenX prepare/iterate kernels, rejected
+
+NCU measured the fused multi-world prepare+PGS kernel at 168 registers/thread,
+23.6% occupancy, 93.4% L2 hits, and 385 GB/s. Two statically pruned kernels
+isolated prepare and iterate while reusing every existing dispatch function.
+On 8,192 changing robot worlds (8 bodies, 8 revolute joints, 4 contacts/world,
+4 iterations), frame time regressed 265.2 to 269.6 us (-1.6%). The extra launch
+cost exceeds any occupancy benefit. Prototype removed; reducing the hot body
+working set remains the target.
+
+## J31 - two-sweep register-resident constraints, rejected
+
+Running two local sweeps per constraint before advancing colors reused body/row
+state without new storage. Full PhoenX mixed 8-body robot worlds improved
+265.2 to 253.8 us (+4.5%). Evolving 32K stacks increased the final manifold
+from 1.049M to 1.180M contacts and regressed 1.944 to 2.073 ms, despite +5.5%
+per-contact throughput. Delaying cross-color propagation weakens convergence
+and creates more collision work. Removed; shared caching must preserve the
+original color order.
+
+## J32 - generic full-PhoenX shared body cache, rejected
+
+A native cache preserved exact color order and held velocity, inverse mass, and
+world inverse inertia in four shared vec4 arrays. Collapsing four loads plus two
+stores per body to one 16-float load and one paired-vec4 store did not recover
+the mini result. On the same 8,192-world mixed solve, committed PhoenX took
+43.40 us versus 55.84 us cached: -22.3% throughput. Merely routing uncached
+scenes through runtime cache-aware accessors regressed an evolving frame from
+5.171 to 5.517 ms (-6.7%). Full PhoenX already uses 168 registers/thread; the
+generic branch/interface and 16 KiB shared allocation cost more than the saved
+body traffic. Removed. Any retry must specialize the fused kernel statically
+and integrate storage directly, as mini does, without changing PGS ordering or
+adding branches to generic body access.
+
+## J33 - conservative hybrid on a 45k-body single world, accepted
+
+A 2x2 Kapla grid (45,361 bodies, ~978k points, 60 warmup + 120 measured)
+validated a safer 24-GS-color + split-tail configuration. Dynamic-body-only
+residuals exclude static/kinematic benchmark bodies.
+
+| Solver | Iterations | Frame | Gain | Seq BW | Random vec4 | FP32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 30-color PGS | 10 | 41.41 ms | - | 44.7% | 64.2% | 0.97% |
+| 24 GS + split tail | 14 | **34.02 ms** | **+21.7%** | 76.0% | 109.1% | 1.65% |
+
+Hybrid mean/max drift improved 0.927/633.5 to 0.664/610.2 mm; mean/max
+linear residual improved 0.00201/0.376 to 0.00182/0.280 m/s. Peak angular
+residual rose 2.55 to 3.09 rad/s (+21%). Cap 16 was faster (+41.5%) but had
+large velocity outliers, so it remains rejected as a general large-world
+setting. The Kapla example now uses cap 24 and 14 iterations. Roofline values
+are useful-work estimates; >100% random-vec4 indicates reuse, not DRAM traffic.

@@ -158,7 +158,7 @@ def _run_one(
 ) -> BenchResult:
     """Build the scene, run warmup + steady-state, return measurements."""
     # Import here so the module loads cheap (parser help, etc.).
-    from newton._src.solvers.phoenx.examples import example_kapla_tower as ek  # noqa: PLC0415
+    from newton._src.solvers.phoenx.examples import example_kapla_tower as ek
 
     ek.TOWER_GRID_DIMS = grid_dims
     ek.ENABLE_MASS_SPLITTING = mass_splitting
@@ -192,14 +192,16 @@ def _run_one(
     wp.synchronize_device(ex.device)
     elapsed = time.perf_counter() - t0
     pos_end = ex.bodies.position.numpy()
-    velocity_end = ex.bodies.velocity.numpy()[1:]
-    angular_velocity_end = ex.bodies.angular_velocity.numpy()[1:]
+    velocity_end = ex.bodies.velocity.numpy()
+    angular_velocity_end = ex.bodies.angular_velocity.numpy()
+    motion_type = ex.bodies.motion_type.numpy()
 
     fps = measured_frames / elapsed
-    drift = np.linalg.norm(pos_end - pos_start, axis=1)
-    speeds = np.linalg.norm(velocity_end, axis=1)
-    angular_speeds = np.linalg.norm(angular_velocity_end, axis=1)
-    zs = pos_end[1:, 2]  # slot 0 is the static world anchor
+    dynamic = motion_type >= 2
+    drift = np.linalg.norm(pos_end[dynamic] - pos_start[dynamic], axis=1)
+    speeds = np.linalg.norm(velocity_end[dynamic], axis=1)
+    angular_speeds = np.linalg.norm(angular_velocity_end[dynamic], axis=1)
+    zs = pos_end[dynamic, 2]
     report = ex.world.step_report()
     contact_points = int(ex.contacts.rigid_contact_count.numpy()[0])
     iteration_rate = contact_points * solver_iterations * substeps * ex.steps_per_frame * fps

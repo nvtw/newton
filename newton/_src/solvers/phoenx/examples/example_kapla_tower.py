@@ -86,14 +86,11 @@ STEP_LAYOUT: str = "single_world" if USE_BIG_WORLD_MODE else "multi_world"
 USE_COLORED_CONTACT_HEADERS: bool = True
 USE_COLORED_CONTACT_ROWS: bool = True
 
-# Tonge mass splitting (C# PhoenX default). When ``True`` the
-# partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`
-# colours and any remainder goes to an overflow bucket solved with
-# per-(body, partition) copy states. Currently requires the single-
-# world layout (the multi-world fast-tail kernels haven't been
-# refactored yet) and no joints / cloth — both true for this scene.
+# Retain 24 true GS colors, then mass-split only the dense tail. On the
+# 45k-body 2x2 scene, 14 iterations is 21.7% faster than 30-color PGS
+# at 10 iterations while improving drift and linear residuals.
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 8
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 24
 
 # Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
 # on the origin. ``(1, 1)`` reproduces the original scene; bigger
@@ -148,14 +145,7 @@ class Example:
         self.sim_time = 0.0
         self.frame_index: int = 0
         self.sim_substeps = 6
-        # iters=3 + sor=1.5 below settles slightly *better* than the
-        # vanilla iters=4 sor=1.0 at +13% FPS. Over-relaxation
-        # (omega=1.5) accelerates lambda propagation through tall
-        # stacks; kapla's iter budget was bound by stack-pressure
-        # propagation, not friction convergence (where cone clipping
-        # would eat the boost). Validated by 1000-frame stability:
-        # max brick velocity 0.66 m/s vs 0.73 m/s vanilla.
-        self.solver_iterations = 1 if self.solver_mode == "jacobi" else (10 if ENABLE_MASS_SPLITTING else 6)
+        self.solver_iterations = 1 if self.solver_mode == "jacobi" else (14 if ENABLE_MASS_SPLITTING else 6)
         self.velocity_iterations = 1
 
         self._build_scene()
