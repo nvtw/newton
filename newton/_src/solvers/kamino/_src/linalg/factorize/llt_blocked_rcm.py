@@ -133,7 +133,8 @@ def make_llt_blocked_rcm_fused_permute_and_tp_kernel(block_size: int, max_dim: i
     """Fused kernel: builds ``inv_P``, permutes ``A -> A_hat``, and reduces
     ``|A_hat|`` into the tile pattern in a single launch.
 
-    Launch dims: ``(num_blocks, max_dim, max_dim)``. Each thread ``(b, r, c)``:
+    Launch dims: ``(num_blocks, max_dim * (max_dim + 1) // 2)``. Each thread
+    processes one element of the lower triangle:
 
     1. If ``c == 0``: writes ``inv_P[P[r]] = r`` for block ``b``.
     2. Computes ``v = A[P[r], P[c]]`` and writes it into ``A_hat[r, c]``.
@@ -163,10 +164,21 @@ def make_llt_blocked_rcm_fused_permute_and_tp_kernel(block_size: int, max_dim: i
         inv_P: wp.array[wp.int32],
         tile_pattern: wp.array[wp.int32],
     ):
-        b, r, c = wp.tid()
+        b, triangular_index = wp.tid()
         n_i = dim[b]
-        if r >= n_i or c >= n_i:
+        triangular_size = n_i * (n_i + 1) // 2
+        if triangular_index >= triangular_size:
             return
+
+        r = int((wp.sqrt(float(8 * triangular_index + 1)) - float(1)) * float(0.5))
+        row_start = r * (r + 1) // 2
+        if row_start > triangular_index:
+            r -= 1
+            row_start = r * (r + 1) // 2
+        elif (r + 1) * (r + 2) // 2 <= triangular_index:
+            r += 1
+            row_start = r * (r + 1) // 2
+        c = triangular_index - row_start
         mat_off = mio[b]
         vec_off = vio[b]
         tp_off = tpo[b]
@@ -778,7 +790,7 @@ def llt_blocked_rcm_fused_permute_and_tp(
     """
     wp.launch(
         kernel=kernel,
-        dim=(num_blocks, max_dim, max_dim),
+        dim=(num_blocks, max_dim * (max_dim + 1) // 2),
         inputs=[dim, mio, vio, tpo, float(tol), P, A, A_hat, inv_P, tile_pattern],
         device=device,
     )
