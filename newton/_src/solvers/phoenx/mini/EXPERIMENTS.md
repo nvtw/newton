@@ -501,3 +501,136 @@ RTX PRO 6000 controlled experiments found no safe full-solver win:
 No solver code was retained. Previous history remains normal+tangent1; tangent2
 is reconstructed by cross product. The next contact-staging decision requires
 the requested Nsight Compute counters, not more source-level load guesses.
+
+## F25 - mini-style cross-frame cold start, rejected
+
+Cold-starting impulses with a fresh velocity-aligned tangent passed 28 scale,
+friction, and force tests. It removed 94.3 us of fixed-state history work and
+improved the 32K stack 1.990 to 1.897 ms (+4.9%). On the evolving stack it
+produced 1,114,112 instead of 1,048,576 contacts and took 2.106 instead of
+2.086 ms. Retaining only the normal impulse still produced 1,114,112 contacts
+and took 2.143 ms, despite a 3.5% fixed-state gain. The mixed robot was neutral.
+
+Cross-frame friction-frame continuity reduces downstream contact work enough
+to repay its staging cost. Full normal+tangent1 history remains retained.
+
+
+## F26 - hardware counters and layout controls
+
+Nsight Compute on the fixed 32K stack identified different bottlenecks:
+
+| Kernel | Time | DRAM | DRAM peak | SM peak | Excess sectors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| deterministic collision gather | 204.9 us | 1.10 TB/s | 64.3% | 7.6% | 75% |
+| contact warm-start gather | 132.5 us | 1.06 TB/s | 61.8% | 47.6% | 25% |
+| contact history copy | 62.3 us | 952 GB/s | 55.8% | 60.4% | negligible |
+| fused prepare + PGS | 555.2 us | 386 GB/s | 22.5% | 19.6% | 85% |
+
+The fused kernel uses 168 registers/thread and 25% occupancy, with 93.4% L2
+hit rate. Its excess sectors are therefore chiefly scattered/cache traffic,
+not proof that the full frame is close to DRAM peak. The collision gather is
+Newton’s general deterministic sort permutation, not PhoenX row gathering.
+
+Controlled full-solver experiments were rejected:
+
+- Disabling Warp grid stride in multi-world fast-tail was neutral and unsafe
+  when the physical grid is capped. Single-world persistent kernels already
+  use `grid_stride=False`.
+- Splitting fused prepare and PGS cost 360.0 versus 313.6 us (+14.8% kernel
+  time) and regressed the frame 2.4%.
+- World-major deterministic sorting reduced world runs but regressed the frame
+  2.7%; collision gather alone grew 23.3 us.
+- True contact-major hot-row AoS recovered the initial plane-major vec4 loss,
+  but remained neutral: 1.9948 versus 1.9917 ms over 400 replays (-0.15%).
+- Symmetric compile-time contact-only dispatch unexpectedly regressed 2.1004
+  versus 1.9825 ms (-5.6%); retaining the unified runtime dispatch generates
+  the faster CUDA on this Warp/NVRTC toolchain.
+
+No solver code was retained. A current 2x2x16 single-world tower sweep found
+the shipped 256-row fused-tail threshold best at 477.6 us/solve; disabling the
+tail took 480.0 us. Large single-world tuning remains an explicit guardrail,
+but this launch threshold is already on its performance plateau.
+
+## J0 - deterministic gather-Jacobi, rejected
+
+A contact kernel wrote two endpoint velocity deltas and a deterministic body
+CSR gather applied them. This removed coloring from the solve and exposed all
+contacts concurrently, but added 64 B/contact/iteration of delta traffic plus
+a second streaming pass. At four iterations:
+
+| Workload | Colored PGS | Gather-Jacobi | Change | Jacobi useful roofline |
+| --- | ---: | ---: | ---: | ---: |
+| 4K fixed stack | 238.2 us | 313.8 us | -24.1% throughput | 39.5% sequential / 56.7% random-vec4 |
+| 32K above-L2 stack | 1.568 ms | 1.978 ms | -20.7% throughput | 50.1% sequential / 72.0% random-vec4 |
+
+Jacobi would also need parity qualification and likely more sweeps to match PGS
+convergence. The prototype was removed. Full parallelism is not a win when it
+materializes endpoint deltas; future algorithm changes must keep body updates
+on chip or remove another pass.
+
+## J1 - fewer over-relaxed PGS sweeps, rejected
+
+Full PhoenX already exposes SOR. On the fixed 32K above-L2 stack, three sweeps
+at SOR 1.2 took 1.952 ms versus 1.985 ms for four sweeps at SOR 1.0: only 1.66%
+more frame throughput. This is the upper bound before proving equal convergence.
+No code was retained. PGS arithmetic is too small a frame fraction for sweep
+count tuning to deliver a high-single-digit win; target staging passes instead.
+
+## J2 - AoS deterministic contact staging, rejected
+
+The deterministic narrow phase wrote one 112-byte packed record/contact, and
+the radix permutation gathered it into canonical SoA. Public contacts and
+matching stayed unchanged. On the fixed 32K stack it took 2.153 ms versus
+2.013 ms for an adjacent F23 control: -6.5% throughput. Packing makes same-field
+warp accesses stride by the record size; per-thread locality did not repay lost
+coalescing and 20 extra padding bytes/contact. The prototype was removed. A
+large gather win now requires avoiding or fusing materialization, not AoS.
+
+## J3 - fuse deterministic gather with matching, rejected
+
+The existing SoA source and canonical output were retained. Match pass one
+consumed each permuted source record inside the gather kernel, eliminating its
+subsequent canonical geometry reread. On the fixed 32K stack the fused frame
+was 2.016 ms versus 2.013 ms for the adjacent F23 control (-0.17%). The larger
+kernel offset the removed read/launch. The prototype was removed. Materialization
+must be skipped, not burdened with additional matching work.
+
+
+## J4 - direct valid-run contact compaction, accepted in full
+
+Matched graph-node profiles showed that full PhoenX's fused prepare+PGS kernel
+was already faster than mini prepare+solve (319 versus 494 us). The remaining
+gap was full-only contact staging: 149 us warm-start gather, 55 us history copy,
+and roughly 130--170 us of pair/column ingest, element projection, run building,
+and scans. Shared collision kernels were matched. This ended solver-kernel
+tuning and moved the experiment to contact ingest.
+
+The mini benchmark replaces two full-capacity scans and intermediate pair
+arrays with: mark only valid sorted shape-pair boundaries, one inclusive scan,
+then materialize run metadata and the contact-to-column map directly. RTX PRO
+6000 isolated results, four points/pair:
+
+| Contacts | Two-stage compaction | Direct compaction | Speedup |
+| ---: | ---: | ---: | ---: |
+| 1,048,576 | 27.28 us | 19.19 us | 1.42x |
+| 4,194,304 | 87.02 us | 45.96 us | 1.89x |
+
+At eight points/pair the 1M-contact speedup remains 1.35x (29.11 to 21.54 us),
+so the boundary thread's short forward walk is not limited to four-point box
+manifolds.
+
+Transferred to full PhoenX, the normal shape-pair path now compacts directly.
+The old two-stage path remains only for optional compound body-pair grouping.
+Matched F23-control results:
+
+| Workload | F23 control | Direct runs | Gain | Direct useful bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| 32K x 8 fixed stack, above L2 | 1.996 ms | **1.898 ms** | **+5.2%** | 778.0 GB/s (52.2% sequential, 75.0% random-vec4) |
+| 8K x 8 evolving stack | 595.95 us | **579.62 us** | **+2.8%** | 736.3 GB/s (49.4% sequential, 71.0% random-vec4) |
+| 512-body single-world stack | 895.92 us | **876.79 us** | **+2.2%** | 3.29 GB/s useful-work lower bound |
+
+The evolving control and candidate finish with the same 303,104 contacts.
+Determinism (6 tests), compound fallback (5), ingest edge cases (4), and mixed
+joint/material behavior (18) pass. The broad multi-world module was stopped
+after producing no progress for 60 seconds; the 32K and evolving 8K workloads
+exercise the changed multi-world path directly.

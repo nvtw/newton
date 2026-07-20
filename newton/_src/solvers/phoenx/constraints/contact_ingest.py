@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Convert Newton's sorted ``Contacts`` buffer into PhoenX contact columns.
 
-Newton sorts Contacts by (shape_a, shape_b). Ingest scans adjacent-pair
-boundaries, inclusive-scans into a 1-based run id, and scatters per-pair
-metadata to emit one CONTACT column per non-filtered shape pair.
+Newton sorts Contacts by (shape_a, shape_b). Ingest marks only valid pair-run
+boundaries, scans them once, and materializes compact contact columns directly.
+Optional compound grouping retains its body-pair sort and two-stage compaction.
 
 Graph-capture-safe: num_contact_columns is device-side; all kernels launch at
 fixed sizes and gate on device counters.
@@ -465,6 +465,92 @@ def _body_pair_filtered(
     return wp.int32(0)
 
 
+@wp.kernel(enable_backward=False, grid_stride=False)
+def _mark_valid_shape_pair_runs_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    rigid_contact_shape0: wp.array[wp.int32],
+    rigid_contact_shape1: wp.array[wp.int32],
+    shape_filter_id: wp.array[wp.int32],
+    num_bodies: wp.int32,
+    filter_keys: wp.array[wp.int64],
+    filter_count: wp.int32,
+    pair_boundary: wp.array[wp.int32],
+    cid_of_contact: wp.array[wp.int32],
+):
+    """Mark only shape-pair runs that will emit a contact column."""
+    contact = wp.tid()
+    cid_of_contact[contact] = wp.int32(-1)
+    count = _clamp_contact_count(rigid_contact_count, rigid_contact_shape0.shape[0])
+    if contact >= count:
+        pair_boundary[contact] = wp.int32(0)
+        return
+    shape_a = rigid_contact_shape0[contact]
+    shape_b = rigid_contact_shape1[contact]
+    if contact > wp.int32(0):
+        previous = contact - wp.int32(1)
+        if shape_a == rigid_contact_shape0[previous] and shape_b == rigid_contact_shape1[previous]:
+            pair_boundary[contact] = wp.int32(0)
+            return
+    body_a = shape_filter_id[shape_a]
+    body_b = shape_filter_id[shape_b]
+    if body_a == body_b:
+        pair_boundary[contact] = wp.int32(0)
+        return
+    lo = wp.min(body_a, body_b)
+    hi = wp.max(body_a, body_b)
+    key = wp.int64(lo) * wp.int64(num_bodies) + wp.int64(hi)
+    pair_boundary[contact] = wp.int32(_body_pair_filtered(filter_keys, filter_count, key) == wp.int32(0))
+
+
+@wp.kernel(enable_backward=False, grid_stride=False)
+def _materialize_valid_shape_pair_runs_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    rigid_contact_shape0: wp.array[wp.int32],
+    rigid_contact_shape1: wp.array[wp.int32],
+    pair_boundary: wp.array[wp.int32],
+    pair_id: wp.array[wp.int32],
+    max_columns: wp.int32,
+    cid_base: wp.int32,
+    pair_first: wp.array[wp.int32],
+    pair_count: wp.array[wp.int32],
+    pair_shape_a: wp.array[wp.int32],
+    pair_shape_b: wp.array[wp.int32],
+    pair_source_idx: wp.array[wp.int32],
+    cid_of_contact: wp.array[wp.int32],
+    num_pairs: wp.array[wp.int32],
+    num_contact_columns: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+):
+    """Materialize compact run metadata directly from the valid-boundary scan."""
+    first = wp.tid()
+    count = _clamp_contact_count(rigid_contact_count, rigid_contact_shape0.shape[0])
+    if first == wp.int32(0):
+        columns = wp.int32(0)
+        if count > wp.int32(0):
+            columns = wp.min(pair_id[count - wp.int32(1)], max_columns)
+        num_pairs[0] = columns
+        num_contact_columns[0] = columns
+        num_active_constraints[0] = cid_base + columns
+    if pair_boundary[first] == wp.int32(0):
+        return
+    column = pair_id[first] - wp.int32(1)
+    if column >= max_columns:
+        return
+    shape_a = rigid_contact_shape0[first]
+    shape_b = rigid_contact_shape1[first]
+    end = first + wp.int32(1)
+    while end < count and rigid_contact_shape0[end] == shape_a and rigid_contact_shape1[end] == shape_b:
+        end += wp.int32(1)
+    pair_first[column] = first
+    pair_count[column] = end - first
+    pair_shape_a[column] = shape_a
+    pair_shape_b[column] = shape_b
+    pair_source_idx[column] = column
+    cid = cid_base + column
+    for contact in range(first, end):
+        cid_of_contact[contact] = cid
+
+
 # ---------------------------------------------------------------------------
 # Step 2: scatter per-pair metadata from run-boundary positions.
 # ---------------------------------------------------------------------------
@@ -778,6 +864,7 @@ def _contact_warmstart_gather_kernel(
     bodies: BodyContainer,
     contacts: ContactViews,
     cid_base: wp.int32,
+    direct_cid_map: wp.int32,
     cid_of_contact: wp.array[wp.int32],
     cc: ContactContainer,
 ):
@@ -810,10 +897,14 @@ def _contact_warmstart_gather_kernel(
     if k >= contact_count:
         return
 
-    p = pair_id[k] - wp.int32(1)
-    if p < wp.int32(0) or pair_columns[p] == wp.int32(0) or pair_col_offset[p] >= max_contact_columns:
-        return
-    cid_of_contact[k] = cid_base + pair_col_offset[p]
+    if direct_cid_map != wp.int32(0):
+        if cid_of_contact[k] < cid_base:
+            return
+    else:
+        p = pair_id[k] - wp.int32(1)
+        if p < wp.int32(0) or pair_columns[p] == wp.int32(0) or pair_col_offset[p] >= max_contact_columns:
+            return
+        cid_of_contact[k] = cid_base + pair_col_offset[p]
 
     sa = contacts.rigid_contact_shape0[k]
     sb = contacts.rigid_contact_shape1[k]
@@ -1086,103 +1177,110 @@ def ingest_contacts(
         ingest_shape0 = contacts.rigid_contact_shape0
         ingest_shape1 = contacts.rigid_contact_shape1
 
-    # Step 1: mark contacts where a new pair (shape-pair or body-pair,
-    # depending on mode) run starts.
-    if enable_body_pair_grouping:
+    filter_id_arr = shape_filter_id if shape_filter_id is not None else shape_body
+    if not enable_body_pair_grouping:
         wp.launch(
-            kernel=_body_pair_boundary_kernel,
-            dim=rigid_contact_max,
-            inputs=[
-                contacts.rigid_contact_count,
-                scratch.body_pair_keys,
-            ],
-            outputs=[scratch.pair_boundary, cid_of_contact],
-            device=device,
-        )
-    else:
-        wp.launch(
-            kernel=_contact_pair_boundary_kernel,
+            kernel=_mark_valid_shape_pair_runs_kernel,
             dim=rigid_contact_max,
             inputs=[
                 contacts.rigid_contact_count,
                 contacts.rigid_contact_shape0,
                 contacts.rigid_contact_shape1,
+                filter_id_arr,
+                int(num_bodies),
+                filter_keys,
+                int(filter_count),
             ],
             outputs=[scratch.pair_boundary, cid_of_contact],
             device=device,
         )
+        wp.utils.array_scan(scratch.pair_boundary, scratch.pair_id, inclusive=True)
+        wp.launch(
+            kernel=_materialize_valid_shape_pair_runs_kernel,
+            dim=rigid_contact_max,
+            inputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                scratch.pair_boundary,
+                scratch.pair_id,
+                int(max_contact_columns),
+                int(active_constraint_base),
+            ],
+            outputs=[
+                scratch.pair_first,
+                scratch.pair_count,
+                scratch.pair_shape_a,
+                scratch.pair_shape_b,
+                scratch.pair_source_idx,
+                cid_of_contact,
+                scratch.num_pairs,
+                scratch.num_contact_columns,
+                num_active_constraints,
+            ],
+            device=device,
+        )
+    else:
+        wp.launch(
+            kernel=_body_pair_boundary_kernel,
+            dim=rigid_contact_max,
+            inputs=[contacts.rigid_contact_count, scratch.body_pair_keys],
+            outputs=[scratch.pair_boundary, cid_of_contact],
+            device=device,
+        )
 
-    # Step 2: inclusive scan of the boundary marks -> 1-based run id
-    # per contact. ``pair_id[count - 1]`` is the total run count.
-    wp.utils.array_scan(scratch.pair_boundary, scratch.pair_id, inclusive=True)
-
-    # Step 3a: scatter per-pair (shape_a, shape_b, pair_first) into
-    # their unique slots, publish num_pairs, clear pair_columns tail.
-    wp.launch(
-        kernel=_scatter_pair_starts_kernel,
-        dim=rigid_contact_max,
-        inputs=[
-            contacts.rigid_contact_count,
-            scratch.pair_boundary,
-            scratch.pair_id,
-            ingest_shape0,
-            ingest_shape1,
-        ],
-        outputs=[
-            scratch.pair_shape_a,
-            scratch.pair_shape_b,
-            scratch.pair_first,
-            scratch.pair_columns,
-            scratch.num_pairs,
-        ],
-        device=device,
-    )
-
-    # Step 3b: derive per-pair contact counts from adjacent pair_first
-    # AND compute the 0/1 pair_columns flag in one pass. Fused from two
-    # back-to-back per-pair kernels that had identical launch geometry.
-    # When the caller doesn't pass a custom filter id array, fall back
-    # to ``shape_body``. This preserves the legacy rigid-only same-body
-    # filter semantics; cloth-aware callers pass a unified array where
-    # cloth tris have unique negative ids.
-    filter_id_arr = shape_filter_id if shape_filter_id is not None else shape_body
-    wp.launch(
-        kernel=_pair_counts_and_columns_kernel,
-        dim=rigid_contact_max,
-        inputs=[
-            contacts.rigid_contact_count,
-            wp.int32(rigid_contact_max),
-            scratch.num_pairs,
-            scratch.pair_first,
-            scratch.pair_shape_a,
-            scratch.pair_shape_b,
-            filter_id_arr,
-            int(num_bodies),
-            filter_keys,
-            int(filter_count),
-        ],
-        outputs=[scratch.pair_count, scratch.pair_columns],
-        device=device,
-    )
-
-    # Step 3d: exclusive scan of pair_columns -> pair_col_offset.
-    wp.utils.array_scan(scratch.pair_columns, scratch.pair_col_offset, inclusive=False)
-
-    # Step 4: publish the total column count and build the
-    # per-column -> pair map in one pass.
-    wp.launch(
-        kernel=_pair_source_idx_kernel,
-        dim=scratch.pair_columns.shape[0],
-        inputs=[
-            scratch.pair_col_offset,
-            scratch.pair_columns,
-            scratch.num_pairs,
-            int(max_contact_columns),
-            int(active_constraint_base),
-        ],
-        outputs=[scratch.pair_source_idx, scratch.num_contact_columns, num_active_constraints],
-        device=device,
-    )
+        wp.utils.array_scan(scratch.pair_boundary, scratch.pair_id, inclusive=True)
+        wp.launch(
+            kernel=_scatter_pair_starts_kernel,
+            dim=rigid_contact_max,
+            inputs=[
+                contacts.rigid_contact_count,
+                scratch.pair_boundary,
+                scratch.pair_id,
+                ingest_shape0,
+                ingest_shape1,
+            ],
+            outputs=[
+                scratch.pair_shape_a,
+                scratch.pair_shape_b,
+                scratch.pair_first,
+                scratch.pair_columns,
+                scratch.num_pairs,
+            ],
+            device=device,
+        )
+        wp.launch(
+            kernel=_pair_counts_and_columns_kernel,
+            dim=rigid_contact_max,
+            inputs=[
+                contacts.rigid_contact_count,
+                wp.int32(rigid_contact_max),
+                scratch.num_pairs,
+                scratch.pair_first,
+                scratch.pair_shape_a,
+                scratch.pair_shape_b,
+                filter_id_arr,
+                int(num_bodies),
+                filter_keys,
+                int(filter_count),
+            ],
+            outputs=[scratch.pair_count, scratch.pair_columns],
+            device=device,
+        )
+        wp.utils.array_scan(scratch.pair_columns, scratch.pair_col_offset, inclusive=False)
+        wp.launch(
+            kernel=_pair_source_idx_kernel,
+            dim=scratch.pair_columns.shape[0],
+            inputs=[
+                scratch.pair_col_offset,
+                scratch.pair_columns,
+                scratch.num_pairs,
+                int(max_contact_columns),
+                int(active_constraint_base),
+            ],
+            outputs=[scratch.pair_source_idx, scratch.num_contact_columns, num_active_constraints],
+            device=device,
+        )
 
     # Step 5: write the contact column headers + ranges.
     if shape_material is None:
@@ -1249,6 +1347,7 @@ def gather_contact_warmstart(
     device: wp.DeviceLike = None,
     *,
     carry_impulses: bool = True,
+    direct_shape_pair_runs: bool = False,
 ) -> None:
     """Copy prev-frame state into ``cc`` for matched contacts; initialise
     PhoenX-style for unmatched contacts.
@@ -1275,6 +1374,7 @@ def gather_contact_warmstart(
             bodies,
             contacts,
             wp.int32(cid_base),
+            wp.int32(1 if direct_shape_pair_runs else 0),
         ],
         outputs=[cid_of_contact, cc],
         device=device,

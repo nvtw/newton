@@ -3238,6 +3238,7 @@ class PhoenXWorld:
             # Cross-frame contact impulses can keep a nearly quiet stack above
             # the sleep threshold; substep-local warm-start still applies.
             carry_impulses=not self._sleeping_enabled,
+            direct_shape_pair_runs=not self._enable_body_pair_grouping,
         )
 
         if self._contact_patch_enabled:
