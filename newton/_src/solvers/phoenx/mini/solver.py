@@ -29,12 +29,12 @@ from .packed_kernels import (
     compute_color_offsets_kernel,
     integrate_poses_packed_kernel,
     integrate_velocities_packed_kernel,
-    make_solve_packed_contacts_shared_kernel,
     prepare_packed_contacts_kernel,
     prepare_world_contacts_kernel,
     solve_packed_contacts_kernel,
     solve_serial_worlds_kernel,
 )
+from .shared_body_cache import solve_packed_contacts_shared_kernel
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ class MiniSolver(SolverBase):
         contiguous_worlds = expected_worlds.shape[0] == model.body_count and np.array_equal(
             model.body_world.numpy(), expected_worlds
         )
-        self._shared_solve_kernel = None
+        self._native_shared_cache = False
         if (
             self._packed_contacts
             and self.config.shared_body_cache
@@ -102,7 +102,8 @@ class MiniSolver(SolverBase):
             and self.config.max_constraints_per_color <= self.config.block_dim
             and contiguous_worlds
         ):
-            self._shared_solve_kernel = make_solve_packed_contacts_shared_kernel(bodies_per_world)
+            self._native_shared_cache = True
+            self._bodies_per_world = bodies_per_world
         capacity = self.config.max_constraints_per_world
         contact_capacity = max(1, int(model.rigid_contact_max))
         self._world_count = world_count
@@ -149,7 +150,7 @@ class MiniSolver(SolverBase):
         self._lambda_t1 = wp.zeros(contact_capacity, dtype=wp.float32, device=model.device)
         self._lambda_t2 = wp.zeros(contact_capacity, dtype=wp.float32, device=model.device)
         self._packed_worlds_per_tile = 1
-        if self._packed_contacts and self._shared_solve_kernel is None and self.config.block_dim <= 32:
+        if self._packed_contacts and self.config.block_dim <= 32:
             self._packed_worlds_per_tile = 32 // self.config.block_dim
         padded_world_count = (
             (world_count + self._packed_worlds_per_tile - 1) // self._packed_worlds_per_tile
@@ -191,8 +192,8 @@ class MiniSolver(SolverBase):
         c = self.config
         if c.substeps < 1 or c.iterations < 1:
             raise ValueError("MiniSolver substeps and iterations must be positive")
-        if c.block_dim not in (8, 16, 32, 64, 128, 256):
-            raise ValueError("MiniSolver block_dim must be one of 8, 16, 32, 64, 128, or 256")
+        if c.block_dim not in (4, 8, 16, 32, 64, 128, 256):
+            raise ValueError("MiniSolver block_dim must be one of 4, 8, 16, 32, 64, 128, or 256")
         if c.max_colors < 1 or c.max_colors > 64:
             raise ValueError("MiniSolver max_colors must be in [1, 64]")
         if c.max_constraints_per_world < 1:
@@ -647,11 +648,14 @@ class MiniSolver(SolverBase):
                         block_dim=128 if self._packed_worlds_per_tile > 1 else self.config.block_dim,
                         device=self.model.device,
                     )
-                    if self._shared_solve_kernel is not None:
-                        wp.launch_tiled(
-                            self._shared_solve_kernel,
-                            dim=self._world_count,
+                    if self._native_shared_cache:
+                        wp.launch(
+                            solve_packed_contacts_shared_kernel,
+                            dim=self._world_count * self.config.block_dim,
                             inputs=[
+                                self.config.block_dim,
+                                self._bodies_per_world,
+                                self._packed_worlds_per_tile,
                                 self.config.max_constraints_per_world,
                                 self.config.max_colors,
                                 self.config.max_constraints_per_color,
@@ -665,14 +669,13 @@ class MiniSolver(SolverBase):
                                 self._packed_arm_mass_a,
                                 self._packed_arm_mass_b,
                                 self._packed_effective_mass,
-                                self._packed_impulse,
-                                self._linear_velocity,
-                                self._angular_velocity,
                                 self._inertia0,
                                 self._inertia1,
                                 self._inertia2,
+                                self._packed_impulse,
                             ],
-                            block_dim=self.config.block_dim,
+                            outputs=[self._linear_velocity, self._angular_velocity],
+                            block_dim=128,
                             device=self.model.device,
                         )
                     else:

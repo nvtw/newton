@@ -892,3 +892,80 @@ Fusing random history reads with seven streaming output fields destroys memory
 latency hiding. The all-fresh gain projects to only 0.5% of the full frame and
 overfits contact churn. Keep random gather and streaming publication separate;
 the prototype was removed.
+
+## J23 - exact-key sticky fast lane, rejected before implementation
+
+Four post-settle evolving 8K-stack frames had exact prior keys for 100% of
+contacts, but only 13--21% passed sticky spatial/gap gates; fixed input was
+100% matched. Separated rows already exit before pair search, and one evolving
+frame mapped only 43% of accepted matches to the identical sub-key. An exact
+key shortcut mainly specializes fixed topology and cannot remove matching or
+fallback work in changing scenes. No solver code was written.
+
+## J24 - matcher-state ping-pong, transfer rejected
+
+A 2N device-phase buffer for only key/midpoint/normal beat separate match+save
+at 4M contacts: 1.17x fully matched and 1.25x at 80% fresh, reaching 94% and
+80% of sequential peak. A full transfer improved fixed 32K input about 1%, but
+changed an evolving trajectory to 1.343M contacts versus 1.049M. Cause: match
+sees fresh geometry, while saved matcher state must reflect geometry selected
+by sticky canonical gather. Publishing after selection either repeats the save
+or fuses into the random gather rejected by J22. The prototype was removed.
+
+## J25 - reconstruct contact tangent from normal, rejected
+
+The tangent is a deterministic function of the stored normal. Removing its
+three float planes reduced rigid colored rows 6 to 3 and saved 12 MiB per 1M
+contacts. A 32K changing-stack prototype improved 1.948 to 1.901 ms (+2.5%),
+but Kapla regressed 12.222 to 12.797 ms (-4.5%) even after callers reused their
+loaded normal. Its persistent PGS loop keeps the stored tangent cache-friendly;
+reconstruction ALU repeats every sweep. Do not compress/decode the frame in the
+hot solver or add a workload-specific layout. The prototype was removed.
+
+## J26 - fuse rigid column pack and coloring projection, rejected
+
+A rigid-only kernel replaced the separate contact-column pack and contact tail
+of element projection. At 1,048,576 fixed contacts, Nsys measured 39.23 + 37.87
+us control versus 55.68 us fused, saving 21.42 us locally. The paired 800-frame
+result improved only 1.64650 to 1.64181 ms (+0.29%): 60.22% to 60.39% of
+sequential peak and 86.48% to 86.73% of random-vec4 peak. The extra orchestration
+and rigid-only kernel are not justified by the frame result; removed.
+
+## J27 - shared-memory warp-local sticky lifecycle, rejected
+
+A native CUDA runtime-loop implementation fixed J20 compile time (234--246 ms)
+and fused deterministic 32-contact/world match, gather, and history publication.
+At 32K worlds/1,048,576 contacts with 20% fresh points, the production-like
+four-point manifold test was exact but took 175.05 us versus 171.68 us for
+three tuned kernels (-1.9%). Block sweeps from 256 to 32 threads did not beat a
+256-thread control. The fused kernel reached 1,126 GB/s useful traffic, 75.6%
+of sequential and 108.6% of random-vec4 peak. Loading every possible history
+row into shared memory costs more than selected random reads; removed.
+
+## J28 - shared body working set plus interleaved rows, accepted in mini
+
+A single native subwarp kernel supports 4/8/16/32-lane worlds. It loads packed
+linear velocity/inverse mass, angular velocity, and three inverse-inertia rows
+once per body, solves every color/iteration in shared memory, then writes each
+body once. Constraint rows retain the interleaved-world layout so active lanes
+across a warp touch the same sectors. The superseded 157-line tiled prototype
+was removed. Conditional graph nodes are not involved.
+
+RTX PRO 6000, 1,048,576 contacts, one substep/four iterations, above L2:
+
+| Bodies/world | Global body state | Shared + interleaved | Gain | Sequential | Random vec4 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 1.489 ms | **1.325 ms** | **+12.4%** | 74.8% | 107.5% |
+| 8 | 1.463 ms | **1.283 ms** | **+14.0%** | 77.3% | 111.0% |
+| 16 | 1.565 ms | **1.375 ms** | **+13.8%** | 72.1% | 103.6% |
+| 32 | 1.608 ms | **1.475 ms** | **+9.0%** | 67.2% | 96.5% |
+
+At 32K changing worlds, both paths ended at 1,245,184 contacts, 38
+constraints/world, 10 colors, and zero overflow. Time improved 1.930 to 1.756
+ms (+9.9%), reaching 67.0% sequential and 96.3% random-vec4 bandwidth. Nsys
+measured the fixed 8-body PGS median at 309 us global versus 147 us cached
+(+52.4% kernel throughput). Two cached runs stayed bitwise identical for 120
+frames; first-step parity passed at all four world sizes. Caching velocity only
+was 1.9% slower than caching velocity plus inertia. Transfer the complete body
+working set and interleaved colored rows to full PhoenX; do not enable a cache
+with unused logical lanes.

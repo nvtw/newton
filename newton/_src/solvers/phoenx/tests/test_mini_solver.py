@@ -88,6 +88,100 @@ class TestMiniSolver(unittest.TestCase):
         np.testing.assert_array_equal(states[0][0].body_qd.numpy(), states[1][0].body_qd.numpy())
         self.assertEqual(solvers[1].stats().overflow_constraints, 0)
 
+    def test_native_shared_cache_matches_first_step_across_world_sizes(self) -> None:
+        for bodies_per_world, block_dim in ((4, 4), (8, 8), (16, 16), (32, 32)):
+            with self.subTest(bodies_per_world=bodies_per_world):
+                model = _make_stacks(4, bodies_per_world=bodies_per_world)
+                pipelines = [
+                    newton.CollisionPipeline(
+                        model,
+                        broad_phase="nxn",
+                        rigid_contact_max=4 * bodies_per_world * 8,
+                        contact_matching="sticky",
+                        deterministic=True,
+                        _deterministic_world_major=True,
+                    )
+                    for _ in range(2)
+                ]
+                contacts = [pipeline.contacts() for pipeline in pipelines]
+                solvers = [
+                    MiniSolver(
+                        model,
+                        MiniSolverConfig(
+                            substeps=1,
+                            iterations=4,
+                            block_dim=block_dim,
+                            max_colors=16,
+                            max_constraints_per_color=block_dim,
+                            max_constraints_per_world=bodies_per_world * 8,
+                            shared_body_cache=shared,
+                        ),
+                    )
+                    for shared in (False, True)
+                ]
+                states = [(model.state(), model.state()) for _ in solvers]
+                control = model.control()
+
+                for index, (pipeline, solver) in enumerate(zip(pipelines, solvers, strict=True)):
+                    state_0, state_1 = states[index]
+                    pipeline.collide(state_0, contacts[index])
+                    state_0.clear_forces()
+                    solver.step(state_0, state_1, control, contacts[index], 1.0 / 120.0)
+                    states[index] = (state_1, state_0)
+
+                np.testing.assert_array_equal(states[0][0].body_q.numpy(), states[1][0].body_q.numpy())
+                np.testing.assert_array_equal(states[0][0].body_qd.numpy(), states[1][0].body_qd.numpy())
+                self.assertEqual(solvers[1].stats().overflow_constraints, 0)
+
+    def test_native_shared_cache_is_deterministic_and_stable(self) -> None:
+        model = _make_stacks(8, bodies_per_world=8)
+        pipelines = [
+            newton.CollisionPipeline(
+                model,
+                broad_phase="nxn",
+                rigid_contact_max=8 * 64,
+                contact_matching="sticky",
+                deterministic=True,
+                _deterministic_world_major=True,
+            )
+            for _ in range(2)
+        ]
+        contacts = [pipeline.contacts() for pipeline in pipelines]
+        solvers = [
+            MiniSolver(
+                model,
+                MiniSolverConfig(
+                    substeps=1,
+                    iterations=4,
+                    block_dim=8,
+                    max_colors=16,
+                    max_constraints_per_color=8,
+                    max_constraints_per_world=64,
+                    shared_body_cache=True,
+                ),
+            )
+            for _ in range(2)
+        ]
+        states = [(model.state(), model.state()) for _ in solvers]
+        control = model.control()
+
+        for _ in range(120):
+            for index, (pipeline, solver) in enumerate(zip(pipelines, solvers, strict=True)):
+                state_0, state_1 = states[index]
+                pipeline.collide(state_0, contacts[index])
+                state_0.clear_forces()
+                solver.step(state_0, state_1, control, contacts[index], 1.0 / 120.0)
+                states[index] = (state_1, state_0)
+
+        poses = [state[0].body_q.numpy() for state in states]
+        velocities = [state[0].body_qd.numpy() for state in states]
+        np.testing.assert_array_equal(poses[0], poses[1])
+        np.testing.assert_array_equal(velocities[0], velocities[1])
+        self.assertTrue(np.isfinite(poses[0]).all())
+        self.assertTrue(np.isfinite(velocities[0]).all())
+        self.assertGreater(float(poses[0][:, 2].min()), 0.2)
+        self.assertEqual(solvers[0].stats().overflow_constraints, 0)
+
     def test_colored_buckets_have_no_body_conflicts(self) -> None:
         model = _make_stacks(16)
         pipeline = newton.CollisionPipeline(
