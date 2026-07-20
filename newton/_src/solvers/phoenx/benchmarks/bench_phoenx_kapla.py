@@ -106,6 +106,10 @@ class BenchResult:
     roofline_basis: str
     blocks_per_sm: int
     colored_contact_layout: bool
+    copy_slots: int
+    copy_nodes: int
+    multi_copy_nodes: int
+    max_copies_per_node: int
 
 
 class _HeadlessViewer:
@@ -158,7 +162,7 @@ def _run_one(
 ) -> BenchResult:
     """Build the scene, run warmup + steady-state, return measurements."""
     # Import here so the module loads cheap (parser help, etc.).
-    from newton._src.solvers.phoenx.examples import example_kapla_tower as ek
+    from newton._src.solvers.phoenx.examples import example_kapla_tower as ek  # noqa: PLC0415
 
     ek.TOWER_GRID_DIMS = grid_dims
     ek.ENABLE_MASS_SPLITTING = mass_splitting
@@ -204,6 +208,7 @@ def _run_one(
     zs = pos_end[dynamic, 2]
     report = ex.world.step_report()
     contact_points = int(ex.contacts.rigid_contact_count.numpy()[0])
+    copy_counts = ex.world._copy_state.count_per_node.numpy() if mass_splitting else np.empty(0, dtype=np.int32)
     iteration_rate = contact_points * solver_iterations * substeps * ex.steps_per_frame * fps
     logical_min_gbps = iteration_rate * _CONTACT_ITERATION_BYTES / 1.0e9
     estimated_tflops = iteration_rate * _CONTACT_ITERATION_FLOPS / 1.0e12
@@ -237,6 +242,10 @@ def _run_one(
         roofline_basis="352 B and 450 FLOP per final contact-point iteration; useful-work estimate, no GPU counters",
         blocks_per_sm=blocks_per_sm,
         colored_contact_layout=colored_contact_layout,
+        copy_slots=int(copy_counts.sum()),
+        copy_nodes=int(np.count_nonzero(copy_counts)),
+        multi_copy_nodes=int(np.count_nonzero(copy_counts > 1)),
+        max_copies_per_node=int(copy_counts.max(initial=0)),
     )
 
 

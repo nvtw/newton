@@ -1257,3 +1257,16 @@ mixed revolute/contact workload while retaining the richer joint implementation.
 Together with J44 (full tied on fixed 32K contacts and much faster with changing
 topology), further research should target shared costs or capabilities absent
 from mini, not re-copy mini's row layout.
+
+
+## J47 - rigid-only copy-state payload, rejected
+
+Kapla uses 77,068 copy slots for 11,341 bodies; 10,373 bodies have multiple
+copies and the maximum is 20. Active-node compaction therefore cannot remove
+meaningful work. A rigid-only broadcast/writeback prototype skipped slot
+position, orientation, and access-mode traffic because rigid contacts/joints
+consume velocity state only. After restoring static-body writeback semantics,
+a 30-frame A/B was physics-identical. A 180-frame bracket measured 9.356 ms
+control versus 9.328 ms lean (+0.30%); shorter brackets ranged from -2.2% to
++0.8%. Two kernels and a dispatch route are unjustified. Prototype removed.
+The Kapla benchmark retains post-timing copy-slot topology counters.
