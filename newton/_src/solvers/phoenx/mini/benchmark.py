@@ -87,7 +87,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
     model = _make_model(args.scene, args.worlds, args.bodies_per_world, args.device)
     contact_matching = args.contact_matching
     if contact_matching == "auto":
-        contact_matching = "sticky" if args.solver == "phoenx" else "disabled"
+        contact_matching = "sticky" if args.solver in ("mini", "phoenx") else "disabled"
     pipeline = newton.CollisionPipeline(
         model,
         broad_phase=args.broad_phase,

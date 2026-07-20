@@ -847,9 +847,6 @@ def _contact_warmstart_gather_kernel(
 
     n = contacts.rigid_contact_normal[k]
     t1 = _build_tangent1_from_normal(n)
-    local_p0 = contacts.rigid_contact_point0[k]
-    local_p1 = contacts.rigid_contact_point1[k]
-
     prev_k = rigid_contact_match_index[k]
     reuse = reuse_contact_indices[0] != wp.int32(0)
     if reuse:
@@ -866,6 +863,8 @@ def _contact_warmstart_gather_kernel(
 
     uses_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
     if uses_start_gap or reuse:
+        local_p0 = contacts.rigid_contact_point0[k]
+        local_p1 = contacts.rigid_contact_point1[k]
         sa = contacts.rigid_contact_shape0[k]
         sb = contacts.rigid_contact_shape1[k]
         b1 = contacts.shape_body[sa]

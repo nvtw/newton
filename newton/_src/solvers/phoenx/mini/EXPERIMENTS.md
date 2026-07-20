@@ -1085,3 +1085,22 @@ The staging cost wins at the crossover but loses once the classic solver is
 already efficient. The prior large Kapla gains therefore do not justify a
 universal classic-PGS row layout. Removed completely; packed rows remain part
 of the explicit hybrid path.
+
+
+## J36 - lazy warm-start anchors, accepted
+
+An RTX PRO 6000 node trace showed the full PhoenX fused prepare/PGS kernel is
+already faster than mini (307.7 vs 496.1 us including mini prepare); the fixed
+32K-world gap is full-only staging. Loading local anchors only on stale-anchor
+or contact-reuse paths removed two unused random vec3 reads per ordinary
+contact. Warm-start gather fell 82.8 to 66.7 us (-19.5%). Matched frame gains:
+
+| Workload | Control | Candidate | Gain |
+| --- | ---: | ---: | ---: |
+| 32K worlds, fixed, 1.049M contacts | 1.6546 ms | 1.6352 ms | +1.19% |
+| 32K worlds, evolving, 0.983M contacts | 1.9692 ms | 1.9596 ms | +0.49% |
+| 1 world, 512 bodies, 512 frames | 1.3975 ms | 1.3844 ms | +0.94% |
+
+Fixed-scene useful bandwidth rose from 59.9% to 60.6% of sequential DRAM and
+86.1% to 87.1% of random-vec4 roof. A FREE-joint force/import fusion saved a
+launch but only 0.4% overall because import grew; removed to avoid a heuristic.
