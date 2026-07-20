@@ -1233,3 +1233,27 @@ joints currently set the generic slot width to 117 dwords versus 36 for the
 next-largest family, so moving densely reused prepared joint groups to a vec4
 sidecar can remain net-size-neutral or smaller. Optional/cold fields stay
 scalar. The isolated benchmark is benchmark_constraint_vec4.py.
+
+Exact robot counts reject even that hot sidecar before production churn. At
+65,536 joints (12 MiB), dense vec4 was only +1.7% (4.165 to 4.096 us); at
+262,144 joints (48 MiB), it regressed 8.193 to 9.395 us (-12.8%). F11's large
+vec4 gain was specific to mutable read-modify-write multipliers, not immutable
+prepared rows. Do not implement the joint hot/cold split without new evidence.
+
+
+## J46 - current full/mini mixed-rigid crossover
+
+Serial, fixed-input RTX PRO 6000 runs used identical sticky matching, four PGS
+iterations, eight bodies/world, four contacts and eight revolutes/world:
+
+| Worlds | Mini | Full PhoenX | Full gain | Full useful roofs |
+| ---: | ---: | ---: | ---: | ---: |
+| 8,192 | 276.61 us | **246.89 us** | **+12.0%** | 41.1% seq / 59.0% random-vec4 |
+| 32,768 | 1,081.11 us | **749.38 us** | **+44.3%** | 54.1% seq / 77.7% random-vec4 |
+
+An evolving 8K run also favored full: 292.45 versus **242.56 us** (+20.6%),
+with identical final contact counts. Full now exceeds mini on the representative
+mixed revolute/contact workload while retaining the richer joint implementation.
+Together with J44 (full tied on fixed 32K contacts and much faster with changing
+topology), further research should target shared costs or capabilities absent
+from mini, not re-copy mini's row layout.
