@@ -134,9 +134,12 @@ class _MatchData:
     new_shape0: wp.array[wp.int32]
     new_shape1: wp.array[wp.int32]
     new_normal: wp.array[wp.vec3]
+    new_margin0: wp.array[wp.float32]
+    new_margin1: wp.array[wp.float32]
     new_count: wp.array[wp.int32]
     canonical_to_source: wp.array[wp.int32]
     use_permutation: int
+    reject_separated: int
 
     # Body transforms for world-space conversion
     body_q: wp.array[wp.transform]
@@ -205,6 +208,10 @@ def _match_contacts_kernel(data: _MatchData):
 
     new_pos_w = 0.5 * (p0w + p1w)
     new_n = data.new_normal[source]
+    fresh_gap = wp.dot(p1w - p0w, new_n) - (data.new_margin0[source] + data.new_margin1[source])
+    if data.reject_separated != 0 and fresh_gap > wp.float32(0.0):
+        data.match_index[tid] = MATCH_BROKEN
+        return
 
     # Binary search the [range_lo, range_hi) interval of prev contacts
     # sharing the same (shape_a, shape_b) pair.  We ignore sort_sub_key
@@ -429,12 +436,6 @@ class _StickyOverlayData:
     current_offset0: wp.array[wp.vec3]
     current_offset1: wp.array[wp.vec3]
     current_normal: wp.array[wp.vec3]
-    current_shape0: wp.array[wp.int32]
-    current_shape1: wp.array[wp.int32]
-    current_margin0: wp.array[wp.float32]
-    current_margin1: wp.array[wp.float32]
-    body_q: wp.array[wp.transform]
-    shape_body: wp.array[wp.int32]
     overlay_point0: wp.array[wp.vec3]
     overlay_point1: wp.array[wp.vec3]
     overlay_offset0: wp.array[wp.vec3]
@@ -449,19 +450,6 @@ def _build_sticky_overlay_kernel(data: _StickyOverlayData):
         return
     source = data.canonical_to_source[i]
     use_previous = data.match_index[i] >= wp.int32(0)
-    if use_previous:
-        body0 = data.shape_body[data.current_shape0[source]]
-        body1 = data.shape_body[data.current_shape1[source]]
-        p0_world = data.current_point0[source]
-        p1_world = data.current_point1[source]
-        if body0 >= wp.int32(0):
-            p0_world = wp.transform_point(data.body_q[body0], p0_world)
-        if body1 >= wp.int32(0):
-            p1_world = wp.transform_point(data.body_q[body1], p1_world)
-        fresh_gap = wp.dot(p1_world - p0_world, data.current_normal[source]) - (
-            data.current_margin0[source] + data.current_margin1[source]
-        )
-        use_previous = fresh_gap <= wp.float32(0.0)
     if use_previous:
         previous = data.match_index[i]
         data.overlay_point0[i] = data.previous_point0[previous]
@@ -647,6 +635,8 @@ class ContactMatcher:
         shape0: wp.array[wp.int32],
         shape1: wp.array[wp.int32],
         normal: wp.array[wp.vec3],
+        margin0: wp.array[wp.float32],
+        margin1: wp.array[wp.float32],
         body_q: wp.array[wp.transform],
         shape_body: wp.array[wp.int32],
         match_index_out: wp.array[wp.int32],
@@ -703,9 +693,12 @@ class ContactMatcher:
         data.new_shape0 = shape0
         data.new_shape1 = shape1
         data.new_normal = normal
+        data.new_margin0 = margin0
+        data.new_margin1 = margin1
         data.new_count = contact_count
         data.canonical_to_source = canonical_to_source if canonical_to_source is not None else match_index_out
         data.use_permutation = 1 if canonical_to_source is not None else 0
+        data.reject_separated = 1 if self._sticky else 0
         data.body_q = body_q
         data.shape_body = shape_body
         data.match_index = match_index_out
@@ -746,12 +739,6 @@ class ContactMatcher:
         current_offset0: wp.array[wp.vec3],
         current_offset1: wp.array[wp.vec3],
         current_normal: wp.array[wp.vec3],
-        current_shape0: wp.array[wp.int32],
-        current_shape1: wp.array[wp.int32],
-        current_margin0: wp.array[wp.float32],
-        current_margin1: wp.array[wp.float32],
-        body_q: wp.array[wp.transform],
-        shape_body: wp.array[wp.int32],
         device: Devicelike = None,
     ) -> None:
         """Build canonical sticky geometry before the full contact gather."""
@@ -771,12 +758,6 @@ class ContactMatcher:
         data.current_offset0 = current_offset0
         data.current_offset1 = current_offset1
         data.current_normal = current_normal
-        data.current_shape0 = current_shape0
-        data.current_shape1 = current_shape1
-        data.current_margin0 = current_margin0
-        data.current_margin1 = current_margin1
-        data.body_q = body_q
-        data.shape_body = shape_body
         data.overlay_point0 = self._prev_point0
         data.overlay_point1 = self._prev_point1
         data.overlay_offset0 = self._prev_offset0

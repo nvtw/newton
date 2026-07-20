@@ -722,3 +722,34 @@ midpoint breaking threshold remains 0.5 mm; sticky geometry is reused only
 while the fresh narrow-phase gap is non-positive. All 40 matching tests and
 five deterministic pipeline tests pass, including 500-step sticky CUDA graph
 execution and alternating contact buffers.
+
+## J11 - compact deterministic warmstart frame in full PhoenX
+
+Matched sticky contacts already reuse the previous canonical normal and anchors.
+PhoenX therefore reconstructs the tangent deterministically from the normal and
+retains only three impulse scalars per contact. The six-float frame-history
+buffer and its copy traffic are removed. Primitive contacts also avoid redundant
+body/velocity gathers; mesh, height-field, tetrahedron, and repeated-generation
+safeguards retain their gap calculation. The sticky fresh-gap decision moves
+into matching, where both world points already exist. No solver path was added.
+
+RTX PRO 6000, 32K x 8 fixed stack, 1,048,576 contacts, adjacent 300-frame runs:
+
+| Metric | J10 control | Compact frame | Change |
+| --- | ---: | ---: | ---: |
+| Frame | 1.9150 ms | **1.8097 ms** | **-5.5%** |
+| Throughput | 2.190B constraints/s | **2.318B/s** | **+5.8%** |
+| Useful bandwidth | 771.0 GB/s | **815.8 GB/s** | **+5.8%** |
+| Sequential / random-vec4 roof | 51.8% / 74.4% | **54.8% / 78.7%** | +3.0 / +4.3 points |
+
+Nsys medians show the source: warmstart gather 146.1 to 100.0 us (-32%),
+history copy 56.9 to 30.5 us (-46%), and overlay 99.0 to 55.5 us (-44%).
+Matching rises 77.8 to 84.5 us (+9%) because it absorbs the exact gap gate.
+The 512-body single-world guardrail is 619.75 to 615.85 us (+0.6%) with only
+2,048 contacts. Evolving trajectories are not used for an A/B claim because the
+deterministic tangent basis changes their final contact count.
+
+A proposed 1 mm sticky separation tolerance destabilized the half-scale stack
+(1.96 m/s versus the 0.1 m/s limit) and was rejected. The original zero-gap
+rule passes all four scale/tower stability tests. Matching (40), friction and
+contact behavior (44), determinism/isolation (7), and bunny mesh (1) tests pass.

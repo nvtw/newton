@@ -733,6 +733,8 @@ def test_tie_break_invariant_under_unsorted_permutation(test, device):
                 shape0=wp.array(sa, dtype=wp.int32, device=device),
                 shape1=wp.array(sb, dtype=wp.int32, device=device),
                 normal=wp.array(nm, dtype=wp.vec3, device=device),
+                margin0=wp.zeros(capacity, dtype=wp.float32, device=device),
+                margin1=wp.zeros(capacity, dtype=wp.float32, device=device),
                 body_q=body_q,
                 shape_body=shape_body,
                 match_index_out=mi,

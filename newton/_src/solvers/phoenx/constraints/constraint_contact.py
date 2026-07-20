@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.geometry.types import GeoType
 from newton._src.solvers.phoenx.body import (
     BodyContainer,
     body_load_inv_inertia_sym6,
@@ -673,6 +674,30 @@ def contact_views_make(
     v.rigid_contact_damping = rigid_contact_damping
     v.rigid_contact_friction = rigid_contact_friction
     return v
+
+
+@wp.func
+def _contact_uses_stale_anchor_start_gap(contacts: ContactViews, k: wp.int32) -> bool:
+    shape0 = contacts.rigid_contact_shape0[k]
+    shape1 = contacts.rigid_contact_shape1[k]
+    shape_type_count = contacts.shape_type.shape[0]
+    uses_start_gap = False
+    if shape0 >= wp.int32(0) and shape0 < shape_type_count:
+        type0 = contacts.shape_type[shape0]
+        uses_start_gap = (
+            type0 == wp.int32(GeoType.MESH)
+            or type0 == wp.int32(GeoType.HFIELD)
+            or type0 == wp.int32(GeoType.TETRAHEDRON)
+        )
+    if shape1 >= wp.int32(0) and shape1 < shape_type_count:
+        type1 = contacts.shape_type[shape1]
+        uses_start_gap = (
+            uses_start_gap
+            or type1 == wp.int32(GeoType.MESH)
+            or type1 == wp.int32(GeoType.HFIELD)
+            or type1 == wp.int32(GeoType.TETRAHEDRON)
+        )
+    return uses_start_gap
 
 
 # ---------------------------------------------------------------------------

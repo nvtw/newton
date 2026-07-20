@@ -1669,6 +1669,8 @@ class CollisionPipeline:
             match_shape0 = sort_buffer.shape0 if self._matching_sticky else contacts.rigid_contact_shape0
             match_shape1 = sort_buffer.shape1 if self._matching_sticky else contacts.rigid_contact_shape1
             match_normal = sort_buffer.normal if self._matching_sticky else contacts.rigid_contact_normal
+            match_margin0 = sort_buffer.margin0 if self._matching_sticky else contacts.rigid_contact_margin0
+            match_margin1 = sort_buffer.margin1 if self._matching_sticky else contacts.rigid_contact_margin1
             self._contact_matcher.match(
                 sort_keys=self._sort_key_array if self._matching_sticky else self._contact_sorter.sorted_keys_view,
                 contact_count=contacts.rigid_contact_count,
@@ -1677,6 +1679,8 @@ class CollisionPipeline:
                 shape0=match_shape0,
                 shape1=match_shape1,
                 normal=match_normal,
+                margin0=match_margin0,
+                margin1=match_margin1,
                 body_q=state.body_q,
                 shape_body=shape_body if shape_body is not None else model.shape_body,
                 match_index_out=contacts.rigid_contact_match_index,
@@ -1699,12 +1703,6 @@ class CollisionPipeline:
                 current_offset0=sort_buffer.offset0,
                 current_offset1=sort_buffer.offset1,
                 current_normal=sort_buffer.normal,
-                current_shape0=sort_buffer.shape0,
-                current_shape1=sort_buffer.shape1,
-                current_margin0=sort_buffer.margin0,
-                current_margin1=sort_buffer.margin1,
-                body_q=state.body_q,
-                shape_body=writer_data.shape_body,
                 device=self.device,
             )
             sticky_point0, sticky_point1, sticky_offset0, sticky_offset1, sticky_normal = (

@@ -754,8 +754,8 @@ solver tests pass.
 
 Previous-frame matching reads only the 12 rigid manifold rows: normal,
 tangent, and two anchors. Cloth barycentrics are current-frame data, so storing
-and copying their six rows in ``prev_lambdas`` was dead traffic. F18 narrows
-that array from 18 to 12 rows without adding a solver path or branch. This
+and copying their six history rows was dead traffic. F18 narrowed
+that array from 18 to 12 rows; J11 later removes it entirely. This
 saves 24 MiB of persistent storage and 48 MiB of copy traffic per 1,048,576
 contact slots.
 

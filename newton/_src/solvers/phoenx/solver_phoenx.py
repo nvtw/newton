@@ -96,7 +96,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DERIVED_DWORDS_PER_CONTACT,
     CC_DWORDS_PER_CONTACT,
     CC_IMPULSE_DWORDS_PER_CONTACT,
-    CC_PREV_DWORDS_PER_CONTACT,
     ContactContainer,
     contact_container_copy_current_to_prev,
     contact_container_zeros,
@@ -1608,7 +1607,6 @@ class PhoenXWorld:
             ("impulses", CC_IMPULSE_DWORDS_PER_CONTACT),
             ("prev_impulses", CC_IMPULSE_DWORDS_PER_CONTACT),
             ("lambdas", CC_DWORDS_PER_CONTACT),
-            ("prev_lambdas", CC_PREV_DWORDS_PER_CONTACT),
             ("derived", CC_DERIVED_DWORDS_PER_CONTACT),
         ):
             actual = getattr(self._contact_container, name).shape

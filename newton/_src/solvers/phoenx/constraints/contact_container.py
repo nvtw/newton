@@ -22,7 +22,6 @@ __all__ = [
     "CC_IMPULSE_DWORDS_PER_CONTACT",
     "CC_LOCAL_ANCHOR_DWORDS",
     "CC_LOCAL_ANCHOR_FIRST_ROW",
-    "CC_PREV_DWORDS_PER_CONTACT",
     "CC_RIGID_DWORDS_PER_CONTACT",
     "ContactContainer",
     "cc_get_bias",
@@ -38,9 +37,7 @@ __all__ = [
     "cc_get_pd_bias",
     "cc_get_pd_eff_soft",
     "cc_get_pd_gamma",
-    "cc_get_prev_normal",
     "cc_get_prev_normal_lambda",
-    "cc_get_prev_tangent1",
     "cc_get_prev_tangent1_lambda",
     "cc_get_prev_tangent2_lambda",
     "cc_get_r0",
@@ -89,9 +86,6 @@ CC_DWORDS_PER_CONTACT: int = 18
 
 #: Rigid contacts use frame directions and two local anchors, but no barycentrics.
 CC_RIGID_DWORDS_PER_CONTACT: int = 12
-
-#: Previous-frame warm-start needs only the normal and tangent basis.
-CC_PREV_DWORDS_PER_CONTACT: int = 6
 
 #: Local anchors are the only manifold rows prepare may update after ingest.
 CC_LOCAL_ANCHOR_FIRST_ROW: int = 6
@@ -157,7 +151,6 @@ class ContactContainer:
     impulses: wp.array2d[wp.float32]
     prev_impulses: wp.array2d[wp.float32]
     lambdas: wp.array2d[wp.float32]
-    prev_lambdas: wp.array2d[wp.float32]
     derived: wp.array2d[wp.float32]
 
 
@@ -172,8 +165,6 @@ def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer, valid_c
         return
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         cc.prev_impulses[row, k] = cc.impulses[row, k]
-    for row in range(CC_PREV_DWORDS_PER_CONTACT):
-        cc.prev_lambdas[row, k] = cc.lambdas[row, k]
 
 
 @wp.kernel(enable_backward=False)
@@ -209,8 +200,6 @@ def _contact_container_clear_reset_worlds_kernel(
         cc.prev_impulses[row, k] = wp.float32(0.0)
     for row in range(CC_DWORDS_PER_CONTACT):
         cc.lambdas[row, k] = wp.float32(0.0)
-    for row in range(CC_PREV_DWORDS_PER_CONTACT):
-        cc.prev_lambdas[row, k] = wp.float32(0.0)
     for row in range(CC_DERIVED_DWORDS_PER_CONTACT):
         cc.derived[row, k] = wp.float32(0.0)
 
@@ -381,24 +370,6 @@ def cc_get_prev_tangent2_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32
     return read2d_f32(cc.prev_impulses, _CC_OFF_TANGENT2_LAMBDA, k)
 
 
-@wp.func
-def cc_get_prev_normal(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
-    return wp.vec3f(
-        read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_X, k),
-        read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_Y, k),
-        read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_Z, k),
-    )
-
-
-@wp.func
-def cc_get_prev_tangent1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
-    return wp.vec3f(
-        read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_X, k),
-        read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_Y, k),
-        read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_Z, k),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Derived (per-substep scratch) accessors -- keyed by contact index k.
 # ---------------------------------------------------------------------------
@@ -542,7 +513,6 @@ def contact_container_zeros(
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
-    cc.prev_lambdas = wp.zeros((CC_PREV_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     return cc
 
@@ -562,7 +532,6 @@ def contact_solve_container_zeros(
     # every substep, including manifold anchors needed by prepare.
     lambda_rows = CC_RIGID_DWORDS_PER_CONTACT if rigid_only else CC_DWORDS_PER_CONTACT
     cc.lambdas = wp.zeros((lambda_rows, n), dtype=wp.float32, device=device)
-    cc.prev_lambdas = wp.zeros((1, 1), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     return cc
 

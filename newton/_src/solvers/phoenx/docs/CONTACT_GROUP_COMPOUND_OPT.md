@@ -281,8 +281,8 @@ underlying contacts the merged column can't use one
    created in PhoenX, it's created upstream — this is not viable
    unless Newton itself adopts body-pair sorting). Better option:
    keep `match_index` in original-position space, apply the same
-   permutation to the matched `prev_lambdas` so the gather lands at
-   the new position.
+   permutation to the compact matched impulse history so the gather
+   lands at the new position.
 
 ### 4.3 Activation predicate
 

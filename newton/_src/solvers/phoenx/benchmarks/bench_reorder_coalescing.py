@@ -264,7 +264,6 @@ def _apply_permutation(
         world._contact_container.impulses = _permute_2d(world._contact_container.impulses, ci)
         world._contact_container.prev_impulses = _permute_2d(world._contact_container.prev_impulses, ci)
         world._contact_container.lambdas = _permute_2d(world._contact_container.lambdas, ci)
-        world._contact_container.prev_lambdas = _permute_2d(world._contact_container.prev_lambdas, ci)
 
     new_eids_arr = wp.array(new_eids, dtype=wp.int32, device=device)
     if world.step_layout == "single_world":

@@ -1029,7 +1029,6 @@ def main() -> int:
         "cc_impulses": cc.impulses,
         "cc_prev_impulses": cc.prev_impulses,
         "cc_lambdas": cc.lambdas,
-        "cc_prev_lambdas": cc.prev_lambdas,
         "cc_derived": cc.derived,
         "packed_jacobian": block.packed_jacobian,
         "packed_response": block.packed_response,

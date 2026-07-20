@@ -19,6 +19,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
     _col_write_int,
+    _contact_uses_stale_anchor_start_gap,
     contact_set_contact_count,
     contact_set_contact_first,
     contact_set_count1,
@@ -40,9 +41,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
-    cc_get_prev_normal,
     cc_get_prev_normal_lambda,
-    cc_get_prev_tangent1,
     cc_get_prev_tangent1_lambda,
     cc_get_prev_tangent2_lambda,
     cc_set_local_p0,
@@ -803,20 +802,8 @@ def _contact_pack_columns_kernel(
 
 
 @wp.func
-def _build_tangent1_from_velocity(n: wp.vec3f, dv: wp.vec3f) -> wp.vec3f:
-    """Build a unit tangent1 from the tangential relative velocity.
-
-    PhoenX's ``RRContactManifoldFunctions::Initialize`` tangent frame:
-    project the contact-point relative velocity onto the contact plane
-    and normalise. When there's no meaningful tangential slide, fall
-    back to a branch-free orthonormal seed (Duff et al. 2017) so the
-    basis still varies smoothly with ``n``.
-    """
-    v_n = wp.dot(dv, n) * n
-    v_t = dv - v_n
-    len_sq = wp.dot(v_t, v_t)
-    if len_sq > wp.float32(1.0e-12):
-        return v_t / wp.sqrt(len_sq)
+def _build_tangent1_from_normal(n: wp.vec3f) -> wp.vec3f:
+    """Reconstruct a deterministic orthonormal tangent from a unit normal."""
     sign = wp.float32(1.0)
     if n[2] < wp.float32(0.0):
         sign = wp.float32(-1.0)
@@ -826,29 +813,6 @@ def _build_tangent1_from_velocity(n: wp.vec3f, dv: wp.vec3f) -> wp.vec3f:
         sign * n[0] * n[1] * a,
         -sign * n[0],
     )
-
-
-#: Maximum prev-frame penetration depth [m] before the sticky-anchor
-#: branch is rejected and the gather falls back to the fresh narrow-phase
-#: anchor.
-#:
-#: The "carry prev anchor forward" branch computes penetration with the
-#: prev body-local anchor under the *current* body pose. When the body
-#: rotates between frames, the drifted prev anchor's world position can
-#: plunge centimetres below a static collider even though the actual
-#: contact only moved sub-millimetre. ``contact_prepare_for_iteration_at``
-#: turns that bogus penetration into a Baumgarte bias that saturates at
-#: ``-max_push_speed`` once depth crosses ~3 cm (bias rate ~62.8 rad/s
-#: from ``DEFAULT_HERTZ_CONTACT=10``), the PGS sweep accumulates an
-#: impulse orders of magnitude too large, and the body launches metres
-#: upward -- bunny-on-ground at rest is the canonical repro (see
-#: ``_probe_lambdas.py``: lambda jumps from ~30 to 5900 N·s in one frame
-#: ~250 frames after first contact).
-#:
-#: ``0.01`` m sits well clear of the bias saturation regime while still
-#: allowing the sticky path to absorb sub-cm prev-anchor drift from
-#: normal rest-pose body oscillation.
-_PREV_ANCHOR_PEN_MAX: float = 0.01
 
 
 @wp.kernel(enable_backward=False)
@@ -868,30 +832,7 @@ def _contact_warmstart_gather_kernel(
     cid_of_contact: wp.array[wp.int32],
     cc: ContactContainer,
 ):
-    """Seed this frame's ``cc`` slots from the prev frame (PhoenX model).
-
-    One thread per canonical contact; filtered or overflowed columns exit early.
-
-    * Matched (``prev_k = rigid_contact_match_index[k] >= 0``) and prev
-      anchor still describes the contact accurately: carry the prev
-      ``(lambdas, normal, tangent1, local_p0, local_p1)`` forward.
-      Preserves sticky friction in the body-local frame when
-      ``carry_impulses`` is non-zero; otherwise only geometry is reused.
-    * Matched but prev anchor has drifted too deep (see
-      :data:`_PREV_ANCHOR_PEN_MAX`): optionally keep impulses, but reseat
-      ``(normal, tangent1, local_p0, local_p1)`` to the fresh narrow-phase
-      values. Tangent1 is rebuilt from current tangential relative
-      velocity. This catches the rotation-induced staleness that lets
-      the sticky path inject metres-per-second of phantom Baumgarte
-      push into a resting body.
-    * Unmatched (``< 0``): cold-start -- fresh geometry, zero impulses.
-
-    ``prev_cid_of_contact`` gates reads of stale prev slots that
-    belonged to an already-overwritten frame. When the same
-    ``Contacts`` generation is solved more than once, ``match_index``
-    still points to the previous collide result, so the gather uses the
-    current contact index directly.
-    """
+    """Seed canonical contact rows from compact matched impulse history."""
     k = wp.tid()
     contact_count = _clamp_contact_count(contacts.rigid_contact_count, pair_id.shape[0])
     if k >= contact_count:
@@ -906,59 +847,42 @@ def _contact_warmstart_gather_kernel(
             return
         cid_of_contact[k] = cid_base + pair_col_offset[p]
 
-    sa = contacts.rigid_contact_shape0[k]
-    sb = contacts.rigid_contact_shape1[k]
-    b1 = contacts.shape_body[sa]
-    b2 = contacts.shape_body[sb]
-
-    body_com1 = bodies.body_com[b1]
-    body_com2 = bodies.body_com[b2]
-    q1 = bodies.orientation[b1]
-    q2 = bodies.orientation[b2]
-    x1 = bodies.position[b1]
-    x2 = bodies.position[b2]
-
+    n = contacts.rigid_contact_normal[k]
+    t1 = _build_tangent1_from_normal(n)
     local_p0 = contacts.rigid_contact_point0[k]
     local_p1 = contacts.rigid_contact_point1[k]
-    n = contacts.rigid_contact_normal[k]
-    r1 = wp.quat_rotate(q1, local_p0 - body_com1)
-    r2 = wp.quat_rotate(q2, local_p1 - body_com2)
-    gap = wp.dot((x2 + r2) - (x1 + r1), n) - (contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k])
-    cc_set_start_gap(cc, k, gap)
 
-    v1 = bodies.velocity[b1]
-    v2 = bodies.velocity[b2]
-    w1 = bodies.angular_velocity[b1]
-    w2 = bodies.angular_velocity[b2]
-    dv = (v2 + wp.cross(w2, r2)) - (v1 + wp.cross(w1, r1))
-    t1 = _build_tangent1_from_velocity(n, dv)
+    prev_k = rigid_contact_match_index[k]
+    reuse = reuse_contact_indices[0] != wp.int32(0)
+    if reuse:
+        prev_k = k
+    prev_valid = prev_k >= wp.int32(0) and prev_cid_of_contact[prev_k] >= wp.int32(0)
 
     lambda_n = wp.float32(0.0)
     lambda_t1 = wp.float32(0.0)
     lambda_t2 = wp.float32(0.0)
-    prev_k = rigid_contact_match_index[k]
-    if reuse_contact_indices[0] != wp.int32(0):
-        prev_k = k
-    prev_valid = prev_k >= wp.int32(0) and prev_cid_of_contact[prev_k] >= wp.int32(0)
-    if prev_valid and gap <= wp.float32(0.0):
-        prev_n = cc_get_prev_normal(cc, prev_k)
-        prev_t1 = cc_get_prev_tangent1(cc, prev_k)
-        normal_alignment = wp.dot(prev_n, n)
-        if normal_alignment > wp.float32(0.999):
-            t1 = prev_t1
-            if carry_impulses != wp.int32(0):
-                lambda_n = cc_get_prev_normal_lambda(cc, prev_k)
-                lambda_t1 = cc_get_prev_tangent1_lambda(cc, prev_k)
-                lambda_t2 = cc_get_prev_tangent2_lambda(cc, prev_k)
-        elif carry_impulses != wp.int32(0):
-            prev_t2 = wp.cross(prev_n, prev_t1)
-            t2 = wp.cross(n, t1)
-            prev_friction_imp = (
-                cc_get_prev_tangent1_lambda(cc, prev_k) * prev_t1 + cc_get_prev_tangent2_lambda(cc, prev_k) * prev_t2
-            )
-            lambda_n = cc_get_prev_normal_lambda(cc, prev_k)
-            lambda_t1 = wp.dot(prev_friction_imp, t1)
-            lambda_t2 = wp.dot(prev_friction_imp, t2)
+    if prev_valid and carry_impulses != wp.int32(0):
+        lambda_n = cc_get_prev_normal_lambda(cc, prev_k)
+        lambda_t1 = cc_get_prev_tangent1_lambda(cc, prev_k)
+        lambda_t2 = cc_get_prev_tangent2_lambda(cc, prev_k)
+
+    uses_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
+    if uses_start_gap or reuse:
+        sa = contacts.rigid_contact_shape0[k]
+        sb = contacts.rigid_contact_shape1[k]
+        b1 = contacts.shape_body[sa]
+        b2 = contacts.shape_body[sb]
+        r1 = wp.quat_rotate(bodies.orientation[b1], local_p0 - bodies.body_com[b1])
+        r2 = wp.quat_rotate(bodies.orientation[b2], local_p1 - bodies.body_com[b2])
+        gap = wp.dot((bodies.position[b2] + r2) - (bodies.position[b1] + r1), n) - (
+            contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
+        )
+        if uses_start_gap:
+            cc_set_start_gap(cc, k, gap)
+        if reuse and gap > wp.float32(0.0):
+            lambda_n = wp.float32(0.0)
+            lambda_t1 = wp.float32(0.0)
+            lambda_t2 = wp.float32(0.0)
 
     cc_set_normal_lambda(cc, k, lambda_n)
     cc_set_tangent1_lambda(cc, k, lambda_t1)

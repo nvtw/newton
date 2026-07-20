@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.geometry.types import GeoType
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
@@ -29,6 +28,7 @@ from newton._src.solvers.phoenx.cloth_collision import (
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
+    _contact_uses_stale_anchor_start_gap,
     contact_get_body1,
     contact_get_body2,
     contact_get_contact_count,
@@ -132,32 +132,6 @@ from newton._src.solvers.phoenx.mass_splitting.access import (
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
-
-
-@wp.func
-def _contact_uses_stale_anchor_start_gap(contacts: ContactViews, k: wp.int32) -> bool:
-    shape0 = contacts.rigid_contact_shape0[k]
-    shape1 = contacts.rigid_contact_shape1[k]
-    shape_type_count = contacts.shape_type.shape[0]
-    uses_start_gap = False
-    if shape0 >= wp.int32(0) and shape0 < shape_type_count:
-        type0 = contacts.shape_type[shape0]
-        uses_start_gap = (
-            uses_start_gap
-            or type0 == wp.int32(GeoType.MESH)
-            or type0 == wp.int32(GeoType.HFIELD)
-            or type0 == wp.int32(GeoType.TETRAHEDRON)
-        )
-    if shape1 >= wp.int32(0) and shape1 < shape_type_count:
-        type1 = contacts.shape_type[shape1]
-        uses_start_gap = (
-            uses_start_gap
-            or type1 == wp.int32(GeoType.MESH)
-            or type1 == wp.int32(GeoType.HFIELD)
-            or type1 == wp.int32(GeoType.TETRAHEDRON)
-        )
-    return uses_start_gap
-
 
 __all__ = [
     "contact_cached_warmstart_lean",
