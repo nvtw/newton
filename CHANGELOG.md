@@ -54,6 +54,7 @@
 
 ### Changed
 
+- Bound PhoenX contact-history and warm-start launches to avoid scheduling inactive capacity tails.
 - Store sticky collision offset directions in octahedral vec2 history and reconstruct their magnitudes from contact margins.
 - Reduce PhoenX contact warm-start traffic by loading local anchors only when contact reuse or stale-anchor correction requires them.
 - Improve `BroadPhaseSAP` performance on anisotropic scenes with denser projection-axis coverage and longer best-axis reuse.

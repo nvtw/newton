@@ -1133,3 +1133,14 @@ remain unchanged. Adjacent RTX PRO 6000 graph traces reduced save + gather from
 32K worlds was neutral (-0.19%) with the identical 1.114M contacts; an 8,192-body
 single world improved 1.4887 to 1.4747 ms (+0.95%). Full CPU/CUDA matching,
 PhoenX ordering, Kapla stability, and momentum tests passed.
+
+
+## J40 - bounded contact staging grids, accepted
+
+PhoenX now caps graph-stable history-copy and warm-start launches at four
+blocks/SM; Warp grid-strides over live work instead of scheduling the full
+11.8M-slot capacity. RTX PRO 6000 node medians: copy 31.71 to 18.30 us and
+warm-start 71.36 to 63.09 us (-21.7 us combined). Fixed 32K worlds improved
+1.6993 to 1.6627 ms (+2.20%, 59.63% sequential / 85.64% random-vec4 roof).
+Changing 32K worlds was neutral (-0.36%) with identical 1.114M contacts; an
+11,341-body Kapla run was also neutral. The change is six launch lines, keeps

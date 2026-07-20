@@ -1278,6 +1278,8 @@ def gather_contact_warmstart(
     reuse matched contact geometry while cold-starting cross-frame impulse
     magnitudes.
     """
+    device_obj = wp.get_device(device)
+    max_blocks = max(1, int(getattr(device_obj, "sm_count", 1))) * 4
     wp.launch(
         kernel=_contact_warmstart_gather_kernel,
         dim=max(1, scratch.rigid_contact_max),
@@ -1297,4 +1299,5 @@ def gather_contact_warmstart(
         ],
         outputs=[cid_of_contact, cc],
         device=device,
+        max_blocks=max_blocks,
     )

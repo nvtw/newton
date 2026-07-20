@@ -493,11 +493,14 @@ def contact_container_copy_current_to_prev(
             contact slots (the prior solve's contact count). Slots beyond it
             are skipped, since Newton packs contacts into ``[0, count)``.
     """
+    device_obj = wp.get_device(device)
+    max_blocks = max(1, int(getattr(device_obj, "sm_count", 1))) * 4
     wp.launch(
         _contact_container_copy_current_to_prev_kernel,
         dim=int(cc.impulses.shape[1]),
         inputs=[cc, valid_count],
         device=device,
+        max_blocks=max_blocks,
     )
 
 
