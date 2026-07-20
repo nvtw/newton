@@ -1215,3 +1215,21 @@ with current mini on the identical fixed workload (1.473 vs 1.477 ms) and is
 far faster when topology evolves. Contact columns, colors, stack/robot body
 states, and the Kapla stability metrics are identical. A 640-slot regression
 covers deterministic IDs and cid mapping across two block boundaries.
+
+
+## J45 - main constraint vec4 grouping, bounded experiment
+
+An isolated coalesced stream compared the current scalar-dword SoA with vec4
+groups using 48 densely consumed dwords, matching a prepared revolute iterate.
+At 1.05M columns (192 MiB allocation), vec4 reduced 145.08 to 132.49 us
+(+9.5%) and raised logical throughput from 1,416.6 to 1,551.2 GB/s
+(95.1% to 104.2% of the sequential roof). At 4.19M columns (768 MiB), vec4
+regressed 514.78 to 545.84 us (-5.7%): scalar SoA already streamed at
+1,597.0 GB/s and vec4 transaction granularity added no DRAM benefit. Loading
+one lane from each group was 3.9x slower above L2 with vec4.
+
+Reject wholesale conversion. Pursue a family-aliased hot/cold split only:
+joints currently set the generic slot width to 117 dwords versus 36 for the
+next-largest family, so moving densely reused prepared joint groups to a vec4
+sidecar can remain net-size-neutral or smaller. Optional/cold fields stay
+scalar. The isolated benchmark is benchmark_constraint_vec4.py.
