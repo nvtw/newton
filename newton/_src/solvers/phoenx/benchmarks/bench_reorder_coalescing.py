@@ -106,6 +106,10 @@ from newton._src.solvers.phoenx.benchmarks.scenarios import h1_flat, tower
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
+_SEQUENTIAL_GBPS = 1489.14
+_RANDOM_VEC4_GBPS = 1036.82
+_FP32_TFLOPS = 87.810
+
 
 def _extract_solver(handle) -> SolverPhoenX:
     """Reach into a :class:`SceneHandle` to grab its underlying solver.
@@ -273,6 +277,85 @@ def _apply_permutation(
     wp.synchronize_device()
 
 
+_BODY_ARRAY_FIELDS = (
+    "position",
+    "velocity",
+    "angular_velocity",
+    "orientation",
+    "body_com",
+    "inverse_inertia_world",
+    "inverse_inertia",
+    "inverse_mass",
+    "force",
+    "torque",
+    "linear_damping",
+    "angular_damping",
+    "affected_by_gravity",
+    "motion_type",
+    "world_id",
+    "constraint_node",
+    "position_prev",
+    "orientation_prev",
+    "kinematic_target_pos",
+    "kinematic_target_orient",
+    "kinematic_target_valid",
+    "position_prev_substep",
+    "orientation_prev_substep",
+    "access_mode",
+    "island_root",
+    "frames_below_threshold",
+)
+
+
+def _build_body_first_touch_permutation(world: PhoenXWorld) -> tuple[np.ndarray, np.ndarray]:
+    """Return new-to-old and old-to-new maps from colored solve order."""
+    if world.step_layout == "single_world" or world.mass_splitting_enabled:
+        raise RuntimeError("body-remap probe currently requires direct rigid multi_world access")
+    if int(world.bodies.reduced.enabled.numpy()[0]) != 0:
+        raise RuntimeError("body-remap probe excludes reduced-coordinate bodies")
+
+    joint_header = world.constraints.data.numpy().view(np.int32)
+    contact_header = world._contact_cols.data.numpy().view(np.int32)
+    eids, _ = _global_eids(world)
+    seen = np.zeros(world.num_bodies, dtype=np.bool_)
+    new_to_old: list[int] = []
+    for start, end in _color_iter_multi_world(world):
+        for eid in eids[start:end]:
+            cid = int(eid)
+            header = joint_header if cid < world.num_joints else contact_header
+            local_cid = cid if cid < world.num_joints else cid - world.num_joints
+            for body in (int(header[1, local_cid]), int(header[2, local_cid])):
+                if body >= 0 and not seen[body]:
+                    seen[body] = True
+                    new_to_old.append(body)
+    new_to_old.extend(int(body) for body in np.flatnonzero(~seen))
+    inverse = np.asarray(new_to_old, dtype=np.int32)
+    old_to_new = np.empty(world.num_bodies, dtype=np.int32)
+    old_to_new[inverse] = np.arange(world.num_bodies, dtype=np.int32)
+    return inverse, old_to_new
+
+
+def _remap_constraint_header(data: wp.array2d, old_to_new: np.ndarray) -> wp.array2d:
+    host = data.numpy()
+    ints = host.view(np.int32)
+    for row in (1, 2):
+        ids = ints[row]
+        active = ids >= 0
+        ids[active] = old_to_new[ids[active]]
+    return wp.array(host, dtype=data.dtype, device=data.device)
+
+
+def _apply_body_permutation(world: PhoenXWorld, new_to_old: np.ndarray, old_to_new: np.ndarray) -> None:
+    """Apply an offline solve-only upper-bound permutation."""
+    for name in _BODY_ARRAY_FIELDS:
+        source = getattr(world.bodies, name)
+        host = source.numpy()[new_to_old].copy()
+        setattr(world.bodies, name, wp.array(host, dtype=source.dtype, device=source.device))
+    world.constraints.data = _remap_constraint_header(world.constraints.data, old_to_new)
+    world._contact_cols.data = _remap_constraint_header(world._contact_cols.data, old_to_new)
+    wp.synchronize_device()
+
+
 # ---------------------------------------------------------------------------
 # Stats + bench
 # ---------------------------------------------------------------------------
@@ -313,6 +396,31 @@ def _print_color_stats(world: PhoenXWorld) -> None:
             f"  per-color cid counts: n={len(cc)} min={cc.min()} "
             f"max={cc.max()} mean={cc.mean():.1f} median={int(np.median(cc))}"
         )
+
+
+def _useful_roofline(world: PhoenXWorld, elapsed_ms: float) -> str:
+    eids, _ = _global_eids(world)
+    active: list[np.ndarray] = []
+    iter_fn = _color_iter_single_world if world.step_layout == "single_world" else _color_iter_multi_world
+    for start, end in iter_fn(world):
+        active.append(eids[start:end])
+    active_eids = np.concatenate(active) if active else np.empty(0, dtype=np.int32)
+    active_joints = int(np.count_nonzero((active_eids >= 0) & (active_eids < world.num_joints)))
+    contact_ids = active_eids[active_eids >= world.num_joints] - world.num_joints
+    header = world._contact_cols.data.numpy().view(np.int32)
+    contact_points = int(np.sum(header[6, contact_ids], dtype=np.int64)) if contact_ids.size else 0
+    scale = int(world.solver_iterations)
+    logical_bytes = (contact_points * 352 + active_joints * 400) * scale
+    estimated_flops = (contact_points * 450 + active_joints * 600) * scale
+    elapsed_s = elapsed_ms * 1.0e-3
+    gbps = logical_bytes / elapsed_s / 1.0e9
+    tflops = estimated_flops / elapsed_s / 1.0e12
+    return (
+        f"useful={gbps:.1f} GB/s ({100.0 * gbps / _SEQUENTIAL_GBPS:.1f}% seq, "
+        f"{100.0 * gbps / _RANDOM_VEC4_GBPS:.1f}% random-vec4), "
+        f"{tflops:.3f} TF/s ({100.0 * tflops / _FP32_TFLOPS:.2f}% FP32); "
+        f"points={contact_points}, joints={active_joints}"
+    )
 
 
 def _bench_solve_main(world: PhoenXWorld, n_runs: int, warmup: int, trials: int) -> tuple[float, float, float]:
@@ -360,7 +468,13 @@ def _bench_solve_main(world: PhoenXWorld, n_runs: int, warmup: int, trials: int)
 
 
 def _run_scene(
-    label: str, build_fn: Callable, kwargs: dict, n_runs: int, warmup: int, trials: int
+    label: str,
+    build_fn: Callable,
+    kwargs: dict,
+    n_runs: int,
+    warmup: int,
+    trials: int,
+    body_remap: bool,
 ) -> tuple[float, float, float]:
     print(f"\n=== {label} ===")
     print(f"  args: {kwargs}")
@@ -386,6 +500,23 @@ def _run_scene(
         f"({1000.0 * base_min / n_runs:.2f} us/run @min)"
     )
 
+    print(f"  {_useful_roofline(world, base_min / n_runs)}")
+
+    if body_remap:
+        new_to_old, old_to_new = _build_body_first_touch_permutation(world)
+        moved = float(np.count_nonzero(new_to_old != np.arange(world.num_bodies))) / float(max(1, world.num_bodies))
+        print(f"  first-touch body permutation moved {100.0 * moved:.1f}% of bodies")
+        _apply_body_permutation(world, new_to_old, old_to_new)
+        reordered_min, reordered_med, _ = _bench_solve_main(world, n_runs=n_runs, warmup=warmup, trials=trials)
+        speedup_min = base_min / reordered_min if reordered_min > 0 else float("nan")
+        speedup_med = base_med / reordered_med if reordered_med > 0 else float("nan")
+        print(
+            f"  body-remapped: min={reordered_min:8.2f} med={reordered_med:8.2f} ms / {n_runs} runs "
+            f"speedup={speedup_min:.3f}x min, {speedup_med:.3f}x median"
+        )
+        print(f"  {_useful_roofline(world, reordered_min / n_runs)}")
+        return base_min, reordered_min, speedup_min
+
     ji, ci, new_eids, n_active_j, n_active_c = _build_permutation(world)
     print(
         f"  active joint cids: {n_active_j}/{world.num_joints}  "
@@ -399,6 +530,8 @@ def _run_scene(
         f"  reordered (clustered): min={reordered_min:8.2f}  med={reordered_med:8.2f}  ms / {n_runs} runs   "
         f"({1000.0 * reordered_min / n_runs:.2f} us/run @min)"
     )
+
+    print(f"  {_useful_roofline(world, reordered_min / n_runs)}")
 
     speedup_min = base_min / reordered_min if reordered_min > 0 else float("nan")
     speedup_med = base_med / reordered_med if reordered_med > 0 else float("nan")
@@ -435,6 +568,16 @@ _SCENE_REGISTRY: dict[str, tuple[Callable, dict, str]] = {
         {"num_worlds": 2048, "solver_name": "phoenx"},
         "h1_flat (2048 worlds, multi_world robot)",
     ),
+    "h1_flat_8192": (
+        h1_flat.build,
+        {"num_worlds": 8192, "solver_name": "phoenx"},
+        "h1_flat (8192 worlds, multi_world robot)",
+    ),
+    "h1_flat_32768": (
+        h1_flat.build,
+        {"num_worlds": 32768, "solver_name": "phoenx"},
+        "h1_flat (32768 worlds, multi_world robot, above-L2 active state)",
+    ),
 }
 
 
@@ -452,6 +595,11 @@ def main() -> None:
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--solver_iterations", type=int, default=8)
+    parser.add_argument(
+        "--body-remap",
+        action="store_true",
+        help="Measure an offline first-touch body-state permutation instead of column reordering.",
+    )
     parser.add_argument(
         "--tower_worlds", type=int, default=32, help="num_worlds passed to the tower scene's multi_world build."
     )
@@ -471,7 +619,13 @@ def main() -> None:
         if scene_key == "tower_multi":
             kwargs.setdefault("num_worlds", args.tower_worlds)
         results[scene_key] = _run_scene(
-            label, builder, kwargs, n_runs=args.n_runs, warmup=args.warmup, trials=args.trials
+            label,
+            builder,
+            kwargs,
+            n_runs=args.n_runs,
+            warmup=args.warmup,
+            trials=args.trials,
+            body_remap=args.body_remap,
         )
 
     print("\n=== Summary ===")

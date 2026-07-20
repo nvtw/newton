@@ -1270,3 +1270,37 @@ a 30-frame A/B was physics-identical. A 180-frame bracket measured 9.356 ms
 control versus 9.328 ms lean (+0.30%); shorter brackets ranged from -2.2% to
 +0.8%. Two kernels and a dispatch route are unjustified. Prototype removed.
 The Kapla benchmark retains post-timing copy-slot topology counters.
+
+
+## J48 - incremental recoloring upper bound, rejected
+
+Single-world already validates and reuses cached colors. J43 rebuilds
+multi-world coloring on only 5% of measured evolving frames; deleting every
+remaining rebuild would save about 0.2-0.3% total. A second temporal cache would
+duplicate machinery for sub-noise upside. No code added.
+
+
+## J49 - unified mixed-frame proxy transfer, rejected
+
+A row-private proxy favored a branchless tagged three-row block at 8K worlds:
+H1 +19%, G1 +41%, DR-Legs +48%. The extracted-graph production-math gate,
+which restores body gathers and dependency scheduling, measured G1 at 2K
+worlds as 0.126 ms production versus 2.470 ms grouped. The proxy omitted the
+dominant costs and is not a qualified roofline benchmark. No solver path added.
+
+
+## J50 - solver-local body remap upper bound, rejected
+
+The retained bench_reorder_coalescing.py --body-remap probe permutes every
+body-length SoA field and joint/contact header offline into deterministic
+colored first-touch order. It leaves collision and coloring unchanged and
+measures the real solve without charging staging.
+
+H1 solve-only results: 512 worlds -0.9%, 2K -8.6%, 8K -7.1%. At 32K worlds
+(622,592 joints, 458,752 contact points, active state above L2), baseline was
+1.8995 ms versus 2.0643 ms remapped (-8.0%). Useful-work roofs were
+1,728.9 GB/s (116.1% sequential, 166.8% random-vec4), 2.443 TF/s (2.78% FP32)
+versus 1,590.8 GB/s (106.8%, 153.4%), 2.248 TF/s (2.56%). Values above 100%
+reflect cache reuse in the algorithmic lower-bound model, not DRAM counters.
+World-contiguous body order is superior; production staging could only worsen
+the result.
