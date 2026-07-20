@@ -184,6 +184,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _PER_WORLD_FAST_FAMILIES,
     _STRAGGLER_BLOCK_DIM,
+    _add_scan_block_offsets_kernel,
     _choose_fast_tail_worlds_per_block,
     _constraint_gather_errors_kernel,
     _constraint_gather_wrenches_kernel,
@@ -203,6 +204,7 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _reduce_constraint_time_us_kernel,
     _reduce_contact_time_us_kernel,
     _reduce_total_colours_kernel,
+    _scan_blocks_int_kernel,
     _scatter_monotone_world_run_starts_kernel,
     _set_kinematic_pose_batch_kernel,
     _zero_constraint_time_us_kernel,
@@ -1069,6 +1071,7 @@ class PhoenXWorld:
             and self.num_soft_tetrahedra == 0
             and self.num_soft_hexahedra == 0
         )
+        self._conditional_world_coloring = self._reuse_rigid_coloring and float(sleeping_velocity_threshold) <= 0.0
         topology_capacity = self._constraint_capacity if self._reuse_rigid_coloring else 1
         self._previous_rigid_topology: wp.array[wp.int64] = wp.empty(
             topology_capacity, dtype=wp.int64, device=self.device
@@ -1263,6 +1266,11 @@ class PhoenXWorld:
         self._per_world_element_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._per_world_elements: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
         self._per_world_run_scan: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
+        scan_count = max(cap, nw + 1) if self._conditional_world_coloring else 1
+        scan_blocks = (scan_count + 255) // 256
+        self._conditional_scan_scratch: wp.array[wp.int32] = wp.zeros(
+            2 * scan_blocks, dtype=wp.int32, device=self.device
+        )
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
         self._per_world_node_color_mask: wp.array[wp.uint64] = wp.zeros(
             max(1, self.num_bodies + self.num_particles), dtype=wp.uint64, device=self.device
@@ -2943,49 +2951,15 @@ class PhoenXWorld:
             self._dispatcher.begin_step()
         elif self._constraint_capacity > 0 and self._partition_active_this_step:
             if not reuse_partition:
-                if self.step_layout == "single_world" or not self._use_greedy_coloring:
-                    self._partitioner.reset(self._elements, self._num_active_constraints)
-                if self.step_layout == "single_world":
-                    compute_family_starts = self._singleworld_needs_family_starts()
-                    if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
-                        # In-graph JP fallback if greedy's 64-colour bitmask overflows.
-                        self._partitioner.build_csr_greedy_with_jp_fallback(compute_family_starts=compute_family_starts)
-                    else:
-                        self._partitioner.build_csr(compute_family_starts=compute_family_starts)
-                else:
-                    self._build_per_world_coloring()
-
-                if self._tpw_auto and self.step_layout != "single_world":
-                    self._pick_tpw()
-
-                # Per-step setup that depends on the just-built CSR. The
-                # dispatcher rebuilds the mass-splitting interaction graph
-                # here (no-op when mass splitting is disabled).
-                self._dispatcher.begin_step()
-                if self._colored_contact_headers:
-                    contact_pack_colored_headers(
-                        self._contact_cols,
-                        self._contact_cols_packed,
-                        self._partitioner.element_ids_by_color,
-                        self._num_active_constraints,
-                        self._contact_offset,
-                        self._constraint_capacity,
-                        device=self.device,
+                if self._conditional_world_coloring and self._reuse_rigid_coloring:
+                    wp.capture_if(
+                        self._topology_rebuild,
+                        on_true=self._rebuild_rigid_partition_conditional,
+                        on_false=None,
                     )
-                    if self._colored_contact_rows:
-                        contact_build_colored_row_offsets(
-                            self._contact_cols_packed,
-                            self._partitioner.element_ids_by_color,
-                            self._num_active_constraints,
-                            self._contact_offset,
-                            self._contact_row_counts,
-                            self._contact_row_offsets,
-                            self._contact_row_source_indices,
-                            self._contact_row_slots,
-                            self._contact_row_total,
-                            self._constraint_capacity,
-                            device=self.device,
-                        )
+                    self._maybe_fallback_from_per_world_greedy_overflow(self.num_worlds)
+                else:
+                    self._rebuild_partition()
 
         # Keep complete contact solve state in color order across every
         # substep. Prepare maps immutable Newton inputs through the canonical
@@ -3283,6 +3257,89 @@ class PhoenXWorld:
                     wp.int32(self.num_bodies),
                 ],
                 outputs=[self._contact_container],
+                device=self.device,
+            )
+
+    def _rebuild_partition(self, *, conditional_scan: bool = False) -> None:
+        """Build coloring and dependent solver state for the active graph."""
+        if self.step_layout == "single_world" or not self._use_greedy_coloring:
+            self._partitioner.reset(self._elements, self._num_active_constraints)
+        if self.step_layout == "single_world":
+            compute_family_starts = self._singleworld_needs_family_starts()
+            if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
+                self._partitioner.build_csr_greedy_with_jp_fallback(compute_family_starts=compute_family_starts)
+            else:
+                self._partitioner.build_csr(compute_family_starts=compute_family_starts)
+        else:
+            self._build_per_world_coloring(
+                conditional_scan=conditional_scan,
+                unconditional_finish=conditional_scan,
+            )
+
+        if self._tpw_auto and self.step_layout != "single_world":
+            self._pick_tpw()
+
+        self._dispatcher.begin_step()
+        if self._colored_contact_headers:
+            contact_pack_colored_headers(
+                self._contact_cols,
+                self._contact_cols_packed,
+                self._partitioner.element_ids_by_color,
+                self._num_active_constraints,
+                self._contact_offset,
+                self._constraint_capacity,
+                device=self.device,
+            )
+            if self._colored_contact_rows:
+                contact_build_colored_row_offsets(
+                    self._contact_cols_packed,
+                    self._partitioner.element_ids_by_color,
+                    self._num_active_constraints,
+                    self._contact_offset,
+                    self._contact_row_counts,
+                    self._contact_row_offsets,
+                    self._contact_row_source_indices,
+                    self._contact_row_slots,
+                    self._contact_row_total,
+                    self._constraint_capacity,
+                    device=self.device,
+                )
+
+    def _rebuild_rigid_partition_conditional(self) -> None:
+        """Rebuild rigid multi-world coloring inside a CUDA graph branch."""
+        self._rebuild_partition(conditional_scan=True)
+
+    def _scan_inclusive_conditional(self, source: wp.array, destination: wp.array) -> None:
+        """Inclusive int32 scan using only kernels legal in a graph conditional."""
+        block_dim = 256
+        count = int(source.shape[0])
+        current_source = source
+        current_destination = destination
+        level_outputs = []
+        scratch_offset = 0
+        while True:
+            num_blocks = (count + block_dim - 1) // block_dim
+            block_sums = self._conditional_scan_scratch[scratch_offset : scratch_offset + num_blocks]
+            wp.launch_tiled(
+                _scan_blocks_int_kernel,
+                dim=num_blocks,
+                inputs=[current_source, current_destination, wp.int32(count), block_sums, wp.int32(block_dim)],
+                block_dim=block_dim,
+                device=self.device,
+            )
+            level_outputs.append((current_destination, count, block_sums))
+            if num_blocks == 1:
+                break
+            scratch_offset += num_blocks
+            current_source = block_sums
+            current_destination = block_sums
+            count = num_blocks
+
+        for values, value_count, block_prefix in reversed(level_outputs[:-1]):
+            wp.launch(
+                _add_scan_block_offsets_kernel,
+                dim=value_count,
+                inputs=[values, wp.int32(value_count), block_prefix, wp.int32(block_dim)],
                 device=self.device,
             )
 
@@ -3743,7 +3800,7 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _build_per_world_coloring(self) -> None:
+    def _build_per_world_coloring(self, *, conditional_scan: bool = False, unconditional_finish: bool = False) -> None:
         """Build deterministic per-world streams and color each world.
 
         The CID stream is split into monotone world-id runs and stable-merged
@@ -3770,21 +3827,27 @@ class PhoenXWorld:
             device=self.device,
         )
 
-        wp.utils.array_scan(self._world_totals_shifted, self._per_world_element_offsets, inclusive=True)
+        if conditional_scan:
+            self._scan_inclusive_conditional(self._world_totals_shifted, self._per_world_element_offsets)
+        else:
+            wp.utils.array_scan(self._world_totals_shifted, self._per_world_element_offsets, inclusive=True)
 
         # Stable linear bucketing without a global radix sort. Split the CID
         # stream at every world-id decrease, then merge those monotone runs in
         # original order so each world receives the same stable CID sequence.
-        wp.utils.array_scan(run_flags, run_ids, inclusive=True)
-        if self._reuse_rigid_coloring:
+        if conditional_scan:
+            self._scan_inclusive_conditional(run_flags, run_ids)
+        else:
+            wp.utils.array_scan(run_flags, run_ids, inclusive=True)
+        if unconditional_finish or not self._reuse_rigid_coloring:
+            self._finish_per_world_coloring()
+        else:
             wp.capture_if(
                 self._topology_rebuild,
                 on_true=self._finish_per_world_coloring,
                 on_false=None,
             )
-        else:
-            self._finish_per_world_coloring()
-        if self._use_greedy_coloring:
+        if self._use_greedy_coloring and not unconditional_finish:
             self._maybe_fallback_from_per_world_greedy_overflow(nw)
 
     def _finish_per_world_coloring(self) -> None:

@@ -1168,3 +1168,25 @@ GJK 200.7 to 194.3 us and primitive 56.0 to 51.7 us, but gather 88.6 to
 avoids the flat control's many-parameter penalty; the synthetic layout result
 did not preserve the real interface/cache sequence. Production prototype
 removed.
+
+
+## J43 - conditional multi-world coloring, accepted
+
+Rigid CUDA multi-world PhoenX now always projects constraint endpoints but
+rebuilds deterministic world streams and greedy coloring only when the ordered
+endpoint keys change. A small allocation-free hierarchical scan makes rebuilds
+legal inside CUDA conditional graphs. CollisionPipeline is unchanged.
+
+| Workload | Control | Candidate | Gain | Rebuilds |
+| --- | ---: | ---: | ---: | ---: |
+| 32K stack, fixed, 1.049M contacts | 1.5795 ms | **1.5288 ms** | **+3.3%** | 0% |
+| 32K stack, evolving, 1.114M contacts | 1.9091 ms | **1.8295 ms** | **+4.4%** | 5% |
+| 8K robots, 65K revolutes + 33K contacts | 264.0 us | **243.5 us** | **+8.4%** | 0% |
+
+Fixed-stack useful bandwidth reaches 64.9% of sequential DRAM and 93.1% of
+the random-vec4 roof; estimated FP32 is 1.4% of peak. Scans match exact int32
+prefix sums across block boundaries. Contact-stack and revolute-robot color
+streams and body states are bit-identical to CUB coloring. First-step graph
+capture, multi-world isolation, TPW scheduling, momentum, and explicit
+single-world joint/contact tests pass. Sleeping, deformables, single-world,
+and non-greedy paths retain the prior implementation.

@@ -2600,6 +2600,40 @@ def _record_rigid_topology(
     previous_topology[tid] = key
 
 
+@wp.kernel(enable_backward=False)
+def _scan_blocks_int_kernel(
+    source: wp.array[wp.int32],
+    destination: wp.array[wp.int32],
+    count: wp.int32,
+    block_sums: wp.array[wp.int32],
+    block_dim: wp.int32,
+):
+    block, lane = wp.tid()
+    index = block * block_dim + lane
+    value = wp.int32(0)
+    if index < count:
+        value = source[index]
+    values = wp.tile(value)
+    inclusive = wp.tile_scan_inclusive(values)
+    if index < count:
+        destination[index] = inclusive[lane]
+    if lane == block_dim - wp.int32(1):
+        block_sums[block] = inclusive[lane]
+
+
+@wp.kernel(enable_backward=False)
+def _add_scan_block_offsets_kernel(
+    values: wp.array[wp.int32],
+    count: wp.int32,
+    block_prefix: wp.array[wp.int32],
+    block_dim: wp.int32,
+):
+    index = wp.tid()
+    block = index / block_dim
+    if index < count and block > wp.int32(0):
+        values[index] = values[index] + block_prefix[block - wp.int32(1)]
+
+
 @wp.func
 def _stable_contact_pair_priority(shape_a: wp.int32, shape_b: wp.int32) -> wp.int32:
     """Return a model-stable 24-bit priority for a contact shape pair."""
