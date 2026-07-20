@@ -35,8 +35,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DERIVED_DWORDS_PER_CONTACT,
     CC_DWORDS_PER_CONTACT,
     CC_IMPULSE_DWORDS_PER_CONTACT,
-    CC_LOCAL_ANCHOR_DWORDS,
-    CC_LOCAL_ANCHOR_FIRST_ROW,
     CC_RIGID_DWORDS_PER_CONTACT,
     ContactContainer,
     cc_get_bias,
@@ -45,8 +43,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_eff_n,
     cc_get_eff_t1,
     cc_get_eff_t2,
-    cc_get_local_p0,
-    cc_get_local_p1,
     cc_get_normal,
     cc_get_normal_lambda,
     cc_get_pd_bias,
@@ -451,9 +447,6 @@ def _contact_scatter_colored_rows_kernel(
         packed_headers.data[_OFF_CONTACT_FIRST, slot] = reinterpret_int_as_float(original_first)
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         destination.impulses[row, destination_k] = source.impulses[row, source_k]
-    for i in range(CC_LOCAL_ANCHOR_DWORDS):
-        row = wp.int32(CC_LOCAL_ANCHOR_FIRST_ROW + i)
-        destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
 
 
 def contact_pack_colored_headers(
@@ -1211,10 +1204,9 @@ def _contact_recompute_r2(
     b2: wp.int32,
     k: wp.int32,
     n: wp.vec3f,
-    cc: ContactContainer,
 ) -> wp.vec3f:
     """``r2 = quat_rotate(orient2, local_p1 - body_com2) - margin1 * n``."""
-    local_p1 = cc_get_local_p1(cc, k)
+    local_p1 = contacts.rigid_contact_point1[k]
     body_com2 = bodies.body_com[b2]
     orientation2 = bodies.orientation[b2]
     margin1 = contacts.rigid_contact_margin1[k]
@@ -1246,7 +1238,7 @@ def contact_world_wrench_at(
         n = cc_get_normal(cc, k)
         t1_dir = cc_get_tangent1(cc, k)
         t2_dir = wp.cross(n, t1_dir)
-        r2 = _contact_recompute_r2(bodies, contacts, b2, k, n, cc)
+        r2 = _contact_recompute_r2(bodies, contacts, b2, k, n)
         lam_n = cc_get_normal_lambda(cc, k)
         lam_t1 = cc_get_tangent1_lambda(cc, k)
         lam_t2 = cc_get_tangent2_lambda(cc, k)
@@ -1282,7 +1274,7 @@ def contact_per_k_wrench_at(
     n = cc_get_normal(cc, k)
     t1_dir = cc_get_tangent1(cc, k)
     t2_dir = wp.cross(n, t1_dir)
-    r2 = _contact_recompute_r2(bodies, contacts, b2, k, n, cc)
+    r2 = _contact_recompute_r2(bodies, contacts, b2, k, n)
     lam_n = cc_get_normal_lambda(cc, k)
     lam_t1 = cc_get_tangent1_lambda(cc, k)
     lam_t2 = cc_get_tangent2_lambda(cc, k)
@@ -1386,8 +1378,8 @@ def contact_per_k_error_at(
     n = cc_get_normal(cc, k)
     t1_dir = cc_get_tangent1(cc, k)
     t2_dir = wp.cross(n, t1_dir)
-    local_p0 = cc_get_local_p0(cc, k)
-    local_p1 = cc_get_local_p1(cc, k)
+    local_p0 = contacts.rigid_contact_point0[k]
+    local_p1 = contacts.rigid_contact_point1[k]
 
     # local_p is in body-origin frame; subtract body_com so r is from COM.
     p1_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1)

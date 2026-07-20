@@ -43,8 +43,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_eff_n,
     cc_get_eff_t1,
     cc_get_eff_t2,
-    cc_get_local_p0,
-    cc_get_local_p1,
     cc_get_normal,
     cc_get_normal_lambda,
     cc_get_tangent1,
@@ -570,8 +568,8 @@ def _gather_reduced_contact_blocks_kernel(
             n = cc_get_normal(cc, contact)
             t0 = cc_get_tangent1(cc, contact)
             t1 = wp.cross(n, t0)
-            local0 = cc_get_local_p0(cc, contact)
-            local1 = cc_get_local_p1(cc, contact)
+            local0 = contacts.rigid_contact_point0[contact]
+            local1 = contacts.rigid_contact_point1[contact]
             offset0 = (
                 wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
                 + contacts.rigid_contact_margin0[contact] * n
@@ -693,8 +691,8 @@ def _gather_reduced_contact_blocks_packed_kernel(
             n = cc_get_normal(cc, contact)
             t0 = cc_get_tangent1(cc, contact)
             t1 = wp.cross(n, t0)
-            local0 = cc_get_local_p0(cc, contact)
-            local1 = cc_get_local_p1(cc, contact)
+            local0 = contacts.rigid_contact_point0[contact]
+            local1 = contacts.rigid_contact_point1[contact]
             offset0 = (
                 wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
                 + contacts.rigid_contact_margin0[contact] * n

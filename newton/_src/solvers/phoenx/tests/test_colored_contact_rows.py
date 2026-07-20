@@ -22,8 +22,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_contact_first,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
-    CC_LOCAL_ANCHOR_DWORDS,
-    CC_LOCAL_ANCHOR_FIRST_ROW,
+    CC_DWORDS_PER_CONTACT,
     CC_RIGID_DWORDS_PER_CONTACT,
     ContactContainer,
     contact_container_zeros,
@@ -44,15 +43,12 @@ def _set_contact_ranges(
 
 
 @wp.kernel(enable_backward=False)
-def _offset_packed_state(contacts: ContactContainer, total: wp.array[wp.int32]):
+def _offset_packed_impulses(contacts: ContactContainer, total: wp.array[wp.int32]):
     k = wp.tid()
     if k >= total[0]:
         return
     for row in range(3):
         contacts.impulses[row, k] += wp.float32(10000.0)
-    for i in range(CC_LOCAL_ANCHOR_DWORDS):
-        row = wp.int32(CC_LOCAL_ANCHOR_FIRST_ROW + i)
-        contacts.lambdas[row, k] += wp.float32(20000.0)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "colored contact-row tests require CUDA graph capture")
@@ -152,7 +148,9 @@ class TestColoredContactRows(unittest.TestCase):
         source = contact_container_zeros(row_capacity, device=device)
         packed = contact_solve_container_zeros(row_capacity, device=device, rigid_only=True)
         impulse_np = np.arange(3 * row_capacity, dtype=np.float32).reshape(3, row_capacity)
-        lambda_np = (1000.0 + np.arange(18 * row_capacity, dtype=np.float32)).reshape(18, row_capacity)
+        lambda_np = (1000.0 + np.arange(CC_DWORDS_PER_CONTACT * row_capacity, dtype=np.float32)).reshape(
+            CC_DWORDS_PER_CONTACT, row_capacity
+        )
         derived_np = (2000.0 + np.arange(16 * row_capacity, dtype=np.float32)).reshape(16, row_capacity)
         source.impulses.assign(impulse_np)
         source.lambdas.assign(lambda_np)
@@ -202,7 +200,7 @@ class TestColoredContactRows(unittest.TestCase):
                 device=device,
                 rigid_only=True,
             )
-            wp.launch(_offset_packed_state, dim=row_capacity, inputs=[packed, total], device=device)
+            wp.launch(_offset_packed_impulses, dim=row_capacity, inputs=[packed, total], device=device)
             contact_scatter_colored_rows(
                 packed,
                 source,
@@ -222,9 +220,6 @@ class TestColoredContactRows(unittest.TestCase):
         np.testing.assert_array_equal(offsets.numpy(), np.array([0, 1, 1, 8], dtype=np.int32))
         self.assertEqual(packed.lambdas.shape[0], CC_RIGID_DWORDS_PER_CONTACT)
         expected_packed_lambdas = lambda_np[:CC_RIGID_DWORDS_PER_CONTACT, expected_order].copy()
-        expected_packed_lambdas[CC_LOCAL_ANCHOR_FIRST_ROW : CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS] += (
-            20000.0
-        )
         np.testing.assert_array_equal(packed.lambdas.numpy()[:, :21], expected_packed_lambdas)
         expected_packed_derived = np.zeros_like(derived_np[:, expected_order])
         expected_packed_derived[-1] = derived_np[-1, expected_order]
@@ -233,9 +228,7 @@ class TestColoredContactRows(unittest.TestCase):
         expected_impulses = impulse_np.copy()
         expected_impulses[:, :21] += 10000.0
         np.testing.assert_array_equal(source.impulses.numpy(), expected_impulses)
-        expected_lambdas = lambda_np.copy()
-        expected_lambdas[CC_LOCAL_ANCHOR_FIRST_ROW : CC_LOCAL_ANCHOR_FIRST_ROW + CC_LOCAL_ANCHOR_DWORDS, :21] += 20000.0
-        np.testing.assert_array_equal(source.lambdas.numpy(), expected_lambdas)
+        np.testing.assert_array_equal(source.lambdas.numpy(), lambda_np)
 
 
 if __name__ == "__main__":

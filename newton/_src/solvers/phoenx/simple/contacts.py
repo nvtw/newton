@@ -15,8 +15,6 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
-    cc_get_local_p0,
-    cc_get_local_p1,
     cc_get_normal,
     cc_get_normal_lambda,
     cc_get_tangent1,
@@ -80,8 +78,8 @@ def assemble_contact_scalar_rows_kernel(
     elif axis_index == wp.int32(2):
         direction = wp.cross(normal, tangent1)
 
-    local_p0 = cc_get_local_p0(cc, contact)
-    local_p1 = cc_get_local_p1(cc, contact)
+    local_p0 = contacts.rigid_contact_point0[contact]
+    local_p1 = contacts.rigid_contact_point1[contact]
     arm_a = wp.quat_rotate(bodies.orientation[body_a], local_p0 - bodies.body_com[body_a])
     arm_b = wp.quat_rotate(bodies.orientation[body_b], local_p1 - bodies.body_com[body_b])
     point_a = bodies.position[body_a] + arm_a + contacts.rigid_contact_margin0[contact] * normal

@@ -44,8 +44,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_prev_normal_lambda,
     cc_get_prev_tangent1_lambda,
     cc_get_prev_tangent2_lambda,
-    cc_set_local_p0,
-    cc_set_local_p1,
     cc_set_normal,
     cc_set_normal_lambda,
     cc_set_start_gap,
@@ -889,8 +887,6 @@ def _contact_warmstart_gather_kernel(
     cc_set_tangent2_lambda(cc, k, lambda_t2)
     cc_set_normal(cc, k, n)
     cc_set_tangent1(cc, k, t1)
-    cc_set_local_p0(cc, k, local_p0)
-    cc_set_local_p1(cc, k, local_p1)
 
 
 @wp.kernel(enable_backward=False)

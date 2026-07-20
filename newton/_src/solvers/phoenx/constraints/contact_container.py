@@ -4,7 +4,7 @@
 
 * ``impulses`` -- mutable accumulated normal/tangent impulse rows.
 * ``lambdas`` -- read-mostly persistent contact manifold data (normal, tangent,
-  anchors, barycentrics).
+  barycentrics).
 * ``derived`` -- per-substep scratch (eff masses, biases); rebuilt every prepare.
 
 All buffers are ``[dword, k]`` with k inner for coalesced loads.
@@ -20,8 +20,6 @@ __all__ = [
     "CC_DERIVED_DWORDS_PER_CONTACT",
     "CC_DWORDS_PER_CONTACT",
     "CC_IMPULSE_DWORDS_PER_CONTACT",
-    "CC_LOCAL_ANCHOR_DWORDS",
-    "CC_LOCAL_ANCHOR_FIRST_ROW",
     "CC_RIGID_DWORDS_PER_CONTACT",
     "ContactContainer",
     "cc_get_bias",
@@ -30,8 +28,6 @@ __all__ = [
     "cc_get_eff_n",
     "cc_get_eff_t1",
     "cc_get_eff_t2",
-    "cc_get_local_p0",
-    "cc_get_local_p1",
     "cc_get_normal",
     "cc_get_normal_lambda",
     "cc_get_pd_bias",
@@ -54,8 +50,6 @@ __all__ = [
     "cc_set_eff_n",
     "cc_set_eff_t1",
     "cc_set_eff_t2",
-    "cc_set_local_p0",
-    "cc_set_local_p1",
     "cc_set_normal",
     "cc_set_normal_lambda",
     "cc_set_pd_bias",
@@ -79,17 +73,13 @@ __all__ = [
 #: Dwords of mutable persistent impulse per contact: normal + two tangents.
 CC_IMPULSE_DWORDS_PER_CONTACT: int = 3
 
-#: 18 = normal(3) + tangent1(3) + local_p0(3) + local_p1(3) + side0_bary(3)
-#: + side1_bary(3). The two ``bary`` slots are populated by contact ingest when
-#: a side is a cloth triangle; rigid sides leave them at zero.
-CC_DWORDS_PER_CONTACT: int = 18
+#: 12 = normal(3) + tangent1(3) + side0_bary(3) + side1_bary(3). The two
+#: ``bary`` slots are populated by contact ingest when a side is a cloth triangle;
+#: rigid sides leave them at zero.
+CC_DWORDS_PER_CONTACT: int = 12
 
-#: Rigid contacts use frame directions and two local anchors, but no barycentrics.
-CC_RIGID_DWORDS_PER_CONTACT: int = 12
-
-#: Local anchors are the only manifold rows prepare may update after ingest.
-CC_LOCAL_ANCHOR_FIRST_ROW: int = 6
-CC_LOCAL_ANCHOR_DWORDS: int = 6
+#: Rigid contacts use only frame directions; canonical contacts own anchors.
+CC_RIGID_DWORDS_PER_CONTACT: int = 6
 
 #: 16 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias +
 #: pd_eff_soft + r0(3) + r1(3). pd_* are non-zero only for soft contacts (user
@@ -110,18 +100,12 @@ _CC_OFF_NORMAL_Z = wp.constant(2)
 _CC_OFF_TANGENT1_X = wp.constant(3)
 _CC_OFF_TANGENT1_Y = wp.constant(4)
 _CC_OFF_TANGENT1_Z = wp.constant(5)
-_CC_OFF_LOCAL_P0_X = wp.constant(6)
-_CC_OFF_LOCAL_P0_Y = wp.constant(7)
-_CC_OFF_LOCAL_P0_Z = wp.constant(8)
-_CC_OFF_LOCAL_P1_X = wp.constant(9)
-_CC_OFF_LOCAL_P1_Y = wp.constant(10)
-_CC_OFF_LOCAL_P1_Z = wp.constant(11)
-_CC_OFF_SIDE0_BARY_X = wp.constant(12)
-_CC_OFF_SIDE0_BARY_Y = wp.constant(13)
-_CC_OFF_SIDE0_BARY_Z = wp.constant(14)
-_CC_OFF_SIDE1_BARY_X = wp.constant(15)
-_CC_OFF_SIDE1_BARY_Y = wp.constant(16)
-_CC_OFF_SIDE1_BARY_Z = wp.constant(17)
+_CC_OFF_SIDE0_BARY_X = wp.constant(6)
+_CC_OFF_SIDE0_BARY_Y = wp.constant(7)
+_CC_OFF_SIDE0_BARY_Z = wp.constant(8)
+_CC_OFF_SIDE1_BARY_X = wp.constant(9)
+_CC_OFF_SIDE1_BARY_Y = wp.constant(10)
+_CC_OFF_SIDE1_BARY_Z = wp.constant(11)
 
 _CC_OFF_EFF_N = wp.constant(0)
 _CC_OFF_EFF_T1 = wp.constant(1)
@@ -272,44 +256,7 @@ def cc_set_tangent1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
     write2d_f32(cc.lambdas, _CC_OFF_TANGENT1_Z, k, v[2])
 
 
-@wp.func
-def cc_get_local_p0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
-    return wp.vec3f(
-        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_X, k),
-        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_Y, k),
-        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_Z, k),
-    )
-
-
-@wp.func
-def cc_set_local_p0(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_X, k, v[0])
-    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_Y, k, v[1])
-    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P0_Z, k, v[2])
-
-
-@wp.func
-def cc_get_local_p1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
-    return wp.vec3f(
-        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_X, k),
-        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_Y, k),
-        read2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_Z, k),
-    )
-
-
-@wp.func
-def cc_set_local_p1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_X, k, v[0])
-    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_Y, k, v[1])
-    write2d_f32(cc.lambdas, _CC_OFF_LOCAL_P1_Z, k, v[2])
-
-
-# Per-side barycentric weights for cloth-aware endpoints. Populated by
-# the contact ingest only when the corresponding ``side*_kind`` is
-# ``CLOTH``; rigid sides leave them at zero (the iterate's endpoint
-# helper just consumes them once it knows the kind).
-
-
+# Per-side barycentric weights are populated only for deformable endpoints.
 @wp.func
 def cc_get_side0_bary(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(

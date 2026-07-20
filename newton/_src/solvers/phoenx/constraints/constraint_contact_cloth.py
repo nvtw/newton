@@ -65,8 +65,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_eff_n,
     cc_get_eff_t1,
     cc_get_eff_t2,
-    cc_get_local_p0,
-    cc_get_local_p1,
     cc_get_normal,
     cc_get_normal_lambda,
     cc_get_pd_bias,
@@ -86,8 +84,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_eff_n,
     cc_set_eff_t1,
     cc_set_eff_t2,
-    cc_set_local_p0,
-    cc_set_local_p1,
     cc_set_normal_lambda,
     cc_set_pd_bias,
     cc_set_pd_eff_soft,
@@ -222,8 +218,8 @@ def _side_world_contact_point(
     bodies: BodyContainer,
     particles: ParticleContainer,
     num_bodies: wp.int32,
-    cc: ContactContainer,
-    k: wp.int32,
+    contacts: ContactViews,
+    source_k: wp.int32,
     is_side1: wp.bool,
     margin: wp.float32,
     n: wp.vec3f,
@@ -264,7 +260,7 @@ def _side_world_contact_point(
             anchor = anchor + weight_d * particles.position[p_d]
         return anchor + (sign * margin) * n
     b = nodes[0]
-    local_p = cc_get_local_p1(cc, k) if is_side1 else cc_get_local_p0(cc, k)
+    local_p = contacts.rigid_contact_point1[source_k] if is_side1 else contacts.rigid_contact_point0[source_k]
     if b < 0:
         # Static-anchor world shape: shape transform is identity.
         return local_p + (sign * margin) * n
@@ -439,8 +435,8 @@ def _make_contact_prepare_for_iteration_at(
                     bodies,
                     particles,
                     num_bodies,
-                    cc,
-                    k,
+                    contacts,
+                    source_k,
                     False,
                     margin0,
                     n,
@@ -452,8 +448,8 @@ def _make_contact_prepare_for_iteration_at(
                     bodies,
                     particles,
                     num_bodies,
-                    cc,
-                    k,
+                    contacts,
+                    source_k,
                     True,
                     margin1,
                     n,
@@ -572,8 +568,8 @@ def _make_contact_prepare_for_iteration_at(
                 effective_gap = wp.dot(p1_world - p0_world, n)
                 p_diff = p1_world - p0_world
             else:
-                local_p0 = cc_get_local_p0(cc, k)
-                local_p1 = cc_get_local_p1(cc, k)
+                local_p0 = contacts.rigid_contact_point0[source_k]
+                local_p1 = contacts.rigid_contact_point1[source_k]
                 p0_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
                 p1_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
                 r1 = p0_world - position1
@@ -630,8 +626,6 @@ def _make_contact_prepare_for_iteration_at(
                 if drift_sq > slip_threshold * slip_threshold or normal_aligned < wp.float32(0.95) or coulomb_saturated:
                     fresh_lp0 = contacts.rigid_contact_point0[source_k]
                     fresh_lp1 = contacts.rigid_contact_point1[source_k]
-                    cc_set_local_p0(cc, k, fresh_lp0)
-                    cc_set_local_p1(cc, k, fresh_lp1)
                     if coulomb_saturated:
                         cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
                         cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
@@ -1101,7 +1095,7 @@ def _make_contact_iterate_at(
                     bodies,
                     particles,
                     num_bodies,
-                    cc,
+                    contacts,
                     k,
                     False,
                     margin0,
@@ -1114,7 +1108,7 @@ def _make_contact_iterate_at(
                     bodies,
                     particles,
                     num_bodies,
-                    cc,
+                    contacts,
                     k,
                     True,
                     margin1,

@@ -818,7 +818,7 @@ The contact-only fused kernel uses 168 registers/thread. A moderate
 workload (-1.1% throughput). The spill/latency cost still exceeds added
 occupancy; no cap remains.
 
-## J18 - conditional coloring scans, active lead
+## J18 - conditional coloring scans, rejected
 
 An evolving 32K-world run reached 1,212,416 contacts while reporting 0 topology
 rebuilds across 120 frames: contact geometry/count changed, but the deterministic
@@ -826,5 +826,69 @@ body-pair graph remained reusable. PhoenX nevertheless executes two global
 world-stream scans before its existing CUDA conditional. The trace measures
 about 25.5 us per CUB scan plus 24.2 us for count/mark, roughly 75 us/frame.
 Moving CUB scans directly into the conditional is illegal because their graph
-contains allocation nodes. Next test: an allocation-free tiled hierarchical
-scan in mini, then transfer only if rebuild frames stay competitive.
+contains allocation nodes. An allocation-free hierarchical tile scan was exact
+at 1M, 4M, and non-power-of-two sizes. At 1M it took 17.20 us versus CUB at
+8.10 us; a true conditional took 22.95 us and a skipped conditional 5.29 us.
+At 4M it took 43.05 versus 12.29 us. The projected stable-topology frame gain
+is only about 2%, while rebuild-heavy scenes regress. The prototype was removed.
+
+
+## J19 - segmented per-world contact sort, not transferred
+
+A fixed-capacity per-world bin, 64-element tile sort, and stable compaction
+produced exactly the same keys/source indices as the global 26-bit radix sort.
+At 32K worlds, 1,048,576 live contacts, and 2,097,152 slots it took 69.35 us
+versus 110.61 us (1.59x). Nsys attributes 31.94 us to atomic binning, 24.88 us
+to tile sort, 6.40 us to compaction, and 3.46 us to the world-count scan.
+The isolated saving projects to only 2--3% of the full frame and requires the
+world-major canonical order that previously raised the full collision gather
+23.3 us and regressed the frame 2.7%. The extra collision path is not justified;
+the prototype was removed.
+
+## J20 - warp-local in-place sticky lifecycle, implementation rejected
+
+A one-warp/world design can theoretically load previous canonical geometry,
+match 32 current contacts, overwrite the same history safely after warp sync,
+and thereby replace global match, gather, and save passes. Both a fully
+unrolled shuffle implementation and a runtime-loop version compiled for more
+than two minutes in Warp/NVRTC. This form fails compile-time and code-size
+requirements before runtime qualification. It was removed. The architectural
+idea remains valid only if a future tiled implementation generates a much
+smaller kernel.
+
+## J21 - canonical anchors instead of solver copies, accepted
+
+PhoenX now reads rigid local points from canonical `Contacts` and removes six
+duplicate float planes from its contact container. Persistent rows fall 18 to
+12 generally and 12 to 6 for rigid color-packed rows. No solver path was added.
+
+RTX PRO 6000, one substep/four iterations:
+
+| Workload | J13 | J21 | Gain | J21 roofline |
+| --- | ---: | ---: | ---: | ---: |
+| 32K x 8 fixed, 1,048,576 contacts | 1.697 ms | **1.661 ms** | **+2.2%** | 59.7% sequential, 85.7% random-vec4 |
+| 32K x 8 evolving, 1,048,576 contacts | 2.009 ms | **1.981 ms** | **+1.4%** | 50.1% sequential, 71.9% random-vec4 |
+| 8K x 8 evolving, 278,528 contacts | 531.14 us | 536.66 us | -1.0% | 49.1% sequential, 70.5% random-vec4 |
+| 11K-body Kapla, 6x10 | 12.611 ms | **12.289 ms** | **+2.6%** | 57.5% sequential, 82.5% random-vec4 |
+
+Four colored-row, 38 rigid/friction/simple, one reduced-contact, and the full
+60-frame cloth-on-box settling test pass. The small evolving loss is accepted
+for the broad above-L2 wins, 24 MiB less state per 1M contacts, and removal of
+the duplicate anchor API.
+
+## J22 - device-phase sticky-history ping-pong, rejected
+
+Mini compared the current random gather + streaming save against graph-safe
+double buffering, both as two arrays and as one 2N array indexed by a device
+phase. At 1,048,576 contacts:
+
+| Fresh contacts | Current | 2N offset ping-pong | Result |
+| ---: | ---: | ---: | ---: |
+| 0% | 150.85 us | 336.15 us | -55.1% |
+| 10% | 181.85 us | 332.64 us | -45.3% |
+| 100% | 274.32 us | **265.76 us** | +3.2% |
+
+Fusing random history reads with seven streaming output fields destroys memory
+latency hiding. The all-fresh gain projects to only 0.5% of the full frame and
+overfits contact churn. Keep random gather and streaming publication separate;
+the prototype was removed.
