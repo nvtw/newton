@@ -152,10 +152,10 @@ class TestMultiWorldColoringContract(unittest.TestCase):
         self.assertLess(clear_idx, launch_idx)
 
     def test_direct_greedy_path_skips_adjacency_but_fallback_rebuilds_it(self) -> None:
-        step_source = inspect.getsource(solver_phoenx.PhoenXWorld.step)
+        rebuild_source = inspect.getsource(solver_phoenx.PhoenXWorld._rebuild_partition)
         self.assertIn(
             'if self.step_layout == "single_world" or not self._use_greedy_coloring:',
-            step_source,
+            rebuild_source,
         )
         fallback_source = inspect.getsource(solver_phoenx.PhoenXWorld._maybe_fallback_from_per_world_greedy_overflow)
         reset_idx = fallback_source.index("self._partitioner.reset")
