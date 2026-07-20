@@ -340,6 +340,8 @@ class _SaveStateData:
     src_keys: wp.array[wp.int64]
     src_point0: wp.array[wp.vec3]
     src_point1: wp.array[wp.vec3]
+    src_offset0: wp.array[wp.vec3]
+    src_offset1: wp.array[wp.vec3]
     src_shape0: wp.array[wp.int32]
     src_shape1: wp.array[wp.int32]
     src_normal: wp.array[wp.vec3]
@@ -351,6 +353,11 @@ class _SaveStateData:
     dst_keys: wp.array[wp.int64]
     dst_pos_world: wp.array[wp.vec3]  # world-space midpoint of point0 and point1
     dst_normal: wp.array[wp.vec3]
+    dst_point0: wp.array[wp.vec3]
+    dst_point1: wp.array[wp.vec3]
+    dst_offset0: wp.array[wp.vec3]
+    dst_offset1: wp.array[wp.vec3]
+    save_sticky: int
     dst_count: wp.array[wp.int32]
 
 
@@ -397,72 +404,11 @@ def _save_sorted_state_kernel(data: _SaveStateData):
 
         data.dst_pos_world[i] = 0.5 * (p0w + p1w)
         data.dst_normal[i] = data.src_normal[i]
-
-
-# ------------------------------------------------------------------
-# Sticky canonical geometry overlay
-# ------------------------------------------------------------------
-#
-# Sticky mode preserves only the fields that actually change across frames
-# for a matched contact: the body-frame contact points (``point0``/``point1``)
-# and offsets (``offset0``/``offset1``), plus the world-frame normal (which
-# is already persisted for matching in ``prev_normal``, no extra allocation).
-#
-# Everything else is either key-derived or a per-shape constant that does
-# not change between frames, so the new frame's values are already correct:
-#
-# - ``shape0`` / ``shape1``  : implied by the sort key; identical by
-#   construction for matched contacts.
-# - ``margin0`` / ``margin1``: ``radius_eff + margin``, per-shape constant.
-# - ``stiffness`` / ``damping`` / ``friction``: per-shape constants, and
-#   contact matching for hydroelastic contacts (the only path that writes
-#   these) is not supported anyway.
-
-
-@wp.struct
-class _StickyOverlayData:
-    """Prior canonical contacts plus current unsorted contact geometry."""
-
-    match_index: wp.array[wp.int32]
-    contact_count: wp.array[wp.int32]
-    canonical_to_source: wp.array[wp.int32]
-    previous_point0: wp.array[wp.vec3]
-    previous_point1: wp.array[wp.vec3]
-    previous_offset0: wp.array[wp.vec3]
-    previous_offset1: wp.array[wp.vec3]
-    previous_normal: wp.array[wp.vec3]
-    current_point0: wp.array[wp.vec3]
-    current_point1: wp.array[wp.vec3]
-    current_offset0: wp.array[wp.vec3]
-    current_offset1: wp.array[wp.vec3]
-    current_normal: wp.array[wp.vec3]
-    overlay_point0: wp.array[wp.vec3]
-    overlay_point1: wp.array[wp.vec3]
-    overlay_offset0: wp.array[wp.vec3]
-    overlay_offset1: wp.array[wp.vec3]
-    overlay_normal: wp.array[wp.vec3]
-
-
-@wp.kernel(enable_backward=False)
-def _build_sticky_overlay_kernel(data: _StickyOverlayData):
-    i = wp.tid()
-    if i >= data.contact_count[0]:
-        return
-    source = data.canonical_to_source[i]
-    use_previous = data.match_index[i] >= wp.int32(0)
-    if use_previous:
-        previous = data.match_index[i]
-        data.overlay_point0[i] = data.previous_point0[previous]
-        data.overlay_point1[i] = data.previous_point1[previous]
-        data.overlay_offset0[i] = data.previous_offset0[previous]
-        data.overlay_offset1[i] = data.previous_offset1[previous]
-        data.overlay_normal[i] = data.previous_normal[previous]
-    else:
-        data.overlay_point0[i] = data.current_point0[source]
-        data.overlay_point1[i] = data.current_point1[source]
-        data.overlay_offset0[i] = data.current_offset0[source]
-        data.overlay_offset1[i] = data.current_offset1[source]
-        data.overlay_normal[i] = data.current_normal[source]
+        if data.save_sticky != 0:
+            data.dst_point0[i] = p0
+            data.dst_point1[i] = p1
+            data.dst_offset0[i] = data.src_offset0[i]
+            data.dst_offset1[i] = data.src_offset1[i]
 
 
 # ------------------------------------------------------------------
@@ -528,7 +474,7 @@ class ContactMatcher:
         pos_threshold: Maximum midpoint distance [m] for a match.
         normal_dot_threshold: Minimum normal dot product for a match.
         contact_report: Whether to retain matched flags for reports.
-        sticky: Whether to allocate canonical sticky geometry overlays.
+        sticky: Whether to retain canonical sticky geometry history.
         device: Device on which to allocate state.
     """
 
@@ -583,13 +529,11 @@ class ContactMatcher:
                 self._prev_point1 = wp.zeros(capacity, dtype=wp.vec3)
                 self._prev_offset0 = wp.zeros(capacity, dtype=wp.vec3)
                 self._prev_offset1 = wp.zeros(capacity, dtype=wp.vec3)
-                self._prev_normal_sticky = wp.zeros(capacity, dtype=wp.vec3)
             else:
                 self._prev_point0 = None
                 self._prev_point1 = None
                 self._prev_offset0 = None
                 self._prev_offset1 = None
-                self._prev_normal_sticky = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -602,7 +546,7 @@ class ContactMatcher:
 
     @property
     def is_sticky(self) -> bool:
-        """Whether sticky-mode overlay buffers are allocated."""
+        """Whether sticky-mode history buffers are allocated."""
         return self._sticky
 
     @property
@@ -723,59 +667,17 @@ class ContactMatcher:
             device=device,
         )
 
-    def build_sticky_overlay(
-        self,
-        contact_count: wp.array[wp.int32],
-        match_index: wp.array[wp.int32],
-        canonical_to_source: wp.array[wp.int32],
-        *,
-        previous_point0: wp.array[wp.vec3],
-        previous_point1: wp.array[wp.vec3],
-        previous_offset0: wp.array[wp.vec3],
-        previous_offset1: wp.array[wp.vec3],
-        previous_normal: wp.array[wp.vec3],
-        current_point0: wp.array[wp.vec3],
-        current_point1: wp.array[wp.vec3],
-        current_offset0: wp.array[wp.vec3],
-        current_offset1: wp.array[wp.vec3],
-        current_normal: wp.array[wp.vec3],
-        device: Devicelike = None,
-    ) -> None:
-        """Build canonical sticky geometry before the full contact gather."""
-        if not self._sticky:
-            raise ValueError("sticky overlay requires sticky matching")
-        data = _StickyOverlayData()
-        data.match_index = match_index
-        data.contact_count = contact_count
-        data.canonical_to_source = canonical_to_source
-        data.previous_point0 = previous_point0
-        data.previous_point1 = previous_point1
-        data.previous_offset0 = previous_offset0
-        data.previous_offset1 = previous_offset1
-        data.previous_normal = previous_normal
-        data.current_point0 = current_point0
-        data.current_point1 = current_point1
-        data.current_offset0 = current_offset0
-        data.current_offset1 = current_offset1
-        data.current_normal = current_normal
-        data.overlay_point0 = self._prev_point0
-        data.overlay_point1 = self._prev_point1
-        data.overlay_offset0 = self._prev_offset0
-        data.overlay_offset1 = self._prev_offset1
-        data.overlay_normal = self._prev_normal_sticky
-        wp.launch(_build_sticky_overlay_kernel, dim=self._capacity, inputs=[data], device=device)
-
     @property
-    def sticky_overlay_arrays(self) -> tuple[wp.array, wp.array, wp.array, wp.array, wp.array]:
-        """Canonical sticky point, offset, and normal overlay arrays."""
+    def sticky_history_arrays(self) -> tuple[wp.array, wp.array, wp.array, wp.array, wp.array]:
+        """Previous canonical sticky points, offsets, and normals."""
         if not self._sticky:
-            raise ValueError("sticky overlay requires sticky matching")
+            raise ValueError("sticky history requires sticky matching")
         return (
             self._prev_point0,
             self._prev_point1,
             self._prev_offset0,
             self._prev_offset1,
-            self._prev_normal_sticky,
+            self._prev_normal,
         )
 
     def save_sorted_state(
@@ -784,6 +686,8 @@ class ContactMatcher:
         contact_count: wp.array[wp.int32],
         sorted_point0: wp.array[wp.vec3],
         sorted_point1: wp.array[wp.vec3],
+        sorted_offset0: wp.array[wp.vec3],
+        sorted_offset1: wp.array[wp.vec3],
         sorted_shape0: wp.array[wp.int32],
         sorted_shape1: wp.array[wp.int32],
         sorted_normal: wp.array[wp.vec3],
@@ -792,11 +696,13 @@ class ContactMatcher:
         *,
         device: Devicelike = None,
     ) -> None:
-        """Save canonical keys, world-space midpoints, and normals for matching."""
+        """Save canonical matching state and optional sticky geometry."""
         data = _SaveStateData()
         data.src_keys = sorted_keys
         data.src_point0 = sorted_point0
         data.src_point1 = sorted_point1
+        data.src_offset0 = sorted_offset0
+        data.src_offset1 = sorted_offset1
         data.src_shape0 = sorted_shape0
         data.src_shape1 = sorted_shape1
         data.src_normal = sorted_normal
@@ -806,6 +712,11 @@ class ContactMatcher:
         data.dst_keys = self._prev_sorted_keys
         data.dst_pos_world = self._prev_pos_world
         data.dst_normal = self._prev_normal
+        data.dst_point0 = self._prev_point0 if self._sticky else sorted_point0
+        data.dst_point1 = self._prev_point1 if self._sticky else sorted_point1
+        data.dst_offset0 = self._prev_offset0 if self._sticky else sorted_offset0
+        data.dst_offset1 = self._prev_offset1 if self._sticky else sorted_offset1
+        data.save_sticky = 1 if self._sticky else 0
         data.dst_count = self._prev_count
 
         wp.launch(_save_sorted_state_kernel, dim=self._capacity, inputs=[data], device=device)

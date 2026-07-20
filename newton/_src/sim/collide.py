@@ -1560,8 +1560,6 @@ class CollisionPipeline:
         :meth:`_generate_soft_contacts` separately.
         """
         model = self.model
-        previous_sticky_contacts = self._previous_sticky_contacts or contacts
-
         # Create ContactWriterData struct for custom contact writing
         writer_data = ContactWriterData()
         writer_data.contact_max = contacts.rigid_contact_max
@@ -1689,33 +1687,22 @@ class CollisionPipeline:
             )
 
         if self._matching_sticky:
-            self._contact_matcher.build_sticky_overlay(
-                contact_count=contacts.rigid_contact_count,
-                match_index=contacts.rigid_contact_match_index,
-                canonical_to_source=self._contact_sorter.sort_indices_view,
-                previous_point0=previous_sticky_contacts.rigid_contact_point0,
-                previous_point1=previous_sticky_contacts.rigid_contact_point1,
-                previous_offset0=previous_sticky_contacts.rigid_contact_offset0,
-                previous_offset1=previous_sticky_contacts.rigid_contact_offset1,
-                previous_normal=previous_sticky_contacts.rigid_contact_normal,
-                current_point0=sort_buffer.point0,
-                current_point1=sort_buffer.point1,
-                current_offset0=sort_buffer.offset0,
-                current_offset1=sort_buffer.offset1,
-                current_normal=sort_buffer.normal,
-                device=self.device,
-            )
-            sticky_point0, sticky_point1, sticky_offset0, sticky_offset1, sticky_normal = (
-                self._contact_matcher.sticky_overlay_arrays
-            )
+            (
+                sticky_prev_point0,
+                sticky_prev_point1,
+                sticky_prev_offset0,
+                sticky_prev_offset1,
+                sticky_prev_normal,
+            ) = self._contact_matcher.sticky_history_arrays
             self._contact_sorter.sort_full(
                 **sort_kwargs,
                 sort_prepared=True,
-                sticky_point0=sticky_point0,
-                sticky_point1=sticky_point1,
-                sticky_offset0=sticky_offset0,
-                sticky_offset1=sticky_offset1,
-                sticky_normal=sticky_normal,
+                sticky_prev_point0=sticky_prev_point0,
+                sticky_prev_point1=sticky_prev_point1,
+                sticky_prev_offset0=sticky_prev_offset0,
+                sticky_prev_offset1=sticky_prev_offset1,
+                sticky_prev_normal=sticky_prev_normal,
+                sticky_match_index=contacts.rigid_contact_match_index,
             )
 
         # Build the contact report before saving state, because save
@@ -1742,6 +1729,8 @@ class CollisionPipeline:
                 contact_count=contacts.rigid_contact_count,
                 sorted_point0=contacts.rigid_contact_point0,
                 sorted_point1=contacts.rigid_contact_point1,
+                sorted_offset0=contacts.rigid_contact_offset0,
+                sorted_offset1=contacts.rigid_contact_offset1,
                 sorted_shape0=contacts.rigid_contact_shape0,
                 sorted_shape1=contacts.rigid_contact_shape1,
                 sorted_normal=contacts.rigid_contact_normal,

@@ -753,3 +753,35 @@ A proposed 1 mm sticky separation tolerance destabilized the half-scale stack
 (1.96 m/s versus the 0.1 m/s limit) and was rejected. The original zero-gap
 rule passes all four scale/tower stability tests. Matching (40), friction and
 contact behavior (44), determinism/isolation (7), and bunny mesh (1) tests pass.
+
+## J12 - vec4-packed contact impulses, rejected
+
+Mini stores the three contact impulses in one vec4. Applying that layout to the
+full shared contact container regressed the fixed 32K stack to 1.836 ms when
+used through scalar compatibility accessors. Aggregate loads/stores recovered
+the loss and measured 1.793 versus 1.810 ms (+0.9%), below the representation
+change threshold. Nsys showed fused prepare/PGS improving 328.6 to 318.8 us
+(-3.0%), but warmstart rose 100.0 to 102.5 us and history copy 30.5 to 34.1 us
+because their streaming records grew from 12 to 16 bytes. The prototype was
+removed. Vec4 packing is valuable for larger always-coaccessed groups (F11),
+not automatically for every three-scalar record.
+
+## J13 - select sticky history during canonical gather, accepted
+
+Sticky matching previously materialized five canonical geometry arrays and the
+full gather immediately read them back. Selecting matched history directly in
+the deterministic gather removes that overlay kernel and 90 net lines. Sticky
+history now lives in matcher-owned arrays, avoiding races when callers reuse a
+single Contacts buffer.
+
+On the fixed 32K-world, 1,048,576-contact workload, full PhoenX improved from
+1.810 to 1.772 ms (+2.1% throughput): 833 GB/s useful lower-bound bandwidth,
+56.0% of the 1,489 GB/s sequential roof and 80.4% of the 1,037 GB/s random-vec4
+roof. A second profile measured 1.756 ms, 56.5% and 81.1% respectively. Nsys
+showed gather falling 127.6 to 98.8 us and removed the 55.5 us overlay; the
+wider state save rose 34.5 to 97.2 us, a net 21 us lifecycle reduction.
+
+The evolving 32K workload retained exactly 819,200 final contacts and measured
+2.093 versus 2.088 ms (-0.3%, noise). The dense 512-body, 2x2 Kapla guardrail
+reduced profiled GPU work about 0.4%. Matching (40) and broad physics,
+determinism, isolation, and mesh-contact tests (54) pass.

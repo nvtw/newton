@@ -192,14 +192,15 @@ class _FullContactArrays:
     damping_buf: wp.array[float]
     friction_buf: wp.array[float]
     match_index_buf: wp.array[wp.int32]
-    sticky_point0: wp.array[wp.vec3]
-    sticky_point1: wp.array[wp.vec3]
-    sticky_offset0: wp.array[wp.vec3]
-    sticky_offset1: wp.array[wp.vec3]
-    sticky_normal: wp.array[wp.vec3]
+    sticky_prev_point0: wp.array[wp.vec3]
+    sticky_prev_point1: wp.array[wp.vec3]
+    sticky_prev_offset0: wp.array[wp.vec3]
+    sticky_prev_offset1: wp.array[wp.vec3]
+    sticky_prev_normal: wp.array[wp.vec3]
+    sticky_match_index: wp.array[wp.int32]
     has_shape_props: int
     has_match_index: int
-    has_sticky_overlay: int
+    has_sticky_history: int
 
 
 @wp.kernel(enable_backward=False)
@@ -237,12 +238,13 @@ def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], coun
         data.sorted_keys[i] = data.sort_keys[p]
     data.shape0[i] = data.shape0_buf[p]
     data.shape1[i] = data.shape1_buf[p]
-    if data.has_sticky_overlay != 0:
-        data.point0[i] = data.sticky_point0[i]
-        data.point1[i] = data.sticky_point1[i]
-        data.offset0[i] = data.sticky_offset0[i]
-        data.offset1[i] = data.sticky_offset1[i]
-        data.normal[i] = data.sticky_normal[i]
+    if data.has_sticky_history != 0 and data.sticky_match_index[i] >= wp.int32(0):
+        previous = data.sticky_match_index[i]
+        data.point0[i] = data.sticky_prev_point0[previous]
+        data.point1[i] = data.sticky_prev_point1[previous]
+        data.offset0[i] = data.sticky_prev_offset0[previous]
+        data.offset1[i] = data.sticky_prev_offset1[previous]
+        data.normal[i] = data.sticky_prev_normal[previous]
     else:
         data.point0[i] = data.point0_buf[p]
         data.point1[i] = data.point1_buf[p]
@@ -465,11 +467,12 @@ class ContactSorter:
         match_index: wp.array | None = None,
         source_is_buffer: bool = False,
         sort_prepared: bool = False,
-        sticky_point0: wp.array | None = None,
-        sticky_point1: wp.array | None = None,
-        sticky_offset0: wp.array | None = None,
-        sticky_offset1: wp.array | None = None,
-        sticky_normal: wp.array | None = None,
+        sticky_prev_point0: wp.array | None = None,
+        sticky_prev_point1: wp.array | None = None,
+        sticky_prev_offset0: wp.array | None = None,
+        sticky_prev_offset1: wp.array | None = None,
+        sticky_prev_normal: wp.array | None = None,
+        sticky_match_index: wp.array | None = None,
         device: Devicelike = None,
     ) -> None:
         """Sort contacts written through the full collide.py writer.
@@ -497,6 +500,13 @@ class ContactSorter:
                 permuted alongside the other contact fields during sorting.
             source_is_buffer: Whether the unsorted record was written directly
                 to :attr:`full_buffer`. Skips the backup pass when true.
+            sort_prepared: Whether :meth:`prepare_full_sort` has already run.
+            sticky_prev_point0: Optional previous canonical points on shape 0.
+            sticky_prev_point1: Optional previous canonical points on shape 1.
+            sticky_prev_offset0: Optional previous canonical offsets on shape 0.
+            sticky_prev_offset1: Optional previous canonical offsets on shape 1.
+            sticky_prev_normal: Optional previous canonical contact normals.
+            sticky_match_index: Optional canonical indices into sticky history.
             device: Device to launch on.
         """
         n = self._capacity
@@ -505,10 +515,17 @@ class ContactSorter:
 
         has_props = self._has_shape_props
         has_match = match_index is not None and match_index.shape[0] > 0
-        sticky_arrays = (sticky_point0, sticky_point1, sticky_offset0, sticky_offset1, sticky_normal)
-        has_sticky_overlay = sticky_point0 is not None
-        if has_sticky_overlay != all(array is not None for array in sticky_arrays):
-            raise ValueError("all sticky overlay arrays must be provided together")
+        sticky_arrays = (
+            sticky_prev_point0,
+            sticky_prev_point1,
+            sticky_prev_offset0,
+            sticky_prev_offset1,
+            sticky_prev_normal,
+            sticky_match_index,
+        )
+        has_sticky_history = sticky_prev_point0 is not None
+        if has_sticky_history != all(array is not None for array in sticky_arrays):
+            raise ValueError("all sticky history arrays must be provided together")
 
         data = _FullContactArrays()
         data.sort_keys = sort_keys
@@ -546,14 +563,15 @@ class ContactSorter:
         data.damping_buf = self._full_damping_buf
         data.friction_buf = self._full_friction_buf
         data.match_index_buf = self._full_match_index_buf
-        data.sticky_point0 = sticky_point0 if sticky_point0 is not None else self._full_point0_buf
-        data.sticky_point1 = sticky_point1 if sticky_point1 is not None else self._full_point1_buf
-        data.sticky_offset0 = sticky_offset0 if sticky_offset0 is not None else self._full_offset0_buf
-        data.sticky_offset1 = sticky_offset1 if sticky_offset1 is not None else self._full_offset1_buf
-        data.sticky_normal = sticky_normal if sticky_normal is not None else self._full_normal_buf
+        data.sticky_prev_point0 = sticky_prev_point0 if sticky_prev_point0 is not None else self._full_point0_buf
+        data.sticky_prev_point1 = sticky_prev_point1 if sticky_prev_point1 is not None else self._full_point1_buf
+        data.sticky_prev_offset0 = sticky_prev_offset0 if sticky_prev_offset0 is not None else self._full_offset0_buf
+        data.sticky_prev_offset1 = sticky_prev_offset1 if sticky_prev_offset1 is not None else self._full_offset1_buf
+        data.sticky_prev_normal = sticky_prev_normal if sticky_prev_normal is not None else self._full_normal_buf
+        data.sticky_match_index = sticky_match_index if sticky_match_index is not None else self._full_match_index_buf
         data.has_shape_props = 1 if has_props else 0
         data.has_match_index = 1 if has_match else 0
-        data.has_sticky_overlay = 1 if has_sticky_overlay else 0
+        data.has_sticky_history = 1 if has_sticky_history else 0
 
         if not source_is_buffer:
             wp.launch(_backup_full_kernel, dim=n, inputs=[data, contact_count], device=device)
