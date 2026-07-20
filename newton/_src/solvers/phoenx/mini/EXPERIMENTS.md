@@ -969,3 +969,27 @@ frames; first-step parity passed at all four world sizes. Caching velocity only
 was 1.9% slower than caching velocity plus inertia. Transfer the complete body
 working set and interleaved colored rows to full PhoenX; do not enable a cache
 with unused logical lanes.
+
+## J29 - quality-matched hybrid mass-splitting tail
+
+Full PhoenX Kapla exposed the cost of serializing 29 PGS colors. An aggressive
+8-GS-color + split-tail solve was 2.35x faster at 10 iterations but rejected:
+final peak motion was 0.73 m/s and 39 rad/s versus 0.069 m/s and 0.52 rad/s for
+10-iteration colored PGS. Extra Jacobi-like iterations erased most of the gain.
+
+Retaining 16 true GS colors and splitting only the dense tail gave a credible
+middle point. RTX PRO 6000, 11,340 bricks, 4 substeps, 60 warmup + 120 measured
+frames:
+
+| Solver | Iterations | Frame | Gain | Seq BW | Random vec4 BW |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Colored PGS, 29 colors | 10 | 21.99 ms | - | 21.1% | 30.4% |
+| 16 GS colors + split tail | 14 | **16.04 ms** | **+37.1%** | 41.3% | 59.3% |
+
+Hybrid mean/max linear residual was 0.00311/0.0584 m/s versus
+0.00197/0.0463 m/s; max angular residual was 0.747 versus 0.309 rad/s. Mean/max
+displacement drift was 0.124/2.65 mm versus 0.268/8.27 mm. Rigid pyramid force
+balance, overflow momentum, and soft-body bit-exact determinism passed. Treat
+16/14 as a qualified Kapla option, not a universal default until other large
+single-world scenes confirm convergence. Always compare mass splitting at
+matched residual quality; equal iteration counts are misleading.

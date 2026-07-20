@@ -9,6 +9,7 @@ steady-state window and reports:
 * **FPS** — frames per second over the steady-state window.
 * **drift** — mean L2 displacement of every brick between the first
   and last steady-state frame. Smaller is more stable.
+* **speed residuals** — final linear/angular motion after settling.
 * **max_z** — tower top height after the run; should stay near the
   initial value (~2.79 for the default 1x1 grid at scale 0.1) for a
   stable settle.
@@ -79,12 +80,16 @@ class BenchResult:
     mass_splitting: bool
     substeps: int
     solver_iterations: int
+    max_colored_partitions: int
     prepare_refresh_stride: int
     warmup_frames: int
     measured_frames: int
     fps: float
     mean_drift_m: float
     max_drift_m: float
+    mean_speed_mps: float
+    max_speed_mps: float
+    max_angular_speed_radps: float
     max_z: float
     min_z: float
     finite: bool
@@ -143,6 +148,7 @@ def _run_one(
     mass_splitting: bool,
     substeps: int,
     solver_iterations: int,
+    max_colored_partitions: int,
     prepare_refresh_stride: int,
     warmup_frames: int,
     measured_frames: int,
@@ -156,6 +162,7 @@ def _run_one(
 
     ek.TOWER_GRID_DIMS = grid_dims
     ek.ENABLE_MASS_SPLITTING = mass_splitting
+    ek.MASS_SPLITTING_MAX_COLORED_PARTITIONS = max_colored_partitions
     ek.USE_COLORED_CONTACT_HEADERS = colored_contact_layout
     ek.USE_COLORED_CONTACT_ROWS = colored_contact_layout
 
@@ -185,9 +192,13 @@ def _run_one(
     wp.synchronize_device(ex.device)
     elapsed = time.perf_counter() - t0
     pos_end = ex.bodies.position.numpy()
+    velocity_end = ex.bodies.velocity.numpy()[1:]
+    angular_velocity_end = ex.bodies.angular_velocity.numpy()[1:]
 
     fps = measured_frames / elapsed
     drift = np.linalg.norm(pos_end - pos_start, axis=1)
+    speeds = np.linalg.norm(velocity_end, axis=1)
+    angular_speeds = np.linalg.norm(angular_velocity_end, axis=1)
     zs = pos_end[1:, 2]  # slot 0 is the static world anchor
     report = ex.world.step_report()
     contact_points = int(ex.contacts.rigid_contact_count.numpy()[0])
@@ -198,12 +209,16 @@ def _run_one(
         mass_splitting=mass_splitting,
         substeps=substeps,
         solver_iterations=solver_iterations,
+        max_colored_partitions=max_colored_partitions,
         prepare_refresh_stride=prepare_refresh_stride,
         warmup_frames=warmup_frames,
         measured_frames=measured_frames,
         fps=float(fps),
         mean_drift_m=float(drift.mean()),
         max_drift_m=float(drift.max()),
+        mean_speed_mps=float(speeds.mean()),
+        max_speed_mps=float(speeds.max()),
+        max_angular_speed_radps=float(angular_speeds.max()),
         max_z=float(zs.max()),
         min_z=float(zs.min()),
         finite=bool(np.isfinite(pos_end).all()),
@@ -224,10 +239,14 @@ def _run_one(
 
 
 def _format_row(r: BenchResult) -> str:
-    label = f"ms={r.mass_splitting!s:<5} sub={r.substeps} it={r.solver_iterations} prep={r.prepare_refresh_stride}"
+    label = (
+        f"ms={r.mass_splitting!s:<5} sub={r.substeps} it={r.solver_iterations} "
+        f"cap={r.max_colored_partitions} prep={r.prepare_refresh_stride}"
+    )
     return (
         f"  {label:<24} fps={r.fps:6.2f}  drift mean={r.mean_drift_m:.4f}m "
-        f"max={r.max_drift_m:.4f}m  z=[{r.min_z:.3f}, {r.max_z:.3f}]  "
+        f"max={r.max_drift_m:.4f}m  speed={r.mean_speed_mps:.4f}/{r.max_speed_mps:.4f}m/s "
+        f"max_w={r.max_angular_speed_radps:.3f}rad/s  z=[{r.min_z:.3f}, {r.max_z:.3f}]  "
         f"contacts={r.contact_points}/{r.contact_columns} colors={r.num_colors} "
         f"BW={r.logical_min_gbps:.1f}GB/s ({r.sequential_bandwidth_percent:.1f}% seq) "
         f"finite={r.finite}"
@@ -252,9 +271,11 @@ def _default_sweep() -> list[dict]:
 def _baseline_key(r: BenchResult) -> tuple[str, ...]:
     """Baseline key. Preserve legacy stride-1 keys for checked-in data."""
     key = (str(r.mass_splitting), str(r.substeps), str(r.solver_iterations))
-    if r.prepare_refresh_stride == 1:
-        return key
-    return (*key, str(r.prepare_refresh_stride))
+    if r.max_colored_partitions != 8:
+        key = (*key, f"cap={r.max_colored_partitions}")
+    if r.prepare_refresh_stride != 1:
+        key = (*key, f"prep={r.prepare_refresh_stride}")
+    return key
 
 
 def _check_against_baseline(results: list[BenchResult]) -> int:
@@ -322,6 +343,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override solver_iterations. Default uses the sweep.",
     )
+    p.add_argument(
+        "--max-colored-partitions",
+        type=int,
+        default=8,
+        help="True GS colors retained before mass-splitting overflow (default 8).",
+    )
     p.add_argument("--warmup", type=int, default=60, help="Warmup frames (default 60).")
     p.add_argument("--frames", type=int, default=120, help="Measured frames (default 120).")
     p.add_argument(
@@ -348,6 +375,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.blocks_per_sm < 1:
         p.error("--blocks-per-sm must be >= 1")
+    if args.max_colored_partitions < 0:
+        p.error("--max-colored-partitions must be >= 0")
 
     if args.prepare_refresh_stride != 1 and args.mass_splitting != "off":
         p.error("--prepare-refresh-stride > 1 requires --mass-splitting off")
@@ -374,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
             mass_splitting=cfg["mass_splitting"],
             substeps=cfg["substeps"],
             solver_iterations=cfg["solver_iterations"],
+            max_colored_partitions=args.max_colored_partitions,
             prepare_refresh_stride=args.prepare_refresh_stride,
             warmup_frames=args.warmup,
             measured_frames=args.frames,
