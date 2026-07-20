@@ -445,14 +445,7 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
                 continue
             j = tile_j * block_size
             previous = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
-            if wp.static(HAS_TILE_MATMUL_TRANSPOSE_UPDATE):
-                wp.tile_matmul_transpose_update(diagonal, previous, previous, alpha=-1.0)
-            elif wp.static(HAS_NATIVE_TILE_MATMUL_TRANSPOSE_UPDATE):
-                wp.static(make_tile_matmul_transpose_update_func(block_size, "shared", "register"))(
-                    diagonal, previous, previous, -1.0
-                )
-            else:
-                wp.tile_matmul(previous, wp.tile_transpose(previous), diagonal, alpha=-1.0)
+            wp.tile_matmul(previous, wp.tile_transpose(previous), diagonal, alpha=-1.0)
 
         wp.tile_cholesky_inplace(diagonal)
         wp.tile_store(L_i, diagonal, offset=(k, k))
@@ -507,14 +500,7 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
             j = tile_j * block_size
             left = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
             right = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
-            if wp.static(HAS_TILE_MATMUL_TRANSPOSE_UPDATE):
-                wp.tile_matmul_transpose_update(panel, left, right, alpha=-1.0)
-            elif wp.static(HAS_NATIVE_TILE_MATMUL_TRANSPOSE_UPDATE):
-                wp.static(make_tile_matmul_transpose_update_func(block_size, "shared", "register"))(
-                    panel, left, right, -1.0
-                )
-            else:
-                wp.tile_matmul(left, wp.tile_transpose(right), panel, alpha=-1.0)
+            wp.tile_matmul(left, wp.tile_transpose(right), panel, alpha=-1.0)
 
         transposed = wp.tile_transpose(panel)
         wp.tile_lower_solve_inplace(diagonal, transposed)
