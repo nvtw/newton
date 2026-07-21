@@ -117,8 +117,7 @@ class SolverKamino(SolverBase, CouplingInterface):
 
         sparse_dynamics: bool | None = None
         """
-        Whether to use a sparse dynamics representation. When unspecified, defaults to `True` for DVI and `False`
-        for PADMM.
+        Whether to use a sparse dynamics representation. When unspecified, defaults to `False`.
         """
 
         use_collision_detector: bool = False
@@ -199,7 +198,7 @@ class SolverKamino(SolverBase, CouplingInterface):
         """
         The time-integrator to use for state integration.\n
         See available options in the `integrators` module.\n
-        When unspecified, defaults to `"moreau"` for DVI and `"euler"` for PADMM.
+        When unspecified, defaults to `"euler"`.
         """
 
         dynamics_solver: Literal["padmm", "dvi"] = "padmm"
@@ -404,9 +403,9 @@ class SolverKamino(SolverBase, CouplingInterface):
             if self.sparse_jacobian is None:
                 self.sparse_jacobian = self.dynamics_solver == "dvi"
             if self.sparse_dynamics is None:
-                self.sparse_dynamics = self.dynamics_solver == "dvi"
+                self.sparse_dynamics = False
             if self.integrator is None:
-                self.integrator = "moreau" if self.dynamics_solver == "dvi" else "euler"
+                self.integrator = "euler"
 
             # Default-initialize any sub-configurations that were not explicitly provided by the user
             if self.collision_detector is None and self.use_collision_detector:
@@ -422,8 +421,13 @@ class SolverKamino(SolverBase, CouplingInterface):
                         linear_solver_type="CR",
                         linear_solver_kwargs={"maxiter": 9},
                     )
+                elif self.dynamics_solver == "dvi":
+                    self.dynamics = config.ConstrainedDynamicsConfig(
+                        preconditioning=False,
+                        linear_solver_type="LLTBRCM",
+                    )
                 else:
-                    self.dynamics = config.ConstrainedDynamicsConfig(preconditioning=self.dynamics_solver != "dvi")
+                    self.dynamics = config.ConstrainedDynamicsConfig()
             if self.padmm is None:
                 self.padmm = config.PADMMSolverConfig()
             if self.dvi is None:

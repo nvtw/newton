@@ -384,8 +384,8 @@ def _solve_dvi_pgs(
                 max_step = wp.max(max_step, wp.abs(delta))
                 max_velocity = wp.max(max_velocity, wp.abs(v_i))
 
-            for l in range(nl):
-                i = lcgo + l
+            for li in range(nl):
+                i = lcgo + li
                 v_i = _compute_row_velocity(ncts, mio, vio, i, problem_D, problem_v_f, solution_lambdas)
                 D_ii_raw = wp.abs(problem_D[mio + ncts * i + i])
                 lambda_limit_old = solution_lambdas[vio + i]
@@ -565,8 +565,8 @@ def _solve_dvi_limits_pgs(
             max_velocity = float32(0.0)
             max_complementarity = float32(0.0)
 
-            for l in range(nl):
-                i = lcgo + l
+            for li in range(nl):
+                i = lcgo + li
                 v_i = _compute_row_velocity(ncts, mio, vio, i, problem_D, problem_v_f, solution_lambdas)
                 D_ii_raw = wp.abs(problem_D[mio + ncts * i + i])
                 lambda_limit_old = solution_lambdas[vio + i]

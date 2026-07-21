@@ -182,16 +182,16 @@ class TestDVISolver(unittest.TestCase):
 
     def test_00_config_selection(self):
         default_config = SolverKamino.Config(dynamics_solver="dvi")
-        self.assertTrue(default_config.sparse_dynamics)
+        self.assertFalse(default_config.sparse_dynamics)
         self.assertTrue(default_config.sparse_jacobian)
-        self.assertEqual(default_config.integrator, "moreau")
-        self.assertEqual(default_config.dynamics.linear_solver_type, "CR")
-        self.assertEqual(default_config.dynamics.linear_solver_kwargs, {"maxiter": 9})
-        self.assertEqual(default_config.dvi.omega, 0.3)
-        self.assertEqual(default_config.dvi.block_iterations, 16)
-        self.assertEqual(default_config.dvi.contact_iterations, 2)
-        self.assertEqual(default_config.dvi.bilateral_solve_period, 2)
-        self.assertEqual(default_config.dvi.contact_jacobi_omega, 0.45)
+        self.assertEqual(default_config.integrator, "euler")
+        self.assertEqual(default_config.dynamics.linear_solver_type, "LLTBRCM")
+        self.assertEqual(default_config.dynamics.linear_solver_kwargs, {})
+        self.assertEqual(default_config.dvi.omega, 1.0)
+        self.assertEqual(default_config.dvi.block_iterations, 32)
+        self.assertEqual(default_config.dvi.contact_iterations, 4)
+        self.assertEqual(default_config.dvi.bilateral_solve_period, 1)
+        self.assertEqual(default_config.dvi.contact_jacobi_omega, 0.3)
         self.assertEqual(default_config.dvi.contact_jacobi_relaxation, 0.9)
 
         dense_config = SolverKamino.Config(
@@ -201,8 +201,8 @@ class TestDVISolver(unittest.TestCase):
         )
         self.assertFalse(dense_config.sparse_dynamics)
         self.assertFalse(dense_config.sparse_jacobian)
-        self.assertEqual(dense_config.integrator, "moreau")
-        self.assertEqual(dense_config.dynamics.linear_solver_type, "LLTB")
+        self.assertEqual(dense_config.integrator, "euler")
+        self.assertEqual(dense_config.dynamics.linear_solver_type, "LLTBRCM")
         self.assertEqual(dense_config.dvi.block_iterations, 32)
 
         padmm_config = SolverKamino.Config()
@@ -231,6 +231,8 @@ class TestDVISolver(unittest.TestCase):
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
         self.assertTrue(sparse_config.sparse_dynamics)
         self.assertTrue(sparse_config.sparse_jacobian)
+        self.assertEqual(sparse_config.dynamics.linear_solver_type, "CR")
+        self.assertEqual(sparse_config.dynamics.linear_solver_kwargs, {"maxiter": 9})
         with self.assertRaises(ValueError):
             SolverKamino.Config(
                 dynamics_solver="dvi",
@@ -944,8 +946,9 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(status["r_d"])))
         self.assertLess(float(np.max(np.abs(state_in.body_qd.numpy()))), 100.0)
         self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
-        self.assertTrue(config.sparse_dynamics)
+        self.assertFalse(config.sparse_dynamics)
         self.assertTrue(config.sparse_jacobian)
+        self.assertEqual(config.dynamics.linear_solver_type, "LLTBRCM")
 
     def test_03a_sparse_dvi_filtered_matvec_matches_full_rows(self):
         builder = basics.build_box_on_plane()
