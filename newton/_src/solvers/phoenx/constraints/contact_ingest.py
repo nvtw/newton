@@ -80,8 +80,6 @@ class IngestScratch:
         "max_contact_columns",
         "num_contact_columns",
         "num_pairs",
-        "pair_block_count",
-        "pair_block_prefix",
         "pair_boundary",
         "pair_col_offset",
         "pair_columns",
@@ -125,9 +123,6 @@ class IngestScratch:
 
         # Inclusive scan of pair_boundary -> 1-based pair id per contact.
         self.pair_id = wp.zeros(self.rigid_contact_max, dtype=wp.int32, device=device)
-        scan_blocks = max(1, (self.rigid_contact_max + 255) // 256)
-        self.pair_block_count = wp.zeros(scan_blocks, dtype=wp.int32, device=device)
-        self.pair_block_prefix = wp.zeros(scan_blocks, dtype=wp.int32, device=device)
 
         # Per-pair arrays.
         self.pair_first = wp.zeros(n_pairs_max, dtype=wp.int32, device=device)
@@ -477,41 +472,31 @@ def _mark_valid_shape_pair_runs_kernel(
     filter_keys: wp.array[wp.int64],
     filter_count: wp.int32,
     pair_boundary: wp.array[wp.int32],
-    pair_local_id: wp.array[wp.int32],
-    pair_block_count: wp.array[wp.int32],
     cid_of_contact: wp.array[wp.int32],
 ):
-    """Mark valid runs and scan boundary flags within each 256-contact block."""
-    block, lane = wp.tid()
-    contact = block * wp.int32(256) + lane
-    capacity = rigid_contact_shape0.shape[0]
-    count = _clamp_contact_count(rigid_contact_count, capacity)
-    boundary = wp.int32(0)
-    if contact < capacity:
-        cid_of_contact[contact] = wp.int32(-1)
-        if contact < count:
-            shape_a = rigid_contact_shape0[contact]
-            shape_b = rigid_contact_shape1[contact]
-            starts_run = contact == wp.int32(0)
-            if contact > wp.int32(0):
-                previous = contact - wp.int32(1)
-                starts_run = shape_a != rigid_contact_shape0[previous] or shape_b != rigid_contact_shape1[previous]
-            if starts_run:
-                body_a = shape_filter_id[shape_a]
-                body_b = shape_filter_id[shape_b]
-                if body_a != body_b:
-                    lo = wp.min(body_a, body_b)
-                    hi = wp.max(body_a, body_b)
-                    key = wp.int64(lo) * wp.int64(num_bodies) + wp.int64(hi)
-                    boundary = wp.int32(_body_pair_filtered(filter_keys, filter_count, key) == wp.int32(0))
-        pair_boundary[contact] = boundary
-
-    boundaries = wp.tile(boundary)
-    local_id = wp.tile_scan_inclusive(boundaries)
-    if contact < capacity:
-        pair_local_id[contact] = local_id[lane]
-    if lane == wp.int32(255):
-        pair_block_count[block] = local_id[lane]
+    """Mark only shape-pair runs that will emit a contact column."""
+    contact = wp.tid()
+    cid_of_contact[contact] = wp.int32(-1)
+    count = _clamp_contact_count(rigid_contact_count, rigid_contact_shape0.shape[0])
+    if contact >= count:
+        pair_boundary[contact] = wp.int32(0)
+        return
+    shape_a = rigid_contact_shape0[contact]
+    shape_b = rigid_contact_shape1[contact]
+    if contact > wp.int32(0):
+        previous = contact - wp.int32(1)
+        if shape_a == rigid_contact_shape0[previous] and shape_b == rigid_contact_shape1[previous]:
+            pair_boundary[contact] = wp.int32(0)
+            return
+    body_a = shape_filter_id[shape_a]
+    body_b = shape_filter_id[shape_b]
+    if body_a == body_b:
+        pair_boundary[contact] = wp.int32(0)
+        return
+    lo = wp.min(body_a, body_b)
+    hi = wp.max(body_a, body_b)
+    key = wp.int64(lo) * wp.int64(num_bodies) + wp.int64(hi)
+    pair_boundary[contact] = wp.int32(_body_pair_filtered(filter_keys, filter_count, key) == wp.int32(0))
 
 
 @wp.kernel(enable_backward=False, grid_stride=False)
@@ -521,9 +506,6 @@ def _materialize_valid_shape_pair_runs_kernel(
     rigid_contact_shape1: wp.array[wp.int32],
     pair_boundary: wp.array[wp.int32],
     pair_id: wp.array[wp.int32],
-    pair_block_prefix: wp.array[wp.int32],
-    num_blocks: wp.int32,
-    block_dim: wp.int32,
     max_columns: wp.int32,
     cid_base: wp.int32,
     pair_first: wp.array[wp.int32],
@@ -542,16 +524,13 @@ def _materialize_valid_shape_pair_runs_kernel(
     if first == wp.int32(0):
         columns = wp.int32(0)
         if count > wp.int32(0):
-            columns = wp.min(pair_block_prefix[num_blocks - wp.int32(1)], max_columns)
+            columns = wp.min(pair_id[count - wp.int32(1)], max_columns)
         num_pairs[0] = columns
         num_contact_columns[0] = columns
         num_active_constraints[0] = cid_base + columns
     if pair_boundary[first] == wp.int32(0):
         return
     column = pair_id[first] - wp.int32(1)
-    block = first / block_dim
-    if block > wp.int32(0):
-        column += pair_block_prefix[block - wp.int32(1)]
     if column >= max_columns:
         return
     shape_a = rigid_contact_shape0[first]
@@ -1119,10 +1098,9 @@ def ingest_contacts(
 
     filter_id_arr = shape_filter_id if shape_filter_id is not None else shape_body
     if not enable_body_pair_grouping:
-        pair_scan_blocks = max(1, (rigid_contact_max + 255) // 256)
-        wp.launch_tiled(
+        wp.launch(
             kernel=_mark_valid_shape_pair_runs_kernel,
-            dim=pair_scan_blocks,
+            dim=rigid_contact_max,
             inputs=[
                 contacts.rigid_contact_count,
                 contacts.rigid_contact_shape0,
@@ -1132,16 +1110,10 @@ def ingest_contacts(
                 filter_keys,
                 int(filter_count),
             ],
-            outputs=[
-                scratch.pair_boundary,
-                scratch.pair_id,
-                scratch.pair_block_count,
-                cid_of_contact,
-            ],
-            block_dim=256,
+            outputs=[scratch.pair_boundary, cid_of_contact],
             device=device,
         )
-        wp.utils.array_scan(scratch.pair_block_count, scratch.pair_block_prefix, inclusive=True)
+        wp.utils.array_scan(scratch.pair_boundary, scratch.pair_id, inclusive=True)
         wp.launch(
             kernel=_materialize_valid_shape_pair_runs_kernel,
             dim=rigid_contact_max,
@@ -1151,9 +1123,6 @@ def ingest_contacts(
                 contacts.rigid_contact_shape1,
                 scratch.pair_boundary,
                 scratch.pair_id,
-                scratch.pair_block_prefix,
-                pair_scan_blocks,
-                256,
                 int(max_contact_columns),
                 int(active_constraint_base),
             ],

@@ -62,7 +62,7 @@
 - Scale the PhoenX Kapla example's persistent contact grid with GPU SM count to hide contact-state load latency without changing solver results.
 - Reduce rigid PhoenX color-row staging traffic by copying only contact state that survives into the solve.
 - Remove deformable barycentric rows from rigid-only PhoenX color-ordered solve buffers.
-- Select the experimental PhoenX single-world scheduler by default for one rigid contact-only world with at least 512 bodies; explicit layout choices still override the policy.
+- Select the experimental PhoenX single-world scheduler by default for one rigid contact-only world with at least 2,048 bodies; explicit layout choices still override the policy.
 
 - Default experimental PhoenX ANYmal and G1 robot training examples to CUDA graph-leapfrog execution; pass `--execution-mode eager` for diagnostic launch-by-launch execution.
 - Allow experimental `TrainerSAC.update(read_stats=False)` to keep entropy temperature and loss diagnostics device-side without host synchronization.

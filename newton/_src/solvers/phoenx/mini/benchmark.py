@@ -85,6 +85,7 @@ def _make_model(scene: str, world_count: int, bodies_per_world: int, device: str
 def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
     device = wp.get_device(args.device)
     model = _make_model(args.scene, args.worlds, args.bodies_per_world, args.device)
+    model.rigid_contact_max = args.worlds * args.max_contacts_per_world
     contact_matching = args.contact_matching
     if contact_matching == "auto":
         contact_matching = "sticky" if args.solver in ("mini", "phoenx") else "disabled"
@@ -96,6 +97,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         deterministic=True,
         _deterministic_world_major=args.solver == "mini",
     )
+    model._collision_pipeline = pipeline
     contacts = pipeline.contacts()
     state_0 = model.state()
     state_1 = model.state()
@@ -128,7 +130,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
             solver_iterations=args.iterations,
             velocity_iterations=0,
             contact_friction_model="point",
-            step_layout="multi_world",
+            step_layout=args.phoenx_step_layout,
             threads_per_world=args.phoenx_threads_per_world,
             multi_world_scheduler=args.phoenx_scheduler,
             articulation_mode="maximal",
@@ -256,6 +258,10 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         "world_id_runs": world_id_runs,
         "bodies_per_world": args.bodies_per_world,
         "contacts_per_step": contacts_per_step,
+        "contact_count_basis": (
+            "constant replay work" if args.fixed_state else "final replay snapshot; evolving roofline is approximate"
+        ),
+        "bandwidth_percent_kind": "algorithmic useful-work ratio; not measured hardware utilization",
         "candidate_pairs_per_step": candidate_pairs_per_step,
         "substeps": args.substeps,
         "iterations": args.iterations,
@@ -302,6 +308,11 @@ def main() -> None:
     parser.add_argument("--reuse-schedule", action="store_true")
     parser.add_argument("--phoenx-threads-per-world", choices=("auto", "8", "16", "32"), default="auto")
     parser.add_argument("--phoenx-scheduler", choices=("auto", "fast_tail", "block_world"), default="auto")
+    parser.add_argument(
+        "--phoenx-step-layout",
+        choices=("auto", "multi_world", "single_world"),
+        default="multi_world",
+    )
     parser.add_argument("--disable-phoenx-color-reuse", action="store_true")
     parser.add_argument(
         "--track-topology-rebuilds",

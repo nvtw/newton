@@ -54,7 +54,7 @@ from newton._src.solvers.solver import SolverBase
 __all__ = ["SolverPhoenX"]
 
 
-_AUTO_SINGLE_WORLD_MIN_BODIES = 512
+_AUTO_SINGLE_WORLD_MIN_BODIES = 2048
 
 
 def _resolve_auto_step_layout(
@@ -264,7 +264,7 @@ class SolverPhoenX(SolverBase):
                 ``substeps * jacobi_max_colors`` substeps. Defaults to 10.
             default_friction: Fallback when Contacts/shapes carry no material.
             step_layout: ``"auto"`` keeps the multi-world scheduler except
-                for one rigid contact-only world with at least 512 bodies,
+                for one rigid contact-only world with at least 2,048 bodies,
                 where it selects ``"single_world"``. Explicit
                 ``"multi_world"`` and ``"single_world"`` override the policy.
             threads_per_world: ``"auto"`` / 32 / 16 / 8 (multi-world).

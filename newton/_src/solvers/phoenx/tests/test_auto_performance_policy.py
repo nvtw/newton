@@ -11,7 +11,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         options = {
             "step_layout": "auto",
             "num_worlds": 1,
-            "body_count": 512,
+            "body_count": 2048,
             "has_joints": False,
             "has_deformables": False,
             "has_shapes": True,
@@ -27,7 +27,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
 
     def test_noneligible_topologies_keep_multi_world(self):
         for overrides in (
-            {"body_count": 511},
+            {"body_count": 2047},
             {"num_worlds": 2},
             {"has_joints": True},
             {"has_deformables": True},

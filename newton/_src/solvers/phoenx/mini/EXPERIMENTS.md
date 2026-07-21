@@ -1051,31 +1051,20 @@ Hybrid mean/max drift improved 0.927/633.5 to 0.664/610.2 mm; mean/max
 linear residual improved 0.00201/0.376 to 0.00182/0.280 m/s. Peak angular
 residual rose 2.55 to 3.09 rad/s (+21%). Cap 16 was faster (+41.5%) but had
 large velocity outliers, so it remains rejected as a general large-world
-setting. The Kapla example now uses cap 24 and 14 iterations. Roofline values
+setting. This explicit experiment used cap 24 and 14 iterations; it is not a
+default. Roofline values
 are useful-work estimates; >100% random-vec4 indicates reuse, not DRAM traffic.
 
 
-## J34 - automatic scheduler policy, accepted
+## J34 - automatic scheduler policy, corrected
 
-RTX PRO 6000 layout sweeps selected one conservative default: one rigid,
-contact-only world uses the single-world scheduler from 512 bodies; multi-world,
-jointed, deformable, and smaller scenes retain multi-world. Explicit overrides
-remain available. Tower-grid frame times (8 PGS iterations):
-
-| Bodies | Multi-world | Single-world | Single gain |
-| ---: | ---: | ---: | ---: |
-| 128 | 0.737 ms | 1.017 ms | -27.5% |
-| 512 | 1.538 ms | 1.119 ms | +37.4% |
-| 2,048 | 1.922 ms | 1.083 ms | +77.4% |
-| 4,608 | 3.869 ms | 1.151 ms | +236.2% |
-
-The final automatic 512-body result was 1.122 ms (+37.0% versus the old
-default). H1, G1, and a 480-body jointed G1 scene favored multi-world, so they
-are excluded. Automatic 24-color/14-iteration hybrid was rejected: versus
-classic single-world PGS it regressed 36.6%, 42.0%, 44.5%, and 39.8% at 512,
-2,048, 4,608, and 8,192 bodies. Hybrid benefit depends on graph structure, not
-body count; keep it explicit until a cheap graph-derived policy is validated.
-
+The original 512-body crossover overfit its tower topology and used a benchmark
+with inconsistent CollisionPipeline ownership/capacity. With one explicitly
+shared, tightly sized pipeline, multi/single measured 0.304/0.782 ms at 512
+bodies, 0.440/0.681 ms at 1,024, and 0.772/0.689 ms at 2,048. The automatic
+threshold is therefore 2,048: it avoids 55--157% losses below the crossover and
+retains the measured 12% win. Jointed, deformable, contactless, and multi-world
+scenes remain on the multi-world layout; explicit overrides remain available.
 
 ## J35 - classic-PGS color-ordered rows, rejected
 
@@ -1200,30 +1189,14 @@ single-world joint/contact tests pass. Sleeping, deformables, single-world,
 and non-greedy paths retain the prior implementation.
 
 
-## J44 - tiled deterministic contact compaction, accepted
+## J44 - tiled deterministic contact compaction, rejected
 
-Ordinary PhoenX contact ingest now scans valid shape-pair boundaries inside
-256-contact blocks, then scans only the block counts. Stable block prefixes
-preserve the exact global column order. CollisionPipeline and compound
-body-pair grouping are unchanged.
-
-At 2.10M contact capacity / 1.05M live contacts, mark + scan + materialize fell
-from 86.5 to 36.4 us (-50.1 us). Matched RTX PRO 6000 results:
-
-| Workload | Control | Candidate | Gain |
-| --- | ---: | ---: | ---: |
-| 32K stack, fixed | 1.5175 ms | **1.4734 ms** | **+3.0%** |
-| 32K stack, evolving | 1.8461 ms | **1.7758 ms** | **+4.0%** |
-| 8K revolute robots, sparse contacts | 245.28 us | 244.69 us | +0.2% |
-| 45K-body compound Kapla | 45.30 FPS | 45.45 FPS | +0.3% |
-
-Fixed-stack useful throughput is 1,002.1 GB/s: 67.3% of sequential DRAM,
-96.6% of random-vec4 bandwidth, and 1.46% of FP32 peak. Full PhoenX is tied
-with current mini on the identical fixed workload (1.473 vs 1.477 ms) and is
-far faster when topology evolves. Contact columns, colors, stack/robot body
-states, and the Kapla stability metrics are identical. A 640-slot regression
-covers deterministic IDs and cid mapping across two block boundaries.
-
+The original +3--4% result did not reproduce once the benchmark used one
+explicitly shared, tightly sized CollisionPipeline. Current-source A/Bs measured
+1.4378/1.4390 ms tiled/direct on fixed topology (+0.08%) and 1.7927/1.7874 ms
+on evolving topology (-0.3%), with identical work. The extra tiled kernels,
+scratch, and specialized test were removed; direct global-scan compaction is
+simpler and remains +4.5% over its historical predecessor.
 
 ## J45 - main constraint vec4 grouping, bounded experiment
 
@@ -1337,3 +1310,65 @@ the half-row solve was only 6.1% faster (321.65 to 303.04 us), while conversion
 cost 73.79 us. Eliminating conversion predicts about +0.7% frame throughput;
 even free half-sized prepare stores bound the gain below roughly 3%. This does
 not justify lossy physics or a second prepare representation. Removed.
+
+
+## J53 - batched dense active-set solve upper bound, rejected
+
+An optimistic tile-Cholesky benchmark assumed free Delassus assembly and a
+known fixed active set. At 32K worlds, factor-plus-solve took 185 us for 32
+normal rows, 2.290 ms for 64 rows, and 106.8 ms for the full 96 rows of 32
+three-direction contacts. The current complete colored-PGS kernel is 322 us.
+Thus even 64 rows are 7.1x slower before assembly, cone projection, active-set
+repair, or body updates; the full formulation is about 332x slower. A hybrid
+normal-only direct solve cannot recover its 185 us cost plus assembly and the
+remaining friction solve. Benchmark removed; reduce row count instead.
+
+
+## J54 - full-PhoenX patch-friction throughput control, rejected
+
+Full PhoenX already groups a shape-pair column, loads its two bodies once, and
+loops its point rows locally. On the fixed 32K stack, its existing fused patch
+mode retained point normals but replaced point tangents with one coupled patch
+block. Point friction took 1.4506 ms versus 1.4733 ms for patch friction
+(-1.5%). Constraint count and sticky manifold were identical. Tangent-row
+reduction alone does not offset patch state and projection arithmetic; do not
+make patch friction a throughput default. No production code changed.
+
+
+## J55 - row-local inertia cache with mass recomputation, rejected
+
+A statically selected mini path cached both bodies' inertia rows per contact,
+recomputed three effective masses during each sweep, and removed prepare-time
+mass calculation/storage. The 32K fixed stack improved 1.441 to 1.385 ms
+(+4.1%); useful work reached 1,066.3 GB/s (71.6% sequential, 102.8%
+random-vec4) and 1.55% FP32. Its PGS node improved 321.65 to 296.54 us (+8.5%).
+At 8K fixed worlds the frame gain shrank to 0.9%. A short changing-manifold
+gate regressed 540.1 to 568.2 us (-5.2% frame, about -2.4% processed-contact
+throughput) with 311K versus 319K final contacts. Long trajectories diverged
+and were not used for the claim. This is an above-L2 density crossover, not a
+general win; reject rather than add a density heuristic. Implementation removed.
+
+
+## J56 - benchmark integrity audit
+
+Two harness errors were fixed: the mini/full benchmark now attaches its declared
+CollisionPipeline to the model, so SolverPhoenX cannot silently create a second,
+differently sized pipeline; and it exposes `--phoenx-step-layout` for direct
+scheduler A/Bs. Reported bandwidth percentages are algorithmic useful-work
+ratios, not hardware-counter utilization. Evolving ratios use the final contact
+snapshot and are approximate; raw timing comparisons require matched work.
+
+Validated retained decisions: direct compaction +4.5%; conditional coloring
++6.4% with tight capacity and +8.9% with default overprovisioning; octahedral
+sticky offsets +0.9%; bounded staging grids +1.6%; vec4 multiplier packing
++24.7%; compact-world fast-tail 2.1--2.8x over block-world, with the 64-body
+guardrail correctly selecting block-world (+11%). Corrected decisions: Kapla
+24-color/14-iteration default (reverted previously), 512-body auto scheduler
+threshold (raised to 2,048), and tiled compaction (removed).
+
+Kapla's historical 81/38 FPS numbers use 6 substeps and 10 iterations. The
+quality default uses 8/10 and measures 66/30 FPS because it performs 33% more
+substeps; comparing those values as a code regression was invalid. Current
+6/10 measures 81.47 FPS (1x1) and 37.53 FPS (2x2). No result may use differing
+iterations, substeps, scene size, final work, pipeline ownership, or GPU
+concurrency as a performance A/B.
