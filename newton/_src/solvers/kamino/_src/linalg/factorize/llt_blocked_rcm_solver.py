@@ -142,7 +142,6 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._y: wp.array[dtype] | None = None
         # Reordering + semi-sparse state
         self._A_hat: wp.array[dtype] | None = None
-        self._b_hat: wp.array[dtype] | None = None
         self._x_hat: wp.array[dtype] | None = None
         self._P: wp.array[wp.int32] | None = None
         self._inv_P: wp.array[wp.int32] | None = None
@@ -268,7 +267,6 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
 
             # Reordering scratch.
             self._A_hat = wp.zeros(shape=(info.total_mat_size,), dtype=self._dtype)
-            self._b_hat = wp.zeros(shape=(info.total_vec_size,), dtype=self._dtype)
             self._x_hat = wp.zeros(shape=(info.total_vec_size,), dtype=self._dtype)
 
             # Permutations (indexed by vio, length dim per block).
@@ -300,7 +298,6 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._L.zero_()
         self._y.zero_()
         self._A_hat.zero_()
-        self._b_hat.zero_()
         self._x_hat.zero_()
         self._P.zero_()
         self._rcm_scratch["permutation_valid"].zero_()
@@ -422,20 +419,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         info = self._operator.info
         num_blocks = info.num_blocks
 
-        # Permute b -> b_hat.
-        llt_blocked_rcm_permute_vector(
-            kernel=self._permute_vector_kernel,
-            dim=info.dim,
-            vio=info.vio,
-            P=self._P,
-            src=b,
-            dst=self._b_hat,
-            num_blocks=num_blocks,
-            max_dim=self._max_dim,
-            device=self._device,
-        )
-
-        # Solve L L^T x_hat = b_hat and scatter x_hat -> x.
+        # Solve L L^T x_hat = P b and scatter x_hat -> x.
         llt_blocked_rcm_solve(
             kernel=self._solve_kernel,
             dim=info.dim,
@@ -445,7 +429,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             P=self._P,
             L=self._L,
             tile_pattern=self._tile_pattern,
-            b=self._b_hat,
+            b=b,
             y=self._y,
             x_hat=self._x_hat,
             x=x,
