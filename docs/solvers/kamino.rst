@@ -31,8 +31,9 @@ Choosing a dynamics solver
 Kamino provides two forward-dynamics backends:
 
 * ``"padmm"`` (default): proximal ADMM, dense Jacobians/dynamics, Euler integrator.
-* ``"dvi"`` (opt-in): projected dual iterations, sparse defaults, Moreau integrator.
-  Dual preconditioning is not supported.
+* ``"dvi"`` (opt-in): projected dual iterations, sparse Jacobians, dense dynamics
+  with the RCM-reordered blocked LLT solver, and the Euler integrator. Dual
+  preconditioning is not supported.
 
 Select the backend when constructing the configuration so dependent defaults
 initialize consistently:
@@ -43,8 +44,9 @@ initialize consistently:
    solver = newton.solvers.SolverKamino(model, config=config)
 
 DVI has been tuned primarily for contact-heavy rigid mechanisms; PADMM remains
-the more broadly validated choice. Set ``sparse_jacobian=False`` and
-``sparse_dynamics=False`` for dense DVI. With
+the more broadly validated choice. Set ``sparse_jacobian=False`` for fully
+dense DVI, or set ``sparse_dynamics=True`` to use sparse dynamics with the
+Conjugate Residual solver. With
 ``collect_solver_info=True``, DVI stores terminal residual status that should
 not be interpreted as PADMM ADMM residuals.
 
