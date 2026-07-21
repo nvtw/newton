@@ -1372,3 +1372,28 @@ substeps; comparing those values as a code regression was invalid. Current
 6/10 measures 81.47 FPS (1x1) and 37.53 FPS (2x2). No result may use differing
 iterations, substeps, scene size, final work, pipeline ownership, or GPU
 concurrency as a performance A/B.
+
+
+## J57 - transfer audit across solver corners, rejected
+
+Corrected-harness RTX PRO 6000 experiments tested retained optimization
+patterns outside their original hot paths:
+
+| Prototype | Control | Candidate | Result |
+| --- | ---: | ---: | ---: |
+| Bound contact-column pack grid, fixed 32K | 1.444 ms | 1.461 ms | -1.2% |
+| Bound patch-friction staging grids, fixed 32K | 1.464 ms | 1.466 ms | neutral |
+| Pack patch frame/arms as two spatial vectors | 1.464 ms | 1.465 ms | neutral |
+| Pack projector drive diagonal/bias as vec2, projected 8K | 1.472 ms | 1.487 ms | -1.0% |
+
+Stable single-world coloring gained 2.1% on Kapla 1x1, but mean drift rose
+6.8x; 2x2 regressed 3.6% and peak angular residual rose 3.9 to 10.6 rad/s.
+Keeping periodic invalidation while removing only rotating color skips gave no
+1x1 gain and regressed 2x2 7%. Both variants were removed. Nsight attributed
+only about 0.4% of Kapla GPU time to visible mass-splitting graph record,
+compact, and slot-cache kernels, so conditional graph reuse has a small ceiling.
+
+Conclusion: bound only cheap capacity scans; pack repeatedly updated hot-loop
+state, not once-per-phase fields; retain coloring cache stir for convergence.
+No production solver change survived. The benchmark retains patch-friction and
+maximal-projected selectors for future cross-corner measurements.
