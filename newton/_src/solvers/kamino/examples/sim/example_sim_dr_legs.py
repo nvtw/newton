@@ -28,7 +28,7 @@ from newton._src.solvers.kamino.solver_kamino import SolverKamino
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
