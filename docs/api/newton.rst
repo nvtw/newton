@@ -58,6 +58,8 @@ newton
    AxisType
    eval_fk
    eval_ik
+   eval_inverse_dynamics_force
+   eval_inverse_dynamics_passive
    eval_jacobian
    eval_mass_matrix
    intersect_ray
@@ -72,6 +74,6 @@ newton
    * - ``MAXVAL``
      - ``10000000000.0``
    * - ``__version__``
-     - ``1.4.0.dev0``
+     - ``1.5.0.dev0``
    * - ``use_coord_layout_targets``
      - ``False``

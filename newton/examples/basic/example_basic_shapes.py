@@ -57,15 +57,10 @@ class Example:
         builder.default_shape_cfg.mu = 0.5  # Friction coefficient
 
         if self.solver_type == "vbd":
-            # VBD: Higher stiffness for stable rigid body contacts
-            builder.default_shape_cfg.ke = 1.0e6  # Contact stiffness
-            builder.default_shape_cfg.kd = 1.0e7  # Contact damping
+            # Stiff, undamped contacts give VBD stable resting poses.
+            builder.default_shape_cfg.ke = 1.0e8
+            builder.default_shape_cfg.kd = 0.0
         elif self.solver_type == "phoenx":
-            # PhoenX: PGS solver consumes contacts from the shared
-            # collision pipeline; it does not use ke/kd (rigid contact),
-            # but it does honour mu_torsional / mu_rolling when the
-            # adapter wires them through. Use the same XPBD defaults
-            # for cross-solver consistency.
             builder.default_shape_cfg.mu_torsional = 0.01
             builder.default_shape_cfg.mu_rolling = 3e-3
         else:
@@ -181,7 +176,8 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = newton.CollisionPipeline(self.model)
+        self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -197,12 +193,9 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
-        else:
-            self.graph = None
+        with wp.ScopedCapture() as capture:
+            self.simulate()
+        self.graph = capture.graph
 
     def simulate(self):
         # Run collision once per frame and reuse the contact set

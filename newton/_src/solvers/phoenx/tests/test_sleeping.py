@@ -1067,7 +1067,7 @@ class TestSleepingKinematicWake(unittest.TestCase):
             getattr(bodies, arr_name).assign(arr)
         for arr_name in ("inverse_inertia", "inverse_inertia_world"):
             arr = getattr(bodies, arr_name).numpy()
-            arr[pusher_slot] = np.zeros((3, 3), dtype=np.float32)
+            arr[pusher_slot] = np.zeros_like(arr[pusher_slot])
             getattr(bodies, arr_name).assign(arr)
 
         constraints = PhoenXWorld.make_constraint_container(num_joints=0, device=device)

@@ -41,6 +41,7 @@ class Example:
         mjcf_filename = newton.examples.get_asset("nv_humanoid.xml")
 
         articulation_builder = newton.ModelBuilder()
+        articulation_builder.default_shape_cfg.gap = 0.0
         articulation_builder.add_mjcf(
             mjcf_filename,
             ignore_names=["floor", "ground"],
@@ -52,6 +53,7 @@ class Example:
         articulation_builder.joint_q[:7] = [0.0, 0.0, 1.5, *start_rot]
 
         builder = newton.ModelBuilder()
+        builder.default_shape_cfg.gap = 0.0
         for _i in range(self.world_count):
             articulation_builder.joint_q[7:] = self.rng.uniform(
                 -1.0, 1.0, size=(len(articulation_builder.joint_q) - 7,)
@@ -91,12 +93,9 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         self.contacts = self.model.contacts() if self.solver_name == "phoenx" else None
 
-        self.use_cuda_graph = wp.get_device().is_cuda
-
-        if self.use_cuda_graph:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
+        with wp.ScopedCapture() as capture:
+            self.simulate()
+        self.graph = capture.graph
 
         # Set model in viewer (ViewerFile will automatically record it)
         self.viewer.set_model(self.model)
@@ -111,10 +110,7 @@ class Example:
 
     def step(self):
         with wp.ScopedTimer("step", active=False):
-            if self.use_cuda_graph:
-                wp.capture_launch(self.graph)
-            else:
-                self.simulate()
+            wp.capture_launch(self.graph)
         self.sim_time += self.frame_dt
 
     def render(self):
@@ -123,7 +119,20 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        pass
+        newton.examples.test_body_state(
+            self.model,
+            self.state_0,
+            "body origins remain above the ground",
+            lambda q, qd: q[2] > -0.1,
+        )
+
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        newton.examples.add_world_count_arg(parser)
+        parser.add_argument("recording_file", nargs="?", default="humanoid_recording.bin")
+        parser.set_defaults(num_frames=1000, world_count=100)
+        return parser
 
     @staticmethod
     def create_parser():
@@ -141,10 +150,15 @@ class Example:
 
 
 if __name__ == "__main__":
-    # Create ViewerFile for automatic recording
     parser = Example.create_parser()
-    args = parser.parse_args()
+    test_args, _ = parser.parse_known_args()
 
+    if test_args.test:
+        viewer, args = newton.examples.init(parser)
+        newton.examples.run(Example(viewer, args), args)
+        raise SystemExit(0)
+
+    args = parser.parse_args()
     if args.device:
         wp.set_device(args.device)
     if args.quiet:
@@ -161,16 +175,15 @@ if __name__ == "__main__":
     example = Example(viewer, args)
 
     # Run for a reasonable number of frames
-    max_frames = args.num_frames
     frame_count = 0
 
-    while frame_count < max_frames:
+    while frame_count < args.num_frames:
         example.step()
         example.render()
         frame_count += 1
 
         if frame_count % 100 == 0:
-            print(f"Frame {frame_count}/{max_frames}")
+            print(f"Frame {frame_count}/{args.num_frames}")
 
     # Close viewer (automatically saves recording)
     viewer.close()
