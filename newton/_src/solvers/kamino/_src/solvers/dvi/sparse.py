@@ -124,6 +124,11 @@ def _get_sparse_delassus(problem: DualProblem) -> BlockSparseMatrixFreeDelassusO
 
 
 def _solve_sparse_jacobi(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Apply fixed Jacobi sweeps to the unified sparse DVI problem.
+
+    Each sweep evaluates ``v_aug = D * lambda + v_f + s`` matrix-free, then
+    applies ``lambda_next = projection(lambda - omega * B * v_aug)``.
+    """
     state = path.data.state
     problem.delassus.diagonal(state.scratch)
 
@@ -219,6 +224,8 @@ def _sparse_delassus_matvec_rows_path(path: SparseDVIPath, problem: DualProblem,
     if bsm is None:
         raise RuntimeError("Sparse DVI row products require initialized Delassus sparse operators.")
 
+    # Evaluate selected rows of D * lambda = J * M^-1 * J^T * lambda + R * lambda
+    # without materializing the Delassus matrix.
     delassus.apply_jacobian_transpose(path.data.solution.lambdas, body_space, path.all_worlds_mask)
     state.v_aug.zero_()
     wp.launch(
@@ -600,6 +607,7 @@ def _solve_sparse_bilateral_block(
 
 
 def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Alternate a direct ``D_bb`` solve with projected sparse unilateral sweeps."""
     state = path.data.state
     _factor_sparse_bilateral_block(path, problem)
     _solve_sparse_bilateral_block(path, problem)

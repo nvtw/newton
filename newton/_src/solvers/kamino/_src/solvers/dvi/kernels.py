@@ -38,6 +38,9 @@ def _compute_row_velocity(
     v_f: wp.array[float32],
     lambdas: wp.array[float32],
 ) -> float32:
+    # Full constraint-space velocity of one row: v_f[row] + sum_j D[row, j] * lambda[j].
+    # The sum spans all columns, so a unilateral row picks up the D_ub * lambda_b
+    # contribution from joint impulses (and a joint row picks up D_bu * lambda_u).
     v = v_f[vio + row]
     m_i = mio + ncts * row
     for j in range(ncts):
@@ -58,6 +61,8 @@ def _contact_velocity_aug(
     lambdas: wp.array[float32],
     mu: wp.array[float32],
 ) -> vec3f:
+    # Contact rows are [t0, t1, n]. De Saxce augments the normal velocity by
+    # mu * ||v_t|| before enforcing Coulomb-cone complementarity.
     ccio = ccgo + 3 * cid
     v_t0 = _compute_row_velocity(ncts, mio, vio, ccio + 0, D, v_f, lambdas)
     v_t1 = _compute_row_velocity(ncts, mio, vio, ccio + 1, D, v_f, lambdas)
@@ -221,6 +226,9 @@ def _build_bilateral_rhs(
     pvio = problem_vio[wid]
     bvio = bilateral_vio[wid]
 
+    # Columns njc..ncts are the unilateral rows, so this loop subtracts the
+    # D_bu * lambda_u coupling: the current limit and contact impulses enter the
+    # joint solve, yielding rhs = -(v_f,b + D_bu * lambda_u).
     rhs = -problem_v_f[pvio + row]
     for col in range(njc, ncts):
         rhs -= problem_D[pmio + ncts * row + col] * solution_lambdas[pvio + col]
@@ -282,15 +290,19 @@ def _compute_dvi_status_residuals(
     if status.iterations == 0:
         status.iterations = int32(1)
 
+    # These terminal diagnostics are distinct from the dense fallback's
+    # iterate-change stopping test. Each value is a maximum over the world.
     r_b = float32(0.0)
     r_p = float32(0.0)
     r_d = float32(0.0)
     r_c = float32(0.0)
 
+    # Bilateral rows require v_aug = 0.
     for jid in range(njc):
         v_j = state_v_aug[vio + jid]
         r_b = wp.max(r_b, wp.abs(v_j))
 
+    # Limits require lambda and v_aug in R+ with lambda * v_aug = 0.
     for lid in range(nl):
         lcio = vio + lcgo + lid
         lambda_l = solution_lambdas[lcio]
@@ -299,6 +311,7 @@ def _compute_dvi_status_residuals(
         r_d = wp.max(r_d, wp.abs(v_l - wp.max(0.0, v_l)))
         r_c = wp.max(r_c, wp.abs(lambda_l * v_l))
 
+    # Contacts require lambda in K_mu, v_aug in its dual cone, and orthogonality.
     for cid in range(nc):
         ccio = vio + ccgo + 3 * cid
         mu_c = problem_mu[cio + cid]
@@ -310,6 +323,8 @@ def _compute_dvi_status_residuals(
         r_d = wp.max(r_d, wp.max(wp.abs(v_c - v_proj)))
         r_c = wp.max(r_c, wp.abs(wp.dot(lambda_c, v_c)))
 
+    # Thus r_p and r_d are infinity-norm cone-projection distances, while r_c
+    # is the maximum absolute impulse-velocity inner product.
     status.r_b = r_b
     status.r_p = r_p
     status.r_d = wp.max(r_d, r_b)
@@ -367,6 +382,9 @@ def _solve_dvi_pgs(
         solver_status[wid] = status
         return
 
+    # This fallback stops on the unnormalized infinity norm of the impulse
+    # update. The residual fields below are provisional; solve() later replaces
+    # them with terminal cone-feasibility and complementarity diagnostics.
     done = int32(0)
     for iteration in range(cfg.max_iterations):
         if done == 0:
@@ -379,6 +397,7 @@ def _solve_dvi_pgs(
             for i in range(njc):
                 v_i = _compute_row_velocity(ncts, mio, vio, i, problem_D, problem_v_f, solution_lambdas)
                 D_ii = wp.abs(problem_D[mio + ncts * i + i]) + cfg.regularization + FLOAT32_EPS
+                # Bilateral projection is the identity: lambda += -omega * B * v.
                 delta = -cfg.omega * v_i / D_ii
                 solution_lambdas[vio + i] += delta
                 max_step = wp.max(max_step, wp.abs(delta))
@@ -391,6 +410,7 @@ def _solve_dvi_pgs(
                 lambda_limit_old = solution_lambdas[vio + i]
                 lambda_limit_new = lambda_limit_old
                 if D_ii_raw > FLOAT32_EPS:
+                    # Project lambda - omega * B * v onto the nonnegative ray.
                     lambda_limit_new = wp.max(0.0, lambda_limit_old - cfg.omega * v_i / (D_ii_raw + cfg.regularization))
                 solution_lambdas[vio + i] = lambda_limit_new
                 max_step = wp.max(max_step, wp.abs(lambda_limit_new - lambda_limit_old))
@@ -419,6 +439,8 @@ def _solve_dvi_pgs(
                     solution_lambdas[vio + ccio + 1],
                     solution_lambdas[vio + ccio + 2],
                 )
+                # Project the three-row impulse update onto K_mu. The block
+                # preconditioner retains normal-tangential coupling in D_cc.
                 if cfg.contact_block_preconditioner:
                     lambda_contact_projected = _project_contact_block_update(
                         lambda_contact_old,
@@ -558,6 +580,8 @@ def _solve_dvi_limits_pgs(
         solver_status[wid] = status
         return
 
+    # Limit sweeps use the same iterate-change stopping measure as the full
+    # dense fallback. Terminal DVI residuals are evaluated after all blocks.
     done = int32(0)
     for iteration in range(cfg.contact_iterations):
         if done == 0:
@@ -634,6 +658,8 @@ def _color_dvi_contacts(
         contact_num_colors[wid] = int32(0)
         return
 
+    # Contacts in one color share no dynamic body, so their Delassus
+    # cross-blocks vanish and their Gauss-Seidel updates may run concurrently.
     num_colors = int32(0)
     for cid in range(nc):
         pair = contact_bid_AB[cio + cid]
@@ -699,6 +725,8 @@ def _solve_dvi_contacts_colored_gs(
         return
 
     num_colors = contact_num_colors[wid]
+    # Colored contact updates execute a fixed number of sweeps. Convergence is
+    # evaluated only after the complete direct-bilateral block schedule.
     iteration = int32(0)
     while iteration < cfg.contact_iterations:
         color = int32(0)
@@ -807,6 +835,8 @@ def _compute_dvi_contact_jacobi_delta(
     if block_iteration >= cfg.block_iterations or contact_iteration >= cfg.contact_iterations:
         return
 
+    # All contacts read the same velocity snapshot. Store impulse deltas so the
+    # companion kernel can apply their coupled Delassus effect simultaneously.
     v_t0 = state_v_aug[ccio_v + 0]
     v_t1 = state_v_aug[ccio_v + 1]
     v_n = state_v_aug[ccio_v + 2] + mu_c * wp.sqrt(v_t0 * v_t0 + v_t1 * v_t1)
@@ -883,6 +913,8 @@ def _apply_dvi_contact_jacobi_delta(
     row = ccgo + tid
     row_mio = mio + ncts * row
 
+    # Accumulate D_cc * delta_lambda for the Jacobi sweep; no contact observes
+    # another contact's new impulse until every delta has been formed.
     dv = float32(0.0)
     for cid in range(nc):
         ccio = ccgo + int32(3) * cid
@@ -941,6 +973,8 @@ def _compute_dvi_solution_vectors(
 
     mio = problem_mio[wid]
     vio = problem_vio[wid]
+    # Recover the physical post-event velocity v_plus = D * lambda + v_f.
+    # De Saxce augmentation is stored separately for cone residual evaluation.
     v_i = _compute_row_velocity(ncts, mio, vio, tid, problem_D, problem_v_f, solution_lambdas)
     solution_v_plus[vio + tid] = v_i
     state_v_aug[vio + tid] = v_i
@@ -971,6 +1005,8 @@ def _compute_dvi_desaxce_corrections(
     ccio = ccgo + 3 * cid
     vt0 = solution_v_plus[vio + ccio]
     vt1 = solution_v_plus[vio + ccio + 1]
+    # s = [0, 0, mu * ||v_t||] maps physical contact velocity to the dual-cone
+    # variable v_aug = v_plus + s used by the DVI contact conditions.
     s_n = problem_mu[problem_cio[wid] + cid] * wp.sqrt(vt0 * vt0 + vt1 * vt1)
     state_s[vio + ccio + 2] = s_n
     state_v_aug[vio + ccio + 2] = solution_v_plus[vio + ccio + 2] + s_n
@@ -997,6 +1033,8 @@ def _unprecondition_dvi_solution(
     vio = problem_vio[wid]
     v_i = vio + tid
     P_i = problem_P[v_i]
+    # The solver uses D_hat = P * D * P: impulses map with P, while
+    # constraint-space velocities and De Saxce terms map with P^-1.
     solution_lambdas[v_i] = P_i * solution_lambdas[v_i]
     solution_v_plus[v_i] = solution_v_plus[v_i] / P_i
     state_v_aug[v_i] = state_v_aug[v_i] / P_i

@@ -22,7 +22,10 @@ def project_contact_diagonal_update(
     omega: float32,
     mu: float32,
 ) -> vec3f:
-    """Apply a diagonally preconditioned contact update and project it."""
+    """Apply a diagonally preconditioned contact projection.
+
+    Computes ``lambda_next = project_K(lambda - omega * B * v_aug)``.
+    """
     lambda_arg = lambda_old
     if D_diag.x > FLOAT32_EPS:
         lambda_arg.x = lambda_old.x - omega * v_c.x / (D_diag.x + regularization)
@@ -43,7 +46,10 @@ def project_contact_block_update(
     omega: float32,
     mu: float32,
 ) -> vec3f:
-    """Apply a block-preconditioned contact update and project it."""
+    """Apply a block-preconditioned contact projection.
+
+    Computes ``lambda_next = project_K(lambda - omega * B * v_aug)``.
+    """
     inv_diag_norm = wp.abs(D_block_inv[0, 0]) + wp.abs(D_block_inv[1, 1]) + wp.abs(D_block_inv[2, 2])
     if inv_diag_norm > FLOAT32_EPS:
         return project_to_coulomb_cone(lambda_old - omega * (D_block_inv * v_c), mu)

@@ -249,6 +249,8 @@ class SolverKaminoImpl(SolverBase):
                 collect_info=self._config.collect_solver_info,
             )
         elif self._config.dynamics_solver == "dvi":
+            # DVI consumes Kamino's unified joint, limit, and contact
+            # DualProblem rather than rebuilding standalone constraint pipelines.
             self._solver_fd = DVISolver(
                 model=self._model,
                 data=self._data,
