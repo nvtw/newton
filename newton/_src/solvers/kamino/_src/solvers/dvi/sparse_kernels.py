@@ -493,6 +493,7 @@ def _solve_dvi_sparse_contacts_colored_gs(
     contact_block_inv: wp.array[mat33f],
     contact_colors: wp.array[int32],
     contact_num_colors: wp.array[int32],
+    block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
     # State:
     body_space: wp.array[float32],
@@ -516,9 +517,14 @@ def _solve_dvi_sparse_contacts_colored_gs(
     row_offset = delassus_row_start[wid]
     delassus_end = delassus_nzb_start[wid] + delassus_num_nzb[wid]
     jacobian_end = jacobian_nzb_start[wid] + jacobian_num_nzb[wid]
+    num_iterations = cfg.max_iterations
+    if block_iteration >= int32(0):
+        if block_iteration >= cfg.block_iterations:
+            return
+        num_iterations = cfg.contact_iterations
 
     iteration = int32(0)
-    while iteration < cfg.max_iterations:
+    while iteration < num_iterations:
         color = int32(0)
         while color < num_colors:
             cid = lane
@@ -632,6 +638,117 @@ def _solve_dvi_sparse_contacts_colored_gs(
 
             _sync_threads()
             color = color + int32(1)
+        iteration = iteration + int32(1)
+
+
+@wp.kernel
+def _solve_dvi_sparse_limits_serial_gs(
+    # Delassus row operator:
+    delassus_num_nzb: wp.array[int32],
+    delassus_nzb_start: wp.array[int32],
+    delassus_nzb_coords: wp.array2d[int32],
+    delassus_nzb_values: wp.array[vec6f],
+    delassus_row_start: wp.array[int32],
+    delassus_col_start: wp.array[int32],
+    # Constraint Jacobian:
+    jacobian_num_nzb: wp.array[int32],
+    jacobian_nzb_start: wp.array[int32],
+    jacobian_nzb_coords: wp.array2d[int32],
+    jacobian_nzb_values: wp.array[vec6f],
+    jacobian_col_start: wp.array[int32],
+    limit_nzb_offsets: wp.array[int32],
+    # Active limits:
+    limits_model_active: wp.array[int32],
+    limits_wid: wp.array[int32],
+    limits_lid: wp.array[int32],
+    # Problem data:
+    problem_vio: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_lcgo: wp.array[int32],
+    problem_diag: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    eta: wp.array[float32],
+    block_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
+    # State:
+    body_space: wp.array[float32],
+    # Outputs:
+    solution_lambdas: wp.array[float32],
+):
+    wid = wp.tid()
+    nl = problem_nl[wid]
+    if nl == 0:
+        return
+
+    vio = problem_vio[wid]
+    lcgo = problem_lcgo[wid]
+    cfg = solver_config[wid]
+    row_offset = delassus_row_start[wid]
+    delassus_end = delassus_nzb_start[wid] + delassus_num_nzb[wid]
+    jacobian_end = jacobian_nzb_start[wid] + jacobian_num_nzb[wid]
+    num_iterations = cfg.max_iterations
+    if block_iteration >= int32(0):
+        if block_iteration >= cfg.block_iterations:
+            return
+        num_iterations = cfg.contact_iterations
+
+    iteration = int32(0)
+    while iteration < num_iterations:
+        limit_id = int32(0)
+        while limit_id < limits_model_active[0]:
+            if limits_wid[limit_id] == wid:
+                lid = limits_lid[limit_id]
+                if lid < nl:
+                    row = lcgo + lid
+                    vec_idx = vio + row
+                    value = eta[row_offset + row] * solution_lambdas[vec_idx]
+
+                    nzb_offset = limit_nzb_offsets[limit_id]
+                    num_limit_bodies = int32(1)
+                    second_body_offset = nzb_offset + int32(1)
+                    if second_body_offset < delassus_end and delassus_nzb_coords[second_body_offset, 0] == row:
+                        num_limit_bodies = int32(2)
+
+                    body_slot = int32(0)
+                    while body_slot < num_limit_bodies:
+                        nzb_idx = nzb_offset + body_slot
+                        block = delassus_nzb_values[nzb_idx]
+                        x_idx_base = delassus_col_start[wid] + delassus_nzb_coords[nzb_idx, 1]
+                        for j in range(6):
+                            value += block[j] * body_space[x_idx_base + j]
+                        body_slot = body_slot + int32(1)
+
+                    P_i = problem_P[vec_idx]
+                    D_ii_raw = wp.abs(problem_diag[vec_idx]) * P_i * P_i
+                    D_ii = D_ii_raw + cfg.regularization + FLOAT32_EPS
+                    lambda_old = solution_lambdas[vec_idx]
+                    lambda_new = lambda_old
+                    if D_ii_raw > FLOAT32_EPS:
+                        v_i = value + problem_v_f[vec_idx]
+                        lambda_new = wp.max(0.0, lambda_old - cfg.omega * v_i / D_ii)
+                    delta = lambda_new - lambda_old
+                    solution_lambdas[vec_idx] = lambda_new
+
+                    jacobian_offset = limit_nzb_offsets[limit_id]
+                    num_jacobian_bodies = int32(1)
+                    second_jacobian_offset = jacobian_offset + int32(1)
+                    if (
+                        second_jacobian_offset < jacobian_end
+                        and jacobian_nzb_coords[second_jacobian_offset, 0] == row
+                    ):
+                        num_jacobian_bodies = int32(2)
+
+                    body_slot = int32(0)
+                    while body_slot < num_jacobian_bodies:
+                        nzb_idx = jacobian_offset + body_slot
+                        block = jacobian_nzb_values[nzb_idx]
+                        body_idx = jacobian_col_start[wid] + jacobian_nzb_coords[nzb_idx, 1]
+                        for j in range(6):
+                            wp.atomic_add(body_space, body_idx + j, block[j] * P_i * delta)
+                        body_slot = body_slot + int32(1)
+
+            limit_id = limit_id + int32(1)
         iteration = iteration + int32(1)
 
 

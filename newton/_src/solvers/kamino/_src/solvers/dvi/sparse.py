@@ -31,6 +31,7 @@ from .sparse_kernels import (
     _solve_dvi_sparse_contacts_colored_gs,
     _solve_dvi_sparse_contacts_offset_update,
     _solve_dvi_sparse_jacobi_update,
+    _solve_dvi_sparse_limits_serial_gs,
     _solve_dvi_sparse_limits_offset_update,
     _solve_dvi_sparse_unilateral_jacobi_update,
     _solve_dvi_sparse_unilateral_offset_update,
@@ -114,13 +115,8 @@ class SparseDVIPath:
 
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _solve_sparse_with_bilateral_direct_block(self, problem)
-        elif (
-            self.device.is_cuda
-            and self.size.max_of_max_limits == 0
-            and self.contacts is not None
-            and self.contacts.model_max_contacts_host > 0
-        ):
-            _solve_sparse_contacts_colored_gs(self, problem)
+        elif self.has_unilateral_constraints:
+            _solve_sparse_unilateral_gs(self, problem)
         else:
             _solve_sparse_jacobi(self, problem)
 
@@ -197,21 +193,11 @@ def _solve_sparse_jacobi(path: SparseDVIPath, problem: DualProblem) -> None:
     )
 
 
-def _solve_sparse_contacts_colored_gs(path: SparseDVIPath, problem: DualProblem) -> None:
-    """Solve contact-only sparse systems with conflict-safe Gauss-Seidel sweeps."""
+def _color_sparse_contacts(path: SparseDVIPath, problem: DualProblem) -> None:
     state = path.data.state
     contacts = path.contacts
-    jacobians = path.jacobians
-    if contacts is None or jacobians is None:
-        raise RuntimeError("Sparse colored contact solves require contacts and sparse Jacobians.")
-
-    delassus = _get_sparse_delassus(problem)
-    bsm = delassus.bsm
-    jacobian = delassus.constraint_jacobian
-    if bsm is None:
-        raise RuntimeError("Sparse colored contact solves require initialized Delassus sparse operators.")
-
-    delassus.diagonal(state.scratch)
+    if contacts is None or contacts.model_max_contacts_host == 0:
+        return
     wp.launch(
         kernel=_color_dvi_contacts,
         dim=path.size.num_worlds,
@@ -224,10 +210,69 @@ def _solve_sparse_contacts_colored_gs(path: SparseDVIPath, problem: DualProblem)
         ],
         device=path.device,
     )
+
+
+def _launch_sparse_unilateral_gs(
+    path: SparseDVIPath,
+    problem: DualProblem,
+    block_iteration: int,
+) -> None:
+    state = path.data.state
+    limits = path.limits
+    contacts = path.contacts
+    jacobians = path.jacobians
+    if jacobians is None:
+        raise RuntimeError("Sparse colored unilateral solves require sparse Jacobians.")
+
+    delassus = _get_sparse_delassus(problem)
+    bsm = delassus.bsm
+    jacobian = delassus.constraint_jacobian
+    if bsm is None:
+        raise RuntimeError("Sparse colored unilateral solves require initialized Delassus sparse operators.")
+
     delassus.apply_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
+    if limits is not None and limits.model_max_limits_host > 0:
+        wp.launch(
+            kernel=_solve_dvi_sparse_limits_serial_gs,
+            dim=path.size.num_worlds,
+            inputs=[
+                bsm.num_nzb,
+                bsm.nzb_start,
+                bsm.nzb_coords,
+                bsm.nzb_values,
+                bsm.row_start,
+                bsm.col_start,
+                jacobian.num_nzb,
+                jacobian.nzb_start,
+                jacobian.nzb_coords,
+                jacobian.nzb_values,
+                jacobian.col_start,
+                jacobians.limit_constraint_nzb_offsets,
+                limits.model_active_limits,
+                limits.wid,
+                limits.lid,
+                problem.data.vio,
+                problem.data.nl,
+                problem.data.lcgo,
+                state.scratch,
+                problem.data.P,
+                problem.data.v_f,
+                delassus.regularization,
+                block_iteration,
+                path.data.config,
+                path.body_space,
+                path.data.solution.lambdas,
+            ],
+            device=path.device,
+        )
+
+    if contacts is None or contacts.model_max_contacts_host == 0:
+        return
+
+    threads_per_world = 64 if path.device.is_cuda else 1
     wp.launch(
         kernel=_solve_dvi_sparse_contacts_colored_gs,
-        dim=path.size.num_worlds * 64,
+        dim=path.size.num_worlds * threads_per_world,
         inputs=[
             bsm.num_nzb,
             bsm.nzb_start,
@@ -253,13 +298,21 @@ def _solve_sparse_contacts_colored_gs(path: SparseDVIPath, problem: DualProblem)
             state.contact_block_inv,
             state.contact_colors,
             state.contact_num_colors,
+            block_iteration,
             path.data.config,
             path.body_space,
             path.data.solution.lambdas,
         ],
         device=path.device,
-        block_dim=64,
+        block_dim=threads_per_world,
     )
+
+
+def _solve_sparse_unilateral_gs(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Solve sparse unilateral systems with Gauss-Seidel sweeps."""
+    problem.delassus.diagonal(path.data.state.scratch)
+    _color_sparse_contacts(path, problem)
+    _launch_sparse_unilateral_gs(path, problem, block_iteration=-1)
     _compute_sparse_solution_vectors(path, problem)
     wp.launch(
         kernel=_set_dvi_sparse_status_iterations,
@@ -712,10 +765,10 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         ],
         device=path.device,
     )
+    _color_sparse_contacts(path, problem)
 
     for block_iteration in range(path.max_block_iterations):
-        for contact_iteration in range(path.max_contact_iterations):
-            _sparse_delassus_update_unilateral_rows(path, problem, block_iteration, contact_iteration)
+        _launch_sparse_unilateral_gs(path, problem, block_iteration)
 
         if path.should_solve_bilateral_after_block(block_iteration):
             _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)

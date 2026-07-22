@@ -925,6 +925,42 @@ class TestDVISolver(unittest.TestCase):
         self.assertGreater(iterations, solver.config[0].max_iterations)
         _check_solution_matches_dual_problem(self, problem, solver)
 
+    def test_04a_sparse_dvi_solve_active_joint_limit(self):
+        builder = testing.build_unary_revolute_joint_test(limits=True, ground=False)
+        model, data, state, limits, _detector, jacobians = make_containers(
+            builder=builder,
+            device=self.device,
+            max_world_contacts=0,
+            sparse=True,
+        )
+        update_containers(model=model, data=data, state=state, limits=limits, detector=None, jacobians=None)
+
+        q_j = data.joints.q_j.numpy()
+        q_j[:] = 1.0
+        data.joints.q_j.assign(q_j)
+        limits.detect(q_j=data.joints.q_j)
+        update_constraints_info(model=model, data=data)
+        jacobians.build(model=model, data=data, limits=limits.data, contacts=None)
+        self.assertGreater(int(limits.model_active_limits.numpy()[0]), 0)
+
+        problem = _make_sparse_dual_problem(model, data, limits, None, jacobians)
+        solver = DVISolver(
+            model=model,
+            data=data,
+            limits=limits,
+            contacts=None,
+            jacobians=jacobians,
+            config=kamino_config.DVISolverConfig(tolerance=1e-4, regularization=1e-5),
+            warmstart=WarmStartMode.NONE,
+        )
+        solver.reset()
+        solver.coldstart()
+        solver.solve(problem)
+
+        _assert_solution_finite(self, solver)
+        limit_start = int(problem.data.lcgo.numpy()[0])
+        self.assertGreater(float(solver.data.solution.lambdas.numpy()[limit_start]), 0.0)
+
     def test_07_dvi_singular_limit_rows_remain_finite(self):
         model, data, _state, limits, contacts = make_test_problem_fourbar(
             device=self.device,
