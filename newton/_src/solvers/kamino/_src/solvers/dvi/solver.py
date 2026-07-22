@@ -14,6 +14,7 @@ from ...core.size import SizeKamino
 from ...core.types import to_warp_int32_array
 from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
+from ...kinematics.jacobians import SparseSystemJacobians
 from ...kinematics.limits import LimitsKamino
 from ...linalg import DenseLinearOperatorData, DenseSquareMultiLinearInfo, LLTBlockedSolver
 from ..common import (
@@ -67,7 +68,10 @@ class DVISolver:
     def __init__(
         self,
         model: ModelKamino | None = None,
+        data: DataKamino | None = None,
+        limits: LimitsKamino | None = None,
         contacts: ContactsKamino | None = None,
+        jacobians: SparseSystemJacobians | None = None,
         problem: DualProblem | None = None,
         config: list[DVISolver.Config] | DVISolver.Config | None = None,
         warmstart: WarmStartMode = WarmStartMode.NONE,
@@ -77,7 +81,10 @@ class DVISolver:
 
         Args:
             model: Model that determines solver allocation sizes.
+            data: Model data used by sparse DVI operator products.
+            limits: Limit topology used by sparse DVI updates.
             contacts: Contact topology used for graph-colored contact updates.
+            jacobians: Sparse constraint Jacobians used by sparse DVI updates.
             problem: Optional sparse problem used to precompute topology outside
                 the first simulation step.
             config: One DVI config or one config per world.
@@ -104,7 +111,10 @@ class DVISolver:
         if model is not None:
             self.finalize(
                 model=model,
+                data=data,
+                limits=limits,
                 contacts=contacts,
+                jacobians=jacobians,
                 problem=problem,
                 config=config,
                 warmstart=warmstart,
@@ -141,7 +151,10 @@ class DVISolver:
     def finalize(
         self,
         model: ModelKamino,
+        data: DataKamino | None = None,
+        limits: LimitsKamino | None = None,
         contacts: ContactsKamino | None = None,
+        jacobians: SparseSystemJacobians | None = None,
         problem: DualProblem | None = None,
         config: list[DVISolver.Config] | DVISolver.Config | None = None,
         warmstart: WarmStartMode = WarmStartMode.NONE,
@@ -151,7 +164,10 @@ class DVISolver:
 
         Args:
             model: Model that determines solver allocation sizes.
+            data: Model data used by sparse DVI operator products.
+            limits: Limit topology used by sparse DVI updates.
             contacts: Contact topology used for graph-colored contact updates.
+            jacobians: Sparse constraint Jacobians used by sparse DVI updates.
             problem: Optional sparse problem used to precompute topology.
             config: One DVI config or one config per world.
             warmstart: Source used to initialize constraint impulses.
@@ -178,6 +194,11 @@ class DVISolver:
             device=self._device,
             size=self._size,
             data=self._data,
+            model=model,
+            model_data=data,
+            limits=limits,
+            contacts=contacts,
+            jacobians=jacobians,
             bilateral_solver=self._bilateral_solver,
             max_iterations=self._max_iterations,
             max_block_iterations=self._max_block_iterations,

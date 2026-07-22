@@ -251,7 +251,10 @@ class SolverKaminoImpl(SolverBase):
         elif self._config.dynamics_solver == "dvi":
             self._solver_fd = DVISolver(
                 model=self._model,
+                data=self._data,
+                limits=self._limits,
                 contacts=contacts,
+                jacobians=self._jacobians if isinstance(self._jacobians, SparseSystemJacobians) else None,
                 problem=self._problem_fd,
                 config=self._config.dvi,
                 warmstart=self._warmstart_mode,

@@ -253,26 +253,6 @@ class ConstraintStabilizationConfig(ConfigBase):
     Defaults to `0.01`.
     """
 
-    contact_recovery_speed: float = -1.0
-    """
-    Maximum contact penetration recovery speed [m/s]. Negative values disable
-    clamping. Defaults to `-1.0`.
-    """
-
-    contact_deep_recovery_gamma: float = -1.0
-    """
-    Baumgarte stabilization parameter for contact penetration beyond
-    `contact_deep_recovery_threshold` [m]. Negative values disable the
-    deep-contact recovery override. Defaults to `-1.0`.
-    """
-
-    contact_deep_recovery_threshold: float = 0.0
-    """
-    Contact penetration depth [m] beyond which `contact_deep_recovery_gamma`
-    is used for the excess penetration. Must be non-negative.
-    Defaults to `0.0`.
-    """
-
     delta: float = 1.0e-6
     """
     Contact penetration margin used for unilateral contact constraints.\n
@@ -330,17 +310,6 @@ class ConstraintStabilizationConfig(ConfigBase):
                 usd_attribute_name="newton:kamino:constraints:gamma",
             )
         )
-        builder.add_custom_attribute(
-            ModelBuilder.CustomAttribute(
-                name="constraints_contact_recovery_speed",
-                frequency=Model.AttributeFrequency.ONCE,
-                assignment=Model.AttributeAssignment.MODEL,
-                dtype=wp.float32,
-                default=default_cfg.contact_recovery_speed,
-                namespace="kamino",
-                usd_attribute_name="newton:kamino:constraints:contactRecoverySpeed",
-            )
-        )
 
     @override
     @staticmethod
@@ -363,8 +332,6 @@ class ConstraintStabilizationConfig(ConfigBase):
                 cfg.beta = float(kamino_attrs.constraints_beta.numpy()[0])
             if hasattr(kamino_attrs, "constraints_gamma"):
                 cfg.gamma = float(kamino_attrs.constraints_gamma.numpy()[0])
-            if hasattr(kamino_attrs, "constraints_contact_recovery_speed"):
-                cfg.contact_recovery_speed = float(kamino_attrs.constraints_contact_recovery_speed.numpy()[0])
 
         # Return the fully constructed config with configurations
         # parsed from the model's custom attributes if available,
@@ -382,16 +349,6 @@ class ConstraintStabilizationConfig(ConfigBase):
             raise ValueError(f"Invalid beta: {self.beta}. Must be in range [0, 1.0].")
         if self.gamma < 0.0 or self.gamma > 1.0:
             raise ValueError(f"Invalid gamma: {self.gamma}. Must be in range [0, 1.0].")
-        if self.contact_deep_recovery_gamma > 1.0:
-            raise ValueError(
-                "Invalid contact_deep_recovery_gamma: "
-                f"{self.contact_deep_recovery_gamma}. Must be negative or in range [0, 1.0]."
-            )
-        if self.contact_deep_recovery_threshold < 0.0:
-            raise ValueError(
-                "Invalid contact_deep_recovery_threshold: "
-                f"{self.contact_deep_recovery_threshold}. Must be non-negative."
-            )
         if self.delta < 0.0:
             raise ValueError(f"Invalid delta: {self.delta}. Must be non-negative.")
 
@@ -655,7 +612,7 @@ class PADMMSolverConfig:
             builder: The model builder instance with which to register the custom attributes.
         """
         # Import here to avoid module-level imports and circular dependencies
-        from ._src.solvers.padmm.types import PADMMWarmStartMode  # noqa: PLC0415
+        from ._src.solvers.padmm import PADMMWarmStartMode  # noqa: PLC0415
 
         # Separately register `newton:maxSolverIterations` from
         # `KaminoSceneAPI` so we have access to it through the model.
@@ -891,7 +848,7 @@ class DVISolverConfig:
     warmstart_mode: Literal["none", "internal", "containers"] = "containers"
     """
     Warmstart mode to be used for the DVI solver.
-    Uses the same choices as :class:`PADMMWarmStartMode`. Defaults to `containers`.
+    Uses the same choices as the other dual dynamics solvers. Defaults to `containers`.
     """
 
     contact_warmstart_method: Literal[
@@ -935,7 +892,7 @@ class DVISolverConfig:
     @override
     def validate(self) -> None:
         """Validates the current values held by this config instance."""
-        from ._src.solvers.padmm.types import PADMMWarmStartMode  # noqa: PLC0415
+        from ._src.solvers.common import WarmStartMode  # noqa: PLC0415
         from ._src.solvers.warmstart import WarmstarterContacts  # noqa: PLC0415
 
         if self.max_iterations <= 0:
@@ -960,7 +917,7 @@ class DVISolverConfig:
             raise ValueError(
                 f"Invalid contact Jacobi relaxation: {self.contact_jacobi_relaxation}. Must be in the range (0, 1]."
             )
-        PADMMWarmStartMode.from_string(self.warmstart_mode)
+        WarmStartMode.from_string(self.warmstart_mode)
         WarmstarterContacts.Method.from_string(self.contact_warmstart_method)
         implemented_contact_warmstart_methods = {
             "key_and_position",

@@ -7,8 +7,13 @@ from __future__ import annotations
 
 import warp as wp
 
+from ...core.data import DataKamino
+from ...core.model import ModelKamino
 from ...dynamics.delassus import BlockSparseMatrixFreeDelassusOperator
 from ...dynamics.dual import DualProblem
+from ...geometry.contacts import ContactsKamino
+from ...kinematics.jacobians import SparseSystemJacobians
+from ...kinematics.limits import LimitsKamino
 from . import sparse_kernels
 from .kernels import (
     _initialize_dvi_status,
@@ -48,6 +53,11 @@ class SparseDVIPath:
         device: wp.DeviceLike,
         size,
         data,
+        model: ModelKamino,
+        model_data: DataKamino | None,
+        limits: LimitsKamino | None,
+        contacts: ContactsKamino | None,
+        jacobians: SparseSystemJacobians | None,
         bilateral_solver,
         max_iterations: int,
         max_block_iterations: int,
@@ -61,6 +71,12 @@ class SparseDVIPath:
         self.device = device
         self.size = size
         self.data = data
+        self.model = model
+        self.model_data = model_data
+        self.limits = limits
+        self.contacts = contacts
+        self.jacobians = jacobians
+        self.body_space = wp.empty(shape=size.sum_of_num_body_dofs, dtype=wp.float32, device=device)
         self.bilateral_solver = bilateral_solver
         self.max_iterations = max_iterations
         self.max_block_iterations = max_block_iterations
@@ -84,6 +100,8 @@ class SparseDVIPath:
     def prepare(self, problem: DualProblem) -> None:
         """Precompute host-derived sparse topology before the first solve."""
         _get_sparse_delassus(problem)
+        if self.model_data is None or self.jacobians is None:
+            raise RuntimeError("Sparse DVI requires model data and sparse Jacobians.")
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _build_sparse_bilateral_pairs(self, problem)
 
@@ -196,21 +214,12 @@ def _sparse_delassus_matvec_rows_path(path: SparseDVIPath, problem: DualProblem,
     delassus = _get_sparse_delassus(problem)
     state = path.data.state
     regularization = delassus.regularization
-    transpose_matrix = delassus.transpose_operator_matrix
-    body_space = delassus.body_space_scratch
+    body_space = path.body_space
     bsm = delassus.bsm
-    if bsm is None or delassus.ATy_op is None:
+    if bsm is None:
         raise RuntimeError("Sparse DVI row products require initialized Delassus sparse operators.")
 
-    if delassus.needs_update:
-        delassus.update()
-
-    delassus.ATy_op(
-        transpose_matrix,
-        path.data.solution.lambdas,
-        body_space,
-        path.all_worlds_mask,
-    )
+    delassus.apply_transpose(path.data.solution.lambdas, body_space, path.all_worlds_mask)
     state.v_aug.zero_()
     wp.launch(
         kernel=_sparse_delassus_gemv_rows,
@@ -290,12 +299,11 @@ def _sparse_delassus_update_unilateral_offsets(
     delassus = _get_sparse_delassus(problem)
     state = path.data.state
     regularization = delassus.regularization
-    transpose_matrix = delassus.transpose_operator_matrix
-    body_space = delassus.body_space_scratch
+    body_space = path.body_space
     bsm = delassus.bsm
-    jacobians = delassus.jacobians
-    limits = delassus.limits
-    contacts = delassus.contacts
+    jacobians = path.jacobians
+    limits = path.limits
+    contacts = path.contacts
     limit_offsets = jacobians.limit_constraint_nzb_offsets
     contact_offsets = jacobians.contact_constraint_nzb_offsets
     has_limits = limits is not None and limits.model_max_limits_host > 0
@@ -303,18 +311,10 @@ def _sparse_delassus_update_unilateral_offsets(
 
     if not (has_limits or has_contacts):
         return False
-    if bsm is None or delassus.ATy_op is None:
+    if bsm is None:
         raise RuntimeError("Sparse DVI offset updates require initialized Delassus sparse operators.")
 
-    if delassus.needs_update:
-        delassus.update()
-
-    delassus.ATy_op(
-        transpose_matrix,
-        path.data.solution.lambdas,
-        body_space,
-        path.all_worlds_mask,
-    )
+    delassus.apply_transpose(path.data.solution.lambdas, body_space, path.all_worlds_mask)
 
     if has_limits and has_contacts:
         # Fuse the two independent sweeps (disjoint lambda outputs, shared
@@ -435,9 +435,9 @@ def _compute_sparse_contact_block_inverse(path: SparseDVIPath, problem: DualProb
         kernel=sparse_kernels._compute_sparse_contact_block_inverse,
         dim=(path.size.num_worlds, path.size.max_of_max_contacts),
         inputs=[
-            problem.delassus.model.info.bodies_offset,
-            problem.delassus.model.bodies.inv_m_i,
-            problem.delassus.data.bodies.inv_I_i,
+            path.model.info.bodies_offset,
+            path.model.bodies.inv_m_i,
+            path.model_data.bodies.inv_I_i,
             jacobian.nzb_start,
             jacobian.num_nzb,
             jacobian.nzb_coords,
@@ -486,8 +486,8 @@ def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) ->
             kernel=_build_sparse_bilateral_block,
             dim=pair_wid.size,
             inputs=[
-                problem.delassus.model.bodies.inv_m_i,
-                problem.delassus.data.bodies.inv_I_i,
+                path.model.bodies.inv_m_i,
+                path.model_data.bodies.inv_I_i,
                 pair_wid,
                 pair_row,
                 pair_col,
@@ -509,11 +509,11 @@ def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) ->
 def _build_sparse_bilateral_pairs(path: SparseDVIPath, problem: DualProblem) -> None:
     """Cache joint Jacobian block pairs that contribute to the bilateral matrix."""
     jacobian = problem.delassus.constraint_jacobian
-    counts = problem.delassus.joint_constraint_nzb_count.numpy().tolist()
+    counts = path.jacobians.joint_constraint_nzb_count.numpy().tolist()
     starts = jacobian.nzb_start.numpy().tolist()
     coords = jacobian.nzb_coords.numpy()
     joint_counts = problem.data.njc.numpy().tolist()
-    body_offsets = problem.delassus.model.info.bodies_offset.numpy().tolist()
+    body_offsets = path.model.info.bodies_offset.numpy().tolist()
 
     pair_wid: list[int] = []
     pair_row: list[int] = []

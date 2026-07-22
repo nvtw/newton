@@ -70,7 +70,7 @@ class Example:
 
         # Create the model from the builder
         self.model = builder.finalize(skip_validation_joints=True)
-        self.model.rigid_contact_max = 72 * self.world_count
+        self.model.rigid_contact_max = 72 * self.world_count if self.dynamics_solver == "dvi" else 72
 
         # Create the Kamino solver for the given model
         self.config = newton.solvers.SolverKamino.Config.from_model(
@@ -93,9 +93,6 @@ class Example:
             self.config.constraints.alpha = 0.1
             self.config.constraints.beta = 0.011
             self.config.constraints.gamma = 0.015
-            self.config.constraints.contact_recovery_speed = 1.0
-            self.config.constraints.contact_deep_recovery_gamma = 0.10
-            self.config.constraints.contact_deep_recovery_threshold = 1.0e-3
             self.config.dynamics.preconditioning = False
             self.config.dynamics.linear_solver_type = "CR"
             self.config.dynamics.linear_solver_kwargs = {"maxiter": 9}

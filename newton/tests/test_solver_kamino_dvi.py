@@ -29,7 +29,6 @@ _DVI_QUALITY_TESTS = (
     "test_08_public_solver_short_rollout_with_dvi",
     "test_08a_public_solver_heterogeneous_contact_rollout_with_dvi",
     "test_12_dvi_opening_contact_releases_warmstarted_force",
-    "test_12b_dvi_contact_recovery_speed_caps_bias",
 )
 
 
