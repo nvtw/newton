@@ -1131,6 +1131,24 @@ def parse_usd(
             )
         return tetmesh_cache[prim_path]
 
+    def _get_axial_visual_dimensions(
+        prim: Usd.Prim, scale: wp.vec3, axis: Axis, default_radius: float, default_height: float
+    ) -> tuple[float, float]:
+        """Return scaled (radius, half_height); radius uses the largest perpendicular scale to match UsdPhysics."""
+        radius = usd.get_float(prim, "radius", default_radius)
+        half_height = usd.get_float(prim, "height", default_height) / 2
+        axis_index = int(axis)
+        radius_scale = max(scale[index] for index in range(3) if index != axis_index)
+        return radius * radius_scale, half_height * scale[axis_index]
+
+    def _get_planar_visual_dimensions(prim: Usd.Prim, scale: wp.vec3, axis: Axis) -> tuple[float, float]:
+        """Return scaled (width, length); UsdGeomPlane aligns width to Z for X-axis planes and length to Z for Y-axis planes."""
+        width_scale = scale[2] if axis == Axis.X else scale[0]
+        length_scale = scale[2] if axis == Axis.Y else scale[1]
+        width = usd.get_float(prim, "width", 0.0) * width_scale
+        length = usd.get_float(prim, "length", 0.0) * length_scale
+        return width, length
+
     def _has_visual_material_properties(material_props: dict[str, Any]) -> bool:
         # Require PBR-like material cues to avoid promoting generic displayColor-only colliders.
         return any(material_props.get(key) is not None for key in ("texture", "roughness", "metallic"))
@@ -1272,14 +1290,12 @@ def parse_usd(
                 )
             elif type_name == "plane":
                 axis = usd.get_gprim_axis(prim)
-                plane_xform = xform
+                width, length = _get_planar_visual_dimensions(prim, scale, axis)
                 # Apply axis rotation to transform
                 xform = wp.transform(xform.p, xform.q * quat_between_axes(Axis.Z, axis))
-                width = usd.get_float(prim, "width", 0.0) * scale[0]
-                length = usd.get_float(prim, "length", 0.0) * scale[1]
                 shape_id = builder.add_shape_plane(
                     body=parent_body_id,
-                    xform=plane_xform,
+                    xform=xform,
                     width=width,
                     length=length,
                     cfg=visual_shape_cfg_for_prim,
@@ -1288,8 +1304,9 @@ def parse_usd(
                 )
             elif type_name == "capsule":
                 axis = usd.get_gprim_axis(prim)
-                radius = usd.get_float(prim, "radius", 0.5) * scale[0]
-                half_height = usd.get_float(prim, "height", 2.0) / 2 * scale[1]
+                radius, half_height = _get_axial_visual_dimensions(
+                    prim, scale, axis, default_radius=0.5, default_height=1.0
+                )
                 # Apply axis rotation to transform
                 xform = wp.transform(xform.p, xform.q * quat_between_axes(Axis.Z, axis))
                 shape_id = builder.add_shape_capsule(
@@ -1304,8 +1321,9 @@ def parse_usd(
                 )
             elif type_name == "cylinder":
                 axis = usd.get_gprim_axis(prim)
-                radius = usd.get_float(prim, "radius", 0.5) * scale[0]
-                half_height = usd.get_float(prim, "height", 2.0) / 2 * scale[1]
+                radius, half_height = _get_axial_visual_dimensions(
+                    prim, scale, axis, default_radius=1.0, default_height=2.0
+                )
                 # Apply axis rotation to transform
                 xform = wp.transform(xform.p, xform.q * quat_between_axes(Axis.Z, axis))
                 shape_id = builder.add_shape_cylinder(
@@ -1320,8 +1338,9 @@ def parse_usd(
                 )
             elif type_name == "cone":
                 axis = usd.get_gprim_axis(prim)
-                radius = usd.get_float(prim, "radius", 0.5) * scale[0]
-                half_height = usd.get_float(prim, "height", 2.0) / 2 * scale[1]
+                radius, half_height = _get_axial_visual_dimensions(
+                    prim, scale, axis, default_radius=1.0, default_height=2.0
+                )
                 # Apply axis rotation to transform
                 xform = wp.transform(xform.p, xform.q * quat_between_axes(Axis.Z, axis))
                 shape_id = builder.add_shape_cone(
