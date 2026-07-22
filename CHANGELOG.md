@@ -25,6 +25,7 @@
 - Add `forward_depth_image` output support to `SensorTiledCamera.update()` and `SensorTiledCamera.utils.create_forward_depth_image_output()` for native forward-depth rendering without post-processing `depth_image`.
 - Add compiled regular-expression support to label-based selectors while preserving glob strings.
 - Add simulation throughput, real-time factor, p95 step-time, steady-state GPU-memory, timestep, and MuJoCo solver-iteration metrics to the ASV robot-learning benchmarks.
+- Add `joint_dof_mask` to `newton.ik.IKSolver` to keep selected joint DOFs fixed during LM optimization. (#3488)
 
 ### Changed
 
