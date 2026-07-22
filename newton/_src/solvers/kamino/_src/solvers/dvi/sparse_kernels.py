@@ -28,6 +28,14 @@ mat33f = wp.mat33f
 vec3f = wp.vec3f
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncthreads();
+#endif
+""")
+def _sync_threads(): ...
+
+
 @wp.kernel
 def _zero_bilateral_lambdas(
     # Inputs:
@@ -454,6 +462,177 @@ def _solve_dvi_sparse_contacts_offset_update(
         solver_config,
         solution_lambdas,
     )
+
+
+@wp.kernel
+def _solve_dvi_sparse_contacts_colored_gs(
+    # Delassus row operator:
+    delassus_num_nzb: wp.array[int32],
+    delassus_nzb_start: wp.array[int32],
+    delassus_nzb_coords: wp.array2d[int32],
+    delassus_nzb_values: wp.array[vec6f],
+    delassus_row_start: wp.array[int32],
+    delassus_col_start: wp.array[int32],
+    # Constraint Jacobian:
+    jacobian_num_nzb: wp.array[int32],
+    jacobian_nzb_start: wp.array[int32],
+    jacobian_nzb_coords: wp.array2d[int32],
+    jacobian_nzb_values: wp.array[vec6f],
+    jacobian_col_start: wp.array[int32],
+    contact_nzb_offsets: wp.array[int32],
+    # Problem data:
+    problem_vio: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_diag: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    eta: wp.array[float32],
+    contact_block_inv: wp.array[mat33f],
+    contact_colors: wp.array[int32],
+    contact_num_colors: wp.array[int32],
+    solver_config: wp.array[DVIConfigStruct],
+    # State:
+    body_space: wp.array[float32],
+    # Outputs:
+    solution_lambdas: wp.array[float32],
+):
+    tid = wp.tid()
+    threads_per_world = int32(wp.block_dim())
+    lane = tid % threads_per_world
+    wid = tid / threads_per_world
+
+    nc = problem_nc[wid]
+    if nc == 0:
+        return
+
+    vio = problem_vio[wid]
+    ccgo = problem_ccgo[wid]
+    cio = problem_cio[wid]
+    cfg = solver_config[wid]
+    num_colors = contact_num_colors[wid]
+    row_offset = delassus_row_start[wid]
+    delassus_end = delassus_nzb_start[wid] + delassus_num_nzb[wid]
+    jacobian_end = jacobian_nzb_start[wid] + jacobian_num_nzb[wid]
+
+    iteration = int32(0)
+    while iteration < cfg.max_iterations:
+        color = int32(0)
+        while color < num_colors:
+            cid = lane
+            while cid < nc:
+                contact_id = cio + cid
+                if contact_colors[contact_id] == color:
+                    ccio = ccgo + int32(3) * cid
+                    ccio_v = vio + ccio
+                    row_0 = ccio + int32(0)
+                    row_1 = ccio + int32(1)
+                    row_2 = ccio + int32(2)
+
+                    value_0 = eta[row_offset + row_0] * solution_lambdas[ccio_v + 0]
+                    value_1 = eta[row_offset + row_1] * solution_lambdas[ccio_v + 1]
+                    value_2 = eta[row_offset + row_2] * solution_lambdas[ccio_v + 2]
+
+                    nzb_offset = contact_nzb_offsets[contact_id]
+                    num_contact_bodies = int32(1)
+                    second_body_offset = nzb_offset + int32(3)
+                    if second_body_offset < delassus_end and delassus_nzb_coords[second_body_offset, 0] == row_0:
+                        num_contact_bodies = int32(2)
+
+                    body_slot = int32(0)
+                    while body_slot < num_contact_bodies:
+                        block_offset = nzb_offset + int32(3) * body_slot
+                        for k in range(3):
+                            nzb_idx = block_offset + k
+                            block = delassus_nzb_values[nzb_idx]
+                            x_idx_base = delassus_col_start[wid] + delassus_nzb_coords[nzb_idx, 1]
+                            acc = float32(0.0)
+                            for j in range(6):
+                                acc += block[j] * body_space[x_idx_base + j]
+                            if k == 0:
+                                value_0 += acc
+                            elif k == 1:
+                                value_1 += acc
+                            else:
+                                value_2 += acc
+                        body_slot = body_slot + int32(1)
+
+                    mu_c = problem_mu[contact_id]
+                    v_t0 = value_0 + problem_v_f[ccio_v + 0]
+                    v_t1 = value_1 + problem_v_f[ccio_v + 1]
+                    v_n = value_2 + problem_v_f[ccio_v + 2] + mu_c * wp.sqrt(v_t0 * v_t0 + v_t1 * v_t1)
+                    v_c = vec3f(v_t0, v_t1, v_n)
+
+                    P_0 = problem_P[ccio_v + 0]
+                    P_1 = problem_P[ccio_v + 1]
+                    P_2 = problem_P[ccio_v + 2]
+                    D_00 = wp.abs(problem_diag[ccio_v + 0]) * P_0 * P_0
+                    D_11 = wp.abs(problem_diag[ccio_v + 1]) * P_1 * P_1
+                    D_22 = wp.abs(problem_diag[ccio_v + 2]) * P_2 * P_2
+                    D_diag = _contact_trace_preconditioner(vec3f(D_00, D_11, D_22))
+
+                    lambda_old = vec3f(
+                        solution_lambdas[ccio_v + 0],
+                        solution_lambdas[ccio_v + 1],
+                        solution_lambdas[ccio_v + 2],
+                    )
+                    if cfg.contact_block_preconditioner:
+                        lambda_projected = _project_contact_block_update(
+                            lambda_old,
+                            v_c,
+                            D_diag,
+                            contact_block_inv[contact_id],
+                            cfg.regularization,
+                            cfg.contact_jacobi_omega,
+                            mu_c,
+                        )
+                        lambda_new = lambda_old + cfg.contact_jacobi_relaxation * (lambda_projected - lambda_old)
+                    else:
+                        lambda_new = _project_contact_diagonal_update(
+                            lambda_old,
+                            v_c,
+                            D_diag,
+                            cfg.regularization,
+                            cfg.omega,
+                            mu_c,
+                        )
+
+                    delta = lambda_new - lambda_old
+                    solution_lambdas[ccio_v + 0] = lambda_new.x
+                    solution_lambdas[ccio_v + 1] = lambda_new.y
+                    solution_lambdas[ccio_v + 2] = lambda_new.z
+
+                    jacobian_offset = contact_nzb_offsets[contact_id]
+                    num_jacobian_bodies = int32(1)
+                    second_jacobian_offset = jacobian_offset + int32(3)
+                    if (
+                        second_jacobian_offset < jacobian_end
+                        and jacobian_nzb_coords[second_jacobian_offset, 0] == row_0
+                    ):
+                        num_jacobian_bodies = int32(2)
+
+                    body_slot = int32(0)
+                    while body_slot < num_jacobian_bodies:
+                        block_offset = jacobian_offset + int32(3) * body_slot
+                        col = jacobian_nzb_coords[block_offset, 1]
+                        body_idx = jacobian_col_start[wid] + col
+                        block_0 = jacobian_nzb_values[block_offset + 0]
+                        block_1 = jacobian_nzb_values[block_offset + 1]
+                        block_2 = jacobian_nzb_values[block_offset + 2]
+                        for j in range(6):
+                            delta_body = (
+                                block_0[j] * P_0 * delta.x + block_1[j] * P_1 * delta.y + block_2[j] * P_2 * delta.z
+                            )
+                            wp.atomic_add(body_space, body_idx + j, delta_body)
+                        body_slot = body_slot + int32(1)
+
+                cid = cid + threads_per_world
+
+            _sync_threads()
+            color = color + int32(1)
+        iteration = iteration + int32(1)
 
 
 @wp.kernel

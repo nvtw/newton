@@ -16,6 +16,7 @@ from ...kinematics.jacobians import SparseSystemJacobians
 from ...kinematics.limits import LimitsKamino
 from . import sparse_kernels
 from .kernels import (
+    _color_dvi_contacts,
     _initialize_dvi_status,
     _scatter_bilateral_solution,
     _set_dvi_bilateral_active_dim,
@@ -27,6 +28,7 @@ from .sparse_kernels import (
     _compute_dvi_sparse_solution_vectors,
     _set_dvi_sparse_status_iterations,
     _set_sparse_bilateral_diagonal,
+    _solve_dvi_sparse_contacts_colored_gs,
     _solve_dvi_sparse_contacts_offset_update,
     _solve_dvi_sparse_jacobi_update,
     _solve_dvi_sparse_limits_offset_update,
@@ -112,6 +114,13 @@ class SparseDVIPath:
 
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _solve_sparse_with_bilateral_direct_block(self, problem)
+        elif (
+            self.device.is_cuda
+            and self.size.max_of_max_limits == 0
+            and self.contacts is not None
+            and self.contacts.model_max_contacts_host > 0
+        ):
+            _solve_sparse_contacts_colored_gs(self, problem)
         else:
             _solve_sparse_jacobi(self, problem)
 
@@ -176,6 +185,82 @@ def _solve_sparse_jacobi(path: SparseDVIPath, problem: DualProblem) -> None:
         ],
         device=path.device,
     )
+    wp.launch(
+        kernel=_set_dvi_sparse_status_iterations,
+        dim=path.size.num_worlds,
+        inputs=[
+            problem.data.dim,
+            path.data.config,
+            path.data.status,
+        ],
+        device=path.device,
+    )
+
+
+def _solve_sparse_contacts_colored_gs(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Solve contact-only sparse systems with conflict-safe Gauss-Seidel sweeps."""
+    state = path.data.state
+    contacts = path.contacts
+    jacobians = path.jacobians
+    if contacts is None or jacobians is None:
+        raise RuntimeError("Sparse colored contact solves require contacts and sparse Jacobians.")
+
+    delassus = _get_sparse_delassus(problem)
+    bsm = delassus.bsm
+    jacobian = delassus.constraint_jacobian
+    if bsm is None:
+        raise RuntimeError("Sparse colored contact solves require initialized Delassus sparse operators.")
+
+    delassus.diagonal(state.scratch)
+    wp.launch(
+        kernel=_color_dvi_contacts,
+        dim=path.size.num_worlds,
+        inputs=[
+            problem.data.nc,
+            problem.data.cio,
+            contacts.bid_AB,
+            state.contact_colors,
+            state.contact_num_colors,
+        ],
+        device=path.device,
+    )
+    delassus.apply_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
+    wp.launch(
+        kernel=_solve_dvi_sparse_contacts_colored_gs,
+        dim=path.size.num_worlds * 64,
+        inputs=[
+            bsm.num_nzb,
+            bsm.nzb_start,
+            bsm.nzb_coords,
+            bsm.nzb_values,
+            bsm.row_start,
+            bsm.col_start,
+            jacobian.num_nzb,
+            jacobian.nzb_start,
+            jacobian.nzb_coords,
+            jacobian.nzb_values,
+            jacobian.col_start,
+            jacobians.contact_constraint_nzb_offsets,
+            problem.data.vio,
+            problem.data.nc,
+            problem.data.ccgo,
+            problem.data.cio,
+            problem.data.mu,
+            state.scratch,
+            problem.data.P,
+            problem.data.v_f,
+            delassus.regularization,
+            state.contact_block_inv,
+            state.contact_colors,
+            state.contact_num_colors,
+            path.data.config,
+            path.body_space,
+            path.data.solution.lambdas,
+        ],
+        device=path.device,
+        block_dim=64,
+    )
+    _compute_sparse_solution_vectors(path, problem)
     wp.launch(
         kernel=_set_dvi_sparse_status_iterations,
         dim=path.size.num_worlds,

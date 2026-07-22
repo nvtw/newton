@@ -172,6 +172,43 @@ def _evaluate_solution_metrics(test: TestSetup, solver: DVISolver) -> dict[str, 
     }
 
 
+def _build_two_box_stack() -> newton.ModelBuilder:
+    from newton._src.geometry import inertia  # noqa: PLC0415
+
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    SolverKamino.register_custom_attributes(builder)
+    builder.begin_world(label="two_box_stack")
+    shape_cfg = newton.ModelBuilder.ShapeConfig(gap=0.0, margin=0.0, mu=0.75)
+    half_extent = 0.1
+    mass = 1.0
+    body_inertia = inertia.compute_inertia_box_from_mass(
+        mass=mass,
+        hx=half_extent,
+        hy=half_extent,
+        hz=half_extent,
+    )
+    for body_index, height in enumerate((0.1, 0.31)):
+        body = builder.add_body(
+            label=f"box_{body_index}",
+            mass=mass,
+            inertia=body_inertia,
+            xform=wp.transformf(0.0, 0.0, height, 0.0, 0.0, 0.0, 1.0),
+            lock_inertia=True,
+        )
+        builder.add_shape_box(
+            label=f"box_geom_{body_index}",
+            body=body,
+            hx=half_extent,
+            hy=half_extent,
+            hz=half_extent,
+            cfg=shape_cfg,
+        )
+    builder.add_ground_plane(label="ground", cfg=shape_cfg)
+    builder.end_world()
+    builder.rigid_contact_max = 24
+    return builder
+
+
 class TestDVISolver(unittest.TestCase):
     def setUp(self):
         if not test_context.setup_done:
@@ -774,6 +811,54 @@ class TestDVISolver(unittest.TestCase):
         self.assertNotEqual(colors[1], colors[4])
         self.assertLess(colors[3], num_colors)
 
+    def test_03g2_dvi_sparse_contact_operator_matches_dense(self):
+        results = {}
+        for sparse in (False, True):
+            test = TestSetup(
+                builder_fn=basics.build_box_on_plane,
+                max_world_contacts=4,
+                gravity=True,
+                perturb=True,
+                device=self.device,
+                sparse=sparse,
+            )
+            test.build()
+            config = SolverKamino.Config(
+                dynamics_solver="dvi",
+                sparse_dynamics=sparse,
+                sparse_jacobian=sparse,
+            ).dvi
+            config.max_iterations = 200
+            config.warmstart_mode = "none"
+            solver = _solve_dvi(test.model, test.problem, config=config, setup=test)
+            results[sparse] = {
+                "D": extract_delassus(test.problem.delassus, only_active_dims=True)[0],
+                "v_f": extract_problem_vector(
+                    test.problem.delassus,
+                    test.problem.data.v_f.numpy(),
+                    only_active_dims=True,
+                )[0],
+                "v_plus": extract_problem_vector(
+                    test.problem.delassus,
+                    solver.data.solution.v_plus.numpy(),
+                    only_active_dims=True,
+                )[0],
+                "lambdas": extract_problem_vector(
+                    test.problem.delassus,
+                    solver.data.solution.lambdas.numpy(),
+                    only_active_dims=True,
+                )[0],
+            }
+
+        np.testing.assert_allclose(results[True]["D"], results[False]["D"], rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(results[True]["v_f"], results[False]["v_f"], rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(results[True]["v_plus"], results[False]["v_plus"], rtol=1e-4, atol=2e-4)
+        self.assertAlmostEqual(
+            float(np.sum(results[True]["lambdas"][2::3])),
+            float(np.sum(results[False]["lambdas"][2::3])),
+            delta=2e-4,
+        )
+
     def test_03i_dvi_coldstart_is_repeatable(self):
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
@@ -1231,6 +1316,80 @@ class TestDVISolver(unittest.TestCase):
                     self.assertLess(solution_metrics["r_ncp_dual"], 1.0e-2, msg=str(solution_metrics))
                     self.assertLess(solution_metrics["r_ncp_compl"], 1.0e-2, msg=str(solution_metrics))
                     self.assertLess(solution_metrics["r_vi_natmap"], 1.0e-2, msg=str(solution_metrics))
+
+    def test_08c_dvi_sparse_two_box_stack_matches_dense(self):
+        model = _build_two_box_stack().finalize()
+        dt = 0.0025
+        steps = 320
+
+        def rollout(sparse: bool) -> dict[str, np.ndarray | float]:
+            config = SolverKamino.Config.from_model(
+                model,
+                dynamics_solver="dvi",
+                sparse_dynamics=sparse,
+                sparse_jacobian=True,
+            )
+            config.dvi.max_iterations = 200
+            config.dvi.tolerance = 1e-4
+            config.dvi.warmstart_mode = "none"
+            solver = SolverKamino(model, config=config)
+            state_0 = model.state()
+            state_1 = model.state()
+            contacts = model.contacts()
+            solver.reset(state_0)
+            solver.reset(state_1)
+
+            for _ in range(steps):
+                state_0.clear_forces()
+                model.collide(state_0, contacts)
+                solver.step(state_0, state_1, control=None, contacts=contacts, dt=dt)
+                state_0, state_1 = state_1, state_0
+
+            body_q = state_0.body_q.numpy()
+            body_qd = state_0.body_qd.numpy()
+            kamino_contacts = solver._contacts_kamino
+            contact_count = int(kamino_contacts.model_active_contacts.numpy()[0])
+            bid_ab = kamino_contacts.bid_AB.numpy()[:contact_count]
+            reactions = kamino_contacts.reaction.numpy()[:contact_count]
+            gaps = kamino_contacts.gapfunc.numpy()[:contact_count, 3]
+            ground_contacts = (bid_ab[:, 0] < 0) | (bid_ab[:, 1] < 0)
+            solver_data = solver._solver_kamino.solver_fd.data
+            return {
+                "body_q": body_q,
+                "body_qd": body_qd,
+                "min_gap": float(np.min(gaps)),
+                "ground_support": float(np.sum(reactions[ground_contacts, 2])),
+                "converged": int(solver_data.status.numpy()[0]["converged"]),
+                "color_count": int(solver_data.state.contact_num_colors.numpy()[0]),
+            }
+
+        dense = rollout(False)
+        sparse = rollout(True)
+        expected_height = np.array([0.1, 0.3])
+        total_weight = 2.0 * 9.80665
+
+        for result in (dense, sparse):
+            self.assertTrue(np.all(np.isfinite(result["body_q"])))
+            self.assertTrue(np.all(np.isfinite(result["body_qd"])))
+            np.testing.assert_allclose(result["body_q"][:, 2], expected_height, rtol=0.0, atol=5e-4)
+            self.assertGreater(result["min_gap"], -5e-4)
+            self.assertAlmostEqual(result["ground_support"], total_weight, delta=0.05 * total_weight)
+
+        np.testing.assert_allclose(
+            sparse["body_q"][:, :3],
+            dense["body_q"][:, :3],
+            rtol=0.0,
+            atol=2e-4,
+        )
+        np.testing.assert_allclose(
+            sparse["body_qd"],
+            dense["body_qd"],
+            rtol=0.0,
+            atol=3e-3,
+        )
+        self.assertEqual(sparse["converged"], 1)
+        if self.device.is_cuda:
+            self.assertGreater(sparse["color_count"], 0)
 
     def test_08b_dr_legs_contact_capacity_scales_with_world_count(self):
         if not self.device.is_cuda:
