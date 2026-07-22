@@ -219,7 +219,7 @@ def _sparse_delassus_matvec_rows_path(path: SparseDVIPath, problem: DualProblem,
     if bsm is None:
         raise RuntimeError("Sparse DVI row products require initialized Delassus sparse operators.")
 
-    delassus.apply_transpose(path.data.solution.lambdas, body_space, path.all_worlds_mask)
+    delassus.apply_jacobian_transpose(path.data.solution.lambdas, body_space, path.all_worlds_mask)
     state.v_aug.zero_()
     wp.launch(
         kernel=_sparse_delassus_gemv_rows,
@@ -314,7 +314,7 @@ def _sparse_delassus_update_unilateral_offsets(
     if bsm is None:
         raise RuntimeError("Sparse DVI offset updates require initialized Delassus sparse operators.")
 
-    delassus.apply_transpose(path.data.solution.lambdas, body_space, path.all_worlds_mask)
+    delassus.apply_jacobian_transpose(path.data.solution.lambdas, body_space, path.all_worlds_mask)
 
     if has_limits and has_contacts:
         # Fuse the two independent sweeps (disjoint lambda outputs, shared

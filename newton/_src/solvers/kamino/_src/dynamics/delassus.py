@@ -1769,7 +1769,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
     # Operations
     ###
 
-    def apply_transpose(
+    def apply_jacobian_transpose(
         self,
         x: wp.array[wp.float32],
         y: wp.array[wp.float32],

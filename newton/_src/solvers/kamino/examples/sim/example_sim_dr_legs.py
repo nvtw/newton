@@ -164,6 +164,9 @@ class Example:
         target_sim_dt = self.frame_dt / 12 if dynamics_solver == "dvi" else 0.01 if implicit_pd else 0.001
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
+        # DVI benefits from early contact detection because it solves inequality
+        # constraints slightly less accurately than PADMM. Contact forces remain
+        # zero until the shapes overlap.
         dvi_contact_margin = 5.0e-4 if dynamics_solver == "dvi" else 0.0
         msg.info(f"Using sim_dt = {self.sim_dt} ({self.sim_substeps} substeps per frame)")
         self.max_steps = max_steps
