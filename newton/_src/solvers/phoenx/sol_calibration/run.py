@@ -47,12 +47,19 @@ def main() -> None:
     memory_peak = args.memory_peak_gbps or limits.memory_gbps
     fp32_peak = args.fp32_peak_gflops or limits.fp32_gflops
     bf16_tensor_peak = args.bf16_tensor_peak_gflops or limits.bf16_tensor_gflops
+    if args.quick:
+        # Quick inputs are cache-resident and too short for stable ceiling estimates.
+        memory_peak = 0.0
+        fp32_peak = 0.0
+        bf16_tensor_peak = 0.0
     print("PhoenX speed-of-light calibration")
     print(f"Device: {device.name} ({device})")
     print(f"CUDA architecture: {device.arch} | Device memory: {total_gib:.1f} GiB")
     print(
         f"Timing: {args.warmup} warmup, {args.repetitions} replays/trial, {args.trials} trials; peak is the best trial"
     )
+    if args.quick:
+        print("Mode: quick smoke test; cache-resident throughput is not a hardware roofline calibration")
 
     common = {
         "device_name": args.device,

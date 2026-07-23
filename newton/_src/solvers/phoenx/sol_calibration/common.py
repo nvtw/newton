@@ -142,8 +142,12 @@ def print_report(results: Sequence[BenchmarkResult]) -> None:
                 row.problem_size,
                 f"{row.peak:,.2f}",
                 f"{row.median:,.2f}",
-                f"{row.theoretical:,.2f}" if row.theoretical is not None else "n/a",
-                f"{100.0 * row.peak / row.theoretical:.1f}%" if row.theoretical is not None else "n/a",
+                f"{row.theoretical:,.2f}" if row.theoretical is not None and row.theoretical > 0.0 else "n/a",
+                (
+                    f"{100.0 * row.peak / row.theoretical:.1f}%"
+                    if row.theoretical is not None and row.theoretical > 0.0
+                    else "n/a"
+                ),
                 row.unit,
                 f"{row.median_ms:,.3f}",
             )

@@ -65,7 +65,9 @@ _FPS_TOLERANCE: float = 0.05
 # +50 % from the recorded baseline before failing.
 _DRIFT_TOLERANCE: float = 0.50
 
-# RTX PRO 6000 Blackwell ceilings measured by mini/bench_hardware_roofline.py.
+# RTX PRO 6000 Blackwell ceilings measured with the full-size
+# ``sol_calibration`` graph-replay suite. These are workload ceilings, not
+# performance-counter readings from the solver itself.
 _SEQUENTIAL_GBPS: float = 1489.14
 _RANDOM_VEC4_GBPS: float = 1036.82
 _FP32_TFLOPS: float = 87.810
@@ -103,7 +105,12 @@ class BenchResult:
     random_vec4_bandwidth_percent: float
     estimated_tflops: float
     fp32_peak_percent: float
+    arithmetic_intensity_flop_per_byte: float
+    calibrated_ridge_flop_per_byte: float
+    roofline_limiter: str
     roofline_basis: str
+    bandwidth_percent_kind: str
+    roofline_ceiling_source: str
     blocks_per_sm: int
     colored_contact_layout: bool
     copy_slots: int
@@ -212,6 +219,8 @@ def _run_one(
     iteration_rate = contact_points * solver_iterations * substeps * ex.steps_per_frame * fps
     logical_min_gbps = iteration_rate * _CONTACT_ITERATION_BYTES / 1.0e9
     estimated_tflops = iteration_rate * _CONTACT_ITERATION_FLOPS / 1.0e12
+    arithmetic_intensity = _CONTACT_ITERATION_FLOPS / _CONTACT_ITERATION_BYTES
+    calibrated_ridge = _FP32_TFLOPS * 1000.0 / _SEQUENTIAL_GBPS
     return BenchResult(
         mass_splitting=mass_splitting,
         substeps=substeps,
@@ -239,7 +248,18 @@ def _run_one(
         random_vec4_bandwidth_percent=100.0 * logical_min_gbps / _RANDOM_VEC4_GBPS,
         estimated_tflops=estimated_tflops,
         fp32_peak_percent=100.0 * estimated_tflops / _FP32_TFLOPS,
-        roofline_basis="352 B and 450 FLOP per final contact-point iteration; useful-work estimate, no GPU counters",
+        arithmetic_intensity_flop_per_byte=arithmetic_intensity,
+        calibrated_ridge_flop_per_byte=calibrated_ridge,
+        roofline_limiter="memory" if arithmetic_intensity < calibrated_ridge else "compute",
+        roofline_basis=(
+            "352 B and 450 FLOP per final contact-point iteration; algorithmic useful-work lower bound, no GPU counters"
+        ),
+        bandwidth_percent_kind=(
+            "minimum useful-byte rate divided by calibrated sequential-copy ceiling; not measured DRAM utilization"
+        ),
+        roofline_ceiling_source=(
+            "RTX PRO 6000 Blackwell full-size CUDA-graph calibration via newton._src.solvers.phoenx.sol_calibration"
+        ),
         blocks_per_sm=blocks_per_sm,
         colored_contact_layout=colored_contact_layout,
         copy_slots=int(copy_counts.sum()),
@@ -259,8 +279,8 @@ def _format_row(r: BenchResult) -> str:
         f"max={r.max_drift_m:.4f}m  speed={r.mean_speed_mps:.4f}/{r.max_speed_mps:.4f}m/s "
         f"max_w={r.max_angular_speed_radps:.3f}rad/s  z=[{r.min_z:.3f}, {r.max_z:.3f}]  "
         f"contacts={r.contact_points}/{r.contact_columns} colors={r.num_colors} "
-        f"BW={r.logical_min_gbps:.1f}GB/s ({r.sequential_bandwidth_percent:.1f}% seq) "
-        f"finite={r.finite}"
+        f"useful_BW>={r.logical_min_gbps:.1f}GB/s ({r.sequential_bandwidth_percent:.1f}% calibrated seq) "
+        f"roof={r.roofline_limiter} finite={r.finite}"
     )
 
 

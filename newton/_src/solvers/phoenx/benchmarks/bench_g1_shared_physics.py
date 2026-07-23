@@ -230,6 +230,8 @@ def main() -> int:
                 "gpu_used_gb": gpu_used_gb,
                 "measure_replays": args.measure_replays,
                 "multi_world_scheduler": args.multi_world_scheduler,
+                "resolved_multi_world_scheduler": solver.world._multi_world_scheduler,
+                "resolved_multi_world_block_dim": int(solver.world._multi_world_block_dim),
                 "physics_steps": physics_steps,
                 "physics_steps_per_s": physics_steps / elapsed,
                 "shape_count_per_world": (int(model.shape_count) - 1) // args.world_count,
