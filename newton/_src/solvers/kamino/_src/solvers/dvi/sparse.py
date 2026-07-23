@@ -122,12 +122,15 @@ class SparseDVIPath:
 
 
 def _can_use_sparse_contact_pgs(path: SparseDVIPath) -> bool:
+    return _can_use_sparse_colored_contacts(path) and path.size.max_of_max_limits == 0
+
+
+def _can_use_sparse_colored_contacts(path: SparseDVIPath) -> bool:
     return (
         path.device.is_cuda
         and path.contacts is not None
         and path.jacobians is not None
         and path.size.max_of_max_contacts > 0
-        and path.size.max_of_max_limits == 0
     )
 
 
@@ -411,6 +414,7 @@ def _sparse_delassus_update_unilateral_offsets(
     problem: DualProblem,
     block_iteration: int,
     contact_iteration: int,
+    update_contacts: bool = True,
 ) -> bool:
     delassus = _get_sparse_delassus(problem)
     state = path.data.state
@@ -423,7 +427,7 @@ def _sparse_delassus_update_unilateral_offsets(
     limit_offsets = jacobians.limit_constraint_nzb_offsets
     contact_offsets = jacobians.contact_constraint_nzb_offsets
     has_limits = limits is not None and limits.model_max_limits_host > 0
-    has_contacts = contacts is not None and contacts.model_max_contacts_host > 0
+    has_contacts = update_contacts and contacts is not None and contacts.model_max_contacts_host > 0
 
     if not (has_limits or has_contacts):
         return False
@@ -745,12 +749,21 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         device=path.device,
     )
 
-    use_contact_pgs = _can_use_sparse_contact_pgs(path)
+    use_contact_pgs = _can_use_sparse_colored_contacts(path)
     if use_contact_pgs:
         _prepare_sparse_contact_pgs(path, problem)
 
     for block_iteration in range(path.max_block_iterations):
         if use_contact_pgs:
+            if path.size.max_of_max_limits > 0:
+                for contact_iteration in range(path.max_contact_iterations):
+                    _sparse_delassus_update_unilateral_offsets(
+                        path,
+                        problem,
+                        block_iteration,
+                        contact_iteration,
+                        update_contacts=False,
+                    )
             _launch_sparse_contact_pgs(path, problem, block_iteration)
         else:
             for contact_iteration in range(path.max_contact_iterations):

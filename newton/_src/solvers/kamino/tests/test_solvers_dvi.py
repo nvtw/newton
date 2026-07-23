@@ -1283,6 +1283,57 @@ class TestDVISolver(unittest.TestCase):
                     delta=0.02 * expected_pair_impulse,
                 )
 
+    def test_05d_sparse_dvi_colors_contacts_with_joint_limits(self):
+        """Use colored contacts when a sparse world also contains joint limits."""
+        if not self.device.is_cuda:
+            self.skipTest("Colored DVI contact updates require CUDA")
+
+        builder = _build_five_box_stack()
+        testing.build_unary_revolute_joint_test(
+            builder=builder,
+            z_offset=5.0,
+            new_world=False,
+            limits=True,
+            ground=False,
+            world_index=0,
+        )
+        model, data, state, limits, detector, jacobians = make_containers(
+            builder=builder,
+            device=self.device,
+            max_world_contacts=64,
+            sparse=True,
+            dt=1.0e-3,
+        )
+        update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
+        joint_q = data.joints.q_j.numpy()
+        joint_q[0] = 1.0
+        data.joints.q_j.assign(joint_q)
+        limits.detect(q_j=data.joints.q_j)
+        update_constraints_info(model=model, data=data)
+        jacobians.build(model=model, data=data, limits=limits.data, contacts=detector.contacts)
+        problem = _make_sparse_dual_problem(model, data, limits, detector.contacts, jacobians)
+        solver = _solve_dvi(
+            model,
+            problem,
+            config=kamino_config.DVISolverConfig(tolerance=1.0e-5, regularization=1.0e-6),
+            setup=SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians),
+        )
+
+        self.assertEqual(int(limits.model_active_limits.numpy()[0]), 1)
+        self.assertEqual(int(detector.contacts.world_active_contacts.numpy()[0]), 36)
+        self.assertGreater(int(solver.data.state.contact_num_colors.numpy()[0]), 0)
+
+        count = int(problem.data.nc.numpy()[0])
+        raw_contacts = solver.data.state.contact_indices.numpy()[:count]
+        contact_bodies = detector.contacts.bid_AB.numpy()[raw_contacts]
+        constraint_offset = int(problem.data.vio.numpy()[0] + problem.data.ccgo.numpy()[0])
+        normal_impulses = solver.data.solution.lambdas.numpy()[
+            constraint_offset + 2 : constraint_offset + 3 * count : 3
+        ]
+        ground_contacts = np.any(contact_bodies == -1, axis=1)
+        self.assertAlmostEqual(float(np.sum(normal_impulses[ground_contacts])), 5.0 * 9.81e-3, delta=1.0e-3)
+        self.assertAlmostEqual(float(np.sum(normal_impulses)), 15.0 * 9.81e-3, delta=3.0e-3)
+
     def test_06_dvi_warmstart_modes(self):
         builder = basics.build_box_on_plane()
         model, data, state, limits, detector, jacobians = make_containers(

@@ -36,7 +36,7 @@
 ### Changed
 
 - Accelerate dense Kamino DVI contact solves with the same conflict-free projected update schedule used by sparse DVI.
-- Accelerate sparse Kamino DVI contact solves with conflict-free projected Gauss-Seidel updates while improving stacked-contact accuracy.
+- Accelerate sparse Kamino DVI contact solves, including models with joint limits, with conflict-free projected Gauss-Seidel updates while improving stacked-contact accuracy.
 - Improve Kamino DVI contact convergence for high-mass-ratio systems using normal effective-mass scaling.
 - Compile tiled camera render kernels with CUDA fast math by default for faster rendering; set `SensorTiledCamera.render_config.enable_fast_math = False` for bit-exact, IEEE-precise output.
 - Optimize raycast/raytrace queries by restructuring ray-shape intersection into local-space primitives and compile specialized depth/shadow variants that skip unused surface-normal work (mesh shadows also use any-hit queries).
