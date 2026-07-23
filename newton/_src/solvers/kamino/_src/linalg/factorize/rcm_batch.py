@@ -381,6 +381,8 @@ def _make_rcm_batch_fused_tile_kernel(dtype, max_dim: int):
         if b >= num_blocks:
             return
         n_b = dims[b]
+        # Every tile lane shares ``b``, so the cached-permutation return is
+        # block-uniform and occurs safely before any tile collective.
         if reuse_permutation and permutation_valid[b] != int(0) and permutation_dim[b] == n_b:
             return
 
