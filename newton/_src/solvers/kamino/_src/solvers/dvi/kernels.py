@@ -721,14 +721,15 @@ def _solve_dvi_contacts_colored_gs(
     mio = problem_mio[wid]
     ccgo = problem_ccgo[wid]
     cfg = solver_config[wid]
-    if block_iteration >= cfg.block_iterations:
+    if block_iteration >= int32(0) and block_iteration >= cfg.block_iterations:
         return
 
     num_colors = contact_num_colors[wid]
-    # Colored contact updates execute a fixed number of sweeps. Convergence is
-    # evaluated only after the complete direct-bilateral block schedule.
+    iteration_budget = cfg.contact_iterations
+    if block_iteration < int32(0):
+        iteration_budget = cfg.max_iterations
     iteration = int32(0)
-    while iteration < cfg.contact_iterations:
+    while iteration < iteration_budget:
         color = int32(0)
         while color < num_colors:
             cid = lane
@@ -764,14 +765,15 @@ def _solve_dvi_contacts_colored_gs(
                         )
                         lambda_new = lambda_old + cfg.contact_jacobi_relaxation * (lambda_projected - lambda_old)
                     else:
-                        lambda_new = _project_contact_diagonal_update(
+                        lambda_projected = _project_contact_diagonal_update(
                             lambda_old,
                             v_c,
                             _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
                             cfg.regularization,
-                            cfg.omega,
+                            float32(0.9),
                             mu_c,
                         )
+                        lambda_new = lambda_old + float32(0.9) * (lambda_projected - lambda_old)
 
                     delta = lambda_new - lambda_old
                     solution_lambdas[ccio_v + 0] = lambda_new.x

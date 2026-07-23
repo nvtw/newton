@@ -27,7 +27,6 @@ from ..common import (
 from .kernels import (
     _apply_dvi_contact_jacobi_delta,
     _build_bilateral_rhs,
-    _color_dvi_contacts,
     _compute_dvi_contact_block_inverse,
     _compute_dvi_contact_jacobi_delta,
     _compute_dvi_contact_velocities,
@@ -47,6 +46,7 @@ from .kernels import (
     _unprecondition_dvi_solution,
 )
 from .sparse import SparseDVIPath
+from .sparse_kernels import _color_mapped_dvi_contacts, _map_active_contacts
 from .types import DVIConfigStruct, DVIData, convert_config_to_struct
 
 wp.set_module_options({"enable_backward": False})
@@ -109,6 +109,7 @@ class DVISolver:
         self._has_contact_block_preconditioner: bool = False
         self._has_unilateral_constraints: bool = False
         self._contact_bid_AB: wp.array[wp.vec2i] | None = None
+        self._contacts: ContactsKamino | None = None
         self._sparse_path: SparseDVIPath | None = None
         self._all_worlds_mask: wp.array[wp.bool] | None = None
         self._device: wp.DeviceLike = None
@@ -301,6 +302,7 @@ class DVISolver:
 
     def set_contacts(self, contacts: ContactsKamino | None):
         """Cache contact topology for graph-colored contact solves."""
+        self._contacts = contacts
         if contacts is not None and contacts.model_max_contacts_host > 0:
             self._contact_bid_AB = contacts.bid_AB
         else:
@@ -440,6 +442,8 @@ class DVISolver:
         if not problem.sparse:
             if self._bilateral_solver is not None and self._data.bilateral_operator is not None:
                 self._solve_with_bilateral_direct_block(problem)
+            elif self._can_use_dense_contact_pgs():
+                self._solve_dense_contact_pgs(problem)
             else:
                 # Solve all rows together with projected Gauss-Seidel:
                 # lambda_next = projection(lambda - omega * B * v_aug).
@@ -546,6 +550,90 @@ class DVISolver:
             device=self.device,
         )
 
+    def _can_use_dense_contact_pgs(self) -> bool:
+        return (
+            self.device.is_cuda
+            and self._contacts is not None
+            and self._size.max_of_max_contacts > 0
+            and self._size.max_of_max_limits == 0
+        )
+
+    def _solve_dense_contact_pgs(self, problem: DualProblem) -> None:
+        contacts = self._contacts
+        if contacts is None:
+            raise RuntimeError("Dense contact PGS requires contact topology.")
+        state = self._data.state
+        wp.launch(
+            kernel=_initialize_dvi_status,
+            dim=self._size.num_worlds,
+            inputs=[self._data.config, self._data.status],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=_map_active_contacts,
+            dim=contacts.model_max_contacts_host,
+            inputs=[
+                contacts.model_active_contacts,
+                contacts.wid,
+                contacts.cid,
+                problem.data.cio,
+                state.contact_indices,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=_color_mapped_dvi_contacts,
+            dim=self._size.num_worlds,
+            inputs=[
+                problem.data.nc,
+                problem.data.cio,
+                state.contact_indices,
+                contacts.bid_AB,
+                state.contact_colors,
+                state.contact_num_colors,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=_compute_dvi_contact_velocities,
+            dim=(self._size.num_worlds, 3 * self._size.max_of_max_contacts),
+            inputs=[
+                problem.data.dim,
+                problem.data.mio,
+                problem.data.vio,
+                problem.data.nc,
+                problem.data.ccgo,
+                problem.data.D,
+                problem.data.v_f,
+                self._data.solution.lambdas,
+                state.v_aug,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=_solve_dvi_contacts_colored_gs,
+            dim=self._size.num_worlds * 64,
+            inputs=[
+                problem.data.dim,
+                problem.data.mio,
+                problem.data.vio,
+                problem.data.nc,
+                problem.data.ccgo,
+                problem.data.cio,
+                problem.data.mu,
+                problem.data.D,
+                -1,
+                state.contact_block_inv,
+                state.contact_colors,
+                state.contact_num_colors,
+                self._data.config,
+                state.v_aug,
+                self._data.solution.lambdas,
+            ],
+            device=self.device,
+            block_dim=64,
+        )
+
     def _solve_bilateral_block(self, problem: DualProblem, active_dim: wp.array[wp.int32] | None = None):
         """Solve ``D_bb * lambda_b = -(v_f,b + D_bu * lambda_u)``."""
         operator = self._data.bilateral_operator
@@ -648,17 +736,29 @@ class DVISolver:
             device=self.device,
         )
 
-        use_colored_contacts = (
-            self._size.max_of_max_contacts > 0 and self.device.is_cuda and self._contact_bid_AB is not None
-        )
+        use_colored_contacts = self._size.max_of_max_contacts > 0 and self.device.is_cuda and self._contacts is not None
         if use_colored_contacts:
+            contacts = self._contacts
             wp.launch(
-                kernel=_color_dvi_contacts,
+                kernel=_map_active_contacts,
+                dim=contacts.model_max_contacts_host,
+                inputs=[
+                    contacts.model_active_contacts,
+                    contacts.wid,
+                    contacts.cid,
+                    problem.data.cio,
+                    self._data.state.contact_indices,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                kernel=_color_mapped_dvi_contacts,
                 dim=self._size.num_worlds,
                 inputs=[
                     problem.data.nc,
                     problem.data.cio,
-                    self._contact_bid_AB,
+                    self._data.state.contact_indices,
+                    contacts.bid_AB,
                     self._data.state.contact_colors,
                     self._data.state.contact_num_colors,
                 ],
