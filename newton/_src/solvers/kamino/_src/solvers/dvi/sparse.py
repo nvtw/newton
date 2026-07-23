@@ -24,17 +24,14 @@ from .kernels import (
 from .sparse_kernels import (
     _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
-    _color_mapped_dvi_contacts,
+    _color_mapped_dvi_inequalities,
     _compute_dvi_sparse_solution_vectors,
     _map_active_contacts,
+    _map_active_limits,
     _set_dvi_sparse_status_iterations,
     _set_sparse_bilateral_diagonal,
-    _solve_dvi_sparse_contacts_offset_update,
-    _solve_dvi_sparse_contacts_pgs,
-    _solve_dvi_sparse_jacobi_update,
-    _solve_dvi_sparse_limits_offset_update,
-    _solve_dvi_sparse_unilateral_jacobi_update,
-    _solve_dvi_sparse_unilateral_offset_update,
+    _solve_dvi_sparse_bilateral_jacobi_update,
+    _solve_dvi_sparse_inequalities_pgs,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
 )
@@ -115,69 +112,93 @@ class SparseDVIPath:
 
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _solve_sparse_with_bilateral_direct_block(self, problem)
-        elif _can_use_sparse_contact_pgs(self):
-            _solve_sparse_contact_pgs(self, problem)
+        elif _can_use_sparse_inequality_pgs(self):
+            _solve_sparse_inequality_pgs(self, problem)
+        elif self.has_unilateral_constraints:
+            raise RuntimeError("Sparse DVI inequalities require limit/contact topology and sparse Jacobians.")
         else:
             _solve_sparse_jacobi(self, problem)
 
 
-def _can_use_sparse_contact_pgs(path: SparseDVIPath) -> bool:
-    return _can_use_sparse_colored_contacts(path) and path.size.max_of_max_limits == 0
+def _can_use_sparse_inequality_pgs(path: SparseDVIPath) -> bool:
+    return _can_use_sparse_colored_inequalities(path)
 
 
-def _can_use_sparse_colored_contacts(path: SparseDVIPath) -> bool:
-    return path.contacts is not None and path.jacobians is not None and path.size.max_of_max_contacts > 0
+def _can_use_sparse_colored_inequalities(path: SparseDVIPath) -> bool:
+    has_limits = path.limits is not None and path.size.max_of_max_limits > 0
+    has_contacts = path.contacts is not None and path.size.max_of_max_contacts > 0
+    return path.jacobians is not None and (has_limits or has_contacts)
 
 
-def _prepare_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
-    """Map and color the active contacts for conflict-free sparse updates."""
+def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Map and color all active inequalities for sparse PGS."""
     state = path.data.state
+    limits = path.limits
+    if limits is not None and limits.model_max_limits_host > 0:
+        wp.launch(
+            kernel=_map_active_limits,
+            dim=limits.model_max_limits_host,
+            inputs=[
+                limits.model_active_limits,
+                limits.wid,
+                limits.lid,
+                limits.bids,
+                problem.data.lio,
+                problem.data.uio,
+                state.limit_indices,
+                state.inequality_bodies,
+            ],
+            device=path.device,
+        )
     contacts = path.contacts
-    if contacts is None:
-        raise RuntimeError("Sparse contact PGS requires contact topology.")
+    if contacts is not None and contacts.model_max_contacts_host > 0:
+        wp.launch(
+            kernel=_map_active_contacts,
+            dim=contacts.model_max_contacts_host,
+            inputs=[
+                contacts.model_active_contacts,
+                contacts.wid,
+                contacts.cid,
+                contacts.bid_AB,
+                problem.data.nl,
+                problem.data.cio,
+                problem.data.uio,
+                state.contact_indices,
+                state.inequality_bodies,
+            ],
+            device=path.device,
+        )
     wp.launch(
-        kernel=_map_active_contacts,
-        dim=contacts.model_max_contacts_host,
-        inputs=[
-            contacts.model_active_contacts,
-            contacts.wid,
-            contacts.cid,
-            problem.data.cio,
-            state.contact_indices,
-        ],
-        device=path.device,
-    )
-    wp.launch(
-        kernel=_color_mapped_dvi_contacts,
+        kernel=_color_mapped_dvi_inequalities,
         dim=path.size.num_worlds,
         inputs=[
+            problem.data.nl,
             problem.data.nc,
-            problem.data.cio,
-            state.contact_indices,
-            contacts.bid_AB,
-            state.contact_colors,
-            state.contact_num_colors,
+            problem.data.uio,
+            state.inequality_bodies,
+            state.inequality_colors,
+            state.inequality_num_colors,
         ],
         device=path.device,
     )
 
 
-def _launch_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem, block_iteration: int) -> None:
-    """Apply colored sparse contact sweeps from the current full dual iterate."""
+def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, block_iteration: int) -> None:
+    """Apply colored sparse PGS from the current full dual iterate."""
     state = path.data.state
     jacobians = path.jacobians
     if jacobians is None:
-        raise RuntimeError("Sparse contact PGS requires Jacobian topology.")
+        raise RuntimeError("Sparse inequality PGS requires Jacobian topology.")
     delassus = _get_sparse_delassus(problem)
     bsm = delassus.bsm
     if bsm is None:
-        raise RuntimeError("Sparse contact PGS requires an initialized Delassus operator.")
+        raise RuntimeError("Sparse inequality PGS requires an initialized Delassus operator.")
 
     path.body_space.zero_()
     delassus.apply_jacobian_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
     threads_per_world = 64 if path.device.is_cuda else 1
     wp.launch(
-        kernel=_solve_dvi_sparse_contacts_pgs,
+        kernel=_solve_dvi_sparse_inequalities_pgs,
         dim=path.size.num_worlds * threads_per_world,
         inputs=[
             bsm.num_nzb,
@@ -187,19 +208,25 @@ def _launch_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem, block_
             delassus.constraint_jacobian.nzb_values,
             bsm.row_start,
             bsm.col_start,
+            jacobians.limit_constraint_nzb_offsets,
             jacobians.contact_constraint_nzb_offsets,
+            state.limit_indices,
             state.contact_indices,
+            problem.data.nl,
             problem.data.nc,
-            problem.data.ccgo,
+            problem.data.lio,
             problem.data.cio,
+            problem.data.uio,
+            problem.data.lcgo,
+            problem.data.ccgo,
             problem.data.vio,
             problem.data.mu,
             problem.data.P,
             problem.data.v_f,
             state.scratch,
             delassus.regularization,
-            state.contact_colors,
-            state.contact_num_colors,
+            state.inequality_colors,
+            state.inequality_num_colors,
             block_iteration,
             path.data.config,
             path.body_space,
@@ -210,11 +237,11 @@ def _launch_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem, block_
     )
 
 
-def _solve_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
+def _solve_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
     delassus = _get_sparse_delassus(problem)
     delassus.diagonal(path.data.state.scratch)
-    _prepare_sparse_contact_pgs(path, problem)
-    _launch_sparse_contact_pgs(path, problem, block_iteration=-1)
+    _prepare_sparse_inequality_pgs(path, problem)
+    _launch_sparse_inequality_pgs(path, problem, block_iteration=-1)
     _compute_sparse_solution_vectors(path, problem)
     wp.launch(
         kernel=_set_dvi_sparse_status_iterations,
@@ -232,11 +259,7 @@ def _get_sparse_delassus(problem: DualProblem) -> BlockSparseMatrixFreeDelassusO
 
 
 def _solve_sparse_jacobi(path: SparseDVIPath, problem: DualProblem) -> None:
-    """Apply fixed Jacobi sweeps to the unified sparse DVI problem.
-
-    Each sweep evaluates ``v_aug = D * lambda + v_f + s`` matrix-free, then
-    applies ``lambda_next = projection(lambda - omega * B * v_aug)``.
-    """
+    """Apply fixed Jacobi sweeps to a bilateral-only sparse problem."""
     state = path.data.state
     problem.delassus.diagonal(state.scratch)
 
@@ -247,23 +270,16 @@ def _solve_sparse_jacobi(path: SparseDVIPath, problem: DualProblem) -> None:
             world_mask=path.all_worlds_mask,
         )
         wp.launch(
-            kernel=_solve_dvi_sparse_jacobi_update,
+            kernel=_solve_dvi_sparse_bilateral_jacobi_update,
             dim=(path.size.num_worlds, path.size.max_of_max_total_cts),
             inputs=[
                 problem.data.dim,
                 problem.data.vio,
                 problem.data.njc,
-                problem.data.nl,
-                problem.data.nc,
-                problem.data.lcgo,
-                problem.data.ccgo,
-                problem.data.cio,
-                problem.data.mu,
                 state.scratch,
                 problem.data.P,
                 problem.data.v_f,
                 state.v_aug,
-                state.contact_block_inv,
                 iteration,
                 path.data.config,
                 path.data.solution.lambdas,
@@ -365,184 +381,6 @@ def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) ->
     if solver._sparse_path is None:
         raise RuntimeError("Sparse DVI path has not been allocated. Call `finalize()` first.")
     _sparse_delassus_matvec_rows_path(solver._sparse_path, problem, row_kind)
-
-
-def _sparse_delassus_update_unilateral_rows(
-    path: SparseDVIPath,
-    problem: DualProblem,
-    block_iteration: int,
-    contact_iteration: int,
-) -> None:
-    if _sparse_delassus_update_unilateral_offsets(path, problem, block_iteration, contact_iteration):
-        return
-
-    state = path.data.state
-    _sparse_delassus_matvec_rows_path(path, problem, _SPARSE_DELASSUS_ROWS_UNILATERAL)
-    wp.launch(
-        kernel=_solve_dvi_sparse_unilateral_jacobi_update,
-        dim=(path.size.num_worlds, path.size.max_of_max_total_cts),
-        inputs=[
-            problem.data.dim,
-            problem.data.vio,
-            problem.data.njc,
-            problem.data.nl,
-            problem.data.nc,
-            problem.data.lcgo,
-            problem.data.ccgo,
-            problem.data.cio,
-            problem.data.mu,
-            state.scratch,
-            problem.data.P,
-            problem.data.v_f,
-            state.v_aug,
-            state.contact_block_inv,
-            block_iteration,
-            contact_iteration,
-            path.data.config,
-            path.data.solution.lambdas,
-        ],
-        device=path.device,
-    )
-
-
-def _sparse_delassus_update_unilateral_offsets(
-    path: SparseDVIPath,
-    problem: DualProblem,
-    block_iteration: int,
-    contact_iteration: int,
-    update_contacts: bool = True,
-) -> bool:
-    delassus = _get_sparse_delassus(problem)
-    state = path.data.state
-    regularization = delassus.regularization
-    body_space = path.body_space
-    bsm = delassus.bsm
-    jacobians = path.jacobians
-    limits = path.limits
-    contacts = path.contacts
-    limit_offsets = jacobians.limit_constraint_nzb_offsets
-    contact_offsets = jacobians.contact_constraint_nzb_offsets
-    has_limits = limits is not None and limits.model_max_limits_host > 0
-    has_contacts = update_contacts and contacts is not None and contacts.model_max_contacts_host > 0
-
-    if not (has_limits or has_contacts):
-        return False
-    if bsm is None:
-        raise RuntimeError("Sparse DVI offset updates require initialized Delassus sparse operators.")
-
-    delassus.apply_jacobian_transpose(path.data.solution.lambdas, body_space, path.all_worlds_mask)
-
-    if has_limits and has_contacts:
-        # Fuse the two independent sweeps (disjoint lambda outputs, shared
-        # body_space) into one launch to remove a per-iteration kernel launch.
-        limits_capacity = limits.model_max_limits_host
-        wp.launch(
-            kernel=_solve_dvi_sparse_unilateral_offset_update,
-            dim=limits_capacity + contacts.model_max_contacts_host,
-            inputs=[
-                limits_capacity,
-                bsm.num_nzb,
-                bsm.nzb_start,
-                bsm.nzb_coords,
-                bsm.nzb_values,
-                bsm.row_start,
-                bsm.col_start,
-                limits.model_active_limits,
-                limits.wid,
-                limits.lid,
-                limit_offsets,
-                problem.data.nl,
-                problem.data.lcgo,
-                contacts.model_active_contacts,
-                contacts.wid,
-                contacts.cid,
-                contact_offsets,
-                problem.data.nc,
-                problem.data.ccgo,
-                problem.data.cio,
-                problem.data.mu,
-                state.contact_block_inv,
-                problem.data.vio,
-                state.scratch,
-                problem.data.P,
-                problem.data.v_f,
-                regularization,
-                body_space,
-                block_iteration,
-                contact_iteration,
-                path.data.config,
-                path.data.solution.lambdas,
-            ],
-            device=path.device,
-        )
-        return True
-
-    if has_limits:
-        wp.launch(
-            kernel=_solve_dvi_sparse_limits_offset_update,
-            dim=limits.model_max_limits_host,
-            inputs=[
-                bsm.num_nzb,
-                bsm.nzb_start,
-                bsm.nzb_coords,
-                bsm.nzb_values,
-                bsm.row_start,
-                bsm.col_start,
-                limits.model_active_limits,
-                limits.wid,
-                limits.lid,
-                limit_offsets,
-                problem.data.vio,
-                problem.data.nl,
-                problem.data.lcgo,
-                state.scratch,
-                problem.data.P,
-                problem.data.v_f,
-                regularization,
-                body_space,
-                block_iteration,
-                contact_iteration,
-                path.data.config,
-                path.data.solution.lambdas,
-            ],
-            device=path.device,
-        )
-
-    if has_contacts:
-        wp.launch(
-            kernel=_solve_dvi_sparse_contacts_offset_update,
-            dim=contacts.model_max_contacts_host,
-            inputs=[
-                bsm.num_nzb,
-                bsm.nzb_start,
-                bsm.nzb_coords,
-                bsm.nzb_values,
-                bsm.row_start,
-                bsm.col_start,
-                contacts.model_active_contacts,
-                contacts.wid,
-                contacts.cid,
-                contact_offsets,
-                problem.data.vio,
-                problem.data.nc,
-                problem.data.ccgo,
-                problem.data.cio,
-                problem.data.mu,
-                state.scratch,
-                problem.data.P,
-                problem.data.v_f,
-                regularization,
-                body_space,
-                state.contact_block_inv,
-                block_iteration,
-                contact_iteration,
-                path.data.config,
-                path.data.solution.lambdas,
-            ],
-            device=path.device,
-        )
-
-    return True
 
 
 def _compute_sparse_contact_block_inverse(path: SparseDVIPath, problem: DualProblem) -> None:
@@ -745,25 +583,14 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         device=path.device,
     )
 
-    use_contact_pgs = _can_use_sparse_colored_contacts(path)
-    if use_contact_pgs:
-        _prepare_sparse_contact_pgs(path, problem)
+    use_inequality_pgs = _can_use_sparse_colored_inequalities(path)
+    if use_inequality_pgs:
+        _prepare_sparse_inequality_pgs(path, problem)
 
     for block_iteration in range(path.max_block_iterations):
-        if use_contact_pgs:
-            if path.size.max_of_max_limits > 0:
-                for contact_iteration in range(path.max_contact_iterations):
-                    _sparse_delassus_update_unilateral_offsets(
-                        path,
-                        problem,
-                        block_iteration,
-                        contact_iteration,
-                        update_contacts=False,
-                    )
-            _launch_sparse_contact_pgs(path, problem, block_iteration)
-        else:
-            for contact_iteration in range(path.max_contact_iterations):
-                _sparse_delassus_update_unilateral_rows(path, problem, block_iteration, contact_iteration)
+        if not use_inequality_pgs:
+            raise RuntimeError("Sparse DVI inequalities require limit/contact topology and sparse Jacobians.")
+        _launch_sparse_inequality_pgs(path, problem, block_iteration)
 
         if path.should_solve_bilateral_after_block(block_iteration):
             _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)

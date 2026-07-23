@@ -24,12 +24,13 @@ from newton._src.solvers.kamino._src.models.builders import basics, testing
 from newton._src.solvers.kamino._src.models.builders import utils as builder_utils
 from newton._src.solvers.kamino._src.solvers.common import WarmStartMode
 from newton._src.solvers.kamino._src.solvers.dvi import DVISolver
-from newton._src.solvers.kamino._src.solvers.dvi.kernels import _color_dvi_contacts, _initialize_dvi_status
+from newton._src.solvers.kamino._src.solvers.dvi.kernels import _initialize_dvi_status
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_JOINTS,
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
     _sparse_delassus_matvec_rows,
 )
+from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import _color_mapped_dvi_inequalities
 from newton._src.solvers.kamino._src.solvers.metrics import SolutionMetrics
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton._src.solvers.kamino.tests import setup_tests, test_context
@@ -407,6 +408,10 @@ class TestDVISolver(unittest.TestCase):
 
         solver = DVISolver(
             model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
             config=kamino_config.DVISolverConfig(max_iterations=1000, tolerance=1e-5, omega=1.0),
             warmstart=WarmStartMode.NONE,
             collect_info=True,
@@ -423,8 +428,8 @@ class TestDVISolver(unittest.TestCase):
         ):
             array.fill_(float("nan"))
         scratch.bilateral_active_dim.fill_(-1)
-        scratch.contact_colors.fill_(-1)
-        scratch.contact_num_colors.fill_(-1)
+        scratch.inequality_colors.fill_(-1)
+        scratch.inequality_num_colors.fill_(-1)
         solver.coldstart()
         solver.solve(problem)
         _check_solution_matches_dual_problem(self, problem, solver)
@@ -502,6 +507,10 @@ class TestDVISolver(unittest.TestCase):
 
         solver = DVISolver(
             model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
             config=kamino_config.DVISolverConfig(max_iterations=200, tolerance=1e-4),
             warmstart=WarmStartMode.NONE,
         )
@@ -534,9 +543,13 @@ class TestDVISolver(unittest.TestCase):
 
         problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
 
-        def solve_with_block_preconditioner(use_colored_contacts: bool) -> DVISolver:
+        def solve_with_block_preconditioner() -> DVISolver:
             solver = DVISolver(
                 model=model,
+                data=data,
+                limits=limits,
+                contacts=detector.contacts,
+                jacobians=jacobians,
                 config=kamino_config.DVISolverConfig(
                     max_iterations=200,
                     tolerance=1e-4,
@@ -546,76 +559,13 @@ class TestDVISolver(unittest.TestCase):
             )
             solver.reset()
             solver.coldstart()
-            if use_colored_contacts:
-                solver.set_contacts(detector.contacts)
             solver.solve(problem)
             return solver
 
-        contact_paths = [False]
-        if self.device.is_cuda:
-            contact_paths.append(True)
-        for use_colored_contacts in contact_paths:
-            with self.subTest(use_colored_contacts=use_colored_contacts):
-                solver = solve_with_block_preconditioner(use_colored_contacts)
-
-                if use_colored_contacts:
-                    self.assertGreater(int(solver.data.state.contact_num_colors.numpy()[0]), 0)
-                else:
-                    self.assertEqual(int(solver.data.state.contact_num_colors.numpy()[0]), 0)
-                _assert_solution_finite(self, solver)
-                _check_solution_matches_dual_problem(self, problem, solver)
-
-    def test_03c_dvi_noncolored_contact_jacobi_uses_configured_omega(self):
-        builder = basics.build_boxes_hinged()
-        model, data, state, limits, detector, jacobians = make_containers(
-            builder=builder,
-            device=self.device,
-            max_world_contacts=8,
-            sparse=False,
-        )
-        update_containers(
-            model=model,
-            data=data,
-            state=state,
-            limits=limits,
-            detector=detector,
-            jacobians=jacobians,
-        )
-        self.assertGreater(int(detector.contacts.model_active_contacts.numpy()[0]), 0)
-
-        problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
-
-        def solve_normal_lambda(contact_jacobi_omega: float) -> float:
-            solver = DVISolver(
-                model=model,
-                config=kamino_config.DVISolverConfig(
-                    tolerance=0.0,
-                    regularization=1e-5,
-                    block_iterations=1,
-                    contact_iterations=1,
-                    contact_jacobi_omega=contact_jacobi_omega,
-                    contact_jacobi_relaxation=1.0,
-                ),
-                warmstart=WarmStartMode.NONE,
-            )
-            solver.reset()
-            solver.coldstart()
-            solver.solve(problem)
-            self.assertEqual(int(solver.data.state.contact_num_colors.numpy()[0]), 0)
-            lambdas = extract_problem_vector(
-                problem.delassus, solver.data.solution.lambdas.numpy(), only_active_dims=True
-            )[0]
-            contact_start = int(problem.data.ccgo.numpy()[0])
-            contact_count = int(problem.data.nc.numpy()[0])
-            normal_lambdas = lambdas[contact_start + 2 : contact_start + 3 * contact_count : 3]
-            return float(np.sum(normal_lambdas))
-
-        lambda_slow = solve_normal_lambda(0.1)
-        lambda_fast = solve_normal_lambda(0.8)
-
-        self.assertTrue(np.isfinite(lambda_slow))
-        self.assertTrue(np.isfinite(lambda_fast))
-        self.assertGreater(lambda_fast, lambda_slow)
+        solver = solve_with_block_preconditioner()
+        self.assertGreater(int(solver.data.state.inequality_num_colors.numpy()[0]), 0)
+        _assert_solution_finite(self, solver)
+        _check_solution_matches_dual_problem(self, problem, solver)
 
     def test_03d_dvi_direct_block_honors_per_world_iteration_counts(self):
         builder = builder_utils.make_homogeneous_builder(
@@ -645,37 +595,37 @@ class TestDVISolver(unittest.TestCase):
                 regularization=1e-5,
                 block_iterations=1,
                 contact_iterations=1,
-                contact_jacobi_relaxation=1.0,
             ),
             kamino_config.DVISolverConfig(
                 tolerance=0.0,
                 regularization=1e-5,
                 block_iterations=3,
                 contact_iterations=1,
-                contact_jacobi_relaxation=1.0,
             ),
             kamino_config.DVISolverConfig(
                 tolerance=0.0,
                 regularization=1e-5,
                 block_iterations=1,
                 contact_iterations=3,
-                contact_jacobi_relaxation=1.0,
             ),
         ]
 
-        def solve_normal_sums(use_colored_contacts: bool) -> list[float]:
-            solver = DVISolver(model=model, config=configs, warmstart=WarmStartMode.NONE)
+        def solve_normal_sums() -> list[float]:
+            solver = DVISolver(
+                model=model,
+                data=data,
+                limits=limits,
+                contacts=detector.contacts,
+                jacobians=jacobians,
+                config=configs,
+                warmstart=WarmStartMode.NONE,
+            )
             solver.reset()
             solver.coldstart()
-            if use_colored_contacts:
-                solver.set_contacts(detector.contacts)
             solver.solve(problem)
             status = solver.data.status.numpy()
             self.assertEqual([int(status[wid]["iterations"]) for wid in range(3)], [1, 3, 3])
-            if use_colored_contacts:
-                self.assertTrue(np.all(solver.data.state.contact_num_colors.numpy() > 0))
-            else:
-                self.assertTrue(np.all(solver.data.state.contact_num_colors.numpy() == 0))
+            self.assertTrue(np.all(solver.data.state.inequality_num_colors.numpy() > 0))
             np.testing.assert_array_equal(
                 solver.data.state.bilateral_active_dim.numpy(),
                 problem.data.njc.numpy(),
@@ -688,15 +638,9 @@ class TestDVISolver(unittest.TestCase):
             nc = problem.data.nc.numpy().astype(int)
             return [float(np.sum(lambdas[wid][ccgo[wid] + 2 : ccgo[wid] + 3 * nc[wid] : 3])) for wid in range(3)]
 
-        contact_paths = [False]
-        if self.device.is_cuda:
-            contact_paths.append(True)
-        for use_colored_contacts in contact_paths:
-            with self.subTest(use_colored_contacts=use_colored_contacts):
-                normal_sums = solve_normal_sums(use_colored_contacts)
-
-                self.assertGreater(normal_sums[1], normal_sums[0])
-                self.assertGreater(normal_sums[2], normal_sums[0])
+        normal_sums = solve_normal_sums()
+        self.assertGreater(normal_sums[1], normal_sums[0])
+        self.assertGreater(normal_sums[2], normal_sums[0])
 
     def test_03d2_dvi_direct_block_finishes_with_bilateral_solve(self):
         builder = basics.build_boxes_hinged()
@@ -719,12 +663,15 @@ class TestDVISolver(unittest.TestCase):
         problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
         solver = DVISolver(
             model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
             config=kamino_config.DVISolverConfig(
                 tolerance=0.0,
                 regularization=1e-5,
                 block_iterations=1,
                 contact_iterations=1,
-                contact_jacobi_relaxation=1.0,
             ),
             warmstart=WarmStartMode.NONE,
         )
@@ -763,6 +710,10 @@ class TestDVISolver(unittest.TestCase):
 
         solver = DVISolver(
             model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
             config=kamino_config.DVISolverConfig(
                 tolerance=1e-4,
                 regularization=1e-5,
@@ -804,6 +755,10 @@ class TestDVISolver(unittest.TestCase):
 
         solver = DVISolver(
             model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
             config=kamino_config.DVISolverConfig(
                 tolerance=1e-4,
                 regularization=1e-5,
@@ -830,9 +785,11 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(int(status["iterations"]), 1)
         _check_solution_matches_dual_problem(self, problem, solver)
 
-    def test_03g_dvi_contact_coloring_separates_dynamic_conflicts(self):
-        problem_nc = wp.array([5], dtype=wp.int32, device=self.device)
-        problem_cio = wp.array([0], dtype=wp.int32, device=self.device)
+    def test_03g_dvi_inequality_coloring_separates_dynamic_conflicts(self):
+        """Separate conflicting inequality endpoints while sharing safe colors."""
+        problem_nl = wp.array([1], dtype=wp.int32, device=self.device)
+        problem_nc = wp.array([4], dtype=wp.int32, device=self.device)
+        problem_uio = wp.array([0], dtype=wp.int32, device=self.device)
         contact_bid_ab = wp.array(
             [
                 wp.vec2i(0, -1),
@@ -844,23 +801,24 @@ class TestDVISolver(unittest.TestCase):
             dtype=wp.vec2i,
             device=self.device,
         )
-        contact_colors = wp.full(shape=5, value=-1, dtype=wp.int32, device=self.device)
-        contact_num_colors = wp.zeros(shape=1, dtype=wp.int32, device=self.device)
+        inequality_colors = wp.full(shape=5, value=-1, dtype=wp.int32, device=self.device)
+        inequality_num_colors = wp.zeros(shape=1, dtype=wp.int32, device=self.device)
 
         wp.launch(
-            kernel=_color_dvi_contacts,
+            kernel=_color_mapped_dvi_inequalities,
             dim=1,
             inputs=[
+                problem_nl,
                 problem_nc,
-                problem_cio,
+                problem_uio,
                 contact_bid_ab,
-                contact_colors,
-                contact_num_colors,
+                inequality_colors,
+                inequality_num_colors,
             ],
             device=self.device,
         )
-        colors = contact_colors.numpy()
-        num_colors = int(contact_num_colors.numpy()[0])
+        colors = inequality_colors.numpy()
+        num_colors = int(inequality_num_colors.numpy()[0])
         self.assertGreaterEqual(num_colors, 2)
         self.assertTrue(np.all(colors >= 0))
         self.assertNotEqual(colors[0], colors[1])
@@ -925,6 +883,7 @@ class TestDVISolver(unittest.TestCase):
             model,
             problem,
             config=kamino_config.DVISolverConfig(max_iterations=8, tolerance=1e-4, regularization=1e-5),
+            setup=SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians),
         )
 
         _assert_solver_status_converged(self, solver)
@@ -945,7 +904,11 @@ class TestDVISolver(unittest.TestCase):
         self.assertGreater(int(limits.model_active_limits.numpy()[0]), 0)
 
         problem = _make_dense_dual_problem(model, data, limits, contacts, jacobians)
-        solver = _solve_dvi(model, problem)
+        solver = _solve_dvi(
+            model,
+            problem,
+            setup=SimpleNamespace(data=data, limits=limits, contacts=contacts, jacobians=jacobians),
+        )
 
         status = solver.data.status.numpy()[0]
         self.assertEqual(int(status["converged"]), 0)
@@ -1109,7 +1072,11 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(detector.contacts.world_active_contacts.numpy() > 0))
 
         problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
-        solver = _solve_dvi(model, problem)
+        solver = _solve_dvi(
+            model,
+            problem,
+            setup=SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians),
+        )
 
         _assert_solver_status_converged(self, solver)
         _check_solution_matches_dual_problem(self, problem, solver)
@@ -1287,53 +1254,65 @@ class TestDVISolver(unittest.TestCase):
                     delta=0.02 * expected_pair_impulse,
                 )
 
-    def test_05d_sparse_dvi_colors_contacts_with_joint_limits(self):
-        """Use colored contacts when a sparse world also contains joint limits."""
-        builder = _build_five_box_stack()
-        testing.build_unary_revolute_joint_test(
-            builder=builder,
-            z_offset=5.0,
-            new_world=False,
-            limits=True,
-            ground=False,
-            world_index=0,
-        )
-        model, data, state, limits, detector, jacobians = make_containers(
-            builder=builder,
-            device=self.device,
-            max_world_contacts=64,
-            sparse=True,
-            dt=1.0e-3,
-        )
-        update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
-        joint_q = data.joints.q_j.numpy()
-        joint_q[0] = 1.0
-        data.joints.q_j.assign(joint_q)
-        limits.detect(q_j=data.joints.q_j)
-        update_constraints_info(model=model, data=data)
-        jacobians.build(model=model, data=data, limits=limits.data, contacts=detector.contacts)
-        problem = _make_sparse_dual_problem(model, data, limits, detector.contacts, jacobians)
-        solver = _solve_dvi(
-            model,
-            problem,
-            config=kamino_config.DVISolverConfig(tolerance=1.0e-5, regularization=1.0e-6),
-            setup=SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians),
-        )
+    def test_05d_dvi_colors_contacts_with_joint_limits(self):
+        """Solve contacts and joint limits through one colored inequality path."""
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                builder = _build_five_box_stack()
+                testing.build_unary_revolute_joint_test(
+                    builder=builder,
+                    z_offset=5.0,
+                    new_world=False,
+                    limits=True,
+                    ground=False,
+                    world_index=0,
+                )
+                model, data, state, limits, detector, jacobians = make_containers(
+                    builder=builder,
+                    device=self.device,
+                    max_world_contacts=64,
+                    sparse=sparse,
+                    dt=1.0e-3,
+                )
+                update_containers(
+                    model=model,
+                    data=data,
+                    state=state,
+                    limits=limits,
+                    detector=detector,
+                    jacobians=jacobians,
+                )
+                joint_q = data.joints.q_j.numpy()
+                joint_q[0] = 1.0
+                data.joints.q_j.assign(joint_q)
+                limits.detect(q_j=data.joints.q_j)
+                update_constraints_info(model=model, data=data)
+                jacobians.build(model=model, data=data, limits=limits.data, contacts=detector.contacts)
+                if sparse:
+                    problem = _make_sparse_dual_problem(model, data, limits, detector.contacts, jacobians)
+                else:
+                    problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
+                solver = _solve_dvi(
+                    model,
+                    problem,
+                    config=kamino_config.DVISolverConfig(tolerance=1.0e-5, regularization=1.0e-6),
+                    setup=SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians),
+                )
 
-        self.assertEqual(int(limits.model_active_limits.numpy()[0]), 1)
-        self.assertEqual(int(detector.contacts.world_active_contacts.numpy()[0]), 36)
-        self.assertGreater(int(solver.data.state.contact_num_colors.numpy()[0]), 0)
+                self.assertEqual(int(limits.model_active_limits.numpy()[0]), 1)
+                self.assertEqual(int(detector.contacts.world_active_contacts.numpy()[0]), 36)
+                self.assertGreater(int(solver.data.state.inequality_num_colors.numpy()[0]), 0)
 
-        count = int(problem.data.nc.numpy()[0])
-        raw_contacts = solver.data.state.contact_indices.numpy()[:count]
-        contact_bodies = detector.contacts.bid_AB.numpy()[raw_contacts]
-        constraint_offset = int(problem.data.vio.numpy()[0] + problem.data.ccgo.numpy()[0])
-        normal_impulses = solver.data.solution.lambdas.numpy()[
-            constraint_offset + 2 : constraint_offset + 3 * count : 3
-        ]
-        ground_contacts = np.any(contact_bodies == -1, axis=1)
-        self.assertAlmostEqual(float(np.sum(normal_impulses[ground_contacts])), 5.0 * 9.81e-3, delta=1.0e-3)
-        self.assertAlmostEqual(float(np.sum(normal_impulses)), 15.0 * 9.81e-3, delta=3.0e-3)
+                count = int(problem.data.nc.numpy()[0])
+                raw_contacts = solver.data.state.contact_indices.numpy()[:count]
+                contact_bodies = detector.contacts.bid_AB.numpy()[raw_contacts]
+                constraint_offset = int(problem.data.vio.numpy()[0] + problem.data.ccgo.numpy()[0])
+                normal_impulses = solver.data.solution.lambdas.numpy()[
+                    constraint_offset + 2 : constraint_offset + 3 * count : 3
+                ]
+                ground_contacts = np.any(contact_bodies == -1, axis=1)
+                self.assertAlmostEqual(float(np.sum(normal_impulses[ground_contacts])), 5.0 * 9.81e-3, delta=1.0e-3)
+                self.assertAlmostEqual(float(np.sum(normal_impulses)), 15.0 * 9.81e-3, delta=3.0e-3)
 
     def test_06_dvi_warmstart_modes(self):
         builder = basics.build_box_on_plane()
@@ -1353,12 +1332,17 @@ class TestDVISolver(unittest.TestCase):
         )
         problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
 
-        internal_solver = _solve_dvi(model, problem, warmstart=WarmStartMode.INTERNAL)
+        internal_solver = _solve_dvi(
+            model,
+            problem,
+            warmstart=WarmStartMode.INTERNAL,
+            setup=SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians),
+        )
         cold_iterations = int(internal_solver.data.status.numpy()[0]["iterations"])
         _assert_solver_status_converged(self, internal_solver)
 
         problem.build(model=model, data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians)
-        internal_solver.warmstart(problem, model, data)
+        internal_solver.warmstart(problem, model, data, limits, detector.contacts)
         internal_solver.solve(problem)
         _assert_solver_status_converged(self, internal_solver)
         self.assertLessEqual(int(internal_solver.data.status.numpy()[0]["iterations"]), cold_iterations)
@@ -1373,6 +1357,10 @@ class TestDVISolver(unittest.TestCase):
         )
         container_solver = DVISolver(
             model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
             config=kamino_config.DVISolverConfig(max_iterations=300, tolerance=1e-4, regularization=1e-5),
             warmstart=WarmStartMode.CONTAINERS,
         )
@@ -1403,7 +1391,11 @@ class TestDVISolver(unittest.TestCase):
             jacobians=jacobians,
         )
         problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
-        solver = _solve_dvi(model, problem)
+        solver = _solve_dvi(
+            model,
+            problem,
+            setup=SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians),
+        )
         lambdas_before = solver.data.solution.lambdas.numpy().copy()
         v_plus_before = solver.data.solution.v_plus.numpy().copy()
 
@@ -1604,7 +1596,7 @@ class TestDVISolver(unittest.TestCase):
                         )
 
                 self.assertTrue(contact_seen)
-                self.assertGreater(int(solver_dvi.data.state.contact_num_colors.numpy()[0]), 0)
+                self.assertGreater(int(solver_dvi.data.state.inequality_num_colors.numpy()[0]), 0)
                 np.testing.assert_allclose(velocities, initial_speed, rtol=0.0, atol=1.0e-6)
                 self.assertLessEqual(max_tangent_impulse, 1.0e-8)
 
@@ -1658,8 +1650,8 @@ class TestDVISolver(unittest.TestCase):
             contact_seen = contact_seen or contact_count > 0
             if contact_count > 0 and not example.config.sparse_dynamics:
                 solver_fd = example.solver._solver_kamino.solver_fd
-                color_count = int(solver_fd.data.state.contact_num_colors.numpy()[0])
-                colors = solver_fd.data.state.contact_colors.numpy()
+                color_count = int(solver_fd.data.state.inequality_num_colors.numpy()[0])
+                colors = solver_fd.data.state.inequality_colors.numpy()
                 bid_ab = kamino_contacts.bid_AB.numpy()
                 self.assertGreater(color_count, 0)
                 self.assertTrue(np.all(colors[:contact_count] >= 0))
