@@ -750,7 +750,7 @@ class BroadPhaseSAP:
         self.max_shapes_per_world = 0
         start_idx = 0
         for end_idx in slice_ends_np:
-            num_shapes = end_idx - start_idx
+            num_shapes = int(end_idx - start_idx)
             self.max_shapes_per_world = max(self.max_shapes_per_world, num_shapes)
             start_idx = end_idx
 
