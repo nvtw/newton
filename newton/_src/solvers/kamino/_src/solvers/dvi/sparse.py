@@ -30,7 +30,6 @@ from .sparse_kernels import (
     _map_active_limits,
     _set_dvi_sparse_status_iterations,
     _set_sparse_bilateral_diagonal,
-    _solve_dvi_sparse_bilateral_jacobi_update,
     _solve_dvi_sparse_inequalities_pgs,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
@@ -117,7 +116,7 @@ class SparseDVIPath:
         elif self.has_unilateral_constraints:
             raise RuntimeError("Sparse DVI inequalities require limit/contact topology and sparse Jacobians.")
         else:
-            _solve_sparse_jacobi(self, problem)
+            _compute_sparse_solution_vectors(self, problem)
 
 
 def _can_use_sparse_inequality_pgs(path: SparseDVIPath) -> bool:
@@ -256,65 +255,6 @@ def _get_sparse_delassus(problem: DualProblem) -> BlockSparseMatrixFreeDelassusO
     if not isinstance(delassus, BlockSparseMatrixFreeDelassusOperator):
         raise TypeError("Sparse DVI requires a `BlockSparseMatrixFreeDelassusOperator`.")
     return delassus
-
-
-def _solve_sparse_jacobi(path: SparseDVIPath, problem: DualProblem) -> None:
-    """Apply fixed Jacobi sweeps to a bilateral-only sparse problem."""
-    state = path.data.state
-    problem.delassus.diagonal(state.scratch)
-
-    for iteration in range(path.max_iterations):
-        problem.delassus.matvec(
-            x=path.data.solution.lambdas,
-            y=state.v_aug,
-            world_mask=path.all_worlds_mask,
-        )
-        wp.launch(
-            kernel=_solve_dvi_sparse_bilateral_jacobi_update,
-            dim=(path.size.num_worlds, path.size.max_of_max_total_cts),
-            inputs=[
-                problem.data.dim,
-                problem.data.vio,
-                problem.data.njc,
-                state.scratch,
-                problem.data.P,
-                problem.data.v_f,
-                state.v_aug,
-                iteration,
-                path.data.config,
-                path.data.solution.lambdas,
-            ],
-            device=path.device,
-        )
-
-    problem.delassus.matvec(
-        x=path.data.solution.lambdas,
-        y=state.v_aug,
-        world_mask=path.all_worlds_mask,
-    )
-    wp.launch(
-        kernel=_compute_dvi_sparse_solution_vectors,
-        dim=(path.size.num_worlds, path.size.max_of_max_total_cts),
-        inputs=[
-            problem.data.dim,
-            problem.data.vio,
-            problem.data.v_f,
-            state.s,
-            state.v_aug,
-            path.data.solution.v_plus,
-        ],
-        device=path.device,
-    )
-    wp.launch(
-        kernel=_set_dvi_sparse_status_iterations,
-        dim=path.size.num_worlds,
-        inputs=[
-            problem.data.dim,
-            path.data.config,
-            path.data.status,
-        ],
-        device=path.device,
-    )
 
 
 def _compute_sparse_solution_vectors(path: SparseDVIPath, problem: DualProblem) -> None:

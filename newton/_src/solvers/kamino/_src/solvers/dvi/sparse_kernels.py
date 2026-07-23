@@ -447,6 +447,11 @@ def _set_sparse_bilateral_diagonal(
     wid, row = wp.tid()
 
     njc = problem_njc[wid]
+    if njc == 0:
+        if row == 0:
+            bilateral_D[bilateral_mio[wid]] = float32(1.0)
+            bilateral_P[bilateral_vio[wid]] = float32(1.0)
+        return
     if row >= njc:
         return
 
@@ -550,33 +555,6 @@ def _compute_sparse_contact_block_inverse(
 
 
 @wp.kernel
-def _solve_dvi_sparse_bilateral_jacobi_update(
-    problem_dim: wp.array[int32],
-    problem_vio: wp.array[int32],
-    problem_njc: wp.array[int32],
-    problem_diag: wp.array[float32],
-    problem_P: wp.array[float32],
-    problem_v_f: wp.array[float32],
-    state_v_aug: wp.array[float32],
-    iteration: int32,
-    solver_config: wp.array[DVIConfigStruct],
-    solution_lambdas: wp.array[float32],
-):
-    """Apply one Jacobi update to bilateral rows only."""
-    wid, tid = wp.tid()
-    if tid >= problem_dim[wid] or tid >= problem_njc[wid]:
-        return
-    cfg = solver_config[wid]
-    if iteration >= cfg.max_iterations:
-        return
-    vec_idx = problem_vio[wid] + tid
-    velocity = state_v_aug[vec_idx] + problem_v_f[vec_idx]
-    scale = problem_P[vec_idx]
-    diagonal = wp.abs(problem_diag[vec_idx]) * scale * scale + cfg.regularization + FLOAT32_EPS
-    solution_lambdas[vec_idx] -= cfg.omega * velocity / diagonal
-
-
-@wp.kernel
 def _compute_dvi_sparse_solution_vectors(
     # Inputs:
     problem_dim: wp.array[int32],
@@ -613,7 +591,7 @@ def _set_dvi_sparse_status_iterations(
     if problem_dim[wid] == int32(0):
         status.iterations = int32(0)
     else:
-        # Sparse Jacobi currently runs a fixed iteration count; terminal DVI
+        # Sparse inequality PGS runs a fixed iteration count; terminal DVI
         # residuals are computed by the shared dense/sparse status kernel.
         status.iterations = solver_config[wid].max_iterations
     solver_status[wid] = status

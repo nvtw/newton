@@ -960,42 +960,57 @@ class TestDVISolver(unittest.TestCase):
         self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
 
     def test_08a_public_solver_heterogeneous_contact_rollout_with_dvi(self):
+        """Use Cholesky for heterogeneous dense and sparse DVI rollouts."""
         builder = newton.ModelBuilder()
         SolverKamino.register_custom_attributes(builder)
         public_basics.make_basics_heterogeneous_builder(builder=builder, ground=True)
         model = builder.finalize(device=self.device, skip_validation_joints=True)
 
-        config = SolverKamino.Config(
-            dynamics_solver="dvi",
-            use_collision_detector=True,
-            collision_detector=kamino_config.CollisionDetectorConfig(
-                max_contacts=64 * model.world_count,
-                max_contacts_per_world=64,
-                max_contacts_per_pair=16,
-            ),
-        )
-        solver = SolverKamino(model, config=config)
-        state_in = model.state()
-        state_out = model.state()
-        control = model.control()
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=True,
+                    use_collision_detector=True,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=64 * model.world_count,
+                        max_contacts_per_world=64,
+                        max_contacts_per_pair=16,
+                    ),
+                )
+                solver = SolverKamino(model, config=config)
+                state_in = model.state()
+                state_out = model.state()
+                control = model.control()
 
-        contact_seen = False
-        for _ in range(24):
-            solver.step(state_in, state_out, control=control, contacts=None, dt=1.0e-3)
-            state_in, state_out = state_out, state_in
-            contact_seen = contact_seen or bool(np.any(solver._contacts_kamino.world_active_contacts.numpy() > 0))
+                contact_seen = False
+                for _ in range(24):
+                    solver.step(state_in, state_out, control=control, contacts=None, dt=1.0e-3)
+                    state_in, state_out = state_out, state_in
+                    contact_seen = contact_seen or bool(
+                        np.any(solver._contacts_kamino.world_active_contacts.numpy() > 0)
+                    )
 
-        status = solver._solver_kamino.solver_fd.data.status.numpy()
-        self.assertTrue(contact_seen)
-        self.assertTrue(np.all(np.isfinite(state_in.body_q.numpy())))
-        self.assertTrue(np.all(np.isfinite(state_in.body_qd.numpy())))
-        self.assertTrue(np.all(np.isfinite(status["r_p"])))
-        self.assertTrue(np.all(np.isfinite(status["r_d"])))
-        self.assertLess(float(np.max(np.abs(state_in.body_qd.numpy()))), 100.0)
-        self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
-        self.assertFalse(config.sparse_dynamics)
-        self.assertTrue(config.sparse_jacobian)
-        self.assertEqual(config.dynamics.linear_solver_type, "LLTBRCM")
+                dvi_solver = solver._solver_kamino.solver_fd
+                status = dvi_solver.data.status.numpy()
+                self.assertTrue(contact_seen)
+                self.assertTrue(np.all(np.isfinite(state_in.body_q.numpy())))
+                self.assertTrue(np.all(np.isfinite(state_in.body_qd.numpy())))
+                self.assertTrue(np.all(np.isfinite(status["r_p"])))
+                self.assertTrue(np.all(np.isfinite(status["r_d"])))
+                self.assertLess(float(np.max(np.abs(state_in.body_qd.numpy()))), 100.0)
+                self.assertIsInstance(dvi_solver, DVISolver)
+                self.assertIsInstance(dvi_solver._bilateral_solver, (LLTBlockedSolver, LLTBlockedRCMSolver))
+                joint_dims = solver._solver_kamino._model.info.num_joint_cts.numpy()
+                self.assertTrue(np.any(joint_dims == 0))
+                self.assertTrue(np.any(joint_dims > 0))
+                np.testing.assert_array_equal(
+                    dvi_solver.data.bilateral_operator.info.dimensions,
+                    np.maximum(joint_dims, 1),
+                )
+                self.assertEqual(config.sparse_dynamics, sparse)
+                self.assertTrue(config.sparse_jacobian)
 
     def test_03a_sparse_dvi_filtered_matvec_matches_full_rows(self):
         builder = basics.build_box_on_plane()

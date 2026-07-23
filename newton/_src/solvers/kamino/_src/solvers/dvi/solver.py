@@ -11,7 +11,6 @@ from ....config import DVISolverConfig
 from ...core.data import DataKamino
 from ...core.model import ModelKamino
 from ...core.size import SizeKamino
-from ...core.types import to_warp_int32_array
 from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.jacobians import SparseSystemJacobians
@@ -38,7 +37,6 @@ from .kernels import (
     _scatter_bilateral_solution,
     _set_dvi_bilateral_active_dim,
     _set_dvi_direct_status_iterations,
-    _solve_dvi_bilateral_pgs,
     _solve_dvi_inequalities_colored_pgs,
     _unprecondition_dvi_solution,
 )
@@ -246,25 +244,18 @@ class DVISolver:
             return
 
         joint_cts_per_world = model.info.num_joint_cts.numpy().astype(int).tolist()
-        if any(njc <= 0 for njc in joint_cts_per_world):
-            return
-
-        mat_sizes = [njc * njc for njc in joint_cts_per_world]
-        mat_offsets = [0]
-        for size in mat_sizes[:-1]:
-            mat_offsets.append(mat_offsets[-1] + size)
+        # LLT metadata requires positive blocks; assembly makes zero-row worlds disconnected identities.
+        factor_dims = [max(1, njc) for njc in joint_cts_per_world]
 
         operator = DenseLinearOperatorData()
         operator.info = DenseSquareMultiLinearInfo()
-        operator.info.assign(
-            maxdim=model.info.num_joint_cts,
-            dim=model.info.num_joint_cts,
-            mio=to_warp_int32_array(mat_offsets, device=self._device),
-            vio=model.info.joint_cts_offset,
-            dtype=float32,
-            device=self._device,
-        )
+        operator.info.finalize(factor_dims, dtype=float32, device=self._device)
         operator.mat = wp.zeros(shape=(operator.info.total_mat_size,), dtype=float32, device=self._device)
+        self._data.state.bilateral_rhs = wp.zeros(operator.info.total_vec_size, dtype=float32, device=self._device)
+        self._data.state.bilateral_solution = wp.zeros(operator.info.total_vec_size, dtype=float32, device=self._device)
+        self._data.state.bilateral_preconditioner = wp.zeros(
+            operator.info.total_vec_size, dtype=float32, device=self._device
+        )
         self._data.bilateral_operator = operator
         first_config = self._config[0]
         if any(
@@ -454,25 +445,6 @@ class DVISolver:
                 self._solve_with_bilateral_direct_block(problem)
             elif self._can_use_dense_inequality_pgs():
                 self._solve_dense_inequality_pgs(problem)
-            elif self._has_unilateral_constraints:
-                self._solve_with_bilateral_iterative_block(problem)
-            else:
-                wp.launch(
-                    kernel=_solve_dvi_bilateral_pgs,
-                    dim=self._size.num_worlds,
-                    inputs=[
-                        problem.data.dim,
-                        problem.data.mio,
-                        problem.data.vio,
-                        problem.data.njc,
-                        problem.data.D,
-                        problem.data.v_f,
-                        self._data.config,
-                        self._data.status,
-                        self._data.solution.lambdas,
-                    ],
-                    device=self.device,
-                )
 
             # Evaluate the physical post-event velocity v_plus = D * lambda + v_f.
             wp.launch(
@@ -665,102 +637,6 @@ class DVISolver:
             ],
             device=self.device,
             block_dim=threads_per_world,
-        )
-
-    def _solve_with_bilateral_iterative_block(self, problem: DualProblem) -> None:
-        """Alternate bilateral PGS with the unified inequality path."""
-        state = self._data.state
-        wp.launch(
-            kernel=_initialize_dvi_status,
-            dim=self._size.num_worlds,
-            inputs=[self._data.config, self._data.status],
-            device=self.device,
-        )
-        self._prepare_inequality_coloring(problem)
-        threads_per_world = 64 if self.device.is_cuda else 1
-
-        for block_iteration in range(self._max_block_iterations):
-            wp.launch(
-                kernel=_solve_dvi_bilateral_pgs,
-                dim=self._size.num_worlds,
-                inputs=[
-                    problem.data.dim,
-                    problem.data.mio,
-                    problem.data.vio,
-                    problem.data.njc,
-                    problem.data.D,
-                    problem.data.v_f,
-                    self._data.config,
-                    self._data.status,
-                    self._data.solution.lambdas,
-                ],
-                device=self.device,
-            )
-            wp.launch(
-                kernel=_compute_dvi_unilateral_velocities,
-                dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
-                inputs=[
-                    problem.data.dim,
-                    problem.data.mio,
-                    problem.data.vio,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.D,
-                    problem.data.v_f,
-                    self._data.solution.lambdas,
-                    state.v_aug,
-                ],
-                device=self.device,
-            )
-            wp.launch(
-                kernel=_solve_dvi_inequalities_colored_pgs,
-                dim=self._size.num_worlds * threads_per_world,
-                inputs=[
-                    problem.data.dim,
-                    problem.data.mio,
-                    problem.data.vio,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.cio,
-                    problem.data.uio,
-                    problem.data.mu,
-                    problem.data.D,
-                    block_iteration,
-                    state.inequality_colors,
-                    state.inequality_num_colors,
-                    self._data.config,
-                    state.v_aug,
-                    self._data.solution.lambdas,
-                ],
-                device=self.device,
-                block_dim=threads_per_world,
-            )
-
-        wp.launch(
-            kernel=_solve_dvi_bilateral_pgs,
-            dim=self._size.num_worlds,
-            inputs=[
-                problem.data.dim,
-                problem.data.mio,
-                problem.data.vio,
-                problem.data.njc,
-                problem.data.D,
-                problem.data.v_f,
-                self._data.config,
-                self._data.status,
-                self._data.solution.lambdas,
-            ],
-            device=self.device,
-        )
-        wp.launch(
-            kernel=_set_dvi_direct_status_iterations,
-            dim=self._size.num_worlds,
-            inputs=[problem.data.nl, problem.data.nc, self._data.config, self._data.status],
-            device=self.device,
         )
 
     def _solve_bilateral_block(self, problem: DualProblem, active_dim: wp.array[wp.int32] | None = None):

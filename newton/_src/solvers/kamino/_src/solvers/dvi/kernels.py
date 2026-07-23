@@ -111,7 +111,12 @@ def _copy_bilateral_block(
     wid, tid = wp.tid()
 
     njc = problem_njc[wid]
-    if njc == 0 or tid >= njc * njc:
+    if njc == 0:
+        if tid == 0:
+            bilateral_D[bilateral_mio[wid]] = float32(1.0)
+            bilateral_P[bilateral_vio[wid]] = float32(1.0)
+        return
+    if tid >= njc * njc:
         return
 
     ncts = problem_dim[wid]
@@ -329,65 +334,6 @@ def _compute_dvi_status_residuals(
     status.converged = int32(0)
     if ncts == 0 or (r_b <= cfg.tolerance and r_p <= cfg.tolerance and r_d <= cfg.tolerance and r_c <= cfg.tolerance):
         status.converged = int32(1)
-    solver_status[wid] = status
-
-
-@wp.kernel
-def _solve_dvi_bilateral_pgs(
-    # Inputs:
-    problem_dim: wp.array[int32],
-    problem_mio: wp.array[int32],
-    problem_vio: wp.array[int32],
-    problem_njc: wp.array[int32],
-    problem_D: wp.array[float32],
-    problem_v_f: wp.array[float32],
-    solver_config: wp.array[DVIConfigStruct],
-    # Outputs:
-    solver_status: wp.array[DVIStatus],
-    solution_lambdas: wp.array[float32],
-):
-    wid = wp.tid()
-
-    ncts = problem_dim[wid]
-    vio = problem_vio[wid]
-    mio = problem_mio[wid]
-    njc = problem_njc[wid]
-    cfg = solver_config[wid]
-
-    status = DVIStatus()
-    status.converged = int32(0)
-    status.iterations = int32(0)
-    status.r_p = float32(0.0)
-    status.r_d = float32(0.0)
-    status.r_c = float32(0.0)
-    status.r_b = float32(0.0)
-
-    if njc == 0:
-        status.converged = int32(1)
-        solver_status[wid] = status
-        return
-
-    done = int32(0)
-    for iteration in range(cfg.max_iterations):
-        if done == 0:
-            max_step = float32(0.0)
-            max_velocity = float32(0.0)
-            for i in range(njc):
-                v_i = _compute_row_velocity(ncts, mio, vio, i, problem_D, problem_v_f, solution_lambdas)
-                diagonal = wp.abs(problem_D[mio + ncts * i + i]) + cfg.regularization + FLOAT32_EPS
-                delta = -cfg.omega * v_i / diagonal
-                solution_lambdas[vio + i] += delta
-                max_step = wp.max(max_step, wp.abs(delta))
-                max_velocity = wp.max(max_velocity, wp.abs(v_i))
-
-            status.iterations = iteration + int32(1)
-            status.r_p = max_step
-            status.r_d = max_velocity
-            status.r_b = max_velocity
-            if max_step <= cfg.tolerance:
-                status.converged = int32(1)
-                done = int32(1)
-
     solver_status[wid] = status
 
 
