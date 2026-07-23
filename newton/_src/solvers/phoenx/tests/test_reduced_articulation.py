@@ -1164,7 +1164,7 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("register introspection requires a CUDA device")
         try:
-            from cuda.bindings import driver as _drv  # optional, guarded
+            from cuda.bindings import driver as _drv  # noqa: PLC0415  # optional, guarded
 
             _num_regs_attr = _drv.CUfunction_attribute.CU_FUNC_ATTRIBUTE_NUM_REGS
         except Exception:
@@ -3816,8 +3816,9 @@ class TestReducedArticulation(unittest.TestCase):
             velocity_iterations=1,
         )
         block = solver._reduced_articulation.contact_block_system
-        block.gather_kernel = _gather_reduced_contact_blocks_packed_kernel
-        block.gather_tile_width = _PACKED_GATHER_TILE_WIDTH
+        if not block.patch_rows:
+            block.gather_kernel = _gather_reduced_contact_blocks_packed_kernel
+            block.gather_tile_width = _PACKED_GATHER_TILE_WIDTH
         contacts = model.contacts()
 
         with wp.ScopedCapture(device=device) as capture:
