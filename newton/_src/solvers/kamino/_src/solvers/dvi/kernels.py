@@ -770,10 +770,10 @@ def _solve_dvi_contacts_colored_gs(
                             v_c,
                             _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
                             cfg.regularization,
-                            float32(0.9),
+                            float32(1.0),
                             mu_c,
                         )
-                        lambda_new = lambda_old + float32(0.9) * (lambda_projected - lambda_old)
+                        lambda_new = lambda_old + float32(1.0) * (lambda_projected - lambda_old)
 
                     delta = lambda_new - lambda_old
                     solution_lambdas[ccio_v + 0] = lambda_new.x

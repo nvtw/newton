@@ -607,9 +607,9 @@ def _solve_dvi_sparse_contacts_pgs(
                     )
                     D_diag = _contact_trace_preconditioner(diag)
                     lambda_projected = _project_contact_diagonal_update(
-                        lambda_old, value, D_diag, cfg.regularization, float32(0.9), mu
+                        lambda_old, value, D_diag, cfg.regularization, float32(1.0), mu
                     )
-                    lambda_new = lambda_old + float32(0.9) * (lambda_projected - lambda_old)
+                    lambda_new = lambda_old + float32(1.0) * (lambda_projected - lambda_old)
                     delta = lambda_new - lambda_old
                     delta_body = vec3f(
                         problem_P[ccio_v] * delta.x,

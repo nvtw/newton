@@ -13,6 +13,8 @@ import warp as wp
 
 import newton
 import newton._src.solvers.kamino.config as kamino_config
+from newton._src.solvers.kamino._src.core import ModelBuilderKamino, inertia
+from newton._src.solvers.kamino._src.core.shapes import BoxShape
 from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
 from newton._src.solvers.kamino._src.integrators.euler import integrate_euler_semi_implicit
 from newton._src.solvers.kamino._src.kinematics.constraints import unpack_constraint_solutions, update_constraints_info
@@ -35,6 +37,29 @@ from newton._src.solvers.kamino.tests.test_solvers_padmm import TestSetup
 from newton._src.solvers.kamino.tests.utils.extract import extract_delassus, extract_problem_vector
 from newton._src.solvers.kamino.tests.utils.make import make_containers, make_test_problem_fourbar, update_containers
 from newton.tests.utils import basics as public_basics
+
+
+def _build_five_box_stack() -> ModelBuilderKamino:
+    """Build a vertical stack with four-point contacts at every interface."""
+    builder = ModelBuilderKamino(default_world=False)
+    world = builder.add_world(name="five_box_stack")
+    for box_index in range(5):
+        body = builder.add_rigid_body(
+            name=f"box_{box_index}",
+            m_i=1.0,
+            i_I_i=inertia.solid_cuboid_body_moment_of_inertia(1.0, 0.2, 0.2, 0.2),
+            q_i_0=wp.transformf(0.0, 0.0, 0.1 + 0.2 * box_index, 0.0, 0.0, 0.0, 1.0),
+            u_i_0=wp.spatial_vectorf(0.0),
+            world_index=world,
+        )
+        builder.add_geometry(body=body, shape=BoxShape(0.1, 0.1, 0.1), world_index=world)
+    builder.add_geometry(
+        body=-1,
+        shape=BoxShape(10.0, 10.0, 0.5),
+        offset=wp.transformf(0.0, 0.0, -0.5, 0.0, 0.0, 0.0, 1.0),
+        world_index=world,
+    )
+    return builder
 
 
 def _reduce_solver_status(status: np.ndarray) -> dict[str, object]:
@@ -1108,6 +1133,76 @@ class TestDVISolver(unittest.TestCase):
                     self.assertEqual(int(contact_cid[raw_contact]), cid)
 
             _assert_solver_status_converged(self, solver)
+
+    def test_05b_dvi_five_box_stack_converges_within_budget(self):
+        """Converge a coupled five-box stack in dense and sparse modes."""
+        if not self.device.is_cuda:
+            self.skipTest("Colored DVI contact updates require CUDA")
+
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                builder = builder_utils.make_homogeneous_builder(4, _build_five_box_stack)
+                model, data, state, limits, detector, jacobians = make_containers(
+                    builder=builder,
+                    device=self.device,
+                    max_world_contacts=64,
+                    sparse=sparse,
+                    dt=1.0e-3,
+                )
+                update_containers(model, data, state, limits, detector, jacobians)
+                self.assertTrue(np.all(detector.contacts.world_active_contacts.numpy() == 36))
+
+                problem = (
+                    _make_sparse_dual_problem(model, data, limits, detector.contacts, jacobians)
+                    if sparse
+                    else _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
+                )
+                solver = _solve_dvi(
+                    model,
+                    problem,
+                    config=kamino_config.DVISolverConfig(
+                        max_iterations=75,
+                        tolerance=1.0e-5,
+                        regularization=1.0e-6,
+                    ),
+                    setup=SimpleNamespace(
+                        data=data,
+                        limits=limits,
+                        contacts=detector.contacts,
+                        jacobians=jacobians,
+                    ),
+                )
+
+                _assert_solver_status_converged(self, solver)
+                _check_solution_matches_dual_problem(self, problem, solver)
+
+                contact_indices = solver.data.state.contact_indices.numpy()
+                contact_bodies = detector.contacts.bid_AB.numpy()
+                lambdas = solver.data.solution.lambdas.numpy()
+                problem_nc = problem.data.nc.numpy()
+                problem_cio = problem.data.cio.numpy()
+                problem_ccgo = problem.data.ccgo.numpy()
+                problem_vio = problem.data.vio.numpy()
+                expected_ground_impulse = 5.0 * 9.81e-3
+                expected_total_impulse = 15.0 * 9.81e-3
+                for world, contact_count in enumerate(problem_nc):
+                    count = int(contact_count)
+                    contact_offset = int(problem_cio[world])
+                    constraint_offset = int(problem_vio[world] + problem_ccgo[world])
+                    raw_contacts = contact_indices[contact_offset : contact_offset + count]
+                    bodies = contact_bodies[raw_contacts]
+                    normal_impulses = lambdas[constraint_offset + 2 : constraint_offset + 3 * count : 3]
+                    ground_contacts = np.any(bodies == -1, axis=1)
+                    self.assertAlmostEqual(
+                        float(np.sum(normal_impulses[ground_contacts])),
+                        expected_ground_impulse,
+                        delta=0.02 * expected_ground_impulse,
+                    )
+                    self.assertAlmostEqual(
+                        float(np.sum(normal_impulses)),
+                        expected_total_impulse,
+                        delta=0.02 * expected_total_impulse,
+                    )
 
     def test_06_dvi_warmstart_modes(self):
         builder = basics.build_box_on_plane()
