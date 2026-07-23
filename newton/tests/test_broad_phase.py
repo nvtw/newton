@@ -961,6 +961,65 @@ class TestBroadPhase(unittest.TestCase):
         """Test SAP broad phase with segmented sort."""
         self._test_sap_broadphase_impl("segmented")
 
+    def test_sap_chunked_dense_sweep_graph_capture(self):
+        device = wp.get_device()
+        if not device.is_cuda:
+            self.skipTest("CUDA graph capture requires a CUDA device")
+
+        shape_count = 4096
+        pair_count = shape_count // 2
+        group = np.arange(shape_count, dtype=np.float32) // 2.0
+        centers = np.zeros((shape_count, 3), dtype=np.float32)
+        centers[:, 1] = group
+        centers[:, 0] = -(np.float32(0.7790) / np.float32(0.5935)) * group
+        half_extent = np.float32(0.1)
+
+        lower = wp.array(centers - half_extent, dtype=wp.vec3, device=device)
+        upper = wp.array(centers + half_extent, dtype=wp.vec3, device=device)
+        collision_group = wp.ones(shape_count, dtype=wp.int32, device=device)
+        shape_world = wp.zeros(shape_count, dtype=wp.int32, device=device)
+        pairs = wp.zeros(pair_count, dtype=wp.vec2i, device=device)
+        count = wp.zeros(1, dtype=wp.int32, device=device)
+        sap = BroadPhaseSAP(shape_world, direction_search=False, device=device)
+
+        def launch():
+            sap.launch(
+                lower,
+                upper,
+                None,
+                collision_group,
+                shape_world,
+                shape_count,
+                pairs,
+                count,
+                device=device,
+            )
+
+        launch()
+        self.assertEqual(int(sap.sap_sweep_mode.numpy()[0]), 1)
+        count.zero_()
+        with wp.ScopedCapture(device=device) as capture:
+            launch()
+        wp.capture_launch(capture.graph)
+
+        actual_count = int(count.numpy()[0])
+        self.assertEqual(actual_count, pair_count)
+        actual_pairs = {tuple(pair) for pair in pairs.numpy()[:actual_count]}
+        expected_pairs = {(i, i + 1) for i in range(0, shape_count, 2)}
+        self.assertEqual(actual_pairs, expected_pairs)
+
+        sparse_centers = np.zeros((shape_count, 3), dtype=np.float32)
+        sparse_centers[:, 0] = group
+        lower.assign(sparse_centers - half_extent)
+        upper.assign(sparse_centers + half_extent)
+        wp.capture_launch(capture.graph)
+
+        self.assertEqual(int(sap.sap_sweep_mode.numpy()[0]), 0)
+        actual_count = int(count.numpy()[0])
+        self.assertEqual(actual_count, pair_count)
+        actual_pairs = {tuple(pair) for pair in pairs.numpy()[:actual_count]}
+        self.assertEqual(actual_pairs, expected_pairs)
+
     def test_sap_broadphase_tile(self):
         """Test SAP broad phase with tile sort."""
         self._test_sap_broadphase_impl("tile")

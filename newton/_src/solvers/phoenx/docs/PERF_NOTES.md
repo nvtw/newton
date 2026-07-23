@@ -33,6 +33,13 @@ Retained results:
 
 Single-world evidence:
 
+- Dense SAP sweeps now use a graph-captured, device-selected 32-pair chunk
+  queue when projected interval work exceeds 256 overlaps per shape. On the
+  11,340-brick Kapla tower this reduces the sweep kernel from 290 to 173 us
+  (-40.5%) and improves a matched captured run from 107.14 to 109.36 FPS
+  (+2.1%) with identical drift and velocity diagnostics. Sparse 46k-body
+  multi-tower and 3,600-box grids retain the legacy sweep and remain neutral.
+  The legacy kernel is statically specialized for smaller robot fleets.
 - A 50-frame captured Kapla trace attributes about 66% of GPU kernel time to
   PGS prepare/iterate/relax/average-broadcast kernels. Broad phase and narrow
   phase together account for about 8.4%.
