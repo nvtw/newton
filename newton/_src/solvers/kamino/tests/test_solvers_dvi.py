@@ -1479,6 +1479,7 @@ class TestDVISolver(unittest.TestCase):
                         )
 
                 self.assertTrue(contact_seen)
+                self.assertGreater(int(solver_dvi.data.state.contact_num_colors.numpy()[0]), 0)
                 np.testing.assert_allclose(velocities, initial_speed, rtol=0.0, atol=1.0e-6)
                 self.assertLessEqual(max_tangent_impulse, 1.0e-8)
 

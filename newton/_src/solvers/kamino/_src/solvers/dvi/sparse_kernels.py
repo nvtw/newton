@@ -543,6 +543,7 @@ def _solve_dvi_sparse_contacts_pgs(
     eta: wp.array[float32],
     contact_colors: wp.array[int32],
     contact_num_colors: wp.array[int32],
+    block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
     body_space: wp.array[float32],
     solution_lambdas: wp.array[float32],
@@ -562,7 +563,11 @@ def _solve_dvi_sparse_contacts_pgs(
     row_start = bsm_row_start[wid]
     col_start = bsm_col_start[wid]
     matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
-    sweep_budget = cfg.max_iterations
+    if block_iteration >= int32(0) and block_iteration >= cfg.block_iterations:
+        return
+    sweep_budget = cfg.contact_iterations
+    if block_iteration < int32(0):
+        sweep_budget = cfg.max_iterations
 
     num_colors = contact_num_colors[wid]
     for _sweep in range(sweep_budget):

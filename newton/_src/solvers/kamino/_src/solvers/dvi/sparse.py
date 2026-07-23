@@ -131,18 +131,12 @@ def _can_use_sparse_contact_pgs(path: SparseDVIPath) -> bool:
     )
 
 
-def _solve_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
+def _prepare_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Map and color the active contacts for conflict-free sparse updates."""
     state = path.data.state
     contacts = path.contacts
-    jacobians = path.jacobians
-    if contacts is None or jacobians is None:
-        raise RuntimeError("Sparse contact PGS requires contact and Jacobian topology.")
-    delassus = _get_sparse_delassus(problem)
-    bsm = delassus.bsm
-    if bsm is None:
-        raise RuntimeError("Sparse contact PGS requires an initialized Delassus operator.")
-
-    delassus.diagonal(state.scratch)
+    if contacts is None:
+        raise RuntimeError("Sparse contact PGS requires contact topology.")
     wp.launch(
         kernel=_map_active_contacts,
         dim=contacts.model_max_contacts_host,
@@ -168,6 +162,19 @@ def _solve_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem) -> None
         ],
         device=path.device,
     )
+
+
+def _launch_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem, block_iteration: int) -> None:
+    """Apply colored sparse contact sweeps from the current full dual iterate."""
+    state = path.data.state
+    jacobians = path.jacobians
+    if jacobians is None:
+        raise RuntimeError("Sparse contact PGS requires Jacobian topology.")
+    delassus = _get_sparse_delassus(problem)
+    bsm = delassus.bsm
+    if bsm is None:
+        raise RuntimeError("Sparse contact PGS requires an initialized Delassus operator.")
+
     path.body_space.zero_()
     delassus.apply_jacobian_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
     wp.launch(
@@ -194,6 +201,7 @@ def _solve_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem) -> None
             delassus.regularization,
             state.contact_colors,
             state.contact_num_colors,
+            block_iteration,
             path.data.config,
             path.body_space,
             path.data.solution.lambdas,
@@ -201,6 +209,13 @@ def _solve_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem) -> None
         device=path.device,
         block_dim=64,
     )
+
+
+def _solve_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
+    delassus = _get_sparse_delassus(problem)
+    delassus.diagonal(path.data.state.scratch)
+    _prepare_sparse_contact_pgs(path, problem)
+    _launch_sparse_contact_pgs(path, problem, block_iteration=-1)
     _compute_sparse_solution_vectors(path, problem)
     wp.launch(
         kernel=_set_dvi_sparse_status_iterations,
@@ -730,9 +745,16 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         device=path.device,
     )
 
+    use_contact_pgs = _can_use_sparse_contact_pgs(path)
+    if use_contact_pgs:
+        _prepare_sparse_contact_pgs(path, problem)
+
     for block_iteration in range(path.max_block_iterations):
-        for contact_iteration in range(path.max_contact_iterations):
-            _sparse_delassus_update_unilateral_rows(path, problem, block_iteration, contact_iteration)
+        if use_contact_pgs:
+            _launch_sparse_contact_pgs(path, problem, block_iteration)
+        else:
+            for contact_iteration in range(path.max_contact_iterations):
+                _sparse_delassus_update_unilateral_rows(path, problem, block_iteration, contact_iteration)
 
         if path.should_solve_bilateral_after_block(block_iteration):
             _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
