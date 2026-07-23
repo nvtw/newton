@@ -10,6 +10,7 @@ from newton._src.solvers.kamino.tests.test_solvers_dvi import TestDVISolver
 _DVI_QUALITY_TESTS = (
     "test_00_config_selection",
     "test_00a_multiworld_status_reduction_requires_all_worlds_converged",
+    "test_00c_dvi_legacy_contact_tuning_is_deprecated",
     "test_01_dvi_solve_dense_dual_problem",
     "test_02_public_solver_step_with_dvi",
     "test_03_dvi_solve_single_contact",
@@ -24,11 +25,15 @@ _DVI_QUALITY_TESTS = (
     "test_04_dvi_solve_active_joint_limit",
     "test_05_dvi_solve_multi_world_contacts",
     "test_05a_dvi_maps_packed_multiworld_contacts",
+    "test_05b_dvi_five_box_stack_converges_within_budget",
+    "test_05c_dvi_high_mass_ratio_stack_supports_weight",
+    "test_05d_sparse_dvi_colors_contacts_with_joint_limits",
     "test_06_dvi_warmstart_modes",
     "test_06a_dvi_masked_reset_preserves_unselected_worlds",
     "test_07_dvi_singular_limit_rows_remain_finite",
     "test_08_public_solver_short_rollout_with_dvi",
     "test_08a_public_solver_heterogeneous_contact_rollout_with_dvi",
+    "test_08c_dvi_zero_friction_preserves_tangent_momentum",
     "test_12_dvi_opening_contact_releases_warmstarted_force",
 )
 
