@@ -23,6 +23,7 @@ _DVI_QUALITY_TESTS = (
     "test_03i_dvi_coldstart_is_repeatable",
     "test_04_dvi_solve_active_joint_limit",
     "test_05_dvi_solve_multi_world_contacts",
+    "test_05a_sparse_dvi_maps_packed_multiworld_contacts",
     "test_06_dvi_warmstart_modes",
     "test_06a_dvi_masked_reset_preserves_unselected_worlds",
     "test_07_dvi_singular_limit_rows_remain_finite",

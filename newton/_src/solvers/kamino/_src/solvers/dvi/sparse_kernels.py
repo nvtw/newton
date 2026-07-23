@@ -9,6 +9,7 @@ import warp as wp
 
 from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
+from .kernels import _sync_threads
 from .projections import (
     contact_trace_preconditioner as _contact_trace_preconditioner,
 )
@@ -460,6 +461,178 @@ def _solve_dvi_sparse_contacts_offset_update(
         solver_config,
         solution_lambdas,
     )
+
+
+@wp.kernel
+def _map_active_contacts(
+    contacts_model_active: wp.array[int32],
+    contacts_wid: wp.array[int32],
+    contacts_cid: wp.array[int32],
+    problem_cio: wp.array[int32],
+    contact_indices: wp.array[int32],
+):
+    """Map packed per-world contact ids to raw active-contact storage."""
+    contact_id = wp.tid()
+    if contact_id < contacts_model_active[0]:
+        wid = contacts_wid[contact_id]
+        contact_indices[problem_cio[wid] + contacts_cid[contact_id]] = contact_id
+
+
+@wp.func
+def _contacts_share_dynamic_body(a: wp.vec2i, b: wp.vec2i) -> bool:
+    shares_body = bool(False)
+    if a[0] >= int32(0) and (a[0] == b[0] or a[0] == b[1]):
+        shares_body = bool(True)
+    if a[1] >= int32(0) and (a[1] == b[0] or a[1] == b[1]):
+        shares_body = bool(True)
+    return shares_body
+
+
+@wp.kernel
+def _color_mapped_dvi_contacts(
+    problem_nc: wp.array[int32],
+    problem_cio: wp.array[int32],
+    contact_indices: wp.array[int32],
+    contact_bid_AB: wp.array[wp.vec2i],
+    contact_colors: wp.array[int32],
+    contact_num_colors: wp.array[int32],
+):
+    wid = wp.tid()
+    nc = problem_nc[wid]
+    cio = problem_cio[wid]
+    num_colors = int32(0)
+    for cid in range(nc):
+        pair = contact_bid_AB[contact_indices[cio + cid]]
+        color = int32(0)
+        found = int32(0)
+        while found == int32(0) and color < nc:
+            conflict = int32(0)
+            for previous_cid in range(cid):
+                if contact_colors[cio + previous_cid] == color:
+                    previous_pair = contact_bid_AB[contact_indices[cio + previous_cid]]
+                    if _contacts_share_dynamic_body(pair, previous_pair):
+                        conflict = int32(1)
+            if conflict == int32(0):
+                found = int32(1)
+            else:
+                color += int32(1)
+        contact_colors[cio + cid] = color
+        num_colors = wp.max(num_colors, color + int32(1))
+    contact_num_colors[wid] = num_colors
+
+
+@wp.kernel
+def _solve_dvi_sparse_contacts_pgs(
+    bsm_num_nzb: wp.array[int32],
+    bsm_nzb_start: wp.array[int32],
+    bsm_nzb_coords: wp.array2d[int32],
+    bsm_nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    bsm_row_start: wp.array[int32],
+    bsm_col_start: wp.array[int32],
+    contacts_nzb_offsets: wp.array[int32],
+    contact_indices: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    problem_diag: wp.array[float32],
+    eta: wp.array[float32],
+    contact_colors: wp.array[int32],
+    contact_num_colors: wp.array[int32],
+    solver_config: wp.array[DVIConfigStruct],
+    body_space: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+):
+    """Apply conflict-free contact PGS with incremental body velocities."""
+    tid = wp.tid()
+    threads_per_world = int32(wp.block_dim())
+    lane = tid % threads_per_world
+    wid = tid / threads_per_world
+    cfg = solver_config[wid]
+    nc = problem_nc[wid]
+    if nc == 0:
+        return
+    cio = problem_cio[wid]
+    ccgo = problem_ccgo[wid]
+    vio = problem_vio[wid]
+    row_start = bsm_row_start[wid]
+    col_start = bsm_col_start[wid]
+    matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
+    sweep_budget = cfg.max_iterations
+
+    num_colors = contact_num_colors[wid]
+    for _sweep in range(sweep_budget):
+        for color in range(num_colors):
+            cid = lane
+            while cid < nc:
+                if contact_colors[cio + cid] == color:
+                    ccio = ccgo + int32(3) * cid
+                    ccio_v = vio + ccio
+                    contact_id = contact_indices[cio + cid]
+                    nzb_offset = contacts_nzb_offsets[contact_id]
+                    value = vec3f(0.0)
+                    for component in range(3):
+                        value[component] = eta[row_start + ccio + component] * solution_lambdas[ccio_v + component]
+                    block_count = int32(3)
+                    second_body_offset = nzb_offset + int32(3)
+                    if second_body_offset < matrix_end and bsm_nzb_coords[second_body_offset, 0] == ccio:
+                        block_count = int32(6)
+                    for local_block in range(block_count):
+                        nzb_idx = nzb_offset + local_block
+                        component = local_block % int32(3)
+                        block = bsm_nzb_values[nzb_idx]
+                        x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
+                        for j in range(6):
+                            value[component] += block[j] * body_space[x_idx_base + j]
+                    value += vec3f(
+                        problem_v_f[ccio_v],
+                        problem_v_f[ccio_v + 1],
+                        problem_v_f[ccio_v + 2],
+                    )
+                    mu = problem_mu[cio + cid]
+                    value.z += mu * wp.sqrt(value.x * value.x + value.y * value.y)
+                    lambda_old = vec3f(
+                        solution_lambdas[ccio_v],
+                        solution_lambdas[ccio_v + 1],
+                        solution_lambdas[ccio_v + 2],
+                    )
+                    diag = vec3f(
+                        wp.abs(problem_diag[ccio_v]) * problem_P[ccio_v] * problem_P[ccio_v],
+                        wp.abs(problem_diag[ccio_v + 1]) * problem_P[ccio_v + 1] * problem_P[ccio_v + 1],
+                        wp.abs(problem_diag[ccio_v + 2]) * problem_P[ccio_v + 2] * problem_P[ccio_v + 2],
+                    )
+                    D_diag = _contact_trace_preconditioner(diag)
+                    lambda_projected = _project_contact_diagonal_update(
+                        lambda_old, value, D_diag, cfg.regularization, float32(0.9), mu
+                    )
+                    lambda_new = lambda_old + float32(0.9) * (lambda_projected - lambda_old)
+                    delta = lambda_new - lambda_old
+                    delta_body = vec3f(
+                        problem_P[ccio_v] * delta.x,
+                        problem_P[ccio_v + 1] * delta.y,
+                        problem_P[ccio_v + 2] * delta.z,
+                    )
+                    solution_lambdas[ccio_v] = lambda_new.x
+                    solution_lambdas[ccio_v + 1] = lambda_new.y
+                    solution_lambdas[ccio_v + 2] = lambda_new.z
+                    body_group = int32(0)
+                    while body_group < block_count:
+                        nzb_idx = nzb_offset + body_group
+                        x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
+                        row_0 = jacobian_nzb_values[nzb_idx]
+                        row_1 = jacobian_nzb_values[nzb_idx + 1]
+                        row_2 = jacobian_nzb_values[nzb_idx + 2]
+                        for j in range(6):
+                            body_space[x_idx_base + j] += (
+                                row_0[j] * delta_body.x + row_1[j] * delta_body.y + row_2[j] * delta_body.z
+                            )
+                        body_group += int32(3)
+                cid += threads_per_world
+            _sync_threads()
 
 
 @wp.kernel

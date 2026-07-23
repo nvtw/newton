@@ -1056,6 +1056,54 @@ class TestDVISolver(unittest.TestCase):
         _assert_solver_status_converged(self, solver)
         _check_solution_matches_dual_problem(self, problem, solver)
 
+    def test_05a_sparse_dvi_maps_packed_multiworld_contacts(self):
+        """Verify sparse DVI maps every packed contact to its raw topology."""
+        builder = builder_utils.make_homogeneous_builder(
+            num_worlds=8,
+            build_fn=basics.build_box_on_plane,
+            ground=True,
+        )
+        model, data, state, limits, detector, jacobians = make_containers(
+            builder=builder,
+            device=self.device,
+            max_world_contacts=4,
+            sparse=True,
+        )
+        update_containers(
+            model=model,
+            data=data,
+            state=state,
+            limits=limits,
+            detector=detector,
+            jacobians=jacobians,
+        )
+        problem = _make_sparse_dual_problem(model, data, limits, detector.contacts, jacobians)
+        solver = DVISolver(
+            model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
+            config=kamino_config.DVISolverConfig(max_iterations=100, tolerance=1e-5),
+            warmstart=WarmStartMode.NONE,
+        )
+        solver.coldstart()
+        solver.solve(problem)
+
+        contact_indices = solver.data.state.contact_indices.numpy()
+        contact_wid = detector.contacts.wid.numpy()
+        contact_cid = detector.contacts.cid.numpy()
+        problem_nc = problem.data.nc.numpy()
+        problem_cio = problem.data.cio.numpy()
+        for wid, nc in enumerate(problem_nc):
+            for cid in range(int(nc)):
+                raw_contact = int(contact_indices[int(problem_cio[wid]) + cid])
+                self.assertGreaterEqual(raw_contact, 0)
+                self.assertEqual(int(contact_wid[raw_contact]), wid)
+                self.assertEqual(int(contact_cid[raw_contact]), cid)
+
+        _assert_solver_status_converged(self, solver)
+
     def test_06_dvi_warmstart_modes(self):
         builder = basics.build_box_on_plane()
         model, data, state, limits, detector, jacobians = make_containers(

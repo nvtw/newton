@@ -106,6 +106,7 @@ class DVIState:
         self.bilateral_active_dim: wp.array[int32] | None = None
         self.contact_block_inv: wp.array[mat33f] | None = None
         self.contact_colors: wp.array[int32] | None = None
+        self.contact_indices: wp.array[int32] | None = None
         self.contact_num_colors: wp.array[int32] | None = None
         if size is not None:
             self.finalize(size)
@@ -122,6 +123,7 @@ class DVIState:
         self.bilateral_active_dim = wp.zeros(size.num_worlds, dtype=int32)
         self.contact_block_inv = wp.zeros(max(1, size.sum_of_max_contacts), dtype=mat33f)
         self.contact_colors = wp.full(max(1, size.sum_of_max_contacts), -1, dtype=int32)
+        self.contact_indices = wp.full(max(1, size.sum_of_max_contacts), -1, dtype=int32)
         self.contact_num_colors = wp.zeros(max(1, size.num_worlds), dtype=int32)
 
     def reset(self):
@@ -136,6 +138,7 @@ class DVIState:
         self.bilateral_active_dim.zero_()
         self.contact_block_inv.zero_()
         self.contact_colors.fill_(-1)
+        self.contact_indices.fill_(-1)
         self.contact_num_colors.zero_()
 
 
