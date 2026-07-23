@@ -133,8 +133,28 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>23 July 2026 &middot; training baseline audit</strong></div>
+      <div class="stamp">Last updated<br><strong>23 July 2026 &middot; matched nanoG1 audit</strong></div>
     </header>
+
+    <section class="work-profile" aria-label="Matched nanoG1 training audit">
+      <div class="meta"><span class="tag warn">Quality frontier in progress</span><span>23 July 2026</span></div>
+      <h2>PhoenX crosses nanoG1 throughput; quality is not qualified yet</h2>
+      <p class="summary-lead">An exact local run of pinned nanoG1/Puffer commit <code>e3825cea</code> corrected the comparison again: its audited 8,192-world, replay-1 end-to-end rate is <strong>1.801M unique environment samples/s</strong>. Matched replay-1 PhoenX reaches <strong>1.666M</strong> (92.5%); omitting the separate post-solve velocity-relaxation sweep reaches <strong>1.897M</strong>, 5.3% above nanoG1.</p>
+      <div class="metrics">
+        <div class="card"><div class="metric">1.801M</div><div class="label">Audited local nanoG1 SPS</div></div>
+        <div class="card"><div class="metric">1.666M</div><div class="label">Matched PhoenX replay-1 SPS</div></div>
+        <div class="card"><div class="metric good">1.897M</div><div class="label">PhoenX without relaxation</div></div>
+        <div class="card"><div class="metric">+13.8%</div><div class="label">Candidate solver speedup</div></div>
+      </div>
+      <ul>
+        <li>The old 1.276M nanoG1 target was not a valid local apples-to-apples result. The new value comes from the machine log's unique-progress counter slope over a 30M-sample production training run.</li>
+        <li>Matched replay-1 Nsight profiling flips the critical path from the learner to rollout physics: rollout streams occupy 529&ndash;715 ms versus 391&ndash;427 ms for learner streams. Contact solve/row construction and reduced advance/factorization dominate; policy copies are negligible.</li>
+        <li>Tensor cores are already used in BF16 learner kernels. The current FP32 dense path emits ordinary cuBLASDx FMA, while BF16 kernels emit SM80 BF16 MMA instructions. A prior BF16 MinGRU-forward prototype gained only 0.7% after conversions and was removed.</li>
+        <li>Removing relaxation is generic and deletes an entire dynamic-state pass rather than specializing for G1. Six-seed smooth-random stability retained exact joint closure, with termination rising modestly from 3.39% to 4.43%.</li>
+      </ul>
+      <div class="verdict"><strong>Not promoted:</strong> the frozen seed-42 policy screen at 39.32M samples rejected both replay-1 configurations. The unchanged solver scored 0.590 and no-relaxation scored 0.401 against the 0.680 threshold. Thus replay reduction itself is not learning-equivalent, and no-relaxation worsens this seed. The next experiment is the replay-2/no-relaxation speed-quality frontier, followed by multi-seed validation and an Ant neutrality check only if it survives.</div>
+      <p class="compact-note"><strong>Current conclusion:</strong> we have found a substantial non-microarchitectural performance lever and have locally exceeded nanoG1 throughput, but have not yet beaten it at qualified time-to-policy. No candidate code has been retained merely for winning the throughput benchmark.</p>
+    </section>
 
     <section class="work-profile" aria-label="July 23 training baseline audit">
       <div class="meta"><span class="tag good">Measurement checkpoint</span><span>Commit <code>d646b9b7b</code></span></div>
