@@ -4,6 +4,63 @@ Curated lessons-learned from past performance work on the PhoenX solver. Goal is
 
 This is **not** a substitute for `git log` — it's a hand-maintained shortlist of the load-bearing decisions and the dead ends.
 
+## Cross-regime campaign (2026-07-23)
+
+The acceptance matrix deliberately spans different solver regimes:
+
+| Regime | Primary throughput benchmark | Correctness/stability gate |
+| --- | --- | --- |
+| Reduced robot fleets | G1 shared physics at 8192 worlds | Reduced CUDA-graph tests and G1 exploration screen |
+| Reduced morphology transfer | ANYmal, H1, and G1 at 8192 worlds | Finite-state screen for every morphology |
+| Maximal robot fleets | G1 shared physics with patch friction | Explicit CUDA capture/replay regression |
+| Large single world | 11,340-brick Kapla tower | Drift, speed, finite-state, and contact-count diagnostics |
+| RL training | G1 graph-leapfrog learning screen | Zero-fall iteration-75 policy screen |
+
+Retained results:
+
+- Compact manifold friction rows for large reduced-coordinate fleets improve
+  fully captured physics by 5.5% on ANYmal, 3.7% on H1, and 1.8% on G1 at
+  8192 worlds. The selection is based on workload size and device SM count,
+  not robot identity. An earlier longer G1 bracket measured 6.9%; Nsight
+  Systems measured 9.1% less total kernel time and 33.6% less row-build time.
+- Extending block-world scheduling to large maximal-coordinate patch-friction
+  fleets improves fully captured G1 physics from 3.617M to 4.298M world
+  steps/s (+18.8%). Small fleets retain the existing fast-tail scheduler.
+- Roofline diagnostics now distinguish useful-work lower bounds from hardware
+  counters. Full local calibration measured about 1.49 TB/s sequential copy
+  and 89.8 TFLOP/s independent FP32 FMA. Nsight Compute counters are
+  unavailable without administrator-enabled performance counters.
+
+Single-world evidence:
+
+- A 50-frame captured Kapla trace attributes about 66% of GPU kernel time to
+  PGS prepare/iterate/relax/average-broadcast kernels. Broad phase and narrow
+  phase together account for about 8.4%.
+- The modeled contact solve has about 1.28 FLOP/B useful arithmetic intensity,
+  far below the calibrated 59 FLOP/B ridge point, but the GPU does not saturate
+  measured copy bandwidth. This is a dependency/latency problem, not evidence
+  of bandwidth saturation.
+- Persistent-grid sweeps from 4 to 12 blocks/SM are flat near the default once
+  at least 6 blocks/SM are used. Twelve blocks/SM is only about 0.5% faster than
+  eight amid contact-count variation, so no scheduler knob is retained.
+- Point versus patch friction is throughput-neutral and produces an identical
+  final state in the tested tower. Unifying velocity backing arrays is also
+  neutral (+0.12%). Both prototypes were removed.
+- Refreshing prepared contact data every other iteration gains about 3%, but
+  changes the numerical trajectory. It remains rejected until a stronger
+  convergence and stability case justifies changing the algorithm.
+- Reducing the colored-partition cap below eight is fast but unstable. Eight is
+  the measured stability/performance boundary for the production 6-substep,
+  10-iteration tower configuration.
+
+Next architectural target: reduce dependent global traffic inside the
+single-world point-contact PGS loop while retaining the same iteration order
+and equations. A candidate must remove material traffic or dependency depth
+across prepare, iterate, and average/broadcast; launch fusion or occupancy
+tuning alone is not a sufficient hypothesis. Retain only changes that improve
+the whole captured frame, pass the Kapla stability gate, and preserve CUDA
+graph capture/replay.
+
 ## Training-throughput predictive model (2026-07-11)
 
 **training gain % ≈ (isolated bandwidth win %) × (phase's share of training GPU %).**
