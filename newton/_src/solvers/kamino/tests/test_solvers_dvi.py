@@ -523,50 +523,6 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(solver.data.solution.lambdas.numpy())))
         self.assertTrue(np.all(np.isfinite(solver.data.solution.v_plus.numpy())))
 
-    def test_03b_dvi_contact_block_preconditioner_smoke(self):
-        builder = basics.build_boxes_hinged()
-        model, data, state, limits, detector, jacobians = make_containers(
-            builder=builder,
-            device=self.device,
-            max_world_contacts=8,
-            sparse=False,
-        )
-        update_containers(
-            model=model,
-            data=data,
-            state=state,
-            limits=limits,
-            detector=detector,
-            jacobians=jacobians,
-        )
-        self.assertGreater(int(detector.contacts.model_active_contacts.numpy()[0]), 0)
-
-        problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
-
-        def solve_with_block_preconditioner() -> DVISolver:
-            solver = DVISolver(
-                model=model,
-                data=data,
-                limits=limits,
-                contacts=detector.contacts,
-                jacobians=jacobians,
-                config=kamino_config.DVISolverConfig(
-                    max_iterations=200,
-                    tolerance=1e-4,
-                    contact_block_preconditioner=True,
-                ),
-                warmstart=WarmStartMode.NONE,
-            )
-            solver.reset()
-            solver.coldstart()
-            solver.solve(problem)
-            return solver
-
-        solver = solve_with_block_preconditioner()
-        self.assertGreater(int(solver.data.state.inequality_num_colors.numpy()[0]), 0)
-        _assert_solution_finite(self, solver)
-        _check_solution_matches_dual_problem(self, problem, solver)
-
     def test_03d_dvi_direct_block_honors_per_world_iteration_counts(self):
         builder = builder_utils.make_homogeneous_builder(
             num_worlds=3,

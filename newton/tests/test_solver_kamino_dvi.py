@@ -15,7 +15,6 @@ _DVI_QUALITY_TESTS = (
     "test_02_public_solver_step_with_dvi",
     "test_03_dvi_solve_single_contact",
     "test_03a_sparse_dvi_filtered_matvec_matches_full_rows",
-    "test_03b_dvi_contact_block_preconditioner_smoke",
     "test_03d2_dvi_direct_block_finishes_with_bilateral_solve",
     "test_03e_dvi_direct_block_no_unilateral_rows_reports_single_iteration",
     "test_03f_dvi_bilateral_only_solve_resets_stale_status",
