@@ -320,6 +320,16 @@ class TestDVISolver(unittest.TestCase):
         )
         self.assertEqual(kamino_config.DVISolverConfig.from_model(model_with_attrs).max_iterations, 37)
 
+    def test_00c_dvi_legacy_contact_tuning_is_deprecated(self):
+        """Deprecate manual selection of legacy DVI contact updates."""
+        for option, value in (
+            ("contact_jacobi_omega", 0.4),
+            ("contact_jacobi_relaxation", 1.0),
+            ("contact_block_preconditioner", True),
+        ):
+            with self.subTest(option=option), self.assertWarnsRegex(DeprecationWarning, option):
+                kamino_config.DVISolverConfig(**{option: value})
+
     def test_00b_bilateral_solver_selection(self):
         """Verify DVI constructs and validates the configured bilateral solver."""
 
@@ -1627,9 +1637,6 @@ class TestDVISolver(unittest.TestCase):
             world_count=world_count,
             use_kamino_contacts=False,
             dynamics_solver="dvi",
-            dvi_contact_block_preconditioner=False,
-            dvi_contact_jacobi_omega=0.45,
-            dvi_contact_jacobi_relaxation=0.9,
         )
         example = Example(ViewerNull(num_frames=1), args)
 
@@ -1651,9 +1658,6 @@ class TestDVISolver(unittest.TestCase):
             world_count=1,
             use_kamino_contacts=True,
             dynamics_solver="dvi",
-            dvi_contact_block_preconditioner=False,
-            dvi_contact_jacobi_omega=0.45,
-            dvi_contact_jacobi_relaxation=0.9,
         )
         example = Example(ViewerNull(num_frames=1), args)
 
@@ -1706,9 +1710,6 @@ class TestDVISolver(unittest.TestCase):
             world_count=1,
             use_kamino_contacts=True,
             dynamics_solver="dvi",
-            dvi_contact_block_preconditioner=False,
-            dvi_contact_jacobi_omega=0.45,
-            dvi_contact_jacobi_relaxation=0.9,
         )
         example = Example(ViewerNull(num_frames=1), args)
 
@@ -1760,9 +1761,6 @@ class TestDVISolver(unittest.TestCase):
             world_count=1,
             use_kamino_contacts=True,
             dynamics_solver="dvi",
-            dvi_contact_block_preconditioner=False,
-            dvi_contact_jacobi_omega=0.45,
-            dvi_contact_jacobi_relaxation=0.9,
         )
         example = Example(ViewerNull(num_frames=1), args)
 

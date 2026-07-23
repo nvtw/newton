@@ -8,6 +8,7 @@ Defines configurations for :class:`SolverKamino`.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -843,20 +844,23 @@ class DVISolverConfig:
 
     contact_jacobi_omega: float = 0.3
     """
-    Step size for contact Jacobi updates and block-preconditioned contact
-    updates. Must be in the range `(0, 2]`. Defaults to `0.3`.
+    Deprecated step size for legacy contact updates. Remove this setting;
+    DVI contact updates are selected automatically. Retained for compatibility
+    during the deprecation period. Defaults to `0.3`.
     """
 
     contact_jacobi_relaxation: float = 0.9
     """
-    Solution mixing factor for contact Jacobi updates and block-preconditioned
-    contact updates. Must be in the range `(0, 1]`. Defaults to `0.9`.
+    Deprecated mixing factor for legacy contact updates. Remove this setting;
+    DVI contact updates are selected automatically. Retained for compatibility
+    during the deprecation period. Defaults to `0.9`.
     """
 
     contact_block_preconditioner: bool = False
     """
-    Whether to use a full 3x3 contact diagonal block preconditioner for DVI
-    projected contact updates. Defaults to `False`.
+    Deprecated legacy contact-preconditioner selection. Remove this setting;
+    DVI contact updates are selected automatically. Retained for compatibility
+    during the deprecation period. Defaults to `False`.
     """
 
     warmstart_mode: Literal["none", "internal", "containers"] = "containers"
@@ -934,6 +938,21 @@ class DVISolverConfig:
         if self.contact_jacobi_relaxation <= 0.0 or self.contact_jacobi_relaxation > 1.0:
             raise ValueError(
                 f"Invalid contact Jacobi relaxation: {self.contact_jacobi_relaxation}. Must be in the range (0, 1]."
+            )
+        legacy_contact_options = []
+        if self.contact_jacobi_omega != 0.3:
+            legacy_contact_options.append("contact_jacobi_omega")
+        if self.contact_jacobi_relaxation != 0.9:
+            legacy_contact_options.append("contact_jacobi_relaxation")
+        if self.contact_block_preconditioner:
+            legacy_contact_options.append("contact_block_preconditioner")
+        if legacy_contact_options:
+            option_names = ", ".join(legacy_contact_options)
+            warnings.warn(
+                f"DVISolverConfig {option_names} is deprecated; "
+                "remove these settings and use the automatic DVI contact updates.",
+                DeprecationWarning,
+                stacklevel=2,
             )
         WarmStartMode.from_string(self.warmstart_mode)
         WarmstarterContacts.Method.from_string(self.contact_warmstart_method)
