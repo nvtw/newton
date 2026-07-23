@@ -1415,6 +1415,73 @@ class TestDVISolver(unittest.TestCase):
                     self.assertLess(solution_metrics["r_ncp_compl"], 1.0e-2, msg=str(solution_metrics))
                     self.assertLess(solution_metrics["r_vi_natmap"], 1.0e-2, msg=str(solution_metrics))
 
+    def test_08c_dvi_zero_friction_preserves_tangent_momentum(self):
+        """Preserve horizontal momentum exactly when Coulomb friction is zero."""
+        if not self.device.is_cuda:
+            self.skipTest("DVI contact-path rollout requires CUDA")
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, gap=0.0, margin=0.0)
+        body = builder.add_link(
+            xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()),
+            mass=1.0,
+        )
+        builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+        joint = builder.add_joint_free(parent=-1, child=body)
+        builder.add_articulation([joint])
+        builder.add_ground_plane(cfg=shape_cfg)
+        model = builder.finalize(device=self.device)
+
+        initial_speed = 3.0
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    use_collision_detector=True,
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=sparse,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=16,
+                        max_contacts_per_world=16,
+                        max_contacts_per_pair=8,
+                    ),
+                )
+                solver = SolverKamino(model, config=config)
+                state_0 = model.state()
+                state_1 = model.state()
+                joint_qd = state_0.joint_qd.numpy()
+                joint_qd[0] = initial_speed
+                state_0.joint_qd.assign(joint_qd)
+                newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+
+                velocities = []
+                max_tangent_impulse = 0.0
+                contact_seen = False
+                for _ in range(50):
+                    solver.step(state_0, state_1, control=None, contacts=None, dt=1.0e-3)
+                    state_0, state_1 = state_1, state_0
+                    velocities.append(float(state_0.body_qd.numpy()[body, 0]))
+
+                    solver_kamino = solver._solver_kamino
+                    problem = solver_kamino._problem_fd
+                    solver_dvi = solver_kamino.solver_fd
+                    contact_count = int(solver._contacts_kamino.world_active_contacts.numpy()[0])
+                    contact_seen = contact_seen or contact_count > 0
+                    constraint_offset = int(problem.data.vio.numpy()[0] + problem.data.ccgo.numpy()[0])
+                    contact_lambdas = solver_dvi.data.solution.lambdas.numpy()[
+                        constraint_offset : constraint_offset + 3 * contact_count
+                    ].reshape((-1, 3))
+                    if contact_count > 0:
+                        max_tangent_impulse = max(
+                            max_tangent_impulse,
+                            float(np.max(np.abs(contact_lambdas[:, :2]))),
+                        )
+
+                self.assertTrue(contact_seen)
+                np.testing.assert_allclose(velocities, initial_speed, rtol=0.0, atol=1.0e-6)
+                self.assertLessEqual(max_tangent_impulse, 1.0e-8)
+
     def test_08b_dr_legs_contact_capacity_scales_with_world_count(self):
         if not self.device.is_cuda:
             self.skipTest("Dr Legs multi-world capacity regression uses the CUDA graph path")
