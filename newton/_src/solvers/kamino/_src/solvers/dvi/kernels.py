@@ -10,7 +10,7 @@ import warp as wp
 from ...core.math import FLOAT32_EPS
 from ..padmm.math import project_to_coulomb_cone, project_to_coulomb_dual_cone
 from .projections import (
-    contact_trace_preconditioner as _contact_trace_preconditioner,
+    contact_normal_preconditioner as _contact_normal_preconditioner,
 )
 from .projections import (
     project_contact_block_update as _project_contact_block_update,
@@ -458,7 +458,7 @@ def _solve_dvi_pgs(
                     lambda_contact_new = _project_contact_diagonal_update(
                         lambda_contact_old,
                         v_c,
-                        _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
+                        _contact_normal_preconditioner(vec3f(D_00, D_11, D_22)),
                         cfg.regularization,
                         cfg.omega,
                         problem_mu[cio + cid],
@@ -768,7 +768,7 @@ def _solve_dvi_contacts_colored_gs(
                         lambda_projected = _project_contact_diagonal_update(
                             lambda_old,
                             v_c,
-                            _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
+                            _contact_normal_preconditioner(vec3f(D_00, D_11, D_22)),
                             cfg.regularization,
                             float32(1.0),
                             mu_c,
@@ -866,7 +866,7 @@ def _compute_dvi_contact_jacobi_delta(
         lambda_projected = _project_contact_diagonal_update(
             lambda_old,
             v_c,
-            _contact_trace_preconditioner(vec3f(D_00, D_11, D_22)),
+            _contact_normal_preconditioner(vec3f(D_00, D_11, D_22)),
             cfg.regularization,
             cfg.contact_jacobi_omega,
             mu_c,

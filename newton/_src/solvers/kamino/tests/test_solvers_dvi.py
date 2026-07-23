@@ -14,7 +14,7 @@ import warp as wp
 import newton
 import newton._src.solvers.kamino.config as kamino_config
 from newton._src.solvers.kamino._src.core import ModelBuilderKamino, inertia
-from newton._src.solvers.kamino._src.core.shapes import BoxShape
+from newton._src.solvers.kamino._src.core.shapes import BoxShape, SphereShape
 from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
 from newton._src.solvers.kamino._src.integrators.euler import integrate_euler_semi_implicit
 from newton._src.solvers.kamino._src.kinematics.constraints import unpack_constraint_solutions, update_constraints_info
@@ -53,6 +53,29 @@ def _build_five_box_stack() -> ModelBuilderKamino:
             world_index=world,
         )
         builder.add_geometry(body=body, shape=BoxShape(0.1, 0.1, 0.1), world_index=world)
+    builder.add_geometry(
+        body=-1,
+        shape=BoxShape(10.0, 10.0, 0.5),
+        offset=wp.transformf(0.0, 0.0, -0.5, 0.0, 0.0, 0.0, 1.0),
+        world_index=world,
+    )
+    return builder
+
+
+def _build_high_mass_ratio_sphere_stack() -> ModelBuilderKamino:
+    """Build a two-sphere stack with a 100:1 mass ratio."""
+    builder = ModelBuilderKamino(default_world=False)
+    world = builder.add_world(name="high_mass_ratio_sphere_stack")
+    for body_index, mass in enumerate((1.0, 100.0)):
+        body = builder.add_rigid_body(
+            name=f"sphere_{body_index}",
+            m_i=mass,
+            i_I_i=inertia.solid_sphere_body_moment_of_inertia(mass, 0.1),
+            q_i_0=wp.transformf(0.0, 0.0, 0.1 + 0.2 * body_index, 0.0, 0.0, 0.0, 1.0),
+            u_i_0=wp.spatial_vectorf(0.0),
+            world_index=world,
+        )
+        builder.add_geometry(body=body, shape=SphereShape(0.1), world_index=world)
     builder.add_geometry(
         body=-1,
         shape=BoxShape(10.0, 10.0, 0.5),
@@ -1203,6 +1226,62 @@ class TestDVISolver(unittest.TestCase):
                         expected_total_impulse,
                         delta=0.02 * expected_total_impulse,
                     )
+
+    def test_05c_dvi_high_mass_ratio_stack_supports_weight(self):
+        """Support a 100:1 sphere stack accurately in dense and sparse modes."""
+        if not self.device.is_cuda:
+            self.skipTest("Colored DVI contact updates require CUDA")
+
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                model, data, state, limits, detector, jacobians = make_containers(
+                    builder=_build_high_mass_ratio_sphere_stack(),
+                    device=self.device,
+                    max_world_contacts=4,
+                    sparse=sparse,
+                    dt=1.0e-3,
+                )
+                update_containers(model, data, state, limits, detector, jacobians)
+                self.assertEqual(int(detector.contacts.world_active_contacts.numpy()[0]), 2)
+
+                problem = (
+                    _make_sparse_dual_problem(model, data, limits, detector.contacts, jacobians)
+                    if sparse
+                    else _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
+                )
+                solver = _solve_dvi(
+                    model,
+                    problem,
+                    config=kamino_config.DVISolverConfig(
+                        max_iterations=500,
+                        tolerance=1.0e-4,
+                        regularization=1.0e-6,
+                    ),
+                    setup=SimpleNamespace(
+                        data=data,
+                        limits=limits,
+                        contacts=detector.contacts,
+                        jacobians=jacobians,
+                    ),
+                )
+                _assert_solver_status_converged(self, solver)
+
+                contact_indices = solver.data.state.contact_indices.numpy()
+                contact_bodies = detector.contacts.bid_AB.numpy()[contact_indices[:2]]
+                normal_impulses = solver.data.solution.lambdas.numpy()[2:6:3]
+                ground_contact = np.any(contact_bodies == -1, axis=1)
+                expected_ground_impulse = 101.0 * 9.81e-3
+                expected_pair_impulse = 100.0 * 9.81e-3
+                self.assertAlmostEqual(
+                    float(normal_impulses[ground_contact][0]),
+                    expected_ground_impulse,
+                    delta=0.02 * expected_ground_impulse,
+                )
+                self.assertAlmostEqual(
+                    float(normal_impulses[~ground_contact][0]),
+                    expected_pair_impulse,
+                    delta=0.02 * expected_pair_impulse,
+                )
 
     def test_06_dvi_warmstart_modes(self):
         builder = basics.build_box_on_plane()

@@ -11,7 +11,7 @@ from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from .kernels import _sync_threads
 from .projections import (
-    contact_trace_preconditioner as _contact_trace_preconditioner,
+    contact_normal_preconditioner as _contact_normal_preconditioner,
 )
 from .projections import (
     project_contact_block_update as _project_contact_block_update,
@@ -374,7 +374,7 @@ def _apply_contact_offset_update(
         solution_lambdas[ccio_v + 1],
         solution_lambdas[ccio_v + 2],
     )
-    D_diag = _contact_trace_preconditioner(vec3f(D_00, D_11, D_22))
+    D_diag = _contact_normal_preconditioner(vec3f(D_00, D_11, D_22))
     if cfg.contact_block_preconditioner:
         lambda_projected = _project_contact_block_update(
             lambda_contact_old,
@@ -610,7 +610,7 @@ def _solve_dvi_sparse_contacts_pgs(
                         wp.abs(problem_diag[ccio_v + 1]) * problem_P[ccio_v + 1] * problem_P[ccio_v + 1],
                         wp.abs(problem_diag[ccio_v + 2]) * problem_P[ccio_v + 2] * problem_P[ccio_v + 2],
                     )
-                    D_diag = _contact_trace_preconditioner(diag)
+                    D_diag = _contact_normal_preconditioner(diag)
                     lambda_projected = _project_contact_diagonal_update(
                         lambda_old, value, D_diag, cfg.regularization, float32(1.0), mu
                     )
@@ -992,7 +992,7 @@ def _solve_dvi_sparse_jacobi_update(
         solution_lambdas[ccio_v + 1],
         solution_lambdas[ccio_v + 2],
     )
-    D_diag = _contact_trace_preconditioner(vec3f(D_00, D_11, D_22))
+    D_diag = _contact_normal_preconditioner(vec3f(D_00, D_11, D_22))
     if cfg.contact_block_preconditioner:
         lambda_projected = _project_contact_block_update(
             lambda_contact_old,
@@ -1101,7 +1101,7 @@ def _solve_dvi_sparse_unilateral_jacobi_update(
         solution_lambdas[ccio_v + 1],
         solution_lambdas[ccio_v + 2],
     )
-    D_diag = _contact_trace_preconditioner(vec3f(D_00, D_11, D_22))
+    D_diag = _contact_normal_preconditioner(vec3f(D_00, D_11, D_22))
     if cfg.contact_block_preconditioner:
         lambda_projected = _project_contact_block_update(
             lambda_contact_old,
