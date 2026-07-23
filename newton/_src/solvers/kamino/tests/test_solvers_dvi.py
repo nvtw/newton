@@ -1169,9 +1169,6 @@ class TestDVISolver(unittest.TestCase):
 
     def test_05b_dvi_five_box_stack_converges_within_budget(self):
         """Converge a coupled five-box stack in dense and sparse modes."""
-        if not self.device.is_cuda:
-            self.skipTest("Colored DVI contact updates require CUDA")
-
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
                 builder = builder_utils.make_homogeneous_builder(4, _build_five_box_stack)
@@ -1239,9 +1236,6 @@ class TestDVISolver(unittest.TestCase):
 
     def test_05c_dvi_high_mass_ratio_stack_supports_weight(self):
         """Support a 100:1 sphere stack accurately in dense and sparse modes."""
-        if not self.device.is_cuda:
-            self.skipTest("Colored DVI contact updates require CUDA")
-
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
                 model, data, state, limits, detector, jacobians = make_containers(
@@ -1295,9 +1289,6 @@ class TestDVISolver(unittest.TestCase):
 
     def test_05d_sparse_dvi_colors_contacts_with_joint_limits(self):
         """Use colored contacts when a sparse world also contains joint limits."""
-        if not self.device.is_cuda:
-            self.skipTest("Colored DVI contact updates require CUDA")
-
         builder = _build_five_box_stack()
         testing.build_unary_revolute_joint_test(
             builder=builder,
@@ -1435,9 +1426,6 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(v_plus_after[1], np.zeros_like(v_plus_after[1]))
 
     def test_12_dvi_opening_contact_releases_warmstarted_force(self):
-        if not self.device.is_cuda:
-            self.skipTest("DVI colored contact release regression uses the CUDA graph-colored path")
-
         radius = 0.1
         separation = 0.005
         gap = 0.03
@@ -1557,9 +1545,6 @@ class TestDVISolver(unittest.TestCase):
 
     def test_08c_dvi_zero_friction_preserves_tangent_momentum(self):
         """Preserve horizontal momentum exactly when Coulomb friction is zero."""
-        if not self.device.is_cuda:
-            self.skipTest("DVI contact-path rollout requires CUDA")
-
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         SolverKamino.register_custom_attributes(builder)
         shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, gap=0.0, margin=0.0)

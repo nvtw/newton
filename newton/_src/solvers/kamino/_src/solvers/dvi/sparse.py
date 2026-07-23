@@ -126,12 +126,7 @@ def _can_use_sparse_contact_pgs(path: SparseDVIPath) -> bool:
 
 
 def _can_use_sparse_colored_contacts(path: SparseDVIPath) -> bool:
-    return (
-        path.device.is_cuda
-        and path.contacts is not None
-        and path.jacobians is not None
-        and path.size.max_of_max_contacts > 0
-    )
+    return path.contacts is not None and path.jacobians is not None and path.size.max_of_max_contacts > 0
 
 
 def _prepare_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
@@ -180,9 +175,10 @@ def _launch_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem, block_
 
     path.body_space.zero_()
     delassus.apply_jacobian_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
+    threads_per_world = 64 if path.device.is_cuda else 1
     wp.launch(
         kernel=_solve_dvi_sparse_contacts_pgs,
-        dim=path.size.num_worlds * 64,
+        dim=path.size.num_worlds * threads_per_world,
         inputs=[
             bsm.num_nzb,
             bsm.nzb_start,
@@ -210,7 +206,7 @@ def _launch_sparse_contact_pgs(path: SparseDVIPath, problem: DualProblem, block_
             path.data.solution.lambdas,
         ],
         device=path.device,
-        block_dim=64,
+        block_dim=threads_per_world,
     )
 
 

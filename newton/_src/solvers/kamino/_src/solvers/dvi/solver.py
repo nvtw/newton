@@ -551,12 +551,7 @@ class DVISolver:
         )
 
     def _can_use_dense_contact_pgs(self) -> bool:
-        return (
-            self.device.is_cuda
-            and self._contacts is not None
-            and self._size.max_of_max_contacts > 0
-            and self._size.max_of_max_limits == 0
-        )
+        return self._contacts is not None and self._size.max_of_max_contacts > 0 and self._size.max_of_max_limits == 0
 
     def _solve_dense_contact_pgs(self, problem: DualProblem) -> None:
         contacts = self._contacts
@@ -610,9 +605,10 @@ class DVISolver:
             ],
             device=self.device,
         )
+        threads_per_world = 64 if self.device.is_cuda else 1
         wp.launch(
             kernel=_solve_dvi_contacts_colored_gs,
-            dim=self._size.num_worlds * 64,
+            dim=self._size.num_worlds * threads_per_world,
             inputs=[
                 problem.data.dim,
                 problem.data.mio,
@@ -631,7 +627,7 @@ class DVISolver:
                 self._data.solution.lambdas,
             ],
             device=self.device,
-            block_dim=64,
+            block_dim=threads_per_world,
         )
 
     def _solve_bilateral_block(self, problem: DualProblem, active_dim: wp.array[wp.int32] | None = None):
@@ -736,7 +732,7 @@ class DVISolver:
             device=self.device,
         )
 
-        use_colored_contacts = self._size.max_of_max_contacts > 0 and self.device.is_cuda and self._contacts is not None
+        use_colored_contacts = self._size.max_of_max_contacts > 0 and self._contacts is not None
         if use_colored_contacts:
             contacts = self._contacts
             wp.launch(
@@ -805,9 +801,10 @@ class DVISolver:
                 )
 
                 if use_colored_contacts:
+                    threads_per_world = 64 if self.device.is_cuda else 1
                     wp.launch(
                         kernel=_solve_dvi_contacts_colored_gs,
-                        dim=self._size.num_worlds * 64,
+                        dim=self._size.num_worlds * threads_per_world,
                         inputs=[
                             problem.data.dim,
                             problem.data.mio,
@@ -826,7 +823,7 @@ class DVISolver:
                             self._data.solution.lambdas,
                         ],
                         device=self.device,
-                        block_dim=64,
+                        block_dim=threads_per_world,
                     )
                 else:
                     for contact_iteration in range(self._max_contact_iterations):
