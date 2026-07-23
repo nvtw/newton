@@ -1133,6 +1133,26 @@ The scheduler is starved (no eligible warp 63-72%), NOT bandwidth-bound. This is
 
 **Warp-packing (N articulations/warp) REJECTED by analysis.** Mapping is one 32-thread block (== 1 warp) per articulation. The solve tile is **18/32 lanes wide** (36 DOFs -> 18 fp16x2 elements), so 2 articulations (2x18=36) don't fit in 32 lanes; the only fillable lanes are the 1/32 scalar friction-cone projection, and reclaiming them needs segmented sub-warp reductions (breaks the uniform-tile model — cf patch-rows -35%). Because all G1 worlds are identical/lockstep, packing wins ONLY if the idle lanes are spatial (structural tile width) AND leave >=half the warp free — here the 18-wide tile leaves too little. Build kernel has 0 row-padding waste (every G1 = 96 rows); its 17/32 is inherent per-row reduced-coordinate tree-walk divergence. **Conclusion: the contact solve is at its GPU-friendly ceiling for the reduced GS-on-uniform-tile design, like the reduced ABA.**
 
+
+## Reuse accepted SDF edge endpoints (KEPT, 2026-07-23)
+
+The mesh-SDF kernels used to load and transform every accepted mesh edge twice:
+once for midpoint culling and again after popping it from the cooperative stack
+for the Brent contact search. `EdgeCullResult` now carries the already-computed
+SDF-space endpoints with the edge index and midpoint sample. This removes the
+second packed-edge load, scale, and transform without adding a scene-specific
+path or changing contact arithmetic.
+
+- PhoenX 20x20 nut-and-bolt, 50 fully captured frames: the SDF kernel improves
+  88.424 ms to 87.603 ms (-0.93%). Total GPU kernel time improves 364.575 ms
+  to 363.820 ms (-0.21%). Both revisions used isolated Warp kernel caches and
+  Nsight Systems CUDA-graph node tracing.
+- The full 17-test mesh-mesh SDF/BVH and broad-phase matrix, 9 focused
+  mesh-SDF tests, and the graph-captured PhoenX mesh-SDF pyramid bitwise
+  determinism test pass.
+- Primitive-only scenes such as Kapla do not launch this kernel and retain the
+  same code path. Full CUDA graph capture remains intact.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

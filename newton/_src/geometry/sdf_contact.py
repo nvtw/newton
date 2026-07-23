@@ -64,6 +64,7 @@ MESH_SDF_BLOCK_DIM = 64
 # outer iteration runs.
 STACK_CAPACITY = 2 * MESH_SDF_BLOCK_DIM
 
+
 @wp.func
 def mesh_sdf_contact_search_precision(
     inner_contact_threshold: float,
@@ -127,15 +128,17 @@ def safe_sdf_scale_inverse(sdf_scale: wp.vec3) -> tuple[wp.vec3, float]:
 class EdgeCullResult:
     """Packed result from the mesh-SDF midphase edge-culling pass.
 
-    Stores the edge index together with the midpoint SDF value computed
-    during culling, so a single cooperative stack can carry both values
-    atomically. Splitting them across two separate stacks would break
-    the pairing because ``wp.tile_stack_pop`` races for slots
-    independently on each stack.
+    Stores the edge index, midpoint SDF value, and transformed endpoints
+    computed during culling, so the contact pass does not reload and
+    retransform accepted edges. A single cooperative stack carries the
+    values atomically; splitting them across separate stacks would break
+    the pairing because ``wp.tile_stack_pop`` races for slots independently.
     """
 
     edge_idx: int
     midpoint_sdf: float
+    v0: wp.vec3
+    v1: wp.vec3
 
 
 @wp.func
@@ -971,10 +974,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # compiled code, otherwise FMA-fusion or register-allocation
     # differences between independent JIT compilations can produce subtly
     # different floating-point results, breaking bit-exact reproducibility.
-    _module = (
-        f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_"
-        f"{force_texture_sdf}"
-    )
+    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_{force_texture_sdf}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def mesh_sdf_collision_kernel(
@@ -1154,6 +1154,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         edge_idx = base_edge_idx + t
                         add_edge = False
                         midpoint_sdf = float(0.0)
+                        v0_cull = wp.vec3(0.0)
+                        v1_cull = wp.vec3(0.0)
 
                         if edge_idx < num_edges:
                             if wp.static(enable_heightfields):
@@ -1224,6 +1226,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         cull_result = EdgeCullResult()
                         cull_result.edge_idx = edge_idx
                         cull_result.midpoint_sdf = midpoint_sdf
+                        cull_result.v0 = v0_cull
+                        cull_result.v1 = v1_cull
                         wp.tile_stack_push(edge_stack, cull_result, add_edge)
                         old_progress = wp.tile_extract(progress, 0)
                         wp.tile_scatter_masked(progress, 0, old_progress + capacity, t == 0)
@@ -1240,44 +1244,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         popped, edge_slot = wp.tile_stack_pop(edge_stack)
                         my_edge_idx = popped.edge_idx
                         cached_sdf_val = popped.midpoint_sdf
+                        v0 = popped.v0
+                        v1 = popped.v1
                         has_edge = edge_slot >= 0
 
                         if has_edge:
-                            if wp.static(enable_heightfields):
-                                if tri_type == GeoType.HFIELD:
-                                    v0s, v1s = get_edge_from_heightfield(
-                                        hfd_tri,
-                                        heightfield_elevations,
-                                        X_mesh_to_sdf,
-                                        my_edge_idx,
-                                    )
-                                else:
-                                    v0s, v1s = get_edge_from_mesh_cached(
-                                        mesh_id_tri,
-                                        mesh_edge_indices,
-                                        mesh_edge_centers,
-                                        mesh_edge_halves,
-                                        has_precomputed_edge_data,
-                                        edge_range_tri,
-                                        mesh_scale_tri,
-                                        X_mesh_to_sdf,
-                                        my_edge_idx,
-                                    )
-                            else:
-                                v0s, v1s = get_edge_from_mesh_cached(
-                                    mesh_id_tri,
-                                    mesh_edge_indices,
-                                    mesh_edge_centers,
-                                    mesh_edge_halves,
-                                    has_precomputed_edge_data,
-                                    edge_range_tri,
-                                    mesh_scale_tri,
-                                    X_mesh_to_sdf,
-                                    my_edge_idx,
-                                )
-                            v0 = wp.cw_mul(v0s, inv_sdf_scale)
-                            v1 = wp.cw_mul(v1s, inv_sdf_scale)
-
                             dist_unscaled, point_unscaled = do_edge_sdf_collision(
                                 texture_sdf,
                                 mesh_id_sdf,
@@ -1602,6 +1573,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         edge_idx = base_edge_idx + t
                         add_edge = False
                         midpoint_sdf = float(0.0)
+                        v0_cull = wp.vec3(0.0)
+                        v1_cull = wp.vec3(0.0)
 
                         if edge_idx < edge_end:
                             if wp.static(enable_heightfields):
@@ -1672,6 +1645,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         cull_result = EdgeCullResult()
                         cull_result.edge_idx = edge_idx
                         cull_result.midpoint_sdf = midpoint_sdf
+                        cull_result.v0 = v0_cull
+                        cull_result.v1 = v1_cull
                         wp.tile_stack_push(edge_stack, cull_result, add_edge)
                         old_progress = wp.tile_extract(progress, 0)
                         wp.tile_scatter_masked(progress, 0, old_progress + capacity, t == 0)
@@ -1685,44 +1660,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         popped, edge_slot = wp.tile_stack_pop(edge_stack)
                         my_edge_idx = popped.edge_idx
                         cached_sdf_val = popped.midpoint_sdf
+                        v0 = popped.v0
+                        v1 = popped.v1
                         has_edge = edge_slot >= 0
 
                         if has_edge:
-                            if wp.static(enable_heightfields):
-                                if tri_type == GeoType.HFIELD:
-                                    v0s, v1s = get_edge_from_heightfield(
-                                        hfd_tri,
-                                        heightfield_elevations,
-                                        X_mesh_to_sdf,
-                                        my_edge_idx,
-                                    )
-                                else:
-                                    v0s, v1s = get_edge_from_mesh_cached(
-                                        mesh_id_tri,
-                                        mesh_edge_indices,
-                                        mesh_edge_centers,
-                                        mesh_edge_halves,
-                                        has_precomputed_edge_data,
-                                        edge_range_tri,
-                                        mesh_scale_tri,
-                                        X_mesh_to_sdf,
-                                        my_edge_idx,
-                                    )
-                            else:
-                                v0s, v1s = get_edge_from_mesh_cached(
-                                    mesh_id_tri,
-                                    mesh_edge_indices,
-                                    mesh_edge_centers,
-                                    mesh_edge_halves,
-                                    has_precomputed_edge_data,
-                                    edge_range_tri,
-                                    mesh_scale_tri,
-                                    X_mesh_to_sdf,
-                                    my_edge_idx,
-                                )
-                            v0 = wp.cw_mul(v0s, inv_sdf_scale)
-                            v1 = wp.cw_mul(v1s, inv_sdf_scale)
-
                             dist_unscaled, point_unscaled = do_edge_sdf_collision(
                                 texture_sdf,
                                 mesh_id_sdf,

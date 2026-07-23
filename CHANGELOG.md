@@ -63,6 +63,7 @@
 ### Changed
 
 - Use compact manifold friction rows automatically for large reduced-coordinate PhoenX fleets, reducing contact-row construction and solve traffic; set `PHOENX_REDUCED_PATCH_ROWS=0` to retain per-point friction rows.
+- Reuse transformed mesh-edge endpoints between PhoenX SDF culling and contact generation, avoiding duplicate edge loads and transforms.
 - Reuse Nyquist-clamped PhoenX contact solver coefficients across PGS columns while preserving exact coefficients for unusual time steps.
 - Bound PhoenX contact-history and warm-start launches to avoid scheduling inactive capacity tails.
 - Store sticky collision offset directions in octahedral vec2 history and reconstruct their magnitudes from contact margins.
