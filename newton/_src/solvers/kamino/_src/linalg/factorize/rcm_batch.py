@@ -101,6 +101,7 @@ def allocate_rcm_batch_scratch(total_vec: int, num_blocks: int, device) -> dict:
         "order_buf": wp.empty(total_vec, dtype=wp.int32, device=device),
         "head": wp.empty(num_blocks, dtype=wp.int32, device=device),
         "root": wp.empty(num_blocks, dtype=wp.int32, device=device),
+        "reorder_active": wp.empty(num_blocks, dtype=wp.int32, device=device),
         "permutation_valid": wp.zeros(num_blocks, dtype=wp.int32, device=device),
         "permutation_dim": wp.zeros(num_blocks, dtype=wp.int32, device=device),
     }
@@ -121,6 +122,19 @@ def _make_rcm_batch_kernels(dtype):
     module.options.update({"enable_backward": False, "default_grid_stride": False})
 
     @wp.kernel(module=module)
+    def prepare_reorder_kernel(
+        reuse_permutation: bool,
+        dims: wp.array[wp.int32],
+        permutation_valid: wp.array[wp.int32],
+        permutation_dim: wp.array[wp.int32],
+        reorder_active: wp.array[wp.int32],
+    ):
+        """Mark blocks whose permutation must be computed."""
+        b = wp.tid()
+        cached = permutation_valid[b] != int(0) and permutation_dim[b] == dims[b]
+        reorder_active[b] = wp.where(reuse_permutation and cached, int(0), int(1))
+
+    @wp.kernel(module=module)
     def init_and_degree_kernel(
         num_blocks: int,
         tol: dtype,  # type: ignore[valid-type]
@@ -132,6 +146,7 @@ def _make_rcm_batch_kernels(dtype):
         level: wp.array[wp.int32],  # type: ignore[valid-type]
         head: wp.array[wp.int32],  # type: ignore[valid-type]
         root: wp.array[wp.int32],  # type: ignore[valid-type]
+        reorder_active: wp.array[wp.int32],
     ):
         """Launch dims: ``(num_blocks, max_dim)``.
 
@@ -141,6 +156,8 @@ def _make_rcm_batch_kernels(dtype):
         """
         b, i = wp.tid()
         if b >= num_blocks:
+            return
+        if reorder_active[b] == int(0):
             return
         n_b = dims[b]
         if i >= n_b:
@@ -178,6 +195,7 @@ def _make_rcm_batch_kernels(dtype):
         order_buf: wp.array[wp.int32],  # type: ignore[valid-type]
         head: wp.array[wp.int32],  # type: ignore[valid-type]
         root: wp.array[wp.int32],  # type: ignore[valid-type]
+        reorder_active: wp.array[wp.int32],
     ):
         """Launch dims: ``(num_blocks,)``. Fused root-selection + BFS seed.
 
@@ -191,6 +209,8 @@ def _make_rcm_batch_kernels(dtype):
         """
         b = wp.tid()
         if b >= num_blocks:
+            return
+        if reorder_active[b] == int(0):
             return
         n_b = dims[b]
         vb = vio[b]
@@ -221,6 +241,7 @@ def _make_rcm_batch_kernels(dtype):
         level: wp.array[wp.int32],  # type: ignore[valid-type]
         order_buf: wp.array[wp.int32],  # type: ignore[valid-type]
         head: wp.array[wp.int32],  # type: ignore[valid-type]
+        reorder_active: wp.array[wp.int32],
     ):
         """Launch dims: ``(num_blocks, max_dim)``. One BFS expansion step.
 
@@ -240,6 +261,8 @@ def _make_rcm_batch_kernels(dtype):
         """
         b, i = wp.tid()
         if b >= num_blocks:
+            return
+        if reorder_active[b] == int(0):
             return
         n_b = dims[b]
         if i >= n_b:
@@ -272,6 +295,7 @@ def _make_rcm_batch_kernels(dtype):
         level: wp.array[wp.int32],  # type: ignore[valid-type]
         order_buf: wp.array[wp.int32],  # type: ignore[valid-type]
         head: wp.array[wp.int32],  # type: ignore[valid-type]
+        reorder_active: wp.array[wp.int32],
     ):
         """Launch dims: ``(num_blocks,)``. Appends any vertex with
         ``level == -1`` to each block's ``order_buf`` segment in ascending
@@ -279,6 +303,8 @@ def _make_rcm_batch_kernels(dtype):
         """
         b = wp.tid()
         if b >= num_blocks:
+            return
+        if reorder_active[b] == int(0):
             return
         n_b = dims[b]
         vb = vio[b]
@@ -296,18 +322,27 @@ def _make_rcm_batch_kernels(dtype):
         vio: wp.array[wp.int32],  # type: ignore[valid-type]
         order_buf: wp.array[wp.int32],  # type: ignore[valid-type]
         perm: wp.array[wp.int32],  # type: ignore[valid-type]
+        reorder_active: wp.array[wp.int32],
+        permutation_valid: wp.array[wp.int32],
+        permutation_dim: wp.array[wp.int32],
     ):
         """Launch dims: ``(num_blocks, max_dim)``. ``perm[i] = order_buf[n-1-i]``."""
         b, i = wp.tid()
         if b >= num_blocks:
+            return
+        if reorder_active[b] == int(0):
             return
         n_b = dims[b]
         if i >= n_b:
             return
         vb = vio[b]
         perm[vb + i] = order_buf[vb + (n_b - int(1) - i)]
+        if i == 0:
+            permutation_valid[b] = int(1)
+            permutation_dim[b] = n_b
 
     return {
+        "prepare_reorder": prepare_reorder_kernel,
         "init_and_degree": init_and_degree_kernel,
         "select_and_seed": select_and_seed_kernel,
         "bfs_step": bfs_step_kernel,
@@ -478,7 +513,7 @@ def create_rcm_batch_launch(
         memory on replay.
     num_blocks, max_dim:
         Host-side sizing used to pick fixed launch dimensions.
-    tol, max_bfs_iters, use_cuda_graph, device, stream:
+    tol, max_bfs_iters, use_cuda_graph, reuse_permutation, device, stream:
         Same semantics as :func:`rcm.create_rcm_launch`.
     """
     if perm_flat.dtype != wp.int32:
@@ -526,6 +561,20 @@ def create_rcm_batch_launch(
     K = _make_rcm_batch_kernels(dtype)
 
     # Pre-record launches with fixed (num_blocks, max_dim) topology.
+    prepare_reorder_launch = wp.launch(
+        K["prepare_reorder"],
+        dim=num_blocks,
+        inputs=[
+            bool(reuse_permutation),
+            dims,
+            scratch["permutation_valid"],
+            scratch["permutation_dim"],
+            scratch["reorder_active"],
+        ],
+        device=device,
+        stream=stream,
+        record_cmd=True,
+    )
     init_and_degree_launch = wp.launch(
         K["init_and_degree"],
         dim=(num_blocks, max_dim),
@@ -540,6 +589,7 @@ def create_rcm_batch_launch(
             scratch["level"],
             scratch["head"],
             scratch["root"],
+            scratch["reorder_active"],
         ],
         device=device,
         stream=stream,
@@ -557,6 +607,7 @@ def create_rcm_batch_launch(
             scratch["order_buf"],
             scratch["head"],
             scratch["root"],
+            scratch["reorder_active"],
         ],
         device=device,
         stream=stream,
@@ -582,6 +633,7 @@ def create_rcm_batch_launch(
                 scratch["level"],
                 scratch["order_buf"],
                 scratch["head"],
+                scratch["reorder_active"],
             ],
             device=device,
             stream=stream,
@@ -592,7 +644,15 @@ def create_rcm_batch_launch(
     append_unreached_launch = wp.launch(
         K["append_unreached"],
         dim=(num_blocks,),
-        inputs=[num_blocks, dims, vio, scratch["level"], scratch["order_buf"], scratch["head"]],
+        inputs=[
+            num_blocks,
+            dims,
+            vio,
+            scratch["level"],
+            scratch["order_buf"],
+            scratch["head"],
+            scratch["reorder_active"],
+        ],
         device=device,
         stream=stream,
         record_cmd=True,
@@ -600,13 +660,23 @@ def create_rcm_batch_launch(
     reverse_launch = wp.launch(
         K["reverse_into_perm"],
         dim=(num_blocks, max_dim),
-        inputs=[num_blocks, dims, vio, scratch["order_buf"], perm_flat],
+        inputs=[
+            num_blocks,
+            dims,
+            vio,
+            scratch["order_buf"],
+            perm_flat,
+            scratch["reorder_active"],
+            scratch["permutation_valid"],
+            scratch["permutation_dim"],
+        ],
         device=device,
         stream=stream,
         record_cmd=True,
     )
 
     def callback():
+        prepare_reorder_launch.launch()
         init_and_degree_launch.launch()
         select_and_seed_launch.launch()
         for step in bfs_step_launches:

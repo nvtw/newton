@@ -555,12 +555,14 @@ def make_llt_blocked_rcm_solve_kernel(block_size: int):
         for i in range(0, n_i_padded, block_size):
             tile_i = i // block_size
             rhs_tile = wp.tile_zeros(shape=(block_size, 1), dtype=wp.float32, storage="shared")
-            row = tid_block
-            active = row < block_size and i + row < n_i
-            value = wp.float32(0.0)
-            if active:
-                value = b_i[P_i[i + row], 0]
-            wp.tile_scatter_masked(rhs_tile, row, 0, value, active)
+            num_row_iterations = (block_size + num_threads_per_block - 1) // num_threads_per_block
+            for ii in range(num_row_iterations):
+                row = tid_block + ii * num_threads_per_block
+                active = row < block_size and i + row < n_i
+                value = wp.float32(0.0)
+                if active:
+                    value = b_i[P_i[i + row], 0]
+                wp.tile_scatter_masked(rhs_tile, row, 0, value, active)
             L_diag = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
             if i > 0:
                 for j in range(0, i, block_size):
