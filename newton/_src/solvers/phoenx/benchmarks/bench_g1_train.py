@@ -320,17 +320,14 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
     effective_tpw = int(world._tpw_choice.numpy()[0])
     history = result.history
     _validate_finite_history(history)
-    warm = history[int(args.warmup_iterations) :]
-    excluded_final_graph_drain = False
-    if args.execution_mode == "graph_leapfrog" and len(warm) > 1:
-        # The last graph-leapfrog interval only drains the pending PPO update; the
-        # matching rollout was already timed in the previous overlapped interval.
-        warm = warm[:-1]
-        excluded_final_graph_drain = True
-    warm_sps = np.asarray([item.samples_per_second for item in warm], dtype=np.float64)
+    warm, env_sps, excluded_final_graph_drain = _summarize_measured_history(
+        history,
+        warmup_iterations=int(args.warmup_iterations),
+        execution_mode=str(args.execution_mode),
+        samples_per_interval=int(args.world_count) * int(args.rollout_steps),
+    )
     warm_rollout = np.asarray([item.rollout_seconds for item in warm], dtype=np.float64)
     warm_update = np.asarray([item.update_seconds for item in warm], dtype=np.float64)
-    env_sps = float(np.mean(warm_sps))
     physics_sps = env_sps * float(args.sim_substeps)
     nanog1_env_sps, nanog1_physics_sps, nanog1_source = _nanog1_training_reference(args)
     phoenx_over_nanog1 = None if nanog1_env_sps is None else env_sps / nanog1_env_sps
@@ -449,6 +446,27 @@ def _validate_finite_history(history: list[rl.StatsTrainG1PPO]) -> None:
             value = float(getattr(stats, field))
             if not np.isfinite(value):
                 raise RuntimeError(f"non-finite {field} at iteration {stats.iteration}: {value}")
+
+
+def _summarize_measured_history(
+    history: list[rl.StatsTrainG1PPO],
+    *,
+    warmup_iterations: int,
+    execution_mode: str,
+    samples_per_interval: int,
+) -> tuple[list[rl.StatsTrainG1PPO], float, bool]:
+    measured = history[int(warmup_iterations) :]
+    excluded_final_graph_drain = execution_mode == "graph_leapfrog"
+    if excluded_final_graph_drain:
+        measured = measured[:-1]
+    if not measured:
+        raise ValueError("benchmark configuration leaves no complete measured training intervals")
+
+    elapsed = sum(float(item.rollout_seconds) + float(item.update_seconds) for item in measured)
+    if elapsed <= 0.0:
+        raise ValueError("measured training intervals must have positive elapsed time")
+    env_sps = float(samples_per_interval * len(measured)) / elapsed
+    return measured, env_sps, excluded_final_graph_drain
 
 
 def _parse_args() -> argparse.Namespace:
