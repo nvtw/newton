@@ -538,6 +538,9 @@ def run(example, args):
     while viewer.is_running():
         frame_start_time = time.perf_counter()
 
+        if hasattr(viewer, "synchronize_simulation_step"):
+            viewer.synchronize_simulation_step()
+
         if browser is not None and browser.switch_target is not None:
             example, example_class = browser.switch(example_class)
             continue
@@ -558,9 +561,21 @@ def run(example, args):
             _throttle_render_fps(frame_start_time, render_fps)
             continue
 
+        overlap_simulation_render = (
+            not perform_test
+            and bool(getattr(example, "overlap_simulation_render", False))
+            and bool(getattr(viewer, "supports_simulation_render_overlap", False))
+        )
+        prepare_render_state = getattr(example, "prepare_render_state", None)
+        if overlap_simulation_render and not callable(prepare_render_state):
+            raise RuntimeError("Examples enabling overlap_simulation_render must implement prepare_render_state().")
         if viewer.should_step():
             with wp.ScopedTimer("step", active=False):
-                example.step()
+                if overlap_simulation_render:
+                    prepare_render_state()
+                    viewer.launch_simulation_step(example.step)
+                else:
+                    example.step()
         if test_post_step:
             example.test_post_step()
 
@@ -568,6 +583,9 @@ def run(example, args):
             example.render()
 
         _throttle_render_fps(frame_start_time, render_fps)
+
+    if hasattr(viewer, "synchronize_simulation_step"):
+        viewer.synchronize_simulation_step()
 
     if perform_test:
         if test_final:

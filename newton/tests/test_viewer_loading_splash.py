@@ -128,6 +128,45 @@ class TestLoadingSplashLifecycle(unittest.TestCase):
         newton.examples.run(example, args)
         self.assertIn(("hide_loading_splash",), viewer.calls)
 
+    def test_run_launches_overlapped_step_before_render(self):
+        """Launch an overlapped simulation step after snapshotting and before rendering."""
+        calls = []
+
+        class OverlapViewer:
+            supports_simulation_render_overlap = True
+
+            def __init__(self):
+                self.running = True
+
+            def is_running(self):
+                running, self.running = self.running, False
+                return running
+
+            def should_step(self):
+                return True
+
+            def synchronize_simulation_step(self):
+                calls.append("synchronize")
+
+            def launch_simulation_step(self, callback):
+                calls.append("launch")
+                callback()
+
+            def close(self):
+                pass
+
+        viewer = OverlapViewer()
+        example = SimpleNamespace(
+            viewer=viewer,
+            overlap_simulation_render=True,
+            prepare_render_state=lambda: calls.append("prepare"),
+            step=lambda: calls.append("step"),
+            render=lambda: calls.append("render"),
+        )
+        newton.examples.run(example, SimpleNamespace(test=False))
+
+        self.assertEqual(calls, ["synchronize", "prepare", "launch", "step", "render", "synchronize"])
+
 
 if __name__ == "__main__":
     unittest.main()

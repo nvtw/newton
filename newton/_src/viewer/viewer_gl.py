@@ -253,6 +253,10 @@ class ViewerGL(ViewerBase):
         self._paused = paused
         self._step_requested = False
         self._reset_callback: Callable[[], None] | None = None
+        self._deferred_simulation_stream: wp.Stream | None = None
+        self._deferred_simulation_raw_stream: Any | None = None
+        self._deferred_simulation_cuda_runtime: Any | None = None
+        self._deferred_simulation_in_flight = False
 
         self.renderer.register_key_press(self.on_key_press)
         self.renderer.register_key_release(self.on_key_release)
@@ -1695,6 +1699,66 @@ class ViewerGL(ViewerBase):
         """
         self._update()
 
+    @property
+    def supports_simulation_render_overlap(self) -> bool:
+        """Whether this viewer can overlap a CUDA step with rendering."""
+        if not self.device.is_cuda:
+            return False
+        try:
+            from cuda.bindings import runtime as cuda_runtime  # noqa: PLC0415
+        except ImportError:
+            return False
+        return hasattr(cuda_runtime, "cudaStreamCreateWithFlags")
+
+    def synchronize_simulation_step(self) -> None:
+        """Wait for a previously deferred simulation step to complete."""
+        if self._deferred_simulation_in_flight:
+            wp.synchronize_stream(self._deferred_simulation_stream)
+            self._deferred_simulation_in_flight = False
+
+    def _destroy_simulation_stream(self) -> None:
+        self.synchronize_simulation_step()
+        stream = self._deferred_simulation_stream
+        if stream is None:
+            return
+        # Warp registers externally owned streams but deliberately does not
+        # destroy them. Unregister before returning ownership to CUDA.
+        stream.device.runtime.core.wp_cuda_stream_unregister(stream.device.context, stream.cuda_stream)
+        stream.cuda_stream = None
+        self._deferred_simulation_stream = None
+        error = self._deferred_simulation_cuda_runtime.cudaStreamDestroy(self._deferred_simulation_raw_stream)[0]
+        self._deferred_simulation_raw_stream = None
+        self._deferred_simulation_cuda_runtime = None
+        if int(error) != 0:
+            raise RuntimeError(f"Failed to destroy the nonblocking CUDA stream: {error}")
+
+    def launch_simulation_step(self, callback: Callable[[], None]) -> None:
+        """Launch ``callback`` concurrently with subsequent OpenGL rendering.
+
+        The common example runner calls :meth:`synchronize_simulation_step`
+        at the next frame boundary. Render data must therefore be snapshotted
+        before calling this method.
+
+        Args:
+            callback: Simulation step to enqueue on a dedicated CUDA stream.
+        """
+        if not self.supports_simulation_render_overlap:
+            raise RuntimeError("Simulation/render overlap requires a CUDA ViewerGL device.")
+        if self._deferred_simulation_in_flight:
+            raise RuntimeError("The previous deferred simulation step must be synchronized first.")
+        if self._deferred_simulation_stream is None:
+            from cuda.bindings import runtime as cuda_runtime  # noqa: PLC0415
+
+            error, raw_stream = cuda_runtime.cudaStreamCreateWithFlags(cuda_runtime.cudaStreamNonBlocking)
+            if int(error) != 0:
+                raise RuntimeError(f"Failed to create a nonblocking CUDA stream: {error}")
+            self._deferred_simulation_raw_stream = raw_stream
+            self._deferred_simulation_cuda_runtime = cuda_runtime
+            self._deferred_simulation_stream = wp.Stream(self.device, cuda_stream=int(raw_stream))
+        with wp.ScopedStream(self._deferred_simulation_stream, sync_enter=False):
+            callback()
+        self._deferred_simulation_in_flight = True
+
     @override
     def apply_forces(self, state: nt.State):
         """
@@ -1884,6 +1948,7 @@ class ViewerGL(ViewerBase):
         """
         Close the viewer and clean up resources.
         """
+        self._destroy_simulation_stream()
         self._clear_array_textures()
         self._invalidate_pbo()
         if self._image_logger is not None:
