@@ -154,6 +154,24 @@ __all__ = [
 ]
 
 
+# The default contact hertz is Nyquist-clamped whenever idt <= 2*hertz.
+# In that regime the Box2D mass/impulse coefficients are independent of dt.
+_DEFAULT_CONTACT_MASS_COEFF = wp.constant(wp.float32(0.9417003989219666))
+_DEFAULT_CONTACT_IMPULSE_COEFF = wp.constant(wp.float32(0.05829954519867897))
+
+
+@wp.func
+def _default_contact_solver_coefficients(idt: wp.float32):
+    """Return default contact mass/impulse coefficients."""
+    if idt <= wp.float32(2.0) * DEFAULT_HERTZ_CONTACT:
+        return _DEFAULT_CONTACT_MASS_COEFF, _DEFAULT_CONTACT_IMPULSE_COEFF
+    dt_substep = wp.float32(1.0) / idt
+    _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+    )
+    return mass_coeff, impulse_coeff
+
+
 @wp.func
 def _soft_tet_endpoint_set_access_mode_for_column(
     nodes: wp.vec4i,
@@ -1005,10 +1023,7 @@ def _make_contact_iterate_at(
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if wp.static(use_bias):
-            dt_substep = wp.float32(1.0) / idt
-            _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-                DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
-            )
+            mass_coeff, impulse_coeff = _default_contact_solver_coefficients(idt)
 
         if wp.static(cloth_support):
             side0_kind = contact_get_side0_kind(constraints, cid)
