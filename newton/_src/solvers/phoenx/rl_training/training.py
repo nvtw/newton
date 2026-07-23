@@ -1287,8 +1287,9 @@ def _train_g1_ppo_graph_leapfrog(
         t0 = time.perf_counter()
         if local_iteration < int(cfg.iterations) - 1:
             phase = phases[prev]
-            wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
+            # Queue the update first to avoid persistent rollout-first cross-stream contention.
             wp.capture_launch(phase.update_graph, stream=update_stream)
+            wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
             with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
                 wp.wait_stream(rollout_stream)
                 wp.wait_stream(update_stream)
@@ -1404,8 +1405,9 @@ def _train_anymal_ppo_graph_leapfrog(
         iteration = int(start_iteration) + local_iteration
         if local_iteration < int(cfg.iterations) - 1:
             phase = phases[prev]
-            wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
+            # Queue the update first to avoid persistent rollout-first cross-stream contention.
             wp.capture_launch(phase.update_graph, stream=update_stream)
+            wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
             with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
                 wp.wait_stream(rollout_stream)
                 wp.wait_stream(update_stream)
