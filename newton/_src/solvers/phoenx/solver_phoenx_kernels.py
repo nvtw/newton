@@ -1879,6 +1879,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
     selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
+    patch_friction: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
     block_dim: int = 128,
@@ -1898,6 +1899,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=cached_prepare,
         enable_column_timers=enable_column_timers,
+        patch_friction=patch_friction,
     )
     (
         _dispatch_iterate_cid,
@@ -1913,6 +1915,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
         use_bias=True,
+        patch_friction=patch_friction,
     )
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -2034,6 +2037,7 @@ def _make_block_world_relax_kernel(
     selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
+    patch_friction: bool = False,
     enable_column_timers: bool = False,
     block_dim: int = 128,
 ):
@@ -2052,6 +2056,7 @@ def _make_block_world_relax_kernel(
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
         use_bias=False,
+        patch_friction=patch_friction,
     )
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -2239,6 +2244,7 @@ def get_block_world_kernel(
     selective_joint_pgs: bool = False,
     has_sleeping: bool = False,
     has_soft_contact_pd: bool = False,
+    patch_friction: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
     block_dim: int = 128,
@@ -2259,6 +2265,7 @@ def get_block_world_kernel(
             selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
+            patch_friction=patch_friction,
             cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
             block_dim=block_dim,
@@ -2273,6 +2280,7 @@ def get_block_world_kernel(
             selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
+            patch_friction=patch_friction,
             enable_column_timers=enable_column_timers,
             block_dim=block_dim,
         )

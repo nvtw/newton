@@ -4106,6 +4106,9 @@ class PhoenXWorld:
 
     def _auto_multi_world_scheduler(self) -> tuple[str, int]:
         """Choose a fixed scheduler from construction-time topology."""
+        sm_count = max(1, int(getattr(self.device, "sm_count", 1)))
+        if self._contact_patch_enabled and self.num_worlds < 32 * sm_count:
+            return "fast_tail", 128
         return _choose_multi_world_scheduler(
             block_world_supported=self._block_world_supported(),
             num_worlds=self.num_worlds,
@@ -4130,7 +4133,6 @@ class PhoenXWorld:
         return bool(
             self.step_layout != "single_world"
             and not self.mass_splitting_enabled
-            and not self._contact_patch_enabled
             and self.num_particles == 0
             and self.num_cloth_triangles == 0
             and self.num_cloth_bending == 0
@@ -4525,6 +4527,7 @@ class PhoenXWorld:
             "selective_joint_pgs": dispatch_kw["selective_joint_pgs"],
             "has_sleeping": dispatch_kw["has_sleeping"],
             "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
+            "patch_friction": self._contact_patch_enabled,
             "enable_column_timers": dispatch_kw["enable_column_timers"],
             "block_dim": int(block_dim),
             "solve_inner_sweeps": int(_BLOCK_WORLD_SOLVE_INNER_SWEEPS),

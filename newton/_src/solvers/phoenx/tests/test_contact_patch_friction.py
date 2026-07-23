@@ -285,6 +285,28 @@ class TestContactPatchFriction(unittest.TestCase):
         np.testing.assert_allclose(linear_after, linear_before, atol=2.0e-5)
         self.assertAlmostEqual(angular_after, angular_before, delta=2.0e-5)
 
+    def test_patch_block_world_runs_under_graph_capture(self) -> None:
+        require_cuda_graph_capture("PhoenX contact-patch tests")
+        scene = _PhoenXScene(
+            substeps=5,
+            solver_iterations=2,
+            velocity_iterations=1,
+            contact_friction_model="patch",
+        )
+        scene.add_ground_plane()
+        body = scene.add_box(position=(0.0, 0.0, 0.5), half_extents=(0.5, 0.5, 0.5))
+        scene.finalize()
+        scene.world._configure_multi_world_scheduler("block_world_32")
+        self.assertEqual(scene.world._multi_world_scheduler, "block_world")
+        scene.set_body_velocity(body, (0.5, 0.0, 0.0))
+        for _ in range(30):
+            scene.step()
+
+        self.assertIsNotNone(scene._graph)
+        self.assertGreater(int(scene.world._contact_cols.patch.eligible.numpy().max()), 0)
+        self.assertTrue(np.isfinite(scene.body_position(body)).all())
+        self.assertTrue(np.isfinite(scene.body_velocity(body)).all())
+
     def test_patch_single_world_runs_under_graph_capture(self) -> None:
         require_cuda_graph_capture("PhoenX contact-patch tests")
         scene = _PhoenXScene(
