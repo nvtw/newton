@@ -110,7 +110,7 @@ def _check_solution_matches_dual_problem(testcase: unittest.TestCase, problem: D
         v_plus_true = D_true @ lambdas_np[wid] + v_f_true
         np.testing.assert_allclose(v_plus_np[wid], v_plus_true, rtol=1e-4, atol=1e-4)
 
-        testcase.assertEqual(int(status[wid]["converged"]), 1)
+        testcase.assertEqual(int(status[wid]["converged"]), 1, msg=str(status[wid]))
         testcase.assertLessEqual(int(status[wid]["iterations"]), _status_iteration_budget(solver, wid))
         testcase.assertLessEqual(float(status[wid]["r_p"]), solver.config[wid].tolerance)
         testcase.assertLessEqual(float(status[wid]["r_d"]), solver.config[wid].tolerance)
@@ -177,7 +177,7 @@ def _status_iteration_budget(solver: DVISolver, wid: int) -> int:
 def _assert_solver_status_converged(testcase: unittest.TestCase, solver: DVISolver):
     status = solver.data.status.numpy()
     for wid in range(solver.size.num_worlds):
-        testcase.assertEqual(int(status[wid]["converged"]), 1)
+        testcase.assertEqual(int(status[wid]["converged"]), 1, msg=str(status[wid]))
         testcase.assertLessEqual(int(status[wid]["iterations"]), _status_iteration_budget(solver, wid))
         testcase.assertLessEqual(float(status[wid]["r_p"]), solver.config[wid].tolerance)
         testcase.assertLessEqual(float(status[wid]["r_d"]), solver.config[wid].tolerance)
@@ -349,7 +349,7 @@ class TestDVISolver(unittest.TestCase):
         )
         solver = DVISolver()
         solver._config = [config]
-        solver._data = SimpleNamespace(bilateral_operator=None)
+        solver._data = SimpleNamespace(bilateral_operator=None, state=SimpleNamespace())
         solver._device = self.device
         solver._allocate_bilateral_solver(make_model([3]))
 
@@ -365,6 +365,7 @@ class TestDVISolver(unittest.TestCase):
             solver._allocate_bilateral_solver(make_model([3, 3]))
 
     def test_00a_multiworld_status_reduction_requires_all_worlds_converged(self):
+        """Require every world to converge when reducing DVI status."""
         status = np.array(
             [(True, 2, 1.0e-5), (False, 7, 2.0e-3)],
             dtype=[("converged", np.bool_), ("iterations", np.int32), ("r_d", np.float32)],
@@ -817,6 +818,7 @@ class TestDVISolver(unittest.TestCase):
                     np.testing.assert_allclose(status[residual], first_status[residual], rtol=1e-5, atol=1e-8)
 
     def test_04_dvi_solve_active_joint_limit(self):
+        """Resolve an active joint limit through the inequality solver."""
         builder = testing.build_unary_revolute_joint_test(limits=True, ground=False)
         model, data, state, limits, detector, jacobians = make_containers(
             builder=builder,
@@ -847,6 +849,12 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(iterations, solver.config[0].block_iterations * solver.config[0].contact_iterations)
         self.assertGreater(iterations, solver.config[0].max_iterations)
         _check_solution_matches_dual_problem(self, problem, solver)
+        limit_offset = int(problem.data.lcgo.numpy()[0])
+        limit_impulse = float(solver.data.solution.lambdas.numpy()[limit_offset])
+        limit_velocity = float(solver.data.solution.v_plus.numpy()[limit_offset])
+        self.assertGreater(limit_impulse, 1.0e-4)
+        self.assertGreaterEqual(limit_velocity, -solver.config[0].tolerance)
+        self.assertLessEqual(abs(limit_impulse * limit_velocity), solver.config[0].tolerance)
 
     def test_07_dvi_singular_limit_rows_remain_finite(self):
         model, data, _state, limits, contacts = make_test_problem_fourbar(
@@ -1284,6 +1292,12 @@ class TestDVISolver(unittest.TestCase):
                 ground_contacts = np.any(contact_bodies == -1, axis=1)
                 self.assertAlmostEqual(float(np.sum(normal_impulses[ground_contacts])), 5.0 * 9.81e-3, delta=1.0e-3)
                 self.assertAlmostEqual(float(np.sum(normal_impulses)), 15.0 * 9.81e-3, delta=3.0e-3)
+                limit_offset = int(problem.data.lcgo.numpy()[0])
+                limit_impulse = float(solver.data.solution.lambdas.numpy()[limit_offset])
+                limit_velocity = float(solver.data.solution.v_plus.numpy()[limit_offset])
+                self.assertGreater(limit_impulse, 1.0e-4)
+                self.assertGreaterEqual(limit_velocity, -solver.config[0].tolerance)
+                self.assertLessEqual(abs(limit_impulse * limit_velocity), solver.config[0].tolerance)
 
     def test_06_dvi_warmstart_modes(self):
         builder = basics.build_box_on_plane()
@@ -1500,6 +1514,7 @@ class TestDVISolver(unittest.TestCase):
                     self.assertLess(solution_metrics["r_eom"], 1.0e-4, msg=str(solution_metrics))
                     self.assertLess(solution_metrics["r_kinematics"], 1.0e-4, msg=str(solution_metrics))
                     self.assertLess(solution_metrics["r_cts_joints"], 1.0e-4, msg=str(solution_metrics))
+                    self.assertLess(solution_metrics["r_cts_contacts"], 1.0e-4, msg=str(solution_metrics))
                     self.assertLess(solution_metrics["r_v_plus"], 1.0e-4, msg=str(solution_metrics))
                     self.assertLess(solution_metrics["r_ncp_primal"], 1.0e-4, msg=str(solution_metrics))
                     self.assertLess(solution_metrics["r_ncp_dual"], 1.0e-2, msg=str(solution_metrics))
@@ -1570,6 +1585,57 @@ class TestDVISolver(unittest.TestCase):
                 self.assertGreater(int(solver_dvi.data.state.inequality_num_colors.numpy()[0]), 0)
                 np.testing.assert_allclose(velocities, initial_speed, rtol=0.0, atol=1.0e-6)
                 self.assertLessEqual(max_tangent_impulse, 1.0e-8)
+
+    def test_08d_dvi_kinetic_friction_matches_coulomb_deceleration(self):
+        """Match analytic Coulomb deceleration for a sliding box."""
+        friction = 0.5
+        initial_speed = 3.0
+        dt = 2.0e-3
+        steps = 50
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(mu=friction, gap=0.0, margin=0.0)
+        body = builder.add_link(
+            xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()),
+            mass=1.0,
+        )
+        builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+        joint = builder.add_joint_free(parent=-1, child=body)
+        builder.add_articulation([joint])
+        builder.add_ground_plane(cfg=shape_cfg)
+        model = builder.finalize(device=self.device)
+
+        expected_speeds = initial_speed - friction * 9.81 * dt * np.arange(1, steps + 1)
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    use_collision_detector=True,
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=sparse,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=16,
+                        max_contacts_per_world=16,
+                        max_contacts_per_pair=8,
+                    ),
+                )
+                solver = SolverKamino(model, config=config)
+                state_0 = model.state()
+                state_1 = model.state()
+                joint_qd = state_0.joint_qd.numpy()
+                joint_qd[0] = initial_speed
+                state_0.joint_qd.assign(joint_qd)
+                newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+
+                measured_speeds = []
+                for _ in range(steps):
+                    solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                    state_0, state_1 = state_1, state_0
+                    measured_speeds.append(float(state_0.body_qd.numpy()[body, 0]))
+
+                self.assertGreater(int(solver._contacts_kamino.world_active_contacts.numpy()[0]), 0)
+                np.testing.assert_allclose(measured_speeds, expected_speeds, rtol=0.0, atol=1.0e-5)
 
     def test_08b_dr_legs_contact_capacity_scales_with_world_count(self):
         if not self.device.is_cuda:
