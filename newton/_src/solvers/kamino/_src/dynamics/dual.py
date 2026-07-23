@@ -105,12 +105,6 @@ class DualProblemConfigStruct:
     """Baumgarte stabilization parameter for unilateral joint limit constraints."""
     gamma: wp.float32
     """Baumgarte stabilization parameter for unilateral contact constraints."""
-    contact_recovery_speed: wp.float32
-    """Maximum contact penetration recovery speed [m/s]; negative disables clamping."""
-    contact_deep_recovery_gamma: wp.float32
-    """Baumgarte stabilization parameter for deep contact penetration; negative disables."""
-    contact_deep_recovery_threshold: wp.float32
-    """Contact penetration depth [m] beyond which deep recovery is used."""
     delta: wp.float32
     """Contact penetration margin used for unilateral contact constraints"""
     preconditioning: wp.bool
@@ -639,20 +633,11 @@ def _build_free_velocity_bias_contacts(
     # penetration_k by delta to preserve continuity w.r.t. distance_k.
     penetration_k = wp.sign(distance_k) * wp.max(0.0, wp.abs(distance_k) - config.delta)
 
-    # Compute the per-contact penetration error reduction term.
-    # Penetrations have xi < 0; positive gap contacts use the full opening
-    # velocity bias so stale normal reactions can release.
-    penetration_depth = -wp.min(0.0, penetration_k)
-    gamma_depth = config.gamma * penetration_depth
-    if config.contact_deep_recovery_gamma >= 0.0 and penetration_depth > config.contact_deep_recovery_threshold:
-        shallow_depth = wp.min(penetration_depth, config.contact_deep_recovery_threshold)
-        deep_depth = penetration_depth - shallow_depth
-        gamma_depth = config.gamma * shallow_depth + config.contact_deep_recovery_gamma * deep_depth
+    # Compute the per-contact penetration error reduction term
+    # NOTE#1: Penetrations are represented as penetration_k < 0
+    # NOTE#2: xi corresponds to one-sided Baumgarte-like stabilization
     xi = inv_dt * penetration_k
-    xi_penetration = -inv_dt * gamma_depth
-    if config.contact_recovery_speed >= 0.0 and xi_penetration < -config.contact_recovery_speed:
-        xi_penetration = -config.contact_recovery_speed
-    xi_relaxed = xi_penetration + wp.max(0.0, xi)
+    xi_relaxed = config.gamma * wp.min(0.0, xi) + wp.max(0.0, xi)
 
     # Gate contact stabilization for restitutive impacts with
     # critical restitution coefficients (i.e. epsilon_k >= 1.0)
@@ -1046,9 +1031,6 @@ class DualProblem:
             config_struct.alpha = wp.float32(self.constraints.alpha)
             config_struct.beta = wp.float32(self.constraints.beta)
             config_struct.gamma = wp.float32(self.constraints.gamma)
-            config_struct.contact_recovery_speed = wp.float32(self.constraints.contact_recovery_speed)
-            config_struct.contact_deep_recovery_gamma = wp.float32(self.constraints.contact_deep_recovery_gamma)
-            config_struct.contact_deep_recovery_threshold = wp.float32(self.constraints.contact_deep_recovery_threshold)
             config_struct.delta = wp.float32(self.constraints.delta)
             config_struct.preconditioning = wp.bool(self.dynamics.preconditioning)
             return config_struct

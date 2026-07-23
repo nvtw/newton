@@ -147,7 +147,6 @@ class Example:
         max_steps: int = 1000,
         use_cuda_graph: bool = False,
         implicit_pd: bool = False,
-        target_sim_dt: float | None = None,
         gravity: bool = True,
         ground: bool = True,
         logging: bool = False,
@@ -162,12 +161,12 @@ class Example:
         # Initialize target frames per second and corresponding time-steps
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
-        if target_sim_dt is None:
-            target_sim_dt = self.frame_dt / 12 if dynamics_solver == "dvi" else 0.01 if implicit_pd else 0.001
-        elif target_sim_dt <= 0.0:
-            raise ValueError("target_sim_dt must be positive.")
+        target_sim_dt = self.frame_dt / 12 if dynamics_solver == "dvi" else 0.01 if implicit_pd else 0.001
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
+        # DVI benefits from early contact detection because it solves inequality
+        # constraints slightly less accurately than PADMM. Contact forces remain
+        # zero until the shapes overlap.
         dvi_contact_margin = 5.0e-4 if dynamics_solver == "dvi" else 0.0
         msg.info(f"Using sim_dt = {self.sim_dt} ({self.sim_substeps} substeps per frame)")
         self.max_steps = max_steps
@@ -239,7 +238,7 @@ class Example:
         config.solver.integrator = "moreau"  # Select from {"euler", "moreau"}
         config.solver.constraints.alpha = 0.1
         config.solver.constraints.beta = 0.011
-        config.solver.constraints.gamma = 0.015
+        config.solver.constraints.gamma = 0.05
         config.solver.padmm.primal_tolerance = 1e-4
         config.solver.padmm.dual_tolerance = 1e-4
         config.solver.padmm.compl_tolerance = 1e-4
@@ -257,9 +256,7 @@ class Example:
         config.solver.dynamics.linear_solver_kwargs = linear_solver_kwargs
         config.solver.dynamics.preconditioning = dynamics_solver != "dvi"
         if dynamics_solver == "dvi":
-            config.solver.constraints.contact_recovery_speed = 1.0
-            config.solver.constraints.contact_deep_recovery_gamma = 0.10
-            config.solver.constraints.contact_deep_recovery_threshold = 1.0e-3
+            config.solver.constraints.gamma = 0.015
             config.solver.dvi.max_iterations = 200
             config.solver.dvi.tolerance = 1e-4
             config.solver.dvi.regularization = 1e-5
@@ -481,12 +478,6 @@ if __name__ == "__main__":
         help="Enables implicit PD control of joints",
     )
     parser.add_argument(
-        "--target-sim-dt",
-        type=float,
-        default=None,
-        help="Target simulation timestep before rounding to an integer number of frame substeps",
-    )
-    parser.add_argument(
         "--gravity", action=argparse.BooleanOptionalAction, default=True, help="Enables gravity in the simulation"
     )
     parser.add_argument(
@@ -569,7 +560,6 @@ if __name__ == "__main__":
         use_graph_conditionals=args.use_graph_conditionals,
         max_steps=args.num_steps,
         implicit_pd=args.implicit_pd,
-        target_sim_dt=args.target_sim_dt,
         gravity=args.gravity,
         ground=args.ground,
         headless=args.headless,

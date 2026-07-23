@@ -96,6 +96,8 @@ def warmstart_joint_constraints(
     dyn_cts_row_start_j = joint_dynamic_cts_offset_total_cts[jid]
     kin_cts_row_start_j = joint_kinematic_cts_offset_total_cts[jid]
 
+    # Convert cached forces to preconditioned impulses. Joint constraints do
+    # not cache a post-event velocity, so their dual iterate starts at zero.
     for j in range(num_dynamic_cts_j):
         P_j = problem_P[dyn_cts_row_start_j + j]
         lambda_j = (dt / P_j) * joint_lambda_j[joint_dyn_cts_start + j]
@@ -133,6 +135,7 @@ def warmstart_limit_constraints(
     wid = limit_wid[lid]
     vio_l = model_info_total_cts_offset[wid] + data_info_limit_cts_group_offset[wid] + limit_lid[lid]
     P_l = problem_P[vio_l]
+    # Reactions are cached as forces and velocities in physical units.
     lambda_l = limit_reaction[lid] * model_time_dt[wid] / P_l
     v_plus_l = limit_velocity[lid] * P_l
     x_0[vio_l] = lambda_l
@@ -167,6 +170,7 @@ def warmstart_contact_constraints(
     lambda_k = contact_reaction[cid] * model_time_dt[wid] / P_k
     v_plus_k = contact_velocity[cid] * P_k
     mu_k = contact_material[cid][0]
+    # Apply the De Saxce correction to recover the solver's dual variable.
     v_plus_k.z += mu_k * wp.sqrt(v_plus_k.x * v_plus_k.x + v_plus_k.y * v_plus_k.y)
 
     for k in range(3):
@@ -189,5 +193,6 @@ def apply_dual_preconditioner_to_solution(
         return
     v_i = problem_vio[wid] + tid
     P_i = problem_P[v_i]
+    # Constraint impulses and velocities scale inversely under dual preconditioning.
     solution_lambdas[v_i] /= P_i
     solution_v_plus[v_i] *= P_i

@@ -25,7 +25,7 @@ class DVIConfigStruct:
     """On-device DVI solver configuration."""
 
     tolerance: float32
-    """Convergence tolerance for DVI feasibility and complementarity residuals."""
+    """Tolerance for iterate-change stopping and terminal DVI residuals."""
 
     regularization: float32
     """Diagonal regularization used by projected Gauss-Seidel updates."""
@@ -60,7 +60,7 @@ class DVIStatus:
     """Per-world DVI convergence status."""
 
     converged: int32
-    """Whether all DVI feasibility and complementarity residuals satisfy tolerance."""
+    """Whether all terminal feasibility, equality, and complementarity residuals satisfy tolerance."""
     iterations: int32
     """Projected sweeps; direct-bilateral solves report block/contact sweeps."""
     r_p: float32
@@ -68,7 +68,7 @@ class DVIStatus:
     r_d: float32
     """Maximum dual cone-feasibility and bilateral velocity residual."""
     r_c: float32
-    """Complementarity residual."""
+    """Maximum absolute impulse-velocity inner product."""
     r_b: float32
     """Bilateral constraint-space velocity residual."""
 

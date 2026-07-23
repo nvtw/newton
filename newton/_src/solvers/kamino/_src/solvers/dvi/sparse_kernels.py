@@ -124,6 +124,8 @@ def _sparse_delassus_gemv_rows(
     if not row_active:
         return
 
+    # The body-space input already contains M^-1 * J^T * lambda. Accumulate
+    # selected rows of J times that vector; eta * lambda supplies R * lambda.
     block = nzb_values[global_block_idx]
     x_idx_base = col_start[wid] + block_coord[1]
     acc = float32(0.0)
@@ -196,6 +198,8 @@ def _apply_limit_offset_update(
     D_ii_raw = wp.abs(problem_diag[vec_idx]) * P_i * P_i
     D_ii = D_ii_raw + cfg.regularization + FLOAT32_EPS
 
+    # Each active limit row references at most two body blocks. The resulting
+    # matrix-free velocity is followed by projection onto the nonnegative ray.
     lambda_limit_old = solution_lambdas[vec_idx]
     lambda_limit_new = lambda_limit_old
     if D_ii_raw > FLOAT32_EPS:
@@ -362,6 +366,8 @@ def _apply_contact_offset_update(
     D_11 = wp.abs(problem_diag[ccio_v + 1]) * P_1 * P_1
     D_22 = wp.abs(problem_diag[ccio_v + 2]) * P_2 * P_2
 
+    # Contact topology offsets select the one or two body blocks contributing
+    # to this [t0, t1, n] row triplet before its Coulomb-cone projection.
     lambda_contact_old = vec3f(
         solution_lambdas[ccio_v + 0],
         solution_lambdas[ccio_v + 1],
@@ -756,6 +762,8 @@ def _solve_dvi_sparse_jacobi_update(
     if iteration >= cfg.max_iterations:
         return
 
+    # Every row uses the same matrix-free D * lambda snapshot. Only the first
+    # row of each contact updates its three-row block, preserving Jacobi semantics.
     vio = problem_vio[wid]
     v_i = state_v_aug[vio + tid] + problem_v_f[vio + tid]
     P_i = problem_P[vio + tid]
@@ -979,5 +987,7 @@ def _set_dvi_sparse_status_iterations(
     if problem_dim[wid] == int32(0):
         status.iterations = int32(0)
     else:
+        # Sparse Jacobi currently runs a fixed iteration count; terminal DVI
+        # residuals are computed by the shared dense/sparse status kernel.
         status.iterations = solver_config[wid].max_iterations
     solver_status[wid] = status

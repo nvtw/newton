@@ -12,11 +12,7 @@ import warp as wp
 
 import newton
 import newton._src.solvers.kamino.config as kamino_config
-from newton._src.solvers.kamino._src.dynamics.dual import (
-    DualProblem,
-    DualProblemConfigStruct,
-    _build_free_velocity_bias_contacts,
-)
+from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
 from newton._src.solvers.kamino._src.integrators.euler import integrate_euler_semi_implicit
 from newton._src.solvers.kamino._src.kinematics.constraints import unpack_constraint_solutions, update_constraints_info
 from newton._src.solvers.kamino._src.kinematics.jacobians import DenseSystemJacobians
@@ -38,9 +34,6 @@ from newton._src.solvers.kamino.tests.test_solvers_padmm import TestSetup
 from newton._src.solvers.kamino.tests.utils.extract import extract_delassus, extract_problem_vector
 from newton._src.solvers.kamino.tests.utils.make import make_containers, make_test_problem_fourbar, update_containers
 from newton.tests.utils import basics as public_basics
-
-vec2f = wp.vec2f
-vec4f = wp.vec4f
 
 
 def _reduce_solver_status(status: np.ndarray) -> dict[str, object]:
@@ -107,9 +100,14 @@ def _solve_dvi(
     problem,
     warmstart: WarmStartMode = WarmStartMode.NONE,
     config: kamino_config.DVISolverConfig | None = None,
+    setup: TestSetup | None = None,
 ) -> DVISolver:
     solver = DVISolver(
         model=model,
+        data=setup.data if setup is not None else None,
+        limits=setup.limits if setup is not None else None,
+        contacts=setup.contacts if setup is not None else None,
+        jacobians=setup.jacobians if setup is not None else None,
         config=config or kamino_config.DVISolverConfig(max_iterations=300, tolerance=1e-4, regularization=1e-5),
         warmstart=warmstart,
     )
@@ -226,9 +224,6 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(config.dvi.contact_block_preconditioner)
         self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_net_force_backup")
         self.assertFalse(config.dynamics.preconditioning)
-        self.assertEqual(config.constraints.contact_recovery_speed, -1.0)
-        self.assertEqual(config.constraints.contact_deep_recovery_gamma, -1.0)
-        self.assertEqual(config.constraints.contact_deep_recovery_threshold, 0.0)
 
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
         self.assertTrue(sparse_config.sparse_dynamics)
@@ -240,10 +235,6 @@ class TestDVISolver(unittest.TestCase):
                 dynamics_solver="dvi",
                 dynamics=kamino_config.ConstrainedDynamicsConfig(preconditioning=True),
             )
-        with self.assertRaises(ValueError):
-            kamino_config.ConstraintStabilizationConfig(contact_deep_recovery_gamma=1.1)
-        with self.assertRaises(ValueError):
-            kamino_config.ConstraintStabilizationConfig(contact_deep_recovery_threshold=-1.0)
         invalid_dvi_configs = (
             {"max_iterations": 0},
             {"tolerance": -1.0},
@@ -803,7 +794,7 @@ class TestDVISolver(unittest.TestCase):
                     sparse_dynamics=sparse,
                     sparse_jacobian=sparse,
                 ).dvi
-                solver = _solve_dvi(test.model, test.problem, config=config)
+                solver = _solve_dvi(test.model, test.problem, config=config, setup=test)
                 first_lambdas = solver.data.solution.lambdas.numpy().copy()
                 first_v_plus = solver.data.solution.v_plus.numpy().copy()
                 first_status = solver.data.status.numpy().copy()
@@ -974,6 +965,10 @@ class TestDVISolver(unittest.TestCase):
         problem = _make_sparse_dual_problem(model, data, limits, detector.contacts, jacobians)
         solver = DVISolver(
             model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
             config=kamino_config.DVISolverConfig(
                 tolerance=0.0,
                 regularization=1e-5,
@@ -1201,66 +1196,6 @@ class TestDVISolver(unittest.TestCase):
         self.assertLess(float(abs(state_0.body_qd.numpy()[0, 2])), 2.0)
         self.assertEqual(int(solver._solver_kamino.solver_fd.data.status.numpy()[0]["converged"]), 1)
 
-    def test_12b_dvi_contact_recovery_speed_caps_bias(self):
-        config = DualProblem.Config(
-            constraints=kamino_config.ConstraintStabilizationConfig(
-                gamma=1.0,
-                delta=0.0,
-                contact_recovery_speed=0.2,
-            )
-        )
-        problem_config = wp.array([config.to_struct()], dtype=DualProblemConfigStruct, device=self.device)
-        model_time_inv_dt = wp.array([100.0], dtype=wp.float32, device=self.device)
-        model_info_contacts_offset = wp.array([0], dtype=wp.int32, device=self.device)
-        data_info_contact_cts_group_offset = wp.array([0], dtype=wp.int32, device=self.device)
-        contacts_model_num = wp.array([1], dtype=wp.int32, device=self.device)
-        contacts_wid = wp.array([0], dtype=wp.int32, device=self.device)
-        contacts_cid = wp.array([0], dtype=wp.int32, device=self.device)
-        contacts_material = wp.array([vec2f(0.5, 0.0)], dtype=vec2f, device=self.device)
-        problem_vio = wp.array([0], dtype=wp.int32, device=self.device)
-
-        def contact_bias(distance: float) -> np.ndarray:
-            contacts_gapfunc = wp.array([vec4f(0.0, 0.0, 0.0, distance)], dtype=vec4f, device=self.device)
-            problem_v_b = wp.zeros(3, dtype=wp.float32, device=self.device)
-            problem_v_i = wp.zeros(3, dtype=wp.float32, device=self.device)
-            problem_mu = wp.zeros(1, dtype=wp.float32, device=self.device)
-            wp.launch(
-                _build_free_velocity_bias_contacts,
-                dim=1,
-                inputs=[
-                    model_time_inv_dt,
-                    model_info_contacts_offset,
-                    data_info_contact_cts_group_offset,
-                    1,
-                    contacts_model_num,
-                    contacts_wid,
-                    contacts_cid,
-                    contacts_gapfunc,
-                    contacts_material,
-                    problem_config,
-                    problem_vio,
-                ],
-                outputs=[problem_v_b, problem_v_i, problem_mu],
-                device=self.device,
-            )
-            return problem_v_b.numpy()
-
-        np.testing.assert_allclose(contact_bias(-0.05), [0.0, 0.0, -0.2], rtol=1e-6, atol=1e-6)
-        np.testing.assert_allclose(contact_bias(0.05), [0.0, 0.0, 5.0], rtol=1e-6, atol=1e-6)
-
-        config = DualProblem.Config(
-            constraints=kamino_config.ConstraintStabilizationConfig(
-                gamma=0.015,
-                delta=0.0,
-                contact_recovery_speed=-1.0,
-                contact_deep_recovery_gamma=0.08,
-                contact_deep_recovery_threshold=0.0025,
-            )
-        )
-        problem_config = wp.array([config.to_struct()], dtype=DualProblemConfigStruct, device=self.device)
-        np.testing.assert_allclose(contact_bias(-0.001), [0.0, 0.0, -0.0015], rtol=1e-6, atol=1e-6)
-        np.testing.assert_allclose(contact_bias(-0.005), [0.0, 0.0, -0.02375], rtol=1e-6, atol=1e-6)
-
     def test_03h_dvi_canonical_contact_solution_metrics(self):
         for builder_fn, max_world_contacts in (
             (basics.build_box_on_plane, 4),
@@ -1282,7 +1217,7 @@ class TestDVISolver(unittest.TestCase):
                         sparse_dynamics=sparse,
                         sparse_jacobian=sparse,
                     ).dvi
-                    solver = _solve_dvi(test.model, test.problem, config=config)
+                    solver = _solve_dvi(test.model, test.problem, config=config, setup=test)
                     solution_metrics = _evaluate_solution_metrics(test, solver)
 
                     _assert_solution_finite(self, solver)

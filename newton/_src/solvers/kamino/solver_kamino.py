@@ -115,9 +115,9 @@ class SolverKamino(SolverBase, CouplingInterface):
         for PADMM.
         """
 
-        sparse_dynamics: bool | None = None
+        sparse_dynamics: bool = False
         """
-        Whether to use a sparse dynamics representation. When unspecified, defaults to `False`.
+        Flag to indicate whether the solver should use sparse data representations for the dynamics.
         """
 
         use_collision_detector: bool = False
@@ -194,11 +194,11 @@ class SolverKamino(SolverBase, CouplingInterface):
         Defaults to `twopi`.
         """
 
-        integrator: Literal["euler", "moreau"] | None = None
+        integrator: Literal["euler", "moreau"] = "euler"
         """
         The time-integrator to use for state integration.\n
         See available options in the `integrators` module.\n
-        When unspecified, defaults to `"euler"`.
+        Defaults to `"euler"`.
         """
 
         dynamics_solver: Literal["padmm", "dvi"] = "padmm"
@@ -402,10 +402,6 @@ class SolverKamino(SolverBase, CouplingInterface):
 
             if self.sparse_jacobian is None:
                 self.sparse_jacobian = self.dynamics_solver == "dvi"
-            if self.sparse_dynamics is None:
-                self.sparse_dynamics = False
-            if self.integrator is None:
-                self.integrator = "euler"
 
             # Default-initialize any sub-configurations that were not explicitly provided by the user
             if self.collision_detector is None and self.use_collision_detector:

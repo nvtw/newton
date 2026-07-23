@@ -52,14 +52,20 @@ class TestLinAlgLLTBlockedSolver(unittest.TestCase):
         self.assertEqual(llt.device, self.default_device)
         self.assertEqual(llt._factorize_block_size, 32)
         self.assertEqual(llt._solve_block_size, 32)
+        self.assertEqual(llt._factorize_block_dim, 128)
+        self.assertEqual(llt._solve_block_dim, 128)
 
         split_blocks = LLTBlockedSolver(
             factorize_block_size=64,
             solve_block_size=16,
+            factorize_block_dim=64,
+            solve_block_dim=256,
             device=self.default_device,
         )
         self.assertEqual(split_blocks._factorize_block_size, 64)
         self.assertEqual(split_blocks._solve_block_size, 16)
+        self.assertEqual(split_blocks._factorize_block_dim, 64)
+        self.assertEqual(split_blocks._solve_block_dim, 256)
 
     def test_01_single_problem_dims_all_active(self):
         """

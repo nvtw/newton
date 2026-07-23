@@ -30,6 +30,9 @@ class Example:
         target_sim_dt = self.frame_dt / 12 if self.dynamics_solver == "dvi" else 0.01
         self.sim_substeps = max(1, round(self.frame_dt / target_sim_dt))
         self.sim_dt = self.frame_dt / self.sim_substeps
+        # DVI benefits from early contact detection because it solves inequality
+        # constraints slightly less accurately than PADMM. Contact forces remain
+        # zero until the shapes overlap.
         dvi_contact_margin = 5.0e-4 if self.dynamics_solver == "dvi" else 1e-6
         self.dvi_contact_block_preconditioner = bool(getattr(args, "dvi_contact_block_preconditioner", False))
         self.dvi_contact_jacobi_omega = float(getattr(args, "dvi_contact_jacobi_omega", 0.45))
@@ -93,9 +96,6 @@ class Example:
             self.config.constraints.alpha = 0.1
             self.config.constraints.beta = 0.011
             self.config.constraints.gamma = 0.015
-            self.config.constraints.contact_recovery_speed = 1.0
-            self.config.constraints.contact_deep_recovery_gamma = 0.10
-            self.config.constraints.contact_deep_recovery_threshold = 1.0e-3
             self.config.dynamics.preconditioning = False
             self.config.dynamics.linear_solver_type = "CR"
             self.config.dynamics.linear_solver_kwargs = {"maxiter": 9}

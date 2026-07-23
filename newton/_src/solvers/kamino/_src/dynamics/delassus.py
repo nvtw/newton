@@ -1756,18 +1756,6 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         return self._jacobians._J_cts.bsm
 
     @property
-    def model(self) -> ModelKamino:
-        return self._model
-
-    @property
-    def data(self) -> DataKamino:
-        return self._data
-
-    @property
-    def joint_constraint_nzb_count(self) -> wp.array:
-        return self._jacobians._J_cts_num_joint_nzb
-
-    @property
     def regularization(self) -> wp.array[wp.float32]:
         """Active diagonal regularization used by sparse matrix-vector products."""
         regularization = self._combined_regularization
@@ -1777,45 +1765,22 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             raise RuntimeError("Sparse Delassus regularization has not been configured.")
         return regularization
 
-    @property
-    def transpose_operator_matrix(self):
-        """Transpose operator metadata used by filtered sparse products."""
-        if self._transpose_op_matrix is None:
-            raise RuntimeError("Sparse Delassus transpose operator has not been assigned.")
-        return self._transpose_op_matrix
-
-    @property
-    def body_space_scratch(self) -> wp.array[vec6f]:
-        """Body-space scratch array used by sparse matrix-vector products."""
-        if self._vec_temp_body_space is None:
-            raise RuntimeError("Sparse Delassus scratch data has not been allocated.")
-        return self._vec_temp_body_space
-
-    @property
-    def jacobians(self) -> SparseSystemJacobians:
-        """Sparse system Jacobians backing this operator."""
-        if self._jacobians is None:
-            raise RuntimeError("Sparse Delassus Jacobians have not been assigned.")
-        return self._jacobians
-
-    @property
-    def limits(self) -> LimitsKamino | None:
-        """Joint-limit container associated with the operator."""
-        return self._limits
-
-    @property
-    def contacts(self) -> ContactsKamino | None:
-        """Contact container associated with the operator."""
-        return self._contacts
-
-    @property
-    def needs_update(self) -> bool:
-        """Whether cached sparse operator values require rebuilding."""
-        return self._needs_update
-
     ###
     # Operations
     ###
+
+    def apply_jacobian_transpose(
+        self,
+        x: wp.array[wp.float32],
+        y: wp.array[wp.float32],
+        world_mask: wp.array[wp.bool],
+    ) -> None:
+        """Apply the current transposed constraint Jacobian to a vector."""
+        if self.ATy_op is None or self._transpose_op_matrix is None:
+            raise RuntimeError("Sparse Delassus transpose operator has not been assigned.")
+        if self._needs_update:
+            self.update()
+        self.ATy_op(self._transpose_op_matrix, x, y, world_mask)
 
     def matvec(self, x: wp.array[wp.float32], y: wp.array[wp.float32], world_mask: wp.array[wp.bool]):
         """
