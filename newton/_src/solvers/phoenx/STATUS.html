@@ -133,8 +133,29 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>17 July 2026 &middot; G1 contact-graph reuse</strong></div>
+      <div class="stamp">Last updated<br><strong>23 July 2026 &middot; training baseline audit</strong></div>
     </header>
+
+    <section class="work-profile" aria-label="July 23 training baseline audit">
+      <div class="meta"><span class="tag good">Measurement checkpoint</span><span>Commit <code>d646b9b7b</code></span></div>
+      <h2>Fresh G1 baseline: trustworthy accounting first</h2>
+      <p class="summary-lead">The current 8,192-world, 64-step, 3-substep/2-iteration graph-leapfrog path measures about <strong>1.08&ndash;1.10M environment samples/s</strong> across steady runs. The pinned nanoG1 engine now reproduces locally at 1.67M environment steps/s (8.35M physics steps/s) at 8,192 worlds; its documented end-to-end training rate is 1.276M samples/s and remains a separate metric.</p>
+      <div class="metrics">
+        <div class="card"><div class="metric">1.08&ndash;1.10M</div><div class="label">Corrected steady G1 samples/s</div></div>
+        <div class="card"><div class="metric">383 ms</div><div class="label">Eager rollout-only phase</div></div>
+        <div class="card"><div class="metric">225 ms</div><div class="label">Eager learner update phase</div></div>
+        <div class="card"><div class="metric">477 ms</div><div class="label">Current overlapped interval</div></div>
+      </div>
+      <ul>
+        <li>Fixed a graph-leapfrog benchmark bug that could count the final update-only drain as a full rollout; the observed false short-run result was 2.05M samples/s. Short invalid configurations now fail explicitly.</li>
+        <li>Throughput now uses total samples divided by total measured time instead of averaging interval rates.</li>
+        <li>A fresh Nsight Systems trace attributes the largest shares to learner dense forward (11.4%), reduced advance/publish (14.8%), reduced contact row build/solve (13.9%), weight gradients (6.2%), and recurrent forward/backward (8.1%). Environment bookkeeping and state import/export are each below 1%.</li>
+        <li>Giving rollout a high-priority CUDA stream was neutral in an A/B/reverse bracket and was fully reverted.</li>
+      </ul>
+      <div class="verdict good-verdict"><strong>Current architectural target:</strong> exploit homogeneous replicated-world structure so immutable articulation topology and parameters can be stored once while dynamic state remains per world. The current 8,192-world G1 model carries 113.4 MiB of model arrays, much of it repeated topology. Any prototype must be automatic for homogeneous fleets, remain neutral for heterogeneous scenes, and prove itself end to end. A staggered half-rollout probe was abandoned because the stale experimental fixture used the wrong solver path and crashed under graph replay.</div>
+      <p class="compact-note"><strong>Reference audit:</strong> current nanoG1 documentation reports 1.276M end-to-end SPS, not the stale 1.3924M dashboard value. Its number is derived from checkpoint-counter slopes over checkpoint mtimes. The exact pinned engine (e3825cea), production physics flags, and model fingerprint 432c765a were rebuilt locally: the published sweep reproduces 1.33M, 1.67M, 1.79M, and 1.78M environment steps/s at 4,096, 8,192, 16,384, and 32,768 worlds respectively. At the matched 8,192 worlds this is 8.35M physics steps/s, within 1.8% of the documented 8.5M raw-engine result.</p>
+      <p class="compact-note"><strong>Matched local diagnosis:</strong> PhoenX at 8,192 worlds measures 1.986M environment steps/s and 5.96M physics steps/s with its current 3-substep recipe. At five substeps per action it measures 1.239M environment steps/s and 6.20M physics steps/s, or 74.2% of nanoG1's reproduced 8.35M physics rate. Yet current full training is already about 1.09M samples/s versus nanoG1's documented 1.276M. The next high-value work is therefore learner/rollout interference and broad replicated-topology bandwidth reduction, not isolated environment bookkeeping kernels.</p>
+    </section>
 
     <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
       <h2>How far PhoenX is behind nanoG1</h2>
