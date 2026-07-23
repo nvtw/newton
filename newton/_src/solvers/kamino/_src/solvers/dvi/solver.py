@@ -273,8 +273,8 @@ class DVISolver:
         solver_type = first_config.bilateral_solver_type
         kwargs = dict(first_config.bilateral_solver_kwargs)
         if solver_type == "LLTB":
-            # The factorization and single-RHS solve benefit from independent
-            # tile and thread-block sizes.
+            # A larger factorization tile reduces panel count, while the
+            # single-RHS solve benefits from more threads on its smaller tile.
             kwargs.setdefault("factorize_block_size", 64)
             kwargs.setdefault("solve_block_dim", 256)
             solver_class = LLTBlockedSolver
