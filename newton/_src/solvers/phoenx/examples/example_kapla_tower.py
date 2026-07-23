@@ -126,6 +126,7 @@ class Example:
     # ticks, so 10 frames at 60 fps == 20 physics ticks at 120 Hz
     # (matches the original warmup duration).
     WARMUP_FRAMES: int = 10
+    overlap_simulation_render: bool = True
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -265,6 +266,9 @@ class Example:
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
         self.state = self.model.state()
+        self._render_states = (self.model.state(), self.model.state())
+        self._render_state_index = 0
+        self._render_state_prepared = False
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.model.body_q.assign(self.state.body_q)
 
@@ -560,6 +564,13 @@ class Example:
         self.sim_time += self.frame_dt * self.steps_per_frame
         self.frame_index += 1
 
+    def prepare_render_state(self) -> None:
+        """Snapshot live body transforms before the next asynchronous step."""
+        self._render_state_index = 1 - self._render_state_index
+        wp.copy(self._render_states[self._render_state_index].body_q, self.state.body_q)
+        wp.synchronize_stream(self.device)
+        self._render_state_prepared = True
+
     def _dump_coloring_graph(self) -> None:
         """Snapshot the active constraint graph to ``kapla_graph.npz``
         for the standalone coloring benchmark to replay."""
@@ -600,10 +611,16 @@ class Example:
         print("[PhoenX KaplaTower] " + " ".join(fields))
 
     def render(self) -> None:
+        render_state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state
         self.viewer.begin_frame(self.sim_time)
-        self.viewer.log_state(self.state)
-        self.viewer.log_contacts(self.contacts, self.state)
+        self.viewer.log_state(render_state)
+        if getattr(self.viewer, "show_contacts", False) and hasattr(self.viewer, "synchronize_simulation_step"):
+            # Contact buffers are solver-owned. Debug contact rendering remains
+            # correct by waiting for the deferred step instead of racing it.
+            self.viewer.synchronize_simulation_step()
+        self.viewer.log_contacts(self.contacts, render_state)
         self.viewer.end_frame()
+        self._render_state_prepared = False
 
     # ------------------------------------------------------------------
     # Post-settle validation
