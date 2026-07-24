@@ -1278,6 +1278,17 @@ A corrected production-recipe phase comparison changes the next target:
   20x8 PhoenX reference has zero falls, 0.00059 rad joint-position RMS,
   0.00665 rad/s joint-velocity RMS, 0.35 mm base-state RMS, and essentially
   identical mean normal support over the 20-step leg perturbation.
+- A valid production G1 Nsight trace attributes about 19% of CUDA time to
+  fused reduced advance/publication, 18% to packed contact-row construction,
+  and 18% to patch contact solve; collision is only about 0.5%. The fused
+  schedule copied every reduced velocity into a snapshot immediately before
+  integration, although momentum correction cannot occur until afterward.
+  Reading the authoritative velocity directly removes one depth traversal and
+  round-trip. Three warmed runs improve median physics throughput from 1.977M
+  to 1.984M environment steps/s (+0.37%); all optimized runs exceeded all
+  controls. Serial equivalence passes on branched 8/16/32-lane topologies, the
+  production 3x2 versus 20x8 quality metrics are unchanged, and a 20-iteration
+  Ant smoke remains finite and learns forward motion.
 
 ## Open ideas (not yet attempted)
 

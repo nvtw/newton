@@ -3033,7 +3033,6 @@ def _make_advance_reduced_articulations_warp_ops(
         dt: wp.float32,
         joint_q: wp.array[wp.float32],
         joint_qd: wp.array[wp.float32],
-        joint_qd_integrator: wp.array[wp.float32],
         joint_s: wp.array[wp.spatial_vector],
         joint_u_matrix: wp.array[wp.spatial_vector],
         joint_d_inv: wp.array2d[wp.float32],
@@ -3102,22 +3101,8 @@ def _make_advance_reduced_articulations_warp_ops(
             captured_momentum,
         )
 
-        lane = thread - articulation * tile_width
-        warp_lane = thread & wp.int32(31)
-        group = warp_lane // tile_width
-        group_mask = wp.uint32(4294967295)
-        if tile_width < wp.int32(32):
-            group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
-        for depth in range(max_depth + wp.int32(1)):
-            index = articulation_depth_start[articulation, depth] + lane
-            depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
-            while index < depth_end:
-                joint = articulation_depth_joint[index]
-                for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
-                    joint_qd_integrator[dof] = joint_qd[dof]
-                index += tile_width
-            _sync_reduced_group(group_mask)
-
+        # Momentum restoration happens after integration, so the authoritative
+        # velocity is also the uncorrected integration velocity here.
         _finish_and_publish_reduced_warp_device(
             thread,
             articulation_count,
@@ -3127,7 +3112,7 @@ def _make_advance_reduced_articulations_warp_ops(
             articulation_depth_joint,
             joint_q,
             joint_qd,
-            joint_qd_integrator,
+            joint_qd,
             joint_q_start,
             joint_qd_start,
             joint_type,
@@ -4642,7 +4627,6 @@ class ReducedPhoenXArticulation:
                 wp.float32(dt),
                 self.state.joint_q,
                 self.system.joint_qd_internal,
-                self.system.joint_qd_integrator,
                 self.system.joint_s,
                 self.system.joint_u_matrix,
                 self.system.joint_d_inv,
