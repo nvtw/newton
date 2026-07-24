@@ -427,8 +427,11 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
                 index = (tid_block + q * block_dim) % (block_size * block_size)
                 row = index // block_size
                 col = index % block_size
+                # Preserve a collective full-tile write before the next Tile operation.
+                value = diagonal[row, col]
                 if k + row >= n or k + col >= n:
-                    diagonal[row, col] = wp.where(row == col, wp.float32(1), wp.float32(0))
+                    value = wp.where(row == col, wp.float32(1), wp.float32(0))
+                diagonal[row, col] = value
 
         for tile_j in range(tile_k):
             if TP_i[tile_k, tile_j] == int(0):
@@ -479,10 +482,15 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
                 index = (tid_block + q * block_dim) % (block_size * block_size)
                 row = index // block_size
                 col = index % block_size
+                # Preserve collective full-tile writes before the next Tile operations.
+                panel_value = panel[row, col]
                 if i + row >= n or k + col >= n:
-                    panel[row, col] = wp.where(i + row == k + col, wp.float32(1), wp.float32(0))
+                    panel_value = wp.where(i + row == k + col, wp.float32(1), wp.float32(0))
+                panel[row, col] = panel_value
+                diagonal_value = diagonal[row, col]
                 if k + row >= n or k + col >= n:
-                    diagonal[row, col] = wp.where(row == col, wp.float32(1), wp.float32(0))
+                    diagonal_value = wp.where(row == col, wp.float32(1), wp.float32(0))
+                diagonal[row, col] = diagonal_value
 
         for tile_j in range(tile_k):
             if TP_i[tile_i, tile_j] == int(0) or TP_i[tile_k, tile_j] == int(0):
