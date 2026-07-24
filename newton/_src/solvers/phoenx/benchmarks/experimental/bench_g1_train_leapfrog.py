@@ -284,8 +284,8 @@ def _measure_leapfrog_graphs(args: argparse.Namespace, device: wp.context.Device
     copy_graph = _capture_graph(copy_stream, device, lambda: _copy_trainer_policy(fixture.rollout, fixture.master))
 
     for phase in (phase_a, phase_b):
-        wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
         wp.capture_launch(phase.update_graph, stream=update_stream)
+        wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
         with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
             wp.wait_stream(rollout_stream)
             wp.wait_stream(update_stream)
@@ -295,8 +295,8 @@ def _measure_leapfrog_graphs(args: argparse.Namespace, device: wp.context.Device
     t0 = time.perf_counter()
     for i in range(int(args.iterations)):
         phase = phase_a if i % 2 == 0 else phase_b
-        wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
         wp.capture_launch(phase.update_graph, stream=update_stream)
+        wp.capture_launch(phase.rollout_graph, stream=rollout_stream)
         with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
             wp.wait_stream(rollout_stream)
             wp.wait_stream(update_stream)
@@ -359,6 +359,7 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
         "graph_leapfrog_env_samples_per_s": graph_leapfrog_sps,
         "graph_leapfrog_speedup": graph_sync_seconds / graph_leapfrog_seconds if graph_leapfrog_seconds > 0.0 else 0.0,
         "graph_seed_note": "separate stream graphs advance command, action, and minibatch RNG with device seed counters",
+        "graph_launch_order": "update_then_rollout",
         "graph_error": graph_error,
         "command_randomization": not bool(args.no_command_randomization),
     }

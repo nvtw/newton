@@ -7,6 +7,13 @@ import unittest
 from types import SimpleNamespace
 
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train import _summarize_measured_history
+from newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog import (
+    _g1_env_config,
+)
+from newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog import (
+    build_arg_parser as build_leapfrog_arg_parser,
+)
+from newton._src.solvers.phoenx.rl_training import g1_recipe
 
 
 def _stats(elapsed: float) -> SimpleNamespace:
@@ -45,6 +52,17 @@ class TestBenchG1Train(unittest.TestCase):
 
         self.assertEqual(env_sps, 50.0)
         self.assertFalse(excluded_drain)
+
+    def test_leapfrog_benchmark_inherits_production_environment(self):
+        args = build_leapfrog_arg_parser().parse_args([])
+        config = _g1_env_config(args)
+
+        self.assertEqual(config.articulation_mode, g1_recipe.ARTICULATION_MODE)
+        self.assertEqual(config.reduced_articulation_path, g1_recipe.REDUCED_ARTICULATION_PATH)
+        self.assertEqual(config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
+        self.assertEqual(config.contact_friction_model, g1_recipe.CONTACT_FRICTION_MODEL)
+        self.assertEqual(config.actuation_model, g1_recipe.ACTUATION_MODEL)
+        self.assertEqual(config.observation_mode, g1_recipe.OBSERVATION_MODE)
 
 
 if __name__ == "__main__":

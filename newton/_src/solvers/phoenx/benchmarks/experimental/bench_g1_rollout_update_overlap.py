@@ -55,7 +55,7 @@ def _g1_ppo_config(args: argparse.Namespace) -> rl.ConfigPPO:
 
 
 def _g1_env_config(args: argparse.Namespace) -> rl.ConfigEnvG1PhoenX:
-    return rl.ConfigEnvG1PhoenX(
+    return g1_recipe.default_g1_env_config(
         world_count=int(args.world_count),
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
@@ -83,7 +83,7 @@ def _make_trainer(
         config=ppo_config,
         device=env.device,
         seed=int(seed),
-        squash_actions=True,
+        squash_actions=g1_recipe.SQUASH_ACTIONS,
         activation=str(args.activation),
         log_std_init=float(args.log_std_init),
         mirror_map=rl.g1_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,
