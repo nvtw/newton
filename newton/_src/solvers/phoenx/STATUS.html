@@ -1,145 +1,66 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PhoenX Performance Status</title>
-  <style>
-    :root { color-scheme: light; --ink:#172033; --muted:#647087; --line:#e2e8f0; --blue:#2563eb; --green:#087f5b; --amber:#9a5b00; }
-    * { box-sizing: border-box; }
-    body { margin:0; color:var(--ink); background:#f7f9fc; font:16px/1.55 Inter,system-ui,sans-serif; }
-    main { width:min(1040px,calc(100% - 32px)); margin:auto; padding:38px 0 60px; }
-    header { display:flex; justify-content:space-between; gap:24px; align-items:end; }
-    h1 { margin:3px 0; font-size:2.15rem; line-height:1.1; }
-    h2 { margin:0 0 8px; font-size:1.25rem; }
-    p { margin:7px 0; }
-    ul { margin:9px 0 0; padding-left:20px; }
-    li + li { margin-top:5px; }
-    code { color:#1748a6; background:#eaf1ff; padding:2px 5px; border-radius:4px; }
-    .eyebrow,.stamp,.meta,.note { color:var(--muted); font-size:.84rem; }
-    .eyebrow { color:var(--blue); font-weight:800; text-transform:uppercase; }
-    .stamp { text-align:right; }
-    .hero,.panel,.metric { background:white; border:1px solid var(--line); border-radius:9px; }
-    .hero,.panel { padding:20px 22px; margin-top:15px; }
-    .hero { border-left:5px solid var(--green); }
-    .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:15px; }
-    .metric { padding:16px; }
-    .metric strong { display:block; font-size:1.55rem; line-height:1.1; }
-    .metric span { color:var(--muted); font-size:.78rem; }
-    .tag { display:inline-block; padding:3px 8px; border-radius:99px; color:var(--green); background:#e8f7f1; font-weight:750; }
-    .warn { color:var(--amber); background:#fff4dd; }
-    .grid { display:grid; grid-template-columns:1fr 1fr; gap:15px; }
-    .decision { margin-top:13px; padding:12px 14px; background:#edf7f3; border-left:4px solid var(--green); }
-    table { width:100%; border-collapse:collapse; margin-top:12px; }
-    th,td { padding:10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
-    th { color:var(--muted); font-size:.76rem; text-transform:uppercase; }
-    footer { margin-top:22px; color:var(--muted); text-align:center; font-size:.82rem; }
-    @media(max-width:760px) { header{display:block}.stamp{text-align:left}.metrics,.grid{grid-template-columns:1fr 1fr} }
-    @media(max-width:500px) { .metrics,.grid{grid-template-columns:1fr} }
-  </style>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PhoenX Progress</title>
+<style>
+:root{--ink:#172033;--muted:#647087;--line:#dfe6ef;--green:#087f5b;--amber:#9a5b00}
+*{box-sizing:border-box}body{margin:0;background:#f6f8fb;color:var(--ink);font:16px/1.5 system-ui,sans-serif}
+main{width:min(900px,calc(100% - 32px));margin:auto;padding:36px 0 52px}h1{margin:0;font-size:2rem}h2{margin:0 0 7px;font-size:1.15rem}
+p{margin:7px 0}.muted{color:var(--muted)}section{background:#fff;border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-top:13px}
+.hero{border-left:5px solid var(--green)}.gap{border-left:5px solid var(--amber)}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:14px}
+.metric{border:1px solid var(--line);border-radius:8px;padding:13px}.metric strong{display:block;font-size:1.4rem}.metric span{color:var(--muted);font-size:.8rem}
+ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff;padding:2px 5px;border-radius:4px}
+@media(max-width:620px){.metrics{grid-template-columns:1fr}}
+</style>
 </head>
-<body>
-<main>
-  <header>
-    <div><div class="eyebrow">Newton · PhoenX</div><h1>Performance status</h1></div>
-    <div class="stamp">24 July 2026<br>branch <code>twidmer/phoenx-bandwidth-wins</code></div>
-  </header>
+<body><main>
+<h1>PhoenX performance</h1>
+<p class="muted">24 July 2026 · <code>twidmer/phoenx-bandwidth-wins</code></p>
 
-  <section class="hero">
-    <span class="tag">Correctness fix committed</span>
-    <h2>Reduced friction is now explicit and reproducible</h2>
-    <p>Reduced PhoenX was silently switching between point and patch friction based on fleet size and GPU SM count. Commit <code>ec51415bf</code> removes that hardware-dependent physics choice. G1 explicitly requests its production patch model, with no meaningful throughput change.</p>
-    <div class="metrics">
-      <div class="metric"><strong>0.897M</strong><span>post-fix G1 samples/s</span></div>
-      <div class="metric"><strong>0.899M</strong><span>matched pre-fix control</span></div>
-      <div class="metric"><strong>−0.21%</strong><span>noise-level difference</span></div>
-      <div class="metric"><strong>Bit-exact</strong><span>G1 patch trajectory</span></div>
-    </div>
-    <ul>
-      <li><code>point</code> and <code>patch</code> are stable across fleet size and GPU.</li>
-      <li>Patch work has one owner; regressions cover selection, routing, unsupported persistent patch mode, and one-world G1.</li>
-      <li>Maximal, projected, hybrid, persistent, Mini, H1, and Ant paths were audited.</li>
-    </ul>
-  </section>
+<section class="hero">
+<h2>Progress: real, but the G1 gap remains</h2>
+<div class="metrics">
+<div class="metric"><strong>1.244M</strong><span>PhoenX matched G1 samples/s</span></div>
+<div class="metric"><strong>1.393M</strong><span>nanoG1 local baseline</span></div>
+<div class="metric"><strong>89.3%</strong><span>PhoenX / nanoG1</span></div>
+</div>
+<p>PhoenX physics and training are faster than at the start of this chase. The latest contact-grouping experiment was not retained: it accelerated isolated physics but slightly slowed full training.</p>
+</section>
 
-  <section class="panel">
-    <span class="tag warn">Current gap</span>
-    <h2>Honest same-machine comparison</h2>
-    <table>
-      <tr><th>System</th><th>Production replay-3 throughput</th><th>Interpretation</th></tr>
-      <tr><td>nanoG1</td><td>1.393M samples/s</td><td>Current local pinned-source run</td></tr>
-      <tr><td>PhoenX</td><td>1.243M samples/s</td><td>Best matched validated control</td></tr>
-      <tr><td>Gap</td><td>12.0%</td><td>PhoenX reaches 89.3% of nanoG1</td></tr>
-    </table>
-    <p class="note">The 0.897M result above is a later exact diagnostic configuration and should not replace the matched 1.243M production comparison.</p>
-    <div class="decision"><strong>Learning verdict:</strong> neither implementation always learns faster. Fresh seed-42 runs failed their own frozen gates in both systems while shipped checkpoints pass. Compare multi-seed time-to-gate, not one lucky checkpoint.</div>
-  </section>
+<section>
+<h2>Retained wins</h2>
+<ul>
+<li>Packed FP16x2 contact rows: about +1.1% G1 training.</li>
+<li>Compact reduced-factor storage and DOF-type factor split: less memory and up to +2.8% isolated physics.</li>
+<li>Packed contact gather and selective launch tuning: substantial isolated physics wins, about +1% training where measured.</li>
+<li>Dense learner tiling and tiled Muon: about +6% and +3.3% G1 training respectively.</li>
+<li>Reusable contact graphs and topology caching: generic gains across homogeneous robot fleets.</li>
+<li>Ant PPO work restored reliable learning and produced a large shared-PPO gain; current smoke remains finite near 0.93M samples/s.</li>
+</ul>
+</section>
 
-  <div class="grid">
-    <section class="panel">
-      <h2>What currently limits performance</h2>
-      <ul>
-        <li>Physics remains the largest work category; reduced advance/publish and contact row build/solve are major components.</li>
-        <li>Learner dense forward, weight gradients, and recurrent forward/backward are the other large blocks.</li>
-        <li>Host launch gaps are negligible: Nsight measured about 0.1–0.2 ms around a roughly 420 ms iteration.</li>
-        <li>Environment bookkeeping and state import/export are each below 1%.</li>
-      </ul>
-    </section>
-    <section class="panel">
-      <h2>Latest grouping verdict</h2>
-      <ul>
-        <li>Sorted body-pair grouping cuts G1 columns from 73,728 to 16,384 and raises isolated physics from 1.620M to 1.887M steps/s (+16.5%), but training falls about 1.8%.</li>
-        <li>Removing the redundant second sort raises isolated physics to 1.995M (+23.2%), yet training remains 1.234M versus 1.244M control (-0.8%). Dominant row build/solve stays unchanged.</li>
-        <li>Decision: do not enable fleet grouping or chase its residual overhead. Commit <code>e549a1ea2</code> retains the mixed-material and per-contact friction fixes with regressions.</li>
-      </ul>
-    </section>
-  </div>
+<section class="gap">
+<h2>Latest rejected result</h2>
+<p>Body-pair grouping reduced G1 columns 73,728 → 16,384 and improved isolated physics 16–23%, but production training measured 1.234M versus 1.244M control. Nsight showed the dominant reduced row build and solve were unchanged, while sorting added work. The optimization was removed.</p>
+</section>
 
-  <section class="panel">
-    <h2>Retained improvements</h2>
-    <table>
-      <tr><th>Change</th><th>Measured outcome</th><th>Scope</th></tr>
-      <tr><td>Update-first graph scheduling</td><td>Best current training schedule</td><td>G1 learner/rollout overlap</td></tr>
-      <tr><td>Skip duplicate reduced FK import</td><td>Higher G1 throughput</td><td>Reduced articulation</td></tr>
-      <tr><td>Reuse G1 contact graph per frame</td><td>+3.13%</td><td>Generic reusable mechanism</td></tr>
-      <tr><td>Selective grid-stride kernels</td><td>About +1% physics</td><td>Five measured kernels</td></tr>
-      <tr><td>Wider dense learner tiles</td><td>About +6% G1 training</td><td>Generic dense learner</td></tr>
-      <tr><td>Tiled Muon path</td><td>+3.3% end to end</td><td>Generic optimizer</td></tr>
-      <tr><td>Static topology caching</td><td>Wins on G1, ANYmal, H1</td><td>Homogeneous fleets</td></tr>
-      <tr><td>Ant PPO fixes/optimization</td><td>Reliable learning; PPO +75%</td><td>Ant and shared PPO code</td></tr>
-    </table>
-  </section>
+<section>
+<h2>What limits us now</h2>
+<ul>
+<li>Reduced advance/publish, contact-row construction, and contact solve dominate PhoenX physics.</li>
+<li>The learner dense/recurrent passes are the other major training cost; host launch gaps and bookkeeping are small.</li>
+<li>Nsight Compute shows the contact kernels are dependency/eligibility limited, not tensor-core or raw-DRAM limited. Wider loads, extra streams, row caches, and patch-row compression have already failed end-to-end validation.</li>
+<li>The next credible solver target is a general pipeline/layout change that improves row construction or removes a full materialization pass—not a scene special case or a small arithmetic tweak.</li>
+</ul>
+</section>
 
-  <section class="panel">
-    <h2>Rejected or parked directions</h2>
-    <ul>
-      <li><strong>BF16/FP16 paths:</strong> isolated kernels improved, but end-to-end throughput or learning gates did not.</li>
-      <li><strong>Fewer PPO replays, less relaxation, or fresh-policy serialization:</strong> failed learning or stability gates.</li>
-      <li><strong>Patch mass caches and host/stream scheduling:</strong> neutral or too small end to end.</li>
-      <li><strong>Scene-specialized kernels:</strong> rejected; PhoenX remains general.</li>
-    </ul>
-  </section>
-
-  <section class="panel">
-    <h2>Correctness findings still open</h2>
-    <ul>
-      <li>Free-flight joint trajectories are close (0.0027 rad RMSE over ten control steps); ground contact causes immediate divergence.</li>
-      <li>Both systems satisfy support-force and Coulomb bounds. Soft-pyramidal versus patch-Coulomb models are a plausible difference, not a proven bug.</li>
-      <li>Projected maximal changes the error rather than consistently improving it.</li>
-    </ul>
-    <div class="decision"><strong>Rule:</strong> reason from physical invariants and regression evidence. Matching nanoG1 is not itself proof of correctness.</div>
-  </section>
-
-  <section class="panel">
-    <h2>Validation discipline</h2>
-    <ul>
-      <li>Primary metric: multi-seed wall-clock time to a frozen policy gate; throughput and traces are secondary.</li>
-      <li>Behavior-changing candidates require multi-seed evidence.</li>
-      <li>Compound grouping and soft-contact suites pass 7/7 each. A cached 30-update Ant smoke remains finite at 0.928M samples/s; this is not a paired speed claim.</li>
-    </ul>
-  </section>
-
-  <footer>Concise current state only. Benchmark artifacts, tests, commits, and Nsight reports are the detailed technical record.</footer>
-</main>
-</body>
-</html>
+<section>
+<h2>Correctness and learning</h2>
+<ul>
+<li>Commit <code>e549a1ea2</code> fixes mixed-material grouping and per-contact friction scaling with end-to-end regressions.</li>
+<li>Neither implementation always learns faster. Single seeds and shipped checkpoints are not reliable evidence; the proper metric is multi-seed wall-clock time to a frozen gate.</li>
+<li>Physics candidates must preserve invariants and pass G1 plus cross-scene tests. Matching nanoG1 alone is not proof of correctness.</li>
+</ul>
+</section>
+</main></body></html>
