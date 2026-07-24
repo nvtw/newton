@@ -89,8 +89,8 @@
       <h2>Current investigation</h2>
       <ul>
         <li>G1 has 17 shape-pair columns but only four compatible physical body pairs per world.</li>
-        <li>The first grouping comparison is invalid: short runs include GPU clock ramp; long runs evolve from 34 to 64 contacts/world.</li>
-        <li>Next: make paired measurements clock- and state-invariant, then re-evaluate grouping.</li>
+        <li>A contact-stable pair measured 1.867M grouped versus 1.623M control physics steps/s (+15%).</li>
+        <li>Blocker: current grouping merges mixed-material compound shapes using friction from the first shape. Fix and regress that root cause before enabling fleets.</li>
       </ul>
     </section>
   </div>
