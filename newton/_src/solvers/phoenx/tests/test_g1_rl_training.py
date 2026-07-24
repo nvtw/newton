@@ -1309,6 +1309,30 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertFalse(optimizer.matrix_transpose)
         self.assertEqual(optimizer.step_count, 1)
 
+    def test_optimizer_grad_norm_matches_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX optimizer gradient-norm tests")
+        rng = np.random.default_rng(20260724)
+        grad_np = [
+            rng.uniform(-0.5, 0.5, 70001).astype(np.float32),
+            rng.uniform(-0.5, 0.5, (513, 257)).astype(np.float32),
+        ]
+        params = [wp.zeros_like(wp.array(grad, device=device), requires_grad=True) for grad in grad_np]
+        for param, grad in zip(params, grad_np, strict=True):
+            param.grad.assign(grad)
+        optimizer = rl.Adam(params, max_grad_norm=0.5)
+
+        with wp.ScopedCapture(device=device) as capture:
+            optimizer.step()
+        wp.capture_launch(capture.graph)
+        first = optimizer._grad_sumsq.numpy()[0]
+        expected = sum(float(np.sum(grad * grad, dtype=np.float32)) for grad in grad_np)
+        np.testing.assert_allclose(first, expected, rtol=2.0e-6)
+
+        for param, grad in zip(params, grad_np, strict=True):
+            param.grad.assign(grad)
+        wp.capture_launch(capture.graph)
+        self.assertEqual(optimizer._grad_sumsq.numpy()[0], first)
+
     def test_pufferlib_muon_tiled_wide_matrix_matches_numpy_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 tiled Muon parity tests")
         rng = np.random.default_rng(20260717)

@@ -45,3 +45,10 @@ Keep new native snippets tiny, GPU-scoped, and documented here.
 - `timer.read_global_timer_ns`: reads CUDA `%globaltimer` for optional
   per-constraint profiling. This is GPU-only instrumentation and should stay
   off the default hot path.
+
+## Block Reductions
+
+- `rl_training.kernels._grad_sumsq_blocks_native`: performs a deterministic
+  shared-memory block reduction for optimizer gradient clipping and Muon
+  normalization. Warp's tile reduction was measured slower for these flat,
+  device-wide arrays; CPU and non-contiguous arrays keep the Warp fallback.

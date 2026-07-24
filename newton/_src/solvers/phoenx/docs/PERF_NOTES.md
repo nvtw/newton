@@ -1301,6 +1301,22 @@ A corrected production-recipe phase comparison changes the next target:
   sampling regressions pass; an 8-iteration G1 smoke remains finite and improves
   reward and tracking.
 
+- Optimizer norm computation then remained a general bandwidth/parallelism gap.
+  Each parameter used one 256-thread block for global clipping and again for
+  Muon normalization. A Puffer-style deterministic 256-block shared-memory
+  reduction lowers the isolated G1 update from a same-session 113.6 to
+  102.8-103.1 ms (-9.5%), leaving roughly 9 ms to the local nanoG1 update.
+  Nsight measures all block partials plus their fixed-order reductions at about
+  2.5 ms/update, versus roughly 12.8 ms before. A Warp tile implementation was
+  rejected at 123.5 ms/update. The small native primitive is CUDA-only; CPU and
+  non-contiguous arrays retain the Warp reduction.
+- G1 graph-leapfrog controls measure 1.5850-1.5858M samples/s versus
+  1.5852-1.5893M for the candidate, effectively neutral because rollout hides
+  the learner gain. Warmed 20-iteration Ant improves 2.272 to 2.115 seconds
+  (-6.9%) and remains finite, reaching 0.73 m/s forward velocity. Large
+  irregular-array norm parity, Muon parity, CUDA-graph reproducibility, CPU
+  fallback, and an 8-iteration G1 learning smoke pass.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

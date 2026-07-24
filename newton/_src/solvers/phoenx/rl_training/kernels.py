@@ -29,6 +29,7 @@ DENSE_BIAS_TILE_BATCH = 256
 DENSE_WEIGHT_GRAD_KCHUNKS = 8
 PPO_LOG_STD_PARTIAL_BATCH = 256
 PPO_ADVANTAGE_PARTIAL_COUNT = 256
+OPTIMIZER_GRAD_BLOCK_SIZE = 256
 OPTIMIZER_GRAD_PARTIAL_COUNT = 256
 
 
@@ -2262,6 +2263,52 @@ def grad_sumsq_partials_2d_kernel(
             value = grad[flat / cols, flat % cols]
             total = total + value * value
     partials[param_index, partial] = total
+
+
+@wp.func_native(
+    r"""
+#if defined(__CUDA_ARCH__)
+    constexpr int block_size = 256;
+    __shared__ float sums[block_size];
+    const int lane = threadIdx.x;
+    const int block = blockIdx.x;
+    const float* __restrict__ values = (const float*)grad.data;
+    float local_sum = 0.0f;
+    for (int i = block * block_size + lane; i < count; i += block_size * gridDim.x) {
+        const float value = values[i];
+        local_sum += value * value;
+    }
+    sums[lane] = local_sum;
+    __syncthreads();
+    for (int offset = block_size / 2; offset > 0; offset >>= 1) {
+        if (lane < offset) {
+            sums[lane] += sums[lane + offset];
+        }
+        __syncthreads();
+    }
+    if (lane == 0) {
+        float* __restrict__ out = (float*)partials.data;
+        out[param_index * partials.shape.dims[1] + block] = sums[0];
+    }
+#endif
+"""
+)
+def _grad_sumsq_blocks_native(
+    grad: wp.array[wp.float32],
+    count: wp.int32,
+    param_index: wp.int32,
+    partials: wp.array2d[wp.float32],
+): ...
+
+
+@wp.kernel(enable_backward=False, module="unique", grid_stride=False)
+def grad_sumsq_blocks_kernel(
+    grad: wp.array[wp.float32],
+    count: wp.int32,
+    param_index: wp.int32,
+    partials: wp.array2d[wp.float32],
+):
+    _grad_sumsq_blocks_native(grad, count, param_index, partials)
 
 
 @wp.kernel

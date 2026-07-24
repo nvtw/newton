@@ -30,7 +30,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 
 <section>
 <h2>Corrected diagnosis</h2>
-<p>Rollout remains about 279 ms versus roughly 270 ms for nanoG1. In the latest isolated profile, replacing quadratic priority scans with a parallel CDF cuts the update from 123.0 to 113.9 ms; nanoG1 is roughly 94 ms. CUDA-graph overlap makes PhoenX faster end to end.</p>
+<p>Rollout remains about 279 ms versus roughly 270 ms for nanoG1. Parallel priority sampling and deterministic block reductions bring the isolated update to about 103 ms; nanoG1 is roughly 94 ms. CUDA-graph overlap makes PhoenX faster end to end.</p>
 </section>
 
 <section>
@@ -46,6 +46,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>Batch three compatible Muon matrix passes: -8.4% isolated update and about +0.5% production G1.</li>
 <li>Optional device-wide BF16 GEMM: -32% isolated G1 update, about +10% production G1, and -23% Ant wall clock.</li>
 <li>Parallel prioritized sampling: -7.4% isolated G1 update and about +0.5% overlapped wall clock.</li>
+<li>Parallel optimizer reductions: -9.5% isolated G1 update and -6.9% warmed Ant wall clock; G1 overlap is neutral.</li>
 <li>Remove a redundant fused reduced-velocity copy: +0.37% G1 physics with unchanged 20×8-reference quality.</li>
 <li>Reusable contact graphs and topology caching: generic gains across homogeneous robot fleets.</li>
 <li>Ant's 120-iteration accelerated smoke remains finite and learns forward locomotion.</li>

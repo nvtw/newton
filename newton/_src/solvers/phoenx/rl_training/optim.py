@@ -9,10 +9,12 @@ import warp as wp
 from .kernels import (
     MUON_TILE,
     MUON_TILE_BLOCK_DIM,
+    OPTIMIZER_GRAD_BLOCK_SIZE,
     OPTIMIZER_GRAD_PARTIAL_COUNT,
     adam_step_1d_kernel,
     adam_step_2d_kernel,
     adam_step_prepare_kernel,
+    grad_sumsq_blocks_kernel,
     grad_sumsq_partials_1d_kernel,
     grad_sumsq_partials_2d_kernel,
     muon_gram_tall_kernel,
@@ -36,33 +38,71 @@ from .kernels import (
 )
 
 
+def _flat_view(value: wp.array) -> wp.array[wp.float32] | None:
+    if not value.is_contiguous:
+        return None
+    return wp.array(
+        ptr=value.ptr,
+        shape=(int(np.prod(value.shape)),),
+        dtype=wp.float32,
+        device=value.device,
+    )
+
+
+def _launch_sumsq_partials(
+    value: wp.array[wp.float32],
+    param_index: int,
+    partials: wp.array2d[wp.float32],
+) -> None:
+    if value.device.is_cuda:
+        block_count = min(
+            (value.shape[0] + OPTIMIZER_GRAD_BLOCK_SIZE - 1) // OPTIMIZER_GRAD_BLOCK_SIZE,
+            OPTIMIZER_GRAD_PARTIAL_COUNT,
+        )
+        wp.launch(
+            grad_sumsq_blocks_kernel,
+            dim=block_count * OPTIMIZER_GRAD_BLOCK_SIZE,
+            inputs=[value, value.shape[0], param_index],
+            outputs=[partials],
+            block_dim=OPTIMIZER_GRAD_BLOCK_SIZE,
+            device=value.device,
+        )
+    else:
+        wp.launch(
+            grad_sumsq_partials_1d_kernel,
+            dim=OPTIMIZER_GRAD_PARTIAL_COUNT,
+            inputs=[value, param_index],
+            outputs=[partials],
+            device=value.device,
+        )
+
+
 def _compute_grad_sumsq(
     params: list[wp.array],
+    flat_grads: list[wp.array | None],
     partials: wp.array2d[wp.float32],
     total: wp.array[wp.float32],
 ) -> None:
     partials.zero_()
-    for index, param in enumerate(params):
+    for index, (param, flat_grad) in enumerate(zip(params, flat_grads, strict=True)):
         grad = param.grad
         if grad is None:
             continue
-        if param.ndim == 1:
-            kernel = grad_sumsq_partials_1d_kernel
-        elif param.ndim == 2:
-            kernel = grad_sumsq_partials_2d_kernel
+        if flat_grad is not None:
+            _launch_sumsq_partials(flat_grad, index, partials)
         else:
-            raise ValueError(f"Optimizer only supports 1-D and 2-D arrays, got ndim={param.ndim}")
-        wp.launch(
-            kernel,
-            dim=OPTIMIZER_GRAD_PARTIAL_COUNT,
-            inputs=[grad, index],
-            outputs=[partials],
-            device=param.device,
-        )
+            kernel = grad_sumsq_partials_1d_kernel if param.ndim == 1 else grad_sumsq_partials_2d_kernel
+            wp.launch(
+                kernel,
+                dim=OPTIMIZER_GRAD_PARTIAL_COUNT,
+                inputs=[grad, index],
+                outputs=[partials],
+                device=grad.device,
+            )
     wp.launch(
         reduce_grad_sumsq_partials_kernel,
         dim=1,
-        inputs=[partials, len(params)],
+        inputs=[partials, len(flat_grads)],
         outputs=[total],
         device=total.device,
     )
@@ -70,17 +110,21 @@ def _compute_grad_sumsq(
 
 def _compute_param_sumsq(
     value: wp.array2d[wp.float32],
+    flat_value: wp.array[wp.float32] | None,
     param_index: int,
     partials: wp.array2d[wp.float32],
     total: wp.array[wp.float32],
 ) -> None:
-    wp.launch(
-        grad_sumsq_partials_2d_kernel,
-        dim=OPTIMIZER_GRAD_PARTIAL_COUNT,
-        inputs=[value, param_index],
-        outputs=[partials],
-        device=value.device,
-    )
+    if flat_value is not None:
+        _launch_sumsq_partials(flat_value, param_index, partials)
+    else:
+        wp.launch(
+            grad_sumsq_partials_2d_kernel,
+            dim=OPTIMIZER_GRAD_PARTIAL_COUNT,
+            inputs=[value, param_index],
+            outputs=[partials],
+            device=value.device,
+        )
     wp.launch(
         reduce_grad_sumsq_param_partials_kernel,
         dim=1,
@@ -131,6 +175,7 @@ class Adam:
         self._step_count = wp.array([0], dtype=wp.int32, device=params[0].device)
         self._step_corrections = wp.zeros(2, dtype=wp.float32, device=params[0].device, requires_grad=False)
         self._grad_sumsq = wp.zeros(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
+        self._flat_grads = [_flat_view(param.grad) if param.grad is not None else None for param in params]
         self._grad_sumsq_partials = wp.zeros(
             (len(params), OPTIMIZER_GRAD_PARTIAL_COUNT), dtype=wp.float32, device=params[0].device
         )
@@ -169,7 +214,7 @@ class Adam:
         )
         max_grad_norm = float(self.max_grad_norm)
         if max_grad_norm > 0.0:
-            _compute_grad_sumsq(self.params, self._grad_sumsq_partials, self._grad_sumsq)
+            _compute_grad_sumsq(self.params, self._flat_grads, self._grad_sumsq_partials, self._grad_sumsq)
 
         for param, m, v in zip(self.params, self.m, self.v, strict=True):
             grad = param.grad
@@ -287,11 +332,13 @@ class Muon:
         self._step_count_host = 0
         self._step_count = wp.array([0], dtype=wp.int32, device=params[0].device)
         self._grad_sumsq = wp.zeros(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
+        self._flat_grads = [_flat_view(param.grad) if param.grad is not None else None for param in params]
         self._grad_sumsq_partials = wp.zeros(
             (len(params), OPTIMIZER_GRAD_PARTIAL_COUNT), dtype=wp.float32, device=params[0].device
         )
         self.m = [wp.zeros_like(param, requires_grad=False) for param in params]
         self._updates: list[wp.array | None] = []
+        self._flat_updates: list[wp.array | None] = []
         self._scratch: list[wp.array | None] = []
         self._grams: list[wp.array | None] = []
         self._polys: list[wp.array | None] = []
@@ -301,13 +348,16 @@ class Muon:
                 rows = int(param.shape[0])
                 cols = int(param.shape[1])
                 gram_dim = min(rows, cols)
-                self._updates.append(wp.zeros_like(param, requires_grad=False))
+                update = wp.zeros_like(param, requires_grad=False)
+                self._updates.append(update)
+                self._flat_updates.append(_flat_view(update))
                 self._scratch.append(wp.zeros_like(param, requires_grad=False))
                 self._grams.append(wp.zeros((gram_dim, gram_dim), dtype=wp.float32, device=param.device))
                 self._polys.append(wp.zeros((gram_dim, gram_dim), dtype=wp.float32, device=param.device))
                 self._norms.append(wp.zeros(1, dtype=wp.float32, device=param.device, requires_grad=False))
             else:
                 self._updates.append(None)
+                self._flat_updates.append(None)
                 self._scratch.append(None)
                 self._grams.append(None)
                 self._polys.append(None)
@@ -345,6 +395,7 @@ class Muon:
         gram = self._grams[index]
         poly = self._polys[index]
         norm = self._norms[index]
+        flat_update = self._flat_updates[index]
         if grad is None or update is None or scratch is None or gram is None or poly is None or norm is None:
             raise RuntimeError("Muon matrix scratch buffers were not initialized")
         wp.launch(
@@ -354,7 +405,7 @@ class Muon:
             outputs=[update],
             device=param.device,
         )
-        _compute_param_sumsq(update, index, self._grad_sumsq_partials, norm)
+        _compute_param_sumsq(update, flat_update, index, self._grad_sumsq_partials, norm)
         wp.launch(
             muon_normalize_2d_kernel,
             dim=param.shape,
@@ -457,7 +508,7 @@ class Muon:
 
         max_grad_norm = float(self.max_grad_norm)
         if max_grad_norm > 0.0:
-            _compute_grad_sumsq(self.params, self._grad_sumsq_partials, self._grad_sumsq)
+            _compute_grad_sumsq(self.params, self._flat_grads, self._grad_sumsq_partials, self._grad_sumsq)
 
         batch3_starts = self._tiled_wide_batch3_starts()
         batch3_tails = {start + offset for start in batch3_starts for offset in (1, 2)}
