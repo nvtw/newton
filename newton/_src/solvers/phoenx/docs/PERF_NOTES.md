@@ -1231,6 +1231,34 @@ A corrected production-recipe phase comparison changes the next target:
   samples/s around a 1.416M reverse control (+0.5%). Grouped and independent
   updates are bit-identical, including CUDA graph replay.
 
+- Warp 1.16 has no device-wide matrix API. Its tile_matmul already uses
+  cuBLASDx tensor-core MMA, but PhoenX still schedules tiles and writes/reduces
+  split-K partials. An optional ctypes bridge now submits the same BF16 inputs
+  to cublasGemmEx on the active Warp stream; systems without cuBLAS keep the
+  existing Warp kernels.
+- On the 32768x128x384 contraction, forward falls from 0.092 to 0.025 ms,
+  weight gradient from 0.166 to 0.019 ms, and input gradient from 0.068 to
+  0.017 ms. Isolated G1 update time falls from 165.6 to 112.6 ms (-32%).
+  A reverse graph bracket measures 1.570-1.576M samples/s versus a 1.430M
+  Warp control (+10%), or 113% of the local 1.393M nanoG1 baseline.
+- The same network-level path reduces warmed 20-iteration Ant runs from
+  2.869/2.884 s to 2.211/2.214 s (-23%). A 120-iteration Ant run remains
+  finite and learns forward locomotion.
+- CUDA-graph tests cover all three transpose modes against independent
+  BF16-rounded NumPy references. Seed 42 passes the full frozen G1 gate after
+  its final phase at 131.07M samples: 0.9306 battery performance, zero falls,
+  0.1527 jerk, 0.1910 roll/pitch rate, 0.1126 yaw rate, and 0.7742 leg speed.
+  Seed 11 misses at 100M under both backends, with cuBLAS slightly better
+  (0.668 versus 0.642), so there is no evidence of a systematic quality loss;
+  multi-seed time-to-quality remains necessary.
+- A Warp-native sweep found that 64-thread, split-64 weight-gradient tiles can
+  halve the G1-shaped contraction to 0.082 ms, but a static block-size change
+  regressed warmed Ant by 12% and was reverted. A shape/device-derived kernel
+  factory is the appropriate follow-up, not a scene-specific selector.
+- Benchmark caution: bench_g1_train_to_gate resets all worlds and recurrent
+  state between chunks by default. Changing --chunk-iterations changes the
+  training trajectory, not just measurement frequency.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

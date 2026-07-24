@@ -19,18 +19,18 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <p class="muted">24 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
 <section class="hero">
-<h2>G1 wall clock remains modestly ahead of local nanoG1</h2>
+<h2>G1 wall clock is now clearly ahead of local nanoG1</h2>
 <div class="metrics">
-<div class="metric"><strong>1.423M</strong><span>PhoenX paired G1 samples/s</span></div>
+<div class="metric"><strong>1.576M</strong><span>PhoenX paired G1 samples/s</span></div>
 <div class="metric"><strong>1.393M</strong><span>nanoG1 local baseline</span></div>
-<div class="metric"><strong>102.2%</strong><span>PhoenX / nanoG1</span></div>
+<div class="metric"><strong>113.1%</strong><span>PhoenX / nanoG1</span></div>
 </div>
-<p>Shape-grouping three compatible Muon matrices reaches 1.422–1.425M samples/s around a 1.416M reverse control. The margin remains modest, so practical parity is still the robust claim.</p>
+<p>Device-wide BF16 contractions reach 1.570–1.576M samples/s around a 1.430M same-session Warp control. cuBLAS is optional; the existing Warp path remains the fallback.</p>
 </section>
 
 <section>
 <h2>Corrected diagnosis</h2>
-<p>Corrected isolation measures about 279 ms per PhoenX rollout versus roughly 270 ms for nanoG1. Shape-grouped Muon reduces the PhoenX update from 181 ms to about 166 ms in a reverse bracket; nanoG1 remains roughly 94 ms. CUDA-graph overlap hides most of that difference. Current G1 graph training has finite rewards, losses, KL, and actions.</p>
+<p>Rollout remains about 279 ms versus roughly 270 ms for nanoG1. Device-wide GEMM cuts the isolated PhoenX update from about 166 ms to 112.6 ms; nanoG1 is roughly 94 ms. CUDA-graph overlap makes PhoenX faster end to end.</p>
 </section>
 
 <section>
@@ -44,19 +44,19 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>Reuse BF16 forward buffers in MinGRU backward: -1.8% isolated update and +0.7% overlap.</li>
 <li>Emit BF16 sequence gradients directly: -2.9% isolated update and about +1.8% production G1.</li>
 <li>Batch three compatible Muon matrix passes: -8.4% isolated update and about +0.5% production G1.</li>
+<li>Optional device-wide BF16 GEMM: -32% isolated G1 update, about +10% production G1, and -23% Ant wall clock.</li>
 <li>Reusable contact graphs and topology caching: generic gains across homogeneous robot fleets.</li>
-<li>Ant PPO work restored reliable learning; the current smoke remains finite near 0.93M samples/s.</li>
+<li>Ant's 120-iteration accelerated smoke remains finite and learns forward locomotion.</li>
 </ul>
 </section>
 
 <section class="gap">
 <h2>What limits us now</h2>
 <ul>
-<li>The measured +2.2% lead is still modest; practical wall-clock parity is the robust claim.</li>
-<li>nanoG1’s 75M claim is one deterministic seed (42), not a seed distribution. In a fresh five-seed PhoenX 39.3M screen, seed 42 was best: 0.732 versus 0.616–0.683.</li>
-<li>Fresh node-level Nsight tracing attributes about 81 ms/update to dense forward and weight-gradient kernels, 41 ms to MinGRU sequence passes, and 30–35 ms to Muon.</li>
-<li>PufferLib still wins isolated learner time through device-wide CUTLASS/cuBLAS contractions and fewer intermediate kernels.</li>
-<li>Next: general contraction fusion/device-wide GEMM experiments and multi-seed time-to-quality.</li>
+<li>Sample efficiency remains the larger gap: accelerated seed 42 passes the full gate at 131.07M samples, versus nanoG1’s single-seed 75M report.</li>
+<li>Seed 11 misses at 100M under both cuBLAS and Warp; cuBLAS is slightly better there. Multi-seed time-to-quality is still required.</li>
+<li>cuBLAS is not guaranteed by a CUDA runtime installation. Systems without it keep the tested Warp tensor-tile kernels.</li>
+<li>Next: a shape/device-derived Warp kernel factory, plus multi-seed time-to-quality.</li>
 </ul>
 </section>
 
@@ -66,6 +66,8 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>FP16 contact rows were removed earlier: their roughly 1% gain did not justify the complexity. Current production rows are FP32.</li>
 <li>Commit <code>e549a1ea2</code> fixes mixed-material grouping and per-contact friction scaling with end-to-end regressions.</li>
 <li>Mirror loss was audited against nanoG1’s exact pinned Puffer commit. Both deliberately stop gradients through the mirrored target and train the original branch; this is not a PhoenX mismatch.</li>
+<li>Forward, weight-gradient, and input-gradient GEMMs match independent BF16-rounded references under CUDA graph capture.</li>
+<li>Accelerated seed 42 passes the full held-out G1 gate at 131.07M samples with zero falls.</li>
 <li>Learning comparisons require multiple seeds and a frozen quality gate; one fast seed or checkpoint is not proof.</li>
 </ul>
 </section>

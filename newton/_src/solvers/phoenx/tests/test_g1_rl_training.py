@@ -55,6 +55,7 @@ from newton._src.solvers.phoenx.experimental.nanog1_import import (
 )
 from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
+from newton._src.solvers.phoenx.rl_training.cublas import gemm_bfloat16, is_cublas_available
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.examples import (
     train_g1_command_curriculum,
@@ -2811,6 +2812,40 @@ class TestG1PhoenXRL(unittest.TestCase):
         wp.capture_launch(capture.graph)
         for parameter, first in zip(bf16.parameters(), bf16_first, strict=True):
             np.testing.assert_array_equal(parameter.grad.numpy(), first)
+
+    def test_cublas_bf16_contractions_match_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX cuBLAS contraction tests")
+        if not is_cublas_available(device):
+            self.skipTest("cuBLAS is not installed")
+
+        rng = np.random.default_rng(20260724)
+        lhs_np = rng.uniform(-0.2, 0.2, (64, 32)).astype(np.float32)
+        rhs_np = rng.uniform(-0.2, 0.2, (32, 48)).astype(np.float32)
+        grad_np = rng.uniform(-0.2, 0.2, (64, 48)).astype(np.float32)
+        lhs = wp.array(lhs_np, dtype=wp.bfloat16, device=device)
+        rhs = wp.array(rhs_np, dtype=wp.bfloat16, device=device)
+        grad = wp.array(grad_np, dtype=wp.bfloat16, device=device)
+        forward = wp.empty((64, 48), dtype=wp.float32, device=device)
+        weight_grad = wp.empty((32, 48), dtype=wp.float32, device=device)
+        input_grad = wp.empty((64, 32), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            gemm_bfloat16(lhs, rhs, forward, 64, 48, 32)
+            gemm_bfloat16(lhs, grad, weight_grad, 32, 48, 64, transpose_lhs=True)
+            gemm_bfloat16(grad, rhs, input_grad, 64, 32, 48, transpose_rhs=True)
+        wp.capture_launch(capture.graph)
+
+        lhs_rounded = lhs.numpy().astype(np.float32)
+        rhs_rounded = rhs.numpy().astype(np.float32)
+        grad_rounded = grad.numpy().astype(np.float32)
+        np.testing.assert_allclose(forward.numpy(), lhs_rounded @ rhs_rounded, rtol=2.0e-3, atol=2.0e-4)
+        np.testing.assert_allclose(weight_grad.numpy(), lhs_rounded.T @ grad_rounded, rtol=2.0e-3, atol=2.0e-4)
+        np.testing.assert_allclose(input_grad.numpy(), grad_rounded @ rhs_rounded.T, rtol=2.0e-3, atol=2.0e-4)
+
+        first = (forward.numpy(), weight_grad.numpy(), input_grad.numpy())
+        wp.capture_launch(capture.graph)
+        for actual, expected in zip((forward, weight_grad, input_grad), first, strict=True):
+            np.testing.assert_array_equal(actual.numpy(), expected)
 
     def test_puffer_mingru_bf16_backward_reuses_forward_casts(self) -> None:
         device = require_cuda_graph_capture("PhoenX BF16 MinGRU dataflow tests")

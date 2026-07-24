@@ -9,6 +9,7 @@ from itertools import pairwise
 import numpy as np
 import warp as wp
 
+from .cublas import gemm_bfloat16, is_cublas_available
 from .kernels import (
     ACTIVATION_ELU,
     ACTIVATION_LINEAR,
@@ -132,6 +133,9 @@ class WarpMLP:
         self.output_activation = activation_code(output_activation)
         self.manual_weight_grad_dtype = _manual_bfloat16_dtype(manual_weight_grad_dtype, "manual_weight_grad_dtype")
         self.manual_forward_dtype = _manual_bfloat16_dtype(manual_forward_dtype, "manual_forward_dtype")
+        self._use_cublas_bfloat16 = (
+            self.manual_weight_grad_dtype == "bfloat16" or self.manual_forward_dtype == "bfloat16"
+        ) and is_cublas_available(self.device)
         self._manual_batch_size = 0
         self._manual_capacity = 0
         self._manual_input: wp.array2d[wp.float32] | None = None
@@ -303,17 +307,20 @@ class WarpMLP:
                 outputs=[weight_bf16],
                 device=self.device,
             )
-            wp.launch_tiled(
-                dense_forward_bf16_tiled_kernel,
-                dim=(
-                    _ceil_div(rows, DENSE_TILE_BATCH),
-                    _ceil_div(cols, DENSE_TILE_OUT),
-                ),
-                inputs=[x_bf16, weight_bf16, int(weight.shape[0])],
-                outputs=[out],
-                block_dim=DENSE_TILE_BLOCK_DIM,
-                device=self.device,
-            )
+            if self._use_cublas_bfloat16:
+                gemm_bfloat16(x_bf16, weight_bf16, out, rows, cols, int(weight.shape[0]))
+            else:
+                wp.launch_tiled(
+                    dense_forward_bf16_tiled_kernel,
+                    dim=(
+                        _ceil_div(rows, DENSE_TILE_BATCH),
+                        _ceil_div(cols, DENSE_TILE_OUT),
+                    ),
+                    inputs=[x_bf16, weight_bf16, int(weight.shape[0])],
+                    outputs=[out],
+                    block_dim=DENSE_TILE_BLOCK_DIM,
+                    device=self.device,
+                )
             wp.launch(
                 dense_bias_activation_kernel,
                 dim=(rows, cols),
@@ -423,31 +430,42 @@ class WarpMLP:
                     )
                     wp.launch(
                         cast_2d_float_to_bfloat16_kernel,
-                        dim=(tiled_rows, width),
+                        dim=(rows if self._use_cublas_bfloat16 else tiled_rows, width),
                         inputs=[grad_pre],
                         outputs=[grad_pre_bf16],
                         device=self.device,
                     )
-                    weight_grad_partials = self._manual_weight_grad_partials[layer]
-                    wp.launch_tiled(
-                        dense_weight_grad_bf16_splitk_tiled_kernel,
-                        dim=(
-                            _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
-                            _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
-                            DENSE_WEIGHT_GRAD_KCHUNKS,
-                        ),
-                        inputs=[x_bf16, grad_pre_bf16, rows],
-                        outputs=[weight_grad_partials],
-                        block_dim=DENSE_TILE_BLOCK_DIM,
-                        device=self.device,
-                    )
-                    wp.launch(
-                        dense_weight_grad_reduce_kernel,
-                        dim=(int(weight.shape[0]), int(weight.shape[1])),
-                        inputs=[weight_grad_partials, DENSE_WEIGHT_GRAD_KCHUNKS],
-                        outputs=[weight.grad],
-                        device=self.device,
-                    )
+                    if self._use_cublas_bfloat16:
+                        gemm_bfloat16(
+                            x_bf16,
+                            grad_pre_bf16,
+                            weight.grad,
+                            int(weight.shape[0]),
+                            int(weight.shape[1]),
+                            rows,
+                            transpose_lhs=True,
+                        )
+                    else:
+                        weight_grad_partials = self._manual_weight_grad_partials[layer]
+                        wp.launch_tiled(
+                            dense_weight_grad_bf16_splitk_tiled_kernel,
+                            dim=(
+                                _ceil_div(int(weight.shape[0]), DENSE_TILE_IN),
+                                _ceil_div(int(weight.shape[1]), DENSE_TILE_OUT),
+                                DENSE_WEIGHT_GRAD_KCHUNKS,
+                            ),
+                            inputs=[x_bf16, grad_pre_bf16, rows],
+                            outputs=[weight_grad_partials],
+                            block_dim=DENSE_TILE_BLOCK_DIM,
+                            device=self.device,
+                        )
+                        wp.launch(
+                            dense_weight_grad_reduce_kernel,
+                            dim=(int(weight.shape[0]), int(weight.shape[1])),
+                            inputs=[weight_grad_partials, DENSE_WEIGHT_GRAD_KCHUNKS],
+                            outputs=[weight.grad],
+                            device=self.device,
+                        )
                 else:
                     weight_grad_partials = self._manual_weight_grad_partials[layer]
                     wp.launch_tiled(
@@ -508,17 +526,28 @@ class WarpMLP:
                             outputs=[weight_bf16],
                             device=self.device,
                         )
-                        wp.launch_tiled(
-                            dense_input_grad_bf16_tiled_kernel,
-                            dim=(
-                                _ceil_div(rows, DENSE_TILE_BATCH),
-                                _ceil_div(int(grad_y.shape[1]), DENSE_TILE_IN),
-                            ),
-                            inputs=[grad_pre_bf16, weight_bf16, int(weight.shape[1])],
-                            outputs=[grad_y],
-                            block_dim=DENSE_TILE_BLOCK_DIM,
-                            device=self.device,
-                        )
+                        if self._use_cublas_bfloat16:
+                            gemm_bfloat16(
+                                grad_pre_bf16,
+                                weight_bf16,
+                                grad_y,
+                                rows,
+                                int(grad_y.shape[1]),
+                                int(weight.shape[1]),
+                                transpose_rhs=True,
+                            )
+                        else:
+                            wp.launch_tiled(
+                                dense_input_grad_bf16_tiled_kernel,
+                                dim=(
+                                    _ceil_div(rows, DENSE_TILE_BATCH),
+                                    _ceil_div(int(grad_y.shape[1]), DENSE_TILE_IN),
+                                ),
+                                inputs=[grad_pre_bf16, weight_bf16, int(weight.shape[1])],
+                                outputs=[grad_y],
+                                block_dim=DENSE_TILE_BLOCK_DIM,
+                                device=self.device,
+                            )
                     else:
                         wp.launch_tiled(
                             dense_input_grad_tiled_kernel,
@@ -721,6 +750,9 @@ class PufferMinGRUNet:
         self.device = wp.get_device(device)
         self.manual_weight_grad_dtype = _manual_bfloat16_dtype(manual_weight_grad_dtype, "manual_weight_grad_dtype")
         self.manual_forward_dtype = _manual_bfloat16_dtype(manual_forward_dtype, "manual_forward_dtype")
+        self._use_cublas_bfloat16 = (
+            self.manual_weight_grad_dtype == "bfloat16" or self.manual_forward_dtype == "bfloat16"
+        ) and is_cublas_available(self.device)
 
         rng = np.random.default_rng(seed)
         self.encoder_weight = wp.array(
@@ -1168,14 +1200,17 @@ class PufferMinGRUNet:
                 outputs=[weight_bf16],
                 device=self.device,
             )
-            wp.launch_tiled(
-                dense_forward_bf16_tiled_kernel,
-                dim=(_ceil_div(rows, DENSE_TILE_BATCH), _ceil_div(out_dim, DENSE_TILE_OUT)),
-                inputs=[x_bf16, weight_bf16, in_dim],
-                outputs=[out],
-                block_dim=DENSE_TILE_BLOCK_DIM,
-                device=self.device,
-            )
+            if self._use_cublas_bfloat16:
+                gemm_bfloat16(x_bf16, weight_bf16, out, rows, out_dim, in_dim)
+            else:
+                wp.launch_tiled(
+                    dense_forward_bf16_tiled_kernel,
+                    dim=(_ceil_div(rows, DENSE_TILE_BATCH), _ceil_div(out_dim, DENSE_TILE_OUT)),
+                    inputs=[x_bf16, weight_bf16, in_dim],
+                    outputs=[out],
+                    block_dim=DENSE_TILE_BLOCK_DIM,
+                    device=self.device,
+                )
         elif (
             self.device.is_cuda
             and rows >= DENSE_TILE_BATCH
@@ -1546,6 +1581,17 @@ class PufferMinGRUNet:
                 weight_grad_kernel = dense_weight_grad_bf16_splitk_tiled_kernel
                 weight_grad_x = x_bf16
                 weight_grad_pre = grad_pre_bf16
+                if self._use_cublas_bfloat16:
+                    gemm_bfloat16(
+                        weight_grad_x,
+                        weight_grad_pre,
+                        weight_grad,
+                        int(weight_grad.shape[0]),
+                        int(weight_grad.shape[1]),
+                        rows,
+                        transpose_lhs=True,
+                    )
+                    return
             wp.launch_tiled(
                 weight_grad_kernel,
                 dim=(
@@ -1604,6 +1650,17 @@ class PufferMinGRUNet:
                 input_grad_kernel = dense_input_grad_bf16_tiled_kernel
                 input_grad_pre = grad_pre_bf16
                 input_grad_weight = weight_bf16
+                if self._use_cublas_bfloat16:
+                    gemm_bfloat16(
+                        input_grad_pre,
+                        input_grad_weight,
+                        grad_x,
+                        rows,
+                        int(grad_x.shape[1]),
+                        out_dim,
+                        transpose_rhs=True,
+                    )
+                    return
             wp.launch_tiled(
                 input_grad_kernel,
                 dim=(_ceil_div(rows, DENSE_TILE_BATCH), _ceil_div(int(grad_x.shape[1]), DENSE_TILE_IN)),
