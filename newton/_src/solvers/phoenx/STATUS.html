@@ -133,27 +133,28 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>23 July 2026 &middot; matched nanoG1 audit</strong></div>
+      <div class="stamp">Last updated<br><strong>24 July 2026 &middot; replay-3 production audit</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Matched nanoG1 training audit">
-      <div class="meta"><span class="tag warn">Quality frontier in progress</span><span>23 July 2026</span></div>
-      <h2>PhoenX crosses nanoG1 throughput; quality is not qualified yet</h2>
-      <p class="summary-lead">An exact local run of pinned nanoG1/Puffer commit <code>e3825cea</code> corrected the comparison again: its audited 8,192-world, replay-1 end-to-end rate is <strong>1.801M unique environment samples/s</strong>. Matched replay-1 PhoenX reaches <strong>1.666M</strong> (92.5%); omitting the separate post-solve velocity-relaxation sweep reaches <strong>1.897M</strong>, 5.3% above nanoG1.</p>
+      <div class="meta"><span class="tag good">Production comparison corrected</span><span>24 July 2026</span></div>
+      <h2>PhoenX is within 2&ndash;3% of shipped nanoG1 at replay 3</h2>
+      <p class="summary-lead">The current nanoG1 repository&rsquo;s frozen production recipe explicitly sets <code>train.replay_ratio=3.0</code> and reports about <strong>1.28M samples/s</strong>. The prior 1.801M local measurement accidentally ran the pinned Puffer engine&rsquo;s default replay-1 configuration without nanoG1&rsquo;s recipe overrides. Current matched replay-3 PhoenX brackets at <strong>1.240&ndash;1.251M samples/s</strong>, roughly 97&ndash;98% of the shipped target.</p>
       <div class="metrics">
-        <div class="card"><div class="metric">1.801M</div><div class="label">Audited local nanoG1 SPS</div></div>
-        <div class="card"><div class="metric">1.666M</div><div class="label">Matched PhoenX replay-1 SPS</div></div>
-        <div class="card"><div class="metric good">1.897M</div><div class="label">PhoenX without relaxation</div></div>
-        <div class="card"><div class="metric">+13.8%</div><div class="label">Candidate solver speedup</div></div>
+        <div class="card"><div class="metric">1.28M</div><div class="label">Shipped nanoG1 replay-3 SPS</div></div>
+        <div class="card"><div class="metric">1.24&ndash;1.25M</div><div class="label">Qualified PhoenX replay-3 SPS</div></div>
+        <div class="card"><div class="metric">97&ndash;98%</div><div class="label">PhoenX / nanoG1 throughput</div></div>
+        <div class="card"><div class="metric">~2.5%</div><div class="label">Remaining production gap</div></div>
       </div>
       <ul>
-        <li>The old 1.276M nanoG1 target was not a valid local apples-to-apples result. The new value comes from the machine log's unique-progress counter slope over a 30M-sample production training run.</li>
-        <li>Matched replay-1 Nsight profiling flips the critical path from the learner to rollout physics: rollout streams occupy 529&ndash;715 ms versus 391&ndash;427 ms for learner streams. Contact solve/row construction and reduced advance/factorization dominate; policy copies are negligible.</li>
-        <li>Tensor cores are already used in BF16 learner kernels. The current FP32 dense path emits ordinary cuBLASDx FMA, while BF16 kernels emit SM80 BF16 MMA instructions. A prior BF16 MinGRU-forward prototype gained only 0.7% after conversions and was removed.</li>
-        <li>Removing relaxation is generic and deletes an entire dynamic-state pass rather than specializing for G1. Six-seed smooth-random stability retained exact joint closure, with termination rising modestly from 3.39% to 4.43%.</li>
+        <li>Replay-2 measured 1.417M with relaxation and 1.579M without it, but seed 42 reached only 0.670 / 0.621 at the frozen 0.680 screen. Replay-1 likewise failed; fewer PPO replays are not learning-equivalent for this recipe.</li>
+        <li>Replay-3 without the velocity-relaxation sweep reached 1.331M (+6.4%) but scored 0.591 at the same screen. The pass is physically and statistically load-bearing, so no-relaxation remains rejected.</li>
+        <li>A nearby world-count bracket confirmed 8,192 as optimal: 1.226M / 1.240M / 1.214M at 7,168 / 8,192 / 9,216 worlds. Larger 65,536 and 131,072 minibatches regressed 3.5&ndash;5.6%.</li>
+        <li>Nsight shows only about 0.1&ndash;0.2 ms between an iteration&rsquo;s device synchronization and the next graph launch, negligible beside a 420 ms interval. Asynchronous host batching is therefore not justified.</li>
+        <li>A narrowly scoped <code>wp.func_native</code> loader converted FP32 tiles directly into shared BF16 tiles and emitted real <code>mma.sync</code> tensor-core instructions. It compiled in 2.6 s and had 9.8e-4 maximum aligned-MinGRU error, but end-to-end throughput regressed to 1.228M versus 1.240M / 1.245M controls. It was fully removed.</li>
       </ul>
-      <div class="verdict"><strong>Not promoted:</strong> the frozen seed-42 policy screen at 39.32M samples rejected both replay-1 configurations. The unchanged solver scored 0.590 and no-relaxation scored 0.401 against the 0.680 threshold. Thus replay reduction itself is not learning-equivalent, and no-relaxation worsens this seed. The next experiment is the replay-2/no-relaxation speed-quality frontier, followed by multi-seed validation and an Ant neutrality check only if it survives.</div>
-      <p class="compact-note"><strong>Current conclusion:</strong> we have found a substantial non-microarchitectural performance lever and have locally exceeded nanoG1 throughput, but have not yet beaten it at qualified time-to-policy. No candidate code has been retained merely for winning the throughput benchmark.</p>
+      <div class="verdict good-verdict"><strong>Current conclusion:</strong> the retained update-first graph scheduling win is still valid and already closes most of the production gap. Tensor cores are used where matrix size and conversion amortization support them (notably BF16 backward contractions and Ant MLP training); forcing the 128-wide recurrent forward onto MMA adds more shared-memory conversion cost than it removes. The remaining work should target a substantive learner or reduced-solver data pass, not recipe under-solving or launch trivia.</div>
+      <p class="compact-note"><strong>Audit rule:</strong> 1.801M remains a useful replay-1 throughput diagnostic, not a nanoG1 production baseline. No speed-only candidate is promoted without the unchanged frozen learning gate.</p>
     </section>
 
     <section class="work-profile" aria-label="July 23 training baseline audit">
@@ -179,35 +180,23 @@
     </section>
 
     <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
-      <h2>How far PhoenX is behind nanoG1</h2>
-      <p class="summary-lead"><strong>Current G1 training is 23.6% lower-throughput than nanoG1:</strong> PhoenX sustains 1.063M samples/s, or 76.4% of nanoG1's measured 1.3924M samples/s. Equivalently, nanoG1 is 1.31x as fast. Raw PhoenX physics reaches 60.5% of nanoG1. The faster experimental PhoenX recipe is listed separately because it has not passed the same multi-seed reliability bar.</p>
-      <div class="gap-list" role="table" aria-label="Measured speed comparison">
+      <h2>Current production comparison</h2>
+      <p class="summary-lead"><strong>PhoenX is approximately 2&ndash;3% below nanoG1&rsquo;s shipped end-to-end training throughput</strong> on the same RTX PRO 6000 class and replay-3 learner workload. The exact value varies by run; the honest bracket is 1.240&ndash;1.251M versus nanoG1&rsquo;s reported 1.28M.</p>
+      <div class="gap-list" role="table" aria-label="Measured production speed comparison">
         <div class="gap-row" role="row">
-          <strong role="cell">Raw physics throughput</strong>
-          <span role="cell">PhoenX<br><b>4.99M steps/s</b></span>
-          <span role="cell">nanoG1<br><b>8.25M steps/s</b></span>
-          <span role="cell"><span class="ratio bad">1.65x slower</span><div class="meter" aria-label="PhoenX reaches 60.5 percent of nanoG1"><span style="width:60.5%"></span></div></span>
+          <strong role="cell">Replay-3 PPO training</strong>
+          <span role="cell">PhoenX<br><b>1.240&ndash;1.251M SPS</b></span>
+          <span role="cell">nanoG1<br><b>about 1.28M SPS</b></span>
+          <span role="cell"><span class="ratio bad">~2.5% gap</span><div class="meter" aria-label="PhoenX reaches about 97.5 percent of nanoG1"><span style="width:97.5%"></span></div></span>
         </div>
         <div class="gap-row" role="row">
-          <strong role="cell">Current PPO training throughput</strong>
-          <span role="cell">PhoenX<br><b>1.063M samples/s</b></span>
-          <span role="cell">nanoG1<br><b>1.3924M samples/s</b></span>
-          <span role="cell"><span class="ratio bad">1.31x slower</span><div class="meter" aria-label="PhoenX reaches 76.4 percent of nanoG1"><span style="width:76.4%"></span></div></span>
-        </div>
-        <div class="gap-row" role="row">
-          <strong role="cell">Zero training to qualified policy</strong>
-          <span role="cell">PhoenX<br><b>183.03 s</b></span>
-          <span role="cell">nanoG1 claim<br><b>58.9 s</b></span>
-          <span role="cell"><span class="ratio bad">3.11x slower</span><div class="meter" aria-label="PhoenX reaches 32.2 percent of nanoG1 time-to-policy performance"><span style="width:32.2%"></span></div></span>
-        </div>
-        <div class="gap-row" role="row">
-          <strong role="cell">Fast experimental PPO recipe</strong>
-          <span role="cell">PhoenX<br><b>1.680M samples/s</b></span>
-          <span role="cell">nanoG1<br><b>1.3924M samples/s</b></span>
-          <span role="cell"><span class="ratio good">1.21x faster</span><div class="meter" aria-label="PhoenX reaches 121 percent of nanoG1"><span style="width:100%;background:#087f5b"></span></div></span>
+          <strong role="cell">Validated solver workload</strong>
+          <span role="cell">PhoenX<br><b>3 substeps, 2 solve, 1 relax</b></span>
+          <span role="cell">nanoG1<br><b>5 substeps, truncated Newton 2/3</b></span>
+          <span role="cell"><span class="ratio">Different solvers</span></span>
         </div>
       </div>
-      <p class="compact-note"><strong>Interpretation:</strong> the 1.680M result is not the headline because only one of two tested seeds passed the unchanged full policy gate. The 1.063M result uses the validated staged recipe with tiled FP32 Muon, wider dense matrix tiles, valid reduced-state imports, and one contact graph per policy frame. Comparisons use measured local nanoG1 throughput; the 58.9 s time-to-walk number is nanoG1's published claim and does not use the same quality gate.</p>
+      <p class="compact-note"><strong>Quality boundary:</strong> PhoenX speed candidates are compared at the frozen policy screen. nanoG1&rsquo;s published 58.9 s time-to-walk uses its own task metric, so it remains contextual rather than a same-gate time-to-policy claim.</p>
     </section>
 
     <section class="work-profile" aria-label="Reduced-state import optimization">
