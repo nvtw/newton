@@ -133,18 +133,18 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>24 July 2026 &middot; replay-3 production audit</strong></div>
+      <div class="stamp">Last updated<br><strong>24 July 2026 &middot; learning-parity audit</strong></div>
     </header>
 
     <section class="work-profile" aria-label="Matched nanoG1 training audit">
       <div class="meta"><span class="tag good">Production comparison corrected</span><span>24 July 2026</span></div>
-      <h2>PhoenX is within 2&ndash;3% of shipped nanoG1 at replay 3</h2>
-      <p class="summary-lead">The current nanoG1 repository&rsquo;s frozen production recipe explicitly sets <code>train.replay_ratio=3.0</code> and reports about <strong>1.28M samples/s</strong>. The prior 1.801M local measurement accidentally ran the pinned Puffer engine&rsquo;s default replay-1 configuration without nanoG1&rsquo;s recipe overrides. Current matched replay-3 PhoenX brackets at <strong>1.240&ndash;1.251M samples/s</strong>, roughly 97&ndash;98% of the shipped target.</p>
+      <h2>Same-machine replay-3 gap is 12%; learning is not reproducibly one-sided</h2>
+      <p class="summary-lead">A fresh pinned-source nanoG1 replay-3 run measures <strong>1.393M samples/s</strong> on this machine, versus <strong>1.243M samples/s</strong> for the matched PhoenX control. PhoenX therefore reaches <strong>89.3%</strong> of local nanoG1 throughput; nanoG1 is 12.0% faster. The published 1.276M figure remains useful historical context, but is no longer the primary local comparator.</p>
       <div class="metrics">
-        <div class="card"><div class="metric">1.28M</div><div class="label">Shipped nanoG1 replay-3 SPS</div></div>
-        <div class="card"><div class="metric">1.24&ndash;1.25M</div><div class="label">Qualified PhoenX replay-3 SPS</div></div>
-        <div class="card"><div class="metric">97&ndash;98%</div><div class="label">PhoenX / nanoG1 throughput</div></div>
-        <div class="card"><div class="metric">~2.5%</div><div class="label">Remaining production gap</div></div>
+        <div class="card"><div class="metric">1.393M</div><div class="label">Local nanoG1 replay-3 SPS</div></div>
+        <div class="card"><div class="metric">1.243M</div><div class="label">Local PhoenX replay-3 SPS</div></div>
+        <div class="card"><div class="metric">89.3%</div><div class="label">PhoenX / nanoG1 throughput</div></div>
+        <div class="card"><div class="metric">12.0%</div><div class="label">nanoG1 local speed lead</div></div>
       </div>
       <ul>
         <li>Replay-2 measured 1.417M with relaxation and 1.579M without it, but seed 42 reached only 0.670 / 0.621 at the frozen 0.680 screen. Replay-1 likewise failed; fewer PPO replays are not learning-equivalent for this recipe.</li>
@@ -152,9 +152,11 @@
         <li>A nearby world-count bracket confirmed 8,192 as optimal: 1.226M / 1.240M / 1.214M at 7,168 / 8,192 / 9,216 worlds. Larger 65,536 and 131,072 minibatches regressed 3.5&ndash;5.6%.</li>
         <li>Nsight shows only about 0.1&ndash;0.2 ms between an iteration&rsquo;s device synchronization and the next graph launch, negligible beside a 420 ms interval. Asynchronous host batching is therefore not justified.</li>
         <li>A narrowly scoped <code>wp.func_native</code> loader converted FP32 tiles directly into shared BF16 tiles and emitted real <code>mma.sync</code> tensor-core instructions. It compiled in 2.6 s and had 9.8e-4 maximum aligned-MinGRU error, but end-to-end throughput regressed to 1.228M versus 1.240M / 1.245M controls. It was fully removed.</li>
+        <li>The supposedly nano-matched PhoenX example inherited PhoenX&rsquo;s stronger yaw, torso-wobble, and action-rate weights. It now uses the pinned nanoG1 values 1.25 / &minus;1.3 / &minus;0.01, with a regression against the external recipe.</li>
+        <li>True-weight PhoenX seed 42 reached 74.97M samples with zero battery falls and 0.843 performance, but missed the 0.90 and wobble gates. A fresh 79.69M pinned nanoG1 seed-42 checkpoint also failed nanoG1&rsquo;s own host gate: 21 falls, 0.746 performance, and every smoothness limit. The shipped checkpoint still passes.</li>
       </ul>
-      <div class="verdict good-verdict"><strong>Current conclusion:</strong> the retained update-first graph scheduling win is still valid and already closes most of the production gap. Tensor cores are used where matrix size and conversion amortization support them (notably BF16 backward contractions and Ant MLP training); forcing the 128-wide recurrent forward onto MMA adds more shared-memory conversion cost than it removes. The remaining work should target a substantive learner or reduced-solver data pass, not recipe under-solving or launch trivia.</div>
-      <p class="compact-note"><strong>Learning-time uncertainty:</strong> nanoG1&rsquo;s 58.9 s claim is one frozen seed (42), computed as 75.1M samples divided by 1.276M steady SPS. Its repository states that a fixed built binary is deterministic, but provides no multi-seed or held-out-seed distribution. The shipped checkpoint does genuinely pass its own gate locally (0 falls, 0.932 battery performance, and all smoothness limits), so it is a valid selected-run result rather than evidence that nanoG1 always learns faster. PhoenX also uses materially stronger action-rate and torso-wobble penalties and a different frozen screen, so samples-to-gate are not yet an apples-to-apples algorithm comparison.</p>
+      <div class="verdict good-verdict"><strong>Current conclusion:</strong> the retained update-first graph scheduling win remains valid, but the honest same-machine gap is about 12%. Tensor cores are already used where conversion amortizes; forcing the 128-wide recurrent forward onto MMA regressed. Learner formulas have direct Puffer-parity tests, so the highest-value correctness work is now physics/controller trajectory parity and the one-update stale-policy effect introduced by overlapped rollout/update.</div>
+      <p class="compact-note"><strong>Learning-time uncertainty:</strong> nanoG1&rsquo;s 58.9 s claim is one frozen seed-42 artifact. The fresh pinned-source reproduction used the recipe, model fingerprint, and task/training flags, but required a GCC/CUDA-library fallback and failed at 79.69M; this demonstrates build/numerical sensitivity, not source-level nondeterminism. The shipped checkpoint genuinely passes locally (0 falls, 0.932 performance, all smoothness limits). Neither engine can claim universal samples-to-gate superiority from one seed.</p>
       <p class="compact-note"><strong>Audit rule:</strong> 1.801M remains a useful replay-1 throughput diagnostic, not a nanoG1 production baseline. No speed-only candidate is promoted without the unchanged frozen learning gate.</p>
     </section>
 
@@ -182,13 +184,13 @@
 
     <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
       <h2>Current production comparison</h2>
-      <p class="summary-lead"><strong>PhoenX is approximately 2&ndash;3% below nanoG1&rsquo;s shipped end-to-end training throughput</strong> on the same RTX PRO 6000 class and replay-3 learner workload. The exact value varies by run; the honest bracket is 1.240&ndash;1.251M versus nanoG1&rsquo;s reported 1.28M.</p>
+      <p class="summary-lead"><strong>PhoenX is 10.7% lower-throughput than the fresh same-machine nanoG1 replay-3 run</strong>: 1.243M versus 1.393M samples/s. Equivalently, nanoG1 is 12.0% faster. This local pairing supersedes the earlier comparison against the published 1.276M figure.</p>
       <div class="gap-list" role="table" aria-label="Measured production speed comparison">
         <div class="gap-row" role="row">
           <strong role="cell">Replay-3 PPO training</strong>
           <span role="cell">PhoenX<br><b>1.240&ndash;1.251M SPS</b></span>
-          <span role="cell">nanoG1<br><b>about 1.28M SPS</b></span>
-          <span role="cell"><span class="ratio bad">~2.5% gap</span><div class="meter" aria-label="PhoenX reaches about 97.5 percent of nanoG1"><span style="width:97.5%"></span></div></span>
+          <span role="cell">nanoG1<br><b>1.393M SPS</b></span>
+          <span role="cell"><span class="ratio bad">10.7% lower</span><div class="meter" aria-label="PhoenX reaches 89.3 percent of nanoG1"><span style="width:89.3%"></span></div></span>
         </div>
         <div class="gap-row" role="row">
           <strong role="cell">Validated solver workload</strong>

@@ -30,6 +30,9 @@ from newton._src.solvers.phoenx.rl_training import g1_recipe
 # nanoG1 walk-gate threshold: tracking_perf >= 0.3 sustained at 0.8 m/s.
 _WALK_GATE_TRACKING_PERF = 0.30
 _WALK_GATE_SAMPLES = 75_000_000  # nanoG1 passes here on average
+_NANOG1_W_TRACK_ANG = 1.25
+_NANOG1_W_ANG_VEL_XY = -1.3
+_NANOG1_W_ACTION_RATE = -0.01
 
 
 def _nanog1_env_config(
@@ -58,12 +61,12 @@ def _nanog1_env_config(
         w_alive=g1_recipe.W_ALIVE,
         w_termination=g1_recipe.W_TERMINATION,
         w_track_lin=g1_recipe.W_TRACK_LIN,
-        w_track_ang=g1_recipe.W_TRACK_ANG,
+        w_track_ang=_NANOG1_W_TRACK_ANG,
         w_lin_vel_z=g1_recipe.W_LIN_VEL_Z,
-        w_ang_vel_xy=g1_recipe.W_ANG_VEL_XY,
+        w_ang_vel_xy=_NANOG1_W_ANG_VEL_XY,
         w_orientation=g1_recipe.W_ORIENTATION,
         w_torque=g1_recipe.W_TORQUE,
-        w_action_rate=g1_recipe.W_ACTION_RATE,
+        w_action_rate=_NANOG1_W_ACTION_RATE,
         # nanoG1 v3 gait shaping compiled by G1_TASK_V3
         w_command_progress=0.0,
         w_gait_contact=g1_recipe.W_GAIT_CONTACT,

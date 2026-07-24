@@ -680,6 +680,22 @@ class TestG1PhoenXRL(unittest.TestCase):
         cli_defaults = train_g1_nanog1._make_parser().parse_args([])
         self.assertEqual(cli_defaults.command_curriculum_start, g1_recipe.COMMAND_CURRICULUM_START)
         self.assertEqual(cli_defaults.command_curriculum_samples, g1_recipe.COMMAND_CURRICULUM_SAMPLES)
+        matched_env = train_g1_nanog1._nanog1_env_config(
+            world_count=1,
+            command_x=0.8,
+            sim_substeps=g1_recipe.SIM_SUBSTEPS,
+            solver_iterations=g1_recipe.SOLVER_ITERATIONS,
+            articulation_mode=g1_recipe.ARTICULATION_MODE,
+            ground_friction=g1_recipe.GROUND_FRICTION,
+            randomize_commands=True,
+            command_x_range=g1_recipe.COMMAND_X_RANGE,
+            command_y_range=g1_recipe.COMMAND_Y_RANGE,
+            command_yaw_range=g1_recipe.COMMAND_YAW_RANGE,
+            command_zero_probability=g1_recipe.COMMAND_ZERO_PROBABILITY,
+        )
+        self.assertAlmostEqual(matched_env.w_track_ang, float(recipe["env.w_track_ang"]))
+        self.assertAlmostEqual(matched_env.w_ang_vel_xy, float(recipe["env.w_ang_vel_xy"]))
+        self.assertAlmostEqual(matched_env.w_action_rate, float(recipe["env.w_action_rate"]))
         self.assertEqual(train_g1_curriculum._make_parser().parse_args([]).execution_mode, "graph_leapfrog")
         self.assertEqual(train_g1_command_curriculum._make_parser().parse_args([]).execution_mode, "graph_leapfrog")
 
