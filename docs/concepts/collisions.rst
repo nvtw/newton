@@ -1819,9 +1819,11 @@ The overhead is small: fingerprint storage per contact, modified packing in
 the reduction, and one radix sort + gather pass per frame.  The sort is
 fully CUDA-graph-capturable.
 
-.. note::
-
-   Hydroelastic contacts are not yet covered by deterministic ordering.
+Hydroelastic contact generation also uses deterministic accumulation and
+contact allocation in this mode. Hydroelastic reduction uses stable geometric
+fingerprints for winner selection and sequential floating-point aggregation.
+This provides bit-exact repeatability across runs on the same GPU architecture
+when the consuming solver is deterministic as well.
 
 .. _Contact Matching:
 

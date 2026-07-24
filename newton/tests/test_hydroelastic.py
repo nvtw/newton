@@ -74,6 +74,7 @@ def build_stacked_cubes_scene(
     cube_half: float = CUBE_HALF_LARGE,
     reduce_contacts: bool = True,
     sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
+    deterministic: bool = False,
 ):
     """Build the stacked cubes scene and return all components for simulation."""
     cube_mesh = None
@@ -157,6 +158,7 @@ def build_stacked_cubes_scene(
         rigid_contact_max=rigid_contact_max,
         broad_phase="explicit",
         sdf_hydroelastic_config=sdf_hydroelastic_config,
+        deterministic=deterministic,
     )
 
     return model, solver, state_0, state_1, control, collision_pipeline, initial_positions, cube_half
@@ -324,6 +326,50 @@ def test_buffer_fraction_no_crash(test, device):
         reduced_count,
         f"Full buffers ({full_count}) produced significantly fewer contacts than reduced buffers ({reduced_count})",
     )
+
+
+def test_deterministic_hydroelastic_contacts(test, device):
+    """Produce bit-identical hydroelastic contacts across repeated collision calls."""
+    model, _, state, _, _, pipeline, _, _ = build_stacked_cubes_scene(
+        device=device,
+        solver_fn=lambda model: None,
+        shape_type=ShapeType.PRIMITIVE,
+        deterministic=True,
+    )
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    contacts = pipeline.contacts()
+    hydro = pipeline.hydroelastic_sdf
+    test.assertIsNotNone(hydro)
+    test.assertTrue(hydro.config.reduce_contacts)
+    test.assertTrue(hydro.contact_reduction.deterministic)
+    snapshots = []
+    contact_fields = (
+        "rigid_contact_point_id",
+        "rigid_contact_shape0",
+        "rigid_contact_shape1",
+        "rigid_contact_point0",
+        "rigid_contact_point1",
+        "rigid_contact_offset0",
+        "rigid_contact_offset1",
+        "rigid_contact_normal",
+        "rigid_contact_margin0",
+        "rigid_contact_margin1",
+        "rigid_contact_tids",
+        "rigid_contact_stiffness",
+        "rigid_contact_damping",
+        "rigid_contact_friction",
+    )
+
+    for _ in range(5):
+        pipeline.collide(state, contacts)
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        snapshots.append((count, tuple(getattr(contacts, name).numpy()[:count].copy() for name in contact_fields)))
+
+    test.assertGreater(snapshots[0][0], 0)
+    for count, fields in snapshots[1:]:
+        test.assertEqual(count, snapshots[0][0])
+        for name, expected, actual in zip(contact_fields, snapshots[0][1], fields, strict=True):
+            np.testing.assert_array_equal(actual, expected, err_msg=name)
 
 
 def test_iso_scan_scratch_buffers_are_level_sized(test, device):
@@ -1596,6 +1642,14 @@ add_function_test(
     TestHydroelastic,
     "test_buffer_fraction_no_crash",
     test_buffer_fraction_no_crash,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_deterministic_hydroelastic_contacts",
+    test_deterministic_hydroelastic_contacts,
     devices=cuda_devices,
     check_output=False,
 )

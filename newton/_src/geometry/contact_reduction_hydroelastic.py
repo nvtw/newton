@@ -48,13 +48,14 @@ from .contact_reduction_global import (
     VALUES_PER_KEY,
     GlobalContactReducer,
     GlobalContactReducerData,
-    _make_contact_value_fast,
     _unpack_contact_id_fast,
     decode_oct,
     export_contact_to_buffer,
     is_contact_already_exported,
     make_contact_key,
+    make_contact_value,
     reduction_update_slot,
+    unpack_contact_id,
 )
 
 # =============================================================================
@@ -64,6 +65,7 @@ from .contact_reduction_global import (
 EPS_LARGE = 1e-8
 EPS_SMALL = 1e-20
 MIN_FRICTION_SCALE = 1e-2
+WinnerIds = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
 
 
 @wp.func
@@ -122,6 +124,7 @@ def export_hydroelastic_contact_to_buffer(
     normal: wp.vec3,
     depth: float,
     area: float,
+    fingerprint: int,
     reducer_data: GlobalContactReducerData,
 ) -> int:
     """Store a hydroelastic contact in the buffer with face area.
@@ -139,18 +142,107 @@ def export_hydroelastic_contact_to_buffer(
         normal: Contact normal
         depth: Penetration depth (negative = penetrating, standard convention)
         area: Contact surface area
+        fingerprint: Stable geometric identifier for deterministic reduction.
         reducer_data: GlobalContactReducerData with all arrays
 
     Returns:
         Contact ID if successfully stored, -1 if buffer full
     """
-    # Use base function to store common contact data (fingerprint=0: hydroelastic excluded from determinism)
-    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, 0, reducer_data)
+    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, fingerprint, reducer_data)
 
     if contact_id >= 0:
         reducer_data.contact_area[contact_id] = area
 
     return contact_id
+
+
+@wp.kernel(enable_backward=False)
+def _register_hydroelastic_normal_bins_kernel(
+    reducer_data: GlobalContactReducerData,
+    shape_material_k_hydro: wp.array[wp.float32],
+    total_num_threads: int,
+):
+    """Register normal-bin keys before deterministic aggregate accumulation."""
+    tid = wp.tid()
+    num_contacts = wp.min(reducer_data.contact_count[0], reducer_data.capacity)
+    for contact_id in range(tid, num_contacts, total_num_threads):
+        pair = reducer_data.shape_pairs[contact_id]
+        normal = decode_oct(reducer_data.normal[contact_id])
+        key = make_contact_key(pair[0], pair[1], get_slot(normal))
+        entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+        reducer_data.contact_nbin_entry[contact_id] = entry_idx
+        if entry_idx >= 0:
+            reducer_data.entry_k_eff[entry_idx] = _effective_stiffness(
+                shape_material_k_hydro[pair[0]], shape_material_k_hydro[pair[1]]
+            )
+        else:
+            wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
+
+
+def _create_deterministic_hydroelastic_aggregate_kernel(pressure_func: Any):
+    """Create the sequential per-bin aggregate kernel."""
+
+    @wp.kernel(enable_backward=False)
+    def aggregate_hydroelastic_normal_bins_kernel(
+        reducer_data: GlobalContactReducerData,
+        pressure_data: Any,
+        agg_moment_unreduced: wp.array[wp.float32],
+        total_num_threads: int,
+    ):
+        tid = wp.tid()
+        ht_capacity = reducer_data.ht_keys.shape[0]
+        num_active = reducer_data.ht_active_slots[ht_capacity]
+        num_contacts = wp.min(reducer_data.contact_count[0], reducer_data.capacity)
+
+        for active_id in range(tid, num_active, total_num_threads):
+            entry_idx = reducer_data.ht_active_slots[active_id]
+            agg_force = wp.vec3(0.0)
+            agg_depth_volume = wp.vec3(0.0)
+            weighted_pos_sum = wp.vec3(0.0)
+            weight_sum = float(0.0)
+
+            for contact_id in range(num_contacts):
+                if reducer_data.contact_nbin_entry[contact_id] != entry_idx:
+                    continue
+                pd = reducer_data.position_depth[contact_id]
+                depth = pd[3]
+                if depth >= 0.0:
+                    continue
+                pair = reducer_data.shape_pairs[contact_id]
+                normal = decode_oct(reducer_data.normal[contact_id])
+                position = wp.vec3(pd[0], pd[1], pd[2])
+                area = reducer_data.contact_area[contact_id]
+                pressure = wp.static(pressure_func)(depth, pair[1], pressure_data)
+                force_weight = area * pressure
+                agg_force += force_weight * normal
+                weighted_pos_sum += force_weight * position
+                weight_sum += force_weight
+                agg_depth_volume += (area * (-depth)) * normal
+
+            reducer_data.agg_force[entry_idx] = agg_force
+            reducer_data.agg_depth_volume[entry_idx] = agg_depth_volume
+            reducer_data.weighted_pos_sum[entry_idx] = weighted_pos_sum
+            reducer_data.weight_sum[entry_idx] = weight_sum
+
+            if agg_moment_unreduced.shape[0] > 0 and weight_sum > wp.static(EPS_SMALL):
+                anchor = weighted_pos_sum / weight_sum
+                moment = float(0.0)
+                for contact_id in range(num_contacts):
+                    if reducer_data.contact_nbin_entry[contact_id] != entry_idx:
+                        continue
+                    pd = reducer_data.position_depth[contact_id]
+                    depth = pd[3]
+                    if depth >= 0.0:
+                        continue
+                    pair = reducer_data.shape_pairs[contact_id]
+                    normal = decode_oct(reducer_data.normal[contact_id])
+                    position = wp.vec3(pd[0], pd[1], pd[2])
+                    pressure = wp.static(pressure_func)(depth, pair[1], pressure_data)
+                    lever = wp.length(wp.cross(position - anchor, normal))
+                    moment += reducer_data.contact_area[contact_id] * pressure * lever
+                agg_moment_unreduced[entry_idx] = moment
+
+    return aggregate_hydroelastic_normal_bins_kernel
 
 
 # =============================================================================
@@ -237,10 +329,20 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
                     for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                         dir_2d = get_spatial_direction_2d(dir_i)
                         score = wp.dot(pos_2d_centered, dir_2d) * pen_weight
-                        value = _make_contact_value_fast(score, 0, i)
+                        value = make_contact_value(
+                            score,
+                            reducer_data.contact_fingerprints[i],
+                            i,
+                            reducer_data.deterministic,
+                        )
                         reduction_update_slot(entry_idx, dir_i, value, reducer_data.ht_values, ht_capacity)
 
-                max_depth_value = _make_contact_value_fast(-depth, 0, i)
+                max_depth_value = make_contact_value(
+                    -depth,
+                    reducer_data.contact_fingerprints[i],
+                    i,
+                    reducer_data.deterministic,
+                )
                 reduction_update_slot(
                     entry_idx,
                     wp.static(NUM_SPATIAL_DIRECTIONS),
@@ -249,7 +351,7 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
                     ht_capacity,
                 )
 
-                if agg_moment_unreduced.shape[0] > 0 and depth < 0.0:
+                if agg_moment_unreduced.shape[0] > 0 and depth < 0.0 and reducer_data.deterministic == 0:
                     ws = reducer_data.weight_sum[entry_idx]
                     if ws > EPS_SMALL:
                         anchor_pos = reducer_data.weighted_pos_sum[entry_idx] / ws
@@ -281,7 +383,12 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
                 reducer_data.entry_k_eff[voxel_entry_idx] = _effective_stiffness(
                     shape_material_k_hydro[shape_a], shape_material_k_hydro[shape_b]
                 )
-                voxel_value = _make_contact_value_fast(-depth, 0, i)
+                voxel_value = make_contact_value(
+                    -depth,
+                    reducer_data.contact_fingerprints[i],
+                    i,
+                    reducer_data.deterministic,
+                )
                 reduction_update_slot(
                     voxel_entry_idx,
                     voxel_local_slot,
@@ -293,6 +400,108 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
                 wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
     return reduce_hydroelastic_contacts_kernel
+
+
+@wp.kernel(enable_backward=False)
+def _count_hydroelastic_winners_kernel(
+    reducer_data: GlobalContactReducerData,
+    winning_count: wp.array[wp.int32],
+    total_num_threads: int,
+):
+    """Count how many reduction entries selected each buffered contact."""
+    tid = wp.tid()
+    ht_capacity = reducer_data.ht_keys.shape[0]
+    num_active = reducer_data.ht_active_slots[ht_capacity]
+    exported_ids = WinnerIds()
+
+    for active_id in range(tid, num_active, total_num_threads):
+        entry_idx = reducer_data.ht_active_slots[active_id]
+        num_exported = int(0)
+        for slot in range(wp.static(VALUES_PER_KEY)):
+            value = reducer_data.ht_values[slot * ht_capacity + entry_idx]
+            if value == wp.uint64(0):
+                continue
+            contact_id = unpack_contact_id(value, reducer_data.deterministic)
+            if is_contact_already_exported(contact_id, exported_ids, num_exported):
+                continue
+            exported_ids[num_exported] = contact_id
+            num_exported += 1
+            wp.atomic_add(winning_count, contact_id, 1)
+
+
+def _create_deterministic_reduced_aggregate_kernel(normal_matching: bool):
+    """Create a sequential reduced-contact aggregate kernel."""
+
+    @wp.kernel(enable_backward=False)
+    def deterministic_reduced_aggregate_kernel(
+        reducer_data: GlobalContactReducerData,
+        winning_count: wp.array[wp.int32],
+        agg_moment_reduced: wp.array[wp.float32],
+        agg_moment2_reduced: wp.array[wp.float32],
+        total_num_threads: int,
+    ):
+        tid = wp.tid()
+        ht_capacity = reducer_data.ht_keys.shape[0]
+        num_active = reducer_data.ht_active_slots[ht_capacity]
+        num_contacts = wp.min(reducer_data.contact_count[0], reducer_data.capacity)
+
+        for active_id in range(tid, num_active, total_num_threads):
+            entry_idx = reducer_data.ht_active_slots[active_id]
+            stored_key = reducer_data.ht_keys[entry_idx]
+            bin_id = int((stored_key >> wp.uint64(55)) & BIN_MASK)
+            if bin_id >= wp.static(NUM_NORMAL_BINS):
+                continue
+
+            total_depth = float(0.0)
+            total_normal = wp.vec3(0.0, 0.0, 0.0)
+            for contact_id in range(num_contacts):
+                if reducer_data.contact_nbin_entry[contact_id] != entry_idx:
+                    continue
+                multiplicity = winning_count[contact_id]
+                depth = reducer_data.position_depth[contact_id][3]
+                if multiplicity > 0 and depth < 0.0:
+                    pen_mag = -depth * float(multiplicity)
+                    total_depth += pen_mag
+                    total_normal += pen_mag * decode_oct(reducer_data.normal[contact_id])
+
+            reducer_data.total_depth_reduced[entry_idx] = total_depth
+            reducer_data.total_normal_reduced[entry_idx] = total_normal
+
+            if agg_moment_reduced.shape[0] == 0:
+                continue
+
+            agg_force = reducer_data.agg_force[entry_idx]
+            agg_force_mag = wp.length(agg_force)
+            rotation = wp.quat_identity()
+            if wp.static(normal_matching):
+                rotation = _compute_normal_matching_rotation(total_normal, agg_force, agg_force_mag)
+            weight_sum = reducer_data.weight_sum[entry_idx]
+            anchor = wp.vec3(0.0, 0.0, 0.0)
+            if weight_sum > wp.static(EPS_SMALL):
+                anchor = reducer_data.weighted_pos_sum[entry_idx] / weight_sum
+
+            moment = float(0.0)
+            moment2 = float(0.0)
+            for contact_id in range(num_contacts):
+                if reducer_data.contact_nbin_entry[contact_id] != entry_idx:
+                    continue
+                multiplicity = winning_count[contact_id]
+                pd = reducer_data.position_depth[contact_id]
+                depth = pd[3]
+                if multiplicity <= 0 or depth >= 0.0:
+                    continue
+                normal = decode_oct(reducer_data.normal[contact_id])
+                if wp.static(normal_matching):
+                    normal = wp.normalize(wp.quat_rotate(rotation, normal))
+                position = wp.vec3(pd[0], pd[1], pd[2])
+                lever = wp.length(wp.cross(position - anchor, normal))
+                weighted_depth = (-depth) * float(multiplicity)
+                moment += weighted_depth * lever
+                moment2 += weighted_depth * lever * lever
+            agg_moment_reduced[entry_idx] = moment
+            agg_moment2_reduced[entry_idx] = moment2
+
+    return deterministic_reduced_aggregate_kernel
 
 
 # =============================================================================
@@ -536,6 +745,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         position_depth: wp.array[wp.vec4],
         normal: wp.array[wp.vec2],  # Octahedral-encoded
         shape_pairs: wp.array[wp.vec2i],
+        contact_fingerprints: wp.array[wp.int32],
         contact_area: wp.array[wp.float32],
         entry_k_eff: wp.array[wp.float32],
         contact_nbin_entry: wp.array[wp.int32],
@@ -554,6 +764,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         pressure_data: Any,
         # Writer data (custom struct)
         writer_data: Any,
+        deterministic: int,
         # Grid stride parameters
         total_num_threads: int,
     ):
@@ -596,7 +807,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                     continue
 
                 # Extract contact ID from low 32 bits
-                contact_id = _unpack_contact_id_fast(value)
+                contact_id = unpack_contact_id(value, deterministic)
 
                 # Skip if already exported
                 if is_contact_already_exported(contact_id, exported_ids, num_exported):
@@ -817,7 +1028,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                                 wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + nbin_entry_idx
                             ]
                             if nbin_max_depth_value != wp.uint64(0):
-                                nbin_max_depth_contact_id = _unpack_contact_id_fast(nbin_max_depth_value)
+                                nbin_max_depth_contact_id = unpack_contact_id(nbin_max_depth_value, deterministic)
                                 nbin_max_depth = position_depth[nbin_max_depth_contact_id][3]
                                 if nbin_max_depth < 0.0:
                                     nbin_anchor_depth = -nbin_max_depth
@@ -902,6 +1113,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = c_stiffness
                 contact_data.contact_friction_scale = wp.float32(c_friction_scale)
+                contact_data.sort_sub_key = contact_fingerprints[contact_id]
 
                 # Call the writer function
                 writer_func(contact_data, writer_data, -1)
@@ -928,6 +1140,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = shared_stiffness
                 contact_data.contact_friction_scale = wp.float32(anchor_friction_scale)
+                bin_id = int((ht_keys[entry_idx] >> wp.uint64(55)) & wp.uint64(0xFF))
+                contact_data.sort_sub_key = int(0x400000) | bin_id
 
                 # Call the writer function for anchor
                 writer_func(contact_data, writer_data, -1)
@@ -1027,6 +1241,7 @@ class HydroelasticContactReduction:
         config: HydroelasticReductionConfig | None = None,
         pressure_func: Any = None,
         pressure_data: Any = None,
+        deterministic: bool = False,
     ):
         """Initialize the hydroelastic contact reduction system.
 
@@ -1041,6 +1256,8 @@ class HydroelasticContactReduction:
                 Required.
             pressure_data: ``@wp.struct`` instance carrying state for ``pressure_func``.
                 Threaded through the reduce / export kernel launches. Required.
+            deterministic: Whether to use fingerprint-based reduction and
+                sequential floating-point aggregation.
         """
         if pressure_func is None or pressure_data is None:
             raise ValueError("HydroelasticContactReduction requires pressure_func and pressure_data.")
@@ -1052,6 +1269,7 @@ class HydroelasticContactReduction:
         self.config = config
         self.device = device
         self.pressure_data = pressure_data
+        self.deterministic = deterministic
 
         # Create the underlying reducer with hydroelastic data storage enabled
         self.reducer = GlobalContactReducer(
@@ -1059,11 +1277,16 @@ class HydroelasticContactReduction:
             device=device,
             store_hydroelastic_data=True,
             store_moment_data=config.moment_matching,
+            deterministic=deterministic,
             hashtable_size_factor=config.hashtable_size_factor,
         )
 
         # Create reduction kernel
         self._reduce_kernel = get_reduce_hydroelastic_contacts_kernel(pressure_func)
+        self._aggregate_kernel = _create_deterministic_hydroelastic_aggregate_kernel(pressure_func)
+        self._deterministic_reduced_aggregate_kernel = _create_deterministic_reduced_aggregate_kernel(
+            config.normal_matching
+        )
         self._accumulate_depth_kernel = _create_accumulate_reduced_depth_kernel()
 
         # Create moment accumulation kernel (only when moment matching is enabled)
@@ -1102,13 +1325,17 @@ class HydroelasticContactReduction:
         """
         return self.reducer.get_data_struct()
 
-    def clear(self):
+    def clear(self, full: bool = False):
         """Clear all contacts and reset for a new frame.
 
-        This efficiently clears only the active hashtable entries and resets
-        the contact counter. Call this at the start of each simulation step.
+        Args:
+            full: Whether to clear every hashtable and aggregate slot. The
+                sparse path clears only entries recorded as active.
         """
-        self.reducer.clear_active()
+        if full:
+            self.reducer.clear()
+        else:
+            self.reducer.clear_active()
 
     def reduce(
         self,
@@ -1138,6 +1365,26 @@ class HydroelasticContactReduction:
             grid_size: Number of threads for the kernel launch.
         """
         reducer_data = self.reducer.get_data_struct()
+        if self.deterministic:
+            wp.launch(
+                kernel=_register_hydroelastic_normal_bins_kernel,
+                dim=[grid_size],
+                inputs=[reducer_data, shape_material_k_hydro, grid_size],
+                device=self.device,
+                record_tape=False,
+            )
+            wp.launch(
+                kernel=self._aggregate_kernel,
+                dim=[grid_size],
+                inputs=[
+                    reducer_data,
+                    self.pressure_data,
+                    self.reducer.agg_moment_unreduced,
+                    grid_size,
+                ],
+                device=self.device,
+                record_tape=False,
+            )
         wp.launch(
             kernel=self._reduce_kernel,
             dim=[grid_size],
@@ -1177,27 +1424,30 @@ class HydroelasticContactReduction:
             writer_data: Data struct for the writer function.
             grid_size: Number of threads for the kernel launch.
         """
-        # --- accumulate winning-contact depths per normal bin (Phase 1) ---
-        wp.launch(
-            kernel=self._accumulate_depth_kernel,
-            dim=[grid_size],
-            inputs=[
-                self.reducer.hashtable.keys,
-                self.reducer.ht_values,
-                self.reducer.hashtable.active_slots,
-                self.reducer.position_depth,
-                self.reducer.normal,
-                self.reducer.contact_nbin_entry,
-                self.reducer.total_depth_reduced,
-                self.reducer.total_normal_reduced,
-                grid_size,
-            ],
-            device=self.device,
-        )
-        # --- accumulate reduced friction moments per normal bin (Phase 1.5) ---
-        if self._accumulate_moments_kernel is not None:
+        if self.deterministic:
+            self.reducer.exported_flags.zero_()
             wp.launch(
-                kernel=self._accumulate_moments_kernel,
+                kernel=_count_hydroelastic_winners_kernel,
+                dim=[grid_size],
+                inputs=[self.reducer.get_data_struct(), self.reducer.exported_flags, grid_size],
+                device=self.device,
+            )
+            wp.launch(
+                kernel=self._deterministic_reduced_aggregate_kernel,
+                dim=[grid_size],
+                inputs=[
+                    self.reducer.get_data_struct(),
+                    self.reducer.exported_flags,
+                    self.reducer.agg_moment_reduced,
+                    self.reducer.agg_moment2_reduced,
+                    grid_size,
+                ],
+                device=self.device,
+            )
+        else:
+            # --- accumulate winning-contact depths per normal bin (Phase 1) ---
+            wp.launch(
+                kernel=self._accumulate_depth_kernel,
                 dim=[grid_size],
                 inputs=[
                     self.reducer.hashtable.keys,
@@ -1206,17 +1456,35 @@ class HydroelasticContactReduction:
                     self.reducer.position_depth,
                     self.reducer.normal,
                     self.reducer.contact_nbin_entry,
-                    self.reducer.weighted_pos_sum,
-                    self.reducer.weight_sum,
-                    self.reducer.agg_force,
-                    self.reducer.agg_depth_volume,
+                    self.reducer.total_depth_reduced,
                     self.reducer.total_normal_reduced,
-                    self.reducer.agg_moment_reduced,
-                    self.reducer.agg_moment2_reduced,
                     grid_size,
                 ],
                 device=self.device,
             )
+            # --- accumulate reduced friction moments per normal bin (Phase 1.5) ---
+            if self._accumulate_moments_kernel is not None:
+                wp.launch(
+                    kernel=self._accumulate_moments_kernel,
+                    dim=[grid_size],
+                    inputs=[
+                        self.reducer.hashtable.keys,
+                        self.reducer.ht_values,
+                        self.reducer.hashtable.active_slots,
+                        self.reducer.position_depth,
+                        self.reducer.normal,
+                        self.reducer.contact_nbin_entry,
+                        self.reducer.weighted_pos_sum,
+                        self.reducer.weight_sum,
+                        self.reducer.agg_force,
+                        self.reducer.agg_depth_volume,
+                        self.reducer.total_normal_reduced,
+                        self.reducer.agg_moment_reduced,
+                        self.reducer.agg_moment2_reduced,
+                        grid_size,
+                    ],
+                    device=self.device,
+                )
         # --- export reduced contacts (Phase 2) ---
         wp.launch(
             kernel=self._export_kernel,
@@ -1232,6 +1500,7 @@ class HydroelasticContactReduction:
                 self.reducer.position_depth,
                 self.reducer.normal,
                 self.reducer.shape_pairs,
+                self.reducer.contact_fingerprints,
                 self.reducer.contact_area,
                 self.reducer.entry_k_eff,
                 self.reducer.contact_nbin_entry,
@@ -1244,6 +1513,7 @@ class HydroelasticContactReduction:
                 shape_transform,
                 self.pressure_data,
                 writer_data,
+                int(self.deterministic),
                 grid_size,
             ],
             device=self.device,

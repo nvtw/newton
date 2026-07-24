@@ -281,6 +281,7 @@ class Example:
             reduce_contacts=True,
             broad_phase="explicit",
             sdf_hydroelastic_config=sdf_hydroelastic_config,
+            deterministic=True,
         )
         self.contacts = self.collision_pipeline.contacts()
 
@@ -288,6 +289,7 @@ class Example:
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
             use_mujoco_contacts=False,
+            disable_sensors=True,
             solver="newton",
             integrator="implicitfast",
             cone="elliptic",
@@ -296,6 +298,7 @@ class Example:
             iterations=15,
             ls_iterations=100,
             impratio=1000.0,
+            deterministic=wp.DeterministicMode.RUN_TO_RUN,
         )
 
         self.viewer.set_model(self.model)
@@ -431,11 +434,9 @@ class Example:
                 f"max lift={max_lift:.3f} (expected > {min_lift_height})"
             )
 
-        # In-cup placement check disabled — see newton-physics/newton#1337.
-        # Hydroelastic contact ordering on GPU still occasionally lets the pen
-        # slip out of the gripper during transport, producing both small drifts
-        # and complete misses. Lift-height check above remains as a coarse
-        # pickup verification.
+        # In-cup placement check remains disabled pending newton-physics/newton#1337.
+        # Determinism removes run-to-run variation but does not make this stricter
+        # placement criterion a suitable pickup regression.
         # # Verify that the object ended up in the cup
         # if self.put_in_cup:
         #     body_q = self.state_0.body_q.numpy()
