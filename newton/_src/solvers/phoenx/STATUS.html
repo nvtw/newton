@@ -56,11 +56,9 @@
       <div class="metric"><strong>Bit-exact</strong><span>G1 patch trajectory</span></div>
     </div>
     <ul>
-      <li><code>point</code> and <code>patch</code> now mean the same thing at every world count and on every GPU.</li>
-      <li>Patch work is routed only to the reduced-contact owner; the generic world path no longer adds duplicate overhead.</li>
-      <li>Regressions cover explicit selection, ownership, unsupported persistent patch mode, and one-world G1.</li>
-      <li>Maximal, projected-maximal, hybrid, persistent reduced, Mini, H1, and Ant sibling paths were audited.</li>
-      <li>The shared-physics benchmark now reads patch statistics from the actual reduced owner; its stale generic-world lookup crashed after the ownership fix.</li>
+      <li><code>point</code> and <code>patch</code> are stable across fleet size and GPU.</li>
+      <li>Patch work has one owner; regressions cover selection, routing, unsupported persistent patch mode, and one-world G1.</li>
+      <li>Maximal, projected, hybrid, persistent, Mini, H1, and Ant paths were audited.</li>
     </ul>
   </section>
 
@@ -90,10 +88,9 @@
     <section class="panel">
       <h2>Current investigation</h2>
       <ul>
-        <li>Use bounded Nsight traces to select the next broad kernel/data-layout target.</li>
-        <li>Favor homogeneous-fleet topology sharing and less repeated immutable data.</li>
-        <li>Validate every candidate end to end on G1 and at least one structurally different scene.</li>
-        <li>Audit every discovered correctness issue across all PhoenX solver paths.</li>
+        <li>G1 has 17 shape-pair columns but only four compatible physical body pairs per world.</li>
+        <li>Radix grouping fell to 1.85M physics steps/s; fused grouping reached 1.90M versus a 1.99M control. Both were removed.</li>
+        <li>Next: target work whose removal exceeds its bookkeeping cost, then validate G1 and a different scene.</li>
       </ul>
     </section>
   </div>
@@ -116,23 +113,20 @@
   <section class="panel">
     <h2>Rejected or parked directions</h2>
     <ul>
-      <li><strong>Fresh-policy serialization:</strong> tracking improved slightly, but throughput fell 11.9% and angular stability worsened.</li>
-      <li><strong>Forced BF16 tensor-core recurrent forward:</strong> emitted real MMA instructions but regressed end-to-end throughput; removed.</li>
-      <li><strong>FP16×2 contact rows:</strong> isolated kernels improved, but a four-seed learning race produced no qualified pass; parked.</li>
-      <li><strong>Fewer PPO replays or removing velocity relaxation:</strong> faster but failed frozen learning gates.</li>
-      <li><strong>High-priority rollout stream and host batching:</strong> neutral or unjustified by measured launch gaps.</li>
-      <li><strong>Cached patch effective masses:</strong> a separate pass lost 1.1–1.8%; exact in-kernel caching was neutral. Reusing the builder scalar gained 6–7% physics but only 1.08% training and changed reduction rounding, so it was removed rather than funding another seed race.</li>
-      <li><strong>Scene-specialized robot kernels:</strong> rejected as overfitting; PhoenX remains a general solver.</li>
+      <li><strong>Patch body-pair merging:</strong> cut G1 patch rows from 67 to 41 per world, but grouping overhead made physics 4–7% slower; removed.</li>
+      <li><strong>BF16/FP16 paths:</strong> isolated kernels improved, but end-to-end throughput or learning gates did not.</li>
+      <li><strong>Fewer PPO replays, less relaxation, or fresh-policy serialization:</strong> failed learning or stability gates.</li>
+      <li><strong>Patch mass caches and host/stream scheduling:</strong> neutral or too small end to end.</li>
+      <li><strong>Scene-specialized kernels:</strong> rejected; PhoenX remains general.</li>
     </ul>
   </section>
 
   <section class="panel">
     <h2>Correctness findings still open</h2>
     <ul>
-      <li>Free-flight PhoenX/nanoG1 joint trajectories are close: 0.0027 rad RMSE over ten control steps.</li>
-      <li>Ground contact causes immediate divergence, but both systems satisfy plausible support-force and Coulomb bounds.</li>
-      <li>The remaining difference is not classified as a bug: nanoG1 uses MuJoCo pyramidal soft constraints; PhoenX uses a patch Coulomb solve.</li>
-      <li>Projected maximal improves position agreement but worsens velocity agreement, so it is diagnostic evidence, not a replacement recommendation.</li>
+      <li>Free-flight joint trajectories are close (0.0027 rad RMSE over ten control steps); ground contact causes immediate divergence.</li>
+      <li>Both systems satisfy support-force and Coulomb bounds. Soft-pyramidal versus patch-Coulomb models are a plausible difference, not a proven bug.</li>
+      <li>Projected maximal changes the error rather than consistently improving it.</li>
     </ul>
     <div class="decision"><strong>Rule:</strong> reason from physical invariants and regression evidence. Matching nanoG1 is not itself proof of correctness.</div>
   </section>
@@ -140,11 +134,9 @@
   <section class="panel">
     <h2>Validation discipline</h2>
     <ul>
-      <li>Primary metric: reproducible multi-seed wall-clock time to a frozen qualified-policy gate.</li>
-      <li>Secondary metrics: steady training throughput, physics throughput, kernel shares, and open-loop trajectory comparisons.</li>
-      <li>No speed candidate is retained when it changes learning behavior without adequate multi-seed evidence.</li>
-      <li>Focused G1, H1, reduced-Ant, ownership, and maximal patch momentum tests pass for the latest fix.</li>
-      <li>Scoped pre-commit passes. Full-repository pre-commit still reports unrelated pre-existing lint/typo failures.</li>
+      <li>Primary metric: multi-seed wall-clock time to a frozen policy gate; throughput and traces are secondary.</li>
+      <li>Behavior-changing candidates require multi-seed evidence.</li>
+      <li>Focused G1, H1, reduced-Ant, ownership, and maximal patch tests pass; scoped pre-commit passes.</li>
     </ul>
   </section>
 
