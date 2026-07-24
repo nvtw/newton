@@ -2858,6 +2858,50 @@ class TestG1PhoenXRL(unittest.TestCase):
                 expected = np.maximum(expected, 0.0)
         np.testing.assert_allclose(out.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
 
+    def test_bf16_puffer_mingru_forward_matches_fp32_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX PufferMinGRU BF16 forward tests")
+        steps = 64
+        envs = _BF16_FORWARD_MIN_BATCH // steps
+        rows = steps * envs
+        input_dim = DENSE_TILE_IN
+        hidden_dim = max(64, DENSE_TILE_OUT)
+        output_dim = 2
+        obs_np = ((np.arange(rows * input_dim, dtype=np.float32) % 17.0) - 8.0).reshape(rows, input_dim) / np.float32(
+            32.0
+        )
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+
+        fp32 = rl.PufferMinGRUNet(
+            input_dim=input_dim,
+            hidden_size=hidden_dim,
+            output_dim=output_dim,
+            num_layers=1,
+            device=device,
+            seed=29,
+            manual_forward_dtype="float32",
+        )
+        bf16 = rl.PufferMinGRUNet(
+            input_dim=input_dim,
+            hidden_size=hidden_dim,
+            output_dim=output_dim,
+            num_layers=1,
+            device=device,
+            seed=29,
+            manual_forward_dtype="bfloat16",
+        )
+        for net in (fp32, bf16):
+            net.set_sequence_shape(steps, envs)
+            net.reserve_buffers(rows)
+
+        with wp.ScopedCapture(device=device) as capture:
+            expected = fp32.forward_manual(obs)
+            actual = bf16.forward_manual(obs)
+        wp.capture_launch(capture.graph)
+
+        self.assertEqual(bf16.manual_forward_dtype, "bfloat16")
+        self.assertIsNotNone(bf16._manual_encoder_weight_bf16)
+        np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=2.0e-2, atol=2.0e-2)
+
     def test_bf16_tiled_mlp_forward_matches_numpy_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 BF16 MLP forward tests")
         batch_size = _BF16_FORWARD_MIN_BATCH

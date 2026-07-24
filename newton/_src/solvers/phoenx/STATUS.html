@@ -21,16 +21,16 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <section class="hero">
 <h2>Physics is near parity; learner is next</h2>
 <div class="metrics">
-<div class="metric"><strong>1.244M</strong><span>PhoenX matched G1 samples/s</span></div>
+<div class="metric"><strong>1.284M</strong><span>PhoenX matched G1 samples/s</span></div>
 <div class="metric"><strong>1.393M</strong><span>nanoG1 local baseline</span></div>
-<div class="metric"><strong>89.3%</strong><span>PhoenX / nanoG1</span></div>
+<div class="metric"><strong>92.2%</strong><span>PhoenX / nanoG1</span></div>
 </div>
-<p>Matched production measurements put PhoenX at about 89% of nanoG1 end-to-end throughput. Phase isolation now shows that physics rollout is close; the remaining wall-clock gap is mainly in the PPO update.</p>
+<p>Enabling the configured BF16 tensor-core forward in PufferMinGRU raised production G1 training from 1.240M to 1.284M samples/s. Physics rollout is close to nanoG1; the remaining wall-clock gap is mainly in the PPO update.</p>
 </section>
 
 <section>
 <h2>Corrected diagnosis</h2>
-<p>An experimental overlap benchmark had inherited non-production environment defaults. It now uses the production G1 recipe and update-first launch order, with a regression test. Corrected isolation measures about 276 ms per PhoenX rollout versus roughly 270 ms for nanoG1, but about 250 ms per PhoenX update versus roughly 94 ms for nanoG1.</p>
+<p>An experimental overlap benchmark had inherited non-production environment defaults. It now uses the production G1 recipe and update-first launch order, with a regression test. Corrected isolation now measures about 273 ms per PhoenX rollout versus roughly 270 ms for nanoG1, and 231 ms per PhoenX update versus roughly 94 ms for nanoG1. The BF16 MinGRU forward reduced the PhoenX update by about 7.7%.</p>
 </section>
 
 <section>
@@ -38,7 +38,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <ul>
 <li>Compact reduced-factor storage and DOF-type factor split: less memory and up to +2.8% isolated physics.</li>
 <li>Packed contact gather and selective launch tuning: substantial isolated physics wins, about +1% training where measured.</li>
-<li>Dense learner tiling and tiled Muon: about +6% and +3.3% G1 training respectively.</li>
+<li>Dense learner tiling, tiled Muon, and BF16 MinGRU forward: about +6%, +3.3%, and +3.6% G1 training respectively.</li>
 <li>Reusable contact graphs and topology caching: generic gains across homogeneous robot fleets.</li>
 <li>Ant PPO work restored reliable learning; the current smoke remains finite near 0.93M samples/s.</li>
 </ul>
@@ -49,8 +49,8 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <ul>
 <li>CUDA-graph overlap hides about 43% of the PhoenX update behind physics, but the exposed learner tail sets the remaining gap.</li>
 <li>Dense forward/weight-gradient passes, MinGRU, and Muon Newton-Schulz matrix work dominate the learner.</li>
-<li>nanoG1/PufferLib keeps persistent BF16 parameter shadows and uses tensor-core GEMMs, including batched equal-shaped Muon matrices. PhoenX currently repeats casts and runs more separate Warp matrix passes.</li>
-<li>Next: prototype general persistent BF16 shadows and BF16/batched Muon, then gate on G1, Ant/shared PPO, numerical checks, and learning.</li>
+<li>PhoenX now uses BF16 tensor-core dense forward and weight gradients, but still repeats some casts and runs more separate Muon matrix passes than nanoG1/PufferLib.</li>
+<li>Next: prototype persistent BF16 shadows and BF16/batched Muon, then gate on G1, cross-scene PPO, numerical checks, and learning.</li>
 </ul>
 </section>
 

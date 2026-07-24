@@ -505,6 +505,7 @@ class TrainerPPO:
                     device=self.device,
                     seed=seed,
                     manual_weight_grad_dtype=self.config.manual_mlp_weight_grad_dtype,
+                    manual_forward_dtype=self.config.manual_mlp_forward_dtype,
                 )
             else:
                 self.actor.net = WarpMLP(

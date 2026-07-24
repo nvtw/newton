@@ -1160,6 +1160,24 @@ path or changing contact arithmetic.
 - Primitive-only scenes such as Kapla do not launch this kernel and retain the
   same code path. Full CUDA graph capture remains intact.
 
+## Current G1 learner diagnosis (2026-07-24)
+
+Older entries describe experiments at the revision where they were measured, not
+the current production state. In particular, packed FP16x2 contact rows were
+removed in `b374c0c4e`: their roughly 1% gain did not justify the added path.
+Production contact rows are FP32.
+
+A corrected production-recipe phase comparison changes the next target:
+
+- PhoenX rollout: about 273 ms per 524,288 samples; nanoG1: about 270 ms.
+- PhoenX PPO update: 250 ms before this work versus about 94 ms in nanoG1.
+- `PufferMinGRUNet` accepted the recipe BF16-forward setting but did not use it.
+  Wiring its large sequence contractions to the existing BF16 tensor-core kernel
+  reduced the update to 231 ms (-7.7%) and production leapfrog training from
+  0.423 s to 0.408 s per iteration: 1.240M to 1.284M samples/s (+3.6%).
+- The remaining general targets are persistent BF16 parameter shadows and fewer
+  Muon Newton-Schulz matrix passes, including batching compatible shapes.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
