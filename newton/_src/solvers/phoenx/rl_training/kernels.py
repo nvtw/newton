@@ -27,7 +27,7 @@ DENSE_BIAS_TILE_BATCH = 256
 # the whole batch. Splitting the batch across DENSE_WEIGHT_GRAD_KCHUNKS blocks
 # per output tile fills the GPU; a fixed-order reduction keeps it deterministic.
 DENSE_WEIGHT_GRAD_KCHUNKS = 8
-PPO_LOG_STD_PARTIAL_BATCH = 256
+PPO_LOG_STD_PARTIAL_BATCH = 16
 PPO_ADVANTAGE_PARTIAL_COUNT = 256
 OPTIMIZER_GRAD_BLOCK_SIZE = 256
 OPTIMIZER_GRAD_PARTIAL_COUNT = 256

@@ -1317,6 +1317,20 @@ A corrected production-recipe phase comparison changes the next target:
   irregular-array norm parity, Muon parity, CUDA-graph reproducibility, CPU
   fallback, and an 8-iteration G1 learning smoke pass.
 
+- The remaining broadcast log-standard-deviation gradient used only about 15
+  blocks: each partial thread serially processed 256 rows. Reducing that chunk
+  to 16 rows raises independent work without changing the equation or adding a
+  scene path. Nsight measures the partial kernel at 0.49 ms/update instead of
+  6.27 ms; the longer fixed-order final reduction leaves about 4.2 ms net
+  savings. Isolated update time reaches 99.3-99.8 ms, about 6% from nanoG1.
+- Paired G1 graph-leapfrog runs are neutral at 1.5823-1.5830M samples/s because
+  the learner remains hidden. Warmed Ant improves again from 2.115 to 2.084
+  seconds and learns 0.74 m/s forward velocity. Graph reproducibility, the
+  corrected Puffer actor/log-std parity regression, and an 8-iteration G1 smoke
+  pass. The regression had stale wiring to the actor-loss output and failed
+  before repair; both production actor paths already used the correct two-stage
+  reduction.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
