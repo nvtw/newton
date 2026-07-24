@@ -89,8 +89,8 @@
       <h2>Current investigation</h2>
       <ul>
         <li>G1 has 17 shape-pair columns but only four compatible physical body pairs per world.</li>
-        <li>Radix grouping fell to 1.85M physics steps/s; fused grouping reached 1.90M versus a 1.99M control. Both were removed.</li>
-        <li>Next: target work whose removal exceeds its bookkeeping cost, then validate G1 and a different scene.</li>
+        <li>The first grouping comparison is invalid: short runs include GPU clock ramp; long runs evolve from 34 to 64 contacts/world.</li>
+        <li>Next: make paired measurements clock- and state-invariant, then re-evaluate grouping.</li>
       </ul>
     </section>
   </div>
@@ -113,7 +113,6 @@
   <section class="panel">
     <h2>Rejected or parked directions</h2>
     <ul>
-      <li><strong>Patch body-pair merging:</strong> cut G1 patch rows from 67 to 41 per world, but grouping overhead made physics 4–7% slower; removed.</li>
       <li><strong>BF16/FP16 paths:</strong> isolated kernels improved, but end-to-end throughput or learning gates did not.</li>
       <li><strong>Fewer PPO replays, less relaxation, or fresh-policy serialization:</strong> failed learning or stability gates.</li>
       <li><strong>Patch mass caches and host/stream scheduling:</strong> neutral or too small end to end.</li>
