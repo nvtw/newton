@@ -1265,12 +1265,19 @@ A corrected production-recipe phase comparison changes the next target:
   75.50M ablation scores 0.730 and lowers throughput to 1.27M samples/s, so it
   is not the missing lever.
 - nanoG1's exact weaker angular/action-rate reward weights improve seed 42 at
-  75.50M from 0.730 to 0.821, including forward-command tracking from 0.182 to
-  0.643. Continuing that checkpoint with PhoenX robustness weights reaches
-  0.892 tracking and zero falls at 99.61M, but still misses jerk (0.213) and
-  roll/pitch rate (0.356); a hard reward switch then regresses tracking. This
-  motivates a controlled smooth curriculum or physics diagnosis, not changing
-  the default from a single seed.
+  75.50M from a paired robust-weight control's 0.774 to 0.821, including
+  forward-command tracking from 0.264 to 0.643. A three-stage ramp to the
+  robust weights reaches 0.896 tracking with zero falls at 99.61M, narrowly
+  missing jerk (0.212 versus 0.210) while roll/pitch rate remains high (0.328
+  versus 0.210). This motivates a multi-seed acquisition/stability curriculum
+  study, not changing the default from a single seed.
+- The G1 drive-convergence benchmark had silently retained old 5x2, maximal,
+  constraint-drive defaults under its rl_current label. It now inherits the
+  production recipe and has a regression for substeps, iterations, articulation,
+  and actuation. The corrected 3x2 reduced explicit-torque path versus a
+  20x8 PhoenX reference has zero falls, 0.00059 rad joint-position RMS,
+  0.00665 rad/s joint-velocity RMS, 0.35 mm base-state RMS, and essentially
+  identical mean normal support over the 20-step leg perturbation.
 
 ## Open ideas (not yet attempted)
 

@@ -5,7 +5,14 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
+from newton._src.solvers.phoenx.benchmarks.bench_g1_drive_convergence import (
+    _SETTINGS as DRIVE_CONVERGENCE_SETTINGS,
+)
+from newton._src.solvers.phoenx.benchmarks.bench_g1_drive_convergence import (
+    _parse_args as parse_drive_convergence_args,
+)
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train import _summarize_measured_history
 from newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog import (
     _g1_env_config,
@@ -63,6 +70,17 @@ class TestBenchG1Train(unittest.TestCase):
         self.assertEqual(config.contact_friction_model, g1_recipe.CONTACT_FRICTION_MODEL)
         self.assertEqual(config.actuation_model, g1_recipe.ACTUATION_MODEL)
         self.assertEqual(config.observation_mode, g1_recipe.OBSERVATION_MODE)
+
+    def test_drive_convergence_benchmark_inherits_production_environment(self):
+        with mock.patch("sys.argv", ["bench_g1_drive_convergence"]):
+            args = parse_drive_convergence_args()
+        setting = DRIVE_CONVERGENCE_SETTINGS["rl_current"]
+
+        self.assertEqual(setting.sim_substeps, g1_recipe.SIM_SUBSTEPS)
+        self.assertEqual(setting.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
+        self.assertEqual(setting.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
+        self.assertEqual(args.actuation_model, g1_recipe.ACTUATION_MODEL)
+        self.assertEqual(args.articulation_mode, g1_recipe.ARTICULATION_MODE)
 
 
 if __name__ == "__main__":

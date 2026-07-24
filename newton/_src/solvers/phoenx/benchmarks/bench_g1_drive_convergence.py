@@ -58,7 +58,12 @@ class SolverSetting:
 
 
 _SETTINGS: dict[str, SolverSetting] = {
-    "rl_current": SolverSetting("rl_current", 5, 2, 1),
+    "rl_current": SolverSetting(
+        "rl_current",
+        g1_recipe.SIM_SUBSTEPS,
+        g1_recipe.SOLVER_ITERATIONS,
+        g1_recipe.VELOCITY_ITERATIONS,
+    ),
     "phoenx_5x4": SolverSetting("phoenx_5x4", 5, 4, 1),
     "phoenx_5x8": SolverSetting("phoenx_5x8", 5, 8, 2),
     "phoenx_10x4": SolverSetting("phoenx_10x4", 10, 4, 1),
@@ -556,12 +561,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-friction-model", choices=("hard", "mujoco"), default=g1_recipe.JOINT_FRICTION_MODEL)
     parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
     parser.add_argument(
-        "--actuation-model", choices=("explicit_torque", "constraint_drive"), default="constraint_drive"
+        "--actuation-model",
+        choices=("explicit_torque", "constraint_drive"),
+        default=g1_recipe.ACTUATION_MODEL,
     )
     parser.add_argument(
         "--articulation-mode",
         choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
-        default="maximal",
+        default=g1_recipe.ARTICULATION_MODE,
     )
     parser.add_argument("--armature-scale", type=float, default=1.0)
     parser.add_argument("--parse-meshes", action="store_true")
