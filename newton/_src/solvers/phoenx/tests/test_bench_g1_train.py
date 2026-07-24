@@ -14,6 +14,9 @@ from newton._src.solvers.phoenx.benchmarks.bench_g1_drive_convergence import (
     _parse_args as parse_drive_convergence_args,
 )
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train import _summarize_measured_history
+from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
+    _make_parser as make_train_to_gate_parser,
+)
 from newton._src.solvers.phoenx.benchmarks.experimental.bench_g1_train_leapfrog import (
     _g1_env_config,
 )
@@ -28,6 +31,11 @@ def _stats(elapsed: float) -> SimpleNamespace:
 
 
 class TestBenchG1Train(unittest.TestCase):
+    def test_train_to_gate_does_not_perturb_training_by_default(self):
+        args = make_train_to_gate_parser().parse_args([])
+
+        self.assertFalse(args.reset_env_between_chunks)
+
     def test_graph_leapfrog_excludes_final_drain(self):
         measured, env_sps, excluded_drain = _summarize_measured_history(
             [_stats(4.0), _stats(2.0), _stats(0.1)],

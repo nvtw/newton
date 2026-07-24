@@ -620,8 +620,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reset-env-between-chunks",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Refresh all training worlds at evaluation boundaries while preserving the live trainer.",
+        default=False,
+        help="Refresh all training worlds and rollout state at evaluation boundaries (changes the training trajectory).",
     )
     parser.add_argument("--chunk-iterations", type=int, default=25)
     parser.add_argument("--hidden-layers", type=_parse_hidden_layers, default=g1_recipe.HIDDEN_LAYERS)
