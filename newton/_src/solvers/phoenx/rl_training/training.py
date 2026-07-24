@@ -1265,7 +1265,8 @@ def _train_g1_ppo_graph_leapfrog(
     collect(buffers[0])
     wp.synchronize_device(device)
 
-    rollout_stream = wp.Stream(device)
+    # Collection is the exposed leapfrog path; let its pending blocks use update slack first.
+    rollout_stream = wp.Stream(device, priority=-1)
     update_stream = wp.Stream(device)
     copy_stream = wp.Stream(device)
     phases = (
@@ -1384,7 +1385,8 @@ def _train_anymal_ppo_graph_leapfrog(
     collect(buffers[0])
     wp.synchronize_device(device)
 
-    rollout_stream = wp.Stream(device)
+    # Collection is the exposed leapfrog path; let its pending blocks use update slack first.
+    rollout_stream = wp.Stream(device, priority=-1)
     update_stream = wp.Stream(device)
     copy_stream = wp.Stream(device)
     phases = (

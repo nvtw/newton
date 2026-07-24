@@ -1186,6 +1186,16 @@ A corrected production-recipe phase comparison changes the next target:
   about 209 ms (-9.4%). Production leapfrog training improves from 1.284M to
   1.364M samples/s (+6.2%), or 97.9% of the local 1.393M nanoG1 baseline.
   The related separate-critic path now reuses its training values too.
+- After that fix, removing per-element division/modulo from gradient reductions
+  cut isolated update time by 2.7% but was neutral in production overlap, so it
+  was reverted. This confirms isolated learner time is no longer the wall-clock
+  objective.
+- Keeping update-first launch order while giving the rollout stream high CUDA
+  priority reduces overlap contention. A longer reverse A/B improves 1.361M to
+  1.382M samples/s (+1.53%); a shorter repeat reaches 1.390M, versus the local
+  1.393M nanoG1 reference. Rollout-first launch was rejected at 1.191M.
+  G1 save/resume and Anymal repeatability tests pass, and a 120-iteration
+  Anymal curriculum run remains finite.
 
 ## Open ideas (not yet attempted)
 
