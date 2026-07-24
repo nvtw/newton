@@ -88,9 +88,9 @@
     <section class="panel">
       <h2>Latest grouping verdict</h2>
       <ul>
-        <li>Compatible body-pair grouping cuts G1 columns from 73,728 to 16,384 and raises isolated 4,096-world physics from 1.620M to 1.887M steps/s (+16.5%).</li>
-        <li>Production training regresses: 1.223M / 1.220M grouped versus 1.244M control (about -1.8%). Nsight attributes about 5.1 ms per interval to added radix-sort and gather work while dominant row build/solve stays unchanged.</li>
-        <li>Decision: do not enable fleet grouping. Preserve mixed-material friction and per-contact friction-scale correctness with regressions.</li>
+        <li>Sorted body-pair grouping cuts G1 columns from 73,728 to 16,384 and raises isolated physics from 1.620M to 1.887M steps/s (+16.5%), but training falls about 1.8%.</li>
+        <li>Removing the redundant second sort raises isolated physics to 1.995M (+23.2%), yet training remains 1.234M versus 1.244M control (-0.8%). Dominant row build/solve stays unchanged.</li>
+        <li>Decision: do not enable fleet grouping or chase its residual overhead. Commit <code>e549a1ea2</code> retains the mixed-material and per-contact friction fixes with regressions.</li>
       </ul>
     </section>
   </div>
