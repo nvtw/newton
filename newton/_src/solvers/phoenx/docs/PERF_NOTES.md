@@ -1214,6 +1214,15 @@ A corrected production-recipe phase comparison changes the next target:
   1.370M samples/s (+0.7%). Production graph-leapfrog measures 1.402M versus a
   1.396M reverse control and the local 1.393M nanoG1 reference. A larger
   tensor-core output tile regressed the isolated update and was reverted.
+- The FP32 combined-gradient buffer from MinGRU sequence backward had no
+  consumer when both following contractions used BF16. Specializing the
+  existing generic Warp kernel by output dtype removes that materialization
+  and cast without duplicating its arithmetic. A paired graph benchmark
+  improves 203.1 to 197.2 ms/update (-2.9%) and 1.359M to 1.388M samples/s
+  (+2.1%). Production graph-leapfrog improves 1.396M to 1.420M samples/s
+  (+1.7%), or 101.9% of the local nanoG1 reference. Unique kernel modules
+  keep first-time specialization compilation below 0.5 seconds instead of
+  recompiling the large shared module.
 
 ## Open ideas (not yet attempted)
 

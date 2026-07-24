@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import warp as wp
 
 LOG_SQRT_2PI = 0.9189385332046727
@@ -332,7 +334,7 @@ def mingru_sequence_forward_initial_kernel(
         out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
 
 
-@wp.kernel
+@wp.kernel(module="unique")
 def mingru_sequence_backward_kernel(
     combined: wp.array2d[wp.float32],
     x: wp.array2d[wp.float32],
@@ -343,7 +345,7 @@ def mingru_sequence_backward_kernel(
     num_steps: wp.int32,
     num_envs: wp.int32,
     hidden_dim: wp.int32,
-    grad_combined: wp.array2d[wp.float32],
+    grad_combined: wp.array2d[Any],
     grad_highway_input: wp.array2d[wp.float32],
 ):
     env, hidden = wp.tid()
@@ -377,12 +379,14 @@ def mingru_sequence_backward_kernel(
         else:
             grad_recurrent_next = grad_recurrent * (wp.float32(1.0) - gate)
 
-        grad_combined[row, hidden] = grad_candidate * _mingru_hidden_candidate_grad(hidden_pre)
-        grad_combined[row, hidden_dim + hidden] = grad_gate * gate * (wp.float32(1.0) - gate)
-        grad_combined[row, wp.int32(2) * hidden_dim + hidden] = grad_proj * proj * (wp.float32(1.0) - proj)
+        grad_combined[row, hidden] = grad_combined.dtype(grad_candidate * _mingru_hidden_candidate_grad(hidden_pre))
+        grad_combined[row, hidden_dim + hidden] = grad_combined.dtype(grad_gate * gate * (wp.float32(1.0) - gate))
+        grad_combined[row, wp.int32(2) * hidden_dim + hidden] = grad_combined.dtype(
+            grad_proj * proj * (wp.float32(1.0) - proj)
+        )
 
 
-@wp.kernel
+@wp.kernel(module="unique")
 def mingru_sequence_backward_initial_kernel(
     combined: wp.array2d[wp.float32],
     x: wp.array2d[wp.float32],
@@ -395,7 +399,7 @@ def mingru_sequence_backward_initial_kernel(
     num_steps: wp.int32,
     num_envs: wp.int32,
     hidden_dim: wp.int32,
-    grad_combined: wp.array2d[wp.float32],
+    grad_combined: wp.array2d[Any],
     grad_highway_input: wp.array2d[wp.float32],
 ):
     env, hidden = wp.tid()
@@ -431,9 +435,11 @@ def mingru_sequence_backward_initial_kernel(
         else:
             grad_recurrent_next = grad_recurrent * (wp.float32(1.0) - gate)
 
-        grad_combined[row, hidden] = grad_candidate * _mingru_hidden_candidate_grad(hidden_pre)
-        grad_combined[row, hidden_dim + hidden] = grad_gate * gate * (wp.float32(1.0) - gate)
-        grad_combined[row, wp.int32(2) * hidden_dim + hidden] = grad_proj * proj * (wp.float32(1.0) - proj)
+        grad_combined[row, hidden] = grad_combined.dtype(grad_candidate * _mingru_hidden_candidate_grad(hidden_pre))
+        grad_combined[row, hidden_dim + hidden] = grad_combined.dtype(grad_gate * gate * (wp.float32(1.0) - gate))
+        grad_combined[row, wp.int32(2) * hidden_dim + hidden] = grad_combined.dtype(
+            grad_proj * proj * (wp.float32(1.0) - proj)
+        )
 
 
 @wp.kernel

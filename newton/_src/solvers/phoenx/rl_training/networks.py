@@ -1042,9 +1042,17 @@ class PufferMinGRUNet:
         for layer in reversed(range(self.num_layers)):
             x_in = self._manual_encoder_out if layer == 0 else self._manual_outputs[layer - 1]
             grad_combined = self._manual_grad_combined[layer]
+            grad_combined_bf16 = self._manual_recurrent_grad_bf16[layer] if self._manual_recurrent_grad_bf16 else None
             grad_highway = self._manual_grad_highway[layer]
             grad_projected = self._manual_grad_projected[layer]
             grad_x = self._manual_grad_inputs[layer]
+            direct_bf16_grad = (
+                self.device.is_cuda
+                and self.manual_weight_grad_dtype == "bfloat16"
+                and rows % DENSE_TILE_BATCH == 0
+                and grad_combined_bf16 is not None
+            )
+            grad_combined_out = grad_combined_bf16 if direct_bf16_grad else grad_combined
             if self._manual_initial_state is None:
                 wp.launch(
                     mingru_sequence_backward_kernel,
@@ -1060,7 +1068,7 @@ class PufferMinGRUNet:
                         envs,
                         self.hidden_size,
                     ],
-                    outputs=[grad_combined, grad_highway],
+                    outputs=[grad_combined_out, grad_highway],
                     device=self.device,
                 )
             else:
@@ -1080,10 +1088,11 @@ class PufferMinGRUNet:
                         envs,
                         self.hidden_size,
                     ],
-                    outputs=[grad_combined, grad_highway],
+                    outputs=[grad_combined_out, grad_highway],
                     device=self.device,
                 )
-            self._zero_tail(grad_combined, rows, 3 * self.hidden_size)
+            if not direct_bf16_grad:
+                self._zero_tail(grad_combined, rows, 3 * self.hidden_size)
             self._weight_grad(
                 x_in,
                 grad_combined,
@@ -1091,7 +1100,8 @@ class PufferMinGRUNet:
                 self.recurrent_weights[layer].grad,
                 self._manual_recurrent_weight_grad_partials[layer],
                 self._manual_recurrent_input_bf16[layer] if self._manual_recurrent_input_bf16 else None,
-                self._manual_recurrent_grad_bf16[layer] if self._manual_recurrent_grad_bf16 else None,
+                grad_combined_bf16,
+                grad_pre_bf16_valid=direct_bf16_grad,
             )
             self._input_grad(
                 grad_combined,
@@ -1504,6 +1514,8 @@ class PufferMinGRUNet:
         partials: wp.array3d[wp.float32] | None,
         x_bf16: wp.array2d[wp.bfloat16] | None,
         grad_pre_bf16: wp.array2d[wp.bfloat16] | None,
+        *,
+        grad_pre_bf16_valid: bool = False,
     ) -> None:
         if self.device.is_cuda:
             if partials is None:
@@ -1523,13 +1535,14 @@ class PufferMinGRUNet:
                         outputs=[x_bf16],
                         device=self.device,
                     )
-                wp.launch(
-                    cast_2d_float_to_bfloat16_kernel,
-                    dim=(rows, int(grad_pre.shape[1])),
-                    inputs=[grad_pre],
-                    outputs=[grad_pre_bf16],
-                    device=self.device,
-                )
+                if not grad_pre_bf16_valid:
+                    wp.launch(
+                        cast_2d_float_to_bfloat16_kernel,
+                        dim=(rows, int(grad_pre.shape[1])),
+                        inputs=[grad_pre],
+                        outputs=[grad_pre_bf16],
+                        device=self.device,
+                    )
                 weight_grad_kernel = dense_weight_grad_bf16_splitk_tiled_kernel
                 weight_grad_x = x_bf16
                 weight_grad_pre = grad_pre_bf16

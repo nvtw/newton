@@ -2771,7 +2771,9 @@ class TestG1PhoenXRL(unittest.TestCase):
         )
         obs = wp.zeros((rows, 64), dtype=wp.float32, device=device)
         output_grad = wp.zeros((rows, output_dim), dtype=wp.float32, device=device)
-        net.set_sequence_shape(num_steps=64, num_envs=rows // 64)
+        envs = rows // 64
+        initial_state = wp.ones((1, envs, hidden_dim), dtype=wp.float32, device=device)
+        net.set_sequence_shape(num_steps=64, num_envs=envs, initial_state=initial_state)
         net.reserve_buffers(rows)
         net.forward_manual(obs)
 
@@ -2780,7 +2782,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         cast_count = sum(
             bool(call.args) and call.args[0] is cast_2d_float_to_bfloat16_kernel for call in launch.call_args_list
         )
-        self.assertEqual(cast_count, 5)
+        self.assertEqual(cast_count, 4)
         wp.synchronize_device(device)
 
     def test_puffer_mingru_ppo_train_save_load_in_graph(self) -> None:
