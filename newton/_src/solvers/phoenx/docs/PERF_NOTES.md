@@ -1196,6 +1196,13 @@ A corrected production-recipe phase comparison changes the next target:
   1.393M nanoG1 reference. Rollout-first launch was rejected at 1.191M.
   G1 save/resume and Anymal repeatability tests pass, and a 120-iteration
   Anymal curriculum run remains finite.
+- nanoG1's published 75.1M-sample crossing is one deterministic seed (42), not
+  a multi-seed estimate. A fresh PhoenX 39.3M-sample screen across seeds
+  11/29/42/47/73 scored 0.616/0.681/0.732/0.683/0.652 with zero falls, making
+  seed 42 the clear early leader here too. This supports a seed-selection
+  effect but does not establish equal sample efficiency: nanoG1 and PhoenX use
+  different physics and the current robust PhoenX recipe first passed its full
+  gate at 91.75M samples.
 
 ## Open ideas (not yet attempted)
 

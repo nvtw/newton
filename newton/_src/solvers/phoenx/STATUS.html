@@ -50,6 +50,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <h2>What limits us now</h2>
 <ul>
 <li>The remaining 0.8% matched gap is within observed run variance; learner and rollout still contend during overlap.</li>
+<li>nanoG1’s 75M claim is one deterministic seed (42), not a seed distribution. In a fresh five-seed PhoenX 39.3M screen, seed 42 was best: 0.732 versus 0.616–0.683.</li>
 <li>Dense forward/weight-gradient passes, MinGRU, and Muon Newton-Schulz matrix work dominate the learner.</li>
 <li>Fusing activation casts and persistent BF16 parameter shadows are not worthwhile: weight casts are under 1 ms/update and a fused prototype was neutral.</li>
 <li>Next: freeze this timing contract and compare multi-seed time-to-quality; pursue only changes that move overlapped wall clock.</li>
