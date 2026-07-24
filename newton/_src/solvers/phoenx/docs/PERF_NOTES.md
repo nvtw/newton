@@ -1223,6 +1223,13 @@ A corrected production-recipe phase comparison changes the next target:
   (+1.7%), or 101.9% of the local nanoG1 reference. Unique kernel modules
   keep first-time specialization compilation below 0.5 seconds instead of
   recompiling the large shared module.
+- Three consecutive 128x384 MinGRU weights independently ran identical Muon
+  Newton-Schulz passes. Shape-grouping any three compatible tiled-wide
+  matrices fills the GPU without changing the equations or parameter layout.
+  A candidate/control/candidate bracket reduces the isolated update from
+  181.3 ms to 166.1 ms (-8.4%). Graph-leapfrog measures 1.422M and 1.425M
+  samples/s around a 1.416M reverse control (+0.5%). Grouped and independent
+  updates are bit-identical, including CUDA graph replay.
 
 ## Open ideas (not yet attempted)
 

@@ -17,13 +17,16 @@ from .kernels import (
     grad_sumsq_partials_2d_kernel,
     muon_gram_tall_kernel,
     muon_gram_wide_kernel,
+    muon_gram_wide_tiled_batch3_kernel,
     muon_gram_wide_tiled_kernel,
     muon_nesterov_2d_kernel,
     muon_normalize_2d_kernel,
     muon_ns_tall_kernel,
     muon_ns_wide_kernel,
+    muon_ns_wide_tiled_batch3_kernel,
     muon_ns_wide_tiled_kernel,
     muon_poly_kernel,
+    muon_poly_tiled_batch3_kernel,
     muon_poly_tiled_kernel,
     muon_step_1d_kernel,
     muon_step_2d_kernel,
@@ -330,6 +333,125 @@ class Muon:
             if param.grad is not None:
                 param.grad.zero_()
 
+    def _prepare_matrix(
+        self,
+        index: int,
+        max_grad_norm: float,
+    ) -> tuple[wp.array, wp.array, wp.array, wp.array]:
+        param = self.params[index]
+        grad = param.grad
+        update = self._updates[index]
+        scratch = self._scratch[index]
+        gram = self._grams[index]
+        poly = self._polys[index]
+        norm = self._norms[index]
+        if grad is None or update is None or scratch is None or gram is None or poly is None or norm is None:
+            raise RuntimeError("Muon matrix scratch buffers were not initialized")
+        wp.launch(
+            muon_nesterov_2d_kernel,
+            dim=param.shape,
+            inputs=[grad, self.m[index], self._grad_sumsq, self.momentum_coeff, max_grad_norm],
+            outputs=[update],
+            device=param.device,
+        )
+        _compute_param_sumsq(update, index, self._grad_sumsq_partials, norm)
+        wp.launch(
+            muon_normalize_2d_kernel,
+            dim=param.shape,
+            inputs=[update, norm, self.eps],
+            device=param.device,
+        )
+        return update, scratch, gram, poly
+
+    def _apply_matrix_update(
+        self,
+        index: int,
+        update: wp.array2d[wp.float32],
+        logical_rows: int,
+        logical_cols: int,
+    ) -> None:
+        param = self.params[index]
+        grad = param.grad
+        if grad is None:
+            raise RuntimeError("Muon matrix gradient was not initialized")
+        scale = np.sqrt(max(1.0, float(logical_rows) / float(logical_cols)))
+        wp.launch(
+            muon_step_2d_kernel,
+            dim=param.shape,
+            inputs=[
+                param,
+                grad,
+                update,
+                self.lr,
+                self.lr_scale,
+                self.pbt_lr_scale,
+                self.weight_decay,
+                float(scale),
+            ],
+            device=param.device,
+        )
+
+    def _tiled_wide_batch3_starts(self) -> set[int]:
+        starts: set[int] = set()
+        index = 0
+        while index + 2 < len(self.params):
+            group = self.params[index : index + 3]
+            shape = tuple(group[0].shape)
+            if all(param.ndim == 2 and param.grad is not None for param in group) and all(
+                tuple(param.shape) == shape and param.device == group[0].device for param in group[1:]
+            ):
+                rows, cols = (int(size) for size in shape)
+                use_tall = rows > cols
+                if self.matrix_transpose:
+                    use_tall = cols <= rows
+                if not use_tall and rows >= MUON_TILE and rows % MUON_TILE == 0 and cols % MUON_TILE == 0:
+                    starts.add(index)
+                    index += 3
+                    continue
+            index += 1
+        return starts
+
+    def _step_tiled_wide_batch3(self, start: int, max_grad_norm: float) -> None:
+        indices = list(range(start, start + 3))
+        params = [self.params[index] for index in indices]
+        prepared = [self._prepare_matrix(index, max_grad_norm) for index in indices]
+        src = [item[0] for item in prepared]
+        dst = [item[1] for item in prepared]
+        grams = [item[2] for item in prepared]
+        polys = [item[3] for item in prepared]
+        rows = int(params[0].shape[0])
+        cols = int(params[0].shape[1])
+        for coeff_a, coeff_b, coeff_c in NS_COEFFS:
+            wp.launch_tiled(
+                muon_gram_wide_tiled_batch3_kernel,
+                dim=(3, rows // MUON_TILE, rows // MUON_TILE),
+                inputs=[src[0], src[1], src[2], cols],
+                outputs=[grams[0], grams[1], grams[2]],
+                block_dim=MUON_TILE_BLOCK_DIM,
+                device=params[0].device,
+            )
+            wp.launch_tiled(
+                muon_poly_tiled_batch3_kernel,
+                dim=(3, rows // MUON_TILE, rows // MUON_TILE),
+                inputs=[grams[0], grams[1], grams[2], coeff_b, coeff_c],
+                outputs=[polys[0], polys[1], polys[2]],
+                block_dim=MUON_TILE_BLOCK_DIM,
+                device=params[0].device,
+            )
+            wp.launch_tiled(
+                muon_ns_wide_tiled_batch3_kernel,
+                dim=(3, rows // MUON_TILE, cols // MUON_TILE),
+                inputs=[src[0], src[1], src[2], polys[0], polys[1], polys[2], coeff_a, rows],
+                outputs=[dst[0], dst[1], dst[2]],
+                block_dim=MUON_TILE_BLOCK_DIM,
+                device=params[0].device,
+            )
+            src, dst = dst, src
+
+        logical_rows, logical_cols = (cols, rows) if self.matrix_transpose else (rows, cols)
+        for offset, index in enumerate(indices):
+            self._apply_matrix_update(index, src[offset], logical_rows, logical_cols)
+
     def step(self) -> None:
         """Apply one Muon update and clear gradients."""
 
@@ -337,7 +459,14 @@ class Muon:
         if max_grad_norm > 0.0:
             _compute_grad_sumsq(self.params, self._grad_sumsq_partials, self._grad_sumsq)
 
+        batch3_starts = self._tiled_wide_batch3_starts()
+        batch3_tails = {start + offset for start in batch3_starts for offset in (1, 2)}
         for index, (param, momentum_buffer) in enumerate(zip(self.params, self.m, strict=True)):
+            if index in batch3_tails:
+                continue
+            if index in batch3_starts:
+                self._step_tiled_wide_batch3(index, max_grad_norm)
+                continue
             grad = param.grad
             if grad is None:
                 continue
@@ -361,26 +490,9 @@ class Muon:
                 )
                 continue
 
-            update = self._updates[index]
-            scratch = self._scratch[index]
-            gram = self._grams[index]
-            poly = self._polys[index]
-            norm = self._norms[index]
-            if update is None or scratch is None or gram is None or poly is None or norm is None:
-                raise RuntimeError("Muon matrix scratch buffers were not initialized")
-
+            update, scratch, gram, poly = self._prepare_matrix(index, max_grad_norm)
             rows = int(param.shape[0])
             cols = int(param.shape[1])
-            wp.launch(
-                muon_nesterov_2d_kernel,
-                dim=param.shape,
-                inputs=[grad, momentum_buffer, self._grad_sumsq, self.momentum_coeff, max_grad_norm],
-                outputs=[update],
-                device=param.device,
-            )
-            _compute_param_sumsq(update, index, self._grad_sumsq_partials, norm)
-            wp.launch(muon_normalize_2d_kernel, dim=param.shape, inputs=[update, norm, self.eps], device=param.device)
-
             src = update
             dst = scratch
             use_tall_kernels = rows > cols
@@ -457,13 +569,7 @@ class Muon:
                     )
                 src, dst = dst, src
 
-            scale = np.sqrt(max(1.0, float(logical_rows) / float(logical_cols)))
-            wp.launch(
-                muon_step_2d_kernel,
-                dim=param.shape,
-                inputs=[param, grad, src, self.lr, self.lr_scale, self.pbt_lr_scale, self.weight_decay, float(scale)],
-                device=param.device,
-            )
+            self._apply_matrix_update(index, src, logical_rows, logical_cols)
 
         wp.launch(optimizer_step_count_kernel, dim=1, inputs=[self._step_count], device=self._step_count.device)
 

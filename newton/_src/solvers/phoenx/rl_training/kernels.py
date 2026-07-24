@@ -2562,6 +2562,119 @@ def muon_ns_wide_tiled_kernel(
 
 
 @wp.kernel
+def muon_gram_wide_tiled_batch3_kernel(
+    x0: wp.array2d[wp.float32],
+    x1: wp.array2d[wp.float32],
+    x2: wp.array2d[wp.float32],
+    cols: wp.int32,
+    gram0: wp.array2d[wp.float32],
+    gram1: wp.array2d[wp.float32],
+    gram2: wp.array2d[wp.float32],
+):
+    batch, row_tile, col_tile = wp.tid()
+    total = wp.tile_zeros(shape=(MUON_TILE, MUON_TILE), dtype=wp.float32)
+    inner_tiles = cols // wp.int32(MUON_TILE)
+    for tile in range(inner_tiles):
+        if batch == 0:
+            x_row = wp.tile_load(x0, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, tile * MUON_TILE))
+            x_col = wp.tile_load(x0, shape=(MUON_TILE, MUON_TILE), offset=(col_tile * MUON_TILE, tile * MUON_TILE))
+        elif batch == 1:
+            x_row = wp.tile_load(x1, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, tile * MUON_TILE))
+            x_col = wp.tile_load(x1, shape=(MUON_TILE, MUON_TILE), offset=(col_tile * MUON_TILE, tile * MUON_TILE))
+        else:
+            x_row = wp.tile_load(x2, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, tile * MUON_TILE))
+            x_col = wp.tile_load(x2, shape=(MUON_TILE, MUON_TILE), offset=(col_tile * MUON_TILE, tile * MUON_TILE))
+        wp.tile_matmul(x_row, wp.tile_transpose(x_col), total)
+    if batch == 0:
+        wp.tile_store(gram0, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+    elif batch == 1:
+        wp.tile_store(gram1, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+    else:
+        wp.tile_store(gram2, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+
+
+@wp.kernel
+def muon_poly_tiled_batch3_kernel(
+    gram0: wp.array2d[wp.float32],
+    gram1: wp.array2d[wp.float32],
+    gram2: wp.array2d[wp.float32],
+    coeff_b: wp.float32,
+    coeff_c: wp.float32,
+    poly0: wp.array2d[wp.float32],
+    poly1: wp.array2d[wp.float32],
+    poly2: wp.array2d[wp.float32],
+):
+    batch, row_tile, col_tile = wp.tid()
+    total = wp.tile_zeros(shape=(MUON_TILE, MUON_TILE), dtype=wp.float32)
+    inner_tiles = gram0.shape[0] // wp.int32(MUON_TILE)
+    for tile in range(inner_tiles):
+        if batch == 0:
+            lhs = wp.tile_load(gram0, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, tile * MUON_TILE))
+            rhs = wp.tile_load(gram0, shape=(MUON_TILE, MUON_TILE), offset=(tile * MUON_TILE, col_tile * MUON_TILE))
+        elif batch == 1:
+            lhs = wp.tile_load(gram1, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, tile * MUON_TILE))
+            rhs = wp.tile_load(gram1, shape=(MUON_TILE, MUON_TILE), offset=(tile * MUON_TILE, col_tile * MUON_TILE))
+        else:
+            lhs = wp.tile_load(gram2, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, tile * MUON_TILE))
+            rhs = wp.tile_load(gram2, shape=(MUON_TILE, MUON_TILE), offset=(tile * MUON_TILE, col_tile * MUON_TILE))
+        wp.tile_matmul(lhs, rhs, total)
+    if batch == 0:
+        gram = wp.tile_load(gram0, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+        total = coeff_c * total + coeff_b * gram
+        wp.tile_store(poly0, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+    elif batch == 1:
+        gram = wp.tile_load(gram1, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+        total = coeff_c * total + coeff_b * gram
+        wp.tile_store(poly1, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+    else:
+        gram = wp.tile_load(gram2, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+        total = coeff_c * total + coeff_b * gram
+        wp.tile_store(poly2, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+
+
+@wp.kernel
+def muon_ns_wide_tiled_batch3_kernel(
+    x0: wp.array2d[wp.float32],
+    x1: wp.array2d[wp.float32],
+    x2: wp.array2d[wp.float32],
+    poly0: wp.array2d[wp.float32],
+    poly1: wp.array2d[wp.float32],
+    poly2: wp.array2d[wp.float32],
+    coeff_a: wp.float32,
+    rows: wp.int32,
+    dst0: wp.array2d[wp.float32],
+    dst1: wp.array2d[wp.float32],
+    dst2: wp.array2d[wp.float32],
+):
+    batch, row_tile, col_tile = wp.tid()
+    total = wp.tile_zeros(shape=(MUON_TILE, MUON_TILE), dtype=wp.float32)
+    inner_tiles = rows // wp.int32(MUON_TILE)
+    for tile in range(inner_tiles):
+        if batch == 0:
+            poly = wp.tile_load(poly0, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, tile * MUON_TILE))
+            x = wp.tile_load(x0, shape=(MUON_TILE, MUON_TILE), offset=(tile * MUON_TILE, col_tile * MUON_TILE))
+        elif batch == 1:
+            poly = wp.tile_load(poly1, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, tile * MUON_TILE))
+            x = wp.tile_load(x1, shape=(MUON_TILE, MUON_TILE), offset=(tile * MUON_TILE, col_tile * MUON_TILE))
+        else:
+            poly = wp.tile_load(poly2, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, tile * MUON_TILE))
+            x = wp.tile_load(x2, shape=(MUON_TILE, MUON_TILE), offset=(tile * MUON_TILE, col_tile * MUON_TILE))
+        wp.tile_matmul(poly, x, total)
+    if batch == 0:
+        source = wp.tile_load(x0, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+        total = total + coeff_a * source
+        wp.tile_store(dst0, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+    elif batch == 1:
+        source = wp.tile_load(x1, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+        total = total + coeff_a * source
+        wp.tile_store(dst1, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+    else:
+        source = wp.tile_load(x2, shape=(MUON_TILE, MUON_TILE), offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+        total = total + coeff_a * source
+        wp.tile_store(dst2, total, offset=(row_tile * MUON_TILE, col_tile * MUON_TILE))
+
+
+@wp.kernel
 def muon_step_2d_kernel(
     param: wp.array2d[wp.float32],
     grad: wp.array2d[wp.float32],

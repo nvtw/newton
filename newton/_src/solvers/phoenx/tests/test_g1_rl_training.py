@@ -85,6 +85,9 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     gather_trajectory_minibatch_kernel,
     mingru_sequence_backward_kernel,
     mingru_sequence_forward_kernel,
+    muon_gram_wide_tiled_batch3_kernel,
+    muon_ns_wide_tiled_batch3_kernel,
+    muon_poly_tiled_batch3_kernel,
     ppo_actor_loss_backward_kernel,
     reduce_ppo_log_std_grad_kernel,
     sample_trajectory_env_ids_kernel,
@@ -1332,6 +1335,61 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(param.numpy(), expected_params[0], rtol=3.0e-5, atol=3.0e-5)
         np.testing.assert_allclose(optimizer.m[0].numpy(), expected_momentum[0], rtol=2.0e-6, atol=2.0e-6)
         np.testing.assert_array_equal(param.grad.numpy(), np.zeros_like(param_np))
+
+    def test_pufferlib_muon_batches_three_matching_wide_matrices(self) -> None:
+        device = require_cuda_graph_capture("PhoenX grouped Muon parity tests")
+        rng = np.random.default_rng(20260724)
+        param_np = [rng.uniform(-0.05, 0.05, (32, 64)).astype(np.float32) for _ in range(3)]
+        grad_np = [rng.uniform(-0.1, 0.1, (32, 64)).astype(np.float32) for _ in range(3)]
+
+        params = [wp.array(value, dtype=wp.float32, device=device, requires_grad=True) for value in param_np]
+        references = [wp.array(value, dtype=wp.float32, device=device, requires_grad=True) for value in param_np]
+        for param, reference, grad in zip(params, references, grad_np, strict=True):
+            param.grad.assign(grad)
+            reference.grad.assign(grad)
+
+        optimizer = rl.Muon(
+            params,
+            lr=0.02,
+            momentum=0.9,
+            eps=1.0e-12,
+            weight_decay=0.01,
+            max_grad_norm=0.0,
+            matrix_transpose=True,
+        )
+        reference_optimizers = [
+            rl.Muon(
+                [reference],
+                lr=0.02,
+                momentum=0.9,
+                eps=1.0e-12,
+                weight_decay=0.01,
+                max_grad_norm=0.0,
+                matrix_transpose=True,
+            )
+            for reference in references
+        ]
+
+        with mock.patch.object(wp, "launch_tiled", wraps=wp.launch_tiled) as launch_tiled:
+            with wp.ScopedCapture(device=device) as capture:
+                optimizer.step()
+        for kernel in (
+            muon_gram_wide_tiled_batch3_kernel,
+            muon_poly_tiled_batch3_kernel,
+            muon_ns_wide_tiled_batch3_kernel,
+        ):
+            self.assertEqual(
+                sum(bool(call.args) and call.args[0] is kernel for call in launch_tiled.call_args_list),
+                5,
+            )
+        wp.capture_launch(capture.graph)
+
+        for reference_optimizer in reference_optimizers:
+            reference_optimizer.step()
+        for actual, expected in zip(params, references, strict=True):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        for actual, reference_optimizer in zip(optimizer.m, reference_optimizers, strict=True):
+            np.testing.assert_array_equal(actual.numpy(), reference_optimizer.m[0].numpy())
 
     def test_pufferlib_muon_matches_warp_mlp_transposed_weight_layout(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 Muon WarpMLP layout parity tests")
