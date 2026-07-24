@@ -546,6 +546,8 @@ class TrainerPPO:
         self._trajectory_priority_total: wp.array[wp.float32] | None = None
         self._trajectory_priority_partials: wp.array[wp.float32] | None = None
         self._actor_policy_out_grad: wp.array2d[wp.float32] | None = None
+        self._last_shared_policy_out: wp.array2d[wp.float32] | None = None
+        self._last_critic_values: wp.array2d[wp.float32] | None = None
         self._critic_value_grad: wp.array2d[wp.float32] | None = None
         self._actor_d_log_prob: wp.array[wp.float32] | None = None
         self._actor_log_std_grad = wp.zeros_like(self.actor.log_std, requires_grad=False)
@@ -960,11 +962,6 @@ class TrainerPPO:
                 ),
             )
         return self.actor.net.forward_reuse(obs)
-
-    def _value_reuse_for_update(self, buffer: BufferRollout | BatchPPO) -> wp.array2d[wp.float32]:
-        if self.shared_value_network:
-            return self._policy_update_reuse(buffer.obs, buffer)
-        return self.value_reuse(buffer.obs, observations_prepared=True)
 
     def act(
         self,
@@ -1538,7 +1535,14 @@ class TrainerPPO:
         )
 
     def _scatter_minibatch_values(self, buffer: BufferRollout, batch: BatchPPO, segment_count: int) -> None:
-        values = self._value_reuse_for_update(batch)
+        if self.shared_value_network:
+            values = self._last_shared_policy_out
+            if values is None:
+                raise RuntimeError("shared minibatch values require a preceding policy update")
+        else:
+            values = self._last_critic_values
+            if values is None:
+                raise RuntimeError("minibatch values require a preceding critic update")
         wp.launch(
             scatter_trajectory_values_kernel,
             dim=batch.num_samples,
@@ -1585,6 +1589,7 @@ class TrainerPPO:
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._value_loss], device=self.device)
 
         policy_out = self.actor.net.forward_manual(buffer.obs)
+        self._last_shared_policy_out = policy_out
         policy_out_grad = self._ensure_actor_backward_buffers(buffer.num_samples, int(policy_out.shape[1]))
         d_log_prob_rows = self._ensure_actor_d_log_prob(buffer.num_samples)
         wp.launch(
@@ -1930,6 +1935,7 @@ class TrainerPPO:
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._value_loss], device=self.device)
         values = self.critic.forward_manual(buffer.obs)
+        self._last_critic_values = values
         value_grad = self._ensure_critic_backward_buffers(buffer.num_samples)
         wp.launch(
             value_loss_grad_kernel,
@@ -1967,6 +1973,7 @@ class TrainerPPO:
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._value_loss], device=self.device)
         with wp.Tape() as tape:
             values = self.critic.forward(buffer.obs, requires_grad=True)
+            self._last_critic_values = values
             wp.launch(
                 value_loss_kernel,
                 dim=buffer.num_samples,

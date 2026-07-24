@@ -1671,6 +1671,100 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(ratios_dst.numpy(), expected_ratios, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(values_dst.numpy(), expected_values, rtol=0.0, atol=0.0)
 
+    def test_shared_vtrace_scatter_reuses_training_forward_values(self) -> None:
+        device = require_cuda_graph_capture("PhoenX shared V-trace value reuse tests")
+        num_steps = 2
+        num_envs = 3
+        segment_count = 2
+        action_dim = 2
+        buffer = rl.BufferRollout(
+            num_steps=num_steps,
+            num_envs=num_envs,
+            obs_dim=4,
+            action_dim=action_dim,
+            device=device,
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=4,
+            action_dim=action_dim,
+            hidden_layers=(8,),
+            config=rl.ConfigPPO(
+                shared_value_network=True,
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+            ),
+            device=device,
+            seed=7,
+        )
+        batch = trainer._ensure_minibatch(buffer, segment_count)
+        env_ids_np = np.asarray([2, 0], dtype=np.int32)
+        trainer._minibatch_env_ids = wp.array(env_ids_np, dtype=wp.int32, device=device)
+        policy_out_np = np.stack(
+            (
+                10.0 + np.arange(batch.num_samples, dtype=np.float32),
+                20.0 + np.arange(batch.num_samples, dtype=np.float32),
+                30.0 + np.arange(batch.num_samples, dtype=np.float32),
+            ),
+            axis=1,
+        )
+        trainer._last_shared_policy_out = wp.array(policy_out_np, dtype=wp.float32, device=device)
+
+        buffer.values.fill_(-1.0)
+        with wp.ScopedCapture(device=device) as capture:
+            trainer._scatter_minibatch_values(buffer, batch, segment_count)
+        wp.capture_launch(capture.graph)
+
+        selected_rows = []
+        for step in range(num_steps):
+            for env_id in env_ids_np:
+                selected_rows.append(step * num_envs + int(env_id))
+        expected = np.full(buffer.num_samples, -1.0, dtype=np.float32)
+        expected[np.asarray(selected_rows, dtype=np.int32)] = policy_out_np[:, action_dim]
+        np.testing.assert_array_equal(buffer.values.numpy()[: buffer.num_samples], expected)
+
+    def test_separate_vtrace_scatter_reuses_training_forward_values(self) -> None:
+        device = require_cuda_graph_capture("PhoenX separate V-trace value reuse tests")
+        num_steps = 2
+        num_envs = 3
+        segment_count = 2
+        buffer = rl.BufferRollout(
+            num_steps=num_steps,
+            num_envs=num_envs,
+            obs_dim=4,
+            action_dim=2,
+            device=device,
+        )
+        trainer = rl.TrainerPPO(
+            obs_dim=4,
+            action_dim=2,
+            hidden_layers=(8,),
+            config=rl.ConfigPPO(
+                shared_value_network=False,
+                manual_actor_backward=True,
+                manual_critic_backward=True,
+            ),
+            device=device,
+            seed=7,
+        )
+        batch = trainer._ensure_minibatch(buffer, segment_count)
+        env_ids_np = np.asarray([2, 0], dtype=np.int32)
+        trainer._minibatch_env_ids = wp.array(env_ids_np, dtype=wp.int32, device=device)
+        values_np = (10.0 + np.arange(batch.num_samples, dtype=np.float32))[:, None]
+        trainer._last_critic_values = wp.array(values_np, dtype=wp.float32, device=device)
+
+        buffer.values.fill_(-1.0)
+        with wp.ScopedCapture(device=device) as capture:
+            trainer._scatter_minibatch_values(buffer, batch, segment_count)
+        wp.capture_launch(capture.graph)
+
+        selected_rows = []
+        for step in range(num_steps):
+            for env_id in env_ids_np:
+                selected_rows.append(step * num_envs + int(env_id))
+        expected = np.full(buffer.num_samples, -1.0, dtype=np.float32)
+        expected[np.asarray(selected_rows, dtype=np.int32)] = values_np[:, 0]
+        np.testing.assert_array_equal(buffer.values.numpy()[: buffer.num_samples], expected)
+
     def test_compact_rollout_and_update_metric_readbacks_reuse_pinned_buffers(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 compact metric readback tests")
         buffer = rl.BufferRollout(num_steps=2, num_envs=3, obs_dim=4, action_dim=2, device=device)

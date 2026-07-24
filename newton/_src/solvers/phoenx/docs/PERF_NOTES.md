@@ -1177,6 +1177,15 @@ A corrected production-recipe phase comparison changes the next target:
   0.423 s to 0.408 s per iteration: 1.240M to 1.284M samples/s (+3.6%).
 - The remaining general targets are persistent BF16 parameter shadows and fewer
   Muon Newton-Schulz matrix passes, including batching compatible shapes.
+- Nsight attribution after BF16 showed parameter casts below 1 ms/update.
+  Fusing the large activation casts into tiled dense kernels was numerically
+  correct but neutral (230.85 ms versus 230.80 ms/update), so it was reverted.
+- Minibatch V-trace then revealed a full redundant post-optimizer policy
+  forward. Reusing values from the same pre-update forward as PPO ratios, as
+  PufferLib does, both restores snapshot consistency and reduces the update to
+  about 209 ms (-9.4%). Production leapfrog training improves from 1.284M to
+  1.364M samples/s (+6.2%), or 97.9% of the local 1.393M nanoG1 baseline.
+  The related separate-critic path now reuses its training values too.
 
 ## Open ideas (not yet attempted)
 
