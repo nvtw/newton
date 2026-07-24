@@ -80,7 +80,10 @@ from newton._src.solvers.phoenx.rl_training.g1_diagnostics import (
 from newton._src.solvers.phoenx.rl_training.kernels import (
     DENSE_TILE_IN,
     DENSE_TILE_OUT,
+    PPO_ADVANTAGE_PARTIAL_COUNT,
     PPO_LOG_STD_PARTIAL_BATCH,
+    add_trajectory_priority_cdf_offsets_kernel,
+    build_trajectory_priority_cdf_partials_kernel,
     compute_puffer_vtrace_returns_kernel,
     gather_trajectory_initial_state_kernel,
     gather_trajectory_minibatch_kernel,
@@ -91,9 +94,12 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     muon_poly_tiled_batch3_kernel,
     ppo_actor_loss_backward_kernel,
     reduce_ppo_log_std_grad_kernel,
+    reduce_sum_partials_kernel,
     sample_trajectory_env_ids_kernel,
+    scan_trajectory_priority_cdf_partials_kernel,
     scatter_trajectory_ratios_kernel,
     scatter_trajectory_values_kernel,
+    sum_partials_kernel,
     trajectory_priority_kernel,
     trajectory_priority_weight_kernel,
     value_column_loss_grad_kernel,
@@ -1544,6 +1550,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         priorities = wp.zeros(num_envs, dtype=wp.float32, device=device)
         weights = wp.zeros(num_envs, dtype=wp.float32, device=device)
         total_weight = wp.zeros(1, dtype=wp.float32, device=device)
+        weight_partials = wp.zeros(PPO_ADVANTAGE_PARTIAL_COUNT, dtype=wp.float32, device=device)
 
         with wp.ScopedCapture(device=device) as capture:
             wp.launch(
@@ -1557,7 +1564,21 @@ class TestG1PhoenXRL(unittest.TestCase):
                 trajectory_priority_weight_kernel,
                 dim=num_envs,
                 inputs=[priorities, float(alpha)],
-                outputs=[weights, total_weight],
+                outputs=[weights],
+                device=device,
+            )
+            wp.launch(
+                sum_partials_kernel,
+                dim=PPO_ADVANTAGE_PARTIAL_COUNT,
+                inputs=[weights, num_envs],
+                outputs=[weight_partials],
+                device=device,
+            )
+            wp.launch(
+                reduce_sum_partials_kernel,
+                dim=1,
+                inputs=[weight_partials],
+                outputs=[total_weight],
                 device=device,
             )
         wp.capture_launch(capture.graph)
@@ -1584,17 +1605,42 @@ class TestG1PhoenXRL(unittest.TestCase):
         manual_total = wp.array(manual_total_np, dtype=wp.float32, device=device)
         env_ids = wp.zeros(sample_count, dtype=wp.int32, device=device)
         importance_weights = wp.zeros(sample_count, dtype=wp.float32, device=device)
+        priority_cdf = wp.zeros(num_envs, dtype=wp.float32, device=device)
+        cdf_partials = wp.zeros(PPO_ADVANTAGE_PARTIAL_COUNT, dtype=wp.float32, device=device)
         with wp.ScopedCapture(device=device) as sample_capture:
+            wp.launch(
+                build_trajectory_priority_cdf_partials_kernel,
+                dim=PPO_ADVANTAGE_PARTIAL_COUNT,
+                inputs=[manual_weights, num_envs],
+                outputs=[priority_cdf, cdf_partials],
+                device=device,
+            )
+            wp.launch(
+                scan_trajectory_priority_cdf_partials_kernel,
+                dim=1,
+                inputs=[priority_cdf, num_envs],
+                outputs=[cdf_partials],
+                device=device,
+            )
+            wp.launch(
+                add_trajectory_priority_cdf_offsets_kernel,
+                dim=num_envs,
+                inputs=[cdf_partials, num_envs],
+                outputs=[priority_cdf],
+                device=device,
+            )
             wp.launch(
                 sample_trajectory_env_ids_kernel,
                 dim=sample_count,
-                inputs=[manual_weights, manual_total, num_envs, 17, float(beta), 1],
+                inputs=[manual_weights, priority_cdf, manual_total, num_envs, 17, float(beta), 1],
                 outputs=[env_ids, importance_weights],
                 device=device,
             )
         wp.capture_launch(sample_capture.graph)
 
         env_ids_np = env_ids.numpy()
+        expected_cdf = np.cumsum(manual_weights_np + np.float32(1.0e-6), dtype=np.float32)
+        np.testing.assert_array_equal(priority_cdf.numpy(), expected_cdf)
         manual_probs = (manual_weights_np + np.float32(1.0e-6)) / (manual_total_np[0] + np.float32(1.0e-6))
         expected_importance = np.power(np.float32(num_envs) * manual_probs[env_ids_np], -beta).astype(np.float32)
         self.assertIn(0, env_ids_np.tolist())

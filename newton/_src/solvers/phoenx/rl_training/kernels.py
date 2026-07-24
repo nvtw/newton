@@ -1189,8 +1189,60 @@ def reduce_sum_partials_kernel(
 
 
 @wp.kernel
+def build_trajectory_priority_cdf_partials_kernel(
+    priority_weights: wp.array[wp.float32],
+    num_envs: wp.int32,
+    cdf: wp.array[wp.float32],
+    partials: wp.array[wp.float32],
+):
+    partial = wp.tid()
+    chunk = (num_envs + partials.shape[0] - wp.int32(1)) / partials.shape[0]
+    start = partial * chunk
+    cumulative = wp.float32(0.0)
+    raw_total = wp.float32(0.0)
+    for offset in range(chunk):
+        env = start + offset
+        if env >= num_envs:
+            break
+        weight = priority_weights[env]
+        raw_total = raw_total + weight
+        cumulative = cumulative + weight + wp.float32(1.0e-6)
+        cdf[env] = cumulative
+    partials[partial] = raw_total
+
+
+@wp.kernel
+def scan_trajectory_priority_cdf_partials_kernel(
+    cdf: wp.array[wp.float32],
+    num_envs: wp.int32,
+    offsets: wp.array[wp.float32],
+):
+    chunk = (num_envs + offsets.shape[0] - wp.int32(1)) / offsets.shape[0]
+    cumulative = wp.float32(0.0)
+    for partial in range(offsets.shape[0]):
+        offsets[partial] = cumulative
+        if partial * chunk >= num_envs:
+            break
+        end = wp.min((partial + wp.int32(1)) * chunk, num_envs) - wp.int32(1)
+        cumulative = cumulative + cdf[end]
+
+
+@wp.kernel
+def add_trajectory_priority_cdf_offsets_kernel(
+    offsets: wp.array[wp.float32],
+    num_envs: wp.int32,
+    cdf: wp.array[wp.float32],
+):
+    env = wp.tid()
+    chunk = (num_envs + offsets.shape[0] - wp.int32(1)) / offsets.shape[0]
+    partial = wp.min(env / chunk, offsets.shape[0] - wp.int32(1))
+    cdf[env] = cdf[env] + offsets[partial]
+
+
+@wp.kernel
 def sample_trajectory_env_ids_kernel(
     priority_weights: wp.array[wp.float32],
+    priority_cdf: wp.array[wp.float32],
     total_weight: wp.array[wp.float32],
     num_envs: wp.int32,
     seed: wp.int32,
@@ -1209,14 +1261,15 @@ def sample_trajectory_env_ids_kernel(
     if use_priority != wp.int32(0) and total > wp.float32(0.0):
         normalizer = total + wp.float32(1.0e-6)
         target = u * normalizer
-        cumulative = wp.float32(0.0)
-        found = wp.int32(0)
-        env = num_envs - wp.int32(1)
-        for candidate in range(num_envs):
-            cumulative = cumulative + priority_weights[candidate] + wp.float32(1.0e-6)
-            if found == wp.int32(0) and target <= cumulative:
-                env = candidate
-                found = wp.int32(1)
+        lo = wp.int32(0)
+        hi = num_envs - wp.int32(1)
+        while lo < hi:
+            mid = (lo + hi) / wp.int32(2)
+            if priority_cdf[mid] < target:
+                lo = mid + wp.int32(1)
+            else:
+                hi = mid
+        env = lo
         if priority_beta > wp.float32(0.0):
             prob = (priority_weights[env] + wp.float32(1.0e-6)) / normalizer
             correction = wp.max(wp.float32(num_envs) * prob, wp.float32(1.0e-6))
@@ -1229,6 +1282,7 @@ def sample_trajectory_env_ids_kernel(
 @wp.kernel
 def sample_trajectory_env_ids_seed_counter_kernel(
     priority_weights: wp.array[wp.float32],
+    priority_cdf: wp.array[wp.float32],
     total_weight: wp.array[wp.float32],
     num_envs: wp.int32,
     seed_counter: wp.array[wp.int32],
@@ -1249,14 +1303,15 @@ def sample_trajectory_env_ids_seed_counter_kernel(
     if use_priority != wp.int32(0) and total > wp.float32(0.0):
         normalizer = total + wp.float32(1.0e-6)
         target = u * normalizer
-        cumulative = wp.float32(0.0)
-        found = wp.int32(0)
-        env = num_envs - wp.int32(1)
-        for candidate in range(num_envs):
-            cumulative = cumulative + priority_weights[candidate] + wp.float32(1.0e-6)
-            if found == wp.int32(0) and target <= cumulative:
-                env = candidate
-                found = wp.int32(1)
+        lo = wp.int32(0)
+        hi = num_envs - wp.int32(1)
+        while lo < hi:
+            mid = (lo + hi) / wp.int32(2)
+            if priority_cdf[mid] < target:
+                lo = mid + wp.int32(1)
+            else:
+                hi = mid
+        env = lo
         if priority_beta > wp.float32(0.0):
             prob = (priority_weights[env] + wp.float32(1.0e-6)) / normalizer
             correction = wp.max(wp.float32(num_envs) * prob, wp.float32(1.0e-6))

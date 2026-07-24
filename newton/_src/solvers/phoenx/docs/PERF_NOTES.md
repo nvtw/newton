@@ -1290,6 +1290,17 @@ A corrected production-recipe phase comparison changes the next target:
   production 3x2 versus 20x8 quality metrics are unchanged, and a 20-iteration
   Ant smoke remains finite and learns forward motion.
 
+- A post-cuBLAS profile found prioritized trajectory sampling scanning all 8,192
+  weights independently for every sampled trajectory. Building a 256-way
+  parallel CDF once per update and binary-searching it reduces the priority
+  pipeline from about 14.2 to 2.5 ms/update. The same-session isolated update
+  falls from 123.0 to 113.9 ms (-7.4%). Interleaved production controls measure
+  1.580-1.582M samples/s versus 1.584-1.594M for the candidate (about +0.5% by
+  median), because graph leapfrogging hides most learner work behind rollout.
+  The implementation is scene-independent and both ordinary and graph-replay
+  sampling regressions pass; an 8-iteration G1 smoke remains finite and improves
+  reward and tracking.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

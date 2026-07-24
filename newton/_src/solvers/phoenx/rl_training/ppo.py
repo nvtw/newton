@@ -15,6 +15,8 @@ import warp as wp
 from .kernels import (
     PPO_ADVANTAGE_PARTIAL_COUNT,
     PPO_LOG_STD_PARTIAL_BATCH,
+    add_trajectory_priority_cdf_offsets_kernel,
+    build_trajectory_priority_cdf_partials_kernel,
     compute_gae_kernel,
     compute_puffer_vtrace_returns_kernel,
     compute_vtrace_returns_kernel,
@@ -42,11 +44,11 @@ from .kernels import (
     rollout_reward_done_success_sums_kernel,
     sample_trajectory_env_ids_kernel,
     sample_trajectory_env_ids_seed_counter_kernel,
+    scan_trajectory_priority_cdf_partials_kernel,
     scatter_trajectory_ratios_kernel,
     scatter_trajectory_values_kernel,
     seed_counter_increment_kernel,
     sum_and_sumsq_partials_kernel,
-    sum_partials_kernel,
     trajectory_priority_kernel,
     trajectory_priority_weight_kernel,
     value_column_loss_grad_kernel,
@@ -543,6 +545,7 @@ class TrainerPPO:
         self._minibatch_env_ids: wp.array[wp.int32] | None = None
         self._trajectory_priorities: wp.array[wp.float32] | None = None
         self._trajectory_priority_weights: wp.array[wp.float32] | None = None
+        self._trajectory_priority_cdf: wp.array[wp.float32] | None = None
         self._trajectory_priority_total: wp.array[wp.float32] | None = None
         self._trajectory_priority_partials: wp.array[wp.float32] | None = None
         self._actor_policy_out_grad: wp.array2d[wp.float32] | None = None
@@ -1428,6 +1431,7 @@ class TrainerPPO:
         if self._trajectory_priorities is None or int(self._trajectory_priorities.shape[0]) != env_count:
             self._trajectory_priorities = wp.zeros(env_count, dtype=wp.float32, device=self.device)
             self._trajectory_priority_weights = wp.zeros(env_count, dtype=wp.float32, device=self.device)
+            self._trajectory_priority_cdf = wp.zeros(env_count, dtype=wp.float32, device=self.device)
             self._trajectory_priority_total = wp.zeros(1, dtype=wp.float32, device=self.device)
             self._trajectory_priority_partials = wp.zeros(
                 PPO_ADVANTAGE_PARTIAL_COUNT, dtype=wp.float32, device=self.device
@@ -1438,7 +1442,11 @@ class TrainerPPO:
         self._ensure_trajectory_sampling_buffers(buffer.num_envs)
         if priority_alpha <= 0.0:
             return False
-        if self._trajectory_priorities is None or self._trajectory_priority_weights is None:
+        if (
+            self._trajectory_priorities is None
+            or self._trajectory_priority_weights is None
+            or self._trajectory_priority_cdf is None
+        ):
             raise RuntimeError("trajectory priority buffers were not initialized")
         if self._trajectory_priority_total is None or self._trajectory_priority_partials is None:
             raise RuntimeError("trajectory priority total buffer was not initialized")
@@ -1457,10 +1465,10 @@ class TrainerPPO:
             device=self.device,
         )
         wp.launch(
-            sum_partials_kernel,
+            build_trajectory_priority_cdf_partials_kernel,
             dim=PPO_ADVANTAGE_PARTIAL_COUNT,
             inputs=[self._trajectory_priority_weights, buffer.num_envs],
-            outputs=[self._trajectory_priority_partials],
+            outputs=[self._trajectory_priority_cdf, self._trajectory_priority_partials],
             device=self.device,
         )
         wp.launch(
@@ -1468,6 +1476,20 @@ class TrainerPPO:
             dim=1,
             inputs=[self._trajectory_priority_partials],
             outputs=[self._trajectory_priority_total],
+            device=self.device,
+        )
+        wp.launch(
+            scan_trajectory_priority_cdf_partials_kernel,
+            dim=1,
+            inputs=[self._trajectory_priority_cdf, buffer.num_envs],
+            outputs=[self._trajectory_priority_partials],
+            device=self.device,
+        )
+        wp.launch(
+            add_trajectory_priority_cdf_offsets_kernel,
+            dim=buffer.num_envs,
+            inputs=[self._trajectory_priority_partials, buffer.num_envs],
+            outputs=[self._trajectory_priority_cdf],
             device=self.device,
         )
         return True
@@ -1478,13 +1500,18 @@ class TrainerPPO:
         self._ensure_trajectory_sampling_buffers(buffer.num_envs)
         if self._minibatch_env_ids is None:
             raise RuntimeError("minibatch env id buffer was not initialized")
-        if self._trajectory_priority_weights is None or self._trajectory_priority_total is None:
+        if (
+            self._trajectory_priority_weights is None
+            or self._trajectory_priority_cdf is None
+            or self._trajectory_priority_total is None
+        ):
             raise RuntimeError("trajectory sampling buffers were not initialized")
         wp.launch(
             sample_trajectory_env_ids_kernel,
             dim=batch.num_envs,
             inputs=[
                 self._trajectory_priority_weights,
+                self._trajectory_priority_cdf,
                 self._trajectory_priority_total,
                 buffer.num_envs,
                 int(seed) & 0x7FFFFFFF,
@@ -1507,13 +1534,18 @@ class TrainerPPO:
         self._ensure_trajectory_sampling_buffers(buffer.num_envs)
         if self._minibatch_env_ids is None:
             raise RuntimeError("minibatch env id buffer was not initialized")
-        if self._trajectory_priority_weights is None or self._trajectory_priority_total is None:
+        if (
+            self._trajectory_priority_weights is None
+            or self._trajectory_priority_cdf is None
+            or self._trajectory_priority_total is None
+        ):
             raise RuntimeError("trajectory sampling buffers were not initialized")
         wp.launch(
             sample_trajectory_env_ids_seed_counter_kernel,
             dim=batch.num_envs,
             inputs=[
                 self._trajectory_priority_weights,
+                self._trajectory_priority_cdf,
                 self._trajectory_priority_total,
                 buffer.num_envs,
                 seed_counter,
