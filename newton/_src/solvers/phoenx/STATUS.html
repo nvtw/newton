@@ -86,11 +86,11 @@
       </ul>
     </section>
     <section class="panel">
-      <h2>Current investigation</h2>
+      <h2>Latest grouping verdict</h2>
       <ul>
-        <li>G1 has 17 shape-pair columns but only four compatible physical body pairs per world.</li>
-        <li>A contact-stable pair measured 1.867M grouped versus 1.623M control physics steps/s (+15%).</li>
-        <li>Blocker: current grouping merges mixed-material compound shapes using friction from the first shape. Fix and regress that root cause before enabling fleets.</li>
+        <li>Compatible body-pair grouping cuts G1 columns from 73,728 to 16,384 and raises isolated 4,096-world physics from 1.620M to 1.887M steps/s (+16.5%).</li>
+        <li>Production training regresses: 1.223M / 1.220M grouped versus 1.244M control (about -1.8%). Nsight attributes about 5.1 ms per interval to added radix-sort and gather work while dominant row build/solve stays unchanged.</li>
+        <li>Decision: do not enable fleet grouping. Preserve mixed-material friction and per-contact friction-scale correctness with regressions.</li>
       </ul>
     </section>
   </div>
@@ -135,7 +135,7 @@
     <ul>
       <li>Primary metric: multi-seed wall-clock time to a frozen policy gate; throughput and traces are secondary.</li>
       <li>Behavior-changing candidates require multi-seed evidence.</li>
-      <li>Focused G1, H1, reduced-Ant, ownership, and maximal patch tests pass; scoped pre-commit passes.</li>
+      <li>Compound grouping and soft-contact suites pass 7/7 each. A cached 30-update Ant smoke remains finite at 0.928M samples/s; this is not a paired speed claim.</li>
     </ul>
   </section>
 

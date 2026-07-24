@@ -626,7 +626,7 @@ class ContactViews:
     #: back to the legacy Box2D hertz-based normal row.
     rigid_contact_stiffness: wp.array[wp.float32]
     rigid_contact_damping: wp.array[wp.float32]
-    #: Per-contact friction override. ``0`` falls back to materials.
+    #: Per-contact friction scale. ``0`` leaves material friction unchanged.
     rigid_contact_friction: wp.array[wp.float32]
 
 

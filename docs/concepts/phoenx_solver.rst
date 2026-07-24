@@ -213,10 +213,10 @@ Per-pair resolution combines the two shapes' coefficients with the
 **stricter** combine mode (``max(mode_a, mode_b)``):
 ``AVERAGE < MIN < MULTIPLY < MAX``.
 
-Per-contact overrides are supported via
+Per-contact friction scaling is supported via
 :attr:`Contacts.rigid_contact_friction` (set via
-:meth:`Model.request_contact_attributes`) when the soft-contact
-path is enabled.
+:meth:`Model.request_contact_attributes`). Positive values multiply
+the resolved material friction; zero leaves it unchanged.
 
 .. note::
 
@@ -424,9 +424,9 @@ Contact features:
 - **Penetrating contacts** (``gap < 0``): soft Baumgarte with the
   contact stiffness/damping from the material; bias=0 in the relax
   pass.
-- **Per-contact overrides**: pass
-  ``Contacts.rigid_contact_stiffness`` / ``rigid_contact_damping`` /
-  ``rigid_contact_friction`` (request via
+- **Per-contact properties**: pass stiffness/damping overrides via
+  ``Contacts.rigid_contact_stiffness`` / ``rigid_contact_damping``,
+  and a multiplicative friction scale via ``rigid_contact_friction`` (request via
   :meth:`Model.request_contact_attributes` and
   :meth:`CollisionPipeline.contacts(per_contact_shape_properties=True)`).
 - **Pairwise contact filter**: register

@@ -148,7 +148,7 @@ def _add_sphere_on_ground(
     """Add a ground plane at z=0 plus a single dynamic sphere whose
     COM is placed at ``z0 = radius`` by default (just touching the
     plane, zero gap). Returns the sphere's body index."""
-    mb.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+    mb.add_shape_plane(-1, xform=wp.transform_identity(), width=0.0, length=0.0)
     if z0 is None:
         z0 = radius
     i_sphere = 0.4 * mass * radius * radius
@@ -167,6 +167,81 @@ def _add_sphere_on_ground(
         cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
     )
     return body
+
+
+def _add_box_on_ground(mb: newton.ModelBuilder, half_extent: float, mass: float) -> int:
+    inertia = mass * half_extent * half_extent * 2.0 / 3.0
+    body = mb.add_body(
+        xform=wp.transform(p=wp.vec3(0.0, 0.0, half_extent), q=wp.quat_identity()),
+        mass=mass,
+        inertia=(
+            (inertia, 0.0, 0.0),
+            (0.0, inertia, 0.0),
+            (0.0, 0.0, inertia),
+        ),
+    )
+    mb.add_shape_plane(-1, xform=wp.transform_identity(), width=0.0, length=0.0)
+    mb.add_shape_box(
+        body,
+        hx=half_extent,
+        hy=half_extent,
+        hz=half_extent,
+        cfg=newton.ModelBuilder.ShapeConfig(density=0.0),
+    )
+    return body
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX soft-contact tests require CUDA")
+class TestContactFrictionScale(unittest.TestCase):
+    "Per-contact friction scaling is honored by contact-column ingest."
+
+    def test_friction_scale_updates_column_coefficients(self) -> None:
+        mb = newton.ModelBuilder()
+        _add_sphere_on_ground(mb, radius=0.1, mass=1.0)
+        model, state_in, state_out, contacts, solver = _finalize_phoenx(
+            mb,
+            per_contact_shape_properties=True,
+            substeps=1,
+            solver_iterations=1,
+        )
+
+        model.collide(state_in, contacts)
+        contacts.rigid_contact_friction.fill_(0.25)
+        solver.step(state_in, state_out, None, contacts, 1.0 / 240.0)
+
+        column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        self.assertEqual(column_count, 1)
+        column_data = solver.world._contact_cols.data.numpy()
+        self.assertAlmostEqual(float(column_data[3, 0]), 0.25)
+        self.assertAlmostEqual(float(column_data[4, 0]), 0.25)
+
+    def test_different_scales_split_shape_pair_columns(self) -> None:
+        mb = newton.ModelBuilder()
+        _add_box_on_ground(mb, half_extent=0.1, mass=1.0)
+        model, state_in, state_out, contacts, solver = _finalize_phoenx(
+            mb,
+            per_contact_shape_properties=True,
+            substeps=1,
+            solver_iterations=1,
+        )
+
+        model.collide(state_in, contacts)
+        contact_count = int(contacts.rigid_contact_count.numpy()[0])
+        self.assertGreaterEqual(contact_count, 2)
+        contacts.rigid_contact_friction.fill_(0.25)
+        wp.copy(
+            contacts.rigid_contact_friction,
+            wp.array([0.5], dtype=wp.float32, device=model.device),
+            count=1,
+            dest_offset=1,
+        )
+        solver.step(state_in, state_out, None, contacts, 1.0 / 240.0)
+
+        column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        self.assertGreaterEqual(column_count, 2)
+        column_friction = solver.world._contact_cols.data.numpy()[3, :column_count]
+        self.assertTrue((abs(column_friction - 0.25) < 1.0e-6).any())
+        self.assertTrue((abs(column_friction - 0.5) < 1.0e-6).any())
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX soft-contact tests require CUDA")

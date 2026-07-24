@@ -144,6 +144,29 @@ def _build_compound_fleet_scene(world_count: int = 2):
     return model
 
 
+def _build_mixed_material_compound_scene():
+    "One compound body whose two ground contacts have different friction."
+    mb = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    mb.add_ground_plane(cfg=mb.ShapeConfig(mu=1.0))
+    body = mb.add_link(
+        xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.05), q=wp.quat_identity()),
+        mass=1.0,
+        inertia=((1.0e-2, 0, 0), (0, 1.0e-2, 0), (0, 0, 1.0e-2)),
+    )
+    joint = mb.add_joint_free(parent=-1, child=body)
+    for x, mu in ((-0.06, 0.2), (0.06, 0.8)):
+        mb.add_shape_box(
+            body,
+            xform=wp.transform(p=wp.vec3(x, 0.0, 0.0), q=wp.quat_identity()),
+            hx=0.05,
+            hy=0.05,
+            hz=0.05,
+            cfg=mb.ShapeConfig(density=1000.0, mu=mu),
+        )
+    mb.add_articulation([joint])
+    return mb.finalize()
+
+
 def _make_solver(model, *, step_layout: str = "multi_world"):
     return newton.solvers.SolverPhoenX(
         model,
@@ -212,6 +235,20 @@ class TestCompoundContactGrouping(unittest.TestCase):
             solver.world._ingest_scratch.body_pair_keys,
             "single-shape scratch should not allocate body-pair sort buffers",
         )
+
+    def test_grouping_preserves_mixed_material_columns(self) -> None:
+        "A body-pair run must split where effective friction changes."
+        model = _build_mixed_material_compound_scene()
+        solver = _make_solver(model, step_layout="single_world")
+
+        _step_n(model, solver, n_frames=4, dt=1.0 / 240.0)
+
+        column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        self.assertEqual(column_count, 2)
+        column_data = solver.world._contact_cols.data.numpy()
+        expected_friction = np.array([0.6, 0.9], dtype=np.float32)
+        np.testing.assert_allclose(np.sort(column_data[3, :column_count]), expected_friction)
+        np.testing.assert_allclose(np.sort(column_data[4, :column_count]), expected_friction)
 
     def test_compound_scene_steps_without_nan(self) -> None:
         """Step the compound scene for ~0.5 s; assert finite poses and

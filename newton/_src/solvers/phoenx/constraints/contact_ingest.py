@@ -399,10 +399,52 @@ def _gather_sorted_contacts_kernel(
         sorted_friction[tid] = wp.float32(0.0)
 
 
+@wp.func
+def _contact_friction_scale(
+    contact: wp.int32,
+    contact_friction: wp.array[wp.float32],
+) -> wp.float32:
+    scale = wp.float32(1.0)
+    if contact >= wp.int32(0) and contact < contact_friction.shape[0]:
+        candidate = contact_friction[contact]
+        if candidate > wp.float32(0.0):
+            scale = candidate
+    return scale
+
+
+@wp.func
+def _shape_pair_friction(
+    contact: wp.int32,
+    shape0: wp.int32,
+    shape1: wp.int32,
+    contact_friction: wp.array[wp.float32],
+    shape_material: wp.array[wp.int32],
+    materials: wp.array[MaterialData],
+    default_friction: wp.float32,
+) -> wp.vec2f:
+    mat0 = wp.int32(-1)
+    mat1 = wp.int32(-1)
+    if shape0 >= wp.int32(0) and shape0 < shape_material.shape[0]:
+        mat0 = shape_material[shape0]
+    if shape1 >= wp.int32(0) and shape1 < shape_material.shape[0]:
+        mat1 = shape_material[shape1]
+    friction = wp.vec2f(
+        resolve_friction_static_in_kernel(materials, mat0, mat1, default_friction),
+        resolve_friction_in_kernel(materials, mat0, mat1, default_friction),
+    )
+    return friction * _contact_friction_scale(contact, contact_friction)
+
+
 @wp.kernel(enable_backward=False)
 def _body_pair_boundary_kernel(
     rigid_contact_count: wp.array[wp.int32],
     body_pair_keys: wp.array[wp.int64],
+    shape0: wp.array[wp.int32],
+    shape1: wp.array[wp.int32],
+    contact_friction: wp.array[wp.float32],
+    shape_material: wp.array[wp.int32],
+    materials: wp.array[MaterialData],
+    default_friction: wp.float32,
     # out
     pair_boundary: wp.array[wp.int32],
     cid_of_contact: wp.array[wp.int32],
@@ -425,7 +467,29 @@ def _body_pair_boundary_kernel(
     if tid == wp.int32(0):
         pair_boundary[tid] = wp.int32(1)
         return
-    if body_pair_keys[tid] != body_pair_keys[tid - 1]:
+    friction = _shape_pair_friction(
+        tid,
+        shape0[tid],
+        shape1[tid],
+        contact_friction,
+        shape_material,
+        materials,
+        default_friction,
+    )
+    previous_friction = _shape_pair_friction(
+        tid - wp.int32(1),
+        shape0[tid - wp.int32(1)],
+        shape1[tid - wp.int32(1)],
+        contact_friction,
+        shape_material,
+        materials,
+        default_friction,
+    )
+    if (
+        body_pair_keys[tid] != body_pair_keys[tid - 1]
+        or friction[0] != previous_friction[0]
+        or friction[1] != previous_friction[1]
+    ):
         pair_boundary[tid] = wp.int32(1)
     else:
         pair_boundary[tid] = wp.int32(0)
@@ -467,6 +531,7 @@ def _mark_valid_shape_pair_runs_kernel(
     rigid_contact_count: wp.array[wp.int32],
     rigid_contact_shape0: wp.array[wp.int32],
     rigid_contact_shape1: wp.array[wp.int32],
+    rigid_contact_friction: wp.array[wp.float32],
     shape_filter_id: wp.array[wp.int32],
     num_bodies: wp.int32,
     filter_keys: wp.array[wp.int64],
@@ -485,7 +550,12 @@ def _mark_valid_shape_pair_runs_kernel(
     shape_b = rigid_contact_shape1[contact]
     if contact > wp.int32(0):
         previous = contact - wp.int32(1)
-        if shape_a == rigid_contact_shape0[previous] and shape_b == rigid_contact_shape1[previous]:
+        if (
+            shape_a == rigid_contact_shape0[previous]
+            and shape_b == rigid_contact_shape1[previous]
+            and _contact_friction_scale(contact, rigid_contact_friction)
+            == _contact_friction_scale(previous, rigid_contact_friction)
+        ):
             pair_boundary[contact] = wp.int32(0)
             return
     body_a = shape_filter_id[shape_a]
@@ -724,6 +794,7 @@ def _contact_pack_columns_kernel(
     pair_count: wp.array[wp.int32],
     pair_shape_a: wp.array[wp.int32],
     pair_shape_b: wp.array[wp.int32],
+    contact_friction: wp.array[wp.float32],
     shape_body: wp.array[wp.int32],
     shape_material: wp.array[wp.int32],
     materials: wp.array[MaterialData],
@@ -768,8 +839,9 @@ def _contact_pack_columns_kernel(
         mat_a = shape_material[sa]
     if shape_material.shape[0] > sb:
         mat_b = shape_material[sb]
-    mu_static = resolve_friction_static_in_kernel(materials, mat_a, mat_b, default_friction)
-    mu_dynamic = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction)
+    friction_scale = _contact_friction_scale(first, contact_friction)
+    mu_static = resolve_friction_static_in_kernel(materials, mat_a, mat_b, default_friction) * friction_scale
+    mu_dynamic = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction) * friction_scale
 
     # Header is stored at offsets 0 / 1 / 2 (contract is
     # ``constraint_type / body1 / body2``). Dispatcher no longer reads
@@ -997,6 +1069,16 @@ def ingest_contacts(
             "signature has no null-pointer path)."
         )
 
+    if shape_material is None:
+        shape_material = wp.array([-1], dtype=wp.int32, device=device)
+    if materials is None:
+        materials = wp.zeros(0, dtype=MaterialData, device=device)
+    contact_friction = (
+        contacts.rigid_contact_friction
+        if getattr(contacts, "rigid_contact_friction", None) is not None
+        else wp.zeros(0, dtype=wp.float32, device=device)
+    )
+
     if enable_body_pair_grouping:
         if scratch.body_pair_keys is None:
             raise RuntimeError(
@@ -1064,9 +1146,7 @@ def ingest_contacts(
                 contacts.rigid_contact_damping
                 if getattr(contacts, "rigid_contact_damping", None) is not None
                 else wp.zeros(0, dtype=wp.float32, device=device),
-                contacts.rigid_contact_friction
-                if getattr(contacts, "rigid_contact_friction", None) is not None
-                else wp.zeros(0, dtype=wp.float32, device=device),
+                contact_friction,
                 scratch.prev_inv_sort_perm,
             ],
             outputs=[
@@ -1085,16 +1165,15 @@ def ingest_contacts(
             device=device,
         )
         # The downstream pipeline uses these sorted arrays in place of
-        # Newton's narrow-phase arrays. ``shape0`` / ``shape1`` come
-        # from the sorted scratch so material lookups land at the
-        # *first* shape pair in each merged column (acceptable for
-        # uniform-material compounds; see docs/CONTACT_GROUP_COMPOUND_OPT.md
-        # Section 5).
+        # Use sorted narrow-phase arrays downstream. Material coefficients and
+        # per-contact friction scales delimit compatible grouped columns.
         ingest_shape0 = scratch.sorted_shape0
         ingest_shape1 = scratch.sorted_shape1
+        ingest_friction = scratch.sorted_friction
     else:
         ingest_shape0 = contacts.rigid_contact_shape0
         ingest_shape1 = contacts.rigid_contact_shape1
+        ingest_friction = contact_friction
 
     filter_id_arr = shape_filter_id if shape_filter_id is not None else shape_body
     if not enable_body_pair_grouping:
@@ -1105,6 +1184,7 @@ def ingest_contacts(
                 contacts.rigid_contact_count,
                 contacts.rigid_contact_shape0,
                 contacts.rigid_contact_shape1,
+                contact_friction,
                 filter_id_arr,
                 int(num_bodies),
                 filter_keys,
@@ -1143,7 +1223,16 @@ def ingest_contacts(
         wp.launch(
             kernel=_body_pair_boundary_kernel,
             dim=rigid_contact_max,
-            inputs=[contacts.rigid_contact_count, scratch.body_pair_keys],
+            inputs=[
+                contacts.rigid_contact_count,
+                scratch.body_pair_keys,
+                ingest_shape0,
+                ingest_shape1,
+                ingest_friction,
+                shape_material,
+                materials,
+                wp.float32(default_friction),
+            ],
             outputs=[scratch.pair_boundary, cid_of_contact],
             device=device,
         )
@@ -1202,11 +1291,6 @@ def ingest_contacts(
         )
 
     # Step 5: write the contact column headers + ranges.
-    if shape_material is None:
-        shape_material = wp.array([-1], dtype=wp.int32, device=device)
-    if materials is None:
-        materials = wp.zeros(0, dtype=MaterialData, device=device)
-
     wp.launch(
         kernel=_contact_pack_columns_kernel,
         dim=max(1, max_contact_columns),
@@ -1216,6 +1300,7 @@ def ingest_contacts(
             scratch.pair_count,
             scratch.pair_shape_a,
             scratch.pair_shape_b,
+            ingest_friction,
             shape_body,
             shape_material,
             materials,
