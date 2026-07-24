@@ -133,8 +133,32 @@
         <div class="eyebrow">Newton · PhoenX</div>
         <h1>Development status</h1>
       </div>
-      <div class="stamp">Last updated<br><strong>24 July 2026 &middot; learning-parity audit</strong></div>
+      <div class="stamp">Last updated<br><strong>24 July 2026 &middot; trajectory-parity audit</strong></div>
     </header>
+
+    <section class="work-profile" aria-label="Fresh-policy and trajectory parity audit">
+      <div class="meta"><span class="tag good">Root-cause fix validated</span><span>24 July 2026</span></div>
+      <h2>Reduced friction no longer changes with fleet size or GPU</h2>
+      <p class="summary-lead">The trajectory audit found a genuine reproducibility bug: reduced PhoenX silently selected point or patch friction from articulation count divided by GPU SM count, despite the public solver default saying point friction. The solver now honors an explicit friction model at every scale; G1 explicitly selects its production patch model.</p>
+      <div class="metrics">
+        <div class="card"><div class="metric">0.699</div><div class="label">Fresh-policy battery performance at 39.3M</div></div>
+        <div class="card"><div class="metric">0.686</div><div class="label">Concurrent control battery performance</div></div>
+        <div class="card"><div class="metric">&minus;11.9%</div><div class="label">Fresh-policy throughput change</div></div>
+        <div class="card"><div class="metric">Bit-exact</div><div class="label">Explicit vs prior production G1 patch path</div></div>
+      </div>
+      <ul>
+        <li>Serialized fresh-policy graph execution measured 0.792M aggregate samples/s versus 0.899M for the exact concurrent control. Its small tracking gain came with much worse angular-velocity RMS (0.250 versus 0.031), so the temporary change was removed.</li>
+        <li>With matched 4 ms physics steps and identical open-loop leg targets in free flight, PhoenX and nanoG1 differ by only 0.0027 rad joint-position trajectory RMSE over ten control steps.</li>
+        <li>Grounded zero-action trajectories diverge on the first control step: reduced PhoenX has 0.137 rad/s joint-velocity RMSE and reaches 0.0125 rad joint-position trajectory RMSE over twenty steps. Matching nanoG1&rsquo;s 4 ms step does not reduce it.</li>
+        <li>Projected-maximal PhoenX cuts grounded base-position RMSE from 0.00610 m to 0.00241 m and joint-position RMSE from 0.01250 rad to 0.00591 rad. Its velocity error is worse, so this is diagnostic evidence rather than a replacement solver recommendation.</li>
+        <li>Small reduced runs previously used independent point friction while 8,192-world G1 used shared patch friction. The same grounded foot measured 78.9 N versus 8.87 N mean tangential support under those two models. The choice depended on GPU SM count as well as fleet size.</li>
+        <li><code>contact_friction_model="point"</code> now stays point friction at every scale; <code>"patch"</code> is explicitly supported by the reference reduced path. The G1 recipe chooses patch, and its one-world trajectory is bit-identical to the former forced production patch path.</li>
+        <li>New regressions cover explicit reduced point/patch selection, reject patch with the unsupported persistent path, prove the non-owning world solver remains on point mode, and prove one-world G1 uses the production patch model. Focused G1, H1, reduced-Ant, and maximal-patch momentum tests pass.</li>
+        <li>A first explicit implementation accidentally activated both reduced and generic patch infrastructure and regressed to 0.371M samples/s; the ownership regression caught the architectural mistake. Routing patch only to reduced ownership restores 0.897M versus the exact 0.899M pre-fix control (&minus;0.21%).</li>
+        <li>Sibling-path audit: maximal already selects point/patch explicitly; maximal-projected and hybrid reject unsupported patch mode; persistent reduced rejects it; Mini exposes an explicit selector. Remaining fleet/SM policies select launch shape, gather kernel, or fallback scheduling and have parity/order regressions rather than changing the friction model.</li>
+      </ul>
+      <div class="verdict good-verdict"><strong>Decision:</strong> retain the correctness fix. It removes hardware- and batch-dependent physics without changing production G1 numerics or throughput. The remaining grounded PhoenX/nanoG1 trajectory difference is not yet classified as a bug: both satisfy plausible support-force and Coulomb bounds, and nanoG1&rsquo;s pyramidal soft constraints intentionally differ from PhoenX&rsquo;s patch Coulomb solve. Continue from first-principles invariants, not nanoG1 matching alone.</div>
+    </section>
 
     <section class="work-profile" aria-label="Matched nanoG1 training audit">
       <div class="meta"><span class="tag good">Production comparison corrected</span><span>24 July 2026</span></div>

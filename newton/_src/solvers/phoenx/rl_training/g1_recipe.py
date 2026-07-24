@@ -87,6 +87,7 @@ W_JOINT_POS_LIMIT_ANKLE = 0.0
 PARSE_MESHES = False
 PARSE_VISUALS = False
 CONTACT_GEOMETRY = "nanog1_foot_boxes"
+CONTACT_FRICTION_MODEL = "patch"
 GROUND_FRICTION = 0.6
 FOOT_BOX_XY_SCALE = 1.0
 AUTO_RESET = True
@@ -225,6 +226,7 @@ def default_g1_env_config(**overrides: Any):
         "parse_meshes": PARSE_MESHES,
         "parse_visuals": PARSE_VISUALS,
         "contact_geometry": CONTACT_GEOMETRY,
+        "contact_friction_model": CONTACT_FRICTION_MODEL,
         "ground_friction": GROUND_FRICTION,
         "foot_box_xy_scale": FOOT_BOX_XY_SCALE,
         "auto_reset": AUTO_RESET,

@@ -4297,9 +4297,20 @@ def _build_persistent_articulation_eligibility(
 class ReducedPhoenXArticulation:
     """Graph-stable bridge between common Newton articulation state and PhoenX bodies."""
 
-    def __init__(self, model: Model, bodies: BodyContainer, *, execution_path: str = "reference"):
+    def __init__(
+        self,
+        model: Model,
+        bodies: BodyContainer,
+        *,
+        execution_path: str = "reference",
+        contact_friction_model: str = "point",
+    ):
         if execution_path not in ("reference", "persistent"):
             raise ValueError(f"execution_path must be 'reference' or 'persistent', got {execution_path!r}")
+        if contact_friction_model not in ("point", "patch"):
+            raise ValueError(f"contact_friction_model must be 'point' or 'patch', got {contact_friction_model!r}")
+        if execution_path == "persistent" and contact_friction_model == "patch":
+            raise ValueError("persistent reduced articulations do not support patch friction")
         self.execution_path = execution_path
         self.model = model
         self.bodies = bodies
@@ -4399,6 +4410,7 @@ class ReducedPhoenXArticulation:
             articulation_depth_joint=self.system.advance_articulation_depth_joint,
             max_depth=self.system.advance_max_depth,
             allow_patch_rows=execution_path != "persistent",
+            use_patch_rows=contact_friction_model == "patch",
         )
         if execution_path == "persistent":
             self.contact_block_system.biased_page_launcher = self._launch_persistent_biased_page

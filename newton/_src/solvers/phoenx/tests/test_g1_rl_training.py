@@ -3197,6 +3197,9 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(env_config.w_joint_pos_limit_ankle, g1_recipe.W_JOINT_POS_LIMIT_ANKLE)
         self.assertEqual(env_config.rigid_contact_max_per_world, g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)
         self.assertEqual(env_config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
+        self.assertEqual(env_config.contact_friction_model, g1_recipe.CONTACT_FRICTION_MODEL)
+        self.assertEqual(env_config.contact_friction_model, "patch")
+        self.assertTrue(env.solver._reduced_articulation.contact_block_system.patch_rows)
         self.assertEqual(env_config.ground_friction, g1_recipe.GROUND_FRICTION)
         self.assertEqual(env_config.foot_box_xy_scale, g1_recipe.FOOT_BOX_XY_SCALE)
         self.assertTrue(train_config.reset_recurrent_state_on_rollout_start)
@@ -3894,6 +3897,13 @@ class TestG1PhoenXRL(unittest.TestCase):
         config = rl.ConfigEnvG1PhoenX(world_count=1, contact_geometry="unknown")
 
         with self.assertRaisesRegex(ValueError, "contact_geometry"):
+            rl.EnvG1PhoenX(config, device=device)
+
+    def test_rejects_unknown_contact_friction_model(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 RL contact friction tests")
+        config = rl.ConfigEnvG1PhoenX(world_count=1, contact_friction_model="unknown")
+
+        with self.assertRaisesRegex(ValueError, "contact_friction_model"):
             rl.EnvG1PhoenX(config, device=device)
 
     def test_rejects_negative_contact_capacity(self) -> None:

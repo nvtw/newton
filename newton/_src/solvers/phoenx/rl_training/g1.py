@@ -2074,6 +2074,7 @@ class ConfigEnvG1PhoenX:
         contact_geometry: G1 contact geometry preset. "mjcf" keeps the
             imported MJCF primitives; "nanog1_foot_boxes" replaces the
             four foot point contacts per foot with nanoG1's MuJoCo contact boxes.
+        contact_friction_model: PhoenX point or contact-patch friction model.
         ground_friction: Ground-plane Coulomb friction coefficient.
         foot_box_xy_scale: Scale applied to the nanoG1 foot-box X/Y half-extents.
         auto_reset: Reset worlds whose done flag is set after each step.
@@ -2156,6 +2157,7 @@ class ConfigEnvG1PhoenX:
     parse_meshes: bool = g1_recipe.PARSE_MESHES
     parse_visuals: bool = g1_recipe.PARSE_VISUALS
     contact_geometry: str = g1_recipe.CONTACT_GEOMETRY
+    contact_friction_model: str = g1_recipe.CONTACT_FRICTION_MODEL
     ground_friction: float = g1_recipe.GROUND_FRICTION
     foot_box_xy_scale: float = g1_recipe.FOOT_BOX_XY_SCALE
     auto_reset: bool = g1_recipe.AUTO_RESET
@@ -2231,6 +2233,8 @@ class EnvG1PhoenX:
             raise ValueError("sparse_target_success_max_base_height must be >= sparse_target_success_min_base_height")
         if str(self.config.contact_geometry) not in _NANOG1_CONTACT_GEOMETRIES:
             raise ValueError(f"contact_geometry must be one of {_NANOG1_CONTACT_GEOMETRIES}")
+        if str(self.config.contact_friction_model) not in ("point", "patch"):
+            raise ValueError("contact_friction_model must be 'point' or 'patch'")
         if float(self.config.ground_friction) < 0.0:
             raise ValueError("ground_friction must be non-negative")
         if float(self.config.foot_box_xy_scale) <= 0.0:
@@ -2461,6 +2465,7 @@ class EnvG1PhoenX:
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
             joint_friction_model=str(self.config.joint_friction_model),
+            contact_friction_model=str(self.config.contact_friction_model),
             threads_per_world=self.config.threads_per_world,
             multi_world_scheduler=self.config.multi_world_scheduler,
             prepare_refresh_stride=self.config.prepare_refresh_stride,

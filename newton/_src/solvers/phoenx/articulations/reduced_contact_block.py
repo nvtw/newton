@@ -86,7 +86,6 @@ _FALLBACK_BLOCK_DIM = 256
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 
 _INT64_MAX = 9223372036854775807
-_PATCH_ROWS_MIN_ARTICULATIONS_PER_SM = 32
 
 
 def _reduced_patch_rows_override() -> bool | None:
@@ -2018,6 +2017,7 @@ class ReducedContactBlockSystem:
         articulation_depth_joint: wp.array[wp.int32],
         max_depth: int,
         allow_patch_rows: bool = True,
+        use_patch_rows: bool = False,
     ):
         self.device = model.device
         self.articulation_depth_start = articulation_depth_start
@@ -2049,12 +2049,10 @@ class ReducedContactBlockSystem:
         self.articulation_count = int(model.articulation_count)
         sm_count = max(1, int(getattr(self.device, "sm_count", 1)))
         patch_rows_override = _reduced_patch_rows_override()
-        patch_rows_at_scale = self.articulation_count >= _PATCH_ROWS_MIN_ARTICULATIONS_PER_SM * sm_count
-        self.patch_rows = (
-            allow_patch_rows
-            and self.device.is_cuda
-            and (patch_rows_at_scale if patch_rows_override is None else patch_rows_override)
-        )
+        patch_rows_requested = bool(use_patch_rows)
+        if patch_rows_override is not None:
+            patch_rows_requested = patch_rows_override
+        self.patch_rows = allow_patch_rows and self.device.is_cuda and patch_rows_requested
         if self.patch_rows:
             self.solve_kernel = _make_solve_patch_contact_tile_kernel(self.contact_dof_width)
         else:

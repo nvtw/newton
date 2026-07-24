@@ -3998,6 +3998,27 @@ class TestReducedArticulation(unittest.TestCase):
                 atol=2.0e-6,
             )
 
+    def test_reduced_contact_friction_model_is_explicit(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA")
+
+        model = _make_grounded_articulation_cluster(device, worlds=1, articulations_per_world=1)
+        point = newton.solvers.SolverPhoenX(model, articulation_mode="reduced", contact_friction_model="point")
+        patch = newton.solvers.SolverPhoenX(model, articulation_mode="reduced", contact_friction_model="patch")
+
+        self.assertFalse(point._reduced_articulation.contact_block_system.patch_rows)
+        self.assertTrue(patch._reduced_articulation.contact_block_system.patch_rows)
+        self.assertEqual(point.world.contact_friction_model, "point")
+        self.assertEqual(patch.world.contact_friction_model, "point")
+        with self.assertRaisesRegex(ValueError, "persistent reduced articulation path"):
+            newton.solvers.SolverPhoenX(
+                model,
+                articulation_mode="reduced",
+                contact_friction_model="patch",
+                reduced_articulation_path="persistent",
+            )
+
     def test_velocity_only_relax_publish_matches_full_publish_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

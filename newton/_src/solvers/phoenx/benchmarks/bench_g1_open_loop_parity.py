@@ -444,6 +444,7 @@ def _make_phoenx_env(setting: PhoenXSetting, args: argparse.Namespace, device: w
             actuation_model=str(args.actuation_model),
             joint_friction_model=str(args.joint_friction_model),
             joint_friction_scale=float(args.joint_friction_scale),
+            contact_friction_model=str(args.contact_friction_model),
             command=(0.0, 0.0, 0.0),
             max_episode_steps=0,
             auto_reset=False,
@@ -747,6 +748,7 @@ def benchmark_open_loop_parity(args: argparse.Namespace) -> dict[str, Any]:
         "action_pattern": str(args.action_pattern),
         "action_amplitude": float(args.action_amplitude),
         "contact_geometry": str(args.contact_geometry),
+        "contact_friction_model": str(args.contact_friction_model),
         "ground_friction": float(args.ground_friction),
         "foot_box_xy_scale": float(args.foot_box_xy_scale),
         "joint_friction_model": str(args.joint_friction_model),
@@ -814,6 +816,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--parse-meshes", action="store_true")
     parser.add_argument("--contact-geometry", choices=("mjcf", "nanog1_foot_boxes"), default=g1_recipe.CONTACT_GEOMETRY)
+    parser.add_argument(
+        "--contact-friction-model",
+        choices=("point", "patch"),
+        default=g1_recipe.CONTACT_FRICTION_MODEL,
+    )
     parser.add_argument("--ground-friction", type=float, default=g1_recipe.GROUND_FRICTION)
     parser.add_argument("--foot-box-xy-scale", type=float, default=g1_recipe.FOOT_BOX_XY_SCALE)
     parser.add_argument("--rigid-contact-max-per-world", type=int, default=g1_recipe.RIGID_CONTACT_MAX_PER_WORLD)

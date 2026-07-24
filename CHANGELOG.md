@@ -64,7 +64,7 @@
 ### Changed
 
 - Accelerate dense large-world SAP broad-phase traversal while retaining the existing path for sparse scenes.
-- Use compact manifold friction rows automatically for large reduced-coordinate PhoenX fleets, reducing contact-row construction and solve traffic; set `PHOENX_REDUCED_PATCH_ROWS=0` to retain per-point friction rows.
+- Make reduced-coordinate PhoenX contact friction independent of fleet size and GPU. Use `contact_friction_model="patch"` for compact manifold friction rows on the reference reduced path; the default `"point"` model now remains point friction at every scale. The G1 recipe explicitly selects patch friction to preserve its production physics and throughput.
 - Reuse transformed mesh-edge endpoints between PhoenX SDF culling and contact generation, avoiding duplicate edge loads and transforms.
 - Reuse Nyquist-clamped PhoenX contact solver coefficients across PGS columns while preserving exact coefficients for unusual time steps.
 - Bound PhoenX contact-history and warm-start launches to avoid scheduling inactive capacity tails.

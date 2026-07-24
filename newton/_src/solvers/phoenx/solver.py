@@ -249,7 +249,8 @@ class SolverPhoenX(SolverBase):
                 every contact point. Experimental "patch" keeps every
                 point normal but couples friction into one central 2D row for
                 each convex shape pair. Raw meshes, heightfields, and compound
-                body-pair columns retain point friction.
+                body-pair columns retain point friction. Patch friction supports
+                maximal and reference reduced articulations.
             prepare_refresh_stride: Refresh cached rigid contact/joint
                 prepare data every N substeps. ``"auto"`` chooses a
                 conservative stride from the substep count and falls back
@@ -348,8 +349,16 @@ class SolverPhoenX(SolverBase):
             raise ValueError("reduced_articulation_path requires articulation_mode='hybrid' or 'reduced'")
         if contact_friction_model not in ("point", "patch"):
             raise ValueError(f"contact_friction_model must be 'point' or 'patch', got {contact_friction_model!r}")
-        if contact_friction_model == "patch" and articulation_mode != "maximal":
-            raise ValueError("contact_friction_model='patch' currently requires articulation_mode='maximal'")
+        if contact_friction_model == "patch" and articulation_mode not in ("maximal", "reduced"):
+            raise ValueError(
+                "contact_friction_model='patch' currently requires articulation_mode='maximal' or 'reduced'"
+            )
+        if (
+            contact_friction_model == "patch"
+            and articulation_mode == "reduced"
+            and reduced_articulation_path == "persistent"
+        ):
+            raise ValueError("contact_friction_model='patch' does not support the persistent reduced articulation path")
         if contact_friction_model == "patch" and (mass_splitting or solver_flavor != "standard"):
             raise ValueError(
                 "contact_friction_model='patch' currently requires solver_flavor='standard' and mass_splitting=False"
@@ -553,7 +562,7 @@ class SolverPhoenX(SolverBase):
             max_colored_partitions=max_colored_partitions,
             solver_flavor=solver_flavor,
             jacobi_max_colors=jacobi_max_colors,
-            contact_friction_model=contact_friction_model,
+            contact_friction_model=contact_friction_model if articulation_mode == "maximal" else "point",
             mass_splitting_batch_size=mass_splitting_batch_size,
             partitioner_algorithm=partitioner_algorithm,
             enable_warm_start_coloring=enable_warm_start_coloring,
@@ -653,7 +662,10 @@ class SolverPhoenX(SolverBase):
             and int(model.articulation_count) > 0
         ):
             self._reduced_articulation = ReducedPhoenXArticulation(
-                model, self.bodies, execution_path=self.reduced_articulation_path
+                model,
+                self.bodies,
+                execution_path=self.reduced_articulation_path,
+                contact_friction_model=contact_friction_model,
             )
             joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
             joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
