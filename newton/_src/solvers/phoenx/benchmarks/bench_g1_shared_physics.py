@@ -183,12 +183,19 @@ def main() -> int:
     eligible_patch_points = None
     projected_generalized_row_reduction = None
     if args.contact_friction_model == "patch":
-        eligible = solver.world._contact_cols.patch.eligible.numpy()[:contact_column_count] != 0
-        pair_source = solver.world._ingest_scratch.pair_source_idx.numpy()[:contact_column_count]
-        pair_count = solver.world._ingest_scratch.pair_count.numpy()
-        column_point_count = pair_count[pair_source]
-        eligible_patch_columns = int(np.count_nonzero(eligible))
-        eligible_patch_points = int(column_point_count[eligible].sum())
+        reduced = solver._reduced_articulation
+        if reduced is not None:
+            block = reduced.contact_block_system
+            section_end = block.schedule_section_end.numpy()
+            eligible_patch_columns = int(section_end[-1]) if len(section_end) else 0
+            eligible_patch_points = int(block.total_point_count.numpy().sum())
+        else:
+            eligible = solver.world._contact_cols.patch.eligible.numpy()[:contact_column_count] != 0
+            pair_source = solver.world._ingest_scratch.pair_source_idx.numpy()[:contact_column_count]
+            pair_count = solver.world._ingest_scratch.pair_count.numpy()
+            column_point_count = pair_count[pair_source]
+            eligible_patch_columns = int(np.count_nonzero(eligible))
+            eligible_patch_points = int(column_point_count[eligible].sum())
         current_rows = 3 * contact_count
         projected_rows = (
             3 * (contact_count - eligible_patch_points) + eligible_patch_points + 2 * eligible_patch_columns

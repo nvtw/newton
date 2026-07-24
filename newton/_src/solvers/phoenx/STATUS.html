@@ -3,1211 +3,152 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PhoenX Development Status</title>
+  <title>PhoenX Performance Status</title>
   <style>
-    :root {
-      color-scheme: light;
-      --ink: #172033;
-      --muted: #647087;
-      --line: #e4e9f1;
-      --panel: rgba(255, 255, 255, .88);
-      --blue: #2563eb;
-      --blue-soft: #eaf1ff;
-      --green: #087f5b;
-      --green-soft: #e8f7f1;
-      --amber: #a05a00;
-      --amber-soft: #fff4dd;
-      --shadow: 0 18px 50px rgba(41, 61, 95, .09);
-    }
+    :root { color-scheme: light; --ink:#172033; --muted:#647087; --line:#e2e8f0; --blue:#2563eb; --green:#087f5b; --amber:#9a5b00; }
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      color: var(--ink);
-      font: 17px/1.58 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f7f9fc;
-    }
-    main { width: min(1120px, calc(100% - 34px)); margin: auto; padding: 46px 0 72px; }
-    header { display: flex; justify-content: space-between; align-items: end; gap: 28px; margin-bottom: 24px; }
-    h1 { margin: 4px 0 0; font-size: 2.2rem; line-height: 1.1; letter-spacing: 0; }
-    h2 { margin: 0 0 10px; font-size: 1.34rem; letter-spacing: 0; }
-    h3 { margin: 0 0 6px; font-size: 1rem; }
-    p { margin: 7px 0; }
-    ul { margin: 9px 0 0; padding-left: 20px; }
-    li + li { margin-top: 5px; }
-    code { color: #1748a6; background: var(--blue-soft); padding: 2px 5px; border-radius: 5px; }
-    .eyebrow { color: var(--blue); font-size: .75rem; font-weight: 800; letter-spacing: 0; text-transform: uppercase; }
-    .stamp { color: var(--muted); text-align: right; white-space: nowrap; font-size: .92rem; }
-    .hero, .card, article, .next {
-      border: 1px solid var(--line);
-      background: var(--panel);
-      box-shadow: var(--shadow);
-    }
-    .hero { padding: 21px 23px; border-radius: 8px; margin-bottom: 16px; }
-    .hero strong { color: var(--blue); }
-    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0 20px; }
-    .card { padding: 18px; border-radius: 8px; }
-    .work-profile + .work-profile { margin-top: 16px; }
-    .metric { font-size: 1.7rem; font-weight: 780; letter-spacing: 0; line-height: 1.05; }
-    .label { margin-top: 7px; color: var(--muted); font-size: .84rem; }
-    .work-profile { padding: 21px 23px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: var(--shadow); }
-    .work-bar { display: flex; height: 22px; margin: 15px 0 13px; overflow: hidden; border-radius: 999px; background: #edf1f6; }
-    .work-bar span { min-width: 3px; }
-    .work-physics { width: 73%; background: #2563eb; }
-    .work-collision { width: 11%; background: #06a77d; }
-    .work-env { width: 8%; background: #7c5ce5; }
-    .work-rl { width: 5%; background: #e58b2a; }
-    .work-other { width: 3%; background: #aab3c2; }
-    .solver-rows { width: 25%; background: #1748a6; }
-    .solver-advance { width: 23%; background: #3478f6; }
-    .solver-factor { width: 22%; background: #65a2ff; }
-    .solver-publish { width: 15%; background: #08a88a; }
-    .solver-contact { width: 15%; background: #61c5ad; }
-    .solver-other { width: 0%; background: #b7c0ce; }
-    .work-legend { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
-    .solver-legend { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-    .subprofile { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
-    .subprofile h3 { font-size: .92rem; }
-    .work-item { color: var(--muted); font-size: .8rem; }
-    .work-item strong { display: block; color: var(--ink); font-size: .94rem; }
-    .work-item i { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; }
-    .profile-note { margin-top: 12px; color: var(--muted); font-size: .78rem; }
-    .ttp-table-wrap { overflow-x: auto; margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; }
-    .ttp-table { width: 100%; border-collapse: collapse; min-width: 800px; background: rgba(255, 255, 255, .7); }
-    .ttp-table th, .ttp-table td { padding: 13px 15px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-    .ttp-table th { color: var(--muted); background: #f8faff; font-size: .75rem; letter-spacing: 0; text-transform: uppercase; }
-    .ttp-table tr:last-child td { border-bottom: 0; }
-    .ttp-table td:first-child { font-weight: 760; white-space: nowrap; }
-    .ttp-table .number { font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .ttp-table .pending { color: var(--muted); }
-    .good { color: var(--green); }
-    .bad { color: #b42318; }
-    .summary-lead { max-width: 850px; margin-bottom: 18px; }
-    .gap-list { border-top: 1px solid var(--line); }
-    .gap-row { display: grid; grid-template-columns: 1.25fr .8fr .8fr 1fr; gap: 18px; align-items: center; padding: 15px 0; border-bottom: 1px solid var(--line); }
-    .gap-row strong, .gap-row span { min-width: 0; }
-    .ratio { font-size: 1.35rem; font-weight: 780; font-variant-numeric: tabular-nums; }
-    .meter { height: 8px; margin-top: 7px; overflow: hidden; background: #e9edf3; border-radius: 4px; }
-    .meter span { display: block; height: 100%; background: var(--blue); }
-    .verdict { margin-top: 18px; padding: 15px 17px; border-left: 4px solid #b42318; background: #fff4f2; }
-    .verdict.good-verdict { border-left-color: var(--green); background: var(--green-soft); }
-    .compact-note { color: var(--muted); font-size: .88rem; }
-    .section-label { margin: 30px 3px 9px; color: var(--muted); font-size: .75rem; font-weight: 800; letter-spacing: 0; text-transform: uppercase; }
-    article { padding: 22px 23px; border-radius: 8px; margin-top: 12px; }
-    .meta { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 7px; color: var(--muted); font-size: .84rem; }
-    .tag { display: inline-flex; padding: 3px 9px; border-radius: 999px; color: #1748a6; background: var(--blue-soft); font-weight: 750; }
-    .tag.good { color: var(--green); background: var(--green-soft); }
-    .tag.warn { color: var(--amber); background: var(--amber-soft); }
-    .next { display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; padding: 23px; border-radius: 8px; }
-    .muted { color: var(--muted); }
-    .action-required {
-      position: relative; isolation: isolate; overflow: hidden;
-      margin: 18px 0; padding: 24px; border: 2px solid #f59e0b; border-radius: 8px;
-      background: #fff1c7;
-      box-shadow: 0 18px 45px rgba(180, 83, 9, .18), 0 0 0 6px rgba(245, 158, 11, .10);
-    }
-    .action-required::before {
-      content: "!"; position: absolute; z-index: -1; right: 20px; top: -42px;
-      color: rgba(180, 83, 9, .10); font-size: 11rem; font-weight: 900; line-height: 1;
-    }
-    .action-required strong { color: #8a4300; font-size: 1.12rem; }
-    .action-required .tag { color: #7c3900; background: rgba(255, 255, 255, .68); }
-    .action-required pre {
-      overflow-x: visible; padding: 16px; border: 1px solid rgba(255, 255, 255, .12); border-radius: 12px;
-      background: #24202a; color: #fff8e7; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
-      white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
-    }
-    .action-required pre code {
-      padding: 0; color: inherit; background: transparent; white-space: inherit;
-      overflow-wrap: inherit; word-break: inherit;
-    }
-    footer { margin-top: 24px; color: var(--muted); font-size: .84rem; text-align: center; }
-    @media (max-width: 820px) { .metrics { grid-template-columns: repeat(2, 1fr); } .work-legend, .solver-legend { grid-template-columns: repeat(3, 1fr); } .next { grid-template-columns: 1fr; } .gap-row { grid-template-columns: 1fr 1fr; } }
-    @media (max-width: 560px) { header { display: block; } .stamp { margin-top: 13px; text-align: left; } .metrics, .work-legend { grid-template-columns: 1fr; } }
+    body { margin:0; color:var(--ink); background:#f7f9fc; font:16px/1.55 Inter,system-ui,sans-serif; }
+    main { width:min(1040px,calc(100% - 32px)); margin:auto; padding:38px 0 60px; }
+    header { display:flex; justify-content:space-between; gap:24px; align-items:end; }
+    h1 { margin:3px 0; font-size:2.15rem; line-height:1.1; }
+    h2 { margin:0 0 8px; font-size:1.25rem; }
+    p { margin:7px 0; }
+    ul { margin:9px 0 0; padding-left:20px; }
+    li + li { margin-top:5px; }
+    code { color:#1748a6; background:#eaf1ff; padding:2px 5px; border-radius:4px; }
+    .eyebrow,.stamp,.meta,.note { color:var(--muted); font-size:.84rem; }
+    .eyebrow { color:var(--blue); font-weight:800; text-transform:uppercase; }
+    .stamp { text-align:right; }
+    .hero,.panel,.metric { background:white; border:1px solid var(--line); border-radius:9px; }
+    .hero,.panel { padding:20px 22px; margin-top:15px; }
+    .hero { border-left:5px solid var(--green); }
+    .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:15px; }
+    .metric { padding:16px; }
+    .metric strong { display:block; font-size:1.55rem; line-height:1.1; }
+    .metric span { color:var(--muted); font-size:.78rem; }
+    .tag { display:inline-block; padding:3px 8px; border-radius:99px; color:var(--green); background:#e8f7f1; font-weight:750; }
+    .warn { color:var(--amber); background:#fff4dd; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:15px; }
+    .decision { margin-top:13px; padding:12px 14px; background:#edf7f3; border-left:4px solid var(--green); }
+    table { width:100%; border-collapse:collapse; margin-top:12px; }
+    th,td { padding:10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-size:.76rem; text-transform:uppercase; }
+    footer { margin-top:22px; color:var(--muted); text-align:center; font-size:.82rem; }
+    @media(max-width:760px) { header{display:block}.stamp{text-align:left}.metrics,.grid{grid-template-columns:1fr 1fr} }
+    @media(max-width:500px) { .metrics,.grid{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
-  <main>
-    <header>
-      <div>
-        <div class="eyebrow">Newton · PhoenX</div>
-        <h1>Development status</h1>
-      </div>
-      <div class="stamp">Last updated<br><strong>24 July 2026 &middot; trajectory-parity audit</strong></div>
-    </header>
+<main>
+  <header>
+    <div><div class="eyebrow">Newton · PhoenX</div><h1>Performance status</h1></div>
+    <div class="stamp">24 July 2026<br>branch <code>twidmer/phoenx-bandwidth-wins</code></div>
+  </header>
 
-    <section class="work-profile" aria-label="Fresh-policy and trajectory parity audit">
-      <div class="meta"><span class="tag good">Root-cause fix validated</span><span>24 July 2026</span></div>
-      <h2>Reduced friction no longer changes with fleet size or GPU</h2>
-      <p class="summary-lead">The trajectory audit found a genuine reproducibility bug: reduced PhoenX silently selected point or patch friction from articulation count divided by GPU SM count, despite the public solver default saying point friction. The solver now honors an explicit friction model at every scale; G1 explicitly selects its production patch model.</p>
-      <div class="metrics">
-        <div class="card"><div class="metric">0.699</div><div class="label">Fresh-policy battery performance at 39.3M</div></div>
-        <div class="card"><div class="metric">0.686</div><div class="label">Concurrent control battery performance</div></div>
-        <div class="card"><div class="metric">&minus;11.9%</div><div class="label">Fresh-policy throughput change</div></div>
-        <div class="card"><div class="metric">Bit-exact</div><div class="label">Explicit vs prior production G1 patch path</div></div>
-      </div>
+  <section class="hero">
+    <span class="tag">Correctness fix committed</span>
+    <h2>Reduced friction is now explicit and reproducible</h2>
+    <p>Reduced PhoenX was silently switching between point and patch friction based on fleet size and GPU SM count. Commit <code>ec51415bf</code> removes that hardware-dependent physics choice. G1 explicitly requests its production patch model, with no meaningful throughput change.</p>
+    <div class="metrics">
+      <div class="metric"><strong>0.897M</strong><span>post-fix G1 samples/s</span></div>
+      <div class="metric"><strong>0.899M</strong><span>matched pre-fix control</span></div>
+      <div class="metric"><strong>−0.21%</strong><span>noise-level difference</span></div>
+      <div class="metric"><strong>Bit-exact</strong><span>G1 patch trajectory</span></div>
+    </div>
+    <ul>
+      <li><code>point</code> and <code>patch</code> now mean the same thing at every world count and on every GPU.</li>
+      <li>Patch work is routed only to the reduced-contact owner; the generic world path no longer adds duplicate overhead.</li>
+      <li>Regressions cover explicit selection, ownership, unsupported persistent patch mode, and one-world G1.</li>
+      <li>Maximal, projected-maximal, hybrid, persistent reduced, Mini, H1, and Ant sibling paths were audited.</li>
+      <li>The shared-physics benchmark now reads patch statistics from the actual reduced owner; its stale generic-world lookup crashed after the ownership fix.</li>
+    </ul>
+  </section>
+
+  <section class="panel">
+    <span class="tag warn">Current gap</span>
+    <h2>Honest same-machine comparison</h2>
+    <table>
+      <tr><th>System</th><th>Production replay-3 throughput</th><th>Interpretation</th></tr>
+      <tr><td>nanoG1</td><td>1.393M samples/s</td><td>Current local pinned-source run</td></tr>
+      <tr><td>PhoenX</td><td>1.243M samples/s</td><td>Best matched validated control</td></tr>
+      <tr><td>Gap</td><td>12.0%</td><td>PhoenX reaches 89.3% of nanoG1</td></tr>
+    </table>
+    <p class="note">The 0.897M result above is a later exact diagnostic configuration and should not replace the matched 1.243M production comparison.</p>
+    <div class="decision"><strong>Learning verdict:</strong> neither implementation always learns faster. Fresh seed-42 runs failed their own frozen gates in both systems while shipped checkpoints pass. Compare multi-seed time-to-gate, not one lucky checkpoint.</div>
+  </section>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>What currently limits performance</h2>
       <ul>
-        <li>Serialized fresh-policy graph execution measured 0.792M aggregate samples/s versus 0.899M for the exact concurrent control. Its small tracking gain came with much worse angular-velocity RMS (0.250 versus 0.031), so the temporary change was removed.</li>
-        <li>With matched 4 ms physics steps and identical open-loop leg targets in free flight, PhoenX and nanoG1 differ by only 0.0027 rad joint-position trajectory RMSE over ten control steps.</li>
-        <li>Grounded zero-action trajectories diverge on the first control step: reduced PhoenX has 0.137 rad/s joint-velocity RMSE and reaches 0.0125 rad joint-position trajectory RMSE over twenty steps. Matching nanoG1&rsquo;s 4 ms step does not reduce it.</li>
-        <li>Projected-maximal PhoenX cuts grounded base-position RMSE from 0.00610 m to 0.00241 m and joint-position RMSE from 0.01250 rad to 0.00591 rad. Its velocity error is worse, so this is diagnostic evidence rather than a replacement solver recommendation.</li>
-        <li>Small reduced runs previously used independent point friction while 8,192-world G1 used shared patch friction. The same grounded foot measured 78.9 N versus 8.87 N mean tangential support under those two models. The choice depended on GPU SM count as well as fleet size.</li>
-        <li><code>contact_friction_model="point"</code> now stays point friction at every scale; <code>"patch"</code> is explicitly supported by the reference reduced path. The G1 recipe chooses patch, and its one-world trajectory is bit-identical to the former forced production patch path.</li>
-        <li>New regressions cover explicit reduced point/patch selection, reject patch with the unsupported persistent path, prove the non-owning world solver remains on point mode, and prove one-world G1 uses the production patch model. Focused G1, H1, reduced-Ant, and maximal-patch momentum tests pass.</li>
-        <li>A first explicit implementation accidentally activated both reduced and generic patch infrastructure and regressed to 0.371M samples/s; the ownership regression caught the architectural mistake. Routing patch only to reduced ownership restores 0.897M versus the exact 0.899M pre-fix control (&minus;0.21%).</li>
-        <li>Sibling-path audit: maximal already selects point/patch explicitly; maximal-projected and hybrid reject unsupported patch mode; persistent reduced rejects it; Mini exposes an explicit selector. Remaining fleet/SM policies select launch shape, gather kernel, or fallback scheduling and have parity/order regressions rather than changing the friction model.</li>
+        <li>Physics remains the largest work category; reduced advance/publish and contact row build/solve are major components.</li>
+        <li>Learner dense forward, weight gradients, and recurrent forward/backward are the other large blocks.</li>
+        <li>Host launch gaps are negligible: Nsight measured about 0.1–0.2 ms around a roughly 420 ms iteration.</li>
+        <li>Environment bookkeeping and state import/export are each below 1%.</li>
       </ul>
-      <div class="verdict good-verdict"><strong>Decision:</strong> retain the correctness fix. It removes hardware- and batch-dependent physics without changing production G1 numerics or throughput. The remaining grounded PhoenX/nanoG1 trajectory difference is not yet classified as a bug: both satisfy plausible support-force and Coulomb bounds, and nanoG1&rsquo;s pyramidal soft constraints intentionally differ from PhoenX&rsquo;s patch Coulomb solve. Continue from first-principles invariants, not nanoG1 matching alone.</div>
     </section>
-
-    <section class="work-profile" aria-label="Matched nanoG1 training audit">
-      <div class="meta"><span class="tag good">Production comparison corrected</span><span>24 July 2026</span></div>
-      <h2>Same-machine replay-3 gap is 12%; learning is not reproducibly one-sided</h2>
-      <p class="summary-lead">A fresh pinned-source nanoG1 replay-3 run measures <strong>1.393M samples/s</strong> on this machine, versus <strong>1.243M samples/s</strong> for the matched PhoenX control. PhoenX therefore reaches <strong>89.3%</strong> of local nanoG1 throughput; nanoG1 is 12.0% faster. The published 1.276M figure remains useful historical context, but is no longer the primary local comparator.</p>
-      <div class="metrics">
-        <div class="card"><div class="metric">1.393M</div><div class="label">Local nanoG1 replay-3 SPS</div></div>
-        <div class="card"><div class="metric">1.243M</div><div class="label">Local PhoenX replay-3 SPS</div></div>
-        <div class="card"><div class="metric">89.3%</div><div class="label">PhoenX / nanoG1 throughput</div></div>
-        <div class="card"><div class="metric">12.0%</div><div class="label">nanoG1 local speed lead</div></div>
-      </div>
+    <section class="panel">
+      <h2>Current investigation</h2>
       <ul>
-        <li>Replay-2 measured 1.417M with relaxation and 1.579M without it, but seed 42 reached only 0.670 / 0.621 at the frozen 0.680 screen. Replay-1 likewise failed; fewer PPO replays are not learning-equivalent for this recipe.</li>
-        <li>Replay-3 without the velocity-relaxation sweep reached 1.331M (+6.4%) but scored 0.591 at the same screen. The pass is physically and statistically load-bearing, so no-relaxation remains rejected.</li>
-        <li>A nearby world-count bracket confirmed 8,192 as optimal: 1.226M / 1.240M / 1.214M at 7,168 / 8,192 / 9,216 worlds. Larger 65,536 and 131,072 minibatches regressed 3.5&ndash;5.6%.</li>
-        <li>Nsight shows only about 0.1&ndash;0.2 ms between an iteration&rsquo;s device synchronization and the next graph launch, negligible beside a 420 ms interval. Asynchronous host batching is therefore not justified.</li>
-        <li>A narrowly scoped <code>wp.func_native</code> loader converted FP32 tiles directly into shared BF16 tiles and emitted real <code>mma.sync</code> tensor-core instructions. It compiled in 2.6 s and had 9.8e-4 maximum aligned-MinGRU error, but end-to-end throughput regressed to 1.228M versus 1.240M / 1.245M controls. It was fully removed.</li>
-        <li>The supposedly nano-matched PhoenX example inherited PhoenX&rsquo;s stronger yaw, torso-wobble, and action-rate weights. It now uses the pinned nanoG1 values 1.25 / &minus;1.3 / &minus;0.01, with a regression against the external recipe.</li>
-        <li>True-weight PhoenX seed 42 reached 74.97M samples with zero battery falls and 0.843 performance, but missed the 0.90 and wobble gates. A fresh 79.69M pinned nanoG1 seed-42 checkpoint also failed nanoG1&rsquo;s own host gate: 21 falls, 0.746 performance, and every smoothness limit. The shipped checkpoint still passes.</li>
+        <li>Use bounded Nsight traces to select the next broad kernel/data-layout target.</li>
+        <li>Favor homogeneous-fleet topology sharing and less repeated immutable data.</li>
+        <li>Validate every candidate end to end on G1 and at least one structurally different scene.</li>
+        <li>Audit every discovered correctness issue across all PhoenX solver paths.</li>
       </ul>
-      <div class="verdict good-verdict"><strong>Current conclusion:</strong> the retained update-first graph scheduling win remains valid, but the honest same-machine gap is about 12%. Tensor cores are already used where conversion amortizes; forcing the 128-wide recurrent forward onto MMA regressed. Learner formulas have direct Puffer-parity tests, so the highest-value correctness work is now physics/controller trajectory parity and the one-update stale-policy effect introduced by overlapped rollout/update.</div>
-      <p class="compact-note"><strong>Learning-time uncertainty:</strong> nanoG1&rsquo;s 58.9 s claim is one frozen seed-42 artifact. The fresh pinned-source reproduction used the recipe, model fingerprint, and task/training flags, but required a GCC/CUDA-library fallback and failed at 79.69M; this demonstrates build/numerical sensitivity, not source-level nondeterminism. The shipped checkpoint genuinely passes locally (0 falls, 0.932 performance, all smoothness limits). Neither engine can claim universal samples-to-gate superiority from one seed.</p>
-      <p class="compact-note"><strong>Audit rule:</strong> 1.801M remains a useful replay-1 throughput diagnostic, not a nanoG1 production baseline. No speed-only candidate is promoted without the unchanged frozen learning gate.</p>
     </section>
+  </div>
 
-    <section class="work-profile" aria-label="July 23 training baseline audit">
-      <div class="meta"><span class="tag good">Measurement checkpoint</span><span>Commit <code>d646b9b7b</code></span></div>
-      <h2>Fresh G1 baseline: trustworthy accounting first</h2>
-      <p class="summary-lead">The current 8,192-world, 64-step, 3-substep/2-iteration update-first graph-leapfrog path measures about <strong>1.25M environment samples/s</strong> across steady runs. The pinned nanoG1 engine now reproduces locally at 1.67M environment steps/s (8.35M physics steps/s) at 8,192 worlds; its documented end-to-end training rate is 1.276M samples/s and remains a separate metric.</p>
-      <div class="metrics">
-        <div class="card"><div class="metric">1.08&ndash;1.10M</div><div class="label">Corrected steady G1 samples/s</div></div>
-        <div class="card"><div class="metric">383 ms</div><div class="label">Eager rollout-only phase</div></div>
-        <div class="card"><div class="metric">225 ms</div><div class="label">Eager learner update phase</div></div>
-        <div class="card"><div class="metric">477 ms</div><div class="label">Current overlapped interval</div></div>
-      </div>
-      <ul>
-        <li>Fixed a graph-leapfrog benchmark bug that could count the final update-only drain as a full rollout; the observed false short-run result was 2.05M samples/s. Short invalid configurations now fail explicitly.</li>
-        <li>Throughput now uses total samples divided by total measured time instead of averaging interval rates.</li>
-        <li>A fresh Nsight Systems trace attributes the largest shares to learner dense forward (11.4%), reduced advance/publish (14.8%), reduced contact row build/solve (13.9%), weight gradients (6.2%), and recurrent forward/backward (8.1%). Environment bookkeeping and state import/export are each below 1%.</li>
-        <li>Giving rollout a high-priority CUDA stream was neutral in an A/B/reverse bracket and was fully reverted.</li>
-      </ul>
-      <div class="verdict good-verdict"><strong>Current architectural target:</strong> exploit homogeneous replicated-world structure so immutable articulation topology and parameters can be stored once while dynamic state remains per world. The current 8,192-world G1 model carries 113.4 MiB of model arrays, much of it repeated topology. Any prototype must be automatic for homogeneous fleets, remain neutral for heterogeneous scenes, and prove itself end to end. A staggered half-rollout probe was abandoned because the stale experimental fixture used the wrong solver path and crashed under graph replay.</div>
-      <p class="compact-note"><strong>Reference audit:</strong> current nanoG1 documentation reports 1.276M end-to-end SPS, not the stale 1.3924M dashboard value. Its number is derived from checkpoint-counter slopes over checkpoint mtimes. The exact pinned engine (e3825cea), production physics flags, and model fingerprint 432c765a were rebuilt locally: the published sweep reproduces 1.33M, 1.67M, 1.79M, and 1.78M environment steps/s at 4,096, 8,192, 16,384, and 32,768 worlds respectively. At the matched 8,192 worlds this is 8.35M physics steps/s, within 1.8% of the documented 8.5M raw-engine result.</p>
-      <p class="compact-note"><strong>Matched local diagnosis:</strong> PhoenX at 8,192 worlds measures 1.986M environment steps/s and 5.96M physics steps/s with its current 3-substep recipe. At five substeps per action it measures 1.239M environment steps/s and 6.20M physics steps/s, or 74.2% of nanoG1's reproduced 8.35M physics rate. Yet current full training is already about 1.09M samples/s versus nanoG1's documented 1.276M. The next high-value work is therefore learner/rollout interference and broad replicated-topology bandwidth reduction, not isolated environment bookkeeping kernels.</p>
-      <p class="compact-note"><strong>First retained scheduling win:</strong> launching the learner update graph before the rollout graph changes CUDA initial work ordering without changing PPO dependencies. An update-first / rollout-first / update-first reverse bracket measured 1.240M / 1.094M / 1.251M samples/s, a repeatable 13&ndash;14% improvement that brings PhoenX to about 98% of nanoG1&rsquo;s documented 1.276M training rate. The equivalent 4,096-world Anymal check was neutral at 21.05 s update-first versus 21.06 s rollout-first over 30 iterations. Focused G1 save/resume and Anymal repeatability graph tests pass. A tile-aligned BF16 MinGRU-forward prototype measured only about +0.7% after conversion overhead and was fully reverted. A generic homogeneous-world topology compaction prototype reduced three replicated schedule arrays without scene-name branching, but an identical 8-iteration reverse control measured 1.219M samples/s compact versus 1.257M full, a 3.1% regression; it was fully removed. The current model still stores 113.4 MiB of arrays, much of it repeated immutable data, but these schedule reads are cache-friendly and compact address arithmetic is counterproductive. A generic kinematics/factor-initialization fusion was also rejected: 1.206M fused versus 1.253M split, a 3.75% regression consistent with occupancy loss in the register-heavy combined kernel. Prefix-CDF trajectory sampling replaced an O(batch&times;worlds) search but was wall-clock neutral at 1.252M because update-first overlap hides that learner bookkeeping, so it too was removed. A fresh world-count bracket measured 1.097M / 1.253M / 1.086M at 4,096 / 8,192 / 16,384 worlds, confirming 8,192 as the current optimum. Reduced factor/advance and contact row work account for roughly 32% of traced GPU time, so the next solver-side work must shorten critical-path passes without inflating register pressure.</p>
-    </section>
+  <section class="panel">
+    <h2>Retained improvements</h2>
+    <table>
+      <tr><th>Change</th><th>Measured outcome</th><th>Scope</th></tr>
+      <tr><td>Update-first graph scheduling</td><td>Best current training schedule</td><td>G1 learner/rollout overlap</td></tr>
+      <tr><td>Skip duplicate reduced FK import</td><td>Higher G1 throughput</td><td>Reduced articulation</td></tr>
+      <tr><td>Reuse G1 contact graph per frame</td><td>+3.13%</td><td>Generic reusable mechanism</td></tr>
+      <tr><td>Selective grid-stride kernels</td><td>About +1% physics</td><td>Five measured kernels</td></tr>
+      <tr><td>Wider dense learner tiles</td><td>About +6% G1 training</td><td>Generic dense learner</td></tr>
+      <tr><td>Tiled Muon path</td><td>+3.3% end to end</td><td>Generic optimizer</td></tr>
+      <tr><td>Static topology caching</td><td>Wins on G1, ANYmal, H1</td><td>Homogeneous fleets</td></tr>
+      <tr><td>Ant PPO fixes/optimization</td><td>Reliable learning; PPO +75%</td><td>Ant and shared PPO code</td></tr>
+    </table>
+  </section>
 
-    <section class="work-profile" aria-label="Current PhoenX and nanoG1 comparison">
-      <h2>Current production comparison</h2>
-      <p class="summary-lead"><strong>PhoenX is 10.7% lower-throughput than the fresh same-machine nanoG1 replay-3 run</strong>: 1.243M versus 1.393M samples/s. Equivalently, nanoG1 is 12.0% faster. This local pairing supersedes the earlier comparison against the published 1.276M figure.</p>
-      <div class="gap-list" role="table" aria-label="Measured production speed comparison">
-        <div class="gap-row" role="row">
-          <strong role="cell">Replay-3 PPO training</strong>
-          <span role="cell">PhoenX<br><b>1.240&ndash;1.251M SPS</b></span>
-          <span role="cell">nanoG1<br><b>1.393M SPS</b></span>
-          <span role="cell"><span class="ratio bad">10.7% lower</span><div class="meter" aria-label="PhoenX reaches 89.3 percent of nanoG1"><span style="width:89.3%"></span></div></span>
-        </div>
-        <div class="gap-row" role="row">
-          <strong role="cell">Validated solver workload</strong>
-          <span role="cell">PhoenX<br><b>3 substeps, 2 solve, 1 relax</b></span>
-          <span role="cell">nanoG1<br><b>5 substeps, truncated Newton 2/3</b></span>
-          <span role="cell"><span class="ratio">Different solvers</span></span>
-        </div>
-      </div>
-      <p class="compact-note"><strong>Quality boundary:</strong> PhoenX speed candidates are compared at the frozen policy screen. nanoG1&rsquo;s published 58.9 s time-to-walk uses its own task metric, so it remains contextual rather than a same-gate time-to-policy claim.</p>
-    </section>
+  <section class="panel">
+    <h2>Rejected or parked directions</h2>
+    <ul>
+      <li><strong>Fresh-policy serialization:</strong> tracking improved slightly, but throughput fell 11.9% and angular stability worsened.</li>
+      <li><strong>Forced BF16 tensor-core recurrent forward:</strong> emitted real MMA instructions but regressed end-to-end throughput; removed.</li>
+      <li><strong>FP16×2 contact rows:</strong> isolated kernels improved, but a four-seed learning race produced no qualified pass; parked.</li>
+      <li><strong>Fewer PPO replays or removing velocity relaxation:</strong> faster but failed frozen learning gates.</li>
+      <li><strong>High-priority rollout stream and host batching:</strong> neutral or unjustified by measured launch gaps.</li>
+      <li><strong>Cached patch effective masses:</strong> removed repeated reductions but added a packed-row pass and global traffic; G1 physics fell 1.1–1.8%.</li>
+      <li><strong>Scene-specialized robot kernels:</strong> rejected as overfitting; PhoenX remains a general solver.</li>
+    </ul>
+  </section>
 
-    <section class="work-profile" aria-label="Reduced-state import optimization">
-      <h2>Skipping duplicate FK raises G1 throughput</h2>
-      <p class="summary-lead">Nsight Systems showed generic articulation FK consuming 8.7% of the 1,024-world profile. Reduced-coordinate robot environments already carry a coherent body pose and velocity into collision, but the first solver substep recomputed those arrays from generalized state. An explicit valid-kinematics import now copies the coherent device state and lets reduced factorization rebuild only the local caches it actually needs.</p>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead><tr><th>Matched scale</th><th>Legacy FK import</th><th>Valid-state import</th><th>Gain</th></tr></thead>
-          <tbody>
-            <tr><td>1,024 worlds</td><td class="number">428.87k samples/s</td><td class="number">461.75k samples/s</td><td class="number"><strong class="good">+7.67%</strong></td></tr>
-            <tr><td>8,192 worlds</td><td class="number">1.0118M samples/s</td><td class="number">1.0294M samples/s</td><td class="number"><strong class="good">+1.75%</strong></td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="verdict good-verdict"><strong>Retained after physics and learning validation.</strong> A CUDA-graph regression matches legacy FK import within 2e-6 across joint and body state. Twenty-eight Ant, ANYmal, DR Legs, H1, and Humanoid tests pass, together with reset and reduced-step parity tests. A fresh G1 iteration-75 screen reaches 0.6923 battery performance against the frozen 0.680 early gate with zero falls.</div>
-      <p class="compact-note"><strong>Scope:</strong> arbitrary solver callers keep the conservative FK default. PhoenX robot RL environments opt in only because reset, collision, and solver publication maintain coherent body and generalized state. No host synchronization or readback was added.</p>
-    </section>
+  <section class="panel">
+    <h2>Correctness findings still open</h2>
+    <ul>
+      <li>Free-flight PhoenX/nanoG1 joint trajectories are close: 0.0027 rad RMSE over ten control steps.</li>
+      <li>Ground contact causes immediate divergence, but both systems satisfy plausible support-force and Coulomb bounds.</li>
+      <li>The remaining difference is not classified as a bug: nanoG1 uses MuJoCo pyramidal soft constraints; PhoenX uses a patch Coulomb solve.</li>
+      <li>Projected maximal improves position agreement but worsens velocity agreement, so it is diagnostic evidence, not a replacement recommendation.</li>
+    </ul>
+    <div class="decision"><strong>Rule:</strong> reason from physical invariants and regression evidence. Matching nanoG1 is not itself proof of correctness.</div>
+  </section>
 
-    <section class="work-profile" aria-label="G1 contact graph reuse">
-      <h2>One contact graph per G1 frame adds 3.13%</h2>
-      <p class="summary-lead">G1 previously repeated broad phase, narrow phase, contact ingestion, and graph scheduling for all three physics substeps in each policy frame. The retained path detects the contact set once, builds its ownership graph once, and reprojects contact anchors from live body poses during every solver substep.</p>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead><tr><th>8,192-world graph-leapfrog training</th><th>Per-substep collision</th><th>One graph per frame</th><th>Gain</th></tr></thead>
-          <tbody><tr><td>Matched steady run</td><td class="number">1.0311M samples/s</td><td class="number">1.0634M samples/s</td><td class="number"><strong class="good">+3.13%</strong></td></tr></tbody>
-        </table>
-      </div>
-      <div class="verdict good-verdict"><strong>Retained as one consolidated G1 path.</strong> The CUDA-graph regression records one collision pass for three physics substeps and stays finite; it fails against the previous implementation with three calls. A fresh 39.32M-sample iteration-75 screen reaches 0.6822 battery performance against the frozen 0.680 early gate, with zero battery and diagnostic falls.</div>
-      <p class="compact-note"><strong>Physics boundary:</strong> anchors and impulses are refreshed from the current pose every substep; only pair discovery is frame-rate. This is appropriate for the fixed 20 ms G1 policy frame and avoids adding a permanent alternate implementation. The qualified-policy wall-clock headline remains unchanged until a full held-out gate passes.</p>
-    </section>
+  <section class="panel">
+    <h2>Validation discipline</h2>
+    <ul>
+      <li>Primary metric: reproducible multi-seed wall-clock time to a frozen qualified-policy gate.</li>
+      <li>Secondary metrics: steady training throughput, physics throughput, kernel shares, and open-loop trajectory comparisons.</li>
+      <li>No speed candidate is retained when it changes learning behavior without adequate multi-seed evidence.</li>
+      <li>Focused G1, H1, reduced-Ant, ownership, and maximal patch momentum tests pass for the latest fix.</li>
+      <li>Scoped pre-commit passes. Full-repository pre-commit still reports unrelated pre-existing lint/typo failures.</li>
+    </ul>
+  </section>
 
-    <section class="work-profile" aria-label="Selective Warp grid-stride results">
-      <h2>Five lean kernels add 1% physics throughput</h2>
-      <p class="summary-lead">Warp grid-stride execution was measured per kernel instead of enabled or disabled by assumption. Turning it off for every PhoenX kernel regressed shared G1 physics by about 2.1%. Nsight Systems graph-node traces identified five ordinary kernels where the lean launch path sharply reduced work or register pressure; keeping only those five raises the matched shared G1 benchmark from 1.410M to an average 1.424M physics steps/s.</p>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead><tr><th>Configuration</th><th>Physics result</th><th>Training result</th><th>Decision</th></tr></thead>
-          <tbody>
-            <tr><td>Lean launch on all PhoenX kernels</td><td class="number"><strong class="bad">about 2.1% slower</strong></td><td class="number">about +0.6%, below noise</td><td>Rejected and removed.</td></tr>
-            <tr><td>Tiled contact row and solve kernels</td><td class="number">-1.0% / -0.1%</td><td>Not advanced.</td><td>Keep Warp default.</td></tr>
-            <tr><td>Five profile-selected kernels</td><td class="number">1.410M &rarr; 1.424M<br><strong class="good">about +1.0%</strong></td><td class="number">1.014M &rarr; 1.013M samples/s</td><td><strong class="good">Retained.</strong> Training is neutral.</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="verdict good-verdict"><strong>Why these five:</strong> reduced factor improved 22%, grouped-contact classification 50%, finish/publish 13%, pair-start scatter 21%, and pair-count construction 14%. The dominant gather kernel became 20% slower with the blanket setting.</div>
-      <p class="compact-note"><strong>Validation:</strong> 75 tests passed together; the recurring CUDA graph-instantiation case passed alone, for 76/76 effective coverage. At that stage the G1 headline remained 1.020M samples/s because training throughput did not improve.</p>
-    </section>
-
-    <section class="work-profile" aria-label="Wider dense G1 learner tiles">
-      <h2>Wider dense tiles add another 6% G1 throughput</h2>
-      <p class="summary-lead">The dominant learner kernel reused each 128x16 input tile across only 16 output columns. A bounded 16 / 32 / 64-column sweep found that 32 columns provides the best general tradeoff: matched graph-leapfrog G1 throughput rises from 0.9631M to 1.0198&ndash;1.0238M samples/s, while 64 columns is slightly slower and 64-row batch tiles regress by 5.9%.</p>
-      <div class="verdict good-verdict">
-        <strong>Retained after correctness and learning checks.</strong> Four CUDA-graph tests cover recurrent sequence parity, BF16 backward contractions, complete PPO train/save/load, and BF16 forward parity. A fresh 39.3M-sample G1 run reaches 0.712 battery performance with zero falls, above the frozen 0.680 early gate.
-      </div>
-      <p class="compact-note"><strong>Current result:</strong> the current production-scale rate is 1.063M samples/s, 76.4% of local nanoG1. The remaining gap is 1.31x. This layout keeps the 16-wide contraction dimension for broad shape coverage and avoids a marginal 0.5% 32-wide contraction gain that would change reduction grouping.</p>
-    </section>
-
-    <section class="work-profile" aria-label="Tiled Muon G1 optimization">
-      <h2>G1 learner kernels are 3.3% faster end to end</h2>
-      <p class="summary-lead">Nsight Systems identified Muon orthogonalization as a major non-physics cost. Replacing scalar wide-matrix products with 16x16 FP32 tile operations cuts profiled Muon time from about 441 ms to 219 ms and raises matched G1 graph-leapfrog throughput from 0.9359M to 0.9671M samples/s.</p>
-      <div class="verdict good-verdict">
-        <strong>Retained after paired learning checks.</strong> Three tiled runs reach 0.668 / 0.686 / 0.673 battery performance at 39.3M samples with zero falls. Their scalar controls reach 0.703 / 0.702 / 0.651. At 78.6M samples, tiled seed 29 reaches 0.791 versus 0.780 for scalar, again with zero falls. The optimization changes floating-point reduction order but does not show a systematic learning regression.
-      </div>
-      <p class="compact-note"><strong>Contribution:</strong> tiled Muon first raised PhoenX to 69.5% of nanoG1. The wider dense tile above builds on it and raises the current result to 73.3%. Three CUDA-graph Muon reference/layout tests pass, including the real 128x384 recurrent weight shape.</p>
-    </section>
-
-    <section class="work-profile" aria-label="Ant PPO optimization and learning validation">
-      <h2>Ant now learns reliably, and PPO is 75% faster</h2>
-      <p class="summary-lead">The mraksha-compatible Ant task now uses reduced coordinates and exact task observations, rewards, reset pose, raw-action accounting, and current-action timing. Measurement then identified the MLP learner as the bottleneck. BF16 tensor-core forward/backward plus deterministic eight-way split-K weight gradients raised end-to-end training throughput from 0.536M to 0.938&ndash;0.942M samples/s.</p>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead>
-            <tr><th>Configuration</th><th>Throughput</th><th>Deterministic no-reset result</th><th>Decision</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>FP32 MLP baseline</td>
-              <td class="number">0.536M samples/s</td>
-              <td>Both retained seeds eventually survive 900/900 steps.</td>
-              <td>Correct reference; superseded for this Ant recipe.</td>
-            </tr>
-            <tr>
-              <td>BF16, serial weight gradient</td>
-              <td class="number">0.664M samples/s<br><strong class="good">+23.9%</strong></td>
-              <td>Seed 8123: 29.85 m at 2.00 m/s. Seed 8124: 28.97 m at 1.94 m/s.</td>
-              <td>Learning passes, but profiling found a serial reduction bottleneck.</td>
-            </tr>
-            <tr>
-              <td>BF16 + split-K</td>
-              <td class="number">0.938&ndash;0.942M samples/s<br><strong class="good">+75.4%</strong></td>
-              <td>Seed 8123: 30.92 m at 2.07 m/s after 300 updates. Seed 8124: 29.84 m at 2.00 m/s after 1000 updates. All 64 worlds survive 900 steps in both runs.</td>
-              <td><strong class="good">Retained.</strong> Numerical, graph replay, and two-seed learning gates pass.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="verdict good-verdict">
-        <strong>Measured wall-clock result:</strong> the slower-seed 1000-update run fell from roughly 245 s in FP32 to 142.5 s with BF16 split-K, about 42% less training time for the same sample count.
-      </div>
-      <p class="compact-note"><strong>Why this does not change the G1 headline:</strong> Ant uses the optimized <code>WarpMLP</code> path. The retained G1 recipe uses <code>puffer_mingru</code>, so the Ant MLP optimization does not transfer directly. Tiled Muon, the wider dense layout, and valid reduced-state imports raise G1 to 1.029M samples/s; G1 remains 1.35x behind nanoG1.</p>
-    </section>
-
-    <section class="work-profile" aria-label="Unified Humanoid fallback contact scheduling">
-      <h2>Humanoid physics is fast; policy qualification is still open</h2>
-      <p class="summary-lead">Nsight Systems showed that reduced-articulation fallback contacts consumed 82.4% of Humanoid GPU work: every solver sweep launched once per contact color, reaching about 57 serial launches as self-contact increased. PhoenX already stores these contacts in independent per-world runs. The retained fleet path solves each run sequentially in one launch while preserving the existing contact columns, friction, warm start, and Gauss&ndash;Seidel order.</p>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead>
-            <tr><th>Measurement</th><th>Before</th><th>Retained fleet path</th><th>Result</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>End-to-end PPO throughput</td>
-              <td class="number">33.9k samples/s</td>
-              <td class="number">114.3&ndash;117.5k samples/s</td>
-              <td><strong class="good">3.37&ndash;3.47x faster</strong></td>
-            </tr>
-            <tr>
-              <td>Fallback kernel time in matched trace</td>
-              <td class="number">12.45 s</td>
-              <td class="number">3.05 s</td>
-              <td><strong class="good">4.09x less GPU work</strong></td>
-            </tr>
-            <tr>
-              <td>Old 26.2M rollout diagnostic</td>
-              <td class="pending">No physical gate</td>
-              <td>Reward 2.509, success 0.610, rollout dones 1.39%</td>
-              <td><strong class="bad">Not a qualified policy.</strong> Deterministic evaluation falls after 67/600 steps.</td>
-            </tr>
-            <tr>
-              <td>Captured physical gate</td>
-              <td class="number">&gt;300 s timeout</td>
-              <td class="number">20.5 s for 64 &times; 600 steps</td>
-              <td>Device-side accumulation removes per-step host synchronization.</td>
-            </tr>
-            <tr>
-              <td>RSL-aligned PPO screen</td>
-              <td>Raw observations; adaptive KL could increase LR at KL=0</td>
-              <td class="number">124.4k samples/s<br>13.1M samples</td>
-              <td>Normalization is throughput-neutral and survival reaches 116/600 steps, but <strong class="bad">the walking gate still fails</strong>.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="verdict good-verdict">
-        <strong>Unified physics is preserved.</strong> CUDA-graph regressions are bit-identical against the colored solver for both articulated self-contact and direct reduced-articulation/maximal-rigid contact. Small fleets and large individual scenes retain colored parallelism; sufficiently large independent fleets select the per-world path automatically. Momentum, determinism, and high-degree overflow regressions pass.
-      </div>
-      <p class="compact-note"><strong>Scope:</strong> this is generic reduced-contact scheduling, with no robot names, topology constants, or task assumptions. It does not change the current G1 headline because G1&rsquo;s ground contacts are owned by the generalized articulation block and do not enter this fallback path. A rejected nested multi-sweep fusion fell to 46.5k samples/s and was removed.</p>
-      <p class="compact-note"><strong>Learning status:</strong> the mraksha/RSL-RL contract now includes clipped values, actor/critic running observation normalization, and adaptive KL. A scheduler bug was fixed so exactly zero KL no longer raises the learning rate. The corrected iteration-100 policy is finite and improves survival, but does not yet sustain locomotion; the mraksha recipe allows 1000 updates, so the next step is continuation under the frozen physical gate rather than reward-only claims.</p>
-    </section>
-
-    <section class="work-profile" aria-label="Current learning validation">
-      <h2>Does PhoenX training actually learn?</h2>
-      <div class="verdict good-verdict">
-        <strong>PPO: yes, validated.</strong> A zero-training PhoenX run produced a G1 policy in 183.03 s. The checkpoint passed the unchanged held-out gate on seeds 1000 and 1001 with zero falls and battery performance 0.924 / 0.920.
-      </div>
-      <div class="verdict">
-        <strong>SAC on G1: stable standing now works; commanded walking does not.</strong> Scalar SAC with normalization and averaged double-Q reaches 0.1970 deterministic tracking on seed 11, but all 64 evaluation robots fall. The FastSAC-style C51 critic and delayed actor schedule changes that failure mode: after 8.19M samples, 63/64 robots survive the 200-step deterministic evaluation. Tracking is only 0.0867, however, and remains 0.0871 after 16.38M samples, so the policy has learned to stand rather than walk.
-      </div>
-      <p class="compact-note"><strong>Cost and rejected directions:</strong> scalar SAC runs at about 417k environment steps/s; eight C51 critic updates per environment step reduce this to about 168k. A direct command-progress reward raises tracking to 0.1226 but causes 26.6% falls. Official-style phase-height shaping reaches 0.0973 with 10.9% falls, and adding privileged linear velocity reaches only 0.0729 with 18.8% falls. None is retained as a default. CUDA regressions cover full-network updates, observation moments, averaged-Q arithmetic, C51 projection mass and terminal returns, delayed actor updates, replay, and learning a known continuous-control optimum.</p>
-      <div class="verdict good-verdict">
-        <strong>Host synchronization audit: qualification is much cheaper; SAC updates are modestly faster.</strong> Scene gates now accumulate metrics on the GPU and read back once. Odd-substep scenes capture both state-buffer phases, with matched eager/captured regressions preventing stale-state speedups. SAC entropy temperature is device-resident and <code>read_stats=False</code> removes all loss/temperature readbacks from the update. Every retained PhoenX robot runner now defaults to CUDA graph capture; eager execution remains an explicit debugging option.
-      </div>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead>
-            <tr><th>Path</th><th>Measured result</th><th>What it means</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Humanoid physical gate</td>
-              <td class="number">&gt;14.6x faster</td>
-              <td>64 &times; 600 deterministic qualification drops from a &gt;300 s timeout to 20.5 s.</td>
-            </tr>
-            <tr>
-              <td>Ant physical gate</td>
-              <td class="number">3.48x warm-loop speedup</td>
-              <td>Metrics match the known 900-step walking policy; first-use graph compilation is excluded.</td>
-            </tr>
-            <tr>
-              <td>DR Legs hold gate</td>
-              <td class="number">1.58x faster</td>
-              <td>All gate metrics match the eager evaluator.</td>
-            </tr>
-            <tr>
-              <td>ANYmal odd-substep gate</td>
-              <td class="number">1.12x end-to-end<br>about 3.5x loop throughput</td>
-              <td>All metrics match eager evaluation; the two-phase graph handles host-swapped state buffers.</td>
-            </tr>
-            <tr>
-              <td>SAC update, batch 2048</td>
-              <td class="number">48.36 ms &rarr; 46.74 ms / 20 updates</td>
-              <td>3.5% completed-work speedup with no statistics readback; learning tests and exact parameter parity pass.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="compact-note"><strong>Scope:</strong> the first four rows accelerate policy qualification, not environment rollout or PPO optimization. They shorten reliable train-to-gate experiments but must not be reported as training-throughput gains. The SAC row is a real update-path gain and removes at least five host waits per update, although the large-batch kernel work dominates wall time.</p>
-      <div class="verdict">
-        <strong>Official-architecture FastSAC probe: fast enough to investigate, not yet a working robot learner.</strong> A direct Torch parity probe used Holosoma's 512-wide LayerNorm/SiLU actor, 768-wide double C51 critics, zero-initialized stochastic heads, BF16 autocast, AdamW, observation normalization, eight critic updates, delayed actor updates, and Polyak targets. It sustained 176.8k samples/s on PhoenX, but after 8.19M samples deterministic tracking was 0.1335 and all 64 evaluation robots fell. The simpler Warp C51 path remains safer at the same horizon: 0.0867 tracking with 63/64 survivors, but it only stands. No FastSAC or FastTD3 variant is promoted until it produces commanded locomotion across seeds.</div>
-      <p class="compact-note"><strong>Measured algorithm decisions:</strong> scalar FastTD3 reached 176.2k samples/s, 0.1196 tracking, and 64/64 falls. Distributional TD3 reached about 152k steady samples/s, 0.1393 tracking, and 64/64 falls. Restricting the critic to the 12 actively controlled joints improved throughput by 3.5% but collapsed tracking to 0.0030. Weakening the action-rate penalty, zero-initializing TD3, and increasing network width also failed. These experiments were removed rather than left as unvalidated production options.</p>
-      <div class="verdict good-verdict">
-        <strong>Ant PPO: yes, validated across two seeds.</strong> Reduced-coordinate training produces stable locomotion from zero while maximal coordinates still fail the deterministic gate even with more solver iterations. The retained BF16 split-K recipe sustains about 0.94M samples/s; both seeds keep all 64 evaluation robots alive for 900 steps and move about 30 m at roughly 2.0 m/s.
-      </div>
-    </section>
-
-    <div class="section-label">Detailed measurements and experiment history</div>
-    <section class="work-profile" aria-label="Latest Nsight Compute results">
-      <h2>Latest Nsight Compute results</h2>
-      <p><strong>The row-builder bottleneck is real, but the first scratch-layout fixes were slower end-to-end.</strong> User-run NCU reports captured the packed G1 contact-row builder and the reduced pipeline. The strongest signal is memory layout/coalescing in <code>_build_packed_generalized_contact_rows_kernel</code>, not arithmetic throughput.</p>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead>
-            <tr><th>Kernel / experiment</th><th>Measured facts</th><th>Decision</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Contact-row builder NCU</td>
-              <td>796.5 &micro;s single-kernel duration, 57.5% memory throughput, 31.2% SM throughput, 982.9 GB/s DRAM, 99.4 MB reads, 683.4 MB writes. NCU reports 72.8% excessive global sectors and only 5.4&ndash;6.1 useful bytes/sector on global accesses.</td>
-              <td><strong>Primary target.</strong> SASS attribution points at six uncoalesced float stores for the per-row body response scratch. The next retained win must reduce this traffic without increasing surrounding costs.</td>
-            </tr>
-            <tr>
-              <td>Reduced pipeline NCU</td>
-              <td>Factor: 89.0 &micro;s, SM-heavy at 68.7%. Advance: 174.8 &micro;s with low eligible warps/cycle. Contact solve: 618.2 &micro;s and 283.0 &micro;s for the two solve launches, about 50% SM throughput and much less sector waste than row build.</td>
-              <td>Secondary target. Solve/factor still matter, but the NCU data says row construction is the cleaner memory-layout target.</td>
-            </tr>
-            <tr>
-              <td>Advance launch occupancy</td>
-              <td>NCU reports only 0.30 waves/SM for reduced advance, 22.5% achieved occupancy, and no eligible warp in 85.0% of scheduler cycles. A targeted 32-thread launch raised shared-physics throughput to 2.127M and 2.102M steps/s versus a 2.088M control, but paired short training averaged 0.9372M samples/s versus 0.9406M for the restored 128-thread control.</td>
-              <td><strong>Rejected.</strong> More independent blocks help isolated stepping but slightly hurt the overlapped training workload. Production keeps 128-thread blocks; kernel-only occupancy is not the objective.</td>
-            </tr>
-            <tr>
-              <td>Reverse ABA register forwarding</td>
-              <td>Replaced the reverse-depth <code>body_bias/body_work</code> child scratch exchange with exact warp-register forwarding. Featherstone API parity and fused-momentum graph tests passed. Shared G1 physics measured 2.101M and 2.079M steps/s, averaging 2.090M versus the 2.088M control.</td>
-              <td><strong>Rejected and removed.</strong> Eliminating dependent L2 scratch traffic was offset by uniform child-lane shuffle work. The result was neutral before training, so no learning run was charged.</td>
-            </tr>
-            <tr>
-              <td>Forced vector body-response stores</td>
-              <td>A CUDA-native store forced the six NCU-attributed scalar <code>st.global.f32</code> instructions into three aligned <code>st.global.v2.f32</code> instructions without changing layout or values; generated PTX confirmed the change. Raw physics measured 2.109M and 2.125M steps/s versus a 2.088M control. Focused FP32/FP16 row parity and deterministic replay tests passed. Paired short training averaged 0.9358M samples/s versus 0.9406M control.</td>
-              <td><strong>Rejected and removed.</strong> A real +1.4% isolated physics gain became a 0.52% training regression under overlap. Fewer store instructions in this kernel alone do not improve the objective.</td>
-            </tr>
-            <tr>
-              <td>Body-response <code>vec4+vec2</code> scratch split</td>
-              <td>Passed focused row-builder parity tests, then measured 2.080M and 2.098M physics steps/s on shared G1 physics.</td>
-              <td><strong>Rejected.</strong> The restored retained baseline measured 2.105M physics steps/s, so aligned vector stores did not improve the full pipeline.</td>
-            </tr>
-            <tr>
-              <td>Body-response scalar component planes</td>
-              <td>Passed the same focused tests, then measured 1.964M physics steps/s.</td>
-              <td><strong>Rejected.</strong> Better coalescing on paper lost too much elsewhere, likely store instruction count/addressing/register pressure.</td>
-            </tr>
-            <tr>
-              <td>Body-response <code>vec3+vec3</code> scratch split</td>
-              <td>Passed the same focused tests, then measured 2.066M physics steps/s.</td>
-              <td><strong>Rejected.</strong> Lower stride than <code>spatial_vector</code> was still slower than the restored 2.105M baseline.</td>
-            </tr>
-            <tr>
-              <td>Historical unit-wrench basis on FP16x2 candidate rows</td>
-              <td>Refreshed <code>bench_g1_response_basis_aba</code> against the current production row mode. Direct build+solve measured 422.8 &micro;s. Compressed basis prepare+solve measured 449.7 &micro;s; adaptive row materialization measured 360.6 &micro;s versus 341.5 &micro;s direct build alone.</td>
-              <td><strong>Rejected for production.</strong> The basis idea is a real larger algorithmic candidate, but the then-current FP16x2 candidate beat it end-to-end; both paths were later removed on the optimistic two-foot G1 case.</td>
-            </tr>
-            <tr>
-              <td>Static one-iteration relax solve specialization</td>
-              <td>Specialized the reduced contact relax pass for <code>use_bias=False</code>, <code>warmstart=False</code>, and one velocity iteration. Focused reduced row tests passed. Shared physics A/B was noisy: enabled 2.140M / 2.088M physics steps/s, disabled 2.088M / 2.094M. Short G1 training rejected it: enabled 0.9322M samples/s, disabled 0.9325M.</td>
-              <td><strong>Rejected.</strong> The static kernel did not improve the training metric, so production stays on the generic solve kernel.</td>
-            </tr>
-            <tr>
-              <td>Fused cached row-velocity refresh + relax solve</td>
-              <td>Fused the cached relax row-velocity refresh with the existing generic solve device. Focused reduced row tests passed. Shared physics improved in the first A/B (2.126M versus 2.094M physics steps/s), but short training rejected it: enabled 0.9333M / 0.9294M samples/s, disabled 0.9319M / 0.9333M.</td>
-              <td><strong>Rejected.</strong> Avoiding the separate refresh launch did not survive training-throughput A/B, so the reference path keeps the separate finalize and solve launches.</td>
-            </tr>
-            <tr>
-              <td>36-point reduced contact pages</td>
-              <td>Raised the page size from 32 to 36 points so the measured G1 case with 34 reduced contact points/world fits in one resident page. Focused reduced row parity tests passed. Shared-physics A/B did not beat noise: candidate 2.082M / 2.109M physics steps/s, restored 32-point baseline 2.098M.</td>
-              <td><strong>Rejected.</strong> Eliminating the second tiny G1 page did not reliably offset the larger response tile footprint.</td>
-            </tr>
-            <tr>
-              <td>Reduced patch-friction row-count ceiling</td>
-              <td>Measured the same G1 scene through the existing maximal patch-friction classifier because reduced patch mode is still hard-disabled. All 147,456 contact columns were eligible; 278,528 points projected from 835,584 point-friction rows to about 573,440 patch rows, a 31.4% generalized-row reduction.</td>
-              <td><strong>Promising larger candidate.</strong> This is not a production speedup yet; it requires a reduced-articulation patch-friction formulation and full learning validation because it changes friction physics.</td>
-            </tr>
-            <tr>
-              <td>Explicit reduced contact row count</td>
-              <td>Threaded a per-page <code>row_count</code> buffer through reduced contact gather, packed row construction, and response transpose. Current point-friction mode still writes <code>row_count = 3 * point_count</code>. Focused reduced row tests pass; shared G1 physics measured 2.113M physics steps/s, within normal baseline noise.</td>
-              <td><strong>Retained infrastructure.</strong> This is behavior-neutral preparation for patch rows, where a page can contain normal rows for points plus two tangent rows per contact column instead of exactly three rows per point.</td>
-            </tr>
-            <tr>
-              <td>Benchmark-only compact patch rows</td>
-              <td>Added experimental first-point and central tangent compaction to <code>bench_g1_response_basis_aba</code>. On the live G1 eight-point page both reduce row materialization from 24 rows/page to 12 rows/page. The 30-replay central-row timing measured direct build 342.8 &micro;s versus central compact+build 238.9 &micro;s. First-point compaction remains a timing reference only; central rows are the plausible physics candidate.</td>
-              <td><strong>Promising, not production.</strong> This confirms row-count reduction can move the measured row-builder kernel even with averaged central tangent rows. It is still not valid physics until the reduced patch projection and warm-start semantics are implemented and training-validated.</td>
-            </tr>
-            <tr>
-              <td>Benchmark-only compact patch solve</td>
-              <td>Added an experimental compact central patch solve that uses per-point normal rows plus two averaged tangent rows per contact column. It computes dynamic scalar normal masses and 2&times;2 tangent effective masses from the compact packed fp16x2 rows. Replacing repeated patch-prefix and full-page scans with linear contiguous-column walks cut the patch solve from 79.1 to 59.7 &micro;s. A warp ballot/popcount prefix then removed the remaining quadratic patch-ordinal loop, cutting central compaction from 10.30 to 8.25 &micro;s at 8192 worlds. Elementwise CPU reconstruction across 4096 worlds reports zero error in row counts, body indices, wrenches, and velocities. Compact build+solve is 1.36&times; faster at 4096 worlds, 1.42&times; at 8192, and 1.46&times; at 16384; compact solve output is unchanged. The compact output remains finite and bit-identical to the earlier patch implementation, but the friction model intentionally differs from point friction.</td>
-              <td><strong>Retained as an experimental algorithm win.</strong> The linear solve removes the specific scan overhead that sank the first production probe. A fixed-page production port still needs shared-physics timing, patch-friction conservation tests, and G1 learning validation before changing the solver default.</td>
-            </tr>
-            <tr>
-              <td>Publish scratch traffic removal</td>
-              <td>The reduced publish kernel previously wrote every link COM twist into <code>state.body_qd</code> while also updating the authoritative <code>bodies.velocity/angular_velocity</code>; the solver then exported public <code>state_out.body_qd</code> from <code>bodies</code>. Replaced the internal parent-twist scratch traffic with direct reads from <code>bodies</code>, leaving the public export path unchanged. Same-session raw G1 physics baseline was 2.077M physics steps/s; the candidate measured 2.082M and 2.107M. Short G1 training measured 0.9391M samples/s versus the retained 0.9343M baseline.</td>
-              <td><strong>Retained as a small win.</strong> Focused reduced row tests, persistent publish parity, velocity-only publish parity, fused momentum, and Featherstone API parity pass. This reduces generic reduced-publish memory traffic, but the measured effect is small and does not materially close the nanoG1 gap by itself.</td>
-            </tr>
-            <tr>
-              <td>Opt-in production compact patch rows</td>
-              <td>Implemented a temporary <code>PHOENX_REDUCED_PATCH_ROWS=1</code> reduced-contact path with separate compact row buffers, compact row build, dynamic patch solve, and distributed tangent warm-start. It compiled and ran, but raw G1 shared physics regressed: 1.72M then 1.67M physics steps/s versus a same-tree baseline of 2.06M. Nsys showed compact rows cut row-build time, but added compaction and a scan-heavy compact solve erased the gain in the real two-page 34-contact G1 loop.</td>
-              <td><strong>Rejected and removed.</strong> A friction-model change is acceptable only if it is physically accurate and a large real speedup. This version was neither validated physically nor faster, so it was not retained. The linear benchmark follow-up now removes the per-solve column scans. The next production attempt must also avoid a separate global compaction phase before any learning validation is worth running.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="profile-note">Re-run commands when needed: <code>sudo -E bash newton/_src/solvers/phoenx/benchmarks/profile_g1_contact_rows_ncu.sh /tmp/phoenx_g1_contact_rows_current</code> and <code>sudo -E bash newton/_src/solvers/phoenx/benchmarks/profile_g1_reduced_pipeline_ncu.sh /tmp/phoenx_g1_reduced_pipeline_current</code>.</p>
-    </section>
-
-    <section class="work-profile" aria-label="Latest overlap and training recipe results">
-      <h2>Latest overlap and training results</h2>
-      <p>The fastest configuration now exceeds nanoG1 in steady samples per second and produces a passing policy, but it is not yet reliable enough across seeds to replace the staged recipe. The table separates throughput from learning quality.</p>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead>
-            <tr><th>Experiment</th><th>Measured result</th><th>Learning evidence</th><th>Decision</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Two substeps + replay 2</td>
-              <td class="number">1.680M samples/s<br><strong class="good">1.21x nanoG1</strong></td>
-              <td>Seed 42 passes the unchanged full gate at iteration 300: 0 falls, 0.912 battery performance, 0.166 angular RMS, and 0.170 action jerk. Seed 11 learns stable locomotion but does not pass by iteration 300.</td>
-              <td><strong>Successful experimental path.</strong> Keep available and continue reliability work; do not replace the staged default on a 1/2 full-gate result.</td>
-            </tr>
-            <tr>
-              <td>Two substeps + replay 2.5</td>
-              <td class="number">1.454M samples/s<br><strong class="good">1.04x nanoG1</strong></td>
-              <td>Seed 42 remains stable but reaches only about 0.79 battery performance by iteration 300.</td>
-              <td><strong>Reject as a recipe.</strong> Faster update throughput does not preserve the required sample efficiency.</td>
-            </tr>
-            <tr>
-              <td>Staged 3&rarr;2 substeps, replay 3&rarr;2</td>
-              <td class="number">183.63 s cold wall time<br>138.94M samples</td>
-              <td>Passes the unchanged full gate at iteration 265 with 0 falls and 0.924 battery performance.</td>
-              <td><strong>Retain.</strong> Fix the phase transition so late replay 2 remains active; wall time is statistically unchanged from 183.03 s.</td>
-            </tr>
-            <tr>
-              <td>More rollout/update overlap</td>
-              <td class="number">Current graph overlap: +11.2%<br>18.8% of update hidden</td>
-              <td>Independent graph workload only; policy semantics are unchanged.</td>
-              <td><strong>Scheduler variants rejected.</strong> High-priority rollout regresses overlap by 1.7%; bounded 160-block learner forward regresses concurrent throughput by 13%.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="profile-note">Local nanoG1 reference: 1.3924M samples/s. The 1.680M result is a steady concurrent workload measurement, not a claim that PhoenX already matches nanoG1 time to policy. PhoenX still needs more samples and has seed-dependent convergence.</p>
-    </section>
-
-    <section class="work-profile" aria-label="Measured PhoenX G1 gap to nanoG1">
-      <h2>Measured G1 gap to nanoG1</h2>
-      <p>PhoenX G1 is currently <strong>1.49x slower than local nanoG1 in validated steady training throughput</strong>: 0.9326M samples/s versus 1.3924M samples/s. The latest zero-training PhoenX run reaches a passing held-out policy in 183.03 s at 138.94M samples after switching PPO replay ratio from 3.0 to 2.0 after the frozen 78.64M-sample screen.</p>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead>
-            <tr><th>Question</th><th>PhoenX G1</th><th>nanoG1 reference</th><th>Current gap</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Validated training throughput</td>
-              <td class="number">0.9326M samples/s<br>2.798M physics steps/s</td>
-              <td class="number">1.3924M samples/s<br>6.962M physics steps/s</td>
-              <td><strong>1.49x slower</strong> by samples/s. Physics-step rate is 40.2% of nanoG1 because PhoenX uses 3 substeps per action while nanoG1 uses 5.</td>
-            </tr>
-            <tr>
-              <td>Raw env stepping</td>
-              <td class="number">1.663M env/s<br>4.99M physics steps/s</td>
-              <td class="number">1.65M env/s<br>8.25M physics steps/s</td>
-              <td>Env-rate is essentially tied at 8192 worlds. Physics-step rate is <strong>1.65x slower</strong>. Latest fused-publish + contact-row reuse kernel changes measured about +1.0% raw-physics throughput.</td>
-            </tr>
-            <tr>
-              <td>Zero-training policy result</td>
-              <td class="number">183.03 s<br>138.94M samples</td>
-              <td class="number">58.9 s claim<br>75M samples claim</td>
-              <td><strong>3.11x slower wall time</strong> against nanoG1's published time-to-walk claim. This is not an equal quality gate; PhoenX is checked with the stricter held-out gate below.</td>
-            </tr>
-            <tr>
-              <td>Policy quality gate</td>
-              <td>Iteration 265 passes the full gate on seeds 1000 and 1001: 0 falls, battery performance 0.924 / 0.920 with the late replay-ratio schedule. Checkpoint 240 still fails the full gate. Replay 2 from the start can pass by iteration 300, but its 1/2 seed result is not reliable enough to replace the staged recipe.</td>
-              <td>Local 20M nanoG1 run learns, but it is not a final pass-gate run.</td>
-              <td>The speed comparison uses measured local throughput. Policy success is only claimed for the passing PhoenX full-gate runs.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="profile-note">Current retained protocol changes: lower only the cheap full-gate promotion screen to 0.84, and switch PPO replay ratio from 3.0 to 2.0 after the frozen 78.64M-sample screen. The full gate is unchanged; the late replay switch is retained only because the zero-training run still passes the full gate on seeds 1000 and 1001.</p>
-      <p class="profile-note"><strong>Latest kernel validation:</strong> fused reference-path advance/publish plus packed contact-row reuse improved raw G1 stepping from 1.6466M to about 1.663M env/s and steady training from 0.9276M to 0.9326M samples/s. Fresh short baseline after row-count plumbing measured 0.9343M samples/s and 2.803M training physics steps/s. The latest retained publish-scratch change measured 2.082M and 2.107M raw physics steps/s after a same-session 2.077M baseline, and 0.9391M short-training samples/s. This is a small measured win, not a major gap closer. Physics tests pass; a fresh 75-iteration learning screen passes at 0.712 battery performance with zero falls; the late-replay iteration-265 policy passes full gates at 0.924 and 0.920 battery performance with zero falls.</p>
-      <p class="profile-note"><strong>Latest measured kernel profile:</strong> fresh nsys ranks packed generalized contact-row construction at 22.1%, fused advance/publish at 15.1%, contact solve at 14.0%, and standalone advance at 7.3% of shared-physics GPU kernel time. User-run NCU confirms the row builder is memory-layout limited: 796.5 &micro;s, 57.5% memory throughput, 31.2% SM throughput, 72.8% excessive global sectors, and dominant uncoalesced body-response stores. NCU also identifies advance as grid-underfilled at 0.30 waves/SM, but a targeted occupancy fix lost 0.37% in paired training and was rejected. Rejected row-layout and solver candidates remain documented in the table above. The larger reduced patch-friction candidate still has a measured 31.4% row-count ceiling, but its first production implementation regressed raw physics to 1.67&ndash;1.72M steps/s, so another patch attempt must remove compaction and scan overhead before learning validation.</p>
-      <p class="profile-note"><strong>Next useful work:</strong> keep accumulating measured generic kernel wins, but the likely bigger needle movers remain contact-row construction, reduced ABA/contact formulation changes, and rollout/physics fusion that applies beyond G1.</p>
-    </section>
-
-    <section class="hero">
-      <strong>Primary goal</strong>
-      <p>Minimize wall-clock time from a zero-training process start to the first policy that passes a predeclared held-out quality gate, using only PhoenX physics and PhoenX RL. Solver speed, timestep size, stability, sample efficiency, curricula, population methods, and learner throughput are jointly optimized—but every cost is counted and every survivor must generalize across diverse tasks.</p>
-    </section>
-
-    <section class="metrics" aria-label="Current headline metrics">
-      <div class="card"><div class="metric">1.35x</div><div class="label">slower validated G1 training throughput</div></div>
-      <div class="card"><div class="metric">183.03 s</div><div class="label">zero-training PhoenX G1 pass</div></div>
-      <div class="card"><div class="metric">138.94M</div><div class="label">samples to validated G1 policy</div></div>
-      <div class="card"><div class="metric">73.3%</div><div class="label">PhoenX / nanoG1 G1 training samples/s</div></div>
-    </section>
-
-    <p class="profile-note"><strong>Latest zero-training run (16 Jul):</strong> the 0.84 promotion screen triggered full gates at iterations 150, 175, 215, 240, and 265. The first four failed the unchanged full gate; iteration 265 passed in 183.03 s total wall time with 0.924 battery performance and zero falls. The same checkpoint also passed held-out gate seed 1001 at 0.920 battery performance and zero falls.</p>
-
-    <div class="section-label">Zero to qualified policy</div>
-    <section class="work-profile" aria-label="Cold-start time to policy across training scenes">
-      <h2>Cross-scene wall-clock scorecard</h2>
-      <p>Times include fresh-process startup, normal cached compilation/loading, CUDA graph capture, training, screening, and held-out evaluation. A number is shown as authoritative only when the policy passes that scene's frozen quality gate.</p>
-      <div class="ttp-table-wrap">
-        <table class="ttp-table">
-          <thead>
-            <tr><th>Scene</th><th>Passing cold run</th><th>Expected time under restart policy</th><th>Evidence / next measurement</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>G1 · PhoenX</td>
-              <td class="number good">183.03 s</td>
-              <td class="pending">Not recomputed for the 0.84 screen</td>
-              <td>Latest zero-training run passes at iteration 265 / 138.94M samples. Checkpoint 240 fails the unchanged full gate; checkpoint 265 passes on held-out seeds 1000 and 1001 with zero falls.</td>
-            </tr>
-            <tr>
-              <td>ANYmal-C · PhoenX</td>
-              <td class="pending">No qualified policy yet</td>
-              <td class="pending">Unresolved</td>
-              <td>Fresh-process runner and held-out disturbance gate work. The 180 s smoke is a charged protocol miss, not a training baseline.</td>
-            </tr>
-            <tr>
-              <td>DR Legs hold · PhoenX</td>
-              <td class="pending">No qualified policy yet</td>
-              <td class="pending">Unresolved</td>
-              <td>Fresh-process runner and closed-linkage physical gate work. A 50-update diagnostic improves survival but does not pass.</td>
-            </tr>
-            <tr>
-              <td>Ant · PhoenX</td><td class="pending">No qualified policy yet</td><td class="pending">Unresolved</td><td>Measured 400-iteration run completes in 59.11 s at 0.911M samples/s but fails with 64/64 falls and 79.3/300 mean survival. Finite state explosions now terminate and reset; the broader learning regression remains open.</td>
-            </tr>
-            <tr>
-              <td>Humanoid · PhoenX</td><td class="pending">No qualified gate yet</td><td class="pending">Unresolved</td><td>A 26.2M-transition diagnostic sustains 117.5k samples/s, reaches reward 2.509 and success 0.610, and lowers falls to 1.39%. A frozen cold-process locomotion gate is still required.</td>
-            </tr>
-            <tr>
-              <td>Go2 · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>
-            </tr>
-            <tr>
-              <td>H1 · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>
-            </tr>
-            <tr>
-              <td>DR Legs walk · PhoenX</td><td class="pending">Not measured</td><td class="pending">Not measured</td><td>Pure-PhoenX scene exists; cold-process gate adapter remains to be added.</td>
-            </tr>
-            <tr>
-              <td>G1 · nanoG1 claim</td>
-              <td class="number">58.9 s</td>
-              <td class="pending">Not reported as a varied-seed expectation</td>
-              <td>Published claim: 75M samples at 1.28M samples/s on one RTX PRO 6000. Its “walk” criterion is not yet matched to our stricter held-out two-window physical gate, so this is a target—not an apples-to-apples result.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="profile-note">nanoG1 source: <a href="https://github.com/kingjulio8238/nanoG1">project README</a>, which states 58.9 s / about 59 s from scratch. PhoenX's latest successful zero-training run is 3.11× slower than that claim. nanoG1 does not report a comparable varied-seed expectation, and the gates are not identical.</p>
-    </section>
-
-    <div class="section-label">Steady-training GPU work profile</div>
-    <section class="work-profile" aria-label="Steady-training GPU kernel time by work type">
-      <h2>Where GPU work is currently spent</h2>
-      <div class="work-bar" role="img" aria-label="Physics solver 73 percent, collision pipeline 11 percent, environment and rewards 8 percent, policy and learner 5 percent, runtime and other 3 percent">
-        <span class="work-physics"></span><span class="work-collision"></span><span class="work-env"></span><span class="work-rl"></span><span class="work-other"></span>
-      </div>
-      <div class="work-legend">
-        <div class="work-item"><strong><i style="background:#2563eb"></i>73%</strong>physics solver</div>
-        <div class="work-item"><strong><i style="background:#06a77d"></i>11%</strong>collision pipeline</div>
-        <div class="work-item"><strong><i style="background:#7c5ce5"></i>8%</strong>environment + rewards</div>
-        <div class="work-item"><strong><i style="background:#e58b2a"></i>5%</strong>policy + learner</div>
-        <div class="work-item"><strong><i style="background:#aab3c2"></i>3%</strong>runtime + other</div>
-      </div>
-      <p class="profile-note">Share of summed CUDA kernel duration in the latest five-second steady graph-leapfrog Nsight trace (rounded). Streams overlap, so these are GPU-work shares—not additive wall-clock latency. The current bounded trace includes compact inertia and specialized ABA; streams overlap, so kernel-work shares do not directly predict wall time.</p>
-      <div class="subprofile">
-        <h3>Inside physics solver work</h3>
-        <div class="work-bar" role="img" aria-label="Contact row construction 25 percent, articulation advance 23 percent, factorization and kinematics 22 percent, publish and momentum 15 percent, contact solve 15 percent">
-          <span class="solver-rows"></span><span class="solver-advance"></span><span class="solver-factor"></span><span class="solver-publish"></span><span class="solver-contact"></span><span class="solver-other"></span>
-        </div>
-        <div class="work-legend solver-legend">
-          <div class="work-item"><strong><i style="background:#1748a6"></i>25%</strong>contact rows</div>
-          <div class="work-item"><strong><i style="background:#3478f6"></i>23%</strong>articulation advance</div>
-          <div class="work-item"><strong><i style="background:#65a2ff"></i>22%</strong>factor + kinematics</div>
-          <div class="work-item"><strong><i style="background:#08a88a"></i>15%</strong>publish + momentum</div>
-          <div class="work-item"><strong><i style="background:#61c5ad"></i>15%</strong>contact solve</div>
-          <div class="work-item"><strong><i style="background:#b7c0ce"></i>0%</strong>joints + other</div>
-        </div>
-        <p class="profile-note">Normalized within physics-solver GPU duration. “Contact rows” includes gather/build/finalize; “factor + kinematics” includes reduced factor initialization and local kinematics. The two specialized ABA modes total 45.7 ms in the bounded trace versus 47.8 ms for the former unified kernel; rows are now the largest individual category.</p>
-      </div>
-    </section>
-
-    <div class="section-label">Current state</div>
-    <article>
-      <div class="meta"><span class="tag good">PHYSICS WIN &middot; DOF-TYPE FACTOR SPLIT</span><time>16 Jul</time></div>
-      <h2>Occupancy unlock: split the factor by joint-DOF-type &mdash; +2.82% physics, the largest retained physics lever in this sweep</h2>
-      <p>The depth-major ABA rejection established the 50%-of-GPU reduced-dynamics phase is <strong>register-bound, not launch-bound</strong> (factor kernel 144 regs &rarr; ~22% occupancy). Followed that pointer to a clean, generic win.</p>
-      <ul>
-        <li><strong>Localized the register wall:</strong> the single-DOF revolute path needs only 64 regs (50% occ), but the one free-base lane&rsquo;s 6&times;6 SPD invert adds +80, dragging the whole warp to 144/22%. Every in-place reduction rejected with compile-time data (Schur 3&times;3-block invert 149, in-place Cholesky 147, recompute 148 &mdash; all &gt; 144): the peak is the multi-DOF branch&rsquo;s aggregate output footprint, not the invert internals. Solve-not-invert also rejected (the inverse is reused as a matrix across advance/impulse-response/contact-solve). Only physically removing the branch helps.</li>
-        <li><strong>The split:</strong> single-DOF joints reduce in a lean 64-reg / 50%-occ depth-walk kernel; the 6&times;6 root invert defers to a companion launch. Generic DOF-count dispatch (mirrors the existing revolute specialization), active only when every multi-DOF joint is an articulation root; mid-chain multi-DOF safely falls back. No scene identity baked in.</li>
-        <li><strong>Measured (solo GPU, reverse A/B, drop trial0, 8 trials):</strong> factor kernel 112.6&rarr;69.3&thinsp;&micro;s = <strong>1.62&times; (+38.4%)</strong> @8192, 1.30&times; @4096. Full-step graph_leapfrog: <strong>+2.82%</strong> @8192, +1.28% @4096 (every ON sample &gt; every OFF sample). Occupancy 22&rarr;50% converted. Biggest physics lever measured this campaign (fp16x2 was +1.06%).</li>
-        <li><strong>Critical fix:</strong> the companion roots kernel must launch <code>block_dim=32</code> &mdash; the default 256 packs the few heavy 6&times;6 roots onto ~16 blocks and stalls (~2.5&times;), regressing 4096 by &minus;36%. With 32 it spreads across SMs and the split is a strict win at both counts (no world-count gate).</li>
-        <li><strong>Exact + tested:</strong> bit-identical to the unified kernel (max_abs_diff 0.0 across 40 floating-base articulations, graph-captured, deterministic); new CUDA-graph regression test pins split==unified; floating-base momentum/energy + Featherstone-parity battery passes.</li>
-      </ul>
-      <p class="profile-note">Data-directed physics innovation: depth-major &rarr; register-bound diagnosis &rarr; localized to the free-base lane &rarr; in-place reformulations (incl. Schur) ruled out with compile-time data &rarr; DOF-split. Awaiting user go to commit. The factor split remains the retained physics win; the marginal FP16 contact-row path was later removed.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">BIG-SWING REJECT &middot; AMP MOTION PRIOR</span><time>16 Jul</time></div>
-      <h2>AMP does not lift p / time-to-policy on G1 &mdash; the gate is tracking-dominated</h2>
-      <p>The user-chosen big swing &mdash; Adversarial Motion Priors (Peng 2021), motion-prior RL to fix seed reliability &mdash; was built end-to-end (discriminator to 0.999 held-out accuracy, LSGAN + style reward + DeepMimic anneal, CUDA-graph-safe, deterministic) and evaluated decisively. Clean reject on the primary metric.</p>
-      <ul>
-        <li><strong>6-seed iter-75 screen, within-run baseline mean 0.583.</strong> NO AMP arm beats it: w_style 0.5=0.525, 0.3=0.512, 0.2=0.529, 0.1=0.582, anneal(1.0&rarr;0)=0.542. As w&rarr;0 it converges to baseline; no weight exceeds it. 0/6 pass the 0.90 gate in every arm.</li>
-        <li><strong>Mechanism (textbook style-vs-task tension):</strong> AMP slashes falls (seed 42: 8&rarr;0, 47: 19&rarr;0) and smooths gait (leg_qvel_rms ~0.08 vs baseline ~0.25&ndash;0.53) &mdash; the policy visibly walks <em>more like the reference</em> &mdash; but velocity-command tracking (the gate metric) drops (mean lin-vel error 0.399&rarr;0.459). The discriminator rewards looking-like-reference, which pulls off the commanded velocities. Anneal&rsquo;s pure-style start destabilized seeds 29 (4&rarr;330 falls) and 71 (44&rarr;118) as easily as it helped seed 89.</li>
-        <li><strong>Silver lining (documented):</strong> AMP is a real robustness / variance-reduction / fall-cutting prior (std 0.100&rarr;0.055&ndash;0.075) &mdash; it would help a robustness-gated task. G1&rsquo;s gate is tracking-dominated, so it is not the lever here. Code + reproducible reference/scripts persisted (out of /tmp); nothing committed.</li>
-      </ul>
-      <p class="profile-note">Three seed-reliability approaches now closed with 6-seed data: entropy floor, gSDE, and AMP. Walking must be discovered <em>and tracked</em>; a style prior guides toward reference-like motion but trades away the command-tracking the gate scores. The p lever remains open; the retained physics result from this sweep is the factor split; FP16 rows were later removed.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">SEED-VARIANCE &middot; EXPLORATION FIXES FAIL</span><time>15 Jul</time></div>
-      <h2>Standard RL exploration levers do not reduce G1 seed variance</h2>
-      <p>G1 training p(success)&asymp;1/3 (baseline 6-seed iter-75: mean 0.633, std 0.077, 2/6 pass 0.68 &mdash; replicated). PhoenX exploration is temporally-independent Gaussian with a collapsing global std and entropy coeff 1e-5, the textbook high-variance setup. Two established SOTA fixes were implemented and swept over 6 seeds:</p>
-      <ul>
-        <li><strong>Entropy floor + anneal</strong> (coeff 3e-3&rarr;1e-5, log_std_min &minus;1.0): <em>worse</em> &mdash; mean 0.605, std 0.116 (WIDER). Forcing exploration magnitude stops seeds committing to a gait.</li>
-        <li><strong>gSDE</strong> (Raffin 2021 correlated state-dependent noise, validated impl): collapses the spread (std 0.077&rarr;0.012) but caps the mean at ~0.48&ndash;0.49 (0/6 pass) at EVERY magnitude swept (log_std_init &minus;1.5/&minus;2.0/&minus;2.5, including eff_std&asymp;1). Not a calibration issue &mdash; correlated noise fundamentally under-explores the walking basin for G1; no magnitude is both tight AND high.</li>
-        <li><strong>Conclusion:</strong> G1 seed variance is NOT fixable by changing exploration NOISE (structure or magnitude) &mdash; the problem is that walking must be DISCOVERED, and neither white nor correlated noise discovers it reliably. This motivates a motion PRIOR (AMP): reward walking-like motion to guide all seeds to the walking basin. Per the primary metric (time-to-policy, p dominates), AMP is the seed-reliability escalation; it is scoped feasible pure-Warp. Learner WIP reverted.</li>
-      </ul>
-      <p class="profile-note">Both exploration interventions rejected with 6-seed data. The one untested learner lever is update-side stability (KL-bounded early-stop, trim replay-ratio/epochs). Solver side is at its GPU-friendly ceiling (APGD, block-GS, iteration/substep reduction all rejected).</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">INNOVATION &middot; EXACT IMPLICIT MAXIMAL DRIVE</span><time>15 Jul</time></div>
-      <h2>Diagnosed the maximal drive-softness &mdash; feasible ~2-line fix unlocks the 1.8&times; solver</h2>
-      <p>After the incremental reduced-pipeline levers were exhausted (bandwidth, row-count, iteration reduction &mdash; the recipe is near-minimal), the real lever is the coordinate system: maximal does the same physics ~1.8&times; faster per step but fails G1 training on soft/laggy drives. A controlled diagnostic pinned the exact cause and the fix.</p>
-      <ul>
-        <li><strong>Root cause (measured):</strong> the softness is not the drive row or joint coupling &mdash; single joints and pinned chains are mode-identical. It appears only on a FLOATING multi-link tree with explicit torque: distal rise time 480&thinsp;ms (maximal) vs 80&thinsp;ms (reduced) = 6&times; lag; maximal@2-iters collapses to 0.099 vs reduced 0.591, and does not converge even at 32 iterations. Reduced folds the implicit PD into the ABA factorization and solves it exactly per substep; the projector does an exact O(tree) solve but has NO drive term, leaving the drive to under-converged PGS.</li>
-        <li><strong>The fix is the exact analog of reduced&rsquo;s implicit PD, in the projector recursion:</strong> add the implicit-PD impedance to the driven-DOF diagonal of the joint block (<code>d_matrix[i,i] += dt&middot;kd + dt&sup2;&middot;ke</code>, mirroring reduced&rsquo;s <code>factor_diagonal += dt&middot;damping + dt&sup2;&middot;stiffness</code>) so it propagates through the articulated inertia the parent sees, plus the drive force in the top-down RHS. One exact recursion &rarr; identical crispness to reduced, zero iteration dependence. ~2 lines in the projector kernel + drive-input plumbing.</li>
-        <li><strong>Validated:</strong> the implicit drive collapses the floating-base tracking gap ~0.015&rarr;~0.002&thinsp;rad (7&times; crisper, matches reduced) at 2 iterations. Committed opt-in (default OFF byte-identical).</li>
-        <li><strong>Projected-maximal now TRAINS G1 (2 seeds).</strong> With crisp drives (constraint_drive, iter-75 screen): maxproj 0.580/0.560 (s42/s11) vs same-actuation reduced 0.631/0.641 &mdash; versus <strong>0.255</strong> with the old soft drives. Drive softness WAS the dominant blocker (0.255&rarr;~0.57), a genuine scientific result: the maximal path is now trainable at all.</li>
-        <li><strong>Trainability confirmed at ~parity (3 seeds).</strong> maxproj+implicit-drive 0.580/0.560/0.593 (mean 0.578) vs same-actuation reduced 0.631/0.641/0.538 (mean 0.603) &mdash; ~96%, within seed noise (seed 29 maxproj beats reduced). Drive softness, not contacts, was the blocker.</li>
-        <li><strong>But the trainable mode&rsquo;s throughput ceiling is only 1.12&times;.</strong> Clean physics (8192 G1): reduced 2.1M, <em>projected</em>-maximal 2.4M = <strong>1.12&times;</strong>; the factor-scale 2.36&times; belongs to PURE maximal (non-articulated independent bodies) which cannot train a robot. The tree-projection step that makes maximal trainable also eats most of its speed advantage. So the innovation is real and correct but caps at ~10% physics for G1 &mdash; not the factor-scale win hoped, and offset by a constraint_drive actuation tax (both arms ~0.60 vs 0.707 explicit_torque). Net G1 time-to-policy: ~neutral unless the actuation quality is recovered.</li>
-        <li><strong>Retained:</strong> the crisp implicit-drive algorithm (committed, opt-in) &mdash; a genuine unblock of maximal trainability, with more upside on contact-rich robots where maximal&rsquo;s per-step edge is larger than G1&rsquo;s 1.12&times;. The marginal FP16 contact-row path was later removed.</li>
-      </ul>
-      <p class="profile-note">Genuine algorithmic innovation (exact implicit drive in the maximal tree projector), diagnosed, built, and shown to unlock G1 training (0.255&rarr;0.580). Builds on the retained position-level tree projection. The projected-maximal trainability breakthrough is retained; the marginal FP16 contact-row path was later removed.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">DEFINITIVE REJECT &middot; PATCH ROWS</span><time>15 Jul</time></div>
-      <h2>Row-count reduction is the wrong lever for the reduced contact solve</h2>
-      <p>Build-time patch-reduced rows (P+2 coupled tangents per convex column instead of 3 per point) was pursued through three milestones after the earlier separate-phase attempt (which lost &minus;7.4%). It is now definitively rejected, with a clean architectural root cause.</p>
-      <ul>
-        <li>The row reduction is <strong>real and physically correct</strong>: G1 is 100% patch-eligible, 30&ndash;33% fewer generalized rows realized, box-on-plane stable, momentum/energy pass, deviation vs per-point &lt; 5&times;10<sup>&minus;3</sup>, default OFF byte-identical.</li>
-        <li>But it costs <strong>&minus;35% isolated G1 physics</strong> (1.40M vs 2.17M steps/s) even in the pure-patch, fully-activated, single-purpose-kernel form (M3, which removed the M2 dual-dispatch occupancy bloat). Realizing the compact layout needs a serial per-articulation emit pass + a DIVERGENT column-iterating 2&times;2 coupled solve, which maps terribly to the warp-cooperative uniform-tile model.</li>
-        <li><strong>Finding:</strong> the classic uniform per-point tight-loop solve is structurally optimal on this hardware. Fewer rows don&rsquo;t help when the rows were cheap uniform tiles and the reduction demands per-column branching. Contrast fp16 byte-reduction on the SAME uniform rows (+9.4% phase) &mdash; it keeps the tile structure. All code reverted; production remains on FP32 rows.</li>
-        <li><strong>Historical post-FP16x2 profile (phase % of training GPU):</strong> ABA advance 16.6, contact row build 15.2, publish/momentum 12.6, factor 12.6, contact solve 10.4, kinematics 8.4, learner ~5&ndash;9; solver 82%, non-solver rollout only ~8.5%. Advance is a launch-bound depth-serial ABA dead end (0.34 waves/SM, grid 512, algorithmic parallelism ceiling); publish is already conditionally-minimal. The big phases are either structural dead ends or (contact stream) now shown row-count-immune.</li>
-      </ul>
-      <p class="profile-note">Session net: the 1.06% FP16 training gain was later judged too small and removed. The reduced-pipeline bandwidth/row levers are largely exhausted &mdash; the remaining wins are byte-level (taken) or blocked by the ABA launch-bound wall and the uniform-tile optimality of the contact solve. Bigger throughput needs a different attack (new solver formulation) or the seed-reliability headline lever.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">REMOVED &middot; FP16 CONTACT ROWS</span><time>16 Jul</time></div>
-      <h2>FP16 contact rows were not worth keeping</h2>
-      <p>Packed FP16 rows improved the isolated contact phase by 9.4%, but the measured end-to-end G1 training gain was only 1.06%. That is too small for a second row format, alias buffers, native unpack helpers, and an additional numerical validation burden.</p>
-      <ul>
-        <li>The operational FP16 switches and buffers were reverted first; the remaining unreachable FP16 builders, transpose variants, reinterpret helpers, and packed solve branches were then deleted.</li>
-        <li>Production reduced contacts are FP32 only. BF16 learner matrix contractions remain separate because they target tensor-core policy training rather than contact physics.</li>
-        <li>Graph-captured generalized-row ABA parity and persistent relax/publish reference tests pass after complete removal.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">REJECTED DIRECTION &middot; SCENE-SPECIALIZED KERNELS</span><time>10 Jul</time></div>
-      <h2>nanoG1 decomposed: the engine gap is 2.25&times; and it is topology baking</h2>
-      <p>A source-level read of the nanoG1 checkout separates its 5.83&times; headline advantage into accounting and engineering. Roughly 2&times; is gate definition and timing: one seed, one eval, one fall allowed, compile time excluded, 58.9 s computed post-hoc as samples&divide;throughput. Under that gate PhoenX would report roughly 125&ndash;145 s today. The true engine gap is per-physics-step cost: nanoG1 sustains ~6.4M physics steps/s in training versus PhoenX&rsquo;s ~2.85M (2.25&times;).</p>
-      <ul>
-        <li>nanoG1&rsquo;s speed is compile-time specialization, not better algorithms: the entire G1 model (topology, DOF offsets, joint types, gains) is baked as constants into warp-per-env staged kernels with shared-memory Hessian build+factor+solve fusion, and its contact system is a <strong>fixed five-pair list with zero broadphase</strong>. Its solver is MuJoCo Newton truncated to 2 iterations, pyramidal cones, no domain randomization (despite the README).</li>
-        <li>The learner recipe is already matched: PhoenX mirrors MinGRU, Muon, mirror loss 0.25, V-trace, replay ratio 3, and the batch shape. The samples-to-gate difference is mostly gate strictness, not learning quality.</li>
-        <li><strong>Scene-specialized kernels are rejected by directive</strong> (10 Jul): baking scene/robot topology into kernels is overfitting, even as generic codegen &mdash; PhoenX stays a general solver. The nanoG1 gap will be closed only as far as generic mechanisms allow.</li>
-        <li><strong>On-chip oracle measured (10 Jul): loses at scale, wins below saturation.</strong> A validated warp-per-world all-in-smem contact solve (deviation 1e-6, lambdas bitwise) measures 1.65&times; at 512 worlds and parity at 2,048, but 0.87&times; ex-gather at 8,192 &mdash; ~40 KB of on-chip rows per world caps residency at ~3 worlds/SM while the production phase kernels overlap across worlds. Retained as evidence (bench_warp_world_contact_oracle.py): locality alone cannot beat the row pipeline at training scale; <em>the O(rows&times;nv) response construction is the floor in both designs</em>.</li>
-        <li><strong>Matrix-free reduced contacts measured (10 Jul): rejected, 0.36&times; at 8,192 worlds.</strong> A validated prototype (warm start matches production to 2.4&times;10<sup>&minus;7</sup>; genuinely different from the July-3 matrix-free rejection &mdash; no response streaming at all, one O(depth) tree pass per sweep) needs &ge;12 Jacobi sweeps for production quality and each tree pass costs as much as a full production dense sweep: one warp per world walks a ~30-joint latency chain while production streams rows at full occupancy. Together with the on-chip oracle this closes the architecture question with a fundamental finding: <em>at high occupancy, streaming rows&times;nv is cheap; per-sweep factorized-solve latency is expensive. The row pipeline is the GPU-correct shape at training scale.</em></li>
-        <li><strong>Consequence &mdash; the remaining generic speed levers are byte-count and row-count, plus reliability:</strong> (1) compress the row stream; (2) build-time patch rows (~25&ndash;27% fewer rows, scoped); (3) seed reliability p=1/3&rarr;2/3 (halves the headline).</li>
-        <li><strong>FP16&times;2 packed rows measured (10 Jul): kernel win proven, training verdict deferred.</strong> Packed half-precision Jacobian/response storage (full-width aligned loads; naked fp16 rejected &mdash; the phase is load-request-bound) wins the isolated contact phase by <strong>+9.4%</strong> and is faster inside real training (nsys: build &minus;11%, solve &minus;4%), with deviations &le;3&times;10<sup>&minus;4</sup> and bit-stable replays. All three paired iteration-75 screens match fp32 (0.707/0.657/0.665 vs 0.708/0.659/0.674), but the full-horizon known-good seed missed the frozen iteration-290 check at 0.8872 vs 0.90 (fp32: 0.9261). Any physics change re-rolls the seed lottery, so one late miss is inconclusive; resolving it costs a multi-seed race that outweighs the ~2&ndash;3% end-to-end win today. Wider packing is a measured dead end (&times;4 slightly worse at +8.3% &mdash; pack&ge;2 already reaches one warp request per row load; &times;8 dominated), so fp16&times;2 is the family optimum. A four-seed full-horizon race found <strong>zero passes</strong> (42: 0.887 at the 290 check; 71: 0.734 at 150; 47/89 screen-rejected) while screen scores track fp32 within 0.02 on every comparable seed &mdash; no screen-level degradation, but zero successes means unresolved expected cost, so the family is <strong>parked, not retained</strong> (revisit when combined with patch rows or once seed reliability makes races cheap). Broadly useful finding banked: Warp emits only scalar loads for all vector types (PTX-verified); the bit-identical wide-load follow-up on the classic per-cid body-field path is now in progress &mdash; no race needed, gates are cross-scene brackets plus bit-identity.</li>
-        <li><strong>Two-substep cold start rejected</strong> (10 Jul): paired screens 0.657 / 0.698 / 0.625 &mdash; only seed 11 passed the iteration-75 screen, then missed the frozen 0.80 second screen at 0.785 (zero falls, steady climb, but the borderline-miss rule is frozen for a reason). 0/3 full-path survivors versus 1/3 at 3&times;2, so expected cost cannot improve. The retained 3&rarr;2 substep transition at 99.6M samples stands.</li>
-      </ul>
-      <p class="profile-note">nanoG1 source: /home/twidmer/Documents/git/nanoG1 at engine pin e3825cea; analysis 10 Jul.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">PHYSICS WIN RETAINED &middot; TRAINING RACE LOST</span><time>10 Jul</time></div>
-      <h2>Position projection fixes 3-substep anchors; learning gap is elsewhere</h2>
-      <p>A mass-metric position-level projection now runs after position integration on the free-root revolute projector path: the unchanged warp-per-tree recursion is applied to zero input twist with full current-pose anchor errors as affine targets (recomputed from body-local anchors; prepared fields are stale post-integrate), and the output twist is applied as a rigid displacement. Three Newton iterations handle the linearization residual (1&rarr;2&rarr;3 iterations: 1.1&times;10<sup>&minus;3</sup> &rarr; 2.0&times;10<sup>&minus;5</sup> &rarr; 1.9&times;10<sup>&minus;7</sup> RMS at 3&times;2). Velocities, momenta, and accumulated impulses are untouched; free-root projection applies zero net reaction, so COM and momentum are preserved &mdash; the momentum, physicality, and bitwise-determinism graph tests pass.</p>
-      <ul>
-        <li>Ladder anchors are solved: 3&times;2 anchor RMS improves 5.1&times;10<sup>&minus;2</sup> &rarr; <strong>1.9&times;10<sup>&minus;7</sup></strong>, 4&times;2 to 8.5&times;10<sup>&minus;8</sup>, 5&times;2 to 7.8&times;10<sup>&minus;8</sup> (all better than the previous 5&times;2 baseline of 3.3&times;10<sup>&minus;6</sup>).</li>
-        <li>Projected 3&times;2 measures <strong>57.3k</strong> diagnostic control-steps/s versus reduced 3&times;2 at <strong>37.4k</strong>: <strong>1.53&times; faster than the retained training schedule</strong> on the readback diagnostic.</li>
-        <li>Remaining gap is trajectory robustness, not joints: aggressive-noise median first termination is 50 for projected 3&times;2 versus 111 for reduced 3&times;2, and 4&times;2 with perfect anchors keeps its baseline termination (51). This screen is historically pessimistic for projected modes; the frozen training screen is the real gate.</li>
-        <li>Scope: revolute free-root specialization only; the general mixed-joint projector keeps prior behavior (documented no-op). The pass is fused into one kernel launch per call (gather + recursion + apply, three Newton iterations warp-locally; the dead reaction recursion is skipped): projected 3&times;2 training improves 727k &rarr; 744k samples/s, and a 2-iteration variant reaches 803k at 2.0&times;10<sup>&minus;5</sup> anchor RMS.</li>
-        <li>At 8,192-world training scale the earlier 64-world diagnostic reversed: reduced 3&times;2 measures <strong>950k</strong> env samples/s versus projected 3&times;2 at <strong>744k</strong> (0.78&times;). All nine projected CUDA-graph tests (momentum, physicality, bitwise determinism) pass with the pass active.</li>
-        <li><strong>Bounded paired-seed race: decisive loss.</strong> Projected 3&times;2 scores 0.255 / 0.390 / 0.403 at the frozen iteration-75 screen versus retained reduced 0.708 / 0.659 / 0.674 &mdash; all three seeds rejected at 0.68. Learning is unstable, not slow: seed 42 peaks 0.408 at iteration 25 then degrades to 0.255; roll/pitch angular RMS 3.3&ndash;3.5 with finite, non-exploding physics.</li>
-        <li><strong>Diagnosis narrows:</strong> with anchors at 1.9&times;10<sup>&minus;7</sup>, positional closure joins contact convergence (the 5&times;12 result, battery 0.154) as ruled-out causes of maximal-mode learning failure. The remaining suspect is drive/actuation dynamics &mdash; maximal PGS drive rows produce a softer, noisier control response than reduced coordinates&rsquo; implicit generalized drives (consistent with the old parity finding that drive boost &ldquo;does not remove the effective-mass and damping softness&rdquo;).</li>
-        <li><strong>Decision:</strong> per the pre-registered kill criterion, the projected-maximal retraining thread stops here. The position pass is retained as a physics-quality win for the opt-in maximal path (it is what makes 3&ndash;4-substep operation physically defensible at all; 5&times;2 anchors also improve 40&times;). Solver-speed work moves to build-time patch-reduced contact rows on the reduced path (measured ~31% generalized-row ceiling); any future maximal learning attempt should start from the drive formulation, not the solver.</li>
-      </ul>
-      <p class="profile-note">Implementation: maximal_projector.py (fused, no flags). Race records: /tmp/proj3x2_seed{42,11,29}.json. Ladder + brackets measured 10 Jul.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">DIAGNOSTIC &middot; SUBSTEP LADDER ROOT CAUSE</span><time>10 Jul</time></div>
-      <h2>Projected-maximal substep failure is positional, not convergence</h2>
-      <p>A fresh 200-step aggressive-action ladder reproduces the known cliff: projected 5&times;2 holds 3.3&times;10<sup>&minus;6</sup> RMS anchor error with noise-driven terminations (median step 80, matching reduced), while 4&times;2 degrades to 1.0&times;10<sup>&minus;3</sup> and 3&times;2 to 5.1&times;10<sup>&minus;2</sup> with terminations at step 11.</p>
-      <ul>
-        <li>Extra PGS iterations rescue nothing at 3 substeps: 3&times;4, 3&times;6, and 3&times;8 all saturate at 5.3&ndash;5.6&times;10<sup>&minus;2</sup> RMS anchor error, terminations stuck at step 13&ndash;14. At 4 substeps, 4&times;4 improves anchors 10&times; to 1.0&times;10<sup>&minus;4</sup> (terminations 51&rarr;64) but stays ~30&times; above the 5&times;2 reference.</li>
-        <li>Interpretation: reduced coordinates survive the same 6.67 ms substep because positions remain on the joint manifold by parametrization. Projected maximal projects velocities only; position recovery is a bounded Baumgarte bias, and at large substeps positional drift outruns it. Iteration count cannot fix that, which the flat 3&times;N curve confirms.</li>
-        <li><strong>Next candidate:</strong> a mass-metric position-level tree projection after position integration (one extra warp-per-tree pass per substep, deterministic, no scheduling changes) &mdash; the projected-maximal analogue of reduced coordinates' exact positional closure. Gates: anchor RMS back to ~10<sup>&minus;6</sup> at 3&times;2&ndash;3&times;4, momentum/energy tests, then the matched throughput bracket versus reduced 3&times;2.</li>
-      </ul>
-      <p class="profile-note">Ladder data: bench_g1_exploration_stability, 64 worlds, action seed 1234. Iterations probe settings 4&times;4 / 3&times;4 / 3&times;6 / 3&times;8 measured 10 Jul.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">REJECTED &middot; MULTI-STREAM STEP OVERLAP</span><time>10 Jul</time></div>
-      <h2>Hiding articulation setup under collision is contention-bound</h2>
-      <p>The long-designed reduced-pipeline overlap was implemented and measured: a side stream ran state import, forward kinematics, and the articulated factorization concurrently with collision + contact ingest, with the advance event-ordered after the contact warm-start gather &mdash; the audit confirmed that gather is the only pre-substep reader of articulated body velocities. The result is deterministic and bit-identical to the serial path.</p>
-      <ul>
-        <li>G1 shared-physics 8,192-world brackets: in-step fork <strong>&minus;1.2%</strong>, pre-collide async fork <strong>+1.6%</strong>. Node-level Nsight tracing of the captured graph confirms the branches genuinely run concurrently.</li>
-        <li>Both branches are memory-bound, so overlap pays half its theoretical ~13%: under concurrency eval_fk slows 173&rarr;320 &micro;s, local kinematics 44&rarr;100 &micro;s, factorization 128&rarr;160 &micro;s.</li>
-        <li>The dominant cost is untouched: contact row build (884 &micro;s) plus contact tile solves (~810 &micro;s) still serialize after the join &mdash; about 61% of the 3.8 ms standing-pose step.</li>
-        <li><strong>Decision:</strong> rejected and fully reverted. +1.6% does not justify a side stream, four events, an async API contract, and per-environment wiring. Streams remain only where they obviously pay (graph-leapfrog rollout/update overlap). The lever on this pipeline is making contact row construction and the contact solve cheaper, not scheduling.</li>
-        <li>Focus moves to the projected-maximal preconditioning track: deterministic parallel tree contraction plus the support-tree contact preconditioner, targeting fewer substeps at physical quality.</li>
-      </ul>
-      <p class="profile-note">Retained record: PERF_NOTES.md &ldquo;Substep-0 articulation/ingest multi-stream overlap&rdquo;. The 2026-07-03 overlap design entry is marked resolved. No user profiling action is currently required.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">DIAGNOSTIC &middot; INTERACTION IDENTIFIED</span><time>Latest paired evidence</time></div>
-      <h2>G1 seed failures are not caused by initialization alone</h2>
-      <p>A reciprocal factor experiment separated the known-success and failed policy/update seeds from environment, command, reset, and rollout randomness. Both mixed runs used the retained reduced-coordinate 3&times;2&times;1 schedule and the frozen iteration-75 screen.</p>
-      <ul>
-        <li>Known-success initialization/update seed 42 with failed rollout/environment seed 11 scores <strong>0.6686</strong>, below the frozen 0.68 threshold.</li>
-        <li>Failed initialization/update seed 11 with known-success rollout/environment seed 42 scores <strong>0.6669</strong>, also below the threshold.</li>
-        <li>Both runs have zero screen falls, so the result is learning-quality variance rather than a physics crash or instability.</li>
-        <li><strong>Conclusion:</strong> neither a standalone initializer replacement nor standalone action-noise pairing is well motivated. The basin depends on the interaction between policy initialization, update ordering, and collected trajectories. The next general candidate should stabilize that coupled update process, then be raced on paired G1 seeds and a non-G1 task.</li>
-        <li>The official expected G1 cost remains <strong>343.19 s</strong>; reduced coordinates remain the fastest reliable path, while physically complete maximal-articulated G1 is still about 2&times; slower.</li>
-      </ul>
-      <p class="profile-note">Retained record: <a href="benchmarks/results/phoenx_g1_seed_factor_20260709.json">phoenx_g1_seed_factor_20260709.json</a>. No user profiling action is currently required.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">EARLY LEARNING WIN &middot; FULL GATE MISS</span><time>Latest systematic experiment</time></div>
-      <h2>Adaptive replay accelerates acquisition but not final G1 quality</h2>
-      <p>Successful and failed seed traces show that initial PPO KL is not a reliable discriminator: successful seed 42 and failed seed 29 both spike above 0.37, while failed seed 11 remains below 0.06. Halving the learning rate therefore has no principled advantage and scores only 0.631 on seed 29 at iteration 75.</p>
-      <ul>
-        <li>Increasing trajectory replay from 3 to 6 raises seed 29 from the retained 0.644 to 0.708 at iteration 75 and 0.815 at iteration 100, but lowers throughput to 473k/s and then overtrains to 0.698 by iteration 150.</li>
-        <li>Replay decay is real but incomplete: 6&rarr;3 reaches 0.831 at iteration 150 and plateaus near 0.84 through iteration 325; 6&rarr;2 reaches 0.809 then plateaus near 0.81&ndash;0.83; 6&rarr;1 misses the second screen by 0.000257.</li>
-        <li>Keeping three physics substeps preserves angular stability but not tracking or leg-speed quality. The IsaacLab-matched leg-acceleration weight of &minus;1e&minus;7 lowers angular RMS to 0.052 but leaves leg-speed RMS near 1.54 and reduces battery performance.</li>
-        <li>Equal checkpoint averaging improves the full-gate battery score to 0.854 and leg-speed RMS to 1.06, but still fails the 0.90 battery and 0.21 angular thresholds.</li>
-        <li><strong>Decision:</strong> reject this family for the primary metric. It is useful evidence that acquisition and final policy quality are separate bottlenecks, but the official expected G1 cost remains 343.19 s.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">CORRECTNESS RETAINED &middot; TRAINING MODE REJECTED</span><time>Latest matched evidence</time></div>
-      <h2>Exact recurrent replay works, but persistence does not improve G1</h2>
-      <p>PPO now records the detached MinGRU state at each rollout boundary, replays from that exact state, cuts gradients at episode terminals, computes persistent-state bootstrap values without advancing hidden state, and synchronizes hidden state across the separate graph-leapfrog rollout trainer. The default reset-at-rollout path remains specialized and branch-free.</p>
-      <ul>
-        <li>Persistent recurrence is rejected on two paired development seeds. Seed 11 reaches 0.716 at iteration 75, peaks at 0.748, then falls to 0.703 at iteration 150 versus the required 0.80. Seed 29 reaches only 0.628 at iteration 75 versus the required 0.68.</li>
-        <li>A detached-worktree, same-machine bracket resolves the apparent speed regression: commit <code>5c526af7</code> measures 906.1k samples/s and the exact-state implementation measures 908.4k/s (+0.25%). This is performance-neutral, not a new speed claim.</li>
-        <li>The former 923k/s headline remains useful historical evidence but is outside today's matched bracket; the headline now shows the reproducible 908k/s diagnostic.</li>
-        <li>CUDA-graph regressions cover nonzero initial-state finite differences, terminal gradient isolation, minibatch state gather, mirror-state isolation, read-only bootstrap, deterministic PPO updates, graph-leapfrog state synchronization, checkpoint/resume, and train-to-gate smoke.</li>
-        <li>A second general learner alternative also fails: standard transition-aligned V-trace scores 0.623 for seed 29 and 0.656 with two falls for seed 11 at iteration 75, versus retained shifted-layout scores of 0.644 and 0.697. PhoenX matches PufferLib's unusual shifted convention exactly; the standard alternative is removed rather than left as benchmark clutter.</li>
-        <li><strong>Decision:</strong> retain the general correctness fix and Puffer-shifted layout, keep rollout-start reset as the recipe default, reject both persistent recurrence and standard-aligned V-trace as time-to-policy optimizations, and leave the official expected G1 cost at 343.19 s.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">CORRECTNESS RETAINED &middot; METRIC GAIN UNPROVEN</span><time>Latest paired evidence</time></div>
-      <h2>Recurrent PPO now respects terminal episode boundaries</h2>
-      <p>Collection already cleared MinGRU state after a terminal transition, but PPO sequence replay previously treated the flat rollout as uninterrupted. Replay now resets the recurrent value at exactly the same boundary, cuts backward gradients there, and carries done masks through trajectory minibatches. The implementation remains deterministic and end-to-end CUDA-graph captured.</p>
-      <ul>
-        <li>Focused CUDA graph coverage passes for forward reset, backward gradient isolation, minibatch gathering, finite-difference gradients, reproducible PPO updates, checkpoint/resume, and train-to-gate smoke.</li>
-        <li>The paired iteration-75 effect is mixed: seed 11 improves from 0.659 to 0.685, seed 42 remains comparable at 0.703, and seed 29 regresses from 0.674 to 0.644. An authoritative chunked seed-11 run still fails the second screen (0.742 at iteration 150; required 0.80).</li>
-        <li><strong>Decision:</strong> retain the correctness fix, but do not claim a faster time-to-policy. The official expected G1 cost remains 343.19 s.</li>
-        <li><strong>Next general candidate:</strong> replay the exact initial recurrent state of each rollout and compute bootstrap values without advancing persistent state. This removes the remaining collection/replay mismatch and enables a clean test of state persistence across rollout chunks.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">REJECTED &middot; MID-TRAINING BRANCH SELECTION</span><time>Latest evidence</time></div>
-      <h2>Continuation diversity rescues early screens, but not the qualified-policy gate</h2>
-      <p>A frozen diagnostic branched retained reduced-coordinate iteration-50 checkpoints by preserving policy and optimizer state while independently reseeding rollout, command, reset, and environment trajectories. Every fresh-process branch and evaluation was charged; selection used held-out fixed-command screens rather than training reward.</p>
-      <ul>
-        <li>A 3&times;3 cross of the existing iteration-75 policies shows genuine training variance: changing the gate seed moves battery performance by about 0.01, while changing the training seed moves it by 0.04&ndash;0.05 and preserves the policy ranking.</li>
-        <li>The eventual successful seed cannot be selected early: seed 42 is worst at iterations 25 and 50, then best at iteration 75. Naive early PBT selection would choose the wrong policy.</li>
-        <li>From the weak seed-11 iteration-50 checkpoint, one 27.17 s branch reaches 0.693 on its selection seed, but only 0.644&ndash;0.674 on four other seeds. This is evaluator overfit, not a robust rescue.</li>
-        <li>The strongest branch starts from seed 29: its five-seed mean improves to 0.683 at iteration 75 and to <strong>0.838</strong> at iteration 150, with zero falls. The frozen second-stage threshold is passed.</li>
-        <li>Full continuation still fails. Battery performance plateaus at 0.822&ndash;0.844 through iteration 325 versus the required 0.90. The angular fine-tune lowers roll/pitch RMS from 0.343 to 0.121, but leg-velocity RMS rises to 1.55 versus the 1.22 limit.</li>
-        <li>The charged incremental process times are 27.06 s for iteration 50&rarr;75, 60.24 s for 75&rarr;150, and 111.41 s for 150&rarr;325. No qualifying policy is produced, so branching cannot improve the expected-cost metric.</li>
-        <li><strong>Decision:</strong> reject branch-and-select and keep the reduced 3&times;2 recipe plus frozen two-stage restart as the 343.19 s baseline. The next candidate must improve learning dynamics or sample efficiency across seeds, not search continuation noise.</li>
-        <li>The separate <code>maximal_articulated</code> experiment remains an opt-in high-mass-ratio research path only: its physically complete 4&times;2 path runs at 0.728M environment steps/s and scores 0.579, versus reduced 3&times;2 at 1.463M/s and 0.716.</li>
-      </ul>
-      <p class="profile-note">Retained record: <a href="benchmarks/results/phoenx_g1_branch_select_20260709.json">phoenx_g1_branch_select_20260709.json</a>. No user profiling action is currently required.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">THROUGHPUT PARITY · QUALITY PENDING</span><time>Latest matched G1 evidence</time></div>
-      <h2>Compact projected full coordinates erase the reduced-coordinate throughput deficit</h2>
-      <p>The exact projector now stores body mass, symmetric world inertia, and joint shift in 10 scalars per body instead of loading two full spatial matrices (72 scalars). It reconstructs the identical block-diagonal spatial mass and shift transform at use sites. At 8,192 worlds with the same 5-substep, 2-PGS-iteration graph-leapfrog schedule, fresh matched runs place projected maximal and reduced coordinates at approximately <strong>649k samples/s each</strong>; two preceding projected repeats measured 651&ndash;653k/s. The honest result is parity within run noise, after an 8.3% projected deficit before compaction.</p>
-      <ul>
-        <li>Physical stability is promising: a 75-iteration projected G1 run and its frozen held-out screen produced zero falls, while graph tests preserve closures, momentum, contacts, and bitwise determinism.</li>
-        <li>Policy quality is not yet sufficient: seed 42 reached held-out battery performance 0.643 versus the frozen 0.680 early gate; the retained reduced-coordinate seed-42 result at the same iteration is 0.708.</li>
-        <li>Reducing projected maximal from five to four or three substeps is not viable: long-horizon random-action tests terminate earlier and constraint error rises sharply.</li>
-        <li>Cross-mode checkpoint swaps confirm materially different coupled dynamics, while contact-free and grounded open-loop trajectories make projected maximal at least as close to the nanoG1 reference as reduced coordinates. There is no evidence of a basic projector correctness bug.</li>
-        <li>The compact representation plus four independent articulation warps per CUDA block improves the isolated graph-captured physics bracket from 920k to <strong>1.050M environment steps/s</strong> (+14.1%). The ordering and equations are unchanged.</li>
-        <li>Ten focused CUDA-graph gates pass after compaction: floating momentum, floating and contacting loops, mixed trees, D6, multiple articulations per world, bitwise determinism, and the G1 joint step response.</li>
-        <li>A production-scale Nsight trace of the former representation identified the exact projector recurrence as 36.9% of measured GPU kernel duration; gather and publish added 12.8%. The counter capture showed zero spilling, 33.3% register-limited occupancy, 72.7% L2 throughput, 48.6% LG-memory throttle, and only 4.45 active threads per warp.</li>
-        <li>Register/shuffle, one-thread-per-articulation, and four-articulations-per-warp sub-warp prototypes were measured and rejected: they were respectively unboundedly slow, 38% slower, and 7.7% slower. The retained layout preserves one warp per articulation and merely packs four independent warps into a block.</li>
-        <li>Promotion is still blocked by policy quality, not throughput: the existing projected seed-42 iteration-75 screen scores 0.643 versus the frozen 0.680 gate and the matched reduced result of 0.708. A bounded retraining race is required before this affects time-to-policy.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">FOUNDATION READY</span><time>Known evidence</time></div>
-      <h2>Training works; the authoritative measurement loop now runs</h2>
-      <p>Reduced-coordinate PhoenX already trains a robust G1 walker from scratch: two independent 157.3M-sample runs pass the complete frozen-policy gate with zero falls and about 0.91 tracking. This proves feasibility, not optimal wall-clock convergence.</p>
-      <ul>
-        <li>Pure PhoenX/PhoenX-RL environments now cover Ant, Humanoid, Go2, G1, H1, ANYmal-C, DR Legs hold-pose, and DR Legs walking, without IsaacLab runtime dependencies.</li>
-        <li>Reduced, hybrid, and full-coordinate PhoenX are all eligible. Coordinate choice is an experimental variable, not an ideology; physical accuracy, stability, and the task gate decide.</li>
-        <li>The compact projected-maximal path now matches reduced-coordinate throughput at about 649k samples/s in the 8,192-world 5&times;2 benchmark. Production-scale held-out policy quality—not throughput alone—decides promotion.</li>
-        <li>The retained 923k/s steady-training result and solver profiles remain secondary diagnostics for explaining time-to-policy changes.</li>
-        <li>G1, ANYmal, and closed-loop DR Legs hold now run under the fresh-process metric with paired train/gate seeds, consecutive held-out windows, strict JSON records, timeout/crash/miss censoring, and restart-cost uncertainty.</li>
-      </ul>
-    </article>
-
-    <div class="section-label">Active milestone</div>
-    <article>
-      <div class="meta"><span class="tag good">NEW AUTHORITATIVE METRIC</span><time>4 Jul</time></div>
-      <h2>Cold-start wall-clock time to a qualified policy</h2>
-      <p>The clock starts immediately before launching the training process with no policy, replay, optimizer, normalization, or curriculum state. It stops at the first held-out evaluation that satisfies the task gate. Environment/model creation, normal Warp cache loading, graph capture, rollout, learning, evaluation, checkpointing, and any population overhead are included.</p>
-      <ul>
-        <li><strong>Primary deployment clock:</strong> a normal ready installation with its persistent Warp kernel cache in the declared state. A cleared-JIT-cache first-install clock is reported separately so compiler noise cannot hide training improvements.</li>
-        <li><strong>Success:</strong> task-specific thresholds are frozen before an optimization run, evaluated on held-out randomized commands/initial states, and must pass in consecutive evaluation windows. Failed runs are not dropped.</li>
-        <li><strong>Expectation value:</strong> time-to-policy is a random variable. The primary estimate is expected wall-clock cost to success under a frozen restart policy: mean successful-run time plus mean charged failure time × <code>(1−p)/p</code>, where <code>p</code> is success probability. A predeclared early rejection is charged its observed time; crashes, timeouts, and ordinary misses are conservatively charged the full cutoff <code>H</code>. Also report uncertainty and raw seed outcomes.</li>
-        <li><strong>Censoring:</strong> timed-out and failed runs are retained. They are not assigned the mean of successful runs; the restart-cost estimate explicitly penalizes unreliability. A configuration with no successes by <code>H</code> is unresolved/dominated, not silently excluded.</li>
-        <li><strong>Sequential judgment:</strong> one run may reject only a correctness failure or overwhelming regression. Ordinary candidates get paired seeds and adaptive racing; uncertain results receive more runs. Finalists use enough independent seeds to estimate expected cost and uncertainty.</li>
-        <li><strong>Seed protocol:</strong> vary seeds for policy initialization, environment/reset randomization, command sampling, and learner ordering. Compare candidates on the same paired development seed bank, then confirm on a separate unseen seed bank. Because PhoenX/PhoenX-RL is deterministic per seed, every trial is exactly reproducible and seed effects are not confused with runtime noise.</li>
-        <li><strong>Evaluation budget:</strong> frequent cheap screening evaluations trigger the full held-out gate only when promising. Both screening and confirmation time count, and stopping rules are frozen to avoid cherry-picking.</li>
-        <li><strong>Generalization:</strong> development uses a rotating subset of the eight task families; promotion requires locomotion diversity and a held-out task. No robot-name solver specializations.</li>
-        <li><strong>Allowed levers:</strong> timestep/substeps, full or reduced coordinates, contact/solver schedules, PPO variants, curricula, recurrent/feed-forward policies, mixed precision, PBT, and overlap. All consumed wall time and GPU work count.</li>
-        <li><strong>Hard gates:</strong> physically defensible simulation, stable contacts/joints, no reward exploitation of stale or degraded physics, CUDA graph support for measured paths, and versatile reusable RL code.</li>
-        <li><strong>Implemented:</strong> the G1 runner emits raw per-seed outcomes and a continuously updated suite record. It reports empirical success probability, Wilson uncertainty, successful-run time, full-cutoff restart charges, expected attempts, and bootstrapped expected time to success.</li>
-        <li><strong>Next:</strong> freeze compact gates for a quadruped and a structurally different task, then establish paired-seed cold-start baselines before changing solver or RL recipes.</li>
-      </ul>
-    </article>
-
-    <div class="section-label">Latest findings</div>
-    <article>
-      <div class="meta"><span class="tag good">INTEGRATED CANDIDATE &middot; GRAPH CAPTURED</span><time>9 Jul</time></div>
-      <h2>Projected maximal robots are stable and faster than reduced PhoenX</h2>
-      <p>The additive <code>articulation_mode="maximal_projected"</code> path now has two exact GPU projectors: a branch-light free-root revolute specialization and a fused general kernel for anchored or floating trees mixing fixed, revolute, prismatic, ball, and reducible D6/universal joints. Existing explicit <code>"hybrid"</code> behavior is unchanged. Remaining unsupported trees automatically use pure reduced ownership, avoiding the old hybrid double solve.</p>
-      <ul>
-        <li>The recurrence still matches dense KKT projection across 1,000 randomized anchored/floating trees with 1&ndash;32 bodies, mixed fixed/revolute/prismatic/ball subspaces, and six mass/inertia decades. Maximum dense error is 2.3&times;10<sup>&minus;7</sup>, allowed-coordinate impulse is 3.4&times;10<sup>&minus;7</sup>, and kinetic energy never increases.</li>
-        <li>Matched graph-captured G1 at 5 substeps &times; 2 PGS iterations keeps all 32 seeded worlds alive for 50 aggressive-action steps with 8.6&times;10<sup>&minus;5</sup> m peak / 1.5&times;10<sup>&minus;6</sup> m RMS anchor error. Ordinary maximal fails almost immediately in the same screen.</li>
-        <li>The latest intentional-readback bracket measures <strong>21.79k</strong> control-steps/s for projected maximal, 12.03k for reduced, and 5.46k for established hybrid: projected maximal is 1.81&times; reduced and 3.99&times; old hybrid in this diagnostic. This is not yet an end-to-end training-throughput or time-to-policy claim.</li>
-        <li>Production CUDA-graph tests now cover anchored and floating mixed trees, reducible D6 universal joints, generic-D6 pure-reduced fallback, multiple articulations per world, bitwise determinism, floating momentum, recovered-reaction orthogonality, loop-joint exclusion, active rigid contacts, and repeated graph replay.</li>
-        <li>The integration exposed a general maximal-coordinate reset bug: importing a rotated state left world inverse inertia at its previous orientation for one frame. Rebuilding it at the import boundary reduces repeated floating-tree angular-momentum error from about 9.3&times;10<sup>&minus;3</sup> to 8&times;10<sup>&minus;6</sup>. Focused momentum, energy, armature, and live-armature-update modules pass.</li>
-        <li>ANYmal and H1 scratch gates previously showed the same robot-independent closure improvement. Permanent cross-robot tests and policy training are still required before this path can affect the primary time-to-policy score.</li>
-        <li>The general gather/tree/publish phases are fused into one graph node per projection pass. In a 512-world mixed-tree bracket with 6,656 active contacts, projected maximal measures <strong>338 &micro;s/step</strong> versus 581 &micro;s reduced and 685 &micro;s old hybrid: 1.72&times; and 2.03&times; faster respectively. Joint-only tiny trees still favor reduced ownership, so this is a regime result rather than a universal ranking.</li>
-        <li><strong>Remaining limitation:</strong> compliant cable behavior, distance inequalities, and generic non-reducible D6 trees are not rigidified by the projector; they use pure reduced ownership. The explicit old hybrid path remains available for comparison but is no longer the automatic fallback.</li>
-        <li>Contacts, loop closures, limits, and other ordinary constraints remain in deterministic PhoenX GS; contact topology is never cached across collision frames. A graph-captured contacting four-bar and a floating internal loop both remain closed, and the mixed path is bitwise deterministic. Long-horizon contact-rich robot training and held-out time-to-policy remain promotion gates.</li>
-      </ul>
-      <p class="profile-note">Retained derivation and promotion gates: <a href="docs/MAXIMAL_JOINT_TREE_PROJECTOR.md">MAXIMAL_JOINT_TREE_PROJECTOR.md</a>. Reproducible ideal kernel: <a href="benchmarks/experimental/bench_maximal_joint_tree_projector.py">bench_maximal_joint_tree_projector.py</a>. No user profiling action is currently required.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">PROMISING PROTOTYPE · NOT PRODUCTION</span><time>9 Jul</time></div>
-      <h2>Exact target-wrench support solve closes the 400:1 stack gap</h2>
-      <p>The support-tree experiment now runs against real PhoenX contact rows after ordinary bias-free Gauss–Seidel relaxation. It computes the complete target patch wrench, redistributes that wrench to the actual contact points, and commits the correction only when every reconstructed point force lies inside its Coulomb cone. Production PhoenX remains unchanged while impact and topology-change gates are completed.</p>
-      <ul>
-        <li>At the difficult 5-substep × 2-PGS schedule, the actual 400:1 two-box stack now has zero measured residual body velocity and relative mean top/ground load errors of 1.5×10<sup>−7</sup> / 5.9×10<sup>−8</sup>. The preceding delta-only distribution left about 7% load error because an arbitrary warm-start distribution could make an otherwise feasible correction appear infeasible.</li>
-        <li>A 100 N lateral load is accepted for every sampled frame and remains static. Under 5000 N, the upper patch fails the cone gate and slides/separates; only the independently grounded lower component remains eligible. This is the required physical behavior, not an unconditional freeze.</li>
-        <li>The solve remains a preconditioned colored-GS path: ordinary PhoenX PGS establishes the nonlinear contact state, the exact tree correction handles a coupled sticking mode, and any rank, topology, normal-alignment, or friction failure leaves the ordinary GS result untouched.</li>
-        <li>A graph-captured dynamic prototype builds deterministic parent/level/component data and solves 1024 branched forests of 32 bodies in about 20.6 µs on RTX PRO 6000 Blackwell. The earlier solve-only result is 10.3 µs for 8192 five-body trees.</li>
-        <li>Contact connectivity is transient and will be rebuilt from the current collision result. Joint/body incidence is persistent and may be preprocessed once, but no contact parentage will be cached across collision frames. Multiple contact components are accepted or rejected independently.</li>
-        <li><strong>Still required:</strong> drop/impact and restitution behavior, opening/sliding contacts, changing manifolds, momentum/energy accounting, non-tree fallback, joints mixed with contacts, deterministic single- and multi-world execution, and end-to-end CUDA graph tests. No production integration will land before these gates pass.</li>
-      </ul>
-      <p class="profile-note">The retained derivation and idealized GPU oracle are in <code>docs/SUPPORT_TREE_CONTACT_PRECONDITIONER.md</code> and <code>benchmarks/experimental/bench_support_tree_patch.py</code>. The real-PhoenX integration remains an isolated scratch experiment.</p>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">ACTIVE · MAXIMAL GS CONVERGENCE</span><time>9 Jul</time></div>
-      <h2>A steady-window benchmark exposes the 100:1 propagation gap</h2>
-      <p>The new graph-captured heavy-on-light benchmark averages contact load over 120 settled frames and records RMS body speed, separation, and lateral drift. This avoids accepting a lucky instantaneous impulse sample from an oscillatory solve.</p>
-      <ul>
-        <li>At the G1-like 5 substeps × 2 PGS iterations, the heavy box falls from the stack and its supported-load error is 73.9%. At 5×4 the stack remains intact, but mean load error is still 45.8%.</li>
-        <li>8×4 reduces mean load error to 25.2%; 8×8 reaches <strong>3.3%</strong>, with 0.025 / 0.034 m/s bottom/top RMS speed and only 0.020 m maximum lateral drift.</li>
-        <li>At fixed five substeps, 5×12 reaches 2.7% error for 100:1 and remains <strong>2.8× faster</strong> than reduced 5×2 on the matched 512-world G1 physics diagnostic. At 400:1 it still has 14.9% error, confirming the benchmark scales beyond one tuned ratio.</li>
-        <li>The old 40×32 unit-test schedule is therefore far above the current convergence frontier, but ordinary RL-like budgets remain insufficient. Increasing substeps alone does not replace GS propagation in this case.</li>
-        <li>Split SOR at 1.2 reduced drift and some instantaneous residuals but did not materially improve the time-averaged load; it is rejected as a standalone fix.</li>
-        <li>A frozen seed-42 maximal 5×12 G1 screen still fails decisively: 488k samples/s, but battery performance is only 0.154 with 286/600 falls. Contact load convergence is therefore not the root cause of maximal G1 learning failure; joint-chain/control dynamics remain distinct work.</li>
-        <li>The next solver experiment keeps deterministic colored Gauss–Seidel: use a support-aware preconditioner or targeted physical GS sweeps for difficult rows, then finish with ordinary unscaled sweeps. Momentum, energy, load transfer, arbitrary contact counts, and graph capture remain hard gates.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag">REJECTED · COMMAND CURRICULUM</span><time>9 Jul</time></div>
-      <h2>Faster early learning did not produce policies sooner</h2>
-      <p>A paired G1 candidate started with 50% command amplitude and reached the full command distribution over 50M samples. It was promoted from the cheap screen because all three iteration-75 scores improved, then evaluated unchanged against the complete frozen gate.</p>
-      <ul>
-        <li>Iteration-75 battery performance improved from 0.708 / 0.659 / 0.674 to <strong>0.761 / 0.710 / 0.700</strong> for seeds 42 / 11 / 29.</li>
-        <li>Final qualification reversed that apparent win: seed 42 missed through iteration 325, seed 11 passed in 204.92 s, and seed 29 was rejected by the second frozen screen in 113.37 s.</li>
-        <li>Success remained 1/3, while conservative failure charging increased expected restart cost from <strong>343.19 s to 678.28 s</strong>. The candidate is rejected and no training default changed.</li>
-        <li>This demonstrates why early reward or tracking alone cannot replace the held-out physical-quality gate. Future curricula must improve robust final acquisition, not merely simplify the first phase.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED CANDIDATE · CONTACT ROW LAYOUT</span><time>9 Jul</time></div>
-      <h2>Color-ordered contact rows move fixed Kapla to 74.9 FPS</h2>
-      <p>The completed source-counter pass confirms that the dominant rigid-contact iterate is a gather-latency problem: 78.2% of issue spacing is long-scoreboard stall and Nsight reports 1.81 million excess global sectors—78% of all sectors. Arithmetic, DRAM saturation, <code>__ldg()</code>, and sleeping are not the target.</p>
-      <ul>
-        <li>The safe opt-in path keeps canonical rows for ingest, warm start, and prepare. After prepare, one thread per contact gathers only the 24 rows consumed by iterate/relax into color order; after relax, one thread per contact scatters only the three accumulated impulses back.</li>
-        <li>An exclusive device scan builds offsets and a packed-to-canonical map once per rebuilt contact graph. There is no hard-coded contact count, binary search, or linked-list traversal. A CUDA-graph unit test covers interleaved 1-, 7-, and 13-contact columns.</li>
-        <li>The shipped workload is unchanged at 6 substeps, 10 PGS iterations, and 1 velocity iteration. Three 120-frame runs measure 74.83 / 75.07 / 74.92 FPS. Against the retained 70.03-FPS checkpoint this is about <strong>+7.0%</strong>.</li>
-        <li>The 2×2 scene with 45,360 bricks improves 23.87 → <strong>28.29 FPS</strong> in the matched run (+18.5%), so the gain grows with contact load rather than overfitting to 1×1. Drift, maximum displacement, and height match the paired baseline.</li>
-        <li>The post-change Systems trace measures the persistent iterate at 5.59 µs average, down from 6.81 µs at the previous checkpoint. Contact-thread gather costs 12.26 µs per substep and only 1.1% of kernel time; iterate falls from 51.4% to 46.9% of the profile.</li>
-        <li>The real-data Kapla settle test and launch-shape suite pass under CUDA graph capture. The arbitrary-count row round-trip test also passes.</li>
-        <li>A smaller response-cache experiment was rejected: it helped 1×1 by 1.4% but hurt 2×2 by 1.4%. The earlier column-thread row gather was also rejected after regressing 2×2; contact-thread staging is the version that scales.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · FROZEN TWO-STAGE RESTART</span><time>9 Jul</time></div>
-      <h2>Ready-cache paired rerun reaches 343.19 seconds expected cost</h2>
-      <p>The frozen restart policy now checks held-out tracking at 39.32M samples (iteration 75, threshold 0.68) before retaining the existing 78.64M-sample threshold of 0.80. Both checks use the same fixed-command CUDA-graph screen and charge actual process wall time.</p>
-      <ul>
-        <li>The known qualifying seed is already at 0.708 at iteration 75 and is retained. Confirmed failures score 0.659 (seed 11), 0.674 (seed 29), and 0.603 (seed 47), so they can be rejected about 50 seconds earlier.</li>
-        <li>Borderline seed 71 scores 0.687 and is deliberately retained by the conservative 0.68 threshold; it later fails at iteration 325. The abandoned 0.69 proposal was rejected because its margin against this unseen trajectory was too small.</li>
-        <li>The authoritative original bank rerun measures seed 42/1000 passing in <strong>215.58 s</strong>; seeds 11/2000 and 29/3000 reject at iteration 75 in <strong>63.79 / 63.83 s</strong>. With one success in three, expected restart cost is <strong>343.19 s</strong>, 21.4% below the previous 436.57 s headline.</li>
-        <li>One cleared-cache diagnostic spent roughly four extra minutes compiling current G1 kernels and stopped at the old 75M-sample child default. It is excluded from the ready-installation primary clock and retained as separate first-install/JIT evidence.</li>
-        <li>The generic suite adapter previously inherited that 75M-sample default, silently limiting G1 to 144 iterations although the frozen PhoenX horizon is 325. It now owns the 170.39M-sample horizon; a protocol regression asserts the child command.</li>
-        <li>The implementation accepts an ordered restart schedule, records every checked threshold in JSON, skips past checks when resuming, and retains the second-stage default. Fifteen protocol tests plus the CUDA graph train/checkpoint/gate smoke pass.</li>
-        <li>The success probability remains only 1/3 (Wilson 95% interval 0.061–0.792), and the three-trial bootstrap upper bound is unbounded. The 343.19 s value is measured but still preliminary, not a stable final ranking.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED CANDIDATE · GRAPHED QUALITY GATE</span><time>4 Jul</time></div>
-      <h2>Device-side evaluation cuts the full G1 gate to 3.44 seconds</h2>
-      <p>The held-out evaluator previously copied dones, successes, actions, joint positions, and velocities to the CPU on every policy step. The replacement accumulates one deterministic, atom-free metric row per evaluation world and reads back only the final totals.</p>
-      <ul>
-        <li>The complete policy → PhoenX step → metric accumulation → recurrent-state reset → done-world reset sequence runs in alternating CUDA graphs. Alternating graphs preserve state-buffer orientation for both odd and even PhoenX substep counts.</li>
-        <li>The known seed-42 iteration-315 policy still passes with zero falls, <code>battery_perf=0.9259843</code>, action jerk <code>0.15872</code>, roll/pitch angular velocity <code>0.14233</code>, yaw rate <code>0.08617</code>, and leg velocity <code>0.72414</code>. These match the pre-optimization frozen result to reporting precision.</li>
-        <li>Internal full-gate time falls from about <strong>11.22 s to 3.44 s</strong> (3.3× faster). In the fresh passing run, two confirmation gates total 6.76 s and all cheap screens total 4.17 s, versus 22.44 s and 7.49 s previously.</li>
-        <li><strong>Fresh three-seed result:</strong> the successful cold process falls from 231.37 s to 211.95 s (−8.4%). Failed attempts stop at 112.54 / 112.07 s, and the same 1/3 success rate gives 436.57 s preliminary expected time-to-policy, down from 459.30 s (−5.0%).</li>
-        <li>Reset seed advancement remains conditional on an actual fall and is performed on-device. Fixed held-out commands are now explicitly restored after a reset, preventing command randomization from silently changing the requested evaluation trajectory.</li>
-        <li>CUDA regressions cover odd-substep graph execution, repeated bit-identical gate metrics, command preservation across a forced fall/reset, and the complete train/checkpoint/reload/gate path. Non-PPO protocol policies and non-graph devices retain the reference evaluator.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">FIXED · DETERMINISTIC RL</span><time>4 Jul</time></div>
-      <h2>Fixed-order reductions make seeded PPO reproducible</h2>
-      <p>The first cold G1 attempts exposed a learner defect rather than ordinary seed variance: identical seed-42 jobs produced bit-identical observations, actions, rewards, physics states, values, and returns, yet diverged after PPO updates. Floating-point atomic reductions changed normalized advantages, prioritized sampling totals, Muon clipping/normalization, and the shared policy log-standard-deviation gradient; the high-learning-rate recurrent learner amplified those tiny changes into different policies.</p>
-      <ul>
-        <li>All update-critical reductions now use graph-capturable fixed-order partial sums with preallocated device buffers. No host synchronization or scene-specific path was added.</li>
-        <li>Independent normal multi-minibatch updates now produce bit-identical policy and optimizer checkpoints. A production-size 25-iteration pair also matches every checkpoint key and the held-out screen exactly (<code>0.5846359273</code>).</li>
-        <li>The 25-iteration pair takes 26.25 and 26.32 s versus 26.77 s before the fix. Removing contended atomics did not impose a throughput penalty in this bracket.</li>
-        <li>Permanent CUDA-graph tests cover fixed-order advantage normalization, complete recurrent PPO update reproducibility, and the G1 train/checkpoint/gate path.</li>
-        <li>The earlier 217 s cold attempts are diagnostic failures, not baseline samples: one happened to learn and one did not under the same nominal seed. They are retained as evidence that expected time-to-policy must not be estimated until seeded reproducibility is established.</li>
-        <li>Live model/trainer reuse plus cheap screening remains retained. A continuation from the old iteration-150 checkpoint passed full gates at iterations 290 and 315 in 129.6 s, but it is not counted as cold-start evidence.</li>
-        <li>Live continuation originally overwrote runtime environment flags and disabled episode command randomization after the first chunk. It now changes only the intended phase fields; the CUDA smoke asserts that randomization survives the transition.</li>
-        <li><strong>First valid cold success:</strong> deterministic train seed 42 / gate seed 1000 qualifies after 315 iterations (165.15M samples) in 231.37 s fresh-process wall time. The child records 197.95 s training, 7.49 s screening, and 22.44 s full-gate time.</li>
-        <li>Full gates at iterations 290 and 315 both pass with zero falls and battery performance 0.9261 / 0.9260. Action jerk, roll/pitch angular velocity, yaw rate, and leg velocity all remain comfortably within the frozen limits.</li>
-        <li><strong>Frozen early restart:</strong> a one-shot held-out screen at 78.64M samples rejects runs below 0.80 battery performance. Seed 11 scores 0.7581 and stops in 113.95 s; unseen seed 29 also rejects in 113.98 s. Seed 42 was already at 0.8456 and continues to its pass, so the rule does not alter the known success. A diagnostic continuation of seed 29 from the saved iteration-150 checkpoint through iteration 325 still misses (peak screen 0.8722, final 0.8681), confirming this held-out rejection was not a late-learning false negative.</li>
-        <li><strong>Preliminary expectation:</strong> one success in three paired trials gives empirical <code>p=1/3</code> and three expected attempts. After graphing the held-out evaluator, fresh paired reruns measure 436.57 s expected restart cost. This is 26% below the earlier 591.37 s two-trial/full-cutoff estimate, but uncertainty remains very large and the early rule needs more unseen-seed validation.</li>
-        <li><strong>Next:</strong> improve recipe reliability without seed-specific tuning, then race candidates on the same paired bank and confirm on unseen seeds. Full gate thresholds remain frozen.</li>
-      </ul>
-    </article>
-
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · PROCESS-LEVEL METRIC</span><time>4 Jul</time></div>
-      <h2>Cold-start G1 trials are executable and failure-aware</h2>
-      <p><code>bench_time_to_policy</code> launches each G1 attempt in a fresh Python process, so imports, CUDA initialization, normal cache loading, graph capture, training, checkpoint reload, and held-out evaluation all contribute to wall time. Candidate recipes cannot improve the score merely by failing more often.</p>
-      <ul>
-        <li>Training seeds and held-out gate seeds are recorded separately and paired in a frozen order. Candidate comparisons can reuse the same banks; final confirmation can use an unseen bank.</li>
-        <li>Qualification can require multiple successive held-out windows. A failure resets the streak, and the child stops only when the configured streak is complete.</li>
-        <li>Timeouts, crashes, and ordinary quality misses are retained as censored trials and charged the full restart horizon. A child-declared predeclared early rejection is charged its observed wall time. Zero observed successes produces an explicit infinite-cost state, serialized as strict JSON <code>null</code> plus a flag.</li>
-        <li>Twenty focused protocol, optimizer, determinism, and CUDA-graph tests pass. A forced 10 ms timeout is correctly censored and charged.</li>
-        <li>The smoke's 3.93 s value used trivial two-world/two-iteration gates and is only protocol validation—not a training result. No new performance claim is made yet.</li>
-        <li>ANYmal's existing pure-PhoenX forward curriculum is now a second task adapter. Its final no-reset walking gate is repeated with distinct held-out disturbance seeds, so confirmation windows exercise different physical trajectories.</li>
-        <li>A tiny ANYmal graph-leapfrog smoke trained, checkpointed, reloaded, evaluated, correctly missed the walking gate, and was retained as a 180 s charged failure. This validates failure accounting; it is not a learning result.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · CLOSED LINKAGE TASK</span><time>4 Jul</time></div>
-      <h2>DR Legs provides structurally different coverage</h2>
-      <ul>
-        <li>DR Legs hold adds a structurally different maximal-coordinate closed linkage. Its no-reset gate applies seeded whole-robot horizontal velocity impulses and independently checks falls, survival, pose success, pelvis height/uprightness/drift, finite state, and closed-loop anchor residual.</li>
-        <li>The untrained DR policy is correctly rejected: all 64 kicked worlds fall, with about 12–13% survival. Anchor residual remains below 0.5 mm, separating policy failure from a broken linkage solve.</li>
-        <li>After 50 production-size PPO updates, survival improves to 15.5% and minimum pelvis height to 0.164 m, but the policy still fails. This is useful direction, not a passing result; no DR time-to-policy baseline is claimed yet.</li>
-        <li>A large-world ordering bug was isolated: building the evaluation model after capturing but before first launching the training graph triggered CUDA error 700. The logically correct order—zero-training gate first, then capture—removes the failure at 2048 and 4096 training worlds.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">CANDIDATE · CROSS-ROBOT TOPOLOGY CACHE</span><time>3 Jul</time></div>
-      <h2>Static topology caching wins across G1, ANYmal, and H1</h2>
-      <p>The post-cache Nsight result showed that row threads still repeatedly chased static parent, path, and DOF metadata. A 768-byte shared cache now stores local parent and DOF metadata once per articulation block; every exact row uses a bounded parent walk while the proven factor cache, row order, and articulated equations remain unchanged.</p>
-      <ul>
-        <li>The 8192-world exact row microbenchmark is bit-identical and improves 220.8 → 210.7 µs (−4.6%). A larger staged-row design was 5% slower and was removed.</li>
-        <li>Matched G1 brackets reach 926.1k and 927.7k samples/s versus an immediate clean retained control at 920.6k/s: about +0.5–0.8%, depending on the retained control bracket.</li>
-        <li>Cross-robot multi-world contacts improve ANYmal 730.4k → 738.7k/s (+1.1%) and H1 708.9k → 717.9k/s (+1.3%).</li>
-        <li>With 64 articulations in one contacted world, ANYmal improves 89.1k → 90.5k/s (+1.6%) and H1 90.9k → 94.1k/s (+3.5%). Final state magnitudes are identical.</li>
-        <li>Articulations above 64 bodies automatically retain the original exact builder. Seven focused CUDA-graph regressions pass: exact rows, fallback selection, arbitrary contact pages, persistent/reference parity, multiple articulations per world, deterministic dense contacts, and spatial momentum.</li>
-        <li>Commit <code>7bc6b868</code> is clean on <code>twidmer/experiment-phoenx-staged-contact-rows</code>. This is a general retained-candidate improvement, not yet the requested needle-moving row-free persistent architecture.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag warn">MEASURED · BUILDER WIN REJECTED END TO END</span><time>3 Jul</time></div>
-      <h2>Faster row construction alone does not move training throughput</h2>
-      <p>The requested post-cache Nsight Compute capture and two exact follow-up prototypes now isolate the remaining problem. The retained headline stays at 923k samples/s; no higher number is being claimed.</p>
-      <ul>
-        <li>After the retained shared-factor cache, contact-row construction falls 943.6 → 879.7 µs (−6.8%), but remains latency-bound: about 68% long-scoreboard issue spacing, only 19.8% scheduler cycles with an eligible warp, and 79% excessive global sectors.</li>
-        <li>An exact compressed 12D body-mobility cache improves its isolated response calculation by 6.7%, but only about 486–503 of 8192 training worlds are eligible. Build and launch overhead lowers complete training throughput, so the path is rejected.</li>
-        <li>An exact ≤4-contact shared-row builder reproduces Jacobians and articulated responses bit-for-bit and improves stable isolated builder medians about 8.5% (222 → 203 µs).</li>
-        <li>Integrated training nevertheless reaches 892.4k/s versus an immediate clean retained control at 922.8k/s: a real 3.3% regression. The extra launch and global row publication erase the local saving; this implementation is rejected.</li>
-        <li>Direct shared-memory PGS variants were also exact, but register/instruction pressure made them 5–40% slower than the proven tile solve.</li>
-        <li>Compiler-supported <code>noinline</code> phase bodies also fail: the exact by-value call ABI reaches about 793k/s, while passing aggregate descriptors by reference falls to about 509k/s because array/member accesses stay behind pointer loads. Both forms are rejected.</li>
-        <li>An exact contact-space Delassus solve and combined articulated impulse application pass graph parity, but reach only 892k/s after depth parallelization; they reduce storage without reducing the dominant per-row articulated work.</li>
-        <li>The next credible large experiment must remove row publication and phase boundaries while also reducing—not repackaging—the <code>O(contact rows × articulation size)</code> response construction.</li>
-      </ul>
-    </article>
-    <article>
-      <div class="meta"><span class="tag good">RETAINED · CROSS-SCENE ROW CACHE</span><time>3 Jul</time></div>
-      <h2>Shared articulation factors remove the row builder's worst latency</h2>
-      <p>The existing contact-row Nsight report showed a 943.6 µs kernel with 76.7% of issue spacing in long-scoreboard stalls and 73% excessive global sectors. Every one of 96 row threads repeatedly loaded the same motion subspaces, articulated-inertia columns, and inverse joint factors.</p>
-      <ul>
-        <li>The row block now cooperatively loads those exact factors into about 4.6 KB of shared memory once, then evaluates the unchanged articulated response equations and deterministic row order.</li>
-        <li>Matched G1 graph-leapfrog training improves 913.8k → 923.0k samples/s (+1.0%). The retained nanoG1 gap is now about 1.38×.</li>
-        <li>Cross-scene gates also improve: 512-world ANYmal +0.5%, H1 +1.7%; 64 articulations in one world ANYmal +1.5%, H1 +1.7%. Final state magnitudes are identical.</li>
-        <li>Six focused CUDA regressions pass: exact generalized rows, arbitrary contact pages, persistent/reference parity, multiple grounded articulations per world, deterministic dense contacts, and spatial momentum conservation.</li>
-        <li>Commit <code>2ce2656a</code> is retained on <code>twidmer/experiment-phoenx-persistent-articulations</code>. Repository-wide pre-commit remains blocked only by unrelated pre-existing lint/typo failures; focused lint and formatting pass.</li>
-        <li><strong>Next:</strong> target the measured publication/dependency chain with a compact native/noinline persistent phase design; no further user profiling action is currently required.</li>
-      </ul>
-    </article>
-    <div class="section-label">Next decisions</div>
-    <section class="next">
-      <div>
-        <h2>Build the measurement loop first</h2>
-        <p>Optimizing throughput before measuring first-passing wall time can reward the wrong solver, timestep, curriculum, or learner. The benchmark must make failures and evaluation cost visible and produce one comparable JSON record per run.</p>
-        <p><strong>First baseline set:</strong> G1 plus a quadruped and a structurally different task, using current proven recipes. Then compare safe timestep/schedule changes, reduced versus full coordinates where valid, and RL changes by time-to-gate—not isolated SPS.</p>
-      </div>
-      <div>
-        <h2>Do not repeat</h2>
-        <ul>
-          <li>Separate 32-row resident Jacobian/response solve: bit-exact but −8.6% G1 training from a second launch, fixed shared loads, and occupancy.</li>
-          <li>One-pass ABA / pre-contact-only Coriolis: +6% physics but severe momentum drift.</li>
-          <li>Compile-time velocity-only publish kernel: exact but +0.1% (neutral).</li>
-          <li>Factor/contact multi-stream overlap: −2.7% training from GPU contention.</li>
-          <li>Substep-0 articulation/collision multi-stream overlap (incl. pre-collide async fork): bit-identical, genuinely concurrent, but memory-bandwidth contention caps it at +1.6% physics for a side stream + four events + async API; front-section scheduling cannot touch the row-build/solve critical path.</li>
-          <li>Conditional empty-reset FK/observation: neutral in overlapped training and −1.7% in high-reset stepping; fully reverted.</li>
-          <li>Always-transposed response rows: faster physics, −2.7% training.</li>
-          <li>Early response-vector prefetch: +0.55% physics but −0.64% training from increased live-register pressure.</li>
-          <li>Drop tiled ABA <code>generalized_rhs</code> store: exact but about −0.6% physics; fully reverted.</li>
-          <li>Serial three-row contact scheduling: 1.06M versus 1.93M physics steps/s; row parallelism is essential.</li>
-          <li>Row blocks of 32 gain 0.56% isolated physics but lose 0.38% training. Blocks of 64 gain 0.65% G1 training overlap but lose 1.2–2.7% on contact-rich G1/H1/ANYmal fleets; retain the general 96-thread block.</li>
-          <li>Stride-3 contact prepare: policy exploits stale-contact physics and fails the true-physics gate.</li>
-          <li>Factor sub-warp tiling: +9% kernel time.</li>
-          <li>Compile-time generalized-contact mode specialization: exact focused tests pass, but static iteration expansion drops G1 physics about 3%; keep the compact runtime loop.</li>
-          <li>Fuse per-joint initialization into tiled factor: physically exact, but −2.3% G1 physics from increased kernel pressure.</li>
-          <li>Path-sparse Jacobian cache: −1.5% physics; indexed tile dots slowed every PGS update.</li>
-          <li>Remove ABA generalized-acceleration stores: neutral/slightly slower.</li>
-          <li>Full 96-row shared response cache: −14% from fixed loads and occupancy.</li>
-          <li>Adaptive two-link unit-wrench response basis: exact algebra, but −0.5–1.6% across G1, ANYmal, and H1 training/robot brackets.</li>
-          <li>No-inline ABA phase inside the contact megakernel: exact and graph-safe, but about −24% G1 training from device-call marshalling/local-stack traffic.</li>
-          <li>Launch bounds on the inline megakernel: four blocks leave its 122 registers unchanged; 20 blocks cap it to 96 with spills and regress training to about 834k/s.</li>
-          <li>Shared ABA-factor cache in contact-row blocks: mixed by articulation width/batch and −3–5% on smaller G1/ANYmal fleets; moving global reads to a synchronized shared phase is not a universal latency fix.</li>
-          <li>Row-builder local ancestor stack: −25%.</li>
-          <li>BF16 recurrent forward: +0.3%, removed.</li>
-        </ul>
-      </div>
-    </section>
-
-    <div class="section-label">AI agent handoff</div>
-    <section class="next" aria-label="Guidance for the next AI agent">
-      <div>
-        <h2>Mission and non-negotiables</h2>
-        <ul>
-          <li><strong>Main quest:</strong> minimize expected cold-start wall-clock cost to a passing policy with PhoenX + PhoenX RL under a frozen restart policy.</li>
-          <li>Count the whole process and every population/evaluation cost. Estimate a distribution over varied, logged seeds—not one lucky runtime—and retain failed/censored seeds.</li>
-          <li>Keep physics clean and physically grounded. Larger timesteps and full coordinates are welcome only when policy and physical-quality gates pass.</li>
-          <li>Do not overfit G1. Use the pure-PhoenX Ant, Humanoid, Go2, G1, H1, ANYmal-C, and DR Legs tasks as a rotating development/held-out suite.</li>
-          <li>Measured solver/RL paths must retain CUDA graph support. Reusable RL improvements must not be task-specific hacks.</li>
-        </ul>
-      </div>
-      <div>
-        <h2>How to continue</h2>
-        <ul>
-          <li>First implement the unified time-to-policy protocol and establish honest baselines; do not infer convergence time from SPS or sample count alone.</li>
-          <li>Use paired seeds, cheap learning-curve checkpoints, and sequential racing for iteration. Do not reject an ordinary candidate from one bad run; spend additional seeds when the expected-cost comparison remains uncertain.</li>
-          <li>Optimize solver, collision, environment, policy, learner, curriculum, precision, and overlap jointly. PBT is allowed, but its full wall time counts.</li>
-          <li>Track supporting diagnostics: paired development seed, held-out evaluation seed bank, samples/s, physics steps/s, sample count to gate, evaluation quality, timestep, GPU memory, and compilation/setup time.</li>
-          <li>Keep this page compact and newest-first, update it whenever the decision state changes, and open it in Chrome after every update.</li>
-          <li><strong>Immediate next step:</strong> checkpoint the compact exact projected-maximal path, then prototype deterministic parallel tree contraction as a maximal-coordinate joint preconditioner. Test high mass ratios, mixed joints, contacts, loops, G1, ANYmal, and H1 before promotion.</li>
-        </ul>
-      </div>
-    </section>
-
-    <footer>Older diary entries were intentionally removed. Git history and benchmark artifacts remain the technical record.</footer>
-  </main>
+  <footer>Concise current state only. Benchmark artifacts, tests, commits, and Nsight reports are the detailed technical record.</footer>
+</main>
 </body>
 </html>
