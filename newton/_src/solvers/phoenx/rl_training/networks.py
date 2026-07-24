@@ -1141,13 +1141,7 @@ class PufferMinGRUNet:
     ) -> None:
         in_dim = int(weight.shape[0])
         out_dim = int(weight.shape[1])
-        if (
-            self.device.is_cuda
-            and self.manual_forward_dtype == "bfloat16"
-            and rows >= _BF16_FORWARD_MIN_BATCH
-            and in_dim >= DENSE_TILE_IN
-            and out_dim >= 64
-        ):
+        if self._uses_bf16_linear_forward(rows, in_dim, out_dim):
             if x_bf16 is None or weight_bf16 is None:
                 raise RuntimeError("manual MinGRU BF16 forward buffers were not initialized")
             wp.launch(
@@ -1195,6 +1189,15 @@ class PufferMinGRUNet:
                 outputs=[out],
                 device=self.device,
             )
+
+    def _uses_bf16_linear_forward(self, rows: int, in_dim: int, out_dim: int) -> bool:
+        return (
+            self.device.is_cuda
+            and self.manual_forward_dtype == "bfloat16"
+            and rows >= _BF16_FORWARD_MIN_BATCH
+            and in_dim >= DENSE_TILE_IN
+            and out_dim >= 64
+        )
 
     def _check_input(self, x: wp.array2d[wp.float32]) -> int:
         if x.ndim != 2:
@@ -1511,13 +1514,15 @@ class PufferMinGRUNet:
             if self.manual_weight_grad_dtype == "bfloat16":
                 if x_bf16 is None or grad_pre_bf16 is None:
                     raise RuntimeError("manual MinGRU BF16 gradient buffers were not initialized")
-                wp.launch(
-                    cast_2d_float_to_bfloat16_kernel,
-                    dim=(rows, int(x.shape[1])),
-                    inputs=[x],
-                    outputs=[x_bf16],
-                    device=self.device,
-                )
+                forward_bf16_valid = self._uses_bf16_linear_forward(rows, int(x.shape[1]), int(weight_grad.shape[1]))
+                if not forward_bf16_valid:
+                    wp.launch(
+                        cast_2d_float_to_bfloat16_kernel,
+                        dim=(rows, int(x.shape[1])),
+                        inputs=[x],
+                        outputs=[x_bf16],
+                        device=self.device,
+                    )
                 wp.launch(
                     cast_2d_float_to_bfloat16_kernel,
                     dim=(rows, int(grad_pre.shape[1])),
@@ -1574,13 +1579,15 @@ class PufferMinGRUNet:
             if self.manual_weight_grad_dtype == "bfloat16" and rows % DENSE_TILE_BATCH == 0:
                 if grad_pre_bf16 is None or weight_bf16 is None:
                     raise RuntimeError("manual MinGRU BF16 input-gradient buffers were not initialized")
-                wp.launch(
-                    cast_2d_float_to_bfloat16_kernel,
-                    dim=weight.shape,
-                    inputs=[weight],
-                    outputs=[weight_bf16],
-                    device=self.device,
-                )
+                forward_bf16_valid = self._uses_bf16_linear_forward(rows, int(weight.shape[0]), int(weight.shape[1]))
+                if not forward_bf16_valid:
+                    wp.launch(
+                        cast_2d_float_to_bfloat16_kernel,
+                        dim=weight.shape,
+                        inputs=[weight],
+                        outputs=[weight_bf16],
+                        device=self.device,
+                    )
                 input_grad_kernel = dense_input_grad_bf16_tiled_kernel
                 input_grad_pre = grad_pre_bf16
                 input_grad_weight = weight_bf16

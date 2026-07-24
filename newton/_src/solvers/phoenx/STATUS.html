@@ -19,18 +19,18 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <p class="muted">24 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
 <section class="hero">
-<h2>G1 wall clock is at practical parity with nanoG1</h2>
+<h2>G1 wall clock edges past local nanoG1</h2>
 <div class="metrics">
-<div class="metric"><strong>1.382M</strong><span>PhoenX conservative G1 samples/s</span></div>
+<div class="metric"><strong>1.402M</strong><span>PhoenX paired G1 samples/s</span></div>
 <div class="metric"><strong>1.393M</strong><span>nanoG1 local baseline</span></div>
-<div class="metric"><strong>99.2%</strong><span>PhoenX / nanoG1</span></div>
+<div class="metric"><strong>100.6%</strong><span>PhoenX / nanoG1</span></div>
 </div>
-<p>Prioritizing rollout blocks during graph-leapfrog overlap raised the longer reverse A/B from 1.361M to 1.382M samples/s; a shorter repeat reached 1.390M. This changes scheduling only, not physics or PPO arithmetic.</p>
+<p>Reusing BF16 forward inputs and weights in the hand-written MinGRU backward reached 1.402M samples/s versus a 1.396M reverse control and the local 1.393M nanoG1 reference. The margin is small; practical parity is the robust claim.</p>
 </section>
 
 <section>
 <h2>Corrected diagnosis</h2>
-<p>Corrected isolation measures about 279 ms per PhoenX rollout versus roughly 270 ms for nanoG1, and 209 ms per PhoenX update versus roughly 94 ms for nanoG1. CUDA-graph overlap hides most of that learner difference. Short eager training with diagnostics has finite rewards, losses, KL, and actions.</p>
+<p>Corrected isolation measures about 279 ms per PhoenX rollout versus roughly 270 ms for nanoG1, and about 200 ms per PhoenX update versus roughly 94 ms for nanoG1. CUDA-graph overlap hides most of that learner difference. Short eager training with diagnostics has finite rewards, losses, KL, and actions.</p>
 </section>
 
 <section>
@@ -40,7 +40,8 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>Packed contact gather and selective launch tuning: substantial isolated physics wins, about +1% training where measured.</li>
 <li>Dense learner tiling, tiled Muon, and BF16 MinGRU forward: about +6%, +3.3%, and +3.6% G1 training respectively.</li>
 <li>PufferLib-style reuse of pre-update V-trace values: +6.2% G1 training and consistent PPO snapshots.</li>
-<li>Update-first launch plus high-priority rollout blocks: +1.5% G1 wall clock and practical nanoG1 parity.</li>
+<li>Update-first launch plus high-priority rollout blocks: +1.5% G1 wall clock.</li>
+<li>Reuse BF16 forward buffers in MinGRU backward: -1.8% isolated update and +0.7% overlap.</li>
 <li>Reusable contact graphs and topology caching: generic gains across homogeneous robot fleets.</li>
 <li>Ant PPO work restored reliable learning; the current smoke remains finite near 0.93M samples/s.</li>
 </ul>
@@ -49,11 +50,11 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <section class="gap">
 <h2>What limits us now</h2>
 <ul>
-<li>The remaining 0.8% matched gap is within observed run variance; learner and rollout still contend during overlap.</li>
+<li>The measured +0.6% lead is within observed run variance; practical wall-clock parity is established.</li>
 <li>nanoG1’s 75M claim is one deterministic seed (42), not a seed distribution. In a fresh five-seed PhoenX 39.3M screen, seed 42 was best: 0.732 versus 0.616–0.683.</li>
 <li>Dense forward/weight-gradient passes, MinGRU, and Muon Newton-Schulz matrix work dominate the learner.</li>
-<li>Fusing activation casts and persistent BF16 parameter shadows are not worthwhile: weight casts are under 1 ms/update and a fused prototype was neutral.</li>
-<li>Next: freeze this timing contract and compare multi-seed time-to-quality; pursue only changes that move overlapped wall clock.</li>
+<li>PufferLib still wins isolated learner time through device-wide CUTLASS/cuBLAS contractions and fewer intermediate kernels.</li>
+<li>Next: general contraction fusion/device-wide GEMM experiments and multi-seed time-to-quality.</li>
 </ul>
 </section>
 

@@ -10,6 +10,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -95,6 +96,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     zero_ppo_actor_stats_kernel,
     zero_scalar_kernel,
 )
+from newton._src.solvers.phoenx.rl_training.kernels_bf16 import cast_2d_float_to_bfloat16_kernel
 from newton._src.solvers.phoenx.rl_training.networks import _BF16_FORWARD_MIN_BATCH
 from newton._src.solvers.phoenx.rl_training.training import (
     _g1_root_origin_linear_velocity_body_np,
@@ -2751,6 +2753,35 @@ class TestG1PhoenXRL(unittest.TestCase):
         wp.capture_launch(capture.graph)
         for parameter, first in zip(bf16.parameters(), bf16_first, strict=True):
             np.testing.assert_array_equal(parameter.grad.numpy(), first)
+
+    def test_puffer_mingru_bf16_backward_reuses_forward_casts(self) -> None:
+        device = require_cuda_graph_capture("PhoenX BF16 MinGRU dataflow tests")
+        rows = _BF16_FORWARD_MIN_BATCH
+        hidden_dim = 64
+        output_dim = 13
+        net = rl.PufferMinGRUNet(
+            input_dim=64,
+            hidden_size=hidden_dim,
+            output_dim=output_dim,
+            num_layers=1,
+            device=device,
+            seed=17,
+            manual_weight_grad_dtype="bfloat16",
+            manual_forward_dtype="bfloat16",
+        )
+        obs = wp.zeros((rows, 64), dtype=wp.float32, device=device)
+        output_grad = wp.zeros((rows, output_dim), dtype=wp.float32, device=device)
+        net.set_sequence_shape(num_steps=64, num_envs=rows // 64)
+        net.reserve_buffers(rows)
+        net.forward_manual(obs)
+
+        with mock.patch.object(wp, "launch", wraps=wp.launch) as launch:
+            net.backward_manual(output_grad)
+        cast_count = sum(
+            bool(call.args) and call.args[0] is cast_2d_float_to_bfloat16_kernel for call in launch.call_args_list
+        )
+        self.assertEqual(cast_count, 5)
+        wp.synchronize_device(device)
 
     def test_puffer_mingru_ppo_train_save_load_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX recurrent PPO tests")

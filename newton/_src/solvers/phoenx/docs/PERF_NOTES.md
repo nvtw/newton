@@ -1203,6 +1203,17 @@ A corrected production-recipe phase comparison changes the next target:
   effect but does not establish equal sample efficiency: nanoG1 and PhoenX use
   different physics and the current robust PhoenX recipe first passed its full
   gate at 91.75M samples.
+- The remaining isolated learner gap is structural rather than Warp autodiff or
+  absent tensor cores: the hot backward is hand-written and generated PTX uses
+  cuBLASDx BF16 MMA. PufferLib instead uses larger device-wide CUTLASS/cuBLAS
+  contractions with fewer casts, epilogues, and reductions across 48 replay
+  minibatches.
+- Reusing BF16 inputs and weights already materialized by the primary MinGRU
+  forward removes seven redundant casts per one-layer backward. A reverse
+  overlap bracket improves 204.1 to 200.4 ms/update (-1.8%) and 1.361M to
+  1.370M samples/s (+0.7%). Production graph-leapfrog measures 1.402M versus a
+  1.396M reverse control and the local 1.393M nanoG1 reference. A larger
+  tensor-core output tile regressed the isolated update and was reverted.
 
 ## Open ideas (not yet attempted)
 
