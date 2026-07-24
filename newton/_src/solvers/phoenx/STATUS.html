@@ -55,6 +55,8 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <ul>
 <li>Sample efficiency remains the larger gap: accelerated seed 42 passes the full gate at 131.07M samples, versus nanoG1’s single-seed 75M report.</li>
 <li>Seed 11 misses at 100M under both cuBLAS and Warp; cuBLAS is slightly better there. Multi-seed time-to-quality is still required.</li>
+<li>Uninterrupted seed 29 is stable but stalls on forward speed at both 105M and 131M. Preserving recurrent state does not fix the plateau.</li>
+<li>nanoG1's weaker acquisition rewards improve seed 42 to 0.821 at 75.5M; a staged run reaches 0.892 at 99.6M, but a hard switch to robust weights is not reliable enough to retain.</li>
 <li>cuBLAS is not guaranteed by a CUDA runtime installation. Systems without it keep the tested Warp tensor-tile kernels.</li>
 <li>A held-out shape sweep rejected a global Warp tile-size change: neighboring layers prefer different launch shapes, and the Ant fallback regressed by about 12% in an end-to-end trial.</li>
 <li>Next: multi-seed time-to-quality. Revisit a Warp kernel factory only with a compact shape/device rule that improves both G1 and Ant.</li>

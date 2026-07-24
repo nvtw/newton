@@ -1258,6 +1258,19 @@ A corrected production-recipe phase comparison changes the next target:
 - Benchmark caution: bench_g1_train_to_gate resets all worlds and recurrent
   state between chunks by default. Changing --chunk-iterations changes the
   training trajectory, not just measurement frequency.
+- Uninterrupted seed 29 confirms a structured sample-efficiency failure rather
+  than instability: it has zero falls at both 104.86M and 131.07M samples, but
+  scores only 0.719 and 0.738 because the +0.8 m/s command stalls. Preserving
+  MinGRU state across rollouts is already supported correctly, but a seed-42
+  75.50M ablation scores 0.730 and lowers throughput to 1.27M samples/s, so it
+  is not the missing lever.
+- nanoG1's exact weaker angular/action-rate reward weights improve seed 42 at
+  75.50M from 0.730 to 0.821, including forward-command tracking from 0.182 to
+  0.643. Continuing that checkpoint with PhoenX robustness weights reaches
+  0.892 tracking and zero falls at 99.61M, but still misses jerk (0.213) and
+  roll/pitch rate (0.356); a hard reward switch then regresses tracking. This
+  motivates a controlled smooth curriculum or physics diagnosis, not changing
+  the default from a single seed.
 
 ## Open ideas (not yet attempted)
 
