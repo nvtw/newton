@@ -121,7 +121,7 @@
       <li><strong>FP16×2 contact rows:</strong> isolated kernels improved, but a four-seed learning race produced no qualified pass; parked.</li>
       <li><strong>Fewer PPO replays or removing velocity relaxation:</strong> faster but failed frozen learning gates.</li>
       <li><strong>High-priority rollout stream and host batching:</strong> neutral or unjustified by measured launch gaps.</li>
-      <li><strong>Cached patch effective masses:</strong> removed repeated reductions but added a packed-row pass and global traffic; G1 physics fell 1.1–1.8%.</li>
+      <li><strong>Cached patch effective masses:</strong> a separate pass lost 1.1–1.8%; exact in-kernel caching was neutral. Reusing the builder scalar gained 6–7% physics but only 1.08% training and changed reduction rounding, so it was removed rather than funding another seed race.</li>
       <li><strong>Scene-specialized robot kernels:</strong> rejected as overfitting; PhoenX remains a general solver.</li>
     </ul>
   </section>
