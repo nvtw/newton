@@ -1203,6 +1203,7 @@ class SolverPhoenX(SolverBase):
                 self._launch_init_phoenx_bodies(self.model)
                 if self._reduced_articulation is not None:
                     self._reduced_articulation.system.refresh_inertial_properties()
+                    self._reduced_articulation.invalidate_kinematics()
         if joint_props_changed and self._uses_maximal_tree_projector:
             assert self._maximal_tree_projector_cls is not None
             if not self._maximal_tree_projector_cls.supports_model(self.model):

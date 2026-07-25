@@ -3843,6 +3843,7 @@ class ReducedArticulationSystem:
         dt: float = 0.0,
         *,
         factorize: bool = True,
+        update_kinematics: bool = True,
     ) -> None:
         """Factor the generalized mass and optional implicit joint operator."""
         if control is None:
@@ -3874,7 +3875,8 @@ class ReducedArticulationSystem:
                 outputs=[self.joint_factor_diagonal, self.joint_implicit_force],
                 device=self.device,
             )
-        self.update_local_kinematics(state)
+        if update_kinematics:
+            self.update_local_kinematics(state)
         wp.launch(
             _initialize_reduced_factor_kernel,
             dim=self.factor_joint_count,
@@ -4303,6 +4305,7 @@ class ReducedPhoenXArticulation:
         self.system = ReducedArticulationSystem(model)
         self.state = model.state()
         self.control = model.control(clone_variables=True)
+        self._kinematics_current = False
 
         articulation_start = model.articulation_start.numpy()
         articulation_end = model.articulation_end.numpy()
@@ -4412,6 +4415,10 @@ class ReducedPhoenXArticulation:
             device=model.device,
         )
 
+    def invalidate_kinematics(self) -> None:
+        """Force reconstruction after a model-property change."""
+        self._kinematics_current = False
+
     def import_step(
         self,
         state: State,
@@ -4421,6 +4428,8 @@ class ReducedPhoenXArticulation:
         state_kinematics_valid: bool = False,
     ) -> None:
         """Import common generalized state and controls into stable graph buffers."""
+        # A continuation keeps the pose-derived buffers published by the preceding step.
+        self._kinematics_current = state_is_continuation
         if not state_is_continuation:
             wp.copy(self.state.joint_q, state.joint_q)
             wp.copy(self.state.joint_qd, state.joint_qd)
@@ -4443,7 +4452,12 @@ class ReducedPhoenXArticulation:
         compute_impulse_response: bool = True,
     ) -> None:
         """Apply pre-PGS reduced dynamics at the current configuration."""
-        self.system.factor(self.state, self.control, dt)
+        self.system.factor(
+            self.state,
+            self.control,
+            dt,
+            update_kinematics=not self._kinematics_current,
+        )
         self.system.advance(
             self.state,
             self.control,
@@ -4829,6 +4843,7 @@ class ReducedPhoenXArticulation:
 
     def end_substep(self, dt: float, *, split_dynamics: bool) -> None:
         """Apply post-impulse Coriolis dynamics, integrate, and conserve momentum."""
+        self._kinematics_current = True
         if self.execution_path == "persistent" and split_dynamics:
             wp.capture_if(
                 self.contact_block_system.biased_advanced,

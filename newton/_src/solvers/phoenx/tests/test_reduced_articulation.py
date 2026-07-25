@@ -1420,7 +1420,9 @@ class TestReducedArticulation(unittest.TestCase):
         inverse_mass[body] *= 0.5
         model.body_mass.assign(mass)
         model.body_inv_mass.assign(inverse_mass)
+        self.assertTrue(solver._reduced_articulation._kinematics_current)
         solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
+        self.assertFalse(solver._reduced_articulation._kinematics_current)
         velocity_after = run_captured_step()
 
         self.assertGreater(abs(float(velocity_before[0])), 1.0e-6)

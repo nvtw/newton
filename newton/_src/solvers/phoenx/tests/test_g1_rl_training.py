@@ -5932,9 +5932,10 @@ class TestG1PhoenXRL(unittest.TestCase):
         device = require_cuda_graph_capture("PhoenX G1 graph-leapfrog continuation tests")
         env_config = rl.ConfigEnvG1PhoenX(
             world_count=2,
-            sim_substeps=1,
+            sim_substeps=2,
             solver_iterations=1,
             velocity_iterations=1,
+            articulation_mode="reduced",
             reward_mode="sparse_target",
             randomize_commands_on_reset=True,
             command_resample_steps=2,
