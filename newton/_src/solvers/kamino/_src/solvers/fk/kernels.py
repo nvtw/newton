@@ -3,25 +3,28 @@
 
 """Defines the Warp kernels used by the Forward Kinematics solver."""
 
+from __future__ import annotations
+
 from functools import cache
 
 import warp as wp
 
 from ...core.joints import JointActuationType, JointDoFType
 from ...core.math import (
-    TWO_PI,
     G_of,
     quat_left_jacobian_inverse,
     quat_log,
-    squared_norm,
     unit_quat_apply,
     unit_quat_apply_jacobian,
     unit_quat_conj_apply,
     unit_quat_conj_apply_jacobian,
     unit_quat_conj_to_rotation_matrix,
 )
-from ...core.types import vec6f
-from ...kinematics.joints import get_joint_coords_mapping_function
+from ...kinematics.joints import (
+    correct_quat_vector_coord,
+    correct_rotational_coord,
+    get_joint_coords_mapping_function,
+)
 from ...linalg.sparse_matrix import BlockDType
 from .types import FKJointDoFType
 
@@ -32,7 +35,10 @@ from .types import FKJointDoFType
 __all__ = [
     "_add_regularizer_to_diagonal",
     "_apply_line_search_step",
+    "_compute_fk_axis_joint_frames",
+    "_compute_fk_joint_frames",
     "_correct_actuator_coords",
+    "_correct_universal_constraint_velocities",
     "_eval_actuator_coords",
     "_eval_body_velocities",
     "_eval_fk_actuated_dofs_or_coords",
@@ -51,6 +57,7 @@ __all__ = [
     "_newton_check",
     "_reset_state",
     "_reset_state_base_q",
+    "_resolve_fk_actuation_types",
     "_update_cg_tolerance_kernel",
     "create_1d_tile_based_kernels",
     "create_2d_tile_based_kernels",
@@ -59,6 +66,7 @@ __all__ = [
     "create_eval_joint_constraints_sparse_jacobian_kernel",
     "create_eval_min_num_iterations_kernel",
     "read_quat_from_array",
+    "validate_fk_actuation_updates",
 ]
 
 
@@ -66,7 +74,7 @@ __all__ = [
 # Module configs
 ###
 
-wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 ###
@@ -94,9 +102,145 @@ def read_quat_from_array(array: wp.array[wp.float32], offset: int, normalize: bo
     return q
 
 
+@wp.func
+def _resolve_fk_actuation_type(act_type: wp.int32, fk_act_flag: wp.int32) -> wp.int32:
+    """Apply an optional FK actuation override to a model actuation type."""
+    if fk_act_flag == 0:
+        return JointActuationType.PASSIVE
+    if fk_act_flag == 1:
+        return JointActuationType.FORCE
+    return act_type
+
+
 ###
 # Kernels
 ###
+
+
+@wp.kernel
+def _resolve_fk_actuation_types(
+    # Inputs
+    model_act_type: wp.array[wp.int32],
+    model_fk_act_flag: wp.array[wp.int32],
+    # Outputs
+    fk_act_type: wp.array[wp.int32],
+):
+    """Resolve effective FK actuation types for the main model joints."""
+    joint = wp.tid()
+    flag = wp.int32(-1)
+    if model_fk_act_flag:
+        flag = model_fk_act_flag[joint]
+    fk_act_type[joint] = _resolve_fk_actuation_type(model_act_type[joint], flag)
+
+
+@wp.kernel
+def validate_fk_actuation_updates(
+    # Inputs
+    model_act_type: wp.array[wp.int32],
+    model_fk_act_flag: wp.array[wp.int32],
+    built_fk_actuated: wp.array[wp.int32],
+    # Outputs
+    violations: wp.array[wp.int32],
+):
+    """Find invalid overrides and changes to the set of joints actuated for FK.
+
+    ``built_fk_actuated`` is indexed by model joint: 0 is passive, 1 is
+    actuated, and -1 skips validation for a joint replaced by FK.
+    """
+    joint = wp.tid()
+    flag = wp.int32(-1)
+    if model_fk_act_flag:
+        flag = model_fk_act_flag[joint]
+        if flag < -1 or flag > 1:
+            wp.atomic_min(violations, 1, joint)
+            return
+
+    built_actuated = built_fk_actuated[joint]
+    if built_actuated < 0:
+        return
+
+    act_type = _resolve_fk_actuation_type(model_act_type[joint], flag)
+    if (act_type != JointActuationType.PASSIVE) != (built_actuated != 0):
+        wp.atomic_min(violations, 0, joint)
+
+
+@wp.kernel
+def _compute_fk_joint_frames(
+    # Inputs
+    source_joint: wp.array[wp.int32],
+    model_B_r_Bj: wp.array[wp.vec3f],
+    model_F_r_Fj: wp.array[wp.vec3f],
+    model_X_Bj: wp.array[wp.mat33f],
+    model_X_Fj: wp.array[wp.mat33f],
+    # Outputs
+    fk_B_r_Bj: wp.array[wp.vec3f],
+    fk_F_r_Fj: wp.array[wp.vec3f],
+    fk_X_Bj: wp.array[wp.mat33f],
+    fk_X_Fj: wp.array[wp.mat33f],
+):
+    """Compute FK joint frames from the current model data."""
+    fk_joint = wp.tid()
+    model_joint = source_joint[fk_joint]
+    if model_joint >= 0:
+        # Preserve frames for joints copied from the model.
+        fk_B_r_Bj[fk_joint] = model_B_r_Bj[model_joint]
+        fk_F_r_Fj[fk_joint] = model_F_r_Fj[model_joint]
+        fk_X_Bj[fk_joint] = model_X_Bj[model_joint]
+        fk_X_Fj[fk_joint] = model_X_Fj[model_joint]
+    else:
+        # FK-added base and axis joints start at identity; axis orientations are
+        # overwritten by _compute_fk_axis_joint_frames.
+        fk_B_r_Bj[fk_joint] = wp.vec3f(0.0)
+        fk_F_r_Fj[fk_joint] = wp.vec3f(0.0)
+        fk_X_Bj[fk_joint] = wp.identity(n=3, dtype=wp.float32)
+        fk_X_Fj[fk_joint] = wp.identity(n=3, dtype=wp.float32)
+
+
+@wp.kernel
+def _compute_fk_axis_joint_frames(
+    # Inputs
+    axis_fk_joint: wp.array[wp.int32],
+    axis_body: wp.array[wp.int32],
+    axis_joint_0: wp.array[wp.int32],
+    axis_joint_1: wp.array[wp.int32],
+    model_joint_bid_B: wp.array[wp.int32],
+    model_joint_B_r_Bj: wp.array[wp.vec3f],
+    model_joint_F_r_Fj: wp.array[wp.vec3f],
+    model_body_q_0: wp.array[wp.transformf],
+    # Outputs
+    fk_X_Bj: wp.array[wp.mat33f],
+    fk_X_Fj: wp.array[wp.mat33f],
+):
+    """Compute synthetic axis-joint frames from the model data."""
+    axis_joint = wp.tid()
+    fk_joint = axis_fk_joint[axis_joint]
+    body = axis_body[axis_joint]
+    joint_0 = axis_joint_0[axis_joint]
+    joint_1 = axis_joint_1[axis_joint]
+    body_q = model_body_q_0[body]
+
+    # Locate both spherical-joint anchors in the tie-rod body frame.
+    local_0 = model_joint_F_r_Fj[joint_0]
+    if model_joint_bid_B[joint_0] == body:
+        local_0 = model_joint_B_r_Bj[joint_0]
+    local_1 = model_joint_F_r_Fj[joint_1]
+    if model_joint_bid_B[joint_1] == body:
+        local_1 = model_joint_B_r_Bj[joint_1]
+
+    # Evaluate the anchors in the initial pose and align the joint X axis with
+    # the line that connects them.
+    pos_0 = wp.transform_point(body_q, local_0)
+    pos_1 = wp.transform_point(body_q, local_1)
+    a_x = wp.normalize(pos_1 - pos_0)
+    if wp.abs(a_x[2]) < 0.99:
+        a_y = wp.normalize(wp.cross(wp.vec3f(0.0, 0.0, 1.0), a_x))
+    else:
+        a_y = wp.normalize(wp.cross(wp.vec3f(0.0, 1.0, 0.0), a_x))
+    a_z = wp.normalize(wp.cross(a_x, a_y))
+    X_Bj = wp.matrix_from_cols(a_x, a_y, a_z)
+    fk_X_Bj[fk_joint] = X_Bj
+    # Match the follower frame to the base frame in the initial pose.
+    fk_X_Fj[fk_joint] = wp.quat_to_matrix(wp.transform_get_rotation(body_q)) * X_Bj
 
 
 @wp.kernel
@@ -218,12 +362,9 @@ def _eval_fk_actuated_dofs_or_coords(
     main model actuated dofs/coords, and negative indices for base dofs/coords (base dof/coord i is stored as -i - 1)
 
     Inputs:
-        model_base_dofs:
-            Base dofs or coordinates of the main model (as a flat vector with 6 dofs or 7 coordinates per world)
-        model_actuated_dofs:
-            Actuated dofs/coords of the main model
-        actuated_dofs_map:
-            Map of fk to main model actuated/base dofs/coords
+        model_base_dofs: Base dofs or coordinates of the main model (as a flat vector with 6 dofs or 7 coordinates per world)
+        model_actuated_dofs: Actuated dofs/coords of the main model
+        actuated_dofs_map: Map of fk to main model actuated/base dofs/coords
     Outputs:
         fk_actuated_dofs: Actuated dofs or coordinates of the fk model
     """
@@ -362,20 +503,6 @@ def _eval_actuator_coords(
     _joint_transform_to_coords(dof_type, pos_rel, q_rel, coord_id, actuators_q)
 
 
-@wp.func
-def _correct_joint_angle(angle: wp.float32, angle_ref: wp.float32) -> wp.float32:
-    """Function adding multiples of 2 pi to an angle, so that it is the closest to a reference."""
-    return angle + wp.round((angle_ref - angle) / TWO_PI) * TWO_PI
-
-
-@wp.func
-def _correct_joint_quaternion(quat: wp.vec4f, quat_ref: wp.vec4f) -> wp.vec4f:
-    """Function flipping the sign of a quaternion if needed, so it is the closest to a reference."""
-    if squared_norm(quat + quat_ref) < squared_norm(quat - quat_ref):
-        return -quat
-    return quat
-
-
 @wp.kernel
 def _correct_actuator_coords(
     # Inputs
@@ -415,7 +542,7 @@ def _correct_actuator_coords(
     elif dof_type == FKJointDoFType.CYLINDRICAL:  # Correct angle up to +/- 2 pi
         angle = actuators_q[coord_id + 1]
         angle_ref = actuators_q_ref[coord_id + 1]
-        actuators_q[coord_id + 1] = _correct_joint_angle(angle, angle_ref)
+        actuators_q[coord_id + 1] = correct_rotational_coord(angle, angle_ref)
     elif dof_type == FKJointDoFType.FREE:  # Correct quaternion up to sign
         quat = wp.vec4f(
             actuators_q[coord_id + 3], actuators_q[coord_id + 4], actuators_q[coord_id + 5], actuators_q[coord_id + 6]
@@ -426,13 +553,13 @@ def _correct_actuator_coords(
             actuators_q_ref[coord_id + 5],
             actuators_q_ref[coord_id + 6],
         )
-        quat_corrected = _correct_joint_quaternion(quat, quat_ref)
+        quat_corrected = correct_quat_vector_coord(quat, quat_ref)
         for i in range(4):
             actuators_q[coord_id + 3 + i] = quat_corrected[i]
     elif dof_type == FKJointDoFType.REVOLUTE:  # Correct angle up to +/- 2 pi
         angle = actuators_q[coord_id]
         angle_ref = actuators_q_ref[coord_id]
-        actuators_q[coord_id] = _correct_joint_angle(angle, angle_ref)
+        actuators_q[coord_id] = correct_rotational_coord(angle, angle_ref)
     elif dof_type == FKJointDoFType.SPHERICAL:  # Correct quaternion up to sign
         quat = wp.vec4f(
             actuators_q[coord_id], actuators_q[coord_id + 1], actuators_q[coord_id + 2], actuators_q[coord_id + 3]
@@ -443,16 +570,16 @@ def _correct_actuator_coords(
             actuators_q_ref[coord_id + 2],
             actuators_q_ref[coord_id + 3],
         )
-        quat_corrected = _correct_joint_quaternion(quat, quat_ref)
+        quat_corrected = correct_quat_vector_coord(quat, quat_ref)
         for i in range(4):
             actuators_q[coord_id + i] = quat_corrected[i]
     elif dof_type == FKJointDoFType.UNIVERSAL:  # Correct angles up to +/- 2 pi
         angle = actuators_q[coord_id]
         angle_ref = actuators_q_ref[coord_id]
-        actuators_q[coord_id] = _correct_joint_angle(angle, angle_ref)
+        actuators_q[coord_id] = correct_rotational_coord(angle, angle_ref)
         angle = actuators_q[coord_id + 1]
         angle_ref = actuators_q_ref[coord_id + 1]
-        actuators_q[coord_id + 1] = _correct_joint_angle(angle, angle_ref)
+        actuators_q[coord_id + 1] = correct_rotational_coord(angle, angle_ref)
     else:
         assert False, "Unexpected actuator dof type"  # noqa: B011
 
@@ -532,7 +659,7 @@ def mul_mask_float(mask: wp.int32, value: wp.float32) -> wp.float32:
 
 @cache
 def create_eval_min_num_iterations_kernel(TILE_SIZE: int):
-    @wp.kernel(module="unique", enable_backward=False)
+    @wp.kernel(module="unique", module_options={"enable_backward": False, "default_grid_stride": False})
     def _eval_min_num_iterations(
         # Inputs
         world_actuated_coord_offsets: wp.array[wp.int32],
@@ -1295,7 +1422,7 @@ def create_2d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
 
     # Create separate warp module for compiling kernels in this factory
     module = wp.get_module(__name__ + "_tile_2d")
-    module.options.update({"enable_backward": False})
+    module.options.update({"enable_backward": False, "default_grid_stride": False})
 
     @wp.func
     def clip_to_one(x: wp.float32):
@@ -1316,7 +1443,7 @@ def create_2d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
         More specifically, given an integer matrix of zeros and ones representing a sparsity pattern, multiply it by
         its transpose and clip values to [0, 1] to get the sparsity pattern of J^T * J
         Note: mostly redundant with _eval_jacobian_T_jacobian apart from the clipping, could possibly be removed
-        (was initially written to take int32, but float32 is actually faster)
+        (was initially written to take wp.int32, but wp.float32 is actually faster)
 
         Inputs:
             sparsity_pattern: Jacobian sparsity pattern per world
@@ -1486,11 +1613,11 @@ def create_1d_tile_based_kernels(TILE_SIZE_CTS: wp.int32, TILE_SIZE_VRS: wp.int3
 
     # Create separate warp module for compiling kernels in this factory
     module = wp.get_module(__name__ + "_tile_1d")
-    module.options.update({"enable_backward": False})
+    module.options.update({"enable_backward": False, "default_grid_stride": False})
 
     @wp.func
     def _isnan(x: wp.float32) -> wp.int32:
-        """Calls wp.isnan and converts the result to int32"""
+        """Calls wp.isnan and converts the result to wp.int32"""
         return wp.int32(wp.isnan(x))
 
     TILE_SIZE = TILE_SIZE_VRS if use_regularization else TILE_SIZE_CTS
@@ -1982,6 +2109,84 @@ def _eval_target_constraint_velocities(
 
 
 @wp.kernel
+def _correct_universal_constraint_velocities(
+    # Inputs
+    num_joints: wp.array[wp.int32],
+    first_joint_id: wp.array[wp.int32],
+    joints_dof_type: wp.array[wp.int32],
+    joints_act_type: wp.array[wp.int32],
+    joints_bid_B: wp.array[wp.int32],
+    joints_bid_F: wp.array[wp.int32],
+    joints_X_Bj: wp.array[wp.mat33f],
+    joints_X_Fj: wp.array[wp.mat33f],
+    ct_full_to_red_map: wp.array[wp.int32],
+    bodies_q: wp.array[wp.transformf],
+    world_mask: wp.array[wp.bool],
+    # Outputs
+    target_cts_u: wp.array2d[wp.float32],
+):
+    """
+    A kernel correcting the prescribed target velocities for universal actuators.
+    This is needed because for universal joints, the dof-space velocity is expressed in the frame of the
+    intermediary body, rather than in the frame on the base body.
+
+    Inputs:
+        num_joints: Num joints per world
+        first_joint_id: First joint id per world
+        joints_dof_type: Joint dof type (i.e. revolute, spherical, ...)
+        joints_act_type: Joint actuation type (i.e. passive or actuated)
+        joints_bid_B: Joint base body id
+        joints_bid_F: Joint follower body id
+        joints_X_Bj: Joint local frame on base body
+        joints_X_Fj: Joint local frame on follower body
+        ct_full_to_red_map: Map from full to reduced constraint id
+        bodies_q: Current body poses.
+        world_mask: Per-world boolean flag to perform the computation (False = skip)
+    Outputs:
+        target_cts_u: Corrected target constraint velocities (provided uncorrected as input).
+    """
+    # Retrieve the thread indices (= world index, joint index)
+    wd_id, jt_id_loc = wp.tid()
+
+    if wd_id < world_mask.shape[0] and world_mask[wd_id] and jt_id_loc < num_joints[wd_id]:
+        # Early return if this is not a universal actuator
+        jt_id_tot = first_joint_id[wd_id] + jt_id_loc
+        if (
+            joints_act_type[jt_id_tot] == JointActuationType.PASSIVE
+            or joints_dof_type[jt_id_tot] != FKJointDoFType.UNIVERSAL
+        ):
+            return
+
+        # Read target angular velocity (currently, in dof space i.e. in the frame of the intermediary body)
+        offset_cts_j = ct_full_to_red_map[6 * jt_id_tot]
+        omega_curr = wp.vec3f(target_cts_u[wd_id, offset_cts_j + 3], target_cts_u[wd_id, offset_cts_j + 4], 0.0)
+
+        # Compute relative orientation of joint frame on follower body w.r.t. joint frame on base body
+        bid_B = joints_bid_B[jt_id_tot]
+        bid_F = joints_bid_F[jt_id_tot]
+        q_B = wp.quatf(0.0, 0.0, 0.0, 1.0) if bid_B < 0 else wp.transform_get_rotation(bodies_q[bid_B])
+        q_F = wp.transform_get_rotation(bodies_q[bid_F])
+        q_X_B = wp.quat_from_matrix(joints_X_Bj[jt_id_tot])
+        q_X_F = wp.quat_from_matrix(joints_X_Fj[jt_id_tot])
+        q_rel = wp.quat_inverse(q_B * q_X_B) * q_F * q_X_F
+
+        # Compute intermediary body axes, in the joint frame on the base body
+        e_x = wp.vec3f(1.0, 0.0, 0.0)
+        e_y = wp.vec3f(0.0, 1.0, 0.0)
+        a_x = e_x  # x axis on base
+        a_y_raw = wp.quat_rotate(q_rel, e_y)  #  y axis on follower (constrained to be orthogonal to a_x)
+        a_y = a_y_raw - wp.dot(a_y_raw, a_x) * a_x  # orthogonalize (in case of constraint violations)
+        a_y = wp.normalize(a_y)
+        a_z = wp.cross(a_x, a_y)
+
+        # Convert target angular velocity back to joint frame on the base body
+        omega = omega_curr[0] * a_x + omega_curr[1] * a_y + omega_curr[2] * a_z
+        target_cts_u[wd_id, offset_cts_j + 3] = omega[0]
+        target_cts_u[wd_id, offset_cts_j + 4] = omega[1]
+        target_cts_u[wd_id, offset_cts_j + 5] = omega[2]
+
+
+@wp.kernel
 def _eval_body_velocities(
     # Inputs
     num_bodies: wp.array[wp.int32],
@@ -1990,7 +2195,7 @@ def _eval_body_velocities(
     bodies_q_dot: wp.array2d[wp.float32],
     world_mask: wp.array[wp.bool],
     # Outputs
-    bodies_u: wp.array[vec6f],
+    bodies_u: wp.array[wp.spatial_vectorf],
 ):
     """
     A kernel computing the body velocities (twists) from the time derivative of body poses,

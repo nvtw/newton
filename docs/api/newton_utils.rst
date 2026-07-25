@@ -13,9 +13,11 @@ newton.utils
    :toctree: _generated
    :nosignatures:
 
+   CableStiffness
    ColorSpace
    EventTracer
    MeshAdjacency
+   MeshAdjacencyData
 
 .. rubric:: Functions
 

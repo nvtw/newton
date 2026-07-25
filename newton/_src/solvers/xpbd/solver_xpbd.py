@@ -8,7 +8,9 @@ import warp as wp
 from ...core.types import override
 from ...sim import Contacts, Control, Model, ModelFlags, State
 from ...utils.deprecation import deprecate_nonkeyword_arguments
+from ..coupled.interface import CouplingInterface
 from ..solver import SolverBase
+from . import kernels
 from .kernels import (
     accumulate_weighted_contact_impulse,
     apply_body_delta_velocities,
@@ -98,7 +100,7 @@ def _calculate_rest_density(rest_distance: float, h: float) -> tuple[float, floa
     return rho, rho_deriv, surface_deriv
 
 
-class SolverXPBD(SolverBase):
+class SolverXPBD(SolverBase, CouplingInterface):
     """An implicit integrator using eXtended Position-Based Dynamics (XPBD) for rigid and soft body simulation.
 
     References:
@@ -193,8 +195,9 @@ class SolverXPBD(SolverBase):
         pbf_vorticity_confinement: float = 0.0,
         pbf_cfl_coefficient: float = 1.0,
         pbf_damping: float = 0.0,
+        deterministic: wp.DeterministicMode | None = None,
     ):
-        """Construct the XPBD solver.
+        """Initialize the XPBD solver.
 
         Position-based fluids are enabled when ``pbf_particle_contact_distance``
         is provided. Particles carrying :attr:`~newton.ParticleFlags.FLUID`
@@ -228,8 +231,21 @@ class SolverXPBD(SolverBase):
             pbf_cfl_coefficient: Maximum relative normal displacement as a
                 fraction of the fluid neighbor radius.
             pbf_damping: Fluid velocity damping coefficient.
+            deterministic: Opt-in determinism for this solver's atomic-emitting
+                kernel module. Pass a :class:`warp.DeterministicMode`, or
+                ``None`` (default) to inherit the current
+                ``wp.config.deterministic`` mode.
         """
         super().__init__(model=model)
+        effective_deterministic = deterministic if deterministic is not None else wp.config.deterministic
+        self._set_module_options(
+            {
+                "deterministic": effective_deterministic,
+                "deterministic_max_records": 0,
+            },
+            module=kernels,
+        )
+
         self.iterations = iterations
 
         self.soft_body_relaxation = soft_body_relaxation
@@ -342,10 +358,37 @@ class SolverXPBD(SolverBase):
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
+        """Refresh cached body data after model properties change.
+
+        Effective inverse masses and inertia tensors are refreshed when
+        :attr:`~newton.ModelFlags.BODY_PROPERTIES` or
+        :attr:`~newton.ModelFlags.BODY_INERTIAL_PROPERTIES` is set. Other flags are ignored.
+
+        Args:
+            flags: Bitmask of :class:`~newton.ModelFlags` or custom ``int`` bits indicating which model properties
+                changed.
+        """
+        self._apply_module_options()
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             self._refresh_kinematic_state()
 
+    @override
+    def coupling_supports_inertial_property_refresh(self) -> bool:
+        """Return whether inertial properties can be refreshed during graph capture.
+
+        Returns:
+            ``True`` because :meth:`notify_model_changed` refreshes the derived inertial buffers with device work.
+        """
+        return True
+
     def copy_kinematic_body_state(self, model: Model, state_in: State, state_out: State):
+        """Copy kinematic body poses and velocities from an input state to an output state.
+
+        Args:
+            model: Simulation model that owns the body data.
+            state_in: State containing the source kinematic body poses and velocities.
+            state_out: State that receives the kinematic body poses and velocities.
+        """
         if model.body_count == 0:
             return
         wp.launch(
@@ -459,7 +502,26 @@ class SolverXPBD(SolverBase):
         return new_body_q, new_body_qd
 
     @override
-    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float) -> None:
+    def step(
+        self,
+        state_in: State,
+        state_out: State,
+        control: Control | None,
+        contacts: Contacts | None,
+        dt: float,
+    ) -> None:
+        """Advance the simulation state by one time step using XPBD.
+
+        Args:
+            state_in: State at the beginning of the time step.
+            state_out: State that receives the simulation result.
+            control: Control inputs. If ``None``, the model's default control values are used.
+            contacts: Contact data populated by :meth:`~newton.CollisionPipeline.collide` and allocated with
+                :meth:`~newton.CollisionPipeline.contacts`. If ``None``, rigid and particle-shape contact handling
+                is skipped; particle-particle contacts and model constraints are still solved.
+            dt: Time step size [s].
+        """
+        self._apply_module_options()
         requires_grad = state_in.requires_grad
         if self.pbf_enabled and requires_grad:
             raise RuntimeError("Position-based fluids do not support differentiable simulation")
@@ -672,7 +734,8 @@ class SolverXPBD(SolverBase):
                             )
 
                         # particle-rigid body contacts (besides ground plane)
-                        if model.shape_count:
+                        if model.shape_count and contacts is not None:
+                            contacts._assert_particle_only_soft_contacts("SolverXPBD")
                             wp.launch(
                                 kernel=solve_particle_shape_contacts,
                                 dim=contacts.soft_contact_max,
@@ -687,6 +750,7 @@ class SolverXPBD(SolverBase):
                                     model.body_com,
                                     self.body_inv_mass_effective,
                                     self.body_inv_inertia_effective,
+                                    model.body_flags,
                                     model.shape_body,
                                     model.shape_material_mu,
                                     model.soft_contact_mu,
@@ -1104,8 +1168,6 @@ class SolverXPBD(SolverBase):
                             contacts.rigid_contact_point1,
                             contacts.rigid_contact_offset0,
                             contacts.rigid_contact_offset1,
-                            contacts.rigid_contact_margin0,
-                            contacts.rigid_contact_margin1,
                             rigid_contact_inv_weight_init,
                             model.gravity,
                             dt,
@@ -1158,6 +1220,7 @@ class SolverXPBD(SolverBase):
             ValueError: If ``contacts.force`` is ``None`` (not requested), if no step has been run yet,
                 or if the contacts capacity does not match the one used in the last :meth:`step`.
         """
+        self._apply_module_options()
         if contacts.force is None:
             raise ValueError(
                 "contacts.force is not allocated. Call model.request_contact_attributes('force') "

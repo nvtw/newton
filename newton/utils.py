@@ -17,6 +17,7 @@ __all__ = [
 from ._src.geometry.utils import remesh_mesh
 from ._src.utils.mesh import (
     MeshAdjacency,
+    MeshAdjacencyData,
     solidify_mesh,
     validate_tet_mesh,
     validate_triangle_mesh,
@@ -24,6 +25,7 @@ from ._src.utils.mesh import (
 
 __all__ += [
     "MeshAdjacency",
+    "MeshAdjacencyData",
     "remesh_mesh",
     "solidify_mesh",
     "validate_tet_mesh",
@@ -61,6 +63,7 @@ __all__ += [
 # cable utils
 # ==================================================================================
 from ._src.utils.cable import (  # noqa: E402
+    CableStiffness,
     create_cable_stiffness_from_elastic_moduli,
     create_parallel_transport_cable_quaternions,
     create_straight_cable_points,
@@ -68,6 +71,7 @@ from ._src.utils.cable import (  # noqa: E402
 )
 
 __all__ += [
+    "CableStiffness",
     "create_cable_stiffness_from_elastic_moduli",
     "create_parallel_transport_cable_quaternions",
     "create_straight_cable_points",

@@ -10,6 +10,7 @@ import warp as wp
 
 import newton
 from newton import Heightfield
+from newton._src.utils import is_graph_capture_allocation_enabled
 from newton.solvers import SolverMuJoCo
 from newton.tests.unittest_utils import assert_np_equal
 
@@ -106,20 +107,8 @@ class TestHeightfield(unittest.TestCase):
         model = builder.finalize(device="cpu")
 
         self.assertEqual(model.heightfield_count, 1)
-        with self.assertWarns(DeprecationWarning):
-            self.assertTrue(model.has_heightfields)
 
         empty_model = newton.Model(device="cpu")
-        self.assertEqual(empty_model.heightfield_count, 0)
-        with self.assertWarns(DeprecationWarning):
-            self.assertFalse(empty_model.has_heightfields)
-
-        with self.assertWarns(DeprecationWarning):
-            empty_model.has_heightfields = True
-        self.assertEqual(empty_model.heightfield_count, 1)
-
-        with self.assertWarns(DeprecationWarning):
-            empty_model.has_heightfields = False
         self.assertEqual(empty_model.heightfield_count, 0)
 
     def test_mjcf_hfield_parsing(self):
@@ -287,8 +276,8 @@ class TestHeightfield(unittest.TestCase):
         sim_dt = 1.0 / 240.0
 
         device = model.device
-        use_cuda_graph = device.is_cuda and wp.is_mempool_enabled(device)
-        if use_cuda_graph:
+        use_graph = is_graph_capture_allocation_enabled(device)
+        if use_graph:
             # warmup (2 steps for full ping-pong cycle)
             solver.step(state_in, state_out, control, None, sim_dt)
             solver.step(state_out, state_in, control, None, sim_dt)
@@ -297,14 +286,14 @@ class TestHeightfield(unittest.TestCase):
                 solver.step(state_out, state_in, control, None, sim_dt)
             graph = capture.graph
 
-        remaining = 500 - (4 if use_cuda_graph else 0)
-        for _ in range(remaining // 2 if use_cuda_graph else remaining):
-            if use_cuda_graph:
+        remaining = 500 - (4 if use_graph else 0)
+        for _ in range(remaining // 2 if use_graph else remaining):
+            if use_graph:
                 wp.capture_launch(graph)
             else:
                 solver.step(state_in, state_out, control, None, sim_dt)
                 state_in, state_out = state_out, state_in
-        if use_cuda_graph and remaining % 2 == 1:
+        if use_graph and remaining % 2 == 1:
             solver.step(state_in, state_out, control, None, sim_dt)
             state_in, state_out = state_out, state_in
 
