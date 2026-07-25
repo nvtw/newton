@@ -1727,6 +1727,7 @@ def test_position_based_fluids_reference_stages(test, device):
     surface_tension = 0.003
     model.particle_grid.build(state.particle_q, radius=radius)
     densities = wp.zeros(particle_count, dtype=float, device=device)
+    pos_lambda = wp.zeros(particle_count, dtype=wp.vec4, device=device)
     normals = wp.zeros(particle_count, dtype=wp.vec3, device=device)
     # No solids in this scene, so the boundary density term is identically zero.
     boundary_log = wp.zeros(particle_count, dtype=float, device=device)
@@ -1771,7 +1772,7 @@ def test_position_based_fluids_reference_stages(test, device):
             surface_tension,
             boundary_log,
         ],
-        outputs=[densities, normals],
+        outputs=[densities, pos_lambda, normals],
         device=device,
     )
 
@@ -1902,6 +1903,7 @@ def test_position_based_fluids_reference_stages(test, device):
             neighbor_counts,
             particle_count,
             densities,
+            pos_lambda,
             normals,
             boundary_grad,
             accumulated_delta,

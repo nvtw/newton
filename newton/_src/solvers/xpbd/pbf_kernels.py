@@ -187,6 +187,7 @@ def calculate_density(
     surface_tension: float,
     boundary_log: wp.array[float],
     densities: wp.array[float],
+    pos_lambda: wp.array[wp.vec4],
     surface_normals: wp.array[wp.vec3],
 ):
     i = wp.hash_grid_point_id(grid, wp.tid())
@@ -217,7 +218,11 @@ def calculate_density(
             normal += _kernel_dw(distance, spiky2, inv_radius) * xij / distance
 
     constraint = wp.max(density - rest_density, -0.005 * rest_density)
-    densities[i] = constraint * lambda_scale
+    scaled = constraint * lambda_scale
+    densities[i] = scaled
+    # Neighbour position and lambda are always read together in the pressure
+    # solve; packing them halves the scattered gathers in its inner loop.
+    pos_lambda[i] = wp.vec4(xi[0], xi[1], xi[2], scaled)
     surface_normals[i] = normal * surface_tension
 
 
@@ -231,6 +236,7 @@ def solve_density(
     neighbor_counts: wp.array[wp.int32],
     num_particles: int,
     densities: wp.array[float],
+    pos_lambda: wp.array[wp.vec4],
     surface_normals: wp.array[wp.vec3],
     boundary_grad: wp.array[wp.vec3],
     accumulated_delta: wp.array[wp.vec3],
@@ -274,14 +280,15 @@ def solve_density(
     for k in range(count):
         j = neighbors[k * num_particles + i]
 
-        xij = xi - particle_q[j]
+        pl = pos_lambda[j]
+        xij = xi - wp.vec3(pl[0], pl[1], pl[2])
         distance_sq = wp.length_sq(xij)
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
             continue
 
         distance = wp.sqrt(distance_sq)
         normal = xij / distance
-        density_correction = 0.5 * (density_i + densities[j]) * _kernel_dw(distance, spiky2, inv_radius)
+        density_correction = 0.5 * (density_i + pl[3]) * _kernel_dw(distance, spiky2, inv_radius)
         cohesion_correction = cohesion * dt * _cohesion_w(distance, cohesion1, cohesion2, inv_radius)
         delta -= normal * (density_correction + cohesion_correction)
 

@@ -391,6 +391,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
             self._pbf_deltas = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_weights = wp.zeros(n, dtype=float, device=model.device)
             self._pbf_accum_delta = wp.zeros(n, dtype=wp.vec3, device=model.device)
+            self._pbf_pos_lambda = wp.zeros(n, dtype=wp.vec4, device=model.device)
             self._pbf_boundary_log = wp.zeros(n, dtype=float, device=model.device)
             self._pbf_boundary_grad = wp.zeros(n, dtype=wp.vec3, device=model.device)
             # A fluid at rest spacing holds ~26 neighbors within the support
@@ -786,7 +787,11 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     self.pbf_surface_tension,
                                     self._pbf_boundary_log,
                                 ],
-                                outputs=[self._pbf_densities, self._pbf_surface_normals],
+                                outputs=[
+                                    self._pbf_densities,
+                                    self._pbf_pos_lambda,
+                                    self._pbf_surface_normals,
+                                ],
                                 device=model.device,
                             )
 
@@ -805,6 +810,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     self._pbf_neighbor_counts,
                                     model.particle_count,
                                     self._pbf_densities,
+                                    self._pbf_pos_lambda,
                                     self._pbf_surface_normals,
                                     self._pbf_boundary_grad,
                                     pbf_delta_pos,
