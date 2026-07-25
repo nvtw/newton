@@ -17,7 +17,7 @@ from ..geometry.contact_match import ContactMatcher
 from ..geometry.contact_sort import ContactSorter
 from ..geometry.differentiable_contacts import launch_differentiable_contact_augment
 from ..geometry.flags import ShapeFlags
-from ..geometry.kernels import create_soft_contacts
+from ..geometry.kernels import build_soft_contact_pairs, create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.soft_contacts_sdf import launch_soft_ef_contacts
@@ -160,6 +160,22 @@ def write_contact(
         writer_data.out_sort_key[index] = make_contact_sort_key(
             contact_data.shape_a, contact_data.shape_b, contact_data.sort_sub_key
         )
+
+
+@wp.kernel(enable_backward=False)
+def gather_shape_centers(
+    bounded_shapes: wp.array[wp.int32],
+    aabb_lower: wp.array[wp.vec3],
+    aabb_upper: wp.array[wp.vec3],
+    centers: wp.array[wp.vec3],
+    pair_count: wp.array[int],
+):
+    """Centers of bounded shapes' world AABBs; also resets the broad-phase counter."""
+    i = wp.tid()
+    if i == 0:
+        pair_count[0] = 0
+    s = bounded_shapes[i]
+    centers[i] = 0.5 * (aabb_lower[s] + aabb_upper[s])
 
 
 @wp.kernel(enable_backward=False)
@@ -1109,6 +1125,7 @@ class CollisionPipeline:
         # Host-side, so not graph-capture-safe -- construct the pipeline before any capture.
         self.soft_rigid_contact_pairs = _build_soft_particle_rigid_contact_pairs(model)
         self._soft_rigid_contact_pair_count = len(self.soft_rigid_contact_pairs)
+        self._init_soft_contact_binning(model)
         self.enable_rigid_soft_full_surface_contact = enable_rigid_soft_full_surface_contact
         # Full-surface edge/face candidate pairs (world-compatible, like the particle pairs above);
         # empty when the flag is off so the flag-off default stays bit-for-bit.
@@ -1221,6 +1238,105 @@ class CollisionPipeline:
         # attach custom attributes with assignment==CONTACT
         self.model._add_custom_attributes(contacts, Model.AttributeAssignment.CONTACT, requires_grad=self.requires_grad)
         return contacts
+
+    #: Bounded-shape count above which particle-shape candidates are found by
+    #: binning instead of testing every pair. Purely a performance crossover --
+    #: both paths feed the same narrow phase and emit identical contacts --
+    #: measured on the particles-versus-many-boxes benchmark.
+    SOFT_CONTACT_BINNING_MIN_SHAPES = 64
+
+    #: Candidate pairs reserved per particle for the binned broad phase. Dense
+    #: scenes really can put ~20 shapes within one particle's contact margin, so
+    #: this is sized well above that; the total is capped by the all-pairs count,
+    #: so it never costs more memory than the list it replaces. Overflow is
+    #: counted, not silent -- see :attr:`soft_contact_pair_overflow_count`.
+    SOFT_CONTACT_PAIRS_PER_PARTICLE = 64
+
+    def _init_soft_contact_binning(self, model: Model) -> None:
+        """Prepare the binned particle-shape broad phase.
+
+        The static candidate list is the full particle-shape product, so the
+        narrow phase costs ``particle_count * shape_count`` every step no matter
+        where anything is. Binning replaces it with a compact list of pairs that
+        can actually touch, found through a hash grid over shape centers that is
+        rebuilt each step from AABBs the pipeline already computes.
+
+        Shapes split by whether their extent is bounded, which is a property of
+        the geometry rather than a tuned cutoff: an infinite plane is near every
+        particle and cannot be culled spatially, so planes keep the static list.
+        """
+        self._soft_use_binning = False
+        self._soft_shape_grid = None
+        self._soft_shape_centers = None
+        self._soft_bounded_shapes = None
+        self._soft_static_pairs = None
+        self._soft_static_pair_count = 0
+        self._soft_binned_pairs = None
+        self._soft_binned_pair_count = None
+        self._soft_binned_overflow = None
+        self._soft_pair_capacity = 0
+        self._soft_shape_query_radius = 0.0
+
+        shape_count = int(getattr(model, "shape_count", 0) or 0)
+        particle_count = int(getattr(model, "particle_count", 0) or 0)
+        if shape_count == 0 or particle_count == 0:
+            return
+
+        shape_type = model.shape_type.numpy()
+        shape_scale = model.shape_scale.numpy()
+        collision_radius = model.shape_collision_radius.numpy()
+
+        # The infinite-plane sentinel is exact-zero scale; its 1e6 stand-in
+        # collision radius would swamp any spatial structure.
+        infinite_plane = (shape_type == int(GeoType.PLANE)) & (shape_scale[:, 0] == 0.0) & (shape_scale[:, 1] == 0.0)
+        bounded = np.nonzero(~infinite_plane)[0].astype(np.int32)
+        unbounded = np.nonzero(infinite_plane)[0].astype(np.int32)
+        if len(bounded) <= self.SOFT_CONTACT_BINNING_MIN_SHAPES:
+            return
+
+        self._soft_use_binning = True
+        self._soft_bounded_shapes = wp.array(bounded, dtype=wp.int32, device=self.device)
+
+        # Planes keep the all-pairs list, restricted to plane pairs.
+        pairs_np = self.soft_rigid_contact_pairs.numpy().reshape(-1, 2)
+        static = pairs_np[np.isin(pairs_np[:, 1], unbounded)] if len(unbounded) else pairs_np[:0]
+        self._soft_static_pairs = wp.array(
+            np.ascontiguousarray(static.astype(np.int32)), dtype=wp.vec2i, device=self.device
+        )
+        self._soft_static_pair_count = int(len(static))
+
+        margins = model.shape_margin.numpy() + model.shape_gap.numpy()
+        self._soft_shape_query_radius = float(np.max(collision_radius[bounded] + margins[bounded]))
+
+        # Size the bin grid to the shape count; a fixed large grid would cost tens
+        # of MB of cell tables per pipeline for no benefit.
+        dim = int(np.clip(np.ceil(len(bounded) ** (1.0 / 3.0)) * 2, 4, 64))
+        self._soft_shape_grid = wp.HashGrid(dim, dim, dim, device=self.device)
+        self._soft_shape_centers = wp.zeros(len(bounded), dtype=wp.vec3, device=self.device)
+
+        self._soft_pair_capacity = min(
+            particle_count * self.SOFT_CONTACT_PAIRS_PER_PARTICLE, self._soft_rigid_contact_pair_count
+        )
+        self._soft_binned_pairs = wp.zeros(self._soft_pair_capacity, dtype=wp.vec2i, device=self.device)
+        self._soft_binned_pair_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._soft_binned_overflow = wp.zeros(1, dtype=wp.int32, device=self.device)
+
+        # Build once up front: the grid allocates its internal buffers on the
+        # first build, and allocating inside a CUDA graph capture fails. The
+        # point count is fixed afterwards, so no later build allocates.
+        with wp.ScopedDevice(self.device):
+            self._soft_shape_grid.build(self._soft_shape_centers, radius=self._soft_shape_query_radius)
+
+    @property
+    def soft_contact_pair_overflow_count(self) -> int:
+        """Candidate pairs dropped because the binned broad-phase buffer was full.
+
+        Nonzero means some particle-shape contacts were missed; raise
+        :attr:`SOFT_CONTACT_PAIRS_PER_PARTICLE`.
+        """
+        if self._soft_binned_overflow is None:
+            return 0
+        return int(self._soft_binned_overflow.numpy()[0])
 
     @staticmethod
     def _build_excluded_pairs(model: Model) -> wp.array[wp.vec2i] | None:
@@ -1552,11 +1668,52 @@ class CollisionPipeline:
 
         # Generate soft contacts for particles and shapes
         if state.particle_q and self.soft_contact_max > 0 and self.soft_rigid_contact_pair_count > 0:
+            if self._soft_use_binning:
+                wp.launch(
+                    kernel=gather_shape_centers,
+                    dim=len(self._soft_bounded_shapes),
+                    inputs=[
+                        self._soft_bounded_shapes,
+                        self.narrow_phase.shape_aabb_lower,
+                        self.narrow_phase.shape_aabb_upper,
+                    ],
+                    outputs=[self._soft_shape_centers, self._soft_binned_pair_count],
+                    device=self.device,
+                )
+                with wp.ScopedDevice(self.device):
+                    self._soft_shape_grid.build(self._soft_shape_centers, radius=self._soft_shape_query_radius)
+                wp.launch(
+                    kernel=build_soft_contact_pairs,
+                    dim=model.particle_count,
+                    inputs=[
+                        self._soft_shape_grid.id,
+                        self._soft_bounded_shapes,
+                        self._soft_shape_query_radius,
+                        state.particle_q,
+                        model.particle_radius,
+                        model.particle_flags,
+                        self.narrow_phase.shape_aabb_lower,
+                        self.narrow_phase.shape_aabb_upper,
+                        soft_contact_margin,
+                        self._soft_pair_capacity,
+                    ],
+                    outputs=[
+                        self._soft_binned_pairs,
+                        self._soft_binned_pair_count,
+                        self._soft_binned_overflow,
+                    ],
+                    device=self.device,
+                )
+
+            soft_pairs = self._soft_binned_pairs if self._soft_use_binning else self.soft_rigid_contact_pairs
+            soft_pair_dim = self._soft_pair_capacity if self._soft_use_binning else self.soft_rigid_contact_pair_count
+            soft_pair_count = self._soft_binned_pair_count if self._soft_use_binning else None
+
             wp.launch(
                 kernel=create_soft_contacts,
-                dim=self.soft_rigid_contact_pair_count,
+                dim=soft_pair_dim,
                 inputs=[
-                    self.soft_rigid_contact_pairs,
+                    soft_pairs,
                     state.particle_q,
                     model.particle_radius,
                     model.particle_flags,
@@ -1576,6 +1733,7 @@ class CollisionPipeline:
                     model.shape_heightfield_index,
                     model.heightfield_data,
                     model.heightfield_elevations,
+                    soft_pair_count,
                 ],
                 outputs=[
                     contacts.soft_contact_count,
@@ -1590,6 +1748,49 @@ class CollisionPipeline:
                 ],
                 device=self.device,
             )
+            # Infinite planes keep the static all-pairs list: they cannot be
+            # culled spatially, and there are only ever a handful.
+            if self._soft_use_binning and self._soft_static_pair_count > 0:
+                wp.launch(
+                    kernel=create_soft_contacts,
+                    dim=self._soft_static_pair_count,
+                    inputs=[
+                        self._soft_static_pairs,
+                        state.particle_q,
+                        model.particle_radius,
+                        model.particle_flags,
+                        model.particle_world,
+                        state.body_q,
+                        model.shape_transform,
+                        model.shape_body,
+                        model.shape_type,
+                        model.shape_scale,
+                        model.shape_source_ptr,
+                        model._shape_mesh_properties,
+                        model.shape_world,
+                        soft_contact_margin,
+                        model.shape_margin,
+                        self.soft_contact_max,
+                        model.shape_flags,
+                        model.shape_heightfield_index,
+                        model.heightfield_data,
+                        model.heightfield_elevations,
+                        None,
+                    ],
+                    outputs=[
+                        contacts.soft_contact_count,
+                        contacts.soft_contact_particle,
+                        contacts.soft_contact_indices,
+                        contacts.soft_contact_barycentric,
+                        contacts.soft_contact_shape,
+                        contacts.soft_contact_body_pos,
+                        contacts.soft_contact_body_vel,
+                        contacts.soft_contact_normal,
+                        contacts.soft_contact_tids,
+                    ],
+                    device=self.device,
+                )
+
 
         # Full-surface EDGE/FACE passes (opt-in, set at construction): add the soft edge/face contacts
         # the per-particle path cannot detect. Run after the legacy particle launch on the same stream;

@@ -918,6 +918,8 @@ def test_mixed_winding_convex_pile_contact_normal(test, device):
             wp.array([0], dtype=wp.int32, device=device),
             wp.empty(0, dtype=HeightfieldData, device=device),
             wp.empty(0, dtype=wp.float32, device=device),
+            # Static pair list: every slot is valid, so no device-side count.
+            None,
         ],
         outputs=[
             soft_contact_count,
@@ -1114,6 +1116,8 @@ def _launch_open_box_soft_contact(test, device, mesh_id, points, mesh_properties
             wp.array([0], dtype=wp.int32, device=device),
             wp.empty(0, dtype=HeightfieldData, device=device),
             wp.empty(0, dtype=wp.float32, device=device),
+            # Static pair list: every slot is valid, so no device-side count.
+            None,
         ],
         outputs=[
             count,
@@ -4182,6 +4186,114 @@ add_function_test(
     TestFullSurfaceSoftContact,
     "test_edge_face_pairs_respect_worlds",
     test_edge_face_pairs_respect_worlds,
+    devices=soft_devices,
+)
+
+
+def test_soft_contact_binning_matches_all_pairs(test, device):
+    """Binned particle-shape broad phase must emit exactly the all-pairs contacts.
+
+    Binning replaces the full particle-times-shape candidate list with a compact
+    one found through a hash grid over shape centers. It is a pure performance
+    path: every shape type must produce identical contacts either way, including
+    infinite planes (which cannot be culled spatially and keep the static list).
+    """
+    cfg = newton.ModelBuilder.ShapeConfig(mu=0.3)
+    builder = newton.ModelBuilder()
+    r = 0.05
+    builder.default_particle_radius = r
+
+    positions = []
+
+    def cloud(cx, cz=0.0):
+        for dx in (-0.12, 0.0, 0.12):
+            for dy in (-0.12, 0.0, 0.12):
+                for dz in (-0.12, 0.0, 0.12):
+                    positions.append((cx + dx, dy, cz + dz))
+
+    def body_at(x):
+        return builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.0), wp.quat_identity()), mass=1.0)
+
+    builder.add_shape_sphere(body=body_at(0.0), radius=0.1, cfg=cfg)
+    cloud(0.0)
+    builder.add_shape_box(body=body_at(1.0), hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+    cloud(1.0)
+    builder.add_shape_capsule(body=body_at(2.0), radius=0.08, half_height=0.1, cfg=cfg)
+    cloud(2.0)
+    builder.add_shape_cylinder(body=body_at(3.0), radius=0.1, half_height=0.1, cfg=cfg)
+    cloud(3.0)
+    builder.add_shape_cone(body=body_at(4.0), radius=0.1, half_height=0.1, cfg=cfg)
+    cloud(4.0)
+
+    verts = (
+        np.array(
+            [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1], [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]],
+            dtype=np.float32,
+        )
+        * 0.1
+    )
+    faces = np.array(
+        [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
+         2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6, 5, 0, 4, 7, 0, 7, 3],
+        dtype=np.int32,
+    )
+    builder.add_shape_mesh(body=body_at(5.0), mesh=newton.Mesh(verts, faces), cfg=cfg)
+    cloud(5.0)
+
+    # finite plane is bounded (binned); the ground plane is infinite (static list)
+    builder.add_shape_plane(
+        plane=(0.0, 0.0, 1.0, 0.0), width=0.5, length=0.5,
+        xform=wp.transform(wp.vec3(6.0, 0.0, 0.0), wp.quat_identity()), cfg=cfg,
+    )
+    cloud(6.0)
+    builder.add_ground_plane(cfg=cfg)
+    cloud(7.0, cz=0.05)
+
+    for pos in positions:
+        builder.add_particle(pos=wp.vec3(*pos), vel=wp.vec3(0.0), mass=1.0, radius=r,
+                             flags=int(ParticleFlags.ACTIVE))
+
+    model = builder.finalize(device=device)
+    model.set_gravity((0.0, 0.0, 0.0))
+
+    def collect(force_binning):
+        original = newton.CollisionPipeline.SOFT_CONTACT_BINNING_MIN_SHAPES
+        newton.CollisionPipeline.SOFT_CONTACT_BINNING_MIN_SHAPES = 0 if force_binning else 10**9
+        try:
+            pipeline = newton.CollisionPipeline(model, soft_contact_margin=0.1)
+            test.assertEqual(pipeline._soft_use_binning, force_binning)
+            contacts = pipeline.contacts()
+            pipeline.collide(model.state(), contacts)
+            wp.synchronize_device()
+            n = int(contacts.soft_contact_count.numpy()[0])
+            test.assertEqual(pipeline.soft_contact_pair_overflow_count, 0)
+            part = contacts.soft_contact_particle.numpy()[:n]
+            shape = contacts.soft_contact_shape.numpy()[:n]
+            pos = contacts.soft_contact_body_pos.numpy()[:n]
+            nrm = contacts.soft_contact_normal.numpy()[:n]
+            order = np.lexsort((shape, part))
+            return n, part[order], shape[order], pos[order], nrm[order]
+        finally:
+            newton.CollisionPipeline.SOFT_CONTACT_BINNING_MIN_SHAPES = original
+
+    n_all, p_all, s_all, pos_all, nrm_all = collect(force_binning=False)
+    n_bin, p_bin, s_bin, pos_bin, nrm_bin = collect(force_binning=True)
+
+    test.assertGreater(n_all, 0, "scene produced no soft contacts")
+    # every shape must actually be exercised, or parity proves nothing for it
+    test.assertEqual(len(set(s_all.tolist())), model.shape_count)
+
+    test.assertEqual(n_bin, n_all, "binned broad phase changed the contact count")
+    np.testing.assert_array_equal(p_bin, p_all)
+    np.testing.assert_array_equal(s_bin, s_all)
+    np.testing.assert_allclose(pos_bin, pos_all, rtol=0, atol=0)
+    np.testing.assert_allclose(nrm_bin, nrm_all, rtol=0, atol=0)
+
+
+add_function_test(
+    TestFullSurfaceSoftContact,
+    "test_soft_contact_binning_matches_all_pairs",
+    test_soft_contact_binning_matches_all_pairs,
     devices=soft_devices,
 )
 

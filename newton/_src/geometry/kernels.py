@@ -1039,6 +1039,7 @@ def create_soft_contacts(
     shape_heightfield_index: wp.array[wp.int32],
     heightfield_data: wp.array[HeightfieldData],
     heightfield_elevations: wp.array[wp.float32],
+    soft_rigid_contact_pair_count: wp.array[int],
     # outputs
     soft_contact_count: wp.array[int],
     soft_contact_particle: wp.array[int],
@@ -1051,6 +1052,11 @@ def create_soft_contacts(
     soft_contact_tids: wp.array[int],
 ):
     tid = wp.tid()
+    # When the pair list is produced by the binning broad phase it is compact and
+    # shorter than the launch, so honour the device-side count. A null array means
+    # the list is the static all-pairs product and every slot is valid.
+    if soft_rigid_contact_pair_count and tid >= soft_rigid_contact_pair_count[0]:
+        return
     pair = soft_rigid_contact_pairs[tid]
     particle_index = pair[0]
     shape_index = pair[1]
@@ -1182,6 +1188,67 @@ def create_soft_contacts(
             soft_contact_indices[index] = wp.vec3i(particle_index, -1, -1)
             soft_contact_barycentric[index] = wp.vec3(1.0, 0.0, 0.0)
             soft_contact_normal[index] = world_normal
+
+
+@wp.kernel
+def build_soft_contact_pairs(
+    shape_grid: wp.uint64,
+    bounded_shapes: wp.array[wp.int32],
+    shape_query_radius: float,
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    shape_aabb_lower: wp.array[wp.vec3],
+    shape_aabb_upper: wp.array[wp.vec3],
+    margin: float,
+    pair_capacity: int,
+    # outputs
+    pairs: wp.array[wp.vec2i],
+    pair_count: wp.array[int],
+    overflow: wp.array[int],
+):
+    """Particle-shape broad phase: emit only pairs that can actually touch.
+
+    Without this every particle is tested against every shape, so the narrow
+    phase costs particle_count * shape_count per step no matter where anything
+    is, which makes many particles and many shapes mutually exclusive.
+
+    Only bounded shapes are binned. An infinite plane has no meaningful bounding
+    sphere -- it is near every particle -- so planes keep the static all-pairs
+    list; models only ever carry a handful. That split is a property of the
+    geometry, not a tuned cutoff.
+    """
+    particle_index = wp.tid()
+    if (particle_flags[particle_index] & ParticleFlags.ACTIVE) == 0:
+        return
+
+    # The query radius covers the largest bounded shape's bounding sphere plus
+    # its margin, so grid hits are a superset of the true candidates.
+    query = wp.hash_grid_query(
+        shape_grid, particle_q[particle_index], shape_query_radius + particle_radius[particle_index]
+    )
+    px = particle_q[particle_index]
+    reach = particle_radius[particle_index] + margin
+
+    slot = int(0)
+    while wp.hash_grid_query_next(query, slot):
+        shape_index = bounded_shapes[slot]
+        # The grid returns everything in the 27 neighbouring cells, unfiltered.
+        # Reject against the shape's world AABB (already inflated by its own
+        # margin and gap) so only genuine candidates reach the narrow phase.
+        lo = shape_aabb_lower[shape_index]
+        hi = shape_aabb_upper[shape_index]
+        nearest = wp.vec3(
+            wp.clamp(px[0], lo[0], hi[0]), wp.clamp(px[1], lo[1], hi[1]), wp.clamp(px[2], lo[2], hi[2])
+        )
+        if wp.length_sq(px - nearest) > reach * reach:
+            continue
+
+        index = wp.atomic_add(pair_count, 0, 1)
+        if index < pair_capacity:
+            pairs[index] = wp.vec2i(particle_index, shape_index)
+        else:
+            wp.atomic_add(overflow, 0, 1)
 
 
 # --------------------------------------
