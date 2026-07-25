@@ -54,6 +54,7 @@ class TestBenchG1Train(unittest.TestCase):
         args = make_train_to_gate_parser().parse_args([])
 
         self.assertFalse(args.reset_env_between_chunks)
+        self.assertEqual(args.late_replay_start_samples, args.angular_fine_tune_start_samples)
 
     def test_graph_leapfrog_excludes_final_drain(self):
         measured, env_sps, excluded_drain = _summarize_measured_history(

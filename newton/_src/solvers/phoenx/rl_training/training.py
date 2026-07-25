@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -731,6 +731,7 @@ class ResultTrainG1PPO:
     env: EnvG1PhoenX
     buffer: BufferRollout
     history: list[StatsTrainG1PPO]
+    _graph_state: _G1GraphLeapfrogState | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -1065,6 +1066,45 @@ class _GraphTrainPhase:
         self.update_graph = update_graph
 
 
+@dataclass
+class _G1GraphLeapfrogState:
+    signature: dict[str, object]
+    rollout_trainer: TrainerPPO
+    buffers: tuple[BufferRollout, BufferRollout]
+    rollout_stream: wp.Stream
+    update_stream: wp.Stream
+    copy_stream: wp.Stream
+    phases: tuple[_GraphTrainPhase, _GraphTrainPhase]
+    copy_graph: object
+    command_curriculum_counter: wp.array[wp.int32]
+    target_curriculum_counter: wp.array[wp.int32]
+    target_seed_counter: wp.array[wp.int32]
+    rollout_seed_counter: wp.array[wp.int32]
+    update_seed_counter: wp.array[wp.int32]
+    learner_rollout_state: wp.array3d[wp.float32] | None = None
+    prev: int = 0
+    buffer_ready: bool = True
+
+
+def _g1_graph_signature(cfg: ConfigTrainG1PPO, env: EnvG1PhoenX, trainer: TrainerPPO) -> dict[str, object]:
+    ignored = {
+        "iterations",
+        "device",
+        "env_config",
+        "ppo_config",
+        "log_interval",
+        "resume_checkpoint",
+        "resume_policy_only",
+        "checkpoint_path",
+        "checkpoint_interval",
+        "readback_diagnostics",
+    }
+    signature = {item.name: getattr(cfg, item.name) for item in fields(cfg) if item.name not in ignored}
+    signature["env_config"] = asdict(env.config)
+    signature["ppo_config"] = asdict(trainer.config)
+    return signature
+
+
 def _g1_command_metric_override(cfg: ConfigTrainG1PPO, env: EnvG1PhoenX) -> tuple[float, float, float]:
     if not cfg.randomize_commands:
         return tuple(float(v) for v in env.config.command)
@@ -1215,74 +1255,119 @@ def _train_g1_ppo_graph_leapfrog(
     *,
     start_iteration: int,
     diagnostics: _G1TrainDiagnosticsReadback | None,
+    graph_state: _G1GraphLeapfrogState | None = None,
 ) -> ResultTrainG1PPO:
     device = env.device
     if not device.is_cuda or not wp.is_mempool_enabled(device):
         raise RuntimeError("G1 graph_leapfrog training requires CUDA with Warp mempool enabled")
 
     checkpoint_metadata = _g1_checkpoint_metadata(cfg, env)
-    rollout_trainer = _make_g1_rollout_trainer(env, trainer)
-    buffers = (first_buffer, _make_g1_buffer(env, int(cfg.rollout_steps)))
-    for graph_trainer in (trainer, rollout_trainer):
-        for buffer in buffers:
-            graph_trainer.reserve_update_buffers(buffer)
+    signature = _g1_graph_signature(cfg, env, trainer)
+    if graph_state is not None and graph_state.learner_rollout_state is not None:
+        learner_state = getattr(trainer.actor.net, "_state", None)
+        if learner_state is not None:
+            wp.copy(learner_state, graph_state.learner_rollout_state)
+            wp.synchronize_device(device)
+    if graph_state is not None and graph_state.signature != signature:
+        graph_state = None
 
-    command_seed_counter = make_seed_counter(int(cfg.seed) + 53_321 + int(start_iteration), device=device)
-    target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + int(start_iteration), device=device)
-    target_curriculum_counter = _make_g1_target_curriculum_counter(cfg, env, int(start_iteration))
-    rollout_seed_counter = make_seed_counter(
-        int(cfg.seed) + int(start_iteration) * int(cfg.rollout_steps), device=device
-    )
-    update_seed_counter = make_seed_counter(int(trainer.seed) + 1_000_003 * int(start_iteration), device=device)
-    reset_seed_counter = make_seed_counter(
-        int(cfg.seed) + 91_337 + int(start_iteration) * int(cfg.rollout_steps), device=device
-    )
-    env.use_reset_seed_counter(reset_seed_counter)
+    if graph_state is None:
+        rollout_trainer = _make_g1_rollout_trainer(env, trainer)
+        buffers = (first_buffer, _make_g1_buffer(env, int(cfg.rollout_steps)))
+        for graph_trainer in (trainer, rollout_trainer):
+            for buffer in buffers:
+                graph_trainer.reserve_update_buffers(buffer)
 
-    env.use_command_seed_counter(command_seed_counter)
-
-    def collect(buffer: BufferRollout) -> None:
-        _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, buffer.num_samples)
-        if cfg.randomize_commands and cfg.command_sampling == "rollout":
-            env.randomize_commands_seed_counter(
-                seed_counter=command_seed_counter,
-                command_x_range=cfg.command_x_range,
-                command_y_range=cfg.command_y_range,
-                command_yaw_range=cfg.command_yaw_range,
-                zero_probability=cfg.command_zero_probability,
+        # Reset and command counters advance inside each simulated step, so a
+        # graph recapture must retain them rather than infer them from iteration.
+        command_seed_counter = env._command_seed_counter
+        if command_seed_counter is None:
+            command_seed_counter = make_seed_counter(int(cfg.seed) + 53_321 + int(start_iteration), device=device)
+        target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + int(start_iteration), device=device)
+        target_curriculum_counter = _make_g1_target_curriculum_counter(cfg, env, int(start_iteration))
+        rollout_seed_counter = make_seed_counter(
+            int(cfg.seed) + int(start_iteration) * int(cfg.rollout_steps), device=device
+        )
+        update_seed_counter = make_seed_counter(int(trainer.seed) + 1_000_003 * int(start_iteration), device=device)
+        reset_seed_counter = env._reset_seed_counter
+        if reset_seed_counter is None:
+            reset_seed_counter = make_seed_counter(
+                int(cfg.seed) + 91_337 + int(start_iteration) * int(cfg.rollout_steps), device=device
             )
-        _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, buffer.num_samples)
-        env.collect_ppo_rollout_seed_counter(
-            rollout_trainer,
-            buffer,
-            seed_counter=rollout_seed_counter,
-            reset_state_at_start=bool(cfg.reset_recurrent_state_on_rollout_start),
+        env.use_reset_seed_counter(reset_seed_counter)
+        env.use_command_seed_counter(command_seed_counter)
+
+        def collect(buffer: BufferRollout) -> None:
+            _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, buffer.num_samples)
+            if cfg.randomize_commands and cfg.command_sampling == "rollout":
+                env.randomize_commands_seed_counter(
+                    seed_counter=command_seed_counter,
+                    command_x_range=cfg.command_x_range,
+                    command_y_range=cfg.command_y_range,
+                    command_yaw_range=cfg.command_yaw_range,
+                    zero_probability=cfg.command_zero_probability,
+                )
+            _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, buffer.num_samples)
+            env.collect_ppo_rollout_seed_counter(
+                rollout_trainer,
+                buffer,
+                seed_counter=rollout_seed_counter,
+                reset_state_at_start=bool(cfg.reset_recurrent_state_on_rollout_start),
+            )
+
+        def update(buffer: BufferRollout) -> None:
+            trainer.update_seed_counter(buffer, seed_counter=update_seed_counter, read_stats=False)
+
+        collect(buffers[0])
+        wp.synchronize_device(device)
+
+        rollout_stream = wp.Stream(device, priority=-1)
+        update_stream = wp.Stream(device)
+        copy_stream = wp.Stream(device)
+        phases = (
+            _GraphTrainPhase(
+                _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[1])),
+                _capture_stream_graph(update_stream, device, lambda: update(buffers[0])),
+            ),
+            _GraphTrainPhase(
+                _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[0])),
+                _capture_stream_graph(update_stream, device, lambda: update(buffers[1])),
+            ),
+        )
+        copy_graph = _capture_stream_graph(copy_stream, device, lambda: _copy_trainer_policy(rollout_trainer, trainer))
+        graph_state = _G1GraphLeapfrogState(
+            signature=signature,
+            rollout_trainer=rollout_trainer,
+            buffers=buffers,
+            rollout_stream=rollout_stream,
+            update_stream=update_stream,
+            copy_stream=copy_stream,
+            phases=phases,
+            copy_graph=copy_graph,
+            command_curriculum_counter=command_curriculum_counter,
+            target_curriculum_counter=target_curriculum_counter,
+            target_seed_counter=target_seed_counter,
+            rollout_seed_counter=rollout_seed_counter,
+            update_seed_counter=update_seed_counter,
         )
 
-    def update(buffer: BufferRollout) -> None:
-        trainer.update_seed_counter(buffer, seed_counter=update_seed_counter, read_stats=False)
-
-    collect(buffers[0])
-    wp.synchronize_device(device)
-
-    # Collection is the exposed leapfrog path; let its pending blocks use update slack first.
-    rollout_stream = wp.Stream(device, priority=-1)
-    update_stream = wp.Stream(device)
-    copy_stream = wp.Stream(device)
-    phases = (
-        _GraphTrainPhase(
-            _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[1])),
-            _capture_stream_graph(update_stream, device, lambda: update(buffers[0])),
-        ),
-        _GraphTrainPhase(
-            _capture_stream_graph(rollout_stream, device, lambda: collect(buffers[0])),
-            _capture_stream_graph(update_stream, device, lambda: update(buffers[1])),
-        ),
-    )
-    copy_graph = _capture_stream_graph(copy_stream, device, lambda: _copy_trainer_policy(rollout_trainer, trainer))
+    rollout_trainer = graph_state.rollout_trainer
+    buffers = graph_state.buffers
+    rollout_stream = graph_state.rollout_stream
+    update_stream = graph_state.update_stream
+    copy_stream = graph_state.copy_stream
+    phases = graph_state.phases
+    copy_graph = graph_state.copy_graph
+    prev = graph_state.prev
+    if not graph_state.buffer_ready:
+        wp.capture_launch(phases[prev].rollout_graph, stream=rollout_stream)
+        with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
+            wp.wait_stream(rollout_stream)
+        wp.capture_launch(copy_graph, stream=copy_stream)
+        wp.synchronize_device(device)
+        prev = 1 - prev
 
     history: list[StatsTrainG1PPO] = []
-    prev = 0
     for local_iteration in range(int(cfg.iterations)):
         iteration = int(start_iteration) + local_iteration
         t0 = time.perf_counter()
@@ -1298,9 +1383,6 @@ def _train_g1_ppo_graph_leapfrog(
             wp.synchronize_device(device)
         else:
             wp.capture_launch(phases[prev].update_graph, stream=update_stream)
-            with wp.ScopedStream(copy_stream, sync_enter=False, sync_exit=False):
-                wp.wait_stream(update_stream)
-            wp.capture_launch(copy_graph, stream=copy_stream)
             wp.synchronize_device(device)
         t1 = time.perf_counter()
 
@@ -1327,8 +1409,23 @@ def _train_g1_ppo_graph_leapfrog(
             metadata=checkpoint_metadata,
         )
 
-    _copy_trainer_rollout_state(trainer, rollout_trainer, env.world_count)
-    return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffers[prev], history=history)
+    copy_state_to = getattr(trainer.actor.net, "copy_state_to", None)
+    make_state_buffer = getattr(trainer.actor.net, "make_state_buffer", None)
+    if copy_state_to is not None and make_state_buffer is not None:
+        if graph_state.learner_rollout_state is None:
+            graph_state.learner_rollout_state = make_state_buffer(env.world_count)
+        copy_state_to(graph_state.learner_rollout_state)
+        _copy_trainer_rollout_state(trainer, rollout_trainer, env.world_count)
+
+    graph_state.prev = prev
+    graph_state.buffer_ready = False
+    return ResultTrainG1PPO(
+        trainer=trainer,
+        env=env,
+        buffer=buffers[prev],
+        history=history,
+        _graph_state=graph_state,
+    )
 
 
 def _check_anymal_graph_leapfrog_config(cfg: ConfigTrainAnymalPPO, env: EnvAnymalPhoenX) -> None:
@@ -1478,12 +1575,12 @@ def _train_g1_ppo_cycle(
     device = env.device
     start_iteration = int(getattr(trainer, "iteration", 0))
     diagnostics = _G1TrainDiagnosticsReadback(device, buffer.num_samples) if cfg.readback_diagnostics else None
-    command_curriculum_counter = _make_g1_command_curriculum_counter(cfg, env, start_iteration)
-    target_curriculum_counter = _make_g1_target_curriculum_counter(cfg, env, start_iteration)
-    target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + start_iteration, device=device)
-    _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, 0)
-    _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, 0)
     if cfg.execution_mode == "graph_leapfrog":
+        command_curriculum_counter = (
+            result._graph_state.command_curriculum_counter
+            if result._graph_state is not None
+            else _make_g1_command_curriculum_counter(cfg, env, start_iteration)
+        )
         return _train_g1_ppo_graph_leapfrog(
             cfg,
             env,
@@ -1492,7 +1589,13 @@ def _train_g1_ppo_cycle(
             command_curriculum_counter,
             start_iteration=start_iteration,
             diagnostics=diagnostics,
+            graph_state=result._graph_state,
         )
+    command_curriculum_counter = _make_g1_command_curriculum_counter(cfg, env, start_iteration)
+    target_curriculum_counter = _make_g1_target_curriculum_counter(cfg, env, start_iteration)
+    target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + start_iteration, device=device)
+    _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, 0)
+    _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, 0)
     for local_iteration in range(cfg.iterations):
         iteration = start_iteration + local_iteration
         _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, buffer.num_samples)

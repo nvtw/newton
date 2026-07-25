@@ -9,6 +9,7 @@ import math
 import re
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -114,6 +115,7 @@ from newton._src.solvers.phoenx.rl_training.training import (
     _g1_train_stat_finalize_kernel,
     _g1_train_stat_partials_kernel,
     _quat_rotate_inverse_xyzw_np,
+    _train_g1_ppo_cycle,
 )
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_REVOLUTE_DRIVE
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
@@ -5926,6 +5928,93 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(second_restored.iteration, 3)
             self.assertEqual(second_restored.actor_optimizer.step_count, resumed.trainer.actor_optimizer.step_count)
 
+    def test_graph_leapfrog_live_cycle_matches_uninterrupted(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 graph-leapfrog continuation tests")
+        env_config = rl.ConfigEnvG1PhoenX(
+            world_count=2,
+            sim_substeps=1,
+            solver_iterations=1,
+            velocity_iterations=1,
+            reward_mode="sparse_target",
+            randomize_commands_on_reset=True,
+            command_resample_steps=2,
+            max_episode_steps=0,
+            min_base_height=-100.0,
+            min_upright_cos=-1.0,
+            max_abs_root_position=0.0,
+            max_abs_root_linear_velocity=0.0,
+            max_abs_root_angular_velocity=0.0,
+            auto_reset=True,
+        )
+        ppo_config = rl.ConfigPPO(
+            train_epochs=1,
+            minibatch_size=2,
+            replay_ratio=1.0,
+            normalize_advantages=False,
+            shared_value_network=True,
+            policy_network="puffer_mingru",
+            manual_actor_backward=True,
+            manual_critic_backward=True,
+        )
+        config = rl.ConfigTrainG1PPO(
+            iterations=2,
+            rollout_steps=2,
+            hidden_layers=(8,),
+            env_config=env_config,
+            ppo_config=ppo_config,
+            device=device,
+            seed=43,
+            log_interval=0,
+            randomize_commands=True,
+            randomize_target_positions=True,
+            readback_diagnostics=False,
+            execution_mode="graph_leapfrog",
+        )
+        result = rl.train_g1_ppo(config)
+        graph_state = result._graph_state
+        self.assertIsNotNone(graph_state)
+        rollout_trainer = graph_state.rollout_trainer
+        self.assertTrue(
+            any(
+                not np.array_equal(learner.numpy(), rollout.numpy())
+                for learner, rollout in zip(
+                    result.trainer.actor.parameters(), rollout_trainer.actor.parameters(), strict=True
+                )
+            )
+        )
+        command_counter = result.env._command_seed_counter
+        reset_counter = result.env._reset_seed_counter
+        self.assertIsNotNone(command_counter)
+        self.assertIsNotNone(reset_counter)
+        command_before = int(command_counter.numpy()[0])
+        reset_before = int(reset_counter.numpy()[0])
+
+        continuation_config = replace(config, iterations=1)
+        continued = _train_g1_ppo_cycle(result, continuation_config)
+
+        self.assertIs(continued._graph_state, graph_state)
+        self.assertIs(continued.env._command_seed_counter, command_counter)
+        self.assertIs(continued.env._reset_seed_counter, reset_counter)
+        rollout_command_advance = int(config.randomize_commands and config.command_sampling == "rollout")
+        self.assertEqual(
+            int(command_counter.numpy()[0]), command_before + rollout_command_advance + 2 * config.rollout_steps
+        )
+        self.assertEqual(int(reset_counter.numpy()[0]), reset_before + config.rollout_steps)
+
+        reference = rl.train_g1_ppo(replace(config, iterations=3))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            continued_path = f"{tmpdir}/continued.npz"
+            reference_path = f"{tmpdir}/reference.npz"
+            continued.trainer.save_checkpoint(continued_path, iteration=3)
+            reference.trainer.save_checkpoint(reference_path, iteration=3)
+            with (
+                np.load(continued_path, allow_pickle=False) as continued_checkpoint,
+                np.load(reference_path, allow_pickle=False) as reference_checkpoint,
+            ):
+                self.assertEqual(continued_checkpoint.files, reference_checkpoint.files)
+                for key in continued_checkpoint.files:
+                    np.testing.assert_array_equal(continued_checkpoint[key], reference_checkpoint[key])
+
     def test_full_solver_replay_training_graph_does_not_collapse_to_all_done(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 full-solver PPO collapse regression tests")
         env_config = g1_recipe.default_g1_env_config(world_count=32)
@@ -6157,9 +6246,9 @@ class TestG1PhoenXRL(unittest.TestCase):
             args = argparse.Namespace(
                 world_count=2,
                 rollout_steps=1,
-                target_samples=4,
-                max_iterations=2,
-                chunk_iterations=2,
+                target_samples=6,
+                max_iterations=3,
+                chunk_iterations=3,
                 hidden_layers=(8,),
                 train_epochs=1,
                 actor_lr=g1_recipe.ACTOR_LR,
@@ -6272,13 +6361,13 @@ class TestG1PhoenXRL(unittest.TestCase):
             defaults = vars(make_g1_train_to_gate_parser().parse_args([]))
             defaults.update(vars(args))
             defaults["articulation_mode"] = "reduced"
-            defaults["angular_fine_tune_start_samples"] = 2
+            defaults["angular_fine_tune_start_samples"] = 4
             defaults["late_replay_ratio"] = 2.0
             defaults["late_replay_start_samples"] = 2
             defaults["final_phase_sim_substeps"] = 2
             args = argparse.Namespace(**defaults)
             result = benchmark_train_to_gate(args)
-            checkpoint_path = Path(checkpoint_template.format(iteration=2))
+            checkpoint_path = Path(checkpoint_template.format(iteration=3))
             restored = rl.load_ppo_checkpoint(checkpoint_path, device=device)
             with np.load(checkpoint_path, allow_pickle=False) as checkpoint:
                 self.assertEqual(checkpoint["metadata_g1_schema"].item(), "training_v1")
@@ -6297,7 +6386,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(result["physics_timestep"], g1_recipe.FRAME_DT)
             self.assertEqual(result["final_phase_sim_substeps"], 2)
             self.assertEqual(result["final_phase_physics_timestep"], g1_recipe.FRAME_DT / 2.0)
-            self.assertEqual(result["angular_fine_tune_iteration"], 1)
+            self.assertEqual(result["late_replay_iteration"], 1)
+            self.assertEqual(result["angular_fine_tune_iteration"], 2)
             self.assertEqual(result["solver_iterations"], 1)
             self.assertEqual(result["velocity_iterations"], g1_recipe.VELOCITY_ITERATIONS)
             self.assertEqual(result["articulation_mode"], "reduced")
@@ -6337,13 +6427,14 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(result["optimizer_eps"], g1_recipe.OPTIMIZER_EPS)
             self.assertEqual(result["optimizer_weight_decay"], g1_recipe.OPTIMIZER_WEIGHT_DECAY)
             self.assertEqual(result["muon_momentum"], g1_recipe.MUON_MOMENTUM)
-            self.assertEqual(result["completed_iterations"], 2)
-            self.assertEqual(result["trained_samples"], 4)
-            self.assertEqual(restored.iteration, 2)
+            self.assertEqual(result["completed_iterations"], 3)
+            self.assertEqual(result["trained_samples"], 6)
+            self.assertEqual(restored.iteration, 3)
             self.assertTrue(restored.actor_optimizer.matrix_transpose)
             self.assertTrue(checkpoint_path.exists())
             self.assertEqual(len(result["gate_history"]), 1)
-            self.assertEqual(len(result["train_history"]), 2)
+            self.assertEqual(len(result["train_history"]), 3)
+            self.assertEqual([item["replay_ratio"] for item in result["train_history"]], [1.0, 2.0, 2.0])
             self.assertFalse(result["pass_gate"])
             self.assertTrue(eval_result["evaluate_only"])
             self.assertEqual(eval_result["articulation_mode"], "reduced")
@@ -6353,6 +6444,10 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertTrue(math.isfinite(result["gate_history"][0]["stats"]["battery_perf"]))
 
             early_args = argparse.Namespace(**vars(args))
+            early_args.target_samples = 4
+            early_args.max_iterations = 2
+            early_args.chunk_iterations = 2
+            early_args.angular_fine_tune_start_samples = 2
             early_args.no_screening = False
             early_args.early_reject_first_samples = 2
             early_args.early_reject_first_min_battery_perf = 2.0

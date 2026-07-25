@@ -238,6 +238,10 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     late_replay_start_samples = int(args.late_replay_start_samples)
     if late_replay_ratio is not None and late_replay_start_samples <= 0:
         raise ValueError("late_replay_start_samples must be positive when late_replay_ratio is set")
+    samples_per_iteration = int(args.world_count) * int(args.rollout_steps)
+    late_replay_iteration = (
+        0 if late_replay_ratio is None else int(math.ceil(late_replay_start_samples / float(samples_per_iteration)))
+    )
     command_curriculum_start = float(getattr(args, "command_curriculum_start", g1_recipe.COMMAND_CURRICULUM_START))
     command_curriculum_samples = int(getattr(args, "command_curriculum_samples", g1_recipe.COMMAND_CURRICULUM_SAMPLES))
     angular_fine_tune_start_samples = int(args.angular_fine_tune_start_samples)
@@ -304,11 +308,9 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
     while not bool(args.evaluate_only) and completed_iterations < int(args.max_iterations):
         chunk_iterations = min(int(args.chunk_iterations), int(args.max_iterations) - completed_iterations)
         fine_tune_active = angular_fine_tune_iteration > 0 and completed_iterations >= angular_fine_tune_iteration
-        if (
-            angular_fine_tune_iteration > completed_iterations
-            and completed_iterations + chunk_iterations > angular_fine_tune_iteration
-        ):
-            chunk_iterations = angular_fine_tune_iteration - completed_iterations
+        for transition_iteration in (late_replay_iteration, angular_fine_tune_iteration):
+            if transition_iteration > completed_iterations:
+                chunk_iterations = min(chunk_iterations, transition_iteration - completed_iterations)
         active_env_config = env_config
         active_ppo_config = ppo_config
         current_samples = _samples_for_iteration(args, completed_iterations)
@@ -384,10 +386,9 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
             entry["replay_ratio"] = float(active_ppo_config.replay_ratio)
             train_history.append(entry)
 
-        if (
-            angular_fine_tune_iteration > 0
-            and completed_iterations == angular_fine_tune_iteration
-            and completed_iterations < int(args.max_iterations)
+        if completed_iterations < int(args.max_iterations) and completed_iterations in (
+            late_replay_iteration,
+            angular_fine_tune_iteration,
         ):
             continue
 
@@ -555,6 +556,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "chunk_iterations": int(args.chunk_iterations),
         "late_replay_ratio": None if late_replay_ratio is None else float(late_replay_ratio),
         "late_replay_start_samples": int(late_replay_start_samples),
+        "late_replay_iteration": int(late_replay_iteration),
         "reset_env_between_chunks": bool(args.reset_env_between_chunks),
         "early_reject_schedule": [
             {"samples": int(samples), "min_battery_perf": float(threshold)}
@@ -645,7 +647,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--late-replay-start-samples",
         type=int,
-        default=150 * g1_recipe.WORLD_COUNT * g1_recipe.ROLLOUT_STEPS,
+        default=g1_recipe.ANGULAR_FINE_TUNE_START_SAMPLES,
         help="Sample count at which --late-replay-ratio becomes active.",
     )
     parser.add_argument("--priority-alpha", type=float, default=g1_recipe.PRIORITY_ALPHA)
