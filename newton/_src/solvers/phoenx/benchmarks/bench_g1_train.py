@@ -309,14 +309,6 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
     if cudart is not None and cudart.cudaProfilerStop() != 0:
         raise RuntimeError("cudaProfilerStop failed")
     world = result.env.solver.world
-    reduced = result.env.solver._reduced_articulation
-    basis_enabled_count = None
-    basis_bodies = None
-    if reduced is not None:
-        block = reduced.contact_block_system
-        basis_enabled = block.basis_enabled.numpy() != 0
-        basis_enabled_count = int(np.count_nonzero(basis_enabled))
-        basis_bodies = np.unique(block.basis_body.numpy()[basis_enabled], axis=0).tolist()
     effective_tpw = int(world._tpw_choice.numpy()[0])
     history = result.history
     _validate_finite_history(history)
@@ -380,8 +372,6 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "velocity_iterations": int(args.velocity_iterations),
         "articulation_mode": str(args.articulation_mode),
         "reduced_articulation_path": str(args.reduced_articulation_path),
-        "basis_enabled_count": basis_enabled_count,
-        "basis_bodies": basis_bodies,
         "actuation_model": str(args.actuation_model),
         "reward_mode": str(args.reward_mode),
         "w_alive": float(args.w_alive),

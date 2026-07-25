@@ -1352,6 +1352,21 @@ A corrected production-recipe phase comparison changes the next target:
   rewards. Analytical G1, learning/replay, overflow-page patch, Ant, and Anymal
   tests pass; non-patch disciplines keep their existing kernel.
 
+- The reverted adaptive response-basis prototype left its contacted-body
+  classifier, three device arrays, benchmark readbacks, and test assertions
+  active even though no solver kernel consumed them. Removing that abandoned
+  metadata cuts the page-count kernel median from 16.94 to 4.05 us (-76%).
+  CUDA reduced advance also wrote every link twist to the internal Newton
+  state although subsequent solver phases consume the authoritative PhoenX
+  body storage and the outer-step export overwrites that state. Removing the
+  redundant store cuts external advance from 104.16 to 96.87 us (-7.0%) and
+  fused advance/publish from 234.84 to 229.27 us (-2.4%).
+- A matched Nsight physics trace improves 2.032M to 2.041M steps/s (+0.42%);
+  longer reverse brackets improve median physics 1.504M to 1.518M (+0.96%)
+  and graph-leapfrog training 1.615M to 1.622M samples/s (+0.40%). The
+  production analytical G1 tests, graph rollout, overflow-page reference
+  parity, and a 20-iteration Ant run pass; Ant reaches 0.742 m/s.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

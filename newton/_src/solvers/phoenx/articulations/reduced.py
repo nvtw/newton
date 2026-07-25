@@ -2810,7 +2810,6 @@ def _make_advance_reduced_articulations_warp_ops(
                 omega = wp.spatial_bottom(twist)
                 x_com = wp.transform_get_translation(body_q_com[child])
                 velocity_com = wp.spatial_top(twist) + wp.cross(omega, x_com)
-                public_body_qd[child] = wp.spatial_vector(velocity_com, omega)
                 slot = child + wp.int32(1)
                 bodies.velocity[slot] = velocity_com
                 bodies.angular_velocity[slot] = omega
