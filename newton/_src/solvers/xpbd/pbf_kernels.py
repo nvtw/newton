@@ -65,6 +65,7 @@ def accumulate_boundary_density(
     contact_body_pos: wp.array[wp.vec3],
     contact_normal: wp.array[wp.vec3],
     contact_max: int,
+    num_threads: int,
     inv_radius: float,
     rest_density: float,
     boundary_log: wp.array[float],
@@ -83,34 +84,35 @@ def accumulate_boundary_density(
     corner cases); it over-estimates for acute dihedrals. ``Psi <= 1/2`` always,
     so ``1 - Psi >= 1/2`` and the logarithm is well conditioned.
     """
-    tid = wp.tid()
-
+    # Grid-stride over the contacts actually produced this substep. The
+    # soft-contact buffer is sized for every particle-shape pair, which for a
+    # scene with many shapes is orders of magnitude larger than the real
+    # contact count; launching one thread per slot would dominate the step.
     count = wp.min(contact_max, contact_count[0])
-    if tid >= count:
-        return
 
-    particle_index = contact_particle[tid]
-    if not _is_active_fluid(particle_flags[particle_index]):
-        return
+    for tid in range(wp.tid(), count, num_threads):
+        particle_index = contact_particle[tid]
+        if not _is_active_fluid(particle_flags[particle_index]):
+            continue
 
-    shape_index = contact_shape[tid]
-    body_index = shape_body[shape_index]
+        shape_index = contact_shape[tid]
+        body_index = shape_body[shape_index]
 
-    X_wb = wp.transform_identity()
-    if body_index >= 0:
-        X_wb = body_q[body_index]
+        X_wb = wp.transform_identity()
+        if body_index >= 0:
+            X_wb = body_q[body_index]
 
-    bx = wp.transform_point(X_wb, contact_body_pos[tid])
-    n = contact_normal[tid]
+        bx = wp.transform_point(X_wb, contact_body_pos[tid])
+        n = contact_normal[tid]
 
-    # Distance from the particle centre (not its surface) to the solid, since
-    # the density integral is evaluated at the particle's sample point.
-    q = wp.clamp(wp.dot(n, particle_q[particle_index] - bx) * inv_radius, 0.0, 1.0)
-    if q >= 1.0:
-        return
+        # Distance from the particle centre (not its surface) to the solid,
+        # since the density integral is evaluated at the particle's sample point.
+        q = wp.clamp(wp.dot(n, particle_q[particle_index] - bx) * inv_radius, 0.0, 1.0)
+        if q >= 1.0:
+            continue
 
-    wp.atomic_add(boundary_log, particle_index, -wp.log(1.0 - _psi(q)))
-    wp.atomic_add(boundary_grad, particle_index, n * (rest_density * inv_radius * _dpsi(q)))
+        wp.atomic_add(boundary_log, particle_index, -wp.log(1.0 - _psi(q)))
+        wp.atomic_add(boundary_grad, particle_index, n * (rest_density * inv_radius * _dpsi(q)))
 
 
 @wp.kernel

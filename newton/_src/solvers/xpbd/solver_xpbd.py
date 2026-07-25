@@ -658,6 +658,37 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             device=model.device,
                         )
 
+                    # Solid boundaries contribute no neighbors to the
+                    # density sum; recover their contribution from the
+                    # particle-shape contacts before accumulating.
+                    self._pbf_boundary_log.zero_()
+                    self._pbf_boundary_grad.zero_()
+                    if self.pbf_boundary_density and model.shape_count and contacts is not None:
+                        wp.launch(
+                            kernel=accumulate_boundary_density,
+                            # Real contacts are far fewer than the
+                            # particle-times-shape slot count the buffer is
+                            # sized for; grid-stride over the actual count.
+                            dim=min(contacts.soft_contact_max, model.particle_count),
+                            inputs=[
+                                particle_q,
+                                model.particle_flags,
+                                state_out.body_q,
+                                model.shape_body,
+                                contacts.soft_contact_count,
+                                contacts.soft_contact_particle,
+                                contacts.soft_contact_shape,
+                                contacts.soft_contact_body_pos,
+                                contacts.soft_contact_normal,
+                                contacts.soft_contact_max,
+                                min(contacts.soft_contact_max, model.particle_count),
+                                self.pbf_inv_radius,
+                                self.pbf_rest_density,
+                            ],
+                            outputs=[self._pbf_boundary_log, self._pbf_boundary_grad],
+                            device=model.device,
+                        )
+
             if model.body_count:
                 body_q = state_out.body_q
                 body_qd = state_out.body_qd
@@ -735,33 +766,6 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             if i > 0 and self._pbf_rebuild_grid_per_iteration:
                                 with wp.ScopedDevice(model.device):
                                     model.particle_grid.build(particle_q, radius=grid_search_radius)
-
-                            # Solid boundaries contribute no neighbors to the
-                            # density sum; recover their contribution from the
-                            # particle-shape contacts before accumulating.
-                            self._pbf_boundary_log.zero_()
-                            self._pbf_boundary_grad.zero_()
-                            if self.pbf_boundary_density and model.shape_count and contacts is not None:
-                                wp.launch(
-                                    kernel=accumulate_boundary_density,
-                                    dim=contacts.soft_contact_max,
-                                    inputs=[
-                                        particle_q,
-                                        model.particle_flags,
-                                        body_q,
-                                        model.shape_body,
-                                        contacts.soft_contact_count,
-                                        contacts.soft_contact_particle,
-                                        contacts.soft_contact_shape,
-                                        contacts.soft_contact_body_pos,
-                                        contacts.soft_contact_normal,
-                                        contacts.soft_contact_max,
-                                        self.pbf_inv_radius,
-                                        self.pbf_rest_density,
-                                    ],
-                                    outputs=[self._pbf_boundary_log, self._pbf_boundary_grad],
-                                    device=model.device,
-                                )
 
                             wp.launch(
                                 kernel=calculate_density,
