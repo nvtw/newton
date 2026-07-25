@@ -69,6 +69,10 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     element_interaction_data_make,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import IncrementalContactPartitioner
+from newton._src.solvers.phoenx.helpers.data_packing import (
+    reinterpret_float_as_int,
+    reinterpret_int_as_float,
+)
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 
 _POINTS_PER_PAGE = 32
@@ -1707,9 +1711,9 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
 
 
 @functools.cache
-def _make_solve_patch_contact_tile_kernel(max_dofs: int):
+def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool):
     packed_width = max_dofs
-    module = wp.get_module(f"reduced_contact_patch_solve_{max_dofs}_fp32")
+    module = wp.get_module(f"reduced_contact_patch_solve_{max_dofs}_{int(build_rows)}_fp32")
 
     def _solve_patch_contact_tile_kernel(
         columns: ContactColumnContainer,
@@ -1729,6 +1733,8 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int):
         packed_response: wp.array2d[wp.float32],
         patch_lambda: wp.array2d[wp.vec2],
         normal_load: wp.array2d[wp.float32],
+        row_body_cache: wp.array2d[wp.int32],
+        row_cross_mass_cache: wp.array2d[wp.spatial_vector],
         bodies: BodyContainer,
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
@@ -1795,6 +1801,7 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int):
                 DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
             )
 
+        # Row body/wrench scratch is dead after construction, so resident pages cache their invariant contact mass there.
         for iteration in range(iterations):
             for point_offset in range(active_point_count):
                 point = wp.int32(point_offset)
@@ -1806,7 +1813,16 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int):
                 jv = row_velocity[packed_articulation, point] + wp.tile_extract(
                     wp.tile_sum(jacobian * generalized_delta), 0
                 )
-                inverse_mass = wp.tile_extract(wp.tile_sum(jacobian * response), 0)
+                inverse_mass = wp.float32(0.0)
+                if wp.static(build_rows):
+                    if iteration == wp.int32(0):
+                        inverse_mass = wp.tile_extract(wp.tile_sum(jacobian * response), 0)
+                        if lane == wp.int32(0):
+                            row_body_cache[packed_articulation, point] = reinterpret_float_as_int(inverse_mass)
+                    elif lane == wp.int32(0):
+                        inverse_mass = reinterpret_int_as_float(row_body_cache[packed_articulation, point])
+                elif lane == wp.int32(0):
+                    inverse_mass = reinterpret_int_as_float(row_body_cache[packed_articulation, point])
                 delta_n = wp.float32(0.0)
                 if lane == wp.int32(0):
                     contact = point_contact[packed_articulation, point]
@@ -1865,9 +1881,28 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int):
                 jv2 = row_velocity[packed_articulation, row + wp.int32(1)] + wp.tile_extract(
                     wp.tile_sum(jacobian2 * generalized_delta), 0
                 )
-                k00 = wp.tile_extract(wp.tile_sum(jacobian1 * response1), 0)
-                k01 = wp.tile_extract(wp.tile_sum(jacobian1 * response2), 0)
-                k11 = wp.tile_extract(wp.tile_sum(jacobian2 * response2), 0)
+                k00 = wp.float32(0.0)
+                k01 = wp.float32(0.0)
+                k11 = wp.float32(0.0)
+                if wp.static(build_rows):
+                    if iteration == wp.int32(0):
+                        k00 = wp.tile_extract(wp.tile_sum(jacobian1 * response1), 0)
+                        k01 = wp.tile_extract(wp.tile_sum(jacobian1 * response2), 0)
+                        k11 = wp.tile_extract(wp.tile_sum(jacobian2 * response2), 0)
+                        if lane == wp.int32(0):
+                            row_body_cache[packed_articulation, row] = reinterpret_float_as_int(k00)
+                            row_body_cache[packed_articulation, row + wp.int32(1)] = reinterpret_float_as_int(k11)
+                            row_cross_mass_cache[packed_articulation, row] = wp.spatial_vector(
+                                wp.vec3(k01, 0.0, 0.0), wp.vec3(0.0)
+                            )
+                    elif lane == wp.int32(0):
+                        k00 = reinterpret_int_as_float(row_body_cache[packed_articulation, row])
+                        k01 = wp.spatial_top(row_cross_mass_cache[packed_articulation, row])[0]
+                        k11 = reinterpret_int_as_float(row_body_cache[packed_articulation, row + wp.int32(1)])
+                elif lane == wp.int32(0):
+                    k00 = reinterpret_int_as_float(row_body_cache[packed_articulation, row])
+                    k01 = wp.spatial_top(row_cross_mass_cache[packed_articulation, row])[0]
+                    k11 = reinterpret_int_as_float(row_body_cache[packed_articulation, row + wp.int32(1)])
 
                 delta_t = wp.vec2f(0.0, 0.0)
                 if lane == wp.int32(0):
@@ -2054,7 +2089,10 @@ class ReducedContactBlockSystem:
             patch_rows_requested = patch_rows_override
         self.patch_rows = allow_patch_rows and self.device.is_cuda and patch_rows_requested
         if self.patch_rows:
-            self.solve_kernel = _make_solve_patch_contact_tile_kernel(self.contact_dof_width)
+            self.solve_kernel = {
+                build_rows: _make_solve_patch_contact_tile_kernel(self.contact_dof_width, build_rows)
+                for build_rows in (False, True)
+            }
         else:
             self.solve_kernel = _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS[self.contact_dof_width]
         self.build_rows_kernel = _get_build_packed_rows_kernel(self.patch_rows)
@@ -2557,7 +2595,7 @@ class ReducedContactBlockSystem:
                 return
             if self.patch_rows:
                 wp.launch_tiled(
-                    self.solve_kernel,
+                    self.solve_kernel[build_rows],
                     dim=[self.articulation_count],
                     inputs=[
                         columns,
@@ -2577,6 +2615,8 @@ class ReducedContactBlockSystem:
                         self.packed_response,
                         self.patch_lambda,
                         self.normal_load,
+                        self.row_body,
+                        self.row_wrench,
                         bodies,
                         wp.int32(self.max_depth),
                         self.articulation_depth_start,

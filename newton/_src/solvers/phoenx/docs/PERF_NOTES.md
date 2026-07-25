@@ -1341,6 +1341,17 @@ A corrected production-recipe phase comparison changes the next target:
   dynamics, G1 learning/replay, Ant, and Anymal tests pass; the reference and
   high-fidelity Coriolis paths are unchanged.
 
+- Patch-contact effective masses are invariant while a packed row page is
+  resident, but the solver recomputed their tile reductions in every biased
+  iteration and again during relaxation. Fresh-row and cached-page kernels now
+  reuse dead row-construction scratch to preserve those exact float values.
+  Nsight reduces the cached solve from about 93.6 to 76.4 us (-18%) and total
+  patch solve time by 6.8%. A reversed production G1 graph-leapfrog bracket
+  improves rollout throughput about 0.48%; a 32-step production trajectory is
+  bit-identical across joint/body state, contact impulses, observations, and
+  rewards. Analytical G1, learning/replay, overflow-page patch, Ant, and Anymal
+  tests pass; non-patch disciplines keep their existing kernel.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
