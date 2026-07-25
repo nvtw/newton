@@ -33,7 +33,9 @@ from .kernels import (
     update_body_velocities,
 )
 from .pbf_kernels import (
+    accumulate_boundary_density,
     apply_damping,
+    build_neighbor_list,
     apply_pbf_deltas,
     apply_vorticity,
     calculate_density,
@@ -170,6 +172,17 @@ class SolverXPBD(SolverBase, CouplingInterface):
 
     """
 
+    @property
+    def pbf_neighbor_overflow_count(self) -> int:
+        """Fluid neighbors dropped so far because ``pbf_max_neighbors`` was exceeded.
+
+        Nonzero means some particles saw a truncated neighborhood and read as
+        less dense than they are. Raise ``pbf_max_neighbors`` if this grows.
+        """
+        if not getattr(self, "pbf_enabled", False):
+            return 0
+        return int(self._pbf_neighbor_overflow.numpy()[0])
+
     @deprecate_nonkeyword_arguments
     def __init__(
         self,
@@ -195,6 +208,8 @@ class SolverXPBD(SolverBase, CouplingInterface):
         pbf_vorticity_confinement: float = 0.0,
         pbf_cfl_coefficient: float = 1.0,
         pbf_damping: float = 0.0,
+        pbf_boundary_density: bool = True,
+        pbf_max_neighbors: int = 64,
         deterministic: wp.DeterministicMode | None = None,
     ):
         """Initialize the XPBD solver.
@@ -231,6 +246,20 @@ class SolverXPBD(SolverBase, CouplingInterface):
             pbf_cfl_coefficient: Maximum relative normal displacement as a
                 fraction of the fluid neighbor radius.
             pbf_damping: Fluid velocity damping coefficient.
+            pbf_boundary_density: Whether solid boundaries contribute to the
+                fluid density. Without it the density sum omits the part of a
+                particle's kernel support occupied by a solid, under-estimating
+                density near walls so the solver never pushes back and
+                particles pile into a compressed layer against the surface.
+                Requires particle-shape contacts generated out to the fluid
+                neighbor radius; a smaller ``soft_contact_margin`` truncates
+                the correction. Disable only to reproduce the prior behavior.
+            pbf_max_neighbors: Capacity of the cached per-particle fluid
+                neighbor list, built once per substep and replayed by the
+                density, pressure and vorticity kernels. Costs
+                ``4 * particle_count * pbf_max_neighbors`` bytes. Neighbors
+                beyond the cap are dropped; see
+                :attr:`pbf_neighbor_overflow_count` to detect it.
             deterministic: Opt-in determinism for this solver's atomic-emitting
                 kernel module. Pass a :class:`warp.DeterministicMode`, or
                 ``None`` (default) to inherit the current
@@ -315,6 +344,15 @@ class SolverXPBD(SolverBase, CouplingInterface):
             self.pbf_rest_density = rest_density
             self.pbf_lambda_scale = 1.0 / density_constraint_scale
 
+            self.pbf_boundary_density = pbf_boundary_density
+            # Rebuilding the neighbor grid inside the iteration loop is a large
+            # fraction of the fluid step. Warp's hash grid searches the 3x3x3
+            # cell neighborhood around a query point, so a grid built at the
+            # start of the substep already tolerates drift on the order of half
+            # a cell -- more than a particle moves across one substep's
+            # iterations. Kept as an attribute so the assumption can be
+            # A/B-tested rather than taken on faith.
+            self._pbf_rebuild_grid_per_iteration = False
             self.pbf_relaxation = pbf_relaxation
             self.pbf_viscosity = pbf_viscosity
             self.pbf_cfl_coefficient = pbf_cfl_coefficient
@@ -353,6 +391,15 @@ class SolverXPBD(SolverBase, CouplingInterface):
             self._pbf_deltas = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_weights = wp.zeros(n, dtype=float, device=model.device)
             self._pbf_accum_delta = wp.zeros(n, dtype=wp.vec3, device=model.device)
+            self._pbf_boundary_log = wp.zeros(n, dtype=float, device=model.device)
+            self._pbf_boundary_grad = wp.zeros(n, dtype=wp.vec3, device=model.device)
+            # A fluid at rest spacing holds ~26 neighbors within the support
+            # radius; a violent dam break peaks near 38. 64 leaves ample
+            # headroom, and overflow is counted rather than silently dropped.
+            self._pbf_max_neighbors = pbf_max_neighbors
+            self._pbf_neighbors = wp.zeros(n * pbf_max_neighbors, dtype=wp.int32, device=model.device)
+            self._pbf_neighbor_counts = wp.zeros(n, dtype=wp.int32, device=model.device)
+            self._pbf_neighbor_overflow = wp.zeros(1, dtype=wp.int32, device=model.device)
             self._pbf_curl = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_curl_mag = wp.zeros(n, dtype=float, device=model.device)
 
@@ -588,6 +635,28 @@ class SolverXPBD(SolverBase, CouplingInterface):
 
                 if self.pbf_enabled:
                     self._pbf_accum_delta.zero_()
+                    # Cache the fluid neighborhood once for the whole substep;
+                    # the density, pressure and vorticity kernels all replay it.
+                    if model.particle_grid is not None:
+                        wp.launch(
+                            kernel=build_neighbor_list,
+                            dim=model.particle_count,
+                            inputs=[
+                                model.particle_grid.id,
+                                state_out.particle_q,
+                                model.particle_flags,
+                                self.pbf_contact_distance_sq,
+                                self.pbf_particle_contact_distance,
+                                self._pbf_max_neighbors,
+                                model.particle_count,
+                            ],
+                            outputs=[
+                                self._pbf_neighbors,
+                                self._pbf_neighbor_counts,
+                                self._pbf_neighbor_overflow,
+                            ],
+                            device=model.device,
+                        )
 
             if model.body_count:
                 body_q = state_out.body_q
@@ -663,11 +732,36 @@ class SolverXPBD(SolverBase, CouplingInterface):
 
                         # --- PBF density calculation ---
                         if self.pbf_enabled and model.particle_grid is not None:
-                            # Rebuild hash grid each iteration so neighbor
-                            # queries reflect the corrected positions.
-                            if i > 0:
+                            if i > 0 and self._pbf_rebuild_grid_per_iteration:
                                 with wp.ScopedDevice(model.device):
                                     model.particle_grid.build(particle_q, radius=grid_search_radius)
+
+                            # Solid boundaries contribute no neighbors to the
+                            # density sum; recover their contribution from the
+                            # particle-shape contacts before accumulating.
+                            self._pbf_boundary_log.zero_()
+                            self._pbf_boundary_grad.zero_()
+                            if self.pbf_boundary_density and model.shape_count and contacts is not None:
+                                wp.launch(
+                                    kernel=accumulate_boundary_density,
+                                    dim=contacts.soft_contact_max,
+                                    inputs=[
+                                        particle_q,
+                                        model.particle_flags,
+                                        body_q,
+                                        model.shape_body,
+                                        contacts.soft_contact_count,
+                                        contacts.soft_contact_particle,
+                                        contacts.soft_contact_shape,
+                                        contacts.soft_contact_body_pos,
+                                        contacts.soft_contact_normal,
+                                        contacts.soft_contact_max,
+                                        self.pbf_inv_radius,
+                                        self.pbf_rest_density,
+                                    ],
+                                    outputs=[self._pbf_boundary_log, self._pbf_boundary_grad],
+                                    device=model.device,
+                                )
 
                             wp.launch(
                                 kernel=calculate_density,
@@ -676,6 +770,9 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     model.particle_grid.id,
                                     particle_q,
                                     model.particle_flags,
+                                    self._pbf_neighbors,
+                                    self._pbf_neighbor_counts,
+                                    model.particle_count,
                                     self.pbf_contact_distance_sq,
                                     self.pbf_inv_radius,
                                     self.pbf_spiky1,
@@ -683,6 +780,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     self.pbf_rest_density,
                                     self.pbf_lambda_scale,
                                     self.pbf_surface_tension,
+                                    self._pbf_boundary_log,
                                 ],
                                 outputs=[self._pbf_densities, self._pbf_surface_normals],
                                 device=model.device,
@@ -699,8 +797,12 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     particle_q,
                                     model.particle_flags,
                                     model.particle_inv_mass,
+                                    self._pbf_neighbors,
+                                    self._pbf_neighbor_counts,
+                                    model.particle_count,
                                     self._pbf_densities,
                                     self._pbf_surface_normals,
+                                    self._pbf_boundary_grad,
                                     pbf_delta_pos,
                                     self.pbf_contact_distance_sq,
                                     self.pbf_inv_radius,
@@ -1018,6 +1120,9 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             particle_q,
                             particle_qd,
                             model.particle_flags,
+                            self._pbf_neighbors,
+                            self._pbf_neighbor_counts,
+                            model.particle_count,
                             self.pbf_contact_distance_sq,
                             self.pbf_inv_radius,
                             self.pbf_spiky2,
@@ -1035,6 +1140,9 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             model.particle_flags,
                             self._pbf_curl,
                             self._pbf_curl_mag,
+                            self._pbf_neighbors,
+                            self._pbf_neighbor_counts,
+                            model.particle_count,
                             self.pbf_contact_distance_sq,
                             self.pbf_inv_radius,
                             self.pbf_spiky2,

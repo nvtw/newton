@@ -28,11 +28,154 @@ def _cohesion_w(distance: float, cohesion1: float, cohesion2: float, inv_radius:
     return cohesion1 * q * q * q + cohesion2 * q * q - 1.0
 
 
+@wp.func
+def _psi(q: float) -> float:
+    """Fraction of the kernel's weight lying inside a solid half-space.
+
+    Closed form of ``int_solid W dV / int_ball W dV`` for the PBF spiky kernel
+    ``W(r) = spiky1 (1 - r/h)^2``, with ``q = d/h`` the distance from the
+    particle centre to the surface. Derived by integrating the projected slice
+    moment ``A0(z) = 2 pi int_|z|^h t W(t) dt`` over the solid side:
+
+        Psi(q) = 1/2 - (5/4) q + (5/2) q^3 - (5/2) q^4 + (3/4) q^5
+
+    ``Psi(0) = 1/2`` exactly (half-space symmetry) and ``Psi(1) = Psi'(1) = 0``,
+    so the boundary density vanishes smoothly at the support radius.
+    """
+    c = wp.clamp(q, 0.0, 1.0)
+    return 0.5 + c * (-1.25 + c * c * (2.5 + c * (-2.5 + 0.75 * c)))
+
+
+@wp.func
+def _dpsi(q: float) -> float:
+    """``d Psi / d q``; multiply by ``rest_density / h`` for ``d rho_B / d d``."""
+    c = wp.clamp(q, 0.0, 1.0)
+    return -1.25 + c * c * (7.5 + c * (-10.0 + 3.75 * c))
+
+
+@wp.kernel
+def accumulate_boundary_density(
+    particle_q: wp.array[wp.vec3],
+    particle_flags: wp.array[wp.int32],
+    body_q: wp.array[wp.transform],
+    shape_body: wp.array[int],
+    contact_count: wp.array[int],
+    contact_particle: wp.array[int],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    contact_max: int,
+    inv_radius: float,
+    rest_density: float,
+    boundary_log: wp.array[float],
+    boundary_grad: wp.array[wp.vec3],
+):
+    """Accumulate the solid boundary's contribution to each fluid particle's density.
+
+    A particle near a solid has part of its kernel support occupied by the
+    solid, where there are no fluid neighbours to sum, so the plain neighbour
+    sum under-estimates its density and the pressure solver fails to push back.
+    ``rho_B = rest_density * Psi(d/h)`` supplies exactly the missing weight.
+
+    Multiple boundaries are combined as a union, ``1 - prod(1 - Psi_i)``,
+    accumulated here in log space so it composes with an atomic add. This is
+    exact for a single boundary and for mutually orthogonal ones (the box and
+    corner cases); it over-estimates for acute dihedrals. ``Psi <= 1/2`` always,
+    so ``1 - Psi >= 1/2`` and the logarithm is well conditioned.
+    """
+    tid = wp.tid()
+
+    count = wp.min(contact_max, contact_count[0])
+    if tid >= count:
+        return
+
+    particle_index = contact_particle[tid]
+    if not _is_active_fluid(particle_flags[particle_index]):
+        return
+
+    shape_index = contact_shape[tid]
+    body_index = shape_body[shape_index]
+
+    X_wb = wp.transform_identity()
+    if body_index >= 0:
+        X_wb = body_q[body_index]
+
+    bx = wp.transform_point(X_wb, contact_body_pos[tid])
+    n = contact_normal[tid]
+
+    # Distance from the particle centre (not its surface) to the solid, since
+    # the density integral is evaluated at the particle's sample point.
+    q = wp.clamp(wp.dot(n, particle_q[particle_index] - bx) * inv_radius, 0.0, 1.0)
+    if q >= 1.0:
+        return
+
+    wp.atomic_add(boundary_log, particle_index, -wp.log(1.0 - _psi(q)))
+    wp.atomic_add(boundary_grad, particle_index, n * (rest_density * inv_radius * _dpsi(q)))
+
+
+@wp.kernel
+def build_neighbor_list(
+    grid: wp.uint64,
+    particle_q: wp.array[wp.vec3],
+    particle_flags: wp.array[wp.int32],
+    contact_distance_sq: float,
+    radius: float,
+    max_neighbors: int,
+    num_particles: int,
+    neighbors: wp.array[wp.int32],
+    neighbor_counts: wp.array[wp.int32],
+    overflow: wp.array[wp.int32],
+):
+    """Cache each fluid particle's neighbors once per substep.
+
+    The density, pressure and vorticity kernels all traverse the neighborhood,
+    several times per substep each. Walking the hash grid means visiting 27
+    cells and rejecting most candidates every single time; doing that traversal
+    once and replaying the surviving indices removes the dominant cost of the
+    fluid step.
+
+    Indices are stored strided (``k * num_particles + i``) so consecutive
+    threads read consecutive addresses. ``overflow`` counts neighbors dropped
+    because a particle exceeded ``max_neighbors``, so truncation is observable
+    rather than silently altering the simulation.
+    """
+    i = wp.hash_grid_point_id(grid, wp.tid())
+    if i < 0:
+        return
+    if not _is_active_fluid(particle_flags[i]):
+        neighbor_counts[i] = 0
+        return
+
+    xi = particle_q[i]
+    query = wp.hash_grid_query(grid, xi, radius)
+    j = int(0)
+    count = int(0)
+
+    while wp.hash_grid_query_next(query, j):
+        if j == i or not _is_active_fluid(particle_flags[j]):
+            continue
+
+        distance_sq = wp.length_sq(xi - particle_q[j])
+        if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
+            continue
+
+        if count < max_neighbors:
+            neighbors[count * num_particles + i] = j
+            count += 1
+        else:
+            wp.atomic_add(overflow, 0, 1)
+
+    neighbor_counts[i] = count
+
+
 @wp.kernel
 def calculate_density(
     grid: wp.uint64,
     particle_q: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
+    neighbors: wp.array[wp.int32],
+    neighbor_counts: wp.array[wp.int32],
+    num_particles: int,
     contact_distance_sq: float,
     inv_radius: float,
     spiky1: float,
@@ -40,6 +183,7 @@ def calculate_density(
     rest_density: float,
     lambda_scale: float,
     surface_tension: float,
+    boundary_log: wp.array[float],
     densities: wp.array[float],
     surface_normals: wp.array[wp.vec3],
 ):
@@ -48,18 +192,20 @@ def calculate_density(
         return
 
     xi = particle_q[i]
-    radius = 1.0 / inv_radius
-    query = wp.hash_grid_query(grid, xi, radius)
-    j = int(0)
-    density = float(0.0)
+    # Solid boundaries occupy part of the kernel support and contribute no
+    # neighbours; seed the sum with the density they stand in for. The union
+    # form collapses to 0 when no boundary is in range (exp(0) - 1 == 0).
+    density = rest_density * (1.0 - wp.exp(-boundary_log[i]))
     normal = wp.vec3(0.0)
 
-    while wp.hash_grid_query_next(query, j):
-        if j == i or not _is_active_fluid(particle_flags[j]):
-            continue
+    count = neighbor_counts[i]
+    for k in range(count):
+        j = neighbors[k * num_particles + i]
 
         xij = xi - particle_q[j]
         distance_sq = wp.length_sq(xij)
+        # The list is built once per substep but positions move across the
+        # iterations, so a cached neighbour may have drifted out of range.
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
             continue
 
@@ -79,8 +225,12 @@ def solve_density(
     particle_q: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
     particle_inv_mass: wp.array[float],
+    neighbors: wp.array[wp.int32],
+    neighbor_counts: wp.array[wp.int32],
+    num_particles: int,
     densities: wp.array[float],
     surface_normals: wp.array[wp.vec3],
+    boundary_grad: wp.array[wp.vec3],
     accumulated_delta: wp.array[wp.vec3],
     contact_distance_sq: float,
     inv_radius: float,
@@ -112,14 +262,15 @@ def solve_density(
     normal_i = surface_normals[i]
     radius = 1.0 / inv_radius
     cfl_radius = radius * cfl_coefficient
-    query = wp.hash_grid_query(grid, xi, radius)
-    j = int(0)
-    delta = wp.vec3(0.0)
+    # Gradient of the boundary density term, the counterpart of the fluid
+    # neighbour gradients below. Without it the constraint and its derivative
+    # disagree and the solver overshoots against walls.
+    delta = -boundary_grad[i] * density_i
     weight = float(0.0)
 
-    while wp.hash_grid_query_next(query, j):
-        if j == i or not _is_active_fluid(particle_flags[j]):
-            continue
+    count = neighbor_counts[i]
+    for k in range(count):
+        j = neighbors[k * num_particles + i]
 
         xij = xi - particle_q[j]
         distance_sq = wp.length_sq(xij)
@@ -195,6 +346,9 @@ def vorticity_confinement(
     particle_q: wp.array[wp.vec3],
     particle_qd: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
+    neighbors: wp.array[wp.int32],
+    neighbor_counts: wp.array[wp.int32],
+    num_particles: int,
     contact_distance_sq: float,
     inv_radius: float,
     spiky2: float,
@@ -207,13 +361,11 @@ def vorticity_confinement(
 
     xi = particle_q[i]
     vi = particle_qd[i]
-    query = wp.hash_grid_query(grid, xi, 1.0 / inv_radius)
-    j = int(0)
     value = wp.vec3(0.0)
 
-    while wp.hash_grid_query_next(query, j):
-        if j == i or not _is_active_fluid(particle_flags[j]):
-            continue
+    count = neighbor_counts[i]
+    for k in range(count):
+        j = neighbors[k * num_particles + i]
         xij = xi - particle_q[j]
         distance_sq = wp.length_sq(xij)
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
@@ -233,6 +385,9 @@ def apply_vorticity(
     particle_flags: wp.array[wp.int32],
     curl: wp.array[wp.vec3],
     curl_magnitude: wp.array[float],
+    neighbors: wp.array[wp.int32],
+    neighbor_counts: wp.array[wp.int32],
+    num_particles: int,
     contact_distance_sq: float,
     inv_radius: float,
     spiky2: float,
@@ -246,14 +401,12 @@ def apply_vorticity(
         return
 
     xi = particle_q[i]
-    query = wp.hash_grid_query(grid, xi, 1.0 / inv_radius)
-    j = int(0)
     gradient = wp.vec3(0.0)
     weight = float(0.0)
 
-    while wp.hash_grid_query_next(query, j):
-        if j == i or not _is_active_fluid(particle_flags[j]):
-            continue
+    count = neighbor_counts[i]
+    for k in range(count):
+        j = neighbors[k * num_particles + i]
         xij = xi - particle_q[j]
         distance_sq = wp.length_sq(xij)
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:

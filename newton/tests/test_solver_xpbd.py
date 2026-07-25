@@ -18,6 +18,7 @@ from newton._src.solvers.xpbd.kernels import apply_rigid_restitution
 from newton._src.solvers.xpbd.pbf_kernels import (
     apply_pbf_deltas,
     apply_vorticity,
+    build_neighbor_list,
     calculate_density,
     solve_density,
     vorticity_confinement,
@@ -1727,6 +1728,30 @@ def test_position_based_fluids_reference_stages(test, device):
     model.particle_grid.build(state.particle_q, radius=radius)
     densities = wp.zeros(particle_count, dtype=float, device=device)
     normals = wp.zeros(particle_count, dtype=wp.vec3, device=device)
+    # No solids in this scene, so the boundary density term is identically zero.
+    boundary_log = wp.zeros(particle_count, dtype=float, device=device)
+    boundary_grad = wp.zeros(particle_count, dtype=wp.vec3, device=device)
+    # Every particle is a neighbour of every other in this tiny scene; build the
+    # cached list the solver would normally build once per substep.
+    max_neighbors = 64
+    neighbors = wp.zeros(particle_count * max_neighbors, dtype=wp.int32, device=device)
+    neighbor_counts = wp.zeros(particle_count, dtype=wp.int32, device=device)
+    overflow = wp.zeros(1, dtype=wp.int32, device=device)
+    wp.launch(
+        build_neighbor_list,
+        dim=particle_count,
+        inputs=[
+            model.particle_grid.id,
+            state.particle_q,
+            model.particle_flags,
+            contact_distance_sq,
+            radius,
+            max_neighbors,
+            particle_count,
+        ],
+        outputs=[neighbors, neighbor_counts, overflow],
+        device=device,
+    )
     wp.launch(
         calculate_density,
         dim=particle_count,
@@ -1734,6 +1759,9 @@ def test_position_based_fluids_reference_stages(test, device):
             model.particle_grid.id,
             state.particle_q,
             model.particle_flags,
+            neighbors,
+            neighbor_counts,
+            particle_count,
             contact_distance_sq,
             inv_radius,
             spiky1,
@@ -1741,6 +1769,7 @@ def test_position_based_fluids_reference_stages(test, device):
             rest_density,
             lambda_scale,
             surface_tension,
+            boundary_log,
         ],
         outputs=[densities, normals],
         device=device,
@@ -1774,6 +1803,9 @@ def test_position_based_fluids_reference_stages(test, device):
             state.particle_q,
             state.particle_qd,
             model.particle_flags,
+            neighbors,
+            neighbor_counts,
+            particle_count,
             contact_distance_sq,
             inv_radius,
             spiky2,
@@ -1823,6 +1855,9 @@ def test_position_based_fluids_reference_stages(test, device):
             model.particle_flags,
             curl,
             curl_magnitude,
+            neighbors,
+            neighbor_counts,
+            particle_count,
             contact_distance_sq,
             inv_radius,
             spiky2,
@@ -1863,8 +1898,12 @@ def test_position_based_fluids_reference_stages(test, device):
             state.particle_q,
             model.particle_flags,
             model.particle_inv_mass,
+            neighbors,
+            neighbor_counts,
+            particle_count,
             densities,
             normals,
+            boundary_grad,
             accumulated_delta,
             contact_distance_sq,
             inv_radius,
@@ -1934,6 +1973,85 @@ def test_position_based_fluids_reference_stages(test, device):
 devices = get_test_devices()
 
 
+def test_pbf_boundary_density_relieves_wall_compression(test, device):
+    """Fluid resting on a wall must not be crushed into a compressed monolayer.
+
+    Without a boundary density term the neighbour sum omits the part of the
+    kernel support occupied by the solid, so near-wall particles read as
+    under-dense, the solver never pushes back, and they pile up against the
+    surface at well under the bulk spacing. Compares median nearest-neighbour
+    distance in the wall layer against the bulk, with and without the term.
+    """
+    spacing = 0.025
+    h = 2.0 * (spacing * 0.9 * 0.6 / 0.6)
+
+    def settle(boundary_density):
+        builder = newton.ModelBuilder()
+        builder.default_particle_radius = spacing * 0.5
+        builder.add_particle_grid(
+            pos=wp.vec3(-0.15, -0.15, spacing),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0),
+            dim_x=12,
+            dim_y=12,
+            dim_z=22,
+            cell_x=spacing,
+            cell_y=spacing,
+            cell_z=spacing,
+            mass=1.0,
+            jitter=spacing * 0.1,
+            radius_mean=spacing * 0.5,
+            flags=int(newton.ParticleFlags.ACTIVE | newton.ParticleFlags.FLUID),
+        )
+        cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, is_visible=False)
+        for plane in ((1.0, 0.0, 0.0, 0.15), (-1.0, 0.0, 0.0, 0.15), (0.0, 1.0, 0.0, 0.15), (0.0, -1.0, 0.0, 0.15)):
+            builder.add_shape_plane(plane, width=0.0, length=0.0, cfg=cfg)
+        builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.0))
+
+        model = builder.finalize(device=device)
+        model.set_gravity((0.0, 0.0, -9.81))
+        pipeline = newton.CollisionPipeline(model, soft_contact_margin=h)
+        solver = newton.solvers.SolverXPBD(
+            model,
+            iterations=4,
+            pbf_particle_contact_distance=h,
+            pbf_fluid_rest_distance=2.0 * spacing * 0.9 * 0.6,
+            pbf_viscosity=0.0001,
+            pbf_boundary_density=boundary_density,
+        )
+        s0, s1 = model.state(), model.state()
+        control, contacts = model.control(), pipeline.contacts()
+        for _ in range(60 * 8):
+            s0.clear_forces()
+            pipeline.collide(s0, contacts)
+            solver.step(s0, s1, control, contacts, 1.0 / 60.0 / 8.0)
+            s0, s1 = s1, s0
+        return s0.particle_q.numpy()
+
+    def wall_layer_compression(q):
+        d = np.linalg.norm(q[:, None, :] - q[None, :, :], axis=2)
+        np.fill_diagonal(d, np.inf)
+        nn = d.min(axis=1)
+        # only particles away from the side walls, so the ground is the only boundary
+        core = (np.abs(q[:, 0]) < 0.15 - h) & (np.abs(q[:, 1]) < 0.15 - h)
+        wall = core & (q[:, 2] < 0.5 * h)
+        # band the bulk reference so the free surface does not skew the spacing
+        bulk = core & (q[:, 2] > h) & (q[:, 2] < 2.5 * h)
+        test.assertGreater(wall.sum(), 20, "no particles resolved in the wall layer")
+        test.assertGreater(bulk.sum(), 20, "no particles resolved in the bulk")
+        return float(np.median(nn[wall]) / np.median(nn[bulk]))
+
+    without = wall_layer_compression(settle(False))
+    with_bd = wall_layer_compression(settle(True))
+
+    # Without the term the wall layer is measurably crushed; with it, close to bulk.
+    test.assertLess(without, 0.98, f"expected wall compression without boundary density, got {without:.3f}")
+    test.assertGreater(with_bd, 0.98, f"wall layer still compressed with boundary density: {with_bd:.3f}")
+    test.assertGreater(
+        with_bd - without, 0.02, f"boundary density barely helped: {without:.3f} -> {with_bd:.3f}"
+    )
+
+
 class TestSolverXPBD(unittest.TestCase):
     pass
 
@@ -1942,6 +2060,15 @@ add_function_test(
     TestSolverXPBD,
     "test_position_based_fluids",
     test_position_based_fluids,
+    devices=devices,
+    check_output=False,
+)
+
+
+add_function_test(
+    TestSolverXPBD,
+    "test_pbf_boundary_density_relieves_wall_compression",
+    test_pbf_boundary_density_relieves_wall_compression,
     devices=devices,
     check_output=False,
 )
