@@ -2695,7 +2695,9 @@ def _make_advance_reduced_articulations_warp_ops(
                             control_torque + wp.cross(x_com, control_force),
                         )
                 body_velocity[child] = velocity
-                body_coriolis[child] = coriolis
+                # External-only passes have no consumer; omitting the store lets CUDA remove the recurrence.
+                if wp.static(include_coriolis):
+                    body_coriolis[child] = coriolis
                 body_bias[child] = bias
             previous_velocity = velocity
             previous_coriolis = coriolis

@@ -1331,6 +1331,16 @@ A corrected production-recipe phase comparison changes the next target:
   before repair; both production actor paths already used the correct two-stage
   reduction.
 
+- The external-force reduced-articulation pass neither consumes nor exposes
+  Coriolis scratch; the later Coriolis pass recomputes it from authoritative
+  velocities. Guarding scratch publication with the existing static factory
+  parameter lets CUDA eliminate this otherwise dead recurrence. Nsight reduces
+  the external advance median from 112.176 to 104.736 us (-6.6%). Repeated
+  production G1 graph-leapfrog runs average 1.6022M samples/s versus a nearby
+  1.5975M control (+0.29%). Reduced-solver parity, production-derived analytical
+  dynamics, G1 learning/replay, Ant, and Anymal tests pass; the reference and
+  high-fidelity Coriolis paths are unchanged.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
