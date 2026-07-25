@@ -2356,6 +2356,10 @@ class TestReducedArticulation(unittest.TestCase):
             solver_iterations=4,
             velocity_iterations=1,
         )
+        joint_to_cid = solver._adbs.joint_idx_to_cid.numpy()
+        tree_joint_mask = solver._reduced_articulation.tree_joint_mask_np
+        np.testing.assert_array_equal(joint_to_cid[tree_joint_mask], -1)
+        self.assertGreaterEqual(int(joint_to_cid[loop_joint]), 0)
         with wp.ScopedCapture(device=device) as capture:
             solver.step(state, output, None, None, 1.0 / 2000.0)
         wp.capture_launch(capture.graph)

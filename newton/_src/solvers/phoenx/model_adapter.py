@@ -448,6 +448,11 @@ def build_adbs_init_arrays(
     for j in range(n_joints):
         jtype = newton.JointType(int(joint_type[j]))
 
+        # Reduced coordinates own articulation-tree joints directly; only
+        # out-of-tree closure rows need maximal-coordinate ADBS columns.
+        if reduced_articulations and int(joint_articulation[j]) >= 0:
+            continue
+
         # FREE and disabled joints don't get a constraint column.
         if not bool(joint_enabled[j]):
             continue
