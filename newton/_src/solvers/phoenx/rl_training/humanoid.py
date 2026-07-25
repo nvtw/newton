@@ -420,8 +420,7 @@ class EnvHumanoidPhoenX:
             robot.joint_effort_limit[dof] = 150.0
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        for _ in range(self.world_count):
-            builder.add_world(robot)
+        builder.replicate(robot, self.world_count)
         builder.default_shape_cfg.ke = 1.0e3
         builder.default_shape_cfg.kd = 1.0e2
         builder.default_shape_cfg.kf = 1.0e3

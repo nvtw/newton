@@ -564,8 +564,7 @@ class EnvAntPhoenX:
                 ant_builder.joint_armature[dof] = float(self.config.joint_armature)
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
-        for _ in range(self.world_count):
-            builder.add_world(ant_builder)
+        builder.replicate(ant_builder, self.world_count)
         builder.default_shape_cfg.ke = 1.0e4
         builder.default_shape_cfg.kd = 1.0e2
         builder.default_shape_cfg.kf = 1.0e3

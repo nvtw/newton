@@ -675,8 +675,7 @@ class EnvAnymalPhoenX:
             articulation_builder.joint_target_mode[i] = int(newton.JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        for _ in range(self.world_count):
-            builder.add_world(articulation_builder)
+        builder.replicate(articulation_builder, self.world_count)
         builder.default_shape_cfg.ke = 1.0e3
         builder.default_shape_cfg.kd = 1.0e2
         builder.default_shape_cfg.kf = 1.0e3
