@@ -5,10 +5,6 @@ import warp as wp
 
 from ...geometry import ParticleFlags
 
-# Fixed thread count for the bounds reduction, so its atomic traffic does not
-# grow with the particle count.
-BOUNDS_REDUCE_THREADS = wp.constant(4096)
-
 
 @wp.func
 def _is_active_fluid(flags: int) -> bool:
@@ -205,80 +201,68 @@ def accumulate_boundary_density(
 # Two properties the stock grid cannot give us and that the fluid step needs:
 # its queries return original particle indices, forcing a scattered read per
 # candidate, and it does not expose cell ranges, so a 27-cell neighbourhood
-# costs 27 hash lookups. Here the flat cell index is x-major, so three cells in
-# a row are one contiguous span -- 9 spans instead of 27 lookups -- and the
-# build leaves positions in cell order, so the search reads them sequentially.
+# costs 27 hash lookups.
+#
+# Here the cell lattice is fixed: the cell is the kernel support radius and
+# cells are anchored at the world origin, so a cell coordinate is just
+# floor(x / h) -- no domain to size, no bounds pass, and no dependence on where
+# the fluid is or how far it has spread. The lattice is unbounded, so the flat
+# index folds it onto a fixed torus: each axis wraps modulo the table extent.
+# Aliased cells share a slot, which only adds candidates -- the distance test
+# rejects them, and the kernel has compact support, so aliased particles cannot
+# influence each other. Wrong answers are impossible; only the candidate count
+# grows, and gracefully.
+#
+# Wrapping rather than hashing is what makes the fold safe. Two cells alias only
+# when they are a whole table extent apart, and every extent is at least 3, so
+# two cells of the same 3x3x3 neighbourhood can never alias. That matters: a
+# neighbour reached through two aliased cells of one neighbourhood would be
+# counted twice, and no distance test can catch it -- it is a genuine neighbour,
+# just found twice. A hash gives no such guarantee.
+#
+# Keeping x contiguous within a row is what buys the traversal: three cells in a
+# row are one span, so the search walks 9 spans instead of 27 lookups. The build
+# also leaves positions in cell order, so the search reads them sequentially.
+#
+# A finer cell fits the support more tightly -- splitting h into k cells searches
+# a region (2 + 1/k)h across instead of 3h -- but costs (2k+1)^2 spans instead of
+# 9, and each span boundary is a dependent, uncoalesced offset load. Measured on
+# the dam break at 216k particles, that trade loses: 175 ms/frame at one cell per
+# support radius against 235 at a half and 315 at a third. So the cell stays at
+# the support radius, which at the default rest spacing holds ~5 particles.
 #
 # Measured against the stock grid on the same particle set, producing identical
 # neighbour sets: 2.4x overall at 216k particles and 2.2x at 439k.
 # --------------------------------------------------------------------------
 
 
-@wp.kernel
-def reduce_particle_bounds(
-    particle_q: wp.array[wp.vec3],
-    particle_flags: wp.array[wp.int32],
-    bounds: wp.array[float],
-):
-    """Axis-aligned bounds of the fluid, as six atomically reduced floats.
-
-    Launched with a fixed thread count and strided over the particles: six
-    atomics per thread onto six addresses, rather than six per particle, which
-    at a few hundred thousand particles is pure contention.
-    """
-    t = wp.tid()
-    stride = BOUNDS_REDUCE_THREADS
-    lo = wp.vec3(1.0e30, 1.0e30, 1.0e30)
-    hi = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
-    for i in range(t, particle_q.shape[0], stride):
-        if not _is_active_fluid(particle_flags[i]):
-            continue
-        p = particle_q[i]
-        lo = wp.min(lo, p)
-        hi = wp.max(hi, p)
-    if lo[0] > 1.0e29:
-        return
-    for c in range(3):
-        wp.atomic_min(bounds, c, lo[c])
-        wp.atomic_max(bounds, c + 3, hi[c])
-
-
-@wp.kernel
-def finalize_grid_params(
-    bounds: wp.array[float],
-    radius: float,
-    dim: int,
-    origin: wp.array[wp.vec3],
-    inv_cell: wp.array[float],
-):
-    """Origin and cell size for this substep.
-
-    The cell must be at least the search radius or a 3x3x3 neighbourhood would
-    not cover it. Beyond that it grows to fit the fluid into the fixed grid
-    resolution, so a spreading fluid coarsens rather than overflowing.
-    """
-    extent = wp.max(wp.max(bounds[3] - bounds[0], bounds[4] - bounds[1]), bounds[5] - bounds[2])
-    cell = wp.max(radius, extent / float(dim - 2))
-    origin[0] = wp.vec3(bounds[0] - cell, bounds[1] - cell, bounds[2] - cell)
-    inv_cell[0] = 1.0 / cell
+@wp.func
+def _cell_coord(p: wp.vec3, inv_cell: float) -> wp.vec3i:
+    """Cell containing ``p`` on the lattice anchored at the world origin."""
+    return wp.vec3i(
+        int(wp.floor(p[0] * inv_cell)),
+        int(wp.floor(p[1] * inv_cell)),
+        int(wp.floor(p[2] * inv_cell)),
+    )
 
 
 @wp.func
-def _cell_index(p: wp.vec3, origin: wp.vec3, inv_cell: float, dim: int) -> int:
-    r = (p - origin) * inv_cell
-    ix = wp.clamp(int(r[0]), 0, dim - 1)
-    iy = wp.clamp(int(r[1]), 0, dim - 1)
-    iz = wp.clamp(int(r[2]), 0, dim - 1)
-    return ix + dim * (iy + dim * iz)
+def _wrap(i: int, n: int) -> int:
+    return ((i % n) + n) % n
+
+
+@wp.func
+def _row_index(iy: int, iz: int, dim: wp.vec3i) -> int:
+    """Flat index of the start of a cell row, x-major so the row is contiguous."""
+    return (_wrap(iz, dim[2]) * dim[1] + _wrap(iy, dim[1])) * dim[0]
 
 
 @wp.kernel
 def count_particles_per_cell(
     particle_q: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
-    origin: wp.array[wp.vec3],
-    inv_cell: wp.array[float],
-    dim: int,
+    inv_cell: float,
+    dim: wp.vec3i,
     cell_of: wp.array[wp.int32],
     counts: wp.array[wp.int32],
 ):
@@ -286,9 +270,10 @@ def count_particles_per_cell(
     if not _is_active_fluid(particle_flags[i]):
         cell_of[i] = -1
         return
-    c = _cell_index(particle_q[i], origin[0], inv_cell[0], dim)
-    cell_of[i] = c
-    wp.atomic_add(counts, c, 1)
+    c = _cell_coord(particle_q[i], inv_cell)
+    cell = _row_index(c[1], c[2], dim) + _wrap(c[0], dim[0])
+    cell_of[i] = cell
+    wp.atomic_add(counts, cell, 1)
 
 
 @wp.kernel
@@ -340,9 +325,8 @@ def gather_sorted_positions(
 def build_neighbor_list(
     pos_sorted: wp.array[wp.vec4],
     offset: wp.array[wp.int32],
-    origin: wp.array[wp.vec3],
-    inv_cell: wp.array[float],
-    dim: int,
+    inv_cell: float,
+    dim: wp.vec3i,
     fluid_count: wp.array[wp.int32],
     contact_distance_sq: float,
     max_neighbors: int,
@@ -365,42 +349,39 @@ def build_neighbor_list(
 
     pm = pos_sorted[slot]
     xi = wp.vec3(pm[0], pm[1], pm[2])
-    o = origin[0]
-    ic = inv_cell[0]
-    r = (xi - o) * ic
-    ix = wp.clamp(int(r[0]), 0, dim - 1)
-    iy = wp.clamp(int(r[1]), 0, dim - 1)
-    iz = wp.clamp(int(r[2]), 0, dim - 1)
+    c = _cell_coord(xi, inv_cell)
+
+    # The three x columns of the search cube are consecutive modulo dim[0], so a
+    # row costs one span, or two where it wraps.
+    mx = _wrap(c[0] - 1, dim[0])
+    split = wp.max(mx + 3 - dim[0], 0)
 
     count = int(0)
-    x0 = wp.max(ix - 1, 0)
-    x1 = wp.min(ix + 1, dim - 1)
-
     for dz in range(-1, 2):
-        z = iz + dz
-        if z < 0 or z >= dim:
-            continue
         for dy in range(-1, 2):
-            y = iy + dy
-            if y < 0 or y >= dim:
-                continue
-            # offset is an exclusive prefix sum, so it is monotonic and one span
-            # covers the three cells of this row even where some are empty.
-            base = dim * (y + dim * z)
-            start = offset[base + x0]
-            end = offset[base + x1 + 1]
-            for k in range(start, end):
-                if k == slot:
-                    continue
-                pj = pos_sorted[k]
-                d = wp.length_sq(xi - wp.vec3(pj[0], pj[1], pj[2]))
-                if d >= contact_distance_sq or d <= 1.0e-12:
-                    continue
-                if count < max_neighbors:
-                    neighbors[count * num_particles + slot] = k
-                    count += 1
-                else:
-                    wp.atomic_add(overflow, 0, 1)
+            base = _row_index(c[1] + dy, c[2] + dz, dim)
+            # offset is an exclusive prefix sum, hence monotonic, so one span
+            # covers a run of cells even where some of them are empty.
+            for k in range(offset[base + mx], offset[base + mx + 3 - split]):
+                if k != slot:
+                    pj = pos_sorted[k]
+                    d = wp.length_sq(xi - wp.vec3(pj[0], pj[1], pj[2]))
+                    if d < contact_distance_sq and d > 1.0e-12:
+                        if count < max_neighbors:
+                            neighbors[count * num_particles + slot] = k
+                            count += 1
+                        else:
+                            wp.atomic_add(overflow, 0, 1)
+            for k in range(offset[base], offset[base + split]):
+                if k != slot:
+                    pj = pos_sorted[k]
+                    d = wp.length_sq(xi - wp.vec3(pj[0], pj[1], pj[2]))
+                    if d < contact_distance_sq and d > 1.0e-12:
+                        if count < max_neighbors:
+                            neighbors[count * num_particles + slot] = k
+                            count += 1
+                        else:
+                            wp.atomic_add(overflow, 0, 1)
 
     neighbor_counts[slot] = count
 

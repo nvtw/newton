@@ -819,6 +819,40 @@ class TestSolverXPBDFluids(unittest.TestCase):
     pass
 
 
+def test_fluid_behaves_the_same_far_from_the_world_origin(test, device):
+    """The neighbour lattice is anchored at the world origin and unbounded.
+
+    So the cell a particle lands in depends only on its own coordinate: there is
+    no domain to leave and no resolution to lose, and a fluid 512 m out must
+    resolve exactly the same neighbours as the same fluid at the origin.
+
+    That is asserted on the neighbour sets rather than on trajectories. Positions
+    are float32, so at 512 m they resolve 3e-5 m and the position arithmetic
+    everywhere in the solver -- not the grid -- makes trajectories diverge at
+    about a spacing per ten frames. The neighbour structure is what the lattice
+    is responsible for, and it is invariant.
+    """
+    sets = []
+    for shift in (0.0, 512.0):
+        builder = newton.ModelBuilder()
+        _block(builder, (8, 8, 8), (shift, shift, shift), jitter=SPACING * 0.05)
+        model = builder.finalize(device=device)
+        solver = _solver(model, device)
+        state, _ = _run(model, solver, frames=1, substeps=1)
+        _finite(test, state, f"at {shift} m")
+
+        n = model.particle_count
+        counts = solver._pbf_neighbor_counts.numpy()
+        found = solver._pbf_neighbors.numpy().reshape(-1, n)
+        order = solver._pbf_sorted_to_orig.numpy()
+        sets.append({int(order[slot]): frozenset(order[found[: counts[slot], slot]].tolist()) for slot in range(n)})
+        test.assertGreater(counts.mean(), 15.0, "scene too sparse to be a meaningful comparison")
+
+    at_origin, far_away = sets
+    differing = [i for i in at_origin if at_origin[i] != far_away[i]]
+    test.assertEqual(differing, [], f"{len(differing)} particles resolved different neighbours 512 m out")
+
+
 for _name, _fn in [
     ("test_fluid_free_fall_matches_ballistic_solution", test_fluid_free_fall_matches_ballistic_solution),
     ("test_fluid_momentum_tracks_impulse_of_gravity", test_fluid_momentum_tracks_impulse_of_gravity),
@@ -847,6 +881,8 @@ for _name, _fn in [
      test_non_fluid_particles_still_collide_when_mixed_with_fluid),
     ("test_fluid_recovers_from_deep_penetration", test_fluid_recovers_from_deep_penetration),
     ("test_neighbor_list_overflow_is_reported", test_neighbor_list_overflow_is_reported),
+    ("test_fluid_behaves_the_same_far_from_the_world_origin",
+     test_fluid_behaves_the_same_far_from_the_world_origin),
 ]:
     add_function_test(TestSolverXPBDFluids, _name, _fn, devices=devices, check_output=False)
 

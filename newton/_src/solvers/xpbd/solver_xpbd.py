@@ -39,12 +39,9 @@ from .pbf_kernels import (
     apply_damping,
     apply_velocity_delta,
     apply_viscosity,
-    BOUNDS_REDUCE_THREADS,
     build_neighbor_list,
     count_particles_per_cell,
-    finalize_grid_params,
     gather_sorted_positions,
-    reduce_particle_bounds,
     scatter_particles_to_cells,
     apply_pbf_deltas,
     apply_vorticity,
@@ -483,6 +480,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
             self.pbf_viscosity = pbf_viscosity
             self.pbf_cfl_coefficient = pbf_cfl_coefficient
             self.pbf_particle_contact_distance = h
+            self.pbf_fluid_rest_distance = fluid_rest_dist
             self.pbf_damping = pbf_damping
             self.pbf_vorticity_confinement = pbf_vorticity_confinement
 
@@ -523,23 +521,28 @@ class SolverXPBD(SolverBase, CouplingInterface):
             # cell each substep, so reusing that ordering costs nothing and makes
             # neighbour gathers mostly local instead of scattered.
             self._pbf_sorted_to_orig = wp.zeros(n, dtype=wp.int32, device=model.device)
-            # Counting-sort neighbour grid. Resolution is fixed so the scan cost
-            # is fixed; the cell size grows instead if the fluid spreads beyond
-            # it, which coarsens the search rather than overflowing it. Roughly
-            # four particles per cell at the initial extent.
-            self._pbf_grid_dim = int(min(max(round((n / 4.0) ** (1.0 / 3.0)) + 2, 8), 128))
-            cells = self._pbf_grid_dim**3
+            # Counting-sort neighbour grid on a lattice anchored at the world
+            # origin, so there is no domain to size or track.
+            #
+            # The cell is the kernel support radius; see pbf_kernels for why a
+            # finer lattice measures slower despite the tighter fit.
+            self._pbf_grid_inv_cell = 1.0 / h
+            # Sized from the fluid, not the particle count: a cell of side h
+            # holds about (h / rest spacing)^3 particles, so that many particles
+            # share a cell and only n / that cells are occupied. Four table
+            # entries per occupied cell keeps the load factor at or below 1/4,
+            # so aliasing stays rare rather than lengthening every span. Each
+            # extent must be at least 3 or a cell could alias with itself.
+            per_cell = max((h / fluid_rest_dist) ** 3, 1.0)
+            occupied = max(int(math.ceil(n / per_cell)), 1)
+            side = max(int(round((4.0 * occupied) ** (1.0 / 3.0))), 4)
+            self._pbf_grid_dim = wp.vec3i(side, side, side)
+            cells = side**3
             self._pbf_cell_of = wp.zeros(n, dtype=wp.int32, device=model.device)
             self._pbf_cell_counts = wp.zeros(cells + 1, dtype=wp.int32, device=model.device)
             self._pbf_cell_offset = wp.zeros(cells + 1, dtype=wp.int32, device=model.device)
             self._pbf_cell_cursor = wp.zeros(cells, dtype=wp.int32, device=model.device)
-            self._pbf_bounds = wp.zeros(6, dtype=float, device=model.device)
-            self._pbf_grid_origin = wp.zeros(1, dtype=wp.vec3, device=model.device)
-            self._pbf_grid_inv_cell = wp.zeros(1, dtype=float, device=model.device)
             self._pbf_fluid_count = wp.zeros(1, dtype=wp.int32, device=model.device)
-            self._pbf_bounds_init = wp.array(
-                [1.0e30, 1.0e30, 1.0e30, -1.0e30, -1.0e30, -1.0e30], dtype=float, device=model.device
-            )
             self._pbf_pos_sorted = wp.zeros(n, dtype=wp.vec4, device=model.device)
             self._pbf_delta_qd = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_boundary_log = wp.zeros(n, dtype=float, device=model.device)
@@ -801,29 +804,10 @@ class SolverXPBD(SolverBase, CouplingInterface):
                     self._pbf_accum_delta.zero_()
                     # Cache the fluid neighborhood once for the whole substep;
                     # the density, pressure and vorticity kernels all replay it.
-                    # Build the neighbour grid: bounds, per-cell counts,
-                    # exclusive scan, then scatter. The scatter leaves positions
-                    # in cell order, so the search reads them sequentially and
-                    # stores neighbours as slots rather than particle indices.
-                    wp.copy(self._pbf_bounds, self._pbf_bounds_init)
-                    wp.launch(
-                        kernel=reduce_particle_bounds,
-                        dim=BOUNDS_REDUCE_THREADS,
-                        inputs=[state_out.particle_q, model.particle_flags],
-                        outputs=[self._pbf_bounds],
-                        device=model.device,
-                    )
-                    wp.launch(
-                        kernel=finalize_grid_params,
-                        dim=1,
-                        inputs=[
-                            self._pbf_bounds,
-                            self.pbf_particle_contact_distance,
-                            self._pbf_grid_dim,
-                        ],
-                        outputs=[self._pbf_grid_origin, self._pbf_grid_inv_cell],
-                        device=model.device,
-                    )
+                    # Build the neighbour grid: per-cell counts, exclusive
+                    # scan, then scatter. The scatter leaves positions in cell
+                    # order, so the search reads them sequentially and stores
+                    # neighbours as slots rather than particle indices.
                     self._pbf_cell_counts.zero_()
                     self._pbf_cell_cursor.zero_()
                     wp.launch(
@@ -832,7 +816,6 @@ class SolverXPBD(SolverBase, CouplingInterface):
                         inputs=[
                             state_out.particle_q,
                             model.particle_flags,
-                            self._pbf_grid_origin,
                             self._pbf_grid_inv_cell,
                             self._pbf_grid_dim,
                         ],
@@ -845,7 +828,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                         self._pbf_fluid_count,
                         self._pbf_cell_offset,
                         dest_offset=0,
-                        src_offset=self._pbf_grid_dim**3,
+                        src_offset=self._pbf_cell_counts.shape[0] - 1,
                         count=1,
                     )
                     wp.launch(
@@ -867,7 +850,6 @@ class SolverXPBD(SolverBase, CouplingInterface):
                         inputs=[
                             self._pbf_pos_sorted,
                             self._pbf_cell_offset,
-                            self._pbf_grid_origin,
                             self._pbf_grid_inv_cell,
                             self._pbf_grid_dim,
                             self._pbf_fluid_count,
