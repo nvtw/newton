@@ -186,6 +186,34 @@ class SolverXPBD(SolverBase, CouplingInterface):
 
     """
 
+    @staticmethod
+    def particle_mass_for_rest_density(rest_density: float, fluid_rest_distance: float, contact_distance: float) -> float:
+        """Particle mass giving a fluid of ``rest_density`` kg/m^3 at rest spacing.
+
+        SPH density is ``sum_j m_j W_ij``, so mass and spacing together fix the
+        density. This returns the mass for which a lattice at
+        ``fluid_rest_distance`` evaluates to exactly ``rest_density``, using the
+        same lattice sum the solver's constraint targets, so a scene built with
+        it starts in equilibrium.
+
+        Args:
+            rest_density: Desired fluid density [kg/m^3]; water is 1000.
+            fluid_rest_distance: Rest spacing between fluid particles [m].
+            contact_distance: Fluid neighbor radius (kernel support) [m].
+
+        Returns:
+            Particle mass in kg.
+        """
+        kernel_sum, _, _ = _calculate_rest_density(fluid_rest_distance, contact_distance)
+        if kernel_sum <= 0.0:
+            return 0.0
+        # _calculate_rest_density sums over neighbours only; the density estimate
+        # also counts the particle itself, as an SPH density sum does, so add it
+        # here or the derived mass leaves the fluid resting at the wrong spacing.
+        self_term = 15.0 / (math.pi * contact_distance**3)
+        # sum m W / 2 == rest_density, the 2 being the kernel's volume integral.
+        return 2.0 * rest_density / (kernel_sum + self_term)
+
     @property
     def pbf_neighbor_overflow_count(self) -> int:
         """Fluid neighbors dropped so far because ``pbf_max_neighbors`` was exceeded.
@@ -222,6 +250,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
         pbf_vorticity_confinement: float = 0.0,
         pbf_cfl_coefficient: float = 1.0,
         pbf_damping: float = 0.0,
+        pbf_rest_density: float = 1000.0,
         pbf_boundary_density: bool = True,
         pbf_max_neighbors: int = 64,
         deterministic: wp.DeterministicMode | None = None,
@@ -252,6 +281,13 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 disables position-based fluids.
             pbf_fluid_rest_distance: Fluid rest spacing [m]. Defaults to 60%
                 of ``pbf_particle_contact_distance``.
+            pbf_rest_density: Fluid rest density in kg/m^3 -- the material
+                property the incompressibility constraint targets. Water is
+                1000. For the fluid to actually rest at
+                ``pbf_fluid_rest_distance`` spacing, particle masses must match
+                this density; :meth:`particle_mass_for_rest_density` returns the
+                mass that does, and a mismatch simply means the fluid settles at
+                a different spacing, as a real fluid would.
             pbf_relaxation: Fluid Jacobi relaxation factor, scaling each
                 density correction after it is averaged over the contributing
                 neighbors. Values below 1 under-relax: smaller, more stable
@@ -371,8 +407,20 @@ class SolverXPBD(SolverBase, CouplingInterface):
             )
             if rest_density <= 0.0 or density_constraint_scale <= 0.0:
                 raise ValueError("Fluid rest spacing does not produce a valid density constraint")
-            self.pbf_rest_density = rest_density
-            self.pbf_lambda_scale = 1.0 / density_constraint_scale
+            # `rest_density` here is the lattice kernel sum in m^-3, which the
+            # cohesion, surface tension and vorticity terms are all defined
+            # against; keep it for those. The density constraint itself now runs
+            # in SI, against a real material density in kg/m^3.
+            self._pbf_kernel_rest_density = rest_density + self.pbf_spiky1
+            self.pbf_rest_density = pbf_rest_density
+            self.pbf_reference_particle_mass = self.particle_mass_for_rest_density(
+                pbf_rest_density, fluid_rest_dist, h
+            )
+            # Mass weighting and kernel normalisation scale the constraint by
+            # (mass / 2) relative to the bare kernel sum, so scale lambda the
+            # other way: at a consistent particle mass the solve is unchanged.
+            density_units = 0.5 * self.pbf_reference_particle_mass
+            self.pbf_lambda_scale = 1.0 / (density_constraint_scale * density_units)
 
             self.pbf_boundary_density = pbf_boundary_density
             # Rebuilding the neighbor grid inside the iteration loop is a large
@@ -390,6 +438,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
             self.pbf_damping = pbf_damping
             self.pbf_vorticity_confinement = pbf_vorticity_confinement
 
+            # Legacy coefficients stay defined against the kernel sum.
             inv_rest_density = 1.0 / rest_density if rest_density > 0.0 else 0.0
 
             # Derive surface tension and cohesion following PhysX exactly:
@@ -832,6 +881,8 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     model.particle_grid.id,
                                     particle_q,
                                     model.particle_flags,
+                                    model.particle_mass,
+                                    self._pbf_sorted_to_orig,
                                     self._pbf_pos_sorted,
                                     self._pbf_neighbors,
                                     self._pbf_neighbor_counts,
@@ -877,7 +928,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     self.pbf_spiky1,
                                     self.pbf_spiky2,
                                     0.0,  # legacy correction damping, superseded by apply_viscosity
-                                    1.0 / self.pbf_rest_density,
+                                    1.0 / self._pbf_kernel_rest_density,
                                     self.pbf_cohesion,
                                     self.pbf_cohesion1,
                                     self.pbf_cohesion2,
@@ -1219,7 +1270,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             self.pbf_inv_radius,
                             self.pbf_spiky2,
                             self.pbf_vorticity_confinement,
-                            1.0 / self.pbf_rest_density,
+                            1.0 / self._pbf_kernel_rest_density,
                             dt,
                         ],
                         outputs=[particle_qd],

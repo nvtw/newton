@@ -36,6 +36,14 @@ FLUID_REST_OFFSET = REST_OFFSET * 0.6
 H = 2.0 * (FLUID_REST_OFFSET / 0.6)
 REST_DISTANCE = 2.0 * FLUID_REST_OFFSET
 
+#: Water. Density in the solver is the SPH sum ``sum_j m_j W_ij``, so mass and
+#: spacing together fix it: a scene must use the mass that matches its rest
+#: density or the fluid starts wildly out of equilibrium.
+REST_DENSITY = 1000.0
+PARTICLE_MASS = newton.solvers.SolverXPBD.particle_mass_for_rest_density(
+    REST_DENSITY, REST_DISTANCE, H
+)
+
 
 def _block(builder, dim, origin, vel=(0.0, 0.0, 0.0), jitter=0.0, spacing=SPACING):
     builder.default_particle_radius = spacing * 0.5
@@ -49,7 +57,7 @@ def _block(builder, dim, origin, vel=(0.0, 0.0, 0.0), jitter=0.0, spacing=SPACIN
         cell_x=spacing,
         cell_y=spacing,
         cell_z=spacing,
-        mass=1.0,
+        mass=PARTICLE_MASS,
         jitter=jitter,
         radius_mean=spacing * 0.5,
         flags=FLUID,
@@ -389,7 +397,7 @@ def test_fluid_vorticity_confinement_is_stable_and_has_an_effect(test, device):
                     q = np.array([ix, iy, iz], dtype=np.float64) * SPACING
                     q -= (dim - 1) * SPACING * 0.5
                     v = np.cross([0.0, 0.0, omega], q)
-                    builder.add_particle(pos=wp.vec3(*q), vel=wp.vec3(*v), mass=1.0,
+                    builder.add_particle(pos=wp.vec3(*q), vel=wp.vec3(*v), mass=PARTICLE_MASS,
                                          radius=SPACING * 0.5, flags=FLUID)
         model = builder.finalize(device=device)
         model.set_gravity((0.0, 0.0, 0.0))
@@ -467,7 +475,9 @@ def _settled_base_density_ratio(test, device, iterations=4, substeps=8, relaxati
     d = np.linalg.norm(q[:, None, :] - q[None, :, :], axis=2)
     np.fill_diagonal(d, np.inf)
     spiky1 = 15.0 / (np.pi * H**3)
-    rho = np.where(d < H, spiky1 * (1.0 - d / H) ** 2, 0.0).sum(axis=1)
+    # The solver's SI definition: mass weighted, self included, kernel normalised
+    # (int W dV == 2 for the PBF spiky kernel), so this is kg/m^3.
+    rho = PARTICLE_MASS * (np.where(d < H, spiky1 * (1.0 - d / H) ** 2, 0.0).sum(axis=1) + spiky1) / 2.0
 
     core = (np.abs(q[:, 0]) < hx - H) & (np.abs(q[:, 1]) < hy - H)
     z = q[:, 2]
@@ -522,6 +532,133 @@ def test_fluid_relaxation_under_relaxes(test, device):
                        f"relaxation=0.25 should under-relax and leave more residual "
                        f"compression than 1.0, got {under:.4f} vs {full:.4f}")
 
+
+def test_fluid_settles_at_the_requested_rest_density(test, device):
+    """``pbf_rest_density`` is a material density in kg/m^3, and the fluid obeys it.
+
+    Density in the solver is the SPH sum ``sum_j m_j W_ij``, kernel normalised,
+    so mass and spacing together fix it. Building a scene with
+    :meth:`particle_mass_for_rest_density` must therefore leave the settled
+    interior at the density that was asked for -- for any density, not just
+    water -- which is what makes the parameter an engineering input rather than
+    a solver coefficient.
+    """
+    spiky1 = 15.0 / (np.pi * H**3)
+
+    def settled_density(rho0):
+        mass = newton.solvers.SolverXPBD.particle_mass_for_rest_density(rho0, REST_DISTANCE, H)
+        test.assertGreater(mass, 0.0)
+        dim = (10, 10, 10)
+        builder = newton.ModelBuilder()
+        builder.default_particle_radius = SPACING * 0.5
+        builder.add_particle_grid(
+            pos=wp.vec3(-dim[0] * SPACING * 0.5, -dim[1] * SPACING * 0.5, SPACING),
+            rot=wp.quat_identity(), vel=wp.vec3(0.0),
+            dim_x=dim[0], dim_y=dim[1], dim_z=dim[2],
+            cell_x=SPACING, cell_y=SPACING, cell_z=SPACING,
+            mass=mass, jitter=SPACING * 0.03, radius_mean=SPACING * 0.5, flags=FLUID,
+        )
+        hx, hy = dim[0] * SPACING * 0.6, dim[1] * SPACING * 0.6
+        _container(builder, hx, hy)
+        model = builder.finalize(device=device)
+        model.set_gravity((0.0, 0.0, -9.81))
+        pipeline = newton.CollisionPipeline(model, soft_contact_margin=H)
+        solver = _solver(model, device, iterations=16, pbf_rest_density=rho0, pbf_viscosity=1.0e-3)
+        state, _ = _run(model, solver, 150, pipeline=pipeline)
+        q, _ = _finite(test, state, f"at rest density {rho0}")
+
+        d = np.linalg.norm(q[:, None, :] - q[None, :, :], axis=2)
+        np.fill_diagonal(d, np.inf)
+        # The solver's own definition: mass weighted, self included, kernel
+        # normalised (int W dV == 2 for the PBF spiky kernel).
+        w = np.where(d < H, spiky1 * (1.0 - d / H) ** 2, 0.0).sum(axis=1) + spiky1
+        rho = mass * w / 2.0
+
+        z = q[:, 2]
+        core = ((np.abs(q[:, 0]) < hx - H) & (np.abs(q[:, 1]) < hy - H)
+                & (z > 1.5 * H) & (z < z.max() - 2.0 * H))
+        test.assertGreater(core.sum(), 20, "no interior particles resolved")
+        return float(rho[core].mean()), mass
+
+    for rho0 in (800.0, 1000.0, 1300.0):
+        got, mass = settled_density(rho0)
+        test.assertLess(abs(got - rho0), 0.06 * rho0,
+                        f"asked for {rho0:.0f} kg/m^3, settled at {got:.1f}")
+        # Sanity against first principles: an HCP packing at the rest spacing
+        # gives each particle rest_distance^3 / sqrt(2) of volume, so the mass
+        # must be close to rho0 times that. They differ only by the kernel's
+        # discretisation error at this smoothing ratio.
+        physical = rho0 * REST_DISTANCE**3 / np.sqrt(2.0)
+        test.assertLess(abs(mass - physical), 0.2 * physical,
+                        f"derived mass {mass:.4f} kg is far from rho0*V = {physical:.4f} kg")
+
+
+def test_fluid_buoyancy_follows_archimedes(test, device):
+    """A floating body must displace its own mass of fluid.
+
+    Archimedes: a body of density ``rho_b`` released in a fluid of density
+    ``rho_f`` settles with a submerged volume fraction of ``rho_b / rho_f``.
+    This is the sharpest end-to-end check that the fluid is in SI: it fails if
+    the rest density is wrong, if particle masses are wrong, or if the
+    particle-shape coupling transmits the wrong force. A body lighter than the
+    fluid must float and one heavier must sink, and the light one must find the
+    depth Archimedes predicts.
+
+    Tolerances are wide because the free surface is only a few particles thick
+    at this resolution, which limits how sharply "submerged" can be defined.
+    """
+    rho_f = REST_DENSITY
+    half = 3.0 * SPACING          # cube half-extent
+    side = 2.0 * half
+    body_volume = side**3
+
+    def settled_depth(rho_b):
+        dim = (14, 14, 10)
+        builder = newton.ModelBuilder()
+        _block(builder, dim, (-dim[0] * SPACING * 0.5, -dim[1] * SPACING * 0.5, SPACING),
+               jitter=SPACING * 0.03)
+        hx, hy = dim[0] * SPACING * 0.55, dim[1] * SPACING * 0.55
+        _container(builder, hx, hy)
+
+        # Drop the cube so it starts just clear of the pool surface.
+        start_z = dim[2] * SPACING + half + 2.0 * SPACING
+        # Let the builder derive mass and inertia from the shape density, so the
+        # body is a real solid of rho_b kg/m^3 rather than a point mass.
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, start_z), wp.quat_identity()))
+        builder.add_shape_box(body=body, hx=half, hy=half, hz=half,
+                              cfg=newton.ModelBuilder.ShapeConfig(mu=0.0, density=rho_b))
+
+        model = builder.finalize(device=device)
+        model.set_gravity((0.0, 0.0, -9.81))
+        pipeline = newton.CollisionPipeline(model, soft_contact_margin=H)
+        solver = _solver(model, device, iterations=8, pbf_viscosity=1.0e-2)
+        state, _ = _run(model, solver, 220, pipeline=pipeline)
+        q, _ = _finite(test, state, f"with body density {rho_b}")
+
+        # Free surface away from the body and the walls.
+        radial = np.linalg.norm(q[:, :2], axis=1)
+        outside = (radial > half + H) & (np.abs(q[:, 0]) < hx - H) & (np.abs(q[:, 1]) < hy - H)
+        test.assertGreater(outside.sum(), 30, "no free surface resolved")
+        surface_z = float(np.percentile(q[outside, 2], 90))
+
+        body_z = float(state.body_q.numpy()[0][2])
+        # Depth of the cube's bottom face below the free surface.
+        return (surface_z - (body_z - half)), surface_z, body_z
+
+    light_depth, surf_l, _ = settled_depth(0.4 * rho_f)
+    heavy_depth, surf_h, heavy_z = settled_depth(2.5 * rho_f)
+
+    # The dense cube must end up on the bottom, submerged past its own height.
+    test.assertGreater(heavy_depth, side * 0.9,
+                       f"a body 2.5x denser than the fluid did not sink (depth {heavy_depth:.4f} m)")
+
+    # The light cube must float: submerged fraction ~ rho_b / rho_f = 0.4.
+    fraction = light_depth / side
+    test.assertGreater(fraction, 0.0, f"floating body sits entirely above the surface ({fraction:.3f})")
+    test.assertLess(fraction, 1.0, f"a body 0.4x the fluid density sank ({fraction:.3f} submerged)")
+    test.assertLess(abs(fraction - 0.4), 0.25,
+                    f"submerged fraction {fraction:.3f} does not match Archimedes' 0.400")
+
 devices = get_test_devices()
 
 
@@ -548,6 +685,9 @@ for _name, _fn in [
     ("test_fluid_incompressibility_converges_with_substeps",
      test_fluid_incompressibility_converges_with_substeps),
     ("test_fluid_relaxation_under_relaxes", test_fluid_relaxation_under_relaxes),
+    ("test_fluid_settles_at_the_requested_rest_density",
+     test_fluid_settles_at_the_requested_rest_density),
+    ("test_fluid_buoyancy_follows_archimedes", test_fluid_buoyancy_follows_archimedes),
 ]:
     add_function_test(TestSolverXPBDFluids, _name, _fn, devices=devices, check_output=False)
 

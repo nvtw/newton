@@ -51,7 +51,17 @@ class Example:
 
         particle_spacing = args.spacing
         particle_radius = particle_spacing * 0.5
-        particle_mass = 1.0
+
+        # Offsets first: particle mass follows from the fluid's rest density and
+        # its rest spacing, so the scene is specified in SI throughout.
+        rest_offset = particle_spacing * 0.9
+        fluid_rest_offset = rest_offset * 0.6
+        particle_contact_offset = fluid_rest_offset / 0.6
+        pbf_contact_distance = 2.0 * particle_contact_offset
+        fluid_rest_distance = 2.0 * fluid_rest_offset
+        particle_mass = newton.solvers.SolverXPBD.particle_mass_for_rest_density(
+            args.rest_density, fluid_rest_distance, pbf_contact_distance
+        )
 
         builder = newton.ModelBuilder()
         builder.default_particle_radius = particle_radius
@@ -110,21 +120,16 @@ class Example:
         self.model = builder.finalize()
         self.model.set_gravity(args.gravity)
 
-        # PhysX offset derivation (same as createPBDParticleSystem):
-        rest_offset = particle_spacing * 0.9
-        fluid_rest_offset = rest_offset * 0.6
-        particle_contact_offset = fluid_rest_offset / 0.6
-        pbf_contact_distance = 2.0 * particle_contact_offset
-        fluid_rest_distance = 2.0 * fluid_rest_offset
-
         print(f"particleContactDistance (h): {pbf_contact_distance:.4f}")
         print(f"fluidRestDistance: {fluid_rest_distance:.4f}")
+        print(f"rest density: {args.rest_density:.1f} kg/m^3 -> particle mass {particle_mass * 1000:.2f} g")
 
         self.solver = newton.solvers.SolverXPBD(
             self.model,
             iterations=args.iterations,
             pbf_particle_contact_distance=pbf_contact_distance,
             pbf_fluid_rest_distance=fluid_rest_distance,
+            pbf_rest_density=args.rest_density,
             pbf_relaxation=args.relaxation,
             pbf_viscosity=args.viscosity,
             pbf_cohesion=args.cohesion,
@@ -232,6 +237,9 @@ class Example:
         parser.add_argument("--dim-x", type=int, default=46, help="Fluid grid X dimension")
         parser.add_argument("--dim-y", type=int, default=46, help="Fluid grid Y dimension")
         parser.add_argument("--dim-z", type=int, default=46, help="Fluid grid Z dimension")
+        parser.add_argument(
+            "--rest-density", type=float, default=1000.0, help="Fluid rest density [kg/m^3] (water is 1000)"
+        )
         parser.add_argument("--relaxation", type=float, default=1.0, help="PBF SOR relaxation")
         parser.add_argument(
             "--viscosity", type=float, default=1.0e-3, help="Dynamic viscosity [Pa s] (water is 1e-3)"

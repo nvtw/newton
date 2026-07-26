@@ -11,6 +11,11 @@ def _is_active_fluid(flags: int) -> bool:
     return (flags & ParticleFlags.ACTIVE) != 0 and (flags & ParticleFlags.FLUID) != 0
 
 
+# The PBF spiky kernel is not normalised: int W dV == 2, not 1. Dividing the
+# mass-weighted sum by this turns it into a true density in kg/m^3.
+KERNEL_VOLUME_INTEGRAL = wp.constant(2.0)
+
+
 @wp.func
 def _kernel_w(distance: float, spiky1: float, inv_radius: float) -> float:
     q = 1.0 - distance * inv_radius
@@ -217,6 +222,8 @@ def calculate_density(
     grid: wp.uint64,
     particle_q: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
+    particle_mass: wp.array[float],
+    sorted_to_orig: wp.array[wp.int32],
     pos_sorted: wp.array[wp.vec3],
     neighbors: wp.array[wp.int32],
     neighbor_counts: wp.array[wp.int32],
@@ -242,8 +249,13 @@ def calculate_density(
     # Solid boundaries occupy part of the kernel support and contribute no
     # neighbours; seed the sum with the density they stand in for. The union
     # form collapses to 0 when no boundary is in range (exp(0) - 1 == 0).
+    # rest_density is in kg/m^3, so this seed already is too.
     density = rest_density * (1.0 - wp.exp(-boundary_log[i]))
     normal = wp.vec3(0.0)
+
+    # Mass weighted and kernel normalised, so `density` is kg/m^3 and the
+    # constraint is against a real material density rather than a kernel sum.
+    inv_norm = 1.0 / KERNEL_VOLUME_INTEGRAL
 
     count = neighbor_counts[slot]
     for k in range(count):
@@ -257,10 +269,12 @@ def calculate_density(
             continue
 
         distance = wp.sqrt(distance_sq)
-        density += _kernel_w(distance, spiky1, inv_radius)
+        density += particle_mass[sorted_to_orig[sj]] * _kernel_w(distance, spiky1, inv_radius) * inv_norm
         if surface_tension > 0.0:
             normal += _kernel_dw(distance, spiky2, inv_radius) * xij / distance
 
+    # Include this particle's own kernel contribution, as an SPH density sum does.
+    density += particle_mass[i] * _kernel_w(0.0, spiky1, inv_radius) * inv_norm
     constraint = wp.max(density - rest_density, -0.005 * rest_density)
     scaled = constraint * lambda_scale
     densities[i] = scaled

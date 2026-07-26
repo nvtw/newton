@@ -1712,12 +1712,16 @@ def test_position_based_fluids_reference_stages(test, device):
         dtype=np.float32,
     )
     particle_count = len(positions)
+    # The density constraint works in SI, so pick the mass that puts this lattice
+    # at a water-like rest density.
+    rest_density = 1000.0
+    particle_mass = newton.solvers.SolverXPBD.particle_mass_for_rest_density(rest_density, 0.11, 0.2)
     fluid_flags = int(newton.ParticleFlags.ACTIVE | newton.ParticleFlags.FLUID)
     builder = newton.ModelBuilder()
     builder.add_particles(
         pos=[wp.vec3(*position) for position in positions],
         vel=[wp.vec3(*velocity) for velocity in velocities],
-        mass=[1.0] * particle_count,
+        mass=[particle_mass] * particle_count,
         radius=[0.02] * particle_count,
         flags=[fluid_flags] * particle_count,
     )
@@ -1729,8 +1733,8 @@ def test_position_based_fluids_reference_stages(test, device):
     contact_distance_sq = radius * radius
     spiky1 = 15.0 / (np.pi * radius**3)
     spiky2 = 30.0 / (np.pi * radius**4)
-    rest_density, lambda_denominator, _ = _calculate_rest_density(0.11, radius)
-    lambda_scale = 1.0 / lambda_denominator
+    _, lambda_denominator, _ = _calculate_rest_density(0.11, radius)
+    lambda_scale = 1.0 / (lambda_denominator * 0.5 * particle_mass)
     surface_tension = 0.003
     model.particle_grid.build(state.particle_q, radius=radius)
     densities = wp.zeros(particle_count, dtype=float, device=device)
@@ -1793,6 +1797,8 @@ def test_position_based_fluids_reference_stages(test, device):
             model.particle_grid.id,
             state.particle_q,
             model.particle_flags,
+            model.particle_mass,
+            sorted_to_orig,
             pos_sorted,
             neighbors,
             neighbor_counts,
@@ -1820,8 +1826,11 @@ def test_position_based_fluids_reference_stages(test, device):
             distance = np.linalg.norm(displacement)
             if i == j or distance <= 1.0e-6 or distance >= radius:
                 continue
-            density += spiky1 * (1.0 - distance * inv_radius) ** 2
+            # Mass weighted and kernel normalised: the density constraint is in
+            # kg/m^3 (int W dV == 2 for this kernel).
+            density += particle_mass * spiky1 * (1.0 - distance * inv_radius) ** 2 / 2.0
             normal += -spiky2 * (1.0 - distance * inv_radius) * displacement / distance
+        density += particle_mass * spiky1 / 2.0  # self contribution
         expected_densities[i] = max(density - rest_density, -0.005 * rest_density) * lambda_scale
         expected_normals[i] = normal * surface_tension
 
@@ -2024,6 +2033,11 @@ def test_pbf_boundary_density_relieves_wall_compression(test, device):
     """
     spacing = 0.025
     h = 2.0 * (spacing * 0.9 * 0.6 / 0.6)
+    # Density is the SPH sum sum_j m_j W_ij, so the scene needs the mass that
+    # matches its rest density or the fluid starts far out of equilibrium.
+    fluid_mass = newton.solvers.SolverXPBD.particle_mass_for_rest_density(
+        1000.0, 2.0 * spacing * 0.9 * 0.6, h
+    )
 
     def settle(boundary_density):
         builder = newton.ModelBuilder()
@@ -2038,7 +2052,7 @@ def test_pbf_boundary_density_relieves_wall_compression(test, device):
             cell_x=spacing,
             cell_y=spacing,
             cell_z=spacing,
-            mass=1.0,
+            mass=fluid_mass,
             jitter=spacing * 0.1,
             radius_mean=spacing * 0.5,
             flags=int(newton.ParticleFlags.ACTIVE | newton.ParticleFlags.FLUID),
