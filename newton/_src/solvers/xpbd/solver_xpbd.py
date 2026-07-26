@@ -821,6 +821,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                 model.shape_type,
                                 model.shape_scale,
                                 int(GeoType.BOX),
+                                int(GeoType.CYLINDER),
                                 contacts.soft_contact_max,
                                 min(contacts.soft_contact_max, model.particle_count),
                                 self.pbf_inv_radius,

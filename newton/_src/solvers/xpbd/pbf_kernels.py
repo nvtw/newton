@@ -87,6 +87,7 @@ def accumulate_boundary_density(
     shape_type: wp.array[wp.int32],
     shape_scale: wp.array[wp.vec3],
     box_type: int,
+    cylinder_type: int,
     contact_max: int,
     num_threads: int,
     inv_radius: float,
@@ -129,41 +130,58 @@ def accumulate_boundary_density(
         n = contact_normal[tid]
         px = particle_q[particle_index]
 
-        if shape_type[shape_index] == box_type:
-            # A box is the intersection of three axis slabs, so the fraction of
-            # the kernel ball inside it is the product of three half-space
-            # fractions -- exactly 1/2 on a face, 1/4 on an edge, 1/8 at a
-            # corner. Treating the nearest surface as a single half-space, as a
-            # closest-point normal implies, over-estimates by 2x on an edge and
-            # 8x at a corner, which shows up as fluid repelled from box edges.
+        stype = shape_type[shape_index]
+        if stype == box_type or stype == cylinder_type:
+            # Box and cylinder are both intersections of a few half-spaces, so
+            # the solid's share of the kernel ball is the product of the
+            # individual shares -- exactly 1/2 on a face, 1/4 on an edge or rim,
+            # 1/8 at a corner. A single closest-point normal instead implies one
+            # half-space everywhere, over-stating it 2x on an edge and 4x at a
+            # corner, which pushes fluid away from those features.
             X_ws = wp.transform_multiply(X_wb, shape_transform[shape_index])
             local = wp.transform_point(wp.transform_inverse(X_ws), px)
             extent = shape_scale[shape_index]
 
-            frac = float(1.0)
-            for axis in range(3):
-                frac *= _half_space_fraction(wp.abs(local[axis]) - extent[axis], inv_radius)
+            # Up to three constraints, each a signed distance and an outward
+            # direction. Unused slots sit far inside and contribute a factor 1.
+            d = wp.vec3(-1.0e6, -1.0e6, -1.0e6)
+            a0 = wp.vec3(0.0)
+            a1 = wp.vec3(0.0)
+            a2 = wp.vec3(0.0)
+            if stype == box_type:
+                d = wp.vec3(
+                    wp.abs(local[0]) - extent[0],
+                    wp.abs(local[1]) - extent[1],
+                    wp.abs(local[2]) - extent[2],
+                )
+                a0 = wp.vec3(wp.sign(local[0]), 0.0, 0.0)
+                a1 = wp.vec3(0.0, wp.sign(local[1]), 0.0)
+                a2 = wp.vec3(0.0, 0.0, wp.sign(local[2]))
+            else:
+                radial = wp.sqrt(local[0] * local[0] + local[1] * local[1])
+                d = wp.vec3(radial - extent[0], wp.abs(local[2]) - extent[1], -1.0e6)
+                if radial > 1.0e-9:
+                    a0 = wp.vec3(local[0] / radial, local[1] / radial, 0.0)
+                a1 = wp.vec3(0.0, 0.0, wp.sign(local[2]))
+
+            f0 = _half_space_fraction(d[0], inv_radius)
+            f1 = _half_space_fraction(d[1], inv_radius)
+            f2 = _half_space_fraction(d[2], inv_radius)
+            frac = f0 * f1 * f2
             if frac <= 0.0:
                 continue
 
-            # Gradient of the product, mapped back to world. Each axis
-            # contributes its own derivative times the other two factors.
-            grad_local = wp.vec3(0.0)
-            for axis in range(3):
-                other = float(1.0)
-                for k in range(3):
-                    if k != axis:
-                        other *= _half_space_fraction(wp.abs(local[k]) - extent[k], inv_radius)
-                d = wp.abs(local[axis]) - extent[axis]
-                slope = _dpsi(wp.abs(d) * inv_radius) * inv_radius
-                sign = 1.0
-                if local[axis] < 0.0:
-                    sign = -1.0
-                grad_local[axis] = other * slope * sign
-            grad_world = wp.transform_vector(X_ws, grad_local)
+            # Product rule: each constraint's derivative times the other factors.
+            grad_local = (
+                a0 * (f1 * f2 * _dpsi(wp.abs(d[0]) * inv_radius) * inv_radius)
+                + a1 * (f0 * f2 * _dpsi(wp.abs(d[1]) * inv_radius) * inv_radius)
+                + a2 * (f0 * f1 * _dpsi(wp.abs(d[2]) * inv_radius) * inv_radius)
+            )
 
             wp.atomic_add(boundary_log, particle_index, -wp.log(1.0 - wp.min(frac, 0.999)))
-            wp.atomic_add(boundary_grad, particle_index, grad_world * rest_density)
+            wp.atomic_add(
+                boundary_grad, particle_index, wp.transform_vector(X_ws, grad_local) * rest_density
+            )
             continue
 
         # Distance from the particle centre (not its surface) to the solid,

@@ -663,7 +663,8 @@ def test_fluid_buoyancy_follows_archimedes(test, device):
 def test_boundary_density_is_exact_at_box_faces_edges_and_corners(test, device):
     """The solid's share of a particle's kernel support must match the geometry.
 
-    A box is the intersection of three axis slabs, so the fraction of the kernel
+    A box is the intersection of three axis slabs, a cylinder of a radial
+    constraint and a cap slab, so the fraction of the kernel
     ball inside it is exactly 1/2 against a face, 1/4 along an edge and 1/8 at a
     corner. Treating the nearest surface as a single half-space -- which is what
     a closest-point contact normal implies -- gives 1/2 everywhere, over-stating
@@ -672,16 +673,22 @@ def test_boundary_density_is_exact_at_box_faces_edges_and_corners(test, device):
     edges.
     """
     box_half = 0.25
+    cfg = newton.ModelBuilder.ShapeConfig(mu=0.0)
     builder = newton.ModelBuilder()
     builder.default_particle_radius = SPACING * 0.5
-    builder.add_shape_box(body=-1, hx=box_half, hy=box_half, hz=box_half,
-                          cfg=newton.ModelBuilder.ShapeConfig(mu=0.0))
+    builder.add_shape_box(body=-1, hx=box_half, hy=box_half, hz=box_half, cfg=cfg)
+    # A cylinder rim is the same defect: side and cap meet at a convex edge.
+    builder.add_shape_cylinder(
+        body=-1, radius=box_half, half_height=box_half, cfg=cfg,
+        xform=wp.transform(wp.vec3(4.0, 0.0, 0.0), wp.quat_identity()),
+    )
 
-    # Touching the face, the edge and the corner, plus one offset probe each.
     probes = [
-        ("face", (box_half, 0.0, 0.0), 0.5),
-        ("edge", (box_half, box_half, 0.0), 0.25),
-        ("corner", (box_half, box_half, box_half), 0.125),
+        ("box face", (box_half, 0.0, 0.0), 0.5),
+        ("box edge", (box_half, box_half, 0.0), 0.25),
+        ("box corner", (box_half, box_half, box_half), 0.125),
+        ("cylinder side", (4.0 + box_half, 0.0, 0.0), 0.5),
+        ("cylinder rim", (4.0 + box_half, 0.0, box_half), 0.25),
     ]
     for _, pos, _ in probes:
         builder.add_particle(pos=wp.vec3(*pos), vel=wp.vec3(0.0), mass=PARTICLE_MASS,
@@ -701,15 +708,18 @@ def test_boundary_density_is_exact_at_box_faces_edges_and_corners(test, device):
 
     fraction = 1.0 - np.exp(-solver._pbf_boundary_log.numpy())
     for i, (name, _, expected) in enumerate(probes):
+        # Curved sides carry a small curvature error on top; flat features are exact.
+        tol = 0.03 if "cylinder" in name else 0.02
         test.assertAlmostEqual(
-            float(fraction[i]), expected, delta=0.02,
-            msg=f"boundary density at a box {name}: {fraction[i]:.4f}, geometry gives {expected:.4f}",
+            float(fraction[i]), expected, delta=tol,
+            msg=f"boundary density at a {name}: {fraction[i]:.4f}, geometry gives {expected:.4f}",
         )
 
     # And the ordering must hold regardless of tolerance: a corner sees less
     # solid than an edge, which sees less than a face.
     test.assertLess(fraction[2], fraction[1])
     test.assertLess(fraction[1], fraction[0])
+    test.assertLess(fraction[4], fraction[3])
 
 devices = get_test_devices()
 
