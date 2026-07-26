@@ -51,7 +51,7 @@ printf "Profiling both patch contact-solve variants\n  ncu: %s\n  python: %s\n  
   --launch-count 2 \
   --kill 1 \
   --section SpeedOfLight \
-  --section MemoryWorkloadAnalysis \
+  --section MemoryWorkloadAnalysis_Tables \
   --section Occupancy \
   --section WarpStateStats \
   --section SchedulerStats \

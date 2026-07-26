@@ -51,7 +51,7 @@ printf "Profiling one contact-row builder launch\n  ncu: %s\n  python: %s\n  rep
   --launch-count 1 \
   --kill 1 \
   --section SpeedOfLight \
-  --section MemoryWorkloadAnalysis \
+  --section MemoryWorkloadAnalysis_Tables \
   --section Occupancy \
   --section WarpStateStats \
   --section SchedulerStats \
