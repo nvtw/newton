@@ -51,6 +51,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>Ant/shared rollout diagnostics now use an ordered two-stage reduction: identical inputs are bitwise deterministic, and 262,144-sample metric time falls from about 1000 to 41 µs. The old atomic path fails the new regression.</li>
 <li>A fresh full-training trace still ranks physics first: advance/publish 13.4%, contact-row build 10.1%, patch solves 10.0%, external advance 5.6%; MinGRU forward/backward total 10.1%.</li>
 <li>Reusing the MinGRU candidate in its derivative removes one redundant sigmoid and cuts backward median 114.6 → 109.5 µs (-4.5%). Randomized old/new gradients are bitwise identical.</li>
+<li>Optional cuBLAS now computes every Muon Gram contraction: Gram time falls 43.9 → 27.6 ms (-37%) and the production PPO update graph 98.18 → 95.30 ms (-2.94%). The Warp fallback remains; two same-seed G1 runs match across all 71 checkpoint arrays.</li>
 <li>Zero-weight optional reward guards cut the fused observation/reward kernel 44.6%; default and enabled air-time, sliding, and joint-regularizer equations pass.</li>
 <li>Random-seed Ant reaches 0.820 m/s after 20 updates; six randomly sampled solver/RL tests and the targeted contractions pass.</li>
 </ul>

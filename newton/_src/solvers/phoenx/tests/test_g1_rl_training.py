@@ -1431,9 +1431,10 @@ class TestG1PhoenXRL(unittest.TestCase):
             muon_poly_tiled_batch3_kernel,
             muon_ns_wide_tiled_batch3_kernel,
         ):
+            expected_launches = 0 if optimizer._use_cublas and kernel is muon_gram_wide_tiled_batch3_kernel else 5
             self.assertEqual(
                 sum(bool(call.args) and call.args[0] is kernel for call in launch_tiled.call_args_list),
-                5,
+                expected_launches,
             )
         wp.capture_launch(capture.graph)
 
