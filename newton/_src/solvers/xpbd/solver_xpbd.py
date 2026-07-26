@@ -313,8 +313,11 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 it scales a colour-normal difference, in the PhysX formulation,
                 and no value of it corresponds to a surface tension in N/m.
 
-                A continuum surface force, ``f = sigma kappa grad c`` in N/m^3,
-                would be SI and was evaluated. It is not usable at this
+                Two SI routes were derived, implemented and measured; both
+                fail here, for different reasons.
+
+                A **continuum surface force**, ``f = sigma kappa grad c`` in
+                N/m^3, was evaluated first. It is not usable at this
                 resolution: the interface normal comes from the gradient of the
                 SPH colour field, and with the ~26 neighbours a PBF kernel
                 support holds, that gradient does not cancel in the fluid
@@ -325,6 +328,27 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 gradient, whose derivative vanishes at the origin, improved both
                 but not enough. CSF wants 50-150 neighbours; PBF deliberately
                 runs far fewer for speed.
+
+                A **pairwise cohesion force** was evaluated second, converting
+                sigma into a pairwise coefficient through the Fowler/Kirkwood-Buff
+                surface tension relation, ``sigma = -(pi/8) n^2 int F(r) r^4 dr``.
+                The relation and its r^4 moment for the Akinci spline
+                (``0.0075960 h^2``) both check out, but the derivation silently
+                assumes a radial distribution function of 1, and a PBF packing is
+                quasi-crystalline with strong structure at the rest spacing, so
+                the prefactor carries an unquantified O(1) error. Measured, the
+                scheme is also unstable at the strengths this particle size needs:
+                a free droplet's peak speed grew monotonically with sigma --
+                0.40, 0.51, 0.68, 1.62, 2.87, 6.31 m/s at sigma = 0, 0.5, 2, 8,
+                32, 128 N/m, from rest and with no gravity -- which is the
+                tensile instability a bulk attractive force invites. The
+                published work in this area calibrates the coefficient against a
+                Young-Laplace or Rayleigh measurement rather than deriving it.
+
+                Making this SI therefore needs a stability fix first (the force
+                belongs in the integration, so the density constraint corrects it
+                within the same substep, rather than as a trailing velocity
+                impulse), and then a measured prefactor to close the g(r) gap.
             pbf_vorticity_confinement: Fluid vorticity-confinement coefficient.
             pbf_cfl_coefficient: Maximum relative normal displacement as a
                 fraction of the fluid neighbor radius.
@@ -1297,6 +1321,10 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 # applied to velocities so the coefficient is a real material
                 # property (Pa s) rather than a solver-side damping factor.
                 if self.pbf_viscosity > 0.0 and model.particle_grid is not None:
+                    # apply_viscosity early-returns for particles with no
+                    # density, which would otherwise leave a stale impulse in
+                    # this shared buffer to be applied again next substep.
+                    self._pbf_delta_qd.zero_()
                     wp.launch(
                         kernel=apply_viscosity,
                         dim=model.particle_count,
