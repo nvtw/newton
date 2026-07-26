@@ -1449,6 +1449,11 @@ A corrected production-recipe phase comparison changes the next target:
 - FP32 and BF16 contractions match NumPy tolerances inside CUDA graphs and are
   bit deterministic across repeated graph launches. Six randomly selected
   solver/RL tests also pass.
+- A post-change Nsight capture at 1.689M samples/s puts FP32 SGEMM at only
+  1.3% of GPU time. The new ranking is reduced advance/publish 13.2%, packed
+  contact rows 9.2%, patch solves 9.2% combined, and reduced factor passes 8.2%.
+  The next broad opportunity is structural reduced-contact traffic, not the
+  remaining narrow scalar decoder.
 
 ## Open ideas (not yet attempted)
 
