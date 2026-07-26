@@ -5928,6 +5928,62 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(second_restored.iteration, 3)
             self.assertEqual(second_restored.actor_optimizer.step_count, resumed.trainer.actor_optimizer.step_count)
 
+    def test_eager_live_cycle_reports_stats_and_matches_uninterrupted(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 eager continuation tests")
+        env_config = rl.ConfigEnvG1PhoenX(
+            world_count=2,
+            sim_substeps=1,
+            solver_iterations=1,
+            velocity_iterations=1,
+            articulation_mode="reduced",
+            max_episode_steps=0,
+            auto_reset=False,
+        )
+        ppo_config = rl.ConfigPPO(
+            train_epochs=1,
+            minibatch_size=2,
+            replay_ratio=1.0,
+            normalize_advantages=False,
+            shared_value_network=True,
+            policy_network="puffer_mingru",
+            manual_actor_backward=True,
+            manual_critic_backward=True,
+        )
+        config = rl.ConfigTrainG1PPO(
+            iterations=2,
+            rollout_steps=2,
+            hidden_layers=(8,),
+            env_config=env_config,
+            ppo_config=ppo_config,
+            device=device,
+            seed=47,
+            log_interval=0,
+            randomize_commands=False,
+            readback_diagnostics=True,
+            execution_mode="eager",
+        )
+        result = rl.train_g1_ppo(config)
+        continued = _train_g1_ppo_cycle(result, replace(config, iterations=1))
+
+        self.assertEqual(len(continued.history), 1)
+        self.assertEqual(continued.history[0].iteration, 2)
+        self.assertTrue(math.isfinite(continued.history[0].mean_tracking_perf))
+        self.assertEqual(continued.trainer.iteration, 3)
+
+        reference = rl.train_g1_ppo(replace(config, iterations=3))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            continued_path = f"{tmpdir}/continued.npz"
+            reference_path = f"{tmpdir}/reference.npz"
+            continued.trainer.save_checkpoint(continued_path, iteration=3)
+            reference.trainer.save_checkpoint(reference_path, iteration=3)
+            with (
+                np.load(continued_path, allow_pickle=False) as continued_checkpoint,
+                np.load(reference_path, allow_pickle=False) as reference_checkpoint,
+            ):
+                self.assertEqual(continued_checkpoint.files, reference_checkpoint.files)
+                for key in continued_checkpoint.files:
+                    np.testing.assert_array_equal(continued_checkpoint[key], reference_checkpoint[key])
+
     def test_graph_leapfrog_live_cycle_matches_uninterrupted(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 graph-leapfrog continuation tests")
         env_config = rl.ConfigEnvG1PhoenX(

@@ -57,6 +57,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>The existing adaptive-KL controller also overreacted at minibatch granularity and blocked acquisition. It is not a suitable automatic default.</li>
 <li>A fresh whole-pipeline Nsight capture at 1.664M samples/s is led by reduced advance/publish (13.4%), packed contact rows (9.5%), reduced advance (6.5%), patch solve (6.0%), and MinGRU forward/backward (9.9% combined). Shared row caches and a forced register cap both failed confidence/performance gates and were removed.</li>
 <li>PhoenX PBT currently reuses live workers but schedules them serially. A fixed-world-budget batched population with early elimination is feasible, but must prove better end-to-quality before production use.</li>
+<li>Fixed G1 eager PBT discarding interval statistics after its first cycle, which made subsequent fitness <code>-inf</code>. G1 graph continuation and both Anymal paths were unaffected; split and uninterrupted same-seed checkpoints now match exactly.</li>
 <li>Next: prototype fixed-budget policy racing and scale-invariant, confidence-gated learning control in a small environment before production G1 integration.</li>
 </ul>
 </section>

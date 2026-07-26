@@ -1559,6 +1559,73 @@ def _train_anymal_ppo_graph_leapfrog(
     return ResultTrainAnymalPPO(trainer=trainer, env=env, buffer=buffers[prev], history=history)
 
 
+def _train_g1_ppo_eager(
+    cfg: ConfigTrainG1PPO,
+    env: EnvG1PhoenX,
+    trainer: TrainerPPO,
+    buffer: BufferRollout,
+    command_curriculum_counter: wp.array[wp.int32],
+    target_curriculum_counter: wp.array[wp.int32],
+    target_seed_counter: wp.array[wp.int32],
+    *,
+    start_iteration: int,
+    diagnostics: _G1TrainDiagnosticsReadback | None,
+    checkpoint_metadata: dict[str, object],
+    write_checkpoints: bool = True,
+) -> ResultTrainG1PPO:
+    """Run one eager G1 training interval with complete statistics."""
+
+    history: list[StatsTrainG1PPO] = []
+    for local_iteration in range(cfg.iterations):
+        iteration = start_iteration + local_iteration
+        _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, buffer.num_samples)
+        if cfg.randomize_commands and cfg.command_sampling == "rollout":
+            env.randomize_commands(
+                seed=int(cfg.seed) + 53_321 + iteration,
+                command_x_range=cfg.command_x_range,
+                command_y_range=cfg.command_y_range,
+                command_yaw_range=cfg.command_yaw_range,
+                zero_probability=cfg.command_zero_probability,
+            )
+        _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, buffer.num_samples)
+
+        t0 = time.perf_counter()
+        env.collect_ppo_rollout(
+            trainer,
+            buffer,
+            seed=cfg.seed + iteration * cfg.rollout_steps,
+            reset_state_at_start=bool(cfg.reset_recurrent_state_on_rollout_start),
+        )
+        t1 = time.perf_counter()
+        update_stats = trainer.update(buffer, read_stats=False)
+        if diagnostics is not None:
+            rollout_metrics, update_stats, action_metrics = diagnostics.read(buffer, env, trainer)
+        else:
+            rollout_metrics = _g1_disabled_rollout_metrics(env)
+            action_metrics = (float("nan"), float("nan"), float("nan"), float("nan"), float("nan"))
+        t2 = time.perf_counter()
+        stats = _merge_g1_stats(
+            iteration, rollout_metrics, update_stats, action_metrics, t1 - t0, t2 - t1, buffer.num_samples
+        )
+        history.append(stats)
+
+        _maybe_log_g1_train_stats(cfg, stats, local_iteration)
+        trainer.iteration = iteration + 1
+        if write_checkpoints:
+            _maybe_checkpoint_g1(cfg, trainer, checkpoint_metadata)
+
+    if write_checkpoints and cfg.checkpoint_path is not None:
+        final_iteration = start_iteration + int(cfg.iterations)
+        trainer.iteration = final_iteration
+        trainer.save_checkpoint(
+            _format_checkpoint_path(cfg.checkpoint_path, final_iteration),
+            iteration=final_iteration,
+            metadata=checkpoint_metadata,
+        )
+
+    return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffer, history=history)
+
+
 def _train_g1_ppo_cycle(
     result: ResultTrainG1PPO,
     cfg: ConfigTrainG1PPO,
@@ -1596,26 +1663,19 @@ def _train_g1_ppo_cycle(
     target_seed_counter = make_seed_counter(int(cfg.seed) + 71_129 + start_iteration, device=device)
     _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, 0)
     _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, 0)
-    for local_iteration in range(cfg.iterations):
-        iteration = start_iteration + local_iteration
-        _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, buffer.num_samples)
-        if cfg.randomize_commands and cfg.command_sampling == "rollout":
-            env.randomize_commands(
-                seed=int(cfg.seed) + 53_321 + iteration,
-                command_x_range=cfg.command_x_range,
-                command_y_range=cfg.command_y_range,
-                command_yaw_range=cfg.command_yaw_range,
-                zero_probability=cfg.command_zero_probability,
-            )
-        _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, buffer.num_samples)
-        env.collect_ppo_rollout_seed_counter(
-            trainer,
-            buffer,
-            seed_counter=make_seed_counter(int(cfg.seed) + iteration * int(cfg.rollout_steps), device=device),
-            reset_state_at_start=bool(cfg.reset_recurrent_state_on_rollout_start),
-        )
-        trainer.update(buffer)
-    return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffer, history=[])
+    return _train_g1_ppo_eager(
+        cfg,
+        env,
+        trainer,
+        buffer,
+        command_curriculum_counter,
+        target_curriculum_counter,
+        target_seed_counter,
+        start_iteration=start_iteration,
+        diagnostics=diagnostics,
+        checkpoint_metadata=_g1_checkpoint_metadata(cfg, env),
+        write_checkpoints=False,
+    )
 
 
 def _train_anymal_ppo_cycle(
@@ -1769,7 +1829,6 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
     checkpoint_metadata = _g1_checkpoint_metadata(cfg, env)
     trainer.reserve_update_buffers(buffer)
 
-    history: list[StatsTrainG1PPO] = []
     start_iteration = int(getattr(trainer, "iteration", 0))
     diagnostics = _G1TrainDiagnosticsReadback(device, buffer.num_samples) if cfg.readback_diagnostics else None
     command_curriculum_counter = _make_g1_command_curriculum_counter(cfg, env, start_iteration)
@@ -1797,53 +1856,18 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
             diagnostics=diagnostics,
         )
 
-    for local_iteration in range(cfg.iterations):
-        iteration = start_iteration + local_iteration
-        _advance_g1_command_curriculum(cfg, env, command_curriculum_counter, buffer.num_samples)
-        if cfg.randomize_commands and cfg.command_sampling == "rollout":
-            env.randomize_commands(
-                seed=int(cfg.seed) + 53_321 + iteration,
-                command_x_range=cfg.command_x_range,
-                command_y_range=cfg.command_y_range,
-                command_yaw_range=cfg.command_yaw_range,
-                zero_probability=cfg.command_zero_probability,
-            )
-        _configure_g1_sparse_targets(cfg, env, target_curriculum_counter, target_seed_counter, buffer.num_samples)
-
-        t0 = time.perf_counter()
-        env.collect_ppo_rollout(
-            trainer,
-            buffer,
-            seed=cfg.seed + iteration * cfg.rollout_steps,
-            reset_state_at_start=bool(cfg.reset_recurrent_state_on_rollout_start),
-        )
-        t1 = time.perf_counter()
-        update_stats = trainer.update(buffer, read_stats=False)
-        if diagnostics is not None:
-            rollout_metrics, update_stats, action_metrics = diagnostics.read(buffer, env, trainer)
-        else:
-            rollout_metrics = _g1_disabled_rollout_metrics(env)
-            action_metrics = (float("nan"), float("nan"), float("nan"), float("nan"), float("nan"))
-        t2 = time.perf_counter()
-        stats = _merge_g1_stats(
-            iteration, rollout_metrics, update_stats, action_metrics, t1 - t0, t2 - t1, buffer.num_samples
-        )
-        history.append(stats)
-
-        _maybe_log_g1_train_stats(cfg, stats, local_iteration)
-        trainer.iteration = iteration + 1
-        _maybe_checkpoint_g1(cfg, trainer, checkpoint_metadata)
-
-    if cfg.checkpoint_path is not None:
-        final_iteration = start_iteration + int(cfg.iterations)
-        trainer.iteration = final_iteration
-        trainer.save_checkpoint(
-            _format_checkpoint_path(cfg.checkpoint_path, final_iteration),
-            iteration=final_iteration,
-            metadata=checkpoint_metadata,
-        )
-
-    return ResultTrainG1PPO(trainer=trainer, env=env, buffer=buffer, history=history)
+    return _train_g1_ppo_eager(
+        cfg,
+        env,
+        trainer,
+        buffer,
+        command_curriculum_counter,
+        target_curriculum_counter,
+        target_seed_counter,
+        start_iteration=start_iteration,
+        diagnostics=diagnostics,
+        checkpoint_metadata=checkpoint_metadata,
+    )
 
 
 def evaluate_g1_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1PPO | None = None) -> ResultEvaluateG1PPO:

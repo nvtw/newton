@@ -143,6 +143,7 @@
 
 ### Fixed
 
+- Fix experimental PhoenX G1 population-based training discarding fitness statistics after the first eager training interval.
 - Fix experimental PhoenX PPO adaptive KL increasing the learning rate when measured KL is exactly zero.
 - Fix experimental PhoenX Ant rollouts to terminate and reset non-finite or physically exploded states instead of retaining corrupted simulation state.
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.

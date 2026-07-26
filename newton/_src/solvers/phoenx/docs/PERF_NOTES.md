@@ -1401,6 +1401,13 @@ A corrected production-recipe phase comparison changes the next target:
   portfolio can instead run smaller workers concurrently and eliminate weak
   policies early. This is feasible, but must beat a single policy on median
   wall-to-quality and failure tails before production integration.
+- G1 eager PBT continuation discarded every interval history after the first,
+  making all later fitness values negative infinity; the graph-leapfrog G1 path and both
+  Anymal paths were unaffected. The eager loop is now shared by initial and live
+  training. A regression proves finite continued statistics and bit-identical
+  same-seed 2+1 versus uninterrupted 3-iteration checkpoints; it fails when the
+  old empty-history result is restored.
+
 
 ## Open ideas (not yet attempted)
 
