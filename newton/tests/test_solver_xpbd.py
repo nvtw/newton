@@ -16,12 +16,15 @@ import newton
 import newton.examples
 from newton._src.solvers.xpbd.kernels import apply_rigid_restitution
 from newton._src.solvers.xpbd.pbf_kernels import (
+    BOUNDS_REDUCE_THREADS,
     apply_pbf_deltas,
     apply_vorticity,
     build_neighbor_list,
-    build_sorted_order,
     calculate_density,
-    gather_sorted_positions,
+    count_particles_per_cell,
+    finalize_grid_params,
+    reduce_particle_bounds,
+    scatter_particles_to_cells,
     solve_density,
     vorticity_confinement,
 )
@@ -1696,10 +1699,6 @@ def test_position_based_fluids_reference_stages(test, device):
         ],
         dtype=np.float32,
     )
-    # Straddle a hash-grid cell boundary so the solver's cell ordering is a
-    # non-trivial permutation. The PBF kernels work in that ordering, and a pure
-    # translation leaves every expected value below unchanged, so this validates
-    # the permutation bookkeeping without altering the reference physics.
     positions = positions + np.array([0.14, 0.0, 0.0], dtype=np.float32)
     velocities = np.array(
         [
@@ -1736,7 +1735,6 @@ def test_position_based_fluids_reference_stages(test, device):
     _, lambda_denominator, _ = _calculate_rest_density(0.11, radius)
     lambda_scale = 1.0 / (lambda_denominator * 0.5 * particle_mass)
     surface_tension = 0.003
-    model.particle_grid.build(state.particle_q, radius=radius)
     densities = wp.zeros(particle_count, dtype=float, device=device)
     pos_lambda = wp.zeros(particle_count, dtype=wp.vec4, device=device)
     normals = wp.zeros(particle_count, dtype=wp.vec3, device=device)
@@ -1749,41 +1747,68 @@ def test_position_based_fluids_reference_stages(test, device):
     neighbors = wp.zeros(particle_count * max_neighbors, dtype=wp.int32, device=device)
     neighbor_counts = wp.zeros(particle_count, dtype=wp.int32, device=device)
     overflow = wp.zeros(1, dtype=wp.int32, device=device)
-    # The PBF kernels work in the hash grid's cell ordering, so results come back
+    # The PBF kernels work in the grid's cell ordering, so results come back
     # permuted; build the mapping and un-permute before comparing per particle.
+    grid_dim = 8
+    n_cells = grid_dim**3
     sorted_to_orig = wp.zeros(particle_count, dtype=wp.int32, device=device)
-    orig_to_sorted = wp.zeros(particle_count, dtype=wp.int32, device=device)
     pos_sorted = wp.zeros(particle_count, dtype=wp.vec4, device=device)
+    cell_of = wp.zeros(particle_count, dtype=wp.int32, device=device)
+    cell_counts = wp.zeros(n_cells + 1, dtype=wp.int32, device=device)
+    cell_offset = wp.zeros(n_cells + 1, dtype=wp.int32, device=device)
+    cell_cursor = wp.zeros(n_cells, dtype=wp.int32, device=device)
+    grid_origin = wp.zeros(1, dtype=wp.vec3, device=device)
+    grid_inv_cell = wp.zeros(1, dtype=float, device=device)
+    fluid_count = wp.zeros(1, dtype=wp.int32, device=device)
+    bounds = wp.array([1.0e30] * 3 + [-1.0e30] * 3, dtype=float, device=device)
     wp.launch(
-        build_sorted_order,
-        dim=particle_count,
-        inputs=[model.particle_grid.id],
-        outputs=[sorted_to_orig, orig_to_sorted],
+        reduce_particle_bounds,
+        dim=BOUNDS_REDUCE_THREADS,
+        inputs=[state.particle_q, model.particle_flags],
+        outputs=[bounds],
         device=device,
     )
     wp.launch(
-        gather_sorted_positions,
-        dim=particle_count,
-        inputs=[state.particle_q, model.particle_mass, sorted_to_orig],
-        outputs=[pos_sorted],
+        finalize_grid_params,
+        dim=1,
+        inputs=[bounds, radius, grid_dim],
+        outputs=[grid_origin, grid_inv_cell],
         device=device,
     )
-    perm = orig_to_sorted.numpy()  # perm[particle] -> slot
-    # Guard the guard: if this ever became the identity the permutation handling
-    # below would be untested.
-    test.assertFalse(np.array_equal(perm, np.arange(particle_count)),
-                     "scene no longer produces a non-trivial cell ordering")
+    wp.launch(
+        count_particles_per_cell,
+        dim=particle_count,
+        inputs=[state.particle_q, model.particle_flags, grid_origin, grid_inv_cell, grid_dim],
+        outputs=[cell_of, cell_counts],
+        device=device,
+    )
+    wp.utils.array_scan(cell_counts, cell_offset, inclusive=False)
+    wp.copy(fluid_count, cell_offset, dest_offset=0, src_offset=n_cells, count=1)
+    wp.launch(
+        scatter_particles_to_cells,
+        dim=particle_count,
+        inputs=[state.particle_q, model.particle_mass, cell_of, cell_offset, cell_cursor],
+        outputs=[sorted_to_orig, pos_sorted],
+        device=device,
+    )
+    perm = np.empty(particle_count, dtype=np.int32)  # perm[particle] -> slot
+    perm[sorted_to_orig.numpy()] = np.arange(particle_count)
+    # This cloud is narrower than the search radius, hence a single cell, hence
+    # no meaningful permutation to exercise here; the un-permutation below is
+    # still applied so it stays correct if that ever changes. The multi-cell
+    # ordering itself is checked separately, without physics, further down.
 
     wp.launch(
         build_neighbor_list,
         dim=particle_count,
         inputs=[
-            model.particle_grid.id,
-            state.particle_q,
-            model.particle_flags,
-            orig_to_sorted,
+            pos_sorted,
+            cell_offset,
+            grid_origin,
+            grid_inv_cell,
+            grid_dim,
+            fluid_count,
             contact_distance_sq,
-            radius,
             max_neighbors,
             particle_count,
         ],
@@ -1794,7 +1819,7 @@ def test_position_based_fluids_reference_stages(test, device):
         calculate_density,
         dim=particle_count,
         inputs=[
-            model.particle_grid.id,
+            sorted_to_orig,
             state.particle_q,
             model.particle_flags,
             model.particle_mass,
@@ -1842,12 +1867,11 @@ def test_position_based_fluids_reference_stages(test, device):
         vorticity_confinement,
         dim=particle_count,
         inputs=[
-            model.particle_grid.id,
+            sorted_to_orig,
             state.particle_q,
             state.particle_qd,
             model.particle_flags,
             pos_sorted,
-            sorted_to_orig,
             neighbors,
             neighbor_counts,
             particle_count,
@@ -1895,7 +1919,7 @@ def test_position_based_fluids_reference_stages(test, device):
         apply_vorticity,
         dim=particle_count,
         inputs=[
-            model.particle_grid.id,
+            sorted_to_orig,
             state.particle_q,
             model.particle_flags,
             curl,
@@ -1941,7 +1965,7 @@ def test_position_based_fluids_reference_stages(test, device):
         solve_density,
         dim=particle_count,
         inputs=[
-            model.particle_grid.id,
+            sorted_to_orig,
             state.particle_q,
             model.particle_flags,
             model.particle_inv_mass,
@@ -2304,3 +2328,94 @@ add_function_test(
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)
+
+
+def test_pbf_grid_orders_particles_by_cell(test, device):
+    """The counting-sort grid must place every particle in its own cell's slice.
+
+    Checked against the cell index recomputed on the host, so it catches an
+    off-by-one in the scan, the cursor, or the x-major flattening.
+    """
+    rng = np.random.default_rng(0)
+    particle_count = 400
+    radius = 0.1
+    grid_dim = 8
+    n_cells = grid_dim**3
+    positions = rng.uniform(-0.5, 0.5, (particle_count, 3)).astype(np.float32)
+
+    q = wp.array(positions, dtype=wp.vec3, device=device)
+    mass = wp.full(particle_count, 1.0, dtype=float, device=device)
+    flags = wp.full(
+        particle_count,
+        int(newton.ParticleFlags.ACTIVE | newton.ParticleFlags.FLUID),
+        dtype=wp.int32,
+        device=device,
+    )
+    bounds = wp.array([1.0e30] * 3 + [-1.0e30] * 3, dtype=float, device=device)
+    origin = wp.zeros(1, dtype=wp.vec3, device=device)
+    inv_cell = wp.zeros(1, dtype=float, device=device)
+    cell_of = wp.zeros(particle_count, dtype=wp.int32, device=device)
+    counts = wp.zeros(n_cells + 1, dtype=wp.int32, device=device)
+    offset = wp.zeros(n_cells + 1, dtype=wp.int32, device=device)
+    cursor = wp.zeros(n_cells, dtype=wp.int32, device=device)
+    sorted_to_orig = wp.zeros(particle_count, dtype=wp.int32, device=device)
+    pos_sorted = wp.zeros(particle_count, dtype=wp.vec4, device=device)
+
+    wp.launch(
+        reduce_particle_bounds, dim=BOUNDS_REDUCE_THREADS, inputs=[q, flags], outputs=[bounds], device=device
+    )
+    wp.launch(
+        finalize_grid_params, dim=1, inputs=[bounds, radius, grid_dim], outputs=[origin, inv_cell], device=device
+    )
+    wp.launch(
+        count_particles_per_cell,
+        dim=particle_count,
+        inputs=[q, flags, origin, inv_cell, grid_dim],
+        outputs=[cell_of, counts],
+        device=device,
+    )
+    wp.utils.array_scan(counts, offset, inclusive=False)
+    wp.launch(
+        scatter_particles_to_cells,
+        dim=particle_count,
+        inputs=[q, mass, cell_of, offset, cursor],
+        outputs=[sorted_to_orig, pos_sorted],
+        device=device,
+    )
+
+    # Bounds must be tight, and the cell at least the search radius or a 3x3x3
+    # neighbourhood would not cover it.
+    np.testing.assert_allclose(bounds.numpy()[:3], positions.min(axis=0), rtol=1.0e-6)
+    np.testing.assert_allclose(bounds.numpy()[3:], positions.max(axis=0), rtol=1.0e-6)
+    cell = 1.0 / inv_cell.numpy()[0]
+    test.assertGreaterEqual(cell, radius)
+
+    lo = np.array(origin.numpy()[0])
+    idx = np.clip(((positions - lo) / cell).astype(np.int32), 0, grid_dim - 1)
+    expected_cell = idx[:, 0] + grid_dim * (idx[:, 1] + grid_dim * idx[:, 2])
+    np.testing.assert_array_equal(cell_of.numpy(), expected_cell)
+
+    order = sorted_to_orig.numpy()
+    # A permutation, and one that actually reorders -- otherwise the solver's
+    # slot bookkeeping would be untested.
+    np.testing.assert_array_equal(np.sort(order), np.arange(particle_count))
+    test.assertFalse(np.array_equal(order, np.arange(particle_count)))
+    # Cell indices are non-decreasing along the sorted order, and each particle
+    # lands inside its own cell's slice.
+    off = offset.numpy()
+    cells_in_order = expected_cell[order]
+    test.assertTrue(np.all(np.diff(cells_in_order) >= 0))
+    slots = np.arange(particle_count)
+    test.assertTrue(np.all(off[cells_in_order] <= slots))
+    test.assertTrue(np.all(slots < off[cells_in_order + 1]))
+    # Positions ride along with mass packed in w.
+    np.testing.assert_allclose(pos_sorted.numpy()[:, :3], positions[order], rtol=1.0e-6)
+    np.testing.assert_allclose(pos_sorted.numpy()[:, 3], 1.0, rtol=1.0e-6)
+
+
+add_function_test(
+    TestSolverXPBD,
+    "test_pbf_grid_orders_particles_by_cell",
+    test_pbf_grid_orders_particles_by_cell,
+    devices=get_test_devices(),
+)

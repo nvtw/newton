@@ -39,9 +39,13 @@ from .pbf_kernels import (
     apply_damping,
     apply_velocity_delta,
     apply_viscosity,
+    BOUNDS_REDUCE_THREADS,
     build_neighbor_list,
-    build_sorted_order,
+    count_particles_per_cell,
+    finalize_grid_params,
     gather_sorted_positions,
+    reduce_particle_bounds,
+    scatter_particles_to_cells,
     apply_pbf_deltas,
     apply_vorticity,
     calculate_density,
@@ -419,9 +423,6 @@ class SolverXPBD(SolverBase, CouplingInterface):
             h = pbf_particle_contact_distance
             if h <= 0.0:
                 raise ValueError("pbf_particle_contact_distance must be positive")
-            if model.particle_count > 1 and model.particle_grid is None:
-                raise ValueError("Position-based fluids require a particle hash grid")
-
             fluid_rest_dist = pbf_fluid_rest_distance if pbf_fluid_rest_distance is not None else h * 0.6
             if fluid_rest_dist <= 0.0 or fluid_rest_dist >= h:
                 raise ValueError("pbf_fluid_rest_distance must be positive and less than the contact distance")
@@ -474,14 +475,10 @@ class SolverXPBD(SolverBase, CouplingInterface):
             # that gains or loses ParticleFlags.FLUID afterwards needs a new solver.
             flags = model.particle_flags.numpy()
             self._pbf_all_particles_fluid = bool(((flags & int(ParticleFlags.FLUID)) != 0).all())
-            # Rebuilding the neighbor grid inside the iteration loop is a large
-            # fraction of the fluid step. Warp's hash grid searches the 3x3x3
-            # cell neighborhood around a query point, so a grid built at the
-            # start of the substep already tolerates drift on the order of half
-            # a cell -- more than a particle moves across one substep's
-            # iterations. Kept as an attribute so the assumption can be
-            # A/B-tested rather than taken on faith.
-            self._pbf_rebuild_grid_per_iteration = False
+            # The neighbour grid is built once per substep, not per iteration.
+            # The search covers the 3x3x3 cell neighbourhood, so it tolerates
+            # drift on the order of half a cell -- more than a particle moves
+            # across one substep's iterations.
             self.pbf_relaxation = pbf_relaxation
             self.pbf_viscosity = pbf_viscosity
             self.pbf_cfl_coefficient = pbf_cfl_coefficient
@@ -526,7 +523,23 @@ class SolverXPBD(SolverBase, CouplingInterface):
             # cell each substep, so reusing that ordering costs nothing and makes
             # neighbour gathers mostly local instead of scattered.
             self._pbf_sorted_to_orig = wp.zeros(n, dtype=wp.int32, device=model.device)
-            self._pbf_orig_to_sorted = wp.zeros(n, dtype=wp.int32, device=model.device)
+            # Counting-sort neighbour grid. Resolution is fixed so the scan cost
+            # is fixed; the cell size grows instead if the fluid spreads beyond
+            # it, which coarsens the search rather than overflowing it. Roughly
+            # four particles per cell at the initial extent.
+            self._pbf_grid_dim = int(min(max(round((n / 4.0) ** (1.0 / 3.0)) + 2, 8), 128))
+            cells = self._pbf_grid_dim**3
+            self._pbf_cell_of = wp.zeros(n, dtype=wp.int32, device=model.device)
+            self._pbf_cell_counts = wp.zeros(cells + 1, dtype=wp.int32, device=model.device)
+            self._pbf_cell_offset = wp.zeros(cells + 1, dtype=wp.int32, device=model.device)
+            self._pbf_cell_cursor = wp.zeros(cells, dtype=wp.int32, device=model.device)
+            self._pbf_bounds = wp.zeros(6, dtype=float, device=model.device)
+            self._pbf_grid_origin = wp.zeros(1, dtype=wp.vec3, device=model.device)
+            self._pbf_grid_inv_cell = wp.zeros(1, dtype=float, device=model.device)
+            self._pbf_fluid_count = wp.zeros(1, dtype=wp.int32, device=model.device)
+            self._pbf_bounds_init = wp.array(
+                [1.0e30, 1.0e30, 1.0e30, -1.0e30, -1.0e30, -1.0e30], dtype=float, device=model.device
+            )
             self._pbf_pos_sorted = wp.zeros(n, dtype=wp.vec4, device=model.device)
             self._pbf_delta_qd = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_boundary_log = wp.zeros(n, dtype=float, device=model.device)
@@ -762,8 +775,14 @@ class SolverXPBD(SolverBase, CouplingInterface):
 
                 self.integrate_particles(model, state_in, state_out, dt)
 
-                # Build/update the particle hash grid for particle-particle contact queries
-                if model.particle_count > 1 and model.particle_grid is not None:
+                # Build/update the particle hash grid for particle-particle contact
+                # queries. Fluid neighbours come from the counting-sort grid below,
+                # so an all-fluid model never needs this.
+                if (
+                    model.particle_count > 1
+                    and model.particle_grid is not None
+                    and not (self.pbf_enabled and self._pbf_all_particles_fluid)
+                ):
                     # Search radius must cover the maximum interaction distance used by the contact query
                     grid_search_radius = model.particle_max_radius * 2.0 + model.particle_cohesion
                     if self.pbf_enabled:
@@ -782,34 +801,87 @@ class SolverXPBD(SolverBase, CouplingInterface):
                     self._pbf_accum_delta.zero_()
                     # Cache the fluid neighborhood once for the whole substep;
                     # the density, pressure and vorticity kernels all replay it.
-                    if model.particle_grid is not None:
-                        wp.launch(
-                            kernel=build_sorted_order,
-                            dim=model.particle_count,
-                            inputs=[model.particle_grid.id],
-                            outputs=[self._pbf_sorted_to_orig, self._pbf_orig_to_sorted],
-                            device=model.device,
-                        )
-                        wp.launch(
-                            kernel=build_neighbor_list,
-                            dim=model.particle_count,
-                            inputs=[
-                                model.particle_grid.id,
-                                state_out.particle_q,
-                                model.particle_flags,
-                                self._pbf_orig_to_sorted,
-                                self.pbf_contact_distance_sq,
-                                self.pbf_particle_contact_distance,
-                                self._pbf_max_neighbors,
-                                model.particle_count,
-                            ],
-                            outputs=[
-                                self._pbf_neighbors,
-                                self._pbf_neighbor_counts,
-                                self._pbf_neighbor_overflow,
-                            ],
-                            device=model.device,
-                        )
+                    # Build the neighbour grid: bounds, per-cell counts,
+                    # exclusive scan, then scatter. The scatter leaves positions
+                    # in cell order, so the search reads them sequentially and
+                    # stores neighbours as slots rather than particle indices.
+                    wp.copy(self._pbf_bounds, self._pbf_bounds_init)
+                    wp.launch(
+                        kernel=reduce_particle_bounds,
+                        dim=BOUNDS_REDUCE_THREADS,
+                        inputs=[state_out.particle_q, model.particle_flags],
+                        outputs=[self._pbf_bounds],
+                        device=model.device,
+                    )
+                    wp.launch(
+                        kernel=finalize_grid_params,
+                        dim=1,
+                        inputs=[
+                            self._pbf_bounds,
+                            self.pbf_particle_contact_distance,
+                            self._pbf_grid_dim,
+                        ],
+                        outputs=[self._pbf_grid_origin, self._pbf_grid_inv_cell],
+                        device=model.device,
+                    )
+                    self._pbf_cell_counts.zero_()
+                    self._pbf_cell_cursor.zero_()
+                    wp.launch(
+                        kernel=count_particles_per_cell,
+                        dim=model.particle_count,
+                        inputs=[
+                            state_out.particle_q,
+                            model.particle_flags,
+                            self._pbf_grid_origin,
+                            self._pbf_grid_inv_cell,
+                            self._pbf_grid_dim,
+                        ],
+                        outputs=[self._pbf_cell_of, self._pbf_cell_counts],
+                        device=model.device,
+                    )
+                    wp.utils.array_scan(self._pbf_cell_counts, self._pbf_cell_offset, inclusive=False)
+                    # The last offset entry is the number of binned particles.
+                    wp.copy(
+                        self._pbf_fluid_count,
+                        self._pbf_cell_offset,
+                        dest_offset=0,
+                        src_offset=self._pbf_grid_dim**3,
+                        count=1,
+                    )
+                    wp.launch(
+                        kernel=scatter_particles_to_cells,
+                        dim=model.particle_count,
+                        inputs=[
+                            state_out.particle_q,
+                            model.particle_mass,
+                            self._pbf_cell_of,
+                            self._pbf_cell_offset,
+                            self._pbf_cell_cursor,
+                        ],
+                        outputs=[self._pbf_sorted_to_orig, self._pbf_pos_sorted],
+                        device=model.device,
+                    )
+                    wp.launch(
+                        kernel=build_neighbor_list,
+                        dim=model.particle_count,
+                        inputs=[
+                            self._pbf_pos_sorted,
+                            self._pbf_cell_offset,
+                            self._pbf_grid_origin,
+                            self._pbf_grid_inv_cell,
+                            self._pbf_grid_dim,
+                            self._pbf_fluid_count,
+                            self.pbf_contact_distance_sq,
+                            self._pbf_max_neighbors,
+                            model.particle_count,
+                        ],
+                        outputs=[
+                            self._pbf_neighbors,
+                            self._pbf_neighbor_counts,
+                            self._pbf_neighbor_overflow,
+                        ],
+                        device=model.device,
+                    )
 
                     # Solid boundaries contribute no neighbors to the
                     # density sum; recover their contribution from the
@@ -920,11 +992,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             particle_deltas.zero_()
 
                         # --- PBF density calculation ---
-                        if self.pbf_enabled and model.particle_grid is not None:
-                            if i > 0 and self._pbf_rebuild_grid_per_iteration:
-                                with wp.ScopedDevice(model.device):
-                                    model.particle_grid.build(particle_q, radius=grid_search_radius)
-
+                        if self.pbf_enabled:
                             # Positions move every iteration; the ordering only
                             # changes per substep. Refreshing the slot-ordered
                             # copy is O(N) and saves O(N * neighbours) scattered
@@ -941,7 +1009,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                 kernel=calculate_density,
                                 dim=model.particle_count,
                                 inputs=[
-                                    model.particle_grid.id,
+                                    self._pbf_sorted_to_orig,
                                     particle_q,
                                     model.particle_flags,
                                     model.particle_mass,
@@ -973,7 +1041,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                 kernel=solve_density,
                                 dim=model.particle_count,
                                 inputs=[
-                                    model.particle_grid.id,
+                                    self._pbf_sorted_to_orig,
                                     particle_q,
                                     model.particle_flags,
                                     model.particle_inv_mass,
@@ -1273,10 +1341,14 @@ class SolverXPBD(SolverBase, CouplingInterface):
                         body_q, body_qd = self._apply_body_deltas(model, state_in, state_out, body_deltas, dt)
 
             # --- PBF post-iteration passes ---
-            if self.pbf_enabled and model.particle_count and model.particle_grid is not None:
-                # Rebuild grid for the post-iteration neighbor queries
-                with wp.ScopedDevice(model.device):
-                    model.particle_grid.build(particle_q, radius=grid_search_radius)
+            if self.pbf_enabled and model.particle_count:
+                wp.launch(
+                    kernel=gather_sorted_positions,
+                    dim=model.particle_count,
+                    inputs=[particle_q, model.particle_mass, self._pbf_sorted_to_orig],
+                    outputs=[self._pbf_pos_sorted],
+                    device=model.device,
+                )
 
                 # Fluid forces below modify the velocity inferred from the
                 # completed positional solve, so initialize that velocity first.
@@ -1302,12 +1374,11 @@ class SolverXPBD(SolverBase, CouplingInterface):
                         kernel=vorticity_confinement,
                         dim=model.particle_count,
                         inputs=[
-                            model.particle_grid.id,
+                            self._pbf_sorted_to_orig,
                             particle_q,
                             particle_qd,
                             model.particle_flags,
                             self._pbf_pos_sorted,
-                            self._pbf_sorted_to_orig,
                             self._pbf_neighbors,
                             self._pbf_neighbor_counts,
                             model.particle_count,
@@ -1323,7 +1394,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                         kernel=apply_vorticity,
                         dim=model.particle_count,
                         inputs=[
-                            model.particle_grid.id,
+                            self._pbf_sorted_to_orig,
                             particle_q,
                             model.particle_flags,
                             self._pbf_curl,
@@ -1346,7 +1417,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 # Physical viscosity: momentum diffusion between neighbours,
                 # applied to velocities so the coefficient is a real material
                 # property (Pa s) rather than a solver-side damping factor.
-                if self.pbf_viscosity > 0.0 and model.particle_grid is not None:
+                if self.pbf_viscosity > 0.0:
                     # apply_viscosity early-returns for particles with no
                     # density, which would otherwise leave a stale impulse in
                     # this shared buffer to be applied again next substep.
@@ -1355,13 +1426,12 @@ class SolverXPBD(SolverBase, CouplingInterface):
                         kernel=apply_viscosity,
                         dim=model.particle_count,
                         inputs=[
-                            model.particle_grid.id,
+                            self._pbf_sorted_to_orig,
                             particle_q,
                             particle_qd,
                             model.particle_flags,
                             model.particle_mass,
                             self._pbf_pos_sorted,
-                            self._pbf_sorted_to_orig,
                             self._pbf_neighbors,
                             self._pbf_neighbor_counts,
                             model.particle_count,
