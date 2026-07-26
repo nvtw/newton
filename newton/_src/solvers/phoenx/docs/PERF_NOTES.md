@@ -261,7 +261,12 @@ Three contact-solve architectures were compared head-to-head on identical
 - The momentum-conserving split captures every articulation's pre-Coriolis world momentum before the second ABA pass. The original CUDA kernel assigned one thread per tree and serially traversed every link; the retained kernel assigns one deterministic 32-lane tile per tree and reduces mass, system COM, linear momentum, and angular momentum in a fixed tree reduction. CPU keeps the serial path.
 - Post-commit nsys measures capture at 69.6 to 13.4 us per launch (5.2x, 1.9% to 0.4% of GPU time). Final matched G1 physics bracket: 1.528M to 1.543M steps/s (+1.0%). Graph-leapfrog training improves 813.5k to 821.9-826.5k samples/s (+1.0-1.6%). Contact-rich 512-robot fleets improve about 5% on Anymal/H1 and 3% on G1; many articulations in one world also pass.
 - Physical validation is load-bearing because the parallel sum changes FP rounding order: all 40 reduced CUDA-graph tests pass, including strict long-horizon energy/momentum, internal loops, self-contact, dense contacts, hybrid mode, and Featherstone comparisons.
-- A fresh from-scratch policy passes the full frozen gate at only 91.75M samples (iteration 175), before fine tuning. Seed 1000/2000: zero falls, battery tracking 0.9057/0.9035, jerk 0.1434, roll/pitch rate 0.2038, yaw rate 0.1172, leg speed 0.9728.
+- A historical from-scratch policy passed the full frozen gate at 91.75M
+  samples (iteration 175), before fine tuning. Do not use this as a current
+  sample-efficiency baseline: it predates fixed-order deterministic updates and
+  the recurrent-PPO episode-boundary and rollout-state replay fixes. Seed
+  1000/2000: zero falls, battery tracking 0.9057/0.9035, jerk 0.1434,
+  roll/pitch rate 0.2038, yaw rate 0.1172, leg speed 0.9728.
 - Rejected alternatives: removing the post-contact Coriolis ABA pass gained 6% physics but failed six momentum/loop tests (up to 5.6% long-horizon drift); compile-time full/velocity publish specialization was exact but neutral (+0.1%).
 
 ### Topology-selected packed reduced-contact gather (2026-07-03)
@@ -1460,6 +1465,7 @@ A corrected production-recipe phase comparison changes the next target:
 - A fresh production G1 capture at 1.686M samples/s confirms the broad ranking: reduced advance/publish 13.2%, packed contact rows 9.1%, patch solves 9.4%, MinGRU forward/backward 10.0%, and reduced factor passes about 8.1%.
 - PufferLib's Python Heinsen recurrence uses parallel cumsum/logcumsumexp; its fused CUDA MinGRU instead loops over time. At the production 512x64x128 shape, a Warp log-space tile_scan is 0.189 versus 0.047 ms and a direct six-level affine scan is 0.174 versus 0.057 ms. Both were removed. Horizon 64 already exposes enough independent environment/channel work for the serial recurrence.
 - Integrated Warp ABA advances consumed generalized RHS and acceleration locally but also published them into response workspaces that are overwritten by the next solve. Removing those two stores improves fused advance/publish median 236.93 to 233.82 us (-1.3%) and external advance 98.82 to 94.97 us (-3.9%). Forward/reverse short G1 brackets improve about 0.4% at the median; sampled analytical G1, floating-tree invariance, deterministic contact, and Ant graph checks pass.
+- The final ABA forward recurrence now carries parent acceleration and twist through the existing topology lane map rather than global response workspaces. A production G1 bracket improves 1.718M to 1.739M samples/s (+1.22%). Matched Nsight reduces external advance 94.14 to 85.46 us (-9.2%) and fused advance/publish 226.22 to 220.61 us (-2.5%). Serial parity across 8/16/32-lane topologies, production analytical G1 stepping, momentum, invariance, deterministic contact, and Ant graph/training screens pass.
 
 ## Open ideas (not yet attempted)
 

@@ -20,7 +20,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 
 <section class="hero">
 <h2>Today: retain exact RL and physics throughput wins</h2>
-<p>The faster BF16 rollout path remains rejected because it delayed the policy. Exact FP32 cuBLAS improves short-run throughput 1.82%; removing two dead reduced-advance workspace stores adds about 0.4% without changing any dynamics equation.</p>
+<p>The faster BF16 rollout path remains rejected because it delayed the policy. Exact FP32 cuBLAS improves short-run throughput 1.82%; eliminating reduced-advance workspace round trips adds a further 1.2% without changing any dynamics equation.</p>
 <ul>
 <li>BF16 rollout: gate pass at 167.77M samples / 93.43 training seconds.</li>
 <li>Matched FP32-rollout control: gate pass at 141.56M samples / 84.18 training seconds.</li>
@@ -29,7 +29,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>FP32 and BF16 cuBLAS numerical/CUDA-graph regressions pass. The optional Warp fallback remains intact.</li>
 <li>A reduced-factor initialization fusion was rejected and removed: 1.6915M → 1.6594M samples/s (-1.9%).</li>
 <li>Parallel MinGRU scans were measured and removed: additive tile scan is 4× slower; direct affine tree scan is 3× slower at the 64-step production horizon.</li>
-<li>Nsight confirms dead-store removal cuts fused advance/publish 1.3% and external advance 3.9%; sampled G1 analytical, invariant/deterministic contact, and Ant graph checks pass.</li>
+<li>Nsight confirms warp-local forward recurrences cut fused advance/publish 2.5% and external advance 9.2%; sampled G1 analytical, topology, invariant/deterministic contact, and Ant checks pass.</li>
 <li>Random-seed Ant reaches 0.820 m/s after 20 updates; six randomly sampled solver/RL tests and the targeted contractions pass.</li>
 </ul>
 </section>
@@ -38,7 +38,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <h2>Target: verified hard-contact policy in nanoG1's 58.9 seconds</h2>
 <div class="metrics">
 <div class="metric"><strong>51.79 s</strong><span>uninterrupted 75.5M training</span></div>
-<div class="metric"><strong>1.714M</strong><span>latest short-run median</span></div>
+<div class="metric"><strong>1.739M</strong><span>latest short-run median</span></div>
 <div class="metric"><strong>84.18 s</strong><span>retained training to verified policy</span></div>
 </div>
 <p>PhoenX reaches 75.5M samples 7.1 seconds faster than nanoG1's reported equal-sample result, but the retained hard-contact policy needs 141.6M samples. Throughput is competitive; sample efficiency remains the wall-to-policy gap.</p>
@@ -47,6 +47,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <section>
 <h2>Current quality result</h2>
 <p>The retained seed-42 policy passes at 141.56M samples after 84.18 seconds of training, with battery score 0.901 and zero falls. Seed 43 previously failed to acquire a good forward policy by 157.29M samples, so the seed-42 wall time is not yet a robust expectation. nanoG1&apos;s published 58.9-second result is also seed 42 only.</p>
+<p>The historical 91.75M PhoenX result is not a current baseline: it predates fixed-order deterministic updates and two recurrent-PPO replay corrections. It may still be a useful artifact, but it cannot support a modern sample-efficiency claim.</p>
 <p>Root cause is now narrower: with nanoG1&apos;s dense-reward coefficients, seed 43 becomes a zero-fall walker by 89–94M samples. A gradual regularization stage retains tracking above 0.90 while improving jerk 0.293 → 0.199, torso motion 0.338 → 0.240, and yaw error 0.357 → 0.168. No checkpoint passes every strict threshold simultaneously, so this remains a diagnostic rather than a retained recipe.</p>
 </section>
 

@@ -2772,21 +2772,27 @@ def _make_advance_reduced_articulations_warp_ops(
                 index += tile_width
             _sync_reduced_group(group_mask)
 
+        # Each depth assigns at most one joint per lane, so parent recurrences can
+        # stay in the warp instead of round-tripping through response workspaces.
+        previous_acceleration = wp.spatial_vector()
+        previous_twist = wp.spatial_vector()
         for depth in range(max_depth + wp.int32(1)):
             index = articulation_depth_start[articulation, depth] + lane
             depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
-            while index < depth_end:
+            active = index < depth_end
+            joint = wp.int32(-1)
+            parent_lane = wp.int32(0)
+            if active:
                 joint = articulation_depth_joint[index]
-                parent = joint_parent[joint]
+                parent_lane = joint_parent_lane[joint]
+            parent_acceleration = _shuffle_reduced_spatial(previous_acceleration, parent_lane, tile_width, group_mask)
+            twist = _shuffle_reduced_spatial(previous_twist, parent_lane, tile_width, group_mask)
+            child_acceleration = wp.spatial_vector()
+            if active:
                 child = joint_child[joint]
                 dof_start = joint_qd_start[joint]
                 dof_end = joint_qd_start[joint + wp.int32(1)]
                 dof_count = dof_end - dof_start
-                parent_acceleration = wp.spatial_vector()
-                twist = wp.spatial_vector()
-                if parent >= wp.int32(0):
-                    parent_acceleration = body_acceleration[parent]
-                    twist = body_velocity[parent]
                 rhs = _vec6(0.0)
                 qdd = _vec6(0.0)
                 for row in range(_MAX_JOINT_DOF):
@@ -2805,7 +2811,6 @@ def _make_advance_reduced_articulations_warp_ops(
                         joint_qd[dof] += qdd[row] * dt
                         child_acceleration += joint_s[dof] * qdd[row]
                         twist += joint_s[dof] * joint_qd[dof]
-                body_acceleration[child] = child_acceleration
                 body_velocity[child] = twist
                 omega = wp.spatial_bottom(twist)
                 x_com = wp.transform_get_translation(body_q_com[child])
@@ -2813,7 +2818,8 @@ def _make_advance_reduced_articulations_warp_ops(
                 slot = child + wp.int32(1)
                 bodies.velocity[slot] = velocity_com
                 bodies.angular_velocity[slot] = omega
-                index += tile_width
+            previous_acceleration = child_acceleration
+            previous_twist = twist
             _sync_reduced_group(group_mask)
 
     @wp.kernel(enable_backward=False, module=module)
