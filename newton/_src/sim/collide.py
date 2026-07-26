@@ -1279,8 +1279,6 @@ class CollisionPipeline:
         self._soft_shape_grid = None
         self._soft_shape_centers = None
         self._soft_bounded_shapes = None
-        self._soft_static_pairs = None
-        self._soft_static_pair_count = 0
         self._soft_binned_pairs = None
         self._soft_binned_pair_count = None
         self._soft_binned_overflow = None
@@ -1301,28 +1299,25 @@ class CollisionPipeline:
         infinite_plane = (shape_type == int(GeoType.PLANE)) & (shape_scale[:, 0] == 0.0) & (shape_scale[:, 1] == 0.0)
         bounded = np.nonzero(~infinite_plane)[0].astype(np.int32)
         unbounded = np.nonzero(infinite_plane)[0].astype(np.int32)
-        if len(bounded) <= self.SOFT_CONTACT_BINNING_MIN_SHAPES:
+        # Binning is worth it once there are enough bounded shapes to amortise
+        # the grid, or as soon as there is any plane at all: a plane's contact
+        # region is a thin slab, so culling against it removes almost every
+        # particle rather than testing them all.
+        if len(bounded) <= self.SOFT_CONTACT_BINNING_MIN_SHAPES and len(unbounded) == 0:
             return
 
         self._soft_use_binning = True
         self._soft_bounded_shapes = wp.array(bounded, dtype=wp.int32, device=self.device)
+        self._soft_unbounded_shapes = wp.array(unbounded, dtype=wp.int32, device=self.device)
 
-        # Planes keep the all-pairs list, restricted to plane pairs.
-        pairs_np = self.soft_rigid_contact_pairs.numpy().reshape(-1, 2)
-        static = pairs_np[np.isin(pairs_np[:, 1], unbounded)] if len(unbounded) else pairs_np[:0]
-        self._soft_static_pairs = wp.array(
-            np.ascontiguousarray(static.astype(np.int32)), dtype=wp.vec2i, device=self.device
-        )
-        self._soft_static_pair_count = int(len(static))
-
-        margins = model.shape_margin.numpy() + model.shape_gap.numpy()
-        self._soft_shape_query_radius = float(np.max(collision_radius[bounded] + margins[bounded]))
-
-        # Size the bin grid to the shape count; a fixed large grid would cost tens
-        # of MB of cell tables per pipeline for no benefit.
-        dim = int(np.clip(np.ceil(len(bounded) ** (1.0 / 3.0)) * 2, 4, 64))
-        self._soft_shape_grid = wp.HashGrid(dim, dim, dim, device=self.device)
-        self._soft_shape_centers = wp.zeros(len(bounded), dtype=wp.vec3, device=self.device)
+        if len(bounded):
+            margins = model.shape_margin.numpy() + model.shape_gap.numpy()
+            self._soft_shape_query_radius = float(np.max(collision_radius[bounded] + margins[bounded]))
+            # Size the bin grid to the shape count; a fixed large grid would cost
+            # tens of MB of cell tables per pipeline for no benefit.
+            dim = int(np.clip(np.ceil(len(bounded) ** (1.0 / 3.0)) * 2, 4, 64))
+            self._soft_shape_grid = wp.HashGrid(dim, dim, dim, device=self.device)
+            self._soft_shape_centers = wp.zeros(len(bounded), dtype=wp.vec3, device=self.device)
 
         self._soft_pair_capacity = min(
             particle_count * self.SOFT_CONTACT_PAIRS_PER_PARTICLE, self._soft_rigid_contact_pair_count
@@ -1334,8 +1329,9 @@ class CollisionPipeline:
         # Build once up front: the grid allocates its internal buffers on the
         # first build, and allocating inside a CUDA graph capture fails. The
         # point count is fixed afterwards, so no later build allocates.
-        with wp.ScopedDevice(self.device):
-            self._soft_shape_grid.build(self._soft_shape_centers, radius=self._soft_shape_query_radius)
+        if self._soft_shape_grid is not None:
+            with wp.ScopedDevice(self.device):
+                self._soft_shape_grid.build(self._soft_shape_centers, radius=self._soft_shape_query_radius)
 
     @property
     def soft_contact_pair_overflow_count(self) -> int:
@@ -1679,6 +1675,16 @@ class CollisionPipeline:
         # Generate soft contacts for particles and shapes
         if state.particle_q and self.soft_contact_max > 0 and self.soft_rigid_contact_pair_count > 0:
             if self._soft_use_binning:
+                # Reset the candidate counter here rather than inside the grid
+                # refresh below: a model with only planes never refreshes a grid,
+                # and an un-reset counter overflows after the first substep and
+                # silently drops every contact.
+                self._soft_binned_pair_count.zero_()
+            # A model with only planes has nothing to bin spatially; the
+            # plane slab test in the broad phase needs no grid, so only the
+            # grid refresh is conditional -- the broad phase itself always
+            # runs when binning is on, or it emits no candidates at all.
+            if self._soft_use_binning and self._soft_shape_grid is not None:
                 wp.launch(
                     kernel=gather_shape_centers,
                     dim=len(self._soft_bounded_shapes),
@@ -1692,11 +1698,12 @@ class CollisionPipeline:
                 )
                 with wp.ScopedDevice(self.device):
                     self._soft_shape_grid.build(self._soft_shape_centers, radius=self._soft_shape_query_radius)
+            if self._soft_use_binning:
                 wp.launch(
                     kernel=build_soft_contact_pairs,
                     dim=model.particle_count,
-                    inputs=[
-                        self._soft_shape_grid.id,
+                        inputs=[
+                        self._soft_shape_grid.id if self._soft_shape_grid is not None else wp.uint64(0),
                         self._soft_bounded_shapes,
                         self._soft_shape_query_radius,
                         state.particle_q,
@@ -1704,6 +1711,9 @@ class CollisionPipeline:
                         model.particle_flags,
                         self.narrow_phase.shape_aabb_lower,
                         self.narrow_phase.shape_aabb_upper,
+                        self._soft_unbounded_shapes,
+                        model.shape_transform,
+                        model.shape_margin,
                         soft_contact_margin,
                         self._soft_pair_capacity,
                     ],
@@ -1758,48 +1768,6 @@ class CollisionPipeline:
                 ],
                 device=self.device,
             )
-            # Infinite planes keep the static all-pairs list: they cannot be
-            # culled spatially, and there are only ever a handful.
-            if self._soft_use_binning and self._soft_static_pair_count > 0:
-                wp.launch(
-                    kernel=create_soft_contacts,
-                    dim=self._soft_static_pair_count,
-                    inputs=[
-                        self._soft_static_pairs,
-                        state.particle_q,
-                        model.particle_radius,
-                        model.particle_flags,
-                        model.particle_world,
-                        state.body_q,
-                        model.shape_transform,
-                        model.shape_body,
-                        model.shape_type,
-                        model.shape_scale,
-                        model.shape_source_ptr,
-                        model._shape_mesh_properties,
-                        model.shape_world,
-                        soft_contact_margin,
-                        model.shape_margin,
-                        self.soft_contact_max,
-                        model.shape_flags,
-                        model.shape_heightfield_index,
-                        model.heightfield_data,
-                        model.heightfield_elevations,
-                        None,
-                    ],
-                    outputs=[
-                        contacts.soft_contact_count,
-                        contacts.soft_contact_particle,
-                        contacts.soft_contact_indices,
-                        contacts.soft_contact_barycentric,
-                        contacts.soft_contact_shape,
-                        contacts.soft_contact_body_pos,
-                        contacts.soft_contact_body_vel,
-                        contacts.soft_contact_normal,
-                        contacts.soft_contact_tids,
-                    ],
-                    device=self.device,
-                )
 
 
         # Full-surface EDGE/FACE passes (opt-in, set at construction): add the soft edge/face contacts

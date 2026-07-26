@@ -1200,6 +1200,9 @@ def build_soft_contact_pairs(
     particle_flags: wp.array[wp.int32],
     shape_aabb_lower: wp.array[wp.vec3],
     shape_aabb_upper: wp.array[wp.vec3],
+    unbounded_shapes: wp.array[wp.int32],
+    shape_transform: wp.array[wp.transform],
+    shape_margin: wp.array[float],
     margin: float,
     pair_capacity: int,
     # outputs
@@ -1213,13 +1216,37 @@ def build_soft_contact_pairs(
     phase costs particle_count * shape_count per step no matter where anything
     is, which makes many particles and many shapes mutually exclusive.
 
-    Only bounded shapes are binned. An infinite plane has no meaningful bounding
-    sphere -- it is near every particle -- so planes keep the static all-pairs
-    list; models only ever carry a handful. That split is a property of the
-    geometry, not a tuned cutoff.
+    Bounded shapes are found through a hash grid over shape centres. An infinite
+    plane has no meaningful bounding sphere -- it is near every particle in the
+    AABB sense -- but its contact region is a thin slab, which is a one-line
+    test, so planes are culled here too rather than falling back to all-pairs.
+    That split is a property of the geometry, not a tuned cutoff.
     """
     particle_index = wp.tid()
     if (particle_flags[particle_index] & ParticleFlags.ACTIVE) == 0:
+        return
+
+    px0 = particle_q[particle_index]
+    reach0 = particle_radius[particle_index] + margin
+
+    # Planes: keep only particles inside the contact slab.
+    for u in range(unbounded_shapes.shape[0]):
+        shape_index = unbounded_shapes[u]
+        X_ws = shape_transform[shape_index]
+        # A plane's surface is the local z=0 plane of its own frame.
+        local_z = wp.transform_point(wp.transform_inverse(X_ws), px0)[2]
+        # One sided: the solid is the half-space below, so a particle that has
+        # already penetrated must always be resolved however deep it is. Culling
+        # on absolute distance strands it below the plane permanently.
+        if local_z > reach0 + shape_margin[shape_index]:
+            continue
+        index = wp.atomic_add(pair_count, 0, 1)
+        if index < pair_capacity:
+            pairs[index] = wp.vec2i(particle_index, shape_index)
+        else:
+            wp.atomic_add(overflow, 0, 1)
+
+    if bounded_shapes.shape[0] == 0:
         return
 
     # The query radius covers the largest bounded shape's bounding sphere plus
@@ -1227,8 +1254,8 @@ def build_soft_contact_pairs(
     query = wp.hash_grid_query(
         shape_grid, particle_q[particle_index], shape_query_radius + particle_radius[particle_index]
     )
-    px = particle_q[particle_index]
-    reach = particle_radius[particle_index] + margin
+    px = px0
+    reach = reach0
 
     slot = int(0)
     while wp.hash_grid_query_next(query, slot):
