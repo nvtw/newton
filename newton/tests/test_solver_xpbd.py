@@ -1753,7 +1753,7 @@ def test_position_based_fluids_reference_stages(test, device):
     # permuted; build the mapping and un-permute before comparing per particle.
     sorted_to_orig = wp.zeros(particle_count, dtype=wp.int32, device=device)
     orig_to_sorted = wp.zeros(particle_count, dtype=wp.int32, device=device)
-    pos_sorted = wp.zeros(particle_count, dtype=wp.vec3, device=device)
+    pos_sorted = wp.zeros(particle_count, dtype=wp.vec4, device=device)
     wp.launch(
         build_sorted_order,
         dim=particle_count,
@@ -1764,7 +1764,7 @@ def test_position_based_fluids_reference_stages(test, device):
     wp.launch(
         gather_sorted_positions,
         dim=particle_count,
-        inputs=[state.particle_q, sorted_to_orig],
+        inputs=[state.particle_q, model.particle_mass, sorted_to_orig],
         outputs=[pos_sorted],
         device=device,
     )
@@ -1798,7 +1798,6 @@ def test_position_based_fluids_reference_stages(test, device):
             state.particle_q,
             model.particle_flags,
             model.particle_mass,
-            sorted_to_orig,
             pos_sorted,
             neighbors,
             neighbor_counts,

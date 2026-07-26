@@ -306,8 +306,25 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 kernel sum, and provably did nothing in a uniform shear at any
                 magnitude -- including 1e6. Values tuned against it do not carry
                 over.
-            pbf_cohesion: Fluid cohesion coefficient.
-            pbf_surface_tension: Fluid surface-tension coefficient.
+            pbf_cohesion: Fluid cohesion coefficient. Not an SI quantity -- see
+                ``pbf_surface_tension``.
+            pbf_surface_tension: Surface-tension coefficient. Unlike
+                ``pbf_rest_density`` and ``pbf_viscosity`` this is **not** in SI:
+                it scales a colour-normal difference, in the PhysX formulation,
+                and no value of it corresponds to a surface tension in N/m.
+
+                A continuum surface force, ``f = sigma kappa grad c`` in N/m^3,
+                would be SI and was evaluated. It is not usable at this
+                resolution: the interface normal comes from the gradient of the
+                SPH colour field, and with the ~26 neighbours a PBF kernel
+                support holds, that gradient does not cancel in the fluid
+                interior. Measured on a static droplet, interior ``|grad c|``
+                reached 2-6 against 9 at the surface, and the surface gradient
+                projected onto the outward radial direction averaged -0.16 where
+                a clean normal gives -1. Switching the colour field to a poly6
+                gradient, whose derivative vanishes at the origin, improved both
+                but not enough. CSF wants 50-150 neighbours; PBF deliberately
+                runs far fewer for speed.
             pbf_vorticity_confinement: Fluid vorticity-confinement coefficient.
             pbf_cfl_coefficient: Maximum relative normal displacement as a
                 fraction of the fluid neighbor radius.
@@ -476,7 +493,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
             # neighbour gathers mostly local instead of scattered.
             self._pbf_sorted_to_orig = wp.zeros(n, dtype=wp.int32, device=model.device)
             self._pbf_orig_to_sorted = wp.zeros(n, dtype=wp.int32, device=model.device)
-            self._pbf_pos_sorted = wp.zeros(n, dtype=wp.vec3, device=model.device)
+            self._pbf_pos_sorted = wp.zeros(n, dtype=wp.vec4, device=model.device)
             self._pbf_delta_qd = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_boundary_log = wp.zeros(n, dtype=float, device=model.device)
             self._pbf_boundary_grad = wp.zeros(n, dtype=wp.vec3, device=model.device)
@@ -869,7 +886,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             wp.launch(
                                 kernel=gather_sorted_positions,
                                 dim=model.particle_count,
-                                inputs=[particle_q, self._pbf_sorted_to_orig],
+                                inputs=[particle_q, model.particle_mass, self._pbf_sorted_to_orig],
                                 outputs=[self._pbf_pos_sorted],
                                 device=model.device,
                             )
@@ -882,7 +899,6 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     particle_q,
                                     model.particle_flags,
                                     model.particle_mass,
-                                    self._pbf_sorted_to_orig,
                                     self._pbf_pos_sorted,
                                     self._pbf_neighbors,
                                     self._pbf_neighbor_counts,

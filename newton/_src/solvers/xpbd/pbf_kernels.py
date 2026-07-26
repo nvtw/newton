@@ -145,17 +145,27 @@ def build_sorted_order(
 @wp.kernel
 def gather_sorted_positions(
     particle_q: wp.array[wp.vec3],
+    particle_mass: wp.array[float],
     sorted_to_orig: wp.array[wp.int32],
-    pos_sorted: wp.array[wp.vec3],
+    pos_sorted: wp.array[wp.vec4],
 ):
-    """Refresh slot-ordered positions. Positions move every iteration while the
-    ordering only changes per substep, so this is the amortisation point: O(N)
-    coalesced writes to avoid O(N * neighbours) scattered reads twice over."""
+    """Refresh slot-ordered position and mass.
+
+    Positions move every iteration while the ordering only changes per substep,
+    so this is the amortisation point: O(N) coalesced writes to avoid
+    O(N * neighbours) scattered reads several times over.
+
+    Mass rides along in ``w``. The SI density sum needs a neighbour's mass, and
+    fetching it as ``particle_mass[sorted_to_orig[sj]]`` costs two scattered
+    reads per neighbour; packed here it costs none, since the position read
+    already brings it in.
+    """
     slot = wp.tid()
     i = sorted_to_orig[slot]
     if i < 0:
         return
-    pos_sorted[slot] = particle_q[i]
+    q = particle_q[i]
+    pos_sorted[slot] = wp.vec4(q[0], q[1], q[2], particle_mass[i])
 
 
 @wp.kernel
@@ -223,8 +233,7 @@ def calculate_density(
     particle_q: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
     particle_mass: wp.array[float],
-    sorted_to_orig: wp.array[wp.int32],
-    pos_sorted: wp.array[wp.vec3],
+    pos_sorted: wp.array[wp.vec4],
     neighbors: wp.array[wp.int32],
     neighbor_counts: wp.array[wp.int32],
     num_particles: int,
@@ -261,7 +270,8 @@ def calculate_density(
     for k in range(count):
         sj = neighbors[k * num_particles + slot]
 
-        xij = xi - pos_sorted[sj]
+        pm = pos_sorted[sj]
+        xij = xi - wp.vec3(pm[0], pm[1], pm[2])
         distance_sq = wp.length_sq(xij)
         # The list is built once per substep but positions move across the
         # iterations, so a cached neighbour may have drifted out of range.
@@ -269,7 +279,7 @@ def calculate_density(
             continue
 
         distance = wp.sqrt(distance_sq)
-        density += particle_mass[sorted_to_orig[sj]] * _kernel_w(distance, spiky1, inv_radius) * inv_norm
+        density += pm[3] * _kernel_w(distance, spiky1, inv_radius) * inv_norm
         if surface_tension > 0.0:
             normal += _kernel_dw(distance, spiky2, inv_radius) * xij / distance
 
@@ -422,7 +432,7 @@ def vorticity_confinement(
     particle_q: wp.array[wp.vec3],
     particle_qd: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
-    pos_sorted: wp.array[wp.vec3],
+    pos_sorted: wp.array[wp.vec4],
     sorted_to_orig: wp.array[wp.int32],
     neighbors: wp.array[wp.int32],
     neighbor_counts: wp.array[wp.int32],
@@ -446,7 +456,8 @@ def vorticity_confinement(
     for k in range(count):
         sj = neighbors[k * num_particles + slot]
         j = sorted_to_orig[sj]
-        xij = xi - pos_sorted[sj]
+        pm = pos_sorted[sj]
+        xij = xi - wp.vec3(pm[0], pm[1], pm[2])
         distance_sq = wp.length_sq(xij)
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
             continue
@@ -465,7 +476,7 @@ def apply_vorticity(
     particle_flags: wp.array[wp.int32],
     curl: wp.array[wp.vec3],
     curl_magnitude: wp.array[float],
-    pos_sorted: wp.array[wp.vec3],
+    pos_sorted: wp.array[wp.vec4],
     neighbors: wp.array[wp.int32],
     neighbor_counts: wp.array[wp.int32],
     num_particles: int,
@@ -489,7 +500,8 @@ def apply_vorticity(
     count = neighbor_counts[slot]
     for k in range(count):
         sj = neighbors[k * num_particles + slot]
-        xij = xi - pos_sorted[sj]
+        pm = pos_sorted[sj]
+        xij = xi - wp.vec3(pm[0], pm[1], pm[2])
         distance_sq = wp.length_sq(xij)
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
             continue
@@ -509,7 +521,7 @@ def apply_viscosity(
     particle_qd: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
     particle_mass: wp.array[float],
-    pos_sorted: wp.array[wp.vec3],
+    pos_sorted: wp.array[wp.vec4],
     sorted_to_orig: wp.array[wp.int32],
     neighbors: wp.array[wp.int32],
     neighbor_counts: wp.array[wp.int32],
@@ -554,10 +566,11 @@ def apply_viscosity(
     rho_i = particle_mass[i] * _kernel_w(0.0, spiky1, inv_radius)
     for k in range(count):
         sj = neighbors[k * num_particles + slot]
-        distance_sq = wp.length_sq(xi - pos_sorted[sj])
+        pm = pos_sorted[sj]
+        distance_sq = wp.length_sq(xi - wp.vec3(pm[0], pm[1], pm[2]))
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
             continue
-        rho_i += particle_mass[sorted_to_orig[sj]] * _kernel_w(wp.sqrt(distance_sq), spiky1, inv_radius)
+        rho_i += pm[3] * _kernel_w(wp.sqrt(distance_sq), spiky1, inv_radius)
 
     rho_i *= 0.5  # normalise: int W dV == 2 for this kernel
     if rho_i <= 0.0:
@@ -567,7 +580,8 @@ def apply_viscosity(
     for k in range(count):
         sj = neighbors[k * num_particles + slot]
         j = sorted_to_orig[sj]
-        xij = xi - pos_sorted[sj]
+        pm = pos_sorted[sj]
+        xij = xi - wp.vec3(pm[0], pm[1], pm[2])
         distance_sq = wp.length_sq(xij)
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
             continue
@@ -575,7 +589,7 @@ def apply_viscosity(
         # Neighbour density is approximated by the local one; the fluid is
         # near-incompressible by construction, so rho_j ~ rho_i holds well.
         coeff = (
-            particle_mass[j]
+            pm[3]
             * 2.0
             * dynamic_viscosity
             / (rho_i * rho_i)
