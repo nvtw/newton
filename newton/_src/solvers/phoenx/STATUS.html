@@ -19,15 +19,16 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <p class="muted">27 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
 <section class="hero">
-<h2>Today: rejected faster iterations that delayed the policy</h2>
-<p>Routing 8,192-row rollout inference to BF16/cuBLAS improved the seven-run median from 1.6915M to 1.7283M samples/s, but a paired learning run showed worse wall-to-quality. The crossover and its caching machinery are removed.</p>
+<h2>Today: reject lossy speed; recover +1.82% in FP32</h2>
+<p>The faster BF16 rollout path is removed because it delayed the policy. A general FP32 cuBLAS path now accelerates the same encoder/recurrent contractions without reduced-precision inputs; three matched short runs improve the median from 1.6701M to 1.7004M samples/s.</p>
 <ul>
 <li>BF16 rollout: gate pass at 167.77M samples / 93.43 training seconds.</li>
 <li>Matched FP32-rollout control: gate pass at 141.56M samples / 84.18 training seconds.</li>
 <li>Two production-size same-seed runs match exactly across all 171 checkpoint entries.</li>
-<li>BF16 numerical, CUDA-graph, determinism, and graph-leapfrog continuation tests pass.</li>
+<li>Two randomly drawn 20-update seeds retain comparable early tracking: 0.388 vs 0.390 and 0.439 vs 0.427; termination rates are slightly lower in both candidates.</li>
+<li>FP32 and BF16 cuBLAS numerical/CUDA-graph regressions pass. The optional Warp fallback remains intact.</li>
 <li>A reduced-factor initialization fusion was rejected and removed: 1.6915M → 1.6594M samples/s (-1.9%).</li>
-<li>Warmed Ant reaches 0.742 m/s after 20 updates at 1.265M samples/s; 11 focused BF16, determinism, analytical G1 physics, and Ant graph tests pass.</li>
+<li>Random-seed Ant reaches 0.820 m/s after 20 updates; six randomly sampled solver/RL tests and the targeted contractions pass.</li>
 </ul>
 </section>
 
@@ -35,7 +36,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <h2>Target: verified hard-contact policy in nanoG1's 58.9 seconds</h2>
 <div class="metrics">
 <div class="metric"><strong>51.79 s</strong><span>uninterrupted 75.5M training</span></div>
-<div class="metric"><strong>1.728M</strong><span>trained steady-state samples/s</span></div>
+<div class="metric"><strong>1.700M</strong><span>FP32 candidate samples/s</span></div>
 <div class="metric"><strong>84.18 s</strong><span>retained training to verified policy</span></div>
 </div>
 <p>PhoenX reaches 75.5M samples 7.1 seconds faster than nanoG1's reported equal-sample result, but the retained hard-contact policy needs 141.6M samples. Throughput is competitive; sample efficiency remains the wall-to-policy gap.</p>

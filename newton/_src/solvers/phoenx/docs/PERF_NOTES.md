@@ -1429,6 +1429,27 @@ A corrected production-recipe phase comparison changes the next target:
   entries. BF16 numerical/graph, graph-leapfrog continuation, analytical G1
   physics, and warmed Ant learning checks pass.
 
+## FP32 cuBLAS rollout contractions (2026-07-27, KEPT)
+
+- Full-FP32 cuBLAS is 0.0287 -> 0.0082 ms for the production 8192x91x128
+  encoder contraction and 0.3467 -> 0.0402 ms for 8192x256x384. The maximum
+  difference from the Warp FP32 recurrent projection is 4.96e-5; the smaller
+  encoder and decoder samples are bit exact.
+- One generic 8,192-row / 64-output crossover now covers both WarpMLP and
+  PufferMinGRUNet, with the existing Warp path retained when cuBLAS is absent.
+  Three matched short G1 runs improve median throughput from 1.6701M to 1.7004M
+  samples/s (+1.82%). The solver limits the end-to-end gain despite the much
+  larger isolated GEMM improvement.
+- Fast paired learning screening used randomly drawn seeds 1779 and 6722. At
+  update 18, candidate/control tracking is 0.388/0.390 and 0.439/0.427; candidate
+  termination rates are slightly lower for both seeds. Random-seed Ant reaches
+  0.820 m/s after 20 updates. This intentionally replaces another immediate
+  full gate run; periodic high-risk validation can cover several retained
+  arithmetic changes together.
+- FP32 and BF16 contractions match NumPy tolerances inside CUDA graphs and are
+  bit deterministic across repeated graph launches. Six randomly selected
+  solver/RL tests also pass.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

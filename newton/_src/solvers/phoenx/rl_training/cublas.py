@@ -102,19 +102,17 @@ def is_cublas_available(device: wp.context.Device) -> bool:
     return True
 
 
-def gemm_bfloat16(
-    lhs: wp.array2d[wp.bfloat16],
-    rhs: wp.array2d[wp.bfloat16],
+def _gemm(
+    lhs: wp.array2d[wp.bfloat16] | wp.array2d[wp.float32],
+    rhs: wp.array2d[wp.bfloat16] | wp.array2d[wp.float32],
     out: wp.array2d[wp.float32],
     rows: int,
     cols: int,
     inner: int,
-    *,
-    transpose_lhs: bool = False,
-    transpose_rhs: bool = False,
+    input_type: int,
+    transpose_lhs: bool,
+    transpose_rhs: bool,
 ) -> None:
-    """Enqueue a row-major BF16 GEMM with FP32 accumulation and output."""
-
     cublas = _get_cublas()
     if cublas is None:
         raise RuntimeError("cuBLAS is not available")
@@ -138,10 +136,10 @@ def gemm_bfloat16(
             inner,
             ctypes.byref(_alpha),
             ctypes.c_void_p(rhs.ptr),
-            _CUDA_R_16BF,
+            input_type,
             rhs_stride,
             ctypes.c_void_p(lhs.ptr),
-            _CUDA_R_16BF,
+            input_type,
             lhs_stride,
             ctypes.byref(_beta),
             ctypes.c_void_p(out.ptr),
@@ -152,3 +150,35 @@ def gemm_bfloat16(
         )
     if status != 0:
         raise RuntimeError(f"cublasGemmEx failed with status {status}")
+
+
+def gemm_bfloat16(
+    lhs: wp.array2d[wp.bfloat16],
+    rhs: wp.array2d[wp.bfloat16],
+    out: wp.array2d[wp.float32],
+    rows: int,
+    cols: int,
+    inner: int,
+    *,
+    transpose_lhs: bool = False,
+    transpose_rhs: bool = False,
+) -> None:
+    """Enqueue a row-major BF16 GEMM with FP32 accumulation and output."""
+
+    _gemm(lhs, rhs, out, rows, cols, inner, _CUDA_R_16BF, transpose_lhs, transpose_rhs)
+
+
+def gemm_float32(
+    lhs: wp.array2d[wp.float32],
+    rhs: wp.array2d[wp.float32],
+    out: wp.array2d[wp.float32],
+    rows: int,
+    cols: int,
+    inner: int,
+    *,
+    transpose_lhs: bool = False,
+    transpose_rhs: bool = False,
+) -> None:
+    """Enqueue a row-major FP32 GEMM."""
+
+    _gemm(lhs, rhs, out, rows, cols, inner, _CUDA_R_32F, transpose_lhs, transpose_rhs)

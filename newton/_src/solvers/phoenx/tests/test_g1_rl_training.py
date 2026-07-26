@@ -56,7 +56,7 @@ from newton._src.solvers.phoenx.experimental.nanog1_import import (
 )
 from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
-from newton._src.solvers.phoenx.rl_training.cublas import gemm_bfloat16, is_cublas_available
+from newton._src.solvers.phoenx.rl_training.cublas import gemm_bfloat16, gemm_float32, is_cublas_available
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.examples import (
     train_g1_command_curriculum,
@@ -2938,6 +2938,57 @@ class TestG1PhoenXRL(unittest.TestCase):
         wp.capture_launch(capture.graph)
         for actual, expected in zip((forward, weight_grad, input_grad), first, strict=True):
             np.testing.assert_array_equal(actual.numpy(), expected)
+
+    def test_cublas_float32_contractions_match_numpy_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX FP32 cuBLAS contraction tests")
+        if not is_cublas_available(device):
+            self.skipTest("cuBLAS is not installed")
+
+        rng = np.random.default_rng(20260727)
+        lhs_np = rng.uniform(-0.2, 0.2, (64, 32)).astype(np.float32)
+        rhs_np = rng.uniform(-0.2, 0.2, (32, 48)).astype(np.float32)
+        grad_np = rng.uniform(-0.2, 0.2, (64, 48)).astype(np.float32)
+        lhs = wp.array(lhs_np, device=device)
+        rhs = wp.array(rhs_np, device=device)
+        grad = wp.array(grad_np, device=device)
+        forward = wp.empty((64, 48), dtype=wp.float32, device=device)
+        weight_grad = wp.empty((32, 48), dtype=wp.float32, device=device)
+        input_grad = wp.empty((64, 32), dtype=wp.float32, device=device)
+
+        with wp.ScopedCapture(device=device) as capture:
+            gemm_float32(lhs, rhs, forward, 64, 48, 32)
+            gemm_float32(lhs, grad, weight_grad, 32, 48, 64, transpose_lhs=True)
+            gemm_float32(grad, rhs, input_grad, 64, 32, 48, transpose_rhs=True)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(forward.numpy(), lhs_np @ rhs_np, rtol=1.0e-5, atol=1.0e-6)
+        np.testing.assert_allclose(weight_grad.numpy(), lhs_np.T @ grad_np, rtol=1.0e-5, atol=1.0e-6)
+        np.testing.assert_allclose(input_grad.numpy(), grad_np @ rhs_np.T, rtol=1.0e-5, atol=1.0e-6)
+
+        first = (forward.numpy(), weight_grad.numpy(), input_grad.numpy())
+        wp.capture_launch(capture.graph)
+        for actual, expected in zip((forward, weight_grad, input_grad), first, strict=True):
+            np.testing.assert_array_equal(actual.numpy(), expected)
+
+    def test_puffer_mingru_fp32_rollout_uses_cublas(self) -> None:
+        device = require_cuda_graph_capture("PhoenX FP32 cuBLAS rollout tests")
+        if not is_cublas_available(device):
+            self.skipTest("cuBLAS is not installed")
+
+        rows = 8192
+        net = rl.PufferMinGRUNet(
+            input_dim=64,
+            hidden_size=64,
+            output_dim=30,
+            num_layers=1,
+            device=device,
+            seed=23,
+            manual_forward_dtype="bfloat16",
+        )
+        obs = wp.zeros((rows, 64), dtype=wp.float32, device=device)
+        with mock.patch("newton._src.solvers.phoenx.rl_training.networks.gemm_float32", wraps=gemm_float32) as gemm:
+            net.forward_reuse(obs)
+        self.assertEqual(gemm.call_count, 2)  # Encoder and recurrent projection; narrow decoder stays on Warp.
 
     def test_puffer_mingru_bf16_backward_reuses_forward_casts(self) -> None:
         device = require_cuda_graph_capture("PhoenX BF16 MinGRU dataflow tests")

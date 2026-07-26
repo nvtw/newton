@@ -9,7 +9,7 @@ from itertools import pairwise
 import numpy as np
 import warp as wp
 
-from .cublas import gemm_bfloat16, is_cublas_available
+from .cublas import gemm_bfloat16, gemm_float32, is_cublas_available
 from .kernels import (
     ACTIVATION_ELU,
     ACTIVATION_LINEAR,
@@ -61,6 +61,7 @@ from .kernels_bf16 import (
 )
 
 _BF16_FORWARD_MIN_BATCH = 16_384
+_F32_CUBLAS_FORWARD_MIN_BATCH = 8_192
 # Minimum batch for the f32 tiled forward. The naive forward re-reads the
 # weight matrix per row, so tiling only pays once the batch is large (training
 # updates), not for per-step rollout inference. Gated to tile-aligned shapes so
@@ -133,9 +134,10 @@ class WarpMLP:
         self.output_activation = activation_code(output_activation)
         self.manual_weight_grad_dtype = _manual_bfloat16_dtype(manual_weight_grad_dtype, "manual_weight_grad_dtype")
         self.manual_forward_dtype = _manual_bfloat16_dtype(manual_forward_dtype, "manual_forward_dtype")
-        self._use_cublas_bfloat16 = (
+        self._use_cublas = is_cublas_available(self.device)
+        self._use_cublas_bfloat16 = self._use_cublas and (
             self.manual_weight_grad_dtype == "bfloat16" or self.manual_forward_dtype == "bfloat16"
-        ) and is_cublas_available(self.device)
+        )
         self._manual_batch_size = 0
         self._manual_capacity = 0
         self._manual_input: wp.array2d[wp.float32] | None = None
@@ -327,6 +329,14 @@ class WarpMLP:
                 inputs=[out, bias, activation],
                 device=self.device,
             )
+        elif self._uses_f32_cublas_forward(weight, rows):
+            gemm_float32(x, weight, out, rows, cols, int(weight.shape[0]))
+            wp.launch(
+                dense_bias_activation_kernel,
+                dim=(rows, cols),
+                inputs=[out, bias, activation],
+                device=self.device,
+            )
         elif self._uses_f32_tiled_forward(weight, rows):
             wp.launch_tiled(
                 dense_forward_tiled_kernel,
@@ -359,6 +369,9 @@ class WarpMLP:
             and int(weight.shape[0]) >= DENSE_TILE_IN
             and int(weight.shape[1]) >= 64
         )
+
+    def _uses_f32_cublas_forward(self, weight: wp.array2d[wp.float32], batch_size: int) -> bool:
+        return self._use_cublas and int(batch_size) >= _F32_CUBLAS_FORWARD_MIN_BATCH and int(weight.shape[1]) >= 64
 
     def _uses_f32_tiled_forward(self, weight: wp.array2d[wp.float32], batch_size: int) -> bool:
         # Tile loads/stores read rounded-up tiles, so require tile-aligned
@@ -750,9 +763,10 @@ class PufferMinGRUNet:
         self.device = wp.get_device(device)
         self.manual_weight_grad_dtype = _manual_bfloat16_dtype(manual_weight_grad_dtype, "manual_weight_grad_dtype")
         self.manual_forward_dtype = _manual_bfloat16_dtype(manual_forward_dtype, "manual_forward_dtype")
-        self._use_cublas_bfloat16 = (
+        self._use_cublas = is_cublas_available(self.device)
+        self._use_cublas_bfloat16 = self._use_cublas and (
             self.manual_weight_grad_dtype == "bfloat16" or self.manual_forward_dtype == "bfloat16"
-        ) and is_cublas_available(self.device)
+        )
 
         rng = np.random.default_rng(seed)
         self.encoder_weight = wp.array(
@@ -1211,6 +1225,8 @@ class PufferMinGRUNet:
                     block_dim=DENSE_TILE_BLOCK_DIM,
                     device=self.device,
                 )
+        elif self._uses_f32_cublas_linear_forward(rows, out_dim):
+            gemm_float32(x, weight, out, rows, out_dim, in_dim)
         elif (
             self.device.is_cuda
             and rows >= DENSE_TILE_BATCH
@@ -1234,6 +1250,9 @@ class PufferMinGRUNet:
                 outputs=[out],
                 device=self.device,
             )
+
+    def _uses_f32_cublas_linear_forward(self, rows: int, out_dim: int) -> bool:
+        return self._use_cublas and rows >= _F32_CUBLAS_FORWARD_MIN_BATCH and out_dim >= 64
 
     def _uses_bf16_linear_forward(self, rows: int, in_dim: int, out_dim: int) -> bool:
         return (
