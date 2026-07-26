@@ -19,8 +19,8 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <p class="muted">27 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
 <section class="hero">
-<h2>Today: reject lossy speed; recover +1.82% in FP32</h2>
-<p>The faster BF16 rollout path is removed because it delayed the policy. A general FP32 cuBLAS path now accelerates the same encoder/recurrent contractions without reduced-precision inputs; three matched short runs improve the median from 1.6701M to 1.7004M samples/s.</p>
+<h2>Today: retain exact RL and physics throughput wins</h2>
+<p>The faster BF16 rollout path remains rejected because it delayed the policy. Exact FP32 cuBLAS improves short-run throughput 1.82%; removing two dead reduced-advance workspace stores adds about 0.4% without changing any dynamics equation.</p>
 <ul>
 <li>BF16 rollout: gate pass at 167.77M samples / 93.43 training seconds.</li>
 <li>Matched FP32-rollout control: gate pass at 141.56M samples / 84.18 training seconds.</li>
@@ -28,6 +28,8 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>Two randomly drawn 20-update seeds retain comparable early tracking: 0.388 vs 0.390 and 0.439 vs 0.427; termination rates are slightly lower in both candidates.</li>
 <li>FP32 and BF16 cuBLAS numerical/CUDA-graph regressions pass. The optional Warp fallback remains intact.</li>
 <li>A reduced-factor initialization fusion was rejected and removed: 1.6915M → 1.6594M samples/s (-1.9%).</li>
+<li>Parallel MinGRU scans were measured and removed: additive tile scan is 4× slower; direct affine tree scan is 3× slower at the 64-step production horizon.</li>
+<li>Nsight confirms dead-store removal cuts fused advance/publish 1.3% and external advance 3.9%; sampled G1 analytical, invariant/deterministic contact, and Ant graph checks pass.</li>
 <li>Random-seed Ant reaches 0.820 m/s after 20 updates; six randomly sampled solver/RL tests and the targeted contractions pass.</li>
 </ul>
 </section>
@@ -36,7 +38,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <h2>Target: verified hard-contact policy in nanoG1's 58.9 seconds</h2>
 <div class="metrics">
 <div class="metric"><strong>51.79 s</strong><span>uninterrupted 75.5M training</span></div>
-<div class="metric"><strong>1.700M</strong><span>FP32 candidate samples/s</span></div>
+<div class="metric"><strong>1.714M</strong><span>latest short-run median</span></div>
 <div class="metric"><strong>84.18 s</strong><span>retained training to verified policy</span></div>
 </div>
 <p>PhoenX reaches 75.5M samples 7.1 seconds faster than nanoG1's reported equal-sample result, but the retained hard-contact policy needs 141.6M samples. Throughput is competitive; sample efficiency remains the wall-to-policy gap.</p>
@@ -69,7 +71,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>A source-level audit finds the core PhoenXRL Puffer-style V-trace, priority replay, normalization, ratio, and value-update semantics aligned with the pinned PufferLib source.</li>
 <li>The 29-output/12-control layout matches pinned nanoG1. Its 17 inactive stochastic outputs distort early PPO KL, but a 12-output prototype only gained 1.4% throughput and made policy acquisition less robust. It was rejected and removed.</li>
 <li>The existing adaptive-KL controller also overreacted at minibatch granularity and blocked acquisition. It is not a suitable automatic default.</li>
-<li>The post-FP32 Nsight capture at 1.689M samples/s shows SGEMM at only 1.3%; reduced advance/publish (13.2%), packed contact rows (9.2%), patch solves (9.2% combined), and reduced factor passes (8.2%) are now the broad targets.</li>
+<li>The fresh Nsight capture at 1.686M samples/s confirms reduced advance/publish (13.2%), packed contact rows (9.1%), patch solves (9.4% combined), MinGRU (10.0%), and reduced factor passes (8.1%) as the broad costs.</li>
 <li>PhoenX PBT currently reuses live workers but schedules them serially. A fixed-world-budget batched population with early elimination is feasible, but must prove better end-to-quality before production use.</li>
 <li>Fixed G1 eager PBT discarding interval statistics after its first cycle, which made subsequent fitness <code>-inf</code>. G1 graph continuation and both Anymal paths were unaffected; split and uninterrupted same-seed checkpoints now match exactly.</li>
 <li>Next: prototype fixed-budget policy racing and scale-invariant, confidence-gated learning control in a small environment before production G1 integration.</li>

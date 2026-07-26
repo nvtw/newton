@@ -69,6 +69,7 @@
 - Reuse transformed mesh-edge endpoints between PhoenX SDF culling and contact generation, avoiding duplicate edge loads and transforms.
 - Reuse Nyquist-clamped PhoenX contact solver coefficients across PGS columns while preserving exact coefficients for unusual time steps.
 - Bound PhoenX contact-history and warm-start launches to avoid scheduling inactive capacity tails.
+- Avoid publishing transient generalized workspaces from integrated reduced-coordinate PhoenX advances.
 - Store sticky collision offset directions in octahedral vec2 history and reconstruct their magnitudes from contact margins.
 - Reduce PhoenX contact warm-start traffic by loading local anchors only when contact reuse or stale-anchor correction requires them.
 - Restore the experimental `SolverPhoenX.max_colored_partitions` default to 12 and the Kapla example to its faster 8-color/10-iteration hybrid; pass `max_colored_partitions=24` explicitly to retain the higher-quality, lower-throughput policy.

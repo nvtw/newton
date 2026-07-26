@@ -2754,7 +2754,8 @@ def _make_advance_reduced_articulations_warp_ops(
                         ):
                             applied += joint_implicit_force[dof]
                         dof_rhs = applied - wp.dot(joint_s[dof], subtree_bias)
-                        generalized_rhs[dof] = dof_rhs
+                        # Integrated advances consume both values locally; publishing them only
+                        # dirties response workspaces before the next solve.
                         reduced_force[row] = dof_rhs - wp.dot(joint_s[dof], p)
                         joint_work[dof] = reduced_force[row]
                 for row in range(_MAX_JOINT_DOF):
@@ -2801,7 +2802,6 @@ def _make_advance_reduced_articulations_warp_ops(
                 for row in range(_MAX_JOINT_DOF):
                     if wp.int32(row) < dof_count:
                         dof = dof_start + wp.int32(row)
-                        generalized_acceleration[dof] = qdd[row]
                         joint_qd[dof] += qdd[row] * dt
                         child_acceleration += joint_s[dof] * qdd[row]
                         twist += joint_s[dof] * joint_qd[dof]

@@ -1455,6 +1455,12 @@ A corrected production-recipe phase comparison changes the next target:
   The next broad opportunity is structural reduced-contact traffic, not the
   remaining narrow scalar decoder.
 
+## Fresh whole-pipeline profile and scan audit (2026-07-27)
+
+- A fresh production G1 capture at 1.686M samples/s confirms the broad ranking: reduced advance/publish 13.2%, packed contact rows 9.1%, patch solves 9.4%, MinGRU forward/backward 10.0%, and reduced factor passes about 8.1%.
+- PufferLib's Python Heinsen recurrence uses parallel cumsum/logcumsumexp; its fused CUDA MinGRU instead loops over time. At the production 512x64x128 shape, a Warp log-space tile_scan is 0.189 versus 0.047 ms and a direct six-level affine scan is 0.174 versus 0.057 ms. Both were removed. Horizon 64 already exposes enough independent environment/channel work for the serial recurrence.
+- Integrated Warp ABA advances consumed generalized RHS and acceleration locally but also published them into response workspaces that are overwritten by the next solve. Removing those two stores improves fused advance/publish median 236.93 to 233.82 us (-1.3%) and external advance 98.82 to 94.97 us (-3.9%). Forward/reverse short G1 brackets improve about 0.4% at the median; sampled analytical G1, floating-tree invariance, deterministic contact, and Ant graph checks pass.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.
