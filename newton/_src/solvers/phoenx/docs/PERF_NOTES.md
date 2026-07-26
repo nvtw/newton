@@ -1367,6 +1367,41 @@ A corrected production-recipe phase comparison changes the next target:
   production analytical G1 tests, graph rollout, overflow-page reference
   parity, and a 20-iteration Ant run pass; Ant reaches 0.742 m/s.
 
+## Whole-pipeline audit and rejected follow-ups (2026-07-26)
+
+- A six-update production Nsight Systems capture at 1.664M samples/s attributes
+  13.4% to reduced advance/publish, 9.5% to packed contact-row construction,
+  6.5% to reduced advance, 6.0% to patch solves, and 9.9% combined to MinGRU
+  forward/backward.
+- Do not retry shared row slabs or a standalone row cache. Existing privileged
+  counters show the builder at 64 registers with no spills and 72% scheduler
+  starvation; its repeated articulation-factor loads are already cache/broadcast
+  friendly. The prior shared-slab and resident-row prototypes regressed 14% and
+  8.6%, respectively.
+- The fused advance/publish kernel uses 101 registers without spills. A
+  `launch_bounds=(128, 6)` prototype forced 80 registers but spilled 80 bytes
+  written and 44 bytes read per thread. Seven candidate and seven control runs
+  differed by only +0.19% at the median, well inside run variance; reverted.
+- Full-training world-count measurements peak on a broad 8192-10240 plateau:
+  4096/6144/8192/10240/12288 worlds measured 1.415/1.574/1.671/1.664/1.608M
+  samples/s. Reversed 8192/10240 runs overlap, so device-side batch-size search
+  has no demonstrated payoff on this GPU.
+- A 12-output G1 policy removed inactive stochastic channels and improved
+  action smoothness, but only gained 1.4% throughput and made forward-policy
+  acquisition less robust across seeds. Its compatibility branch also slowed
+  the default path; the prototype was removed.
+- The existing minibatch-level adaptive-KL controller overreacted to the first
+  noisy KL observations and blocked acquisition. Future automatic decisions
+  must use dimensionless signals, confidence gating, and hysteresis. Reward
+  scale invariance also requires normalized value targets (for example,
+  PopArt-style output-preserving normalization), not merely normalized PPO
+  advantages.
+- PhoenX PBT owns independent environments/trainers and schedules them in a
+  Python loop; “parallel workers” is not true on one GPU. A fixed-total-world
+  portfolio can instead run smaller workers concurrently and eliminate weak
+  policies early. This is feasible, but must beat a single policy on median
+  wall-to-quality and failure tails before production integration.
+
 ## Open ideas (not yet attempted)
 
 - **Drop the `partition_data_concat` int64 write entirely** — would require updating the JP-fallback to also write `color_tags`. Saves ~1 byte/8 bytes/commit and unifies the read path. Modest win since commits are only ~3K/round.

@@ -16,49 +16,60 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 </head>
 <body><main>
 <h1>PhoenX performance</h1>
-<p class="muted">24 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
+<p class="muted">26 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
 <section class="hero">
-<h2>G1 wall clock has reached nanoG1</h2>
+<h2>Target: verified hard-contact policy in nanoG1's 58.9 seconds</h2>
 <div class="metrics">
-<div class="metric"><strong>1.280M</strong><span>PhoenX uninterrupted samples/s</span></div>
-<div class="metric"><strong>1.276M</strong><span>nanoG1 reported samples/s</span></div>
-<div class="metric"><strong>≈59 s</strong><span>75M-sample training time</span></div>
+<div class="metric"><strong>51.79 s</strong><span>uninterrupted 75.5M training</span></div>
+<div class="metric"><strong>1.698M</strong><span>trained steady-state samples/s</span></div>
+<div class="metric"><strong>83.98 s</strong><span>training to verified policy</span></div>
 </div>
-<p>Three current 75.5M-sample runs take 58.4–59.1 s of training. Short paired overlap benchmarks can reach 1.590M samples/s, but the uninterrupted number is the honest time-to-quality comparison.</p>
+<p>PhoenX reaches 75.5M samples 7.1 seconds faster than nanoG1's reported equal-sample result, but its hard-contact policy currently needs 141.6M samples. Throughput is competitive; sample efficiency remains the wall-to-policy gap.</p>
 </section>
 
 <section>
 <h2>Current quality result</h2>
-<p>Seeds 11, 29, and 42 are stable with zero falls at 75.5M samples, but none passes the frozen gate. Battery performance is 0.745–0.765; all three under-track the +0.8 m/s forward command and exceed the torso angular-velocity limit. nanoG1’s shipped seed-42 checkpoint was re-run locally and passes all six frozen checks at 75M.</p>
+<p>Seed 42 passed the frozen gate at 141.56M samples after 83.98 seconds of training. Seed 43 did not acquire a good forward policy by 157.29M samples, so the seed-42 wall time is reproducible but not yet a robust expectation. nanoG1&apos;s published 58.9-second result is also seed 42 only.</p>
+<p>Root cause is now narrower: with nanoG1&apos;s dense-reward coefficients, seed 43 becomes a zero-fall walker by 89–94M samples. A gradual regularization stage retains tracking above 0.90 while improving jerk 0.293 → 0.199, torso motion 0.338 → 0.240, and yaw error 0.357 → 0.168. No checkpoint passes every strict threshold simultaneously, so this remains a diagnostic rather than a retained recipe.</p>
 </section>
 
 <section>
 <h2>Retained wins</h2>
 <ul>
-<li>Isolated learner: about 114 to 99.5 ms/update through parallel priority sampling and reductions.</li>
-<li>Optional BF16/cuBLAS path: about +10% G1 and -23% Ant wall clock; tested Warp fallback remains available.</li>
-<li>Reduced/contact data-layout work gives smaller general physics wins without changing reference quality.</li>
-<li>Warmed Ant learner time improved from 2.272 to 2.084 s and still learns finite forward locomotion.</li>
+<li><code>86d1aa643</code>: reuse published reduced kinematics across proven continuation substeps. G1 steady throughput is 1.658M → 1.698M samples/s (+2.4%); the profiled reconstruction count falls by exactly two thirds.</li>
+<li><code>bd4e99f77</code>: preserve the graph-leapfrog pipeline across live chunks. Same-seed 8+8 and uninterrupted checkpoints are identical; matched split time is 12.32 → 11.10 seconds.</li>
+<li><code>b6501a981</code>: omit maximal rows already owned by reduced coordinates. G1 75.5M wall time is 58.46 → 51.79 seconds; reduced Ant initialization is 1.190 → 0.963 seconds.</li>
+<li><code>88f7c2569</code>: batch homogeneous world construction across all seven robot environments; matched G1 setup/training is 14.410 → 13.083 seconds.</li>
+<li>Isolated learner: about 114 → 99.5 ms/update through parallel priority sampling and reductions.</li>
+<li>Optional BF16/cuBLAS path: about +10% G1 and -23% Ant wall clock; the tested Warp fallback remains available.</li>
+<li>Earlier reduced/contact data-layout work gives smaller physics wins; warmed Ant learner time is 2.272 → 2.084 seconds.</li>
 </ul>
 </section>
 
 <section class="gap">
 <h2>What remains</h2>
 <ul>
-<li>A moderate action-rate penalty relaxation made seed 42 worse, so it is rejected.</li>
-<li>The train-to-gate default reset worlds and recurrent state at each measurement boundary. The fix makes uninterrupted training the default and adds a regression.</li>
-<li>Next: explain the repeated fast-forward acquisition gap from solver/task dynamics and learner semantics, then test only first-principles changes across multiple seeds.</li>
-<li>For physics, Nsight points to reduced advance/publish, contact-row construction, and patch solve—not collision micro-tuning.</li>
+<li>Robust sample efficiency is the main gap: seed 42 needs 66.6M more samples than nanoG1, and seed 43 fails the gate by 157.3M.</li>
+<li>Strong early regularization blocks acquisition; applying it late exposes a torso-versus-action-smoothness tradeoff. Larger action penalties eventually suppress forward tracking rather than solve the tradeoff.</li>
+<li>A source-level audit finds the core PhoenXRL Puffer-style V-trace, priority replay, normalization, ratio, and value-update semantics aligned with the pinned PufferLib source.</li>
+<li>The 29-output/12-control layout matches pinned nanoG1. Its 17 inactive stochastic outputs distort early PPO KL, but a 12-output prototype only gained 1.4% throughput and made policy acquisition less robust. It was rejected and removed.</li>
+<li>The existing adaptive-KL controller also overreacted at minibatch granularity and blocked acquisition. It is not a suitable automatic default.</li>
+<li>A fresh whole-pipeline Nsight capture at 1.664M samples/s is led by reduced advance/publish (13.4%), packed contact rows (9.5%), reduced advance (6.5%), patch solve (6.0%), and MinGRU forward/backward (9.9% combined). Shared row caches and a forced register cap both failed confidence/performance gates and were removed.</li>
+<li>PhoenX PBT currently reuses live workers but schedules them serially. A fixed-world-budget batched population with early elimination is feasible, but must prove better end-to-quality before production use.</li>
+<li>Next: prototype fixed-budget policy racing and scale-invariant, confidence-gated learning control in a small environment before production G1 integration.</li>
 </ul>
 </section>
 
 <section>
 <h2>Correctness guardrails</h2>
 <ul>
-<li>Production physics matches the 20×8 PhoenX reference to 0.00059 rad joint-position RMS and 0.35 mm base-state RMS with zero falls.</li>
-<li>Mirror loss and BF16 GEMM forward/backward paths have independent parity coverage.</li>
-<li>Learning claims require uninterrupted multi-seed runs and the frozen gate; a short throughput sample or one lucky seed is not proof.</li>
+<li>Two independent production seed-42 runs are identical across all 171 checkpoint entries at update 260; every physical gate metric at updates 240/250/260 also matches exactly.</li>
+<li>Same-seed live 8+8 and uninterrupted 16-update checkpoints are identical across all 171 entries.</li>
+<li>The exact graph regression now uses reduced coordinates and two simulation substeps, directly covering continuation-buffer reuse.</li>
+<li>A 30-step, 256-world graph rollout has bit-identical state, observations, rewards, dones, and contacts with or without the omitted rows.</li>
+<li>The G1 benchmark has exact regressions for production-derived clamped PD torques and 20 ms / 3-substep reduced dynamics.</li>
+<li>103 targeted reduced-articulation and robot-environment test invocations pass, including loop closures, momentum, graph capture, and analytical dynamics.</li>
 </ul>
 </section>
 </main></body></html>
