@@ -1146,7 +1146,17 @@ class CollisionPipeline:
             _empty_pairs = wp.array(np.empty((0, 2), np.int32), dtype=wp.vec2i, device=model.device)
             self.soft_edge_rigid_pairs, self.soft_face_rigid_pairs = _empty_pairs, _empty_pairs
         if soft_contact_max is None:
-            soft_contact_max = self.soft_rigid_contact_pair_count
+            # With binning, the narrow phase only ever sees the candidate pairs
+            # the broad phase emitted, so that capacity bounds the contact count
+            # too. Sizing the buffer at the full particle-times-shape product
+            # instead costs both memory and launch width: solvers iterate the
+            # buffer, so an oversized one is paid on every solver iteration.
+            particle_pairs = (
+                self._soft_pair_capacity
+                if self._soft_use_binning
+                else self.soft_rigid_contact_pair_count
+            )
+            soft_contact_max = particle_pairs
             # Flag-aware headroom: one record per world-compatible (soft edge/tri, shape) pair.
             soft_contact_max += len(self.soft_edge_rigid_pairs) + len(self.soft_face_rigid_pairs)
         self.soft_contact_margin = soft_contact_margin
