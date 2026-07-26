@@ -6,6 +6,7 @@ import math
 import warp as wp
 
 from ...core.types import override
+from ...geometry import ParticleFlags
 from ...geometry.types import GeoType
 from ...sim import Contacts, Control, Model, ModelFlags, State
 from ...utils.deprecation import deprecate_nonkeyword_arguments
@@ -465,6 +466,14 @@ class SolverXPBD(SolverBase, CouplingInterface):
             self.pbf_lambda_scale = 1.0 / (density_constraint_scale * density_units)
 
             self.pbf_boundary_density = pbf_boundary_density
+            # Fluid particles skip particle-particle contacts, since the density
+            # constraint already governs them. When every particle is fluid the
+            # kernel has nothing to do, so skip the launch rather than start
+            # hundreds of thousands of threads that immediately return.
+            # Snapshotted here like the other flag-derived setup, so a particle
+            # that gains or loses ParticleFlags.FLUID afterwards needs a new solver.
+            flags = model.particle_flags.numpy()
+            self._pbf_all_particles_fluid = bool(((flags & int(ParticleFlags.FLUID)) != 0).all())
             # Rebuilding the neighbor grid inside the iteration loop is a large
             # fraction of the fluid step. Warp's hash grid searches the 3x3x3
             # cell neighborhood around a query point, so a grid built at the
@@ -1038,7 +1047,11 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                 device=model.device,
                             )
 
-                        if model.particle_max_radius > 0.0 and model.particle_count > 1:
+                        if (
+                            model.particle_max_radius > 0.0
+                            and model.particle_count > 1
+                            and not (self.pbf_enabled and self._pbf_all_particles_fluid)
+                        ):
                             # assert model.particle_grid.reserved, "model.particle_grid must be built, see HashGrid.build()"
                             assert model.particle_grid is not None
                             wp.launch(

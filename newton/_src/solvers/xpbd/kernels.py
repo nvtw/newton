@@ -264,6 +264,10 @@ def solve_particle_particle_contacts(
     particle_flag = particle_flags[i]
     if (particle_flag & ParticleFlags.ACTIVE) == 0:
         return
+    # Fluid particles are governed by the density constraint, so bail before
+    # building a neighbor query that would be discarded.
+    if skip_fluid_fluid and (particle_flag & ParticleFlags.FLUID) != 0:
+        return
     is_proxy = particle_flag & ParticleFlags.PROXY
 
     x = particle_x[i]
@@ -276,10 +280,6 @@ def solve_particle_particle_contacts(
     index = int(0)
 
     delta = wp.vec3(0.0)
-
-    is_fluid_i = (particle_flags[i] & ParticleFlags.FLUID) != 0
-    if skip_fluid_fluid and is_fluid_i:
-        return
 
     while wp.hash_grid_query_next(query, index):
         neighbor_flag = particle_flags[index]
