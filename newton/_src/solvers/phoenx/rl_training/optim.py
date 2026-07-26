@@ -6,6 +6,7 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
+from .cublas import gemm_float32, is_cublas_available
 from .kernels import (
     MUON_TILE,
     MUON_TILE_BLOCK_DIM,
@@ -329,6 +330,7 @@ class Muon:
         self.weight_decay = float(weight_decay)
         self.max_grad_norm = float(max_grad_norm)
         self.matrix_transpose = bool(matrix_transpose)
+        self._use_cublas = is_cublas_available(params[0].device)
         self._step_count_host = 0
         self._step_count = wp.array([0], dtype=wp.int32, device=params[0].device)
         self._grad_sumsq = wp.zeros(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
@@ -473,14 +475,18 @@ class Muon:
         rows = int(params[0].shape[0])
         cols = int(params[0].shape[1])
         for coeff_a, coeff_b, coeff_c in NS_COEFFS:
-            wp.launch_tiled(
-                muon_gram_wide_tiled_batch3_kernel,
-                dim=(3, rows // MUON_TILE, rows // MUON_TILE),
-                inputs=[src[0], src[1], src[2], cols],
-                outputs=[grams[0], grams[1], grams[2]],
-                block_dim=MUON_TILE_BLOCK_DIM,
-                device=params[0].device,
-            )
+            if self._use_cublas:
+                for source, gram in zip(src, grams, strict=True):
+                    gemm_float32(source, source, gram, rows, rows, cols, transpose_rhs=True)
+            else:
+                wp.launch_tiled(
+                    muon_gram_wide_tiled_batch3_kernel,
+                    dim=(3, rows // MUON_TILE, rows // MUON_TILE),
+                    inputs=[src[0], src[1], src[2], cols],
+                    outputs=[grams[0], grams[1], grams[2]],
+                    block_dim=MUON_TILE_BLOCK_DIM,
+                    device=params[0].device,
+                )
             wp.launch_tiled(
                 muon_poly_tiled_batch3_kernel,
                 dim=(3, rows // MUON_TILE, rows // MUON_TILE),
@@ -557,10 +563,20 @@ class Muon:
                 not use_tall_kernels and rows % MUON_TILE == 0 and cols % MUON_TILE == 0 and rows >= MUON_TILE
             )
             for coeff_a, coeff_b, coeff_c in NS_COEFFS:
+                if self._use_cublas:
+                    if use_tall_kernels:
+                        gemm_float32(src, src, gram, cols, cols, rows, transpose_lhs=True)
+                    else:
+                        gemm_float32(src, src, gram, rows, rows, cols, transpose_rhs=True)
                 if use_tall_kernels:
-                    wp.launch(
-                        muon_gram_tall_kernel, dim=gram.shape, inputs=[src, rows], outputs=[gram], device=param.device
-                    )
+                    if not self._use_cublas:
+                        wp.launch(
+                            muon_gram_tall_kernel,
+                            dim=gram.shape,
+                            inputs=[src, rows],
+                            outputs=[gram],
+                            device=param.device,
+                        )
                     wp.launch(
                         muon_poly_kernel,
                         dim=gram.shape,
@@ -576,14 +592,15 @@ class Muon:
                         device=param.device,
                     )
                 elif use_tiled_wide:
-                    wp.launch_tiled(
-                        muon_gram_wide_tiled_kernel,
-                        dim=(rows // MUON_TILE, rows // MUON_TILE),
-                        inputs=[src, cols],
-                        outputs=[gram],
-                        block_dim=MUON_TILE_BLOCK_DIM,
-                        device=param.device,
-                    )
+                    if not self._use_cublas:
+                        wp.launch_tiled(
+                            muon_gram_wide_tiled_kernel,
+                            dim=(rows // MUON_TILE, rows // MUON_TILE),
+                            inputs=[src, cols],
+                            outputs=[gram],
+                            block_dim=MUON_TILE_BLOCK_DIM,
+                            device=param.device,
+                        )
                     wp.launch_tiled(
                         muon_poly_tiled_kernel,
                         dim=(rows // MUON_TILE, rows // MUON_TILE),
@@ -601,9 +618,14 @@ class Muon:
                         device=param.device,
                     )
                 else:
-                    wp.launch(
-                        muon_gram_wide_kernel, dim=gram.shape, inputs=[src, cols], outputs=[gram], device=param.device
-                    )
+                    if not self._use_cublas:
+                        wp.launch(
+                            muon_gram_wide_kernel,
+                            dim=gram.shape,
+                            inputs=[src, cols],
+                            outputs=[gram],
+                            device=param.device,
+                        )
                     wp.launch(
                         muon_poly_kernel,
                         dim=gram.shape,
