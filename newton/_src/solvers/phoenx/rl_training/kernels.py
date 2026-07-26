@@ -138,11 +138,10 @@ def _mingru_hidden_candidate(x: wp.float32) -> wp.float32:
 
 
 @wp.func
-def _mingru_hidden_candidate_grad(x: wp.float32) -> wp.float32:
+def _mingru_hidden_candidate_grad(x: wp.float32, candidate: wp.float32) -> wp.float32:
     if x >= wp.float32(0.0):
         return wp.float32(1.0)
-    s = _sigmoid(x)
-    return s * (wp.float32(1.0) - s)
+    return candidate * (wp.float32(1.0) - candidate)
 
 
 @wp.kernel
@@ -380,7 +379,9 @@ def mingru_sequence_backward_kernel(
         else:
             grad_recurrent_next = grad_recurrent * (wp.float32(1.0) - gate)
 
-        grad_combined[row, hidden] = grad_combined.dtype(grad_candidate * _mingru_hidden_candidate_grad(hidden_pre))
+        grad_combined[row, hidden] = grad_combined.dtype(
+            grad_candidate * _mingru_hidden_candidate_grad(hidden_pre, candidate)
+        )
         grad_combined[row, hidden_dim + hidden] = grad_combined.dtype(grad_gate * gate * (wp.float32(1.0) - gate))
         grad_combined[row, wp.int32(2) * hidden_dim + hidden] = grad_combined.dtype(
             grad_proj * proj * (wp.float32(1.0) - proj)
@@ -436,7 +437,9 @@ def mingru_sequence_backward_initial_kernel(
         else:
             grad_recurrent_next = grad_recurrent * (wp.float32(1.0) - gate)
 
-        grad_combined[row, hidden] = grad_combined.dtype(grad_candidate * _mingru_hidden_candidate_grad(hidden_pre))
+        grad_combined[row, hidden] = grad_combined.dtype(
+            grad_candidate * _mingru_hidden_candidate_grad(hidden_pre, candidate)
+        )
         grad_combined[row, hidden_dim + hidden] = grad_combined.dtype(grad_gate * gate * (wp.float32(1.0) - gate))
         grad_combined[row, wp.int32(2) * hidden_dim + hidden] = grad_combined.dtype(
             grad_proj * proj * (wp.float32(1.0) - proj)
