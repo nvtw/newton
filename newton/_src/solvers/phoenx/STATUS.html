@@ -20,7 +20,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 
 <section class="hero">
 <h2>Today: retain exact RL and physics throughput wins</h2>
-<p>The faster BF16 rollout path remains rejected because it delayed the policy. Exact FP32 cuBLAS improves short-run throughput 1.82%; eliminating reduced-advance workspace round trips adds a further 1.2% without changing any dynamics equation.</p>
+<p>The faster BF16 rollout path remains rejected because it delayed the policy. Exact FP32 cuBLAS improves short-run throughput 1.82%; warp-local reduced recurrences add 1.2%, and skipping disabled optional reward families adds 1.1% without changing enabled formulas or dynamics.</p>
 <ul>
 <li>BF16 rollout: gate pass at 167.77M samples / 93.43 training seconds.</li>
 <li>Matched FP32-rollout control: gate pass at 141.56M samples / 84.18 training seconds.</li>
@@ -30,6 +30,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>A reduced-factor initialization fusion was rejected and removed: 1.6915M → 1.6594M samples/s (-1.9%).</li>
 <li>Parallel MinGRU scans were measured and removed: additive tile scan is 4× slower; direct affine tree scan is 3× slower at the 64-step production horizon.</li>
 <li>Nsight confirms warp-local forward recurrences cut fused advance/publish 2.5% and external advance 9.2%; sampled G1 analytical, topology, invariant/deterministic contact, and Ant checks pass.</li>
+<li>Zero-weight optional reward guards cut the fused observation/reward kernel 44.6%; default and enabled air-time, sliding, and joint-regularizer equations pass.</li>
 <li>Random-seed Ant reaches 0.820 m/s after 20 updates; six randomly sampled solver/RL tests and the targeted contractions pass.</li>
 </ul>
 </section>
@@ -38,7 +39,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <h2>Target: verified hard-contact policy in nanoG1's 58.9 seconds</h2>
 <div class="metrics">
 <div class="metric"><strong>51.79 s</strong><span>uninterrupted 75.5M training</span></div>
-<div class="metric"><strong>1.739M</strong><span>latest short-run median</span></div>
+<div class="metric"><strong>1.750M</strong><span>thermal-matched median</span></div>
 <div class="metric"><strong>84.18 s</strong><span>retained training to verified policy</span></div>
 </div>
 <p>PhoenX reaches 75.5M samples 7.1 seconds faster than nanoG1's reported equal-sample result, but the retained hard-contact policy needs 141.6M samples. Throughput is competitive; sample efficiency remains the wall-to-policy gap.</p>

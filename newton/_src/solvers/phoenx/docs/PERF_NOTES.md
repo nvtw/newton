@@ -1206,8 +1206,8 @@ A corrected production-recipe phase comparison changes the next target:
   11/29/42/47/73 scored 0.616/0.681/0.732/0.683/0.652 with zero falls, making
   seed 42 the clear early leader here too. This supports a seed-selection
   effect but does not establish equal sample efficiency: nanoG1 and PhoenX use
-  different physics and the current robust PhoenX recipe first passed its full
-  gate at 91.75M samples.
+  different physics. The historical 91.75M PhoenX result predates fixed-order
+  updates and recurrent-PPO replay fixes and is not a current baseline.
 - The remaining isolated learner gap is structural rather than Warp autodiff or
   absent tensor cores: the hot backward is hand-written and generated PTX uses
   cuBLASDx BF16 MMA. PufferLib instead uses larger device-wide CUTLASS/cuBLAS
@@ -1466,6 +1466,7 @@ A corrected production-recipe phase comparison changes the next target:
 - PufferLib's Python Heinsen recurrence uses parallel cumsum/logcumsumexp; its fused CUDA MinGRU instead loops over time. At the production 512x64x128 shape, a Warp log-space tile_scan is 0.189 versus 0.047 ms and a direct six-level affine scan is 0.174 versus 0.057 ms. Both were removed. Horizon 64 already exposes enough independent environment/channel work for the serial recurrence.
 - Integrated Warp ABA advances consumed generalized RHS and acceleration locally but also published them into response workspaces that are overwritten by the next solve. Removing those two stores improves fused advance/publish median 236.93 to 233.82 us (-1.3%) and external advance 98.82 to 94.97 us (-3.9%). Forward/reverse short G1 brackets improve about 0.4% at the median; sampled analytical G1, floating-tree invariance, deterministic contact, and Ant graph checks pass.
 - The final ABA forward recurrence now carries parent acceleration and twist through the existing topology lane map rather than global response workspaces. A production G1 bracket improves 1.718M to 1.739M samples/s (+1.22%). Matched Nsight reduces external advance 94.14 to 85.46 us (-9.2%) and fused advance/publish 226.22 to 220.61 us (-2.5%). Serial parity across 8/16/32-lane topologies, production analytical G1 stepping, momentum, invariance, deterministic contact, and Ant graph/training screens pass.
+- The fused G1 observation/reward kernel used to evaluate joint-deviation/acceleration and foot sliding families even when every corresponding weight was zero. Uniform coefficient guards preserve enabled formulas and foot-timer state while reducing the kernel median 57.02 to 31.60 us (-44.6%). A thermal-matched reverse training bracket improves 1.731M to 1.750M samples/s (+1.12%); default nanoG1 reward decomposition and enabled air-time, sliding, and joint-regularizer tests pass.
 
 ## Open ideas (not yet attempted)
 

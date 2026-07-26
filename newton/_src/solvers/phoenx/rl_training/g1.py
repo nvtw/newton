@@ -1244,14 +1244,17 @@ def g1_observe_reward_kernel(
                         right_mode_time = foot_contact_time[world, 1]
                     feet_air_time_reward = wp.min(wp.min(left_mode_time, right_mode_time), feet_air_time_threshold)
 
-            if left_contact != wp.int32(0):
-                left_vel = wp.spatial_top(body_qd[world * body_stride + left_foot_body])
-                feet_slide_penalty = feet_slide_penalty + wp.sqrt(left_vel[0] * left_vel[0] + left_vel[1] * left_vel[1])
-            if right_contact != wp.int32(0):
-                right_vel = wp.spatial_top(body_qd[world * body_stride + right_foot_body])
-                feet_slide_penalty = feet_slide_penalty + wp.sqrt(
-                    right_vel[0] * right_vel[0] + right_vel[1] * right_vel[1]
-                )
+            if w_feet_slide != wp.float32(0.0):
+                if left_contact != wp.int32(0):
+                    left_vel = wp.spatial_top(body_qd[world * body_stride + left_foot_body])
+                    feet_slide_penalty = feet_slide_penalty + wp.sqrt(
+                        left_vel[0] * left_vel[0] + left_vel[1] * left_vel[1]
+                    )
+                if right_contact != wp.int32(0):
+                    right_vel = wp.spatial_top(body_qd[world * body_stride + right_foot_body])
+                    feet_slide_penalty = feet_slide_penalty + wp.sqrt(
+                        right_vel[0] * right_vel[0] + right_vel[1] * right_vel[1]
+                    )
 
             phase_step = episode_steps[world] % phase_period
             left_phase = wp.float32(phase_step) / wp.float32(phase_period)
@@ -1302,55 +1305,67 @@ def g1_observe_reward_kernel(
 
         biped_contact_reward = w_feet_air_time * feet_air_time_reward + w_feet_slide * feet_slide_penalty
 
-        hip_deviation_l1 = wp.float32(0.0)
-        hip_q = joint_q[q_base + wp.int32(7) + wp.int32(1)] - default_joint_pos[wp.int32(1)]
-        hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
-        hip_q = joint_q[q_base + wp.int32(7) + wp.int32(2)] - default_joint_pos[wp.int32(2)]
-        hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
-        hip_q = joint_q[q_base + wp.int32(7) + wp.int32(7)] - default_joint_pos[wp.int32(7)]
-        hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
-        hip_q = joint_q[q_base + wp.int32(7) + wp.int32(8)] - default_joint_pos[wp.int32(8)]
-        hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
+        joint_regularizer_reward = wp.float32(0.0)
+        if (
+            w_joint_deviation_hip != wp.float32(0.0)
+            or w_joint_deviation_waist != wp.float32(0.0)
+            or w_joint_deviation_upper != wp.float32(0.0)
+            or w_joint_acc_legs != wp.float32(0.0)
+            or w_joint_pos_limit_ankle != wp.float32(0.0)
+        ):
+            hip_deviation_l1 = wp.float32(0.0)
+            hip_q = joint_q[q_base + wp.int32(7) + wp.int32(1)] - default_joint_pos[wp.int32(1)]
+            hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
+            hip_q = joint_q[q_base + wp.int32(7) + wp.int32(2)] - default_joint_pos[wp.int32(2)]
+            hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
+            hip_q = joint_q[q_base + wp.int32(7) + wp.int32(7)] - default_joint_pos[wp.int32(7)]
+            hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
+            hip_q = joint_q[q_base + wp.int32(7) + wp.int32(8)] - default_joint_pos[wp.int32(8)]
+            hip_deviation_l1 = hip_deviation_l1 + wp.abs(_clip_finite(hip_q, wp.float32(-10.0), wp.float32(10.0)))
 
-        waist_deviation_l1 = wp.float32(0.0)
-        for j in range(12, 15):
-            waist_q = joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j]
-            waist_deviation_l1 = waist_deviation_l1 + wp.abs(_clip_finite(waist_q, wp.float32(-10.0), wp.float32(10.0)))
+            waist_deviation_l1 = wp.float32(0.0)
+            for j in range(12, 15):
+                waist_q = joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j]
+                waist_deviation_l1 = waist_deviation_l1 + wp.abs(
+                    _clip_finite(waist_q, wp.float32(-10.0), wp.float32(10.0))
+                )
 
-        upper_deviation_l1 = wp.float32(0.0)
-        for j in range(15, ACTION_DIM_G1):
-            upper_q = joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j]
-            upper_deviation_l1 = upper_deviation_l1 + wp.abs(_clip_finite(upper_q, wp.float32(-10.0), wp.float32(10.0)))
+            upper_deviation_l1 = wp.float32(0.0)
+            for j in range(15, ACTION_DIM_G1):
+                upper_q = joint_q[q_base + wp.int32(7) + j] - default_joint_pos[j]
+                upper_deviation_l1 = upper_deviation_l1 + wp.abs(
+                    _clip_finite(upper_q, wp.float32(-10.0), wp.float32(10.0))
+                )
 
-        ankle_limit_penalty = wp.float32(0.0)
-        for j in range(ACTION_DIM_G1):
-            if j == 4 or j == 5 or j == 10 or j == 11:
-                ankle_q = joint_q[q_base + wp.int32(7) + j]
-                ankle_limit_penalty = ankle_limit_penalty + wp.max(ctrl_lower[j] - ankle_q, wp.float32(0.0))
-                ankle_limit_penalty = ankle_limit_penalty + wp.max(ankle_q - ctrl_upper[j], wp.float32(0.0))
-
-        joint_acc_penalty = joint_acc_l2[world]
-        current_step_regularizer = episode_steps[world]
-        if current_step_regularizer > joint_regularizer_episode_step[world]:
-            joint_regularizer_episode_step[world] = current_step_regularizer
-            joint_acc_penalty = wp.float32(0.0)
-            inv_dt = wp.float32(1.0) / wp.max(reward_dt, wp.float32(1.0e-6))
+            ankle_limit_penalty = wp.float32(0.0)
             for j in range(ACTION_DIM_G1):
-                qd_joint = _clip_finite(joint_qd[qd_base + wp.int32(6) + j], wp.float32(-200.0), wp.float32(200.0))
-                if current_step_regularizer > wp.int32(0):
-                    if j < 4 or (j >= 6 and j < 10):
-                        dqd = (qd_joint - previous_joint_qd[world, j]) * inv_dt
-                        joint_acc_penalty = joint_acc_penalty + dqd * dqd
-                previous_joint_qd[world, j] = qd_joint
-            joint_acc_l2[world] = joint_acc_penalty
+                if j == 4 or j == 5 or j == 10 or j == 11:
+                    ankle_q = joint_q[q_base + wp.int32(7) + j]
+                    ankle_limit_penalty = ankle_limit_penalty + wp.max(ctrl_lower[j] - ankle_q, wp.float32(0.0))
+                    ankle_limit_penalty = ankle_limit_penalty + wp.max(ankle_q - ctrl_upper[j], wp.float32(0.0))
 
-        joint_regularizer_reward = (
-            w_joint_deviation_hip * hip_deviation_l1
-            + w_joint_deviation_waist * waist_deviation_l1
-            + w_joint_deviation_upper * upper_deviation_l1
-            + w_joint_acc_legs * joint_acc_penalty
-            + w_joint_pos_limit_ankle * ankle_limit_penalty
-        )
+            joint_acc_penalty = joint_acc_l2[world]
+            current_step_regularizer = episode_steps[world]
+            if current_step_regularizer > joint_regularizer_episode_step[world]:
+                joint_regularizer_episode_step[world] = current_step_regularizer
+                joint_acc_penalty = wp.float32(0.0)
+                inv_dt = wp.float32(1.0) / wp.max(reward_dt, wp.float32(1.0e-6))
+                for j in range(ACTION_DIM_G1):
+                    qd_joint = _clip_finite(joint_qd[qd_base + wp.int32(6) + j], wp.float32(-200.0), wp.float32(200.0))
+                    if current_step_regularizer > wp.int32(0):
+                        if j < 4 or (j >= 6 and j < 10):
+                            dqd = (qd_joint - previous_joint_qd[world, j]) * inv_dt
+                            joint_acc_penalty = joint_acc_penalty + dqd * dqd
+                    previous_joint_qd[world, j] = qd_joint
+                joint_acc_l2[world] = joint_acc_penalty
+
+            joint_regularizer_reward = (
+                w_joint_deviation_hip * hip_deviation_l1
+                + w_joint_deviation_waist * waist_deviation_l1
+                + w_joint_deviation_upper * upper_deviation_l1
+                + w_joint_acc_legs * joint_acc_penalty
+                + w_joint_pos_limit_ankle * ankle_limit_penalty
+            )
 
         sparse_success = wp.float32(0.0)
         sparse_lin_tol = wp.max(sparse_command_velocity_tolerance, wp.float32(0.0))
