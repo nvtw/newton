@@ -1408,36 +1408,26 @@ A corrected production-recipe phase comparison changes the next target:
   same-seed 2+1 versus uninterrupted 3-iteration checkpoints; it fails when the
   old empty-history result is restored.
 
-## G1 rollout tensor-core crossover (2026-07-27, PROVISIONAL)
+## G1 rollout tensor-core crossover (2026-07-27, REJECTED)
 
 - A fresh eight-update Nsight trace confirms the previous solver ranking and
-  shows the 8,192-row encoder and recurrent layers still outside the tensor-core
-  path; the narrow decoder remains on its scalar Warp kernel.
-- Fusing factor initialization into the reduced depth walk is exact but loses:
-  seven-run graph-leapfrog medians are 1.6915M baseline versus 1.6594M samples/s
-  fused (-1.9%). The larger live working set outweighs the removed launch; the
-  prototype was fully removed.
-- Moving the general BF16/cuBLAS crossover from 16,384 to 8,192 rows improves
-  the seven-run median to 1.7179M samples/s. Casting fixed MinGRU weights once
-  per rollout instead of once per environment step reaches 1.7283M (+2.17%
-  versus baseline). Batches below 8,192 keep the existing Warp path. A delayed
-  Nsight trace confirms the 8,192-row encoder and recurrent scalar launches are
-  gone; the narrow 30-column decoder correctly remains on the Warp kernel.
-- Two production-size seed-42 runs are identical across all 171 checkpoint
-  entries. BF16 numerical/graph tests, explicit cast-reuse coverage, and
-  graph-leapfrog continuation pass. Warmed default Ant reaches 0.742 m/s after
-  20 updates at 1.265M samples/s, matching the retained learning smoke.
-- Extending BF16 routing to the 30-column G1 decoder measured only +0.16%, below
-  run variance; it was removed. The 64-column output crossover remains.
-- An uninterrupted production seed-42 learning run passes the frozen
-  six-command gate with zero falls at 167.77M samples. Training takes 93.43
-  seconds at 1.796M samples/s; the save/reload/gate-every-ten-updates harness
-  takes 199.57 seconds and is not representative of normal training overhead.
-  The previous FP32-rollout seed-42 reference passed at 141.56M samples / 83.98
-  training seconds. Thus the kernel throughput gain is real, but this one-seed
-  policy trajectory is a wall-to-quality regression. Keep the crossover
-  provisional until paired or multi-seed learning evidence separates a
-  systematic precision effect from trajectory variance.
+  shows the 8,192-row encoder and recurrent layers outside the tensor-core path.
+- Moving BF16/cuBLAS from 16,384 to 8,192 rows and caching fixed MinGRU weights
+  once per rollout improves the seven-run median from 1.6915M to 1.7283M
+  samples/s (+2.17%). The narrow 30-column decoder adds only +0.16% and was
+  rejected separately.
+- The matched high-risk learning control reverses the throughput-only decision.
+  With seed 42 and the frozen six-command gate, BF16 rollout passes at 167.77M
+  samples / 93.43 training seconds, while the otherwise-identical FP32-rollout
+  control passes at 141.56M / 84.18 seconds. Both score about 0.901 with zero
+  falls. The 8,192-row crossover therefore loses 11.0% wall-to-quality despite
+  faster iterations; it and the now-unused rollout weight cache were removed.
+- Fusing factor initialization into the reduced depth walk is exact but also
+  loses: 1.6915M baseline versus 1.6594M samples/s (-1.9%). The larger live
+  working set outweighs the removed launch; that prototype was removed.
+- Two production-size same-seed runs match exactly across all 171 checkpoint
+  entries. BF16 numerical/graph, graph-leapfrog continuation, analytical G1
+  physics, and warmed Ant learning checks pass.
 
 ## Open ideas (not yet attempted)
 

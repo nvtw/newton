@@ -19,13 +19,13 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <p class="muted">27 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
 <section class="hero">
-<h2>Today: faster iterations, but not yet faster policy</h2>
-<p>Fresh profiling found 8,192-row rollout inference still using scalar Warp dense kernels. Routing that batch to BF16/cuBLAS and casting fixed MinGRU weights once per rollout improves the seven-run median from 1.6915M to 1.7283M samples/s.</p>
+<h2>Today: rejected faster iterations that delayed the policy</h2>
+<p>Routing 8,192-row rollout inference to BF16/cuBLAS improved the seven-run median from 1.6915M to 1.7283M samples/s, but a paired learning run showed worse wall-to-quality. The crossover and its caching machinery are removed.</p>
 <ul>
-<li>An uninterrupted seed-42 run passes the full six-command gate with zero falls at 167.77M samples: 93.43 seconds of training at 1.796M samples/s.</li>
-<li>This is slower to policy than the previous seed-42 result (141.56M samples / 83.98 seconds), so the throughput change is not yet an end-to-end win.</li>
+<li>BF16 rollout: gate pass at 167.77M samples / 93.43 training seconds.</li>
+<li>Matched FP32-rollout control: gate pass at 141.56M samples / 84.18 training seconds.</li>
 <li>Two production-size same-seed runs match exactly across all 171 checkpoint entries.</li>
-<li>BF16 numerical, CUDA-graph, cast-reuse, and graph-leapfrog continuation tests pass.</li>
+<li>BF16 numerical, CUDA-graph, determinism, and graph-leapfrog continuation tests pass.</li>
 <li>A reduced-factor initialization fusion was rejected and removed: 1.6915M → 1.6594M samples/s (-1.9%).</li>
 <li>Warmed Ant reaches 0.742 m/s after 20 updates at 1.265M samples/s; 11 focused BF16, determinism, analytical G1 physics, and Ant graph tests pass.</li>
 </ul>
@@ -36,14 +36,14 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <div class="metrics">
 <div class="metric"><strong>51.79 s</strong><span>uninterrupted 75.5M training</span></div>
 <div class="metric"><strong>1.728M</strong><span>trained steady-state samples/s</span></div>
-<div class="metric"><strong>93.43 s</strong><span>latest training to verified policy</span></div>
+<div class="metric"><strong>84.18 s</strong><span>retained training to verified policy</span></div>
 </div>
-<p>PhoenX reaches 75.5M samples 7.1 seconds faster than nanoG1's reported equal-sample result, but the latest hard-contact policy needs 167.8M samples. Throughput is competitive; sample efficiency remains the wall-to-policy gap.</p>
+<p>PhoenX reaches 75.5M samples 7.1 seconds faster than nanoG1's reported equal-sample result, but the retained hard-contact policy needs 141.6M samples. Throughput is competitive; sample efficiency remains the wall-to-policy gap.</p>
 </section>
 
 <section>
 <h2>Current quality result</h2>
-<p>The latest seed-42 policy passes at 167.77M samples after 93.43 seconds of training, with battery score 0.901 and zero falls. The validation harness took 199.57 seconds because it saved, reloaded, and ran a 24,000-sample gate every ten updates; that is not normal training overhead. Seed 43 previously failed to acquire a good forward policy by 157.29M samples, so neither seed-42 wall time is yet a robust expectation. nanoG1&apos;s published 58.9-second result is also seed 42 only.</p>
+<p>The retained seed-42 policy passes at 141.56M samples after 84.18 seconds of training, with battery score 0.901 and zero falls. Seed 43 previously failed to acquire a good forward policy by 157.29M samples, so the seed-42 wall time is not yet a robust expectation. nanoG1&apos;s published 58.9-second result is also seed 42 only.</p>
 <p>Root cause is now narrower: with nanoG1&apos;s dense-reward coefficients, seed 43 becomes a zero-fall walker by 89–94M samples. A gradual regularization stage retains tracking above 0.90 while improving jerk 0.293 → 0.199, torso motion 0.338 → 0.240, and yaw error 0.357 → 0.168. No checkpoint passes every strict threshold simultaneously, so this remains a diagnostic rather than a retained recipe.</p>
 </section>
 
