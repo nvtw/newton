@@ -1408,7 +1408,7 @@ A corrected production-recipe phase comparison changes the next target:
   same-seed 2+1 versus uninterrupted 3-iteration checkpoints; it fails when the
   old empty-history result is restored.
 
-## G1 rollout tensor-core crossover (2026-07-27, KEPT)
+## G1 rollout tensor-core crossover (2026-07-27, PROVISIONAL)
 
 - A fresh eight-update Nsight trace confirms the previous solver ranking and
   shows the 8,192-row encoder and recurrent layers still outside the tensor-core
@@ -1429,6 +1429,15 @@ A corrected production-recipe phase comparison changes the next target:
   20 updates at 1.265M samples/s, matching the retained learning smoke.
 - Extending BF16 routing to the 30-column G1 decoder measured only +0.16%, below
   run variance; it was removed. The 64-column output crossover remains.
+- An uninterrupted production seed-42 learning run passes the frozen
+  six-command gate with zero falls at 167.77M samples. Training takes 93.43
+  seconds at 1.796M samples/s; the save/reload/gate-every-ten-updates harness
+  takes 199.57 seconds and is not representative of normal training overhead.
+  The previous FP32-rollout seed-42 reference passed at 141.56M samples / 83.98
+  training seconds. Thus the kernel throughput gain is real, but this one-seed
+  policy trajectory is a wall-to-quality regression. Keep the crossover
+  provisional until paired or multi-seed learning evidence separates a
+  systematic precision effect from trajectory variance.
 
 ## Open ideas (not yet attempted)
 
