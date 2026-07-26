@@ -228,6 +228,7 @@ def _collect_ppo_rollout_impl(
     if reset_state_at_start:
         trainer.reset_rollout_state()
     trainer.snapshot_rollout_state(buffer, use_state=not reset_state_at_start)
+    trainer._prepare_rollout_forward_reuse(buffer.num_envs)
     obs = env.observe()
     max_cols = max(env.obs_dim, env.action_dim, 1)
     value_col = trainer.value_column
@@ -315,6 +316,7 @@ def _collect_ppo_rollout_impl(
         outputs=[buffer.values],
         device=env.device,
     )
+    trainer._finish_rollout_forward_reuse()
     buffer.compute_returns(
         gamma=trainer.config.gamma,
         gae_lambda=trainer.config.gae_lambda,

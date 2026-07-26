@@ -60,7 +60,8 @@ from .kernels_bf16 import (
     dense_weight_grad_bf16_splitk_tiled_kernel,
 )
 
-_BF16_FORWARD_MIN_BATCH = 16_384
+# The cuBLAS BF16 path wins from 8K rows on the reference Blackwell GPU.
+_BF16_FORWARD_MIN_BATCH = 8_192
 # Minimum batch for the f32 tiled forward. The naive forward re-reads the
 # weight matrix per row, so tiling only pays once the batch is large (training
 # updates), not for per-step rollout inference. Gated to tile-aligned shapes so
@@ -782,6 +783,7 @@ class PufferMinGRUNet:
         self._zero_combined = wp.zeros(3 * self.hidden_size, dtype=wp.float32, device=self.device)
         self._zero_output = wp.zeros(self.output_dim, dtype=wp.float32, device=self.device)
         self._forward_scratch: dict[str, PufferMinGRUNet._ForwardScratch] = {}
+        self._forward_reuse_weights_prepared = False
         self._state_capacity = 0
         self._state: wp.array3d[wp.float32] | None = None
 
@@ -846,6 +848,29 @@ class PufferMinGRUNet:
 
         self._ensure_forward_scratch(int(batch_size), "default")
         self._ensure_state(int(batch_size))
+
+    def _prepare_forward_reuse(self, batch_size: int) -> None:
+        """Cast reusable BF16 weights once before repeated rollout inference."""
+
+        scratch = self._ensure_forward_scratch(int(batch_size), "default")
+        self._forward_reuse_weights_prepared = False
+        if not scratch.bf16_weights:
+            return
+        weights = [self.encoder_weight, *self.recurrent_weights, self.decoder_weight]
+        for weight, weight_bf16 in zip(weights, scratch.bf16_weights, strict=True):
+            wp.launch(
+                cast_2d_float_to_bfloat16_kernel,
+                dim=weight.shape,
+                inputs=[weight],
+                outputs=[weight_bf16],
+                device=self.device,
+            )
+        self._forward_reuse_weights_prepared = True
+
+    def _finish_forward_reuse(self) -> None:
+        """End rollout-scoped BF16 weight reuse."""
+
+        self._forward_reuse_weights_prepared = False
 
     def reserve_buffers(self, batch_size: int) -> None:
         """Reserve no-grad and manual-backward buffers."""
@@ -1180,6 +1205,8 @@ class PufferMinGRUNet:
         out: wp.array2d[wp.float32],
         x_bf16: wp.array2d[wp.bfloat16] | None = None,
         weight_bf16: wp.array2d[wp.bfloat16] | None = None,
+        *,
+        weight_bf16_valid: bool = False,
     ) -> None:
         in_dim = int(weight.shape[0])
         out_dim = int(weight.shape[1])
@@ -1193,13 +1220,14 @@ class PufferMinGRUNet:
                 outputs=[x_bf16],
                 device=self.device,
             )
-            wp.launch(
-                cast_2d_float_to_bfloat16_kernel,
-                dim=weight.shape,
-                inputs=[weight],
-                outputs=[weight_bf16],
-                device=self.device,
-            )
+            if not weight_bf16_valid:
+                wp.launch(
+                    cast_2d_float_to_bfloat16_kernel,
+                    dim=weight.shape,
+                    inputs=[weight],
+                    outputs=[weight_bf16],
+                    device=self.device,
+                )
             if self._use_cublas_bfloat16:
                 gemm_bfloat16(x_bf16, weight_bf16, out, rows, out_dim, in_dim)
             else:
@@ -1405,6 +1433,7 @@ class PufferMinGRUNet:
             scratch.encoder_out,
             scratch.bf16_inputs[0] if scratch.bf16_inputs else None,
             scratch.bf16_weights[0] if scratch.bf16_weights else None,
+            weight_bf16_valid=self._forward_reuse_weights_prepared,
         )
         h = scratch.encoder_out
         for layer, weight in enumerate(self.recurrent_weights):
@@ -1418,6 +1447,7 @@ class PufferMinGRUNet:
                 combined,
                 scratch.bf16_inputs[layer + 1] if scratch.bf16_inputs else None,
                 scratch.bf16_weights[layer + 1] if scratch.bf16_weights else None,
+                weight_bf16_valid=self._forward_reuse_weights_prepared,
             )
             if update_state:
                 wp.launch(
@@ -1444,6 +1474,7 @@ class PufferMinGRUNet:
             scratch.decoder_out,
             scratch.bf16_inputs[-1] if scratch.bf16_inputs else None,
             scratch.bf16_weights[-1] if scratch.bf16_weights else None,
+            weight_bf16_valid=self._forward_reuse_weights_prepared,
         )
         return scratch.decoder_out[:rows]
 

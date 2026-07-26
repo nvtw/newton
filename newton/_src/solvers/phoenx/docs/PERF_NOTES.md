@@ -1408,6 +1408,27 @@ A corrected production-recipe phase comparison changes the next target:
   same-seed 2+1 versus uninterrupted 3-iteration checkpoints; it fails when the
   old empty-history result is restored.
 
+## G1 rollout tensor-core crossover (2026-07-27, KEPT)
+
+- A fresh eight-update Nsight trace confirms the previous solver ranking and
+  shows the 8,192-row encoder and recurrent layers still outside the tensor-core
+  path; the narrow decoder remains on its scalar Warp kernel.
+- Fusing factor initialization into the reduced depth walk is exact but loses:
+  seven-run graph-leapfrog medians are 1.6915M baseline versus 1.6594M samples/s
+  fused (-1.9%). The larger live working set outweighs the removed launch; the
+  prototype was fully removed.
+- Moving the general BF16/cuBLAS crossover from 16,384 to 8,192 rows improves
+  the seven-run median to 1.7179M samples/s. Casting fixed MinGRU weights once
+  per rollout instead of once per environment step reaches 1.7283M (+2.17%
+  versus baseline). Batches below 8,192 keep the existing Warp path. A delayed
+  Nsight trace confirms the 8,192-row encoder and recurrent scalar launches are
+  gone; the narrow 30-column decoder correctly remains on the Warp kernel.
+- Two production-size seed-42 runs are identical across all 171 checkpoint
+  entries. BF16 numerical/graph tests, explicit cast-reuse coverage, and
+  graph-leapfrog continuation pass. Warmed default Ant reaches 0.742 m/s after
+  20 updates at 1.265M samples/s, matching the retained learning smoke.
+- Extending BF16 routing to the 30-column G1 decoder measured only +0.16%, below
+  run variance; it was removed. The 64-column output crossover remains.
 
 ## Open ideas (not yet attempted)
 

@@ -936,6 +936,28 @@ class TrainerPPO:
         if reset_state is not None:
             reset_state(dones)
 
+    def _prepare_rollout_forward_reuse(self, batch_size: int) -> None:
+        """Prepare fixed policy weights for repeated rollout inference."""
+
+        networks = [self.actor.net]
+        if self.critic is not None:
+            networks.append(self.critic)
+        for network in networks:
+            prepare = getattr(network, "_prepare_forward_reuse", None)
+            if prepare is not None:
+                prepare(int(batch_size))
+
+    def _finish_rollout_forward_reuse(self) -> None:
+        """End fixed-weight rollout inference before learner updates."""
+
+        networks = [self.actor.net]
+        if self.critic is not None:
+            networks.append(self.critic)
+        for network in networks:
+            finish = getattr(network, "_finish_forward_reuse", None)
+            if finish is not None:
+                finish()
+
     def _set_update_sequence_shape(self, buffer: BufferRollout | BatchPPO) -> None:
         set_sequence_shape = getattr(self.actor.net, "set_sequence_shape", None)
         if set_sequence_shape is not None:

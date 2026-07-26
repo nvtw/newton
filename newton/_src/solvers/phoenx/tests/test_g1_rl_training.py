@@ -2939,6 +2939,38 @@ class TestG1PhoenXRL(unittest.TestCase):
         for actual, expected in zip((forward, weight_grad, input_grad), first, strict=True):
             np.testing.assert_array_equal(actual.numpy(), expected)
 
+    def test_puffer_mingru_rollout_reuses_bf16_weight_casts(self) -> None:
+        device = require_cuda_graph_capture("PhoenX BF16 rollout weight reuse tests")
+        rows = _BF16_FORWARD_MIN_BATCH
+        net = rl.PufferMinGRUNet(
+            input_dim=64,
+            hidden_size=64,
+            output_dim=64,
+            num_layers=1,
+            device=device,
+            seed=19,
+            manual_forward_dtype="bfloat16",
+        )
+        obs = wp.zeros((rows, 64), dtype=wp.float32, device=device)
+        net.reserve_forward_buffers(rows)
+
+        with mock.patch.object(wp, "launch", wraps=wp.launch) as launch:
+            net._prepare_forward_reuse(rows)
+            net.forward_reuse(obs)
+            net.forward_reuse(obs)
+        cast_count = sum(
+            bool(call.args) and call.args[0] is cast_2d_float_to_bfloat16_kernel for call in launch.call_args_list
+        )
+        self.assertEqual(cast_count, 9)  # Three weights once, plus three inputs per forward.
+
+        net._finish_forward_reuse()
+        with mock.patch.object(wp, "launch", wraps=wp.launch) as launch:
+            net.forward_reuse(obs)
+        cast_count = sum(
+            bool(call.args) and call.args[0] is cast_2d_float_to_bfloat16_kernel for call in launch.call_args_list
+        )
+        self.assertEqual(cast_count, 6)  # Outside rollout scope, inputs and current weights are both cast.
+
     def test_puffer_mingru_bf16_backward_reuses_forward_casts(self) -> None:
         device = require_cuda_graph_capture("PhoenX BF16 MinGRU dataflow tests")
         rows = _BF16_FORWARD_MIN_BATCH
