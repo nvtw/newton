@@ -6,6 +6,7 @@ import math
 import warp as wp
 
 from ...core.types import override
+from ...geometry.types import GeoType
 from ...sim import Contacts, Control, Model, ModelFlags, State
 from ...utils.deprecation import deprecate_nonkeyword_arguments
 from ..coupled.interface import CouplingInterface
@@ -816,6 +817,10 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                 contacts.soft_contact_shape,
                                 contacts.soft_contact_body_pos,
                                 contacts.soft_contact_normal,
+                                model.shape_transform,
+                                model.shape_type,
+                                model.shape_scale,
+                                int(GeoType.BOX),
                                 contacts.soft_contact_max,
                                 min(contacts.soft_contact_max, model.particle_count),
                                 self.pbf_inv_radius,

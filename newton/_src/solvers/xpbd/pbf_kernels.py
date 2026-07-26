@@ -52,6 +52,20 @@ def _psi(q: float) -> float:
 
 
 @wp.func
+def _half_space_fraction(signed_distance: float, inv_radius: float) -> float:
+    """Fraction of the kernel ball lying inside a half-space.
+
+    ``signed_distance`` is from the particle to the bounding plane, positive when
+    the particle is outside the solid. Inside, the solid covers all but the
+    complementary cap, hence ``1 - Psi``.
+    """
+    q = signed_distance * inv_radius
+    if q >= 0.0:
+        return _psi(q)
+    return 1.0 - _psi(-q)
+
+
+@wp.func
 def _dpsi(q: float) -> float:
     """``d Psi / d q``; multiply by ``rest_density / h`` for ``d rho_B / d d``."""
     c = wp.clamp(q, 0.0, 1.0)
@@ -69,6 +83,10 @@ def accumulate_boundary_density(
     contact_shape: wp.array[int],
     contact_body_pos: wp.array[wp.vec3],
     contact_normal: wp.array[wp.vec3],
+    shape_transform: wp.array[wp.transform],
+    shape_type: wp.array[wp.int32],
+    shape_scale: wp.array[wp.vec3],
+    box_type: int,
     contact_max: int,
     num_threads: int,
     inv_radius: float,
@@ -109,10 +127,48 @@ def accumulate_boundary_density(
 
         bx = wp.transform_point(X_wb, contact_body_pos[tid])
         n = contact_normal[tid]
+        px = particle_q[particle_index]
+
+        if shape_type[shape_index] == box_type:
+            # A box is the intersection of three axis slabs, so the fraction of
+            # the kernel ball inside it is the product of three half-space
+            # fractions -- exactly 1/2 on a face, 1/4 on an edge, 1/8 at a
+            # corner. Treating the nearest surface as a single half-space, as a
+            # closest-point normal implies, over-estimates by 2x on an edge and
+            # 8x at a corner, which shows up as fluid repelled from box edges.
+            X_ws = wp.transform_multiply(X_wb, shape_transform[shape_index])
+            local = wp.transform_point(wp.transform_inverse(X_ws), px)
+            extent = shape_scale[shape_index]
+
+            frac = float(1.0)
+            for axis in range(3):
+                frac *= _half_space_fraction(wp.abs(local[axis]) - extent[axis], inv_radius)
+            if frac <= 0.0:
+                continue
+
+            # Gradient of the product, mapped back to world. Each axis
+            # contributes its own derivative times the other two factors.
+            grad_local = wp.vec3(0.0)
+            for axis in range(3):
+                other = float(1.0)
+                for k in range(3):
+                    if k != axis:
+                        other *= _half_space_fraction(wp.abs(local[k]) - extent[k], inv_radius)
+                d = wp.abs(local[axis]) - extent[axis]
+                slope = _dpsi(wp.abs(d) * inv_radius) * inv_radius
+                sign = 1.0
+                if local[axis] < 0.0:
+                    sign = -1.0
+                grad_local[axis] = other * slope * sign
+            grad_world = wp.transform_vector(X_ws, grad_local)
+
+            wp.atomic_add(boundary_log, particle_index, -wp.log(1.0 - wp.min(frac, 0.999)))
+            wp.atomic_add(boundary_grad, particle_index, grad_world * rest_density)
+            continue
 
         # Distance from the particle centre (not its surface) to the solid,
         # since the density integral is evaluated at the particle's sample point.
-        q = wp.clamp(wp.dot(n, particle_q[particle_index] - bx) * inv_radius, 0.0, 1.0)
+        q = wp.clamp(wp.dot(n, px - bx) * inv_radius, 0.0, 1.0)
         if q >= 1.0:
             continue
 

@@ -659,6 +659,58 @@ def test_fluid_buoyancy_follows_archimedes(test, device):
     test.assertLess(abs(fraction - 0.4), 0.25,
                     f"submerged fraction {fraction:.3f} does not match Archimedes' 0.400")
 
+
+def test_boundary_density_is_exact_at_box_faces_edges_and_corners(test, device):
+    """The solid's share of a particle's kernel support must match the geometry.
+
+    A box is the intersection of three axis slabs, so the fraction of the kernel
+    ball inside it is exactly 1/2 against a face, 1/4 along an edge and 1/8 at a
+    corner. Treating the nearest surface as a single half-space -- which is what
+    a closest-point contact normal implies -- gives 1/2 everywhere, over-stating
+    the boundary density 2x on an edge and 4x at a corner. Particles there read
+    as denser than they are and get pushed away, so fluid visibly avoids box
+    edges.
+    """
+    box_half = 0.25
+    builder = newton.ModelBuilder()
+    builder.default_particle_radius = SPACING * 0.5
+    builder.add_shape_box(body=-1, hx=box_half, hy=box_half, hz=box_half,
+                          cfg=newton.ModelBuilder.ShapeConfig(mu=0.0))
+
+    # Touching the face, the edge and the corner, plus one offset probe each.
+    probes = [
+        ("face", (box_half, 0.0, 0.0), 0.5),
+        ("edge", (box_half, box_half, 0.0), 0.25),
+        ("corner", (box_half, box_half, box_half), 0.125),
+    ]
+    for _, pos, _ in probes:
+        builder.add_particle(pos=wp.vec3(*pos), vel=wp.vec3(0.0), mass=PARTICLE_MASS,
+                             radius=SPACING * 0.5, flags=FLUID)
+
+    model = builder.finalize(device=device)
+    model.set_gravity((0.0, 0.0, 0.0))
+    pipeline = newton.CollisionPipeline(model, soft_contact_margin=H)
+    solver = _solver(model, device, iterations=1)
+
+    s0, s1 = model.state(), model.state()
+    contacts = pipeline.contacts()
+    s0.clear_forces()
+    pipeline.collide(s0, contacts)
+    # A vanishing step so nothing moves before the boundary term is read back.
+    solver.step(s0, s1, model.control(), contacts, 1.0e-6)
+
+    fraction = 1.0 - np.exp(-solver._pbf_boundary_log.numpy())
+    for i, (name, _, expected) in enumerate(probes):
+        test.assertAlmostEqual(
+            float(fraction[i]), expected, delta=0.02,
+            msg=f"boundary density at a box {name}: {fraction[i]:.4f}, geometry gives {expected:.4f}",
+        )
+
+    # And the ordering must hold regardless of tolerance: a corner sees less
+    # solid than an edge, which sees less than a face.
+    test.assertLess(fraction[2], fraction[1])
+    test.assertLess(fraction[1], fraction[0])
+
 devices = get_test_devices()
 
 
@@ -688,6 +740,8 @@ for _name, _fn in [
     ("test_fluid_settles_at_the_requested_rest_density",
      test_fluid_settles_at_the_requested_rest_density),
     ("test_fluid_buoyancy_follows_archimedes", test_fluid_buoyancy_follows_archimedes),
+    ("test_boundary_density_is_exact_at_box_faces_edges_and_corners",
+     test_boundary_density_is_exact_at_box_faces_edges_and_corners),
 ]:
     add_function_test(TestSolverXPBDFluids, _name, _fn, devices=devices, check_output=False)
 
