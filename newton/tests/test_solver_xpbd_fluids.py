@@ -271,35 +271,60 @@ def test_fluid_at_rest_stays_at_rest(test, device):
                     f"kinetic energy is growing at rest: {early:.4f} -> {late:.4f} m/s")
 
 
-def test_fluid_viscosity_has_a_monotone_effect_on_the_flow(test, device):
-    """Pin ``pbf_viscosity`` against regression, at the scale where it acts.
+def test_fluid_viscosity_matches_stokes_decay(test, device):
+    """``pbf_viscosity`` is dynamic viscosity in Pa s, checked against Stokes.
 
-    This term is a faithful port of PhysX: it damps the difference in accumulated
-    *constraint corrections* between neighbours, scaled by ``viscosity * dt /
-    rest_density``. It is therefore not a Navier-Stokes velocity diffusion -- in a
-    uniform shear with no density violation it does nothing at all, even at 1e6 --
-    and the rest-density division puts its useful range in the thousands.
-    Asserting a monotone effect over that range is the honest, robust check;
-    asserting "viscous fluid spreads less" would encode physics this term does
-    not implement.
+    A sinusoidal shear ``v_y = V sin(k x)`` in an unbounded viscous fluid decays
+    as ``V exp(-nu k^2 t)`` with ``nu = mu / rho``. That is an exact solution of
+    the unsteady Stokes equation, so it pins the coefficient to a real material
+    property rather than to a solver-side damping factor.
+
+    The solver has its own small numerical dissipation, measured here at mu = 0
+    and divided out, so what is compared is the decay viscosity is responsible
+    for.
     """
-    def spread(viscosity):
-        dim = (5, 5, 14)
-        builder = newton.ModelBuilder()
-        _block(builder, dim, (-dim[0] * SPACING * 0.5, -dim[1] * SPACING * 0.5, SPACING),
-               jitter=SPACING * 0.05)
-        builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.0))
-        model = builder.finalize(device=device)
-        model.set_gravity((0.0, 0.0, -9.81))
-        pipeline = newton.CollisionPipeline(model, soft_contact_margin=H)
-        solver = _solver(model, device, pbf_viscosity=viscosity)
-        state, _ = _run(model, solver, 40, pipeline=pipeline)
-        q, _ = _finite(test, state, f"with viscosity={viscosity}")
-        return float(np.percentile(np.linalg.norm(q[:, :2], axis=1), 90))
+    rho0 = 1000.0
+    nx, ny, nz = 24, 6, 6
+    k = 2.0 * np.pi / (nx * SPACING)
+    # Mass from the rest spacing so the fluid really is rho0 kg/m^3.
+    mass = rho0 * 0.75 * REST_DISTANCE**3
+    frames, fps = 20, 60.0
 
-    weak, mid, strong = spread(1.0e3), spread(1.0e4), spread(1.0e5)
-    test.assertLess(weak, mid, f"viscosity 1e3 -> 1e4 had no effect ({weak:.4f} -> {mid:.4f})")
-    test.assertLess(mid, strong, f"viscosity 1e4 -> 1e5 had no effect ({mid:.4f} -> {strong:.4f})")
+    positions = np.array(
+        [[ix, iy, iz] for ix in range(nx) for iy in range(ny) for iz in range(nz)],
+        dtype=np.float64,
+    ) * SPACING
+    basis = np.sin(k * positions[:, 0])
+    norm = float((basis**2).sum())
+
+    def shear_amplitude_ratio(mu):
+        builder = newton.ModelBuilder()
+        builder.default_particle_radius = SPACING * 0.5
+        for pos in positions:
+            builder.add_particle(pos=wp.vec3(*pos),
+                                 vel=wp.vec3(0.0, float(np.sin(k * pos[0])), 0.0),
+                                 mass=mass, radius=SPACING * 0.5, flags=FLUID)
+        model = builder.finalize(device=device)
+        model.set_gravity((0.0, 0.0, 0.0))
+        solver = _solver(model, device, pbf_viscosity=mu)
+        state, _ = _run(model, solver, frames, fps=fps)
+        _, qd = _finite(test, state, f"with mu={mu}")
+        # Project the velocity field back onto the imposed mode.
+        return float((qd[:, 1] * basis).sum() / norm)
+
+    baseline = shear_amplitude_ratio(0.0)
+    test.assertGreater(baseline, 0.9, f"solver dissipates too much on its own: {baseline:.4f}")
+
+    t = frames / fps
+    for mu in (5.0, 20.0):
+        exact = float(np.exp(-(mu / rho0) * k * k * t))
+        got = shear_amplitude_ratio(mu) / baseline
+        test.assertLess(abs(got - exact), 0.1 * exact,
+                        f"mu={mu} Pa s: shear decayed to {got:.4f}, Stokes predicts {exact:.4f}")
+
+    # And it must be monotone in the coefficient.
+    test.assertLess(shear_amplitude_ratio(20.0), shear_amplitude_ratio(5.0),
+                    "more viscosity must damp shear faster")
 
 
 def test_fluid_cohesion_contracts_a_free_droplet(test, device):
@@ -511,8 +536,7 @@ for _name, _fn in [
     ("test_fluid_column_does_not_compress_under_its_own_weight",
      test_fluid_column_does_not_compress_under_its_own_weight),
     ("test_fluid_at_rest_stays_at_rest", test_fluid_at_rest_stays_at_rest),
-    ("test_fluid_viscosity_has_a_monotone_effect_on_the_flow",
-     test_fluid_viscosity_has_a_monotone_effect_on_the_flow),
+    ("test_fluid_viscosity_matches_stokes_decay", test_fluid_viscosity_matches_stokes_decay),
     ("test_fluid_cohesion_contracts_a_free_droplet", test_fluid_cohesion_contracts_a_free_droplet),
     ("test_fluid_surface_tension_contracts_a_free_droplet",
      test_fluid_surface_tension_contracts_a_free_droplet),

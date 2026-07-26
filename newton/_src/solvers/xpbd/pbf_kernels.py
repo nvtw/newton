@@ -489,6 +489,102 @@ def apply_vorticity(
 
 
 @wp.kernel
+def apply_viscosity(
+    grid: wp.uint64,
+    particle_q: wp.array[wp.vec3],
+    particle_qd: wp.array[wp.vec3],
+    particle_flags: wp.array[wp.int32],
+    particle_mass: wp.array[float],
+    pos_sorted: wp.array[wp.vec3],
+    sorted_to_orig: wp.array[wp.int32],
+    neighbors: wp.array[wp.int32],
+    neighbor_counts: wp.array[wp.int32],
+    num_particles: int,
+    contact_distance_sq: float,
+    inv_radius: float,
+    spiky1: float,
+    spiky2: float,
+    dynamic_viscosity: float,
+    dt: float,
+    delta_qd: wp.array[wp.vec3],
+):
+    """Physical viscous acceleration, with ``dynamic_viscosity`` in Pa s.
+
+    Morris et al. (1997) SPH viscosity:
+
+        a_i = sum_j m_j * 2 mu / (rho_i rho_j) * (r_ij . grad W_ij) / |r_ij|^2 * v_ij
+
+    with ``r_ij = x_i - x_j`` and ``v_ij = v_i - v_j``. Since
+    ``r_ij . grad W_ij = r W'(r)`` and ``W' < 0``, the term pulls each particle's
+    velocity toward its neighbours', which is what momentum diffusion does. It
+    reproduces the closed-form Stokes decay of a sinusoidal shear,
+    ``exp(-(mu/rho) k^2 t)``, so the coefficient is a real material property and
+    not a solver knob.
+
+    Densities are the true SPH mass-weighted sums in kg/m^3, so a scene set up in
+    SI units gets SI behaviour: water is 1e-3 Pa s, olive oil 0.08, honey ~10.
+    """
+    slot = wp.tid()
+    i = wp.hash_grid_point_id(grid, slot)
+    if i < 0 or not _is_active_fluid(particle_flags[i]):
+        return
+
+    xi = particle_q[i]
+    vi = particle_qd[i]
+    count = neighbor_counts[slot]
+
+    # Local density, mass weighted, including this particle's own contribution.
+    # The PBF spiky kernel is not normalised -- it integrates to 2, not 1 -- so
+    # the raw sum overstates density by that factor. Morris goes as 1/rho^2, so
+    # leaving it in makes the viscosity four times too weak.
+    rho_i = particle_mass[i] * _kernel_w(0.0, spiky1, inv_radius)
+    for k in range(count):
+        sj = neighbors[k * num_particles + slot]
+        distance_sq = wp.length_sq(xi - pos_sorted[sj])
+        if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
+            continue
+        rho_i += particle_mass[sorted_to_orig[sj]] * _kernel_w(wp.sqrt(distance_sq), spiky1, inv_radius)
+
+    rho_i *= 0.5  # normalise: int W dV == 2 for this kernel
+    if rho_i <= 0.0:
+        return
+
+    accel = wp.vec3(0.0)
+    for k in range(count):
+        sj = neighbors[k * num_particles + slot]
+        j = sorted_to_orig[sj]
+        xij = xi - pos_sorted[sj]
+        distance_sq = wp.length_sq(xij)
+        if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
+            continue
+        distance = wp.sqrt(distance_sq)
+        # Neighbour density is approximated by the local one; the fluid is
+        # near-incompressible by construction, so rho_j ~ rho_i holds well.
+        coeff = (
+            particle_mass[j]
+            * 2.0
+            * dynamic_viscosity
+            / (rho_i * rho_i)
+            * _kernel_dw(distance, spiky2, inv_radius)
+            / distance
+        )
+        accel += coeff * (vi - particle_qd[j])
+
+    delta_qd[i] = accel * dt
+
+
+@wp.kernel
+def apply_velocity_delta(
+    particle_flags: wp.array[wp.int32],
+    delta_qd: wp.array[wp.vec3],
+    particle_qd: wp.array[wp.vec3],
+):
+    i = wp.tid()
+    if _is_active_fluid(particle_flags[i]):
+        particle_qd[i] += delta_qd[i]
+
+
+@wp.kernel
 def apply_damping(
     particle_flags: wp.array[wp.int32],
     damping: float,

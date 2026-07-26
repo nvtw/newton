@@ -233,7 +233,9 @@ class Example:
         parser.add_argument("--dim-y", type=int, default=46, help="Fluid grid Y dimension")
         parser.add_argument("--dim-z", type=int, default=46, help="Fluid grid Z dimension")
         parser.add_argument("--relaxation", type=float, default=1.0, help="PBF SOR relaxation")
-        parser.add_argument("--viscosity", type=float, default=0.0001, help="PBF viscosity")
+        parser.add_argument(
+            "--viscosity", type=float, default=1.0e-3, help="Dynamic viscosity [Pa s] (water is 1e-3)"
+        )
         parser.add_argument("--cohesion", type=float, default=0.005, help="PBF cohesion")
         parser.add_argument("--surface-tension", type=float, default=0.005, help="PBF surface tension")
         parser.add_argument("--vorticity", type=float, default=5.0, help="PBF vorticity confinement")

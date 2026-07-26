@@ -35,6 +35,8 @@ from .kernels import (
 from .pbf_kernels import (
     accumulate_boundary_density,
     apply_damping,
+    apply_velocity_delta,
+    apply_viscosity,
     build_neighbor_list,
     build_sorted_order,
     gather_sorted_positions,
@@ -254,7 +256,20 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 density correction after it is averaged over the contributing
                 neighbors. Values below 1 under-relax: smaller, more stable
                 steps that converge more slowly. 1.0 matches PhysX.
-            pbf_viscosity: Fluid viscosity coefficient.
+            pbf_viscosity: Dynamic viscosity in Pa s -- a real material
+                property, not a solver knob. Water is 1e-3, olive oil 8e-2,
+                honey around 10. Implemented as Morris et al. (1997) SPH
+                momentum diffusion over mass-weighted densities, so it
+                reproduces the closed-form Stokes decay of a sinusoidal shear,
+                ``exp(-(mu/rho) k^2 t)``.
+
+                This replaces the PhysX/FleX formulation, which damped the
+                difference in accumulated *density corrections* rather than
+                velocities. That term was dimensionless, scaled by
+                ``viscosity * dt / rest_density`` where ``rest_density`` is a
+                kernel sum, and provably did nothing in a uniform shear at any
+                magnitude -- including 1e6. Values tuned against it do not carry
+                over.
             pbf_cohesion: Fluid cohesion coefficient.
             pbf_surface_tension: Fluid surface-tension coefficient.
             pbf_vorticity_confinement: Fluid vorticity-confinement coefficient.
@@ -413,6 +428,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
             self._pbf_sorted_to_orig = wp.zeros(n, dtype=wp.int32, device=model.device)
             self._pbf_orig_to_sorted = wp.zeros(n, dtype=wp.int32, device=model.device)
             self._pbf_pos_sorted = wp.zeros(n, dtype=wp.vec3, device=model.device)
+            self._pbf_delta_qd = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_boundary_log = wp.zeros(n, dtype=float, device=model.device)
             self._pbf_boundary_grad = wp.zeros(n, dtype=wp.vec3, device=model.device)
             # A fluid at rest spacing holds ~26 neighbors within the support
@@ -860,7 +876,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     self.pbf_inv_radius,
                                     self.pbf_spiky1,
                                     self.pbf_spiky2,
-                                    self.pbf_viscosity,
+                                    0.0,  # legacy correction damping, superseded by apply_viscosity
                                     1.0 / self.pbf_rest_density,
                                     self.pbf_cohesion,
                                     self.pbf_cohesion1,
@@ -1206,6 +1222,42 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             1.0 / self.pbf_rest_density,
                             dt,
                         ],
+                        outputs=[particle_qd],
+                        device=model.device,
+                    )
+
+                # Physical viscosity: momentum diffusion between neighbours,
+                # applied to velocities so the coefficient is a real material
+                # property (Pa s) rather than a solver-side damping factor.
+                if self.pbf_viscosity > 0.0 and model.particle_grid is not None:
+                    wp.launch(
+                        kernel=apply_viscosity,
+                        dim=model.particle_count,
+                        inputs=[
+                            model.particle_grid.id,
+                            particle_q,
+                            particle_qd,
+                            model.particle_flags,
+                            model.particle_mass,
+                            self._pbf_pos_sorted,
+                            self._pbf_sorted_to_orig,
+                            self._pbf_neighbors,
+                            self._pbf_neighbor_counts,
+                            model.particle_count,
+                            self.pbf_contact_distance_sq,
+                            self.pbf_inv_radius,
+                            self.pbf_spiky1,
+                            self.pbf_spiky2,
+                            self.pbf_viscosity,
+                            dt,
+                        ],
+                        outputs=[self._pbf_delta_qd],
+                        device=model.device,
+                    )
+                    wp.launch(
+                        kernel=apply_velocity_delta,
+                        dim=model.particle_count,
+                        inputs=[model.particle_flags, self._pbf_delta_qd],
                         outputs=[particle_qd],
                         device=model.device,
                     )
