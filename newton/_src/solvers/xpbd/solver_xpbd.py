@@ -11,6 +11,17 @@ from ...geometry.types import GeoType
 from ...sim import Contacts, Control, Model, ModelFlags, State
 from ...utils.deprecation import deprecate_nonkeyword_arguments
 from ..coupled.interface import CouplingInterface
+
+#: Constant relating a surface tension in N/m to the pairwise cohesion
+#: coefficient, ``sigma = K gamma rho^2 h^2``.
+#:
+#: The Fowler/Kirkwood-Buff relation ``sigma = -(pi/8) n^2 int F(r) r^4 dr``
+#: gives ``K = (pi/8) * 0.0075960 = 0.0029830`` for the Akinci spline, where
+#: ``0.0075960 h^2`` is its ``r^4`` moment. That derivation assumes a radial
+#: distribution function of 1, and a PBF packing is quasi-crystalline, so the
+#: value is taken as a starting point and the residual factor is measured --
+#: see ``fluids/research/sigma_puddle.py``.
+SURFACE_TENSION_CALIBRATION = 0.0029830
 from ..solver import SolverBase
 from . import kernels
 from .kernels import (
@@ -39,6 +50,7 @@ from .pbf_kernels import (
     apply_damping,
     apply_velocity_delta,
     apply_viscosity,
+    apply_cohesion,
     build_neighbor_list,
     count_particles_per_cell,
     gather_sorted_positions,
@@ -248,7 +260,6 @@ class SolverXPBD(SolverBase, CouplingInterface):
         pbf_fluid_rest_distance: float | None = None,
         pbf_relaxation: float = 1.0,
         pbf_viscosity: float = 0.0,
-        pbf_cohesion: float = 0.0,
         pbf_surface_tension: float = 0.0,
         pbf_vorticity_confinement: float = 0.0,
         pbf_cfl_coefficient: float = 1.0,
@@ -309,49 +320,42 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 kernel sum, and provably did nothing in a uniform shear at any
                 magnitude -- including 1e6. Values tuned against it do not carry
                 over.
-            pbf_cohesion: Fluid cohesion coefficient. Not an SI quantity -- see
-                ``pbf_surface_tension``.
-            pbf_surface_tension: Surface-tension coefficient. Unlike
-                ``pbf_rest_density`` and ``pbf_viscosity`` this is **not** in SI:
-                it scales a colour-normal difference, in the PhysX formulation,
-                and no value of it corresponds to a surface tension in N/m.
+            pbf_surface_tension: Surface tension in N/m -- water is 0.072,
+                mercury 0.49, ethanol 0.022.
 
-                Two SI routes were derived, implemented and measured; both
-                fail here, for different reasons.
+                Implemented as a pairwise cohesion force, since surface tension
+                *is* the macroscopic effect of cohesion rather than a second,
+                independent property. This replaces the two separate knobs the
+                PhysX formulation had. Neither was usable: the old cohesion term
+                applied a displacement proportional to ``dt``, which is a velocity
+                in disguise, so its effect depended on the substep count -- a free
+                droplet contracted 4.7% at 4 substeps and 30% at 32. The old
+                surface-tension term scaled a colour-normal difference, and its
+                response was non-monotonic: droplet contraction went 0.3%, 4%, 22%,
+                then back to 3% and finally divergence, as the coefficient went
+                1, 10, 100, 1000, 10000.
 
-                A **continuum surface force**, ``f = sigma kappa grad c`` in
-                N/m^3, was evaluated first. It is not usable at this
-                resolution: the interface normal comes from the gradient of the
-                SPH colour field, and with the ~26 neighbours a PBF kernel
-                support holds, that gradient does not cancel in the fluid
-                interior. Measured on a static droplet, interior ``|grad c|``
-                reached 2-6 against 9 at the surface, and the surface gradient
-                projected onto the outward radial direction averaged -0.16 where
-                a clean normal gives -1. Switching the colour field to a poly6
-                gradient, whose derivative vanishes at the origin, improved both
-                but not enough. CSF wants 50-150 neighbours; PBF deliberately
-                runs far fewer for speed.
+                The force is ``a_i = -gamma sum_j m_j C(r_ij) n_ij`` with the
+                Akinci et al. (2013) spline ``C``, applied to the predicted
+                position as ``a dt^2`` before the density solve, so the density
+                constraint corrects the compression it causes in the same substep.
+                ``gamma`` follows from ``sigma = K gamma rho^2 h^2``; see
+                :data:`SURFACE_TENSION_CALIBRATION`.
 
-                A **pairwise cohesion force** was evaluated second, converting
-                sigma into a pairwise coefficient through the Fowler/Kirkwood-Buff
-                surface tension relation, ``sigma = -(pi/8) n^2 int F(r) r^4 dr``.
-                The relation and its r^4 moment for the Akinci spline
-                (``0.0075960 h^2``) both check out, but the derivation silently
-                assumes a radial distribution function of 1, and a PBF packing is
-                quasi-crystalline with strong structure at the rest spacing, so
-                the prefactor carries an unquantified O(1) error. Measured, the
-                scheme is also unstable at the strengths this particle size needs:
-                a free droplet's peak speed grew monotonically with sigma --
-                0.40, 0.51, 0.68, 1.62, 2.87, 6.31 m/s at sigma = 0, 0.5, 2, 8,
-                32, 128 N/m, from rest and with no gravity -- which is the
-                tensile instability a bulk attractive force invites. The
-                published work in this area calibrates the coefficient against a
-                Young-Laplace or Rayleigh measurement rather than deriving it.
-
-                Making this SI therefore needs a stability fix first (the force
-                belongs in the integration, so the density constraint corrects it
-                within the same substep, rather than as a trailing velocity
-                impulse), and then a measured prefactor to close the g(r) gap.
+                **The units are honest in form but the prefactor is not yet
+                measured.** ``K`` is the Fowler/Kirkwood-Buff value, which assumes
+                a radial distribution function of 1 while a PBF packing is
+                quasi-crystalline, so expect an O(1) error in the absolute scale.
+                What *is* verified is that the term is a force and not a velocity
+                -- displacement scales as ``dt^2`` to 1% and linearly in sigma to
+                0.01% -- that it pulls the free surface inward and leaves the
+                interior alone, and that a gravity-bounded puddle thickens with
+                sigma, which is the right sign. Calibrating the prefactor needs an
+                observable this solver can resolve: a Rayleigh droplet oscillation
+                is overdamped by the position projection (it crosses zero once and
+                freezes), and the non-wetting puddle height ``h = 2 sqrt(sigma /
+                rho g)`` only holds while the puddle stays wide compared to its
+                height, which fails before the signal is clean.
             pbf_vorticity_confinement: Fluid vorticity-confinement coefficient.
             pbf_cfl_coefficient: Maximum relative normal displacement as a
                 fraction of the fluid neighbor radius.
@@ -428,7 +432,6 @@ class SolverXPBD(SolverBase, CouplingInterface):
             if (
                 min(
                     pbf_viscosity,
-                    pbf_cohesion,
                     pbf_surface_tension,
                     pbf_vorticity_confinement,
                     pbf_cfl_coefficient,
@@ -487,32 +490,17 @@ class SolverXPBD(SolverBase, CouplingInterface):
             # Legacy coefficients stay defined against the kernel sum.
             inv_rest_density = 1.0 / rest_density if rest_density > 0.0 else 0.0
 
-            # Derive surface tension and cohesion following PhysX exactly:
-            #   surfaceTension = invRestDensity * mat.surfaceTension / surfaceConstraintScale
-            #   cohesion = mat.cohesion * particleContactDistance
-            if surface_constraint_scale != 0.0:
-                self.pbf_surface_tension = inv_rest_density * pbf_surface_tension / surface_constraint_scale
-            else:
-                self.pbf_surface_tension = pbf_surface_tension
-            self.pbf_cohesion = pbf_cohesion * h
-
-            # Cohesion kernel coefficients from PhysX:
-            # W_cohesion(d) = c1*(d/h)^3 + c2*(d/h)^2 - 1
-            # With rest = fluidRestDistance / particleContactDistance:
-            #   c1 = -(1 + rest) / rest^2
-            #   c2 = (rest^2 + rest + 1) / rest^2
-            rest_ratio = fluid_rest_dist / h if h > 0.0 else 1.0
-            rest_sq = rest_ratio * rest_ratio
-            if rest_sq > 0.0:
-                self.pbf_cohesion1 = -(1.0 + rest_ratio) / rest_sq
-                self.pbf_cohesion2 = (rest_sq + rest_ratio + 1.0) / rest_sq
-            else:
-                self.pbf_cohesion1 = -2.0
-                self.pbf_cohesion2 = 3.0
+            # Surface tension is a pairwise cohesion force. Kirkwood-Buff gives
+            # sigma = -(pi/8) n^2 int F(r) r^4 dr, so with F = gamma m_i m_j C(r)
+            # and n = rho / m the mass drops out and sigma = K gamma rho^2 h^2.
+            # See SURFACE_TENSION_CALIBRATION for where K comes from.
+            self.pbf_cohesion_gamma = pbf_surface_tension / (
+                SURFACE_TENSION_CALIBRATION * pbf_rest_density * pbf_rest_density * h * h
+            )
+            self.pbf_cohesion_norm = 32.0 / (math.pi * h**9)
 
             n = model.particle_count
             self._pbf_densities = wp.zeros(n, dtype=float, device=model.device)
-            self._pbf_surface_normals = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_deltas = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_weights = wp.zeros(n, dtype=float, device=model.device)
             self._pbf_accum_delta = wp.zeros(n, dtype=wp.vec3, device=model.device)
@@ -865,6 +853,29 @@ class SolverXPBD(SolverBase, CouplingInterface):
                         device=model.device,
                     )
 
+                    # Cohesion goes into the predicted position, so the density
+                    # constraint corrects it in this same substep.
+                    if self.pbf_cohesion_gamma > 0.0:
+                        wp.launch(
+                            kernel=apply_cohesion,
+                            dim=model.particle_count,
+                            inputs=[
+                                self._pbf_sorted_to_orig,
+                                model.particle_flags,
+                                self._pbf_pos_sorted,
+                                self._pbf_neighbors,
+                                self._pbf_neighbor_counts,
+                                model.particle_count,
+                                self.pbf_contact_distance_sq,
+                                self.pbf_particle_contact_distance,
+                                self.pbf_cohesion_gamma,
+                                self.pbf_cohesion_norm,
+                                dt,
+                            ],
+                            outputs=[state_out.particle_q],
+                            device=model.device,
+                        )
+
                     # Solid boundaries contribute no neighbors to the
                     # density sum; recover their contribution from the
                     # particle-shape contacts before accumulating.
@@ -1002,16 +1013,13 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     self.pbf_contact_distance_sq,
                                     self.pbf_inv_radius,
                                     self.pbf_spiky1,
-                                    self.pbf_spiky2,
                                     self.pbf_rest_density,
                                     self.pbf_lambda_scale,
-                                    self.pbf_surface_tension,
                                     self._pbf_boundary_log,
                                 ],
                                 outputs=[
                                     self._pbf_densities,
                                     self._pbf_pos_lambda,
-                                    self._pbf_surface_normals,
                                 ],
                                 device=model.device,
                             )
@@ -1032,7 +1040,6 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     model.particle_count,
                                     self._pbf_densities,
                                     self._pbf_pos_lambda,
-                                    self._pbf_surface_normals,
                                     self._pbf_boundary_grad,
                                     pbf_delta_pos,
                                     self.pbf_contact_distance_sq,
@@ -1041,10 +1048,6 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     self.pbf_spiky2,
                                     0.0,  # legacy correction damping, superseded by apply_viscosity
                                     1.0 / self._pbf_kernel_rest_density,
-                                    self.pbf_cohesion,
-                                    self.pbf_cohesion1,
-                                    self.pbf_cohesion2,
-                                    self.pbf_surface_tension,
                                     self.pbf_cfl_coefficient,
                                     1.0,  # coefficient
                                     dt,

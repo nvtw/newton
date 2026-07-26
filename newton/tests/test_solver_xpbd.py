@@ -1731,10 +1731,8 @@ def test_position_based_fluids_reference_stages(test, device):
     spiky2 = 30.0 / (np.pi * radius**4)
     _, lambda_denominator, _ = _calculate_rest_density(0.11, radius)
     lambda_scale = 1.0 / (lambda_denominator * 0.5 * particle_mass)
-    surface_tension = 0.003
     densities = wp.zeros(particle_count, dtype=float, device=device)
     pos_lambda = wp.zeros(particle_count, dtype=wp.vec4, device=device)
-    normals = wp.zeros(particle_count, dtype=wp.vec3, device=device)
     # No solids in this scene, so the boundary density term is identically zero.
     boundary_log = wp.zeros(particle_count, dtype=float, device=device)
     boundary_grad = wp.zeros(particle_count, dtype=wp.vec3, device=device)
@@ -1806,21 +1804,17 @@ def test_position_based_fluids_reference_stages(test, device):
             contact_distance_sq,
             inv_radius,
             spiky1,
-            spiky2,
             rest_density,
             lambda_scale,
-            surface_tension,
             boundary_log,
         ],
-        outputs=[densities, pos_lambda, normals],
+        outputs=[densities, pos_lambda],
         device=device,
     )
 
     expected_densities = np.zeros(particle_count, dtype=np.float64)
-    expected_normals = np.zeros((particle_count, 3), dtype=np.float64)
     for i in range(particle_count):
         density = 0.0
-        normal = np.zeros(3)
         for j in range(particle_count):
             displacement = positions[i].astype(np.float64) - positions[j]
             distance = np.linalg.norm(displacement)
@@ -1829,13 +1823,10 @@ def test_position_based_fluids_reference_stages(test, device):
             # Mass weighted and kernel normalised: the density constraint is in
             # kg/m^3 (int W dV == 2 for this kernel).
             density += particle_mass * spiky1 * (1.0 - distance * inv_radius) ** 2 / 2.0
-            normal += -spiky2 * (1.0 - distance * inv_radius) * displacement / distance
         density += particle_mass * spiky1 / 2.0  # self contribution
         expected_densities[i] = max(density - rest_density, -0.005 * rest_density) * lambda_scale
-        expected_normals[i] = normal * surface_tension
 
     np.testing.assert_allclose(densities.numpy(), expected_densities, rtol=2.0e-5, atol=2.0e-5)
-    np.testing.assert_allclose(normals.numpy()[perm], expected_normals, rtol=2.0e-5, atol=2.0e-5)
 
     curl = wp.zeros(particle_count, dtype=wp.vec3, device=device)
     curl_magnitude = wp.zeros(particle_count, dtype=float, device=device)
@@ -1931,10 +1922,7 @@ def test_position_based_fluids_reference_stages(test, device):
     deltas = wp.zeros(particle_count, dtype=wp.vec3, device=device)
     weights = wp.zeros(particle_count, dtype=float, device=device)
     viscosity = 0.002
-    cohesion = 0.001
     rest_ratio = 0.11 / radius
-    cohesion1 = -(1.0 + rest_ratio) / rest_ratio**2
-    cohesion2 = (rest_ratio**2 + rest_ratio + 1.0) / rest_ratio**2
     cfl_coefficient = 0.01
     coefficient = 0.8
     wp.launch(
@@ -1950,7 +1938,6 @@ def test_position_based_fluids_reference_stages(test, device):
             particle_count,
             densities,
             pos_lambda,
-            normals,
             boundary_grad,
             accumulated_delta,
             contact_distance_sq,
@@ -1959,10 +1946,6 @@ def test_position_based_fluids_reference_stages(test, device):
             spiky2,
             viscosity,
             inv_rest_density,
-            cohesion,
-            cohesion1,
-            cohesion2,
-            surface_tension,
             cfl_coefficient,
             coefficient,
             dt,
@@ -1983,9 +1966,7 @@ def test_position_based_fluids_reference_stages(test, device):
             density_correction = (
                 0.5 * (expected_densities[i] + expected_densities[j]) * -spiky2 * (1.0 - distance * inv_radius)
             )
-            q = distance * inv_radius
-            cohesion_w = cohesion1 * q**3 + cohesion2 * q**2 - 1.0
-            expected_deltas[i] -= direction * (density_correction + cohesion * dt * cohesion_w)
+            expected_deltas[i] -= direction * density_correction
 
             relative_delta = accumulated_values[i].astype(np.float64) - accumulated_values[j]
             kernel_w = spiky1 * (1.0 - distance * inv_radius) ** 2
@@ -1996,7 +1977,6 @@ def test_position_based_fluids_reference_stages(test, device):
             cfl_radius = radius * cfl_coefficient
             if relative_normal_delta < -cfl_radius:
                 expected_deltas[i] -= 0.5 * direction * (relative_normal_delta + cfl_radius)
-            expected_deltas[i] -= (expected_normals[i] - expected_normals[j]) * dt
             expected_weights[i] += 1.0
         expected_deltas[i] *= coefficient
 

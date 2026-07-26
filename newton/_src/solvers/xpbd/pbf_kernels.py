@@ -28,9 +28,19 @@ def _kernel_dw(distance: float, spiky2: float, inv_radius: float) -> float:
 
 
 @wp.func
-def _cohesion_w(distance: float, cohesion1: float, cohesion2: float, inv_radius: float) -> float:
-    q = distance * inv_radius
-    return cohesion1 * q * q * q + cohesion2 * q * q - 1.0
+def _cohesion_c(distance: float, radius: float, norm: float) -> float:
+    """Akinci et al. (2013) cohesion spline: attractive, C^2, zero at 0 and h.
+
+    ``norm`` is ``32 / (pi h^9)``. Purely attractive by design -- short-range
+    repulsion is the density constraint's job, and duplicating it here would
+    only fight the solver.
+    """
+    d3 = distance * distance * distance
+    g = radius - distance
+    g3 = g * g * g
+    if 2.0 * distance > radius:
+        return norm * g3 * d3
+    return norm * (2.0 * g3 * d3 - radius**6.0 / 64.0)
 
 
 @wp.func
@@ -399,14 +409,11 @@ def calculate_density(
     contact_distance_sq: float,
     inv_radius: float,
     spiky1: float,
-    spiky2: float,
     rest_density: float,
     lambda_scale: float,
-    surface_tension: float,
     boundary_log: wp.array[float],
     densities: wp.array[float],
     pos_lambda: wp.array[wp.vec4],
-    surface_normals: wp.array[wp.vec3],
 ):
     slot = wp.tid()
     i = sorted_to_orig[slot]
@@ -419,7 +426,6 @@ def calculate_density(
     # form collapses to 0 when no boundary is in range (exp(0) - 1 == 0).
     # rest_density is in kg/m^3, so this seed already is too.
     density = rest_density * (1.0 - wp.exp(-boundary_log[i]))
-    normal = wp.vec3(0.0)
 
     # Mass weighted and kernel normalised, so `density` is kg/m^3 and the
     # constraint is against a real material density rather than a kernel sum.
@@ -439,8 +445,6 @@ def calculate_density(
 
         distance = wp.sqrt(distance_sq)
         density += pm[3] * _kernel_w(distance, spiky1, inv_radius) * inv_norm
-        if surface_tension > 0.0:
-            normal += _kernel_dw(distance, spiky2, inv_radius) * xij / distance
 
     # Include this particle's own kernel contribution, as an SPH density sum does.
     density += particle_mass[i] * _kernel_w(0.0, spiky1, inv_radius) * inv_norm
@@ -450,7 +454,6 @@ def calculate_density(
     # Neighbour position and lambda are always read together in the pressure
     # solve; packing them halves the scattered gathers in its inner loop.
     pos_lambda[slot] = wp.vec4(xi[0], xi[1], xi[2], scaled)
-    surface_normals[slot] = normal * surface_tension
 
 
 @wp.kernel
@@ -464,7 +467,6 @@ def solve_density(
     num_particles: int,
     densities: wp.array[float],
     pos_lambda: wp.array[wp.vec4],
-    surface_normals: wp.array[wp.vec3],
     boundary_grad: wp.array[wp.vec3],
     accumulated_delta: wp.array[wp.vec3],
     contact_distance_sq: float,
@@ -473,10 +475,6 @@ def solve_density(
     spiky2: float,
     viscosity: float,
     inv_rest_density: float,
-    cohesion: float,
-    cohesion1: float,
-    cohesion2: float,
-    surface_tension: float,
     cfl_coefficient: float,
     coefficient: float,
     dt: float,
@@ -495,7 +493,6 @@ def solve_density(
     xi = particle_q[i]
     delta_i = accumulated_delta[slot]
     density_i = densities[i]
-    normal_i = surface_normals[slot]
     radius = 1.0 / inv_radius
     cfl_radius = radius * cfl_coefficient
     # Gradient of the boundary density term, the counterpart of the fluid
@@ -516,9 +513,7 @@ def solve_density(
 
         distance = wp.sqrt(distance_sq)
         normal = xij / distance
-        density_correction = 0.5 * (density_i + pl[3]) * _kernel_dw(distance, spiky2, inv_radius)
-        cohesion_correction = cohesion * dt * _cohesion_w(distance, cohesion1, cohesion2, inv_radius)
-        delta -= normal * (density_correction + cohesion_correction)
+        delta -= normal * (0.5 * (density_i + pl[3]) * _kernel_dw(distance, spiky2, inv_radius))
 
         relative_delta = delta_i - accumulated_delta[sj]
         viscosity_amount = viscosity * dt * inv_rest_density * _kernel_w(distance, spiky1, inv_radius)
@@ -529,8 +524,6 @@ def solve_density(
         if relative_normal_delta < -cfl_radius:
             delta -= 0.5 * normal * (relative_normal_delta + cfl_radius)
 
-        if surface_tension > 0.0:
-            delta -= (normal_i - surface_normals[sj]) * dt
 
         weight += 1.0
 
@@ -757,6 +750,58 @@ def apply_viscosity(
 
     delta_qd[i] = accel * dt
 
+
+
+@wp.kernel
+def apply_cohesion(
+    sorted_to_orig: wp.array[wp.int32],
+    particle_flags: wp.array[wp.int32],
+    pos_sorted: wp.array[wp.vec4],
+    neighbors: wp.array[wp.int32],
+    neighbor_counts: wp.array[wp.int32],
+    num_particles: int,
+    contact_distance_sq: float,
+    radius: float,
+    cohesion_gamma: float,
+    cohesion_norm: float,
+    dt: float,
+    particle_q: wp.array[wp.vec3],
+):
+    """Pairwise cohesion, whose macroscopic effect is surface tension.
+
+        a_i = -gamma sum_j m_j C(r_ij) n_ij
+
+    with the Akinci spline ``C``. The caller derives ``gamma`` from a surface
+    tension in N/m.
+
+    Applied to the *predicted position* as ``a dt^2``, before the density solve,
+    for two reasons. It is dt-consistent, unlike a displacement proportional to
+    dt, which is a velocity in disguise and made the effect depend on the substep
+    count. And the density constraint then corrects the compression cohesion
+    causes within the same substep: applied afterwards instead, each substep
+    pulled particles together and the next one blasted them apart, which injected
+    energy -- a droplet *expanded* with increasing surface tension, and peak speed
+    grew from 0.28 to 7.17 m/s as sigma went from 0 to 128 N/m.
+    """
+    slot = wp.tid()
+    i = sorted_to_orig[slot]
+    if i < 0 or not _is_active_fluid(particle_flags[i]):
+        return
+
+    pi = pos_sorted[slot]
+    xi = wp.vec3(pi[0], pi[1], pi[2])
+    accel = wp.vec3(0.0)
+    count = neighbor_counts[slot]
+    for k in range(count):
+        pm = pos_sorted[neighbors[k * num_particles + slot]]
+        xij = xi - wp.vec3(pm[0], pm[1], pm[2])
+        distance_sq = wp.length_sq(xij)
+        if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
+            continue
+        distance = wp.sqrt(distance_sq)
+        accel -= (cohesion_gamma * pm[3] * _cohesion_c(distance, radius, cohesion_norm) / distance) * xij
+
+    particle_q[i] = xi + accel * dt * dt
 
 @wp.kernel
 def apply_velocity_delta(

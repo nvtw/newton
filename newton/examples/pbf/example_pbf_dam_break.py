@@ -132,7 +132,6 @@ class Example:
             pbf_rest_density=args.rest_density,
             pbf_relaxation=args.relaxation,
             pbf_viscosity=args.viscosity,
-            pbf_cohesion=args.cohesion,
             pbf_surface_tension=args.surface_tension,
             pbf_vorticity_confinement=args.vorticity,
             pbf_cfl_coefficient=args.cfl,
@@ -244,8 +243,7 @@ class Example:
         parser.add_argument(
             "--viscosity", type=float, default=1.0e-3, help="Dynamic viscosity [Pa s] (water is 1e-3)"
         )
-        parser.add_argument("--cohesion", type=float, default=0.005, help="PBF cohesion")
-        parser.add_argument("--surface-tension", type=float, default=0.005, help="PBF surface tension")
+        parser.add_argument("--surface-tension", type=float, default=0.072, help="Surface tension [N/m]; water is 0.072")
         parser.add_argument("--vorticity", type=float, default=5.0, help="PBF vorticity confinement")
         parser.add_argument("--cfl", type=float, default=1.0, help="PBF CFL coefficient")
         parser.add_argument("--iterations", type=int, default=4, help="XPBD/PBF iterations")

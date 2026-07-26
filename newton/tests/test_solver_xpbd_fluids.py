@@ -70,7 +70,6 @@ def _solver(model, device, **kwargs):
         pbf_particle_contact_distance=H,
         pbf_fluid_rest_distance=REST_DISTANCE,
         pbf_viscosity=0.0,
-        pbf_cohesion=0.0,
         pbf_surface_tension=0.0,
         pbf_vorticity_confinement=0.0,
     )
@@ -335,45 +334,106 @@ def test_fluid_viscosity_matches_stokes_decay(test, device):
                     "more viscosity must damp shear faster")
 
 
-def test_fluid_cohesion_contracts_a_free_droplet(test, device):
-    """In zero gravity a cohesive droplet must pull itself inward; without
-    cohesion the density solve can only push particles apart."""
-    def radius(cohesion):
-        builder = newton.ModelBuilder()
-        _block(builder, (6, 6, 6), (0.0, 0.0, 0.0), jitter=SPACING * 0.05)
-        model = builder.finalize(device=device)
-        model.set_gravity((0.0, 0.0, 0.0))
-        solver = _solver(model, device, pbf_cohesion=cohesion)
-        state, _ = _run(model, solver, 40)
-        q, _ = _finite(test, state, f"with cohesion={cohesion}")
-        return float(np.linalg.norm(q - q.mean(axis=0), axis=1).mean())
+def _cohesion_displacement(device, sigma, dt, dim=7):
+    """One ``apply_cohesion`` pass over a lattice block, as displacement per particle."""
+    from newton._src.solvers.xpbd.pbf_kernels import apply_cohesion, count_particles_per_cell, scatter_particles_to_cells
 
-    loose, tight = radius(0.0), radius(0.05)
-    test.assertLess(tight, loose,
-                    f"cohesion did not contract the droplet ({loose:.5f} -> {tight:.5f})")
+    builder = newton.ModelBuilder()
+    _block(builder, (dim, dim, dim), (0.0, 0.0, 0.0))
+    model = builder.finalize(device=device)
+    solver = _solver(model, device, pbf_surface_tension=sigma)
+    n = model.particle_count
+
+    grid_dim, cells = wp.vec3i(8, 8, 8), 8**3
+    cell_of = wp.zeros(n, dtype=wp.int32, device=device)
+    counts = wp.zeros(cells + 1, dtype=wp.int32, device=device)
+    offset = wp.zeros(cells + 1, dtype=wp.int32, device=device)
+    cursor = wp.zeros(cells, dtype=wp.int32, device=device)
+    order = wp.zeros(n, dtype=wp.int32, device=device)
+    pos_sorted = wp.zeros(n, dtype=wp.vec4, device=device)
+    fluid_count = wp.zeros(1, dtype=wp.int32, device=device)
+    q = wp.clone(model.particle_q)
+    args = [q, model.particle_flags, 1.0 / H, grid_dim]
+    wp.launch(count_particles_per_cell, dim=n, inputs=args, outputs=[cell_of, counts], device=device)
+    wp.utils.array_scan(counts, offset, inclusive=False)
+    wp.copy(fluid_count, offset, dest_offset=0, src_offset=cells, count=1)
+    wp.launch(
+        scatter_particles_to_cells,
+        dim=n,
+        inputs=[q, model.particle_mass, cell_of, offset, cursor],
+        outputs=[order, pos_sorted],
+        device=device,
+    )
+    neighbors = wp.zeros(n * 64, dtype=wp.int32, device=device)
+    ncounts = wp.zeros(n, dtype=wp.int32, device=device)
+    overflow = wp.zeros(1, dtype=wp.int32, device=device)
+    wp.launch(
+        newton._src.solvers.xpbd.pbf_kernels.build_neighbor_list,
+        dim=n,
+        inputs=[pos_sorted, offset, 1.0 / H, grid_dim, fluid_count, H * H, 64, n],
+        outputs=[neighbors, ncounts, overflow],
+        device=device,
+    )
+    before = q.numpy().copy()
+    wp.launch(
+        apply_cohesion,
+        dim=n,
+        inputs=[order, model.particle_flags, pos_sorted, neighbors, ncounts, n, H * H, H,
+                solver.pbf_cohesion_gamma, solver.pbf_cohesion_norm, dt],
+        outputs=[q],
+        device=device,
+    )
+    return before, q.numpy() - before
 
 
-def test_fluid_surface_tension_contracts_a_free_droplet(test, device):
-    """Surface tension penalises surface area, so a free droplet must pull inward.
+def test_fluid_surface_tension_pulls_the_surface_inward(test, device):
+    """Cohesion must pull the free surface in and leave the interior alone.
 
-    Measured as the mean particle radius about the centre of mass, which is the
-    effect that is monotone in this solver. The spread of those radii is not: it
-    moves non-monotonically with the coefficient, so it would make a flaky
-    assertion.
+    Asserted on one pass of the kernel rather than on a settled shape: a free
+    blob in zero gravity is only marginally stable in this solver -- its extent
+    grows with substep count on its own -- so any slow drift measured there is
+    the scene, not the force.
     """
-    def mean_radius(surface_tension):
-        builder = newton.ModelBuilder()
-        _block(builder, (6, 6, 6), (0.0, 0.0, 0.0), jitter=SPACING * 0.15)
-        model = builder.finalize(device=device)
-        model.set_gravity((0.0, 0.0, 0.0))
-        solver = _solver(model, device, pbf_surface_tension=surface_tension)
-        state, _ = _run(model, solver, 40)
-        q, _ = _finite(test, state, f"with surface_tension={surface_tension}")
-        return float(np.linalg.norm(q - q.mean(axis=0), axis=1).mean())
+    pos, delta = _cohesion_displacement(device, sigma=1.0, dt=1.0 / 60.0 / 8.0)
+    # The block is built from a corner, so centre it before talking about
+    # depth below the surface or a radial direction.
+    pos = pos - pos.mean(axis=0)
+    depth = np.abs(pos).max() - np.abs(pos).max(axis=1)
+    radial = pos / np.maximum(np.linalg.norm(pos, axis=1, keepdims=True), 1e-12)
+    inward = -(delta * radial).sum(axis=1)
 
-    loose, mid, taut = mean_radius(0.0), mean_radius(5.0), mean_radius(50.0)
-    test.assertLess(mid, loose, f"surface tension did not contract the droplet ({loose:.5f} -> {mid:.5f})")
-    test.assertLess(taut, mid, f"more surface tension did not contract further ({mid:.5f} -> {taut:.5f})")
+    surface, interior = depth < 0.5 * SPACING, depth > 1.5 * SPACING
+    test.assertGreater(surface.sum(), 50)
+    test.assertGreater(interior.sum(), 20)
+    test.assertGreater(inward[surface].mean(), 0.0, "cohesion did not pull the surface inward")
+    # By symmetry an interior particle of a lattice feels no net cohesion.
+    test.assertLess(
+        np.linalg.norm(delta[interior], axis=1).max(),
+        0.02 * inward[surface].mean(),
+        "cohesion has a net effect in the interior, where symmetry forbids one",
+    )
+
+
+def test_fluid_surface_tension_is_a_force_not_a_velocity(test, device):
+    """Displacement must go as dt^2 and as sigma, or the coefficient is not in N/m.
+
+    The previous formulation applied a displacement proportional to dt, which is
+    a velocity in disguise: the effect then depended on the substep count, so no
+    value of it corresponded to a surface tension.
+    """
+    dt = 1.0 / 60.0 / 8.0
+    _, base = _cohesion_displacement(device, sigma=1.0, dt=dt)
+    _, half_dt = _cohesion_displacement(device, sigma=1.0, dt=0.5 * dt)
+    _, quad = _cohesion_displacement(device, sigma=4.0, dt=dt)
+
+    # Norm over the whole field, not the max: which particle attains the max can
+    # change with float summation order. The 1% tolerance is float32 cancellation
+    # -- the displacement is ~1e-5 m read back off positions of ~0.15 m, so
+    # differencing them costs a few hundred ulps.
+    scale = np.linalg.norm(base)
+    test.assertGreater(scale, 0.0)
+    np.testing.assert_allclose(np.linalg.norm(half_dt) / scale, 0.25, rtol=1.0e-2)
+    np.testing.assert_allclose(np.linalg.norm(quad) / scale, 4.0, rtol=1.0e-3)
 
 
 def test_fluid_vorticity_confinement_is_stable_and_has_an_effect(test, device):
@@ -861,9 +921,10 @@ for _name, _fn in [
      test_fluid_column_does_not_compress_under_its_own_weight),
     ("test_fluid_at_rest_stays_at_rest", test_fluid_at_rest_stays_at_rest),
     ("test_fluid_viscosity_matches_stokes_decay", test_fluid_viscosity_matches_stokes_decay),
-    ("test_fluid_cohesion_contracts_a_free_droplet", test_fluid_cohesion_contracts_a_free_droplet),
-    ("test_fluid_surface_tension_contracts_a_free_droplet",
-     test_fluid_surface_tension_contracts_a_free_droplet),
+    ("test_fluid_surface_tension_pulls_the_surface_inward",
+     test_fluid_surface_tension_pulls_the_surface_inward),
+    ("test_fluid_surface_tension_is_a_force_not_a_velocity",
+     test_fluid_surface_tension_is_a_force_not_a_velocity),
     ("test_fluid_vorticity_confinement_is_stable_and_has_an_effect",
      test_fluid_vorticity_confinement_is_stable_and_has_an_effect),
     ("test_fluid_settles_to_the_expected_fill_height", test_fluid_settles_to_the_expected_fill_height),
