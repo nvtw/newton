@@ -1605,18 +1605,56 @@ def reduce_sum_and_sumsq_partials_kernel(
 
 
 @wp.kernel
-def rollout_reward_done_success_sums_kernel(
+def rollout_reward_done_success_sum_partials_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
     successes: wp.array[wp.float32],
     count: wp.int32,
+    partials: wp.array2d[wp.float32],
+):
+    partial, lane = wp.tid()
+    i = partial * wp.int32(32) + lane
+    reward_sum = wp.float32(0.0)
+    done_sum = wp.float32(0.0)
+    success_sum = wp.float32(0.0)
+    if i < count:
+        reward_sum = rewards[i]
+        done_sum = dones[i]
+        success_sum = successes[i]
+
+    reward_tile = wp.tile_sum(wp.tile(reward_sum))
+    done_tile = wp.tile_sum(wp.tile(done_sum))
+    success_tile = wp.tile_sum(wp.tile(success_sum))
+    if lane == wp.int32(0):
+        partials[partial, 0] = reward_tile[0]
+        partials[partial, 1] = done_tile[0]
+        partials[partial, 2] = success_tile[0]
+
+
+@wp.kernel
+def rollout_reward_done_success_sums_kernel(
+    partials: wp.array2d[wp.float32],
+    partial_count: wp.int32,
     sums: wp.array[wp.float32],
 ):
-    i = wp.tid()
-    if i < count:
-        wp.atomic_add(sums, 0, rewards[i])
-        wp.atomic_add(sums, 1, dones[i])
-        wp.atomic_add(sums, 2, successes[i])
+    lane = wp.tid()
+    reward_sum = wp.float32(0.0)
+    done_sum = wp.float32(0.0)
+    success_sum = wp.float32(0.0)
+    partial = lane
+    while partial < partial_count:
+        reward_sum = reward_sum + partials[partial, 0]
+        done_sum = done_sum + partials[partial, 1]
+        success_sum = success_sum + partials[partial, 2]
+        partial = partial + wp.int32(32)
+
+    reward_tile = wp.tile_sum(wp.tile(reward_sum))
+    done_tile = wp.tile_sum(wp.tile(done_sum))
+    success_tile = wp.tile_sum(wp.tile(success_sum))
+    if lane == wp.int32(0):
+        sums[0] = reward_tile[0]
+        sums[1] = done_tile[0]
+        sums[2] = success_tile[0]
 
 
 @wp.kernel

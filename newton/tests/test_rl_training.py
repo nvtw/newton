@@ -176,6 +176,23 @@ class TestRolloutBuffer(unittest.TestCase):
         self.assertAlmostEqual(mean_done, float(np.mean(dones)), places=6)
         self.assertAlmostEqual(mean_success, float(np.mean(successes)), places=6)
 
+    def test_reward_done_success_sums_are_deterministic(self) -> None:
+        device = _rl_cuda_device()
+        num_steps = 64
+        num_envs = 4096
+        buffer = rl.BufferRollout(num_steps=num_steps, num_envs=num_envs, obs_dim=1, action_dim=1, device=device)
+        rng = np.random.default_rng(729)
+        rewards = rng.normal(size=buffer.num_samples).astype(np.float32)
+        rewards *= np.exp2(rng.integers(-12, 13, size=buffer.num_samples)).astype(np.float32)
+        buffer.rewards.assign(rewards)
+        buffer.dones.assign(rng.integers(0, 2, size=buffer.num_samples).astype(np.float32))
+        buffer.successes.assign(rng.integers(0, 2, size=buffer.num_samples).astype(np.float32))
+
+        reference = buffer.compute_reward_done_success_sums().numpy()
+        for _ in range(16):
+            actual = buffer.compute_reward_done_success_sums().numpy()
+            np.testing.assert_array_equal(actual, reference)
+
 
 class TestTrainerPPO(unittest.TestCase):
     def test_manual_actor_backward_matches_tape_update(self) -> None:

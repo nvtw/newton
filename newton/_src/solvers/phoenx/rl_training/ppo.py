@@ -41,6 +41,7 @@ from .kernels import (
     reduce_ppo_log_std_grad_kernel,
     reduce_sum_and_sumsq_partials_kernel,
     reduce_sum_partials_kernel,
+    rollout_reward_done_success_sum_partials_kernel,
     rollout_reward_done_success_sums_kernel,
     sample_trajectory_env_ids_kernel,
     sample_trajectory_env_ids_seed_counter_kernel,
@@ -324,6 +325,8 @@ class BufferRollout:
         self._advantage_stats = wp.zeros(2, dtype=wp.float32, device=self.device)
         self._metric_sums = wp.zeros(3, dtype=wp.float32, device=self.device)
         self._metric_sums_host = wp.empty(3, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
+        self._metric_partial_count = (count + 31) // 32
+        self._metric_partials = wp.empty((self._metric_partial_count, 3), dtype=wp.float32, device=self.device)
 
         self._advantage_partials = wp.zeros((PPO_ADVANTAGE_PARTIAL_COUNT, 2), dtype=wp.float32, device=self.device)
 
@@ -369,11 +372,18 @@ class BufferRollout:
     def compute_reward_done_success_sums(self) -> wp.array[wp.float32]:
         """Compute rollout reward, done, and success sums in preallocated storage."""
 
-        self._metric_sums.zero_()
+        wp.launch(
+            rollout_reward_done_success_sum_partials_kernel,
+            dim=(self._metric_partial_count, 32),
+            block_dim=32,
+            inputs=[self.rewards, self.dones, self.successes, self.num_samples],
+            outputs=[self._metric_partials],
+            device=self.device,
+        )
         wp.launch(
             rollout_reward_done_success_sums_kernel,
-            dim=self.num_samples,
-            inputs=[self.rewards, self.dones, self.successes, self.num_samples],
+            dim=32,
+            inputs=[self._metric_partials, self._metric_partial_count],
             outputs=[self._metric_sums],
             device=self.device,
         )
