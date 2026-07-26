@@ -721,6 +721,97 @@ def test_boundary_density_is_exact_at_box_faces_edges_and_corners(test, device):
     test.assertLess(fraction[1], fraction[0])
     test.assertLess(fraction[4], fraction[3])
 
+
+def test_non_fluid_particles_still_collide_when_mixed_with_fluid(test, device):
+    """A scene mixing fluid and rigid particles must still solve rigid contacts.
+
+    Fluid particles skip particle-particle contacts because the density
+    constraint governs them, and when *every* particle is fluid the solver skips
+    that kernel's launch entirely. This checks the mixed case still works: two
+    overlapping non-fluid particles must be pushed apart even though fluid is
+    present, which fails if the skip is applied too broadly.
+    """
+    radius = 0.05
+    builder = newton.ModelBuilder()
+    builder.default_particle_radius = radius
+
+    # Two rigid particles overlapping by half a diameter.
+    overlap = radius
+    builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.0), vel=wp.vec3(0.0), mass=1.0,
+                         radius=radius, flags=int(ParticleFlags.ACTIVE))
+    builder.add_particle(pos=wp.vec3(overlap, 0.0, 0.0), vel=wp.vec3(0.0), mass=1.0,
+                         radius=radius, flags=int(ParticleFlags.ACTIVE))
+    # Fluid elsewhere, far enough away to be irrelevant.
+    _block(builder, (3, 3, 3), (2.0, 2.0, 2.0))
+
+    model = builder.finalize(device=device)
+    model.set_gravity((0.0, 0.0, 0.0))
+    solver = _solver(model, device)
+    state, _ = _run(model, solver, 15)
+    q, _ = _finite(test, state, "in a mixed fluid/rigid scene")
+
+    separation = float(np.linalg.norm(q[1] - q[0]))
+    test.assertGreater(separation, overlap * 1.2,
+                       f"overlapping rigid particles were not separated: {separation:.4f} m "
+                       f"(started at {overlap:.4f})")
+
+
+def test_fluid_recovers_from_deep_penetration(test, device):
+    """A particle far inside a solid must be pushed back out, however deep.
+
+    A plane's solid is the half-space behind it, so a boundary cull keyed on
+    absolute distance discards exactly the particles that most need resolving and
+    strands them inside forever. Start a particle well beyond the culling
+    distance and require it to come back.
+    """
+    builder = newton.ModelBuilder()
+    builder.default_particle_radius = SPACING * 0.5
+    builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.0))
+    # Many kernel radii below the floor, far outside any contact margin.
+    start_z = -6.0 * H
+    builder.add_particle(pos=wp.vec3(0.0, 0.0, start_z), vel=wp.vec3(0.0),
+                         mass=PARTICLE_MASS, radius=SPACING * 0.5, flags=FLUID)
+
+    model = builder.finalize(device=device)
+    model.set_gravity((0.0, 0.0, 0.0))
+    pipeline = newton.CollisionPipeline(model, soft_contact_margin=H)
+    solver = _solver(model, device)
+    state, _ = _run(model, solver, 60, pipeline=pipeline)
+    q, _ = _finite(test, state, "after deep penetration")
+
+    test.assertGreater(float(q[0, 2]), start_z,
+                       "a deeply penetrating particle was never pushed out at all")
+    test.assertGreater(float(q[0, 2]), -H,
+                       f"particle still {-float(q[0, 2]) / H:.1f} kernel radii inside the floor")
+
+
+def test_neighbor_list_overflow_is_reported(test, device):
+    """Truncating a particle's neighbourhood must be visible, not silent.
+
+    The cached neighbour list has a fixed capacity. Exceeding it drops
+    neighbours, so the particle reads as less dense than it is -- a quiet
+    accuracy loss. It has to show up in the counter, and the sim must stay
+    finite when it does.
+    """
+    builder = newton.ModelBuilder()
+    _block(builder, (8, 8, 8), (0.0, 0.0, 0.0), jitter=SPACING * 0.05)
+    model = builder.finalize(device=device)
+    model.set_gravity((0.0, 0.0, 0.0))
+
+    # A real neighbourhood holds ~25 particles, so 4 must overflow.
+    starved = _solver(model, device, pbf_max_neighbors=4)
+    state, _ = _run(model, starved, 5)
+    _finite(test, state, "with a starved neighbour list")
+    test.assertGreater(starved.pbf_neighbor_overflow_count, 0,
+                       "neighbour list truncation went unreported")
+
+    # With room to spare there must be no truncation at all.
+    roomy = _solver(model, device, pbf_max_neighbors=64)
+    state, _ = _run(model, roomy, 5)
+    _finite(test, state, "with a roomy neighbour list")
+    test.assertEqual(roomy.pbf_neighbor_overflow_count, 0,
+                     "reported truncation where the capacity is ample")
+
 devices = get_test_devices()
 
 
@@ -752,6 +843,10 @@ for _name, _fn in [
     ("test_fluid_buoyancy_follows_archimedes", test_fluid_buoyancy_follows_archimedes),
     ("test_boundary_density_is_exact_at_box_faces_edges_and_corners",
      test_boundary_density_is_exact_at_box_faces_edges_and_corners),
+    ("test_non_fluid_particles_still_collide_when_mixed_with_fluid",
+     test_non_fluid_particles_still_collide_when_mixed_with_fluid),
+    ("test_fluid_recovers_from_deep_penetration", test_fluid_recovers_from_deep_penetration),
+    ("test_neighbor_list_overflow_is_reported", test_neighbor_list_overflow_is_reported),
 ]:
     add_function_test(TestSolverXPBDFluids, _name, _fn, devices=devices, check_output=False)
 
