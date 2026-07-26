@@ -2694,8 +2694,8 @@ def _make_advance_reduced_articulations_warp_ops(
                             control_force,
                             control_torque + wp.cross(x_com, control_force),
                         )
-                body_velocity[child] = velocity
-                # External-only passes have no consumer; omitting the store lets CUDA remove the recurrence.
+                # The final forward pass publishes the authoritative twist before any consumer.
+                # External-only passes also omit Coriolis scratch so CUDA can remove both recurrences.
                 if wp.static(include_coriolis):
                     body_coriolis[child] = coriolis
                 body_bias[child] = bias

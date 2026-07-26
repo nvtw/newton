@@ -1538,3 +1538,11 @@ A resumable eager-mode Nsight Compute driver captures the five leading G1 physic
 - External reduced advance: 107.74 us, 21.09% SM and 26.12% DRAM, 0.17 eligible warps and only 0.30 full GPU waves. Factor: 66.56 us, balanced 62.31% compute/memory utilization but still only 0.57 eligible warps.
 
 The shared limit is dependent traversal latency, not tensor throughput or raw bandwidth. The next general experiment is to combine repeated forward publication depth walks in fused advance/publish, preserving depth ordering and equations while removing topology reloads, group synchronizations, and intermediate state round-trips.
+
+
+## Post-counter advance experiments (2026-07-27)
+
+- Publication traversal fusion was rejected. Moving local-transform publication into the configuration depth walk removed one complete topology traversal, but enlarged live state in the already register-limited fused kernel. Matched production-recipe traces regressed fused advance/publish from 222.2 to 226.7 us (+2.0%); whole-step brackets were neutral. The prototype was removed.
+- The first forward pass also stored each link twist to internal body_velocity even though the kernel's final forward pass overwrites every value before any consumer. Removing that dead store additionally lets CUDA eliminate the otherwise unused velocity/Coriolis recurrence from the external-only pass. Matched traces improve fused advance/publish 222.0 to 214.6 us (-3.4%) and external advance 85.9 to 81.0 us (-5.7%). Reversed 512-replay whole-step brackets improve about 1.2%, despite thermal drift against the candidate.
+- The production three-substep 30-step leg-action trajectory is exactly JSON-identical to control. Nine production benchmark/analytical tests, all three Ant environment tests, fused momentum parity, and the short full G1 graph rollout pass.
+- Naive vec4 or lossy value packing is not supported by the counters: the kernels are neither DRAM- nor ALU-saturated and prior L2-resident packing tests were neutral. The remaining data-layout hypothesis is world-interleaving corresponding hot joint/body fields so adjacent sub-warps issue fewer scattered transactions. Quantify transactions first and prototype in PhoenX mini before changing the full solver.
