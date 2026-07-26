@@ -73,10 +73,11 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>A source-level audit finds the core PhoenXRL Puffer-style V-trace, priority replay, normalization, ratio, and value-update semantics aligned with the pinned PufferLib source.</li>
 <li>The 29-output/12-control layout matches pinned nanoG1. Its 17 inactive stochastic outputs distort early PPO KL, but a 12-output prototype only gained 1.4% throughput and made policy acquisition less robust. It was rejected and removed.</li>
 <li>The existing adaptive-KL controller also overreacted at minibatch granularity and blocked acquisition. It is not a suitable automatic default.</li>
-<li>The fresh Nsight capture at 1.686M samples/s confirms reduced advance/publish (13.2%), packed contact rows (9.1%), patch solves (9.4% combined), MinGRU (10.0%), and reduced factor passes (8.1%) as the broad costs.</li>
+<li>The fresh post-change Nsight capture at 1.741M samples/s ranks reduced advance/publish (13.2%), packed contact rows (9.5%), patch solves (9.3% combined), MinGRU forward/backward (10.3%), and reduced factor passes (8.3%) as the broad costs.</li>
+<li>Two MinGRU cast fusions were removed: activation handoff lost 0.2%, while same-weight reuse was neutral. Compact patch-row workers were also neutral, confirming useful row traversal—not idle lanes—is the contact-build cost.</li>
 <li>PhoenX PBT currently reuses live workers but schedules them serially. A fixed-world-budget batched population with early elimination is feasible, but must prove better end-to-quality before production use.</li>
 <li>Fixed G1 eager PBT discarding interval statistics after its first cycle, which made subsequent fitness <code>-inf</code>. G1 graph continuation and both Anymal paths were unaffected; split and uninterrupted same-seed checkpoints now match exactly.</li>
-<li>Next: prototype fixed-budget policy racing and scale-invariant, confidence-gated learning control in a small environment before production G1 integration.</li>
+<li>After the measured kernel work: prototype fixed-budget policy racing and scale-invariant, confidence-gated learning control in a small environment before production G1 integration.</li>
 </ul>
 </section>
 
