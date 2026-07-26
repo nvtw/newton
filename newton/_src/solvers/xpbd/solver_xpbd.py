@@ -768,6 +768,13 @@ class SolverXPBD(SolverBase, CouplingInterface):
                     grid_search_radius = model.particle_max_radius * 2.0 + model.particle_cohesion
                     if self.pbf_enabled:
                         grid_search_radius = max(grid_search_radius, self.pbf_particle_contact_distance)
+                    # Cell size equal to the search radius is the measured
+                    # optimum. A finer grid examines fewer candidates -- 27 cells
+                    # spanning 3h hold ~167 candidates for ~26 real neighbours,
+                    # against ~97 at half the cell size -- but visiting 125 cells
+                    # instead of 27 costs more than the candidates saved. Halving
+                    # took the dam break from 143 to 185 ms/frame and thirding it
+                    # to 300; enlarging was no better.
                     with wp.ScopedDevice(model.device):
                         model.particle_grid.build(state_out.particle_q, radius=grid_search_radius)
 
