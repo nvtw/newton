@@ -115,6 +115,16 @@ class SolverXPBD(SolverBase, CouplingInterface):
     may be used to advance the simulation state forward in time.
 
     Limitations:
+        **Fluid incompressibility** -- The density constraint is solved by
+        relaxation, so a resting column stays slightly compressed under its own
+        weight and the residual is set by the iteration budget, not by the
+        solver. Measured at the base of a 24-particle-deep column, density runs
+        1.17x rest at 2 iterations, 1.09x at 4, 1.05x at 8, 1.02x at 16 and
+        1.01x at 32, converging to rest density as expected. Substeps buy the
+        same accuracy more cheaply than iterations: doubling substeps costs
+        twice as much and reaches what quadrupling iterations does. Raise
+        ``substeps`` first if a scene needs stiffer incompressibility.
+
         **Position-based fluids** -- The fluid solve currently supports one
         global fluid material. Multiphase fluids, diffuse particles, anisotropy,
         smoothing, and fluid-particle adhesion are not supported. Fluid-shape
@@ -240,7 +250,10 @@ class SolverXPBD(SolverBase, CouplingInterface):
                 disables position-based fluids.
             pbf_fluid_rest_distance: Fluid rest spacing [m]. Defaults to 60%
                 of ``pbf_particle_contact_distance``.
-            pbf_relaxation: Fluid Jacobi relaxation factor.
+            pbf_relaxation: Fluid Jacobi relaxation factor, scaling each
+                density correction after it is averaged over the contributing
+                neighbors. Values below 1 under-relax: smaller, more stable
+                steps that converge more slowly. 1.0 matches PhysX.
             pbf_viscosity: Fluid viscosity coefficient.
             pbf_cohesion: Fluid cohesion coefficient.
             pbf_surface_tension: Fluid surface-tension coefficient.

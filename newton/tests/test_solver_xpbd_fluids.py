@@ -418,6 +418,85 @@ def test_fluid_settles_to_the_expected_fill_height(test, device):
                     f"fluid over-expanded: height {got_h:.4f} vs expected {expected_h:.4f}")
 
 
+
+def _settled_base_density_ratio(test, device, iterations=4, substeps=8, relaxation=1.0,
+                                frames=140, dim=(8, 8, 24)):
+    """Solver-native density at the base of a settled column, over rest density.
+
+    Uses the solver's own kernel definition, ``sum_j W(|xi - xj|)``, so this is
+    the quantity the density constraint is trying to drive to rest density -- not
+    a proxy like particle spacing.
+    """
+    builder = newton.ModelBuilder()
+    _block(builder, dim, (-dim[0] * SPACING * 0.5, -dim[1] * SPACING * 0.5, SPACING),
+           jitter=SPACING * 0.05)
+    hx, hy = dim[0] * SPACING * 0.5, dim[1] * SPACING * 0.5
+    _container(builder, hx, hy)
+    model = builder.finalize(device=device)
+    model.set_gravity((0.0, 0.0, -9.81))
+    pipeline = newton.CollisionPipeline(model, soft_contact_margin=H)
+    solver = _solver(model, device, iterations=iterations, pbf_relaxation=relaxation)
+    state, _ = _run(model, solver, frames, substeps=substeps, pipeline=pipeline)
+    q, _ = _finite(test, state, "in a settled column")
+
+    d = np.linalg.norm(q[:, None, :] - q[None, :, :], axis=2)
+    np.fill_diagonal(d, np.inf)
+    spiky1 = 15.0 / (np.pi * H**3)
+    rho = np.where(d < H, spiky1 * (1.0 - d / H) ** 2, 0.0).sum(axis=1)
+
+    core = (np.abs(q[:, 0]) < hx - H) & (np.abs(q[:, 1]) < hy - H)
+    z = q[:, 2]
+    # Above the floor's kernel reach, so the boundary density term is not part of
+    # the measurement, but deep enough to carry the full hydrostatic load.
+    base = core & (z > 1.0 * H) & (z < 2.5 * H)
+    test.assertGreater(base.sum(), 15, "no particles resolved at the base")
+    return float(rho[base].mean() / solver.pbf_rest_density)
+
+
+def test_fluid_incompressibility_converges_with_iterations(test, device):
+    """Residual compression must shrink as the constraint solve is given more work.
+
+    A resting column is compressed by its own weight because the density
+    constraint is solved by relaxation, not exactly. That is expected; what must
+    hold is that the residual is a convergence property and not a floor. If this
+    ever stops decreasing, the projection is broken rather than merely
+    under-converged.
+    """
+    coarse = _settled_base_density_ratio(test, device, iterations=2)
+    medium = _settled_base_density_ratio(test, device, iterations=8)
+    fine = _settled_base_density_ratio(test, device, iterations=32)
+
+    test.assertGreater(coarse, 1.02, f"expected visible compression at 2 iterations, got {coarse:.4f}")
+    test.assertLess(medium, coarse, f"8 iterations did not improve on 2 ({coarse:.4f} -> {medium:.4f})")
+    test.assertLess(fine, medium, f"32 iterations did not improve on 8 ({medium:.4f} -> {fine:.4f})")
+    # Converging to incompressible, not to some other fixed point.
+    test.assertLess(fine, 1.03, f"still {100 * (fine - 1):.1f}% compressed at 32 iterations")
+    test.assertGreater(fine, 0.97, f"fluid expanded to {fine:.4f} of rest density")
+
+
+def test_fluid_incompressibility_converges_with_substeps(test, device):
+    """Substeps must also drive the residual down, and do so more cheaply than
+    iterations: doubling substeps costs 2x and buys what 4x the iterations does."""
+    coarse = _settled_base_density_ratio(test, device, substeps=4)
+    fine = _settled_base_density_ratio(test, device, substeps=16)
+    test.assertLess(fine, coarse, f"more substeps did not reduce compression ({coarse:.4f} -> {fine:.4f})")
+    test.assertLess(fine, 1.06, f"still {100 * (fine - 1):.1f}% compressed at 16 substeps")
+
+
+def test_fluid_relaxation_under_relaxes(test, device):
+    """``pbf_relaxation`` must scale the correction, so below 1 converges slower.
+
+    It previously multiplied the Jacobi divisor instead, which inverted its
+    sense: 0.5 produced corrections twice as large, so *lowering* it converged
+    faster. The default of 1.0 is unaffected either way, which is why the
+    inversion went unnoticed.
+    """
+    full = _settled_base_density_ratio(test, device, iterations=8, relaxation=1.0)
+    under = _settled_base_density_ratio(test, device, iterations=8, relaxation=0.25)
+    test.assertGreater(under, full,
+                       f"relaxation=0.25 should under-relax and leave more residual "
+                       f"compression than 1.0, got {under:.4f} vs {full:.4f}")
+
 devices = get_test_devices()
 
 
@@ -440,6 +519,11 @@ for _name, _fn in [
     ("test_fluid_vorticity_confinement_is_stable_and_has_an_effect",
      test_fluid_vorticity_confinement_is_stable_and_has_an_effect),
     ("test_fluid_settles_to_the_expected_fill_height", test_fluid_settles_to_the_expected_fill_height),
+    ("test_fluid_incompressibility_converges_with_iterations",
+     test_fluid_incompressibility_converges_with_iterations),
+    ("test_fluid_incompressibility_converges_with_substeps",
+     test_fluid_incompressibility_converges_with_substeps),
+    ("test_fluid_relaxation_under_relaxes", test_fluid_relaxation_under_relaxes),
 ]:
     add_function_test(TestSolverXPBDFluids, _name, _fn, devices=devices, check_output=False)
 

@@ -370,7 +370,13 @@ def apply_pbf_deltas(
     if i < 0 or not _is_active_fluid(particle_flags[i]):
         return
 
-    scale = 1.0 / wp.max(weights[slot] * relaxation, 1.0)
+    # Jacobi averaging: divide the accumulated correction by the number of
+    # neighbours that contributed, then apply the relaxation factor. Relaxation
+    # scales the correction, so values below 1 under-relax as the name implies.
+    # It used to multiply the divisor instead, which inverted its sense --
+    # pbf_relaxation=0.5 doubled the correction rather than halving it. At the
+    # default of 1.0 both forms agree, and match PhysX's 1/max(weight, 1).
+    scale = relaxation / wp.max(weights[slot], 1.0)
     correction = deltas[slot] * scale
     particle_q[i] += correction
     accumulated_delta[slot] += correction
