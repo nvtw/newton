@@ -19,7 +19,9 @@ from newton._src.solvers.xpbd.pbf_kernels import (
     apply_pbf_deltas,
     apply_vorticity,
     build_neighbor_list,
+    build_sorted_order,
     calculate_density,
+    gather_sorted_positions,
     solve_density,
     vorticity_confinement,
 )
@@ -1694,6 +1696,11 @@ def test_position_based_fluids_reference_stages(test, device):
         ],
         dtype=np.float32,
     )
+    # Straddle a hash-grid cell boundary so the solver's cell ordering is a
+    # non-trivial permutation. The PBF kernels work in that ordering, and a pure
+    # translation leaves every expected value below unchanged, so this validates
+    # the permutation bookkeeping without altering the reference physics.
+    positions = positions + np.array([0.14, 0.0, 0.0], dtype=np.float32)
     velocities = np.array(
         [
             [0.0, 0.0, 0.0],
@@ -1738,6 +1745,31 @@ def test_position_based_fluids_reference_stages(test, device):
     neighbors = wp.zeros(particle_count * max_neighbors, dtype=wp.int32, device=device)
     neighbor_counts = wp.zeros(particle_count, dtype=wp.int32, device=device)
     overflow = wp.zeros(1, dtype=wp.int32, device=device)
+    # The PBF kernels work in the hash grid's cell ordering, so results come back
+    # permuted; build the mapping and un-permute before comparing per particle.
+    sorted_to_orig = wp.zeros(particle_count, dtype=wp.int32, device=device)
+    orig_to_sorted = wp.zeros(particle_count, dtype=wp.int32, device=device)
+    pos_sorted = wp.zeros(particle_count, dtype=wp.vec3, device=device)
+    wp.launch(
+        build_sorted_order,
+        dim=particle_count,
+        inputs=[model.particle_grid.id],
+        outputs=[sorted_to_orig, orig_to_sorted],
+        device=device,
+    )
+    wp.launch(
+        gather_sorted_positions,
+        dim=particle_count,
+        inputs=[state.particle_q, sorted_to_orig],
+        outputs=[pos_sorted],
+        device=device,
+    )
+    perm = orig_to_sorted.numpy()  # perm[particle] -> slot
+    # Guard the guard: if this ever became the identity the permutation handling
+    # below would be untested.
+    test.assertFalse(np.array_equal(perm, np.arange(particle_count)),
+                     "scene no longer produces a non-trivial cell ordering")
+
     wp.launch(
         build_neighbor_list,
         dim=particle_count,
@@ -1745,6 +1777,7 @@ def test_position_based_fluids_reference_stages(test, device):
             model.particle_grid.id,
             state.particle_q,
             model.particle_flags,
+            orig_to_sorted,
             contact_distance_sq,
             radius,
             max_neighbors,
@@ -1760,6 +1793,7 @@ def test_position_based_fluids_reference_stages(test, device):
             model.particle_grid.id,
             state.particle_q,
             model.particle_flags,
+            pos_sorted,
             neighbors,
             neighbor_counts,
             particle_count,
@@ -1792,7 +1826,7 @@ def test_position_based_fluids_reference_stages(test, device):
         expected_normals[i] = normal * surface_tension
 
     np.testing.assert_allclose(densities.numpy(), expected_densities, rtol=2.0e-5, atol=2.0e-5)
-    np.testing.assert_allclose(normals.numpy(), expected_normals, rtol=2.0e-5, atol=2.0e-5)
+    np.testing.assert_allclose(normals.numpy()[perm], expected_normals, rtol=2.0e-5, atol=2.0e-5)
 
     curl = wp.zeros(particle_count, dtype=wp.vec3, device=device)
     curl_magnitude = wp.zeros(particle_count, dtype=float, device=device)
@@ -1804,6 +1838,8 @@ def test_position_based_fluids_reference_stages(test, device):
             state.particle_q,
             state.particle_qd,
             model.particle_flags,
+            pos_sorted,
+            sorted_to_orig,
             neighbors,
             neighbor_counts,
             particle_count,
@@ -1825,7 +1861,7 @@ def test_position_based_fluids_reference_stages(test, device):
             gradient = -spiky2 * (1.0 - distance * inv_radius) * displacement / distance
             expected_curl[i] += np.cross(velocities[j] - velocities[i], gradient)
 
-    np.testing.assert_allclose(curl.numpy(), expected_curl, rtol=2.0e-5, atol=2.0e-5)
+    np.testing.assert_allclose(curl.numpy()[perm], expected_curl, rtol=2.0e-5, atol=2.0e-5)
 
     confinement = 2.5
     inv_rest_density = 1.0 / rest_density
@@ -1856,6 +1892,7 @@ def test_position_based_fluids_reference_stages(test, device):
             model.particle_flags,
             curl,
             curl_magnitude,
+            pos_sorted,
             neighbors,
             neighbor_counts,
             particle_count,
@@ -1881,7 +1918,8 @@ def test_position_based_fluids_reference_stages(test, device):
         ],
         dtype=np.float32,
     )
-    accumulated_delta = wp.array(accumulated_values, dtype=wp.vec3, device=device)
+    # solve_density reads this in the solver's cell ordering, so feed it permuted.
+    accumulated_delta = wp.array(accumulated_values[sorted_to_orig.numpy()], dtype=wp.vec3, device=device)
     deltas = wp.zeros(particle_count, dtype=wp.vec3, device=device)
     weights = wp.zeros(particle_count, dtype=float, device=device)
     viscosity = 0.002
@@ -1954,8 +1992,8 @@ def test_position_based_fluids_reference_stages(test, device):
             expected_weights[i] += 1.0
         expected_deltas[i] *= coefficient
 
-    np.testing.assert_allclose(deltas.numpy(), expected_deltas, rtol=3.0e-5, atol=3.0e-5)
-    np.testing.assert_allclose(weights.numpy(), expected_weights, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(deltas.numpy()[perm], expected_deltas, rtol=3.0e-5, atol=3.0e-5)
+    np.testing.assert_allclose(weights.numpy()[perm], expected_weights, rtol=0.0, atol=0.0)
 
     relaxation = 1.0
     expected_corrections = expected_deltas / np.maximum(expected_weights[:, None] * relaxation, 1.0)
@@ -1964,12 +2002,12 @@ def test_position_based_fluids_reference_stages(test, device):
     wp.launch(
         apply_pbf_deltas,
         dim=particle_count,
-        inputs=[model.particle_flags, deltas, weights, relaxation],
+        inputs=[model.particle_flags, sorted_to_orig, deltas, weights, relaxation],
         outputs=[state.particle_q, accumulated_delta],
         device=device,
     )
     np.testing.assert_allclose(state.particle_q.numpy(), expected_positions, rtol=3.0e-5, atol=3.0e-5)
-    np.testing.assert_allclose(accumulated_delta.numpy(), expected_accumulated, rtol=3.0e-5, atol=3.0e-5)
+    np.testing.assert_allclose(accumulated_delta.numpy()[perm], expected_accumulated, rtol=3.0e-5, atol=3.0e-5)
 
 
 devices = get_test_devices()

@@ -36,6 +36,8 @@ from .pbf_kernels import (
     accumulate_boundary_density,
     apply_damping,
     build_neighbor_list,
+    build_sorted_order,
+    gather_sorted_positions,
     apply_pbf_deltas,
     apply_vorticity,
     calculate_density,
@@ -392,6 +394,12 @@ class SolverXPBD(SolverBase, CouplingInterface):
             self._pbf_weights = wp.zeros(n, dtype=float, device=model.device)
             self._pbf_accum_delta = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_pos_lambda = wp.zeros(n, dtype=wp.vec4, device=model.device)
+            # Cell-ordered view of the particles. The hash grid already sorts by
+            # cell each substep, so reusing that ordering costs nothing and makes
+            # neighbour gathers mostly local instead of scattered.
+            self._pbf_sorted_to_orig = wp.zeros(n, dtype=wp.int32, device=model.device)
+            self._pbf_orig_to_sorted = wp.zeros(n, dtype=wp.int32, device=model.device)
+            self._pbf_pos_sorted = wp.zeros(n, dtype=wp.vec3, device=model.device)
             self._pbf_boundary_log = wp.zeros(n, dtype=float, device=model.device)
             self._pbf_boundary_grad = wp.zeros(n, dtype=wp.vec3, device=model.device)
             # A fluid at rest spacing holds ~26 neighbors within the support
@@ -640,12 +648,20 @@ class SolverXPBD(SolverBase, CouplingInterface):
                     # the density, pressure and vorticity kernels all replay it.
                     if model.particle_grid is not None:
                         wp.launch(
+                            kernel=build_sorted_order,
+                            dim=model.particle_count,
+                            inputs=[model.particle_grid.id],
+                            outputs=[self._pbf_sorted_to_orig, self._pbf_orig_to_sorted],
+                            device=model.device,
+                        )
+                        wp.launch(
                             kernel=build_neighbor_list,
                             dim=model.particle_count,
                             inputs=[
                                 model.particle_grid.id,
                                 state_out.particle_q,
                                 model.particle_flags,
+                                self._pbf_orig_to_sorted,
                                 self.pbf_contact_distance_sq,
                                 self.pbf_particle_contact_distance,
                                 self._pbf_max_neighbors,
@@ -768,6 +784,18 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                 with wp.ScopedDevice(model.device):
                                     model.particle_grid.build(particle_q, radius=grid_search_radius)
 
+                            # Positions move every iteration; the ordering only
+                            # changes per substep. Refreshing the slot-ordered
+                            # copy is O(N) and saves O(N * neighbours) scattered
+                            # reads in the two kernels below.
+                            wp.launch(
+                                kernel=gather_sorted_positions,
+                                dim=model.particle_count,
+                                inputs=[particle_q, self._pbf_sorted_to_orig],
+                                outputs=[self._pbf_pos_sorted],
+                                device=model.device,
+                            )
+
                             wp.launch(
                                 kernel=calculate_density,
                                 dim=model.particle_count,
@@ -775,6 +803,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                     model.particle_grid.id,
                                     particle_q,
                                     model.particle_flags,
+                                    self._pbf_pos_sorted,
                                     self._pbf_neighbors,
                                     self._pbf_neighbor_counts,
                                     model.particle_count,
@@ -837,6 +866,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                 dim=model.particle_count,
                                 inputs=[
                                     model.particle_flags,
+                                    self._pbf_sorted_to_orig,
                                     self._pbf_deltas,
                                     self._pbf_weights,
                                     self.pbf_relaxation,
@@ -1130,6 +1160,8 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             particle_q,
                             particle_qd,
                             model.particle_flags,
+                            self._pbf_pos_sorted,
+                            self._pbf_sorted_to_orig,
                             self._pbf_neighbors,
                             self._pbf_neighbor_counts,
                             model.particle_count,
@@ -1150,6 +1182,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                             model.particle_flags,
                             self._pbf_curl,
                             self._pbf_curl_mag,
+                            self._pbf_pos_sorted,
                             self._pbf_neighbors,
                             self._pbf_neighbor_counts,
                             model.particle_count,

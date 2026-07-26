@@ -116,10 +116,49 @@ def accumulate_boundary_density(
 
 
 @wp.kernel
+def build_sorted_order(
+    grid: wp.uint64,
+    sorted_to_orig: wp.array[wp.int32],
+    orig_to_sorted: wp.array[wp.int32],
+):
+    """Record the hash grid's own cell ordering as an explicit permutation.
+
+    Spatially close particles land in close slots, so gathering neighbour data
+    through slots instead of particle indices turns scattered reads into mostly
+    local ones. The ordering comes free with the grid, which is already rebuilt
+    once per substep -- nothing extra is sorted.
+    """
+    slot = wp.tid()
+    i = wp.hash_grid_point_id(grid, slot)
+    if i < 0:
+        sorted_to_orig[slot] = -1
+        return
+    sorted_to_orig[slot] = i
+    orig_to_sorted[i] = slot
+
+
+@wp.kernel
+def gather_sorted_positions(
+    particle_q: wp.array[wp.vec3],
+    sorted_to_orig: wp.array[wp.int32],
+    pos_sorted: wp.array[wp.vec3],
+):
+    """Refresh slot-ordered positions. Positions move every iteration while the
+    ordering only changes per substep, so this is the amortisation point: O(N)
+    coalesced writes to avoid O(N * neighbours) scattered reads twice over."""
+    slot = wp.tid()
+    i = sorted_to_orig[slot]
+    if i < 0:
+        return
+    pos_sorted[slot] = particle_q[i]
+
+
+@wp.kernel
 def build_neighbor_list(
     grid: wp.uint64,
     particle_q: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
+    orig_to_sorted: wp.array[wp.int32],
     contact_distance_sq: float,
     radius: float,
     max_neighbors: int,
@@ -141,11 +180,12 @@ def build_neighbor_list(
     because a particle exceeded ``max_neighbors``, so truncation is observable
     rather than silently altering the simulation.
     """
-    i = wp.hash_grid_point_id(grid, wp.tid())
+    slot = wp.tid()
+    i = wp.hash_grid_point_id(grid, slot)
     if i < 0:
         return
     if not _is_active_fluid(particle_flags[i]):
-        neighbor_counts[i] = 0
+        neighbor_counts[slot] = 0
         return
 
     xi = particle_q[i]
@@ -162,12 +202,14 @@ def build_neighbor_list(
             continue
 
         if count < max_neighbors:
-            neighbors[count * num_particles + i] = j
+            # Store the neighbour's slot, not its particle index, so downstream
+            # gathers hit nearby addresses.
+            neighbors[count * num_particles + slot] = orig_to_sorted[j]
             count += 1
         else:
             wp.atomic_add(overflow, 0, 1)
 
-    neighbor_counts[i] = count
+    neighbor_counts[slot] = count
 
 
 @wp.kernel
@@ -175,6 +217,7 @@ def calculate_density(
     grid: wp.uint64,
     particle_q: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
+    pos_sorted: wp.array[wp.vec3],
     neighbors: wp.array[wp.int32],
     neighbor_counts: wp.array[wp.int32],
     num_particles: int,
@@ -190,7 +233,8 @@ def calculate_density(
     pos_lambda: wp.array[wp.vec4],
     surface_normals: wp.array[wp.vec3],
 ):
-    i = wp.hash_grid_point_id(grid, wp.tid())
+    slot = wp.tid()
+    i = wp.hash_grid_point_id(grid, slot)
     if i < 0 or not _is_active_fluid(particle_flags[i]):
         return
 
@@ -201,11 +245,11 @@ def calculate_density(
     density = rest_density * (1.0 - wp.exp(-boundary_log[i]))
     normal = wp.vec3(0.0)
 
-    count = neighbor_counts[i]
+    count = neighbor_counts[slot]
     for k in range(count):
-        j = neighbors[k * num_particles + i]
+        sj = neighbors[k * num_particles + slot]
 
-        xij = xi - particle_q[j]
+        xij = xi - pos_sorted[sj]
         distance_sq = wp.length_sq(xij)
         # The list is built once per substep but positions move across the
         # iterations, so a cached neighbour may have drifted out of range.
@@ -222,8 +266,8 @@ def calculate_density(
     densities[i] = scaled
     # Neighbour position and lambda are always read together in the pressure
     # solve; packing them halves the scattered gathers in its inner loop.
-    pos_lambda[i] = wp.vec4(xi[0], xi[1], xi[2], scaled)
-    surface_normals[i] = normal * surface_tension
+    pos_lambda[slot] = wp.vec4(xi[0], xi[1], xi[2], scaled)
+    surface_normals[slot] = normal * surface_tension
 
 
 @wp.kernel
@@ -256,18 +300,19 @@ def solve_density(
     deltas: wp.array[wp.vec3],
     weights: wp.array[float],
 ):
-    i = wp.hash_grid_point_id(grid, wp.tid())
+    slot = wp.tid()
+    i = wp.hash_grid_point_id(grid, slot)
     if i < 0 or not _is_active_fluid(particle_flags[i]):
         return
     if particle_inv_mass[i] == 0.0:
-        deltas[i] = wp.vec3(0.0)
-        weights[i] = 0.0
+        deltas[slot] = wp.vec3(0.0)
+        weights[slot] = 0.0
         return
 
     xi = particle_q[i]
-    delta_i = accumulated_delta[i]
+    delta_i = accumulated_delta[slot]
     density_i = densities[i]
-    normal_i = surface_normals[i]
+    normal_i = surface_normals[slot]
     radius = 1.0 / inv_radius
     cfl_radius = radius * cfl_coefficient
     # Gradient of the boundary density term, the counterpart of the fluid
@@ -276,11 +321,11 @@ def solve_density(
     delta = -boundary_grad[i] * density_i
     weight = float(0.0)
 
-    count = neighbor_counts[i]
+    count = neighbor_counts[slot]
     for k in range(count):
-        j = neighbors[k * num_particles + i]
+        sj = neighbors[k * num_particles + slot]
 
-        pl = pos_lambda[j]
+        pl = pos_lambda[sj]
         xij = xi - wp.vec3(pl[0], pl[1], pl[2])
         distance_sq = wp.length_sq(xij)
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
@@ -292,7 +337,7 @@ def solve_density(
         cohesion_correction = cohesion * dt * _cohesion_w(distance, cohesion1, cohesion2, inv_radius)
         delta -= normal * (density_correction + cohesion_correction)
 
-        relative_delta = delta_i - accumulated_delta[j]
+        relative_delta = delta_i - accumulated_delta[sj]
         viscosity_amount = viscosity * dt * inv_rest_density * _kernel_w(distance, spiky1, inv_radius)
         viscosity_scale = 1.0 - 1.0 / (1.0 + viscosity_amount)
         delta -= viscosity_scale * relative_delta
@@ -302,31 +347,33 @@ def solve_density(
             delta -= 0.5 * normal * (relative_normal_delta + cfl_radius)
 
         if surface_tension > 0.0:
-            delta -= (normal_i - surface_normals[j]) * dt
+            delta -= (normal_i - surface_normals[sj]) * dt
 
         weight += 1.0
 
-    deltas[i] = delta * coefficient
-    weights[i] = weight
+    deltas[slot] = delta * coefficient
+    weights[slot] = weight
 
 
 @wp.kernel
 def apply_pbf_deltas(
     particle_flags: wp.array[wp.int32],
+    sorted_to_orig: wp.array[wp.int32],
     deltas: wp.array[wp.vec3],
     weights: wp.array[float],
     relaxation: float,
     particle_q: wp.array[wp.vec3],
     accumulated_delta: wp.array[wp.vec3],
 ):
-    i = wp.tid()
-    if not _is_active_fluid(particle_flags[i]):
+    slot = wp.tid()
+    i = sorted_to_orig[slot]
+    if i < 0 or not _is_active_fluid(particle_flags[i]):
         return
 
-    scale = 1.0 / wp.max(weights[i] * relaxation, 1.0)
-    correction = deltas[i] * scale
+    scale = 1.0 / wp.max(weights[slot] * relaxation, 1.0)
+    correction = deltas[slot] * scale
     particle_q[i] += correction
-    accumulated_delta[i] += correction
+    accumulated_delta[slot] += correction
 
 
 @wp.kernel
@@ -355,6 +402,8 @@ def vorticity_confinement(
     particle_q: wp.array[wp.vec3],
     particle_qd: wp.array[wp.vec3],
     particle_flags: wp.array[wp.int32],
+    pos_sorted: wp.array[wp.vec3],
+    sorted_to_orig: wp.array[wp.int32],
     neighbors: wp.array[wp.int32],
     neighbor_counts: wp.array[wp.int32],
     num_particles: int,
@@ -364,7 +413,8 @@ def vorticity_confinement(
     curl: wp.array[wp.vec3],
     curl_magnitude: wp.array[float],
 ):
-    i = wp.hash_grid_point_id(grid, wp.tid())
+    slot = wp.tid()
+    i = wp.hash_grid_point_id(grid, slot)
     if i < 0 or not _is_active_fluid(particle_flags[i]):
         return
 
@@ -372,10 +422,11 @@ def vorticity_confinement(
     vi = particle_qd[i]
     value = wp.vec3(0.0)
 
-    count = neighbor_counts[i]
+    count = neighbor_counts[slot]
     for k in range(count):
-        j = neighbors[k * num_particles + i]
-        xij = xi - particle_q[j]
+        sj = neighbors[k * num_particles + slot]
+        j = sorted_to_orig[sj]
+        xij = xi - pos_sorted[sj]
         distance_sq = wp.length_sq(xij)
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
             continue
@@ -383,8 +434,8 @@ def vorticity_confinement(
         gradient = _kernel_dw(distance, spiky2, inv_radius) * xij / distance
         value += wp.cross(particle_qd[j] - vi, gradient)
 
-    curl[i] = value
-    curl_magnitude[i] = wp.length(value)
+    curl[slot] = value
+    curl_magnitude[slot] = wp.length(value)
 
 
 @wp.kernel
@@ -394,6 +445,7 @@ def apply_vorticity(
     particle_flags: wp.array[wp.int32],
     curl: wp.array[wp.vec3],
     curl_magnitude: wp.array[float],
+    pos_sorted: wp.array[wp.vec3],
     neighbors: wp.array[wp.int32],
     neighbor_counts: wp.array[wp.int32],
     num_particles: int,
@@ -405,7 +457,8 @@ def apply_vorticity(
     dt: float,
     particle_qd: wp.array[wp.vec3],
 ):
-    i = wp.hash_grid_point_id(grid, wp.tid())
+    slot = wp.tid()
+    i = wp.hash_grid_point_id(grid, slot)
     if i < 0 or not _is_active_fluid(particle_flags[i]):
         return
 
@@ -413,19 +466,19 @@ def apply_vorticity(
     gradient = wp.vec3(0.0)
     weight = float(0.0)
 
-    count = neighbor_counts[i]
+    count = neighbor_counts[slot]
     for k in range(count):
-        j = neighbors[k * num_particles + i]
-        xij = xi - particle_q[j]
+        sj = neighbors[k * num_particles + slot]
+        xij = xi - pos_sorted[sj]
         distance_sq = wp.length_sq(xij)
         if distance_sq >= contact_distance_sq or distance_sq <= 1.0e-12:
             continue
         distance = wp.sqrt(distance_sq)
-        gradient += curl_magnitude[j] * _kernel_dw(distance, spiky2, inv_radius) * xij / distance
+        gradient += curl_magnitude[sj] * _kernel_dw(distance, spiky2, inv_radius) * xij / distance
         weight += 1.0
 
     direction = wp.normalize(gradient)
-    impulse = dt * inv_rest_density * confinement * wp.cross(direction, curl[i])
+    impulse = dt * inv_rest_density * confinement * wp.cross(direction, curl[slot])
     particle_qd[i] += impulse / wp.max(weight, 1.0)
 
 
