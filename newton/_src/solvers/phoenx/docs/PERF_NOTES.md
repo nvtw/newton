@@ -1505,3 +1505,36 @@ for k in sorted(a):
 ```
 
 When investigating a regression: kapla and h1_flat at 4096-16384 worlds give the cleanest signal. Run one or two scenes for ~5-10s; ignore the first ~2s of any nsys capture (kernel compilation warmup).
+
+## Active-action PPO likelihood audit (2026-07-27, REJECTED)
+
+- The production G1 environment applies only the leading 12 of its 29 policy
+  outputs. A general PPO prototype kept the compatible 29-output tensor but
+  marginalized the 17 ignored Gaussian dimensions out of rollout and update
+  log probabilities, entropy, and gradients.
+- Paired short screens looked positive: at update 18, seeds 1779 and 6722
+  improved tracking from 0.432 to 0.471 and 0.466 to 0.498. Seed 42 at 39.3M
+  samples improved the training statistic from 0.683 to 0.710 with fewer
+  terminations.
+- The independent frozen-policy screen reversed the decision. At 41.9M samples
+  battery performance was only 0.650, below the established 0.68 confidence
+  cutoff, and +0.8 m/s tracking had collapsed to 0.012 despite zero falls. The
+  prototype and its API/test wiring were removed completely.
+- First-principles interpretation: marginalizing ignored actions is the correct
+  environment likelihood, but the pinned Puffer hyperparameters were tuned for
+  a 29-dimensional joint likelihood. Its nuisance dimensions inadvertently
+  constrain updates to the shared recurrent representation. Any replacement
+  needs a dimension-normalized, confidence-gated trust region; a G1-specific
+  learning-rate or clip adjustment would be overfitting.
+
+
+## Privileged G1 hotspot counters (2026-07-27)
+
+A resumable eager-mode Nsight Compute driver captures the five leading G1 physics kernels without relying on unreliable CUDA-graph kernel replay. The first reports used 8,192 worlds but inherited stale four/five-substep wrapper overrides rather than the authoritative three-substep G1 recipe. Their stall diagnosis remains useful, but their timings are diagnostic rather than production baselines. The wrappers now follow the recipe default and write a fresh production archive.
+
+- Fused reduced advance/publish: 235.20 us, 19.95% SM and 35.82% DRAM throughput, 0.22 eligible warps per scheduler. L1TEX scoreboard dependencies consume 69.9% of issue gaps; 101 registers cap theoretical occupancy at 33.3%. The earlier launch_bounds=(128, 6) register-cap prototype spilled and was neutral, so retrying launch bounds is not supported.
+- Packed contact rows: 234.75 us, 20.21% SM and 26.66% DRAM throughput, 0.20 eligible warps. L1TEX dependencies consume 76.1% of issue gaps. Shared row slabs, compact workers, and block-size sweeps were already rejected.
+- Patch solve with row construction: 175.68 us, 30.29% SM and 19.63% DRAM throughput, 0.49 eligible warps; L1TEX dependencies consume 52.9% of issue gaps. Cached-row solve: 91.46 us, 34.52% SM and 37.50% DRAM, also 0.49 eligible warps; L1TEX dependencies consume 66.9%.
+- External reduced advance: 107.74 us, 21.09% SM and 26.12% DRAM, 0.17 eligible warps and only 0.30 full GPU waves. Factor: 66.56 us, balanced 62.31% compute/memory utilization but still only 0.57 eligible warps.
+
+The shared limit is dependent traversal latency, not tensor throughput or raw bandwidth. The next general experiment is to combine repeated forward publication depth walks in fused advance/publish, preserving depth ordering and equations while removing topology reloads, group synchronizations, and intermediate state round-trips.

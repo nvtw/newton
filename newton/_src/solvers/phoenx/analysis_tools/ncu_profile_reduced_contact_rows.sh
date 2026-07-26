@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Profile exactly one steady-state reduced-coordinate generalized contact-row
-# builder launch. The Python driver performs warmup before opening the CUDA
-# profiler-API window; ncu then selects the first matching kernel and stops.
+# builder launch. Eager warmup precedes the CUDA profiler-API window because
+# graph-node kernel replay is unreliable under Nsight Compute.
 #
 # Run from anywhere:
 #   sudo bash newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_contact_rows.sh
@@ -58,9 +58,9 @@ printf "Profiling one contact-row builder launch\n  ncu: %s\n  python: %s\n  rep
   --force-overwrite \
   --export "$OUT_BASE" \
   "$PY" -m newton._src.solvers.phoenx.benchmarks.profile_g1_reduced_kernels \
+    --eager \
     --replays 1 \
     --warmup-replays 2 \
-    --sim-substeps 4 \
     --solver-iterations 2 \
     --velocity-iterations 1
 NCU_RC=$?

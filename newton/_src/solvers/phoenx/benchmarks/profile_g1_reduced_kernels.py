@@ -49,6 +49,7 @@ def main() -> int:
     )
     parser.add_argument("--replays", type=int, choices=range(1, 11), default=5)
     parser.add_argument("--warmup-replays", type=int, default=2)
+    parser.add_argument("--eager", action="store_true", help="Launch environment steps without a CUDA graph")
     parser.add_argument("--projector-block-dim", type=int, choices=(32, 64, 128, 256), default=32)
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=2)
@@ -88,9 +89,14 @@ def main() -> int:
         projector.block_dim = args.projector_block_dim
     actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
     steps_per_graph = 1 if args.sim_substeps % 2 == 0 else 4
-    graph = rl.capture_env_steps(env, actions, steps_per_graph=steps_per_graph, warmup_steps=4)
-    for _ in range(args.warmup_replays):
-        wp.capture_launch(graph)
+    graph = None
+    if args.eager:
+        for _ in range(4 + args.warmup_replays * steps_per_graph):
+            env.step(actions)
+    else:
+        graph = rl.capture_env_steps(env, actions, steps_per_graph=steps_per_graph, warmup_steps=4)
+        for _ in range(args.warmup_replays):
+            wp.capture_launch(graph)
     wp.synchronize_device(device)
 
     cudart = _load_cudart()
@@ -98,7 +104,11 @@ def main() -> int:
         raise RuntimeError("cudaProfilerStart failed")
     start = time.perf_counter()
     for _ in range(args.replays):
-        wp.capture_launch(graph)
+        if args.eager:
+            for _ in range(steps_per_graph):
+                env.step(actions)
+        else:
+            wp.capture_launch(graph)
     wp.synchronize_device(device)
     elapsed = time.perf_counter() - start
     if cudart.cudaProfilerStop() != 0:

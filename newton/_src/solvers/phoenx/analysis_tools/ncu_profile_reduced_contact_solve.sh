@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 #
-# Profile exactly one steady-state reduced-coordinate generalized contact-solve
-# launch. Warmup and graph capture happen before the CUDA profiler-API window.
+# Profile both steady-state reduced-coordinate patch contact-solve
+# variants. Eager warmup precedes the CUDA profiler-API window because
+# graph-node kernel replay is unreliable under Nsight Compute.
 #
 # Run from anywhere:
 #   sudo bash newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_contact_solve.sh
@@ -40,14 +41,14 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="$REPO"
 export PYTHONUTF8=1
 
-printf "Profiling one generalized contact-solve launch\n  ncu: %s\n  python: %s\n  report: %s\n" "$NCU" "$PY" "$REPORT"
+printf "Profiling both patch contact-solve variants\n  ncu: %s\n  python: %s\n  report: %s\n" "$NCU" "$PY" "$REPORT"
 
 "$NCU" \
   --target-processes all \
   --replay-mode kernel \
   --profile-from-start off \
-  --kernel-name "regex:_solve_generalized_contact_tile_kernel.*" \
-  --launch-count 1 \
+  --kernel-name "regex:_solve_patch_contact_tile_kernel.*" \
+  --launch-count 2 \
   --kill 1 \
   --section SpeedOfLight \
   --section MemoryWorkloadAnalysis \
@@ -57,9 +58,9 @@ printf "Profiling one generalized contact-solve launch\n  ncu: %s\n  python: %s\
   --force-overwrite \
   --export "$OUT_BASE" \
   "$PY" -m newton._src.solvers.phoenx.benchmarks.profile_g1_reduced_kernels \
+    --eager \
     --replays 1 \
     --warmup-replays 2 \
-    --sim-substeps 5 \
     --solver-iterations 2 \
     --velocity-iterations 1
 NCU_RC=$?
