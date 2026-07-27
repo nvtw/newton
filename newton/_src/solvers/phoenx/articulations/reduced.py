@@ -2552,6 +2552,7 @@ def _make_advance_reduced_articulations_warp_ops(
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
+        joint_depth_desc: wp.array[wp.vec4i],
         joint_parent_lane: wp.array[wp.int32],
         child_start: wp.array[wp.int32],
         child_joint: wp.array[wp.int32],
@@ -2641,16 +2642,17 @@ def _make_advance_reduced_articulations_warp_ops(
             joint = wp.int32(-1)
             parent_lane = wp.int32(0)
             if active:
-                joint = articulation_depth_joint[index]
-                parent_lane = joint_parent_lane[joint]
+                desc = joint_depth_desc[index]
+                joint = desc[0]
+                parent_lane = desc[1]
             parent_velocity = _shuffle_reduced_spatial(previous_velocity, parent_lane, tile_width, group_mask)
             parent_coriolis = _shuffle_reduced_spatial(previous_coriolis, parent_lane, tile_width, group_mask)
             velocity = wp.spatial_vector()
             coriolis = wp.spatial_vector()
             if active:
-                child = joint_child[joint]
-                dof_start = joint_qd_start[joint]
-                dof_end = joint_qd_start[joint + wp.int32(1)]
+                child = desc[2]
+                dof_start = desc[3] & wp.int32(0xFFFFFF)
+                dof_end = dof_start + (desc[3] >> wp.int32(24))
                 joint_velocity = wp.spatial_vector()
                 for dof in range(dof_start, dof_end):
                     joint_velocity += joint_s[dof] * joint_qd[dof]
@@ -2793,16 +2795,16 @@ def _make_advance_reduced_articulations_warp_ops(
             joint = wp.int32(-1)
             parent_lane = wp.int32(0)
             if active:
-                joint = articulation_depth_joint[index]
-                parent_lane = joint_parent_lane[joint]
+                desc = joint_depth_desc[index]
+                joint = desc[0]
+                parent_lane = desc[1]
             parent_acceleration = _shuffle_reduced_spatial(previous_acceleration, parent_lane, tile_width, group_mask)
             twist = _shuffle_reduced_spatial(previous_twist, parent_lane, tile_width, group_mask)
             child_acceleration = wp.spatial_vector()
             if active:
-                child = joint_child[joint]
-                dof_start = joint_qd_start[joint]
-                dof_end = joint_qd_start[joint + wp.int32(1)]
-                dof_count = dof_end - dof_start
+                child = desc[2]
+                dof_start = desc[3] & wp.int32(0xFFFFFF)
+                dof_count = desc[3] >> wp.int32(24)
                 rhs = _vec6(0.0)
                 qdd = _vec6(0.0)
                 for row in range(_MAX_JOINT_DOF):
@@ -2839,6 +2841,7 @@ def _make_advance_reduced_articulations_warp_ops(
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
+        joint_depth_desc: wp.array[wp.vec4i],
         joint_parent_lane: wp.array[wp.int32],
         child_start: wp.array[wp.int32],
         child_joint: wp.array[wp.int32],
@@ -2878,6 +2881,7 @@ def _make_advance_reduced_articulations_warp_ops(
             max_depth,
             articulation_depth_start,
             articulation_depth_joint,
+            joint_depth_desc,
             joint_parent_lane,
             child_start,
             child_joint,
@@ -2919,6 +2923,7 @@ def _make_advance_reduced_articulations_warp_ops(
             max_depth: wp.int32,
             articulation_depth_start: wp.array2d[wp.int32],
             articulation_depth_joint: wp.array[wp.int32],
+            joint_depth_desc: wp.array[wp.vec4i],
             joint_parent_lane: wp.array[wp.int32],
             child_start: wp.array[wp.int32],
             child_joint: wp.array[wp.int32],
@@ -2980,6 +2985,7 @@ def _make_advance_reduced_articulations_warp_ops(
                 max_depth,
                 articulation_depth_start,
                 articulation_depth_joint,
+                joint_depth_desc,
                 joint_parent_lane,
                 child_start,
                 child_joint,
@@ -3025,6 +3031,7 @@ def _make_advance_reduced_articulations_warp_ops(
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
+        joint_depth_desc: wp.array[wp.vec4i],
         joint_parent_lane: wp.array[wp.int32],
         child_start: wp.array[wp.int32],
         child_joint: wp.array[wp.int32],
@@ -3087,6 +3094,7 @@ def _make_advance_reduced_articulations_warp_ops(
             max_depth,
             articulation_depth_start,
             articulation_depth_joint,
+            joint_depth_desc,
             joint_parent_lane,
             child_start,
             child_joint,
@@ -3213,6 +3221,7 @@ def _make_biased_contact_advance_publish_kernel(max_dofs: int):
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
+        joint_depth_desc: wp.array[wp.vec4i],
         generalized_delta: wp.array2d[wp.float32],
         body_delta: wp.array2d[wp.spatial_vector],
         articulation_count: wp.int32,
@@ -3306,6 +3315,7 @@ def _make_biased_contact_advance_publish_kernel(max_dofs: int):
             max_depth,
             articulation_depth_start,
             articulation_depth_joint,
+            joint_depth_desc,
             joint_parent_lane,
             child_start,
             child_joint,
@@ -3729,6 +3739,21 @@ class ReducedArticulationSystem:
             if parent >= 0:
                 joint_parent_lane_np[joint] = joint_depth_lane_np[body_joint_np[parent]]
         self.advance_joint_parent_lane = wp.array(joint_parent_lane_np, device=self.device)
+
+        joint_qd_start_np = np.asarray(model.joint_qd_start.numpy(), dtype=np.int64)
+        desc_np = np.zeros((max(len(articulation_depth_joint_list), 1), 4), dtype=np.int32)
+        for slot, desc_joint in enumerate(articulation_depth_joint_list):
+            desc_dof_start = int(joint_qd_start_np[desc_joint])
+            desc_dof_count = int(joint_qd_start_np[desc_joint + 1]) - desc_dof_start
+            if desc_dof_start >= (1 << 24) or not 0 <= desc_dof_count < (1 << 8):
+                raise ValueError(f"joint {desc_joint} DOF range exceeds descriptor packing")
+            desc_np[slot] = (
+                desc_joint,
+                int(joint_parent_lane_np[desc_joint]),
+                int(joint_child_np[desc_joint]),
+                desc_dof_start | (desc_dof_count << 24),
+            )
+        self.advance_joint_depth_desc = wp.array(desc_np, dtype=wp.vec4i, device=self.device)
         max_articulation_breadth = int(np.max(np.diff(articulation_depth_start_np, axis=1)))
         self.use_warp_advance = bool(self.device.is_cuda and max_articulation_breadth <= 32)
         if max_articulation_breadth <= 8:
@@ -4118,6 +4143,7 @@ class ReducedArticulationSystem:
                     wp.int32(self.advance_max_depth),
                     self.advance_articulation_depth_start,
                     self.advance_articulation_depth_joint,
+                    self.advance_joint_depth_desc,
                     self.advance_joint_parent_lane,
                     self.factor_child_start,
                     self.factor_child_joint,
@@ -4165,6 +4191,7 @@ class ReducedArticulationSystem:
                 wp.int32(self.advance_max_depth),
                 self.advance_articulation_depth_start,
                 self.advance_articulation_depth_joint,
+                self.advance_joint_depth_desc,
                 self.advance_joint_parent_lane,
                 self.factor_child_start,
                 self.factor_child_joint,
@@ -4651,6 +4678,7 @@ class ReducedPhoenXArticulation:
                 wp.int32(self.system.advance_max_depth),
                 self.system.advance_articulation_depth_start,
                 self.system.advance_articulation_depth_joint,
+                self.system.advance_joint_depth_desc,
                 self.system.advance_joint_parent_lane,
                 self.system.factor_child_start,
                 self.system.advance_child_depth_index,
@@ -4740,6 +4768,7 @@ class ReducedPhoenXArticulation:
                 wp.int32(self.system.advance_max_depth),
                 self.system.advance_articulation_depth_start,
                 self.system.advance_articulation_depth_joint,
+                self.system.advance_joint_depth_desc,
                 contact.generalized_delta,
                 contact.generalized_body_delta,
                 wp.int32(self.model.articulation_count),

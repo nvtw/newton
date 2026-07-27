@@ -143,7 +143,23 @@ Do not retry without new evidence or a materially different design.
   shared memory, 48 KB per cluster), which keep all 188 SMs busy. Blocked on a
   Warp cluster launch path (`cudaLaunchKernelEx` cluster dims plus a sync
   intrinsic). Changes GS ordering; gate on invariants and quality.
-- Depth-ordered joint descriptor, attempted 2026-07-27 and reverted unfinished.
+- LANDED 2026-07-27, but far below prediction. The depth-slot descriptor is
+  worth about **1.0% on the advance recurrence** (80,159 -> 79,343 ns median of
+  96) and **0.25% on fused advance/publish** (200,080 -> 199,580 ns), moving the
+  pair from 28.0% to 27.3% of G1 GPU time. Both deltas are many sigma given
+  ~900-1,150 ns stddev, and the suite is at baseline. The Open Idea below
+  predicted 8-20%; it was wrong, and for the same reason the Kapla contact
+  iterate resists layout work -- these kernels are limited by the arithmetic in
+  the depth recurrence, not by the address chase feeding it. Treat "collapse
+  dependent address levels" as worth ~1%, not double digits, in this solver.
+
+  Three earlier attempts at this change failed for a reason worth recording:
+  the descriptor build loop reassigned `dof_count`, an existing constructor
+  variable holding the *total* DOF count, so `joint_factor_diagonal` was
+  allocated with one element. Every symptom looked like a kernel/plumbing
+  defect and none of it was. Read the actual exception text early.
+
+- Depth-ordered joint descriptor, superseded by the entry above.
   Packing `(joint, parent_lane, child, dof_start | dof_count << 24)` into one
   `vec4i` indexed by the unit-stride depth slot replaces a dependent
   `articulation_depth_joint` fetch plus four scattered per-joint gathers, and
