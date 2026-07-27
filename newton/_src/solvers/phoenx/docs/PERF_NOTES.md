@@ -169,6 +169,16 @@ production single-world geometry (1,504 blocks x 32 threads):
   2.67 us at 32,000. A regular color (~5k rows) therefore sits ~0.34 us above
   the empty floor.
 
+Do not size the persistent grid from the empty-kernel floor. Re-measured
+2026-07-27 at matched settings and bit-identical physics: 8 blocks/SM (the
+production 1,504) gives 115.84 FPS, 6 gives 116.02 (noise), 4 gives 113.60
+(-1.9%). The floor model predicts a gain from shrinking; it is wrong because it
+ignores the 32,222-row overflow partition, which at 4 blocks/SM reaches 1.34
+items/thread and serialises for more than the eight ~5k colors save. Partition
+sizes on the settled tower are [5513, 5338, 5203, 5075, 4925, 4775, 4553, 4305,
+32222] -- overflow alone is 44.8% of rows and, by the scaling above, roughly
+37% of iterate time in one launch of nine.
+
 The production iterate is 5.25 us, i.e. ~3.8 us above floor at comparable item
 counts. The address chase does not explain it -- the per-column solve does
 (1-5 point manifold, sequential GS over points, friction cone). Two
