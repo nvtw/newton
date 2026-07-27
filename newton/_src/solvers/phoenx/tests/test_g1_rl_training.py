@@ -91,7 +91,9 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     compute_puffer_vtrace_returns_kernel,
     gather_trajectory_initial_state_kernel,
     gather_trajectory_minibatch_kernel,
+    mingru_sequence_backward_checkpoint_kernel,
     mingru_sequence_backward_kernel,
+    mingru_sequence_forward_checkpoint_kernel,
     mingru_sequence_forward_kernel,
     muon_gram_wide_tiled_batch3_kernel,
     muon_ns_wide_tiled_batch3_kernel,
@@ -2762,6 +2764,92 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(grad_combined.numpy()[0], 0.0, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(grad_highway.numpy()[0], 0.0, rtol=0.0, atol=0.0)
         self.assertGreater(float(np.linalg.norm(grad_combined.numpy()[1])), 0.0)
+
+    def test_mingru_checkpoint_recompute_matches_full_tape_in_graph(self) -> None:
+        device = require_cuda_graph_capture("PhoenX MinGRU checkpoint tests")
+        steps = 9
+        envs = 3
+        hidden_dim = 5
+        rows = steps * envs
+        rng = np.random.default_rng(20260727)
+        combined = wp.array(
+            rng.uniform(-0.8, 0.8, (rows, 3 * hidden_dim)).astype(np.float32),
+            dtype=wp.float32,
+            device=device,
+        )
+        x = wp.array(
+            rng.uniform(-0.5, 0.5, (rows, hidden_dim)).astype(np.float32),
+            dtype=wp.float32,
+            device=device,
+        )
+        grad_out = wp.array(
+            rng.uniform(-0.4, 0.4, (rows, hidden_dim)).astype(np.float32),
+            dtype=wp.float32,
+            device=device,
+        )
+        dones_np = np.zeros(rows, dtype=np.float32)
+        dones_np[[1, 11, 17, 22]] = 1.0
+        dones = wp.array(dones_np, dtype=wp.float32, device=device)
+        dummy_state = wp.zeros((1, envs, hidden_dim), dtype=wp.float32, device=device)
+
+        full_out = wp.empty((rows, hidden_dim), dtype=wp.float32, device=device)
+        full_recurrent = wp.empty_like(full_out)
+        full_grad = wp.empty_like(combined)
+        full_highway = wp.empty_like(x)
+        checkpoint_out = wp.empty_like(full_out)
+        checkpoints = wp.empty((((steps + 3) // 4) * envs, hidden_dim), dtype=wp.float32, device=device)
+        checkpoint_grad = wp.empty_like(combined)
+        checkpoint_highway = wp.empty_like(x)
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                mingru_sequence_forward_kernel,
+                dim=(envs, hidden_dim),
+                inputs=[combined, x, dones, 1, steps, envs, hidden_dim],
+                outputs=[full_out, full_recurrent],
+                device=device,
+            )
+            wp.launch(
+                mingru_sequence_backward_kernel,
+                dim=(envs, hidden_dim),
+                inputs=[combined, x, full_recurrent, grad_out, dones, 1, steps, envs, hidden_dim],
+                outputs=[full_grad, full_highway],
+                device=device,
+            )
+            wp.launch(
+                mingru_sequence_forward_checkpoint_kernel,
+                dim=(envs, hidden_dim),
+                inputs=[combined, x, dones, 1, dummy_state, 0, 0, steps, envs, hidden_dim],
+                outputs=[checkpoint_out, checkpoints],
+                device=device,
+            )
+            wp.launch(
+                mingru_sequence_backward_checkpoint_kernel,
+                dim=(envs, hidden_dim),
+                inputs=[
+                    combined,
+                    x,
+                    checkpoints,
+                    grad_out,
+                    dones,
+                    1,
+                    dummy_state,
+                    0,
+                    0,
+                    steps,
+                    envs,
+                    hidden_dim,
+                ],
+                outputs=[checkpoint_grad, checkpoint_highway],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_array_equal(checkpoint_out.numpy(), full_out.numpy())
+        np.testing.assert_array_equal(checkpoint_grad.numpy(), full_grad.numpy())
+        np.testing.assert_array_equal(checkpoint_highway.numpy(), full_highway.numpy())
+        first = checkpoint_grad.numpy().copy()
+        wp.capture_launch(capture.graph)
+        np.testing.assert_array_equal(checkpoint_grad.numpy(), first)
 
     def test_puffer_mingru_backward_matches_finite_difference_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX MinGRU backward tests")

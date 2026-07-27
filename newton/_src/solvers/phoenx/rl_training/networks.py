@@ -39,8 +39,8 @@ from .kernels import (
     fill_eps_seed_counter_kernel,
     gaussian_entropy_kernel,
     gaussian_log_prob_kernel,
-    mingru_sequence_backward_initial_kernel,
-    mingru_sequence_backward_kernel,
+    mingru_sequence_backward_checkpoint_kernel,
+    mingru_sequence_forward_checkpoint_kernel,
     mingru_sequence_forward_initial_kernel,
     mingru_sequence_forward_kernel,
     mingru_step_kernel,
@@ -992,6 +992,10 @@ class PufferMinGRUNet:
             self._manual_encoder_weight_bf16,
         )
         h = self._manual_encoder_out
+        initial_state = (
+            self._manual_initial_state if self._manual_initial_state is not None else self._ensure_state(envs)
+        )
+        use_initial_state = int(self._manual_initial_state is not None)
         for layer, weight in enumerate(self.recurrent_weights):
             combined = self._manual_combined[layer]
             out = self._manual_outputs[layer]
@@ -1004,40 +1008,24 @@ class PufferMinGRUNet:
                 self._manual_recurrent_input_bf16[layer] if self._manual_recurrent_input_bf16 else None,
                 self._manual_recurrent_weight_bf16[layer] if self._manual_recurrent_weight_bf16 else None,
             )
-            if self._manual_initial_state is None:
-                wp.launch(
-                    mingru_sequence_forward_kernel,
-                    dim=(envs, self.hidden_size),
-                    inputs=[
-                        combined,
-                        h,
-                        self._manual_dones if self._manual_dones is not None else self._zero_dones,
-                        int(self._manual_dones is not None),
-                        steps,
-                        envs,
-                        self.hidden_size,
-                    ],
-                    outputs=[out, self._manual_recurrent[layer]],
-                    device=self.device,
-                )
-            else:
-                wp.launch(
-                    mingru_sequence_forward_initial_kernel,
-                    dim=(envs, self.hidden_size),
-                    inputs=[
-                        combined,
-                        h,
-                        self._manual_dones if self._manual_dones is not None else self._zero_dones,
-                        int(self._manual_dones is not None),
-                        self._manual_initial_state,
-                        layer,
-                        steps,
-                        envs,
-                        self.hidden_size,
-                    ],
-                    outputs=[out, self._manual_recurrent[layer]],
-                    device=self.device,
-                )
+            wp.launch(
+                mingru_sequence_forward_checkpoint_kernel,
+                dim=(envs, self.hidden_size),
+                inputs=[
+                    combined,
+                    h,
+                    self._manual_dones if self._manual_dones is not None else self._zero_dones,
+                    int(self._manual_dones is not None),
+                    initial_state,
+                    use_initial_state,
+                    layer,
+                    steps,
+                    envs,
+                    self.hidden_size,
+                ],
+                outputs=[out, self._manual_recurrent[layer]],
+                device=self.device,
+            )
             h = out
         self._linear_forward(
             h,
@@ -1085,6 +1073,10 @@ class PufferMinGRUNet:
         grad_h = self._manual_decoder_input_grad
         self._zero_tail(grad_h, rows, self.hidden_size)
 
+        initial_state = (
+            self._manual_initial_state if self._manual_initial_state is not None else self._ensure_state(envs)
+        )
+        use_initial_state = int(self._manual_initial_state is not None)
         for layer in reversed(range(self.num_layers)):
             x_in = self._manual_encoder_out if layer == 0 else self._manual_outputs[layer - 1]
             grad_combined = self._manual_grad_combined[layer]
@@ -1099,44 +1091,26 @@ class PufferMinGRUNet:
                 and grad_combined_bf16 is not None
             )
             grad_combined_out = grad_combined_bf16 if direct_bf16_grad else grad_combined
-            if self._manual_initial_state is None:
-                wp.launch(
-                    mingru_sequence_backward_kernel,
-                    dim=(envs, self.hidden_size),
-                    inputs=[
-                        self._manual_combined[layer],
-                        x_in,
-                        self._manual_recurrent[layer],
-                        grad_h,
-                        self._manual_dones if self._manual_dones is not None else self._zero_dones,
-                        int(self._manual_dones is not None),
-                        steps,
-                        envs,
-                        self.hidden_size,
-                    ],
-                    outputs=[grad_combined_out, grad_highway],
-                    device=self.device,
-                )
-            else:
-                wp.launch(
-                    mingru_sequence_backward_initial_kernel,
-                    dim=(envs, self.hidden_size),
-                    inputs=[
-                        self._manual_combined[layer],
-                        x_in,
-                        self._manual_recurrent[layer],
-                        grad_h,
-                        self._manual_dones if self._manual_dones is not None else self._zero_dones,
-                        int(self._manual_dones is not None),
-                        self._manual_initial_state,
-                        layer,
-                        steps,
-                        envs,
-                        self.hidden_size,
-                    ],
-                    outputs=[grad_combined_out, grad_highway],
-                    device=self.device,
-                )
+            wp.launch(
+                mingru_sequence_backward_checkpoint_kernel,
+                dim=(envs, self.hidden_size),
+                inputs=[
+                    self._manual_combined[layer],
+                    x_in,
+                    self._manual_recurrent[layer],
+                    grad_h,
+                    self._manual_dones if self._manual_dones is not None else self._zero_dones,
+                    int(self._manual_dones is not None),
+                    initial_state,
+                    use_initial_state,
+                    layer,
+                    steps,
+                    envs,
+                    self.hidden_size,
+                ],
+                outputs=[grad_combined_out, grad_highway],
+                device=self.device,
+            )
             if not direct_bf16_grad:
                 self._zero_tail(grad_combined, rows, 3 * self.hidden_size)
             self._weight_grad(

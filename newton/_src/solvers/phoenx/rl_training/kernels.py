@@ -334,6 +334,137 @@ def mingru_sequence_forward_initial_kernel(
         out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
 
 
+@wp.kernel
+def mingru_sequence_forward_checkpoint_kernel(
+    combined: wp.array2d[wp.float32],
+    x: wp.array2d[wp.float32],
+    dones: wp.array[wp.float32],
+    use_dones: wp.int32,
+    initial_state: wp.array3d[wp.float32],
+    use_initial_state: wp.int32,
+    layer: wp.int32,
+    num_steps: wp.int32,
+    num_envs: wp.int32,
+    hidden_dim: wp.int32,
+    out: wp.array2d[wp.float32],
+    recurrent_checkpoints: wp.array2d[wp.float32],
+):
+    env, hidden = wp.tid()
+    recurrent = wp.float32(0.0)
+    if use_initial_state != wp.int32(0):
+        recurrent = initial_state[layer, env, hidden]
+    for step in range(num_steps):
+        row = step * num_envs + env
+        if use_dones != wp.int32(0) and step > wp.int32(0) and dones[row - num_envs] > wp.float32(0.5):
+            recurrent = wp.float32(0.0)
+        hidden_pre = combined[row, hidden]
+        gate_pre = combined[row, hidden_dim + hidden]
+        proj_pre = combined[row, wp.int32(2) * hidden_dim + hidden]
+        candidate = _mingru_hidden_candidate(hidden_pre)
+        gate = _sigmoid(gate_pre)
+        recurrent = recurrent + gate * (candidate - recurrent)
+        if (step + wp.int32(1)) % wp.int32(4) == wp.int32(0) or step == num_steps - wp.int32(1):
+            checkpoint_row = (step // wp.int32(4)) * num_envs + env
+            recurrent_checkpoints[checkpoint_row, hidden] = recurrent
+        proj = _sigmoid(proj_pre)
+        x_val = x[row, hidden]
+        out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
+
+
+@wp.kernel(module="unique")
+def mingru_sequence_backward_checkpoint_kernel(
+    combined: wp.array2d[wp.float32],
+    x: wp.array2d[wp.float32],
+    recurrent_checkpoints: wp.array2d[wp.float32],
+    grad_out: wp.array2d[wp.float32],
+    dones: wp.array[wp.float32],
+    use_dones: wp.int32,
+    initial_state: wp.array3d[wp.float32],
+    use_initial_state: wp.int32,
+    layer: wp.int32,
+    num_steps: wp.int32,
+    num_envs: wp.int32,
+    hidden_dim: wp.int32,
+    grad_combined: wp.array2d[Any],
+    grad_highway_input: wp.array2d[wp.float32],
+):
+    env, hidden = wp.tid()
+    grad_recurrent_next = wp.float32(0.0)
+    chunk_count = (num_steps + wp.int32(3)) // wp.int32(4)
+    for reverse_chunk in range(chunk_count):
+        chunk = chunk_count - wp.int32(1) - reverse_chunk
+        chunk_start = chunk * wp.int32(4)
+        chunk_size = wp.min(wp.int32(4), num_steps - chunk_start)
+        recurrent_before = wp.float32(0.0)
+        if chunk > wp.int32(0):
+            recurrent_before = recurrent_checkpoints[(chunk - wp.int32(1)) * num_envs + env, hidden]
+        elif use_initial_state != wp.int32(0):
+            recurrent_before = initial_state[layer, env, hidden]
+
+        recurrent_values = wp.vec4f(0.0)
+        candidate_values = wp.vec4f(0.0)
+        gate_values = wp.vec4f(0.0)
+        recurrent_value = recurrent_before
+        for offset in range(4):
+            if offset < chunk_size:
+                step = chunk_start + offset
+                row = step * num_envs + env
+                if use_dones != wp.int32(0) and step > wp.int32(0) and dones[row - num_envs] > wp.float32(0.5):
+                    recurrent_value = wp.float32(0.0)
+                hidden_pre = combined[row, hidden]
+                gate_pre = combined[row, hidden_dim + hidden]
+                candidate = _mingru_hidden_candidate(hidden_pre)
+                gate = _sigmoid(gate_pre)
+                recurrent_value = recurrent_value + gate * (candidate - recurrent_value)
+                recurrent_values[offset] = recurrent_value
+                candidate_values[offset] = candidate
+                gate_values[offset] = gate
+
+        for reverse_offset in range(4):
+            offset = wp.int32(3) - reverse_offset
+            if offset < chunk_size:
+                step = chunk_start + offset
+                row = step * num_envs + env
+                reset_before = (
+                    use_dones != wp.int32(0) and step > wp.int32(0) and dones[row - num_envs] > wp.float32(0.5)
+                )
+                prev_recurrent = recurrent_before
+                if offset > wp.int32(0):
+                    prev_recurrent = recurrent_values[offset - wp.int32(1)]
+                if reset_before:
+                    prev_recurrent = wp.float32(0.0)
+
+                hidden_pre = combined[row, hidden]
+                proj_pre = combined[row, wp.int32(2) * hidden_dim + hidden]
+                candidate = candidate_values[offset]
+                gate = gate_values[offset]
+                current_recurrent = recurrent_values[offset]
+                proj = _sigmoid(proj_pre)
+                x_val = x[row, hidden]
+
+                grad_y = grad_out[row, hidden]
+                grad_proj = grad_y * (current_recurrent - x_val)
+                grad_recurrent = grad_y * proj + grad_recurrent_next
+                grad_highway_input[row, hidden] = grad_y * (wp.float32(1.0) - proj)
+
+                grad_gate = grad_recurrent * (candidate - prev_recurrent)
+                grad_candidate = grad_recurrent * gate
+                if reset_before:
+                    grad_recurrent_next = wp.float32(0.0)
+                else:
+                    grad_recurrent_next = grad_recurrent * (wp.float32(1.0) - gate)
+
+                grad_combined[row, hidden] = grad_combined.dtype(
+                    grad_candidate * _mingru_hidden_candidate_grad(hidden_pre, candidate)
+                )
+                grad_combined[row, hidden_dim + hidden] = grad_combined.dtype(
+                    grad_gate * gate * (wp.float32(1.0) - gate)
+                )
+                grad_combined[row, wp.int32(2) * hidden_dim + hidden] = grad_combined.dtype(
+                    grad_proj * proj * (wp.float32(1.0) - proj)
+                )
+
+
 @wp.kernel(module="unique")
 def mingru_sequence_backward_kernel(
     combined: wp.array2d[wp.float32],

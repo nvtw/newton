@@ -46,6 +46,11 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <p>The current redesign attacks throughput without changing the hard Hertz model. The latest short full-PPO bracket reaches about 1.90M samples/s, making 131M samples roughly 69 s under the same benchmark conditions; a fresh long bracket will refine this after the commit.</p>
 </section>
 
+<section>
+<h2>Retained learner-layout result</h2>
+<p>Sparse FP32 MinGRU checkpoints plus four-step register recomputation preserve the recurrence equations. Nsight measures forward at 53.2 → 43.9 µs (-17%); backward is neutral at 110.9 → 111.2 µs. Randomized reset-boundary outputs and gradients are bitwise exact, graph replay is deterministic, and the final full G1 run reaches 1.887M samples/s versus the 1.869M/s pre-change trace.</p>
+</section>
+
 <section class="gap">
 <h2>Latest ABA result</h2>
 <ul>

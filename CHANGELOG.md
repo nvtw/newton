@@ -67,6 +67,7 @@
 - Accelerate reduced-coordinate PhoenX compact patch-contact rows with subgroup-cooperative response and solved-delta traversal without changing hard-contact equations.
 - Accelerate dense large-world SAP broad-phase traversal while retaining the existing path for sparse scenes.
 - Accelerate large-batch experimental PhoenXRL FP32 inference with optional cuBLAS contractions while retaining the Warp fallback.
+- Reduce experimental PhoenXRL MinGRU training traffic with sparse FP32 recurrent checkpoints and deterministic register recomputation.
 - Make reduced-coordinate PhoenX contact friction independent of fleet size and GPU. Use `contact_friction_model="patch"` for compact manifold friction rows on the reference reduced path; the default `"point"` model now remains point friction at every scale. The G1 recipe explicitly selects patch friction to preserve its production physics and throughput.
 - Reuse transformed mesh-edge endpoints between PhoenX SDF culling and contact generation, avoiding duplicate edge loads and transforms.
 - Reuse Nyquist-clamped PhoenX contact solver coefficients across PGS columns while preserving exact coefficients for unusual time steps.

@@ -53,6 +53,7 @@ Detailed experiment histories belong in benchmark output, not here.
 | SDF | Reuse accepted edge endpoints | Retained after parity tests. |
 | RL rollout | FP32 cuBLAS for large dense contractions | 8192x91x128: 0.0287 -> 0.0082 ms; 8192x256x384: 0.3467 -> 0.0402 ms; about +1.82% matched training throughput. |
 | RL optimizer | cuBLAS Muon Gram contractions | Bounded update trace 43.9 -> 27.6 ms; same-session update graphs 98.18 -> 95.30 ms. |
+| RL recurrence | Four-step sparse FP32 checkpoints with register recomputation | MinGRU forward 53.2 -> 43.9 us; backward neutral at 110.9 -> 111.2 us; randomized reset-boundary outputs and gradients are bitwise exact. |
 | Diagnostics | Fixed-order rollout reductions | Deterministic and much faster than contended atomics at production scale. |
 
 ## Representative production profiles
