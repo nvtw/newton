@@ -143,6 +143,19 @@ Do not retry without new evidence or a materially different design.
   shared memory, 48 KB per cluster), which keep all 188 SMs busy. Blocked on a
   Warp cluster launch path (`cudaLaunchKernelEx` cluster dims plus a sync
   intrinsic). Changes GS ordering; gate on invariants and quality.
+- Depth-ordered joint descriptor, attempted 2026-07-27 and reverted unfinished.
+  Packing `(joint, parent_lane, child, dof_start | dof_count << 24)` into one
+  `vec4i` indexed by the unit-stride depth slot replaces a dependent
+  `articulation_depth_joint` fetch plus four scattered per-joint gathers, and
+  hoists `parent_lane` -- which gates both `_shuffle_reduced_spatial` calls --
+  to the first dependent level. Plumbing is wider than it looks: the device
+  func has four kernel wrappers, including
+  `_make_biased_contact_advance_publish_kernel`, whose argument order differs,
+  plus consumers in `reduced_contact_block.py`. The attempt left 18 failures
+  and 4 errors in `tests/test_reduced_articulation.py` (baseline: 1 error), so
+  the nsys timings taken against it are void -- four modules failed to compile,
+  so the measurement was not an A/B. Redo by converting one wrapper at a time
+  and running the suite after each.
 - Test a depth-ordered reduced-joint descriptor that coalesces invariant child,
   DOF, type, parent-lane, and child-range metadata only after auditing which
   fields are not already derivable or packed. Require at least 5% on fused
