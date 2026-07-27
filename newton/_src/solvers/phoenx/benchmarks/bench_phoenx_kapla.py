@@ -166,6 +166,7 @@ def _run_one(
     grid_dims: tuple[int, int],
     blocks_per_sm: int,
     colored_contact_layout: bool,
+    sleeping_threshold: float,
 ) -> BenchResult:
     """Build the scene, run warmup + steady-state, return measurements."""
     # Import here so the module loads cheap (parser help, etc.).
@@ -174,6 +175,7 @@ def _run_one(
     ek.TOWER_GRID_DIMS = grid_dims
     ek.ENABLE_MASS_SPLITTING = mass_splitting
     ek.MASS_SPLITTING_MAX_COLORED_PARTITIONS = max_colored_partitions
+    ek.SLEEPING_VELOCITY_THRESHOLD = sleeping_threshold
     ek.USE_COLORED_CONTACT_HEADERS = colored_contact_layout
     ek.USE_COLORED_CONTACT_ROWS = colored_contact_layout
 
@@ -394,6 +396,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--grid", type=int, default=1, help="Tower grid edge length (default 1 = 1x1).")
     p.add_argument("--blocks-per-sm", type=int, default=8, help="Persistent-grid blocks per GPU SM.")
     p.add_argument(
+        "--sleeping-threshold",
+        type=float,
+        default=0.0,
+        help="Per-island sleep cutoff [m/s]; 0 disables sleeping (default 0).",
+    )
+    p.add_argument(
         "--colored-contact-layout",
         choices=["auto", "on", "off"],
         default="auto",
@@ -441,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
             grid_dims=grid_dims,
             blocks_per_sm=args.blocks_per_sm,
             colored_contact_layout=colored_contact_layout,
+            sleeping_threshold=args.sleeping_threshold,
         )
         results.append(r)
         if not args.json:

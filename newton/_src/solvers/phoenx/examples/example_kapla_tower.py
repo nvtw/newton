@@ -92,6 +92,12 @@ USE_COLORED_CONTACT_ROWS: bool = True
 ENABLE_MASS_SPLITTING: bool = True
 MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 8
 
+# Per-island sleep cutoff [m/s]; 0 disables sleeping. A settled tower
+# leaves most contact columns dormant, but the contact graph is a few
+# large islands, so the reachable fraction is bounded by how coarsely
+# islands quiesce (see PERF_NOTES.md).
+SLEEPING_VELOCITY_THRESHOLD: float = 0.0
+
 # Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
 # on the origin. ``(1, 1)`` reproduces the original scene; bigger
 # grids scale brick count, SAP candidates and contact pool linearly,
@@ -363,6 +369,7 @@ class Example:
             sor_boost=1.0,
             solver_flavor=solver_flavor,
             jacobi_max_colors=self.max_colors,
+            sleeping_velocity_threshold=SLEEPING_VELOCITY_THRESHOLD,
             device=self.device,
         )
 
