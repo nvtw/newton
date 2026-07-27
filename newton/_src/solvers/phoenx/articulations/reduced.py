@@ -2701,7 +2701,10 @@ def _make_advance_reduced_articulations_warp_ops(
                 # External-only passes also omit Coriolis scratch so CUDA can remove both recurrences.
                 if wp.static(include_coriolis):
                     body_coriolis[child] = coriolis
-                body_bias[child] = bias
+                bias_slot = child
+                if wp.static(fuse_publish and static_tile_width > 0):
+                    bias_slot = index
+                body_bias[bias_slot] = bias
             previous_velocity = velocity
             previous_coriolis = coriolis
             _sync_reduced_group(group_mask)
@@ -2727,13 +2730,17 @@ def _make_advance_reduced_articulations_warp_ops(
             while index < depth_end:
                 joint = articulation_depth_joint[index]
                 child = joint_child[joint]
-                subtree_bias = body_bias[child]
+                body_slot = child
+                if wp.static(fuse_publish and static_tile_width > 0):
+                    body_slot = index
+                subtree_bias = body_bias[body_slot]
                 p = wp.spatial_vector()
                 for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
-                    descendant_joint = child_joint[child_index]
-                    descendant = joint_child[descendant_joint]
-                    subtree_bias += body_bias[descendant]
-                    p += body_work[descendant]
+                    descendant_slot = child_joint[child_index]
+                    if wp.static(not (fuse_publish and static_tile_width > 0)):
+                        descendant_slot = joint_child[descendant_slot]
+                    subtree_bias += body_bias[descendant_slot]
+                    p += body_work[descendant_slot]
                 dof_start = joint_qd_start[joint]
                 dof_end = joint_qd_start[joint + wp.int32(1)]
                 dof_count = dof_end - dof_start
@@ -2770,8 +2777,8 @@ def _make_advance_reduced_articulations_warp_ops(
                 for column in range(_MAX_JOINT_DOF):
                     if wp.int32(column) < dof_count:
                         propagated += joint_u_matrix[dof_start + wp.int32(column)] * d_inv_u[column]
-                body_bias[child] = subtree_bias
-                body_work[child] = propagated
+                body_bias[body_slot] = subtree_bias
+                body_work[body_slot] = propagated
                 index += tile_width
             _sync_reduced_group(group_mask)
 
@@ -3708,6 +3715,14 @@ class ReducedArticulationSystem:
             np.asarray(articulation_depth_joint_list, dtype=np.int32),
             device=self.device,
         )
+        # The static fused recurrence uses the depth walk itself as its compact scratch address space.
+        joint_depth_index_np = np.zeros(joint_count, dtype=np.int32)
+        for depth_index, joint in enumerate(articulation_depth_joint_list):
+            joint_depth_index_np[joint] = depth_index
+        self.advance_child_depth_index = wp.array(
+            np.asarray([joint_depth_index_np[joint] for joint in child_joint_list], dtype=np.int32),
+            device=self.device,
+        )
         joint_parent_lane_np = np.zeros(joint_count, dtype=np.int32)
         for joint in tree_joint_np:
             parent = int(joint_parent_np[joint])
@@ -4638,7 +4653,7 @@ class ReducedPhoenXArticulation:
                 self.system.advance_articulation_depth_joint,
                 self.system.advance_joint_parent_lane,
                 self.system.factor_child_start,
-                self.system.factor_child_joint,
+                self.system.advance_child_depth_index,
                 self.model.joint_type,
                 self.model.joint_parent,
                 self.model.joint_child,

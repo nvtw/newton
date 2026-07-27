@@ -19,9 +19,9 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <p class="muted">27 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
 <section class="hero">
-<h2>Fused advance captured - no sudo command pending</h2>
-<p>Nsight measures 98 registers/thread, 22.9% achieved occupancy, and a 66.3% long-scoreboard issue interval. Memory/L2 throughput is 50.8% versus 22.9% compute; scattered scalar access wastes 83% of sectors. This is latency hiding and access locality, not arithmetic saturation.</p>
-<p>Splitting momentum capture added 10.2 µs per step and was removed. Applying rigid inertia directly from mass, COM, and the local 3×3 tensor cut this kernel about 1.9%, but complete physics was neutral and the changed floating-point order bought no pipeline win, so it was also removed. The packed 21-value inertia is not the missing end-to-end lever.</p>
+<h2>Fused advance layout win - no sudo command pending</h2>
+<p>A fused-only depth/lane scratch layout cuts the retained advance/publish median from 210.35 to 206.16 µs (-2.0%); complete G1 physics reached 2.04M steps/s in the confirming trace, while the external advance remained unchanged at 80.94 µs.</p>
+<p>This directly targets Nsight&apos;s 66.3% long-scoreboard interval and 83% excess memory sectors. It preserves the canonical body-index layout elsewhere, uses the same equations and operation order, and passes serial-oracle 8/16/32-lane plus production G1 analytical tests.</p>
 </section>
 
 <section class="hero">

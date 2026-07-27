@@ -310,6 +310,14 @@ authoritative three-substep baseline.
   branched 8/16/32-lane trees, but the floating-point reorder had no pipeline
   payoff and was removed.
 
+- Body-index component SoA regressed fused advance to 213.6 us. Depth-packed
+  canonical scratch reached 208.8 us but slowed external advance 80.8 to
+  85.4 us; shared scratch reached 241.3 us. All were removed. Restricting depth
+  packing to the static fused recurrence retained canonical storage elsewhere:
+  two Nsight repeats measured 205.2 and 206.2 us versus the 210.35 us baseline,
+  external advance stayed near 80.9 us, and complete physics reached 2.04M
+  steps/s. Serial-oracle 8/16/32-lane and production G1 analytical tests pass.
+
 ### Configuration and experimental boundaries
 
 - Key knobs live in solver configuration: greedy coloring, tail-fuse threshold,
