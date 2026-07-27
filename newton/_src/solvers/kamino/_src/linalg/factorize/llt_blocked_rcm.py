@@ -168,6 +168,8 @@ def make_llt_blocked_rcm_fused_permute_and_tp_kernel(block_size: int, max_dim: i
         if triangular_index >= triangular_size:
             return
 
+        # Dense systems larger than 23169 can overflow int32 in 8 * triangular_index;
+        # systems at that scale should use the sparse factorization path.
         r = int((wp.sqrt(float(8 * triangular_index + 1)) - float(1)) * float(0.5))
         row_start = r * (r + 1) // 2
         if row_start > triangular_index:
