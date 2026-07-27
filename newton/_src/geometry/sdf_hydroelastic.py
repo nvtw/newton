@@ -29,7 +29,6 @@ See Also:
 
 from __future__ import annotations
 
-import sys
 import warnings
 from dataclasses import dataclass, replace
 from typing import Any
@@ -68,6 +67,34 @@ from .utils import scan_with_total
 
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
 PRE_PRUNE_MAX_PENETRATING = 2
+
+# Marching cubes emits at most 5 triangles per voxel, so ``tid * 5 + fi``
+# uniquely identifies a generated face.  That value is used both as the
+# reduction fingerprint and as the contact sort sub-key.
+MAX_MC_FACES_PER_VOXEL = 5
+
+# Contact sort sub-keys reserve bit 22 for hydroelastic anchor contacts (see
+# ``create_export_hydroelastic_reduced_contacts_kernel``), so face fingerprints
+# must stay below it to remain distinguishable after masking.
+_MAX_FACE_FINGERPRINT = 0x400000
+
+
+def _validate_deterministic_fingerprint_range(max_num_iso_voxels: int) -> None:
+    """Warn when face fingerprints can no longer be distinguished.
+
+    Fingerprints and sort sub-keys are masked to a fixed width; once
+    ``max_num_iso_voxels * MAX_MC_FACES_PER_VOXEL`` reaches the anchor bit, two
+    different faces can alias and contact ordering stops being reproducible.
+    """
+    if max_num_iso_voxels * MAX_MC_FACES_PER_VOXEL >= _MAX_FACE_FINGERPRINT:
+        warnings.warn(
+            f"Deterministic hydroelastic contacts need "
+            f"max_num_iso_voxels * {MAX_MC_FACES_PER_VOXEL} < {_MAX_FACE_FINGERPRINT}, but "
+            f"max_num_iso_voxels={max_num_iso_voxels}. Face fingerprints will alias and "
+            "contact ordering may vary between runs. Lower "
+            "HydroelasticSDF.Config.buffer_fraction or reduce the SDF resolution.",
+            stacklevel=3,
+        )
 
 
 @wp.kernel(enable_backward=False)
@@ -483,14 +510,12 @@ class HydroelasticSDF:
                 face_contact_budget = face_contact_budget * config.contact_buffer_fraction
             self.max_num_face_contacts = max(int(face_contact_budget), 64)
             self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
+            # The generate kernel walks ``voxels_per_thread`` voxels per thread and
+            # reserves at most MAX_MC_FACES_PER_VOXEL contact slots per voxel.
             voxels_per_thread = (self.max_num_iso_voxels + self.grid_size - 1) // self.grid_size
-            reduction_capacity_bound = max(
-                self.max_num_face_contacts,
-                int(2 * self.max_num_face_contacts * self.config.contact_reduction_hashtable_size_factor),
-            )
-            entries_per_thread = (reduction_capacity_bound + self.grid_size - 1) // self.grid_size
-            self._deterministic_max_records = max(5 * voxels_per_thread, 8 * entries_per_thread)
-            self._apply_deterministic_module_options()
+            self._deterministic_max_records = MAX_MC_FACES_PER_VOXEL * voxels_per_thread
+            if deterministic:
+                _validate_deterministic_fingerprint_range(self.max_num_iso_voxels)
 
             if self.config.output_contact_surface:
                 # stores the point and depth of the contact surface vertex
@@ -535,6 +560,7 @@ class HydroelasticSDF:
                 output_vertices=self.config.output_contact_surface,
                 pre_prune=self.config.reduce_contacts and self.config.pre_prune_contacts,
                 deterministic_reduction=self.deterministic and self.config.reduce_contacts,
+                deterministic_max_records=self._deterministic_max_records,
                 pressure_func=self.pressure_func,
                 mc_edge_clamp_min=self.config.mc_edge_clamp_min,
             )
@@ -582,24 +608,13 @@ class HydroelasticSDF:
         self._host_warning_poll_interval = 120
         self._launch_counter = 0
 
-    def _apply_deterministic_module_options(self) -> None:
-        """Apply hydroelastic determinism to all kernel-owning modules."""
-        mode = wp.DeterministicMode.RUN_TO_RUN if self.deterministic else wp.DeterministicMode.NOT_GUARANTEED
-        options = {
-            "deterministic": mode,
-            "deterministic_max_records": self._deterministic_max_records if self.deterministic else 0,
-        }
-        wp.set_module_options(options, module=sys.modules[__name__])
-
     def configure_deterministic(self, deterministic: bool) -> None:
-        """Configure deterministic hydroelastic kernel execution."""
+        """Validate that determinism matches the mode selected at construction."""
         if deterministic != self.deterministic:
             raise ValueError(
                 "Hydroelastic determinism must be selected when HydroelasticSDF is constructed "
                 "because it changes the generated kernels and reducer layout."
             )
-        self.deterministic = deterministic
-        self._apply_deterministic_module_options()
 
     @classmethod
     def _from_model(
@@ -744,7 +759,6 @@ class HydroelasticSDF:
             shape_pairs_sdf_sdf_count: Number of valid shape pairs.
             writer_data: Contact data writer for output.
         """
-        self._apply_deterministic_module_options()
         shape_sdf_data = self._shape_sdf_data
         wp.launch(
             kernel=map_shape_texture_sdf_data_kernel,
@@ -951,9 +965,7 @@ class HydroelasticSDF:
         When pre-pruning is active the extra AABB/voxel-resolution arrays must be
         provided so the kernel can populate the hashtable and gate buffer writes.
         """
-        # A full clear makes deterministic execution independent of the
-        # scheduling-dependent physical slots selected by hash insertion.
-        self.contact_reduction.clear(full=self.deterministic)
+        self.contact_reduction.clear()
         reducer_data = self.contact_reduction.get_data_struct()
 
         # Placeholder arrays for the pre-prune parameters when not used
@@ -1544,6 +1556,7 @@ def get_generate_contacts_kernel(
     output_vertices: bool,
     pre_prune: bool = False,
     deterministic_reduction: bool = False,
+    deterministic_max_records: int = 0,
     pressure_func: Any = None,
     mc_edge_clamp_min: float = 0.02,
 ):
@@ -1569,7 +1582,11 @@ def get_generate_contacts_kernel(
         output_vertices: Whether to output contact surface vertices for visualization.
         pre_prune: Whether to perform local-first face compaction.
         deterministic_reduction: Whether aggregate accumulation is deferred
-            to the deterministic reduction phase.
+            to the deterministic reduction phase. Also compiles the kernel into
+            a dedicated module so its contact-slot counter is allocated by
+            Warp's deterministic count-scan-write lowering.
+        deterministic_max_records: Per-thread upper bound on contact-slot
+            reservations, used only when ``deterministic_reduction`` is set.
         pressure_func: Warp function defining the per-shape pressure law used
             to locate the iso-pressure surface. Required.
         mc_edge_clamp_min: Lower bound for the marching-cubes edge
@@ -1587,7 +1604,21 @@ def get_generate_contacts_kernel(
     edge_clamp_min = float(mc_edge_clamp_min)
     edge_clamp_max = float(1.0 - mc_edge_clamp_min)
 
-    @wp.kernel(enable_backward=False)
+    # Scope determinism to this kernel rather than the whole module: the module's
+    # other kernels either have no contended atomics or call
+    # ``hashtable_find_or_insert``, whose consumed ``atomic_add`` return would
+    # trigger two-pass lowering and drop the table's active-slot bookkeeping.
+    kernel_options = {}
+    if deterministic_reduction:
+        kernel_options = {
+            "module": "unique",
+            "module_options": {
+                "deterministic": wp.DeterministicMode.RUN_TO_RUN,
+                "deterministic_max_records": int(deterministic_max_records),
+            },
+        }
+
+    @wp.kernel(enable_backward=False, **kernel_options)
     def generate_contacts_kernel(
         grid_size: int,
         iso_voxel_count: wp.array[wp.int32],
@@ -1754,7 +1785,7 @@ def get_generate_contacts_kernel(
                         normal,
                         pen_depth,
                         area,
-                        tid * 5 + fi,
+                        tid * MAX_MC_FACES_PER_VOXEL + fi,
                         reducer_data,
                     )
                     if wp.static(output_vertices) and contact_id >= 0:

@@ -328,13 +328,18 @@ def test_buffer_fraction_no_crash(test, device):
     )
 
 
-def test_deterministic_hydroelastic_contacts(test, device):
+def test_deterministic_hydroelastic_contacts(test, device, moment_matching=False):
     """Produce bit-identical hydroelastic contacts across repeated collision calls."""
     model, _, state, _, _, pipeline, _, _ = build_stacked_cubes_scene(
         device=device,
         solver_fn=lambda model: None,
         shape_type=ShapeType.PRIMITIVE,
         deterministic=True,
+        sdf_hydroelastic_config=HydroelasticSDF.Config(
+            reduce_contacts=True,
+            anchor_contact=True,
+            moment_matching=moment_matching,
+        ),
     )
     newton.eval_fk(model, model.joint_q, model.joint_qd, state)
     contacts = pipeline.contacts()
@@ -370,6 +375,11 @@ def test_deterministic_hydroelastic_contacts(test, device):
         test.assertEqual(count, snapshots[0][0])
         for name, expected, actual in zip(contact_fields, snapshots[0][1], fields, strict=True):
             np.testing.assert_array_equal(actual, expected, err_msg=name)
+
+
+def test_deterministic_hydroelastic_contacts_moment_matching(test, device):
+    """Keep hydroelastic contacts bit-identical when moment matching is enabled."""
+    test_deterministic_hydroelastic_contacts(test, device, moment_matching=True)
 
 
 def test_iso_scan_scratch_buffers_are_level_sized(test, device):
@@ -1650,6 +1660,14 @@ add_function_test(
     TestHydroelastic,
     "test_deterministic_hydroelastic_contacts",
     test_deterministic_hydroelastic_contacts,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_deterministic_hydroelastic_contacts_moment_matching",
+    test_deterministic_hydroelastic_contacts_moment_matching,
     devices=cuda_devices,
     check_output=False,
 )
