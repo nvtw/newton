@@ -38,6 +38,10 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_friction,
     contact_get_friction_dynamic,
     contact_get_original_contact_first,
+    contact_get_packed_inv_inertia1,
+    contact_get_packed_inv_inertia2,
+    contact_get_packed_inv_mass1,
+    contact_get_packed_inv_mass2,
     contact_get_side0_counts_extra,
     contact_get_side0_kind,
     contact_get_side0_nodes_extra,
@@ -48,6 +52,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_side1_slots_extra,
     contact_get_slot1,
     contact_get_slot2,
+    contact_set_packed_body_properties,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -302,6 +307,7 @@ def _make_contact_prepare_for_iteration_at(
     has_soft_contact_pd: bool = True,
     patch_friction: bool = False,
     packed_rows: bool = False,
+    stage_body_properties: bool = False,
 ):
     @wp.func
     def impl(
@@ -417,10 +423,23 @@ def _make_contact_prepare_for_iteration_at(
                 inv_factor2 = contact_get_count2(constraints, cid)
                 inv_factor1_f = wp.float32(inv_factor1)
                 inv_factor2_f = wp.float32(inv_factor2)
-                inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
-                inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
-                inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1)) * inv_factor1_f
-                inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2)) * inv_factor2_f
+                inv_mass1_raw = bodies.inverse_mass[b1]
+                inv_mass2_raw = bodies.inverse_mass[b2]
+                inv_inertia1_raw = body_load_inv_inertia_sym6(bodies, b1)
+                inv_inertia2_raw = body_load_inv_inertia_sym6(bodies, b2)
+                inv_mass1 = inv_mass1_raw * inv_factor1_f
+                inv_mass2 = inv_mass2_raw * inv_factor2_f
+                inv_inertia1 = mat33_from_sym6(inv_inertia1_raw) * inv_factor1_f
+                inv_inertia2 = mat33_from_sym6(inv_inertia2_raw) * inv_factor2_f
+                if wp.static(stage_body_properties):
+                    contact_set_packed_body_properties(
+                        constraints,
+                        cid,
+                        inv_mass1_raw,
+                        inv_mass2_raw,
+                        inv_inertia1_raw,
+                        inv_inertia2_raw,
+                    )
             # Batched warm-start accumulators (one velocity scatter at end).
             total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
             total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
@@ -977,6 +996,7 @@ def _make_contact_iterate_at(
     use_bias: bool = True,
     has_soft_contact_pd: bool = True,
     patch_friction: bool = False,
+    staged_body_properties: bool = False,
 ):
     @wp.func
     def impl(
@@ -1086,10 +1106,16 @@ def _make_contact_iterate_at(
                     w2 = copy_state.angular_velocity[slot2]
                 inv_factor1_f = wp.float32(inv_factor1)
                 inv_factor2_f = wp.float32(inv_factor2)
-                inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
-                inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
-                inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * inv_factor1_f
-                inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * inv_factor2_f
+                if wp.static(staged_body_properties):
+                    inv_mass1 = contact_get_packed_inv_mass1(constraints, cid) * inv_factor1_f
+                    inv_mass2 = contact_get_packed_inv_mass2(constraints, cid) * inv_factor2_f
+                    inv_inertia1 = mat33_from_sym6(contact_get_packed_inv_inertia1(constraints, cid)) * inv_factor1_f
+                    inv_inertia2 = mat33_from_sym6(contact_get_packed_inv_inertia2(constraints, cid)) * inv_factor2_f
+                else:
+                    inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
+                    inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
+                    inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * inv_factor1_f
+                    inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * inv_factor2_f
 
         for i in range(contact_count):
             k = contact_first + i
@@ -1487,10 +1513,10 @@ contact_prepare_for_iteration_at_no_soft_pd = _make_contact_prepare_for_iteratio
     cloth_support=False, has_soft_contact_pd=False
 )
 contact_prepare_for_iteration_at_packed_rows = _make_contact_prepare_for_iteration_at(
-    cloth_support=False, packed_rows=True
+    cloth_support=False, packed_rows=True, stage_body_properties=True
 )
 contact_prepare_for_iteration_at_packed_rows_no_soft_pd = _make_contact_prepare_for_iteration_at(
-    cloth_support=False, has_soft_contact_pd=False, packed_rows=True
+    cloth_support=False, has_soft_contact_pd=False, packed_rows=True, stage_body_properties=True
 )
 contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(
     cloth_support=False, has_mass_splitting=False
@@ -1509,6 +1535,14 @@ contact_iterate_at = _make_contact_iterate_at(cloth_support=False, use_bias=True
 contact_relax_at = _make_contact_iterate_at(cloth_support=False, use_bias=False)
 contact_iterate_at_no_soft_pd = _make_contact_iterate_at(cloth_support=False, use_bias=True, has_soft_contact_pd=False)
 contact_relax_at_no_soft_pd = _make_contact_iterate_at(cloth_support=False, use_bias=False, has_soft_contact_pd=False)
+contact_iterate_at_packed = _make_contact_iterate_at(cloth_support=False, use_bias=True, staged_body_properties=True)
+contact_relax_at_packed = _make_contact_iterate_at(cloth_support=False, use_bias=False, staged_body_properties=True)
+contact_iterate_at_packed_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False, use_bias=True, has_soft_contact_pd=False, staged_body_properties=True
+)
+contact_relax_at_packed_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False, use_bias=False, has_soft_contact_pd=False, staged_body_properties=True
+)
 contact_iterate_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=True)
 contact_relax_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=False)
 contact_iterate_at_lean_no_soft_pd = _make_contact_iterate_at(
@@ -1903,125 +1937,13 @@ def contact_prepare_for_iteration_cloth_aware(
 
 
 @wp.func
-def contact_iterate(
-    constraints: ContactColumnContainer,
-    cid: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    num_bodies: wp.int32,
-    idt: wp.float32,
-    cc: ContactContainer,
-    contacts: ContactViews,
-    use_bias: wp.bool,
-    copy_state: CopyStateContainer,
-    parallel_id: wp.int32,
-    sor_boost: wp.float32,
-):
-    b1 = contact_get_body1(constraints, cid)
-    b2 = contact_get_body2(constraints, cid)
-    if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
-        return
-    # Access-mode flip is the caller's responsibility now (dispatcher only
-    # routes rigid-only scenes here, so the flip is provably a no-op).
-    body_pair = constraint_bodies_make(b1, b2)
-    if use_bias:
-        contact_iterate_at(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
-        )
-    else:
-        contact_relax_at(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
-        )
-
-
-@wp.func
-def contact_iterate_no_soft_pd(
-    constraints: ContactColumnContainer,
-    cid: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    num_bodies: wp.int32,
-    idt: wp.float32,
-    cc: ContactContainer,
-    contacts: ContactViews,
-    use_bias: wp.bool,
-    copy_state: CopyStateContainer,
-    parallel_id: wp.int32,
-    sor_boost: wp.float32,
-):
-    b1 = contact_get_body1(constraints, cid)
-    b2 = contact_get_body2(constraints, cid)
-    if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
-        return
-    body_pair = constraint_bodies_make(b1, b2)
-    if use_bias:
-        contact_iterate_at_no_soft_pd(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
-        )
-    else:
-        contact_relax_at_no_soft_pd(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
-        )
-
-
-@wp.func
 def _contact_iterate_guard_allows(
     bodies: BodyContainer,
     b1: wp.int32,
     b2: wp.int32,
     num_bodies: wp.int32,
 ) -> wp.bool:
-    # Backup safety for the sleep-transition frame. Contacts produced
-    # before the sleeping pass can survive into this step; if both
-    # endpoints are frozen, skip the row.
+    # Contacts produced before a sleep transition can survive for one step.
     if b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies:
         frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.island_root[b1] >= wp.int32(0))
         frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.island_root[b2] >= wp.int32(0))
@@ -2030,108 +1952,93 @@ def _contact_iterate_guard_allows(
     return True
 
 
-@wp.func
-def contact_iterate_no_sleep(
-    constraints: ContactColumnContainer,
-    cid: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    num_bodies: wp.int32,
-    idt: wp.float32,
-    cc: ContactContainer,
-    contacts: ContactViews,
-    use_bias: wp.bool,
-    copy_state: CopyStateContainer,
-    parallel_id: wp.int32,
-    sor_boost: wp.float32,
-):
-    b1 = contact_get_body1(constraints, cid)
-    b2 = contact_get_body2(constraints, cid)
-    body_pair = constraint_bodies_make(b1, b2)
-    if use_bias:
-        contact_iterate_at(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
-        )
+def _make_contact_iterate_entry(*, has_sleeping: bool, has_soft_contact_pd: bool, staged_body_properties: bool):
+    if staged_body_properties:
+        iterate_at = contact_iterate_at_packed if has_soft_contact_pd else contact_iterate_at_packed_no_soft_pd
+        relax_at = contact_relax_at_packed if has_soft_contact_pd else contact_relax_at_packed_no_soft_pd
     else:
-        contact_relax_at(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
-        )
+        iterate_at = contact_iterate_at if has_soft_contact_pd else contact_iterate_at_no_soft_pd
+        relax_at = contact_relax_at if has_soft_contact_pd else contact_relax_at_no_soft_pd
+
+    @wp.func
+    def impl(
+        constraints: ContactColumnContainer,
+        cid: wp.int32,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
+        idt: wp.float32,
+        cc: ContactContainer,
+        contacts: ContactViews,
+        use_bias: wp.bool,
+        copy_state: CopyStateContainer,
+        parallel_id: wp.int32,
+        sor_boost: wp.float32,
+    ):
+        b1 = contact_get_body1(constraints, cid)
+        b2 = contact_get_body2(constraints, cid)
+        if wp.static(has_sleeping):
+            if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
+                return
+        body_pair = constraint_bodies_make(b1, b2)
+        if use_bias:
+            iterate_at(
+                constraints,
+                cid,
+                0,
+                bodies,
+                particles,
+                num_bodies,
+                body_pair,
+                idt,
+                cc,
+                contacts,
+                copy_state,
+                parallel_id,
+                sor_boost,
+            )
+        else:
+            relax_at(
+                constraints,
+                cid,
+                0,
+                bodies,
+                particles,
+                num_bodies,
+                body_pair,
+                idt,
+                cc,
+                contacts,
+                copy_state,
+                parallel_id,
+                sor_boost,
+            )
+
+    return impl
 
 
-@wp.func
-def contact_iterate_no_sleep_no_soft_pd(
-    constraints: ContactColumnContainer,
-    cid: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    num_bodies: wp.int32,
-    idt: wp.float32,
-    cc: ContactContainer,
-    contacts: ContactViews,
-    use_bias: wp.bool,
-    copy_state: CopyStateContainer,
-    parallel_id: wp.int32,
-    sor_boost: wp.float32,
-):
-    b1 = contact_get_body1(constraints, cid)
-    b2 = contact_get_body2(constraints, cid)
-    body_pair = constraint_bodies_make(b1, b2)
-    if use_bias:
-        contact_iterate_at_no_soft_pd(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
-        )
-    else:
-        contact_relax_at_no_soft_pd(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
-        )
+contact_iterate = _make_contact_iterate_entry(has_sleeping=True, has_soft_contact_pd=True, staged_body_properties=False)
+contact_iterate_no_soft_pd = _make_contact_iterate_entry(
+    has_sleeping=True, has_soft_contact_pd=False, staged_body_properties=False
+)
+contact_iterate_no_sleep = _make_contact_iterate_entry(
+    has_sleeping=False, has_soft_contact_pd=True, staged_body_properties=False
+)
+contact_iterate_no_sleep_no_soft_pd = _make_contact_iterate_entry(
+    has_sleeping=False, has_soft_contact_pd=False, staged_body_properties=False
+)
+contact_iterate_packed = _make_contact_iterate_entry(
+    has_sleeping=True, has_soft_contact_pd=True, staged_body_properties=True
+)
+contact_iterate_packed_no_soft_pd = _make_contact_iterate_entry(
+    has_sleeping=True, has_soft_contact_pd=False, staged_body_properties=True
+)
+contact_iterate_packed_no_sleep = _make_contact_iterate_entry(
+    has_sleeping=False, has_soft_contact_pd=True, staged_body_properties=True
+)
+contact_iterate_packed_no_sleep_no_soft_pd = _make_contact_iterate_entry(
+    has_sleeping=False, has_soft_contact_pd=False, staged_body_properties=True
+)
 
 
 @wp.func

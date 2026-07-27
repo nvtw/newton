@@ -65,6 +65,10 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_iterate_no_sleep,
     contact_iterate_no_sleep_no_soft_pd,
     contact_iterate_no_soft_pd,
+    contact_iterate_packed,
+    contact_iterate_packed_no_sleep,
+    contact_iterate_packed_no_sleep_no_soft_pd,
+    contact_iterate_packed_no_soft_pd,
     contact_iterate_patch_lean_no_sleep,
     contact_iterate_patch_lean_no_sleep_no_soft_pd,
     contact_iterate_patch_multi,
@@ -3373,7 +3377,16 @@ def _make_singleworld_rigid_contact_dispatch_func(
                 else contact_iterate_patch_lean_no_sleep_no_soft_pd
             )
         elif has_mass_splitting:
-            if has_sleeping:
+            if packed_contact_headers:
+                if has_sleeping:
+                    iterate_func = contact_iterate_packed if has_soft_contact_pd else contact_iterate_packed_no_soft_pd
+                else:
+                    iterate_func = (
+                        contact_iterate_packed_no_sleep
+                        if has_soft_contact_pd
+                        else contact_iterate_packed_no_sleep_no_soft_pd
+                    )
+            elif has_sleeping:
                 iterate_func = contact_iterate if has_soft_contact_pd else contact_iterate_no_soft_pd
             else:
                 iterate_func = contact_iterate_no_sleep if has_soft_contact_pd else contact_iterate_no_sleep_no_soft_pd

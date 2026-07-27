@@ -21,6 +21,7 @@ from newton._src.solvers.phoenx.body import (
     body_load_inv_inertia_sym6,
     body_load_vw,
     body_store_vw,
+    inertia_sym6,
     mat33_from_sym6,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -236,7 +237,11 @@ CONTACT_DWORDS: int = num_dwords(ContactConstraintData)
 # metadata occupies holes in that prefix but is compile-time dead in the
 # rigid solve; retaining the original offsets avoids a second getter family.
 _OFF_ORIGINAL_CONTACT_FIRST: int = int(_OFF_COUNT2) + 1
-RIGID_CONTACT_SOLVE_DWORDS: int = _OFF_ORIGINAL_CONTACT_FIRST + 1
+_OFF_PACKED_INV_MASS1: int = _OFF_ORIGINAL_CONTACT_FIRST + 1
+_OFF_PACKED_INV_MASS2: int = _OFF_PACKED_INV_MASS1 + 1
+_OFF_PACKED_INV_INERTIA1: int = _OFF_PACKED_INV_MASS2 + 1
+_OFF_PACKED_INV_INERTIA2: int = _OFF_PACKED_INV_INERTIA1 + 6
+RIGID_CONTACT_SOLVE_DWORDS: int = _OFF_PACKED_INV_INERTIA2 + 6
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +289,56 @@ def _col_read_int(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32)
 @wp.func
 def _col_write_int(c: ContactColumnContainer, off: wp.int32, local_cid: wp.int32, v: wp.int32):
     write2d_f32(c.data, off, local_cid, reinterpret_int_as_float(v))
+
+
+@wp.func
+def contact_set_packed_body_properties(
+    c: ContactColumnContainer,
+    local_cid: wp.int32,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1: inertia_sym6,
+    inv_inertia2: inertia_sym6,
+):
+    c.data[_OFF_PACKED_INV_MASS1, local_cid] = inv_mass1
+    c.data[_OFF_PACKED_INV_MASS2, local_cid] = inv_mass2
+    for component in range(6):
+        c.data[_OFF_PACKED_INV_INERTIA1 + component, local_cid] = inv_inertia1[component]
+        c.data[_OFF_PACKED_INV_INERTIA2 + component, local_cid] = inv_inertia2[component]
+
+
+@wp.func
+def contact_get_packed_inv_mass1(c: ContactColumnContainer, local_cid: wp.int32) -> wp.float32:
+    return c.data[_OFF_PACKED_INV_MASS1, local_cid]
+
+
+@wp.func
+def contact_get_packed_inv_mass2(c: ContactColumnContainer, local_cid: wp.int32) -> wp.float32:
+    return c.data[_OFF_PACKED_INV_MASS2, local_cid]
+
+
+@wp.func
+def contact_get_packed_inv_inertia1(c: ContactColumnContainer, local_cid: wp.int32) -> inertia_sym6:
+    return inertia_sym6(
+        c.data[_OFF_PACKED_INV_INERTIA1 + 0, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA1 + 1, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA1 + 2, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA1 + 3, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA1 + 4, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA1 + 5, local_cid],
+    )
+
+
+@wp.func
+def contact_get_packed_inv_inertia2(c: ContactColumnContainer, local_cid: wp.int32) -> inertia_sym6:
+    return inertia_sym6(
+        c.data[_OFF_PACKED_INV_INERTIA2 + 0, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA2 + 1, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA2 + 2, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA2 + 3, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA2 + 4, local_cid],
+        c.data[_OFF_PACKED_INV_INERTIA2 + 5, local_cid],
+    )
 
 
 @wp.func
