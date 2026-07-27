@@ -14,6 +14,7 @@ import warp as wp
 from newton._src.sim import Model
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_point_velocity,
+    _prepare_contact_bias_geometry,
     reduced_contact_deferred_owner,
     reduced_contact_iterate,
     reduced_contact_prepare,
@@ -515,6 +516,11 @@ def _gather_reduced_contact_blocks_kernel(
     row_velocity: wp.array2d[wp.float32],
 ):
     articulation, lane = wp.tid()
+    bias_rate = wp.float32(0.0)
+    if prepare:
+        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
+        )
     start = wp.int32(0)
     if articulation > wp.int32(0):
         start = schedule_section_end[articulation - wp.int32(1)]
@@ -540,14 +546,6 @@ def _gather_reduced_contact_blocks_kernel(
         column = scheduled_column[index]
         column_count = contact_get_contact_count(columns, column)
         column_end = point_offset + column_count
-        overlaps_page = point_offset < page_end and column_end > page_start
-        if overlaps_page and prepare and (index - start) % wp.int32(_BLOCK_DIM) == lane:
-            # Effective masses are derived exactly by the packed row builder
-            # right after this gather; skip the redundant traversals here.
-            reduced_contact_prepare(
-                columns, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(False), wp.bool(False)
-            )
-
         if global_point >= point_offset and global_point < column_end and global_point < page_end:
             point = lane
             offset = global_point - point_offset
@@ -573,10 +571,27 @@ def _gather_reduced_contact_blocks_kernel(
                 wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
                 - contacts.rigid_contact_margin1[contact] * n
             )
-            p0 = bodies.position[body0] + offset0
-            p1 = bodies.position[body1] + offset1
+            position0 = bodies.position[body0]
+            position1 = bodies.position[body1]
+            p0 = position0 + offset0
+            p1 = position1 + offset1
             separation = p1 - p0
             contact_point = p0 + wp.float32(0.5) * separation
+            if prepare:
+                bias_contact_point = wp.float32(0.5) * (p0 + p1)
+                _prepare_contact_bias_geometry(
+                    cc,
+                    contacts,
+                    contact,
+                    idt,
+                    bias_rate,
+                    n,
+                    t0,
+                    t1,
+                    separation,
+                    bias_contact_point - position0,
+                    bias_contact_point - position1,
+                )
             point_contact[packed_articulation, point] = contact
             point_column[packed_articulation, point] = column
             point0[packed_articulation, point] = contact_point
@@ -647,6 +662,11 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
     row_velocity: wp.array2d[wp.float32],
 ):
     articulation, lane = wp.tid()
+    bias_rate = wp.float32(0.0)
+    if prepare:
+        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
+        )
     start = wp.int32(0)
     if articulation > wp.int32(0):
         start = schedule_section_end[articulation - wp.int32(1)]
@@ -671,12 +691,6 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
             column = scheduled_column[index]
             column_count = contact_get_contact_count(columns, column)
             column_end = point_offset + column_count
-            overlaps_page = point_offset < page_end and column_end > page_start
-            if overlaps_page and prepare and (index - start) % wp.int32(_PACKED_GATHER_TILE_WIDTH) == lane:
-                reduced_contact_prepare(
-                    columns, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(False), wp.bool(False)
-                )
-
             global_point = wp.max(point_offset, page_start) + lane
             column_page_end = wp.min(column_end, page_end)
             while global_point < column_page_end:
@@ -704,10 +718,27 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
                     wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
                     - contacts.rigid_contact_margin1[contact] * n
                 )
-                p0 = bodies.position[body0] + offset0
-                p1 = bodies.position[body1] + offset1
+                position0 = bodies.position[body0]
+                position1 = bodies.position[body1]
+                p0 = position0 + offset0
+                p1 = position1 + offset1
                 separation = p1 - p0
                 contact_point = p0 + wp.float32(0.5) * separation
+                if prepare:
+                    bias_contact_point = wp.float32(0.5) * (p0 + p1)
+                    _prepare_contact_bias_geometry(
+                        cc,
+                        contacts,
+                        contact,
+                        idt,
+                        bias_rate,
+                        n,
+                        t0,
+                        t1,
+                        separation,
+                        bias_contact_point - position0,
+                        bias_contact_point - position1,
+                    )
                 point_contact[packed_articulation, point] = contact
                 point_column[packed_articulation, point] = column
                 point0[packed_articulation, point] = contact_point
@@ -803,6 +834,11 @@ def _gather_reduced_contact_blocks_packed_kernel(
     row_velocity: wp.array2d[wp.float32],
 ):
     articulation, lane = wp.tid()
+    bias_rate = wp.float32(0.0)
+    if prepare:
+        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
+        )
     start = wp.int32(0)
     if articulation > wp.int32(0):
         start = schedule_section_end[articulation - wp.int32(1)]
@@ -827,14 +863,6 @@ def _gather_reduced_contact_blocks_packed_kernel(
         column = scheduled_column[index]
         column_count = contact_get_contact_count(columns, column)
         column_end = point_offset + column_count
-        overlaps_page = point_offset < page_end and column_end > page_start
-        if overlaps_page and prepare and (index - start) % wp.int32(_PACKED_GATHER_TILE_WIDTH) == lane:
-            # Effective masses are derived exactly by the packed row builder
-            # right after this gather; skip the redundant traversals here.
-            reduced_contact_prepare(
-                columns, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(False), wp.bool(False)
-            )
-
         global_point = wp.max(point_offset, page_start) + lane
         column_page_end = wp.min(column_end, page_end)
         while global_point < column_page_end:
@@ -862,10 +890,27 @@ def _gather_reduced_contact_blocks_packed_kernel(
                 wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
                 - contacts.rigid_contact_margin1[contact] * n
             )
-            p0 = bodies.position[body0] + offset0
-            p1 = bodies.position[body1] + offset1
+            position0 = bodies.position[body0]
+            position1 = bodies.position[body1]
+            p0 = position0 + offset0
+            p1 = position1 + offset1
             separation = p1 - p0
             contact_point = p0 + wp.float32(0.5) * separation
+            if prepare:
+                bias_contact_point = wp.float32(0.5) * (p0 + p1)
+                _prepare_contact_bias_geometry(
+                    cc,
+                    contacts,
+                    contact,
+                    idt,
+                    bias_rate,
+                    n,
+                    t0,
+                    t1,
+                    separation,
+                    bias_contact_point - position0,
+                    bias_contact_point - position1,
+                )
             point_contact[packed_articulation, point] = contact
             point_column[packed_articulation, point] = column
             point0[packed_articulation, point] = contact_point

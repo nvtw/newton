@@ -399,6 +399,41 @@ def _uses_start_gap(contacts: ContactViews, contact: wp.int32) -> wp.bool:
 
 
 @wp.func
+def _prepare_contact_bias_geometry(
+    contacts_state: ContactContainer,
+    contacts: ContactViews,
+    contact: wp.int32,
+    idt: wp.float32,
+    bias_rate: wp.float32,
+    normal: wp.vec3,
+    tangent0: wp.vec3,
+    tangent1: wp.vec3,
+    separation: wp.vec3,
+    r0: wp.vec3,
+    r1: wp.vec3,
+):
+    gap = wp.dot(separation, normal)
+    solver_gap = gap
+    if _uses_start_gap(contacts, contact):
+        start_gap = cc_get_start_gap(contacts_state, contact)
+        if start_gap > wp.float32(0.0) and solver_gap < start_gap:
+            solver_gap = start_gap
+    bias = solver_gap * idt if solver_gap > wp.float32(0.0) else gap * bias_rate
+    bias = wp.clamp(bias, wp.float32(-2.0), wp.float32(10.0))
+    bias_t0 = wp.float32(0.0)
+    bias_t1 = wp.float32(0.0)
+    if solver_gap <= wp.float32(0.0) and gap <= wp.float32(0.002):
+        bias_t0 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent0), -0.001, 0.001) * idt
+        bias_t1 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent1), -0.001, 0.001) * idt
+
+    cc_set_bias(contacts_state, contact, bias)
+    cc_set_bias_t1(contacts_state, contact, bias_t0)
+    cc_set_bias_t2(contacts_state, contact, bias_t1)
+    cc_set_r0(contacts_state, contact, r0)
+    cc_set_r1(contacts_state, contact, r1)
+
+
+@wp.func
 def reduced_contact_prepare(
     columns: ContactColumnContainer,
     column: wp.int32,
@@ -462,30 +497,23 @@ def reduced_contact_prepare(
                 if inverse_mass > wp.float32(1.0e-12):
                     effective_mass[row] = wp.float32(1.0) / inverse_mass
 
-        separation = point1 - point0
-        gap = wp.dot(separation, normal)
-        solver_gap = gap
-        if _uses_start_gap(contacts, contact):
-            start_gap = cc_get_start_gap(contacts_state, contact)
-            if start_gap > wp.float32(0.0) and solver_gap < start_gap:
-                solver_gap = start_gap
-        bias = solver_gap * idt if solver_gap > wp.float32(0.0) else gap * bias_rate
-        bias = wp.clamp(bias, wp.float32(-2.0), wp.float32(10.0))
-        bias_t0 = wp.float32(0.0)
-        bias_t1 = wp.float32(0.0)
-        if solver_gap <= wp.float32(0.0) and gap <= wp.float32(0.002):
-            bias_t0 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent0), -0.001, 0.001) * idt
-            bias_t1 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent1), -0.001, 0.001) * idt
-
         if compute_effective_mass:
             cc_set_eff_n(contacts_state, contact, effective_mass[0])
             cc_set_eff_t1(contacts_state, contact, effective_mass[1])
             cc_set_eff_t2(contacts_state, contact, effective_mass[2])
-        cc_set_bias(contacts_state, contact, bias)
-        cc_set_bias_t1(contacts_state, contact, bias_t0)
-        cc_set_bias_t2(contacts_state, contact, bias_t1)
-        cc_set_r0(contacts_state, contact, contact_point - bodies.position[body0])
-        cc_set_r1(contacts_state, contact, contact_point - bodies.position[body1])
+        _prepare_contact_bias_geometry(
+            contacts_state,
+            contacts,
+            contact,
+            idt,
+            bias_rate,
+            normal,
+            tangent0,
+            tangent1,
+            point1 - point0,
+            contact_point - bodies.position[body0],
+            contact_point - bodies.position[body1],
+        )
 
         if apply_warmstart:
             impulse = (

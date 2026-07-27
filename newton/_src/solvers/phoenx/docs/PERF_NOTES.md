@@ -375,6 +375,12 @@ These later results supersede the early FP16/contact-row prioritization:
   isolated kernel 8--14%. Matched 8-update G1 runs reduced graph-captured
   PPO updates 96.94 to 96.39 ms and eager updates 104.89 to 103.96 ms;
   NumPy parity and exact graph replay pass.
+- Reusing contact transforms during reduced gather removed a second per-column
+  geometry traversal without changing hard-Hertz bias arithmetic. Long 8,192-world
+  runs improved point contacts 1.378M to a 1.400M candidate mean (+1.62%) and
+  patch contacts 1.478M to 1.503M steps/s (+1.72%) at identical contact counts.
+  Bitwise patch trajectory, multipage, refresh-stride, fused-apply, and deterministic
+  momentum regressions pass.
 - Static omission of unused external-pass Coriolis publication reduced external
   advance 112.176 to 104.736 us. Reusing invariant patch effective masses cut
   cached patch solve about 18% and total patch solve 6.8%, with bitwise
