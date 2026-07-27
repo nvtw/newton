@@ -383,6 +383,44 @@ def test_deterministic_hydroelastic_contacts_moment_matching(test, device):
     test_deterministic_hydroelastic_contacts(test, device, moment_matching=True)
 
 
+def test_deterministic_hydroelastic_contacts_unreduced(test, device):
+    """Produce bit-identical hydroelastic contacts with contact reduction disabled.
+
+    The unreduced path exports straight from the contact buffer, so it has to
+    sort on the geometric fingerprint rather than the atomically assigned buffer
+    slot, which varies between runs.
+    """
+    model, _, state, _, _, pipeline, _, _ = build_stacked_cubes_scene(
+        device=device,
+        solver_fn=lambda model: None,
+        shape_type=ShapeType.PRIMITIVE,
+        deterministic=True,
+        reduce_contacts=False,
+        sdf_hydroelastic_config=HydroelasticSDF.Config(reduce_contacts=False),
+    )
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    contacts = pipeline.contacts()
+    test.assertFalse(pipeline.hydroelastic_sdf.config.reduce_contacts)
+
+    snapshots = []
+    for _ in range(4):
+        pipeline.collide(state, contacts)
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        snapshots.append(
+            (
+                count,
+                contacts.rigid_contact_point0.numpy()[:count].copy(),
+                contacts.rigid_contact_normal.numpy()[:count].copy(),
+            )
+        )
+
+    test.assertGreater(snapshots[0][0], 0)
+    for count, point0, normal in snapshots[1:]:
+        test.assertEqual(count, snapshots[0][0])
+        np.testing.assert_array_equal(point0, snapshots[0][1], err_msg="rigid_contact_point0")
+        np.testing.assert_array_equal(normal, snapshots[0][2], err_msg="rigid_contact_normal")
+
+
 def test_iso_scan_scratch_buffers_are_level_sized(test, device):
     """Validate iso-scan scratch buffers match each level input size.
 
@@ -1686,6 +1724,14 @@ add_function_test(
     TestHydroelastic,
     "test_deterministic_hydroelastic_contacts_moment_matching",
     test_deterministic_hydroelastic_contacts_moment_matching,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_deterministic_hydroelastic_contacts_unreduced",
+    test_deterministic_hydroelastic_contacts_unreduced,
     devices=cuda_devices,
     check_output=False,
 )

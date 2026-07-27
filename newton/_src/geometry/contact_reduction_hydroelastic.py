@@ -1389,7 +1389,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.contact_stiffness = shared_stiffness
                 contact_data.contact_friction_scale = wp.float32(anchor_friction_scale)
                 bin_id = int((ht_keys[entry_idx] >> wp.uint64(55)) & wp.uint64(0xFF))
-                contact_data.sort_sub_key = int(0x400000) | bin_id
+                contact_data.sort_sub_key = 0x400000 | bin_id
 
                 # Call the writer function for anchor
                 writer_func(contact_data, writer_data, -1)
@@ -1505,7 +1505,8 @@ class HydroelasticContactReduction:
             pressure_data: ``@wp.struct`` instance carrying state for ``pressure_func``.
                 Threaded through the reduce / export kernel launches. Required.
             deterministic: Whether to use fingerprint-based winner selection and
-                fixed-order floating-point aggregation.
+                int64 fixed-point aggregate accumulation, making results
+                independent of GPU thread scheduling.
         """
         if pressure_func is None or pressure_data is None:
             raise ValueError("HydroelasticContactReduction requires pressure_func and pressure_data.")
@@ -1641,9 +1642,12 @@ class HydroelasticContactReduction:
         buffer and registers them in the hashtable based on spatial extremes,
         max-depth per normal bin, and voxel-based slots.
 
-        Aggregate accumulation (agg_force, weighted_pos_sum, weight_sum) is
-        always performed in the generate kernel, so this method only handles
-        hashtable slot registration.
+        Aggregate accumulation (``agg_force``, ``weighted_pos_sum``,
+        ``weight_sum``, ``agg_depth_volume``) normally happens in the generate
+        kernel, leaving this method to do only hashtable slot registration.  In
+        deterministic mode the generate kernel skips it and this method
+        accumulates instead, in int64 fixed point so the sums do not depend on
+        the order threads arrive.
 
         Args:
             shape_material_k_hydro: Per-shape hydroelastic material stiffness (dtype: float).

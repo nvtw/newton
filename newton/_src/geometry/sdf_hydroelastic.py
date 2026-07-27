@@ -1030,6 +1030,7 @@ class HydroelasticSDF:
                 self.contact_reduction.reducer.position_depth,
                 self.contact_reduction.reducer.normal,
                 self.contact_reduction.reducer.shape_pairs,
+                self.contact_reduction.reducer.contact_fingerprints,
                 self.contact_reduction.reducer.contact_area,
                 self.pressure_data,
                 self.max_num_face_contacts,
@@ -1450,6 +1451,7 @@ def get_decode_contacts_kernel(
         position_depth: wp.array[wp.vec4],
         normal: wp.array[wp.vec2],  # Octahedral-encoded
         shape_pairs: wp.array[wp.vec2i],
+        contact_fingerprints: wp.array[wp.int32],
         contact_area: wp.array[wp.float32],
         pressure_data: Any,
         max_num_face_contacts: int,
@@ -1540,7 +1542,10 @@ def get_decode_contacts_kernel(
             contact_data.shape_b = shape_b
             contact_data.gap_sum = gap_sum
             contact_data.contact_stiffness = c_stiffness
-            contact_data.sort_sub_key = tid
+            # ``tid`` is a buffer slot handed out by an atomic during generation,
+            # so it varies between runs; the fingerprint is the marching-cubes
+            # voxel and face index and is stable.
+            contact_data.sort_sub_key = contact_fingerprints[tid]
 
             writer_func(contact_data, writer_data, output_index)
 

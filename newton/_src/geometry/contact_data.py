@@ -75,6 +75,11 @@ def make_contact_sort_key(shape_a: int, shape_b: int, sort_sub_key: int) -> wp.i
     - SDF contacts: ``(edge_idx << 2) | (mode << 1)`` — 21 effective bits
       for ``edge_idx`` (~2M edges).  After multi-contact expansion
       (``<< 3``), 18 effective bits (~262K edges).
+    - Hydroelastic contacts: ``voxel_idx * 5 + face_idx``, with bit 22
+      reserved for reduction anchors — 22 effective bits (~839K iso voxels).
+      No source tag bit is needed here: hydroelastic shape pairs are routed
+      exclusively to the SDF-SDF pipeline, so no other generator contributes
+      contacts for the same pair.
     """
     return (
         ((wp.int64(shape_a) & wp.int64(0xFFFFF)) << wp.int64(43))
