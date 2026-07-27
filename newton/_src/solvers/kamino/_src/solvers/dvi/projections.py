@@ -9,7 +9,6 @@ from ...core.math import FLOAT32_EPS
 from ..padmm.math import project_to_coulomb_cone
 
 float32 = wp.float32
-mat33f = wp.mat33f
 vec3f = wp.vec3f
 
 
@@ -34,26 +33,6 @@ def project_contact_diagonal_update(
     if D_diag.z > FLOAT32_EPS:
         lambda_arg.z = lambda_old.z - omega * v_c.z / (D_diag.z + regularization)
     return project_to_coulomb_cone(lambda_arg, mu)
-
-
-@wp.func
-def project_contact_block_update(
-    lambda_old: vec3f,
-    v_c: vec3f,
-    D_diag: vec3f,
-    D_block_inv: mat33f,
-    regularization: float32,
-    omega: float32,
-    mu: float32,
-) -> vec3f:
-    """Apply a block-preconditioned contact projection.
-
-    Computes ``lambda_next = project_K(lambda - omega * B * v_aug)``.
-    """
-    inv_diag_norm = wp.abs(D_block_inv[0, 0]) + wp.abs(D_block_inv[1, 1]) + wp.abs(D_block_inv[2, 2])
-    if inv_diag_norm > FLOAT32_EPS:
-        return project_to_coulomb_cone(lambda_old - omega * (D_block_inv * v_c), mu)
-    return project_contact_diagonal_update(lambda_old, v_c, D_diag, regularization, omega, mu)
 
 
 @wp.func

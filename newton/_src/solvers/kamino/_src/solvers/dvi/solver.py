@@ -25,7 +25,6 @@ from ..common import (
 )
 from .kernels import (
     _build_bilateral_rhs,
-    _compute_dvi_contact_block_inverse,
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
     _compute_dvi_status_residuals,
@@ -105,9 +104,7 @@ class DVISolver:
         self._max_contact_iterations: int = 1
         self._max_iterations: int = 1
         self._bilateral_solve_after_block: tuple[bool, ...] = ()
-        self._has_contact_block_preconditioner: bool = False
         self._has_unilateral_constraints: bool = False
-        self._contact_bid_AB: wp.array[wp.vec2i] | None = None
         self._limits: LimitsKamino | None = None
         self._contacts: ContactsKamino | None = None
         self._sparse_path: SparseDVIPath | None = None
@@ -191,7 +188,6 @@ class DVISolver:
         self._max_block_iterations = max(c.block_iterations for c in self._config)
         self._max_contact_iterations = max(c.contact_iterations for c in self._config)
         self._bilateral_solve_after_block = self._make_bilateral_solve_schedule(self._config)
-        self._has_contact_block_preconditioner = any(c.contact_block_preconditioner for c in self._config)
         self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
         self._data = DVIData(size=self._size, collect_info=self._collect_info, device=self._device)
         self._all_worlds_mask = wp.ones(shape=(self._size.num_worlds,), dtype=wp.bool, device=self._device)
@@ -209,7 +205,6 @@ class DVISolver:
             max_iterations=self._max_iterations,
             max_block_iterations=self._max_block_iterations,
             max_contact_iterations=self._max_contact_iterations,
-            has_contact_block_preconditioner=self._has_contact_block_preconditioner,
             has_unilateral_constraints=self._has_unilateral_constraints,
             all_worlds_mask=self._all_worlds_mask,
             should_solve_bilateral_after_block=self._should_solve_bilateral_after_block,
@@ -295,12 +290,10 @@ class DVISolver:
         return config
 
     def set_contacts(self, contacts: ContactsKamino | None):
-        """Cache contact topology for graph-colored contact solves."""
+        """Cache contact topology for graph-colored inequality solves."""
         self._contacts = contacts
-        if contacts is not None and contacts.model_max_contacts_host > 0:
-            self._contact_bid_AB = contacts.bid_AB
-        else:
-            self._contact_bid_AB = None
+        if self._sparse_path is not None:
+            self._sparse_path.contacts = contacts
 
     def reset(self, problem: DualProblem | None = None, world_mask: wp.array[wp.bool] | None = None):
         """Reset scratch state and cached solution data."""
@@ -344,6 +337,8 @@ class DVISolver:
             limits = self._limits
         else:
             self._limits = limits
+            if self._sparse_path is not None:
+                self._sparse_path.limits = limits
         if contacts is None:
             contacts = self._contacts
         else:
@@ -422,23 +417,6 @@ class DVISolver:
             # Apply projected iterations through matrix-free products
             # D * lambda = J * (M^-1 * (J^T * lambda)) + R * lambda.
             self._sparse_path.solve(problem)
-        elif self._has_contact_block_preconditioner and self._size.max_of_max_contacts > 0:
-            # For each contact c, form B_c = (D_cc + regularization * I)^-1.
-            wp.launch(
-                kernel=_compute_dvi_contact_block_inverse,
-                dim=(self._size.num_worlds, self._size.max_of_max_contacts),
-                inputs=[
-                    problem.data.dim,
-                    problem.data.mio,
-                    problem.data.nc,
-                    problem.data.ccgo,
-                    problem.data.cio,
-                    problem.data.D,
-                    self._data.config,
-                    self._data.state.contact_block_inv,
-                ],
-                device=self.device,
-            )
 
         if not problem.sparse:
             if self._bilateral_solver is not None and self._data.bilateral_operator is not None:

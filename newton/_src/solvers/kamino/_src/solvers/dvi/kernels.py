@@ -21,7 +21,6 @@ wp.set_module_options({"enable_backward": False})
 
 float32 = wp.float32
 int32 = wp.int32
-mat33f = wp.mat33f
 vec3f = wp.vec3f
 
 
@@ -137,69 +136,6 @@ def _copy_bilateral_block(
         val += float32(7.0e-7)
         bilateral_P[bvio + row] = p_row
     bilateral_D[bmio + njc * row + col] = val
-
-
-@wp.kernel
-def _compute_dvi_contact_block_inverse(
-    # Inputs:
-    problem_dim: wp.array[int32],
-    problem_mio: wp.array[int32],
-    problem_nc: wp.array[int32],
-    problem_ccgo: wp.array[int32],
-    problem_cio: wp.array[int32],
-    problem_D: wp.array[float32],
-    solver_config: wp.array[DVIConfigStruct],
-    # Outputs:
-    contact_block_inv: wp.array[mat33f],
-):
-    wid, cid = wp.tid()
-
-    nc = problem_nc[wid]
-    if cid >= nc:
-        return
-
-    ncts = problem_dim[wid]
-    mio = problem_mio[wid]
-    ccgo = problem_ccgo[wid]
-    cio = problem_cio[wid]
-    ccio = ccgo + int32(3) * cid
-    cfg = solver_config[wid]
-    D_inv = mat33f(0.0)
-
-    if not cfg.contact_block_preconditioner:
-        contact_block_inv[cio + cid] = D_inv
-        return
-
-    r0 = mio + ncts * (ccio + 0)
-    r1 = mio + ncts * (ccio + 1)
-    r2 = mio + ncts * (ccio + 2)
-
-    d00 = problem_D[r0 + ccio + 0]
-    d01 = float32(0.5) * (problem_D[r0 + ccio + 1] + problem_D[r1 + ccio + 0])
-    d02 = float32(0.5) * (problem_D[r0 + ccio + 2] + problem_D[r2 + ccio + 0])
-    d11 = problem_D[r1 + ccio + 1]
-    d12 = float32(0.5) * (problem_D[r1 + ccio + 2] + problem_D[r2 + ccio + 1])
-    d22 = problem_D[r2 + ccio + 2]
-
-    diag_max = wp.max(wp.max(wp.abs(d00), wp.abs(d11)), wp.abs(d22))
-    if diag_max > FLOAT32_EPS:
-        D_reg = mat33f(
-            d00 + cfg.regularization,
-            d01,
-            d02,
-            d01,
-            d11 + cfg.regularization,
-            d12,
-            d02,
-            d12,
-            d22 + cfg.regularization,
-        )
-        det = wp.determinant(D_reg)
-        det_min = FLOAT32_EPS * diag_max * diag_max * diag_max
-        if det > det_min:
-            D_inv = wp.inverse(D_reg)
-
-    contact_block_inv[cio + cid] = D_inv
 
 
 @wp.kernel

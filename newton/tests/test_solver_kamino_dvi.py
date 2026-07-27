@@ -11,7 +11,6 @@ _DVI_QUALITY_TESTS = (
     "test_00_config_selection",
     "test_00a_multiworld_status_reduction_requires_all_worlds_converged",
     "test_00b_bilateral_solver_selection",
-    "test_00c_dvi_legacy_contact_tuning_is_deprecated",
     "test_01_dvi_solve_dense_dual_problem",
     "test_02_public_solver_step_with_dvi",
     "test_03_dvi_solve_single_contact",

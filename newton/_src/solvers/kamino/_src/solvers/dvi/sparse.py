@@ -14,7 +14,6 @@ from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.jacobians import SparseSystemJacobians
 from ...kinematics.limits import LimitsKamino
-from . import sparse_kernels
 from .kernels import (
     _initialize_dvi_status,
     _scatter_bilateral_solution,
@@ -61,7 +60,6 @@ class SparseDVIPath:
         max_iterations: int,
         max_block_iterations: int,
         max_contact_iterations: int,
-        has_contact_block_preconditioner: bool,
         has_unilateral_constraints: bool,
         all_worlds_mask: wp.array[wp.bool],
         should_solve_bilateral_after_block,
@@ -80,7 +78,6 @@ class SparseDVIPath:
         self.max_iterations = max_iterations
         self.max_block_iterations = max_block_iterations
         self.max_contact_iterations = max_contact_iterations
-        self.has_contact_block_preconditioner = has_contact_block_preconditioner
         self.has_unilateral_constraints = has_unilateral_constraints
         self.all_worlds_mask = all_worlds_mask
         self.should_solve_bilateral_after_block = should_solve_bilateral_after_block
@@ -106,9 +103,6 @@ class SparseDVIPath:
 
     def solve(self, problem: DualProblem) -> None:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
-        if self.has_contact_block_preconditioner and self.size.max_of_max_contacts > 0:
-            _compute_sparse_contact_block_inverse(self, problem)
-
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _solve_sparse_with_bilateral_direct_block(self, problem)
         elif _can_use_sparse_inequality_pgs(self):
@@ -124,9 +118,13 @@ def _can_use_sparse_inequality_pgs(path: SparseDVIPath) -> bool:
 
 
 def _can_use_sparse_colored_inequalities(path: SparseDVIPath) -> bool:
-    has_limits = path.limits is not None and path.size.max_of_max_limits > 0
-    has_contacts = path.contacts is not None and path.size.max_of_max_contacts > 0
-    return path.jacobians is not None and (has_limits or has_contacts)
+    has_limit_capacity = path.size.max_of_max_limits > 0
+    has_contact_capacity = path.size.max_of_max_contacts > 0
+    limits_ready = not has_limit_capacity or path.limits is not None
+    contacts_ready = not has_contact_capacity or path.contacts is not None
+    return (
+        path.jacobians is not None and (has_limit_capacity or has_contact_capacity) and limits_ready and contacts_ready
+    )
 
 
 def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
@@ -321,32 +319,6 @@ def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) ->
     if solver._sparse_path is None:
         raise RuntimeError("Sparse DVI path has not been allocated. Call `finalize()` first.")
     _sparse_delassus_matvec_rows_path(solver._sparse_path, problem, row_kind)
-
-
-def _compute_sparse_contact_block_inverse(path: SparseDVIPath, problem: DualProblem) -> None:
-    jacobian = problem.delassus.constraint_jacobian
-    wp.launch(
-        kernel=sparse_kernels._compute_sparse_contact_block_inverse,
-        dim=(path.size.num_worlds, path.size.max_of_max_contacts),
-        inputs=[
-            path.model.info.bodies_offset,
-            path.model.bodies.inv_m_i,
-            path.model_data.bodies.inv_I_i,
-            jacobian.nzb_start,
-            jacobian.num_nzb,
-            jacobian.nzb_coords,
-            jacobian.nzb_values,
-            problem.data.nc,
-            problem.data.ccgo,
-            problem.data.cio,
-            problem.data.vio,
-            problem.data.P,
-            path.data.config,
-            jacobian.max_of_num_nzb,
-            path.data.state.contact_block_inv,
-        ],
-        device=path.device,
-    )
 
 
 def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) -> None:

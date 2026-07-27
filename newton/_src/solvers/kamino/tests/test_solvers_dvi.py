@@ -241,8 +241,6 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(default_config.dvi.bilateral_solve_period, 1)
         self.assertEqual(default_config.dvi.bilateral_solver_type, "LLTB")
         self.assertEqual(default_config.dvi.bilateral_solver_kwargs, {})
-        self.assertEqual(default_config.dvi.contact_jacobi_omega, 0.3)
-        self.assertEqual(default_config.dvi.contact_jacobi_relaxation, 0.9)
 
         dense_config = SolverKamino.Config(
             dynamics_solver="dvi",
@@ -269,9 +267,6 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.block_iterations, 32)
         self.assertEqual(config.dvi.contact_iterations, 4)
         self.assertEqual(config.dvi.bilateral_solve_period, 1)
-        self.assertEqual(config.dvi.contact_jacobi_omega, 0.3)
-        self.assertEqual(config.dvi.contact_jacobi_relaxation, 0.9)
-        self.assertFalse(config.dvi.contact_block_preconditioner)
         self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_net_force_backup")
         self.assertFalse(config.dynamics.preconditioning)
 
@@ -295,10 +290,6 @@ class TestDVISolver(unittest.TestCase):
             {"contact_iterations": 0},
             {"bilateral_solve_period": 0},
             {"bilateral_solver_type": "invalid"},
-            {"contact_jacobi_omega": 0.0},
-            {"contact_jacobi_omega": 2.1},
-            {"contact_jacobi_relaxation": 0.0},
-            {"contact_jacobi_relaxation": 1.1},
             {"warmstart_mode": "invalid"},
         )
         for kwargs in invalid_dvi_configs:
@@ -320,16 +311,6 @@ class TestDVISolver(unittest.TestCase):
             kamino=SimpleNamespace(max_solver_iterations=wp.array([37], dtype=wp.int32, device=self.device))
         )
         self.assertEqual(kamino_config.DVISolverConfig.from_model(model_with_attrs).max_iterations, 37)
-
-    def test_00c_dvi_legacy_contact_tuning_is_deprecated(self):
-        """Deprecate manual selection of legacy DVI contact updates."""
-        for option, value in (
-            ("contact_jacobi_omega", 0.4),
-            ("contact_jacobi_relaxation", 1.0),
-            ("contact_block_preconditioner", True),
-        ):
-            with self.subTest(option=option), self.assertWarnsRegex(DeprecationWarning, option):
-                kamino_config.DVISolverConfig(**{option: value})
 
     def test_00b_bilateral_solver_selection(self):
         """Verify DVI constructs and validates the configured bilateral solver."""
@@ -1759,7 +1740,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertLess(float(np.linalg.norm(base_delta_xy)), 0.008)
         self.assertGreater(len(post_settle_penetration), 0)
         self.assertLess(float(np.percentile(post_settle_penetration, 95)), 0.0035)
-        self.assertLess(float(np.linalg.norm(post_settle_xy[-1] - post_settle_xy[0])), 5.0e-4)
+        self.assertLess(float(np.linalg.norm(post_settle_xy[-1] - post_settle_xy[0])), 2.0e-4)
 
     def test_11_dr_legs_dvi_contact_force_balances_weight(self):
         if not self.device.is_cuda:
