@@ -1,16 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Surface-to-volume gate for resident-subdomain block Gauss-Seidel.
+"""Structural census of the settled Kapla tower.
 
-Colored GS touches every body once per color, so body-state reuse exists
-only across colors and iterations. Capturing it needs one block to own
-every constraint incident to a set of bodies, i.e. spatial partitioning.
-A contact straddling two parts stays on the global mass-splitting path,
-so the interior fraction decides whether the design can pay.
+Prices solver architecture changes before any kernel is written.
 
-Reports interior contact fraction, bodies per part, and shared-memory
-footprint at 52 B/body for each part count ``P``. See PERF_NOTES.md.
+``subdomain`` -- colored GS touches every body once per color, so
+body-state reuse exists only across colors and iterations. Capturing it
+needs one block to own every constraint incident to a set of bodies,
+i.e. spatial partitioning. A contact straddling two parts stays on the
+global mass-splitting path, so the interior fraction decides whether the
+design can pay.
+
+``dormancy`` -- reports how much solver work is skippable at rest, at
+both granularities: per body (a contact is dead iff both endpoints are
+at rest) and per contact-graph island (what the existing
+``sleeping_velocity_threshold`` machinery can actually reach).
+
+See PERF_NOTES.md.
 """
 
 from __future__ import annotations
@@ -68,8 +75,63 @@ def _partition_stats(
     }
 
 
+def _islands(body1: np.ndarray, body2: np.ndarray, dynamic: np.ndarray) -> np.ndarray:
+    """Union-find contact-graph roots. Static bodies are excluded so the
+    ground plane does not fuse otherwise-separate islands."""
+    parent = np.arange(dynamic.size)
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    both_dynamic = dynamic[body1] & dynamic[body2]
+    for x, y in zip(body1[both_dynamic], body2[both_dynamic], strict=True):
+        rx, ry = find(int(x)), find(int(y))
+        if rx != ry:
+            parent[rx] = ry
+    return np.array([find(i) for i in range(dynamic.size)])
+
+
+def _report_dormancy(
+    body1: np.ndarray,
+    body2: np.ndarray,
+    velocity: np.ndarray,
+    angular_velocity: np.ndarray,
+    dynamic: np.ndarray,
+) -> None:
+    """Skippable-work census at body and island granularity."""
+    speed = np.linalg.norm(velocity, axis=1)
+    spin = np.linalg.norm(angular_velocity, axis=1)
+
+    print(f"{'v,w threshold':>16} {'bodies at rest':>15} {'contacts dead':>14}")
+    for lin, ang in ((0.01, 0.05), (0.02, 0.1)):
+        # Static bodies never move, so they are permanently at rest.
+        at_rest = ((speed < lin) & (spin < ang)) | ~dynamic
+        dead = at_rest[body1] & at_rest[body2]
+        print(f"{f'{lin}, {ang}':>16} {at_rest[dynamic].mean() * 100:>14.1f}% {dead.mean() * 100:>13.1f}%")
+
+    roots = _islands(body1, body2, dynamic)[dynamic]
+    uniq, counts = np.unique(roots, return_counts=True)
+    print(f"\nislands={uniq.size}  largest={counts.max()} ({counts.max() / dynamic.sum() * 100:.1f}% of bodies)")
+
+    # The shipped mechanism sleeps a whole island only when its fastest
+    # member is below the threshold.
+    score = np.maximum(speed, spin)[dynamic]
+    index = {int(r): i for i, r in enumerate(uniq)}
+    island_max = np.zeros(uniq.size)
+    np.maximum.at(island_max, [index[int(r)] for r in roots], score)
+    print(f"{'island threshold':>16} {'islands asleep':>15} {'bodies asleep':>14}")
+    for threshold in (0.05, 0.15, 0.3):
+        asleep = island_max < threshold
+        frac = counts[asleep].sum() / dynamic.sum()
+        print(f"{threshold:>16} {asleep.mean() * 100:>14.1f}% {frac * 100:>13.1f}%")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("subdomain", "dormancy"), default="subdomain")
     parser.add_argument("--settle", type=int, default=60, help="Warmup frames before sampling.")
     parser.add_argument("--grid", type=int, default=1, help="Tower grid edge length.")
     parser.add_argument(
@@ -119,6 +181,18 @@ def main() -> int:
     body1 = body1[valid]
     body2 = body2[valid]
 
+    print(f"bodies={num_bodies} (dynamic={int((motion_type >= 2).sum())})  contacts={body1.size}")
+
+    if args.mode == "dormancy":
+        _report_dormancy(
+            body1,
+            body2,
+            ex.bodies.velocity.numpy(),
+            ex.bodies.angular_velocity.numpy(),
+            motion_type >= 2,
+        )
+        return 0
+
     sm_count = ex.device.sm_count
     part_counts = args.parts or [sm_count // 2, sm_count, sm_count * 2, sm_count * 4]
 
@@ -126,7 +200,7 @@ def main() -> int:
     rank = np.empty(num_bodies, dtype=np.int64)
     rank[order] = np.arange(num_bodies)
 
-    print(f"bodies={num_bodies} (dynamic={int((motion_type >= 2).sum())})  contacts={body1.size}  SMs={sm_count}")
+    print(f"SMs={sm_count}")
     print(f"{'P':>6} {'interior%':>10} {'bodies/part':>12} {'max/part':>9} {'smem KB':>9}")
     for num_parts in part_counts:
         part_of_body = (rank * num_parts // num_bodies).astype(np.int64)

@@ -126,6 +126,16 @@ Do not retry without new evidence or a materially different design.
 
 ## Open ideas
 
+- Sub-island contact dormancy. The settled tower leaves 63.9% of live contact
+  columns with both endpoints at rest (v<0.01, w<0.05) and 86.5% at
+  (0.02, 0.1) -- against an iterate kernel that is 52.3% of GPU time. The
+  shipped `sleeping_velocity_threshold` path cannot reach it: the contact graph
+  is 10 islands with one 7,100-body giant (62.6% of bodies) that a few spinning
+  bricks keep permanently awake, capping island sleeping at 28.2% of bodies at
+  threshold 0.15 and 31.2% at 0.3. Granularity is the defect, not the idea --
+  a contact is skippable iff *both* endpoints are dormant, which is per-body
+  state, and dormant endpoints behave as infinite mass (what copy-state slots
+  already express). `analysis_tools/kapla_census.py --mode dormancy`.
 - Cluster-scale resident subdomain block GS. The census that rejected one-block
   subdomains measures 83.8% interior at `P = 12` and 78.7% at `P = 24` -- part
   sizes reachable only with Blackwell clusters (16 blocks sharing distributed
