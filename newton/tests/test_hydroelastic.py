@@ -608,7 +608,7 @@ def _build_cube_sphere_scene(device, cube_half=0.1, sphere_radius=0.1):
     return model, state, sphere_body, rest_z
 
 
-def _make_pipelines(model, configs, rigid_contact_maxes=None):
+def _make_pipelines(model, configs, rigid_contact_maxes=None, deterministic=False):
     """Create collision pipelines and contacts for a list of HydroelasticSDF.Configs.
 
     Returns list of (pipeline, contacts) tuples.
@@ -617,12 +617,14 @@ def _make_pipelines(model, configs, rigid_contact_maxes=None):
         rigid_contact_maxes = [500] * len(configs)
     result = []
     for cfg, rcm in zip(configs, rigid_contact_maxes, strict=True):
-        pipe = newton.CollisionPipeline(model, rigid_contact_max=rcm, sdf_hydroelastic_config=cfg)
+        pipe = newton.CollisionPipeline(
+            model, rigid_contact_max=rcm, sdf_hydroelastic_config=cfg, deterministic=deterministic
+        )
         result.append((pipe, pipe.contacts()))
     return result
 
 
-def test_reduced_vs_unreduced_contact_forces(test, device, anchor_contact=False):
+def test_reduced_vs_unreduced_contact_forces(test, device, anchor_contact=False, deterministic=False):
     """Reduced and unreduced hydroelastic forces must agree within 1%."""
     model, state, sphere_body, rest_z = _build_cube_sphere_scene(device)
 
@@ -637,7 +639,7 @@ def test_reduced_vs_unreduced_contact_forces(test, device, anchor_contact=False)
         anchor_contact=False,
     )
     (pipe_red, contacts_red), (pipe_unr, contacts_unr) = _make_pipelines(
-        model, [cfg_reduced, cfg_unreduced], [500, 20000]
+        model, [cfg_reduced, cfg_unreduced], [500, 20000], deterministic=deterministic
     )
 
     anchor_label = "with anchor" if anchor_contact else "without anchor"
@@ -678,7 +680,7 @@ def test_reduced_vs_unreduced_contact_forces_with_anchor_contact(test, device):
     test_reduced_vs_unreduced_contact_forces(test, device, anchor_contact=True)
 
 
-def test_reduced_vs_unreduced_contact_moments(test, device):
+def test_reduced_vs_unreduced_contact_moments(test, device, deterministic=False):
     """Reduced and unreduced hydroelastic moments must agree with moment_matching."""
     model, state, sphere_body, rest_z = _build_cube_sphere_scene(device)
 
@@ -694,7 +696,7 @@ def test_reduced_vs_unreduced_contact_moments(test, device):
         anchor_contact=False,
     )
     (pipe_red, contacts_red), (pipe_unr, contacts_unr) = _make_pipelines(
-        model, [cfg_reduced, cfg_unreduced], [500, 20000]
+        model, [cfg_reduced, cfg_unreduced], [500, 20000], deterministic=deterministic
     )
 
     # Filter to the cube-sphere shape pair (shape 1=cube, shape 2=sphere).
@@ -727,6 +729,25 @@ def test_reduced_vs_unreduced_contact_moments(test, device):
                 0.4,
                 f"pen={pen}: moment mismatch {rel * 100:.2f}% (reduced={m_red:.6f}, unreduced={m_unr:.6f})",
             )
+
+
+def test_reduced_vs_unreduced_contact_forces_deterministic(test, device):
+    """Reduced hydroelastic forces must still match when determinism is enabled.
+
+    Deterministic mode accumulates the aggregates that drive contact stiffness in
+    int64 fixed point, so this checks that path against the unreduced reference
+    rather than only against itself.
+    """
+    test_reduced_vs_unreduced_contact_forces(test, device, anchor_contact=True, deterministic=True)
+
+
+def test_reduced_vs_unreduced_contact_moments_deterministic(test, device):
+    """Reduced hydroelastic moments must still match when determinism is enabled.
+
+    Exercises the fixed-point unreduced/reduced friction-moment accumulators,
+    which deterministic mode computes in separate kernels from the default path.
+    """
+    test_reduced_vs_unreduced_contact_moments(test, device, deterministic=True)
 
 
 def _compute_total_friction_capacity(contacts, model, state, shape_pair=None):
@@ -1769,6 +1790,22 @@ add_function_test(
     TestHydroelastic,
     "test_reduced_vs_unreduced_contact_forces_with_anchor_contact",
     test_reduced_vs_unreduced_contact_forces_with_anchor_contact,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_reduced_vs_unreduced_contact_forces_deterministic",
+    test_reduced_vs_unreduced_contact_forces_deterministic,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_reduced_vs_unreduced_contact_moments_deterministic",
+    test_reduced_vs_unreduced_contact_moments_deterministic,
     devices=cuda_devices,
     check_output=False,
 )
