@@ -154,8 +154,21 @@ Do not retry without new evidence or a materially different design.
   plus consumers in `reduced_contact_block.py`. The attempt left 18 failures
   and 4 errors in `tests/test_reduced_articulation.py` (baseline: 1 error), so
   the nsys timings taken against it are void -- four modules failed to compile,
-  so the measurement was not an A/B. Redo by converting one wrapper at a time
-  and running the suite after each.
+  so the measurement was not an A/B.
+
+  A second attempt swapped the array *in place* (`wp.array[wp.int32]` ->
+  `wp.array[wp.vec4i]` in the same argument slot) so a missed launch fails as a
+  loud dtype error instead of silent corruption. That worked as a plumbing
+  technique -- it found every miscabled launch, including that
+  `_make_biased_contact_advance_publish_kernel` needs *both* arrays because it
+  also feeds `_finish_and_publish_reduced_warp_device`, and that
+  `_relax_and_publish_reduced_contacts_kernel` must not receive it. With all
+  dtype and arity errors cleared the suite still failed 27 tests, i.e. the
+  defect is semantic, not plumbing. Descriptor contents were verified to come
+  from the same `model.joint_child`, `model.joint_qd_start` and
+  `advance_joint_parent_lane` the kernels already receive, in the same slot
+  order, so the next attempt should first assert the packed table against the
+  live arrays on device before touching any kernel.
 - Test a depth-ordered reduced-joint descriptor that coalesces invariant child,
   DOF, type, parent-lane, and child-range metadata only after auditing which
   fields are not already derivable or packed. Require at least 5% on fused
