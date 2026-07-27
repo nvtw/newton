@@ -270,6 +270,7 @@ class HydroelasticSDF:
         writer_func: Callback for writing decoded contact data.
         deterministic: Whether to make hydroelastic accumulation and contact
             allocation reproducible across runs on the same GPU architecture.
+            Must be chosen at construction because it changes code generation.
 
     Note:
         Instances are typically created internally when constructing a
@@ -510,10 +511,6 @@ class HydroelasticSDF:
                 face_contact_budget = face_contact_budget * config.contact_buffer_fraction
             self.max_num_face_contacts = max(int(face_contact_budget), 64)
             self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
-            # The generate kernel walks ``voxels_per_thread`` voxels per thread and
-            # reserves at most MAX_MC_FACES_PER_VOXEL contact slots per voxel.
-            voxels_per_thread = (self.max_num_iso_voxels + self.grid_size - 1) // self.grid_size
-            self._deterministic_max_records = MAX_MC_FACES_PER_VOXEL * voxels_per_thread
             if deterministic:
                 _validate_deterministic_fingerprint_range(self.max_num_iso_voxels)
 
@@ -560,7 +557,6 @@ class HydroelasticSDF:
                 output_vertices=self.config.output_contact_surface,
                 pre_prune=self.config.reduce_contacts and self.config.pre_prune_contacts,
                 deterministic_reduction=self.deterministic and self.config.reduce_contacts,
-                deterministic_max_records=self._deterministic_max_records,
                 pressure_func=self.pressure_func,
                 mc_edge_clamp_min=self.config.mc_edge_clamp_min,
             )
@@ -1556,7 +1552,6 @@ def get_generate_contacts_kernel(
     output_vertices: bool,
     pre_prune: bool = False,
     deterministic_reduction: bool = False,
-    deterministic_max_records: int = 0,
     pressure_func: Any = None,
     mc_edge_clamp_min: float = 0.02,
 ):
@@ -1582,11 +1577,8 @@ def get_generate_contacts_kernel(
         output_vertices: Whether to output contact surface vertices for visualization.
         pre_prune: Whether to perform local-first face compaction.
         deterministic_reduction: Whether aggregate accumulation is deferred
-            to the deterministic reduction phase. Also compiles the kernel into
-            a dedicated module so its contact-slot counter is allocated by
-            Warp's deterministic count-scan-write lowering.
-        deterministic_max_records: Per-thread upper bound on contact-slot
-            reservations, used only when ``deterministic_reduction`` is set.
+            to the deterministic reduction phase, which sums in fixed point so
+            the result does not depend on contact ordering.
         pressure_func: Warp function defining the per-shape pressure law used
             to locate the iso-pressure surface. Required.
         mc_edge_clamp_min: Lower bound for the marching-cubes edge
@@ -1604,21 +1596,7 @@ def get_generate_contacts_kernel(
     edge_clamp_min = float(mc_edge_clamp_min)
     edge_clamp_max = float(1.0 - mc_edge_clamp_min)
 
-    # Scope determinism to this kernel rather than the whole module: the module's
-    # other kernels either have no contended atomics or call
-    # ``hashtable_find_or_insert``, whose consumed ``atomic_add`` return would
-    # trigger two-pass lowering and drop the table's active-slot bookkeeping.
-    kernel_options = {}
-    if deterministic_reduction:
-        kernel_options = {
-            "module": "unique",
-            "module_options": {
-                "deterministic": wp.DeterministicMode.RUN_TO_RUN,
-                "deterministic_max_records": int(deterministic_max_records),
-            },
-        }
-
-    @wp.kernel(enable_backward=False, **kernel_options)
+    @wp.kernel(enable_backward=False)
     def generate_contacts_kernel(
         grid_size: int,
         iso_voxel_count: wp.array[wp.int32],
