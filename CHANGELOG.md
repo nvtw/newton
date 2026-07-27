@@ -63,6 +63,7 @@
 
 ### Changed
 
+- Specialize reduced-coordinate PhoenX fused advance and publication by articulation topology width.
 - Accelerate reduced-coordinate PhoenX compact patch-contact rows with subgroup-cooperative response and solved-delta traversal without changing hard-contact equations.
 - Accelerate dense large-world SAP broad-phase traversal while retaining the existing path for sparse scenes.
 - Accelerate large-batch experimental PhoenXRL FP32 inference with optional cuBLAS contractions while retaining the Warp fallback.

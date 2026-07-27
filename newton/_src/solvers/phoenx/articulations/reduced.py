@@ -2535,12 +2535,13 @@ def _make_advance_reduced_articulations_warp_ops(
     capture_momentum: bool,
     fuse_publish: bool = False,
     fuse_factor: bool = False,
+    static_tile_width: int = 0,
 ):
     if fuse_publish and fuse_factor:
         raise ValueError("factor and publish fusion are separate schedule boundaries")
     suffix = "_publish" if fuse_publish else "_factor" if fuse_factor else ""
     module = wp.get_module(
-        f"reduced_advance_{int(include_external)}_{int(include_coriolis)}_{int(capture_momentum)}{suffix}"
+        f"reduced_advance_{int(include_external)}_{int(include_coriolis)}_{int(capture_momentum)}_{static_tile_width}{suffix}"
     )
 
     @wp.func
@@ -2583,6 +2584,8 @@ def _make_advance_reduced_articulations_warp_ops(
         bodies: BodyContainer,
         captured_momentum: wp.array[wp.spatial_vector],
     ):
+        if wp.static(static_tile_width > 0):
+            tile_width = wp.int32(static_tile_width)
         articulation = thread // tile_width
         lane = thread - articulation * tile_width
         if articulation >= articulation_count:
@@ -3064,6 +3067,8 @@ def _make_advance_reduced_articulations_warp_ops(
         joint_s_publish: wp.array[wp.spatial_vector],
     ):
         thread = wp.tid()
+        if wp.static(static_tile_width > 0):
+            tile_width = wp.int32(static_tile_width)
         articulation = thread // tile_width
         if articulation >= articulation_count:
             return
@@ -3159,6 +3164,7 @@ def _make_advance_reduced_articulations_warp_kernel(
     capture_momentum: bool,
     fuse_publish: bool = False,
     fuse_factor: bool = False,
+    static_tile_width: int = 0,
 ):
     return _make_advance_reduced_articulations_warp_ops(
         include_external=include_external,
@@ -3166,6 +3172,7 @@ def _make_advance_reduced_articulations_warp_kernel(
         capture_momentum=capture_momentum,
         fuse_publish=fuse_publish,
         fuse_factor=fuse_factor,
+        static_tile_width=static_tile_width,
     )[1]
 
 
@@ -4617,6 +4624,7 @@ class ReducedPhoenXArticulation:
             include_coriolis=True,
             capture_momentum=True,
             fuse_publish=True,
+            static_tile_width=tile_width,
         )
         wp.launch(
             kernel,

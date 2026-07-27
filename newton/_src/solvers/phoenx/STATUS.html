@@ -47,10 +47,12 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 </section>
 
 <section class="gap">
-<h2>Next</h2>
+<h2>Latest ABA result</h2>
 <ul>
-<li>Profile and prototype the advance/publish body-state layout, now the largest single physics hotspot.</li>
-<li>Test interleaving or lifetime elimination against full-pipeline timing; avoid blanket vec4 packing.</li>
+<li>Advance write-lifetime reduction was rejected: the broad version averaged +0.14%; the cleaner internal-only version regressed 2%.</li>
+<li>Packing joint work into inverse-factor rows was neutral (+0.08%) and removed.</li>
+<li>Topology-width specialization reduces fused advance/publish 211.8 → 206.8 µs (-2.4%); eight interleaved production pairs improve environment stepping 1.03%.</li>
+<li>The external advance did not improve and retains its general kernel.</li>
 <li>After the layout work, explore a correct multi-wave schedule for exceptionally wide trees.</li>
 </ul>
 </section>
