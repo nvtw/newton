@@ -18,6 +18,9 @@ import warp as wp
 
 import newton
 import newton.rl as rl
+from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
+    _make_solve_patch_contact_tile_kernel,
+)
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
     _make_parser as make_g1_train_to_gate_parser,
 )
@@ -6335,6 +6338,10 @@ class TestG1PhoenXRL(unittest.TestCase):
         reference = rl.EnvG1PhoenX(config, device=device)
         reference_block = reference.solver._reduced_articulation.contact_block_system
         reference_block.build_patch_rows_warp_kernel = None
+        reference_block.solve_kernel = {
+            build_rows: _make_solve_patch_contact_tile_kernel(reference_block.contact_dof_width, build_rows, False)
+            for build_rows in (False, True)
+        }
         candidate = rl.EnvG1PhoenX(config, device=device)
         candidate_block = candidate.solver._reduced_articulation.contact_block_system
         self.assertTrue(candidate_block.patch_rows)

@@ -1573,3 +1573,26 @@ The shared limit is dependent traversal latency, not tensor throughput or raw ba
 - Isolated row time falls 240.1 to 150.3 us (-37.4%). A fresh production physics candidate/reference/candidate bracket averages 2.392M versus 2.255M samples/s (+6.1%). Full eight-update PPO candidate/reference/candidate averages 1.855M versus 1.776M samples/s (+4.4%).
 - Random rows match the scalar builder bitwise for 8-, 16-, and 32-lane branched topologies. A 24-step randomized production G1 graph trajectory matches bitwise across joint/body state, observations, rewards, and dones. Analytical ABA, production constant-torque, deterministic contact/momentum, and Ant graph tests pass.
 - The topology audit exposed a pre-existing correctness bug: warp advance omitted joints when a depth contained more than 32 joints. A 62-child tree differed from serial ABA by up to 0.604 rad/s. Reference reduced paths now use exact serial advance for such trees; persistent paths reject them until a correct multi-wave implementation exists. The extended regression is bitwise exact after the fix.
+
+## Patch-delta layout follow-up (2026-07-27)
+
+- A fresh production trace after cooperative row construction puts fused
+  advance/publish at 19.9% of physics kernel time, row construction at 14.8%,
+  and the two patch solves at 21.0% combined. Patch application was therefore
+  still large enough to justify one more structural layout experiment.
+- Copying response rows into shared memory for reuse across warm start and PGS
+  regressed production physics about 10%. Keeping all 32x36 response values in
+  registers regressed by the same amount. Both increase the live working set
+  and were removed.
+- The retained application layout eliminates storage instead: solved body
+  deltas remain lane-local between tree depths and parent values move by
+  subgroup shuffle. The exact wide-tree fallback retains its global scratch.
+  The row-building solve median falls 137.25 to 126.45 us (-7.9%), and the
+  cached-row solve falls 74.30 to 67.20 us (-9.6%).
+- Production physics candidate/control/candidate averages 2.480M versus 2.434M
+  steps/s (+1.88%). Full PPO candidate/control/candidate averages 1.898M versus
+  1.870M samples/s (+1.47%).
+- A randomized 24-step production G1 CUDA-graph trajectory is bitwise identical
+  to the old global-memory builder and application paths. Generic topology
+  parity, analytical production G1 stepping, deterministic contact/momentum,
+  and Ant graph capture also pass.

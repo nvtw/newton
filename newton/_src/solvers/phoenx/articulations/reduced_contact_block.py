@@ -1859,9 +1859,9 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
 
 
 @functools.cache
-def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool):
+def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool, shuffle_apply: bool):
     packed_width = max_dofs
-    module = wp.get_module(f"reduced_contact_patch_solve_{max_dofs}_{int(build_rows)}_fp32")
+    module = wp.get_module(f"reduced_contact_patch_solve_{max_dofs}_{int(build_rows)}_{int(shuffle_apply)}_fp32")
 
     def _solve_patch_contact_tile_kernel(
         columns: ContactColumnContainer,
@@ -1887,6 +1887,7 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool):
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
+        joint_parent_lane: wp.array[wp.int32],
         generalized_delta_out: wp.array2d[wp.float32],
         body_delta: wp.array2d[wp.spatial_vector],
     ):
@@ -2113,30 +2114,61 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool):
         data = bodies.reduced
         start = data.articulation_start[articulation]
         dof_start_articulation = data.joint_qd_start[start]
-        for depth in range(max_depth + wp.int32(1)):
-            index = articulation_depth_start[articulation, depth] + lane
-            depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
-            while index < depth_end:
-                joint = articulation_depth_joint[index]
-                local_joint = joint - start
-                parent = data.joint_parent[joint]
-                delta = wp.spatial_vector()
-                if parent >= wp.int32(0):
-                    delta = body_delta[articulation, data.body_joint[parent] - start]
-                for dof in range(data.joint_qd_start[joint], data.joint_qd_start[joint + wp.int32(1)]):
-                    local_dof = dof - dof_start_articulation
-                    dof_delta = generalized_delta_out[articulation, local_dof]
-                    data.joint_qd[dof] += dof_delta
-                    delta += data.joint_s[dof] * dof_delta
-                body_delta[articulation, local_joint] = delta
-                child = data.joint_child[joint]
-                slot = child + wp.int32(1)
-                delta_omega = wp.spatial_bottom(delta)
-                bodies.angular_velocity[slot] += delta_omega
-                local_com_position = wp.transform_get_translation(data.body_q_com[child])
-                bodies.velocity[slot] += wp.spatial_top(delta) + wp.cross(delta_omega, local_com_position)
-                index += wp.int32(_BLOCK_DIM)
-            _sync_contact_warp()
+        if wp.static(shuffle_apply):
+            previous_delta = wp.spatial_vector()
+            for depth in range(max_depth + wp.int32(1)):
+                index = articulation_depth_start[articulation, depth] + lane
+                depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+                active = index < depth_end
+                joint = wp.int32(-1)
+                parent_lane = wp.int32(0)
+                if active:
+                    joint = articulation_depth_joint[index]
+                    parent_lane = joint_parent_lane[joint]
+                parent_delta = _shuffle_contact_spatial(
+                    previous_delta, parent_lane, wp.int32(32), wp.uint32(4294967295)
+                )
+                child_delta = wp.spatial_vector()
+                if active:
+                    child_delta = parent_delta
+                    for dof in range(data.joint_qd_start[joint], data.joint_qd_start[joint + wp.int32(1)]):
+                        local_dof = dof - dof_start_articulation
+                        dof_delta = generalized_delta_out[articulation, local_dof]
+                        data.joint_qd[dof] += dof_delta
+                        child_delta += data.joint_s[dof] * dof_delta
+                    child = data.joint_child[joint]
+                    slot = child + wp.int32(1)
+                    delta_omega = wp.spatial_bottom(child_delta)
+                    bodies.angular_velocity[slot] += delta_omega
+                    local_com_position = wp.transform_get_translation(data.body_q_com[child])
+                    bodies.velocity[slot] += wp.spatial_top(child_delta) + wp.cross(delta_omega, local_com_position)
+                previous_delta = child_delta
+                _sync_contact_warp()
+        else:
+            for depth in range(max_depth + wp.int32(1)):
+                index = articulation_depth_start[articulation, depth] + lane
+                depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+                while index < depth_end:
+                    joint = articulation_depth_joint[index]
+                    local_joint = joint - start
+                    parent = data.joint_parent[joint]
+                    delta = wp.spatial_vector()
+                    if parent >= wp.int32(0):
+                        delta = body_delta[articulation, data.body_joint[parent] - start]
+                    for dof in range(data.joint_qd_start[joint], data.joint_qd_start[joint + wp.int32(1)]):
+                        local_dof = dof - dof_start_articulation
+                        dof_delta = generalized_delta_out[articulation, local_dof]
+                        data.joint_qd[dof] += dof_delta
+                        delta += data.joint_s[dof] * dof_delta
+                    body_delta[articulation, local_joint] = delta
+                    child = data.joint_child[joint]
+                    slot = child + wp.int32(1)
+                    delta_omega = wp.spatial_bottom(delta)
+                    bodies.angular_velocity[slot] += delta_omega
+                    local_com_position = wp.transform_get_translation(data.body_q_com[child])
+                    bodies.velocity[slot] += wp.spatial_top(delta) + wp.cross(delta_omega, local_com_position)
+                    index += wp.int32(_BLOCK_DIM)
+                _sync_contact_warp()
 
     return wp.kernel(enable_backward=False, module=module)(_solve_patch_contact_tile_kernel)
 
@@ -2243,7 +2275,7 @@ class ReducedContactBlockSystem:
         self.patch_rows = allow_patch_rows and self.device.is_cuda and patch_rows_requested
         if self.patch_rows:
             self.solve_kernel = {
-                build_rows: _make_solve_patch_contact_tile_kernel(self.contact_dof_width, build_rows)
+                build_rows: _make_solve_patch_contact_tile_kernel(self.contact_dof_width, build_rows, use_depth_warp)
                 for build_rows in (False, True)
             }
         else:
@@ -2796,6 +2828,7 @@ class ReducedContactBlockSystem:
                         wp.int32(self.max_depth),
                         self.articulation_depth_start,
                         self.articulation_depth_joint,
+                        self.joint_parent_lane,
                     ],
                     outputs=[self.generalized_delta, self.generalized_body_delta],
                     block_dim=_BLOCK_DIM,

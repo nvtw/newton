@@ -19,17 +19,18 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <p class="muted">27 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
 <section class="hero">
-<h2>Data-layout result: patch-row traversal is faster</h2>
-<p>Compact patch rows now keep forward tree responses in registers and exchange parent values with subgroup shuffles. This removes the old global-memory response recurrence without changing the ABA or hard-contact equations.</p>
+<h2>Data-layout result: patch traversal is faster</h2>
+<p>Compact patch rows now keep both forward tree responses and solved body deltas in registers, exchanging parent values with subgroup shuffles. This removes two global-memory recurrences without changing the ABA or hard-contact equations.</p>
 <div class="metrics">
 <div class="metric"><strong>-37.4%</strong><span>row builder: 240.1 → 150.3 µs</span></div>
-<div class="metric"><strong>+6.1%</strong><span>fresh production physics bracket</span></div>
-<div class="metric"><strong>+4.4%</strong><span>full PPO candidate/reference/candidate</span></div>
+<div class="metric"><strong>-8–10%</strong><span>each patch-solve kernel</span></div>
+<div class="metric"><strong>+1.5%</strong><span>incremental full PPO gain</span></div>
 </div>
 <ul>
-<li>Randomized 24-step production G1 graph trajectories are bitwise identical to the scalar builder.</li>
+<li>Randomized 24-step production G1 graph trajectories are bitwise identical to the old global-memory paths.</li>
 <li>Randomized rows match exactly on generic 8-, 16-, and 32-lane branched trees.</li>
-<li>Point contacts retain their existing row-parallel builder; forcing this layout there was 9.5% slower.</li>
+<li>Shared and register-cached response-row layouts both regressed about 10% and were removed.</li>
+<li>Point contacts retain their existing row-parallel builder; forcing the compact traversal there was 9.5% slower.</li>
 <li>No further sudo/Nsight command is needed.</li>
 </ul>
 </section>
@@ -42,15 +43,15 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <section>
 <h2>Wall-to-policy state</h2>
 <p>PhoenX throughput is competitive, but it does not yet match nanoG1 wall-to-policy robustly. The retained seed-42 hard-contact policy passes at 141.56M samples / 84.18 s; nanoG1 reports 75.1M / 58.9 s for one seed. Seed 43 variability shows sample efficiency remains the larger gap.</p>
-<p>The current redesign attacks throughput without changing the hard Hertz model. At the measured +4.4% full-PPO gain, 131M samples are roughly a 71 s run under the same benchmark conditions; a fresh long bracket will refine this after the commit.</p>
+<p>The current redesign attacks throughput without changing the hard Hertz model. The latest short full-PPO bracket reaches about 1.90M samples/s, making 131M samples roughly 69 s under the same benchmark conditions; a fresh long bracket will refine this after the commit.</p>
 </section>
 
 <section class="gap">
 <h2>Next</h2>
 <ul>
-<li>Use a new Nsight trace to choose the next broad hotspot; do not start a blanket vec4 rewrite.</li>
-<li>Test another materially different layout only where counters and full-pipeline timing support it.</li>
-<li>Explore a correct multi-wave depth schedule for exceptionally wide trees separately.</li>
+<li>Profile and prototype the advance/publish body-state layout, now the largest single physics hotspot.</li>
+<li>Test interleaving or lifetime elimination against full-pipeline timing; avoid blanket vec4 packing.</li>
+<li>After the layout work, explore a correct multi-wave schedule for exceptionally wide trees.</li>
 </ul>
 </section>
 </main></body></html>
