@@ -169,6 +169,20 @@ Do not retry without new evidence or a materially different design.
   `advance_joint_parent_lane` the kernels already receive, in the same slot
   order, so the next attempt should first assert the packed table against the
   live arrays on device before touching any kernel.
+
+  Third attempt did exactly that and narrowed it further. Ruled out: the packed
+  table is correct (verified against `advance_articulation_depth_joint`,
+  `advance_joint_parent_lane`, `model.joint_qd_start`, `model.joint_child` on a
+  built system -- note the depth order is *not* sorted, e.g. `[0, 1, 3, 2, 4]`,
+  and the build follows it); no packing violations; none of the three arrays is
+  reassigned after construction. A *minimal* variant supplying only `joint` and
+  `parent_lane` from the descriptor, leaving every downstream load untouched,
+  still fails the same 27 tests. So the fault is in the descriptor read path
+  inside the kernels, not the table, the plumbing, or the field packing.
+  Suspect the `desc` value surviving across the `_shuffle_reduced_spatial`
+  calls between the two `if active:` blocks. Next step is a single-kernel
+  probe that writes `desc[0]` and `articulation_depth_joint[index]` to a debug
+  buffer and diffs them, rather than another whole-path conversion.
 - Test a depth-ordered reduced-joint descriptor that coalesces invariant child,
   DOF, type, parent-lane, and child-range metadata only after auditing which
   fields are not already derivable or packed. Require at least 5% on fused
