@@ -1599,6 +1599,18 @@ def _sync_contact_warp(): ...
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
+    return __shfl_sync(0xffffffffu, value, 0);
+#else
+    return value;
+#endif
+"""
+)
+def _broadcast_contact_scalar(value: wp.float32) -> wp.float32: ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
     __syncthreads();
 #endif
 """
@@ -1656,15 +1668,15 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                     lambda0 = cc_get_normal_lambda(cc, contact)
                     lambda1 = cc_get_tangent1_lambda(cc, contact)
                     lambda2 = cc_get_tangent2_lambda(cc, contact)
+                lambda0 = _broadcast_contact_scalar(lambda0)
+                lambda1 = _broadcast_contact_scalar(lambda1)
+                lambda2 = _broadcast_contact_scalar(lambda2)
                 row = wp.int32(3) * point
                 packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
-                broadcast0 = wp.tile_from_thread(shape=max_dofs, value=lambda0, thread_idx=0, storage="shared")
-                broadcast1 = wp.tile_from_thread(shape=max_dofs, value=lambda1, thread_idx=0, storage="shared")
-                broadcast2 = wp.tile_from_thread(shape=max_dofs, value=lambda2, thread_idx=0, storage="shared")
                 response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
                 response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
                 response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
-                generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                generalized_delta += lambda0 * response0 + lambda1 * response1 + lambda2 * response2
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
@@ -1745,13 +1757,13 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                         delta1 = wp.dot(impulse, t0)
                         delta2 = wp.dot(impulse, t1)
 
-                broadcast0 = wp.tile_from_thread(shape=max_dofs, value=delta0, thread_idx=0, storage="shared")
-                broadcast1 = wp.tile_from_thread(shape=max_dofs, value=delta1, thread_idx=0, storage="shared")
-                broadcast2 = wp.tile_from_thread(shape=max_dofs, value=delta2, thread_idx=0, storage="shared")
+                delta0 = _broadcast_contact_scalar(delta0)
+                delta1 = _broadcast_contact_scalar(delta1)
+                delta2 = _broadcast_contact_scalar(delta2)
                 response0 = wp.tile_load(packed_response[packed_row], shape=max_dofs, storage="register")
                 response1 = wp.tile_load(packed_response[packed_row + wp.int32(1)], shape=max_dofs, storage="register")
                 response2 = wp.tile_load(packed_response[packed_row + wp.int32(2)], shape=max_dofs, storage="register")
-                generalized_delta += broadcast0 * response0 + broadcast1 * response1 + broadcast2 * response2
+                generalized_delta += delta0 * response0 + delta1 * response1 + delta2 * response2
 
         wp.tile_store(generalized_delta_out[articulation], generalized_delta)
         if not fuse_apply:
@@ -1908,9 +1920,8 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool, shuff
                     lambda_n = cc_get_normal_lambda(cc, contact)
                 packed_row = packed_articulation * wp.int32(_MAX_ROWS) + point
                 response = wp.tile_load(packed_response[packed_row], shape=packed_width, storage="register")
-                generalized_delta += response * wp.tile_from_thread(
-                    shape=packed_width, value=lambda_n, thread_idx=0, storage="shared"
-                )
+                lambda_n = _broadcast_contact_scalar(lambda_n)
+                generalized_delta += response * lambda_n
 
             point = wp.int32(0)
             column_ordinal = wp.int32(0)
@@ -1933,12 +1944,10 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool, shuff
                 response2 = wp.tile_load(
                     packed_response[packed_row + wp.int32(1)], shape=packed_width, storage="register"
                 )
-                generalized_delta += response1 * wp.tile_from_thread(
-                    shape=packed_width, value=lambda_t[0], thread_idx=0, storage="shared"
-                )
-                generalized_delta += response2 * wp.tile_from_thread(
-                    shape=packed_width, value=lambda_t[1], thread_idx=0, storage="shared"
-                )
+                lambda_t[0] = _broadcast_contact_scalar(lambda_t[0])
+                lambda_t[1] = _broadcast_contact_scalar(lambda_t[1])
+                generalized_delta += response1 * lambda_t[0]
+                generalized_delta += response2 * lambda_t[1]
                 column_ordinal += wp.int32(1)
                 while point < active_point_count and point_column[packed_articulation, point] == column:
                     point += wp.int32(1)
@@ -2006,9 +2015,8 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool, shuff
                         )
                         if speculative and bias > idt * wp.float32(0.002):
                             normal_load[packed_articulation, point] = wp.float32(0.0)
-                generalized_delta += response * wp.tile_from_thread(
-                    shape=packed_width, value=delta_n, thread_idx=0, storage="shared"
-                )
+                delta_n = _broadcast_contact_scalar(delta_n)
+                generalized_delta += response * delta_n
 
             point = wp.int32(0)
             column_ordinal = wp.int32(0)
@@ -2098,12 +2106,10 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool, shuff
                         contact = point_contact[packed_articulation, point + wp.int32(column_point_offset)]
                         cc_set_tangent1_lambda(cc, contact, point_lambda[0])
                         cc_set_tangent2_lambda(cc, contact, point_lambda[1])
-                generalized_delta += response1 * wp.tile_from_thread(
-                    shape=packed_width, value=delta_t[0], thread_idx=0, storage="shared"
-                )
-                generalized_delta += response2 * wp.tile_from_thread(
-                    shape=packed_width, value=delta_t[1], thread_idx=0, storage="shared"
-                )
+                delta_t[0] = _broadcast_contact_scalar(delta_t[0])
+                delta_t[1] = _broadcast_contact_scalar(delta_t[1])
+                generalized_delta += response1 * delta_t[0]
+                generalized_delta += response2 * delta_t[1]
                 column_ordinal += wp.int32(1)
                 while point < active_point_count and point_column[packed_articulation, point] == column:
                     point += wp.int32(1)

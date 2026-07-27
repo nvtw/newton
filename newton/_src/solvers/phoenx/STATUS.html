@@ -1,87 +1,14 @@
 <!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PhoenX Progress</title>
-<style>
-:root{--ink:#172033;--muted:#647087;--line:#dfe6ef;--green:#087f5b;--amber:#9a5b00}
-*{box-sizing:border-box}body{margin:0;background:#f6f8fb;color:var(--ink);font:16px/1.5 system-ui,sans-serif}
-main{width:min(900px,calc(100% - 32px));margin:auto;padding:36px 0 52px}h1{margin:0;font-size:2rem}h2{margin:0 0 7px;font-size:1.15rem}
-p{margin:7px 0}.muted{color:var(--muted)}section{background:#fff;border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-top:13px}
-.hero{border-left:5px solid var(--green)}.gap{border-left:5px solid var(--amber)}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:14px}
-.metric{border:1px solid var(--line);border-radius:8px;padding:13px}.metric strong{display:block;font-size:1.4rem}.metric span{color:var(--muted);font-size:.8rem}
-ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff;padding:2px 5px;border-radius:4px}
-@media(max-width:620px){.metrics{grid-template-columns:1fr}}
-</style>
-</head>
-<body><main>
-<h1>PhoenX performance</h1>
-<p class="muted">27 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
-
-
-<section class="gap">
-<h2>One contact-kernel profile requested</h2>
-<p>The current trace is dominated by the general point-contact row builder, not ABA factorization. Please run this one line; it writes the report plus metric and source CSVs automatically:</p>
-<p><code>sudo /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/benchmarks/profile_g1_contact_rows_ncu.sh</code></p>
-</section>
-
-<section class="hero">
-<h2>Fused advance layout win</h2>
-<p>A fused-only depth/lane scratch layout cuts the retained advance/publish median from 210.35 to 206.16 µs (-2.0%); complete G1 physics reached 2.04M steps/s in the confirming trace, while the external advance remained unchanged at 80.94 µs.</p>
-<p>This directly targets Nsight&apos;s 66.3% long-scoreboard interval and 83% excess memory sectors. It preserves the canonical body-index layout elsewhere, uses the same equations and operation order, and passes serial-oracle 8/16/32-lane plus production G1 analytical tests.</p>
-</section>
-
-<section class="hero">
-<h2>Nsight confirms another layout target</h2>
-<p>The factor-initialization report is valid despite the application exiting afterward; no rerun is needed. The 72.3 µs kernel reaches 62.6% memory/L2 throughput but only 9.4% compute. Uncoalesced packed-inertia traffic creates 10.27M excess sectors out of 12.71M (81%).</p>
-<p>The 6×6 inertia is already symmetric-packed (21 rather than 36 floats). A component-parallel writer regressed full physics 0.4%; packing the source 3×3 tensor from nine to six values saved only 0.9 µs in the initializer and was neutral end to end. Both are removed. The compact AoS layout remains preferable for factor/advance consumers; the next experiment targets a larger consumer directly.</p>
-</section>
-
-<section class="hero">
-<h2>Data-layout result: patch traversal is faster</h2>
-<p>Compact patch rows now keep both forward tree responses and solved body deltas in registers, exchanging parent values with subgroup shuffles. This removes two global-memory recurrences without changing the ABA or hard-contact equations.</p>
-<div class="metrics">
-<div class="metric"><strong>-37.4%</strong><span>row builder: 240.1 → 150.3 µs</span></div>
-<div class="metric"><strong>-8–10%</strong><span>each patch-solve kernel</span></div>
-<div class="metric"><strong>+1.5%</strong><span>incremental full PPO gain</span></div>
-</div>
-<ul>
-<li>Randomized 24-step production G1 graph trajectories are bitwise identical to the old global-memory paths.</li>
-<li>Randomized rows match exactly on generic 8-, 16-, and 32-lane branched trees.</li>
-<li>Shared and register-cached response-row layouts both regressed about 10% and were removed.</li>
-<li>Point contacts retain their existing row-parallel builder; forcing the compact traversal there was 9.5% slower.</li>
-</ul>
-</section>
-
-<section class="hero">
-<h2>Correctness issue found and fixed</h2>
-<p>A pre-existing warp advance silently skipped joints when one tree depth contained more than 32 joints. A 62-child test differed from serial ABA by as much as 0.604 rad/s. Such trees now select the exact serial advance; the extended regression is bitwise exact. A future multi-wave/grid-stride design can restore parallel speed without weakening this guard.</p>
-</section>
-
-<section>
-<h2>Wall-to-policy state</h2>
-<p>PhoenX throughput is competitive, but it does not yet match nanoG1 wall-to-policy robustly. The retained seed-42 hard-contact policy passes at 141.56M samples / 84.18 s; nanoG1 reports 75.1M / 58.9 s for one seed. Seed 43 variability shows sample efficiency remains the larger gap.</p>
-<p>The current redesign attacks throughput without changing the hard Hertz model. The latest short full-PPO bracket reaches about 1.90M samples/s, making 131M samples roughly 69 s under the same benchmark conditions; a fresh long bracket will refine this after the commit.</p>
-</section>
-
-<section>
-<h2>Retained learner-layout result</h2>
-<p>Sparse FP32 MinGRU checkpoints plus four-step register recomputation preserve the recurrence equations. Nsight measures forward at 53.2 → 43.9 µs (-17%); backward is neutral at 110.9 → 111.2 µs. Randomized reset-boundary outputs and gradients are bitwise exact, graph replay is deterministic, and the final full G1 run reaches 1.887M samples/s versus the 1.869M/s pre-change trace.</p>
-</section>
-
-<section>
-<h2>Current data-layout focus</h2>
-<p>The BF16 MinGRU activation layout is qualified: projection storage falls 151.0 → 75.5 MB, isolated forward/backward improves 0.776 → 0.730 ms, and full PPO improves 0.8%. Seed 42 passed the 131.072M-sample gate with zero falls and 0.918 battery performance in 70.64 s training. A noisy 39M-sample seed-29 screen rejected both BF16 and the retained FP32-projection control; paired frozen-policy evaluation is next.</p>
-</section>
-
-<section class="gap">
-<h2>Latest ABA result</h2>
-<ul>
-<li>Advance write-lifetime reduction was rejected: the broad version averaged +0.14%; the cleaner internal-only version regressed 2%.</li>
-<li>Packing joint work into inverse-factor rows was neutral (+0.08%) and removed.</li>
-<li>Topology-width specialization reduces fused advance/publish 211.8 → 206.8 µs (-2.4%); eight interleaved production pairs improve environment stepping 1.03%.</li>
-<li>The external advance did not improve and retains its general kernel.</li>
-<li>After the layout work, explore a correct multi-wave schedule for exceptionally wide trees.</li>
-</ul>
-</section>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PhoenX Progress</title><style>
+:root{--ink:#172033;--muted:#647087;--line:#dfe6ef;--green:#087f5b;--amber:#9a5b00}*{box-sizing:border-box}body{margin:0;background:#f6f8fb;color:var(--ink);font:16px/1.5 system-ui,sans-serif}main{width:min(880px,calc(100% - 32px));margin:auto;padding:34px 0 50px}h1{margin:0;font-size:2rem}h2{margin:0 0 7px;font-size:1.15rem}p{margin:7px 0}.muted{color:var(--muted)}section{background:#fff;border:1px solid var(--line);border-radius:10px;padding:17px 19px;margin-top:13px}.good{border-left:5px solid var(--green)}.open{border-left:5px solid var(--amber)}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:12px}.metric{border:1px solid var(--line);border-radius:8px;padding:12px}.metric strong{display:block;font-size:1.35rem}.metric span{color:var(--muted);font-size:.8rem}ul{margin:7px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff;padding:2px 5px;border-radius:4px}@media(max-width:620px){.metrics{grid-template-columns:1fr}}
+</style></head><body><main>
+<h1>PhoenX performance</h1><p class="muted">27 July 2026 · <code>twidmer/phoenx-bandwidth-wins</code></p>
+<section class="open"><h2>No user action pending</h2><p>No sudo rerun is needed. Current work is driven by the saved Nsight reports and matched A/B measurements.</p></section>
+<section class="good"><h2>Warp-shuffle contact solve</h2><div class="metrics"><div class="metric"><strong>+2.82%</strong><span>point-contact G1 physics</span></div><div class="metric"><strong>36 → 6</strong><span>point-solve PTX barriers</span></div><div class="metric"><strong>38 → 14</strong><span>patch-solve PTX barriers</span></div></div><p>One-warp contact solvers now broadcast lane-0 scalars with <code>__shfl_sync</code> instead of shared <code>tile_from_thread</code> tiles. The point-contact A/B/B/A bracket improved 1.376M → 1.415M steps/s at identical 524,288 contacts. Determinism, width-selection, fused-apply, and G1 patch trajectory tests pass. Patch end-to-end timing is roughly neutral to +1%.</p></section>
+<section class="good"><h2>Contact-row bottleneck</h2><div class="metrics"><div class="metric"><strong>932 µs</strong><span>focused row-builder duration</span></div><div class="metric"><strong>78.7%</strong><span>cycles with no eligible warp</span></div><div class="metric"><strong>72.5%</strong><span>global sectors excessive</span></div></div><p>Nsight reports 52.8% DRAM versus 26.2% compute, 64 registers/thread, and long-scoreboard stalls. Six strided loads plus six stores of the ABA body-response workspace account for about 94% of excessive sectors.</p></section>
+<section><h2>Memory-layout experiments</h2><ul><li>Two row-contiguous <code>vec4</code> planes: Warp scalarized normal accesses; forced 128-bit PTX still made the heavy kernel about 17% slower because six floats became 32 bytes.</li><li>Three <code>vec2</code> planes: padding-free, but end-to-end remained about 3.5% below the adjacent baseline.</li><li>Six scalar planes with raw-pointer access: regressed to 1.81M steps/s. Perfect coalescing did not repay six distant streams and dependency latency.</li><li>Explicit consecutive-parent register reuse also regressed the row builder 0.3% and was removed.</li><li>All rejected Newton solver experiments are removed.</li></ul></section>
+<section class="good"><h2>Warp <code>array_noalias</code> verdict</h2><p>The feature is correct and now propagates through nested <code>wp.func</code> calls. It removes redundant loads in its PTX regression. On real G1 physics:</p><ul><li>Largest row builder: neutral (about 912 versus 911 µs, 64 registers both).</li><li>Generalized contact solver: repeatable 1.8–2.0% kernel win and 86 → 84 registers/thread.</li><li>Packed gather: rejected at +1.3% kernel time.</li><li>Long end-to-end brackets: about 1.0% mean gain.</li></ul><p>Keep the Warp changes only as an uncommitted research branch; current evidence is not large enough to recommend merging. General forced vec4 widening was below 1% in a synthetic oracle and has been removed from Warp.</p></section>
+<section><h2>Retained progress</h2><ul><li>Depth/lane fused ABA scratch: advance/publish 210.35 → 206.16 µs (−2.0%); confirming complete G1 trace reached about 2.04M steps/s.</li><li>Compact patch traversal: row builder −37.4%, patch solve −8–10%, full PPO about +1.5%.</li><li>Wide-tree correctness guard fixes skipped joints above 32 joints/depth; serial-oracle regression is bitwise exact.</li><li>PhoenX remains competitive but does not yet robustly match nanoG1 wall-to-policy; hard Hertz contact remains unchanged.</li></ul></section>
+<section class="open"><h2>Next</h2><p>Commit the validated shuffle win, then test single-pass contact gather: reuse already-computed contact geometry instead of recomputing it for bias preparation. Keep experimental <code>array_noalias</code> out of PhoenX unless future evidence exceeds the current ~1%.</p></section>
 </main></body></html>

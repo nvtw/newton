@@ -43,6 +43,7 @@ Detailed experiment histories belong in benchmark output, not here.
 | Inertia | Symmetric-packed body and reduced inertia | Preserve exact unpacking and alignment. |
 | Reduced ABA | Remove unused inertia stores; parallel momentum capture | Retained by full physics tests. |
 | Reduced contacts | Topology-selected packed gather and recomputed path Jacobian | Better than resident/path-sparse row storage. |
+| Reduced contacts | Warp-shuffle scalar broadcasts in one-warp contact solves | Removes shared-tile barriers without changing arithmetic. Point-contact G1 improved about 2.82% end to end. |
 | Coloring | Deterministic per-world greedy/direct endpoint ownership | Large gain for many small worlds; retain fallback above 64 colors. |
 | Scheduling | Adaptive threads per world and block-world scheduler | Select by workload; no universal scheduler wins. |
 | Solver | Fast-tail specializations, zero velocity-iteration support, per-substep inertia refresh | Required correctness/performance behavior. |
@@ -104,6 +105,8 @@ Do not retry without new evidence or a materially different design.
 | Small algebra/function-extraction rewrites | Neutral or negative generated code. |
 | Lean greedy fixed-iteration coloring | Incorrect or slower on difficult graphs. |
 | Patch-row cooperative traversal/layout rewrites | Sparse dependent access remained dominant. |
+| Warp `array_noalias` annotations | Generalized solve improved about 1.8%, but contact rows were neutral, packed gather regressed about 1.3%, and settled G1 physics improved only about 1%. Do not depend on the experimental Warp branch. |
+| Forced vec4 response layouts | Wide PTX loads/stores were emitted, but the best isolated vector-load gain was below 1% and every tested PhoenX response layout regressed end to end. |
 | Always use coalesced packed-response transpose | Production throughput fell about 6.6%. |
 | Tensor-core rollout crossover at 8,192 rows | Faster iterations but about 11% worse wall-to-quality; removed. |
 | Active-action-only PPO likelihood | Changed the objective and failed training evidence. |
