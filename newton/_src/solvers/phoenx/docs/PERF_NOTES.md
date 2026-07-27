@@ -499,3 +499,42 @@ These later results supersede the early FP16/contact-row prioritization:
   velocity-level mass splitting, independent of whether its slots were
   produced by joints or contacts. Reduced-coordinate articulation blocks and
   the generic mixed/deformable synchronization path are unchanged.
+
+- Kapla's production grid launches 48,128 threads although its eight regular
+  colors contain only 4,287--5,535 constraints; overflow contains 32,256.
+  Reducing residency to 4/2/1 blocks per SM measured 83.78/82.28/75.99 FPS
+  versus 85.09--86.58 at 8 blocks per SM. A real-distribution next-column
+  prefetch oracle was neutral with one item per thread and 25--33% slower with
+  2--3 items per thread; its PTX also had substantially more live registers.
+  Both production ideas were rejected and removed.
+
+- A fresh current-recipe G1 trace at 8,192 worlds assigns about 30% of GPU time
+  to reduced advance/publication, 13.9% to packed patch-row construction,
+  19.9% to the two contact-solve variants, 9.5% to factorization, and 6.2% to
+  factor initialization. Omitting the final internal twist-workspace store
+  from fused publication reduced that kernel's median 200.35 to 198.09 us
+  (1.1%), but complete throughput remained about 2.52M environment steps/s in
+  the matched bracket. The candidate was removed as too small.
+
+- Specializing the packed patch-row kernel for its already-selected 8-thread
+  articulation tile did not improve G1 throughput. Seven candidate/control
+  runs measured medians of 2.49936/2.49967M environment steps/s (-0.01%).
+  Runtime tile-width division, masks, and shuffle width are therefore not a
+  material bottleneck; the factory specialization was removed.
+
+- Replacing the packed-row topology chase with full-size depth-ordered arrays
+  increased its median from 150.24 to 160.59 us (+6.9%) and reduced complete
+  G1 throughput about 1.1%. It preserved the number of PTX topology loads while
+  increasing address state and footprint, so it was removed.
+
+- Deduplicating repeated topology signatures and packing local joint offset,
+  DOF offset/count, and parent lane into one aligned `vec4i` descriptor did
+  emit `ld.global.v4.u32` and reduced the packed-row median from 150.24 to
+  143.05 us (-4.8%). It passed byte-exact G1 scalar trajectory parity,
+  heterogeneous-template checks, 8/16/32-wide scalar parity, mixed
+  reduced/maximal contacts, analytical G1 torque, full-coordinate
+  determinism, and momentum conservation. The final close bracket improved
+  complete throughput only from 2.51573 to 2.52157M environment steps/s
+  (+0.23%), too little for the added representation and native accessor. The
+  production candidate was removed; reuse by the larger reduced-advance walk
+  is the only justified follow-up.
