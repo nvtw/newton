@@ -16,6 +16,9 @@ Port of C# ``MassSplitting`` substep helpers
 * :func:`launch_average_and_broadcast_grouped` -- CUDA fast path for
   the same operation, using one warp block per node with a fixed tile
   reduction and cooperative slot writes.
+* :func:`launch_average_and_broadcast_rigid_velocity` -- velocity-only
+  rigid specialization. CUDA uses eight-lane groups with scalar-order
+  shuffle gathers; CPU retains the scalar implementation.
 * :func:`launch_copy_state_into_rigids` -- once post-PGS. Writes
   slot[0]'s averaged velocity back to body / particle storage.
 
@@ -256,6 +259,72 @@ _average_and_broadcast_kernel = _make_average_and_broadcast_kernel(velocity_only
 _average_and_broadcast_rigid_velocity_kernel = _make_average_and_broadcast_kernel(velocity_only=True)
 
 
+_SUBGROUP_ACCUMULATE8_VEC3_CODE = "\n".join(
+    (
+        "#if defined(__CUDA_ARCH__)",
+        "for (int source = 0; source < 8; ++source) {",
+        "    accumulator[0] += __shfl_sync(mask, value[0], source, 8);",
+        "    accumulator[1] += __shfl_sync(mask, value[1], source, 8);",
+        "    accumulator[2] += __shfl_sync(mask, value[2], source, 8);",
+        "}",
+        "#else",
+        "accumulator += value;",
+        "#endif",
+        "return accumulator;",
+    )
+)
+
+
+@wp.func_native(_SUBGROUP_ACCUMULATE8_VEC3_CODE)
+def _subgroup_accumulate8_vec3(
+    accumulator: wp.vec3f,
+    value: wp.vec3f,
+    mask: wp.uint32,
+) -> wp.vec3f: ...
+
+
+@wp.kernel(enable_backward=False)
+def _average_and_broadcast_rigid_velocity_subgroup_kernel(copy_state: CopyStateContainer):
+    tid = wp.tid()
+    node_id = tid // wp.int32(8)
+    lane = tid & wp.int32(7)
+    if node_id >= copy_state.section_end.shape[0]:
+        return
+
+    count = copy_state.count_per_node[node_id]
+    if count <= wp.int32(1):
+        return
+    start = wp.int32(0)
+    if node_id > wp.int32(0):
+        start = copy_state.section_end[node_id - wp.int32(1)]
+    end = start + count
+
+    mask = wp.uint32(255) << wp.uint32(tid & wp.int32(24))
+    sum_v = wp.vec3f(0.0)
+    sum_w = wp.vec3f(0.0)
+    chunk = start
+    while chunk < end:
+        value_v = wp.vec3f(0.0)
+        value_w = wp.vec3f(0.0)
+        slot = chunk + lane
+        if slot < end:
+            value_v = copy_state.velocity[slot]
+            value_w = copy_state.angular_velocity[slot]
+        # Gather in source-lane order to preserve the scalar kernel sum exactly.
+        sum_v = _subgroup_accumulate8_vec3(sum_v, value_v, mask)
+        sum_w = _subgroup_accumulate8_vec3(sum_w, value_w, mask)
+        chunk += wp.int32(8)
+
+    inv_count = wp.float32(1.0) / wp.float32(count)
+    avg_v = sum_v * inv_count
+    avg_w = sum_w * inv_count
+    slot = start + lane
+    while slot < end:
+        copy_state.velocity[slot] = avg_v
+        copy_state.angular_velocity[slot] = avg_w
+        slot += wp.int32(8)
+
+
 @wp.kernel(enable_backward=False)
 def _average_and_broadcast_grouped_kernel(
     copy_state: CopyStateContainer,
@@ -474,12 +543,22 @@ def launch_average_and_broadcast_rigid_velocity(
 ) -> None:
     """Launch the rigid-only velocity-level average/broadcast specialization."""
     num_nodes = copy_state.section_end.shape[0]
+    device = copy_state.section_end.device
+    if device.is_cuda:
+        wp.launch(
+            _average_and_broadcast_rigid_velocity_subgroup_kernel,
+            dim=num_nodes * 8,
+            inputs=[copy_state],
+            block_dim=128,
+            device=device,
+        )
+        return
     wp.launch(
         _average_and_broadcast_rigid_velocity_kernel,
         dim=num_nodes,
         inputs=[copy_state, bodies, particles, wp.int32(num_bodies), wp.float32(inv_dt)],
         block_dim=_MASS_SPLITTING_PER_NODE_BLOCK_DIM,
-        device=copy_state.section_end.device,
+        device=device,
     )
 
 

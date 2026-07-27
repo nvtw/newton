@@ -479,3 +479,23 @@ These later results supersede the early FP16/contact-row prioritization:
   chunks took 10.03 us (-19%). Cross-thread SoA coalescing is more valuable
   than per-thread row locality for this access pattern; no production code was
   changed.
+
+- An eight-lane cooperative manifold oracle improved row fetch and sequential
+  projection about 19.5% using width-eight shuffles. The real regular-color
+  implementation preserved the packed-row dynamics tests but reduced matched
+  Kapla throughput from 83.7 to 78.2 FPS (-6.6%). Assigning eight lanes per
+  manifold reduced available manifold-level parallelism and increased register
+  demand more than coalescing repaid. The implementation was removed.
+
+- A fresh whole-frame Kapla trace assigned 49.2% of GPU time to repeated PGS,
+  9.7% to prepare, 6.3% each to rigid mass-splitting average/broadcast and
+  relax, 13.9% to collision sort/broad/narrow phase, and about 4% to graph
+  selection/commit. An eight-lane rigid average/broadcast specialization
+  reduced its real-copy-state kernel from 6.23--6.30 to 4.10--4.30 us
+  (32--35%). Source-lane-ordered shuffle gathers are byte-exact to the scalar
+  sum for randomized copy counts 0--33. Candidate/control/candidate Kapla
+  measured 86.35/84.20/86.21 FPS, a 2.47% candidate-mean gain with identical
+  contact counts and motion diagnostics. This path is selected by rigid
+  velocity-level mass splitting, independent of whether its slots were
+  produced by joints or contacts. Reduced-coordinate articulation blocks and
+  the generic mixed/deformable synchronization path are unchanged.

@@ -243,6 +243,36 @@ class TestBroadcastAverage(unittest.TestCase):
         np.testing.assert_array_equal(cs_rigid.velocity.numpy()[:5], cs_scalar.velocity.numpy()[:5])
         np.testing.assert_array_equal(cs_rigid.angular_velocity.numpy()[:5], cs_scalar.angular_velocity.numpy()[:5])
 
+    def test_rigid_velocity_average_matches_scalar_across_subgroups(self):
+        device = wp.get_preferred_device()
+        counts = (0, 1, 2, 7, 8, 9, 21, 33)
+        num_bodies = len(counts)
+        capacity = sum(counts)
+        bodies = body_container_zeros(num_bodies=num_bodies, device=device)
+        particles = particle_container_zeros(num_particles=1, device=device)
+        bodies.access_mode.fill_(int(ACCESS_MODE_VELOCITY_LEVEL))
+        cs_scalar = copy_state_container_zeros(capacity=capacity, num_nodes=num_bodies, device=device)
+        cs_rigid = copy_state_container_zeros(capacity=capacity, num_nodes=num_bodies, device=device)
+        scratch = interaction_graph_scratch_zeros(capacity=capacity, device=device)
+        pairs = [(node, partition) for node, count in enumerate(counts) for partition in range(count)]
+        for copy_state in (cs_scalar, cs_rigid):
+            _seed_pairs_direct(scratch, pairs, device)
+            build_interaction_graph(scratch, copy_state)
+            launch_broadcast_rigid_to_copy_states(copy_state, bodies, particles, num_bodies, 0.01)
+
+        rng = np.random.default_rng(seed=20260727)
+        velocity = rng.normal(size=(capacity, 3)).astype(np.float32)
+        angular_velocity = rng.normal(size=(capacity, 3)).astype(np.float32)
+        for copy_state in (cs_scalar, cs_rigid):
+            copy_state.velocity.assign(velocity)
+            copy_state.angular_velocity.assign(angular_velocity)
+
+        launch_average_and_broadcast(cs_scalar, bodies, particles, num_bodies, 100.0)
+        launch_average_and_broadcast_rigid_velocity(cs_rigid, bodies, particles, num_bodies, 100.0)
+
+        np.testing.assert_array_equal(cs_rigid.velocity.numpy(), cs_scalar.velocity.numpy())
+        np.testing.assert_array_equal(cs_rigid.angular_velocity.numpy(), cs_scalar.angular_velocity.numpy())
+
     def test_grouped_average_matches_scalar(self):
         device = wp.get_preferred_device()
         capacity = 16
