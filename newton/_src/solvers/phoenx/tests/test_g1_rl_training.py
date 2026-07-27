@@ -59,7 +59,12 @@ from newton._src.solvers.phoenx.experimental.nanog1_import import (
 )
 from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
-from newton._src.solvers.phoenx.rl_training.cublas import gemm_bfloat16, gemm_float32, is_cublas_available
+from newton._src.solvers.phoenx.rl_training.cublas import (
+    gemm_bfloat16,
+    gemm_bfloat16_output,
+    gemm_float32,
+    is_cublas_available,
+)
 from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 from newton._src.solvers.phoenx.rl_training.examples import (
     train_g1_command_curriculum,
@@ -3010,11 +3015,13 @@ class TestG1PhoenXRL(unittest.TestCase):
         rhs = wp.array(rhs_np, dtype=wp.bfloat16, device=device)
         grad = wp.array(grad_np, dtype=wp.bfloat16, device=device)
         forward = wp.empty((64, 48), dtype=wp.float32, device=device)
+        forward_bf16 = wp.empty((64, 48), dtype=wp.bfloat16, device=device)
         weight_grad = wp.empty((32, 48), dtype=wp.float32, device=device)
         input_grad = wp.empty((64, 32), dtype=wp.float32, device=device)
 
         with wp.ScopedCapture(device=device) as capture:
             gemm_bfloat16(lhs, rhs, forward, 64, 48, 32)
+            gemm_bfloat16_output(lhs, rhs, forward_bf16, 64, 48, 32)
             gemm_bfloat16(lhs, grad, weight_grad, 32, 48, 64, transpose_lhs=True)
             gemm_bfloat16(grad, rhs, input_grad, 64, 32, 48, transpose_rhs=True)
         wp.capture_launch(capture.graph)
@@ -3022,13 +3029,15 @@ class TestG1PhoenXRL(unittest.TestCase):
         lhs_rounded = lhs.numpy().astype(np.float32)
         rhs_rounded = rhs.numpy().astype(np.float32)
         grad_rounded = grad.numpy().astype(np.float32)
-        np.testing.assert_allclose(forward.numpy(), lhs_rounded @ rhs_rounded, rtol=2.0e-3, atol=2.0e-4)
+        expected_forward = lhs_rounded @ rhs_rounded
+        np.testing.assert_allclose(forward.numpy(), expected_forward, rtol=2.0e-3, atol=2.0e-4)
+        np.testing.assert_allclose(forward_bf16.numpy(), expected_forward, rtol=8.0e-3, atol=1.0e-3)
         np.testing.assert_allclose(weight_grad.numpy(), lhs_rounded.T @ grad_rounded, rtol=2.0e-3, atol=2.0e-4)
         np.testing.assert_allclose(input_grad.numpy(), grad_rounded @ rhs_rounded.T, rtol=2.0e-3, atol=2.0e-4)
 
-        first = (forward.numpy(), weight_grad.numpy(), input_grad.numpy())
+        first = (forward.numpy(), forward_bf16.numpy(), weight_grad.numpy(), input_grad.numpy())
         wp.capture_launch(capture.graph)
-        for actual, expected in zip((forward, weight_grad, input_grad), first, strict=True):
+        for actual, expected in zip((forward, forward_bf16, weight_grad, input_grad), first, strict=True):
             np.testing.assert_array_equal(actual.numpy(), expected)
 
     def test_cublas_float32_contractions_match_numpy_in_graph(self) -> None:
@@ -3355,6 +3364,8 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         self.assertEqual(bf16.manual_forward_dtype, "bfloat16")
         self.assertIsNotNone(bf16._manual_encoder_weight_bf16)
+        self.assertFalse(bf16._manual_combined)
+        self.assertEqual(len(bf16._manual_combined_bf16), 1)
         np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=2.0e-2, atol=2.0e-2)
 
     def test_bf16_tiled_mlp_forward_matches_numpy_in_graph(self) -> None:

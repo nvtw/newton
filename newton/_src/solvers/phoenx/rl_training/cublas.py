@@ -105,13 +105,14 @@ def is_cublas_available(device: wp.context.Device) -> bool:
 def _gemm(
     lhs: wp.array2d[wp.bfloat16] | wp.array2d[wp.float32],
     rhs: wp.array2d[wp.bfloat16] | wp.array2d[wp.float32],
-    out: wp.array2d[wp.float32],
+    out: wp.array2d[wp.bfloat16] | wp.array2d[wp.float32],
     rows: int,
     cols: int,
     inner: int,
     input_type: int,
     transpose_lhs: bool,
     transpose_rhs: bool,
+    output_type: int = _CUDA_R_32F,
 ) -> None:
     cublas = _get_cublas()
     if cublas is None:
@@ -143,7 +144,7 @@ def _gemm(
             lhs_stride,
             ctypes.byref(_beta),
             ctypes.c_void_p(out.ptr),
-            _CUDA_R_32F,
+            output_type,
             cols,
             _CUBLAS_COMPUTE_32F,
             _CUBLAS_GEMM_DEFAULT,
@@ -166,6 +167,33 @@ def gemm_bfloat16(
     """Enqueue a row-major BF16 GEMM with FP32 accumulation and output."""
 
     _gemm(lhs, rhs, out, rows, cols, inner, _CUDA_R_16BF, transpose_lhs, transpose_rhs)
+
+
+def gemm_bfloat16_output(
+    lhs: wp.array2d[wp.bfloat16],
+    rhs: wp.array2d[wp.bfloat16],
+    out: wp.array2d[wp.bfloat16],
+    rows: int,
+    cols: int,
+    inner: int,
+    *,
+    transpose_lhs: bool = False,
+    transpose_rhs: bool = False,
+) -> None:
+    """Enqueue a row-major BF16 GEMM with FP32 accumulation and BF16 output."""
+
+    _gemm(
+        lhs,
+        rhs,
+        out,
+        rows,
+        cols,
+        inner,
+        _CUDA_R_16BF,
+        transpose_lhs,
+        transpose_rhs,
+        output_type=_CUDA_R_16BF,
+    )
 
 
 def gemm_float32(

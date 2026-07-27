@@ -54,6 +54,7 @@ Detailed experiment histories belong in benchmark output, not here.
 | RL rollout | FP32 cuBLAS for large dense contractions | 8192x91x128: 0.0287 -> 0.0082 ms; 8192x256x384: 0.3467 -> 0.0402 ms; about +1.82% matched training throughput. |
 | RL optimizer | cuBLAS Muon Gram contractions | Bounded update trace 43.9 -> 27.6 ms; same-session update graphs 98.18 -> 95.30 ms. |
 | RL recurrence | Four-step sparse FP32 checkpoints with register recomputation | MinGRU forward 53.2 -> 43.9 us; backward neutral at 110.9 -> 111.2 us; randomized reset-boundary outputs and gradients are bitwise exact. |
+| RL activations | BF16 MinGRU projection slabs with FP32 recurrence/accumulation | Production storage 151.0 -> 75.5 MB; isolated forward/backward 0.776 -> 0.730 ms; full A/B/B/A 1.887M -> 1.902M samples/s. Seed 42 passed the 131.072M-sample frozen gate. |
 | Diagnostics | Fixed-order rollout reductions | Deterministic and much faster than contended atomics at production scale. |
 
 ## Representative production profiles
@@ -109,12 +110,14 @@ Do not retry without new evidence or a materially different design.
 | Publication traversal fusion | Enlarged live state; fused advance/publish regressed about 2%. |
 | Skip advance outputs overwritten by publication | Suppressing both outputs averaged only +0.14% with a divergent branch; suppressing only dead internal twists regressed about 2%. Removed. |
 | Pack scalar joint work into inverse-factor rows | Same 28-byte footprint but only +0.08% in the production graph; retained SoA layout. |
+| Depth-local reduced scalar/factor repacking | Scalar depth order was neutral; global inertia-component SoA was 75% slower; compact depth AoSoA and split joint-u/d storage were neutral. |
+| Reuse checkpoint MinGRU kernel for read-only sequences | Only a 1.1% forward-subphase change and no measurable full-training gain. |
 
 ## Open ideas
 
 - Improve reuse of topology/factor data within dependent packed-row traversal.
-- Test world-interleaved hot joint/body fields only with transaction and
-  end-to-end measurements; padding-only vec4 experiments regressed.
+- Test truly world-interleaved hot joint/body fields only if profiling identifies
+  repeated scalar transactions; depth-local packing and vec4 padding already lost.
 - Benchmark FP32 cuBLAS backward contractions for non-production FP32 learner
   configurations.
 - Benchmark complete Muon Newton--Schulz steps before routing its remaining

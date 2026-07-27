@@ -334,9 +334,9 @@ def mingru_sequence_forward_initial_kernel(
         out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
 
 
-@wp.kernel
+@wp.kernel(module="unique")
 def mingru_sequence_forward_checkpoint_kernel(
-    combined: wp.array2d[wp.float32],
+    combined: wp.array2d[Any],
     x: wp.array2d[wp.float32],
     dones: wp.array[wp.float32],
     use_dones: wp.int32,
@@ -357,9 +357,9 @@ def mingru_sequence_forward_checkpoint_kernel(
         row = step * num_envs + env
         if use_dones != wp.int32(0) and step > wp.int32(0) and dones[row - num_envs] > wp.float32(0.5):
             recurrent = wp.float32(0.0)
-        hidden_pre = combined[row, hidden]
-        gate_pre = combined[row, hidden_dim + hidden]
-        proj_pre = combined[row, wp.int32(2) * hidden_dim + hidden]
+        hidden_pre = wp.float32(combined[row, hidden])
+        gate_pre = wp.float32(combined[row, hidden_dim + hidden])
+        proj_pre = wp.float32(combined[row, wp.int32(2) * hidden_dim + hidden])
         candidate = _mingru_hidden_candidate(hidden_pre)
         gate = _sigmoid(gate_pre)
         recurrent = recurrent + gate * (candidate - recurrent)
@@ -373,7 +373,7 @@ def mingru_sequence_forward_checkpoint_kernel(
 
 @wp.kernel(module="unique")
 def mingru_sequence_backward_checkpoint_kernel(
-    combined: wp.array2d[wp.float32],
+    combined: wp.array2d[Any],
     x: wp.array2d[wp.float32],
     recurrent_checkpoints: wp.array2d[wp.float32],
     grad_out: wp.array2d[wp.float32],
@@ -411,8 +411,8 @@ def mingru_sequence_backward_checkpoint_kernel(
                 row = step * num_envs + env
                 if use_dones != wp.int32(0) and step > wp.int32(0) and dones[row - num_envs] > wp.float32(0.5):
                     recurrent_value = wp.float32(0.0)
-                hidden_pre = combined[row, hidden]
-                gate_pre = combined[row, hidden_dim + hidden]
+                hidden_pre = wp.float32(combined[row, hidden])
+                gate_pre = wp.float32(combined[row, hidden_dim + hidden])
                 candidate = _mingru_hidden_candidate(hidden_pre)
                 gate = _sigmoid(gate_pre)
                 recurrent_value = recurrent_value + gate * (candidate - recurrent_value)
@@ -434,8 +434,8 @@ def mingru_sequence_backward_checkpoint_kernel(
                 if reset_before:
                     prev_recurrent = wp.float32(0.0)
 
-                hidden_pre = combined[row, hidden]
-                proj_pre = combined[row, wp.int32(2) * hidden_dim + hidden]
+                hidden_pre = wp.float32(combined[row, hidden])
+                proj_pre = wp.float32(combined[row, wp.int32(2) * hidden_dim + hidden])
                 candidate = candidate_values[offset]
                 gate = gate_values[offset]
                 current_recurrent = recurrent_values[offset]

@@ -9,7 +9,7 @@ from itertools import pairwise
 import numpy as np
 import warp as wp
 
-from .cublas import gemm_bfloat16, gemm_float32, is_cublas_available
+from .cublas import gemm_bfloat16, gemm_bfloat16_output, gemm_float32, is_cublas_available
 from .kernels import (
     ACTIVATION_ELU,
     ACTIVATION_LINEAR,
@@ -808,6 +808,7 @@ class PufferMinGRUNet:
         self._manual_input: wp.array2d[wp.float32] | None = None
         self._manual_encoder_out: wp.array2d[wp.float32] | None = None
         self._manual_combined: list[wp.array2d[wp.float32]] = []
+        self._manual_combined_bf16: list[wp.array2d[wp.bfloat16]] = []
         self._manual_outputs: list[wp.array2d[wp.float32]] = []
         self._manual_recurrent: list[wp.array2d[wp.float32]] = []
         self._manual_decoder_out: wp.array2d[wp.float32] | None = None
@@ -997,17 +998,29 @@ class PufferMinGRUNet:
         )
         use_initial_state = int(self._manual_initial_state is not None)
         for layer, weight in enumerate(self.recurrent_weights):
-            combined = self._manual_combined[layer]
             out = self._manual_outputs[layer]
-            self._linear_forward(
-                h,
-                weight,
-                self._zero_combined,
-                rows,
-                combined,
-                self._manual_recurrent_input_bf16[layer] if self._manual_recurrent_input_bf16 else None,
-                self._manual_recurrent_weight_bf16[layer] if self._manual_recurrent_weight_bf16 else None,
-            )
+            use_bf16_combined = bool(self._manual_combined_bf16)
+            if use_bf16_combined:
+                combined = self._manual_combined_bf16[layer]
+                self._linear_forward_bf16_output(
+                    h,
+                    weight,
+                    rows,
+                    combined,
+                    self._manual_recurrent_input_bf16[layer],
+                    self._manual_recurrent_weight_bf16[layer],
+                )
+            else:
+                combined = self._manual_combined[layer]
+                self._linear_forward(
+                    h,
+                    weight,
+                    self._zero_combined,
+                    rows,
+                    combined,
+                    self._manual_recurrent_input_bf16[layer] if self._manual_recurrent_input_bf16 else None,
+                    self._manual_recurrent_weight_bf16[layer] if self._manual_recurrent_weight_bf16 else None,
+                )
             wp.launch(
                 mingru_sequence_forward_checkpoint_kernel,
                 dim=(envs, self.hidden_size),
@@ -1079,6 +1092,7 @@ class PufferMinGRUNet:
         use_initial_state = int(self._manual_initial_state is not None)
         for layer in reversed(range(self.num_layers)):
             x_in = self._manual_encoder_out if layer == 0 else self._manual_outputs[layer - 1]
+            combined = self._manual_combined_bf16[layer] if self._manual_combined_bf16 else self._manual_combined[layer]
             grad_combined = self._manual_grad_combined[layer]
             grad_combined_bf16 = self._manual_recurrent_grad_bf16[layer] if self._manual_recurrent_grad_bf16 else None
             grad_highway = self._manual_grad_highway[layer]
@@ -1095,7 +1109,7 @@ class PufferMinGRUNet:
                 mingru_sequence_backward_checkpoint_kernel,
                 dim=(envs, self.hidden_size),
                 inputs=[
-                    self._manual_combined[layer],
+                    combined,
                     x_in,
                     self._manual_recurrent[layer],
                     grad_h,
@@ -1225,6 +1239,32 @@ class PufferMinGRUNet:
                 device=self.device,
             )
 
+    def _linear_forward_bf16_output(
+        self,
+        x: wp.array2d[wp.float32],
+        weight: wp.array2d[wp.float32],
+        rows: int,
+        out: wp.array2d[wp.bfloat16],
+        x_bf16: wp.array2d[wp.bfloat16],
+        weight_bf16: wp.array2d[wp.bfloat16],
+    ) -> None:
+        in_dim = int(weight.shape[0])
+        wp.launch(
+            cast_2d_float_to_bfloat16_kernel,
+            dim=(rows, in_dim),
+            inputs=[x],
+            outputs=[x_bf16],
+            device=self.device,
+        )
+        wp.launch(
+            cast_2d_float_to_bfloat16_kernel,
+            dim=weight.shape,
+            inputs=[weight],
+            outputs=[weight_bf16],
+            device=self.device,
+        )
+        gemm_bfloat16_output(x_bf16, weight_bf16, out, rows, int(weight.shape[1]), in_dim)
+
     def _uses_f32_cublas_linear_forward(self, rows: int, out_dim: int) -> bool:
         return self._use_cublas and rows >= _F32_CUBLAS_FORWARD_MIN_BATCH and out_dim >= 64
 
@@ -1314,9 +1354,23 @@ class PufferMinGRUNet:
             return
         self._manual_capacity = rows
         self._manual_encoder_out = wp.empty((rows, self.hidden_size), dtype=wp.float32, device=self.device)
-        self._manual_combined = [
-            wp.empty((rows, 3 * self.hidden_size), dtype=wp.float32, device=self.device) for _ in range(self.num_layers)
-        ]
+        use_bf16_combined = self._use_cublas_bfloat16 and self._uses_bf16_linear_forward(
+            rows, self.hidden_size, 3 * self.hidden_size
+        )
+        self._manual_combined = (
+            []
+            if use_bf16_combined
+            else [
+                wp.empty((rows, 3 * self.hidden_size), dtype=wp.float32, device=self.device)
+                for _ in range(self.num_layers)
+            ]
+        )
+        self._manual_combined_bf16 = []
+        if use_bf16_combined:
+            self._manual_combined_bf16 = [
+                wp.empty((rows, 3 * self.hidden_size), dtype=wp.bfloat16, device=self.device)
+                for _ in range(self.num_layers)
+            ]
         self._manual_outputs = [
             wp.empty((rows, self.hidden_size), dtype=wp.float32, device=self.device) for _ in range(self.num_layers)
         ]
