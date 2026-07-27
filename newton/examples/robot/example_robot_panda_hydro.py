@@ -12,6 +12,7 @@
 #
 ###########################################################################
 
+import argparse
 import copy
 from dataclasses import replace
 from enum import Enum
@@ -56,6 +57,7 @@ class Example:
         newton.use_coord_layout_targets = True
         self.scene = SceneType(args.scene)
         self.test_mode = args.test
+        self.deterministic = args.deterministic
         self.show_isosurface = False  # Disabled by default for performance
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -281,7 +283,7 @@ class Example:
             reduce_contacts=True,
             broad_phase="explicit",
             sdf_hydroelastic_config=sdf_hydroelastic_config,
-            deterministic=True,
+            deterministic=self.deterministic,
         )
         self.contacts = self.collision_pipeline.contacts()
 
@@ -298,7 +300,9 @@ class Example:
             iterations=15,
             ls_iterations=100,
             impratio=1000.0,
-            deterministic=wp.DeterministicMode.RUN_TO_RUN,
+            deterministic=wp.DeterministicMode.RUN_TO_RUN
+            if self.deterministic
+            else wp.DeterministicMode.NOT_GUARANTEED,
         )
 
         self.viewer.set_model(self.model)
@@ -526,6 +530,12 @@ class Example:
         newton.examples.add_world_count_arg(parser)
         parser.set_defaults(num_frames=720)
         parser.set_defaults(world_count=1)
+        parser.add_argument(
+            "--deterministic",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Make contacts and the solver bit-exact across runs on the same GPU.",
+        )
         parser.add_argument(
             "--scene",
             type=str,
