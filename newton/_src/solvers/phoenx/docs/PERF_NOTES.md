@@ -98,7 +98,12 @@ Do not retry without new evidence or a materially different design.
 | Higher occupancy by register caps | Spills or recomputation worsened latency. |
 | Further lossy inertia packing | Precision/range risk without a measured gain. |
 | Contact-major/AoS body layouts | Larger footprint or conversion passes lost. |
-| Cooperative grid-sync iterate megakernel | Synchronization and residency constraints lost. |
+| Cooperative grid-sync iterate megakernel | Direct CUDA cooperative launch was bitwise correct but 3.0--3.3x slower: captured launches took 12.65 us for 9 phases and 112.65 us for 90, versus 38.54 and 371.27 us with hardware grid barriers. |
+| Eight-lane cooperative contact manifold | Bitwise-exact scalar and cooperative probes were neutral at 4.095 and 4.099 us; allocating lanes to cached row streams reduces independent columns without helping scattered endpoints. |
+| Cross-item Kapla prefetch by shrinking the grid | Settled regular colors have 4,294--5,529 rows and overflow has 32,247, all below the 48,128-thread production grid. Creating two-row regular-color work would use fewer than 87 of 188 SMs; the prior 4-blocks/SM A/B also lost. |
+| Separate regular-color launch grid | Reducing regular colors from 48,128 to 11,360 threads measured 82.40 FPS versus fresh 82.76--82.78 FPS baselines. Lower launch waste did not repay lost latency hiding; removed. |
+| Indexed AoSoA8 contact rows | A no-padding point-major layout reduced a synthetic 24-plane gather from 10.86 to 7.62 us, but the required dependent row-index load reduced full Kapla throughput to 78.17 FPS versus 82.76--82.78. Removed. |
+| Per-substep packed endpoint mass/inertia | Corrected staging improved matched Kapla throughput only about 1.9% (82.76--82.78 to 84.02--84.62 FPS), required 14 planes and a new launch, and changed the floating-point trajectory; removed. Step-level staging is incorrect because world inertia refreshes every substep. |
 | One-block-per-world all-substep megakernel | Register pressure and limited parallelism. |
 | Multiple fused inner sweeps | Live-state cost exceeded launch savings. |
 | Single-world multi-sweep iterate | Same register/dependency problem. |
@@ -114,11 +119,16 @@ Do not retry without new evidence or a materially different design.
 | Skip advance outputs overwritten by publication | Suppressing both outputs averaged only +0.14% with a divergent branch; suppressing only dead internal twists regressed about 2%. Removed. |
 | Pack scalar joint work into inverse-factor rows | Same 28-byte footprint but only +0.08% in the production graph; retained SoA layout. |
 | Depth-local reduced scalar/factor repacking | Scalar depth order was neutral; global inertia-component SoA was 75% slower; compact depth AoSoA and split joint-u/d storage were neutral. |
+| Depth-major reduced-factor workspace | Bitwise-correct, but matched G1 patch throughput improved only 0.35%; removed. |
 | Reuse checkpoint MinGRU kernel for read-only sequences | Only a 1.1% forward-subphase change and no measurable full-training gain. |
 | Fuse next-layer BF16 shadows into MinGRU recurrence | Isolated recurrent graph improved 0.730 -> 0.713 ms, but the extra dependent store reduced full A/B/B/A throughput 1.940M -> 1.927M samples/s; removed. |
 
 ## Open ideas
 
+- Test a depth-ordered reduced-joint descriptor that coalesces invariant child,
+  DOF, type, parent-lane, and child-range metadata only after auditing which
+  fields are not already derivable or packed. Require at least 5% on fused
+  advance/publish and bitwise trajectory parity.
 - Improve reuse of topology/factor data within dependent packed-row traversal.
 - Test truly world-interleaved hot joint/body fields only if profiling identifies
   repeated scalar transactions; depth-local packing and vec4 padding already lost.
@@ -168,6 +178,17 @@ For Kapla, device-selected 32-pair SAP chunks reduced dense sweep time 290 to
 about 66% of kernel time; collision is about 8.4%. A contact-refresh stride of
 two gained about 3% but changed trajectories and remains rejected. Eight
 colored partitions is the measured stability floor for the production tower.
+On a settled 11,340-brick snapshot, deterministic Morton partitions retained
+75.3%, 67.8%, 58.2%, and 47.7% of contact points as partition-interior for
+47, 94, 188, and 376 partitions. This supports a block-resident subdomain
+oracle; it does not yet establish convergence or an end-to-end win.
+The oracle rejected explicit shared caching at practical occupancy. With 188
+subdomains, 61 bodies per subdomain, one 128-thread block per subdomain, and
+58.2% interior points, two repeats measured 558.9/558.7 us with global body
+state versus 553.1/552.2 us with explicit shared state (about 1.1%). The 42%
+cache gain seen for 376 one-warp subdomains only recovered their insufficient
+latency hiding; both shared variants converged near 2.5--2.6B simplified
+point-iterations/s, close to production's useful iteration rate.
 
 ### Predicting training value
 
@@ -320,6 +341,12 @@ authoritative three-substep baseline.
   two Nsight repeats measured 205.2 and 206.2 us versus the 210.35 us baseline,
   external advance stayed near 80.9 us, and complete physics reached 2.04M
   steps/s. Serial-oracle 8/16/32-lane and production G1 analytical tests pass.
+- A depth-indexed SoA topology descriptor removed joint-to-metadata dependent
+  lookup chains and improved an isolated real-G1 three-pass metadata probe
+  17.1%. The production integration passed analytical, warp-versus-serial, and
+  fused-momentum tests, but a longer matched 8,192-world run regressed complete
+  physics from 7.43M to 7.30M steps/s (1.8%). Its seven extra arrays increased
+  cache traffic more than the pointer chasing cost; the integration was removed.
 
 ### Configuration and experimental boundaries
 
@@ -417,3 +444,23 @@ These later results supersede the early FP16/contact-row prioritization:
 - Shared row slabs, resident row caches, and register-capped advance kernels are
   specifically rejected: they regressed 14%/8.6% or spilled 80-byte writes and
   44-byte reads per thread for a noise-level +0.19% median.
+
+- A one-launch Kapla Nsight Compute capture attributed the worst sector
+  inefficiency to scalar indexed endpoint-property loads in the persistent
+  contact solve. Each instruction in the inverse-mass/inertia cluster reported
+  about 10,213 excessive L2 sectors, and its consumers dominated sampled
+  long-scoreboard stalls. Staging both inverse masses and both symmetric
+  six-float world inverse inertias into the existing color-ordered header
+  changed a matched 80-frame run from 83.03 to 85.30 median FPS (+2.7%) and
+  82.09 to 83.49 mean FPS (+1.7%). It is fused into prepare, adds no launch,
+  passed 20 packed-row/contact-force/tower tests, and was retained in
+  `c29693f4f`.
+
+- A post-integration Nsight Systems A/B localized that end-to-end gain: over
+  60 steady frames the repeated PGS kernel fell 360.39 to 345.28 ms (-4.2%)
+  and relax fell 38.53 to 34.43 ms (-10.6%), while prepare rose 68.66 to
+  72.78 ms (+6.0%). A 5,500-contact layout oracle then measured 4.51 us for
+  node-major random velocity reads/writes versus 3.40 us for coalesced
+  contact-local reads with scattered successor writes (1.33x). This is only an
+  upper bound: a production successor layout must preserve mass-splitting
+  average/broadcast semantics and both deterministic sweep directions.

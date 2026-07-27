@@ -39,6 +39,9 @@ LAUNCH_COUNT="${1:-8}"
 OUT="${2:-/tmp/phoenx_kapla_ncu.txt}"
 KERNEL_REGEX="${3:-singleworld_persistent}"
 LAUNCH_SKIP="${4:-9}"
+REPORT_BASE="${OUT%.txt}"
+REPORT="${REPORT_BASE}.ncu-rep"
+SOURCE_OUT="${REPORT_BASE}_source.csv"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../../../.." && pwd)"
@@ -121,15 +124,24 @@ echo "=== running ncu (eager kapla, $LAUNCH_COUNT launches x a few passes; a cou
   --section SourceCounters \
   --section SchedulerStats \
   --section LaunchStats \
+  --import-source yes \
+  --export "$REPORT_BASE" \
+  --force-overwrite \
   "$PY" "$RUNNER" > "$OUT" 2>&1
 NCU_RC=$?
 rm -f "$RUNNER"
 chmod 644 "$OUT" 2>/dev/null
+if [ -f "$REPORT" ]; then
+  "$NCU" --import "$REPORT" --page source --print-source sass --csv > "$SOURCE_OUT" 2>&1
+  chmod 644 "$REPORT" "$SOURCE_OUT" 2>/dev/null
+fi
 
 echo ""
 echo "==================== KEY METRICS (full report: $OUT) ===================="
 grep -iE "Compute \(SM\) Throughput|Memory Throughput|DRAM Throughput|L2 Cache Throughput|L1/TEX Cache Throughput|Achieved Occupancy|Theoretical Occupancy|Block Limit Registers|Registers Per Thread|Stall Long Scoreboard|Stall MIO|Stall Wait|Stall Short|Eligible Warps Per Scheduler|Issued Warp Per Scheduler|Active Threads Per Warp|Duration|Waves Per SM" "$OUT" | head -60
 echo "========================================================================"
+echo "Report: $REPORT"
+echo "Source metrics: $SOURCE_OUT"
 if grep -qiE "Compute \(SM\) Throughput" "$OUT"; then
   echo "OK: iterate profile captured after skipping the nine-color prepare sweep."
 else
