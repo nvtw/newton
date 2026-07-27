@@ -464,3 +464,18 @@ These later results supersede the early FP16/contact-row prioritization:
   contact-local reads with scattered successor writes (1.33x). This is only an
   upper bound: a production successor layout must preserve mass-splitting
   average/broadcast semantics and both deterministic sweep directions.
+
+- Ordinal-major contact rows looked 1.23x faster in a 5,556-column isolated
+  load/store oracle, but a capacity-safe hybrid implementation regressed the
+  matched Kapla run from 84.10 to 80.67 FPS (-4.1%). Nsight Systems showed
+  that the regression was inside the solver, not only its extra map build:
+  repeated PGS rose 5.33 to 5.50 us, prepare 11.23 to 11.48 us, and relax
+  5.31 to 7.01 us. The wider physical row extent and address/control overhead
+  outweighed better sector use in the full working set. The implementation was
+  removed; do not infer production wins from the small row-layout oracle.
+
+- Row-local AoS packing also failed its isolated gate. Against the current SoA
+  row stream at 8.14 us, scalar AoS took 10.39 us (-22%) and six aligned vec4
+  chunks took 10.03 us (-19%). Cross-thread SoA coalescing is more valuable
+  than per-thread row locality for this access pattern; no production code was
+  changed.
