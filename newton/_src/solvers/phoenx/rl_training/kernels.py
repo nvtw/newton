@@ -2441,8 +2441,12 @@ def grad_sumsq_partials_2d_kernel(
     r"""
 #if defined(__CUDA_ARCH__)
     constexpr int block_size = 256;
-    __shared__ float sums[block_size];
+    constexpr int warp_size = 32;
+    constexpr int warp_count = block_size / warp_size;
+    __shared__ float warp_sums[warp_count];
     const int lane = threadIdx.x;
+    const int warp_lane = lane & (warp_size - 1);
+    const int warp = lane / warp_size;
     const int block = blockIdx.x;
     const float* __restrict__ values = (const float*)grad.data;
     float local_sum = 0.0f;
@@ -2450,17 +2454,22 @@ def grad_sumsq_partials_2d_kernel(
         const float value = values[i];
         local_sum += value * value;
     }
-    sums[lane] = local_sum;
+    for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+        local_sum += __shfl_down_sync(0xffffffffu, local_sum, offset);
+    }
+    if (warp_lane == 0) {
+        warp_sums[warp] = local_sum;
+    }
     __syncthreads();
-    for (int offset = block_size / 2; offset > 0; offset >>= 1) {
-        if (lane < offset) {
-            sums[lane] += sums[lane + offset];
+    if (warp == 0) {
+        local_sum = warp_lane < warp_count ? warp_sums[warp_lane] : 0.0f;
+        for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+            local_sum += __shfl_down_sync(0xffffffffu, local_sum, offset);
         }
-        __syncthreads();
     }
     if (lane == 0) {
         float* __restrict__ out = (float*)partials.data;
-        out[param_index * partials.shape.dims[1] + block] = sums[0];
+        out[param_index * partials.shape.dims[1] + block] = local_sum;
     }
 #endif
 """

@@ -370,6 +370,11 @@ These later results supersede the early FP16/contact-row prioritization:
   deviation partial chunks from 256 to 16 rows cut its partial kernel 6.27 to
   0.49 ms and brought isolated update to 99.3--99.8 ms. Both were neutral for
   rollout-bound G1 but improved Ant.
+- Replacing the optimizer gradient-norm block reduction with a two-stage
+  warp-shuffle reduction cut its barriers from eight to one and improved the
+  isolated kernel 8--14%. Matched 8-update G1 runs reduced graph-captured
+  PPO updates 96.94 to 96.39 ms and eager updates 104.89 to 103.96 ms;
+  NumPy parity and exact graph replay pass.
 - Static omission of unused external-pass Coriolis publication reduced external
   advance 112.176 to 104.736 us. Reusing invariant patch effective masses cut
   cached patch solve about 18% and total patch solve 6.8%, with bitwise
