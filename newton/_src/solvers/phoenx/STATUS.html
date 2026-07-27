@@ -18,6 +18,12 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <h1>PhoenX performance</h1>
 <p class="muted">27 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
+<section class="gap">
+<h2>One profiler command needed</h2>
+<p><code>sudo /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/benchmarks/profile_g1_factor_init_ncu.sh</code></p>
+<p>This profiles one steady factor-initialization launch and writes the report plus exported metrics under <code>/tmp/phoenx_g1_factor_init_latest</code>. It decides whether factor-data fusion is a real layout opportunity.</p>
+</section>
+
 <section class="hero">
 <h2>Data-layout result: patch traversal is faster</h2>
 <p>Compact patch rows now keep both forward tree responses and solved body deltas in registers, exchanging parent values with subgroup shuffles. This removes two global-memory recurrences without changing the ABA or hard-contact equations.</p>
@@ -31,7 +37,6 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <li>Randomized rows match exactly on generic 8-, 16-, and 32-lane branched trees.</li>
 <li>Shared and register-cached response-row layouts both regressed about 10% and were removed.</li>
 <li>Point contacts retain their existing row-parallel builder; forcing the compact traversal there was 9.5% slower.</li>
-<li>No further sudo/Nsight command is needed.</li>
 </ul>
 </section>
 
