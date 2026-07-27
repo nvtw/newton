@@ -10,7 +10,7 @@ import warp as wp
 from ...core.math import FLOAT32_EPS
 from ..padmm.math import project_to_coulomb_cone, project_to_coulomb_dual_cone
 from .projections import (
-    contact_normal_preconditioner as _contact_normal_preconditioner,
+    contact_diagonal_preconditioner as _contact_diagonal_preconditioner,
 )
 from .projections import (
     project_contact_diagonal_update as _project_contact_diagonal_update,
@@ -312,6 +312,25 @@ def _set_dvi_direct_status_iterations(
 
 
 @wp.kernel
+def _set_dvi_fixed_status_iterations(
+    # Inputs:
+    problem_dim: wp.array[int32],
+    solver_config: wp.array[DVIConfigStruct],
+    # Outputs:
+    solver_status: wp.array[DVIStatus],
+):
+    wid = wp.tid()
+    status = solver_status[wid]
+    if problem_dim[wid] == int32(0):
+        status.iterations = int32(0)
+    else:
+        # Inequality-only PGS runs `max_iterations` sweeps without a block
+        # schedule; terminal residuals come from the shared status kernel.
+        status.iterations = solver_config[wid].max_iterations
+    solver_status[wid] = status
+
+
+@wp.kernel
 def _set_dvi_bilateral_active_dim(
     # Inputs:
     problem_njc: wp.array[int32],
@@ -426,7 +445,8 @@ def _solve_dvi_inequalities_colored_pgs(
                         lambda_limit_new = lambda_limit_old
                         if diagonal > FLOAT32_EPS:
                             lambda_limit_new = wp.max(
-                                float32(0.0), lambda_limit_old - state_v_aug[vec_idx] / (diagonal + cfg.regularization)
+                                float32(0.0),
+                                lambda_limit_old - cfg.omega * state_v_aug[vec_idx] / (diagonal + cfg.regularization),
                             )
                         solution_lambdas[vec_idx] = lambda_limit_new
                         delta_0 = lambda_limit_new - lambda_limit_old
@@ -456,9 +476,9 @@ def _solve_dvi_inequalities_colored_pgs(
                         lambda_contact_new = _project_contact_diagonal_update(
                             lambda_contact_old,
                             velocity,
-                            _contact_normal_preconditioner(contact_diagonal),
+                            _contact_diagonal_preconditioner(contact_diagonal),
                             cfg.regularization,
-                            float32(1.0),
+                            cfg.omega,
                             mu,
                         )
                         contact_delta = lambda_contact_new - lambda_contact_old

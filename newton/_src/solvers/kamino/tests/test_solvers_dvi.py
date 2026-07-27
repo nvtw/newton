@@ -15,6 +15,7 @@ import newton
 import newton._src.solvers.kamino.config as kamino_config
 from newton._src.solvers.kamino._src.core import ModelBuilderKamino, inertia
 from newton._src.solvers.kamino._src.core.shapes import BoxShape, SphereShape
+from newton._src.solvers.kamino._src.core.types import vec6f
 from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
 from newton._src.solvers.kamino._src.integrators.euler import integrate_euler_semi_implicit
 from newton._src.solvers.kamino._src.kinematics.constraints import unpack_constraint_solutions, update_constraints_info
@@ -30,7 +31,11 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
     _sparse_delassus_matvec_rows,
 )
-from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import _color_mapped_dvi_inequalities
+from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
+    _color_mapped_dvi_inequalities,
+    _solve_dvi_sparse_inequalities_pgs,
+)
+from newton._src.solvers.kamino._src.solvers.dvi.types import DVIConfigStruct, convert_config_to_struct
 from newton._src.solvers.kamino._src.solvers.metrics import SolutionMetrics
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton._src.solvers.kamino.tests import setup_tests, test_context
@@ -417,6 +422,33 @@ class TestDVISolver(unittest.TestCase):
         _check_solution_matches_dual_problem(self, problem, solver)
         np.testing.assert_array_equal(solver.data.info.status.numpy(), solver.data.status.numpy())
 
+    def test_01a_dvi_requires_contact_topology_at_allocation(self):
+        """Reject missing contact topology when the model allocates contacts.
+
+        Graph-colored inequality solves consume the contact container, so the
+        omission must surface at allocation rather than inside a solve that may
+        already be recorded into a captured graph.
+        """
+        model, data, _state, limits, detector, jacobians = make_containers(
+            builder=basics.build_box_on_plane(),
+            device=self.device,
+            max_world_contacts=4,
+            sparse=False,
+        )
+        self.assertGreater(model.size.max_of_max_contacts, 0)
+
+        with self.assertRaises(ValueError):
+            DVISolver(model=model, data=data, limits=limits, jacobians=jacobians)
+
+        solver = DVISolver(
+            model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
+        )
+        self.assertIsNotNone(solver.data)
+
     def test_02_public_solver_step_with_dvi(self):
         builder = newton.ModelBuilder()
         SolverKamino.register_custom_attributes(builder)
@@ -504,6 +536,148 @@ class TestDVISolver(unittest.TestCase):
         self.assertLessEqual(int(status["iterations"]), _status_iteration_budget(solver, 0))
         self.assertTrue(np.all(np.isfinite(solver.data.solution.lambdas.numpy())))
         self.assertTrue(np.all(np.isfinite(solver.data.solution.v_plus.numpy())))
+
+    def test_03l_sparse_dvi_skips_inequalities_without_mapped_topology(self):
+        """Skip a sparse inequality whose row has no mapped Jacobian topology.
+
+        The sweep reads per-entity Jacobian offsets through the mapped index,
+        so an unmapped row must be skipped rather than dereferenced through a
+        negative index.
+        """
+
+        def solve_single_limit(limit_index: int) -> float:
+            int32_array = lambda values: wp.array(values, dtype=wp.int32, device=self.device)  # noqa: E731
+            float_array = lambda values: wp.array(values, dtype=wp.float32, device=self.device)  # noqa: E731
+            jacobian_block = wp.array([vec6f(1.0, 0.0, 0.0, 0.0, 0.0, 0.0)], dtype=vec6f, device=self.device)
+            lambdas = float_array([0.0])
+            config = wp.array(
+                [
+                    convert_config_to_struct(
+                        kamino_config.DVISolverConfig(max_iterations=1, tolerance=0.0, regularization=1e-6)
+                    )
+                ],
+                dtype=DVIConfigStruct,
+                device=self.device,
+            )
+            threads_per_world = 64 if self.device.is_cuda else 1
+            wp.launch(
+                kernel=_solve_dvi_sparse_inequalities_pgs,
+                dim=threads_per_world,
+                inputs=[
+                    int32_array([1]),  # bsm_num_nzb
+                    int32_array([0]),  # bsm_nzb_start
+                    wp.array([[0, 0]], dtype=wp.int32, device=self.device),  # bsm_nzb_coords
+                    jacobian_block,  # bsm_nzb_values
+                    jacobian_block,  # jacobian_nzb_values
+                    int32_array([0]),  # bsm_row_start
+                    int32_array([0]),  # bsm_col_start
+                    int32_array([0]),  # limit_nzb_offsets
+                    int32_array([0]),  # contact_nzb_offsets
+                    int32_array([limit_index]),  # limit_indices
+                    int32_array([-1]),  # contact_indices
+                    int32_array([1]),  # problem_nl
+                    int32_array([0]),  # problem_nc
+                    int32_array([0]),  # problem_lio
+                    int32_array([0]),  # problem_cio
+                    int32_array([0]),  # problem_uio
+                    int32_array([0]),  # problem_lcgo
+                    int32_array([1]),  # problem_ccgo
+                    int32_array([0]),  # problem_vio
+                    float_array([0.0]),  # problem_mu
+                    float_array([1.0]),  # problem_P
+                    float_array([-1.0]),  # problem_v_f
+                    float_array([1.0]),  # problem_diag
+                    float_array([0.0]),  # eta
+                    int32_array([0]),  # inequality_colors
+                    int32_array([1]),  # inequality_num_colors
+                    -1,  # block_iteration
+                    config,
+                    wp.zeros(6, dtype=wp.float32, device=self.device),  # body_space
+                    lambdas,
+                ],
+                device=self.device,
+                block_dim=threads_per_world,
+            )
+            return float(lambdas.numpy()[0])
+
+        # A mapped row resolves its violated limit velocity into a positive impulse.
+        self.assertAlmostEqual(solve_single_limit(0), 1.0, places=4)
+        # An unmapped row keeps its impulse and touches no Jacobian offsets.
+        self.assertEqual(solve_single_limit(-1), 0.0)
+
+    def _make_box_on_plane_setup(self, max_world_contacts: int = 4):
+        """Build an inequality-only box-on-plane problem and its containers."""
+        model, data, state, limits, detector, jacobians = make_containers(
+            builder=basics.build_box_on_plane(),
+            device=self.device,
+            max_world_contacts=max_world_contacts,
+            sparse=False,
+        )
+        update_containers(
+            model=model,
+            data=data,
+            state=state,
+            limits=limits,
+            detector=detector,
+            jacobians=jacobians,
+        )
+        problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
+        setup = SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians)
+        return model, problem, setup
+
+    def test_03j_dvi_omega_scales_projected_updates_without_moving_the_solution(self):
+        """Relax projected updates by `omega` while preserving the fixed point.
+
+        `omega` scales the step of every projected update, so a single sweep
+        must move less for a smaller value, while additional sweeps must still
+        reach the same cone-complementarity solution.
+        """
+        model, problem, setup = self._make_box_on_plane_setup()
+
+        def solve_normal_impulse(omega: float, max_iterations: int) -> float:
+            solver = _solve_dvi(
+                model,
+                problem,
+                config=kamino_config.DVISolverConfig(
+                    max_iterations=max_iterations,
+                    tolerance=0.0,
+                    regularization=1e-6,
+                    omega=omega,
+                ),
+                setup=setup,
+            )
+            lambdas = solver.data.solution.lambdas.numpy()
+            offset = int(problem.data.vio.numpy()[0] + problem.data.ccgo.numpy()[0])
+            count = int(problem.data.nc.numpy()[0])
+            return float(np.sum(lambdas[offset + 2 : offset + 3 * count : 3]))
+
+        single_sweep_slow = solve_normal_impulse(0.25, max_iterations=1)
+        single_sweep_fast = solve_normal_impulse(1.0, max_iterations=1)
+        self.assertGreater(single_sweep_slow, 0.0)
+        self.assertGreater(single_sweep_fast, 2.0 * single_sweep_slow)
+
+        converged_slow = solve_normal_impulse(0.25, max_iterations=400)
+        converged_fast = solve_normal_impulse(1.0, max_iterations=400)
+        self.assertAlmostEqual(converged_slow, converged_fast, delta=1.0e-4 * converged_fast)
+
+    def test_03k_dvi_inequality_only_status_reports_the_sweep_budget(self):
+        """Report the sweeps actually run by the inequality-only dense path."""
+        model, problem, setup = self._make_box_on_plane_setup()
+        max_iterations = 17
+        solver = _solve_dvi(
+            model,
+            problem,
+            config=kamino_config.DVISolverConfig(
+                max_iterations=max_iterations,
+                tolerance=1e-4,
+                regularization=1e-6,
+                contact_iterations=3,
+            ),
+            setup=setup,
+        )
+
+        self.assertTrue(solver._can_use_dense_inequality_pgs())
+        self.assertEqual(int(solver.data.status.numpy()[0]["iterations"]), max_iterations)
 
     def test_03d_dvi_direct_block_honors_per_world_iteration_counts(self):
         builder = builder_utils.make_homogeneous_builder(
@@ -1617,6 +1791,76 @@ class TestDVISolver(unittest.TestCase):
 
                 self.assertGreater(int(solver._contacts_kamino.world_active_contacts.numpy()[0]), 0)
                 np.testing.assert_allclose(measured_speeds, expected_speeds, rtol=0.0, atol=1.0e-5)
+
+    def test_08e_dvi_sliding_sphere_settles_into_analytic_rolling(self):
+        """Match the analytic sliding-to-rolling transition of a sphere.
+
+        A sphere contacts the ground through a lever arm, so its tangential
+        Delassus diagonal exceeds its normal diagonal. Preconditioning the
+        tangential rows by the smaller normal diagonal over-relaxes them, which
+        makes the friction impulse oscillate instead of settling: the sphere
+        keeps a residual slip and its speed stops decreasing monotonically.
+        """
+        friction = 0.5
+        initial_speed = 2.0
+        radius = 0.1
+        dt = 1.0e-3
+        # Pure sliding reaches rolling at t = 2 * v0 / (7 * mu * g) for a solid
+        # sphere; twice that leaves margin for the discrete friction impulse.
+        steps = int(2.0 * (2.0 * initial_speed / (7.0 * friction * 9.81)) / dt)
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(mu=friction, gap=0.0, margin=0.0)
+        body = builder.add_link(xform=wp.transformf((0.0, 0.0, radius), wp.quat_identity()), mass=1.0)
+        builder.add_shape_sphere(body=body, radius=radius, cfg=shape_cfg)
+        joint = builder.add_joint_free(parent=-1, child=body)
+        builder.add_articulation([joint])
+        builder.add_ground_plane(cfg=shape_cfg)
+        model = builder.finalize(device=self.device)
+
+        # Rolling without slip conserves v0 = J * (1 / m + r^2 / I), so the
+        # terminal speed follows from the finalized mass distribution.
+        mass = float(model.body_mass.numpy()[body])
+        inertia_yy = float(model.body_inertia.numpy()[body][1, 1])
+        expected_rolling_speed = initial_speed / (1.0 + inertia_yy / (mass * radius * radius))
+
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    use_collision_detector=True,
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=sparse,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=16,
+                        max_contacts_per_world=16,
+                        max_contacts_per_pair=8,
+                    ),
+                )
+                solver = SolverKamino(model, config=config)
+                state_0 = model.state()
+                state_1 = model.state()
+                joint_qd = state_0.joint_qd.numpy()
+                joint_qd[0] = initial_speed
+                state_0.joint_qd.assign(joint_qd)
+                newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+
+                speeds = []
+                spins = []
+                for _ in range(steps):
+                    solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                    state_0, state_1 = state_1, state_0
+                    body_qd = state_0.body_qd.numpy()[body]
+                    speeds.append(float(body_qd[0]))
+                    spins.append(float(body_qd[4]))
+
+                speeds = np.array(speeds)
+                slip = speeds - radius * np.array(spins)
+                self.assertAlmostEqual(float(speeds[-1]), expected_rolling_speed, delta=1.0e-4)
+                self.assertLessEqual(float(np.abs(slip[-1])), 1.0e-5)
+                # Coulomb friction only opposes sliding, so the speed never rises.
+                self.assertLessEqual(float(np.max(np.diff(speeds))), 1.0e-6)
 
     def test_08b_dr_legs_contact_capacity_scales_with_world_count(self):
         if not self.device.is_cuda:

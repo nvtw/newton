@@ -36,7 +36,17 @@ def project_contact_diagonal_update(
 
 
 @wp.func
-def contact_normal_preconditioner(D_diag: vec3f) -> vec3f:
-    """Return an isotropic contact preconditioner based on normal effective mass."""
-    D_eff = D_diag.z
-    return vec3f(D_eff, D_eff, D_eff)
+def contact_diagonal_preconditioner(D_diag: vec3f) -> vec3f:
+    """Return the contact preconditioner as a shared tangential and true normal diagonal.
+
+    The two tangential rows must share one scalar, otherwise the friction disk
+    ``norm(lambda_t) <= mu * lambda_n`` is scaled into an ellipse and the
+    Coulomb-cone projection is no longer a projection. Taking their maximum
+    also bounds each row's effective relaxation by ``omega``: preconditioning
+    a tangential row by the smaller normal diagonal over-relaxes it whenever
+    the contact carries a lever arm, reaching ``D_tt / D_nn = 3.5`` for a
+    solid sphere. The normal row keeps its own diagonal, which converges far
+    faster than a shared maximum under high mass ratios.
+    """
+    D_t = wp.max(D_diag.x, D_diag.y)
+    return vec3f(D_t, D_t, D_diag.z)

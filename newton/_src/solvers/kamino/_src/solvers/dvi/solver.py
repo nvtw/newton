@@ -36,6 +36,7 @@ from .kernels import (
     _scatter_bilateral_solution,
     _set_dvi_bilateral_active_dim,
     _set_dvi_direct_status_iterations,
+    _set_dvi_fixed_status_iterations,
     _solve_dvi_inequalities_colored_pgs,
     _unprecondition_dvi_solution,
 )
@@ -211,6 +212,7 @@ class DVISolver:
         )
         self._limits = limits
         self.set_contacts(contacts)
+        self._validate_inequality_topology()
         if problem is not None and problem.sparse:
             self._sparse_path.prepare(problem)
 
@@ -503,13 +505,21 @@ class DVISolver:
             device=self.device,
         )
 
+    def _validate_inequality_topology(self) -> None:
+        """Require the topology that graph-colored inequality solves consume.
+
+        Checked at allocation so a model with limit or contact capacity fails
+        before the first solve, which may run inside a captured graph.
+        """
+        if self._size.max_of_max_limits > 0 and self._limits is None:
+            raise ValueError("DVI requires `limits` when the model allocates joint limits.")
+        if self._size.max_of_max_contacts > 0 and self._contacts is None:
+            raise ValueError("DVI requires `contacts` when the model allocates contacts.")
+
     def _prepare_inequality_coloring(self, problem: DualProblem) -> None:
         """Map and color every active DVI inequality."""
         state = self._data.state
-        if self._size.max_of_max_limits > 0 and self._limits is None:
-            raise RuntimeError("DVI inequality coloring requires joint-limit topology.")
-        if self._size.max_of_max_contacts > 0 and self._contacts is None:
-            raise RuntimeError("DVI inequality coloring requires contact topology.")
+        self._validate_inequality_topology()
         limits = self._limits
         if limits is not None and limits.model_max_limits_host > 0:
             wp.launch(
@@ -615,6 +625,12 @@ class DVISolver:
             ],
             device=self.device,
             block_dim=threads_per_world,
+        )
+        wp.launch(
+            kernel=_set_dvi_fixed_status_iterations,
+            dim=self._size.num_worlds,
+            inputs=[problem.data.dim, self._data.config, self._data.status],
+            device=self.device,
         )
 
     def _solve_bilateral_block(self, problem: DualProblem, active_dim: wp.array[wp.int32] | None = None):

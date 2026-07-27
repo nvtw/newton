@@ -19,6 +19,7 @@ from .kernels import (
     _scatter_bilateral_solution,
     _set_dvi_bilateral_active_dim,
     _set_dvi_direct_status_iterations,
+    _set_dvi_fixed_status_iterations,
 )
 from .sparse_kernels import (
     _build_sparse_bilateral_block,
@@ -27,7 +28,6 @@ from .sparse_kernels import (
     _compute_dvi_sparse_solution_vectors,
     _map_active_contacts,
     _map_active_limits,
-    _set_dvi_sparse_status_iterations,
     _set_sparse_bilateral_diagonal,
     _solve_dvi_sparse_inequalities_pgs,
     _sparse_delassus_gemv_rows,
@@ -41,6 +41,8 @@ int32 = wp.int32
 
 _SPARSE_DELASSUS_ROWS_JOINTS = 0
 _SPARSE_DELASSUS_ROWS_UNILATERAL = 1
+
+_SPARSE_INEQUALITY_TOPOLOGY_ERROR = "Sparse DVI inequalities require limit/contact topology and sparse Jacobians."
 
 
 class SparseDVIPath:
@@ -105,16 +107,12 @@ class SparseDVIPath:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _solve_sparse_with_bilateral_direct_block(self, problem)
-        elif _can_use_sparse_inequality_pgs(self):
+        elif _can_use_sparse_colored_inequalities(self):
             _solve_sparse_inequality_pgs(self, problem)
         elif self.has_unilateral_constraints:
-            raise RuntimeError("Sparse DVI inequalities require limit/contact topology and sparse Jacobians.")
+            raise RuntimeError(_SPARSE_INEQUALITY_TOPOLOGY_ERROR)
         else:
             _compute_sparse_solution_vectors(self, problem)
-
-
-def _can_use_sparse_inequality_pgs(path: SparseDVIPath) -> bool:
-    return _can_use_sparse_colored_inequalities(path)
 
 
 def _can_use_sparse_colored_inequalities(path: SparseDVIPath) -> bool:
@@ -241,7 +239,7 @@ def _solve_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) -> N
     _launch_sparse_inequality_pgs(path, problem, block_iteration=-1)
     _compute_sparse_solution_vectors(path, problem)
     wp.launch(
-        kernel=_set_dvi_sparse_status_iterations,
+        kernel=_set_dvi_fixed_status_iterations,
         dim=path.size.num_worlds,
         inputs=[problem.data.dim, path.data.config, path.data.status],
         device=path.device,
@@ -495,13 +493,11 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         device=path.device,
     )
 
-    use_inequality_pgs = _can_use_sparse_colored_inequalities(path)
-    if use_inequality_pgs:
-        _prepare_sparse_inequality_pgs(path, problem)
+    if not _can_use_sparse_colored_inequalities(path):
+        raise RuntimeError(_SPARSE_INEQUALITY_TOPOLOGY_ERROR)
+    _prepare_sparse_inequality_pgs(path, problem)
 
     for block_iteration in range(path.max_block_iterations):
-        if not use_inequality_pgs:
-            raise RuntimeError("Sparse DVI inequalities require limit/contact topology and sparse Jacobians.")
         _launch_sparse_inequality_pgs(path, problem, block_iteration)
 
         if path.should_solve_bilateral_after_block(block_iteration):

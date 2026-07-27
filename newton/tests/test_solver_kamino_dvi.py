@@ -12,6 +12,7 @@ _DVI_QUALITY_TESTS = (
     "test_00a_multiworld_status_reduction_requires_all_worlds_converged",
     "test_00b_bilateral_solver_selection",
     "test_01_dvi_solve_dense_dual_problem",
+    "test_01a_dvi_requires_contact_topology_at_allocation",
     "test_02_public_solver_step_with_dvi",
     "test_03_dvi_solve_single_contact",
     "test_03a_sparse_dvi_filtered_matvec_matches_full_rows",
@@ -22,6 +23,9 @@ _DVI_QUALITY_TESTS = (
     "test_03g_dvi_inequality_coloring_separates_dynamic_conflicts",
     "test_03h_dvi_canonical_contact_solution_metrics",
     "test_03i_dvi_coldstart_is_repeatable",
+    "test_03j_dvi_omega_scales_projected_updates_without_moving_the_solution",
+    "test_03k_dvi_inequality_only_status_reports_the_sweep_budget",
+    "test_03l_sparse_dvi_skips_inequalities_without_mapped_topology",
     "test_04_dvi_solve_active_joint_limit",
     "test_05_dvi_solve_multi_world_contacts",
     "test_05a_dvi_maps_packed_multiworld_contacts",
@@ -35,6 +39,7 @@ _DVI_QUALITY_TESTS = (
     "test_08a_public_solver_heterogeneous_contact_rollout_with_dvi",
     "test_08c_dvi_zero_friction_preserves_tangent_momentum",
     "test_08d_dvi_kinetic_friction_matches_coulomb_deceleration",
+    "test_08e_dvi_sliding_sphere_settles_into_analytic_rolling",
     "test_12_dvi_opening_contact_releases_warmstarted_force",
 )
 

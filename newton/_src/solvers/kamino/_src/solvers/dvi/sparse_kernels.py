@@ -11,12 +11,12 @@ from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from .kernels import _sync_threads
 from .projections import (
-    contact_normal_preconditioner as _contact_normal_preconditioner,
+    contact_diagonal_preconditioner as _contact_diagonal_preconditioner,
 )
 from .projections import (
     project_contact_diagonal_update as _project_contact_diagonal_update,
 )
-from .types import DVIConfigStruct, DVIStatus
+from .types import DVIConfigStruct
 
 wp.set_module_options({"enable_backward": False})
 
@@ -209,6 +209,7 @@ def _color_mapped_dvi_inequalities(
                     previous_pair = inequality_bodies[uio + previous_uid]
                     if _inequalities_share_dynamic_body(pair, previous_pair):
                         conflict = int32(1)
+                        break
             if conflict == int32(0):
                 found = int32(1)
             else:
@@ -281,9 +282,16 @@ def _solve_dvi_sparse_inequalities_pgs(
         for color in range(inequality_num_colors[wid]):
             uid = lane
             while uid < nu:
-                if inequality_colors[uio + uid] == color:
+                # An inequality without mapped topology has no Jacobian offsets
+                # to read, so it is skipped rather than dereferenced.
+                mapped_id = int32(-1)
+                if uid < nl:
+                    mapped_id = limit_indices[lio + uid]
+                else:
+                    mapped_id = contact_indices[cio + uid - nl]
+                if inequality_colors[uio + uid] == color and mapped_id >= int32(0):
                     if uid < nl:
-                        limit_id = limit_indices[lio + uid]
+                        limit_id = mapped_id
                         row = lcgo + uid
                         vec_idx = vio + row
                         nzb_offset = limit_nzb_offsets[limit_id]
@@ -303,7 +311,8 @@ def _solve_dvi_sparse_inequalities_pgs(
                         if diagonal_raw > FLOAT32_EPS:
                             lambda_limit_new = wp.max(
                                 float32(0.0),
-                                lambda_limit_old - limit_value / (diagonal_raw + cfg.regularization + FLOAT32_EPS),
+                                lambda_limit_old
+                                - cfg.omega * limit_value / (diagonal_raw + cfg.regularization + FLOAT32_EPS),
                             )
                         limit_delta_body = P_i * (lambda_limit_new - lambda_limit_old)
                         solution_lambdas[vec_idx] = lambda_limit_new
@@ -318,7 +327,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                         cid = uid - nl
                         row = ccgo + int32(3) * cid
                         vec_idx = vio + row
-                        contact_id = contact_indices[cio + cid]
+                        contact_id = mapped_id
                         nzb_offset = contact_nzb_offsets[contact_id]
                         contact_value = vec3f(0.0)
                         for component in range(3):
@@ -354,9 +363,9 @@ def _solve_dvi_sparse_inequalities_pgs(
                         lambda_contact_new = _project_contact_diagonal_update(
                             lambda_contact_old,
                             contact_value,
-                            _contact_normal_preconditioner(contact_diagonal),
+                            _contact_diagonal_preconditioner(contact_diagonal),
                             cfg.regularization,
-                            float32(1.0),
+                            cfg.omega,
                             mu,
                         )
                         contact_delta = lambda_contact_new - lambda_contact_old
@@ -486,22 +495,3 @@ def _compute_dvi_sparse_solution_vectors(
     solution_v_plus[v_i] = v_plus
     state_v_aug[v_i] = v_plus
     state_s[v_i] = 0.0
-
-
-@wp.kernel
-def _set_dvi_sparse_status_iterations(
-    # Inputs:
-    problem_dim: wp.array[int32],
-    solver_config: wp.array[DVIConfigStruct],
-    # Outputs:
-    solver_status: wp.array[DVIStatus],
-):
-    wid = wp.tid()
-    status = solver_status[wid]
-    if problem_dim[wid] == int32(0):
-        status.iterations = int32(0)
-    else:
-        # Sparse inequality PGS runs a fixed iteration count; terminal DVI
-        # residuals are computed by the shared dense/sparse status kernel.
-        status.iterations = solver_config[wid].max_iterations
-    solver_status[wid] = status

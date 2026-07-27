@@ -101,7 +101,6 @@ class Example:
             self.config.dvi.max_iterations = 200
             self.config.dvi.tolerance = 1e-4
             self.config.dvi.regularization = 1e-5
-            self.config.dvi.omega = 0.3
             self.config.dvi.block_iterations = 4
             self.config.dvi.contact_iterations = 3
             self.config.dvi.bilateral_solve_period = 1
