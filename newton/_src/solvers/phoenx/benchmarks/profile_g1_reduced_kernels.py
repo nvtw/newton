@@ -50,6 +50,11 @@ def main() -> int:
     parser.add_argument("--replays", type=int, choices=range(1, 11), default=5)
     parser.add_argument("--warmup-replays", type=int, default=2)
     parser.add_argument("--eager", action="store_true", help="Launch environment steps without a CUDA graph")
+    parser.add_argument(
+        "--scalar-patch-rows",
+        action="store_true",
+        help="Use the scalar reduced patch-row reference for comparison",
+    )
     parser.add_argument("--projector-block-dim", type=int, choices=(32, 64, 128, 256), default=32)
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=2)
@@ -82,6 +87,10 @@ def main() -> int:
         ),
         device=device,
     )
+    if args.scalar_patch_rows:
+        if args.articulation_mode != "reduced":
+            parser.error("--scalar-patch-rows requires --articulation-mode reduced")
+        env.solver._reduced_articulation.contact_block_system.build_patch_rows_warp_kernel = None
     if args.articulation_mode == "maximal_projected":
         projector = env.solver._maximal_tree_projector
         if projector is None:
@@ -121,6 +130,7 @@ def main() -> int:
                 "articulation_mode": args.articulation_mode,
                 "world_count": args.world_count,
                 "sim_substeps": args.sim_substeps,
+                "scalar_patch_rows": bool(args.scalar_patch_rows),
                 "solver_iterations": args.solver_iterations,
                 "velocity_iterations": args.velocity_iterations,
                 "prepare_refresh_stride": args.prepare_refresh_stride,

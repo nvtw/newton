@@ -6321,6 +6321,46 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(np.isfinite(env.state_0.joint_q.numpy()).all())
         self.assertTrue(np.isfinite(env.state_0.joint_qd.numpy()).all())
 
+    def test_default_g1_patch_depth_rows_match_scalar_trajectory(self) -> None:
+        device = require_cuda_graph_capture("PhoenX G1 patch-row parity tests")
+        config = g1_recipe.default_g1_env_config(
+            world_count=32,
+            max_episode_steps=0,
+            auto_reset=False,
+            randomize_commands_on_reset=False,
+            command_resample_steps=0,
+            reset_noise=0.0,
+            parse_visuals=False,
+        )
+        reference = rl.EnvG1PhoenX(config, device=device)
+        reference_block = reference.solver._reduced_articulation.contact_block_system
+        reference_block.build_patch_rows_warp_kernel = None
+        candidate = rl.EnvG1PhoenX(config, device=device)
+        candidate_block = candidate.solver._reduced_articulation.contact_block_system
+        self.assertTrue(candidate_block.patch_rows)
+        self.assertIsNotNone(candidate_block.build_patch_rows_warp_kernel)
+
+        rng = np.random.default_rng(20260727)
+        actions_np = rng.uniform(-1.0, 1.0, (reference.world_count, reference.action_dim)).astype(np.float32)
+        reference_actions = wp.array(actions_np, dtype=wp.float32, device=device)
+        candidate_actions = wp.array(actions_np, dtype=wp.float32, device=device)
+        reference_graph = rl.capture_env_steps(reference, reference_actions, steps_per_graph=4, warmup_steps=0)
+        candidate_graph = rl.capture_env_steps(candidate, candidate_actions, steps_per_graph=4, warmup_steps=0)
+        for _ in range(6):
+            wp.capture_launch(reference_graph)
+            wp.capture_launch(candidate_graph)
+
+        for reference_value, candidate_value in (
+            (reference.state_0.joint_q, candidate.state_0.joint_q),
+            (reference.state_0.joint_qd, candidate.state_0.joint_qd),
+            (reference.state_0.body_q, candidate.state_0.body_q),
+            (reference.state_0.body_qd, candidate.state_0.body_qd),
+            (reference.rewards, candidate.rewards),
+            (reference.dones, candidate.dones),
+            (reference.obs, candidate.obs),
+        ):
+            np.testing.assert_array_equal(candidate_value.numpy(), reference_value.numpy())
+
     def test_block_owned_g1_contacts_skip_redundant_impulse_response(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 block contact response regression tests")
         env = rl.EnvG1PhoenX(

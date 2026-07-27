@@ -3628,7 +3628,6 @@ class ReducedArticulationSystem:
             raise ValueError("reduced articulation system requires at least one articulation")
         self.model = model
         self.device = model.device
-        self.use_warp_advance = bool(self.device.is_cuda)
         self.use_warp_factor = bool(self.device.is_cuda and model.articulation_count >= _WARP_FACTOR_MIN_ARTICULATIONS)
         self.use_warp_kinematics = bool(self.device.is_cuda)
         self.use_warp_publish = bool(self.device.is_cuda)
@@ -3709,6 +3708,7 @@ class ReducedArticulationSystem:
                 joint_parent_lane_np[joint] = joint_depth_lane_np[body_joint_np[parent]]
         self.advance_joint_parent_lane = wp.array(joint_parent_lane_np, device=self.device)
         max_articulation_breadth = int(np.max(np.diff(articulation_depth_start_np, axis=1)))
+        self.use_warp_advance = bool(self.device.is_cuda and max_articulation_breadth <= 32)
         if max_articulation_breadth <= 8:
             self.advance_tile_width = 8
         elif max_articulation_breadth <= 16:
@@ -4394,6 +4394,8 @@ class ReducedPhoenXArticulation:
         if execution_path == "persistent":
             if not model.device.is_cuda:
                 raise ValueError("execution_path='persistent' currently requires CUDA")
+            if not self.system.use_warp_advance:
+                raise ValueError("persistent reduced articulations require at most 32 joints at each tree depth")
             if not bool(np.all(self.persistent_eligible_np)):
                 rejected = sorted(
                     {reason for reason in self.persistent_ineligible_reasons if reason != _PERSISTENT_ELIGIBLE}
@@ -4403,7 +4405,10 @@ class ReducedPhoenXArticulation:
             model,
             articulation_depth_start=self.system.advance_articulation_depth_start,
             articulation_depth_joint=self.system.advance_articulation_depth_joint,
+            joint_parent_lane=self.system.advance_joint_parent_lane,
+            row_tile_width=self.system.advance_tile_width,
             max_depth=self.system.advance_max_depth,
+            use_depth_warp=self.system.use_warp_advance,
             allow_patch_rows=execution_path != "persistent",
             use_patch_rows=contact_friction_model == "patch",
         )

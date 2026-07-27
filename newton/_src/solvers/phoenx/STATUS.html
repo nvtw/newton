@@ -15,104 +15,42 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 </style>
 </head>
 <body><main>
-<section class="gap">
-<h2>Action requested: final production-config counters</h2>
-<p><code>sudo bash /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/analysis_tools/ncu_profile_g1_hotspots.sh</code></p>
-<p class="muted">The corrected script uses the authoritative 3-substep G1 recipe, includes bytes-per-sector coalescing metrics, and writes a fresh archive to <code>/tmp/phoenx_g1_ncu_production_latest</code>.</p>
-</section>
 <h1>PhoenX performance</h1>
 <p class="muted">27 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
 <section class="hero">
-<h2>Nsight Compute: latency is the current physics limit</h2>
-<p>The inherited 4/5-substep diagnostic reports agree on the limiting mechanism: none shows tensor/ALU saturation or a raw DRAM wall; dependent memory operations leave most schedulers with no eligible warp. A corrected 3-substep production capture is pending.</p>
-<ul>
-<li>Fused advance/publish: 235.2 µs, 20% SM / 36% DRAM, 0.22 eligible warps per scheduler; 69.9% of issue gaps are L1TEX dependencies. Its 101 registers cap theoretical occupancy at 33%.</li>
-<li>Packed contact rows: 234.8 µs, 20% SM / 27% DRAM, 0.20 eligible warps; L1TEX dependencies cause 76.1% of issue gaps.</li>
-<li>Patch solves: 175.7 and 91.5 µs, only 30–38% utilization and 0.49 eligible warps; L1TEX dependencies cause 52.9–66.9% of issue gaps.</li>
-<li>External advance: 107.7 µs, 0.17 eligible warps and only 0.30 GPU waves. Factor: 66.6 µs, balanced 62% compute/memory but still only 0.57 eligible warps.</li>
-</ul>
-<p>A publication-traversal fusion was rejected because extra live state slowed the target kernel 2.0%. Removing a provably overwritten link-velocity store instead cuts fused advance/publish 3.4% and external advance 5.7%; a 30-step production trajectory is exactly identical. A 21-to-24-float aligned inertia prototype also regressed G1 0.6–0.7% and was removed. Next, use production bytes-per-sector results to decide whether any cross-world interleaving has real transaction headroom.</p>
-</section>
-
-<section class="hero">
-<h2>Today: retain exact RL and physics throughput wins</h2>
-<p>The faster BF16 rollout path remains rejected because it delayed the policy. Exact FP32 cuBLAS improves short-run throughput 1.82%; warp-local reduced recurrences add 1.2%, and skipping disabled optional reward families adds 1.1% without changing enabled formulas or dynamics.</p>
-<ul>
-<li>BF16 rollout: gate pass at 167.77M samples / 93.43 training seconds.</li>
-<li>Matched FP32-rollout control: gate pass at 141.56M samples / 84.18 training seconds.</li>
-<li>Two production-size same-seed runs match exactly across all 171 checkpoint entries.</li>
-<li>Two randomly drawn 20-update seeds retain comparable early tracking: 0.388 vs 0.390 and 0.439 vs 0.427; termination rates are slightly lower in both candidates.</li>
-<li>FP32 and BF16 cuBLAS numerical/CUDA-graph regressions pass. The optional Warp fallback remains intact.</li>
-<li>A reduced-factor initialization fusion was rejected and removed: 1.6915M → 1.6594M samples/s (-1.9%).</li>
-<li>Parallel MinGRU scans were measured and removed: additive tile scan is 4× slower; direct affine tree scan is 3× slower at the 64-step production horizon.</li>
-<li>Nsight confirms warp-local forward recurrences cut fused advance/publish 2.5% and external advance 9.2%; sampled G1 analytical, topology, invariant/deterministic contact, and Ant checks pass.</li>
-<li>Removing an overwritten internal twist store cuts the current fused/external advance kernels another 3.4%/5.7%; production G1 analytical, exact trajectory, momentum, graph, and Ant tests pass.</li>
-<li>Ant/shared rollout diagnostics now use an ordered two-stage reduction: identical inputs are bitwise deterministic, and 262,144-sample metric time falls from about 1000 to 41 µs. The old atomic path fails the new regression.</li>
-<li>A fresh full-training trace still ranks physics first: advance/publish 13.4%, contact-row build 10.1%, patch solves 10.0%, external advance 5.6%; MinGRU forward/backward total 10.1%.</li>
-<li>Reusing the MinGRU candidate in its derivative removes one redundant sigmoid and cuts backward median 114.6 → 109.5 µs (-4.5%). Randomized old/new gradients are bitwise identical.</li>
-<li>Optional cuBLAS now computes every Muon Gram contraction: Gram time falls 43.9 → 27.6 ms (-37%) and the PPO update graph 98.18 → 95.30 ms (-2.94%). Full G1 throughput is neutral within thermal noise because rollout hides the learner; the Warp fallback remains and same-seed checkpoints match.</li>
-<li>Zero-weight optional reward guards cut the fused observation/reward kernel 44.6%; default and enabled air-time, sliding, and joint-regularizer equations pass.</li>
-<li>Random-seed Ant reaches 0.820 m/s after 20 updates; six randomly sampled solver/RL tests and the targeted contractions pass.</li>
-</ul>
-</section>
-
-<section class="hero">
-<h2>Target: verified hard-contact policy in nanoG1's 58.9 seconds</h2>
+<h2>Data-layout result: patch-row traversal is faster</h2>
+<p>Compact patch rows now keep forward tree responses in registers and exchange parent values with subgroup shuffles. This removes the old global-memory response recurrence without changing the ABA or hard-contact equations.</p>
 <div class="metrics">
-<div class="metric"><strong>51.79 s</strong><span>uninterrupted 75.5M training</span></div>
-<div class="metric"><strong>1.750M</strong><span>thermal-matched median</span></div>
-<div class="metric"><strong>84.18 s</strong><span>retained training to verified policy</span></div>
+<div class="metric"><strong>-37.4%</strong><span>row builder: 240.1 → 150.3 µs</span></div>
+<div class="metric"><strong>+6.1%</strong><span>fresh production physics bracket</span></div>
+<div class="metric"><strong>+4.4%</strong><span>full PPO candidate/reference/candidate</span></div>
 </div>
-<p>PhoenX reaches 75.5M samples 7.1 seconds faster than nanoG1's reported equal-sample result, but the retained hard-contact policy needs 141.6M samples. Throughput is competitive; sample efficiency remains the wall-to-policy gap.</p>
-</section>
-
-<section>
-<h2>Current quality result</h2>
-<p>The retained seed-42 policy passes at 141.56M samples after 84.18 seconds of training, with battery score 0.901 and zero falls. Seed 43 previously failed to acquire a good forward policy by 157.29M samples, so the seed-42 wall time is not yet a robust expectation. nanoG1&apos;s published 58.9-second result is also seed 42 only.</p>
-<p>The historical 91.75M PhoenX result is not a current baseline: it predates fixed-order deterministic updates and two recurrent-PPO replay corrections. It may still be a useful artifact, but it cannot support a modern sample-efficiency claim.</p>
-<p>Root cause is now narrower: with nanoG1&apos;s dense-reward coefficients, seed 43 becomes a zero-fall walker by 89–94M samples. A gradual regularization stage retains tracking above 0.90 while improving jerk 0.293 → 0.199, torso motion 0.338 → 0.240, and yaw error 0.357 → 0.168. No checkpoint passes every strict threshold simultaneously, so this remains a diagnostic rather than a retained recipe.</p>
-</section>
-
-<section>
-<h2>Retained wins</h2>
 <ul>
-<li><code>86d1aa643</code>: reuse published reduced kinematics across proven continuation substeps. G1 steady throughput is 1.658M → 1.698M samples/s (+2.4%); the profiled reconstruction count falls by exactly two thirds.</li>
-<li><code>bd4e99f77</code>: preserve the graph-leapfrog pipeline across live chunks. Same-seed 8+8 and uninterrupted checkpoints are identical; matched split time is 12.32 → 11.10 seconds.</li>
-<li><code>b6501a981</code>: omit maximal rows already owned by reduced coordinates. G1 75.5M wall time is 58.46 → 51.79 seconds; reduced Ant initialization is 1.190 → 0.963 seconds.</li>
-<li><code>88f7c2569</code>: batch homogeneous world construction across all seven robot environments; matched G1 setup/training is 14.410 → 13.083 seconds.</li>
-<li>Isolated learner: about 114 → 99.5 ms/update through parallel priority sampling and reductions.</li>
-<li>Optional BF16/cuBLAS path: about +10% G1 and -23% Ant wall clock; the tested Warp fallback remains available.</li>
-<li>Earlier reduced/contact data-layout work gives smaller physics wins; warmed Ant learner time is 2.272 → 2.084 seconds.</li>
+<li>Randomized 24-step production G1 graph trajectories are bitwise identical to the scalar builder.</li>
+<li>Randomized rows match exactly on generic 8-, 16-, and 32-lane branched trees.</li>
+<li>Point contacts retain their existing row-parallel builder; forcing this layout there was 9.5% slower.</li>
+<li>No further sudo/Nsight command is needed.</li>
 </ul>
+</section>
+
+<section class="hero">
+<h2>Correctness issue found and fixed</h2>
+<p>A pre-existing warp advance silently skipped joints when one tree depth contained more than 32 joints. A 62-child test differed from serial ABA by as much as 0.604 rad/s. Such trees now select the exact serial advance; the extended regression is bitwise exact. A future multi-wave/grid-stride design can restore parallel speed without weakening this guard.</p>
+</section>
+
+<section>
+<h2>Wall-to-policy state</h2>
+<p>PhoenX throughput is competitive, but it does not yet match nanoG1 wall-to-policy robustly. The retained seed-42 hard-contact policy passes at 141.56M samples / 84.18 s; nanoG1 reports 75.1M / 58.9 s for one seed. Seed 43 variability shows sample efficiency remains the larger gap.</p>
+<p>The current redesign attacks throughput without changing the hard Hertz model. At the measured +4.4% full-PPO gain, 131M samples are roughly a 71 s run under the same benchmark conditions; a fresh long bracket will refine this after the commit.</p>
 </section>
 
 <section class="gap">
-<h2>What remains</h2>
+<h2>Next</h2>
 <ul>
-<li>Robust sample efficiency is the main gap: seed 42 needs 66.6M more samples than nanoG1, and seed 43 fails the gate by 157.3M.</li>
-<li>Strong early regularization blocks acquisition; applying it late exposes a torso-versus-action-smoothness tradeoff. Larger action penalties eventually suppress forward tracking rather than solve the tradeoff.</li>
-<li>A source-level audit finds the core PhoenXRL Puffer-style V-trace, priority replay, normalization, ratio, and value-update semantics aligned with the pinned PufferLib source.</li>
-<li>The 29-output/12-control layout matches pinned nanoG1. Its 17 inactive stochastic outputs distort early PPO KL, but a 12-output prototype only gained 1.4% throughput and made policy acquisition less robust. It was rejected and removed.</li>
-<li>An active-only likelihood prototype improved three short training screens, but the independent 41.9M-sample frozen gate scored only 0.650 and collapsed the +0.8 m/s command. It was removed; the inactive channels currently act as implicit trust-region regularization.</li>
-<li>The existing adaptive-KL controller also overreacted at minibatch granularity and blocked acquisition. It is not a suitable automatic default.</li>
-<li>The fresh post-change Nsight capture at 1.741M samples/s ranks reduced advance/publish (13.2%), packed contact rows (9.5%), patch solves (9.3% combined), MinGRU forward/backward (10.3%), and reduced factor passes (8.3%) as the broad costs.</li>
-<li>Two MinGRU cast fusions were removed: activation handoff lost 0.2%, while same-weight reuse was neutral. Compact patch-row workers were also neutral, confirming useful row traversal—not idle lanes—is the contact-build cost.</li>
-<li>PhoenX PBT currently reuses live workers but schedules them serially. A fixed-world-budget batched population with early elimination is feasible, but must prove better end-to-quality before production use.</li>
-<li>Fixed G1 eager PBT discarding interval statistics after its first cycle, which made subsequent fitness <code>-inf</code>. G1 graph continuation and both Anymal paths were unaffected; split and uninterrupted same-seed checkpoints now match exactly.</li>
-<li>After the measured kernel work: prototype fixed-budget policy racing and scale-invariant, confidence-gated learning control in a small environment before production G1 integration.</li>
-</ul>
-</section>
-
-<section>
-<h2>Correctness guardrails</h2>
-<ul>
-<li>Two independent production seed-42 runs are identical across all 171 checkpoint entries at update 260; every physical gate metric at updates 240/250/260 also matches exactly.</li>
-<li>Same-seed live 8+8 and uninterrupted 16-update checkpoints are identical across all 171 entries.</li>
-<li>The exact graph regression now uses reduced coordinates and two simulation substeps, directly covering continuation-buffer reuse.</li>
-<li>A 30-step, 256-world graph rollout has bit-identical state, observations, rewards, dones, and contacts with or without the omitted rows.</li>
-<li>The G1 benchmark has exact regressions for production-derived clamped PD torques and 20 ms / 3-substep reduced dynamics.</li>
-<li>103 targeted reduced-articulation and robot-environment test invocations pass, including loop closures, momentum, graph capture, and analytical dynamics.</li>
+<li>Use a new Nsight trace to choose the next broad hotspot; do not start a blanket vec4 rewrite.</li>
+<li>Test another materially different layout only where counters and full-pipeline timing support it.</li>
+<li>Explore a correct multi-wave depth schedule for exceptionally wide trees separately.</li>
 </ul>
 </section>
 </main></body></html>

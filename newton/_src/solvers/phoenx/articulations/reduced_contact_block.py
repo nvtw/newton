@@ -1339,6 +1339,181 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
     )
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    __syncwarp(mask);
+#endif
+"""
+)
+def _sync_contact_group(mask: wp.uint32): ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    wp::spatial_vector result;
+    for (int component = 0; component < 6; ++component) {
+        result[component] = __shfl_sync(mask, value[component], source_lane, width);
+    }
+    return result;
+#else
+    return value;
+#endif
+"""
+)
+def _shuffle_contact_spatial(
+    value: wp.spatial_vector,
+    source_lane: wp.int32,
+    width: wp.int32,
+    mask: wp.uint32,
+) -> wp.spatial_vector: ...
+
+
+@functools.cache
+def _make_build_packed_patch_rows_warp_kernel():
+    module = wp.get_module("reduced_contact_patch_rows_depth_warp")
+
+    @wp.kernel(enable_backward=False, module=module)
+    def _build_packed_patch_rows_warp_kernel(
+        bodies: BodyContainer,
+        enabled: wp.array[wp.int32],
+        row_count_array: wp.array[wp.int32],
+        row_body: wp.array2d[wp.int32],
+        row_wrench: wp.array2d[wp.spatial_vector],
+        max_page_count: wp.array[wp.int32],
+        page_index: wp.array[wp.int32],
+        prepare: wp.bool,
+        max_depth: wp.int32,
+        tile_width: wp.int32,
+        articulation_depth_start: wp.array2d[wp.int32],
+        articulation_depth_joint: wp.array[wp.int32],
+        joint_parent_lane: wp.array[wp.int32],
+        previous_row_body: wp.array[wp.int32],
+        packed_jacobian: wp.array2d[wp.float32],
+        packed_response: wp.array2d[wp.float32],
+        joint_work: wp.array3d[wp.float32],
+    ):
+        articulation, local_thread = wp.tid()
+        row = local_thread // tile_width
+        lane = local_thread - row * tile_width
+        data = bodies.reduced
+        start = data.articulation_start[articulation]
+        end = data.articulation_end[articulation]
+        dof_start_articulation = data.joint_qd_start[start]
+        dof_count_articulation = data.joint_qd_start[end] - dof_start_articulation
+        page = page_index[0]
+        storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
+        packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
+        row_count = row_count_array[packed_articulation]
+        if enabled[articulation] == wp.int32(0) or dof_count_articulation > wp.int32(packed_response.shape[1]):
+            return
+        if not prepare and (
+            page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
+        ):
+            return
+        if row >= row_count:
+            return
+
+        flat_thread = articulation * wp.int32(_MAX_ROWS) * tile_width + local_thread
+        warp_lane = flat_thread & wp.int32(31)
+        group = warp_lane // tile_width
+        group_mask = wp.uint32(4294967295)
+        if tile_width < wp.int32(32):
+            group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
+        packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
+        source_body = row_body[packed_articulation, row]
+        source_wrench = row_wrench[packed_articulation, row]
+        path_start = data.body_path_start[source_body]
+        path_end = data.body_path_start[source_body + wp.int32(1)]
+        path_length = path_end - path_start
+
+        if lane == wp.int32(0):
+            previous_body = previous_row_body[packed_row]
+            if previous_body >= wp.int32(0) and previous_body != source_body:
+                previous_path_start = data.body_path_start[previous_body]
+                previous_path_end = data.body_path_start[previous_body + wp.int32(1)]
+                for path_index in range(previous_path_start, previous_path_end):
+                    previous_joint = data.body_path_joint[path_index]
+                    previous_dof_start = data.joint_qd_start[previous_joint]
+                    previous_dof_end = data.joint_qd_start[previous_joint + wp.int32(1)]
+                    for dof in range(previous_dof_start, previous_dof_end):
+                        packed_jacobian[packed_row, dof - dof_start_articulation] = wp.float32(0.0)
+            previous_row_body[packed_row] = source_body
+
+            propagated_wrench = source_wrench
+            for reverse in range(path_end - path_start):
+                path_index = path_end - wp.int32(1) - reverse
+                joint = data.body_path_joint[path_index]
+                dof_start = data.joint_qd_start[joint]
+                dof_end = data.joint_qd_start[joint + wp.int32(1)]
+                dof_count = dof_end - dof_start
+                projected = _vec6(0.0)
+                reduced = _vec6(0.0)
+                for dof_row in range(6):
+                    if wp.int32(dof_row) < dof_count:
+                        dof = dof_start + wp.int32(dof_row)
+                        projected[dof_row] = wp.dot(data.joint_s[dof], propagated_wrench)
+                        joint_work[articulation, dof - dof_start_articulation, row] = projected[dof_row]
+                        packed_jacobian[packed_row, dof - dof_start_articulation] = wp.dot(
+                            data.joint_s[dof], source_wrench
+                        )
+                for dof_row in range(6):
+                    if wp.int32(dof_row) < dof_count:
+                        for dof_column in range(6):
+                            if wp.int32(dof_column) < dof_count:
+                                reduced[dof_row] += (
+                                    data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * projected[dof_column]
+                                )
+                        propagated_wrench -= data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
+        _sync_contact_group(group_mask)
+
+        previous_delta = wp.spatial_vector()
+        for depth in range(max_depth + wp.int32(1)):
+            index = articulation_depth_start[articulation, depth] + lane
+            depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+            active = index < depth_end
+            joint = wp.int32(-1)
+            parent_lane = wp.int32(0)
+            if active:
+                joint = articulation_depth_joint[index]
+                parent_lane = joint_parent_lane[joint]
+            parent_delta = _shuffle_contact_spatial(previous_delta, parent_lane, tile_width, group_mask)
+            child_delta = wp.spatial_vector()
+            if active:
+                child_delta = parent_delta
+                dof_start = data.joint_qd_start[joint]
+                dof_end = data.joint_qd_start[joint + wp.int32(1)]
+                dof_count = dof_end - dof_start
+                on_source_path = depth < path_length and joint == data.body_path_joint[path_start + depth]
+                rhs = _vec6(0.0)
+                generalized_delta = _vec6(0.0)
+                for dof_row in range(6):
+                    if wp.int32(dof_row) < dof_count:
+                        dof = dof_start + wp.int32(dof_row)
+                        rhs[dof_row] = -wp.dot(data.joint_u[dof], parent_delta)
+                        if on_source_path:
+                            rhs[dof_row] += joint_work[articulation, dof - dof_start_articulation, row]
+                for dof_row in range(6):
+                    if wp.int32(dof_row) < dof_count:
+                        for dof_column in range(6):
+                            if wp.int32(dof_column) < dof_count:
+                                generalized_delta[dof_row] += (
+                                    data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * rhs[dof_column]
+                                )
+                        dof = dof_start + wp.int32(dof_row)
+                        response_value = generalized_delta[dof_row]
+                        if row_count > wp.int32(_RESPONSE_TILE):
+                            joint_work[articulation, dof - dof_start_articulation, row] = response_value
+                        else:
+                            packed_response[packed_row, dof - dof_start_articulation] = response_value
+                        child_delta += data.joint_s[dof] * response_value
+            previous_delta = child_delta
+            _sync_contact_group(group_mask)
+
+    return _build_packed_patch_rows_warp_kernel
+
+
 _BUILD_PACKED_ROWS_KERNELS = {False: _make_build_packed_rows_ops(False)}
 _build_packed_generalized_contact_rows_kernel = _BUILD_PACKED_ROWS_KERNELS[False]
 
@@ -2023,13 +2198,18 @@ class ReducedContactBlockSystem:
         *,
         articulation_depth_start: wp.array2d[wp.int32],
         articulation_depth_joint: wp.array[wp.int32],
+        joint_parent_lane: wp.array[wp.int32],
+        row_tile_width: int,
         max_depth: int,
+        use_depth_warp: bool,
         allow_patch_rows: bool = True,
         use_patch_rows: bool = False,
     ):
         self.device = model.device
         self.articulation_depth_start = articulation_depth_start
         self.articulation_depth_joint = articulation_depth_joint
+        self.joint_parent_lane = joint_parent_lane
+        self.row_tile_width = int(row_tile_width)
         self.max_depth = int(max_depth)
         self.fuse_apply = bool(self.device.is_cuda)
         (
@@ -2069,6 +2249,9 @@ class ReducedContactBlockSystem:
         else:
             self.solve_kernel = _SOLVE_GENERALIZED_CONTACT_TILE_KERNELS[self.contact_dof_width]
         self.build_rows_kernel = _get_build_packed_rows_kernel(self.patch_rows)
+        self.build_patch_rows_warp_kernel = (
+            _make_build_packed_patch_rows_warp_kernel() if self.patch_rows and use_depth_warp else None
+        )
         self.transpose_kernel = _transpose_generalized_contact_response_kernel
         self.biased_page_launcher = None
         self.relax_page_launcher = None
@@ -2507,32 +2690,57 @@ class ReducedContactBlockSystem:
                     device=self.device,
                 )
             if build_rows:
-                wp.launch(
-                    self.build_rows_kernel,
-                    dim=(self.articulation_count, _MAX_ROWS),
-                    block_dim=_MAX_ROWS,
-                    inputs=[
-                        bodies,
-                        self.enabled,
-                        self.point_count,
-                        self.row_count,
-                        self.row_body,
-                        self.row_wrench,
-                        self.point_contact,
-                        cc,
-                        self.max_page_count,
-                        self.page_index,
-                        wp.bool(prepare),
-                        self.packed_previous_row_body,
-                    ],
-                    outputs=[
-                        self.packed_jacobian,
-                        self.packed_response,
-                        self.aba_joint_work,
-                        self.aba_body_response,
-                    ],
-                    device=self.device,
-                )
+                if self.build_patch_rows_warp_kernel is not None:
+                    wp.launch(
+                        self.build_patch_rows_warp_kernel,
+                        dim=(self.articulation_count, _MAX_ROWS * self.row_tile_width),
+                        block_dim=128,
+                        inputs=[
+                            bodies,
+                            self.enabled,
+                            self.row_count,
+                            self.row_body,
+                            self.row_wrench,
+                            self.max_page_count,
+                            self.page_index,
+                            wp.bool(prepare),
+                            wp.int32(self.max_depth),
+                            wp.int32(self.row_tile_width),
+                            self.articulation_depth_start,
+                            self.articulation_depth_joint,
+                            self.joint_parent_lane,
+                            self.packed_previous_row_body,
+                        ],
+                        outputs=[self.packed_jacobian, self.packed_response, self.aba_joint_work],
+                        device=self.device,
+                    )
+                else:
+                    wp.launch(
+                        self.build_rows_kernel,
+                        dim=(self.articulation_count, _MAX_ROWS),
+                        block_dim=_MAX_ROWS,
+                        inputs=[
+                            bodies,
+                            self.enabled,
+                            self.point_count,
+                            self.row_count,
+                            self.row_body,
+                            self.row_wrench,
+                            self.point_contact,
+                            cc,
+                            self.max_page_count,
+                            self.page_index,
+                            wp.bool(prepare),
+                            self.packed_previous_row_body,
+                        ],
+                        outputs=[
+                            self.packed_jacobian,
+                            self.packed_response,
+                            self.aba_joint_work,
+                            self.aba_body_response,
+                        ],
+                        device=self.device,
+                    )
 
                 def transpose_response() -> None:
                     wp.launch_tiled(

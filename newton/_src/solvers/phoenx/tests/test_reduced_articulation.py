@@ -47,6 +47,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _build_generalized_contact_rows_kernel,
     _build_packed_generalized_contact_rows_kernel,
     _gather_reduced_contact_blocks_packed_kernel,
+    _get_build_packed_rows_kernel,
     _transpose_generalized_contact_response_kernel,
 )
 from newton._src.solvers.phoenx.body import BodyContainer, inertia_sym6_unpack_np
@@ -2941,6 +2942,146 @@ class TestReducedArticulation(unittest.TestCase):
             reference_response.numpy()[0, :, :dof_count],
         )
 
+    def test_patch_contact_depth_rows_match_scalar_for_all_topology_widths(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        for child_count, expected_tile_width in ((7, 8), (15, 16), (31, 32)):
+            with self.subTest(tile_width=expected_tile_width):
+                model = _make_wide_tree(device, child_count)
+                state = model.state()
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    articulation_mode="reduced",
+                    contact_friction_model="patch",
+                    substeps=1,
+                    solver_iterations=1,
+                    velocity_iterations=0,
+                )
+                bridge = solver._reduced_articulation
+                block = bridge.contact_block_system
+                self.assertEqual(bridge.system.advance_tile_width, expected_tile_width)
+                self.assertIsNotNone(block.build_patch_rows_warp_kernel)
+                assert block.packed_jacobian is not None
+                assert block.packed_response is not None
+
+                active_rows = 72
+                dof_count = int(model.joint_dof_count)
+                rng = np.random.default_rng(20260727 + child_count)
+                block.enabled.assign(np.ones(block.enabled.shape, dtype=np.int32))
+                block.point_count.assign(np.full(block.point_count.shape, active_rows // 3, dtype=np.int32))
+                block.row_count.assign(np.full(block.row_count.shape, active_rows, dtype=np.int32))
+                block.row_body.assign(rng.integers(0, int(model.body_count), size=block.row_body.shape, dtype=np.int32))
+                block.row_wrench.assign(rng.uniform(-0.8, 0.8, (*block.row_wrench.shape, 6)).astype(np.float32))
+                block.packed_previous_row_body.fill_(-1)
+
+                reference_jacobian = wp.zeros_like(block.packed_jacobian)
+                reference_response = wp.zeros_like(block.packed_response)
+                reference_joint_work = wp.zeros_like(block.aba_joint_work)
+                reference_body_response = wp.zeros_like(block.aba_body_response)
+                reference_previous_row_body = wp.full(
+                    block.packed_previous_row_body.shape, -1, dtype=wp.int32, device=device
+                )
+                reference_kernel = _get_build_packed_rows_kernel(True)
+
+                with wp.ScopedCapture(device=device) as capture:
+                    bridge.import_step(state, model.control())
+                    bridge.begin_substep(0.0, split_dynamics=False)
+                    wp.launch(
+                        reference_kernel,
+                        dim=(1, block.row_wrench.shape[1]),
+                        block_dim=block.row_wrench.shape[1],
+                        inputs=[
+                            solver.bodies,
+                            block.enabled,
+                            block.point_count,
+                            block.row_count,
+                            block.row_body,
+                            block.row_wrench,
+                            block.point_contact,
+                            solver.world._contact_container,
+                            block.max_page_count,
+                            block.page_index,
+                            wp.bool(True),
+                            reference_previous_row_body,
+                        ],
+                        outputs=[
+                            reference_jacobian,
+                            reference_response,
+                            reference_joint_work,
+                            reference_body_response,
+                        ],
+                        device=device,
+                    )
+                    wp.launch_tiled(
+                        _transpose_generalized_contact_response_kernel,
+                        dim=[_RESPONSE_TILES_PER_ARTICULATION],
+                        block_dim=_RESPONSE_TILE,
+                        inputs=[
+                            solver.bodies,
+                            block.enabled,
+                            block.point_count,
+                            block.row_count,
+                            block.page_index,
+                            block.max_page_count,
+                            wp.bool(True),
+                            reference_joint_work,
+                        ],
+                        outputs=[reference_response],
+                        device=device,
+                    )
+                    wp.launch(
+                        block.build_patch_rows_warp_kernel,
+                        dim=(1, block.row_wrench.shape[1] * expected_tile_width),
+                        block_dim=128,
+                        inputs=[
+                            solver.bodies,
+                            block.enabled,
+                            block.row_count,
+                            block.row_body,
+                            block.row_wrench,
+                            block.max_page_count,
+                            block.page_index,
+                            wp.bool(True),
+                            wp.int32(bridge.system.advance_max_depth),
+                            wp.int32(expected_tile_width),
+                            bridge.system.advance_articulation_depth_start,
+                            bridge.system.advance_articulation_depth_joint,
+                            bridge.system.advance_joint_parent_lane,
+                            block.packed_previous_row_body,
+                        ],
+                        outputs=[block.packed_jacobian, block.packed_response, block.aba_joint_work],
+                        device=device,
+                    )
+                    wp.launch_tiled(
+                        _transpose_generalized_contact_response_kernel,
+                        dim=[_RESPONSE_TILES_PER_ARTICULATION],
+                        block_dim=_RESPONSE_TILE,
+                        inputs=[
+                            solver.bodies,
+                            block.enabled,
+                            block.point_count,
+                            block.row_count,
+                            block.page_index,
+                            block.max_page_count,
+                            wp.bool(True),
+                            block.aba_joint_work,
+                        ],
+                        outputs=[block.packed_response],
+                        device=device,
+                    )
+                wp.capture_launch(capture.graph)
+
+                np.testing.assert_array_equal(
+                    block.packed_jacobian.numpy()[:active_rows, :dof_count],
+                    reference_jacobian.numpy()[:active_rows, :dof_count],
+                )
+                np.testing.assert_array_equal(
+                    block.packed_response.numpy()[:active_rows, :dof_count],
+                    reference_response.numpy()[:active_rows, :dof_count],
+                )
+
     def test_contact_block_selects_smallest_dof_width_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -3220,7 +3361,7 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")
 
-        for child_count, expected_tile_width in ((7, 8), (9, 16), (17, 32)):
+        for child_count, expected_tile_width in ((7, 8), (9, 16), (17, 32), (62, 32)):
             with self.subTest(tile_width=expected_tile_width):
                 model = _make_wide_tree(device, child_count)
                 state_serial = model.state()
@@ -3254,6 +3395,7 @@ class TestReducedArticulation(unittest.TestCase):
                 serial._reduced_articulation.system.use_warp_kinematics = False
                 serial._reduced_articulation.system.use_warp_publish = False
                 self.assertEqual(warp._reduced_articulation.system.advance_tile_width, expected_tile_width)
+                self.assertEqual(warp._reduced_articulation.system.use_warp_advance, child_count <= 31)
                 self.assertTrue(warp._reduced_articulation.system.use_warp_publish)
                 dt = 1.0 / 240.0
 
