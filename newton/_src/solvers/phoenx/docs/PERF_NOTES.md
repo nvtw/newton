@@ -291,6 +291,25 @@ The first counter wrappers accidentally used stale four/five-substep overrides;
 the stall diagnosis is valid, but those timings are diagnostic rather than the
 authoritative three-substep baseline.
 
+- A later 8,192-world factor-initialization capture measured 72.3 us, 62.6%
+  memory/L2 throughput, 9.4% compute, and 10.27M excessive sectors out of
+  12.71M. Its 6x6 spatial inertia was already symmetric-packed to 21 floats.
+- A component-parallel 21-float writer improved coalescing but reduced complete
+  G1 physics throughput about 0.4%; the consumer-friendly AoS layout remains.
+- Packing the source symmetric 3x3 inertia from nine to six floats reduced the
+  initializer median 52.4 to 51.5 us, but was neutral end to end and added a
+  persistent cache. Both experiments were removed.
+- The fused advance/publish capture used 98 registers/thread, reached 22.9%
+  occupancy, and spent 66.3% of its issue interval on long-scoreboard stalls.
+  Memory/L2 throughput was 50.8% versus 22.9% compute, with 72.81M excessive
+  sectors out of 87.66M; scalar accesses used about 4.3 bytes per 32-byte sector.
+- Splitting momentum capture reduced the fused median only 210.4 to 208.7 us but
+  added an 11.9 us kernel, so it was removed. An exact rigid-body operator using
+  mass, COM, and local 3x3 inertia reduced the fused median to 206.3 us, while
+  complete G1 physics stayed neutral. Serial-oracle comparisons passed on
+  branched 8/16/32-lane trees, but the floating-point reorder had no pipeline
+  payoff and was removed.
+
 ### Configuration and experimental boundaries
 
 - Key knobs live in solver configuration: greedy coloring, tail-fuse threshold,

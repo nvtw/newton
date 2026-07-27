@@ -18,10 +18,16 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 <h1>PhoenX performance</h1>
 <p class="muted">27 July 2026 - <code>twidmer/phoenx-bandwidth-wins</code></p>
 
-<section class="gap">
-<h2>One profiler command needed</h2>
-<p><code>sudo /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/benchmarks/profile_g1_factor_init_ncu.sh</code></p>
-<p>This profiles one steady factor-initialization launch and writes the report plus exported metrics under <code>/tmp/phoenx_g1_factor_init_latest</code>. It decides whether factor-data fusion is a real layout opportunity.</p>
+<section class="hero">
+<h2>Fused advance captured - no sudo command pending</h2>
+<p>Nsight measures 98 registers/thread, 22.9% achieved occupancy, and a 66.3% long-scoreboard issue interval. Memory/L2 throughput is 50.8% versus 22.9% compute; scattered scalar access wastes 83% of sectors. This is latency hiding and access locality, not arithmetic saturation.</p>
+<p>Splitting momentum capture added 10.2 µs per step and was removed. Applying rigid inertia directly from mass, COM, and the local 3×3 tensor cut this kernel about 1.9%, but complete physics was neutral and the changed floating-point order bought no pipeline win, so it was also removed. The packed 21-value inertia is not the missing end-to-end lever.</p>
+</section>
+
+<section class="hero">
+<h2>Nsight confirms another layout target</h2>
+<p>The factor-initialization report is valid despite the application exiting afterward; no rerun is needed. The 72.3 µs kernel reaches 62.6% memory/L2 throughput but only 9.4% compute. Uncoalesced packed-inertia traffic creates 10.27M excess sectors out of 12.71M (81%).</p>
+<p>The 6×6 inertia is already symmetric-packed (21 rather than 36 floats). A component-parallel writer regressed full physics 0.4%; packing the source 3×3 tensor from nine to six values saved only 0.9 µs in the initializer and was neutral end to end. Both are removed. The compact AoS layout remains preferable for factor/advance consumers; the next experiment targets a larger consumer directly.</p>
 </section>
 
 <section class="hero">
@@ -58,7 +64,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 
 <section>
 <h2>Current data-layout focus</h2>
-<p>The BF16 MinGRU activation layout is qualified: projection storage falls 151.0 → 75.5 MB, isolated forward/backward improves 0.776 → 0.730 ms, and an A/B/B/A bracket averages 1.887M → 1.902M samples/s (+0.8%). FP32 recurrence/accumulation, gradient checks, and deterministic replay pass. Seed 42 passed the full 131.072M-sample gate with zero falls and 0.918 battery performance in 70.64 s training / 75.09 s including save, reload, and gate. Depth-local physics repacks were neutral or worse. A follow-up that fused next-layer BF16 shadows improved the isolated recurrent graph 0.730 → 0.713 ms but reduced full A/B/B/A throughput 1.940M → 1.927M/s, so it was removed.</p>
+<p>The BF16 MinGRU activation layout is qualified: projection storage falls 151.0 → 75.5 MB, isolated forward/backward improves 0.776 → 0.730 ms, and full PPO improves 0.8%. Seed 42 passed the 131.072M-sample gate with zero falls and 0.918 battery performance in 70.64 s training. A noisy 39M-sample seed-29 screen rejected both BF16 and the retained FP32-projection control; paired frozen-policy evaluation is next.</p>
 </section>
 
 <section class="gap">
