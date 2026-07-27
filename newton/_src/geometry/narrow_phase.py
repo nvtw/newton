@@ -1658,7 +1658,7 @@ class NarrowPhase:
 
         self.hydroelastic_sdf = hydroelastic_sdf
         if self.hydroelastic_sdf is not None:
-            self.hydroelastic_sdf.configure_deterministic(deterministic)
+            self.hydroelastic_sdf.validate_deterministic(deterministic)
 
         # Pre-allocate all intermediate buffers.
         # Counters live in one consolidated array for efficient zeroing.

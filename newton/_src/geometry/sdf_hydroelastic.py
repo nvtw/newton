@@ -604,8 +604,12 @@ class HydroelasticSDF:
         self._host_warning_poll_interval = 120
         self._launch_counter = 0
 
-    def configure_deterministic(self, deterministic: bool) -> None:
-        """Validate that determinism matches the mode selected at construction."""
+    def validate_deterministic(self, deterministic: bool) -> None:
+        """Raise if ``deterministic`` disagrees with the mode chosen at construction.
+
+        Lets :class:`~newton.geometry.NarrowPhase` reject a pre-built instance
+        whose determinism setting does not match the pipeline's.
+        """
         if deterministic != self.deterministic:
             raise ValueError(
                 "Hydroelastic determinism must be selected when HydroelasticSDF is constructed "

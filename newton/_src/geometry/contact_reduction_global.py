@@ -915,16 +915,6 @@ class GlobalContactReducer:
         self.ht_insert_failures.zero_()
         self.hashtable.clear()
         self.ht_values.zero_()
-        self.agg_force.zero_()
-        self.agg_depth_volume.zero_()
-        self.weighted_pos_sum.zero_()
-        self.weight_sum.zero_()
-        self.entry_k_eff.zero_()
-        self.total_depth_reduced.zero_()
-        self.total_normal_reduced.zero_()
-        self.agg_moment_unreduced.zero_()
-        self.agg_moment_reduced.zero_()
-        self.agg_moment2_reduced.zero_()
 
     def clear_active(self):
         """Clear only the active entries (efficient for sparse usage).

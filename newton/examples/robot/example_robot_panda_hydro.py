@@ -439,8 +439,11 @@ class Example:
             )
 
         # In-cup placement check remains disabled pending newton-physics/newton#1337.
-        # Determinism removes run-to-run variation but does not make this stricter
-        # placement criterion a suitable pickup regression.
+        # With --deterministic the placement does succeed (measured 19mm from the
+        # cup center against a 50mm tolerance), but wp.DeterministicMode.RUN_TO_RUN
+        # only guarantees repeatability within one GPU architecture, so that margin
+        # is not established across the CI fleet. Re-enable once determinism is
+        # verified on every target architecture.
         # # Verify that the object ended up in the cup
         # if self.put_in_cup:
         #     body_q = self.state_0.body_q.numpy()

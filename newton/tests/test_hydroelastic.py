@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.contact_reduction_hydroelastic import _fixed_mantissa_bits
 from newton.geometry import HydroelasticSDF
 from newton.tests.unittest_utils import (
     add_function_test,
@@ -1531,6 +1532,23 @@ def test_convex_mesh_hydroelastic_contacts(test, device):
 
 
 class TestHydroelastic(unittest.TestCase):
+    def test_fixed_point_accumulator_cannot_overflow(self):
+        """``_fixed_mantissa_bits`` keeps deterministic fixed-point sums inside int64.
+
+        A contribution equal to the entry maximum scales to just under
+        ``2**(bits + 1)``, because ``|x| / 2**exponent`` lies in ``[1, 2)``.  The
+        worst case is every term hitting that ceiling in the same entry, so the
+        chosen width must keep ``max_terms * 2**(bits + 1)`` below ``2**63``.
+        This bound is host-side only, so the test runs even on CPU-only CI.
+        """
+        int64_max = 2**63 - 1
+        for max_terms in (1, 2, 64, 7168, 28672, 1 << 20, 1835008, (1 << 24) + 1):
+            bits = _fixed_mantissa_bits(max_terms)
+            worst_case_sum = max_terms * 2 ** (bits + 1)
+            self.assertLessEqual(worst_case_sum, int64_max, msg=f"max_terms={max_terms}, bits={bits}")
+            # Must still beat float32's 24-bit significand by a wide margin.
+            self.assertGreater(bits, 24, msg=f"max_terms={max_terms}")
+
     def test_mc_edge_clamp_min_validation(self):
         """``HydroelasticSDF.Config.mc_edge_clamp_min`` validates its range at construction.
 

@@ -81,11 +81,9 @@ MIN_FRICTION_SCALE = 1e-2
 # The fixed-point grid is chosen per hashtable entry so no magnitude has to be
 # assumed: a first pass records ``max(|contribution|)`` as a binary exponent via
 # ``atomic_max`` (order-independent for integers), and the accumulating pass
-# shifts every contribution onto that entry's grid.  Contributions land in
-# ``[-2**FIXED_MANTISSA_BITS, 2**FIXED_MANTISSA_BITS]``, and the mantissa width
-# is derived from the buffer capacity so that ``capacity`` such terms still fit
-# in a signed int64 -- overflow is impossible by construction rather than by
-# assumption.  See :func:`_fixed_mantissa_bits`.
+# shifts every contribution onto that entry's grid.  The mantissa width is
+# derived from how many terms can reach one entry, so overflow is impossible by
+# construction rather than by assumption.  See :func:`_fixed_mantissa_bits`.
 
 # Sentinel exponent meaning "this entry saw no usable contribution".
 FIXED_EXP_NONE = wp.constant(-10000)
@@ -129,15 +127,19 @@ FINALIZE_REDUCED_DEPTH = 1
 FINALIZE_MOMENTS = 2
 
 
-def _fixed_mantissa_bits(capacity: int) -> int:
-    """Fixed-point mantissa width that cannot overflow for ``capacity`` terms.
+def _fixed_mantissa_bits(max_terms: int) -> int:
+    """Fixed-point mantissa width that cannot overflow for ``max_terms`` terms.
 
-    Every contribution is bounded by ``2**bits`` after scaling, so summing at
-    most ``capacity`` of them stays below ``2**62`` and therefore inside a
-    signed int64 in both directions.
+    A contribution equal to the entry maximum scales to just under
+    ``2**(bits + 1)``, because ``|x| / 2**exponent`` lies in ``[1, 2)``.  Summing
+    ``max_terms`` of those therefore stays at or below ``2**62``, which fits a
+    signed int64 in both directions with a bit to spare.
+
+    Args:
+        max_terms: Upper bound on how many contributions reach a single entry.
     """
-    count_bits = max(int(capacity - 1), 1).bit_length()
-    return 62 - count_bits
+    count_bits = max(int(max_terms - 1), 1).bit_length()
+    return 61 - count_bits
 
 
 @wp.func
@@ -1527,11 +1529,12 @@ class HydroelasticContactReduction:
             hashtable_size_factor=config.hashtable_size_factor,
         )
 
-        # Fixed-point accumulators used only in deterministic mode.  The mantissa
-        # width is derived from the buffer capacity so that summing every
-        # buffered contact into one entry still fits in a signed int64.
+        # Fixed-point accumulators, used only in deterministic mode.  Unreduced
+        # aggregates take one term per buffered contact; the reduced ones take up
+        # to VALUES_PER_KEY winners from every hashtable entry, which can exceed
+        # the contact capacity.  The wider of the two bounds sizes the grid.
         ht_capacity = self.reducer.hashtable.capacity
-        self._mantissa_bits = _fixed_mantissa_bits(capacity)
+        self._mantissa_bits = _fixed_mantissa_bits(max(capacity, ht_capacity * VALUES_PER_KEY))
         if deterministic:
             self._fixed_accum = wp.zeros(NUM_FIXED_SLOTS * ht_capacity, dtype=wp.int64, device=device)
             self._fixed_scale = wp.full(NUM_SCALE_FAMILIES * ht_capacity, FIXED_EXP_NONE, dtype=wp.int32, device=device)
