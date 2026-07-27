@@ -154,6 +154,27 @@ Do not retry without new evidence or a materially different design.
 - Benchmark complete Muon Newton--Schulz steps before routing its remaining
   fused GEMMs through cuBLAS.
 
+### Kapla launch floor and work scaling
+
+Measured 2026-07-27, RTX PRO 6000 Blackwell, captured-graph replay at the
+production single-world geometry (1,504 blocks x 32 threads):
+
+- An empty kernel of identical geometry costs **1.14 us/launch** (90 launches)
+  to 1.37 us (9 launches). Against the 5.25 us production iterate that is a
+  ~22% dispatch floor, so fusing launches is capped near 22% and is not the
+  dominant lever.
+- A synthetic three-level pointer chase (slot -> header -> two body states)
+  over the same grid costs 1.39 us at 500 live items, 1.48 us at 5,000, and
+  2.67 us at 32,000. A regular color (~5k rows) therefore sits ~0.34 us above
+  the empty floor.
+
+The production iterate is 5.25 us, i.e. ~3.8 us above floor at comparable item
+counts. The address chase does not explain it -- the per-column solve does
+(1-5 point manifold, sequential GS over points, friction cone). Two
+consequences: do not model this kernel as address-latency-starved, and expect
+work removal to pay mainly on the large overflow partition (~32k rows), where
+item count is well above the floor knee, rather than on the ~5k regular colors.
+
 ## Correctness traps
 
 - CUDA-graph state ping-pong requires either an even captured substep count or an
