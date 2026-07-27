@@ -112,6 +112,7 @@ Do not retry without new evidence or a materially different design.
 | Pack scalar joint work into inverse-factor rows | Same 28-byte footprint but only +0.08% in the production graph; retained SoA layout. |
 | Depth-local reduced scalar/factor repacking | Scalar depth order was neutral; global inertia-component SoA was 75% slower; compact depth AoSoA and split joint-u/d storage were neutral. |
 | Reuse checkpoint MinGRU kernel for read-only sequences | Only a 1.1% forward-subphase change and no measurable full-training gain. |
+| Fuse next-layer BF16 shadows into MinGRU recurrence | Isolated recurrent graph improved 0.730 -> 0.713 ms, but the extra dependent store reduced full A/B/B/A throughput 1.940M -> 1.927M samples/s; removed. |
 
 ## Open ideas
 

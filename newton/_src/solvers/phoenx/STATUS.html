@@ -53,7 +53,7 @@ ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:4px}code{background:#edf2ff
 
 <section>
 <h2>Current data-layout focus</h2>
-<p>The BF16 MinGRU activation layout is qualified: projection storage falls 151.0 → 75.5 MB, isolated forward/backward improves 0.776 → 0.730 ms, and an A/B/B/A bracket averages 1.887M → 1.902M samples/s (+0.8%). FP32 recurrence/accumulation, gradient checks, and deterministic replay pass. Seed 42 passed the full 131.072M-sample gate with zero falls and 0.918 battery performance in 70.64 s training / 75.09 s including save, reload, and gate. Depth-local physics repacks were neutral or worse; layout work remains evidence-driven.</p>
+<p>The BF16 MinGRU activation layout is qualified: projection storage falls 151.0 → 75.5 MB, isolated forward/backward improves 0.776 → 0.730 ms, and an A/B/B/A bracket averages 1.887M → 1.902M samples/s (+0.8%). FP32 recurrence/accumulation, gradient checks, and deterministic replay pass. Seed 42 passed the full 131.072M-sample gate with zero falls and 0.918 battery performance in 70.64 s training / 75.09 s including save, reload, and gate. Depth-local physics repacks were neutral or worse. A follow-up that fused next-layer BF16 shadows improved the isolated recurrent graph 0.730 → 0.713 ms but reduced full A/B/B/A throughput 1.940M → 1.927M/s, so it was removed.</p>
 </section>
 
 <section class="gap">
