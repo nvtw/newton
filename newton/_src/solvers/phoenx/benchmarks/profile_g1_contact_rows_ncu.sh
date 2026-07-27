@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
+# Profile one steady G1 point-contact row build and export metrics and source counters.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../" && pwd)"
-REPORT="${1:-/tmp/phoenx_g1_contact_rows_full}"
-REPORT="${REPORT%.ncu-rep}"
+OUTPUT_DIR=/tmp/phoenx_g1_contact_rows_latest
+REPORT="${OUTPUT_DIR}/contact_rows"
 NCU=/usr/local/cuda-13.1/bin/ncu
-PYTHON=${ROOT_DIR}/.venv/bin/python
+PYTHON="${ROOT_DIR}/.venv/bin/python"
 
+mkdir -p "${OUTPUT_DIR}"
 cd "${ROOT_DIR}"
+
 set +e
 "${NCU}" \
   --set full \
   --target-processes all \
   --replay-mode kernel \
-  --kernel-name "regex:_build_packed_generalized_contact_rows_kernel.*" \
+  --kernel-name "regex:.*build_packed_generalized_contact_rows_kernel.*" \
   --launch-count 1 \
   --force-overwrite \
   --export "${REPORT}" \
@@ -24,14 +27,20 @@ set +e
     --articulation-mode reduced \
     --solver-iterations 2 \
     --velocity-iterations 1
-ncu_status=$?
+capture_status=$?
 set -e
 
-if [[ ! -f "${REPORT}.ncu-rep" ]]; then
-  exit "${ncu_status}"
+if [[ ! -r "${REPORT}.ncu-rep" ]]; then
+  printf "ERROR: ncu exited with code %d and did not create %s.ncu-rep\n" "${capture_status}" "${REPORT}" >&2
+  exit 1
 fi
 
-printf "Nsight Compute report: %s.ncu-rep\n" "${REPORT}"
-if [[ "${ncu_status}" -ne 0 ]]; then
-  printf "The profiled process exited with status %s after the report was captured.\n" "${ncu_status}" >&2
+"${NCU}" --import "${REPORT}.ncu-rep" --csv --page raw >"${OUTPUT_DIR}/contact_rows_metrics.csv" || true
+"${NCU}" --import "${REPORT}.ncu-rep" --csv --page source >"${OUTPUT_DIR}/contact_rows_source.csv" || true
+chmod -R a+rX "${OUTPUT_DIR}"
+printf "Report: %s.ncu-rep\n" "${REPORT}"
+printf "Metrics: %s/contact_rows_metrics.csv\n" "${OUTPUT_DIR}"
+printf "Source: %s/contact_rows_source.csv\n" "${OUTPUT_DIR}"
+if (( capture_status != 0 )); then
+  printf "The application exited with code %d after capture; the saved report is still usable.\n" "${capture_status}"
 fi
