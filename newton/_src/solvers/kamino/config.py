@@ -781,12 +781,13 @@ class DVISolverConfig:
     A container to hold configurations for the DVI forward dynamics solver.
     """
 
-    max_iterations: int = 100
+    max_inequality_sweeps: int = 20
     """
-    Maximum projected Gauss-Seidel iterations for the all-constraint
+    Maximum projected Gauss-Seidel sweeps for the inequality-only
     fallback path. The direct bilateral block path is controlled by
-    `block_iterations` and `contact_iterations`. Must be greater than zero.
-    Defaults to `100`.
+    `max_alternating_iterations` and `inequality_sweeps_per_iteration`.
+    Must be greater than zero.
+    Defaults to `20`.
     """
 
     tolerance: float = 1e-5
@@ -807,22 +808,23 @@ class DVISolverConfig:
     Must be in the range `(0, 2]`. Defaults to `1.0`.
     """
 
-    block_iterations: int = 32
+    max_alternating_iterations: int = 32
     """
-    Number of outer DVI block iterations alternating direct bilateral solves
-    with projected inequality solves. Must be greater than zero. Defaults to `32`.
+    Maximum number of outer DVI iterations alternating direct bilateral
+    solves with projected inequality solves. Must be greater than zero.
+    Defaults to `32`.
     """
 
-    contact_iterations: int = 4
+    inequality_sweeps_per_iteration: int = 4
     """
     Number of projected Gauss-Seidel sweeps used for unilateral inequalities
-    during each DVI block iteration. Contacts use graph-colored sweeps on CUDA.
-    Must be greater than zero. Defaults to `4`.
+    during each alternating DVI iteration. Contacts use graph-colored sweeps
+    on CUDA. Must be greater than zero. Defaults to `4`.
     """
 
-    bilateral_solve_period: int = 1
+    bilateral_solve_interval: int = 1
     """
-    Number of DVI block iterations between repeated direct bilateral solves.
+    Number of alternating DVI iterations between repeated direct bilateral solves.
     A value of `1` re-solves after every projected inequality block, preserving
     the standard direct-block schedule. Must be greater than zero. Defaults to `1`.
     """
@@ -879,9 +881,9 @@ class DVISolverConfig:
         cfg = DVISolverConfig(**kwargs)
         kamino_attrs = getattr(model, "kamino", None)
         if kamino_attrs is not None and hasattr(kamino_attrs, "max_solver_iterations"):
-            max_iterations = int(kamino_attrs.max_solver_iterations.numpy()[0])
-            if max_iterations >= 0:
-                cfg.max_iterations = max_iterations
+            max_inequality_sweeps = int(kamino_attrs.max_solver_iterations.numpy()[0])
+            if max_inequality_sweeps >= 0:
+                cfg.max_inequality_sweeps = max_inequality_sweeps
         cfg.validate()
         return cfg
 
@@ -891,21 +893,29 @@ class DVISolverConfig:
         from ._src.solvers.common import WarmStartMode  # noqa: PLC0415
         from ._src.solvers.warmstart import WarmstarterContacts  # noqa: PLC0415
 
-        if self.max_iterations <= 0:
-            raise ValueError(f"Invalid maximum iterations: {self.max_iterations}. Must be a positive integer.")
+        if self.max_inequality_sweeps <= 0:
+            raise ValueError(
+                f"Invalid maximum inequality sweeps: {self.max_inequality_sweeps}. Must be a positive integer."
+            )
         if self.tolerance < 0.0:
             raise ValueError(f"Invalid tolerance: {self.tolerance}. Must be non-negative.")
         if self.regularization <= 0.0:
             raise ValueError(f"Invalid regularization: {self.regularization}. Must be greater than zero.")
         if self.omega <= 0.0 or self.omega > 2.0:
             raise ValueError(f"Invalid omega: {self.omega}. Must be in the range (0, 2].")
-        if self.block_iterations <= 0:
-            raise ValueError(f"Invalid block iterations: {self.block_iterations}. Must be a positive integer.")
-        if self.contact_iterations <= 0:
-            raise ValueError(f"Invalid contact iterations: {self.contact_iterations}. Must be a positive integer.")
-        if self.bilateral_solve_period <= 0:
+        if self.max_alternating_iterations <= 0:
             raise ValueError(
-                f"Invalid bilateral solve period: {self.bilateral_solve_period}. Must be a positive integer."
+                f"Invalid maximum alternating iterations: {self.max_alternating_iterations}. "
+                "Must be a positive integer."
+            )
+        if self.inequality_sweeps_per_iteration <= 0:
+            raise ValueError(
+                f"Invalid inequality sweeps per iteration: {self.inequality_sweeps_per_iteration}. "
+                "Must be a positive integer."
+            )
+        if self.bilateral_solve_interval <= 0:
+            raise ValueError(
+                f"Invalid bilateral solve interval: {self.bilateral_solve_interval}. Must be a positive integer."
             )
         if self.bilateral_solver_type not in {"LLTB", "LLTBRCM"}:
             raise ValueError(

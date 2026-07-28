@@ -59,9 +59,9 @@ class SparseDVIPath:
         contacts: ContactsKamino | None,
         jacobians: SparseSystemJacobians | None,
         bilateral_solver,
-        max_iterations: int,
-        max_block_iterations: int,
-        max_contact_iterations: int,
+        max_inequality_sweeps: int,
+        max_alternating_iterations: int,
+        max_inequality_sweeps_per_iteration: int,
         has_unilateral_constraints: bool,
         all_worlds_mask: wp.array[wp.bool],
         should_solve_bilateral_after_block,
@@ -77,9 +77,9 @@ class SparseDVIPath:
         self.jacobians = jacobians
         self.body_space = wp.empty(shape=size.sum_of_num_body_dofs, dtype=wp.float32, device=device)
         self.bilateral_solver = bilateral_solver
-        self.max_iterations = max_iterations
-        self.max_block_iterations = max_block_iterations
-        self.max_contact_iterations = max_contact_iterations
+        self.max_inequality_sweeps = max_inequality_sweeps
+        self.max_alternating_iterations = max_alternating_iterations
+        self.max_inequality_sweeps_per_iteration = max_inequality_sweeps_per_iteration
         self.has_unilateral_constraints = has_unilateral_constraints
         self.all_worlds_mask = all_worlds_mask
         self.should_solve_bilateral_after_block = should_solve_bilateral_after_block
@@ -502,7 +502,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         raise RuntimeError(_SPARSE_INEQUALITY_TOPOLOGY_ERROR)
     _prepare_sparse_inequality_pgs(path, problem)
 
-    for block_iteration in range(path.max_block_iterations):
+    for block_iteration in range(path.max_alternating_iterations):
         _launch_sparse_inequality_pgs(path, problem, block_iteration)
 
         if path.should_solve_bilateral_after_block(block_iteration):

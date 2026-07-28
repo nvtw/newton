@@ -34,16 +34,16 @@ class DVIConfigStruct:
     omega: float32
     """Projected Gauss-Seidel update relaxation."""
 
-    max_iterations: int32
+    max_inequality_sweeps: int32
     """Maximum projected Gauss-Seidel iterations for the fallback path."""
 
-    block_iterations: int32
+    max_alternating_iterations: int32
     """Outer direct-bilateral/projected-inequality block iterations."""
 
-    contact_iterations: int32
+    inequality_sweeps_per_iteration: int32
     """Projected sweeps for unilateral inequalities in each direct-bilateral block."""
 
-    bilateral_solve_period: int32
+    bilateral_solve_interval: int32
     """Block iteration period for repeated direct bilateral solves."""
 
 
@@ -181,8 +181,8 @@ def convert_config_to_struct(config: DVISolverConfig) -> DVIConfigStruct:
     config_struct.tolerance = config.tolerance
     config_struct.regularization = config.regularization
     config_struct.omega = config.omega
-    config_struct.max_iterations = config.max_iterations
-    config_struct.block_iterations = config.block_iterations
-    config_struct.contact_iterations = config.contact_iterations
-    config_struct.bilateral_solve_period = config.bilateral_solve_period
+    config_struct.max_inequality_sweeps = config.max_inequality_sweeps
+    config_struct.max_alternating_iterations = config.max_alternating_iterations
+    config_struct.inequality_sweeps_per_iteration = config.inequality_sweeps_per_iteration
+    config_struct.bilateral_solve_interval = config.bilateral_solve_interval
     return config_struct

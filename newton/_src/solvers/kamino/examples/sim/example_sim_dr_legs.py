@@ -258,12 +258,16 @@ class Example:
         config.solver.dynamics.preconditioning = dynamics_solver != "dvi"
         if dynamics_solver == "dvi":
             config.solver.constraints.gamma = 0.015
-            config.solver.dvi.max_iterations = 200
+            config.solver.dynamics.linear_solver_type = "CR"
+            config.solver.dynamics.linear_solver_kwargs = {"maxiter": 9}
+            config.solver.dvi.bilateral_solver_type = "LLTBRCM"
+            config.solver.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
+            config.solver.dvi.max_inequality_sweeps = 200
             config.solver.dvi.tolerance = 1e-4
             config.solver.dvi.regularization = 1e-5
-            config.solver.dvi.block_iterations = 4
-            config.solver.dvi.contact_iterations = 3
-            config.solver.dvi.bilateral_solve_period = 1
+            config.solver.dvi.max_alternating_iterations = 4
+            config.solver.dvi.inequality_sweeps_per_iteration = 3
+            config.solver.dvi.bilateral_solve_interval = 1
             config.solver.dvi.warmstart_mode = "containers"
             config.solver.dvi.contact_warmstart_method = "key_and_position_with_net_force_backup"
         config.solver.padmm.use_graph_conditionals = use_graph_conditionals

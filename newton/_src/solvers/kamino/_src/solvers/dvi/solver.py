@@ -101,9 +101,9 @@ class DVISolver:
         self._size: SizeKamino | None = None
         self._data: DVIData | None = None
         self._bilateral_solver: LLTBlockedSolver | LLTBlockedRCMSolver | None = None
-        self._max_block_iterations: int = 1
-        self._max_contact_iterations: int = 1
-        self._max_iterations: int = 1
+        self._max_alternating_iterations: int = 1
+        self._max_inequality_sweeps_per_iteration: int = 1
+        self._max_inequality_sweeps: int = 1
         self._bilateral_solve_after_block: tuple[bool, ...] = ()
         self._has_unilateral_constraints: bool = False
         self._limits: LimitsKamino | None = None
@@ -185,9 +185,9 @@ class DVISolver:
         self._config = self._check_config(model, config)
         self._warmstart = warmstart
         self._collect_info = collect_info
-        self._max_iterations = max(c.max_iterations for c in self._config)
-        self._max_block_iterations = max(c.block_iterations for c in self._config)
-        self._max_contact_iterations = max(c.contact_iterations for c in self._config)
+        self._max_inequality_sweeps = max(c.max_inequality_sweeps for c in self._config)
+        self._max_alternating_iterations = max(c.max_alternating_iterations for c in self._config)
+        self._max_inequality_sweeps_per_iteration = max(c.inequality_sweeps_per_iteration for c in self._config)
         self._bilateral_solve_after_block = self._make_bilateral_solve_schedule(self._config)
         self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
         self._data = DVIData(size=self._size, collect_info=self._collect_info, device=self._device)
@@ -203,9 +203,9 @@ class DVISolver:
             contacts=contacts,
             jacobians=jacobians,
             bilateral_solver=self._bilateral_solver,
-            max_iterations=self._max_iterations,
-            max_block_iterations=self._max_block_iterations,
-            max_contact_iterations=self._max_contact_iterations,
+            max_inequality_sweeps=self._max_inequality_sweeps,
+            max_alternating_iterations=self._max_alternating_iterations,
+            max_inequality_sweeps_per_iteration=self._max_inequality_sweeps_per_iteration,
             has_unilateral_constraints=self._has_unilateral_constraints,
             all_worlds_mask=self._all_worlds_mask,
             should_solve_bilateral_after_block=self._should_solve_bilateral_after_block,
@@ -223,8 +223,11 @@ class DVISolver:
     def _make_bilateral_solve_schedule(self, configs: list[DVISolver.Config]) -> tuple[bool, ...]:
         """Return host-side repeated bilateral solve points for direct-block DVI."""
         return tuple(
-            any(next_block < c.block_iterations and next_block % c.bilateral_solve_period == 0 for c in configs)
-            for next_block in range(1, self._max_block_iterations)
+            any(
+                next_block < c.max_alternating_iterations and next_block % c.bilateral_solve_interval == 0
+                for c in configs
+            )
+            for next_block in range(1, self._max_alternating_iterations)
         )
 
     def _should_solve_bilateral_after_block(self, block_iteration: int) -> bool:
@@ -386,7 +389,7 @@ class DVISolver:
         The unilateral block is updated iteratively with projection onto the
         nonnegative and Coulomb cones. Alternating these updates retains the
         ``D_bu`` and ``D_ub`` coupling while using a solver suited to each
-        constraint class. Repeating the alternation for ``block_iterations``
+        constraint class. Repeating the alternation for ``max_alternating_iterations``
         drives ``lambda_b`` and ``lambda_u`` toward a mutually consistent
         solution; a single block without a bilateral re-solve reduces to a
         one-directional solve where the joints never see the final contact and
@@ -742,7 +745,7 @@ class DVISolver:
 
         self._prepare_inequality_coloring(problem)
         threads_per_world = 64 if self.device.is_cuda else 1
-        for block_iteration in range(self._max_block_iterations):
+        for block_iteration in range(self._max_alternating_iterations):
             wp.launch(
                 kernel=_compute_dvi_unilateral_velocities,
                 dim=(self._size.num_worlds, self._size.max_of_max_total_cts),

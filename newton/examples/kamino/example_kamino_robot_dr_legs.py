@@ -76,6 +76,8 @@ class Example:
         self.config = newton.solvers.SolverKamino.Config.from_model(
             self.model,
             dynamics_solver=self.dynamics_solver,
+            sparse_dynamics=self.dynamics_solver == "dvi",
+            sparse_jacobian=self.dynamics_solver == "dvi",
         )
         self.config.use_fk_solver = True
         self.config.use_collision_detector = self.use_kamino_contacts
@@ -96,14 +98,14 @@ class Example:
             self.config.dynamics.preconditioning = False
             self.config.dynamics.linear_solver_type = "CR"
             self.config.dynamics.linear_solver_kwargs = {"maxiter": 9}
-            self.config.sparse_dynamics = True
-            self.config.sparse_jacobian = True
-            self.config.dvi.max_iterations = 200
+            self.config.dvi.bilateral_solver_type = "LLTBRCM"
+            self.config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
+            self.config.dvi.max_inequality_sweeps = 200
             self.config.dvi.tolerance = 1e-4
             self.config.dvi.regularization = 1e-5
-            self.config.dvi.block_iterations = 4
-            self.config.dvi.contact_iterations = 3
-            self.config.dvi.bilateral_solve_period = 1
+            self.config.dvi.max_alternating_iterations = 4
+            self.config.dvi.inequality_sweeps_per_iteration = 3
+            self.config.dvi.bilateral_solve_interval = 1
             self.config.dvi.contact_warmstart_method = "key_and_position_with_net_force_backup"
         self.solver = newton.solvers.SolverKamino(self.model, config=self.config)
 

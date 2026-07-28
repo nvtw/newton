@@ -317,7 +317,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     lane = tid % threads_per_world
     wid = tid / threads_per_world
     cfg = solver_config[wid]
-    if block_iteration >= int32(0) and block_iteration >= cfg.block_iterations:
+    if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
         return
     nl = problem_nl[wid]
     nc = problem_nc[wid]
@@ -334,9 +334,9 @@ def _solve_dvi_sparse_inequalities_pgs(
     row_start = bsm_row_start[wid]
     col_start = bsm_col_start[wid]
     matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
-    sweep_budget = cfg.contact_iterations
+    sweep_budget = cfg.inequality_sweeps_per_iteration
     if block_iteration < int32(0):
-        sweep_budget = cfg.max_iterations
+        sweep_budget = cfg.max_inequality_sweeps
 
     for _sweep in range(sweep_budget):
         for color in range(inequality_num_colors[wid]):

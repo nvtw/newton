@@ -469,7 +469,8 @@ class CollisionPipelineUnifiedKamino:
         if broadphase == "explicit":
             self.shape_pairs_filtered = self._model.geoms.collidable_pairs
             self._max_shape_pairs = self._model.geoms.num_collidable_pairs
-            self._max_contacts = self._model.geoms.model_minimum_contacts
+            if max_contacts is None:
+                self._max_contacts = self._model.geoms.model_minimum_contacts
 
         # Build excluded pairs for NXN/SAP broadphase filtering.
         # Kamino uses a bitmask group/collides system that is more expressive than

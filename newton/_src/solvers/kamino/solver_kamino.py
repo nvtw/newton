@@ -9,7 +9,7 @@ simulating constrained multi-body systems for arbitrary mechanical assemblies.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -46,6 +46,33 @@ if TYPE_CHECKING:
 ###
 
 __all__ = ["SolverKamino"]
+
+
+_DVI_MIN_CONTACTS_PER_WORLD = 64
+_DVI_CONTACTS_PER_GEOMETRY = 8
+
+
+def _estimate_dvi_contacts_per_world(model) -> int:
+    """Estimate a practical contact capacity for DVI allocations."""
+    theoretical = max(model.geoms.world_minimum_contacts, default=0)
+    if theoretical == 0:
+        return 0
+
+    world_count = model.size.num_worlds
+    geom_world = model.geoms.wid.numpy()
+    geom_group = model.geoms.group.numpy()
+    collidable = geom_group > 0
+    global_count = int(np.count_nonzero(collidable & (geom_world < 0)))
+    max_world_geometries = global_count
+    for world_index in range(world_count):
+        world_geometries = global_count + int(np.count_nonzero(collidable & (geom_world == world_index)))
+        max_world_geometries = max(max_world_geometries, world_geometries)
+
+    heuristic = max(
+        _DVI_MIN_CONTACTS_PER_WORLD,
+        _DVI_CONTACTS_PER_GEOMETRY * max_world_geometries,
+    )
+    return min(theoretical, heuristic)
 
 
 ###
@@ -429,9 +456,9 @@ class SolverKamino(SolverBase, CouplingInterface):
                 if self.dynamics_solver == "dvi" and self.sparse_dynamics:
                     self.dvi = config.DVISolverConfig(
                         omega=0.3,
-                        block_iterations=16,
-                        contact_iterations=2,
-                        bilateral_solve_period=2,
+                        max_alternating_iterations=16,
+                        inequality_sweeps_per_iteration=2,
+                        bilateral_solve_interval=2,
                     )
                 else:
                     self.dvi = config.DVISolverConfig()
@@ -710,9 +737,15 @@ class SolverKamino(SolverBase, CouplingInterface):
         # set to `None` to disable internal collision detection in Kamino
         self._collision_detector_kamino = None
         if self._config.use_collision_detector:
+            collision_config = self._config.collision_detector
+            if self._config.dynamics_solver == "dvi" and collision_config.max_contacts_per_world is None:
+                collision_config = replace(
+                    collision_config,
+                    max_contacts_per_world=_estimate_dvi_contacts_per_world(self._model_kamino),
+                )
             self._collision_detector_kamino = self._kamino.CollisionDetector(
                 model=self._model_kamino,
-                config=self._config.collision_detector,
+                config=collision_config,
             )
 
         # Capture a reference to the contacts container

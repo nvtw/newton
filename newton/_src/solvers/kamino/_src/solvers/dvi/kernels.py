@@ -284,7 +284,7 @@ def _initialize_dvi_status(
     cfg = solver_config[wid]
     status = DVIStatus()
     status.converged = int32(0)
-    status.iterations = cfg.contact_iterations
+    status.iterations = cfg.inequality_sweeps_per_iteration
     status.r_p = float32(0.0)
     status.r_d = float32(0.0)
     status.r_c = float32(0.0)
@@ -307,7 +307,7 @@ def _set_dvi_direct_status_iterations(
     if problem_nl[wid] == int32(0) and problem_nc[wid] == int32(0):
         status.iterations = int32(1)
     else:
-        status.iterations = cfg.block_iterations * cfg.contact_iterations
+        status.iterations = cfg.max_alternating_iterations * cfg.inequality_sweeps_per_iteration
     solver_status[wid] = status
 
 
@@ -324,9 +324,9 @@ def _set_dvi_fixed_status_iterations(
     if problem_dim[wid] == int32(0):
         status.iterations = int32(0)
     else:
-        # Inequality-only PGS runs `max_iterations` sweeps without a block
+        # Inequality-only PGS runs `max_inequality_sweeps` sweeps without a block
         # schedule; terminal residuals come from the shared status kernel.
-        status.iterations = solver_config[wid].max_iterations
+        status.iterations = solver_config[wid].max_inequality_sweeps
     solver_status[wid] = status
 
 
@@ -409,7 +409,7 @@ def _solve_dvi_inequalities_colored_pgs(
     lane = tid % threads_per_world
     wid = tid / threads_per_world
     cfg = solver_config[wid]
-    if block_iteration >= int32(0) and block_iteration >= cfg.block_iterations:
+    if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
         return
 
     nl = problem_nl[wid]
@@ -426,9 +426,9 @@ def _solve_dvi_inequalities_colored_pgs(
     uio = problem_uio[wid]
     schedule_offset = uio + wid
     contact_end = ccgo + int32(3) * nc
-    sweep_budget = cfg.contact_iterations
+    sweep_budget = cfg.inequality_sweeps_per_iteration
     if block_iteration < int32(0):
-        sweep_budget = cfg.max_iterations
+        sweep_budget = cfg.max_inequality_sweeps
 
     for _sweep in range(sweep_budget):
         for color in range(inequality_num_colors[wid]):
