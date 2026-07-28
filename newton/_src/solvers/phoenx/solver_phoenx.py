@@ -707,10 +707,11 @@ class PhoenXWorld:
             mass_splitting_batch_size: Overflow batch size (B). Within
                 a batch, constraints process sequentially (one thread);
                 across batches, parallel. ``8`` matches C# PhoenX.
-            partitioner_algorithm: ``"greedy"`` (default) uses
-                :class:`IncrementalContactPartitioner`; ``"luby_fixed"``
-                uses :class:`FixedIterationLubyPartitioner` (fixed
-                launches, spill to overflow on saturation).
+            partitioner_algorithm: ``"greedy"`` (default) constructs the
+                interaction graph, ``"endpoint_owner"`` uses adjacency-free
+                endpoint elections for single-world mass splitting, and
+                ``"luby_fixed"`` uses fixed launches with overflow on
+                saturation.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -1118,6 +1119,9 @@ class PhoenXWorld:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
         self.partitioner_algorithm: str = str(partitioner_algorithm)
+        if self.partitioner_algorithm == "endpoint_owner":
+            if step_layout != "single_world" or not self.mass_splitting_enabled:
+                raise ValueError("partitioner_algorithm=endpoint_owner requires single-world mass splitting")
         # The cache-stir defaults are needed for contact-heavy dynamic
         # rigid stacks, where a perfectly locked colouring can bias the
         # PGS fixed point over many frames. Deformable-only worlds pay
@@ -1158,10 +1162,14 @@ class PhoenXWorld:
         # Warm-start coloring only feeds the single-world greedy build;
         # the per-world multi-world path uses a different kernel that
         # never reads the cache. Skip the allocation in that case.
-        _warm_start_active: bool = bool(enable_warm_start_coloring) and step_layout == "single_world"
+        _warm_start_active: bool = (
+            bool(enable_warm_start_coloring)
+            and step_layout == "single_world"
+            and self.partitioner_algorithm == "greedy"
+        )
         if self.solver_flavor == "simple":
             self._partitioner = None
-        elif self.partitioner_algorithm == "greedy":
+        elif self.partitioner_algorithm in ("greedy", "endpoint_owner"):
             self._partitioner = IncrementalContactPartitioner(
                 max_num_interactions=self._constraint_capacity,
                 max_num_nodes=max(1, self.num_bodies + self.num_particles),
@@ -1170,6 +1178,7 @@ class PhoenXWorld:
                 max_colored_partitions=self.max_colored_partitions,
                 max_greedy_outer_iters=max_greedy_outer_iters,
                 enable_warm_start=_warm_start_active,
+                endpoint_owner_coloring=self.partitioner_algorithm == "endpoint_owner",
             )
             self._partitioner.set_locality_family(self._element_family)
             self._partitioner.set_symmetric_sweep(bool(symmetric_color_sweep))
@@ -1200,7 +1209,7 @@ class PhoenXWorld:
         else:
             raise ValueError(
                 f"Unknown partitioner_algorithm '{self.partitioner_algorithm}'. "
-                "Expected one of: 'greedy', 'luby_fixed'."
+                "Expected one of: 'greedy', 'endpoint_owner', 'luby_fixed'."
             )
 
         # Mass-splitting data plane. Always allocated (sentinel-sized
@@ -3266,7 +3275,9 @@ class PhoenXWorld:
             self._partitioner.reset(self._elements, self._num_active_constraints)
         if self.step_layout == "single_world":
             compute_family_starts = self._singleworld_needs_family_starts()
-            if self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
+            if self.partitioner_algorithm == "endpoint_owner":
+                self._partitioner.build_csr_endpoint_owner(compute_family_starts=compute_family_starts)
+            elif self.partitioner_algorithm == "greedy" and self._use_greedy_coloring:
                 self._partitioner.build_csr_greedy_with_jp_fallback(compute_family_starts=compute_family_starts)
             else:
                 self._partitioner.build_csr(compute_family_starts=compute_family_starts)

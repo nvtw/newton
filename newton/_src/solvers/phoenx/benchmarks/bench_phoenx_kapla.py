@@ -166,6 +166,7 @@ def _run_one(
     grid_dims: tuple[int, int],
     blocks_per_sm: int,
     colored_contact_layout: bool,
+    partitioner_algorithm: str,
 ) -> BenchResult:
     """Build the scene, run warmup + steady-state, return measurements."""
     # Import here so the module loads cheap (parser help, etc.).
@@ -176,6 +177,7 @@ def _run_one(
     ek.MASS_SPLITTING_MAX_COLORED_PARTITIONS = max_colored_partitions
     ek.USE_COLORED_CONTACT_HEADERS = colored_contact_layout
     ek.USE_COLORED_CONTACT_ROWS = colored_contact_layout
+    ek.PARTITIONER_ALGORITHM = partitioner_algorithm
 
     if mass_splitting and prepare_refresh_stride != 1:
         raise ValueError("prepare_refresh_stride > 1 is only supported with --mass-splitting off")
@@ -394,6 +396,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--grid", type=int, default=1, help="Tower grid edge length (default 1 = 1x1).")
     p.add_argument("--blocks-per-sm", type=int, default=8, help="Persistent-grid blocks per GPU SM.")
     p.add_argument(
+        "--partitioner-algorithm",
+        choices=["greedy", "endpoint_owner"],
+        default="greedy",
+        help="Single-world mass-splitting coloring algorithm.",
+    )
+    p.add_argument(
         "--colored-contact-layout",
         choices=["auto", "on", "off"],
         default="auto",
@@ -441,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
             grid_dims=grid_dims,
             blocks_per_sm=args.blocks_per_sm,
             colored_contact_layout=colored_contact_layout,
+            partitioner_algorithm=args.partitioner_algorithm,
         )
         results.append(r)
         if not args.json:

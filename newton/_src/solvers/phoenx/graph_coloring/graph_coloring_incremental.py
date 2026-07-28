@@ -27,6 +27,10 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     TILE_SCAN_BLOCK_DIM,
     ElementInteractionData,
     element_interaction_data_get,
+    endpoint_owner_clear_winners_kernel,
+    endpoint_owner_commit_kernel,
+    endpoint_owner_propose_kernel,
+    endpoint_owner_reset_kernel,
     greedy_clear_int_kernel,
     greedy_color_histogram_kernel,
     greedy_count_and_scan_color_starts_kernel,
@@ -59,6 +63,8 @@ __all__ = ["MAX_COLORS", "IncrementalContactPartitioner"]
 # Upper bound on colour count per pass. Real graphs stay below 200; 1024 gives
 # comfortable margin at negligible cost (color_starts is (MAX_COLORS+1)*4 B).
 MAX_COLORS = 1024
+
+_ENDPOINT_OWNER_ROUNDS = 15
 
 _GREEDY_BLOCK_DIM: int = 256
 
@@ -259,17 +265,23 @@ class IncrementalContactPartitioner:
         max_colored_partitions: int | None = None,
         max_greedy_outer_iters: int | None = None,
         enable_warm_start: bool = False,
+        endpoint_owner_coloring: bool = False,
     ) -> None:
-        """``max_colored_partitions``: soft cap for the overflow bucket. When
-        set to ``K``, colours ``0..K-1`` are produced by normal MIS coloring
-        and any still-uncoloured remainder lands in colour ``K`` (the
-        overflow bucket). Mass splitting consumes the bucket and resolves
-        the within-colour conflicts via copy states. ``None`` (default)
-        disables the cap — overshooting :data:`MAX_COLORS` raises.
-        ``K`` must be ``<= GREEDY_MAX_COLORS - 1`` for the greedy path
-        (the int64 forbidden mask covers ``[0, GREEDY_MAX_COLORS)``) and
-        ``<= MAX_COLORS - 1`` for the JP path so ``color_starts[K + 1]``
-        stays in-bounds.
+        """Initialize the contact partitioner.
+
+        Args:
+            max_num_interactions: Maximum number of constraint interactions.
+            max_num_nodes: Maximum number of bodies and particles.
+            device: Warp device.
+            seed: Seed for the deterministic priority permutation.
+            use_tile_scan: Use graph-capture-safe tile scans.
+            max_colored_partitions: Soft regular-color cap. Any remainder
+                lands in one mass-splitting overflow bucket.
+            max_greedy_outer_iters: Optional greedy iteration limit.
+            enable_warm_start: Reuse valid colors from the previous build.
+            endpoint_owner_coloring: Use bounded per-endpoint elections instead
+                of constructing interaction adjacency. This requires a positive
+                ``max_colored_partitions`` and disables warm starting.
         """
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
@@ -291,6 +303,12 @@ class IncrementalContactPartitioner:
                     f"color_starts[K + 1] stays in-bounds; got {max_colored_partitions}."
                 )
         self.max_colored_partitions = max_colored_partitions
+        self._use_endpoint_owner_coloring = bool(endpoint_owner_coloring)
+        if self._use_endpoint_owner_coloring:
+            if max_colored_partitions is None or max_colored_partitions < 1:
+                raise ValueError("endpoint-owner coloring requires max_colored_partitions >= 1")
+            if enable_warm_start:
+                raise ValueError("endpoint-owner coloring replaces adjacency-based warm-start coloring")
         # Per-instance override for the host-side greedy loop bound. ``None``
         # uses the module-level :data:`MAX_GREEDY_OUTER_ITERS` (default 16).
         # Mass-splitting scenes can safely lower this -- excess uncoloured
@@ -452,6 +470,15 @@ class IncrementalContactPartitioner:
         self._use_speculative_coloring: bool = False
         self._spec_tentative_color: wp.array[wp.int32] = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
+        # Endpoint-owner coloring avoids CSR adjacency entirely. Allocation is
+        # exact for the configured regular-colour cap; disabled instances keep
+        # one-element sentinels so launch signatures remain concrete.
+        owner_colors = int(max_colored_partitions) if self._use_endpoint_owner_coloring else 1
+        owner_nodes = max_num_nodes if self._use_endpoint_owner_coloring else 1
+        self._owner_body_masks = wp.zeros(owner_nodes, dtype=wp.uint64, device=device)
+        self._owner_winners = wp.zeros(owner_nodes * owner_colors, dtype=wp.uint32, device=device)
+        self._owner_tentative_color = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
+
         # Dummies for reusing partitioning_prepare_kernel as adjacency zeroer.
         self._prepare_partition_ends_dummy = wp.zeros(1, dtype=wp.int32, device=device)
         self._prepare_max_used_color_dummy = wp.zeros(1, dtype=wp.int32, device=device)
@@ -504,6 +531,9 @@ class IncrementalContactPartitioner:
         passed arrays; callers must keep them alive until the next reset."""
         self._elements = elements
         self._num_elements = num_elements
+
+        if self._use_endpoint_owner_coloring:
+            return
 
         # Reuse partitioning_prepare_kernel to clear adjacency_section_end_indices.
         prepare_dim = max(1, self.max_num_nodes)
@@ -634,6 +664,117 @@ class IncrementalContactPartitioner:
             ],
             block_dim=int(TILE_SCAN_BLOCK_DIM),
         )
+
+    def build_csr_endpoint_owner(self, *, compute_family_starts: bool = False) -> None:
+        """Build capped colors through endpoint elections without adjacency."""
+        assert self._elements is not None and self._num_elements is not None, (
+            "reset() must be called before build_csr_endpoint_owner()"
+        )
+        if not self._use_endpoint_owner_coloring:
+            raise RuntimeError("endpoint-owner coloring was not enabled at construction")
+        self._compute_color_family_starts = bool(compute_family_starts)
+        cap = wp.int32(self._max_colored_partitions_kernel_arg)
+        wp.launch(
+            greedy_reset_init_kernel,
+            dim=int(GREEDY_MAX_COLORS),
+            inputs=[
+                self._overflow_flag,
+                self._greedy_color_count,
+                self._greedy_color_offsets,
+                int(GREEDY_MAX_COLORS),
+            ],
+        )
+        wp.launch(
+            endpoint_owner_reset_kernel,
+            dim=max(self.max_num_interactions, self.max_num_nodes),
+            inputs=[
+                self._owner_body_masks,
+                self._partition_data_concat,
+                self._color_tags,
+                self._num_elements,
+                self._num_remaining,
+            ],
+        )
+        for _ in range(_ENDPOINT_OWNER_ROUNDS):
+            wp.launch(
+                endpoint_owner_clear_winners_kernel,
+                dim=self._owner_winners.shape[0],
+                inputs=[self._owner_winners],
+            )
+            wp.launch(
+                endpoint_owner_propose_kernel,
+                dim=self.max_num_interactions,
+                inputs=[
+                    self._elements,
+                    self._packed_priorities,
+                    self._num_elements,
+                    cap,
+                    self._owner_body_masks,
+                    self._owner_winners,
+                    self._color_tags,
+                    self._owner_tentative_color,
+                ],
+            )
+            wp.launch(
+                endpoint_owner_commit_kernel,
+                dim=self.max_num_interactions,
+                inputs=[
+                    self._elements,
+                    self._packed_priorities,
+                    self._num_elements,
+                    cap,
+                    self._owner_body_masks,
+                    self._owner_winners,
+                    self._partition_data_concat,
+                    self._color_tags,
+                    self._owner_tentative_color,
+                    self._num_remaining,
+                ],
+            )
+        wp.launch(
+            greedy_overflow_spill_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._color_tags,
+                self._partition_data_concat,
+                self._num_elements,
+                self._num_remaining,
+                self._overflow_flag,
+                cap,
+            ],
+        )
+        wp.launch(
+            greedy_color_histogram_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._partition_data_concat,
+                self._num_elements,
+                self._greedy_color_count,
+                self._interaction_id_to_partition,
+            ],
+        )
+        wp.launch(
+            greedy_count_and_scan_color_starts_kernel,
+            dim=1,
+            inputs=[
+                self._greedy_color_count,
+                self._color_starts,
+                self._num_colors,
+                int(GREEDY_MAX_COLORS),
+            ],
+        )
+        wp.launch(
+            greedy_scatter_elements_by_color_kernel,
+            dim=self.max_num_interactions,
+            inputs=[
+                self._partition_data_concat,
+                self._color_starts,
+                self._greedy_color_offsets,
+                self._element_ids_by_color,
+                self._num_elements,
+            ],
+        )
+        self._sort_csr_by_body_locality()
 
     # Mode B: build coloring once, replay across many sweeps.
 

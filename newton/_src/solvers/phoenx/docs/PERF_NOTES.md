@@ -637,3 +637,36 @@ These later results supersede the early FP16/contact-row prioritization:
   at 10.2 versus 10.1 us, as were bandwidth-saturated vec2/vec4 copies. The
   PhoenX mini packed-record gather improved 29.2% and its pipeline 5.1%; a
   production layout A/B is still required.
+
+- A settled-Kapla oracle predicted 30% fewer copy-state velocity sectors from
+  a deterministic first-use physical slot order and measured a 26% isolated
+  state-stream gain. The full production layout reduced repeated PGS 2.6%,
+  prepare 7.1%, and relax 10.3%, but increased rigid reconciliation 24% and
+  added another full radix sort. End-to-end candidate runs reached
+  111.51--112.10 FPS versus 112.28 for the identity-layout control and 113.68
+  for the clean committed baseline, so the prototype was removed.
+
+- Settled Kapla does not have an exactly stable contact graph: none of 29
+  consecutive transitions were identical. It does retain 99.86--99.90% of
+  body pairs, with only 10 pairs mean and 28 maximum count change among about
+  71,361 pairs. Single-world greedy coloring already caches colors by body
+  pair, validates them against current adjacency, and re-colors only
+  new/conflicting rows. Any incremental follow-up must therefore reduce the
+  surrounding adjacency, CSR, locality-sort, and cache-persistence work rather
+  than add another matching scheme.
+
+- The rotating warm-color repair was accidentally inactive because the build
+  cleared ``num_colors`` before the rotate kernel read it. Moving the read
+  before the reset made the feature active, but canonical Kapla mean drift
+  rose to 6.4 cm and bricks left the tower even with periodic full recoloring
+  retained. The activation was rejected; stable production behavior still
+  relies on the every-fourth-step cold recolor.
+
+- Nsight Compute measured the first required cold recolor directly. Speculative
+  pick took 37.09 us at 5.1% DRAM and 8.2% SM throughput, with 55.5% of issue
+  time in long-scoreboard stalls. Validate took 57.66 us at 3.9% DRAM and 4.6%
+  SM throughput, with 63.6% long-scoreboard stalls and only 6.36 active lanes
+  per warp. Registers were only 27/34 with no local memory. The next useful
+  lever is eliminating dependent adjacency walks, not vec4 packing or register
+  caps.
+\n- Adjacency-free endpoint-owner coloring replaced irregular neighbor walks with\n  deterministic per-body elections for capped single-world mass splitting. On\n  the captured 71,991-constraint Kapla graph, the complete production coloring\n  benchmark fell from 3.55 ms for uncapped greedy coloring to 2.00 ms at an\n  eight-color cap. In the full 4-substep/10-iteration scene, eight colors\n  reached 121.75--121.99 FPS but failed the strict 400-frame stationary-speed\n  threshold. Nine colors passed that physics regression and reached\n  114.17--115.27 FPS versus 110.08--110.82 FPS for the prior eight-color greedy\n  default. Mixed 2/3/4/6/8-endpoint tests validate independence, overflow, and\n  deterministic graph replay.\n

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Add opt-in adjacency-free endpoint-owner coloring to experimental `SolverPhoenX` single-world mass splitting.
+
 - Add opt-in running observation normalization to experimental `ConfigPPO`, including graph-captured rollout moments and checkpointed statistics.
 - Add opt-in averaged double-Q targets and actor objectives to experimental `ConfigSAC`, matching the FastSAC estimator used for massively parallel humanoid training.
 - Add experimental `SolverPhoenX(contact_friction_model="patch")` for maximal rigid PGS scenes. It preserves every point normal while coupling convex shape-pair friction into one central 2D Coulomb block with full tangent effective-mass coupling, contact-matched world-space warm starting, CUDA graph capture, and conservative point-friction fallback for raw meshes, heightfields, and compound body-pair columns.

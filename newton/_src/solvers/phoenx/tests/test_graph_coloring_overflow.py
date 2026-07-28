@@ -179,6 +179,96 @@ class TestColoringOverflowBucket(unittest.TestCase):
             "interaction_id_to_partition": p.interaction_id_to_partition.numpy().copy(),
         }
 
+    def _run_endpoint_owner(
+        self,
+        bodies_per_elem: list[list[int]],
+        max_colored_partitions: int,
+        num_bodies: int,
+    ):
+        device = wp.get_preferred_device()
+        n = len(bodies_per_elem)
+        elements_arr = _make_elements_array(bodies_per_elem, device)
+        num_elements_arr = wp.array([n], dtype=wp.int32, device=device)
+        p = IncrementalContactPartitioner(
+            max_num_interactions=n,
+            max_num_nodes=num_bodies,
+            device=device,
+            seed=0,
+            use_tile_scan=True,
+            max_colored_partitions=max_colored_partitions,
+            endpoint_owner_coloring=True,
+        )
+        p.reset(elements_arr, num_elements_arr)
+        with wp.ScopedCapture(device=device) as capture:
+            p.build_csr_endpoint_owner()
+        wp.capture_launch(capture.graph)
+        first = (
+            p.element_ids_by_color.numpy().copy(),
+            p.color_starts.numpy().copy(),
+            p.interaction_id_to_partition.numpy().copy(),
+        )
+        wp.capture_launch(capture.graph)
+        second = (
+            p.element_ids_by_color.numpy().copy(),
+            p.color_starts.numpy().copy(),
+            p.interaction_id_to_partition.numpy().copy(),
+        )
+        for a, b in zip(first, second, strict=True):
+            np.testing.assert_array_equal(a, b)
+        return {
+            "num_colors": int(p.num_colors.numpy()[0]),
+            "color_starts": second[1],
+            "element_ids_by_color": second[0],
+            "interaction_id_to_partition": second[2],
+        }
+
+    def test_endpoint_owner_mixed_arity_is_valid_and_deterministic(self):
+        bodies = [
+            [0, 1],
+            [1, 2, 3],
+            [3, 4, 5, 6],
+            [0, 2, 4, 6, 8, 10],
+            [7, 8, 9, 10, 11, 12, 13, 14],
+            [15, 16],
+        ]
+        cap = 4
+        result = self._run_endpoint_owner(bodies, cap, num_bodies=17)
+        _validate_colored_independence(
+            bodies,
+            result["element_ids_by_color"],
+            result["color_starts"],
+            cap,
+            result["num_colors"],
+        )
+        _validate_full_partition(
+            len(bodies),
+            result["element_ids_by_color"],
+            result["color_starts"],
+            result["num_colors"],
+            result["interaction_id_to_partition"],
+        )
+
+    def test_endpoint_owner_hub_clique_overflows(self):
+        n = 20
+        cap = 4
+        bodies = _hub_clique_elements(n)
+        result = self._run_endpoint_owner(bodies, cap, num_bodies=n + 1)
+        self.assertEqual(result["num_colors"], cap + 1)
+        _validate_colored_independence(
+            bodies,
+            result["element_ids_by_color"],
+            result["color_starts"],
+            cap,
+            result["num_colors"],
+        )
+        _validate_full_partition(
+            n,
+            result["element_ids_by_color"],
+            result["color_starts"],
+            result["num_colors"],
+            result["interaction_id_to_partition"],
+        )
+
     def test_greedy_no_overflow_when_under_cap(self):
         # K=4 colours, three pairwise-disjoint elements — fits in colour 0
         # alone, no overflow.

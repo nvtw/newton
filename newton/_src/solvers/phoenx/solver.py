@@ -280,7 +280,8 @@ class SolverPhoenX(SolverBase):
             mass_splitting: Enable the graph-colored mass-splitting tail.
             max_colored_partitions: True GS colors retained before the
                 mass-splitting tail. Defaults to 12.
-            partitioner_algorithm: ``"greedy"`` (default) or
+            partitioner_algorithm: ``"greedy"`` (default),
+                ``"endpoint_owner"`` (single-world mass splitting only), or
                 ``"luby_fixed"`` (single-world only).
             enable_warm_start_coloring: Reuse previous-frame colour
                 assignments. No-op on multi-world.

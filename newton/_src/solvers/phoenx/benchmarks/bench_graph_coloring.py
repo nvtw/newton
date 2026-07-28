@@ -123,7 +123,7 @@ class Snapshot:
 # ---------------------------------------------------------------------------
 
 
-def validate_coloring(snapshot: Snapshot, color_per_element: np.ndarray) -> None:
+def validate_coloring(snapshot: Snapshot, color_per_element: np.ndarray, overflow_color: int | None = None) -> None:
     """Raise if any element has the same color as a neighbour.
 
     Two elements neighbour iff they share a body. We walk the adjacency
@@ -145,6 +145,8 @@ def validate_coloring(snapshot: Snapshot, color_per_element: np.ndarray) -> None
             c = int(color_per_element[e])
             if c < 0:
                 raise AssertionError(f"element {e} has unassigned color {c}")
+            if overflow_color is not None and c == overflow_color:
+                continue
             if c in seen:
                 other = seen[c]
                 raise AssertionError(f"elements {other} and {e} both colored {c} but share body {v}")
@@ -154,6 +156,13 @@ def validate_coloring(snapshot: Snapshot, color_per_element: np.ndarray) -> None
 # ---------------------------------------------------------------------------
 # Algorithms
 # ---------------------------------------------------------------------------
+
+
+def _pack_priorities(cost: np.ndarray, jitter: np.ndarray) -> np.ndarray:
+    """Pack the current ``(8-bit cost, 24-bit jitter)`` layout."""
+    cost_u32 = np.clip(cost, 0, 255).astype(np.uint32, copy=False)
+    jitter_u32 = jitter.astype(np.uint32, copy=False) & np.uint32(0x00FFFFFF)
+    return ((cost_u32 << np.uint32(24)) | jitter_u32).view(np.int32)
 
 
 def _run_partitioner_with_costs(
@@ -168,11 +177,7 @@ def _run_partitioner_with_costs(
     n = snapshot.num_elements
     elements, num_elements, _, _ = snapshot.to_warp(device)
 
-    # The partitioner needs adjacency built from the elements first;
-    # ``reset()`` does that and seeds its own random_values from a
-    # default RNG. We then overwrite both _random_values and
-    # _cost_values with the snapshot's payloads (or any candidate
-    # priorities) before running build_csr.
+    # ``reset()`` builds adjacency; coloring consumes one packed priority word.
     p = IncrementalContactPartitioner(
         max_num_interactions=n,
         max_num_nodes=snapshot.num_bodies,
@@ -181,13 +186,8 @@ def _run_partitioner_with_costs(
     )
     p.reset(elements, num_elements)
 
-    # Inject costs + jitter. The partitioner allocates its own
-    # _random_values internally; we replace them with the snapshot's
-    # so multiple algorithms running on the same snapshot see the
-    # same tiebreaker noise (only the cost word matters for
-    # comparing algorithms).
-    p._cost_values.assign(cost_host)
-    p._random_values.assign(jitter_host)
+    # Inject the snapshot's current packed cost and deterministic jitter.
+    p._packed_priorities.assign(_pack_priorities(cost_host, jitter_host))
 
     p.build_csr()
     wp.synchronize_device(device)
@@ -225,13 +225,38 @@ def algo_gpu_greedy_jp(snapshot: Snapshot, device: wp.DeviceLike) -> tuple[int, 
         use_tile_scan=True,
     )
     p.reset(elements, num_elements)
-    p._cost_values.assign(np.zeros(n, dtype=np.int32))
-    p._random_values.assign(snapshot.random_values.copy())
+    p._packed_priorities.assign(_pack_priorities(np.zeros(n, dtype=np.int32), snapshot.random_values))
     p.build_csr_greedy()
     wp.synchronize_device(device)
     num_colors = int(p.num_colors.numpy()[0])
     color_per_element = p.interaction_id_to_partition.numpy()[:n].astype(np.int32, copy=True)
     color_starts = p.color_starts.numpy()[: num_colors + 1].astype(np.int32, copy=True)
+    return num_colors, color_per_element, color_starts
+
+
+_OWNER_MAX_COLORS = 9
+
+
+def algo_owner_election(snapshot: Snapshot, device: wp.DeviceLike) -> tuple[int, np.ndarray, np.ndarray]:
+    """Adjacency-free endpoint-owner coloring with one overflow bucket."""
+    n = snapshot.num_elements
+    elements, num_elements, _, _ = snapshot.to_warp(device)
+    partitioner = IncrementalContactPartitioner(
+        max_num_interactions=n,
+        max_num_nodes=snapshot.num_bodies,
+        device=device,
+        seed=0,
+        use_tile_scan=True,
+        max_colored_partitions=_OWNER_MAX_COLORS,
+        endpoint_owner_coloring=True,
+    )
+    partitioner._packed_priorities.assign(_pack_priorities(snapshot.cost_values, snapshot.random_values))
+    partitioner.reset(elements, num_elements)
+    partitioner.build_csr_endpoint_owner()
+    wp.synchronize_device(device)
+    num_colors = int(partitioner.num_colors.numpy()[0])
+    color_per_element = partitioner.interaction_id_to_partition.numpy()[:n].copy()
+    color_starts = partitioner.color_starts.numpy()[: num_colors + 1].copy()
     return num_colors, color_per_element, color_starts
 
 
@@ -698,6 +723,7 @@ def algo_host_parallel_greedy_verbose(snapshot: Snapshot, device: wp.DeviceLike)
 ALGORITHMS = {
     "baseline_jp": algo_baseline_jp,
     "gpu_greedy_jp": algo_gpu_greedy_jp,
+    "owner_election": algo_owner_election,
     "zero_cost_jp": algo_zero_cost_jp,
     "degree_jp": algo_degree_jp,
     "degree_max_jp": algo_degree_max_jp,
@@ -746,7 +772,9 @@ def run_one(
             num_colors = nc
             color_starts = cs
             if validate:
-                validate_coloring(snapshot, cpe)
+                validate_coloring(
+                    snapshot, cpe, overflow_color=_OWNER_MAX_COLORS if algo_name == "owner_election" else None
+                )
     color_sizes = np.diff(color_starts)
     return {
         "algo": algo_name,

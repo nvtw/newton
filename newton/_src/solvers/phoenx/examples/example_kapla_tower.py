@@ -90,7 +90,8 @@ USE_COLORED_CONTACT_ROWS: bool = True
 # 14-iteration policy was more accurate than pure PGS but 2.4x slower
 # than this prior hybrid on the same 1x1 workload.
 ENABLE_MASS_SPLITTING: bool = True
-MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 8
+MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 9
+PARTITIONER_ALGORITHM: str = "endpoint_owner"
 
 # Tile the single ``KaplaTower2.usda`` instancer into a 2D grid centred
 # on the origin. ``(1, 1)`` reproduces the original scene; bigger
@@ -358,6 +359,7 @@ class Example:
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
             mass_splitting_batch_size=1,
+            partitioner_algorithm=PARTITIONER_ALGORITHM,
             colored_contact_headers=USE_COLORED_CONTACT_HEADERS,
             colored_contact_rows=USE_COLORED_CONTACT_ROWS,
             sor_boost=1.0,
@@ -578,7 +580,8 @@ class Example:
         n_active = int(self.world._num_active_constraints.numpy()[0])
         elements_struct = partitioner._elements.numpy()[:n_active]
         bodies = elements_struct["bodies"].astype(np.int32, copy=False)
-        cost = partitioner._cost_values.numpy()[:n_active].astype(np.int32, copy=False)
+        packed_priority = partitioner._packed_priorities.numpy()[:n_active].astype(np.uint32, copy=False)
+        cost = (packed_priority >> np.uint32(24)).astype(np.int32)
         jitter = partitioner._random_values.numpy()[:n_active].astype(np.int32, copy=False)
         out_path = pathlib.Path("kapla_graph.npz").resolve()
         np.savez(

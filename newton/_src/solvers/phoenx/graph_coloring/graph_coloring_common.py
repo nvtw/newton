@@ -589,6 +589,113 @@ def speculative_overflow_exit_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def endpoint_owner_reset_kernel(
+    body_masks: wp.array[wp.uint64],
+    partition_data_concat: wp.array[wp.int64],
+    color_tags: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    num_remaining: wp.array[wp.int32],
+):
+    """Reset endpoint-owner state without constructing adjacency."""
+    tid = wp.tid()
+    if tid < body_masks.shape[0]:
+        body_masks[tid] = wp.uint64(0)
+    if tid < num_elements[0]:
+        partition_data_concat[tid] = _UNPARTITIONED | wp.int64(tid)
+        color_tags[tid] = wp.int32(0)
+    if tid == 0:
+        num_remaining[0] = num_elements[0]
+
+
+@wp.kernel(enable_backward=False)
+def endpoint_owner_clear_winners_kernel(winners: wp.array[wp.uint32]):
+    """Clear the per-body, per-colour election winners."""
+    winners[wp.tid()] = wp.uint32(0)
+
+
+@wp.kernel(enable_backward=False)
+def endpoint_owner_propose_kernel(
+    elements: wp.array[ElementInteractionData],
+    packed_priorities: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+    body_masks: wp.array[wp.uint64],
+    winners: wp.array[wp.uint32],
+    color_tags: wp.array[wp.int32],
+    tentative_color: wp.array[wp.int32],
+):
+    """Pick the first free colour and elect one owner at every endpoint."""
+    tid = wp.tid()
+    if tid >= num_elements[0] or color_tags[tid] != wp.int32(0):
+        return
+    element = elements[tid]
+    used = wp.uint64(0)
+    for j in range(MAX_BODIES):
+        body = element_interaction_data_get(element, j)
+        if body < wp.int32(0):
+            break
+        used = used | body_masks[body]
+    color = wp.int32(0)
+    while color < max_colored_partitions and (used & (wp.uint64(1) << wp.uint64(color))) != wp.uint64(0):
+        color += wp.int32(1)
+    tentative_color[tid] = color
+    if color >= max_colored_partitions:
+        return
+    priority = wp.uint32(packed_priorities[tid])
+    for j in range(MAX_BODIES):
+        body = element_interaction_data_get(element, j)
+        if body < wp.int32(0):
+            break
+        wp.atomic_max(winners, body * max_colored_partitions + color, priority)
+
+
+@wp.kernel(enable_backward=False)
+def endpoint_owner_commit_kernel(
+    elements: wp.array[ElementInteractionData],
+    packed_priorities: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+    body_masks: wp.array[wp.uint64],
+    winners: wp.array[wp.uint32],
+    partition_data_concat: wp.array[wp.int64],
+    color_tags: wp.array[wp.int32],
+    tentative_color: wp.array[wp.int32],
+    num_remaining: wp.array[wp.int32],
+):
+    """Commit constraints that won the same colour at every endpoint."""
+    tid = wp.tid()
+    if tid >= num_elements[0] or color_tags[tid] != wp.int32(0):
+        return
+    color = tentative_color[tid]
+    if color >= max_colored_partitions:
+        color_tags[tid] = max_colored_partitions + wp.int32(1)
+        partition_data_concat[tid] = (wp.int64(max_colored_partitions + wp.int32(1)) << _COLOR_SHIFT) | wp.int64(tid)
+        wp.atomic_sub(num_remaining, 0, wp.int32(1))
+        return
+    element = elements[tid]
+    priority = wp.uint32(packed_priorities[tid])
+    commit = bool(True)
+    for j in range(MAX_BODIES):
+        body = element_interaction_data_get(element, j)
+        if body < wp.int32(0):
+            break
+        if winners[body * max_colored_partitions + color] != priority:
+            commit = False
+            break
+    if not commit:
+        return
+    color_tags[tid] = color + wp.int32(1)
+    partition_data_concat[tid] = (wp.int64(color + wp.int32(1)) << _COLOR_SHIFT) | wp.int64(tid)
+    bit = wp.uint64(1) << wp.uint64(color)
+    for j in range(MAX_BODIES):
+        body = element_interaction_data_get(element, j)
+        if body < wp.int32(0):
+            break
+        wp.atomic_or(body_masks, body, bit)
+    wp.atomic_sub(num_remaining, 0, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
 def greedy_overflow_spill_kernel(
     color_tags: wp.array[wp.int32],
     partition_data_concat: wp.array[wp.int64],

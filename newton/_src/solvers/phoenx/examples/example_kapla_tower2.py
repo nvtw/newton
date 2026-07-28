@@ -799,7 +799,8 @@ class Example:
         n_active = int(self.world._num_active_constraints.numpy()[0])
         elements_struct = partitioner._elements.numpy()[:n_active]
         bodies = elements_struct["bodies"].astype(np.int32, copy=False)
-        cost = partitioner._cost_values.numpy()[:n_active].astype(np.int32, copy=False)
+        packed_priority = partitioner._packed_priorities.numpy()[:n_active].astype(np.uint32, copy=False)
+        cost = (packed_priority >> np.uint32(24)).astype(np.int32)
         jitter = partitioner._random_values.numpy()[:n_active].astype(np.int32, copy=False)
         out_path = pathlib.Path("kapla_graph.npz").resolve()
         np.savez(
