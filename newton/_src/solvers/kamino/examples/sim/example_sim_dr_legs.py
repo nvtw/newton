@@ -262,7 +262,6 @@ class Example:
             config.solver.dynamics.linear_solver_kwargs = {"maxiter": 9}
             config.solver.dvi.bilateral_solver_type = "LLTBRCM"
             config.solver.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
-            config.solver.dvi.max_inequality_sweeps = 200
             config.solver.dvi.tolerance = 1e-4
             config.solver.dvi.regularization = 1e-5
             config.solver.dvi.max_alternating_iterations = 4

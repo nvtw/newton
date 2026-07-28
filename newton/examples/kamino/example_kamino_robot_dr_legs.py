@@ -100,7 +100,6 @@ class Example:
             self.config.dynamics.linear_solver_kwargs = {"maxiter": 9}
             self.config.dvi.bilateral_solver_type = "LLTBRCM"
             self.config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
-            self.config.dvi.max_inequality_sweeps = 200
             self.config.dvi.tolerance = 1e-4
             self.config.dvi.regularization = 1e-5
             self.config.dvi.max_alternating_iterations = 4

@@ -334,11 +334,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     row_start = bsm_row_start[wid]
     col_start = bsm_col_start[wid]
     matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
-    sweep_budget = cfg.inequality_sweeps_per_iteration
-    if block_iteration < int32(0):
-        sweep_budget = cfg.max_inequality_sweeps
-
-    for _sweep in range(sweep_budget):
+    for _sweep in range(cfg.inequality_sweeps_per_iteration):
         for color in range(inequality_num_colors[wid]):
             color_start = inequality_color_starts[schedule_offset + color]
             color_end = inequality_color_starts[schedule_offset + color + int32(1)]
