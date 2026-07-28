@@ -37,19 +37,23 @@ XPBD_CONTACT_RELAXATION = 0.8
 
 class Example:
     def __init__(self, viewer, args):
-        self.fps = 100
-        self.frame_dt = 1.0 / self.fps
-        self.sim_time = 0.0
-        self.sim_substeps = 10
-        self.sim_dt = self.frame_dt / self.sim_substeps
-
         self.viewer = viewer
         self.test_mode = args.test
         self.world_count = args.world_count
         self.solver_type = args.solver
 
+        self.fps = 100
+        self.frame_dt = 1.0 / self.fps
+        self.sim_time = 0.0
+        self.sim_substeps = 2 if self.solver_type == "kamino" else 10
+        self.sim_dt = self.frame_dt / self.sim_substeps
+
         num_pyramids = args.num_pyramids
+        if num_pyramids is None:
+            num_pyramids = 1 if self.solver_type == "kamino" else DEFAULT_NUM_PYRAMIDS
         pyramid_size = args.pyramid_size
+        if pyramid_size is None:
+            pyramid_size = DEFAULT_PYRAMID_SIZE
 
         builder = newton.ModelBuilder()
         if self.solver_type == "kamino":
@@ -128,6 +132,7 @@ class Example:
             solver_config.collision_detector.broadphase = args.broad_phase
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
             solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
+            solver_config.dvi.max_alternating_iterations = 5
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
             self.collision_pipeline = None
             self.contacts = None
@@ -224,14 +229,14 @@ class Example:
         parser.add_argument(
             "--num-pyramids",
             type=int,
-            default=DEFAULT_NUM_PYRAMIDS,
-            help="Number of pyramids to build.",
+            default=None,
+            help=f"Number of pyramids to build (default: 1 for Kamino, {DEFAULT_NUM_PYRAMIDS} otherwise).",
         )
         parser.add_argument(
             "--pyramid-size",
             type=int,
-            default=DEFAULT_PYRAMID_SIZE,
-            help="Number of rows in each pyramid base.",
+            default=None,
+            help=f"Number of rows in each pyramid base (default: {DEFAULT_PYRAMID_SIZE}).",
         )
         return parser
 

@@ -25,15 +25,15 @@ import newton.usd
 
 class Example:
     def __init__(self, viewer, args):
+        self.viewer = viewer
+        self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
+
         # setup simulation parameters first
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 10
+        self.sim_substeps = 8 if self.solver_type == "kamino" else 10
         self.sim_dt = self.frame_dt / self.sim_substeps
-
-        self.viewer = viewer
-        self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
 
         builder = newton.ModelBuilder()
         if self.solver_type == "kamino":
@@ -121,6 +121,7 @@ class Example:
             solver_config.integrator = "moreau"
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
             solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
+            solver_config.dvi.max_alternating_iterations = 5
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverXPBD(self.model, iterations=10)
