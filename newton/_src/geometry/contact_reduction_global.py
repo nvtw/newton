@@ -857,8 +857,9 @@ class GlobalContactReducer:
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
             self.contact_nbin_entry = wp.zeros(0, dtype=wp.int32, device=device)
 
-        # Per-contact dedup flags for cross-entry deduplication during export
-        self.exported_flags = wp.zeros(capacity, dtype=wp.int32, device=device)
+        # Generic reduction deduplicates cross-entry winners during export.
+        # Hydroelastic reduction intentionally preserves and source-tags them.
+        self.exported_flags = wp.zeros(0 if store_hydroelastic_data else capacity, dtype=wp.int32, device=device)
 
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -913,8 +914,6 @@ class GlobalContactReducer:
         """Clear all contacts and reset the reducer (full clear)."""
         self.contact_count.zero_()
         self.ht_insert_failures.zero_()
-        if not self.store_hydroelastic_data:
-            self.exported_flags.zero_()
         self.hashtable.clear()
         self.ht_values.zero_()
 
@@ -935,12 +934,6 @@ class GlobalContactReducer:
         later-scheduled blocks (or even later-issued warps/lanes under
         independent thread scheduling), causing some entries to be skipped.
         """
-        # Contact IDs are reused from zero every frame, so generic reduction's
-        # cross-entry export flags must be cleared even when no hashtable entry
-        # was active. Hydroelastic export uses source-tagged duplicates instead.
-        if not self.store_hydroelastic_data:
-            self.exported_flags.zero_()
-
         # Use fixed thread count for efficient GPU utilization
         num_threads = min(1024, self.hashtable.capacity)
 
