@@ -16,6 +16,14 @@ import numpy as np
 import warp as wp
 
 from ...core.types import override
+from ...geometry.types import GeoType
+from ...sim.collide import (
+    _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE,
+    _RIGID_CONTACT_MIN_CAPACITY,
+    _RIGID_CONTACTS_PER_MESH_PAIR,
+    _RIGID_CONTACTS_PER_PRIMITIVE_PAIR,
+    _estimate_rigid_contact_max,
+)
 from ...sim import (
     Contacts,
     Control,
@@ -48,32 +56,52 @@ if TYPE_CHECKING:
 __all__ = ["SolverKamino"]
 
 
-_DVI_MIN_CONTACTS_PER_WORLD = 64
-_DVI_CONTACTS_PER_GEOMETRY = 12
-
-
-def _estimate_dvi_contacts_per_world(model) -> int:
-    """Estimate a practical contact capacity for DVI allocations."""
+def _estimate_dvi_contacts_per_world(model, newton_model: Model) -> int:
+    """Estimate DVI contact capacity using the collision pipeline's weights."""
     theoretical = max(model.geoms.world_minimum_contacts, default=0)
+    if model.size.num_worlds == 1:
+        heuristic = _estimate_rigid_contact_max(newton_model)
+        return min(theoretical, heuristic) if theoretical > 0 else heuristic
 
     world_count = model.size.num_worlds
     geom_world = model.geoms.wid.numpy()
     geom_group = model.geoms.group.numpy()
+    geom_type = model.geoms.type.numpy()
     collidable = geom_group > 0
-    global_count = int(np.count_nonzero(collidable & (geom_world < 0)))
-    max_world_geometries = global_count
+    global_mask = collidable & (geom_world < 0)
+    max_world_contacts = 0
     for world_index in range(world_count):
-        world_geometries = global_count + int(np.count_nonzero(collidable & (geom_world == world_index)))
-        max_world_geometries = max(max_world_geometries, world_geometries)
+        world_mask = global_mask | (collidable & (geom_world == world_index))
+        mesh_mask = world_mask & (
+            (geom_type == int(GeoType.MESH))
+            | (geom_type == int(GeoType.CONVEX_MESH))
+            | (geom_type == int(GeoType.HFIELD))
+        )
+        plane_mask = world_mask & (geom_type == int(GeoType.PLANE))
+        non_plane_count = int(np.count_nonzero(world_mask & ~plane_mask))
+        mesh_count = int(np.count_nonzero(mesh_mask))
+        primitive_count = non_plane_count - mesh_count
+        plane_count = int(np.count_nonzero(plane_mask))
+        non_plane_contacts = (
+            primitive_count
+            * _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE
+            * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR
+            + mesh_count * _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE * _RIGID_CONTACTS_PER_MESH_PAIR
+        ) // 2
+        plane_contacts = plane_count * (
+            primitive_count * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR
+            + mesh_count * _RIGID_CONTACTS_PER_MESH_PAIR
+        )
+        max_world_contacts = max(
+            max_world_contacts,
+            _RIGID_CONTACT_MIN_CAPACITY,
+            non_plane_contacts + plane_contacts,
+        )
 
-    if max_world_geometries < 2:
+    if not np.any(collidable):
         return 0
 
-    heuristic = max(
-        _DVI_MIN_CONTACTS_PER_WORLD,
-        _DVI_CONTACTS_PER_GEOMETRY * max_world_geometries,
-    )
-    return min(theoretical, heuristic) if theoretical > 0 else heuristic
+    return min(theoretical, max_world_contacts) if theoretical > 0 else max_world_contacts
 
 
 ###
@@ -736,7 +764,7 @@ class SolverKamino(SolverBase, CouplingInterface):
             if self._config.dynamics_solver == "dvi" and collision_config.max_contacts_per_world is None:
                 collision_config = replace(
                     collision_config,
-                    max_contacts_per_world=_estimate_dvi_contacts_per_world(self._model_kamino),
+                    max_contacts_per_world=_estimate_dvi_contacts_per_world(self._model_kamino, self.model),
                 )
             self._collision_detector_kamino = self._kamino.CollisionDetector(
                 model=self._model_kamino,

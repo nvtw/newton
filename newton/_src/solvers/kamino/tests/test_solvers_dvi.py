@@ -383,7 +383,7 @@ class TestDVISolver(unittest.TestCase):
             use_collision_detector=True,
         )
         solver = SolverKamino(model, config)
-        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [132])
+        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1000])
         self.assertLess(
             solver._contacts_kamino.model_max_contacts_host,
             solver._model_kamino.geoms.model_minimum_contacts,
