@@ -49,14 +49,12 @@ __all__ = ["SolverKamino"]
 
 
 _DVI_MIN_CONTACTS_PER_WORLD = 64
-_DVI_CONTACTS_PER_GEOMETRY = 8
+_DVI_CONTACTS_PER_GEOMETRY = 12
 
 
 def _estimate_dvi_contacts_per_world(model) -> int:
     """Estimate a practical contact capacity for DVI allocations."""
     theoretical = max(model.geoms.world_minimum_contacts, default=0)
-    if theoretical == 0:
-        return 0
 
     world_count = model.size.num_worlds
     geom_world = model.geoms.wid.numpy()
@@ -68,11 +66,14 @@ def _estimate_dvi_contacts_per_world(model) -> int:
         world_geometries = global_count + int(np.count_nonzero(collidable & (geom_world == world_index)))
         max_world_geometries = max(max_world_geometries, world_geometries)
 
+    if max_world_geometries < 2:
+        return 0
+
     heuristic = max(
         _DVI_MIN_CONTACTS_PER_WORLD,
         _DVI_CONTACTS_PER_GEOMETRY * max_world_geometries,
     )
-    return min(theoretical, heuristic)
+    return min(theoretical, heuristic) if theoretical > 0 else heuristic
 
 
 ###

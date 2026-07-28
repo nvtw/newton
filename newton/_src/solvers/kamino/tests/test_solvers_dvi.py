@@ -384,16 +384,11 @@ class TestDVISolver(unittest.TestCase):
             use_collision_detector=True,
         )
         solver = SolverKamino(model, config)
-        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [88])
+        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [132])
         self.assertLess(
             solver._contacts_kamino.model_max_contacts_host,
             solver._model_kamino.geoms.model_minimum_contacts,
         )
-        self.assertGreater(
-            solver._collision_detector_kamino._unified_pipeline._max_contacts,
-            solver._contacts_kamino.model_max_contacts_host,
-        )
-
         override_config = SolverKamino.Config(
             dynamics_solver="dvi",
             sparse_jacobian=False,
@@ -402,6 +397,40 @@ class TestDVISolver(unittest.TestCase):
         )
         override_solver = SolverKamino(model, override_config)
         self.assertEqual(override_solver._contacts_kamino.world_max_contacts_host, [37])
+
+    def test_00a2_dvi_contact_capacity_reports_per_world_overflow(self):
+        """Report contacts dropped when one world exhausts its capacity."""
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for world_index in range(50):
+            builder.begin_world()
+            if world_index == 0:
+                for box_index in range(10):
+                    body = builder.add_body(xform=wp.transform(wp.vec3(float(box_index), 0.0, 0.5), wp.quat_identity()))
+                    builder.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
+            else:
+                builder.add_body(is_kinematic=True)
+            builder.end_world()
+        model = builder.finalize(device=self.device)
+
+        config = SolverKamino.Config(
+            dynamics_solver="dvi",
+            sparse_jacobian=False,
+            use_collision_detector=True,
+            collision_detector=kamino_config.CollisionDetectorConfig(max_contacts_per_world=1),
+        )
+        solver = SolverKamino(model, config)
+        state_0 = model.state()
+        state_1 = model.state()
+        solver.step(state_0, state_1, control=None, contacts=None, dt=1.0e-3)
+        self.assertGreater(
+            int(solver._collision_detector_kamino._unified_pipeline.dropped_contact_count.numpy()[0]),
+            0,
+        )
+        self.assertEqual(
+            int(solver._collision_detector_kamino._unified_pipeline.contact_overflow_warning_emitted.numpy()[0]),
+            1,
+        )
 
     def test_00b_bilateral_solver_selection(self):
         """Verify DVI constructs and validates the configured bilateral solver."""
