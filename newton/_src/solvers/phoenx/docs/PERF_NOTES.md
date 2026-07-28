@@ -621,12 +621,17 @@ These later results supersede the early FP16/contact-row prioritization:
   1% within measurement noise. The implementation remains isolated in the
   Warp stash and should not be merged without new evidence.
 
-- Warp commit `715e9478f` adds an explicit `wp.array_aligned[...]` contract
+- Warp commits `715e9478f` and `ddd354e64` add an explicit
+  `wp.array_aligned[...]` contract
   without changing ordinary vector layout or array behavior. It validates
   pointer/stride alignment and emits 64/128-bit CUDA loads and stores for
   supported `vec2`/`vec4` types. CPU/CUDA tests cover exact repeated results,
   `wp.func`, generics, dimensions, raw/external descriptors, unsupported
-  widths, and misalignment. A final ASV run measured a six-`vec4` random
-  gather at 16.6 versus 13.3 us (-19.9%), while a bandwidth-saturated copy was
-  neutral at 194 versus 192 us. The PhoenX mini packed-record gather improved
-  29.2% and its pipeline 5.1%; a production layout A/B is still required.
+  widths, and misalignment. The vec2 benchmark addition exposed generic
+  specialization dropping the alignment qualifier; a fail-before-fix
+  regression now guards generic kernels and `wp.func`, and PTX confirms wide
+  accesses survive specialization. A ten-repeat ASV run measured the six-vec4
+  gather at 16.1 versus 13.3 us (-17.4%). The analogous vec2 gather was neutral
+  at 10.2 versus 10.1 us, as were bandwidth-saturated vec2/vec4 copies. The
+  PhoenX mini packed-record gather improved 29.2% and its pipeline 5.1%; a
+  production layout A/B is still required.
