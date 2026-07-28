@@ -6,10 +6,11 @@
 #
 # Shows how to programmatically create a variety of
 # collision shapes using the newton.ModelBuilder() API.
-# Supports XPBD (default) and VBD solvers.
+# Supports XPBD (default), VBD, and Kamino DVI solvers.
 #
 # Command: python -m newton.examples basic_shapes
 # With VBD: python -m newton.examples basic_shapes --solver vbd
+# With Kamino DVI: python -m newton.examples basic_shapes --solver kamino
 #
 #
 ###########################################################################
@@ -35,6 +36,8 @@ class Example:
         self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
 
         builder = newton.ModelBuilder()
+        if self.solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(builder)
 
         builder.default_shape_cfg.mu = 0.5  # Friction coefficient
 
@@ -107,6 +110,18 @@ class Example:
                 self.model,
                 iterations=10,
             )
+        elif self.solver_type == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model,
+                dynamics_solver="dvi",
+                sparse_dynamics=True,
+                sparse_jacobian=True,
+            )
+            solver_config.use_collision_detector = True
+            solver_config.integrator = "moreau"
+            solver_config.dvi.bilateral_solver_type = "LLTBRCM"
+            solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverXPBD(self.model, iterations=10)
 
@@ -114,8 +129,12 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        self.collision_pipeline = newton.CollisionPipeline(self.model)
-        self.contacts = self.collision_pipeline.contacts()
+        if self.solver_type == "kamino":
+            self.collision_pipeline = None
+            self.contacts = None
+        else:
+            self.collision_pipeline = newton.CollisionPipeline(self.model)
+            self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -142,7 +161,8 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            if self.collision_pipeline is not None:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
@@ -225,7 +245,8 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.contacts is not None:
+            self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
 
@@ -236,8 +257,8 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         default="xpbd",
-        choices=["vbd", "xpbd"],
-        help="Solver type: xpbd (default) or vbd",
+        choices=["vbd", "xpbd", "kamino"],
+        help="Solver type: xpbd (default), vbd, or kamino",
     )
 
     viewer, args = newton.examples.init(parser)

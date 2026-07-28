@@ -5,10 +5,11 @@
 # Example Basic Heightfield
 #
 # Demonstrates heightfield terrain with objects dropped onto it.
-# Supports both Newton's native CollisionPipeline and MuJoCo solver.
+# Supports XPBD, MuJoCo, and Kamino DVI solvers.
 #
 # Command: uv run -m newton.examples basic_heightfield
 # MuJoCo: uv run -m newton.examples basic_heightfield --solver mujoco
+# Kamino DVI: uv run -m newton.examples basic_heightfield --solver kamino
 #
 ###########################################################################
 
@@ -31,6 +32,8 @@ class Example:
         self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
 
         builder = newton.ModelBuilder()
+        if self.solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(builder)
 
         # Create a wave-like heightfield terrain
         nrow, ncol = 50, 50
@@ -68,11 +71,25 @@ class Example:
 
         self.model = builder.finalize()
 
-        self.use_mujoco_contacts = False
+        self.use_mujoco_contacts = self.solver_type == "mujoco"
         if self.solver_type == "mujoco":
             self.solver = newton.solvers.SolverMuJoCo(self.model)
-            self.use_mujoco_contacts = True
             self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
+            self.collision_pipeline = None
+        elif self.solver_type == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model,
+                dynamics_solver="dvi",
+                sparse_dynamics=True,
+                sparse_jacobian=True,
+            )
+            solver_config.use_collision_detector = True
+            solver_config.integrator = "moreau"
+            solver_config.dvi.bilateral_solver_type = "LLTBRCM"
+            solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+            self.collision_pipeline = None
+            self.contacts = None
         else:
             self.solver = newton.solvers.SolverXPBD(self.model, iterations=10)
             self.collision_pipeline = newton.CollisionPipeline(self.model)
@@ -92,7 +109,7 @@ class Example:
         self.graph = capture.graph
 
     def simulate(self):
-        if not self.use_mujoco_contacts:
+        if self.collision_pipeline is not None:
             self.collision_pipeline.collide(self.state_0, self.contacts)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
@@ -112,7 +129,8 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.contacts is not None:
+            self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
     def test_final(self):
@@ -129,8 +147,8 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         default="xpbd",
-        choices=["xpbd", "mujoco"],
-        help="Solver type: xpbd (default, native collision) or mujoco",
+        choices=["xpbd", "mujoco", "kamino"],
+        help="Solver type: xpbd (default), mujoco, or kamino",
     )
     viewer, args = newton.examples.init(parser)
     newton.examples.run(Example(viewer, args), args)

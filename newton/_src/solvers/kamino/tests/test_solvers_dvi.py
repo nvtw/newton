@@ -1291,6 +1291,76 @@ class TestDVISolver(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(state_in.body_qd.numpy())))
         self.assertIsInstance(solver._solver_kamino.solver_fd, DVISolver)
 
+    def test_08aa_public_solver_preserves_immovable_joint_anchor_with_dvi(self):
+        """Keep zero-inverse-mass joint anchors fixed with DVI."""
+        for integrator in ("euler", "moreau"):
+            with self.subTest(integrator=integrator):
+                builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+                SolverKamino.register_custom_attributes(builder)
+                static_cfg = newton.ModelBuilder.ShapeConfig(density=0.0)
+                anchor = builder.add_link(
+                    label="anchor",
+                    xform=wp.transformf(wp.vec3f(0.0, 0.0, 2.0), wp.quat_identity(dtype=wp.float32)),
+                )
+                link = builder.add_link(
+                    label="link",
+                    xform=wp.transformf(wp.vec3f(0.0, 0.0, 0.5), wp.quat_identity(dtype=wp.float32)),
+                )
+                builder.add_shape_box(body=anchor, hx=0.1, hy=0.1, hz=0.2, cfg=static_cfg)
+                builder.add_shape_box(body=link, hx=0.1, hy=0.1, hz=0.75)
+                fixed = builder.add_joint_fixed(
+                    parent=-1,
+                    child=anchor,
+                    parent_xform=wp.transformf(
+                        wp.vec3f(0.0, 0.0, 2.0),
+                        wp.quat_identity(dtype=wp.float32),
+                    ),
+                )
+                revolute = builder.add_joint_revolute(
+                    parent=anchor,
+                    child=link,
+                    axis=newton.Axis.X,
+                    parent_xform=wp.transformf(
+                        wp.vec3f(0.0, 0.0, -0.2),
+                        wp.quat_identity(dtype=wp.float32),
+                    ),
+                    child_xform=wp.transformf(
+                        wp.vec3f(0.0, 0.0, 0.75),
+                        wp.quat_identity(dtype=wp.float32),
+                    ),
+                )
+                builder.add_articulation([fixed, revolute])
+                model = builder.finalize(device=self.device)
+                newton.eval_fk(model, model.joint_q, model.joint_qd, model)
+
+                state_in = model.state()
+                state_out = model.state()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+                anchor_q_initial = state_in.body_q.numpy()[anchor].copy()
+
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    integrator=integrator,
+                    sparse_dynamics=True,
+                    sparse_jacobian=True,
+                    use_collision_detector=False,
+                )
+                solver = SolverKamino(model, config=config)
+                np.testing.assert_array_equal(solver._model_kamino.joints.num_cts.numpy(), [0, 5])
+
+                for _ in range(64):
+                    state_in.clear_forces()
+                    solver.step(state_in, state_out, control=None, contacts=None, dt=1.0e-3)
+                    state_in, state_out = state_out, state_in
+
+                body_q = state_in.body_q.numpy()
+                body_qd = state_in.body_qd.numpy()
+                np.testing.assert_array_equal(body_q[anchor], anchor_q_initial)
+                np.testing.assert_array_equal(body_qd[anchor], np.zeros(6, dtype=np.float32))
+                self.assertTrue(np.all(np.isfinite(body_q)))
+                self.assertTrue(np.all(np.isfinite(body_qd)))
+                self.assertEqual(int(solver._solver_kamino.solver_fd.data.status.numpy()[0]["converged"]), 1)
+
     def test_08a_public_solver_heterogeneous_contact_rollout_with_dvi(self):
         """Use Cholesky for heterogeneous dense and sparse DVI rollouts."""
         builder = newton.ModelBuilder()

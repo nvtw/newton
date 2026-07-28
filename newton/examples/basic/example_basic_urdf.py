@@ -11,6 +11,7 @@
 # Users can pick bodies by right-clicking and dragging with the mouse.
 #
 # Command: python -m newton.examples basic_urdf
+# Kamino DVI: python -m newton.examples basic_urdf --solver kamino
 #
 ###########################################################################
 
@@ -37,6 +38,8 @@ class Example:
         self.viewer = viewer
 
         quadruped = newton.ModelBuilder()
+        if self.solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(quadruped)
 
         # set default parameters for the quadruped
         quadruped.default_joint_cfg.armature = 0.01
@@ -92,6 +95,19 @@ class Example:
                 self.model,
                 iterations=2,
             )
+        elif self.solver_type == "kamino":
+            self.update_step_interval = 1
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model,
+                dynamics_solver="dvi",
+                sparse_dynamics=True,
+                sparse_jacobian=True,
+            )
+            solver_config.use_collision_detector = True
+            solver_config.integrator = "moreau"
+            solver_config.dvi.bilateral_solver_type = "LLTBRCM"
+            solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.update_step_interval = 1
             self.solver = newton.solvers.SolverXPBD(self.model)
@@ -100,8 +116,12 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        self.collision_pipeline = newton.CollisionPipeline(self.model)
-        self.contacts = self.collision_pipeline.contacts()
+        if self.solver_type == "kamino":
+            self.collision_pipeline = None
+            self.contacts = None
+        else:
+            self.collision_pipeline = newton.CollisionPipeline(self.model)
+            self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -122,7 +142,7 @@ class Example:
 
             # Collision detection and contact refresh cadence.
             refresh_contacts = (substep % self.update_step_interval) == 0
-            if refresh_contacts:
+            if refresh_contacts and self.collision_pipeline is not None:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
 
             if self.solver_type == "vbd":
@@ -162,7 +182,8 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.contacts is not None:
+            self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
     @staticmethod
@@ -174,8 +195,8 @@ class Example:
             "--solver",
             type=str,
             default="xpbd",
-            choices=["vbd", "xpbd"],
-            help="Solver type: xpbd (default) or vbd",
+            choices=["vbd", "xpbd", "kamino"],
+            help="Solver type: xpbd (default), vbd, or kamino",
         )
         return parser
 

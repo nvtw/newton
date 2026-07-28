@@ -34,7 +34,7 @@ SUBSTEPS = {
     "vbd": 10,
     "mujoco": 10,
     "featherstone": 100,
-    "kamino": 5,
+    "kamino": 10,
 }
 SOLVER_CHOICES = ("xpbd", "vbd", "mujoco", "featherstone", "kamino")
 NATIVE_CONTACT_SOLVERS = {"mujoco", "kamino"}
@@ -123,8 +123,19 @@ class Example:
         elif self.solver_name == "featherstone":
             self.solver = newton.solvers.SolverFeatherstone(self.model, angular_damping=0.0)
         elif self.solver_name == "kamino":
-            solver_config = newton.solvers.SolverKamino.Config.from_model(self.model)
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model,
+                dynamics_solver="dvi",
+                sparse_dynamics=True,
+                sparse_jacobian=True,
+            )
             solver_config.use_collision_detector = True
+            solver_config.integrator = "moreau"
+            solver_config.constraints.gamma = 0.2
+            solver_config.dvi.max_inequality_sweeps = 10
+            solver_config.dvi.omega = 1.0
+            solver_config.dvi.bilateral_solver_type = "LLTBRCM"
+            solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             raise ValueError(f"Unknown solver: {self.solver_name}")
@@ -138,7 +149,7 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
+        if wp.get_device().is_cuda and not wp.config.verify_cuda:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
@@ -146,7 +157,7 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
+        for substep in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
             if self.solver_name in NATIVE_CONTACT_SOLVERS:
@@ -155,7 +166,10 @@ class Example:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
                 contacts = self.contacts
             self.solver.step(self.state_0, self.state_1, self.control, contacts, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
+            if self.sim_substeps % 2 == 1 and substep == self.sim_substeps - 1:
+                self.state_0.assign(self.state_1)
+            else:
+                self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
         if self.graph:
@@ -170,6 +184,13 @@ class Example:
             self.state_0,
             "dominoes remain within scene bounds",
             lambda q, qd: abs(q[0]) < 1.0 and abs(q[1]) < 1.0 and 0.0 < q[2] < 0.5,
+        )
+        newton.examples.test_body_state(
+            self.model,
+            self.state_0,
+            "the first domino falls",
+            lambda q, qd: q[2] < 0.17,
+            indices=[0],
         )
 
     def render(self):
