@@ -80,6 +80,7 @@ _POINTS_PER_PAGE = 32
 _MAX_ROWS = 3 * _POINTS_PER_PAGE
 _CACHED_PAGE_COUNT = 2
 _BLOCK_DIM = 32
+_PATCH_SOLVE_MIN_BLOCKS_PER_SM = 24
 _PACKED_GATHER_TILE_WIDTH = 8
 _RESPONSE_TILE = 32
 _RESPONSE_ROW_TILES = _MAX_ROWS // _RESPONSE_TILE
@@ -1938,9 +1939,13 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
 
 
 @functools.cache
-def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool, shuffle_apply: bool):
+def _make_solve_patch_contact_tile_kernel(
+    max_dofs: int, build_rows: bool, shuffle_apply: bool, occupancy_bound: bool = False
+):
     packed_width = max_dofs
-    module = wp.get_module(f"reduced_contact_patch_solve_{max_dofs}_{int(build_rows)}_{int(shuffle_apply)}_fp32")
+    module = wp.get_module(
+        f"reduced_contact_patch_solve_{max_dofs}_{int(build_rows)}_{int(shuffle_apply)}_{int(occupancy_bound)}_fp32"
+    )
 
     def _solve_patch_contact_tile_kernel(
         columns: ContactColumnContainer,
@@ -2243,6 +2248,10 @@ def _make_solve_patch_contact_tile_kernel(max_dofs: int, build_rows: bool, shuff
                     index += wp.int32(_BLOCK_DIM)
                 _sync_contact_warp()
 
+    if occupancy_bound:
+        return wp.kernel(enable_backward=False, launch_bounds=(32, _PATCH_SOLVE_MIN_BLOCKS_PER_SM), module=module)(
+            _solve_patch_contact_tile_kernel
+        )
     return wp.kernel(enable_backward=False, module=module)(_solve_patch_contact_tile_kernel)
 
 
@@ -2347,8 +2356,11 @@ class ReducedContactBlockSystem:
             patch_rows_requested = patch_rows_override
         self.patch_rows = allow_patch_rows and self.device.is_cuda and patch_rows_requested
         if self.patch_rows:
+            occupancy_bound = self.articulation_count >= _PATCH_SOLVE_MIN_BLOCKS_PER_SM * sm_count
             self.solve_kernel = {
-                build_rows: _make_solve_patch_contact_tile_kernel(self.contact_dof_width, build_rows, use_depth_warp)
+                build_rows: _make_solve_patch_contact_tile_kernel(
+                    self.contact_dof_width, build_rows, use_depth_warp, occupancy_bound
+                )
                 for build_rows in (False, True)
             }
         else:
