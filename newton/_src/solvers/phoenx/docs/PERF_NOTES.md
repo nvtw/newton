@@ -591,3 +591,26 @@ These later results supersede the early FP16/contact-row prioritization:
   low-single-digit opportunity in the current G1 pipeline. A future
   template/instance split should be tested as a compact cross-consumer data
   model, not added piecemeal to individual kernels.
+
+- A PhoenX mini oracle gave each 128-thread articulation block the same
+  36-DOF `joint_s`, `joint_u`, and factor workload as the packed-row builder.
+  Cooperative shared-memory staging measured 63.596 us versus 63.658 us for
+  direct global reads (1.001x). Hardware caching already handles this reuse;
+  the oracle was removed. Row-builder work should be reduced algorithmically,
+  not moved to shared memory.
+
+- A second mini oracle tested eliminating the dense Jacobian stream. A
+  path-compressed row solve took 50.49 us versus 40.96 us dense (-19%) because
+  dynamic lane shuffles cost more than the coalesced loads. Contact-space state
+  plus a matrix built from existing ABA body responses was better only for
+  small contact sets: estimated solve pipelines improved 12.8% at four points
+  and 6.0% at six, but lost 42.6% at eight. Standing G1 has about 33 points
+  (`R > N`), so this cannot improve its current path. The oracle was removed;
+  contact-space solve remains a possible general low-contact regime, not a G1
+  optimization.
+
+- Caching the ABA-computed patch-row diagonal in dead row scratch was tested in
+  both scalar and cooperative builders. It removed redundant solve reductions
+  but reduced complete G1 throughput about 0.8%; moving the scratch overwrite
+  also invalidated the sequential scalar/cooperative parity harness. The
+  candidate was fully reverted rather than complicating the data contract.
