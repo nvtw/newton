@@ -539,13 +539,15 @@ def _create_finalize_fixed_kernel(mantissa_bits: int):
 # =============================================================================
 
 
-def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
+def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any, deterministic: bool = False):
     """Create a hydroelastic contact reduction kernel specialized to a pressure callback.
 
     Args:
         pressure_func: User-supplied Warp function ``(signed_depth, shape_idx, data) ->
             pressure``. Required. Used to weight the unreduced friction-moment
             accumulator by ``area * pressure_func(depth, shape_b, pressure_data)``.
+        deterministic: Whether normal bins were pre-registered for deterministic
+            fixed-point accumulation.
 
     Returns:
         A Warp kernel that registers buffered contacts in the hashtable.
@@ -598,7 +600,7 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
             key = make_contact_key(shape_a, shape_b, bin_id)
 
             entry_idx = int(-1)
-            if reducer_data.deterministic != 0:
+            if wp.static(deterministic):
                 # Deterministic aggregate accumulation pre-registers normal
                 # bins. Reuse that result so a failed registration is counted
                 # once rather than again in this kernel.
@@ -659,7 +661,7 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
                         area_i = reducer_data.contact_area[i]
                         p_i = wp.static(pressure_func)(depth, shape_b, pressure_data)
                         wp.atomic_add(agg_moment_unreduced, entry_idx, area_i * p_i * lever)
-            elif reducer_data.deterministic == 0:
+            elif not wp.static(deterministic):
                 wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
             # === Part 2: Voxel-based reduction ===
@@ -938,6 +940,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
     anchor_contact: bool = False,
     moment_matching: bool = False,
     pressure_func: Any = None,
+    deterministic_sort_keys: bool = False,
 ):
     """Create a kernel that exports reduced hydroelastic contacts using a custom writer function.
 
@@ -969,6 +972,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         moment_matching: If True, adjust per-contact friction scales so that
             the maximum friction moment per normal bin is preserved between
             reduced and unreduced contacts.
+        deterministic_sort_keys: Whether to tag normal-bin and voxel-bin
+            exports so deterministic contact sort keys remain unique.
 
     Returns:
         A warp kernel that can be launched to export reduced hydroelastic contacts.
@@ -1039,8 +1044,10 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         for i in range(tid, num_active, total_num_threads):
             # Get the hashtable entry index
             entry_idx = ht_active_slots[i]
-            bin_id = int((ht_keys[entry_idx] >> wp.uint64(55)) & wp.uint64(0xFF))
-            is_voxel_entry = bin_id >= wp.static(NUM_NORMAL_BINS)
+            is_voxel_entry = False
+            if wp.static(deterministic_sort_keys):
+                bin_id = int((ht_keys[entry_idx] >> wp.uint64(55)) & wp.uint64(0xFF))
+                is_voxel_entry = bin_id >= wp.static(NUM_NORMAL_BINS)
 
             # === First pass: collect unique contacts and compute aggregates ===
             exported_ids = exported_ids_vec()
@@ -1370,10 +1377,13 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = c_stiffness
                 contact_data.contact_friction_scale = wp.float32(c_friction_scale)
-                # Both copies contribute to the force-preserving denominator
-                # when a face wins a normal and voxel entry. Tag their sources
-                # so their exported sort keys remain unique.
-                contact_data.sort_sub_key = (contact_fingerprints[contact_id] << 1) | int(is_voxel_entry)
+                if wp.static(deterministic_sort_keys):
+                    # Both copies contribute to the force-preserving denominator
+                    # when a face wins a normal and voxel entry. Tag their sources
+                    # so their exported sort keys remain unique.
+                    contact_data.sort_sub_key = (contact_fingerprints[contact_id] << 1) | int(is_voxel_entry)
+                else:
+                    contact_data.sort_sub_key = contact_fingerprints[contact_id]
 
                 # Call the writer function
                 writer_func(contact_data, writer_data, -1)
@@ -1400,6 +1410,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = shared_stiffness
                 contact_data.contact_friction_scale = wp.float32(anchor_friction_scale)
+                bin_id = int((ht_keys[entry_idx] >> wp.uint64(55)) & wp.uint64(0xFF))
                 contact_data.sort_sub_key = 0x400000 | bin_id
 
                 # Call the writer function for anchor
@@ -1555,7 +1566,7 @@ class HydroelasticContactReduction:
             self._fixed_scale = wp.zeros(0, dtype=wp.int32, device=device)
 
         # Create reduction kernel
-        self._reduce_kernel = get_reduce_hydroelastic_contacts_kernel(pressure_func)
+        self._reduce_kernel = get_reduce_hydroelastic_contacts_kernel(pressure_func, deterministic=deterministic)
         self._accumulate_depth_kernel = _create_accumulate_reduced_depth_kernel(
             deterministic=deterministic, mantissa_bits=self._mantissa_bits
         )
@@ -1588,6 +1599,7 @@ class HydroelasticContactReduction:
             anchor_contact=config.anchor_contact,
             moment_matching=config.moment_matching,
             pressure_func=pressure_func,
+            deterministic_sort_keys=deterministic,
         )
 
     @property

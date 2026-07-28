@@ -913,7 +913,8 @@ class GlobalContactReducer:
         """Clear all contacts and reset the reducer (full clear)."""
         self.contact_count.zero_()
         self.ht_insert_failures.zero_()
-        self.exported_flags.zero_()
+        if not self.store_hydroelastic_data:
+            self.exported_flags.zero_()
         self.hashtable.clear()
         self.ht_values.zero_()
 
@@ -934,9 +935,11 @@ class GlobalContactReducer:
         later-scheduled blocks (or even later-issued warps/lanes under
         independent thread scheduling), causing some entries to be skipped.
         """
-        # Contact IDs are reused from zero every frame, so cross-entry export
-        # flags must be cleared even when no hashtable entry was active.
-        self.exported_flags.zero_()
+        # Contact IDs are reused from zero every frame, so generic reduction's
+        # cross-entry export flags must be cleared even when no hashtable entry
+        # was active. Hydroelastic export uses source-tagged duplicates instead.
+        if not self.store_hydroelastic_data:
+            self.exported_flags.zero_()
 
         # Use fixed thread count for efficient GPU utilization
         num_threads = min(1024, self.hashtable.capacity)
