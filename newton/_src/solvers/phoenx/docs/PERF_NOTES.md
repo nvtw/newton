@@ -44,6 +44,7 @@ Detailed experiment histories belong in benchmark output, not here.
 | Reduced ABA | Remove unused inertia stores; parallel momentum capture | Retained by full physics tests. |
 | Reduced contacts | Topology-selected packed gather and recomputed path Jacobian | Better than resident/path-sparse row storage. |
 | Reduced contacts | Warp-shuffle scalar broadcasts in one-warp contact solves | Removes shared-tile barriers without changing arithmetic. Point-contact G1 improved about 2.82% end to end. |
+| Reduced contacts | Scalar 1-DOF patch-row traversal | Avoids six-wide temporary work for common revolute/prismatic joints. Five-sample G1 mean +0.88%, median +1.05%; mixed-width rows remain bitwise equal. |
 | Coloring | Deterministic per-world greedy/direct endpoint ownership | Large gain for many small worlds; retain fallback above 64 colors. |
 | Scheduling | Adaptive threads per world and block-world scheduler | Select by workload; no universal scheduler wins. |
 | Solver | Fast-tail specializations, zero velocity-iteration support, per-substep inertia refresh | Required correctness/performance behavior. |

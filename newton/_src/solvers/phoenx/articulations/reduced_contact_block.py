@@ -1493,6 +1493,15 @@ def _make_build_packed_patch_rows_warp_kernel():
                 dof_start = data.joint_qd_start[joint]
                 dof_end = data.joint_qd_start[joint + wp.int32(1)]
                 dof_count = dof_end - dof_start
+                if dof_count == wp.int32(1):
+                    projected_scalar = wp.dot(data.joint_s[dof_start], propagated_wrench)
+                    joint_work[articulation, dof_start - dof_start_articulation, row] = projected_scalar
+                    packed_jacobian[packed_row, dof_start - dof_start_articulation] = wp.dot(
+                        data.joint_s[dof_start], source_wrench
+                    )
+                    reduced_scalar = data.joint_d_inv[dof_start, 0] * projected_scalar
+                    propagated_wrench -= data.joint_u[dof_start] * reduced_scalar
+                    continue
                 projected = _vec6(0.0)
                 reduced = _vec6(0.0)
                 for dof_row in range(6):
@@ -1531,6 +1540,19 @@ def _make_build_packed_patch_rows_warp_kernel():
                 dof_end = data.joint_qd_start[joint + wp.int32(1)]
                 dof_count = dof_end - dof_start
                 on_source_path = depth < path_length and joint == data.body_path_joint[path_start + depth]
+                if dof_count == wp.int32(1):
+                    rhs_scalar = -wp.dot(data.joint_u[dof_start], parent_delta)
+                    if on_source_path:
+                        rhs_scalar += joint_work[articulation, dof_start - dof_start_articulation, row]
+                    response_value = data.joint_d_inv[dof_start, 0] * rhs_scalar
+                    if row_count > wp.int32(_RESPONSE_TILE):
+                        joint_work[articulation, dof_start - dof_start_articulation, row] = response_value
+                    else:
+                        packed_response[packed_row, dof_start - dof_start_articulation] = response_value
+                    child_delta += data.joint_s[dof_start] * response_value
+                    previous_delta = child_delta
+                    _sync_contact_group(group_mask)
+                    continue
                 rhs = _vec6(0.0)
                 generalized_delta = _vec6(0.0)
                 for dof_row in range(6):
